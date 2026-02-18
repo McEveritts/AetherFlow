@@ -16,7 +16,8 @@ include('..inc/panel.menu.php');
           <tr>
             <th class="text-center"><?php echo T('SERVICE_STATUS'); ?></th>
             <th class="text-center"><?php echo T('RESTART_SERVICES'); ?></th>
-            <th class="text-center"><?php echo T('ENABLE_DISABLE_SERVICES'); ?></th>
+            <!-- Disabled column removed as it is now integrated into Status/Toggle -->
+            <!-- <th class="text-center"><?php echo T('ENABLE_DISABLE_SERVICES'); ?></th> -->
             <th class="text-center"><?php echo T('LOGS'); ?></th>
           </tr>
         </thead>
@@ -30,13 +31,15 @@ include('..inc/panel.menu.php');
                 $scgiport = search($rtorrentrc_data, 'localhost:', "\n");
               }
               ?>
-              <td><span id="appstat_rtorrent"></span> <?php echo T('SERVICE_RTORRENT'); ?> <span class="tooltips"
-                  data-toggle="tooltip" title="scgi_port: <?php echo $scgiport; ?>" data-placement="right"><i
-                    class="tooltips fa fa-usb"></i><span></td>
+              <td>
+                <div style="display:flex; align-items:center; justify-content:space-between;">
+                  <span><span id="appstat_rtorrent"></span> <?php echo T('SERVICE_RTORRENT'); ?></span>
+                  <?php echo "$cbodyr"; ?>
+                </div>
+              </td>
               <td class="text-center"><a href="javascript:;" onclick="location.href='?id=88&servicestart=rtorrent'"
                   class="btn btn-xs btn-default"><i class="fa fa-refresh text-info"></i> <?php echo T('REFRESH'); ?></a>
               </td>
-              <td class="text-center"><?php echo "$cbodyr"; ?></td>
               <td class="text-center"><a href="javascript:;" onclick="viewLogs('rtorrent')" class="btn btn-xs btn-info"><i
                     class="fa fa-file-text-o"></i></a></td>
             </tr>
@@ -44,11 +47,15 @@ include('..inc/panel.menu.php');
 
           <?php if (file_exists("/install/.autodlirssi.lock")) { ?>
             <tr>
-              <td><span id="appstat_irssi"></span> <?php echo T('SERVICE_IRSSI'); ?> </td>
+              <td>
+                <div style="display:flex; align-items:center; justify-content:space-between;">
+                  <span><span id="appstat_irssi"></span> <?php echo T('SERVICE_IRSSI'); ?> </span>
+                  <?php echo "$cbodyi"; ?>
+                </div>
+              </td>
               <td class="text-center"><a href="javascript:;" onclick="location.href='?id=88&servicestart=irssi'"
                   class="btn btn-xs btn-default"><i class="fa fa-refresh text-info"></i> <?php echo T('REFRESH'); ?></a>
               </td>
-              <td class="text-center"><?php echo "$cbodyi"; ?></td>
               <td class="text-center"><a href="javascript:;" onclick="viewLogs('irssi')" class="btn btn-xs btn-info"><i
                     class="fa fa-file-text-o"></i></a></td>
             </tr>
@@ -56,264 +63,407 @@ include('..inc/panel.menu.php');
 
           <?php if (file_exists("/install/.deluge.lock")) { ?>
             <tr>
-              <td><span id="appstat_deluged"></span> DelugeD </td>
+              <td>
+                <div style="display:flex; align-items:center; justify-content:space-between;">
+                  <span><span id="appstat_deluged"></span> DelugeD </span>
+                  <?php echo "$cbodyd"; ?>
+                </div>
+              </td>
               <td class="text-center"><a href="javascript:;" onclick="location.href='?id=88&servicestart=deluged'"
                   class="btn btn-xs btn-default"><i class="fa fa-refresh text-info"></i> <?php echo T('REFRESH'); ?></a>
               </td>
-              <td class="text-center"><?php echo "$cbodyd"; ?></td>
+              <td class="text-center"><a href="javascript:;" onclick="viewLogs('deluged')" class="btn btn-xs btn-info"><i
+                    class="fa fa-file-text-o"></i></a></td>
             </tr>
             <tr>
-              <td><span id="appstat_delugeweb"></span> Deluge Web </td>
+              <td>
+                <div style="display:flex; align-items:center; justify-content:space-between;">
+                  <span><span id="appstat_delugeweb"></span> Deluge Web </span>
+                  <?php echo "$cbodydw"; ?>
+                </div>
+              </td>
               <td class="text-center"><a href="javascript:;" onclick="location.href='?id=88&servicestart=delugeweb'"
                   class="btn btn-xs btn-default"><i class="fa fa-refresh text-info"></i> <?php echo T('REFRESH'); ?></a>
               </td>
-              <td class="text-center"><?php echo "$cbodydw"; ?></td>
+              <td class="text-center"><a href="javascript:;" onclick="viewLogs('delugeweb')"
+                  class="btn btn-xs btn-info"><i class="fa fa-file-text-o"></i></a></td>
             </tr>
           <?php } ?>
 
           <?php if (file_exists("/install/.transmission.lock")) { ?>
             <tr>
-              <td><span id="appstat_transmission"></span> Transmission </td>
+              <td>
+                <div style="display:flex; align-items:center; justify-content:space-between;">
+                  <span><span id="appstat_transmission"></span> Transmission </span>
+                  <?php echo "$cbodytr"; ?>
+                </div>
+              </td>
               <td class="text-center"><a href="javascript:;" onclick="location.href='?id=88&servicestart=transmission'"
                   class="btn btn-xs btn-default"><i class="fa fa-refresh text-info"></i> <?php echo T('REFRESH'); ?></a>
               </td>
-              <td class="text-center"><?php echo "$cbodytr"; ?></td>
+              <td class="text-center"><a href="javascript:;" onclick="viewLogs('transmission')"
+                  class="btn btn-xs btn-info"><i class="fa fa-file-text-o"></i></a></td>
             </tr>
           <?php } ?>
 
           <?php if (file_exists("/install/.qbittorrent.lock")) { ?>
             <tr>
-              <td><span id="appstat_qbittorrent"></span> qBittorrent </td>
+              <td>
+                <div style="display:flex; align-items:center; justify-content:space-between;">
+                  <span><span id="appstat_qbittorrent"></span> qBittorrent </span>
+                  <?php echo "$cbodyqb"; ?>
+                </div>
+              </td>
               <td class="text-center"><a href="javascript:;" onclick="location.href='?id=88&servicestart=qbittorrent'"
                   class="btn btn-xs btn-default"><i class="fa fa-refresh text-info"></i> <?php echo T('REFRESH'); ?></a>
               </td>
-              <td class="text-center"><?php echo "$cbodyqb"; ?></td>
+              <td class="text-center"><a href="javascript:;" onclick="viewLogs('qbittorrent')"
+                  class="btn btn-xs btn-info"><i class="fa fa-file-text-o"></i></a></td>
             </tr>
           <?php } ?>
 
           <?php if (isAdmin()) { ?>
 
             <tr>
-              <td><span id="appstat_webconsole"></span> Web Console </td>
+              <td>
+                <div style="display:flex; align-items:center; justify-content:space-between;">
+                  <span><span id="appstat_webconsole"></span> Web Console </span>
+                  <?php echo "$wcbodyb"; ?>
+                </div>
+              </td>
               <td class="text-center"><a href="javascript:;" onclick="location.href='?id=88&servicestart=shellinabox'"
                   class="btn btn-xs btn-default"><i class="fa fa-refresh text-info"></i> <?php echo T('REFRESH'); ?></a>
               </td>
-              <td class="text-center"><?php echo "$wcbodyb"; ?></td>
             </tr>
-
-            <!--
-                    <//?php if (file_exists("/install/.csf.lock")) { ?>
-                    <tr>
-                      <td><//?php echo "$csfval"; ?> CSF (firewall) </td>
-                      <td class="text-center"><a href="javascript:;" onclick="location.href='?id=88&servicestart=csf'" class="btn btn-xs btn-default"><i class="fa fa-refresh text-info"></i> <//?php echo T('REFRESH'); ?></a></td>
-                      <td class="text-center"><//?php echo "$cbodycf"; ?></td>
-                    </tr>
-                    <//?php } ?>
-                    -->
 
             <?php if (file_exists("/install/.btsync.lock")) { ?>
               <tr>
-                <td><span id="appstat_btsync"></span> BTSync </td>
+                <td>
+                  <div style="display:flex; align-items:center; justify-content:space-between;">
+                    <span><span id="appstat_btsync"></span> BTSync </span>
+                    <?php echo "$cbodyb"; ?>
+                  </div>
+                </td>
                 <td class="text-center"><a href="javascript:;" onclick="location.href='?id=88&servicestart=btsync'"
                     class="btn btn-xs btn-default"><i class="fa fa-refresh text-info"></i> <?php echo T('REFRESH'); ?></a>
                 </td>
-                <td class="text-center"><?php echo "$cbodyb"; ?></td>
+                <td class="text-center"><a href="javascript:;" onclick="viewLogs('btsync')" class="btn btn-xs btn-info"><i
+                      class="fa fa-file-text-o"></i></a></td>
               </tr>
             <?php } ?>
 
             <?php if (file_exists("/install/.couchpotato.lock")) { ?>
               <tr>
-                <td><span id="appstat_couchpotato"></span> CouchPotato </td>
+                <td>
+                  <div style="display:flex; align-items:center; justify-content:space-between;">
+                    <span><span id="appstat_couchpotato"></span> CouchPotato </span>
+                    <?php echo "$cbodycp"; ?>
+                  </div>
+                </td>
                 <td class="text-center"><a href="javascript:;" onclick="location.href='?id=88&servicestart=couchpotato'"
                     class="btn btn-xs btn-default"><i class="fa fa-refresh text-info"></i> <?php echo T('REFRESH'); ?></a>
                 </td>
-                <td class="text-center"><?php echo "$cbodycp"; ?></td>
+                <td class="text-center"><a href="javascript:;" onclick="viewLogs('couchpotato')"
+                    class="btn btn-xs btn-info"><i class="fa fa-file-text-o"></i></a></td>
               </tr>
             <?php } ?>
 
             <?php if (file_exists("/install/.emby.lock")) { ?>
               <tr>
-                <td><span id="appstat_emby"></span> Emby </td>
+                <td>
+                  <div style="display:flex; align-items:center; justify-content:space-between;">
+                    <span><span id="appstat_emby"></span> Emby </span>
+                    <?php echo "$cbodye"; ?>
+                  </div>
+                </td>
                 <td class="text-center"><a href="javascript:;" onclick="location.href='?id=88&servicestart=emby'"
                     class="btn btn-xs btn-default"><i class="fa fa-refresh text-info"></i> <?php echo T('REFRESH'); ?></a>
                 </td>
-                <td class="text-center"><?php echo "$cbodye"; ?></td>
+                <td class="text-center"><a href="javascript:;" onclick="viewLogs('emby')" class="btn btn-xs btn-info"><i
+                      class="fa fa-file-text-o"></i></a></td>
               </tr>
             <?php } ?>
 
             <?php if (file_exists("/install/.headphones.lock")) { ?>
               <tr>
-                <td><span id="appstat_headphones"></span> Headphones </td>
+                <td>
+                  <div style="display:flex; align-items:center; justify-content:space-between;">
+                    <span><span id="appstat_headphones"></span> Headphones </span>
+                    <?php echo "$cbodyhp"; ?>
+                  </div>
+                </td>
                 <td class="text-center"><a href="javascript:;" onclick="location.href='?id=88&servicestart=headphones'"
                     class="btn btn-xs btn-default"><i class="fa fa-refresh text-info"></i> <?php echo T('REFRESH'); ?></a>
                 </td>
-                <td class="text-center"><?php echo "$cbodyhp"; ?></td>
+                <td class="text-center"><a href="javascript:;" onclick="viewLogs('headphones')"
+                    class="btn btn-xs btn-info"><i class="fa fa-file-text-o"></i></a></td>
               </tr>
             <?php } ?>
 
             <?php if (file_exists("/install/.jackett.lock")) { ?>
               <tr>
-                <td><span id="appstat_jackett"></span> Jackett </td>
+                <td>
+                  <div style="display:flex; align-items:center; justify-content:space-between;">
+                    <span><span id="appstat_jackett"></span> Jackett </span>
+                    <?php echo "$cbodyj"; ?>
+                  </div>
+                </td>
                 <td class="text-center"><a href="javascript:;" onclick="location.href='?id=88&servicestart=jackett'"
                     class="btn btn-xs btn-default"><i class="fa fa-refresh text-info"></i> <?php echo T('REFRESH'); ?></a>
                 </td>
-                <td class="text-center"><?php echo "$cbodyj"; ?></td>
+                <td class="text-center"><a href="javascript:;" onclick="viewLogs('jackett')" class="btn btn-xs btn-info"><i
+                      class="fa fa-file-text-o"></i></a></td>
               </tr>
             <?php } ?>
 
             <?php if (file_exists("/install/.lidarr.lock")) { ?>
               <tr>
-                <td><span id="appstat_lidarr"></span> Lidarr </td>
+                <td>
+                  <div style="display:flex; align-items:center; justify-content:space-between;">
+                    <span><span id="appstat_lidarr"></span> Lidarr </span>
+                    <?php echo "$cbodylid"; ?>
+                  </div>
+                </td>
                 <td class="text-center"><a href="javascript:;" onclick="location.href='?id=88&servicestart=lidarr'"
                     class="btn btn-xs btn-default"><i class="fa fa-refresh text-info"></i> <?php echo T('REFRESH'); ?></a>
                 </td>
-                <td class="text-center"><?php echo "$cbodylid"; ?></td>
+                <td class="text-center"><a href="javascript:;" onclick="viewLogs('lidarr')" class="btn btn-xs btn-info"><i
+                      class="fa fa-file-text-o"></i></a></td>
               </tr>
             <?php } ?>
 
             <?php if (file_exists("/install/.medusa.lock")) { ?>
               <tr>
-                <td><span id="appstat_medusa"></span> Medusa </td>
+                <td>
+                  <div style="display:flex; align-items:center; justify-content:space-between;">
+                    <span><span id="appstat_medusa"></span> Medusa </span>
+                    <?php echo "$cbodym"; ?>
+                  </div>
+                </td>
                 <td class="text-center"><a href="javascript:;" onclick="location.href='?id=88&servicestart=medusa'"
                     class="btn btn-xs btn-default"><i class="fa fa-refresh text-info"></i> <?php echo T('REFRESH'); ?></a>
                 </td>
-                <td class="text-center"><?php echo "$cbodym"; ?></td>
+                <td class="text-center"><a href="javascript:;" onclick="viewLogs('medusa')" class="btn btn-xs btn-info"><i
+                      class="fa fa-file-text-o"></i></a></td>
               </tr>
             <?php } ?>
 
             <?php if (file_exists("/install/.nzbget.lock")) { ?>
               <tr>
-                <td><span id="appstat_nzbget"></span> NZBGet </td>
+                <td>
+                  <div style="display:flex; align-items:center; justify-content:space-between;">
+                    <span><span id="appstat_nzbget"></span> NZBGet </span>
+                    <?php echo "$cbodynzg"; ?>
+                  </div>
+                </td>
                 <td class="text-center"><a href="javascript:;" onclick="location.href='?id=88&servicestart=nzbget'"
                     class="btn btn-xs btn-default"><i class="fa fa-refresh text-info"></i> <?php echo T('REFRESH'); ?></a>
                 </td>
-                <td class="text-center"><?php echo "$cbodynzg"; ?></td>
+                <td class="text-center"><a href="javascript:;" onclick="viewLogs('nzbget')" class="btn btn-xs btn-info"><i
+                      class="fa fa-file-text-o"></i></a></td>
               </tr>
             <?php } ?>
 
             <?php if (file_exists("/install/.nzbhydra.lock")) { ?>
               <tr>
-                <td><span id="appstat_nzbhydra"></span> NZBHydra </td>
+                <td>
+                  <div style="display:flex; align-items:center; justify-content:space-between;">
+                    <span><span id="appstat_nzbhydra"></span> NZBHydra </span>
+                    <?php echo "$cbodynzb"; ?>
+                  </div>
+                </td>
                 <td class="text-center"><a href="javascript:;" onclick="location.href='?id=88&servicestart=nzbhydra'"
                     class="btn btn-xs btn-default"><i class="fa fa-refresh text-info"></i> <?php echo T('REFRESH'); ?></a>
                 </td>
-                <td class="text-center"><?php echo "$cbodynzb"; ?></td>
+                <td class="text-center"><a href="javascript:;" onclick="viewLogs('nzbhydra')" class="btn btn-xs btn-info"><i
+                      class="fa fa-file-text-o"></i></a></td>
               </tr>
             <?php } ?>
 
             <?php if (file_exists("/install/.ombi.lock")) { ?>
               <tr>
-                <td><span id="appstat_ombi"></span> Ombi </td>
+                <td>
+                  <div style="display:flex; align-items:center; justify-content:space-between;">
+                    <span><span id="appstat_ombi"></span> Ombi </span>
+                    <?php echo "$cbodypr"; ?>
+                  </div>
+                </td>
                 <td class="text-center"><a href="javascript:;" onclick="location.href='?id=88&servicestart=ombi'"
                     class="btn btn-xs btn-default"><i class="fa fa-refresh text-info"></i> <?php echo T('REFRESH'); ?></a>
                 </td>
-                <td class="text-center"><?php echo "$cbodypr"; ?></td>
+                <td class="text-center"><a href="javascript:;" onclick="viewLogs('ombi')" class="btn btn-xs btn-info"><i
+                      class="fa fa-file-text-o"></i></a></td>
               </tr>
             <?php } ?>
 
             <?php if (file_exists("/install/.plex.lock")) { ?>
               <tr>
-                <td><span id="appstat_plex"></span> Plex </td>
+                <td>
+                  <div style="display:flex; align-items:center; justify-content:space-between;">
+                    <span><span id="appstat_plex"></span> Plex </span>
+                    <?php echo "$cbodyp"; ?>
+                  </div>
+                </td>
                 <td class="text-center"><a href="javascript:;" onclick="location.href='?id=88&servicestart=plex'"
                     class="btn btn-xs btn-default"><i class="fa fa-refresh text-info"></i> <?php echo T('REFRESH'); ?></a>
                 </td>
-                <td class="text-center"><?php echo "$cbodyp"; ?></td>
+                <td class="text-center"><a href="javascript:;" onclick="viewLogs('plex')" class="btn btn-xs btn-info"><i
+                      class="fa fa-file-text-o"></i></a></td>
               </tr>
             <?php } ?>
 
             <?php if (file_exists("/install/.Tautulli.lock")) { ?>
               <tr>
-                <td><span id="appstat_Tautulli"></span> Tautulli </td>
+                <td>
+                  <div style="display:flex; align-items:center; justify-content:space-between;">
+                    <span><span id="appstat_Tautulli"></span> Tautulli </span>
+                    <?php echo "$cbodypp"; ?>
+                  </div>
+                </td>
                 <td class="text-center"><a href="javascript:;" onclick="location.href='?id=88&servicestart=Tautulli'"
                     class="btn btn-xs btn-default"><i class="fa fa-refresh text-info"></i> <?php echo T('REFRESH'); ?></a>
                 </td>
-                <td class="text-center"><?php echo "$cbodypp"; ?></td>
+                <td class="text-center"><a href="javascript:;" onclick="viewLogs('tautulli')" class="btn btn-xs btn-info"><i
+                      class="fa fa-file-text-o"></i></a></td>
               </tr>
             <?php } ?>
 
             <?php if (file_exists("/install/.pyload.lock")) { ?>
               <tr>
-                <td><span id="appstat_pyload"></span> pyLoad </td>
+                <td>
+                  <div style="display:flex; align-items:center; justify-content:space-between;">
+                    <span><span id="appstat_pyload"></span> pyLoad </span>
+                    <?php echo "$cbodypl"; ?>
+                  </div>
+                </td>
                 <td class="text-center"><a href="javascript:;" onclick="location.href='?id=88&servicestart=pyload'"
                     class="btn btn-xs btn-default"><i class="fa fa-refresh text-info"></i> <?php echo T('REFRESH'); ?></a>
                 </td>
-                <td class="text-center"><?php echo "$cbodypl"; ?></td>
+                <td class="text-center"><a href="javascript:;" onclick="viewLogs('pyload')" class="btn btn-xs btn-info"><i
+                      class="fa fa-file-text-o"></i></a></td>
               </tr>
             <?php } ?>
 
             <?php if (file_exists("/install/.radarr.lock")) { ?>
               <tr>
-                <td><span id="appstat_radarr"></span> Radarr </td>
+                <td>
+                  <div style="display:flex; align-items:center; justify-content:space-between;">
+                    <span><span id="appstat_radarr"></span> Radarr </span>
+                    <?php echo "$cbodyrad"; ?>
+                  </div>
+                </td>
                 <td class="text-center"><a href="javascript:;" onclick="location.href='?id=88&servicestart=radarr'"
                     class="btn btn-xs btn-default"><i class="fa fa-refresh text-info"></i> <?php echo T('REFRESH'); ?></a>
                 </td>
-                <td class="text-center"><?php echo "$cbodyrad"; ?></td>
+                <td class="text-center"><a href="javascript:;" onclick="viewLogs('radarr')" class="btn btn-xs btn-info"><i
+                      class="fa fa-file-text-o"></i></a></td>
               </tr>
             <?php } ?>
 
             <?php if (file_exists("/install/.sabnzbd.lock")) { ?>
               <tr>
-                <td><span id="appstat_sabnzbd"></span> SABnzbd </td>
+                <td>
+                  <div style="display:flex; align-items:center; justify-content:space-between;">
+                    <span><span id="appstat_sabnzbd"></span> SABnzbd </span>
+                    <?php echo "$cbodysz"; ?>
+                  </div>
+                </td>
                 <td class="text-center"><a href="javascript:;" onclick="location.href='?id=88&servicestart=sabnzbd'"
                     class="btn btn-xs btn-default"><i class="fa fa-refresh text-info"></i> <?php echo T('REFRESH'); ?></a>
                 </td>
-                <td class="text-center"><?php echo "$cbodysz"; ?></td>
+                <td class="text-center"><a href="javascript:;" onclick="viewLogs('sabnzbd')" class="btn btn-xs btn-info"><i
+                      class="fa fa-file-text-o"></i></a></td>
               </tr>
             <?php } ?>
 
             <?php if (file_exists("/install/.sickgear.lock")) { ?>
               <tr>
-                <td><span id="appstat_sickgear"></span> SickGear </td>
+                <td>
+                  <div style="display:flex; align-items:center; justify-content:space-between;">
+                    <span><span id="appstat_sickgear"></span> SickGear </span>
+                    <?php echo "$cbodysg"; ?>
+                  </div>
+                </td>
                 <td class="text-center"><a href="javascript:;" onclick="location.href='?id=88&servicestart=sickgear'"
                     class="btn btn-xs btn-default"><i class="fa fa-refresh text-info"></i> <?php echo T('REFRESH'); ?></a>
                 </td>
-                <td class="text-center"><?php echo "$cbodysg"; ?></td>
+                <td class="text-center"><a href="javascript:;" onclick="viewLogs('sickgear')" class="btn btn-xs btn-info"><i
+                      class="fa fa-file-text-o"></i></a></td>
               </tr>
             <?php } ?>
 
             <?php if (file_exists("/install/.sickrage.lock")) { ?>
               <tr>
-                <td><span id="appstat_sickrage"></span> SickRage </td>
+                <td>
+                  <div style="display:flex; align-items:center; justify-content:space-between;">
+                    <span><span id="appstat_sickrage"></span> SickRage </span>
+                    <?php echo "$cbodysr"; ?>
+                  </div>
+                </td>
                 <td class="text-center"><a href="javascript:;" onclick="location.href='?id=88&servicestart=sickrage'"
                     class="btn btn-xs btn-default"><i class="fa fa-refresh text-info"></i> <?php echo T('REFRESH'); ?></a>
                 </td>
-                <td class="text-center"><?php echo "$cbodysr"; ?></td>
+                <td class="text-center"><a href="javascript:;" onclick="viewLogs('sickrage')" class="btn btn-xs btn-info"><i
+                      class="fa fa-file-text-o"></i></a></td>
               </tr>
             <?php } ?>
 
             <?php if (file_exists("/install/.sonarr.lock")) { ?>
               <tr>
-                <td><span id="appstat_sonarr"></span> Sonarr </td>
+                <td>
+                  <div style="display:flex; align-items:center; justify-content:space-between;">
+                    <span><span id="appstat_sonarr"></span> Sonarr </span>
+                    <?php echo "$cbodys"; ?>
+                  </div>
+                </td>
                 <td class="text-center"><a href="javascript:;" onclick="location.href='?id=88&servicestart=sonarr'"
                     class="btn btn-xs btn-default"><i class="fa fa-refresh text-info"></i> <?php echo T('REFRESH'); ?></a>
                 </td>
-                <td class="text-center"><?php echo "$cbodys"; ?></td>
+                <td class="text-center"><a href="javascript:;" onclick="viewLogs('sonarr')" class="btn btn-xs btn-info"><i
+                      class="fa fa-file-text-o"></i></a></td>
               </tr>
             <?php } ?>
 
             <?php if (file_exists("/install/.subsonic.lock")) { ?>
               <tr>
-                <td><span id="appstat_subsonic"></span> Subsonic </td>
+                <td>
+                  <div style="display:flex; align-items:center; justify-content:space-between;">
+                    <span><span id="appstat_subsonic"></span> Subsonic </span>
+                    <?php echo "$cbodyss"; ?>
+                  </div>
+                </td>
                 <td class="text-center"><a href="javascript:;" onclick="location.href='?id=88&servicestart=subsonic'"
                     class="btn btn-xs btn-default"><i class="fa fa-refresh text-info"></i> <?php echo T('REFRESH'); ?></a>
                 </td>
-                <td class="text-center"><?php echo "$cbodyss"; ?></td>
+                <td class="text-center"><a href="javascript:;" onclick="viewLogs('subsonic')" class="btn btn-xs btn-info"><i
+                      class="fa fa-file-text-o"></i></a></td>
               </tr>
             <?php } ?>
 
             <?php if (file_exists("/install/.syncthing.lock")) { ?>
               <tr>
-                <td><span id="appstat_syncthing"></span> Syncthing </td>
+                <td>
+                  <div style="display:flex; align-items:center; justify-content:space-between;">
+                    <span><span id="appstat_syncthing"></span> Syncthing </span>
+                    <?php echo "$cbodyst"; ?>
+                  </div>
+                </td>
                 <td class="text-center"><a href="javascript:;" onclick="location.href='?id=88&servicestart=syncthing'"
                     class="btn btn-xs btn-default"><i class="fa fa-refresh text-info"></i> <?php echo T('REFRESH'); ?></a>
                 </td>
-                <td class="text-center"><?php echo "$cbodyst"; ?></td>
+                <td class="text-center"><a href="javascript:;" onclick="viewLogs('syncthing')"
+                    class="btn btn-xs btn-info"><i class="fa fa-file-text-o"></i></a></td>
               </tr>
             <?php } ?>
 
             <?php if (file_exists("/install/.sample.lock")) { ?>
               <tr>
-                <td><?php echo "$sampleval"; ?> SAMPLE </td>
+                <td>
+                  <div style="display:flex; align-items:center; justify-content:space-between;">
+                    <span><?php echo "$sampleval"; ?> SAMPLE </span>
+                    <?php echo "$samplebody"; ?>
+                  </div>
+                </td>
                 <td class="text-center"><a href="javascript:;" onclick="location.href='?id=88&servicestart=sample'"
                     class="btn btn-xs btn-default"><i class="fa fa-refresh text-info"></i> <?php echo T('REFRESH'); ?></a>
                 </td>
@@ -352,7 +502,7 @@ include('..inc/panel.menu.php');
 <script>
   function viewLogs(service) {
     $('#logServiceTitle').text(service);
-    $('#serviceLogContent').text('Loading...');
+    $('#serviceLogContent').text('<?php echo T("LOADING"); ?>');
     $('#serviceLogModal').modal('show');
 
     $.ajax({
@@ -361,7 +511,7 @@ include('..inc/panel.menu.php');
       dataType: 'json',
       success: function (data) {
         if (data.error) {
-          $('#serviceLogContent').text('Error: ' + data.error);
+          $('#serviceLogContent').text('<?php echo T("ERROR"); ?>: ' + data.error);
         } else {
           $('#serviceLogContent').text(data.logs.join('\n'));
           var logDiv = document.getElementById("serviceLogContent");
@@ -369,7 +519,7 @@ include('..inc/panel.menu.php');
         }
       },
       error: function () {
-        $('#serviceLogContent').text('Error fetching logs.');
+        $('#serviceLogContent').text('<?php echo T("ERROR_FETCHING_LOGS"); ?>');
       }
     });
   }

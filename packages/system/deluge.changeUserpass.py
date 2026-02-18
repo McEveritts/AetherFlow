@@ -1,4 +1,4 @@
-#!/usr/bin/env python                                                                                                                                                                         
+#!/usr/bin/env python3
 # Changes the password for Deluge's Web UI
 
 from deluge.config import Config
@@ -12,21 +12,21 @@ if len(sys.argv) == 2:
     if os.path.isdir(deluge_dir):
         try:
             config = Config("web.conf", config_dir=deluge_dir)
-        except IOError, e:
-            print "Can't open web ui config file: ", e
+        except IOError as e:
+            print("Can't open web ui config file: ", e)
         else:
-            password = raw_input("Enter new password: ")
+            password = input("Enter new password: ")
             s = hashlib.sha1()
-            s.update(config['pwd_salt'])
-            s.update(password)
+            s.update(config['pwd_salt'].encode('utf-8'))
+            s.update(password.encode('utf-8'))
             config['pwd_sha1'] = s.hexdigest()
             try:
                 config.save()
-            except IOError, e:
-                print "Couldn't save new password: ", e
+            except IOError as e:
+                print("Couldn't save new password: ", e)
             else:
-                print "New password successfully set!"
+                print("New password successfully set!")
     else:
-        print "%s is not a directory!" % deluge_dir
+        print("%s is not a directory!" % deluge_dir)
 else:
-    print "Usage: %s <deluge config dir>" % (os.path.basename(sys.argv[0]))
+    print("Usage: %s <deluge config dir>" % (os.path.basename(sys.argv[0])))

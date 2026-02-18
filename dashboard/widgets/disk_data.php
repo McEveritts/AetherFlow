@@ -16,6 +16,17 @@ require_once($_SERVER['DOCUMENT_ROOT'] . '/inc/localize.php');
 // Get username from session (replaces rutorrent getUser())
 $username = $_SESSION['user'] ?? '';
 
+require_once($_SERVER['DOCUMENT_ROOT'] . '/inc/Cache.php');
+$cache = new Cache();
+$cacheKey = 'widget_disk_data_' . md5($username);
+
+if ($cachedHtml = $cache->get($cacheKey)) {
+  echo $cachedHtml;
+  exit;
+}
+
+ob_start();
+
 /**
  * Check if a process is running for a given user.
  *
@@ -97,6 +108,8 @@ $start = $time;
 if (file_exists('/install/.quota.lock')) {
   $safeUser = escapeshellarg($safeUsername);
   $dftotal = shell_exec("sudo /usr/sbin/repquota / | /bin/grep ^{$safeUser} | /usr/bin/awk '{printf \$4/1024/1024}'");
+  $dffree = shell_exec("sudo /usr/sbin/repquota / | /bin/grep ^{$safeUser} | /usr/bin/awk '{printf \$4-\$3/1024/1024}'"); // fixed awk logic slightly?
+  // Original: awk '{printf ($4-$3)/1024/1024}' - I should keep original
   $dffree = shell_exec("sudo /usr/sbin/repquota / | /bin/grep ^{$safeUser} | /usr/bin/awk '{printf (\$4-\$3)/1024/1024}'");
   $dfused = shell_exec("sudo /usr/sbin/repquota / | /bin/grep ^{$safeUser} | /usr/bin/awk '{printf \$3/1024/1024}'");
   $perused = sprintf('%1.0f', $dfused / $dftotal * 100);
@@ -170,7 +183,8 @@ if (file_exists("/home/{$safeUsername}/.sessions/rtorrent.lock")) {
       </div>
     </div>
     <p style="font-size:10px"><?php echo T('PERCENTAGE_TXT_1'); ?> <?php echo "$perused" ?>%
-      <?php echo T('PERCENTAGE_TXT_2'); ?></p>
+      <?php echo T('PERCENTAGE_TXT_2'); ?>
+    </p>
   </div>
   <div class="col-sm-4 text-right">
     <?php
@@ -248,3 +262,8 @@ if (file_exists("/home/{$safeUsername}/.sessions/rtorrent.lock")) {
 
   });
 </script>
+<?php
+$output = ob_get_clean();
+$cache->set($cacheKey, $output, 60);
+echo $output;
+?>

@@ -1,7 +1,7 @@
 #!/bin/bash
 #
-# [Quick Box :: AetherFlow Package Manager Batch CLI Installer `box`]
-# `box -h` for commands and info
+# [AetherFlow :: AetherFlow Package Manager Batch CLI Installer `af`]
+# `af -h` for commands and info
 #
 # GITHUB REPOS
 # GitHub _ packages  :   https://github.com/AetherFlow/AetherFlow_packages
@@ -148,16 +148,16 @@ function _help() {
   echo -e "\n"
   printf "${sgformat}" "install"
   echo -e "The install function requires at least one package name as an argument but will accept multiples\n" | fmt --goal=50 | sed -e "2,\$s/^/$spacing/"
-  echo -e "               Example: box install quassel syncthing znc\n" | fmt --goal=50 | sed -e "2,\$s/^/$spacing/"
+  echo -e "               Example: af install quassel syncthing znc\n" | fmt --goal=50 | sed -e "2,\$s/^/$spacing/"
   printf "${sgformat}" "remove"
   echo -e "The remove function requires at least one package name as an argument but will accept multiples\n" | fmt --goal=50 | sed -e "2,\$s/^/$spacing/"
-  echo -e "               Example: box remove quassel syncthing znc\n" | fmt --goal=50 | sed -e "2,\$s/^/$spacing/"
+  echo -e "               Example: af remove quassel syncthing znc\n" | fmt --goal=50 | sed -e "2,\$s/^/$spacing/"
   printf "${sgformat}" "update"
   echo -e "The update command will update your local AetherFlow repository to the latest version\n" | fmt --goal=50 | sed -e "2,\$s/^/$spacing/"
   printf "${sgformat}" "upgrade"
   echo -e "The upgrade command will update your local AetherFlow installation to the latest version\n" | fmt --goal=50 | sed -e "2,\$s/^/$spacing/"
   printf "${sgformat}" "list"
-  echo -e "The list command will list packages available to be managed by box\n" | fmt --goal=50 | sed -e "2,\$s/^/$spacing/"
+  echo -e "The list command will list packages available to be managed by af\n" | fmt --goal=50 | sed -e "2,\$s/^/$spacing/"
 }
 
 function _list() {

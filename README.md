@@ -50,9 +50,8 @@ After installation, you can use these commands in your terminal:
 *   `setdisk`: Manage user disk quotas.
 *   `createSeedboxUser`: Add a new user.
 *   `changeUserpass`: Update passwords.
-*   `upgradeBox`: Update AetherFlow to the latest version.
+*   `upgradeBox`: Update AetherFlow to the latest version `v3.0.1-PreAlpha.01`.
 
 ---
 
 ## Credits
-

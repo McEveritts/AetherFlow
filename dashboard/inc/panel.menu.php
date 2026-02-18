@@ -128,6 +128,27 @@ $current_vs = "<span id=\"version-result\"></span>";
                 </div>
               </li>
             <?php } ?>
+            <!-- Notification Bell -->
+            <li class="dropdown" id="notification-li">
+              <a href="#" class="dropdown-toggle" data-toggle="dropdown" aria-expanded="false">
+                <i class="fa fa-bell"></i>
+                <span class="badge badge-danger" id="notif-count" style="display:none;">0</span>
+              </a>
+              <ul class="dropdown-menu dm-icon pull-right" id="notif-dropdown">
+                <li>
+                  <div class="panel panel-default" style="margin-bottom:0; width: 300px;">
+                    <div class="panel-heading">
+                      Notifications
+                      <a href="#" id="mark-all-read" class="pull-right" style="font-size: 11px;">Mark all read</a>
+                    </div>
+                    <div class="panel-body" id="notif-list" style="max-height: 300px; overflow-y: auto; padding: 0;">
+                      <!-- Notifications will be loaded here -->
+                      <div class="text-center" style="padding: 10px; color: #777;">Loading...</div>
+                    </div>
+                  </div>
+                </li>
+              </ul>
+            </li>
             <li>
               <div class="btn-group">
                 <button type="button" class="btn btn-logged" data-toggle="dropdown">

@@ -1,0 +1,120 @@
+#!/bin/bash
+# AetherFlow Backup Manager
+# Location: /usr/local/bin/AetherFlow/system/af-backup
+
+BACKUP_DIR="/home/${SUDO_USER:-$USER}/AetherFlow_Backups"
+DATE=$(date +%Y-%m-%d-%H%M)
+FILENAME="aetherflow-backup-${DATE}.tar.gz"
+
+function show_help() {
+    echo "AetherFlow Backup Manager"
+    echo "Usage: af-backup [command]"
+    echo ""
+    echo "Commands:"
+    echo "  create      Create a new system snapshot"
+    echo "  list        List available snapshots"
+    echo "  restore     [filename] Restore a specific snapshot"
+    echo "  delete      [filename] Delete a specific snapshot"
+    echo "  help        Show this help message"
+}
+
+function create_backup() {
+    echo "Creating backup..."
+    mkdir -p "$BACKUP_DIR"
+    
+    # Define directories to backup
+    # Adjust these paths based on actual AetherFlow structure
+    TARGETS=(
+        "/etc/AetherFlow"
+        "/var/www/html/dashboard/inc/config.php"
+        "/var/www/html/dashboard/custom"
+        "/home/${SUDO_USER:-$USER}/.rtorrent.rc"
+    )
+    
+    VALID_TARGETS=()
+    for target in "${TARGETS[@]}"; do
+        if [ -e "$target" ]; then
+            VALID_TARGETS+=("$target")
+        fi
+    done
+    
+    if [ ${#VALID_TARGETS[@]} -eq 0 ]; then
+        echo "Error: No configuration files found to backup."
+        return 1
+    fi
+
+    tar -czf "$BACKUP_DIR/$FILENAME" "${VALID_TARGETS[@]}" 2>/dev/null
+    
+    if [ $? -eq 0 ]; then
+        echo "Backup created successfully: $BACKUP_DIR/$FILENAME"
+        chown "${SUDO_USER:-$USER}:${SUDO_USER:-$USER}" "$BACKUP_DIR/$FILENAME"
+    else
+        echo "Error creating backup."
+    fi
+}
+
+function list_backups() {
+    if [ -d "$BACKUP_DIR" ]; then
+        ls -lh "$BACKUP_DIR"/*.tar.gz 2>/dev/null | awk '{print $9, "(" $5 ")"}'
+    else
+        echo "No backup directory found."
+    fi
+}
+
+function delete_backup() {
+    if [ -z "$1" ]; then
+        echo "Error: details needed. Usage: af-backup delete [filename]"
+        return 1
+    fi
+    
+    if [ -f "$BACKUP_DIR/$1" ]; then
+        rm "$BACKUP_DIR/$1"
+        echo "Deleted $1"
+    else
+        echo "File not found: $1"
+    fi
+}
+
+function restore_backup() {
+    if [ -z "$1" ]; then
+        echo "Error: filename needed. Usage: af-backup restore [filename]"
+        return 1
+    fi
+    
+    FILE="$BACKUP_DIR/$1"
+    
+    if [ ! -f "$FILE" ]; then
+        echo "Backup file not found: $FILE"
+        return 1
+    fi
+    
+    echo "Restoring from $FILE..."
+    # Extract to root /
+    tar -xzf "$FILE" -C /
+    
+    if [ $? -eq 0 ]; then
+        echo "Restore complete."
+        # Optional: Restart services if needed
+        # systemctl restart rtorrent@$USER
+    else
+        echo "Error during restore."
+    fi
+}
+
+case "$1" in
+    create)
+        create_backup
+        ;;
+    list)
+        list_backups
+        ;;
+    delete)
+        delete_backup "$2"
+        ;;
+    restore)
+        restore_backup "$2"
+        ;;
+    *)
+        show_help
+        ;;
+esac

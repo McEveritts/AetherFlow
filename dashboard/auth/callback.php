@@ -199,6 +199,28 @@ try {
         'google_access_token' => $accessToken,
     ];
 
+    // ---- Log Login History ----
+    try {
+        $db->exec("CREATE TABLE IF NOT EXISTS login_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            ip_address TEXT,
+            user_agent TEXT,
+            login_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(user_id) REFERENCES users(id)
+        )");
+
+        $logStmt = $db->prepare("INSERT INTO login_history (user_id, ip_address, user_agent) VALUES (?, ?, ?)");
+        $logStmt->execute([
+            $userId,
+            $_SERVER['REMOTE_ADDR'] ?? 'Unknown',
+            $_SERVER['HTTP_USER_AGENT'] ?? 'Unknown'
+        ]);
+    } catch (PDOException $e) {
+        // Non-fatal logging error
+        error_log("Failed to log login history: " . $e->getMessage());
+    }
+
     // ---- Remember Me: extend session to 30 days ----
     $rememberMe = $_SESSION['remember_me'] ?? false;
     unset($_SESSION['remember_me']); // Clean up the temp flag

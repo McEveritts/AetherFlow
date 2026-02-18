@@ -89,6 +89,13 @@ include('inc/panel.menu.php');
           <?php if (isWidgetVisible('package_control'))
             include('widgets/pmc.php'); ?>
           <!-- panel -->
+
+          <!-- AETHERFLOW STORE -->
+          <?php include('widgets/store_ui.php'); ?>
+
+          <!--BACKUP CONTROL CENTER-->
+          <?php include('widgets/backup_control.php'); ?>
+          <!-- panel -->
         <?php } ?>
 
       </div>

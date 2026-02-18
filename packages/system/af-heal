@@ -1,0 +1,39 @@
+#!/bin/bash
+# AetherFlow AI Self-Healing Grid
+# Location: /usr/local/bin/AetherFlow/system/af-heal
+
+LOG_FILE="/var/log/aetherflow/self_healing.log"
+SERVICES=("rtorrent" "nginx" "php7.4-fpm" "deluged")
+
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"
+}
+
+check_and_heal() {
+    for SERVICE in "${SERVICES[@]}"; do
+        if ! pgrep -x "$SERVICE" > /dev/null && ! systemctl is-active --quiet "$SERVICE"; then
+            log "ALERT: Service $SERVICE is down. Attempting healing..."
+            systemctl restart "$SERVICE"
+            
+            if [ $? -eq 0 ]; then
+                log "SUCCESS: $SERVICE successfully restarted."
+                # Future: Send notification via API
+            else
+                log "CRITICAL: Failed to restart $SERVICE."
+            fi
+        else
+            # Service is running fine
+            :
+        fi
+    done
+}
+
+clean_logs() {
+    # Rotate logs larger than 50MB
+    find /var/log/aetherflow -name "*.log" -size +50M -exec truncate -s 0 {} \;
+}
+
+# Main Loop
+log "Running diagnostics..."
+check_and_heal
+clean_logs
