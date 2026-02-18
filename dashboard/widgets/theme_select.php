@@ -1,14 +1,28 @@
 <?php
+/**
+ * Theme Selection Handler (Admin Only)
+ *
+ * @package AetherFlow\Widgets
+ * @author McEveritts <armyworkbs@gmail.com>
+ */
 
-$option = array(
-        'defaulted',
-        'smoked'
-);
+if (!isAdmin()) {
+        return;
+}
 
-foreach ($option as $theme) {
-if (isset($_GET['themeSelect-'.$theme.''])) {
+$validThemes = ['defaulted', 'smoked'];
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['theme_select'])) {
+        requireCsrfToken();
+        $theme = $_POST['theme_select'];
+
+        if (!in_array($theme, $validThemes, true)) {
+                http_response_code(400);
+                die('Invalid theme');
+        }
+
+        shell_exec("sudo /usr/local/bin/aetherflow/system/theme/themeSelect-{$theme}");
         header('Location: /');
-        shell_exec("sudo /usr/local/bin/quickbox/system/theme/themeSelect-$theme");
-}}
-
+        exit;
+}
 ?>

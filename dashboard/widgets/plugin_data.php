@@ -1,6 +1,19 @@
 <?php
+/**
+ * Plugin Management Data Actions (Admin Only)
+ *
+ * Handles ruTorrent plugin install/remove operations.
+ * Requires POST + CSRF + admin privileges.
+ *
+ * @package AetherFlow\Widgets
+ * @author McEveritts <armyworkbs@gmail.com>
+ */
 
-$plugins = array(
+if (!isAdmin()) {
+        return;
+}
+
+$plugins = [
         '_getdir',
         '_noty',
         '_noty2',
@@ -54,19 +67,38 @@ $plugins = array(
         'tracklabels',
         'trafic',
         'unpack',
-        'xmpp'
-);
+        'xmpp',
+];
 
-foreach ($plugins as $plugin) {
-if (isset($_GET['installplugin-'.$plugin.''])) {
+// Handle plugin installation (POST only)
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['install_plugin'])) {
+        requireCsrfToken();
+        $plugin = $_POST['install_plugin'];
+
+        if (!in_array($plugin, $plugins, true)) {
+                http_response_code(400);
+                die('Invalid plugin name');
+        }
+
+        $safePlugin = basename($plugin);
+        shell_exec("sudo /usr/local/bin/aetherflow/plugin/install/installplugin-{$safePlugin}");
         header('Location: /');
-        shell_exec("sudo /usr/local/bin/quickbox/plugin/install/installplugin-$plugin");
-}}
+        exit;
+}
 
-foreach ($plugins as $plugin) {
-if (isset($_GET['removeplugin-'.$plugin.''])) {
+// Handle plugin removal (POST only)
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['remove_plugin'])) {
+        requireCsrfToken();
+        $plugin = $_POST['remove_plugin'];
+
+        if (!in_array($plugin, $plugins, true)) {
+                http_response_code(400);
+                die('Invalid plugin name');
+        }
+
+        $safePlugin = basename($plugin);
+        shell_exec("sudo /usr/local/bin/aetherflow/plugin/remove/removeplugin-{$safePlugin}");
         header('Location: /');
-        shell_exec("sudo /usr/local/bin/quickbox/plugin/remove/removeplugin-$plugin");
-}}
-
+        exit;
+}
 ?>

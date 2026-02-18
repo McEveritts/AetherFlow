@@ -91,7 +91,7 @@ include('..inc/panel.menu.php');
             </tr>
           <?php } ?>
 
-          <?php if ($username == "$master") { ?>
+          <?php if (isAdmin()) { ?>
 
             <tr>
               <td><span id="appstat_webconsole"></span> Web Console </td>

@@ -1,14 +1,21 @@
 <?php
-// session_destroy(); // Removed as it destroys session on every request
-include '/srv/rutorrent/php/util.php';
+// Load Composer autoloader & environment variables
+require_once $_SERVER['DOCUMENT_ROOT'] . '/vendor/autoload.php';
+$dotenv = Dotenv\Dotenv::createImmutable($_SERVER['DOCUMENT_ROOT']);
+$dotenv->safeLoad();
+
 include($_SERVER['DOCUMENT_ROOT'] . '/widgets/class.php');
 $version = "v3.0.1";
 error_reporting(E_ERROR);
-$master = file_get_contents('/srv/rutorrent/home/db/master.txt');
-$master = preg_replace('/\s+/', '', $master);
-$username = getUser();
 
+// Auth: start session and load auth middleware
+require_once($_SERVER['DOCUMENT_ROOT'] . '/inc/auth.php');
+require_once($_SERVER['DOCUMENT_ROOT'] . '/inc/csrf.php');
+require_once($_SERVER['DOCUMENT_ROOT'] . '/inc/Cache.php');
 require_once($_SERVER['DOCUMENT_ROOT'] . '/inc/localize.php');
+
+// Start session with custom timeout (must be before requireAuth)
+// Session is started in session_start_timeout() below, so auth check happens after.
 
 // Database Connection
 try {
@@ -79,9 +86,9 @@ $panel = array(
   'active_page' => basename($_SERVER['PHP_SELF']),
 );
 
-// Gemini AI Configuration
-define('GEMINI_API_KEY', 'YOUR_GEMINI_API_KEY_HERE'); // User to update this
-define('GEMINI_MODEL', 'gemini-1.5-pro'); // Default model, can be switched to 'gemini-ultra' if available
+// Gemini AI Configuration (loaded from .env)
+// Auth is handled by GeminiAuth.php (Service Account OAuth — no API key needed)
+define('GEMINI_MODEL', $_ENV['GEMINI_MODEL'] ?? 'gemini-2.0-flash');
 
 $time_start = microtime_float();
 
@@ -201,12 +208,12 @@ switch (PHP_OS) {
 function sys_linux()
 {
   // CPU
-  if (false === ($str = @file("/proc/cpuinfo")))
+  if (false === ($str = file("/proc/cpuinfo")))
     return false;
   $str = implode("", $str);
-  @preg_match_all("/model\s+name\s{0,}\:+\s{0,}([^\:]+)([\r\n]+)/s", $str, $model);
-  @preg_match_all("/cpu\s+MHz\s{0,}\:+\s{0,}([\d\.]+)[\r\n]+/", $str, $mhz);
-  @preg_match_all("/cache\s+size\s{0,}\:+\s{0,}([\d\.]+\s{0,}[A-Z]+[\r\n]+)/", $str, $cache);
+  preg_match_all("/model\s+name\s{0,}\:+\s{0,}([^\:]+)([\r\n]+)/s", $str, $model);
+  preg_match_all("/cpu\s+MHz\s{0,}\:+\s{0,}([\d\.]+)[\r\n]+/", $str, $mhz);
+  preg_match_all("/cache\s+size\s{0,}\:+\s{0,}([\d\.]+\s{0,}[A-Z]+[\r\n]+)/", $str, $cache);
   if (false !== is_array($model[1])) {
     $res['cpu']['num'] = sizeof($model[1]);
 
@@ -249,7 +256,7 @@ function find_command($commandName)
 {
   $path = array('/bin', '/sbin', '/usr/bin', '/usr/sbin', '/usr/local/bin', '/usr/local/sbin');
   foreach ($path as $p) {
-    if (@is_executable("$p/$commandName"))
+    if (is_executable("$p/$commandName"))
       return "$p/$commandName";
   }
   return false;
@@ -261,9 +268,9 @@ function do_command($commandName, $args)
   $buffer = "";
   if (false === ($command = find_command($commandName)))
     return false;
-  if ($fp = @popen("$command $args", 'r')) {
-    while (!@feof($fp)) {
-      $buffer .= @fgets($fp, 4096);
+  if ($fp = popen("$command $args", 'r')) {
+    while (!feof($fp)) {
+      $buffer .= fgets($fp, 4096);
     }
     return trim($buffer);
   }
@@ -279,10 +286,10 @@ function GetWMI($wmi, $strClass, $strValue = array())
   $arrProp = $objWEBM->Properties_;
   $arrWEBMCol = $objWEBM->Instances_();
   foreach ($arrWEBMCol as $objItem) {
-    @reset($arrProp);
     $arrInstance = array();
     foreach ($arrProp as $propItem) {
-      eval ("\$value = \$objItem->" . $propItem->Name . ";");
+      $propName = $propItem->Name;
+      $value = $objItem->$propName;
       if (empty($strValue)) {
         $arrInstance[$propItem->Name] = trim($value);
       } else {
@@ -297,7 +304,7 @@ function GetWMI($wmi, $strClass, $strValue = array())
 }
 
 //NIC flow
-$strs = @file("/proc/net/dev");
+$strs = file("/proc/net/dev");
 
 for ($i = 2; $i < count($strs); $i++) {
   preg_match_all("/([^\s]+):[\s]{0,}(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)/", $strs[$i], $info);
@@ -345,6 +352,22 @@ function session_start_timeout($timeout = 5, $probability = 100, $cookie_domain 
 
 session_start_timeout(3600);
 $MSGFILE = session_id();
+
+// If user has a "Remember Me" session, re-extend GC lifetime and cookie
+if (isset($_SESSION['remembered']) && $_SESSION['remembered'] && isset($_SESSION['session_lifetime'])) {
+  $lifetime = (int) $_SESSION['session_lifetime'];
+  ini_set('session.gc_maxlifetime', $lifetime);
+  $params = session_get_cookie_params();
+  setcookie(session_name(), session_id(), time() + $lifetime, $params['path'], $params['domain'], $params['secure'], $params['httponly']);
+}
+
+// Enforce authentication after session is started
+requireAuth();
+
+// Set username from OAuth session (replaces getUser() from rutorrent)
+$username = getCurrentUser();
+// Admin check replaces $master = file_get_contents('/srv/rutorrent/home/db/master.txt')
+$master = isAdmin() ? $username : '__admin__';
 
 // Optimization: Fetch process list once per request
 $processList = shell_exec("ps axo user,pid,comm,cmd");
@@ -609,49 +632,58 @@ $appName = [
   ['x2go', 'x2Go', 'x2go'],
   ['znc', 'ZNC', 'znc'],
 ];
-foreach ($appName as list($a, $b, $c)) {
-  switch (intval(isset($_GET['id']) ? $_GET['id'] : '')) {
-    /* enable & start services */
-    case 66:
-      $process = escapeshellarg($_GET['serviceenable']);
-      if ($process == "'$c'") {
-        if (file_exists('/etc/systemd/system/' . $c . '@.service') || file_exists('/etc/systemd/system/' . $c . '@' . $username . '.service') || file_exists('/etc/systemd/system/multi-user.target.wants/' . $c . '@' . $username . '.service')) {
-          shell_exec("sudo systemctl enable $c@$username");
-          shell_exec("sudo systemctl start $c@$username");
-        } elseif (file_exists('/etc/systemd/system/' . $c . '.service') || file_exists('/lib/systemd/system/' . $c . '.service')) {
-          shell_exec("sudo systemctl enable $c");
-          shell_exec("sudo systemctl start $c");
+
+// Service control — POST only with CSRF + admin validation
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['id']) && isAdmin()) {
+  requireCsrfToken();
+  foreach ($appName as list($a, $b, $c)) {
+    switch (intval($_POST['id'])) {
+      /* enable & start services */
+      case 66:
+        $process = escapeshellarg($_POST['serviceenable'] ?? '');
+        if ($process == "'$c'") {
+          if (file_exists('/etc/systemd/system/' . $c . '@.service') || file_exists('/etc/systemd/system/' . $c . '@' . $username . '.service') || file_exists('/etc/systemd/system/multi-user.target.wants/' . $c . '@' . $username . '.service')) {
+            shell_exec("sudo systemctl enable $c@$username");
+            shell_exec("sudo systemctl start $c@$username");
+          } elseif (file_exists('/etc/systemd/system/' . $c . '.service') || file_exists('/lib/systemd/system/' . $c . '.service')) {
+            shell_exec("sudo systemctl enable $c");
+            shell_exec("sudo systemctl start $c");
+          }
+          header("Location: /");
+          exit;
         }
-        header("Location: /");
-      }
-      break;
-    /* disable & stop services */
-    case 77:
-      $process = escapeshellarg($_GET['servicedisable']);
-      if ($process == "'$c'") {
-        if (file_exists('/etc/systemd/system/' . $c . '@.service') || file_exists('/etc/systemd/system/' . $c . '@' . $username . '.service') || file_exists('/etc/systemd/system/multi-user.target.wants/' . $c . '@' . $username . '.service')) {
-          shell_exec("sudo systemctl stop $c@$username");
-          shell_exec("sudo systemctl disable $c@$username");
-        } elseif (file_exists('/etc/systemd/system/' . $c . '.service') || file_exists('/lib/systemd/system/' . $c . '.service')) {
-          shell_exec("sudo systemctl stop $c");
-          shell_exec("sudo systemctl disable $c");
+        break;
+      /* disable & stop services */
+      case 77:
+        $process = escapeshellarg($_POST['servicedisable'] ?? '');
+        if ($process == "'$c'") {
+          if (file_exists('/etc/systemd/system/' . $c . '@.service') || file_exists('/etc/systemd/system/' . $c . '@' . $username . '.service') || file_exists('/etc/systemd/system/multi-user.target.wants/' . $c . '@' . $username . '.service')) {
+            shell_exec("sudo systemctl stop $c@$username");
+            shell_exec("sudo systemctl disable $c@$username");
+          } elseif (file_exists('/etc/systemd/system/' . $c . '.service') || file_exists('/lib/systemd/system/' . $c . '.service')) {
+            shell_exec("sudo systemctl stop $c");
+            shell_exec("sudo systemctl disable $c");
+          }
+          header("Location: /");
+          exit;
         }
-        header("Location: /");
-      }
-      break;
-    /* restart services */
-    case 88:
-      $process = escapeshellarg($_GET['servicestart']);
-      if ($process == "'$c'") {
-        if (file_exists('/etc/systemd/system/' . $c . '@.service') || file_exists('/etc/systemd/system/' . $c . '@' . $username . '.service') || file_exists('/etc/systemd/system/multi-user.target.wants/' . $c . '@' . $username . '.service')) {
-          shell_exec("sudo systemctl enable $c@$username");
-          shell_exec("sudo systemctl restart $c@$username");
-        } elseif (file_exists('/etc/systemd/system/' . $c . '.service') || file_exists('/lib/systemd/system/' . $c . '.service')) {
-          shell_exec("sudo systemctl enable $c");
-          shell_exec("sudo systemctl restart $c");
+        break;
+      /* restart services */
+      case 88:
+        $process = escapeshellarg($_POST['servicestart'] ?? '');
+        if ($process == "'$c'") {
+          if (file_exists('/etc/systemd/system/' . $c . '@.service') || file_exists('/etc/systemd/system/' . $c . '@' . $username . '.service') || file_exists('/etc/systemd/system/multi-user.target.wants/' . $c . '@' . $username . '.service')) {
+            shell_exec("sudo systemctl enable $c@$username");
+            shell_exec("sudo systemctl restart $c@$username");
+          } elseif (file_exists('/etc/systemd/system/' . $c . '.service') || file_exists('/lib/systemd/system/' . $c . '.service')) {
+            shell_exec("sudo systemctl enable $c");
+            shell_exec("sudo systemctl restart $c");
+          }
+          header("Location: /");
+          exit;
         }
-        header("Location: /");
-      }
-      break;
+        break;
+    }
   }
 }
+
