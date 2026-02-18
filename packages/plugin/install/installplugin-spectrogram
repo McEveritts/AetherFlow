@@ -3,14 +3,14 @@
 # [Quick Box :: Install spectrogram plugin]
 #
 # GITHUB REPOS
-# GitHub _ plugins   :   https://github.com/QuickBox/QB/tree/master/rtplugins
+# GitHub _ plugins   :   https://github.com/AetherFlow/QB/tree/master/rtplugins
 # LOCAL REPOS
-# Local _ packages   :   /etc/QuickBox/packages
-# Local _ plugins    :   /etc/QuickBox/rtplugins
-# Author             :   QuickBox.IO | JMSolo
-# URL                :   https://quickbox.io
+# Local _ packages   :   /etc/AetherFlow/packages
+# Local _ plugins    :   /etc/AetherFlow/rtplugins
+# Author             :   AetherFlow.IO | JMSolo
+# URL                :   https://AetherFlow.io
 #
-# QuickBox Copyright (C) 2018 QuickBox.io
+# AetherFlow Copyright (C) 2018 AetherFlow.io
 # Licensed under GNU General Public License v3.0 GPL-3 (in short)
 #
 #   You may copy, distribute and modify the software as long as you track
@@ -24,13 +24,13 @@ MIN_OUTPUT=  #yes
 
 # To print to shell, set to nothing, otherwise output to LOGFILE
 USE_LOGFILE=yes
-LOGFILE=/srv/rutorrent/home/db/output.log # QuickBox logfile
+LOGFILE=/srv/rutorrent/home/db/output.log # AetherFlow logfile
 
 # To print to shell, set to nothing, otherwise output to LOGFILE
 rutorrent=/srv/rutorrent/
 
-# Location of QuickBox ruTorrent plugins on localhost
-PLUGINVAULT=/etc/QuickBox/rtplugins/
+# Location of AetherFlow ruTorrent plugins on localhost
+PLUGINVAULT=/etc/AetherFlow/rtplugins/
 
 # Plugin to install
 PLUGIN=spectrogram
@@ -97,3 +97,4 @@ _done() {
 _installBaseDeps
 _installplugin-spectrogram
 _done
+
