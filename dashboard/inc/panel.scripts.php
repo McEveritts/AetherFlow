@@ -580,7 +580,9 @@
 <!-- THEME SELECT MODAL -->
 <?php $option = array();
 $option[] = array('file' => 'defaulted', 'title' => 'Defaulted');
-$option[] = array('file' => 'smoked', 'title' => 'Smoked'); { ?>
+$option[] = array('file' => 'smoked', 'title' => 'Smoked');
+$option[] = array('file' => 'glass', 'title' => 'Glass (Gold)');
+$option[] = array('file' => 'aetherflow', 'title' => 'AetherFlow'); { ?>
   <?php foreach ($option as $theme) { ?>
     <div class="modal bounceIn animated" id="themeSelect<?php echo $theme['file'] ?>Confirm" tabindex="-1" role="dialog"
       aria-labelledby="ThemeSelect<?php echo $theme['file'] ?>Confirm" aria-hidden="true">

@@ -14,6 +14,15 @@ require_once($_SERVER['DOCUMENT_ROOT'] . '/inc/csrf.php');
 require_once($_SERVER['DOCUMENT_ROOT'] . '/inc/Cache.php');
 require_once($_SERVER['DOCUMENT_ROOT'] . '/inc/localize.php');
 
+// Theme Selection Logic
+$theme_options = ['slate_stone', 'glass', 'aetherflow'];
+// Check session or cookie for theme, default to 'slate_stone'
+$user_theme = $_SESSION['theme'] ?? $_COOKIE['theme'] ?? 'slate_stone';
+if (!in_array($user_theme, $theme_options)) {
+  $user_theme = 'slate_stone';
+}
+$theme_css = "skins/{$user_theme}.css";
+
 // Start session with custom timeout (must be before requireAuth)
 // Session is started in session_start_timeout() below, so auth check happens after.
 
