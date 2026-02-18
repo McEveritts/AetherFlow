@@ -35,7 +35,7 @@
 ### Install Command
 ```bash
 apt-get -yqq update; apt-get -yqq upgrade; apt-get -yqq install git lsb-release bc; \
-git clone https://github.com/AetherFlow/MediaNexus /etc/AetherFlow; \
+git clone https://github.com/McEveritts/MediaNexus /etc/AetherFlow; \
 bash /etc/AetherFlow/setup/aetherflow-setup
 ```
 
@@ -45,8 +45,8 @@ bash /etc/AetherFlow/setup/aetherflow-setup
 
 After installation, you can use these commands in your terminal:
 
-*   `box install <package>`: Install an application (e.g., `box install plex`).
-*   `box remove <package>`: Remove an application.
+*   `af install <package>`: Install an application (e.g., `af install plex`).
+*   `af remove <package>`: Remove an application.
 *   `setdisk`: Manage user disk quotas.
 *   `createSeedboxUser`: Add a new user.
 *   `changeUserpass`: Update passwords.
@@ -55,4 +55,4 @@ After installation, you can use these commands in your terminal:
 ---
 
 ## Credits
-Forked from [AetherFlow Community Edition](https://github.com/AetherFlow/MediaNexus). All original licenses apply.
+Forked from [QuickBox Community Edition](https://github.com/QuickBox/QB). All original licenses apply.
