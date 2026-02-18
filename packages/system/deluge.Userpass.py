@@ -17,3 +17,4 @@ s.update(salt)
 s.update(password)
 
 print s.hexdigest()
+

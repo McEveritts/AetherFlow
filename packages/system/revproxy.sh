@@ -290,7 +290,7 @@ EOF
   fi
 }
 
-local_setup=/etc/QuickBox/setup/
+local_setup=/etc/AetherFlow/setup/
 MASTER=$(cat /srv/rutorrent/home/db/master.txt)
 
 if [[ -f /install/.couchpotato.lock ]]; then _couchpotato; fi
@@ -304,3 +304,4 @@ if [[ -f /install/.medusa.lock ]]; then _medusa; fi
 if [[ -f /install/.sonarr.lock ]]; then _sonarr; fi
 if [[ -f /install/.subsonic.lock ]]; then _subsonic; fi
 if [[ -f /install/.syncthing.lock ]]; then _syncthing; fi
+

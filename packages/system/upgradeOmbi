@@ -360,3 +360,4 @@ fi
 durationmsg="Update complete...elapsed time $duration..."
 durationmsg="${durationmsg//  / }"
 .log 6 "$durationmsg"
+

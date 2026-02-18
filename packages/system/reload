@@ -1,12 +1,12 @@
 #!/bin/bash
 #
-# [QuickBox Reload Script - rtorrent|irssi]
+# [AetherFlow Reload Script - rtorrent|irssi]
 #
-# GitHub:   https://github.com/QuickBox/quickbox_packages
-# Author:   QuickBox.io | Swizards
-# URL:      https://plaza.quickbox.io
+# GitHub:   https://github.com/AetherFlow/AetherFlow_packages
+# Author:   AetherFlow.io | Swizards
+# URL:      https://plaza.AetherFlow.io
 #
-# QuickBox Copyright (C) 2017 QuickBox.io
+# AetherFlow Copyright (C) 2017 AetherFlow.io
 # Licensed under GNU General Public License v3.0 GPL-3 (in short)
 #
 #   You may copy, distribute and modify the software as long as you track
@@ -20,3 +20,4 @@ pkill -u $USER irssi >/dev/null 2>&1
 pkill -u $USER rtorrent >/dev/null 2>&1
 killall -u $USER main >/dev/null 2>&1
 rm -rf ~/.sessions/rtorrent.lock
+

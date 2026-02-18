@@ -1,12 +1,12 @@
 #!/bin/bash
 #
-# [QuickBox Quota Set Script]
+# [AetherFlow Quota Set Script]
 #
-# GitHub:   https://github.com/QuickBox/quickbox_packages
-# Author:   QuickBox.io
-# URL:      https://plaza.quickbox.io
+# GitHub:   https://github.com/AetherFlow/AetherFlow_packages
+# Author:   AetherFlow.io
+# URL:      https://plaza.AetherFlow.io
 #
-# QuickBox Copyright (C) 2017 QuickBox.io
+# AetherFlow Copyright (C) 2017 AetherFlow.io
 # Licensed under GNU General Public License v3.0 GPL-3 (in short)
 #
 #   You may copy, distribute and modify the software as long as you track
@@ -52,3 +52,4 @@ esac
 }
 
 _setdisk
+

@@ -1,16 +1,16 @@
 #!/bin/bash
 #
-# [Quick Box :: QuickBox Package Manager Batch CLI Installer `box`]
+# [Quick Box :: AetherFlow Package Manager Batch CLI Installer `box`]
 # `box -h` for commands and info
 #
 # GITHUB REPOS
-# GitHub _ packages  :   https://github.com/QuickBox/quickbox_packages
+# GitHub _ packages  :   https://github.com/AetherFlow/AetherFlow_packages
 # LOCAL REPOS
-# Local _ packages   :   ~/QuickBox/packages
-# Author             :   QuickBox.IO | liara
-# URL                :   https://plaza.quickbox.io
+# Local _ packages   :   ~/AetherFlow/packages
+# Author             :   AetherFlow.IO | liara
+# URL                :   https://plaza.AetherFlow.io
 #
-# QuickBox Copyright (C) 2017 QuickBox.io
+# AetherFlow Copyright (C) 2017 AetherFlow.io
 # Licensed under GNU General Public License v3.0 GPL-3 (in short)
 #
 #   You may copy, distribute and modify the software as long as you track
@@ -21,7 +21,7 @@
 #################################################################################
 
 function _intro() {
-  whiptail --title "QuickBox Package Manager" --msgbox "Welcome to the QuickBox Package Manger! Using this script you can choose to install and remove the packages contained within our quickbox package repository. Use the arrow keys to navigate, spacebar to toggle the currently selected item and enter to continue." 15 50
+  whiptail --title "AetherFlow Package Manager" --msgbox "Welcome to the AetherFlow Package Manger! Using this script you can choose to install and remove the packages contained within our AetherFlow package repository. Use the arrow keys to navigate, spacebar to toggle the currently selected item and enter to continue." 15 50
 }
 
 function _function() {
@@ -41,7 +41,7 @@ function _function() {
 
 function _install() {
   installa=()
-  locks=($(find /usr/local/bin/quickbox/package/install -type f -printf "%f\n" | cut -d "-" -f 2 | sort -d))
+  locks=($(find /usr/local/bin/AetherFlow/package/install -type f -printf "%f\n" | cut -d "-" -f 2 | sort -d))
   for i in "${locks[@]}"; do
     app=${i}
     if [[ $i == autodl ]]; then app=autodlirssi; fi
@@ -53,7 +53,7 @@ function _install() {
   readarray packages < results
   for i in "${packages[@]}"; do
     echo -e "Installing $i ";
-    bash /usr/local/bin/quickbox/package/install/installpackage-$i
+    bash /usr/local/bin/AetherFlow/package/install/installpackage-$i
   done
   rm results
   _function
@@ -61,7 +61,7 @@ function _install() {
 
 function _remove() {
 removea=()
-locks=($(find /usr/local/bin/quickbox/package/remove -type f -printf "%f\n" | cut -d "-" -f 2 | sort -d))
+locks=($(find /usr/local/bin/AetherFlow/package/remove -type f -printf "%f\n" | cut -d "-" -f 2 | sort -d))
 for i in "${locks[@]}"; do
   app=${i}
   if [[ $i == autodl ]]; then app=autodlirssi; fi
@@ -73,7 +73,7 @@ whiptail --title "Remove Software" --noitem --checklist --separate-output "Make 
 readarray packages < results
 for i in "${packages[@]}"; do
   echo -e "Removing $i ";
-  bash /usr/local/bin/quickbox/package/remove/removepackage-$i
+  bash /usr/local/bin/AetherFlow/package/remove/removepackage-$i
 done
 rm results
 _function
@@ -82,7 +82,7 @@ _function
 function _cli() {
   arg=("$@")
   packages=("${arg[@]:1}")
-  repo=($(find /usr/local/bin/quickbox/package/install -type f -printf "%f\n" | cut -d "-" -f 2))
+  repo=($(find /usr/local/bin/AetherFlow/package/install -type f -printf "%f\n" | cut -d "-" -f 2))
   for i in "${packages[@]}"; do
     app=${i}
     if [[ $i == autodl ]]; then app=autodlirssi; fi
@@ -91,7 +91,7 @@ function _cli() {
     else
       if [[ "${repo[@]}" =~ $i ]]; then
         echo -e "Installing $i "
-        bash /usr/local/bin/quickbox/package/install/installpackage-$i
+        bash /usr/local/bin/AetherFlow/package/install/installpackage-$i
       else
         echo -e "Package $i not found"
       fi
@@ -107,7 +107,7 @@ function _clr() {
     if [[ $i == autodl ]]; then app=autodlirssi; fi
     if [[ -f /install/.$app.lock ]]; then
       echo -e "Removing $i "
-      bash /usr/local/bin/quickbox/package/remove/removepackage-$i
+      bash /usr/local/bin/AetherFlow/package/remove/removepackage-$i
     else
       echo -e "Package $i not installed"
     fi
@@ -115,24 +115,24 @@ function _clr() {
 }
 
 function _updateqb() {
-  echo -e "Updating QuickBox local repository"
+  echo -e "Updating AetherFlow local repository"
   if [[ ! -f /install/.developer.lock ]]; then
-    if [[ -d /etc/QuickBox ]]; then
-      cd /etc/QuickBox
+    if [[ -d /etc/AetherFlow ]]; then
+      cd /etc/AetherFlow
       git submodule foreach git checkout master
       git submodule foreach git reset --hard origin/master
       git submodule foreach git pull
     else
-      git clone --recursive https://github.com/QuickBox/QuickBox /etc/QuickBox
+      git clone --recursive https://github.com/AetherFlow/AetherFlow /etc/AetherFlow
     fi
   else
-    if [[ -d /etc/QuickBox ]]; then
-      cd /etc/QuickBox
+    if [[ -d /etc/AetherFlow ]]; then
+      cd /etc/AetherFlow
       git submodule foreach git checkout development
       git submodule foreach git reset --hard origin/development
       git submodule foreach git pull
     else
-      git clone --recursive --branch "development" https://github.com/QuickBox/QuickBox /etc/QuickBox
+      git clone --recursive --branch "development" https://github.com/AetherFlow/AetherFlow /etc/AetherFlow
     fi
   fi
 }
@@ -153,15 +153,15 @@ function _help() {
   echo -e "The remove function requires at least one package name as an argument but will accept multiples\n" | fmt --goal=50 | sed -e "2,\$s/^/$spacing/"
   echo -e "               Example: box remove quassel syncthing znc\n" | fmt --goal=50 | sed -e "2,\$s/^/$spacing/"
   printf "${sgformat}" "update"
-  echo -e "The update command will update your local QuickBox repository to the latest version\n" | fmt --goal=50 | sed -e "2,\$s/^/$spacing/"
+  echo -e "The update command will update your local AetherFlow repository to the latest version\n" | fmt --goal=50 | sed -e "2,\$s/^/$spacing/"
   printf "${sgformat}" "upgrade"
-  echo -e "The upgrade command will update your local QuickBox installation to the latest version\n" | fmt --goal=50 | sed -e "2,\$s/^/$spacing/"
+  echo -e "The upgrade command will update your local AetherFlow installation to the latest version\n" | fmt --goal=50 | sed -e "2,\$s/^/$spacing/"
   printf "${sgformat}" "list"
   echo -e "The list command will list packages available to be managed by box\n" | fmt --goal=50 | sed -e "2,\$s/^/$spacing/"
 }
 
 function _list() {
-  repo=($(find /usr/local/bin/quickbox/package/install -type f -printf "%f\n" | cut -d "-" -f 2 | sort -d))
+  repo=($(find /usr/local/bin/AetherFlow/package/install -type f -printf "%f\n" | cut -d "-" -f 2 | sort -d))
   for i in "${repo[@]}"; do
     locale=$(cat /srv/rutorrent/home/inc/localize.php | grep language | cut -d "'" -f 2)
     app=$i
@@ -197,22 +197,22 @@ if [[ $1 == update ]]; then
   exit 0
 fi
 if [[ $1 == upgrade ]]; then
-    # Update QuickBox local repository before upgrade
+    # Update AetherFlow local repository before upgrade
   _updateqb
-  echo "Upgrading QuickBox ... This may take a moment"
+  echo "Upgrading AetherFlow ... This may take a moment"
   if [[ ! -f /install/.developer.lock ]]; then
-    if [[ -d /etc/QuickBox ]]; then
-      bash /etc/QuickBox/packages/system/updateQuickBox
+    if [[ -d /etc/AetherFlow ]]; then
+      bash /etc/AetherFlow/packages/system/updateAetherFlow
     else
-      git clone --recursive https://github.com/QuickBox/QuickBox /etc/QuickBox
-      bash /etc/QuickBox/packages/system/updateQuickBox
+      git clone --recursive https://github.com/AetherFlow/AetherFlow /etc/AetherFlow
+      bash /etc/AetherFlow/packages/system/updateAetherFlow
     fi
   else
-    if [[ -d /etc/QuickBox ]]; then
-      bash /etc/QuickBox/packages/system/updateQuickBox
+    if [[ -d /etc/AetherFlow ]]; then
+      bash /etc/AetherFlow/packages/system/updateAetherFlow
     else
-      git clone --recursive --branch "development" https://github.com/QuickBox/QuickBox /etc/QuickBox
-      bash /etc/QuickBox/packages/system/updateQuickBox
+      git clone --recursive --branch "development" https://github.com/AetherFlow/AetherFlow /etc/AetherFlow
+      bash /etc/AetherFlow/packages/system/updateAetherFlow
     fi
   fi
   #printf "" > /srv/rutorrent/home/db/output.log
@@ -234,3 +234,4 @@ if [[ $1 == remove ]]; then
   _clr "$@"
   exit 0
 fi
+
