@@ -1,8 +1,8 @@
 <?php
-session_destroy();
+// session_destroy(); // Removed as it destroys session on every request
 include '/srv/rutorrent/php/util.php';
 include($_SERVER['DOCUMENT_ROOT'] . '/widgets/class.php');
-$version = "v2.6.0";
+$version = "v3.0.1";
 error_reporting(E_ERROR);
 $master = file_get_contents('/srv/rutorrent/home/db/master.txt');
 $master = preg_replace('/\s+/', '', $master);
@@ -10,8 +10,29 @@ $username = getUser();
 
 require_once($_SERVER['DOCUMENT_ROOT'] . '/inc/localize.php');
 
+// Database Connection
+try {
+  $db_path = $_SERVER['DOCUMENT_ROOT'] . '/db/aetherflow.sqlite';
+  $db = new PDO('sqlite:' . $db_path);
+  $db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+  // Auto-create tables if DB file is new/empty (naive check)
+  if (filesize($db_path) == 0) {
+    $schema = file_get_contents($_SERVER['DOCUMENT_ROOT'] . '/db/schema.sql');
+    $queries = explode(';', $schema);
+    foreach ($queries as $query) {
+      $query = trim($query);
+      if (!empty($query))
+        $db->exec($query);
+    }
+    // Seed default user if needed, or rely on registration/first login logic
+  }
+} catch (PDOException $e) {
+  error_log("Database Error: " . $e->getMessage());
+  // Fallback or exit? For now, continue but features might break.
+}
+
 // Network Interface
-$interface = INETFACE;
+$interface = 'INETFACE';
 $iface_list = array('INETFACE');
 $iface_title['INETFACE'] = 'External';
 $vnstat_bin = '/usr/bin/vnstat';
@@ -40,7 +61,8 @@ if (file_exists($zconf)) {
 }
 
 
-function search($data, $find, $end) {
+function search($data, $find, $end)
+{
   $pos1 = strpos($data, $find) + strlen($find);
   $pos2 = strpos($data, $end, $pos1);
   return substr($data, $pos1, $pos2 - $pos1);
@@ -49,25 +71,44 @@ function search($data, $find, $end) {
 define('HTTP_HOST', preg_replace('~^www\.~i', '', $_SERVER['HTTP_HOST']));
 
 $panel = array(
-  'name'              => 'QuickBox Seedbox',
-  'author'            => 'Everyone that contributes to the open QuickBox project!',
-  'robots'            => 'noindex, nofollow',
-  'title'             => 'Quickbox Dashboard',
-  'description'       => 'QuickBox is an open-source seedbox project that is developed and maintained by anyone who so choses to provide time and energy. For more QuickBox, checkout https://plaza.quickbox.io',
-  'active_page'       => basename($_SERVER['PHP_SELF']),
+  'name' => 'AetherFlow Seedbox',
+  'author' => 'Everyone that contributes to the open AetherFlow project!',
+  'robots' => 'noindex, nofollow',
+  'title' => 'AetherFlow Dashboard',
+  'description' => 'AetherFlow is an open-source seedbox project. Only for personal use.',
+  'active_page' => basename($_SERVER['PHP_SELF']),
 );
+
+// Gemini AI Configuration
+define('GEMINI_API_KEY', 'YOUR_GEMINI_API_KEY_HERE'); // User to update this
+define('GEMINI_MODEL', 'gemini-1.5-pro'); // Default model, can be switched to 'gemini-ultra' if available
 
 $time_start = microtime_float();
 
 // Timing
-function microtime_float() {
+// Timing
+/**
+ * Calculate the current microtime float.
+ * Used for measuring script execution time.
+ * 
+ * @return float
+ */
+function microtime_float()
+{
   $mtime = microtime();
   $mtime = explode(' ', $mtime);
   return $mtime[1] + $mtime[0];
 }
 
 //Unit Conversion
-function formatsize($size) {
+/**
+ * Format bytes into human-readable strings (KB, MB, GB, TB).
+ * 
+ * @param int $size Size in bytes
+ * @return string Formatted string (e.g. "1.5 GB")
+ */
+function formatsize($size)
+{
   $danwei = array(' B ', ' KB ', ' MB ', ' GB ', ' TB ');
   $allsize = array();
   $i = 0;
@@ -81,13 +122,20 @@ function formatsize($size) {
     $allsize[$l] = $allsize1[$l] - $allsize1[$l + 1] * 1024;
   }
   $len = count($allsize);
+  $fsize = "";
   for ($j = $len - 1; $j >= 0; $j--) {
     $fsize = $fsize . $allsize[$j] . $danwei[$j];
   }
   return $fsize;
 }
 
-function GetCoreInformation() {
+/**
+ * Retrieve CPU Core usage statistics from /proc/stat.
+ * 
+ * @return array Array of core usage data
+ */
+function GetCoreInformation()
+{
   $data = file('/proc/stat');
   $cores = array();
   foreach ($data as $line) {
@@ -98,7 +146,16 @@ function GetCoreInformation() {
   }
   return $cores;
 }
-function GetCpuPercentages($stat1, $stat2) {
+
+/**
+ * Calculate CPU percentage based on two snapshots of core info.
+ * 
+ * @param array $stat1 Snapshot 1
+ * @param array $stat2 Snapshot 2
+ * @return array|void
+ */
+function GetCpuPercentages($stat1, $stat2)
+{
   if (count($stat1) !== count($stat2)) {
     return;
   }
@@ -114,7 +171,8 @@ function GetCpuPercentages($stat1, $stat2) {
     $dif['softirq'] = $stat2[$i]['softirq'] - $stat1[$i]['softirq'];
     $total = array_sum($dif);
     $cpu = array();
-    foreach ($dif as $x => $y) $cpu[$x] = round($y / $total * 100, 2);
+    foreach ($dif as $x => $y)
+      $cpu[$x] = round($y / $total * 100, 2);
     $cpus['cpu' . $i] = $cpu;
   }
   return $cpus;
@@ -140,9 +198,11 @@ switch (PHP_OS) {
 }
 
 //linux system detects
-function sys_linux() {
+function sys_linux()
+{
   // CPU
-  if (false === ($str = @file("/proc/cpuinfo"))) return false;
+  if (false === ($str = @file("/proc/cpuinfo")))
+    return false;
   $str = implode("", $str);
   @preg_match_all("/model\s+name\s{0,}\:+\s{0,}([^\:]+)([\r\n]+)/s", $str, $model);
   @preg_match_all("/cpu\s+MHz\s{0,}\:+\s{0,}([\d\.]+)[\r\n]+/", $str, $mhz);
@@ -157,40 +217,50 @@ function sys_linux() {
     $mhz[1][0] = ' <span style="color:#999;font-weight:600">Frequency:</span> ' . $mhz[1][0];
     $cache[1][0] = ' <br /> <span style="color:#999;font-weight:600">Secondary cache:</span> ' . $cache[1][0];
     $res['cpu']['model'][] = '<h4>' . $model[1][0] . '</h4>' . $mhz[1][0] . $cache[1][0] . $x1;
-    if (false !== is_array($res['cpu']['model'])) $res['cpu']['model'] = implode("<br />", $res['cpu']['model']);
-    if (false !== is_array($res['cpu']['mhz'])) $res['cpu']['mhz'] = implode("<br />", $res['cpu']['mhz']);
-    if (false !== is_array($res['cpu']['cache'])) $res['cpu']['cache'] = implode("<br />", $res['cpu']['cache']);
+    if (false !== is_array($res['cpu']['model']))
+      $res['cpu']['model'] = implode("<br />", $res['cpu']['model']);
+    if (false !== is_array($res['cpu']['mhz']))
+      $res['cpu']['mhz'] = implode("<br />", $res['cpu']['mhz']);
+    if (false !== is_array($res['cpu']['cache']))
+      $res['cpu']['cache'] = implode("<br />", $res['cpu']['cache']);
   }
 
   return $res;
 }
 
 //FreeBSD system detects
-function sys_freebsd() {
+function sys_freebsd()
+{
   //CPU
-  if (false === ($res['cpu']['num'] = get_key("hw.ncpu"))) return false;
+  if (false === ($res['cpu']['num'] = get_key("hw.ncpu")))
+    return false;
   $res['cpu']['model'] = get_key("hw.model");
   return $res;
 }
 
 //Obtain the parameter values FreeBSD
-function get_key($keyName) {
+function get_key($keyName)
+{
   return do_command('sysctl', "-n $keyName");
 }
 
 //Determining the location of the executable file FreeBSD
-function find_command($commandName) {
+function find_command($commandName)
+{
   $path = array('/bin', '/sbin', '/usr/bin', '/usr/sbin', '/usr/local/bin', '/usr/local/sbin');
   foreach ($path as $p) {
-    if (@is_executable("$p/$commandName")) return "$p/$commandName";
+    if (@is_executable("$p/$commandName"))
+      return "$p/$commandName";
   }
   return false;
 }
 
 //Order Execution System FreeBSD
-function do_command($commandName, $args) {
+function do_command($commandName, $args)
+{
   $buffer = "";
-  if (false === ($command = find_command($commandName))) return false;
+  if (false === ($command = find_command($commandName)))
+    return false;
   if ($fp = @popen("$command $args", 'r')) {
     while (!@feof($fp)) {
       $buffer .= @fgets($fp, 4096);
@@ -201,7 +271,8 @@ function do_command($commandName, $args) {
 }
 
 
-function GetWMI($wmi, $strClass, $strValue = array()) {
+function GetWMI($wmi, $strClass, $strValue = array())
+{
   $arrData = array();
 
   $objWEBM = $wmi->Get($strClass);
@@ -211,7 +282,7 @@ function GetWMI($wmi, $strClass, $strValue = array()) {
     @reset($arrProp);
     $arrInstance = array();
     foreach ($arrProp as $propItem) {
-      eval("\$value = \$objItem->" . $propItem->Name . ";");
+      eval ("\$value = \$objItem->" . $propItem->Name . ";");
       if (empty($strValue)) {
         $arrInstance[$propItem->Name] = trim($value);
       } else {
@@ -233,7 +304,7 @@ for ($i = 2; $i < count($strs); $i++) {
   $NetOutSpeed[$i] = $info[10][0];
   $NetInputSpeed[$i] = $info[2][0];
   $NetInput[$i] = formatsize($info[2][0]);
-  $NetOut[$i]  = formatsize($info[10][0]);
+  $NetOut[$i] = formatsize($info[10][0]);
 }
 
 //Real-time refresh ajax calls
@@ -245,7 +316,15 @@ if ($_GET['act'] == "rt") {
   exit;
 }
 
-function session_start_timeout($timeout = 5, $probability = 100, $cookie_domain = '/') {
+/**
+ * Start a session with a custom timeout.
+ * 
+ * @param int $timeout Session lifetime in seconds
+ * @param int $probability GC Probability
+ * @param string $cookie_domain Custom cookie domain
+ */
+function session_start_timeout($timeout = 5, $probability = 100, $cookie_domain = '/')
+{
   ini_set("session.gc_maxlifetime", $timeout);
   ini_set("session.cookie_lifetime", $timeout);
   $seperator = strstr(strtoupper(substr(PHP_OS, 0, 3)), "WIN") ? "\\" : "/";
@@ -264,17 +343,38 @@ function session_start_timeout($timeout = 5, $probability = 100, $cookie_domain 
   }
 }
 
-session_start_timeout(5);
+session_start_timeout(3600);
 $MSGFILE = session_id();
 
-function processExists($processName, $username) {
-  $exists = false;
-  exec("ps axo user:20,pid,pcpu,pmem,vsz,rss,tty,stat,start,time,comm,cmd|grep $username | grep -iE $processName | grep -v grep", $pids);
-  if (count($pids) > 0) {
-    $exists = true;
+// Optimization: Fetch process list once per request
+$processList = shell_exec("ps axo user,pid,comm,cmd");
+
+/**
+ * Check if a specific process is running for a user.
+ * 
+ * Uses the cached global $processList to avoid repeated shell execution.
+ * 
+ * Regex Logic:
+ * - Matches the start of a line ('m' modifier).
+ * - Matches the username followed by whitespace.
+ * - Matches any characters until the process name is found.
+ * - Case-insensitive matching ('i' modifier).
+ * 
+ * @param string $processName Name of the process/command to search for
+ * @param string $username User who owns the process
+ * @return bool True if running, false otherwise
+ */
+function processExists($processName, $username)
+{
+  global $processList;
+  // Regex: Start of line -> username -> whitespace -> ... -> processName
+  // 'm' modifier allows matching start of lines
+  if (preg_match("/^$username\s+.*\s+$processName/mi", $processList)) {
+    return true;
   }
-  return $exists;
+  return false;
 }
+
 
 $btsync = processExists("resilio-sync", 'rslsync');
 $deluged = processExists("deluged", $username);
@@ -305,7 +405,7 @@ $csf = processExists("lfd", 'root');
 $sickgear = processExists("sickgear", 8088);
 $transmission = processExists("transmission-daemon", $username);
 $qbittorrent = processExists("qbittorrent-nox", $username);
-$nzbget = processExists("nzbget", $username);
+// $nzbget = processExists("nzbget", $username); // Removed duplicate call
 $znc = processExists("znc", $username);
 
 if (file_exists('/srv/rutorrent/home/custom/url.override.php')) {
@@ -359,7 +459,46 @@ include($_SERVER['DOCUMENT_ROOT'] . '/widgets/sys_data.php');
 include($_SERVER['DOCUMENT_ROOT'] . '/widgets/theme_select.php');
 $base = 1024;
 $location = "/home";
-function isEnabled($process, $username) {
+
+function isWidgetVisible($widgetName)
+{
+  global $db, $username;
+  if (!isset($db))
+    return true; // Fallback if DB invalid
+
+  // Check user_widgets
+  // We need user_id. For now, assume username is unique and we can subquery or join.
+  // Or fetch user_id. 
+  // Optimization: Store user_id in session?
+
+  try {
+    $stmt = $db->prepare("
+            SELECT uw.is_visible 
+            FROM user_widgets uw
+            JOIN users u ON uw.user_id = u.id
+            JOIN widgets w ON uw.widget_id = w.id
+            WHERE u.username = ? AND w.name = ?
+        ");
+    $stmt->execute([$username, $widgetName]);
+    $res = $stmt->fetchColumn();
+
+    if ($res !== false) {
+      return (bool) $res;
+    }
+
+    // Fallback to widget default
+    $stmt = $db->prepare("SELECT default_enabled FROM widgets WHERE name = ?");
+    $stmt->execute([$widgetName]);
+    $def = $stmt->fetchColumn();
+    return ($def !== false) ? (bool) $def : true;
+
+  } catch (PDOException $e) {
+    return true; // Default to visible on error
+  }
+}
+
+function isEnabled($process, $username)
+{
   $service = $process;
   if (file_exists('/etc/systemd/system/multi-user.target.wants/' . $process . '@' . $username . '.service') || file_exists('/etc/systemd/system/multi-user.target.wants/' . $process . '.service')) {
     return " <div class=\"toggle-wrapper text-center\"> <div class=\"toggle-en toggle-light primary\" onclick=\"location.href='?id=77&servicedisable=$service'\"></div></div>";
@@ -472,7 +611,7 @@ $appName = [
 ];
 foreach ($appName as list($a, $b, $c)) {
   switch (intval(isset($_GET['id']) ? $_GET['id'] : '')) {
-      /* enable & start services */
+    /* enable & start services */
     case 66:
       $process = escapeshellarg($_GET['serviceenable']);
       if ($process == "'$c'") {
@@ -486,7 +625,7 @@ foreach ($appName as list($a, $b, $c)) {
         header("Location: /");
       }
       break;
-      /* disable & stop services */
+    /* disable & stop services */
     case 77:
       $process = escapeshellarg($_GET['servicedisable']);
       if ($process == "'$c'") {
@@ -500,7 +639,7 @@ foreach ($appName as list($a, $b, $c)) {
         header("Location: /");
       }
       break;
-      /* restart services */
+    /* restart services */
     case 88:
       $process = escapeshellarg($_GET['servicestart']);
       if ($process == "'$c'") {

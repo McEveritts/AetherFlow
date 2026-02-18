@@ -1,10 +1,10 @@
 <?php
 
 /*******************************************************************************
-*                                                                              *
-*                               English	                                       *
-*                                                                              *
-*******************************************************************************/
+ *                                                                              *
+ *                               English	                                       *
+ *                                                                              *
+ *******************************************************************************/
 
 ////////////////////////////////////////
 //DASHBOARD MENU
@@ -13,7 +13,7 @@
 // main menu tab
 $L['ANNOUNCEMENTS'] = 'Announcements';
 $L['CHAT_CONNECT_TXT'] = 'Click to connect';
-$L['DEV_REPO_TXT'] = 'You are on the QuickBox Development Repo';
+$L['DEV_REPO_TXT'] = 'You are on the AetherFlow Development Repo';
 $L['DOWNLOADS'] = 'Downloads';
 $L['ISSUE_REPORT_TXT'] = 'Report an issue';
 $L['JOIN_US_TXT'] = 'Join Us On Live Chat!';
@@ -32,7 +32,7 @@ $L['PLUGINS'] = 'Plugins';
 
 // quick help menu tab
 $L['HELP_COMMANDS'] = 'Help Commands & More';
-$L['QUICK_SYSTEM_TIPS'] = 'Quick System Tips';
+$L['QUICK_SYSTEM_TIPS'] = 'System Tips';
 $L['CLEAN_MEM_TXT'] = 'Use the above command as root if/when you decide to clear your systems Physical Memory Cache';
 $L['DISKTEST_TXT'] = 'Type this command to perform a quick r/w test of your disk.';
 $L['FIXHOME_TXT'] = 'Type this command to quickly adjusts /home directory permissions.';
@@ -100,7 +100,7 @@ $L['COMPARE_COMMITS'] = 'compare your current status to the latest commits.';
 $L['CURRENT_COMMIT'] = 'View your current commit status';
 $L['CURRENT_VERSIONS_CHANGELOG'] = 'View your current versions changelog.';
 $L['LATEST_COMMIT'] = 'latest.';
-$L['QUICKBOX_COMMIT'] = 'You are on the QuickBox commit - ';
+$L['QUICKBOX_COMMIT'] = 'You are on the AetherFlow commit - ';
 $L['RECENT_UPDATES'] = 'Recent Activity';
 $L['RECENT_UPDATES_TXT'] = 'To view feed, scroll with your mouse wheel.';
 
@@ -370,4 +370,55 @@ $L['UNINSTALLING_TXT_2'] = 'is being uninstalled from your system.';
 ////////////////////////////////////////////////////////////////////////////
 
 
-?>
+////////////////////////////////////////////////////////////////////////////
+// AETHERFLOW SPECIFIC
+////////////////////////////////////////////////////////////////////////////
+$L['AI_ASSISTANT'] = 'AI Assistant';
+$L['README'] = 'README.md';
+$L['CHANGELOG'] = 'CHANGELOG';
+$L['ERROR_LOG'] = 'Error Log';
+$L['PROFILE'] = 'Profile';
+$L['LOGOUT'] = 'Logout';
+$L['WIDGET_SETTINGS'] = 'Widget Settings';
+// PACKAGE NAMES
+$L['SERVICE_RTORRENT'] = 'RTorrent';
+$L['SERVICE_IRSSI'] = 'iRSSi-AutoDL';
+$L['SERVICE_DELUGED'] = 'DelugeD';
+$L['SERVICE_DELUGEWEB'] = 'Deluge Web';
+$L['SERVICE_WEBCONSOLE'] = 'Web Console';
+$L['LOGS'] = 'Logs';
+$L['VIEW_LOGS'] = 'View Logs';
+$L['CLOSE'] = 'Close';
+
+$L['PMC_NAME_BTSYNC'] = 'BTSync';
+$L['PMC_NAME_COUCHPOTATO'] = 'CouchPotato';
+$L['PMC_NAME_CSF'] = 'CSF (Firewall)';
+$L['PMC_NAME_DELUGE'] = 'Deluge';
+$L['PMC_NAME_EMBY'] = 'Emby';
+$L['PMC_NAME_HEADPHONES'] = 'Headphones';
+$L['PMC_NAME_JACKETT'] = 'Jackett';
+$L['PMC_NAME_LIDARR'] = 'Lidarr';
+$L['PMC_NAME_MEDUSA'] = 'Medusa';
+$L['PMC_NAME_NEXTCLOUD'] = 'NextCloud';
+$L['PMC_NAME_NZBGET'] = 'NZBGet';
+$L['PMC_NAME_NZBHYDRA'] = 'NZBHydra';
+$L['PMC_NAME_OMBI'] = 'Ombi';
+$L['PMC_NAME_OPENVPN'] = 'OpenVPN';
+$L['PMC_NAME_PLEX'] = 'Plex';
+$L['PMC_NAME_PYLOAD'] = 'pyLoad';
+$L['PMC_NAME_QUASSEL'] = 'Quassel';
+$L['PMC_NAME_QUOTAS'] = 'Quotas';
+$L['PMC_NAME_RADARR'] = 'Radarr';
+$L['PMC_NAME_RAPIDLEECH'] = 'Rapidleech';
+$L['PMC_NAME_SABNZBD'] = 'SABnzbd';
+$L['PMC_NAME_SICKGEAR'] = 'SickGear';
+$L['PMC_NAME_SICKRAGE'] = 'SickRage';
+$L['PMC_NAME_SONARR'] = 'Sonarr';
+$L['PMC_NAME_SUBSONIC'] = 'Subsonic';
+$L['PMC_NAME_SYNCTHING'] = 'Syncthing';
+$L['PMC_NAME_TAUTULLI'] = 'Tautulli';
+$L['PMC_NAME_TRANSMISSION'] = 'Transmission';
+$L['PMC_NAME_QBITTORRENT'] = 'qBittorrent';
+$L['PMC_NAME_X2GO'] = 'x2Go';
+$L['PMC_NAME_ZNC'] = 'ZNC';
+
