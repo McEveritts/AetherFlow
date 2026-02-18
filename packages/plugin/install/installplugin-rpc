@@ -3,15 +3,15 @@
 # [Quick Box :: Install rpc plugin]
 #
 # GITHUB REPOS
-# GitHub _ packages  :   https://github.com/QuickBox/quickbox_packages
-# GitHub _ plugins   :   https://github.com/QuickBox/quickbox_rutorrent-plugins
+# GitHub _ packages  :   https://github.com/AetherFlow/AetherFlow_packages
+# GitHub _ plugins   :   https://github.com/AetherFlow/AetherFlow_rutorrent-plugins
 # LOCAL REPOS
-# Local _ packages   :   /etc/QuickBox/packages
-# Local _ plugins    :   /etc/QuickBox/rtplugins
-# Author             :   QuickBox.IO | JMSolo
-# URL                :   https://quickbox.io
+# Local _ packages   :   /etc/AetherFlow/packages
+# Local _ plugins    :   /etc/AetherFlow/rtplugins
+# Author             :   AetherFlow.IO | JMSolo
+# URL                :   https://AetherFlow.io
 #
-# QuickBox Copyright (C) 2017 QuickBox.io
+# AetherFlow Copyright (C) 2017 AetherFlow.io
 # Licensed under GNU General Public License v3.0 GPL-3 (in short)
 #
 #   You may copy, distribute and modify the software as long as you track
@@ -25,7 +25,7 @@ function _installplugin-rpc() {
   username=$(whoami);
   rutorrent="/srv/rutorrent/";
   echo "Accessing rpc in the plugin vault ... " >>"${OUTTO}" 2>&1;
-  PLUGINVAULT="/etc/QuickBox/rtplugins/"; cd "${rutorrent}plugins"
+  PLUGINVAULT="/etc/AetherFlow/rtplugins/"; cd "${rutorrent}plugins"
   sleep 5
 
   echo "Installing rpc plugin ... " >>"${OUTTO}" 2>&1;
@@ -48,3 +48,4 @@ function _installplugin-rpc() {
 }
 
 _installplugin-rpc
+
