@@ -1,12 +1,12 @@
 #!/bin/bash
 ################################################################################
-# QuickBox Installation Script
+# AetherFlow Installation Script
 #
-# GitHub:   https://github.com/QuickBox/QuickBox
-# Author:   QuickBox.IO
-# URL:      https://plaza.quickbox.io
+# GitHub:   https://github.com/AetherFlow/AetherFlow
+# Author:   AetherFlow Team
+# URL:      https://aetherflow.io
 #
-# QuickBox Copyright (C) 2017-2022 QuickBox.io
+# AetherFlow Copyright (C) 2017-2022 AetherFlow.io
 # Licensed under GNU General Public License v3.0 GPL-3 (in short)
 #
 #   You may copy, distribute and modify the software as long as you track
@@ -54,23 +54,23 @@ function _intro() {
 	SETNAME=$(lsb_release -rc)
 	echo
 	echo
-	echo "[${repo_title}QuickBox${normal}] ${title} QuickBox Seedbox Installation ${normal}  "
+	echo "[${repo_title}AetherFlow${normal}] ${title} AetherFlow Seedbox Installation ${normal}  "
 	echo
 	echo "   ${title}              Heads Up!              ${normal} "
-	echo "   ${message_title}  QuickBox works with the following  ${normal} "
+	echo "   ${message_title}  AetherFlow works with the following  ${normal} "
 	echo "   ${message_title}  Ubuntu 18.04 / Debian 9 ${normal} "
 	echo
 	echo
 	echo "${green}Checking distribution ...${normal}"
 	if [[ ! -x /usr/bin/lsb_release ]]; then
-		echo "It looks like you are running ${DISTRO}, which is not supported by QuickBox."
+		echo "It looks like you are running ${DISTRO}, which is not supported by AetherFlow."
 		echo "Exiting..."
 		exit 1
 	fi
 	echo "$(lsb_release -a)"
 	echo
 	if [[ ! "${DISTRO}" =~ ("Ubuntu"|"Debian") ]]; then
-		echo "${DISTRO}: ${alert} It looks like you are running ${DISTRO}, which is not supported by QuickBox ${normal} "
+		echo "${DISTRO}: ${alert} It looks like you are running ${DISTRO}, which is not supported by AetherFlow ${normal} "
 		echo 'Exiting...'
 		exit 1
 	elif [[ ! "${CODENAME}" =~ ("bionic"|"stretch") ]]; then
@@ -99,7 +99,7 @@ function _checkkernel() {
 	if [[ -n ${grsec} ]]; then
 		echo -e "Your server is currently running with kernel version: $(uname -r)"
 		echo -e "Kernels with ${bold}grsec${normal} are not supported"
-		echo -ne "${bold}${yellow}Would you like QuickBox to install the distribution kernel?${normal} (Default: ${green}${bold}Y${normal}) "
+		echo -ne "${bold}${yellow}Would you like AetherFlow to install the distribution kernel?${normal} (Default: ${green}${bold}Y${normal}) "
 		read input
 		case ${input} in
 		[yY] | [yY][Ee][Ss] | "")
@@ -139,16 +139,16 @@ function _logcheck() {
 	read input
 	case ${input} in
 	[yY] | [yY][Ee][Ss] | "")
-		OUTTO="/root/quickbox.${PPID}.log"
-		echo "${bold}Output is being sent to /root/quickbox.${magenta}${PPID}${normal}${bold}.log${normal}"
+		OUTTO="/root/AetherFlow.${PPID}.log"
+		echo "${bold}Output is being sent to /root/AetherFlow.${magenta}${PPID}${normal}${bold}.log${normal}"
 		;;
 	[nN] | [nN][Oo])
 		OUTTO="/dev/null 2>&1"
 		echo "${cyan}NO output will be logged${normal}"
 		;;
 	*)
-		OUTTO="/root/quickbox.${PPID}.log"
-		echo "${bold}Output is being sent to /root/quickbox.${magenta}${PPID}${normal}${bold}.log${normal}"
+		OUTTO="/root/AetherFlow.${PPID}.log"
+		echo "${bold}Output is being sent to /root/AetherFlow.${magenta}${PPID}${normal}${bold}.log${normal}"
 		;;
 	esac
 	if [[ ! -d /root/tmp ]]; then
@@ -219,7 +219,7 @@ function _askpartition() {
 	if [[ ${quota} == yes ]]; then
 		echo
 		echo "##################################################################################"
-		echo "#${bold} By default the QuickBox script will initiate a build using ${green}/${normal} ${bold}as the${normal}"
+		echo "#${bold} By default the AetherFlow script will initiate a build using ${green}/${normal} ${bold}as the${normal}"
 		echo "#${bold} primary partition for mounting quotas.${normal}"
 		echo "#"
 		echo "#${bold} Some providers, such as OVH and SYS force ${green}/home${normal} ${bold}as the primary mount ${normal}"
@@ -284,16 +284,16 @@ function _locale() {
 # ask what theme version (8)
 # shellcheck disable=2250,2162
 function _askdashtheme() {
-	echo -e "1) QuickBox - ${green}smoked${normal} :: Dark theme"
-	echo -e "2) QuickBox - ${green}defaulted${normal} :: Light theme"
-	echo -ne "${bold}${yellow}Pick your QuickBox Dashboard Theme${normal} (Default ${green}1${normal}): "
+	echo -e "1) AetherFlow - ${green}smoked${normal} :: Dark theme"
+	echo -e "2) AetherFlow - ${green}defaulted${normal} :: Light theme"
+	echo -ne "${bold}${yellow}Pick your AetherFlow Dashboard Theme${normal} (Default ${green}1${normal}): "
 	read version
 	case $version in
 	1 | "") dash_theme=smoked ;;
 	2) dash_theme=defaulted ;;
 	*) dash_theme=smoked ;;
 	esac
-	echo "We will be using QuickBox Theme : ${green}$dash_theme${normal}"
+	echo "We will be using AetherFlow Theme : ${green}$dash_theme${normal}"
 	echo
 }
 
@@ -581,11 +581,11 @@ function _openssl() {
 # Pre-processing scripts,  giving permissions
 # shellcheck disable=2312
 function _syscommands() {
-	mkdir -p /usr/local/bin/quickbox
-	\cp -rf ${local_packages}/. /usr/local/bin/quickbox
-	dos2unix $(find /usr/local/bin/quickbox -type f) >>"${OUTTO}" 2>&1
-	chmod +x $(find /usr/local/bin/quickbox -type f) >>"${OUTTO}" 2>&1
-	\cp -f /usr/local/bin/quickbox/system/reload /usr/bin/reload
+	mkdir -p /usr/local/bin/AetherFlow
+	\cp -rf ${local_packages}/. /usr/local/bin/AetherFlow
+	dos2unix $(find /usr/local/bin/AetherFlow -type f) >>"${OUTTO}" 2>&1
+	chmod +x $(find /usr/local/bin/AetherFlow -type f) >>"${OUTTO}" 2>&1
+	\cp -f /usr/local/bin/AetherFlow/system/reload /usr/bin/reload
 }
 
 # install skel template
@@ -673,9 +673,9 @@ function _lshell() {
 	cd lshell || { printf -- "%s" "Unable to enter lshell" && return 1; }
 	python2 setup.py install --no-compile --install-scripts=/usr/bin/ >>/dev/null 2>&1
 	if [[ (${CODENAME} != "focal") || (${CODENAME} != "bionic") ]]; then
-		\cp -f /etc/QuickBox/setup/templates/lshell.conf.template /etc/lshell.conf
+		\cp -f /etc/AetherFlow/setup/templates/lshell.conf.template /etc/lshell.conf
 	else
-		\cp -f /etc/QuickBox/setup/templates/lshell.conf-focal.template /etc/lshell.conf
+		\cp -f /etc/AetherFlow/setup/templates/lshell.conf-focal.template /etc/lshell.conf
 	fi
 	echo "/usr/bin/lshell" >>/etc/shells
 	groupadd lshell
@@ -1333,10 +1333,10 @@ function _plugins() {
 	sed -i 's/showhidden: true,/showhidden: false,/g' "${rutorrent}plugins/filemanager/init.js"
 	chown -R www-data.www-data "${rutorrent}"
 	cd ${rutorrent}plugins/theme/themes/
-	git clone https://github.com/QuickBox/club-QuickBox club-QuickBox >>"${OUTTO}" 2>&1
-	chown -R www-data:www-data club-QuickBox
+	git clone https://github.com/AetherFlow/club-AetherFlow club-AetherFlow >>"${OUTTO}" 2>&1
+	chown -R www-data:www-data club-AetherFlow
 	cd ${rutorrent}plugins
-	perl -pi -e "s/\$defaultTheme \= \"\"\;/\$defaultTheme \= \"club-QuickBox\"\;/g" ${rutorrent}plugins/theme/conf.php
+	perl -pi -e "s/\$defaultTheme \= \"\"\;/\$defaultTheme \= \"club-AetherFlow\"\;/g" ${rutorrent}plugins/theme/conf.php
 	rm -rf ${rutorrent}plugins/tracklabels/labels/nlb.png
 
 	# Needed for fileupload
@@ -1449,7 +1449,7 @@ function _ftpdconfig() {
 }
 
 # The following function makes necessary changes to Network and TZ settings needed for
-# the proper functionality of the QuickBox Dashboard.
+# the proper functionality of the AetherFlow Dashboard.
 function _quickstats() {
 	# Dynamically adjust to use the servers active network adapter
 	printf "${IFACE}" >/srv/rutorrent/home/db/interface.txt
@@ -1481,8 +1481,8 @@ function _quickconsole() {
 	cat >/etc/profile<<EOF
 echo " Welcome Back !"
 echo "    * Dashboard:  https://${PUBLICIP}"
-echo "    * Support:    https://plaza.quickbox.io"
-echo "    * Donate:     https://quickbox.io/donate"
+echo "    * Support:    https://plaza.AetherFlow.io"
+echo "    * Donate:     https://AetherFlow.io/donate"
 echo ""
 EOF
 	apt-get -y install shellinabox >>"${OUTTO}" 2>&1
@@ -1519,8 +1519,8 @@ function _boot() {
 	systemctl start {rtorrent,irssi,deluged,deluge-web}@${username} >/dev/null 2>&1
 	#fi
 
-	echo "*/1 * * * * root bash /usr/local/bin/quickbox/system/set_interface" >/etc/cron.d/set_interface
-	/usr/local/bin/quickbox/system/set_interface >/dev/null 2>&1
+	echo "*/1 * * * * root bash /usr/local/bin/AetherFlow/system/set_interface" >/etc/cron.d/set_interface
+	/usr/local/bin/AetherFlow/system/set_interface >/dev/null 2>&1
 }
 
 # function to set permissions on first user
@@ -1591,7 +1591,7 @@ function _finished() {
 	ip=$(ip route get 8.8.8.8 | awk 'NR==1 {print $7}')
 	echo
 	echo
-	echo -e " ${black}${on_green}    [quickbox] Seedbox & GUI Installation Completed    ${normal} "
+	echo -e " ${black}${on_green}    [AetherFlow] Seedbox & GUI Installation Completed    ${normal} "
 	echo -e "        ${standout}    INSTALLATION COMPLETED in ${FIN}/min    ${normal}             "
 	echo
 	echo
@@ -1658,11 +1658,11 @@ spinner() {
 	echo -ne "${OK}"
 }
 
-local_setup=/etc/QuickBox/setup/
-local_packages=/etc/QuickBox/packages/
-local_rutorrent=/etc/QuickBox/rutorrent/
-local_rplugins=/etc/QuickBox/rtplugins/
-local_dashboard=/etc/QuickBox/dashboard/
+local_setup=/etc/AetherFlow/setup/
+local_packages=/etc/AetherFlow/packages/
+local_rutorrent=/etc/AetherFlow/rutorrent/
+local_rplugins=/etc/AetherFlow/rtplugins/
+local_dashboard=/etc/AetherFlow/dashboard/
 # shellcheck disable=2312
 IFACE=$(ip link show | grep -i broadcast | grep -m1 UP | cut -d: -f 2 | cut -d@ -f 1 | sed -e 's/ //g')
 PORT=$(shuf -i 2000-61000 -n 1)
@@ -1685,7 +1685,7 @@ ip=$(ip route get 8.8.8.8 | awk 'NR==1 {print $7}')
 export DEBIAN_FRONTEND=noninteractive
 cd
 
-# QuickBox STRUCTURE
+# AetherFlow STRUCTURE
 _bashrc
 _intro
 _checkroot
@@ -1715,10 +1715,10 @@ clear
 
 echo
 echo ""
-echo "${bold}${magenta}QuickBox will now install, this may take between${normal}"
+echo "${bold}${magenta}AetherFlow will now install, this may take between${normal}"
 echo "${bold}${magenta}10 and 45 minutes depending on your systems specs${normal}"
 echo ""
-echo -n "Pulling QuickBox Ecosystem ... "
+echo -n "Pulling AetherFlow Ecosystem ... "
 _repos &
 spinner $!
 echo
@@ -1819,7 +1819,7 @@ echo -n "Installing mktorrent from source ... "
 _mktorrent &
 spinner $!
 echo
-echo -n "Installing quickbox dashboard ... "
+echo -n "Installing AetherFlow dashboard ... "
 _dashboard &
 spinner $!
 echo
@@ -1892,3 +1892,4 @@ DIFF=$(echo "${E}" - "${S}" | bc)
 FIN=$(echo "${DIFF}" / 60 | bc)
 clear
 _finished
+
