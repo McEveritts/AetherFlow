@@ -71,7 +71,7 @@ if (empty($clientId) || empty($redirectUri)) {
     }
 }
 
-$version = 'v3.0.1-PreAlpha.01';
+$version = 'v3.0.1';
 ?>
 <!DOCTYPE html>
 <html lang="en">
