@@ -55,4 +55,4 @@ After installation, you can use these commands in your terminal:
 ---
 
 ## Credits
-Forked from [QuickBox Community Edition](https://github.com/QuickBox/QB). All original licenses apply.
+
