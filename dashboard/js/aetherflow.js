@@ -7,15 +7,35 @@ $(document).ready(function () {
 
     $('#menuToggle').on('click', function (e) {
         e.preventDefault();
-        var collapsedMargin = $('.mainpanel').css('margin-left');
-        var collapsedLeft = $('.mainpanel').css('left');
 
-        if (collapsedMargin === '280px' || collapsedLeft === '280px') {
-            toggleMenu(-280, 0);
+        // Check if menu is currently open
+        // Desktop: mainpanel margin-left is 280px
+        // Mobile: mainpanel left is 280px (when open via JS)
+
+        var margin = parseInt($('.mainpanel').css('margin-left'));
+        var left = parseInt($('.mainpanel').css('left'));
+        var position = $('.mainpanel').css('position');
+        var windowWidth = $(window).width();
+
+        var isOpen = false;
+
+        if (windowWidth <= 991) {
+            // Mobile / Small Screen
+            // If mainpanel left > 0, it's open
+            if (left > 0) isOpen = true;
         } else {
-            toggleMenu(0, 280);
+            // Desktop
+            // If margin-left > 0, it's open
+            if (margin > 0) isOpen = true;
         }
 
+        if (isOpen) {
+            // Close it
+            toggleMenu(-280, 0);
+        } else {
+            // Open it
+            toggleMenu(0, 280);
+        }
     });
 
 
@@ -23,7 +43,7 @@ $(document).ready(function () {
 
         var emailList = ($(window).width() <= 768 && $(window).width() > 640) ? 320 : 360;
 
-        if ($('.mainpanel').css('position') === 'relative') {
+        if ($(window).width() <= 991) {
 
             $('.logopanel, .leftpanel').animate({ left: marginLeft }, 'fast');
             $('.headerbar, .mainpanel').animate({ left: marginMain }, 'fast');

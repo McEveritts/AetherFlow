@@ -184,11 +184,11 @@ function GetCpuPercentages($stat1, $stat2)
   }
   return $cpus;
 }
-$stat1 = GetCoreInformation();
-sleep(1);
-$stat2 = GetCoreInformation();
-$data = GetCpuPercentages($stat1, $stat2);
-$cpu_show = $data['cpu0']['user'] . "%us,  " . $data['cpu0']['idle'] . "%id,  ";
+// $stat1 = GetCoreInformation();
+// sleep(1);
+// $stat2 = GetCoreInformation();
+// $data = GetCpuPercentages($stat1, $stat2);
+// $cpu_show = $data['cpu0']['user'] . "%us,  " . $data['cpu0']['idle'] . "%id,  ";
 
 // Information obtained depending on the system CPU
 switch (PHP_OS) {
@@ -523,11 +523,38 @@ function isWidgetVisible($widgetName)
 function isEnabled($process, $username)
 {
   $service = $process;
-  if (file_exists('/etc/systemd/system/multi-user.target.wants/' . $process . '@' . $username . '.service') || file_exists('/etc/systemd/system/multi-user.target.wants/' . $process . '.service')) {
-    return " <div class=\"toggle-wrapper text-center\"> <div class=\"toggle-en toggle-light primary\" onclick=\"location.href='?id=77&servicedisable=$service'\"></div></div>";
+  // Check if service is active/enabled
+  // We check for .service file existence as a proxy for 'installed'
+  // But strictly 'enabled/running' is what we want to toggle.
+  // The original code checked file existence to decide if it CAN be toggled, 
+  // and seemingly assumed if it's there, it's ON? 
+  // No, the original logic returned a 'disable' button (green/toggle-en) if the service file exists in multi-user.target.wants (meaning enabled).
+  // And a 'enable' button (red/toggle-dis) if it doesn't.
+
+  $is_enabled = (
+    file_exists('/etc/systemd/system/multi-user.target.wants/' . $process . '@' . $username . '.service') ||
+    file_exists('/etc/systemd/system/multi-user.target.wants/' . $process . '.service')
+  );
+
+  if ($is_enabled) {
+    // It is currently ENABLED. Toggle should show CHECKED. 
+    // Action: Clicking it should sending servicedisable command.
+    $action_url = "?id=77&servicedisable=$service";
+    $checked = 'checked';
   } else {
-    return " <div class=\"toggle-wrapper text-center\"> <div class=\"toggle-dis toggle-light primary\" onclick=\"location.href='?id=66&serviceenable=$service'\"></div></div>";
+    // It is currently DISABLED. Toggle should show UNCHECKED.
+    // Action: Clicking it should sending serviceenable command.
+    $action_url = "?id=66&serviceenable=$service";
+    $checked = '';
   }
+
+  return "
+  <div class=\"toggle-wrapper text-right\">
+    <label class=\"vp-toggle\">
+      <input type=\"checkbox\" $checked onchange=\"location.href='$action_url'\">
+      <span class=\"vp-slider\"></span>
+    </label>
+  </div>";
 }
 /* check for services */
 switch (intval(isset($_GET['id']) ? $_GET['id'] : '')) {
@@ -598,39 +625,39 @@ switch (intval(isset($_GET['id']) ? $_GET['id'] : '')) {
     break;
 }
 $appName = [
-  ['autodl', "AutoDL-IRSSI", 'irssi'],
-  ['btsync', "Resilio-Sync BTSync", 'resilio-sync'],
-  ['couchpotato', 'CouchPotato', 'couchpotato'],
-  ['csf', "Config Server Firewall", 'csf'],
-  ['deluge', "Deluge Daemon", 'deluged'],
-  ['deluge', "Deluge Web Interface", "deluge-web"],
-  ['emby', "Emby-Server", 'emby-server'],
-  ['headphones', 'Headphones', 'headphones'],
-  ['jackett', 'Jackett', 'jackett'],
-  ['lidarr', 'Lidarr', 'lidarr'],
-  ['medusa', 'Medusa', 'medusa'],
-  ['nextcloud', 'Nextcloud', 'nextcloud'],
-  ['nzbget', 'NZBGet', 'nzbget'],
-  ['nzbhydra', 'NZBHydra', 'nzbhydra'],
-  ['ombi', 'Ombi', 'ombi'],
-  ['plex', 'Plex', 'plexmediaserver'],
-  ['pyload', 'pyLoad', 'pyload'],
-  ['qbittorrent', 'qBittorrent', 'qbittorrent'],
-  ['quassel', 'Quassel', 'quassel'],
-  ['radarr', 'Radarr', 'radarr'],
-  ['rapidleech', 'Rapidleech', 'nginx'],
-  ['rtorrent', 'rTorrent', 'rtorrent'],
-  ['sabnzbd', 'SABnzbd', 'sabnzbd'],
-  ['sickgear', 'SickGear', 'sickgear'],
-  ['sickrage', 'SickRage', 'sickrage'],
-  ['sonarr', "Sonarr v2", 'nzbdrone'],
-  ['subsonic', 'Subsonic', 'subsonic'],
-  ['syncthing', 'Syncthing', 'syncthing'],
-  ['tautulli', 'Tautulli', 'tautulli'],
-  ['transmission', 'Transmission', 'transmission'],
-  ['webconsole', "Web Console", 'shellinabox'],
-  ['x2go', 'x2Go', 'x2go'],
-  ['znc', 'ZNC', 'znc'],
+  ['autodl', "AutoDL-IRSSI", 'irssi', "/home/$username/.irssi/log"],
+  ['btsync', "Resilio-Sync BTSync", 'resilio-sync', "/home/$username/.config/resilio-sync/sync.log"],
+  ['couchpotato', 'CouchPotato', 'couchpotato', "/home/$username/.couchpotato/logs/CouchPotato.log"],
+  ['csf', "Config Server Firewall", 'csf', "/var/log/lfd.log"],
+  ['deluge', "Deluge Daemon", 'deluged', "/home/$username/.config/deluge/deluged.log"],
+  ['deluge', "Deluge Web Interface", "deluge-web", "/home/$username/.config/deluge/deluge-web.log"],
+  ['emby', "Emby-Server", 'emby-server', "/var/lib/emby/logs/embyserver.txt"],
+  ['headphones', 'Headphones', 'headphones', "/home/$username/.headphones/logs/headphones.log"],
+  ['jackett', 'Jackett', 'jackett', "/home/$username/.config/Jackett/log.txt"],
+  ['lidarr', 'Lidarr', 'lidarr', "/home/$username/.config/Lidarr/logs/lidarr.txt"],
+  ['medusa', 'Medusa', 'medusa', "/home/$username/.medusa/Logs/medusa.log"],
+  ['nextcloud', 'Nextcloud', 'nextcloud', "/var/www/nextcloud/data/nextcloud.log"],
+  ['nzbget', 'NZBGet', 'nzbget', "/home/$username/.nzbget.log"],
+  ['nzbhydra', 'NZBHydra', 'nzbhydra', "/home/$username/.nzbhydra/nzbhydra.log"],
+  ['ombi', 'Ombi', 'ombi', "/home/$username/.config/Ombi/Logs/log-base.txt"],
+  ['plex', 'Plex', 'plexmediaserver', "/var/lib/plexmediaserver/Library/Application Support/Plex Media Server/Logs/Plex Media Server.log"],
+  ['pyload', 'pyLoad', 'pyload', "/home/$username/.pyload/Logs/log.txt"],
+  ['qbittorrent', 'qBittorrent', 'qbittorrent', "/home/$username/.local/share/data/qBittorrent/logs/qbittorrent.log"],
+  ['quassel', 'Quassel', 'quassel', "/var/log/quassel.log"],
+  ['radarr', 'Radarr', 'radarr', "/home/$username/.config/Radarr/logs/radarr.txt"],
+  ['rapidleech', 'Rapidleech', 'nginx', "/var/log/nginx/rapidleech.error.log"],
+  ['rtorrent', 'rTorrent', 'rtorrent', "/home/$username/.sessions/rtorrent.log"],
+  ['sabnzbd', 'SABnzbd', 'sabnzbd', "/home/$username/.sabnzbd/logs/sabnzbd.log"],
+  ['sickgear', 'SickGear', 'sickgear', "/home/$username/.sickgear/logs/sickgear.log"],
+  ['sickrage', 'SickRage', 'sickrage', "/home/$username/.sickrage/Logs/sickrage.log"],
+  ['sonarr', "Sonarr v2", 'nzbdrone', "/home/$username/.config/NzbDrone/logs/sonarr.txt"],
+  ['subsonic', 'Subsonic', 'subsonic', "/var/subsonic/subsonic_sh.log"],
+  ['syncthing', 'Syncthing', 'syncthing', "/home/$username/.config/syncthing/syncthing.log"],
+  ['tautulli', 'Tautulli', 'tautulli', "/home/$username/.config/Tautulli/logs/tautulli.log"],
+  ['transmission', 'Transmission', 'transmission', "/var/lib/transmission-daemon/info/transmission-daemon.log"],
+  ['webconsole', "Web Console", 'shellinabox', ""],
+  ['x2go', 'x2Go', 'x2go', "/var/log/syslog"],
+  ['znc', 'ZNC', 'znc', "/home/$username/.znc/znc.log"],
 ];
 
 // Service control — POST only with CSRF + admin validation

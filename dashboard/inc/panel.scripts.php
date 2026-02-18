@@ -622,7 +622,8 @@ $option[] = array('file' => 'smoked', 'title' => 'Smoked'); { ?>
 </div><!-- modal -->
 
 <!-- VERSION UPDATE CHECK MODAL (Visual placeholder — no API dependency) -->
-<div class="modal bounceIn animated" id="versionChecker" tabindex="-1" role="dialog" aria-labelledby="VersionChecker" aria-hidden="true">
+<div class="modal bounceIn animated" id="versionChecker" tabindex="-1" role="dialog" aria-labelledby="VersionChecker"
+  aria-hidden="true">
   <div class="modal-dialog">
     <div class="modal-content">
       <div class="modal-header">
@@ -649,11 +650,26 @@ $option[] = array('file' => 'smoked', 'title' => 'Smoked'); { ?>
 <script src="lib/jquery-knob/jquery.knob.js"></script>
 <script src="lib/jquery.gritter/jquery.gritter.js"></script>
 <script src="js/aetherflow.js"></script>
+<script src="js/notifications.js"></script>
 <script src="js/csrf-interceptor.js"></script>
 <script src="js/lobipanel.js"></script>
 <script>
   $(function () {
-    //$('.lobipanel').lobiPanel();
+    // Phase 23: Drag and Drop Dashboard
+    // Initialize sortable on the columns containing panels
+    $('.col-md-8, .col-md-4').sortable({
+      connectWith: '.col-md-8, .col-md-4',
+      handle: '.panel-heading',
+      placeholder: 'panel-placeholder',
+      forcePlaceholderSize: true,
+      opacity: 0.8,
+      stop: function (event, ui) {
+        // Future: Save order via API
+        // var order = $(this).sortable('toArray');
+        console.log('Dashboard layout updated');
+      }
+    });
+
     $('.panel').lobiPanel({
       reload: {
         icon: 'fa fa-refresh'
@@ -1095,5 +1111,13 @@ $option[] = array('file' => 'smoked', 'title' => 'Smoked'); { ?>
     // Select2
     $('select').select2({ minimumResultsForSearch: Infinity });
 
+  });
+</script>
+
+<script>
+  $(document).ready(functio n() {
+    if($('#bw_tables').length) {
+    $('#bw_tables').load('widgets/bw_tables.php?page=s');
+  }
   });
 </script>

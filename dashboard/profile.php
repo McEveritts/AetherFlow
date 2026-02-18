@@ -2,143 +2,249 @@
 include('inc/config.php');
 include('inc/panel.header.php');
 include('inc/panel.menu.php');
+
+// Handle Password Change
+$password_feedback = "";
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['change_password'])) {
+    requireCsrfToken();
+    $new_pass = $_POST['new_pass'];
+    
+    // Basic validation
+    if (strlen($new_pass) < 6) {
+        $password_feedback = "<div class='alert alert-danger'>Password must be at least 6 characters long.</div>";
+    } else {
+        $safeUser = escapeshellarg($username);
+        $safePass = escapeshellarg($new_pass);
+
+        // Try to update system password for the user
+        // Using chpasswd is generally safer/better if available, but sudo passwd needs stdin handling.
+        // Command: echo "username:password" | sudo chpasswd
+        // OR: printf "password\npassword" | sudo passwd username
+
+        // Let's try the pipe to passwd method as it's common on Linux
+        $cmd = sprintf("printf '%%s\\n%%s' %s %s | sudo passwd %s 2>&1", $safePass, $safePass, $safeUser);
+        $output = shell_exec($cmd);
+
+        if (strpos($output, 'successfully') !== false || strpos($output, 'success') !== false) {
+            $password_feedback = "<div class='alert alert-success'>System password updated successfully.</div>";
+        } else {
+            $password_feedback = "<div class='alert alert-warning'>Password update attempt finished. Output: " . htmlspecialchars($output) . "</div>";
+        }
+    }
+}
+
+// Handle Webhook Save
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_webhook'])) {
+    requireCsrfToken();
+    $webhook = trim($_POST['discord_webhook']);
+    
+    // Insert or Update
+    $stmt = $db->prepare("INSERT INTO user_settings (user_id, setting_key, setting_value) VALUES (?, 'discord_webhook', ?) 
+                          ON CONFLICT(user_id, setting_key) DO UPDATE SET setting_value = excluded.setting_value");
+    if ($stmt->execute([$_SESSION['user']['id'], $webhook])) {
+        $password_feedback = "<div class='alert alert-success'>Webhook settings updated.</div>";
+    } else {
+        $password_feedback = "<div class='alert alert-danger'>Failed to update webhook settings.</div>";
+    }
+}
+
+// Fetch Login History
+$loginHistory = [];
+try {
+    // Check if table exists first (it should via callback.php)
+    $stmt = $db->prepare("SELECT ip_address, user_agent, login_time FROM login_history WHERE user_id = ? ORDER BY login_time DESC LIMIT 10");
+    $stmt->execute([$_SESSION['user']['id']]);
+    $loginHistory = $stmt->fetchAll(PDO::FETCH_ASSOC);
+} catch (PDOException $e) {
+    // Table might not exist yet if no logins recorded or migration failed
+    $loginHistory = []; 
+}
+
+// Fetch Widget Settings (Preserving Phase 15 placeholder logic)
+$widgetsList = [];
+try {
+    $widgetsList = $db->query("SELECT * FROM widgets")->fetchAll(PDO::FETCH_ASSOC);
+} catch (PDOException $e) {
+    $widgetsList = [];
+}
+
 ?>
 
 <div class="mainpanel">
     <div class="contentpanel">
         <ol class="breadcrumb">
-            <li><a href="index.php"><i class="fa fa-home"></i>
-                    <?php echo T('MAIN_MENU'); ?>
-                </a></li>
-            <li class="active">
-                <?php echo T('PROFILE'); ?>
-            </li>
+            <li><a href="index.php"><i class="fa fa-home"></i> <?php echo T('MAIN_MENU'); ?></a></li>
+            <li class="active"><?php echo T('PROFILE'); ?></li>
         </ol>
 
-        <?php if (isset($_GET['success']) && $_GET['success'] == 'widgets'): ?>
-        <div class="alert alert-success">
-            <button type="button" class="close" data-dismiss="alert" aria-hidden="true">&times;</button>
-            <?php echo T('WIDGET_SETTINGS'); ?> updated successfully!
-        </div>
-        <?php endif; ?>
-
         <div class="row">
-            <div class="col-md-12">
+            <!-- Account Info Column (Left) -->
+            <div class="col-md-4">
                 <div class="panel panel-default">
                     <div class="panel-heading">
-                        <h4 class="panel-title">
-                            <?php echo T('PROFILE'); ?>
-                        </h4>
-                        <p>Manage your account settings and dashboard preferences.</p>
-                    </div>
-                </div>
-            </div>
-
-            <div class="col-md-6">
-                <!-- User Settings -->
-                <div class="panel panel-default">
-                    <div class="panel-heading">
-                        <h4 class="panel-title">
-                            <?php echo T('WIDGET_SETTINGS'); ?> (P15)
-                        </h4>
+                        <h4 class="panel-title">Account Information</h4>
                     </div>
                     <div class="panel-body">
-                        <p>Toggle visibility of dashboard widgets.</p>
-                        <?php
-                        // Fetch widgets for display
-                        try {
-                            $widgetsList = $db->query("SELECT * FROM widgets")->fetchAll(PDO::FETCH_ASSOC);
-                        } catch (PDOException $e) {
-                            $widgetsList = [];
-                            echo "<div class='alert alert-warning'>Failed to load widgets list. Database error.</div>";
-                        }
-                        ?>
+                        <div class="text-center" style="margin-bottom: 20px;">
+                            <img src="<?php echo htmlspecialchars($_SESSION['user']['avatar_url'] ?? 'img/default-avatar.png'); ?>" 
+                                 alt="Avatar" class="img-circle" style="width: 100px; height: 100px; border: 3px solid #eee;">
+                        </div>
+                        <ul class="list-group list-group-flush">
+                            <li class="list-group-item">
+                                <strong>Username</strong>
+                                <span class="pull-right text-muted"><?php echo htmlspecialchars($_SESSION['user']['username']); ?></span>
+                            </li>
+                            <li class="list-group-item">
+                                <strong>Email</strong>
+                                <span class="pull-right text-muted"><?php echo htmlspecialchars($_SESSION['user']['email']); ?></span>
+                            </li>
+                            <li class="list-group-item">
+                                <strong>Role</strong>
+                                <span class="pull-right text-muted"><?php echo htmlspecialchars(ucfirst($_SESSION['user']['role'])); ?></span>
+                            </li>
+                            <li class="list-group-item">
+                                <strong>Google ID</strong>
+                                <span class="pull-right text-muted" title="<?php echo htmlspecialchars($_SESSION['user']['google_id']); ?>">
+                                    <?php echo substr($_SESSION['user']['google_id'], 0, 8) . '...'; ?>
+                                </span>
+                            </li>
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Widget Settings (Phase 15 Placeholder) -->
+                <div class="panel panel-default">
+                    <div class="panel-heading">
+                        <h4 class="panel-title"><?php echo T('WIDGET_SETTINGS'); ?></h4>
+                    </div>
+                    <div class="panel-body">
+                        <p class="small text-muted">Toggle visibility of dashboard widgets.</p>
                         <form action="api/save_widget_pref.php" method="POST">
                             <?php csrfField(); ?>
-                            <ul class="list-group">
+                            <ul class="list-group" style="max-height: 300px; overflow-y: auto;">
                                 <?php foreach ($widgetsList as $widget): ?>
-                                <li class="list-group-item">
+                                <li class="list-group-item" style="padding: 10px 15px;">
                                     <?php echo T($widget['title_key']); ?>
                                     <div class="pull-right">
-                                        <label>
+                                        <label class="switch-sm">
                                             <input type="checkbox" name="widgets[]" value="<?php echo htmlspecialchars($widget['name']); ?>" 
-                                            <?php echo isWidgetVisible($widget['name']) ? 'checked' : ''; ?>> Visible
+                                            <?php echo isWidgetVisible($widget['name']) ? 'checked' : ''; ?>>
                                         </label>
                                     </div>
                                 </li>
                                 <?php endforeach; ?>
                             </ul>
-                            <button type="submit" class="btn btn-primary">
-                                <?php echo T('AGREE'); ?>
+                            <button type="submit" class="btn btn-primary btn-block btn-sm" style="margin-top: 10px;">
+                                <?php echo T('UPDATE'); ?> Preferences
                             </button>
                         </form>
                     </div>
                 </div>
             </div>
 
-            <?php
-            if (isset($_POST['change_password'])) {
-                requireCsrfToken();
-                $new_pass = $_POST['new_pass'];
-                // P0: Critical Security - Sanitize Input
-                // Although we pipe the password, we must ensure it doesn't contain null bytes or other shell manipulation characters if possible.
-                // However, passwords can contain almost anything. escapeshellarg is safe for quoting.
-                $safeUser = escapeshellarg($username);
-                $safePass = escapeshellarg($new_pass);
+            <!-- Notification Settings -->
+            <div class="panel panel-default">
+                <div class="panel-heading">
+                    <h4 class="panel-title">Notification Settings</h4>
+                </div>
+                <div class="panel-body">
+                    <form method="POST">
+                        <?php csrfField(); ?>
+                        <div class="form-group">
+                            <label>Discord Webhook URL</label>
+                            <input type="url" name="discord_webhook" class="form-control" placeholder="https://discord.com/api/webhooks/..."
+                                value="<?php echo htmlspecialchars($db->query("SELECT setting_value FROM user_settings WHERE user_id = " . $_SESSION['user']['id'] . " AND setting_key = 'discord_webhook'")->fetchColumn() ?: ''); ?>">
+                            <p class="help-block small">Receive notifications directly to your Discord server.</p>
+                        </div>
+                        <button type="submit" name="save_webhook" value="true" class="btn btn-primary btn-sm btn-block">
+                            Save Webhook
+                        </button>
+                    </form>
+                </div>
+            </div>
+        </div>
 
-                // Using echo pipeline to feed password to passwd command
-                // Note: echoing password in process list is visible? echo is built-in usually, but checking `ps` might reveal it if executed as /bin/echo.
-                // Better to use a file or pipe securely. Given constraints, we use the standard approach for this environment.
-                // We assume sudoers allows 'sudo passwd $username' without password for www-data.
-            
-                // Command: echo "password\npassword" | sudo passwd username
-                $cmd = "echo $safePass | sudo passwd --stdin $safeUser";
-
-                // Fallback if --stdin is not supported (e.g. standard passwd), try sending twice
-                // $cmd = "echo -e \"$safePass\\n$safePass\" | sudo passwd $safeUser";
-            
-                // Let's us the double echo method which is more compatible
-                // formatting the string for echo -e needs care.
-                // A simpler way: printf "$new_pass\n$new_pass" | sudo passwd "$username"
-                // We use escapeshellarg for the pass, so it's quoted: 'password'.
-                // printf '%s\n%s' 'pass' 'pass' | ...
-            
-                $cmd = sprintf("printf '%%s\\n%%s' %s %s | sudo passwd %s", $safePass, $safePass, $safeUser);
-
-                $output = shell_exec($cmd);
-                $password_feedback = "<div class='alert alert-info'>Password change attempt executed. Output: " . htmlspecialchars($output) . "</div>";
-            }
-            ?>
-            <!-- ... existing layout ... -->
-            <div class="col-md-6">
-                <!-- User Settings -->
+            <!-- Settings Column (Right) -->
+            <div class="col-md-8">
+                
+                <!-- System Password Change -->
                 <div class="panel panel-default">
                     <div class="panel-heading">
-                        <h4 class="panel-title">Account Security</h4>
+                        <h4 class="panel-title">System Password</h4>
+                        <p class="small text-muted" style="margin-bottom:0">Change your Linux system password (affects SSH, FTP, etc).</p>
                     </div>
                     <div class="panel-body">
-                        <?php if (isset($password_feedback))
-                            echo $password_feedback; ?>
-                        <form method="POST">
+                        <?php if (!empty($password_feedback)) echo $password_feedback; ?>
+                        
+                        <form method="POST" class="form-horizontal">
                             <?php csrfField(); ?>
-                            <div class="form-group">
-                                <label class="col-sm-3 control-label">Current Password</label>
-                                <div class="col-sm-9">
-                                    <input type="password" name="old_pass" class="form-control"
-                                        placeholder="(Not verified)">
-                                </div>
-                            </div>
+                            <!-- Old password not strictly verified by sudo passwd in this flow, usually root force sets it. 
+                                 Ideally we'd verify old password first for security, but sudo allows override. 
+                                 Let's ask for it for UI consistency/safety if we can verify it later. -->
+                            
                             <div class="form-group">
                                 <label class="col-sm-3 control-label">New Password</label>
-                                <div class="col-sm-9">
-                                    <input type="password" name="new_pass" class="form-control" required>
+                                <div class="col-sm-6">
+                                    <input type="password" name="new_pass" class="form-control" required minlength="6">
                                 </div>
                             </div>
-                            <button type="submit" name="change_password" value="true"
-                                class="btn btn-danger btn-block">Change Password</button>
+                            
+                            <div class="form-group">
+                                <div class="col-sm-offset-3 col-sm-6">
+                                    <button type="submit" name="change_password" value="true" class="btn btn-danger">
+                                        Update System Password
+                                    </button>
+                                </div>
+                            </div>
                         </form>
                     </div>
                 </div>
+
+                <!-- Login History -->
+                <div class="panel panel-default">
+                    <div class="panel-heading">
+                        <h4 class="panel-title">Login History</h4>
+                        <p class="small text-muted" style="margin-bottom:0">Recent access to your account.</p>
+                    </div>
+                    <div class="panel-body">
+                        <div class="table-responsive">
+                            <table class="table table-hover table-striped">
+                                <thead>
+                                    <tr>
+                                        <th>Date/Time</th>
+                                        <th>IP Address</th>
+                                        <th>User Agent</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <?php if (empty($loginHistory)): ?>
+                                        <tr><td colspan="3" class="text-center text-muted">No login history available.</td></tr>
+                                    <?php else: ?>
+                                        <?php foreach ($loginHistory as $entry): ?>
+                                            <tr>
+                                                <td><?php echo htmlspecialchars($entry['login_time']); ?></td>
+                                                <td><?php echo htmlspecialchars($entry['ip_address']); ?></td>
+                                                <td title="<?php echo htmlspecialchars($entry['user_agent']); ?>">
+                                                    <?php 
+                                                        // Simplify User Agent for display
+                                                        $ua = $entry['user_agent'];
+                                                        if (strpos($ua, 'Chrome') !== false) $ua = 'Chrome';
+                                                        elseif (strpos($ua, 'Firefox') !== false) $ua = 'Firefox';
+                                                        elseif (strpos($ua, 'Safari') !== false) $ua = 'Safari';
+                                                        elseif (strpos($ua, 'Edge') !== false) $ua = 'Edge';
+                                                        echo htmlspecialchars($ua); 
+                                                    ?>
+                                                    <small class="text-muted" style="font-size: 0.8em;">(...) </small>
+                                                </td>
+                                            </tr>
+                                        <?php endforeach; ?>
+                                    <?php endif; ?>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+
             </div>
         </div>
     </div>

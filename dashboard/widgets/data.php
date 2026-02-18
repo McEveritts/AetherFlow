@@ -1,22 +1,34 @@
 <?php
 $interface = INETFACE;
 session_start();
-$rx[] = file_get_contents("/sys/class/net/$interface/statistics/rx_bytes");
-$tx[] = file_get_contents("/sys/class/net/$interface/statistics/tx_bytes");
-sleep(1);
-$rx[] = file_get_contents("/sys/class/net/$interface/statistics/rx_bytes");
-$tx[] = file_get_contents("/sys/class/net/$interface/statistics/tx_bytes");
-$tbps = $tx[1] - $tx[0];
-$rbps = $rx[1] - $rx[0];
+$current_rx = file_get_contents("/sys/class/net/$interface/statistics/rx_bytes");
+$current_tx = file_get_contents("/sys/class/net/$interface/statistics/tx_bytes");
+$current_time = microtime(true);
+
+if (isset($_SESSION['last_rx']) && isset($_SESSION['last_tx']) && isset($_SESSION['last_time'])) {
+    $time_diff = $current_time - $_SESSION['last_time'];
+    if ($time_diff > 0) {
+        $rbps = ($current_rx - $_SESSION['last_rx']) / $time_diff;
+        $tbps = ($current_tx - $_SESSION['last_tx']) / $time_diff;
+    } else {
+        $rbps = 0;
+        $tbps = 0;
+    }
+} else {
+    $rbps = 0;
+    $tbps = 0;
+}
+
+$_SESSION['last_rx'] = $current_rx;
+$_SESSION['last_tx'] = $current_tx;
+$_SESSION['last_time'] = $current_time;
+
 $round_rx = round(($rbps * 8) / 10000000, 3);
 $round_tx = round(($tbps * 8) / 10000000, 3);
-//$round_rx=round($rbps/1024/1024, 1);
-//$round_tx=round($tbps/1024/1024, 1);
+
 $time = date("U") . "000";
 $_SESSION['rx'][] = "[$time, $round_rx]";
 $_SESSION['tx'][] = "[$time, $round_tx]";
-//$data['label'] = "1";
-//$data['data'] = $_SESSION['rx'];
 # to make sure that the graph shows only the
 # last minute (saves some bandwitch to)
 if (count($_SESSION['rx']) > 60) {

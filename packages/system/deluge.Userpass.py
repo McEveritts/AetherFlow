@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 #
 # Deluge password generator
 #
@@ -13,8 +13,8 @@ password = sys.argv[1]
 salt = sys.argv[2]
 
 s = hashlib.sha1()
-s.update(salt)
-s.update(password)
+s.update(salt.encode('utf-8'))
+s.update(password.encode('utf-8'))
 
-print s.hexdigest()
+print(s.hexdigest())
 

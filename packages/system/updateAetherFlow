@@ -322,7 +322,7 @@ echo ""
 echo "Welcome Back !"
 echo "  * Dashboard:  https://${PUBLICIP}"
 echo "  * Support:    https://plaza.AetherFlow.io"
-echo "  * Donate:     https://AetherFlow.io/donate"
+echo ""
 echo ""
 EOF
 

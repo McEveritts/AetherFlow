@@ -14,6 +14,8 @@ require_once __DIR__ . '/vendor/autoload.php';
 $dotenv = Dotenv\Dotenv::createImmutable(__DIR__);
 $dotenv->safeLoad();
 
+require_once __DIR__ . '/inc/csrf.php';
+
 // Start session if not already started
 if (session_status() === PHP_SESSION_NONE) {
     session_start();
@@ -27,6 +29,9 @@ if (isset($_SESSION['user']) && !empty($_SESSION['user']['id'])) {
 
 // Handle "Remember Me" form submission
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['google_login'])) {
+    if (!validateCsrfToken($_POST['_csrf_token'] ?? '')) {
+        die('Invalid CSRF Token');
+    }
     $_SESSION['remember_me'] = isset($_POST['remember_me']);
 }
 
@@ -66,7 +71,7 @@ if (empty($clientId) || empty($redirectUri)) {
     }
 }
 
-$version = 'v3.0.1';
+$version = 'v3.0.1-PreAlpha.01';
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -300,6 +305,7 @@ $version = 'v3.0.1';
                 </div>
             <?php else: ?>
                 <form method="POST" action="login.php">
+                    <?php echo csrfField(); ?>
                     <button type="submit" name="google_login" value="1" class="btn-google">
                         <!-- Google "G" logo SVG -->
                         <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">

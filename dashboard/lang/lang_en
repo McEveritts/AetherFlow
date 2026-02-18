@@ -422,3 +422,14 @@ $L['PMC_NAME_QBITTORRENT'] = 'qBittorrent';
 $L['PMC_NAME_X2GO'] = 'x2Go';
 $L['PMC_NAME_ZNC'] = 'ZNC';
 
+// API ERROR MESSAGES
+$L['ERROR_UNAUTHORIZED'] = 'Unauthorized access';
+$L['ERROR_NO_SERVICE'] = 'No service specified';
+$L['ERROR_LOG_PATH_NOT_DEFINED'] = 'Log path not defined for this service';
+$L['ERROR_LOG_FILE_NOT_FOUND'] = 'Log file not found';
+$L['ERROR_LOG_FILE_NOT_READABLE'] = 'Log file not readable';
+$L['ERROR_OPEN_LOG'] = 'Failed to open log file';
+$L['LOADING'] = 'Loading...';
+$L['ERROR_FETCHING_LOGS'] = 'Error fetching logs.';
+$L['ERROR'] = 'Error';
+

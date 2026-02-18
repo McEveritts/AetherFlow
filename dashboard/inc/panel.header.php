@@ -25,6 +25,30 @@ header('Permissions-Policy: camera=(), microphone=(), geolocation=()');
   <link rel="manifest" href="img/favicon/manifest.json">
   <link rel="mask-icon" href="img/favicon/safari-pinned-tab.svg" color="#5bbad5">
   <!-- CSS STYLESHEETS AND ASSETTS -->
+  <script>
+    // Phase 28: Command Bar Listener
+    document.addEventListener('keydown', function (e) {
+      if (e.ctrlKey && e.key === 'k') {
+        var cmd = prompt("AetherFlow Command Center:");
+        if (cmd) {
+          $.post('api/command.php', { command: cmd }, function (res) {
+            alert(res.message);
+          });
+        }
+      }
+    });
+  </script>
+  <link rel="manifest" href="manifest.json">
+  <meta name="theme-color" content="#00BFA5">
+  <script>
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('sw.js')
+          .then((reg) => console.log('SW registered:', reg))
+          .catch((err) => console.log('SW failed:', err));
+      });
+    }
+  </script>
   <link rel="shortcut icon" href="/img/favicon.ico" type="image/ico">
   <link rel="stylesheet" href="lib/jquery-ui/jquery-ui.css">
   <link rel="stylesheet" href="lib/Hover/hover.css">
@@ -47,6 +71,7 @@ header('Permissions-Policy: camera=(), microphone=(), geolocation=()');
   <link rel="stylesheet" href="skins/aetherflow.css">
   <link rel="stylesheet" href="skins/slate_stone.css">
   <link rel="stylesheet" href="skins/lobipanel.css" />
+  <link rel="stylesheet" href="css/vision_pro_toggles.css">
   <!-- JAVASCRIPT -->
   <script src="lib/jquery/jquery.js"></script>
   <script src="lib/chartjs/chart.umd.js"></script>
@@ -234,7 +259,8 @@ header('Permissions-Policy: camera=(), microphone=(), geolocation=()');
     });
   </script>
 
-  <script type="text/javascript" src="inc/panel.app_status.ajax.js"></script>
+  <!-- <script type="text/javascript" src="inc/panel.app_status.ajax.js"></script> -->
+  <script type="text/javascript" src="js/service_monitor.js"></script>
 
   <script type="text/javascript">
     $(document).ready(function () { getJSONData(); });

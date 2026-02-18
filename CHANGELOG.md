@@ -1,3 +1,14 @@
+## CHANGELOG v3.0.1-PreAlpha.01 - Initial Release
+_Changelog updated February 18, 2026_
+
+---
+
+### Initial Pre-Alpha Release
+* **Version**: Set to `v3.0.1-PreAlpha.01`.
+* **System**: Initial codebase preparing for alpha testing.
+
+---
+
 ## CHANGELOG v3.0.0 - AetherFlow Modernization
 _Changelog updated February 18, 2026_
 
@@ -8,7 +19,7 @@ _Changelog updated February 18, 2026_
   * Repository moved to `McEveritts/AetherFlow`.
   * Logos, favicons, and branding assets updated.
   * System paths updated: `/usr/local/bin/quickbox` -> `/usr/local/bin/aetherflow`.
-  * Setup script renamed: `quickbox-setup` -> `aetherflow-setup`.
+  * Setup script renamed: `quickbox-setup` -> `AetherFlow-Setup`.
 
 ### Core System Updates
 * **Command Renaming**: All `box` commands are now `af`.

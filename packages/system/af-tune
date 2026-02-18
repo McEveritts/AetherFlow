@@ -1,0 +1,53 @@
+#!/bin/bash
+# AetherFlow AI Resource Tuner
+# Location: /usr/local/bin/AetherFlow/system/af-tune
+
+# This script analyzes system resources and adjusts configurations dynamically
+
+LOG_FILE="/var/log/aetherflow/ai_tuner.log"
+RTORRENT_RC="/home/${SUDO_USER:-$USER}/.rtorrent.rc"
+
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"
+}
+
+tune_rtorrent() {
+    # Get total RAM in MB
+    TOTAL_RAM=$(free -m | awk '/^Mem:/{print $2}')
+    
+    # Simple heuristic: Use 25% of RAM for rTorrent max_memory_usage
+    TARGET_MEM=$((TOTAL_RAM / 4))
+    
+    # Minimum 512MB, Max 8192MB
+    if [ "$TARGET_MEM" -lt 512 ]; then TARGET_MEM=512; fi
+    if [ "$TARGET_MEM" -gt 8192 ]; then TARGET_MEM=8192; fi
+    
+    TARGET_BYTES=$((TARGET_MEM * 1024 * 1024))
+    
+    if [ -f "$RTORRENT_RC" ]; then
+        if grep -q "max_memory_usage" "$RTORRENT_RC"; then
+            sed -i "s/^max_memory_usage.*/max_memory_usage = $TARGET_BYTES/" "$RTORRENT_RC"
+            log "Updated rTorrent max_memory_usage to $TARGET_MEM MB"
+        else
+            echo "max_memory_usage = $TARGET_BYTES" >> "$RTORRENT_RC"
+            log "Added rTorrent max_memory_usage = $TARGET_MEM MB"
+        fi
+    else
+        log "rTorrent config not found at $RTORRENT_RC"
+    fi
+}
+
+tune_sysctl() {
+    # Increase network buffer sizes for high-speed connections
+    sysctl -w net.core.rmem_max=16777216 > /dev/null
+    sysctl -w net.core.wmem_max=16777216 > /dev/null
+    sysctl -w net.ipv4.tcp_rmem="4096 87380 16777216" > /dev/null
+    sysctl -w net.ipv4.tcp_wmem="4096 65536 16777216" > /dev/null
+    log "Optimized sysctl network buffers"
+}
+
+# Main Execution
+log "Starting AI Resource Tuning..."
+tune_rtorrent
+tune_sysctl
+log "Tuning sequence complete."

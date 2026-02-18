@@ -73,19 +73,60 @@ class Database
      */
     private function initializeSchema()
     {
-        // Simple migration system: check if table exists
+        // Check for users table
         $query = "SELECT name FROM sqlite_master WHERE type='table' AND name='users'";
         $result = $this->pdo->query($query)->fetch();
 
         if (!$result) {
-            $schema = file_get_contents($_SERVER['DOCUMENT_ROOT'] . '/db/schema.sql');
-            if ($schema) {
-                // Split by semicolon and execute each statement
-                $statements = explode(';', $schema);
-                foreach ($statements as $statement) {
-                    if (trim($statement)) {
-                        $this->pdo->exec($statement);
-                    }
+            $this->runSchema();
+        }
+
+        // Check for notifications table (migration)
+        $query = "SELECT name FROM sqlite_master WHERE type='table' AND name='notifications'";
+        $result = $this->pdo->query($query)->fetch();
+
+        if (!$result) {
+            $this->pdo->exec("
+                CREATE TABLE IF NOT EXISTS notifications (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    type TEXT DEFAULT 'info', -- info, success, warning, error
+                    message TEXT NOT NULL,
+                    link TEXT,
+                    is_read INTEGER DEFAULT 0,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(user_id) REFERENCES users(id)
+                );
+            ");
+        }
+
+        // Check for user_settings table (migration)
+        $query = "SELECT name FROM sqlite_master WHERE type='table' AND name='user_settings'";
+        $result = $this->pdo->query($query)->fetch();
+
+        if (!$result) {
+            $this->pdo->exec("
+                CREATE TABLE IF NOT EXISTS user_settings (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    setting_key TEXT NOT NULL,
+                    setting_value TEXT,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(user_id) REFERENCES users(id),
+                    UNIQUE(user_id, setting_key)
+                );
+            ");
+        }
+    }
+
+    private function runSchema()
+    {
+        $schema = file_get_contents($_SERVER['DOCUMENT_ROOT'] . '/db/schema.sql');
+        if ($schema) {
+            $statements = explode(';', $schema);
+            foreach ($statements as $statement) {
+                if (trim($statement)) {
+                    $this->pdo->exec($statement);
                 }
             }
         }
