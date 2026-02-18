@@ -3,13 +3,13 @@
 # [Quick Box :: Install Quassel IRC Bouncer package]
 #
 # GITHUB REPOS
-# GitHub _ packages  :   https://github.com/QuickBox/quickbox_packages
+# GitHub _ packages  :   https://github.com/AetherFlow/AetherFlow_packages
 # LOCAL REPOS
-# Local _ packages   :   /etc/QuickBox/packages
-# Author             :   QuickBox.IO | liara
-# URL                :   https://quickbox.io
+# Local _ packages   :   /etc/AetherFlow/packages
+# Author             :   AetherFlow.IO | liara
+# URL                :   https://AetherFlow.io
 #
-# QuickBox Copyright (C) 2016
+# AetherFlow Copyright (C) 2016
 # Licensed under GNU General Public License v3.0 GPL-3 (in short)
 #
 #   You may copy, distribute and modify the software as long as you track
@@ -47,7 +47,7 @@ function _installQuassel2() {
   exit
 }
 
-local_setup=/etc/QuickBox/setup/
+local_setup=/etc/AetherFlow/setup/
 OUTTO=/srv/rutorrent/home/db/output.log
 distribution=$(lsb_release -is)
 IP=$(ip route get 8.8.8.8 | awk 'NR==1 {print $NF}')
@@ -58,3 +58,4 @@ echo "Quassel has now been installed! "
 echo "Please install quassel-client on your personal computer "
 echo "and connect to the newly created core at "
 echo "${IP}:4242 to set up your account" >>"${OUTTO}" 2>&1;_installQuassel2
+

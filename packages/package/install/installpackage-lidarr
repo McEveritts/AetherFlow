@@ -3,13 +3,13 @@
 # [Quick Box :: Install Lidarr package]
 #
 # GITHUB REPOS
-# GitHub _ packages  :   https://github.com/QuickBox/QB
+# GitHub _ packages  :   https://github.com/AetherFlow/QB
 # LOCAL REPOS
-# Local _ packages   :   /etc/QuickBox/packages
+# Local _ packages   :   /etc/AetherFlow/packages
 # Author             :   KaraokeStu
-# URL                :   https://quickbox.io
+# URL                :   https://AetherFlow.io
 #
-# QuickBox Copyright (C) 2018 QuickBox.io
+# AetherFlow Copyright (C) 2018 AetherFlow.io
 # Licensed under GNU General Public License v3.0 GPL-3 (in short)
 #
 #   You may copy, distribute and modify the software as long as you track
@@ -145,8 +145,8 @@ function _installLidarrExit() {
 }
 
 OUTTO=/srv/rutorrent/home/db/output.log
-local_setup=/etc/QuickBox/setup/
-local_packages=/etc/QuickBox/packages/
+local_setup=/etc/AetherFlow/setup/
+local_packages=/etc/AetherFlow/packages/
 username=$(cat /srv/rutorrent/home/db/master.txt)
 distribution=$(lsb_release -is)
 ip=$(curl -s http://whatismyip.akamai.com)
@@ -158,3 +158,4 @@ echo "Configuring Lidarr ... " >>"${OUTTO}" 2>&1;_installLidarrConfigure
 echo "Starting Lidarr ... " >>"${OUTTO}" 2>&1;_installLidarrStart
 _installLidarrFinish
 _installLidarrExit
+

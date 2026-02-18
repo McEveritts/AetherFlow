@@ -3,13 +3,13 @@
 # [Quick Box :: Install SickRage package]
 #
 # GITHUB REPOS
-# GitHub _ packages  :   https://github.com/QuickBox/QB/tree/master/packages
+# GitHub _ packages  :   https://github.com/AetherFlow/QB/tree/master/packages
 # LOCAL REPOS
-# Local _ packages   :   /etc/QuickBox/packages
-# Author             :   QuickBox.IO | JMSolo
-# URL                :   https://quickbox.io
+# Local _ packages   :   /etc/AetherFlow/packages
+# Author             :   AetherFlow.IO | JMSolo
+# URL                :   https://AetherFlow.io
 #
-# QuickBox Copyright (C) 2018 QuickBox.io
+# AetherFlow Copyright (C) 2018 AetherFlow.io
 # Licensed under GNU General Public License v3.0 GPL-3 (in short)
 #
 #   You may copy, distribute and modify the software as long as you track
@@ -19,7 +19,7 @@
 #
 MASTER=$(cat /srv/rutorrent/home/db/master.txt)
 OUTTO=/srv/rutorrent/home/db/output.log
-local_setup=/etc/QuickBox/setup/
+local_setup=/etc/AetherFlow/setup/
 
 function _installSickRage1() {
   sudo git clone https://github.com/SickRage/SickRage.git  /home/"${MASTER}"/.sickrage >/dev/null 2>&1
@@ -73,3 +73,4 @@ echo "Setting up sickrage permissions ... " >>"${OUTTO}" 2>&1;_installSickRage2
 echo "Setting up sickrage configurations and enabling ... " >>"${OUTTO}" 2>&1;_installSickRage3
 _installSickRage4
 _installSickRage5
+

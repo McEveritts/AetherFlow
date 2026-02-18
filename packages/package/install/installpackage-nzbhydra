@@ -3,13 +3,13 @@
 # [Quick Box :: Install nzbhydra package]
 #
 # GITHUB REPOS
-# GitHub _ packages  :   https://github.com/QuickBox/quickbox_packages
+# GitHub _ packages  :   https://github.com/AetherFlow/AetherFlow_packages
 # LOCAL REPOS
-# Local _ packages   :   /etc/QuickBox/packages
-# Author             :   QuickBox.IO | liara
-# URL                :   https://quickbox.io
+# Local _ packages   :   /etc/AetherFlow/packages
+# Author             :   AetherFlow.IO | liara
+# URL                :   https://AetherFlow.io
 #
-# QuickBox Copyright (C) 2017 QuickBox.io
+# AetherFlow Copyright (C) 2017 AetherFlow.io
 # Licensed under GNU General Public License v3.0 GPL-3 (in short)
 #
 #   You may copy, distribute and modify the software as long as you track
@@ -76,8 +76,9 @@ echo
 echo "Close this dialog box to refresh your browser" >>"${OUTTO}" 2>&1;
 }
 
-local_setup=/etc/QuickBox/setup/
+local_setup=/etc/AetherFlow/setup/
 OUTTO=/srv/rutorrent/home/db/output.log
 MASTER=$(cat /srv/rutorrent/home/db/master.txt)
 _install
 _services
+

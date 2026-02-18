@@ -3,13 +3,13 @@
 # [Quick Box :: Install Resilio Sync (BTSync) package]
 #
 # GITHUB REPOS
-# GitHub _ packages  :   https://github.com/QuickBox/quickbox_packages
+# GitHub _ packages  :   https://github.com/AetherFlow/AetherFlow_packages
 # LOCAL REPOS
-# Local _ packages   :   /etc/QuickBox/packages
-# Author             :   QuickBox.IO | JMSolo
-# URL                :   https://quickbox.io
+# Local _ packages   :   /etc/AetherFlow/packages
+# Author             :   AetherFlow.IO | JMSolo
+# URL                :   https://AetherFlow.io
 #
-# QuickBox Copyright (C) 2017 QuickBox.io
+# AetherFlow Copyright (C) 2017 AetherFlow.io
 # Licensed under GNU General Public License v3.0 GPL-3 (in short)
 #
 #   You may copy, distribute and modify the software as long as you track
@@ -20,7 +20,7 @@
 MASTER=$(cat /srv/rutorrent/home/db/master.txt)
 BTSYNCIP=$(ip route get 8.8.8.8 | awk 'NR==1 {print $NF}')
 OUTTO=/srv/rutorrent/home/db/output.log
-local_setup=/etc/QuickBox/setup/
+local_setup=/etc/AetherFlow/setup/
 
 function _installBTSync1() {
   #sudo sh -c 'echo "deb http://linux-packages.getsync.com/btsync/deb btsync non-free" > /etc/apt/sources.list.d/btsync.list'
@@ -75,3 +75,4 @@ echo "Setting up btsync configurations ... " >>"${OUTTO}" 2>&1;_installBTSync5
 echo "Starting btsync ... " >>"${OUTTO}" 2>&1;_installBTSync6
 _installBTSync7
 _installBTSync8
+

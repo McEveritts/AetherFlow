@@ -7,3 +7,4 @@ service apache2 reload
 rm -rf /opt/Ombi
 rm -rf /etc/Ombi
 rm /install/.ombi.lock
+

@@ -43,3 +43,4 @@ echo
 echo "$APPTITLE has been removed" >>"${OUTTO}" 2>&1;
 echo >>"${OUTTO}" 2>&1;
 echo >>"${OUTTO}" 2>&1;
+

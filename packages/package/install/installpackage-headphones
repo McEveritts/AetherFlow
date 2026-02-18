@@ -3,13 +3,13 @@
 # [Quick Box :: Install Headphones package]
 #
 # GITHUB REPOS
-# GitHub _ packages  :   https://github.com/QuickBox/QB/packages
+# GitHub _ packages  :   https://github.com/AetherFlow/QB/packages
 # LOCAL REPOS
-# Local _ packages   :   /etc/QuickBox/packages
-# Author             :   QuickBox.IO | JMSolo
-# URL                :   https://quickbox.io
+# Local _ packages   :   /etc/AetherFlow/packages
+# Author             :   AetherFlow.IO | JMSolo
+# URL                :   https://AetherFlow.io
 #
-# QuickBox Copyright (C) 2017 QuickBox.io
+# AetherFlow Copyright (C) 2017 AetherFlow.io
 # Licensed under GNU General Public License v3.0 GPL-3 (in short)
 #
 #   You may copy, distribute and modify the software as long as you track
@@ -17,9 +17,9 @@
 #   including (via compiler) GPL-licensed code must also be made available
 #   under the GPL along with build & install instructions.
 #
-#   QuickBox.IO does not grant the end-user the right to distribute this
+#   AetherFlow.IO does not grant the end-user the right to distribute this
 #   code in a means to supply commercial monetization. If you would like
-#   to include QuickBox in your commercial project, write to echo@quickbox.io
+#   to include AetherFlow in your commercial project, write to echo@AetherFlow.io
 #   with a summary of your project as well as its intended use for moentization.
 #
 
@@ -32,7 +32,7 @@ GREEN='\e[92m'
 OUTTO=/srv/rutorrent/home/db/output.log
 USERNAME=$(cat /srv/rutorrent/home/db/master.txt)
 PASSWD=$(cat /root/$USERNAME.info | cut -d ":" -f 3 | cut -d "@" -f 1)
-local_setup=/etc/QuickBox/setup/
+local_setup=/etc/AetherFlow/setup/
 
 
 APPNAME='headphones'
@@ -152,3 +152,4 @@ echo "Close this dialog box to refresh your browser" >>"${OUTTO}" 2>&1;
 service apache2 reload > /dev/null 2>&1
 
 exit
+

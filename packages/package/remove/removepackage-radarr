@@ -53,3 +53,4 @@ rm -rf /install/.radarr.lock
 apt-get -y autoremove && apt-get -y autoclean
 service apache2 reload
 echo "Radarr uninstalled!"
+

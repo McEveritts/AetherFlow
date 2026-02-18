@@ -62,3 +62,4 @@ if [[ -f /etc/init.d/jackett ]]; then
     update-rc.d -f jackett remove
     service jackett stop
 fi
+
