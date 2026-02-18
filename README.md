@@ -28,16 +28,13 @@
 
 ## Installation
 
-### Requirements
-*   A clean installation of **Ubuntu 20.04** or **Debian 11**.
-*   Root access.
+To install AetherFlow, run the following command as root:
 
-### Install Command
 ```bash
-apt-get -yqq update; apt-get -yqq upgrade; apt-get -yqq install git lsb-release bc; \
-git clone https://github.com/McEveritts/AetherFlow /etc/AetherFlow; \
-bash /etc/AetherFlow/setup/aetherflow-setup
+wget -qO AetherFlow-Setup https://raw.githubusercontent.com/McEveritts/AetherFlow/master/setup/AetherFlow-Setup && bash AetherFlow-Setup
 ```
+
+This will download the latest setup script and initiate the installation process.
 
 ---
 
