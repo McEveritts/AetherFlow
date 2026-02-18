@@ -1,3 +1,45 @@
+## CHANGELOG v3.0.0 - AetherFlow Modernization
+_Changelog updated February 18, 2026_
+
+---
+
+### Major Overhaul & Rebranding
+* **Rebranding**: Complete transition from "QuickBox" to "**AetherFlow**".
+  * Repository moved to `McEveritts/AetherFlow`.
+  * Logos, favicons, and branding assets updated.
+  * System paths updated: `/usr/local/bin/quickbox` -> `/usr/local/bin/aetherflow`.
+  * Setup script renamed: `quickbox-setup` -> `aetherflow-setup`.
+
+### Core System Updates
+* **Command Renaming**: All `box` commands are now `af`.
+  * `af install <package>`
+  * `af remove <package>`
+  * `af upgrade`
+* **Authentication**: 
+  * **Google Sign-In**: Native Google OAuth 2.0 integration for dashboard login.
+  * **Remember Me**: Added 30-day persistent session support.
+  * **Middleware**: Robust `requireAuth()` protection for all dashboard pages.
+* **Gemini AI Integration**: 
+  * Replaced API Key auth with **OAuth 2.0 Service Account** authentication.
+  * Integration with Google AI Ultra (Gemini 2.0 Flash) for system assistance.
+* **Security**:
+  * Added CSRF protection middleware and interceptors.
+  * Implemented file-based caching via `Cache.php`.
+  * Removed legacy/insecure code (JMSolo references, donation widgets).
+
+### Dashboard Modernization
+* **UI/UX**: 
+  * **Glassmorphism Design**: New `slate_stone` skin with translucent, blurry panels.
+  * **Font Awesome 6**: Upgraded from FA4 to FA6.
+  * **Typography**: Standardized on Google Roboto font.
+* **Widgets**:
+  * **Charts**: Migrated Bandwidth/CPU charts from Flot to **Chart.js** for smoother animations.
+  * **Service Control**: New "Vision Pro" inspired toggle switches and status indicators.
+  * **Logging**: Added real-time service log viewer modal.
+  * **Network**: Integrated `vnstat` with JSON output for accurate traffic stats.
+
+---
+
 ## CHANGELOG QBPR branch:
 _Changelog updated saturday, Oct 17, 2018_
 
