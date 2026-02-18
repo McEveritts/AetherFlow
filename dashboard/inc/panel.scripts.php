@@ -621,49 +621,25 @@ $option[] = array('file' => 'smoked', 'title' => 'Smoked'); { ?>
   </div><!-- modal-dialog -->
 </div><!-- modal -->
 
-<!-- VERSION UPDATE CHECK MODAL >
+<!-- VERSION UPDATE CHECK MODAL (Visual placeholder — no API dependency) -->
 <div class="modal bounceIn animated" id="versionChecker" tabindex="-1" role="dialog" aria-labelledby="VersionChecker" aria-hidden="true">
   <div class="modal-dialog">
     <div class="modal-content">
       <div class="modal-header">
         <button type="button" class="close" data-dismiss="modal" aria-hidden="true">&times;</button>
-        <h4 class="modal-title" id="VersionChecker">Select Your Update Branch</h4>
+        <h4 class="modal-title" id="VersionChecker">System Updates</h4>
       </div>
       <div class="modal-body">
-        Take your pick between updates.<br/><br/>Select to update your dashboard on the Stable branches (fully tested) or opt to hop on our Testing branches. <br/><br/>You may run the update interchangeably and swap back to a stable branch and visa versa.
+        <p>The AetherFlow update system is being redesigned.</p>
+        <p class="text-muted">A new release-based update mechanism is coming soon. Stay tuned!</p>
       </div>
       <div class="modal-footer">
-        <button type="button" class="btn btn-default pull-left" data-dismiss="modal">Close</button>
-        <a href="?updatetestingQuickBox=true" class="btn btn-primary" data-toggle="modal" data-target="#sysResponse" data-dismiss="modal" aria-label="Close">TESTING</a>
-        <a href="?updateQuickBox=true" class="btn btn-success" data-toggle="modal" data-target="#sysResponse" data-dismiss="modal" aria-label="Close">STABLE</a>
+        <button type="button" class="btn btn-default" data-dismiss="modal">Close</button>
       </div>
-    </div><!-- modal-content ->
-  </div><!-- modal-dialog ->
-</div><!-- modal -->
+    </div>
+  </div>
+</div>
 
-<!-- COMMIT COMPARISON MODAL >
-<div class="modal bounceIn animated" id="commitComparison" tabindex="-1" role="dialog" aria-labelledby="CommitComparison" aria-hidden="true">
-  <div class="modal-dialog">
-    <div class="modal-content">
-      <div class="modal-header">
-        <button type="button" class="close" data-dismiss="modal" aria-hidden="true">&times;</button>
-        <h4 class="modal-title" id="CommitComparison">Choose A Module For Comparison</h4>
-      </div>
-      <div class="modal-body">
-        Dashboard - <a href="#" target="blank"><?php echo $version ?> ... latest commit</a><br/>
-        Packages - <a href="#" target="blank"><?php echo $version ?> ... latest commit</a><br/>
-        Setup - <a href="#" target="blank"><?php echo $version ?> ... latest commit</a><br/>
-        Themes - <a href="#" target="blank"><?php echo $version ?> ... latest commit</a><br/>
-        RUTorrent - <a href="#" target="blank"><?php echo $version ?> ... latest commit</a><br/>
-        RUTorrent Plugins - <a href="#" target="blank"><?php echo $version ?> ... latest commit</a><br/>
-        club-AetherFlow - <a href="#" target="blank"><?php echo $version ?> ... latest commit</a><br/>
-      </div>
-      <div class="modal-footer">
-        <button type="button" class="btn btn-default" data-dismiss="modal"><?php echo T('CANCEL'); ?></button>
-      </div>
-    </div><!-- modal-content ->
-  </div><!-- modal-dialog ->
-</div><!-- modal -->
 
 <!--script src="js/script.js"></script-->
 <script src="lib/jquery-ui/jquery-ui.js"></script>
@@ -673,6 +649,7 @@ $option[] = array('file' => 'smoked', 'title' => 'Smoked'); { ?>
 <script src="lib/jquery-knob/jquery.knob.js"></script>
 <script src="lib/jquery.gritter/jquery.gritter.js"></script>
 <script src="js/aetherflow.js"></script>
+<script src="js/csrf-interceptor.js"></script>
 <script src="js/lobipanel.js"></script>
 <script>
   $(function () {

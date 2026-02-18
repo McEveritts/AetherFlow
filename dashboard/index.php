@@ -18,11 +18,13 @@ include('inc/panel.menu.php');
         <?php if (isWidgetVisible('bandwidth_data')) { ?>
           <div class="panel panel-main panel-inverse">
             <div class="panel-heading">
-              <h4 class="panel-title"><?php echo T('BANDWIDTH_DATA'); ?></h4>
+              <h4 class="panel-title">
+                <?php echo T('BANDWIDTH_DATA'); ?>
+              </h4>
             </div>
             <div class="panel-body text-center" style="padding:0 0 0 5px; overflow: hidden !important">
               <div style="margin-right: -30px">
-                <div id="mainbw" style="width:100%;height:350px;"></div>
+                <div style="width:100%;height:350px;"><canvas id="mainbw"></canvas></div>
               </div>
             </div>
             <div class="row panel-footer panel-statistics" style="padding:0">
@@ -31,17 +33,24 @@ include('inc/panel.menu.php');
                   <table class="table table-hover table-bordered nomargin">
                     <thead>
                       <tr>
-                        <th style="width:33%;padding: 4px 4px 4px 12px"><?php echo T('NETWORK'); ?></th>
-                        <th style="width:33%;padding: 4px 4px 4px 12px"><?php echo T('UPLOAD'); ?></th>
-                        <th style="width:33%;padding: 4px 4px 4px 12px"><?php echo T('DOWNLOAD'); ?></th>
+                        <th style="width:33%;padding: 4px 4px 4px 12px">
+                          <?php echo T('NETWORK'); ?>
+                        </th>
+                        <th style="width:33%;padding: 4px 4px 4px 12px">
+                          <?php echo T('UPLOAD'); ?>
+                        </th>
+                        <th style="width:33%;padding: 4px 4px 4px 12px">
+                          <?php echo T('DOWNLOAD'); ?>
+                        </th>
                       </tr>
                     </thead>
                     <tbody>
-                      <?php if (false !== ($strs = @file("/proc/net/dev"))): ?>
+                      <?php if (false !== ($strs = file("/proc/net/dev"))): ?>
                         <?php for ($i = 2; $i < count($strs); $i++): ?>
                           <?php preg_match_all("/([^\s]+):[\s]{0,}(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)/", $strs[$i], $info); ?>
                           <tr>
-                            <td style="font-size:14px;font-weight:bold;padding: 2px 2px 2px 12px"><?php echo $info[1][0] ?>
+                            <td style="font-size:14px;font-weight:bold;padding: 2px 2px 2px 12px">
+                              <?php echo $info[1][0] ?>
                             </td>
                             <td style="font-size:11px;padding: 2px 2px 2px 12px"><span class="text-success"><span
                                   id="NetOutSpeed<?php echo $i ?>">0B/s</span></span></td>
@@ -58,7 +67,9 @@ include('inc/panel.menu.php');
           </div>
           <div class="panel panel-inverse">
             <div class="panel-heading">
-              <h4 class="panel-title"><?php echo T('VIEW_ADDITIONAL_BANDWIDTH_DETAILS'); ?></h4>
+              <h4 class="panel-title">
+                <?php echo T('VIEW_ADDITIONAL_BANDWIDTH_DETAILS'); ?>
+              </h4>
             </div>
             <div class="panel-body" style="padding:0">
               <div class="row" style="padding: 0; margin: 0">
@@ -73,7 +84,7 @@ include('inc/panel.menu.php');
           include('widgets/service_control.php'); ?>
         <!-- panel -->
 
-        <?php if ($username == "$master") { ?>
+        <?php if (isAdmin()) { ?>
           <!--PACKAGE MANAGEMENT CENTER-->
           <?php if (isWidgetVisible('package_control'))
             include('widgets/pmc.php'); ?>
@@ -88,20 +99,26 @@ include('inc/panel.menu.php');
             <div class="panel panel-side panel-inverse-full panel-updates">
               <?php if (isWidgetVisible('server_load')) { ?>
                 <div class="panel-heading">
-                  <h4 class="panel-title text-success"><?php echo T('SERVER_LOAD'); ?></h4>
+                  <h4 class="panel-title text-success">
+                    <?php echo T('SERVER_LOAD'); ?>
+                  </h4>
                 </div>
                 <div class="panel-body">
                   <div class="row">
                     <div class="col-sm-9">
                       <h4><span id="cpuload"></span></h4>
-                      <p><?php echo T('SL_TXT'); ?></p>
+                      <p>
+                        <?php echo T('SL_TXT'); ?>
+                      </p>
                     </div>
                     <div class="col-sm-3 text-right">
                       <i class="fa fa-heartbeat text-danger" style="font-size: 70px"></i>
                     </div>
                     <div class="row">
                       <div class="col-sm-12 mt20 text-center">
-                        <strong><?php echo T('UPTIME'); ?>:</strong> <span id="uptime"></span>
+                        <strong>
+                          <?php echo T('UPTIME'); ?>:
+                        </strong> <span id="uptime"></span>
                       </div>
                     </div>
                   </div>
@@ -113,7 +130,9 @@ include('inc/panel.menu.php');
             <div class="panel panel-side panel-inverse">
               <?php if (isWidgetVisible('disk_data')) { ?>
                 <div class="panel-heading">
-                  <h4 class="panel-title"><?php echo T('YOUR_DISK_STATUS'); ?></h4>
+                  <h4 class="panel-title">
+                    <?php echo T('YOUR_DISK_STATUS'); ?>
+                  </h4>
                 </div>
                 <div class="panel-body">
                   <div id="disk_data"></div>
@@ -125,7 +144,9 @@ include('inc/panel.menu.php');
             <div class="panel panel-side panel-inverse">
               <?php if (isWidgetVisible('ram_status')) { ?>
                 <div class="panel-heading">
-                  <h4 class="panel-title"><?php echo T('SYSTEM_RAM_STATUS'); ?></h4>
+                  <h4 class="panel-title">
+                    <?php echo T('SYSTEM_RAM_STATUS'); ?>
+                  </h4>
                 </div>
                 <div class="panel-body">
                   <div id="meterram"></div>
@@ -137,32 +158,37 @@ include('inc/panel.menu.php');
             <div class="panel panel-side panel-inverse">
               <?php if (isWidgetVisible('cpu_status')) { ?>
                 <div class="panel-heading">
-                  <h4 class="panel-title"><?php echo T('CPU_STATUS'); ?></h4>
+                  <h4 class="panel-title">
+                    <?php echo T('CPU_STATUS'); ?>
+                  </h4>
                 </div>
                 <div class="panel-body" style="overflow:hidden">
                   <div style="padding:0;margin:-15px -30 -15px -15px">
-                    <div id="flot-placeholder1" style="width:100%;height:200px;"></div>
+                    <div style="width:100%;height:200px;"><canvas id="flot-placeholder1"></canvas></div>
                     <!--div id="metercpu"></div-->
                   </div>
                   <hr />
                   <span class="nomargin" style="font-size:14px">
                     <?php echo $sysInfo['cpu']['model']; ?><br />
-                    [<span style="color:#999;font-weight:600">x<?php echo $sysInfo['cpu']['num']; ?></span> core]
+                    [<span style="color:#999;font-weight:600">x
+                      <?php echo $sysInfo['cpu']['num']; ?>
+                    </span> core]
                   </span>
                 </div>
               <?php } ?>
             </div>
           </div><!-- CPU WIDGET -->
-          <?php if ($username == "$master") { ?>
+          <?php if (isAdmin()) { ?>
             <div class="col-sm-12">
               <div id="project-commits" class="panel panel-inverse">
                 <div class="panel-body ps-container" style="max-height: 350px; padding: 0;">
-                  <a href="?updateQuickBox=true" data-toggle="modal" data-target="#sysResponse"><button
-                      class="btn btn-success btn-quirk btn-block"><i class="fa fa-bell text-success"></i>
-                      <?php echo T('UPDATE'); ?> </button></a>
+                  <button class="btn btn-default btn-quirk btn-block" disabled>
+                    <i class="fa fa-bell text-muted"></i>
+                    <?php echo T('UPDATE'); ?> — Coming Soon
+                  </button>
                 </div>
               </div>
-            </div><!-- QUICKBOX UPDATE WIDGET -->
+            </div><!-- AETHERFLOW UPDATE WIDGET -->
           <?php } ?>
         </div><!-- row -->
       </div>

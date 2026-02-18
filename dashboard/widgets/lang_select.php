@@ -1,18 +1,28 @@
 <?php
+/**
+ * Language Selection Handler (Admin Only)
+ *
+ * @package AetherFlow\Widgets
+ * @author McEveritts <armyworkbs@gmail.com>
+ */
 
-$language = array(
-        'lang_de',
-        'lang_dk',
-        'lang_en',
-        'lang_fr',
-        'lang_es',
-        'lang_zh',
-);
+if (!isAdmin()) {
+        return;
+}
 
-foreach ($language as $lang) {
-if (isset($_GET['langSelect-'.$lang.''])) {
+$validLanguages = ['lang_de', 'lang_dk', 'lang_en', 'lang_fr', 'lang_es', 'lang_zh'];
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['lang_select'])) {
+        requireCsrfToken();
+        $lang = $_POST['lang_select'];
+
+        if (!in_array($lang, $validLanguages, true)) {
+                http_response_code(400);
+                die('Invalid language');
+        }
+
+        shell_exec("sudo /usr/local/bin/aetherflow/system/lang/langSelect-{$lang}");
         header('Location: /');
-        shell_exec("sudo /usr/local/bin/quickbox/system/lang/langSelect-$lang");
-}}
-
+        exit;
+}
 ?>

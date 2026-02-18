@@ -1,6 +1,15 @@
+<?php
+// HTTP Security Headers
+header('X-Frame-Options: DENY');
+header('X-Content-Type-Options: nosniff');
+header('X-XSS-Protection: 1; mode=block');
+header('Referrer-Policy: strict-origin-when-cross-origin');
+header('Permissions-Policy: camera=(), microphone=(), geolocation=()');
+?>
 <html lang="en">
 
 <head>
+  <?php echo csrfMeta(); ?>
   <!-- META -->
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
@@ -22,243 +31,206 @@
   <link rel="stylesheet" href="lib/jquery-toggles/toggles-full.css">
   <link rel="stylesheet" href="lib/jquery.gritter/jquery.gritter.css">
   <link rel="stylesheet" href="lib/animate.css/animate.css">
-  <link rel="stylesheet" href="lib/font-awesome/font-awesome.css">
+  <!-- Font Awesome 6 (CDN) -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.7.2/css/all.min.css"
+    integrity="sha512-Evv84Mr4kqVGRNSgIGL/F/aIDqQb7xQ2vcrdIwxfjThSH8CSR7PBEakCr51Ck+w+/U6swU2Im1vVX0SVk9ABhg=="
+    crossorigin="anonymous" referrerpolicy="no-referrer" />
+  <!-- Font Awesome 4 compatibility shim -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.7.2/css/v4-shims.min.css"
+    crossorigin="anonymous" referrerpolicy="no-referrer" />
   <link rel="stylesheet" href="lib/ionicons/css/ionicons.css">
   <link rel="stylesheet" href="lib/select2/select2.css">
+  <!-- Google Font: Roboto -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="skins/aetherflow.css">
   <link rel="stylesheet" href="skins/slate_stone.css">
   <link rel="stylesheet" href="skins/lobipanel.css" />
   <!-- JAVASCRIPT -->
-  <script src="lib/modernizr/modernizr.js"></script>
   <script src="lib/jquery/jquery.js"></script>
-  <script type="text/javascript" src="lib/flot/jquery.flot.js"></script>
-  <script type="text/javascript" src="lib/flot/jquery.flot.time.js"></script>
-  <script type="text/javascript" src="lib/flot/jquery.flot.resize.js"></script>
-  <script type="text/javascript" src="lib/flot/jquery.flot.canvas.js"></script>
-  <script type="text/javascript" src="lib/flot-spline/jquery.flot.spline.js"></script>
-  <!--script type="text/javascript" src="lib/flot/jquery.flot.axislabels.js"></script-->
+  <script src="lib/chartjs/chart.umd.js"></script>
 
-  <!--///// BANDWIDTH CHART /////-->
-  <script id="source" language="javascript" type="text/javascript">
+  <!--///// BANDWIDTH CHART (Chart.js) /////-->
+  <script type="text/javascript">
     $(document).ready(function () {
-      var options = {
-        series: {
-          lines: {
-            show: false
-          },
-          splines: {
-            show: true,
+      var bwCanvas = document.getElementById('mainbw');
+      if (!bwCanvas) return;
+      var bwCtx = bwCanvas.getContext('2d');
+      var bwChart = new Chart(bwCtx, {
+        type: 'line',
+        data: {
+          labels: [],
+          datasets: [{
+            label: 'Upload',
+            data: [],
+            borderColor: '#F4B400',
+            backgroundColor: 'rgba(244, 180, 0, 0.15)',
+            borderWidth: 1.5,
+            fill: true,
             tension: 0.4,
-            lineWidth: 1,
-            fill: 0.4
-          }
+            pointRadius: 0
+          }, {
+            label: 'Download',
+            data: [],
+            borderColor: '#D4AF37',
+            backgroundColor: 'rgba(212, 175, 55, 0.15)',
+            borderWidth: 1.5,
+            fill: true,
+            tension: 0.4,
+            pointRadius: 0
+          }]
         },
-        points: { show: false },
-        legend: {
-          show: true,
-          labelBoxBorderColor: '#222',
-          position: 'ne',
-          margin: 10
-        },
-        grid: {
-          borderWidth: 0,
-          border: { show: false },
-          color: '#333',
-          labelMargin: 5,
-          backgroundColor: '#222'
-        },
-        xaxis: {
-          mode: "time",
-          tickSize: [60, "second"],
-          tickFormatter: function (v, axis) {
-            var date = new Date(v);
-            if (date.getSeconds() % 20 == 0) {
-              var hours = date.getHours() < 10 ? "0" + date.getHours() : date.getHours();
-              var minutes = date.getMinutes() < 10 ? "0" + date.getMinutes() : date.getMinutes();
-              var seconds = date.getSeconds() < 10 ? "0" + date.getSeconds() : date.getSeconds();
-              return hours + ":" + minutes + ":" + seconds;
-            } else {
-              return "";
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          animation: { duration: 300 },
+          plugins: {
+            legend: {
+              display: true,
+              position: 'top',
+              labels: { color: '#acacac', font: { family: 'Roboto, sans-serif', size: 11 } }
             }
           },
-          axisLabel: "Time",
-          axisLabelUseCanvas: true,
-          axisLabelPadding: 1,
-          font: {
-            size: 9,
-            style: "normal",
-            color: "#999999",
-            weight: "light",
-            family: "open sans",
-            variant: "small-caps"
-          }
-        },
-        yaxis: {
-          min: 0,
-          tickFormatter: function (val, axis) { return val < axis.max ? val.toFixed(2) : "MB/s"; },
-          font: {
-            size: 11,
-            style: "normal",
-            color: "#999",
-            weight: "light",
-            family: "open sans",
-            variant: "small-caps"
-          }
-        },
-        colors: ["#F4B400", "#D4AF37"],
-        border: { show: false },
-        shadowSize: 0
-      };
-      window.onresize = function (event) {
-        var data = [];
-        var placeholder = $("#mainbw");
-        $.plot(placeholder, data, options);
-        var iteration = 0;
-        function fetchData() {
-          ++iteration;
-          function onDataReceived(series) {
-            // we get all the data in one go, if we only got partial
-            // data, we could merge it with what we already got
-            data = series;
-            var updateInterval = 30;
-            var now = new Date().getTime();
-            $.plot($("#mainbw"), data, options);
-            fetchData();
-          }
-          $.ajax({
-            url: "widgets/data.php",
-            method: 'GET',
-            dataType: 'json',
-            success: onDataReceived
-          });
-        }
-        setTimeout(fetchData, 30);
-      }
-    });
-  </script>
-  <!--///// CPU CHART /////-->
-  <script id="source" language="javascript" type="text/javascript">
-    var cpu = [];
-    var dataset;
-    var totalPoints = 100;
-    var updateInterval = 30;
-    var now = new Date().getTime();
-    var options = {
-      series: {
-        lines: {
-          show: true,
-          lineWidth: 1.5,
-          fill: 0.4
-        }
-      },
-      points: { show: false },
-      legend: {
-        show: true,
-        noColumns: 0,
-        labelBoxBorderColor: '#222',
-        position: 'ne',
-      },
-      grid: {
-        borderWidth: 0,
-        border: { show: false },
-        color: '#333',
-        labelMargin: 5,
-        backgroundColor: '#222'
-      },
-      xaxis: {
-        mode: "time",
-        tickSize: [60, "second"],
-        tickFormatter: function (v, axis) {
-          var date = new Date(v);
-          if (date.getSeconds() % 20 == 0) {
-            var hours = date.getHours() < 10 ? "0" + date.getHours() : date.getHours();
-            var minutes = date.getMinutes() < 10 ? "0" + date.getMinutes() : date.getMinutes();
-            var seconds = date.getSeconds() < 10 ? "0" + date.getSeconds() : date.getSeconds();
-            return hours + ":" + minutes + ":" + seconds;
-          } else {
-            return "";
-          }
-        },
-        axisLabel: "Time",
-        axisLabelUseCanvas: true,
-        axisLabelPadding: 1,
-        font: {
-          size: 9,
-          style: "normal",
-          color: "#999999",
-          weight: "light",
-          family: "open sans",
-          variant: "small-caps"
-        }
-      },
-      yaxes: [
-        {
-          min: 0,
-          max: 100,
-          tickSize: 5,
-          tickFormatter: function (v, axis) {
-            if (v % 10 == 0) {
-              return v + "%";
-            } else {
-              return "";
+          scales: {
+            x: {
+              display: true,
+              ticks: { color: '#999', font: { family: 'Roboto, sans-serif', size: 9 }, maxTicksLimit: 6 },
+              grid: { color: 'rgba(255,255,255,0.05)' }
+            },
+            y: {
+              display: true,
+              beginAtZero: true,
+              ticks: {
+                color: '#999',
+                font: { family: 'Roboto, sans-serif', size: 9 },
+                callback: function (val) { return val.toFixed(1) + ' MB/s'; }
+              },
+              grid: { color: 'rgba(255,255,255,0.05)' }
             }
-          },
-          axisLabel: "CPU loading",
-          axisLabelUseCanvas: true,
-          axisLabelFontSizePixels: 6,
-          //axisLabelFontSizePixels: 8,
-          //axisLabelFontFamily: 'open sans',
-          axisLabelPadding: 1,
-          font: {
-            size: 9,
-            style: "normal",
-            color: "#999999",
-            weight: "light",
-            family: "open sans",
-            variant: "small-caps"
           }
-        }
-      ],
-      border: { show: false },
-      shadowSize: 0
-    };
-    function initData() {
-      for (var i = 0; i < totalPoints; i++) {
-        var temp = [now += updateInterval, 0];
-        cpu.push(temp)
-      }
-    }
-    function GetData() {
-      $.ajaxSetup({ cache: false });
-
-      $.ajax({
-        url: "widgets/cpu.php",
-        dataType: 'json',
-        success: update,
-        error: function () {
-          setTimeout(GetData, updateInterval);
         }
       });
+      // Fetch bandwidth data and update chart
+      function fetchBwData() {
+        $.ajax({
+          url: 'widgets/data.php',
+          method: 'GET',
+          dataType: 'json',
+          success: function (series) {
+            if (series && series.length >= 2) {
+              // Flot format: [{label, data:[[x,y],...]}, ...]
+              var uploadData = series[0] && series[0].data ? series[0].data : [];
+              var downloadData = series[1] && series[1].data ? series[1].data : [];
+              var labels = uploadData.map(function (pt) {
+                var d = new Date(pt[0]);
+                return ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2) + ':' + ('0' + d.getSeconds()).slice(-2);
+              });
+              bwChart.data.labels = labels;
+              bwChart.data.datasets[0].data = uploadData.map(function (pt) { return pt[1]; });
+              bwChart.data.datasets[1].data = downloadData.map(function (pt) { return pt[1]; });
+              bwChart.update('none');
+            }
+            setTimeout(fetchBwData, 3000);
+          },
+          error: function () { setTimeout(fetchBwData, 5000); }
+        });
+      }
+      fetchBwData();
+    });
+  </script>
+
+  <!--///// CPU CHART (Chart.js) /////-->
+  <script type="text/javascript">
+    var cpuData = [];
+    var cpuLabels = [];
+    var cpuTotalPoints = 100;
+    var cpuUpdateInterval = 1000;
+    var cpuChart;
+
+    function initCpuData() {
+      var now = new Date();
+      for (var i = cpuTotalPoints; i > 0; i--) {
+        var t = new Date(now.getTime() - i * cpuUpdateInterval);
+        cpuLabels.push(('0' + t.getHours()).slice(-2) + ':' + ('0' + t.getMinutes()).slice(-2) + ':' + ('0' + t.getSeconds()).slice(-2));
+        cpuData.push(0);
+      }
     }
-    var temp;
-    function update(_data) {
-      cpu.shift();
-      now = new Date().getTime();
-      temp = [now, _data.cpu];
-      cpu.push(temp);
-      dataset = [
-        { label: "CPU:" + _data.cpu + "%", data: cpu, lines: { fill: 0.2, lineWidth: 1.5 }, color: "#F4B400" }
-      ];
-      $.plot($("#flot-placeholder1"), dataset, options);
-      setTimeout(GetData, updateInterval);
+
+    function getCpuData() {
+      $.ajax({
+        url: 'widgets/cpu.php',
+        dataType: 'json',
+        cache: false,
+        success: function (_data) {
+          cpuData.shift();
+          cpuLabels.shift();
+          var now = new Date();
+          cpuLabels.push(('0' + now.getHours()).slice(-2) + ':' + ('0' + now.getMinutes()).slice(-2) + ':' + ('0' + now.getSeconds()).slice(-2));
+          cpuData.push(_data.cpu);
+          cpuChart.data.labels = cpuLabels;
+          cpuChart.data.datasets[0].data = cpuData;
+          cpuChart.data.datasets[0].label = 'CPU: ' + _data.cpu + '%';
+          cpuChart.update('none');
+          setTimeout(getCpuData, cpuUpdateInterval);
+        },
+        error: function () { setTimeout(getCpuData, cpuUpdateInterval * 3); }
+      });
     }
+
     $(document).ready(function () {
-      initData();
-      dataset = [
-        { label: "CPU", data: cpu, lines: { fill: 0.2, lineWidth: 1 }, color: "#F4B400" }
-      ];
-      $.plot($("#flot-placeholder1"), dataset, options);
-      setTimeout(GetData, updateInterval);
+      var cpuCanvas = document.getElementById('flot-placeholder1');
+      if (!cpuCanvas) return;
+      initCpuData();
+      var cpuCtx = cpuCanvas.getContext('2d');
+      cpuChart = new Chart(cpuCtx, {
+        type: 'line',
+        data: {
+          labels: cpuLabels,
+          datasets: [{
+            label: 'CPU: 0%',
+            data: cpuData,
+            borderColor: '#F4B400',
+            backgroundColor: 'rgba(244, 180, 0, 0.15)',
+            borderWidth: 1.5,
+            fill: true,
+            tension: 0.3,
+            pointRadius: 0
+          }]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          animation: { duration: 200 },
+          plugins: {
+            legend: {
+              display: true,
+              position: 'top',
+              labels: { color: '#acacac', font: { family: 'Roboto, sans-serif', size: 11 } }
+            }
+          },
+          scales: {
+            x: {
+              display: true,
+              ticks: { color: '#999', font: { family: 'Roboto, sans-serif', size: 9 }, maxTicksLimit: 6 },
+              grid: { color: 'rgba(255,255,255,0.05)' }
+            },
+            y: {
+              display: true,
+              min: 0,
+              max: 100,
+              ticks: {
+                color: '#999',
+                font: { family: 'Roboto, sans-serif', size: 9 },
+                stepSize: 10,
+                callback: function (val) { return val + '%'; }
+              },
+              grid: { color: 'rgba(255,255,255,0.05)' }
+            }
+          }
+        }
+      });
+      setTimeout(getCpuData, cpuUpdateInterval);
     });
   </script>
 
@@ -322,11 +294,7 @@
     }
   </script>
 
-  <!-- HTML5 shim and Respond.js IE8 support of HTML5 elements and media queries -->
-  <!--[if lt IE 9]>
-  <script src="../lib/html5shiv/html5shiv.js"></script>
-  <script src="../lib/respond/respond.src.js"></script>
-  <![endif]-->
+  <!-- Legacy IE shims removed — targeting modern browsers only -->
 
   <style>
     #sysPre {

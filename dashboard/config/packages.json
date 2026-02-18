@@ -1,0 +1,278 @@
+[
+    {
+        "name": "btsync",
+        "label": "BTSync",
+        "description": "BTSYNC_DETAILS",
+        "lockFile": "/install/.btsync.lock",
+        "installScript": "installpackage-btsync",
+        "removeScript": "removepackage-btsync",
+        "category": "sync"
+    },
+    {
+        "name": "csf",
+        "label": "Config Server Firewall",
+        "description": "CSF",
+        "lockFile": "/install/.csf.lock",
+        "installScript": null,
+        "removeScript": "removepackage-csf",
+        "boxOnly": true,
+        "boxTooltip": "BOX_TOOLTIP_CSF",
+        "category": "security"
+    },
+    {
+        "name": "couchpotato",
+        "label": "CouchPotato",
+        "description": "COUCHPOTATO",
+        "lockFile": "/install/.couchpotato.lock",
+        "installScript": "installpackage-couchpotato",
+        "removeScript": "removepackage-couchpotato",
+        "category": "media"
+    },
+    {
+        "name": "deluge",
+        "label": "Deluge",
+        "description": "DELUGE",
+        "lockFile": "/install/.deluge.lock",
+        "installScript": "installpackage-deluge",
+        "removeScript": "removepackage-deluge",
+        "category": "torrent"
+    },
+    {
+        "name": "emby",
+        "label": "Emby",
+        "description": "EMBY",
+        "lockFile": "/install/.emby.lock",
+        "installScript": "installpackage-emby",
+        "removeScript": "removepackage-emby",
+        "category": "media"
+    },
+    {
+        "name": "headphones",
+        "label": "Headphones",
+        "description": "HEADPHONES",
+        "lockFile": "/install/.headphones.lock",
+        "installScript": "installpackage-headphones",
+        "removeScript": "removepackage-headphones",
+        "category": "media"
+    },
+    {
+        "name": "jackett",
+        "label": "Jackett",
+        "description": "JACKETT",
+        "lockFile": "/install/.jackett.lock",
+        "installScript": "installpackage-jackett",
+        "removeScript": "removepackage-jackett",
+        "category": "indexer"
+    },
+    {
+        "name": "lidarr",
+        "label": "Lidarr",
+        "description": "LIDARR",
+        "lockFile": "/install/.lidarr.lock",
+        "installScript": "installpackage-lidarr",
+        "removeScript": "removepackage-lidarr",
+        "category": "media"
+    },
+    {
+        "name": "medusa",
+        "label": "Medusa",
+        "description": "MEDUSA",
+        "lockFile": "/install/.medusa.lock",
+        "installScript": "installpackage-medusa",
+        "removeScript": "removepackage-medusa",
+        "category": "media"
+    },
+    {
+        "name": "nextcloud",
+        "label": "NextCloud",
+        "description": "NEXTCLOUD",
+        "lockFile": "/install/.nextcloud.lock",
+        "installScript": null,
+        "removeScript": "removepackage-nextcloud",
+        "boxOnly": true,
+        "boxTooltip": "BOX_TOOLTIP_NEXTCLOUD",
+        "category": "cloud"
+    },
+    {
+        "name": "nzbget",
+        "label": "NZBGet",
+        "description": "NZBGET",
+        "lockFile": "/install/.nzbget.lock",
+        "installScript": "installpackage-nzbget",
+        "removeScript": "removepackage-nzbget",
+        "category": "usenet"
+    },
+    {
+        "name": "nzbhydra",
+        "label": "NZBHydra",
+        "description": "NZBHYDRA",
+        "lockFile": "/install/.nzbhydra.lock",
+        "installScript": "installpackage-nzbhydra",
+        "removeScript": "removepackage-nzbhydra",
+        "category": "usenet"
+    },
+    {
+        "name": "ombi",
+        "label": "Ombi",
+        "description": "OMBI",
+        "lockFile": "/install/.ombi.lock",
+        "installScript": "installpackage-ombi",
+        "removeScript": "removepackage-ombi",
+        "category": "media"
+    },
+    {
+        "name": "plex",
+        "label": "Plex",
+        "description": "PLEX",
+        "lockFile": "/install/.plex.lock",
+        "installScript": "installpackage-plex",
+        "removeScript": "removepackage-plex",
+        "category": "media"
+    },
+    {
+        "name": "Tautulli",
+        "label": "Tautulli",
+        "description": "TAUTULLI",
+        "lockFile": "/install/.Tautulli.lock",
+        "installScript": "installpackage-Tautulli",
+        "removeScript": "removepackage-Tautulli",
+        "category": "media"
+    },
+    {
+        "name": "pyload",
+        "label": "pyLoad",
+        "description": "PYLOAD",
+        "lockFile": "/install/.pyload.lock",
+        "installScript": "installpackage-pyload",
+        "removeScript": "removepackage-pyload",
+        "category": "download"
+    },
+    {
+        "name": "quassel",
+        "label": "Quassel",
+        "description": "QUASSEL",
+        "lockFile": "/install/.quassel.lock",
+        "installScript": "installpackage-quassel",
+        "removeScript": "removepackage-quassel",
+        "category": "communication"
+    },
+    {
+        "name": "quota",
+        "label": "Quotas",
+        "description": "QUOTAS",
+        "lockFile": "/install/.quota.lock",
+        "installScript": "installpackage-quota",
+        "removeScript": "removepackage-quota",
+        "category": "system"
+    },
+    {
+        "name": "radarr",
+        "label": "Radarr",
+        "description": "RADARR",
+        "lockFile": "/install/.radarr.lock",
+        "installScript": "installpackage-radarr",
+        "removeScript": "removepackage-radarr",
+        "category": "media"
+    },
+    {
+        "name": "rapidleech",
+        "label": "Rapidleech",
+        "description": "RAPIDLEECH",
+        "lockFile": "/install/.rapidleech.lock",
+        "installScript": "installpackage-rapidleech",
+        "removeScript": "removepackage-rapidleech",
+        "category": "download"
+    },
+    {
+        "name": "sabnzbd",
+        "label": "SABnzbd",
+        "description": "SABNZBD",
+        "lockFile": "/install/.sabnzbd.lock",
+        "installScript": "installpackage-sabnzbd",
+        "removeScript": "removepackage-sabnzbd",
+        "category": "usenet"
+    },
+    {
+        "name": "sickgear",
+        "label": "SickGear",
+        "description": "SICKGEAR",
+        "lockFile": "/install/.sickgear.lock",
+        "installScript": "installpackage-sickgear",
+        "removeScript": "removepackage-sickgear",
+        "category": "media"
+    },
+    {
+        "name": "sickrage",
+        "label": "SickRage",
+        "description": "SICKRAGE",
+        "lockFile": "/install/.sickrage.lock",
+        "installScript": "installpackage-sickrage",
+        "removeScript": "removepackage-sickrage",
+        "category": "media"
+    },
+    {
+        "name": "sonarr",
+        "label": "Sonarr",
+        "description": "SONARR",
+        "lockFile": "/install/.sonarr.lock",
+        "installScript": "installpackage-sonarr",
+        "removeScript": "removepackage-sonarr",
+        "category": "media"
+    },
+    {
+        "name": "subsonic",
+        "label": "Subsonic",
+        "description": "SUBSONIC",
+        "lockFile": "/install/.subsonic.lock",
+        "installScript": "installpackage-subsonic",
+        "removeScript": "removepackage-subsonic",
+        "category": "media"
+    },
+    {
+        "name": "syncthing",
+        "label": "Syncthing",
+        "description": "SYNCTHING",
+        "lockFile": "/install/.syncthing.lock",
+        "installScript": "installpackage-syncthing",
+        "removeScript": "removepackage-syncthing",
+        "category": "sync"
+    },
+    {
+        "name": "transmission",
+        "label": "Transmission",
+        "description": "TRANSMISSION",
+        "lockFile": "/install/.transmission.lock",
+        "installScript": "installpackage-transmission",
+        "removeScript": "removepackage-transmission",
+        "category": "torrent"
+    },
+    {
+        "name": "qbittorrent",
+        "label": "qBittorrent",
+        "description": "QBITTORRENT",
+        "lockFile": "/install/.qbittorrent.lock",
+        "installScript": "installpackage-qbittorrent",
+        "removeScript": "removepackage-qbittorrent",
+        "category": "torrent"
+    },
+    {
+        "name": "x2go",
+        "label": "x2go",
+        "description": "X2GO",
+        "lockFile": "/install/.x2go.lock",
+        "installScript": "installpackage-x2go",
+        "removeScript": "removepackage-x2go",
+        "category": "remote"
+    },
+    {
+        "name": "znc",
+        "label": "ZNC",
+        "description": "ZNC",
+        "lockFile": "/install/.znc.lock",
+        "installScript": null,
+        "removeScript": "removepackage-znc",
+        "boxOnly": true,
+        "boxTooltip": "BOX_TOOLTIP_ZNC",
+        "category": "communication"
+    }
+]
