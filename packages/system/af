@@ -4,7 +4,7 @@
 # `af -h` for commands and info
 #
 # GITHUB REPOS
-# GitHub _ packages  :   https://github.com/AetherFlow/AetherFlow_packages
+# GitHub _ packages  :   https://github.com/McEveritts/AetherFlow
 # LOCAL REPOS
 # Local _ packages   :   ~/AetherFlow/packages
 # Author             :   AetherFlow.IO | liara
@@ -123,7 +123,7 @@ function _updateqb() {
       git submodule foreach git reset --hard origin/master
       git submodule foreach git pull
     else
-      git clone --recursive https://github.com/AetherFlow/AetherFlow /etc/AetherFlow
+      git clone --recursive https://github.com/McEveritts/AetherFlow /etc/AetherFlow
     fi
   else
     if [[ -d /etc/AetherFlow ]]; then
@@ -132,7 +132,7 @@ function _updateqb() {
       git submodule foreach git reset --hard origin/development
       git submodule foreach git pull
     else
-      git clone --recursive --branch "development" https://github.com/AetherFlow/AetherFlow /etc/AetherFlow
+      git clone --recursive --branch "development" https://github.com/McEveritts/AetherFlow /etc/AetherFlow
     fi
   fi
 }

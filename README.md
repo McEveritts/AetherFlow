@@ -35,7 +35,7 @@
 ### Install Command
 ```bash
 apt-get -yqq update; apt-get -yqq upgrade; apt-get -yqq install git lsb-release bc; \
-git clone https://github.com/McEveritts/MediaNexus /etc/AetherFlow; \
+git clone https://github.com/McEveritts/AetherFlow /etc/AetherFlow; \
 bash /etc/AetherFlow/setup/aetherflow-setup
 ```
 
