@@ -13,7 +13,7 @@
 // main menu tab
 $L['ANNOUNCEMENTS'] = 'Anuncios';
 $L['CHAT_CONNECT_TXT'] = 'Pincha para conectarte';
-$L['DEV_REPO_TXT'] = 'Estás en el repositorio de desarrollo de Quickbox';
+$L['DEV_REPO_TXT'] = 'Estás en el repositorio de desarrollo de AetherFlow';
 $L['DOWNLOADS'] = 'Descargas';
 $L['ISSUE_REPORT_TXT'] = 'Informa de un problema';
 $L['JOIN_US_TXT'] = '¡Únete a nuestro chat';
@@ -100,7 +100,7 @@ $L['COMPARE_COMMITS'] = 'Compara el estado actual de tu servidor con los último
 $L['CURRENT_COMMIT'] = 'Ver el estado del commit actual.';
 $L['CURRENT_VERSIONS_CHANGELOG'] = 'Comprueba el registro de cambios de tu versión actual.';
 $L['LATEST_COMMIT'] = 'último.';
-$L['QUICKBOX_COMMIT'] = 'Estás en el commit de Quickbox - ';
+$L['AETHERFLOW_COMMIT'] = 'Estás en el commit de AetherFlow - ';
 $L['RECENT_UPDATES'] = 'Actividad Reciente';
 $L['RECENT_UPDATES_TXT'] = 'Para ver los nuevos aportes, desplázate con la rueda del ratón.';
 
@@ -157,9 +157,9 @@ $L['INSTALLED'] = 'Instalado';
 $L['OVPN_TOOLTIP_I'] = 'Accede a esta característica desde la consola web escribiendo: quickVPN';
 $L['OVPN_TOOLTIP_U'] = 'Accede a esta característica desde la consola web escribiendo: quickVPN';
 $L['BOX'] = 'Solo BOX';
-$L['BOX_TOOLTIP_CSF'] = 'Accede a esta característica desde SSH escribiendo: box install csf';
-$L['BOX_TOOLTIP_NEXTCLOUD'] = 'Accede a esta característica desde SSH escribiendo: box install nextcloud';
-$L['BOX_TOOLTIP_ZNC'] = 'Accede a esta característica desde SSH escribiendo: box install znc';
+$L['BOX_TOOLTIP_CSF'] = 'Accede a esta característica desde SSH escribiendo: af install csf';
+$L['BOX_TOOLTIP_NEXTCLOUD'] = 'Accede a esta característica desde SSH escribiendo: af install nextcloud';
+$L['BOX_TOOLTIP_ZNC'] = 'Accede a esta característica desde SSH escribiendo: af install znc';
 
 ////////////////////////////////////////
 //BANDWIDTH & DATA TABLES

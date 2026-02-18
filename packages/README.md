@@ -1,1 +1,2 @@
-QuickBox Application Installer and Removal Packages
+AetherFlow Application Installer and Removal Packages
+

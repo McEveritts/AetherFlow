@@ -30,7 +30,7 @@ $current_vs = "<span id=\"version-result\"></span>";
                 </button>
               </div>
             </li>
-            <?php if ($username == "$master") { ?>
+            <?php if (isAdmin()) { ?>
               <li>
                 <div id="noticePanel" class="btn-group">
                   <button class="btn" data-toggle="dropdown">
@@ -131,9 +131,18 @@ $current_vs = "<span id=\"version-result\"></span>";
             <li>
               <div class="btn-group">
                 <button type="button" class="btn btn-logged" data-toggle="dropdown">
+                  <?php if (function_exists('getCurrentUserAvatar') && getCurrentUserAvatar()): ?>
+                    <img src="<?php echo htmlspecialchars(getCurrentUserAvatar()); ?>" alt=""
+                      style="width:20px;height:20px;border-radius:50%;margin-right:4px;vertical-align:middle;">
+                  <?php endif; ?>
                   <?php echo "$username"; ?>
                   <span class="caret"></span>
                 </button>
+                <ul class="dropdown-menu pull-right" style="min-width:160px">
+                  <li><a href="profile.php"><i class="fa fa-user"></i> <?php echo T('PROFILE'); ?></a></li>
+                  <li class="divider"></li>
+                  <li><a href="/auth/logout.php"><i class="fa fa-sign-out"></i> Sign Out</a></li>
+                </ul>
                 <?php include("db/branding-m.php"); ?>
               </div>
             </li>
@@ -149,7 +158,7 @@ $current_vs = "<span id=\"version-result\"></span>";
           <li class="tooltips active" data-toggle="tooltip" title="<?php echo T('MAIN_MENU'); ?>"
             data-placement="bottom"><a data-toggle="tab" data-target="#mainmenu"><i
                 class="tooltips fa fa-ellipsis-h"></i></a></li>
-          <?php if ($username == "$master") { ?>
+          <?php if (isAdmin()) { ?>
             <li class="tooltips" data-toggle="tooltip" title="<?php echo T('RPLUGIN_MENU'); ?>" data-placement="bottom"><a
                 data-toggle="tab" data-target="#plugins"><i class="tooltips fa fa-puzzle-piece"></i></a></li>
           <?php } ?>
@@ -183,7 +192,7 @@ $current_vs = "<span id=\"version-result\"></span>";
                 <li><a href="<?php echo "$qbittorrentURL"; ?>" class="grayscale" target="_blank"><img
                       src="img/brands/qbittorrent.png" class="brand-ico"> <span>qBittorrent</span></a></li>
               <?php } ?>
-              <?php if ($username == "$master") { ?>
+              <?php if (isAdmin()) { ?>
                 <?php if (processExists("resilio-sync", "rslsync") && file_exists('/install/.btsync.lock')) { ?>
                   <li><a class="grayscale" href="<?php echo "$btsyncURL"; ?>" target="_blank"><img
                         src="img/brands/btsync.png" class="brand-ico"> <span>BTSync</span></a></li>
@@ -300,7 +309,7 @@ $current_vs = "<span id=\"version-result\"></span>";
                   <?php } ?>
                 </ul>
               </li>
-              <?php if (processExists("shellinabox", "shellinabox") && ($username == "$master")) { ?>
+              <?php if (processExists("shellinabox", "shellinabox") && (isAdmin())) { ?>
                 <li><a href="/<?php echo "$username"; ?>.console" target="_blank"><i class="fa fa-keyboard-o"></i>
                     <span><?php echo T('WEB_CONSOLE'); ?></span></a></li>
               <?php } ?>
@@ -312,7 +321,7 @@ $current_vs = "<span id=\"version-result\"></span>";
 
           <!-- ######################## HELP MENU TAB ##################### -->
           <div class="tab-pane" id="help">
-            <?php if ($username == "$master") { ?>
+            <?php if (isAdmin()) { ?>
               <h5 class="sidebar-title"><?php echo T('QUICK_SYSTEM_TIPS'); ?></h5>
               <ul class="nav nav-pills nav-stacked nav-quirk nav-mail">
                 <li style="padding: 7px"><span style="font-size: 12px; color:#eee">clean_mem</span><br />

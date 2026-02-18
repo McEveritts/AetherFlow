@@ -4,13 +4,13 @@
 ##  [Quick Box - action.php modified for quota systems use]
 #################################################################################
 # QUICKLAB REPOS
-# QuickLab _ packages:   https://github.com/QuickBox/quickbox_rutorrent-plugins
+# QuickLab _ packages:   https://github.com/AetherFlow/aetherflow_rutorrent-plugins
 # LOCAL REPOS
-# Local _ packages   :   ~/QuickBox/rtplugins
-# Author             :   QuickBox.IO
-# URL                :   https://plaza.quickbox.io
+# Local _ packages   :   ~/AetherFlow/rtplugins
+# Author             :   AetherFlow.IO
+# URL                :   https://plaza.aetherflow.io
 #
-# QuickBox Copyright (C) 2017 QuickBox.io
+# AetherFlow Copyright (C) 2017 AetherFlow.io
 # Licensed under GNU General Public License v3.0 GPL-3 (in short)
 #
 #   You may copy, distribute and modify the software as long as you track

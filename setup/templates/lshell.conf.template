@@ -7,7 +7,7 @@ allowed         : ['cd','cp','-d','-dmS','git','irssi','ll','ls','-m','mkdir','m
 forbidden       : [';', '&', '|','`','>','<', '$(', '${','sudo','vi','vim','./']
 warning_counter : 2
 aliases         : {'ls':'ls --color=auto','ll':'ls -l'}
-intro           : "== Seedbox Shell ==\nWelcome To Your QuickBox Seedbox Shell\nType '?' to get the list of allowed commands"
+intro           : "== Seedbox Shell ==\nWelcome To Your AetherFlow Seedbox Shell\nType '?' to get the list of allowed commands"
 home_path       : '/home/%u'
 env_path        : ':/usr/local/bin:/usr/sbin'
 allowed_cmd_path: 

@@ -100,7 +100,7 @@ $L['COMPARE_COMMITS'] = 'compare your current status to the latest commits.';
 $L['CURRENT_COMMIT'] = 'View your current commit status';
 $L['CURRENT_VERSIONS_CHANGELOG'] = 'View your current versions changelog.';
 $L['LATEST_COMMIT'] = 'latest.';
-$L['QUICKBOX_COMMIT'] = 'You are on the AetherFlow commit - ';
+$L['AETHERFLOW_COMMIT'] = 'You are on the AetherFlow commit - ';
 $L['RECENT_UPDATES'] = 'Recent Activity';
 $L['RECENT_UPDATES_TXT'] = 'To view feed, scroll with your mouse wheel.';
 
@@ -159,9 +159,9 @@ $L['INSTALLED'] = 'Installed';
 $L['OVPN_TOOLTIP_I'] = 'Access this feature from your web-console by typing: quickVPN';
 $L['OVPN_TOOLTIP_U'] = 'Access this feature from your web-console by typing: quickVPN';
 $L['BOX'] = 'BOX Only';
-$L['BOX_TOOLTIP_CSF'] = 'Access this feature from ssh by typing: box install csf';
-$L['BOX_TOOLTIP_NEXTCLOUD'] = 'Access this feature from ssh by typing: box install nextcloud';
-$L['BOX_TOOLTIP_ZNC'] = 'Access this feature from ssh by typing: box install znc';
+$L['BOX_TOOLTIP_CSF'] = 'Access this feature from ssh by typing: af install csf';
+$L['BOX_TOOLTIP_NEXTCLOUD'] = 'Access this feature from ssh by typing: af install nextcloud';
+$L['BOX_TOOLTIP_ZNC'] = 'Access this feature from ssh by typing: af install znc';
 
 ////////////////////////////////////////
 //BANDWIDTH & DATA TABLES

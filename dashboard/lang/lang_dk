@@ -13,7 +13,7 @@
 // main menu tab
 $L['ANNOUNCEMENTS'] = 'Annonceringer';
 $L['CHAT_CONNECT_TXT'] = 'Klik for at oprette forbindelse';
-$L['DEV_REPO_TXT'] = 'Du er på QuickBox Development Repo';
+$L['DEV_REPO_TXT'] = 'Du er på AetherFlow Development Repo';
 $L['DOWNLOADS'] = 'Downloads';
 $L['ISSUE_REPORT_TXT'] = 'Rapporter et problem';
 $L['JOIN_US_TXT'] = 'Deltag på Live Chat!';
@@ -100,7 +100,7 @@ $L['COMPARE_COMMITS'] = 'compare your current status to the latest commits.';
 $L['CURRENT_COMMIT'] = 'View your current commit status';
 $L['CURRENT_VERSIONS_CHANGELOG'] = 'View your current versions changelog.';
 $L['LATEST_COMMIT'] = 'latest.';
-$L['QUICKBOX_COMMIT'] = 'You are on the QuickBox commit - ';
+$L['AETHERFLOW_COMMIT'] = 'You are on the AetherFlow commit - ';
 $L['RECENT_UPDATES'] = 'Seneste Aktivitet & Opdateringer';
 $L['RECENT_UPDATES_TXT'] = 'Dette feed opdateres hvert 60 sekund';
 
@@ -157,9 +157,9 @@ $L['INSTALLED'] = 'Installeret';
 $L['OVPN_TOOLTIP_I'] = 'Adgang til denne feature fås via webkonsollen ved at skrive: quickVPN';
 $L['OVPN_TOOLTIP_U'] = 'Adgang til denne feature fås via webkonsollen ved at skrive: quickVPN';
 $L['BOX'] = 'Kun BOX';
-$L['BOX_TOOLTIP_CSF'] = 'Adgang til denne feature fås via ssh ved at skrive:  box install csf';
-$L['BOX_TOOLTIP_NEXTCLOUD'] = 'Adgang til denne feature fås via ssh ved at skrive: box install nextcloud';
-$L['BOX_TOOLTIP_ZNC'] = 'Adgang til denne feature fås via ssh ved at skrive:  box install znc';
+$L['BOX_TOOLTIP_CSF'] = 'Adgang til denne feature fås via ssh ved at skrive:  af install csf';
+$L['BOX_TOOLTIP_NEXTCLOUD'] = 'Adgang til denne feature fås via ssh ved at skrive: af install nextcloud';
+$L['BOX_TOOLTIP_ZNC'] = 'Adgang til denne feature fås via ssh ved at skrive:  af install znc';
 
 ////////////////////////////////////////
 //BANDWIDTH & DATA TABLES
