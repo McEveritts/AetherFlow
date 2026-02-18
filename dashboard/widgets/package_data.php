@@ -8,7 +8,7 @@ $packages = array(
         'emby',
         'headphones',
         'jackett',
-		'lidarr',
+        'lidarr',
         'medusa',
         'nextcloud',
         'nzbget',
@@ -28,21 +28,23 @@ $packages = array(
         'subsonic',
         'syncthing',
         'transmission',
-	'qbittorrent',
+        'qbittorrent',
         'x2go',
         'znc'
 );
 
 foreach ($packages as $ipackage) {
-if (isset($_GET['installpackage-'.$ipackage.''])) {
-        header('Location: //');
-        shell_exec("sudo /usr/local/bin/quickbox/package/install/installpackage-$ipackage");
-}}
+        if (isset($_GET['installpackage-' . $ipackage . ''])) {
+                header('Location: //');
+                shell_exec("sudo /usr/local/bin/aetherflow/package/install/installpackage-$ipackage");
+        }
+}
 
 foreach ($packages as $rpackage) {
-if (isset($_GET['removepackage-'.$rpackage.''])) {
-        header('Location: /');
-        shell_exec("sudo /usr/local/bin/quickbox/package/remove/removepackage-$rpackage");
-}}
+        if (isset($_GET['removepackage-' . $rpackage . ''])) {
+                header('Location: /');
+                shell_exec("sudo /usr/local/bin/aetherflow/package/remove/removepackage-$rpackage");
+        }
+}
 
 ?>
