@@ -4,13 +4,13 @@
 # [NOTES     :: Installs ffmpeg with x264 and x265 libraries]
 #
 # QUICKLAB REPOS
-# QuickLab _ packages  :   https://github.com/QuickBox/quickbox_packages
+# QuickLab _ packages  :   https://github.com/AetherFlow/AetherFlow_packages
 # LOCAL REPOS
-# Local _ packages   :   /etc/QuickBox/packages
-# Author             :   QuickBox.IO | JMSolo
-# URL                :   https://quickbox.io
+# Local _ packages   :   /etc/AetherFlow/packages
+# Author             :   AetherFlow.IO | JMSolo
+# URL                :   https://AetherFlow.io
 #
-# QuickBox Copyright (C) 2017 QuickBox.io
+# AetherFlow Copyright (C) 2017 AetherFlow.io
 # Licensed under GNU General Public License v3.0 GPL-3 (in short)
 #
 #   You may copy, distribute and modify the software as long as you track
@@ -101,3 +101,4 @@ DISTRO=$(lsb_release -is)
 echo -n "${NOTICE}Installing ffmpeg, please hold as this may take some time${NC} ... ";_ffmpeg & spinner $!;echo
 echo -n "${OK}Installation Completed${NC}"
 echo
+

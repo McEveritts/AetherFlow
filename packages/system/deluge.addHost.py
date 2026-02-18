@@ -11,3 +11,4 @@ import sys
 import time
 
 print hashlib.sha1(str(time.time())).hexdigest()
+

@@ -2,11 +2,11 @@
 #
 # [Quick Network Interface Input]
 #
-# GitHub:   https://github.com/QuickBox/QuickBox
-# Author:   QuickBox.IO
-# URL:      https://quickbox.io
+# GitHub:   https://github.com/AetherFlow/AetherFlow
+# Author:   AetherFlow.IO
+# URL:      https://AetherFlow.io
 #
-# QuickBox Copyright (C) 2017 QuickBox.io
+# AetherFlow Copyright (C) 2017 AetherFlow.io
 # Licensed under GNU General Public License v3.0 GPL-3 (in short)
 #
 #   You may copy, distribute and modify the software as long as you track
@@ -22,3 +22,4 @@ sed -i "s/INETFACE/${ADAPT}/g" /srv/rutorrent/home/widgets/stat.php;
 sed -i "s/INETFACE/${ADAPT}/g" /srv/rutorrent/home/widgets/data.php;
 sed -i "s/INETFACE/${ADAPT}/g" /srv/rutorrent/home/widgets/bw_tables.php;
 sed -i "s/INETFACE/${ADAPT}/g" /srv/rutorrent/home/inc/config.php;
+
