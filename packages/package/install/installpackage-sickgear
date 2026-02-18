@@ -3,7 +3,7 @@
 # [Quick Box :: Install SickGear package]
 #
 # GITHUB REPOS
-# GitHub _ packages  :   https://github.com/AetherFlow/QB
+# GitHub _ packages  :   https://github.com/McEveritts/MediaNexus
 # LOCAL REPOS
 # Local _ packages   :   /etc/AetherFlow/packages
 # Author             :   A SickGear development | JackDandy
@@ -107,7 +107,7 @@ _sudo() {
 }
 
 _getUserVars() {
-  # if no user/pw, then use one from QB (if set)
+  # if no user/pw, then use one from AetherFlow (if set)
   QB_FILE=/srv/rutorrent/home/db/master.txt
   if [[ -z ${SG_USERNAME} && -f ${QB_FILE} ]]; then
     SG_USERNAME=`cat ${QB_FILE}`

@@ -2,7 +2,7 @@
 #
 # [Quick Box :: EcoSystem Update Script]
 #
-# QuickLab:   https://github.com/AetherFlow/AetherFlow_packages
+# AetherFlow:   https://github.com/AetherFlow/AetherFlow_packages
 # Local   :   /etc/AetherFlow/packages
 # Author  :   AetherFlow.io
 # URL     :   https://AetherFlow.io
@@ -36,24 +36,24 @@ function _directorycheck() {
   if [[ ! -f /install/.developer.lock ]]; then
     if [[ -d /etc/AetherFlow ]]; then
       #rm -rf /etc/AetherFlow
-      #git clone https://github.com/AetherFlow/QB /etc/AetherFlow
+      #git clone https://github.com/McEveritts/MediaNexus /etc/AetherFlow
       cd /etc/AetherFlow
       git checkout master >>"${OUTTO}" 2>&1;
       git reset --hard origin/master
       git pull >>"${OUTTO}" 2>&1;
     else
-      git clone https://github.com/AetherFlow/QB /etc/AetherFlow
+      git clone https://github.com/McEveritts/MediaNexus /etc/AetherFlow
     fi
   else
     if [[ -d /etc/AetherFlow ]]; then
       #rm -rf /etc/AetherFlow
-      #git clone --branch "development" https://github.com/AetherFlow/QB /etc/AetherFlow
+      #git clone --branch "development" https://github.com/McEveritts/MediaNexus /etc/AetherFlow
       cd /etc/AetherFlow
       git checkout development >>"${OUTTO}" 2>&1;
       git reset --hard origin/development
       git pull >>"${OUTTO}" 2>&1;
     else
-      git clone --branch "development" https://github.com/AetherFlow/QB /etc/AetherFlow
+      git clone --branch "development" https://github.com/McEveritts/MediaNexus /etc/AetherFlow
     fi
   fi
 }

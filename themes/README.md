@@ -1,15 +1,15 @@
-# quickbox_themes
-All additional themes for the QuickBox Dashboard are housed here... nice and tidy like! Want to make your own? Fork and submit!
+# aetherflow_themes
+All additional themes for the AetherFlow Dashboard are housed here... nice and tidy like! Want to make your own? Fork and submit!
 
-https://www.dropbox.com/s/300201cvzlilz3z/QuickBox%20-%20Smoked%20preview.gif
+https://www.dropbox.com/s/300201cvzlilz3z/AetherFlow%20-%20Smoked%20preview.gif
 
 ##Feel free to discuss... :stuck_out_tongue_winking_eye:
 
-### Want to install the QuickBox Smoked Theme?
+### Want to install the AetherFlow Smoked Theme?
 
 ##Updated Theme Install Method
 
-Thanks [@Reynald](https://plaza.quickbox.io/u/reynald) for confirming this method to be working!
+Thanks [@Reynald](https://plaza.aetherflow.io/u/reynald) for confirming this method to be working!
 
 You can add a **.smoked.lock** which the updater (if it dicovers the theme lock) will port in the needed theme assets. You can add this lock by doing
 ```
@@ -28,7 +28,7 @@ printf "" > /srv/rutorrent/home/db/.defaulted.lock
 Perform `box upgrade` to set the new/previous theme.
 
 
-##The [@Reynald](https://plaza.quickbox.io/u/reynald) method - simple one liner!
+##The [@Reynald](https://plaza.aetherflow.io/u/reynald) method - simple one liner!
 
 Select **smoked**:
 ```

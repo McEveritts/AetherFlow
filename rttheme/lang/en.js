@@ -3,10 +3,10 @@
  *
  * English language file.
  *
- * Author: JMSolo - https://plaza.quickbox.io/
+ * Author: McEveritts
  */
 
- theUILang.themeStandard	= "QuickBox";
- theUILang.theme		= "Theme";
+theUILang.themeStandard = "AetherFlow";
+theUILang.theme = "Theme";
 
 thePlugins.get("theme").langLoaded();

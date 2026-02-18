@@ -13,7 +13,7 @@
 // main menu tab
 $L['ANNOUNCEMENTS'] = '公告';
 $L['CHAT_CONNECT_TXT'] = '点击连接';
-$L['DEV_REPO_TXT'] = '你正向QuickBox开发部门报告';
+$L['DEV_REPO_TXT'] = '你正向AetherFlow开发部门报告';
 $L['DOWNLOADS'] = '下载';
 $L['ISSUE_REPORT_TXT'] = '报告问题';
 $L['JOIN_US_TXT'] = '与我们在线交流!';
@@ -100,7 +100,7 @@ $L['COMPARE_COMMITS'] = '将当前状态与最新的提交进行比较。';
 $L['CURRENT_COMMIT'] = '查看你当前的提交状态';
 $L['CURRENT_VERSIONS_CHANGELOG'] = '查看你当前的版本更新日志。';
 $L['LATEST_COMMIT'] = '最新';
-$L['QUICKBOX_COMMIT'] = '在QuickBox的提交 -';
+$L['AETHERFLOW_COMMIT'] = '在AetherFlow的提交 -';
 $L['RECENT_UPDATES'] = '近期更新';
 $L['RECENT_UPDATES_TXT'] = '要查看反馈，请使用鼠标滚轮进行滚动。';
 
@@ -157,9 +157,9 @@ $L['INSTALLED'] = '已安装';
 $L['OVPN_TOOLTIP_I'] = '从Web控制台输入: quickVPN访问此功能';
 $L['OVPN_TOOLTIP_U'] = '从Web控制台输入: quickVPN访问此功能';
 $L['BOX'] = '仅限BOX';
-$L['BOX_TOOLTIP_CSF'] = '从Web控制台输入: box install csf访问此功能';
-$L['BOX_TOOLTIP_NEXTCLOUD'] = '从Web控制台输入: box install nextcloud访问此功能';
-$L['BOX_TOOLTIP_ZNC'] = '从Web控制台输入: box install znc访问此功能';
+$L['BOX_TOOLTIP_CSF'] = '从Web控制台输入: af install csf访问此功能';
+$L['BOX_TOOLTIP_NEXTCLOUD'] = '从Web控制台输入: af install nextcloud访问此功能';
+$L['BOX_TOOLTIP_ZNC'] = '从Web控制台输入: af install znc访问此功能';
 
 ////////////////////////////////////////
 //BANDWIDTH & DATA TABLES

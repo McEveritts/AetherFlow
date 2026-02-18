@@ -11,8 +11,10 @@
 //
 // Now, let's add them to the menu!
 //
-// <li><a class="grayscale" href="<?php echo "$appURL"; ?//>" target="_blank"><img src="img/brands/app.png" class="brand-ico"> <span>Custom App</span></a></li>
-// <li><a class="grayscale" href="<?php echo "$mysiteURL"; ?//>" target="_blank"><img src="img/brands/sitelogo.png" class="brand-ico"> <span>My External Site</span></a></li>
+// <li><a class="grayscale" href="<?php echo "$appURL"; ?>// " target="_blank"><img src="img/brands/app.png"
+    class="brand-ico"> <span>Custom App</span></a></li>
+// <li><a class="grayscale" href="<?php echo "$mysiteURL"; ?>// " target="_blank"><img src="img/brands/sitelogo.png"
+            class="brand-ico"> <span>My External Site</span></a></li>
 //
 // You'll notice in the examples above that after (for instance) "$appURL"; ?
 // there are two forward slashes (//). Remove these on live examples.
@@ -23,7 +25,7 @@
 //----------------------
 //
 // You can add custom logos to your created menu items by placing the logos
-// within the /srv/rutorrent/home/img/brands/ directory. For best results, add
+// within the dashboard/img/brands/ directory. For best results, add
 // images to be no greater than 128x128 pixels in size.
 // Remember to change the image source to the name you have given your logo icon.
 // Any image format is acceptable: (jpg,png,svg,gif)
@@ -31,15 +33,16 @@
 //
 //
 ///////////////////////////////////////////////////
-//  END TUTORIAL ON ADDING IN YOUR CUSTOM LINKS  //
+// END TUTORIAL ON ADDING IN YOUR CUSTOM LINKS //
 ///////////////////////////////////////////////////
 
 
 // INSERT YOUR CUSTOM EXTERNAL or INTERNAL LINKS HERE! //
-$quickboxURL = "https://quickbox.io/donate/";
+$aetherflowURL = "https://github.com/McEveritts/AetherFlow";
 
 ?> <!-- Do not remove this closing (?>) -->
 
 
 <!-- // INSERT YOUR CUSTOM EXTERNAL or INTERNAL MENU ITEMS HERE! // -->
-<li><a href="<?php echo "$quickboxURL"; ?>" class="grayscale" target="_blank"><i class="fa fa-heart text-danger"></i> <span><?php echo T('DONATE'); ?></span></a></li>
+<li><a href="<?php echo "$aetherflowURL"; ?>" class="grayscale" target="_blank"><i class="fa fa-github"></i>
+        <span>AetherFlow</span></a></li>

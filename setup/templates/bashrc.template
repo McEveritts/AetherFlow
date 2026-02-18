@@ -9,18 +9,18 @@
 #+ you'll have to do some other choices for readability.
 #
 #  In addition to the aliases and prompts to make your shell experience
-#+ with QuickBox an easy and enjoyable one, there are additional
+#+ with AetherFlow an easy and enjoyable one, there are additional
 #+ functions towards the bottom of this file that are necessary
-#+ to the working order of your QuickBox install. It is advisable
+#+ to the working order of your AetherFlow install. It is advisable
 #+ that unless you know what you are doing, this file remain untouched.
 # =============================================================== #
 
 # If not running interactively, don't do anything
 [ -z "$PS1" ] && return
-QUICKBOX_VERSION=2.5.8
+AETHERFLOW_VERSION=2.5.8
 
 export TERM=xterm;TERM=xterm
-export PATH=$PATH:/usr/local/sbin:/usr/sbin:/sbin:/usr/local/bin:/usr/bin:/bin:/usr/local/games:/usr/games:/home/quickbox/.bin/:/usr/local/bin/quickbox/:/usr/local/bin/quickbox/package/:/usr/local/bin/quickbox/package/install/:/usr/local/bin/quickbox/package/remove/:/usr/local/bin/quickbox/plugin/:/usr/local/bin/quickbox/plugin/install/:/usr/local/bin/quickbox/plugin/remove/:/usr/local/bin/quickbox/system/:/usr/local/bin/quickbox/system/lang/
+export PATH=$PATH:/usr/local/sbin:/usr/sbin:/sbin:/usr/local/bin:/usr/bin:/bin:/usr/local/games:/usr/games:/home/aetherflow/.bin/:/usr/local/bin/aetherflow/:/usr/local/bin/aetherflow/package/:/usr/local/bin/aetherflow/package/install/:/usr/local/bin/aetherflow/package/remove/:/usr/local/bin/aetherflow/plugin/:/usr/local/bin/aetherflow/plugin/install/:/usr/local/bin/aetherflow/plugin/remove/:/usr/local/bin/aetherflow/system/:/usr/local/bin/aetherflow/system/lang/
 
 EDITOR=nano; export EDITOR=nano
 
@@ -155,7 +155,7 @@ NC="\e[m"               # Color Reset
   echo "|------------------------------------------------------------------------|"
   echo "|  ###################   This Server is OFF limits   ####################|"
   echo "|------------------------------------------------------------------------|"
-  echo -e "     ${BCyan}You are running QuickBox v${BRed}${QUICKBOX_VERSION}${NC}"
+  echo -e "     ${BCyan}You are running AetherFlow v${BRed}${AETHERFLOW_VERSION}${NC}"
   echo -e "     ${BCyan}Your logged IP is ${BRed}$DISPLAY${NC}"
   echo -e "     ${BCyan}Your BASH version is ${BRed}${BASH_VERSION%.*}${BCyan}${NC}"
   echo "     $date"
@@ -167,7 +167,7 @@ NC="\e[m"               # Color Reset
   ##echo ""
   ##echo ""
   ##echo "|========================================================================|"
-  ##echo -e "        ${BCyan}You are running QuickBox v${BRed}${QUICKBOX_VERSION}${BCyan} - on ${BRed}$DISPLAY${NC}          "
+  ##echo -e "        ${BCyan}You are running AetherFlow v${BRed}${AETHERFLOW_VERSION}${BCyan} - on ${BRed}$DISPLAY${NC}          "
   ##echo -e "                    ${BCyan}Your BASH version is ${BRed}${BASH_VERSION%.*}${BCyan}${NC}                             "
   ##echo "                  $date                           "
   ##echo "|------------------------------------------------------------------------|"
@@ -406,28 +406,28 @@ alias libpath='echo -e ${LD_LIBRARY_PATH//:/\\n}'
 alias du='du -kh'    # Makes a more readable output.
 alias df='df -kTh'
 
-# -> Navigates to set QuickBox trees.
-alias Qsetup='cd ~/QuickBox/setup'
-alias Qpackages='cd ~/QuickBox/packages'
-alias Qrutorrent='cd ~/QuickBox/rutorrent'
-alias Qdashboard='cd ~/QuickBox/dashboard'
-alias Qrtplugins='cd ~/QuickBox/rtplugins'
+# -> Navigates to set AetherFlow trees.
+alias Qsetup='cd ~/AetherFlow/setup'
+alias Qpackages='cd ~/AetherFlow/packages'
+alias Qrutorrent='cd ~/AetherFlow/rutorrent'
+alias Qdashboard='cd ~/AetherFlow/dashboard'
+alias Qrtplugins='cd ~/AetherFlow/rtplugins'
 
-# -> Navigates to set QuickBox directories.
+# -> Navigates to set AetherFlow directories.
 alias rutorrent='cd /srv/rutorrent'
 alias dashboard='cd /srv/rutorrent/home'
-alias syscommands='cd /usr/local/bin/quickbox'
+alias syscommands='cd /usr/local/bin/aetherflow'
 
 # -> Performs some quick adjustments for certain conditions.
 home_diskwidget() {
   rm -f /srv/rutorrent/home/widgets/disk_data.php
-  cp /etc/QuickBox/dashboard/widgets/disk_datah.php /srv/rutorrent/home/widgets/disk_data.php
+  cp /etc/AetherFlow/dashboard/widgets/disk_datah.php /srv/rutorrent/home/widgets/disk_data.php
   chown www-data: /srv/rutorrent/home/widgets/disk_data.php
   service apache2 restart
 }
 root_diskwidget() {
   rm -f /srv/rutorrent/home/widgets/disk_data.php
-  cp /etc/QuickBox/dashboard/widgets/disk_data.php /srv/rutorrent/home/widgets/disk_data.php
+  cp /etc/AetherFlow/dashboard/widgets/disk_data.php /srv/rutorrent/home/widgets/disk_data.php
   chown www-data: /srv/rutorrent/home/widgets/disk_data.php
   service apache2 restart
 }
@@ -994,7 +994,7 @@ complete -F _killall killall killps
 
 #=========================================================================
 #
-#  QUICKBOX USER CREATION & SPECIFICS SECTION
+#  AETHERFLOW USER CREATION & SPECIFICS SECTION
 #
 #=========================================================================
 
@@ -1102,7 +1102,7 @@ echo -n "Username: "; read user
           systemctl stop deluged@${username}
           systemctl stop deluge-web@${username}
           DWSALT=$(head /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 32 | head -n 1)
-          DWP=$(python /usr/local/bin/quickbox/system/deluge.Userpass.py ${passwd} ${DWSALT})
+          DWP=$(python /usr/local/bin/aetherflow/system/deluge.Userpass.py ${passwd} ${DWSALT})
           sed -i "s/.*$username.*/${username}:${passwd}:10/" /home/$username/.config/deluge/auth
           sed -i "s/.*pwd_salt.*/  \"pwd_salt\": \"${DWSALT}\",/" /home/$username/.config/deluge/web.conf
           sed -i "s/.*pwd_sha1.*/  \"pwd_sha1\": \"${DWP}\",/" /home/$username/.config/deluge/web.conf
@@ -1296,8 +1296,8 @@ ip=$(ip route get 8.8.8.8 | awk 'NR==1 {print $NF}')
 dport=$((RANDOM%59000+10024))
 dwport=$(shuf -i 10001-11000 -n 1)
 DWSALT=$(head /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 32 | head -n 1)
-DWP=$(python /usr/local/bin/quickbox/system/deluge.Userpass.py ${passwd} ${DWSALT})
-DUDID=$(python /usr/local/bin/quickbox/system/deluge.addHost.py)
+DWP=$(python /usr/local/bin/aetherflow/system/deluge.Userpass.py ${passwd} ${DWSALT})
+DUDID=$(python /usr/local/bin/aetherflow/system/deluge.addHost.py)
 mkdir -p /home/${username}/.config/deluge/plugins
 chmod 755 /home/${username}/.config
 chmod 755 /home/${username}/.config/deluge
@@ -1509,7 +1509,7 @@ echo -n "Setting up modern file-system indexer (h5ai) for $username ... "
   ln -s /home/${username}/torrents/rtorrent/ ${username}.rtorrent.downloads
   ln -s /home/${username}/torrents/deluge/ ${username}.deluge.downloads
 
-local_setup=/etc/QuickBox/setup/
+local_setup=/etc/AetherFlow/setup/
 PUBLICIP=$(ip route get 8.8.8.8 | awk 'NR==1 {print $NF}')
 cp ${local_setup}templates/web-console.conf.template /etc/apache2/sites-enabled/${username}.console.conf
 sed -i "s/PUBLICIP/${PUBLICIP}/g" /etc/apache2/sites-enabled/${username}.console.conf
@@ -1604,7 +1604,7 @@ function upgradePlex() {
   # Credits to MrWorf for supplying a means to NOT reinvent the wheel
   # Check out the full Plex Update Script at the following repo:
   # https://github.com/mrworf/plexupdate/blob/master/plexupdate.sh
-  # We've merely modified a means for cleaner QuickBox integration
+  # We've merely modified a means for cleaner AetherFlow integration
   #############################################################################
 
   echo "  Please enter in your Plex Email and Password"
