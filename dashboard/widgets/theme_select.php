@@ -10,7 +10,7 @@ if (!isAdmin()) {
         return;
 }
 
-$validThemes = ['defaulted', 'smoked'];
+$validThemes = ['defaulted', 'smoked', 'glass', 'aetherflow'];
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['theme_select'])) {
         requireCsrfToken();
@@ -21,7 +21,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['theme_select'])) {
                 die('Invalid theme');
         }
 
-        shell_exec("sudo /usr/local/bin/aetherflow/system/theme/themeSelect-{$theme}");
+        // Set cookie for persistence (30 days)
+        setcookie('theme', $theme, time() + (86400 * 30), "/");
+        $_SESSION['theme'] = $theme;
+
+        // shell_exec("sudo /usr/local/bin/aetherflow/system/theme/themeSelect-{$theme}");
         header('Location: /');
         exit;
 }

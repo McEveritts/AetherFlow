@@ -106,7 +106,9 @@ $current_vs = "<span id=\"version-result\"></span>";
                                   <div class="col-xs-12 col-md-6" style="padding: 0">
                                     <?php $option = array();
                                     $option[] = array('file' => 'defaulted', 'title' => 'Defaulted');
-                                    $option[] = array('file' => 'smoked', 'title' => 'Smoked'); { ?>
+                                    $option[] = array('file' => 'smoked', 'title' => 'Smoked');
+                                    $option[] = array('file' => 'glass', 'title' => 'Glass (Gold)');
+                                    $option[] = array('file' => 'aetherflow', 'title' => 'AetherFlow'); { ?>
                                       <h5><?php echo T('THEME_SELECT'); ?></h5>
                                       <?php foreach ($option as $theme) { ?>
                                         <small><a href="javascript:void()" data-toggle="modal"

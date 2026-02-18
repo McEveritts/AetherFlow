@@ -1,0 +1,241 @@
+/* 
+   AetherFlow Theme: Glass (Gold)
+   Based on Slate Stone, but with transparency and blur.
+*/
+
+:root {
+    /* Backgrounds with opacity for Glassmorphism */
+    --bg-dark-slate: #15191E;
+    --bg-card-glass: rgba(30, 35, 41, 0.65);
+    /* High transparency */
+    --bg-header-glass: rgba(26, 30, 36, 0.75);
+    --bg-sidebar-glass: rgba(26, 30, 36, 0.75);
+
+    --accent-gold: #F4B400;
+    --accent-gold-hover: #D4AF37;
+    --text-primary: #E8EAED;
+    --text-secondary: #9CA3AF;
+
+    /* Borders are lighter/more subtle for glass effect */
+    --border-glass: rgba(255, 255, 255, 0.08);
+    --border-glass-highlight: rgba(255, 255, 255, 0.15);
+
+    --blur-amount: 12px;
+}
+
+body {
+    /* Use a rich gradient or image background to make glass visible */
+    background: radial-gradient(circle at top right, #1a202c 0%, #15191E 60%, #0d1117 100%) !important;
+    background-attachment: fixed !important;
+    color: var(--text-primary) !important;
+    font-family: 'Open Sans', 'Lato', sans-serif;
+}
+
+/* --- Layout & Structure --- */
+
+.mainpanel {
+    background-color: transparent !important;
+}
+
+.leftpanel {
+    background-color: var(--bg-sidebar-glass) !important;
+    backdrop-filter: blur(var(--blur-amount));
+    -webkit-backdrop-filter: blur(var(--blur-amount));
+    border-right: 1px solid var(--border-glass);
+}
+
+.headerbar {
+    background-color: var(--bg-header-glass) !important;
+    backdrop-filter: blur(var(--blur-amount));
+    -webkit-backdrop-filter: blur(var(--blur-amount));
+    border-bottom: 1px solid var(--border-glass);
+    color: var(--text-primary);
+}
+
+.logopanel {
+    background-color: rgba(26, 30, 36, 0.85) !important;
+    /* Slightly more opaque */
+    backdrop-filter: blur(var(--blur-amount));
+    -webkit-backdrop-filter: blur(var(--blur-amount));
+    border-right: 1px solid var(--border-glass);
+}
+
+.pageheader {
+    background-color: transparent !important;
+    border-bottom: none !important;
+}
+
+.pageheader h2 {
+    color: var(--text-primary) !important;
+    text-shadow: 0 2px 4px rgba(0, 0, 0, 0.5);
+}
+
+/* --- Cards / Panels --- */
+
+.panel {
+    background-color: var(--bg-card-glass) !important;
+    backdrop-filter: blur(var(--blur-amount));
+    -webkit-backdrop-filter: blur(var(--blur-amount));
+    border: 1px solid var(--border-glass) !important;
+    border-top: 1px solid var(--border-glass-highlight) !important;
+    /* Top highlight */
+    border-radius: 12px;
+    box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.36) !important;
+}
+
+.panel-heading {
+    background-color: rgba(255, 255, 255, 0.03) !important;
+    border-bottom: 1px solid var(--border-glass) !important;
+    color: var(--text-primary) !important;
+    border-radius: 12px 12px 0 0;
+}
+
+.panel-title {
+    color: var(--text-primary) !important;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+}
+
+.panel-footer {
+    background-color: rgba(0, 0, 0, 0.2) !important;
+    border-top: 1px solid var(--border-glass) !important;
+    color: var(--text-secondary);
+    border-radius: 0 0 12px 12px;
+}
+
+/* --- Typography --- */
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+    color: var(--text-primary) !important;
+}
+
+p,
+span,
+div {
+    color: inherit;
+}
+
+.text-muted {
+    color: var(--text-secondary) !important;
+}
+
+a {
+    color: var(--accent-gold);
+    transition: color 0.2s ease, text-shadow 0.2s ease;
+}
+
+a:hover {
+    color: var(--accent-gold-hover);
+    text-decoration: none;
+    text-shadow: 0 0 8px rgba(244, 180, 0, 0.4);
+}
+
+/* --- Buttons --- */
+
+.btn-primary,
+.btn-success,
+.btn-info {
+    background: linear-gradient(135deg, var(--accent-gold) 0%, #d4af37 100%) !important;
+    border: none !important;
+    color: #15191E !important;
+    font-weight: 700;
+    box-shadow: 0 4px 15px rgba(244, 180, 0, 0.3);
+}
+
+.btn-primary:hover,
+.btn-success:hover,
+.btn-info:hover {
+    background: linear-gradient(135deg, #FFC800 0%, #E5BE01 100%) !important;
+    box-shadow: 0 6px 20px rgba(244, 180, 0, 0.5);
+    transform: translateY(-1px);
+}
+
+.btn-default {
+    background-color: rgba(255, 255, 255, 0.1) !important;
+    border: 1px solid var(--border-glass) !important;
+    color: var(--text-primary) !important;
+    backdrop-filter: blur(4px);
+}
+
+.btn-default:hover {
+    background-color: rgba(255, 255, 255, 0.2) !important;
+}
+
+/* --- Navigation --- */
+
+.nav-bracket>li>a {
+    color: var(--text-secondary) !important;
+}
+
+.nav-bracket>li.active>a,
+.nav-bracket>li>a:hover {
+    background-color: rgba(244, 180, 0, 0.15) !important;
+    color: var(--accent-gold) !important;
+    border-left: 3px solid var(--accent-gold);
+    box-shadow: inset 10px 0 20px -10px rgba(244, 180, 0, 0.2);
+}
+
+.nav-bracket .children {
+    background-color: rgba(0, 0, 0, 0.3) !important;
+}
+
+/* --- Tables --- */
+
+.table-bordered {
+    border: 1px solid var(--border-glass) !important;
+}
+
+.table>thead>tr>th,
+.table>tbody>tr>th,
+.table>tfoot>tr>th,
+.table>thead>tr>td,
+.table>tbody>tr>td,
+.table>tfoot>tr>td {
+    border-color: var(--border-glass) !important;
+}
+
+.table-hover>tbody>tr:hover {
+    background-color: rgba(244, 180, 0, 0.05) !important;
+}
+
+/* --- Forms --- */
+
+input,
+textarea,
+select,
+.form-control {
+    background-color: rgba(0, 0, 0, 0.3) !important;
+    border: 1px solid var(--border-glass) !important;
+    color: var(--text-primary) !important;
+    backdrop-filter: blur(5px);
+}
+
+input:focus,
+.form-control:focus {
+    border-color: var(--accent-gold) !important;
+    background-color: rgba(0, 0, 0, 0.5) !important;
+    box-shadow: 0 0 10px rgba(244, 180, 0, 0.3);
+}
+
+/* --- Gemini Assistant Overrides --- */
+.gemini-assistant {
+    background: rgba(30, 35, 41, 0.85) !important;
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border: 1px solid var(--border-glass-highlight) !important;
+}
+
+.gemini-header {
+    background: rgba(244, 180, 0, 0.15) !important;
+    border-bottom: 1px solid var(--border-glass) !important;
+}
+
+.gemini-title {
+    color: var(--accent-gold) !important;
+    text-shadow: 0 0 10px rgba(244, 180, 0, 0.5);
+}
