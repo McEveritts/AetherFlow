@@ -21,3 +21,4 @@ username=$(cat /srv/rutorrent/home/db/master.txt)
 OUTTO="/srv/rutorrent/home/db/output.log"
 
 _removepackage-qb
+

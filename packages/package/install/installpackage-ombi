@@ -3,13 +3,13 @@
 # [Quick Box :: Install Ombi (formerly Plex Request.NET) package]
 #
 # GITHUB REPOS
-# GitHub _ packages  :   https://github.com/QuickBox/quickbox_packages
+# GitHub _ packages  :   https://github.com/AetherFlow/AetherFlow_packages
 # LOCAL REPOS
-# Local _ packages   :   /etc/QuickBox/packages
-# Author             :   QuickBox.IO | liza
-# URL                :   https://quickbox.io
+# Local _ packages   :   /etc/AetherFlow/packages
+# Author             :   AetherFlow.IO | liza
+# URL                :   https://AetherFlow.io
 #
-# QuickBox Copyright (C) 2016
+# AetherFlow Copyright (C) 2016
 # Licensed under GNU General Public License v3.0 GPL-3 (in short)
 #
 #   You may copy, distribute and modify the software as long as you track
@@ -91,7 +91,7 @@ spinner() {
 }
 
 OUTTO=/srv/rutorrent/home/db/output.log
-local_setup=/etc/QuickBox/setup/
+local_setup=/etc/AetherFlow/setup/
 user=$(cat /srv/rutorrent/home/db/master.txt)
 
 echo "////////////////////////////////////////////////////">>"${OUTTO}" 2>&1;
@@ -124,3 +124,4 @@ echo >>"${OUTTO}" 2>&1;
 echo "Close this dialog box to refresh your browser" >>"${OUTTO}" 2>&1;
 
 echo ""
+

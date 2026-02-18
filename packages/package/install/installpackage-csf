@@ -3,13 +3,13 @@
 # [Quick Box :: Install Config Server Firewall package]
 #
 # QUICKLAB REPOS
-# QuickLab _ packages  :   https://github.com/QuickBox/quickbox_packages
+# QuickLab _ packages  :   https://github.com/AetherFlow/AetherFlow_packages
 # LOCAL REPOS
-# Local _ packages   :   /etc/QuickBox/packages
-# Author             :   QuickBox.IO | JMSolo
-# URL                :   https://quickbox.io
+# Local _ packages   :   /etc/AetherFlow/packages
+# Author             :   AetherFlow.IO | JMSolo
+# URL                :   https://AetherFlow.io
 #
-# QuickBox Copyright (C) 2017 QuickBox.io
+# AetherFlow Copyright (C) 2017 AetherFlow.io
 # Licensed under GNU General Public License v3.0 GPL-3 (in short)
 #
 #   You may copy, distribute and modify the software as long as you track
@@ -58,7 +58,7 @@ function _installCSF() {
              -e "s/#BDE|3600|0|/BDE|3600|100|/" \
              -e "s/#BDEALL|86400|0|/BDEALL|86400|100|/" /etc/csf/csf.blocklists;
   echo >> /etc/csf/csf.pignore;
-  echo "[ QuickBox Additions - These are necessary to avoid noisy emails ]" >> /etc/csf/csf.pignore;
+  echo "[ AetherFlow Additions - These are necessary to avoid noisy emails ]" >> /etc/csf/csf.pignore;
   echo "exe:/usr/sbin/rsyslogd" >> /etc/csf/csf.pignore;
   echo "exe:/lib/systemd/systemd-timesyncd" >> /etc/csf/csf.pignore;
   echo "exe:/lib/systemd/systemd-resolved" >> /etc/csf/csf.pignore;
@@ -104,7 +104,7 @@ function _installCSF() {
   echo "exe:/usr/bin/transmission-daemon" >> /etc/csf/csf.pignore;
   echo "exe:/usr/local/bin/qbittorrent-nox" >> /etc/csf/csf.pignore;
   echo "exe:/opt/Ombi/Ombi" >> /etc/csf/csf.pignore;
-  echo "[ QuickBox Additions - This is the QuickLab IP - needed for pulling updates ]" >> /etc/csf/csf.ignore;
+  echo "[ AetherFlow Additions - This is the QuickLab IP - needed for pulling updates ]" >> /etc/csf/csf.ignore;
   echo "45.79.179.250" >> /etc/csf/csf.ignore;
   # import csf conf template - made suitable for non-cpanel environments
   cp ${local_setup}templates/csf.conf.template /etc/csf/csf.conf
@@ -158,12 +158,13 @@ root: $admin_email" > /etc/aliases
 
 }
 
-OUTTO=/etc/QuickBox.csf-install.log
+OUTTO=/etc/AetherFlow.csf-install.log
 HOSTNAME1=$(hostname -s)
 PUBLICIP=$(ip route get 8.8.8.8 | awk 'NR==1 {print $NF}')
 #EMAIL=$(cat /srv/rutorrent/home/db/masteremail.txt)
-local_setup=/etc/QuickBox/setup/
+local_setup=/etc/AetherFlow/setup/
 username=$(cat /srv/rutorrent/home/db/master.txt)
 passwd=$(cat /root/${username}.info | cut -d ":" -f 3 | cut -d "@" -f 1)
 
 _installCSF
+

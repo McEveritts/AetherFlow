@@ -3,13 +3,13 @@
 # [Quick Box :: Install Emby package]
 #
 # GITHUB REPOS
-# GitHub _ packages  :   https://github.com/QuickBox/quickbox_packages
+# GitHub _ packages  :   https://github.com/AetherFlow/AetherFlow_packages
 # LOCAL REPOS
-# Local _ packages   :   /etc/QuickBox/packages
-# Author             :   QuickBox.IO | JMSolo
-# URL                :   https://quickbox.io
+# Local _ packages   :   /etc/AetherFlow/packages
+# Author             :   AetherFlow.IO | JMSolo
+# URL                :   https://AetherFlow.io
 #
-# QuickBox Copyright (C) 2017 QuickBox.io
+# AetherFlow Copyright (C) 2017 AetherFlow.io
 # Licensed under GNU General Public License v3.0 GPL-3 (in short)
 #
 #   You may copy, distribute and modify the software as long as you track
@@ -21,7 +21,7 @@ DISTRO=$(lsb_release -is)
 CODENAME=$(lsb_release -cs)
 OUTTO=/srv/rutorrent/home/db/output.log
 username=$(cat /srv/rutorrent/home/db/master.txt)
-local_setup=/etc/QuickBox/setup/
+local_setup=/etc/AetherFlow/setup/
 
 echo "Setting up emby apache configuration ... " >>"${OUTTO}" 2>&1
 cp ${local_setup}templates/emby.conf.template /etc/apache2/sites-enabled/emby.conf
@@ -48,8 +48,8 @@ fi
 
 echo "Installing emby server ... " >>"${OUTTO}" 2>&1
 emby_version=$(curl -Ls https://github.com/MediaBrowser/Emby.Releases/releases/latest | grep "emby-server-deb" | cut -d "/" -f 6 | head -1)
-mkdir -p /tmp/quickbox
-cd /tmp/quickbox
+mkdir -p /tmp/AetherFlow
+cd /tmp/AetherFlow
 wget -q https://github.com/MediaBrowser/Emby.Releases/releases/download/${emby_version}/emby-server-deb_${emby_version}_amd64.deb >/dev/null 2>&1
 dpkg -i emby-server-deb_${emby_version}_amd64.deb >/dev/null 2>&1
 
@@ -78,3 +78,4 @@ echo "Close this dialog box to refresh your browser" >>"${OUTTO}" 2>&1
 service apache2 reload >/dev/null 2>&1
 
 exit
+

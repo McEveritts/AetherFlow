@@ -5,3 +5,4 @@ apt-get remove -y -q znc
 userdel -rf znc
 groupdel -rf znc
 rm /install/.znc.lock
+

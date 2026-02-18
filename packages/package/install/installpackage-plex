@@ -5,11 +5,11 @@
 # GITHUB REPOS
 # GitHub _ packages  :   https://github.com/PastaGringo/scripts
 # LOCAL REPOS        :
-# Local _ packages   :   /etc/QuickBox/packages
+# Local _ packages   :   /etc/AetherFlow/packages
 # Author             :   PastaGringo
-# URL                :   https://plaza.quickbox.io
+# URL                :   https://plaza.AetherFlow.io
 #
-# QuickBox Copyright (C) 2017 QuickBox.io
+# AetherFlow Copyright (C) 2017 AetherFlow.io
 # Licensed under GNU General Public License v3.0 GPL-3 (in short)
 #
 #   You may copy, distribute and modify the software as long as you track
@@ -20,7 +20,7 @@
 OUTTO="/srv/rutorrent/home/db/output.log"
 HOSTNAME1=$(hostname -s)
 PUBLICIP=$(ip route get 8.8.8.8 | awk 'NR==1 {print $NF}')
-local_setup=/etc/QuickBox/setup/
+local_setup=/etc/AetherFlow/setup/
 
 echo "Setting up hostname for plex ... "
     echo -ne "ServerName ${HOSTNAME1}" | sudo tee /etc/apache2/conf-available/fqdn.conf >/dev/null 2>&1
@@ -69,3 +69,4 @@ echo "Plex Install Complete!" >>"${OUTTO}" 2>&1;
     service apache2 reload >/dev/null 2>&1
 
     exit
+

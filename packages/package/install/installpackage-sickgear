@@ -3,13 +3,13 @@
 # [Quick Box :: Install SickGear package]
 #
 # GITHUB REPOS
-# GitHub _ packages  :   https://github.com/QuickBox/QB
+# GitHub _ packages  :   https://github.com/AetherFlow/QB
 # LOCAL REPOS
-# Local _ packages   :   /etc/QuickBox/packages
+# Local _ packages   :   /etc/AetherFlow/packages
 # Author             :   A SickGear development | JackDandy
-# URL                :   https://quickbox.io
+# URL                :   https://AetherFlow.io
 #
-# QuickBox Copyright (C) 2017 QuickBox.io
+# AetherFlow Copyright (C) 2017 AetherFlow.io
 # Licensed under GNU General Public License v3.0 GPL-3 (in short)
 #
 #   You may copy, distribute and modify the software as long as you track
@@ -38,7 +38,7 @@
 #
 #
 # 20 Jun 2017
-# Change script name, verified working with QuickBox (#c917fe8 - 6 Apr 2017).
+# Change script name, verified working with AetherFlow (#c917fe8 - 6 Apr 2017).
 #
 # 23 Dec 2016.
 # Change, now installs master branch by default.
@@ -55,7 +55,7 @@ SG_SERVICE=sickgear
 SG_INSTALL_DIR=/opt/${SG_SERVICE}/
 FILE_OWNER=`whoami`
 
-# Login is used if set. QuickBox details used if found. Otherwise, no SG login
+# Login is used if set. AetherFlow details used if found. Otherwise, no SG login
 # If login not wanted, remove detais in SG at general config/user interface
 SG_USERNAME=
 SG_PASSWORD=
@@ -78,7 +78,7 @@ PYTHON_BIN=${SG_INSTALL_DIR}.pyenv/versions/${PYTHON_VER}/bin/
 
 # To print to shell, set to nothing, otherwise output to LOGFILE
 USE_LOGFILE=yes
-LOGFILE=/srv/rutorrent/home/db/output.log # QuickBox logfile
+LOGFILE=/srv/rutorrent/home/db/output.log # AetherFlow logfile
 
 # To get most output from commands that are run, set to nothing
 MIN_OUTPUT=  #yes
@@ -354,3 +354,4 @@ else
   _installSickGearOutro
   _done
 fi
+
