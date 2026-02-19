@@ -28,7 +28,7 @@ body {
     background: radial-gradient(circle at top right, #1a202c 0%, #15191E 60%, #0d1117 100%) !important;
     background-attachment: fixed !important;
     color: var(--text-primary) !important;
-    font-family: 'Open Sans', 'Lato', sans-serif;
+    font-family: 'Roboto', 'Lato', sans-serif;
 }
 
 /* --- Layout & Structure --- */
