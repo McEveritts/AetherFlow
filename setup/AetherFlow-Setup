@@ -414,8 +414,8 @@ function _askqb() {
 # shellcheck disable=2162
 function _asktr() {
 	echo -ne "${bold}${yellow}Would you like to install transmission? ${normal} [y]es or [${green}n${normal}]o: "
-	read responce
-	case ${responce} in
+	read response
+	case ${response} in
 	[yY] | [yY][Ee][Ss]) tr="yes" ;;
 	[nN] | [nN][Oo] | "") tr="no" ;;
 	*) tr="no" ;;
@@ -454,8 +454,8 @@ function _adduser() {
 # shellcheck disable=2162
 function _askffmpeg() {
 	echo -ne "${bold}${yellow}Would you like to install ffmpeg? (Used for screenshots)${normal} [${green}y${normal}]es or [n]o: "
-	read responce
-	case ${responce} in
+	read response
+	case ${response} in
 	[yY] | [yY][Ee][Ss] | "") ffmpeg=yes ;;
 	[nN] | [nN][Oo]) ffmpeg=no ;;
 	*) ffmpeg=yes ;;
@@ -484,8 +484,8 @@ function _askvsftpd() {
 # shellcheck disable=2249,2162
 function _denyhosts() {
 	echo -ne "${bold}${yellow}Block Public Trackers?${normal}: [${green}y${normal}]es or [n]o: "
-	read responce
-	case ${responce} in
+	read response
+	case ${response} in
 	[yY] | [yY][Ee][Ss] | "")
 
 		echo "[ ${red}-  Blocking public trackers  -${normal} ]"
@@ -506,8 +506,8 @@ function _denyhosts() {
 # shellcheck disable=2162
 function _askbbr() {
 	echo -ne "${bold}${yellow}Would you like to install bbr? (Used for Congestion Control)${normal} [${green}y${normal}]es or [n]o: "
-	read responce
-	case ${responce} in
+	read response
+	case ${response} in
 	[yY] | [yY][Ee][Ss] | "") bbr=yes ;;
 	[nN] | [nN][Oo]) bbr=no ;;
 	*) bbr=yes ;;
@@ -610,11 +610,12 @@ function _skel() {
 	\cp -f ./rar/*rar /usr/sbin
 	rm -rf rarlinux*.tar.gz
 	rm -rf ./rar
-	wget -q http://geolite.maxmind.com/download/geoip/database/GeoLiteCity.dat.gz
-	gunzip GeoLiteCity.dat.gz >>"${OUTTO}" 2>&1
-	mkdir -p /usr/share/GeoIP >>"${OUTTO}" 2>&1
-	rm -rf GeoLiteCity.dat.gz
-	mv GeoLiteCity.dat /usr/share/GeoIP/GeoIPCity.dat >>"${OUTTO}" 2>&1
+	# GeoLiteCity.dat.gz is no longer available from MaxMind
+	# wget -q http://geolite.maxmind.com/download/geoip/database/GeoLiteCity.dat.gz
+	# gunzip GeoLiteCity.dat.gz >>"${OUTTO}" 2>&1
+	# mkdir -p /usr/share/GeoIP >>"${OUTTO}" 2>&1
+	# rm -rf GeoLiteCity.dat.gz
+	# mv GeoLiteCity.dat /usr/share/GeoIP/GeoIPCity.dat >>"${OUTTO}" 2>&1
 	(
 		echo y
 		echo o conf prerequisites_policy follow
@@ -684,10 +685,10 @@ function _lshell() {
 	git clone https://github.com/ghantoos/lshell.git lshell >>/dev/null 2>&1
 	cd lshell || { printf -- "%s" "Unable to enter lshell" && return 1; }
 	python2 setup.py install --no-compile --install-scripts=/usr/bin/ >>/dev/null 2>&1
-	if [[ (${CODENAME} != "focal") || (${CODENAME} != "bionic") ]]; then
-		\cp -f /etc/AetherFlow/setup/templates/lshell.conf.template /etc/lshell.conf
+	if [[ "${CODENAME}" == "focal" || "${CODENAME}" == "bionic" ]]; then
+		\cp -f ${local_setup}templates/lshell.conf-focal.template /etc/lshell.conf
 	else
-		\cp -f /etc/AetherFlow/setup/templates/lshell.conf-focal.template /etc/lshell.conf
+		\cp -f ${local_setup}templates/lshell.conf.template /etc/lshell.conf
 	fi
 	echo "/usr/bin/lshell" >>/etc/shells
 	groupadd lshell
@@ -707,7 +708,7 @@ function _ffmpeg() {
 		done
 		MAXCPUS=$(echo "$(nproc) / 2" | bc)
 		mkdir -p /tmp
-		cd /tmp
+		cd /tmp || exit 1
 		if [[ -d /tmp/ffmpeg ]]; then rm -rf ffmpeg; fi
 		git clone --depth 1 -b release/4.4 https://github.com/FFmpeg/FFmpeg.git ffmpeg >>"${OUTTO}" 2>&1
 		git clone https://github.com/yasm/yasm.git ffmpeg/yasm >>"${OUTTO}" 2>&1
@@ -718,30 +719,30 @@ function _ffmpeg() {
 		####---- Github Mirror source ----####
 		#git clone https://git.ffmpeg.org/ffmpeg.git ffmpeg >>"${OUTTO}" 2>&1
 		############################################################################
-		cd ffmpeg
+		cd ffmpeg || exit 1
 		wget -q https://www.nasm.us/pub/nasm/releasebuilds/2.15.05/nasm-2.15.05.tar.gz
 		tar zxvf nasm-2.15.05.tar.gz >>"${OUTTO}" 2>&1
-		cd nasm-2.15.05
+		cd nasm-2.15.05 || exit 1
 		./autogen.sh >>"${OUTTO}" 2>&1
 		./configure >>"${OUTTO}" 2>&1
 		make -j${MAXCPUS} >>"${OUTTO}" 2>&1
 		make install >>"${OUTTO}" 2>&1
-		cd ../yasm
+		cd ../yasm || exit 1
 		./autogen.sh >>"${OUTTO}" 2>&1
 		./configure >>"${OUTTO}" 2>&1
 		make >>"${OUTTO}" 2>&1
 		make install >>"${OUTTO}" 2>&1
-		cd ../x264
+		cd ../x264 || exit 1
 		PKG_CONFIG_PATH="$PKG_CONFIG_PATH:/tmp/ffmpeg/lib/pkgconfig" ./configure --prefix="/tmp/ffmpeg" --enable-static --enable-pic >>"${OUTTO}" 2>&1
 		make -j${MAXCPUS} >>"${OUTTO}" 2>&1
 		make install >>"${OUTTO}" 2>&1
-		cd ../x265/build/linux
+		cd ../x265/build/linux || exit 1
 		#./make-Makefiles.bash >>"${OUTTO}" 2>&1
 		cmake -G "Unix Makefiles" /tmp/ffmpeg/x265/source -DCMAKE_INSTALL_PREFIX="/tmp/ffmpeg" -DENABLE_SHARED:bool=off >>"${OUTTO}" 2>&1
 		make -j${MAXCPUS} >>"${OUTTO}" 2>&1
 		make install >>"${OUTTO}" 2>&1
 		ldconfig >>"${OUTTO}" 2>&1
-		cd /tmp/ffmpeg
+		cd /tmp/ffmpeg || exit 1
 		export FC_CONFIG_DIR=/etc/fonts
 		export FC_CONFIG_FILE=/etc/fonts/fonts.conf
 		PKG_CONFIG_PATH="$PKG_CONFIG_PATH:/tmp/ffmpeg/lib/pkgconfig" \
@@ -755,7 +756,7 @@ function _ffmpeg() {
 		make install >>"${OUTTO}" 2>&1
 		\cp -f /usr/local/bin/ffmpeg /usr/bin >>"${OUTTO}" 2>&1
 		\cp -f /usr/local/bin/ffprobe /usr/bin >>"${OUTTO}" 2>&1
-		cd /tmp
+		cd /tmp || exit 1
 		rm -rf /tmp/ffmpeg >>"${OUTTO}" 2>&1
 	fi
 }
@@ -769,15 +770,15 @@ function _apachesudo() {
 	mv /tmp/sudoers /etc
 	echo -n "${username}" >/etc/apache2/master.txt
 	#fi
-	cd
+	cd || exit 1
 }
 
 # xmlrpc-c function
 function _xmlrpc() {
-	mkdir -p /tmp && cd /tmp
+	mkdir -p /tmp && cd /tmp || exit 1
 	if [[ -d /tmp/xmlrpc-c ]]; then rm -rf /tmp/xmlrpc-c; fi
 	\cp -rf ${local_setup}sources/xmlrpc-c_1-39-13/ .
-	cd xmlrpc-c_1-39-13
+	cd xmlrpc-c_1-39-13 || exit 1
 	chmod +x configure
 	./configure --prefix=/usr --disable-cplusplus >>"${OUTTO}" 2>&1
 	make >>"${OUTTO}" 2>&1
@@ -790,19 +791,25 @@ function _xmlrpc() {
 # apt rtorrent handles the libtorrent install
 # remember this is temporary until patched
 function _libtorrent() {
-	mkdir -p /tmp && cd /tmp
+	mkdir -p /tmp && cd /tmp || exit 1
 	MAXCPUS=$(echo "$(nproc) / 2" | bc)
 	rm -rf xmlrpc-c* >>"${OUTTO}" 2>&1
 	if [[ -e /tmp/libtorrent-${LTORRENT}.tar.gz ]]; then rm -rf libtorrent-"${LTORRENT}".tar.gz; fi
 	mkdir -p /tmp/libtorrent
 	\cp -f ${local_setup}sources/libtorrent-"${LTORRENT}".tar.gz .
 	tar -xvf "libtorrent-${LTORRENT}.tar.gz" -C /tmp/libtorrent --strip-components=1 >>"${OUTTO}" 2>&1
-	cd libtorrent
+	cd libtorrent || exit 1
 	./autogen.sh >>"${OUTTO}" 2>&1
 	if [[ ${LTORRENT} == "0.13.4" ]]; then
 		\cp -f ${local_setup}sources/libtorrent-0.13.4-tar.patch .
 		patch -p1 <libtorrent-*-tar.patch >>"${OUTTO}" 2>&1
-		./configure --disable-debug --prefix=/usr OPENSSL_LIBS="-L/root/openssl-1.0.2p -lssl -lcrypto" OPENSSL_CFLAGS="-I/root/openssl-1.0.2p/include" --enable-ipv6 >>"${OUTTO}" 2>&1
+		# Check for custom OpenSSL 1.0.2p, otherwise use system
+		if [[ -d "/root/openssl-1.0.2p" ]]; then
+			./configure --disable-debug --prefix=/usr OPENSSL_LIBS="-L/root/openssl-1.0.2p -lssl -lcrypto" OPENSSL_CFLAGS="-I/root/openssl-1.0.2p/include" --enable-ipv6 >>"${OUTTO}" 2>&1
+		else
+			echo "Custom OpenSSL not found, attempting build with system OpenSSL..." >>"${OUTTO}" 2>&1
+			./configure --disable-debug --prefix=/usr --enable-ipv6 >>"${OUTTO}" 2>&1
+		fi
 	elif [[ ${LTORRENT} == "0.13.6" ]]; then
 		./configure --disable-debug --prefix=/usr --enable-ipv6 >>"${OUTTO}" 2>&1
 	elif [[ ${LTORRENT} == "0.13.7" ]]; then
@@ -821,14 +828,14 @@ function _libtorrent() {
 # using apt install rtorrent in the meantime
 # shellcheck disable=2215,2312,2250
 function _rtorrent() {
-	mkdir -p /tmp && cd /tmp
+	mkdir -p /tmp && cd /tmp || exit 1
 	MAXCPUS=$(echo "$(nproc) / 2" | bc)
 	rm -rf libtorrent* >>"${OUTTO}" 2>&1
 	if [[ -e /tmp/libtorrent-${LTORRENT}.tar.gz ]]; then rm -rf /tmp/libtorrent-${LTORRENT}.tar.gz; fi
 	mkdir -p /tmp/rtorrent
 	\cp -f ${local_setup}sources/rtorrent-"${RTVERSION}".tar.gz .
 	tar -xzvf rtorrent-"${RTVERSION}".tar.gz >>"${OUTTO}" 2>&1
-	cd "rtorrent-${RTVERSION}"
+	cd "rtorrent-${RTVERSION}" || exit 1
 	./autogen.sh >>"${OUTTO}" 2>&1
 	if [[ ${RTVERSION} == "0.9.4" ]]; then
 		\cp -f ${local_setup}sources/rtorrent-0.9.4-tar.patch .
@@ -841,7 +848,7 @@ function _rtorrent() {
 	fi
 	make -j${MAXCPUS} >>"${OUTTO}" 2>&1
 	make install >>"${OUTTO}" 2>&1
-	cd /tmp
+	cd /tmp || exit 1
 	ldconfig >>"${OUTTO}" 2>&1
 	rm -rf /tmp/rtorrent-"${RTVERSION}"* >>"${OUTTO}" 2>&1
 	touch /install/.rtorrent.lock
@@ -877,9 +884,9 @@ function _deluge() {
 		if [[ ${QBVERSION} != "no" ]] && (version_qb "${QBVERSION}" 4.1.3); then
 			LTRC=RC_1_1
 		fi
-		cd "${local_packages}"
+		cd "${local_packages}" || exit 1
 		git clone -b "${LTRC}" https://github.com/arvidn/libtorrent.git >>"${OUTTO}" 2>&1
-		cd libtorrent
+		cd libtorrent || exit 1
 		\cp -rf ${local_setup}sources/libtorrent-rasterbar-"${LTRC}".patch .
 		patch -p1 <libtorrent-rasterbar-"${LTRC}".patch >>"${OUTTO}" 2>&1
 		ltversion=$(cat configure.ac | grep -Eo "AC_INIT\(\[libtorrent-rasterbar\],.*" | grep -Eo "[0-9.]+" | head -n1)
@@ -891,7 +898,7 @@ function _deluge() {
 		cd ..
 		wget -q http://download.deluge-torrent.org/source/deluge-1.3.15.tar.gz
 		tar -zxvf deluge-1.3.15.tar.gz >>"${OUTTO}" 2>&1
-		cd deluge-1.3.15
+		cd deluge-1.3.15 || exit 1
 		python setup.py build >>"${OUTTO}" 2>&1
 		python setup.py install --install-layout=deb >>"${OUTTO}" 2>&1
 		python setup.py install_data >>"${OUTTO}" 2>&1
@@ -1132,14 +1139,14 @@ function _qbittorrent() {
 	for depend in ${LIST}; do
 		apt-get -qq -y install "${depend}" >>"${OUTTO}" 2>&1
 	done
-	cd ${local_packages}
+	cd ${local_packages} || exit 1
 	if [[ ! -e /usr/local/lib/libtorrent-rasterbar.so ]]; then
 		function version_qb() { test "$(echo "$@" | tr " " "\n" | sort -V | head -n 1)" != "$1"; }
 		if [[ ${QBVERSION} != "no" ]] && (version_qb "${QBVERSION}" 4.1.3); then
 			LTRC=RC_1_1
 		fi
 		git clone -b "${LTRC}" https://github.com/arvidn/libtorrent.git >>"${OUTTO}" 2>&1
-		cd libtorrent
+		cd libtorrent || exit 1
 		\cp -f ${local_setup}sources/libtorrent-rasterbar-"${LTRC}".patch .
 		patch -p1 <libtorrent-rasterbar-"${LTRC}".patch >>"${OUTTO}" 2>&1
 		ltversion=$(cat configure.ac | grep -Eo "AC_INIT\(\[libtorrent-rasterbar\],.*" | grep -Eo "[0-9.]+" | head -n1)
@@ -1154,9 +1161,9 @@ function _qbittorrent() {
 	for depend in ${LIST}; do
 		apt-get -qq -y install "${depend}" >>"${OUTTO}" 2>&1
 	done
-	cd ${local_packages}
+	cd ${local_packages} || exit 1
 	git clone https://github.com/qbittorrent/qBittorrent >>"${OUTTO}" 2>&1
-	cd qBittorrent
+	cd qBittorrent || exit 1
 	git checkout release-"${QBVERSION}" >>"${OUTTO}" 2>&1
 	./configure --disable-gui --disable-debug >>"${OUTTO}" 2>&1
 	make -j$(nproc) >>"${OUTTO}" 2>&1
@@ -1181,7 +1188,7 @@ function _qbittorrent() {
 	chown ${username}: /home/${username}/torrents/qbittorrent
 	systemctl enable qbittorrent@${username} >/dev/null 2>&1
 	systemctl start qbittorrent@${username} >/dev/null 2>&1
-	cd ${local_packages}
+	cd ${local_packages} || exit 1
 	rm -rf qBittorrent
 }
 
@@ -1205,11 +1212,11 @@ EOF
 # mktorrent function
 function _mktorrent() {
 	if [[ -d /tmp ]]; then rm -r tmp; fi
-	mkdir -p /tmp && cd /tmp
+	mkdir -p /tmp && cd /tmp || exit 1
 	mktorrent_version=1.1
 	wget --quiet https://github.com/Rudde/mktorrent/archive/v"${mktorrent_version}".zip -O mktorrent.zip >>"${OUTTO}" 2>&1
 	unzip -o mktorrent.zip >>"${OUTTO}" 2>&1
-	cd mktorrent-1.1
+	cd mktorrent-1.1 || exit 1
 	make >>"${OUTTO}" 2>&1
 	make install >>"${OUTTO}" 2>&1
 	cd ..
@@ -1320,14 +1327,14 @@ function _rconf() {
 	sed -i "s/XXX/${PORT}/g" /home/${username}/.rtorrent.rc
 	sed -i "s/YYY/${PORTEND}/g" /home/${username}/.rtorrent.rc
 	if [[ -f /install/.10g.lock ]]; then
-		sed -i "s/hrottle.max_peers.normal.set = 100/hrottle.max_peers.normal.set = 300/g" /home/${username}/.rtorrent.rc
+		sed -i "s/throttle.max_peers.normal.set = 100/throttle.max_peers.normal.set = 300/g" /home/${username}/.rtorrent.rc
 		sed -i "s/throttle.max_uploads.global.set = 100/throttle.max_uploads.global.set = 300/g" /home/${username}/.rtorrent.rc
 	fi
 }
 
 # function to set proper diskspace plugin
 function _plugins() {
-	cd "${rutorrent}plugins/"
+	cd "${rutorrent}plugins/" || exit 1
 	if [[ ${primaryroot} == "root" ]]; then
 		rm -rf ${rutorrent}plugins/diskspaceh
 	else
@@ -1543,7 +1550,7 @@ function _perms() {
 	sudo -u ${username} chmod 755 /home/${username}/ >>"${OUTTO}" 2>&1
 	chmod +x /etc/cron.daily/denypublic >/dev/null 2>&1
 	chmod 777 /home/${username}/.sessions >/dev/null 2>&1
-	chown -R chown -R www-data:www-data /srv/rutorrent/home >/dev/null 2>&1
+	chown -R www-data:www-data /srv/rutorrent/home >/dev/null 2>&1
 	if [[ ${tr} == "yes" ]]; then
 		chown -R ${username}:debian-transmission /home/${username}/torrents/transmission >/dev/null 2>&1
 		service transmission-daemon reload >>"${OUTTO}" 2>&1
@@ -1647,9 +1654,10 @@ EOF
 	done
 	rm -rf /root/tmp/
 	echo -ne "  Do you wish to reboot (recommended!): (Default ${green}Y${normal})"
-	read reboot
-	case $reboot in
-	[yY] | [yY][Ee][Ss] | "") reboot ;;
+	echo -ne "  Do you wish to reboot (recommended!): (Default ${green}Y${normal})"
+	read reboot_response
+	case $reboot_response in
+	[yY] | [yY][Ee][Ss] | "") systemctl reboot ;;
 	[nN] | [nN][Oo]) echo "  ${cyan}Skipping reboot${normal} ... " ;;
 	esac
 }
@@ -1672,11 +1680,24 @@ spinner() {
 	echo -ne "${OK}"
 }
 
-local_setup=/etc/AetherFlow/setup/
-local_packages=/etc/AetherFlow/packages/
-local_rutorrent=/etc/AetherFlow/rutorrent/
-local_rplugins=/etc/AetherFlow/rtplugins/
-local_dashboard=/etc/AetherFlow/dashboard/
+# Check if running from setup directory or installed location
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+if [[ -f "${SCRIPT_DIR}/AetherFlow-Setup" ]]; then
+    # We are in the setup directory of the repo/install
+    BASE_DIR="$(dirname "${SCRIPT_DIR}")"
+    local_setup="${SCRIPT_DIR}/"
+    local_packages="${BASE_DIR}/packages/"
+    local_rutorrent="${BASE_DIR}/rutorrent/"
+    local_rplugins="${BASE_DIR}/rtplugins/"
+    local_dashboard="${BASE_DIR}/dashboard/"
+else
+    # Fallback to default locations
+    local_setup="/etc/AetherFlow/setup/"
+    local_packages="/etc/AetherFlow/packages/"
+    local_rutorrent="/etc/AetherFlow/rutorrent/"
+    local_rplugins="/etc/AetherFlow/rtplugins/"
+    local_dashboard="/etc/AetherFlow/dashboard/"
+fi
 # shellcheck disable=2312
 IFACE=$(ip link show | grep -i broadcast | grep -m1 UP | cut -d: -f 2 | cut -d@ -f 1 | sed -e 's/ //g')
 PORT=$(shuf -i 2000-61000 -n 1)
