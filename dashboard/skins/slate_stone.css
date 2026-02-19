@@ -17,7 +17,7 @@
 body {
   background-color: var(--bg-dark-slate) !important;
   color: var(--text-primary) !important;
-  font-family: 'Open Sans', 'Lato', sans-serif;
+  font-family: 'Roboto', 'Lato', sans-serif;
 }
 
 /* --- Layout & Structure --- */
@@ -79,11 +79,18 @@ body {
 
 /* --- Typography --- */
 
-h1, h2, h3, h4, h5, h6 {
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
   color: var(--text-primary) !important;
 }
 
-p, span, div {
+p,
+span,
+div {
   color: inherit;
 }
 
@@ -103,14 +110,19 @@ a:hover {
 
 /* --- Buttons --- */
 
-.btn-primary, .btn-success, .btn-info {
+.btn-primary,
+.btn-success,
+.btn-info {
   background-color: var(--accent-gold) !important;
   border-color: var(--accent-gold) !important;
-  color: #15191E !important; /* Dark text on Gold for contrast */
+  color: #15191E !important;
+  /* Dark text on Gold for contrast */
   font-weight: 600;
 }
 
-.btn-primary:hover, .btn-success:hover, .btn-info:hover {
+.btn-primary:hover,
+.btn-success:hover,
+.btn-info:hover {
   background-color: var(--accent-gold-hover) !important;
   border-color: var(--accent-gold-hover) !important;
 }
@@ -127,13 +139,14 @@ a:hover {
 
 /* --- Navigation --- */
 
-.nav-bracket > li > a {
+.nav-bracket>li>a {
   color: var(--text-secondary) !important;
 }
 
-.nav-bracket > li.active > a, 
-.nav-bracket > li > a:hover {
-  background-color: rgba(244, 180, 0, 0.1) !important; /* Low opacity Gold */
+.nav-bracket>li.active>a,
+.nav-bracket>li>a:hover {
+  background-color: rgba(244, 180, 0, 0.1) !important;
+  /* Low opacity Gold */
   color: var(--accent-gold) !important;
   border-left: 3px solid var(--accent-gold);
 }
@@ -148,35 +161,40 @@ a:hover {
   border: 1px solid var(--border-subtle) !important;
 }
 
-.table > thead > tr > th, 
-.table > tbody > tr > th, 
-.table > tfoot > tr > th, 
-.table > thead > tr > td, 
-.table > tbody > tr > td, 
-.table > tfoot > tr > td {
+.table>thead>tr>th,
+.table>tbody>tr>th,
+.table>tfoot>tr>th,
+.table>thead>tr>td,
+.table>tbody>tr>td,
+.table>tfoot>tr>td {
   border-color: var(--border-subtle) !important;
 }
 
-.table-hover > tbody > tr:hover {
+.table-hover>tbody>tr:hover {
   background-color: rgba(255, 255, 255, 0.05) !important;
 }
 
 /* --- Forms --- */
 
-input, textarea, select, .form-control {
+input,
+textarea,
+select,
+.form-control {
   background-color: #121519 !important;
   border: 1px solid var(--border-subtle) !important;
   color: var(--text-primary) !important;
 }
 
-input:focus, .form-control:focus {
+input:focus,
+.form-control:focus {
   border-color: var(--accent-gold) !important;
   box-shadow: 0 0 5px rgba(244, 180, 0, 0.5);
 }
 
 /* --- Gemini Assistant Overrides --- */
 .gemini-assistant {
-  background: rgba(30, 35, 41, 0.95) !important; /* Slate Card bg */
+  background: rgba(30, 35, 41, 0.95) !important;
+  /* Slate Card bg */
   border-color: var(--border-subtle) !important;
 }
 
