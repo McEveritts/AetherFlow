@@ -21,7 +21,7 @@ else
   MainURL='http://kernel.ubuntu.com/~kernel-ppa/mainline'
   [ -n "$tmpKernelVer" ] && {
     wget -qO /dev/null "$MainURL/$tmpKernelVer"
-    [ $? -ne '0' ] && echo 'Please input a vaild kernel version! exp: v4.11.9.' && exit 1
+    [ $? -ne '0' ] && echo 'Please input a valid kernel version! exp: v4.11.9.' && exit 1
     KernelVer="$tmpKernelVer"
   }
   [ -z "$tmpKernelVer" ] && {
@@ -42,11 +42,11 @@ else
   Newest="$(echo "$KernelFile" |awk -F '_' '{print $1}')"
   KernelList="$(dpkg -l |grep 'linux-image' |awk '{print $2}')"
   [ -z "$(echo $KernelList |grep -o "$Newest")" ] && echo "Install error." && exit 1
-  for KernelTMP in `echo "$KernelList"`
-  do
-    [ "$KernelTMP" != "$Newest" ] && echo -ne "Uninstall Old Kernel\n\t$KernelTMP\n" && DEBIAN_FRONTEND=noninteractive dpkg --purge "$KernelTMP" >/dev/null 2>&1
-  done
-  [ "$(dpkg --get-selections |grep 'linux-image' |awk '{print $2}' |grep '^install' |wc -l)" != '1' ] && echo "Error, uninstall old Kernel." && exit 1
+  #for KernelTMP in $(echo "$KernelList")
+  #do
+  #  [ "$KernelTMP" != "$Newest" ] && echo -ne "Uninstall Old Kernel\n\t$KernelTMP\n" && DEBIAN_FRONTEND=noninteractive dpkg --purge "$KernelTMP" >/dev/null 2>&1
+  #done
+  #[ "$(dpkg --get-selections |grep 'linux-image' |awk '{print $2}' |grep '^install' |wc -l)" != '1' ] && echo "Error, uninstall old Kernel." && exit 1
   update-grub >/dev/null 2>&1
   echo "pre-Loading TCP BBR ..."
   [ ! -f /etc/sysctl.conf ] && touch /etc/sysctl.conf

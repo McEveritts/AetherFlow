@@ -680,7 +680,7 @@ function my_ip() # Get IP adress on ethernet.
 function ii()   # Get current host related info.
 {
     echo -e "\nYou are logged on ${BRed}$HOST"
-    echo -e "\n${BRed}Additionnal information:$NC " ; uname -a
+    echo -e "\n${BRed}Additional information:$NC " ; uname -a
     echo -e "\n${BRed}Users logged on:$NC " ; w -hs |
              cut -d " " -f1 | sort | uniq
     echo -e "\n${BRed}Current date :$NC " ; date
@@ -1151,7 +1151,7 @@ echo -n "Username: "; read username
   else
     useradd -m -k /etc/skel/ $username -s /usr/bin/lshell
     echo -n "Password: (hit enter to generate a password) ";read 'password'
-    chown $username.www-data /home/$username >/dev/null 2>&1
+    chown ${username}:www-data /home/$username >/dev/null 2>&1
     cp $htpasswd /root/rutorrent-htpasswd.`date +'%d.%m.%y-%S'`
     if [[ "$password" == "" ]]; then
       echo "setting password to $genpass"
@@ -1226,7 +1226,7 @@ fi
 echo $OK
 
 echo -n "setting permissions ... "
-  chown $username.www-data /home/$username/{torrents,.sessions,watch,.rtorrent.rc} >/dev/null 2>&1
+  chown $username:www-data /home/$username/{torrents,.sessions,watch,.rtorrent.rc} >/dev/null 2>&1
   usermod -a -G www-data $username >/dev/null 2>&1
   usermod -a -G $username www-data >/dev/null 2>&1
   mkdir -p /home/${username}/torrents/rtorrent
@@ -1241,7 +1241,7 @@ echo -n "setting permissions ... "
   cp /srv/rutorrent/plugins/fileupload/conf.php /srv/rutorrent/conf/users/"${username}"/plugins/fileupload/conf.php
   chown -R www-data: /srv/rutorrent/conf/users/"${username}" >/dev/null 2>&1
   sudo -u $username chmod 750 /home/$username/ >/dev/null 2>&1
-  chown -R $username.www-data /home/${username} >/dev/null 2>&1
+  chown -R $username:www-data /home/${username} >/dev/null 2>&1
 echo $OK
 
 echo -n "writing $username rutorrent config.php ... "
@@ -1456,7 +1456,7 @@ if [[ ! -f /home/${username}/.config/deluge/plugins/ltConfig-0.2.5.0-py2.7.egg ]
   cd /home/${username}/.config/deluge/plugins/
   wget -q https://github.com/ratanakvlun/deluge-ltconfig/releases/download/v0.2.5.0/ltConfig-0.2.5.0-py2.7.egg
 fi
-chown -R ${username}.${username} /home/${username}/.config/
+chown -R ${username}:${username} /home/${username}/.config/
 fi
 echo $OK
 
@@ -1729,7 +1729,7 @@ function upgradePlex() {
   		echo -e " ${BWhite}${On_Red}ERROR: Failed to login, debug information:${NC}" >&2
   		cat /tmp/failcause >&2
     else
-      # If the system got here, it means the login was successfull, so we set the TOKEN variable to the authToken from the response
+      # If the system got here, it means the login was successful, so we set the TOKEN variable to the authToken from the response
     	# I use cut -c 14- to cut off the "authToken":" string from the grepped result, can probably be done in a different way
     	TOKEN=$(</tmp/failcause  grep -ioe '"authToken":"[^"]*' | cut -c 14-)
 
@@ -1907,7 +1907,7 @@ done
     for depend in $LIST; do
       apt-get -qq -y install $depend >>"${OUTTO}" 2>&1
     done
-    echo "Cloning libtorrent and Deluge repostitories..."
+    echo "Cloning libtorrent and Deluge repositories..."
     git clone -b ${LTRC} https://github.com/arvidn/libtorrent.git >>"${OUTTO}" 2>&1
     git clone -b 1.3-stable git://deluge-torrent.org/deluge.git >>"${OUTTO}" 2>&1
     cd libtorrent
@@ -1950,7 +1950,7 @@ function upgradeJackett() {
   wget -q https://github.com/Jackett/Jackett/releases/download/${jackettver}/Jackett.Binaries.LinuxAMDx64.tar.gz
   tar -xzf Jackett.Binaries.LinuxAMDx64.tar.gz >/dev/null 2>&1
   rm -f Jackett.Binaries.LinuxAMDx64.tar.gz
-  chown ${username}.${username} -R Jackett
+  chown ${username}:${username} -R Jackett
   cat >/etc/systemd/system/jackett@${username}.service <<JCKSYS
 [Unit]
 Description=Jackett Daemon
@@ -1976,7 +1976,7 @@ JCKSYS
 
   systemctl daemon-reload
   echo "Adjusting permissions..."
-  chown ${username}.${username} -R Jackett
+  chown ${username}:${username} -R Jackett
   echo "Starting Jackett..."
   systemctl start jackett@${username}
   if [[ -d /home/${username}/Jackett ]]; then
@@ -1996,7 +1996,7 @@ function upgradeSABnzbd() {
   git reset --hard origin/master
   git pull origin master
   echo "Adjusting permissions..."
-  chown ${username}.${username} -R /home/${username}/SABnzbd
+  chown ${username}:${username} -R /home/${username}/SABnzbd
   echo "Starting SABnzbd..."
   systemctl start sabnzbd@${username}
   echo ${OK}
@@ -2007,7 +2007,7 @@ function setup-pyLoad() {
   if [ -d /home/${username}/.pyload ]; then
     cd /home/${username}/.pyload
     /usr/bin/python /home/${username}/.pyload/pyLoadCore.py --setup --config=/home/${username}/.pyload
-    chown -R ${username}.${username} /home/${username}/.pyload
+    chown -R ${username}:${username} /home/${username}/.pyload
     sleep 5
     sed -i 's/"Path Prefix" = /"Path Prefix" = \/pyload/g' /home/${username}/.pyload/pyload.conf
     systemctl start pyload@${username}.service
@@ -2024,7 +2024,7 @@ function upgradepyLoad() {
     echo "Setting up latest version of pyLoad..."
     git checkout stable && git pull
     echo "Adjusting permissions..."
-    chown -R ${username}.${username} /home/${username}/.pyload
+    chown -R ${username}:${username} /home/${username}/.pyload
     echo ${OK}
   else
     echo "pyLoad is not installed. You can install by typing: box install pyload"
