@@ -1,6 +1,6 @@
 # AetherFlow
 
-[![AetherFlow](https://cdn.aetherflow.io/files/2018/04/af_logo.svg "AetherFlow")](https://github.com/AetherFlow/MediaNexus)
+[![AetherFlow](https://ptpimg.me/1l3y37.png) "AetherFlow")](https://github.com/AetherFlow/MediaNexus)
 
 ---
 
