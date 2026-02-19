@@ -23,6 +23,9 @@ yellow=$(tput setaf 3)
 magenta=$(tput setaf 5)
 cyan=$(tput setaf 6)
 white=$(tput setaf 7)
+# Ensure system binaries are in PATH
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
+
 on_red=$(tput setab 1)
 on_green=$(tput setab 2)
 on_magenta=$(tput setab 5)
@@ -431,18 +434,18 @@ function _adduser() {
 	echo -n "Username: "
 	read user
 	username=$(echo "${user}" | sed 's/.*/\L&/')
-	useradd "${username}" -m -G www-data -s "${theshell}"
+	/usr/sbin/useradd "${username}" -m -G www-data -s "${theshell}"
 	echo -n "Password: (hit enter to generate a password) "
 	read 'password'
 	if [[ -n "${password}" ]]; then
 		echo "setting password to ${password}"
 		passwd=${password}
-		echo "${username}:${passwd}" | chpasswd >>"${OUTTO}" 2>&1
+		echo "${username}:${passwd}" | /usr/sbin/chpasswd >>"${OUTTO}" 2>&1
 		(echo -n "${username}:${REALM}:" && echo -n "${username}:${REALM}:${passwd}" | md5sum | awk '{print $1}') >>"${HTPASSWD}"
 	else
 		echo "setting password to ${genpass}"
 		passwd=${genpass}
-		echo "${username}:${passwd}" | chpasswd >>"${OUTTO}" 2>&1
+		echo "${username}:${passwd}" | /usr/sbin/chpasswd >>"${OUTTO}" 2>&1
 		(echo -n "${username}:${REALM}:" && echo -n "${username}:${REALM}:${passwd}" | md5sum | awk '{print $1}') >>"${HTPASSWD}"
 	fi
 	printf "${username}:${passwd}" >/root/"${username}".info.db
@@ -1409,8 +1412,8 @@ function _makedirs() {
 	#mkdir /home/"${username}"/{torrents,.sessions,watch} >>"${OUTTO}" 2>&1
 	\cp -rf /etc/skel/. /home/"${username}"
 	chown -R "${username}".www-data /home/"${username}" >>"${OUTTO}" 2>&1 #/{torrents,.sessions,watch,.rtorrent.rc} >>"${OUTTO}" 2>&1
-	usermod -a -G www-data "${username}" >>"${OUTTO}" 2>&1
-	usermod -a -G "${username}" www-data >>"${OUTTO}" 2>&1
+	/usr/sbin/usermod -a -G www-data "${username}" >>"${OUTTO}" 2>&1
+	/usr/sbin/usermod -a -G "${username}" www-data >>"${OUTTO}" 2>&1
 }
 
 # function to make crontab .statup file

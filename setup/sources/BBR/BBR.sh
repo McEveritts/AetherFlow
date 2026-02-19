@@ -4,7 +4,7 @@ kernel_version_min=4.9
 
 [ "$EUID" -ne '0' ] && echo "Error,This script must be run as root! " && exit 1
 function version_gt() { test "$(echo "$@" | tr " " "\n" | sort -V | head -n 1)" != "$1"; }
-if version_gt $kernel_version $kernel_version_min; then
+if version_gt "$kernel_version" "$kernel_version_min"; then
   echo "Your kernel version is greater than 4.9, directly setting TCP BBR..."
   [ ! -f /etc/sysctl.conf ] && touch /etc/sysctl.conf
   sed -i '/net.core.default_qdisc.*/d' /etc/sysctl.conf
@@ -14,7 +14,7 @@ if version_gt $kernel_version $kernel_version_min; then
   sysctl -p
   echo "Finish! "
 else
-  [ $# -gt '1' ] && [ "$1" == '-f' ] && tmpKernelVer="$2" || tmpKernelVer='v4.14.32';
+  [ $# -gt 1 ] && [ "$1" == '-f' ] && tmpKernelVer="$2" || tmpKernelVer='v4.14.32';
   KernelVer='';
   KernelBitVer='';
   [ -z "$(dpkg -l |grep 'grub-')" ] && echo "Not found grub." && exit 1

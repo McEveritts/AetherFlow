@@ -20,7 +20,7 @@
 AETHERFLOW_VERSION=2.5.8
 
 export TERM=xterm;TERM=xterm
-export PATH=$PATH:/usr/local/sbin:/usr/sbin:/sbin:/usr/local/bin:/usr/bin:/bin:/usr/local/games:/usr/games:/home/aetherflow/.bin/:/usr/local/bin/aetherflow/:/usr/local/bin/aetherflow/package/:/usr/local/bin/aetherflow/package/install/:/usr/local/bin/aetherflow/package/remove/:/usr/local/bin/aetherflow/plugin/:/usr/local/bin/aetherflow/plugin/install/:/usr/local/bin/aetherflow/plugin/remove/:/usr/local/bin/aetherflow/system/:/usr/local/bin/aetherflow/system/lang/
+export PATH=$PATH:/usr/local/sbin:/usr/sbin:/sbin:/usr/local/bin:/usr/bin:/bin:/usr/local/games:/usr/games:/home/AetherFlow/.bin/:/usr/local/bin/AetherFlow/:/usr/local/bin/AetherFlow/package/:/usr/local/bin/AetherFlow/package/install/:/usr/local/bin/AetherFlow/package/remove/:/usr/local/bin/AetherFlow/plugin/:/usr/local/bin/AetherFlow/plugin/install/:/usr/local/bin/AetherFlow/plugin/remove/:/usr/local/bin/AetherFlow/system/:/usr/local/bin/AetherFlow/system/lang/
 
 EDITOR=nano; export EDITOR=nano
 
@@ -146,7 +146,7 @@ NC="\e[m"               # Color Reset
 
 
   ALERT=${BWhite}${On_Red} # Bold White on red background
-  date=`date`
+  date=$(date)
 
 
   echo ""
@@ -319,13 +319,13 @@ function job_color()
 
 ## ---> Command Prompt
 commandprompt_on() {
-export PROMPT_COMMAND='export H1="`history 1|sed -e "s/^[\ 0-9]*//; s/[\d0\d31\d34\d39\d96\d127]*//g; s/\(.\{1,50\}\).*$/\1/g"`";history -a;echo -e "sgr0\ncnorm\nrmso"|tput -S'
-export PS1='\n\e[1;30m[\j:\!\e[1;30m]\e[0;36m \T \d \e[1;30m[\e[1;34m\u@\H\e[1;30m:\e[0;37m`tty 2>/dev/null` \e[0;32m+${SHLVL}\e[1;30m] \e[1;37m\w\e[0;37m\[\033]0;[ ${H1}... ] \w - \u@\H +$SHLVL @`tty 2>/dev/null` - [ `uptime` ]\007\]\n\[\]\$ '
+export PROMPT_COMMAND='export H1="$(history 1|sed -e "s/^[\ 0-9]*//; s/[\d0\d31\d34\d39\d96\d127]*//g; s/\(.\{1,50\}\).*$/\1/g")";history -a;echo -e "sgr0\ncnorm\nrmso"|tput -S'
+export PS1='\n\e[1;30m[\j:\!\e[1;30m]\e[0;36m \T \d \e[1;30m[\e[1;34m\u@\H\e[1;30m:\e[0;37m$(tty 2>/dev/null) \e[0;32m+${SHLVL}\e[1;30m] \e[1;37m\w\e[0;37m\[\033]0;[ ${H1}... ] \w - \u@\H +$SHLVL @$(tty 2>/dev/null) - [ $(uptime) ]\007\]\n\[\]\$ '
 }
 
 ## ---> Power Prompt
 powerprompt_on() {
-export AA_P="export PVE=\"\\033[m\\033[38;5;2m\"\$(( \`sed -n \"s/MemFree:[\\t ]\\+\\([0-9]\\+\\) kB/\\1/p\" /proc/meminfo\` / 1024 ))\"\\033[38;5;22m/\"\$((\`sed -n \"s/MemTotal:[\\t ]\\+\\([0-9]\\+\\) kB/\\1/p\" /proc/meminfo\`/ 1024 ))MB\"\\t\\033[m\\033[38;5;55m\$(< /proc/loadavg)\\033[m\";echo -en \"\"" \
+export AA_P="export PVE=\"\\033[m\\033[38;5;2m\"\$(( \$(sed -n \"s/MemFree:[\\t ]\\+\\([0-9]\\+\\) kB/\\1/p\" /proc/meminfo) / 1024 ))\"\\033[38;5;22m/\"\$((\$(sed -n \"s/MemTotal:[\\t ]\\+\\([0-9]\\+\\) kB/\\1/p\" /proc/meminfo)/ 1024 ))MB\"\\t\\033[m\\033[38;5;55m\$(< /proc/loadavg)\\033[m\";echo -en \"\"" \
 export PROMPT_COMMAND="history -a;((\$SECONDS % 10==0 ))&&eval \"\$AA_P\";echo -en \"\$PVE\";" \
 export PS1="\\[\\e[m\\n\\e[1;30m\\][\$\$:\$PPID \\j:\\!\\[\\e[1;30m\\]]\\[\\e[0;36m\\] \\T \\d \\[\\e[1;30m\\][\\[\\e[1;34m\\]\\u@\\H\\[\\e[1;30m\\]\\[\\e[1;30m\\]] \\[\\e[1;37m\\]\\w\\[\\e[0;37m\\] \\n(\$SHLVL:\\!)\\\$ " \
 export PVE="\\033[m\\033[38;5;2m813\\033[38;5;22m/1024MB\\t\\033[m\\033[38;5;55m0.25 0.22 0.18 1/66 26820\\033[m" && eval $AA_P
@@ -361,9 +361,9 @@ PS1='${debian_chroot:+($debian_chroot)}\h:\w\$ '
 #PS1='[${USER}@${HOSTNAME}]'
 umask 022
 
-# You may uncomment the following lines if you want `ls' to be colorized:
+# You may uncomment the following lines if you want \`ls' to be colorized:
 export LS_OPTIONS='--color=auto'
-eval "`dircolors`"
+eval "$(dircolors)"
 }
 
 
