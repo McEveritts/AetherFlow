@@ -41,6 +41,22 @@ message_title=${white}${on_magenta}
 # Check if running from setup directory or installed location
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
+# Auto-Bootstrap if downloaded as a single script via the GitHub one-liner
+if [[ ! -d "${SCRIPT_DIR}/modules" ]]; then
+    echo "Bootstrapping AetherFlow Installer Environment..."
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -y >/dev/null 2>&1
+    apt-get install -y git bc curl >/dev/null 2>&1
+    
+    rm -rf /opt/MediaNexus
+    git clone https://github.com/McEveritts/AetherFlow.git /opt/MediaNexus >/dev/null 2>&1
+    
+    # Relaunch from the proper directory
+    cd /opt/MediaNexus/setup || exit 1
+    exec bash AetherFlow-Setup "$@"
+    exit 0
+fi
+
 # Load Modules
 for module in "${SCRIPT_DIR}/modules/"*.sh; do
     # shellcheck disable=1090
@@ -75,11 +91,11 @@ if [[ -f "${SCRIPT_DIR}/AetherFlow-Setup" ]]; then
     local_dashboard="${BASE_DIR}/dashboard/"
 else
     # Fallback to default locations
-    local_setup="/etc/AetherFlow/setup/"
-    local_packages="/etc/AetherFlow/packages/"
-    local_rutorrent="/etc/AetherFlow/rutorrent/"
-    local_rplugins="/etc/AetherFlow/rtplugins/"
-    local_dashboard="/etc/AetherFlow/dashboard/"
+    local_setup="/opt/MediaNexus/setup/"
+    local_packages="/opt/MediaNexus/packages/"
+    local_rutorrent="/opt/MediaNexus/rutorrent/"
+    local_rplugins="/opt/MediaNexus/rtplugins/"
+    local_dashboard="/opt/MediaNexus/dashboard/"
 fi
 # shellcheck disable=2312
 IFACE=$(ip link show | grep -i broadcast | grep -m1 UP | cut -d: -f 2 | cut -d@ -f 1 | sed -e 's/ //g')
