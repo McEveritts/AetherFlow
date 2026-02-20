@@ -190,7 +190,7 @@ ProxyPass /${APPNAME} http://localhost:${APPDPORT}/
 </Location>
 DELCONF
 	touch /install/.deluge.lock
-	chown www-data: /etc/apache2/sites-enabled/deluge.conf
+	chown www-data:www-data /etc/apache2/sites-enabled/deluge.conf
 }
 
 # Transmission function
@@ -347,7 +347,7 @@ ProxyPassReverse http://localhost:${APPDPORT}/${APPNAME}
 </Location>
 EOF
 	touch /install/.transmission.lock
-	chown www-data: /etc/apache2/sites-enabled/transmission.conf
+	chown www-data:www-data /etc/apache2/sites-enabled/transmission.conf
 	cat >/usr/share/transmission/web/.htaccess <<EOF
 allow from all
 EOF
@@ -432,7 +432,7 @@ Require all granted
 </Location>
 EOF
 	touch /install/.qbittorrent.lock
-	chown www-data: /etc/apache2/sites-enabled/qbittorrent.conf
+	chown www-data:www-data /etc/apache2/sites-enabled/qbittorrent.conf
 }
 
 # scgi enable function (22-nixed)
@@ -551,14 +551,14 @@ function _plugins() {
 	mkdir -p /root/bin
 	git clone https://github.com/mcrapet/plowshare.git ~/.plowshare-source >>"${OUTTO}" 2>&1
 	cd ~/.plowshare-source >>"${OUTTO}" 2>&1
-	make install PREFIX=${HOME} >>"${OUTTO}" 2>&1
+	make install PREFIX=/usr/local >>"${OUTTO}" 2>&1
 	cd && rm -rf .plowshare-source >>"${OUTTO}" 2>&1
 	apt-get -f install >>"${OUTTO}" 2>&1
 
 	mkdir -p /srv/rutorrent/conf/users/"${username}"/plugins/fileupload/
 	chmod 775 /srv/rutorrent/plugins/fileupload/scripts/upload
 	\cp -f /srv/rutorrent/plugins/fileupload/conf.php /srv/rutorrent/conf/users/"${username}"/plugins/fileupload/conf.php
-	chown -R www-data: /srv/rutorrent/conf/users/"${username}"
+	chown -R www-data:www-data /srv/rutorrent/conf/users/"${username}"
 
 	# Set proper permissions to filemanager so it may execute commands
 	find /srv/rutorrent/plugins/filemanager/scripts -type f -exec chmod 755 {} \;

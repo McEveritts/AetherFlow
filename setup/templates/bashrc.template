@@ -422,13 +422,13 @@ alias syscommands='cd /usr/local/bin/aetherflow'
 home_diskwidget() {
   rm -f /srv/rutorrent/home/widgets/disk_data.php
   cp /etc/AetherFlow/dashboard/widgets/disk_datah.php /srv/rutorrent/home/widgets/disk_data.php
-  chown www-data: /srv/rutorrent/home/widgets/disk_data.php
+  chown www-data:www-data /srv/rutorrent/home/widgets/disk_data.php
   service apache2 restart
 }
 root_diskwidget() {
   rm -f /srv/rutorrent/home/widgets/disk_data.php
   cp /etc/AetherFlow/dashboard/widgets/disk_data.php /srv/rutorrent/home/widgets/disk_data.php
-  chown www-data: /srv/rutorrent/home/widgets/disk_data.php
+  chown www-data:www-data /srv/rutorrent/home/widgets/disk_data.php
   service apache2 restart
 }
 
@@ -1239,7 +1239,7 @@ echo -n "setting permissions ... "
   mkdir "/srv/rutorrent/conf/users/${username}" >/dev/null 2>&1
   mkdir -p /srv/rutorrent/conf/users/"${username}"/plugins/fileupload/ >/dev/null 2>&1
   cp /srv/rutorrent/plugins/fileupload/conf.php /srv/rutorrent/conf/users/"${username}"/plugins/fileupload/conf.php
-  chown -R www-data: /srv/rutorrent/conf/users/"${username}" >/dev/null 2>&1
+  chown -R www-data:www-data /srv/rutorrent/conf/users/"${username}" >/dev/null 2>&1
   sudo -u $username chmod 750 /home/$username/ >/dev/null 2>&1
   chown -R $username:www-data /home/${username} >/dev/null 2>&1
 echo $OK

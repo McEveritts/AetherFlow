@@ -39,6 +39,10 @@ SSLEngine on
                 AllowOverride All AuthConfig
                 Order allow,deny
                 Require all granted
+                AuthType Digest
+                AuthName "REALM"
+                AuthUserFile 'HTPASSWD'
+                Require valid-user
         </Directory>
 
         # Route Next.js Frontend
@@ -52,11 +56,6 @@ SSLEngine on
         # Route Go Backend API
         ProxyPass /api/system/ http://127.0.0.1:8080/api/system/
         ProxyPassReverse /api/system/ http://127.0.0.1:8080/api/system/
-        AuthType Digest
-        AuthName "REALM"
-        AuthUserFile 'HTPASSWD'
-        Require valid-user
-        </Directory>
         SSLEngine on
         SSLProtocol ALL -SSLv2 -SSLv3
         SSLHonorCipherOrder On
