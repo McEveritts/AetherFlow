@@ -37,7 +37,7 @@ include('../inc/card.menu.php');
                   <?php echo "$cbodyr"; ?>
                 </div>
               </td>
-              <td class="text-center"><a href="javascript:;" onclick="location.href='?id=88&servicestart=rtorrent'"
+              <td class="text-center"><a href="javascript:;" onclick="submitServiceStart('rtorrent')" 
                   class="btn btn-xs btn-default"><i class="fa fa-refresh text-info"></i> <?php echo T('REFRESH'); ?></a>
               </td>
               <td class="text-center"><a href="javascript:;" onclick="viewLogs('rtorrent')" class="btn btn-xs btn-info"><i
@@ -53,7 +53,7 @@ include('../inc/card.menu.php');
                   <?php echo "$cbodyi"; ?>
                 </div>
               </td>
-              <td class="text-center"><a href="javascript:;" onclick="location.href='?id=88&servicestart=irssi'"
+              <td class="text-center"><a href="javascript:;" onclick="submitServiceStart('irssi')" 
                   class="btn btn-xs btn-default"><i class="fa fa-refresh text-info"></i> <?php echo T('REFRESH'); ?></a>
               </td>
               <td class="text-center"><a href="javascript:;" onclick="viewLogs('irssi')" class="btn btn-xs btn-info"><i
@@ -69,7 +69,7 @@ include('../inc/card.menu.php');
                   <?php echo "$cbodyd"; ?>
                 </div>
               </td>
-              <td class="text-center"><a href="javascript:;" onclick="location.href='?id=88&servicestart=deluged'"
+              <td class="text-center"><a href="javascript:;" onclick="submitServiceStart('deluged')" 
                   class="btn btn-xs btn-default"><i class="fa fa-refresh text-info"></i> <?php echo T('REFRESH'); ?></a>
               </td>
               <td class="text-center"><a href="javascript:;" onclick="viewLogs('deluged')" class="btn btn-xs btn-info"><i
@@ -82,7 +82,7 @@ include('../inc/card.menu.php');
                   <?php echo "$cbodydw"; ?>
                 </div>
               </td>
-              <td class="text-center"><a href="javascript:;" onclick="location.href='?id=88&servicestart=delugeweb'"
+              <td class="text-center"><a href="javascript:;" onclick="submitServiceStart('delugeweb')" 
                   class="btn btn-xs btn-default"><i class="fa fa-refresh text-info"></i> <?php echo T('REFRESH'); ?></a>
               </td>
               <td class="text-center"><a href="javascript:;" onclick="viewLogs('delugeweb')"
@@ -98,7 +98,7 @@ include('../inc/card.menu.php');
                   <?php echo "$cbodytr"; ?>
                 </div>
               </td>
-              <td class="text-center"><a href="javascript:;" onclick="location.href='?id=88&servicestart=transmission'"
+              <td class="text-center"><a href="javascript:;" onclick="submitServiceStart('transmission')" 
                   class="btn btn-xs btn-default"><i class="fa fa-refresh text-info"></i> <?php echo T('REFRESH'); ?></a>
               </td>
               <td class="text-center"><a href="javascript:;" onclick="viewLogs('transmission')"
@@ -114,7 +114,7 @@ include('../inc/card.menu.php');
                   <?php echo "$cbodyqb"; ?>
                 </div>
               </td>
-              <td class="text-center"><a href="javascript:;" onclick="location.href='?id=88&servicestart=qbittorrent'"
+              <td class="text-center"><a href="javascript:;" onclick="submitServiceStart('qbittorrent')" 
                   class="btn btn-xs btn-default"><i class="fa fa-refresh text-info"></i> <?php echo T('REFRESH'); ?></a>
               </td>
               <td class="text-center"><a href="javascript:;" onclick="viewLogs('qbittorrent')"
@@ -131,7 +131,7 @@ include('../inc/card.menu.php');
                   <?php echo "$wcbodyb"; ?>
                 </div>
               </td>
-              <td class="text-center"><a href="javascript:;" onclick="location.href='?id=88&servicestart=shellinabox'"
+              <td class="text-center"><a href="javascript:;" onclick="submitServiceStart('shellinabox')" 
                   class="btn btn-xs btn-default"><i class="fa fa-refresh text-info"></i> <?php echo T('REFRESH'); ?></a>
               </td>
             </tr>
@@ -144,7 +144,7 @@ include('../inc/card.menu.php');
                     <?php echo "$cbodyb"; ?>
                   </div>
                 </td>
-                <td class="text-center"><a href="javascript:;" onclick="location.href='?id=88&servicestart=btsync'"
+                <td class="text-center"><a href="javascript:;" onclick="submitServiceStart('btsync')" 
                     class="btn btn-xs btn-default"><i class="fa fa-refresh text-info"></i> <?php echo T('REFRESH'); ?></a>
                 </td>
                 <td class="text-center"><a href="javascript:;" onclick="viewLogs('btsync')" class="btn btn-xs btn-info"><i
@@ -160,7 +160,7 @@ include('../inc/card.menu.php');
                     <?php echo "$cbodycp"; ?>
                   </div>
                 </td>
-                <td class="text-center"><a href="javascript:;" onclick="location.href='?id=88&servicestart=couchpotato'"
+                <td class="text-center"><a href="javascript:;" onclick="submitServiceStart('couchpotato')" 
                     class="btn btn-xs btn-default"><i class="fa fa-refresh text-info"></i> <?php echo T('REFRESH'); ?></a>
                 </td>
                 <td class="text-center"><a href="javascript:;" onclick="viewLogs('couchpotato')"
@@ -176,7 +176,7 @@ include('../inc/card.menu.php');
                     <?php echo "$cbodye"; ?>
                   </div>
                 </td>
-                <td class="text-center"><a href="javascript:;" onclick="location.href='?id=88&servicestart=emby'"
+                <td class="text-center"><a href="javascript:;" onclick="submitServiceStart('emby')" 
                     class="btn btn-xs btn-default"><i class="fa fa-refresh text-info"></i> <?php echo T('REFRESH'); ?></a>
                 </td>
                 <td class="text-center"><a href="javascript:;" onclick="viewLogs('emby')" class="btn btn-xs btn-info"><i
@@ -192,7 +192,7 @@ include('../inc/card.menu.php');
                     <?php echo "$cbodyhp"; ?>
                   </div>
                 </td>
-                <td class="text-center"><a href="javascript:;" onclick="location.href='?id=88&servicestart=headphones'"
+                <td class="text-center"><a href="javascript:;" onclick="submitServiceStart('headphones')" 
                     class="btn btn-xs btn-default"><i class="fa fa-refresh text-info"></i> <?php echo T('REFRESH'); ?></a>
                 </td>
                 <td class="text-center"><a href="javascript:;" onclick="viewLogs('headphones')"
@@ -208,7 +208,7 @@ include('../inc/card.menu.php');
                     <?php echo "$cbodyj"; ?>
                   </div>
                 </td>
-                <td class="text-center"><a href="javascript:;" onclick="location.href='?id=88&servicestart=jackett'"
+                <td class="text-center"><a href="javascript:;" onclick="submitServiceStart('jackett')" 
                     class="btn btn-xs btn-default"><i class="fa fa-refresh text-info"></i> <?php echo T('REFRESH'); ?></a>
                 </td>
                 <td class="text-center"><a href="javascript:;" onclick="viewLogs('jackett')" class="btn btn-xs btn-info"><i
@@ -224,7 +224,7 @@ include('../inc/card.menu.php');
                     <?php echo "$cbodylid"; ?>
                   </div>
                 </td>
-                <td class="text-center"><a href="javascript:;" onclick="location.href='?id=88&servicestart=lidarr'"
+                <td class="text-center"><a href="javascript:;" onclick="submitServiceStart('lidarr')" 
                     class="btn btn-xs btn-default"><i class="fa fa-refresh text-info"></i> <?php echo T('REFRESH'); ?></a>
                 </td>
                 <td class="text-center"><a href="javascript:;" onclick="viewLogs('lidarr')" class="btn btn-xs btn-info"><i
@@ -240,7 +240,7 @@ include('../inc/card.menu.php');
                     <?php echo "$cbodym"; ?>
                   </div>
                 </td>
-                <td class="text-center"><a href="javascript:;" onclick="location.href='?id=88&servicestart=medusa'"
+                <td class="text-center"><a href="javascript:;" onclick="submitServiceStart('medusa')" 
                     class="btn btn-xs btn-default"><i class="fa fa-refresh text-info"></i> <?php echo T('REFRESH'); ?></a>
                 </td>
                 <td class="text-center"><a href="javascript:;" onclick="viewLogs('medusa')" class="btn btn-xs btn-info"><i
@@ -256,7 +256,7 @@ include('../inc/card.menu.php');
                     <?php echo "$cbodynzg"; ?>
                   </div>
                 </td>
-                <td class="text-center"><a href="javascript:;" onclick="location.href='?id=88&servicestart=nzbget'"
+                <td class="text-center"><a href="javascript:;" onclick="submitServiceStart('nzbget')" 
                     class="btn btn-xs btn-default"><i class="fa fa-refresh text-info"></i> <?php echo T('REFRESH'); ?></a>
                 </td>
                 <td class="text-center"><a href="javascript:;" onclick="viewLogs('nzbget')" class="btn btn-xs btn-info"><i
@@ -272,7 +272,7 @@ include('../inc/card.menu.php');
                     <?php echo "$cbodynzb"; ?>
                   </div>
                 </td>
-                <td class="text-center"><a href="javascript:;" onclick="location.href='?id=88&servicestart=nzbhydra'"
+                <td class="text-center"><a href="javascript:;" onclick="submitServiceStart('nzbhydra')" 
                     class="btn btn-xs btn-default"><i class="fa fa-refresh text-info"></i> <?php echo T('REFRESH'); ?></a>
                 </td>
                 <td class="text-center"><a href="javascript:;" onclick="viewLogs('nzbhydra')" class="btn btn-xs btn-info"><i
@@ -288,7 +288,7 @@ include('../inc/card.menu.php');
                     <?php echo "$cbodypr"; ?>
                   </div>
                 </td>
-                <td class="text-center"><a href="javascript:;" onclick="location.href='?id=88&servicestart=ombi'"
+                <td class="text-center"><a href="javascript:;" onclick="submitServiceStart('ombi')" 
                     class="btn btn-xs btn-default"><i class="fa fa-refresh text-info"></i> <?php echo T('REFRESH'); ?></a>
                 </td>
                 <td class="text-center"><a href="javascript:;" onclick="viewLogs('ombi')" class="btn btn-xs btn-info"><i
@@ -304,7 +304,7 @@ include('../inc/card.menu.php');
                     <?php echo "$cbodyp"; ?>
                   </div>
                 </td>
-                <td class="text-center"><a href="javascript:;" onclick="location.href='?id=88&servicestart=plex'"
+                <td class="text-center"><a href="javascript:;" onclick="submitServiceStart('plex')" 
                     class="btn btn-xs btn-default"><i class="fa fa-refresh text-info"></i> <?php echo T('REFRESH'); ?></a>
                 </td>
                 <td class="text-center"><a href="javascript:;" onclick="viewLogs('plex')" class="btn btn-xs btn-info"><i
@@ -320,7 +320,7 @@ include('../inc/card.menu.php');
                     <?php echo "$cbodypp"; ?>
                   </div>
                 </td>
-                <td class="text-center"><a href="javascript:;" onclick="location.href='?id=88&servicestart=Tautulli'"
+                <td class="text-center"><a href="javascript:;" onclick="submitServiceStart('Tautulli')" 
                     class="btn btn-xs btn-default"><i class="fa fa-refresh text-info"></i> <?php echo T('REFRESH'); ?></a>
                 </td>
                 <td class="text-center"><a href="javascript:;" onclick="viewLogs('tautulli')" class="btn btn-xs btn-info"><i
@@ -336,7 +336,7 @@ include('../inc/card.menu.php');
                     <?php echo "$cbodypl"; ?>
                   </div>
                 </td>
-                <td class="text-center"><a href="javascript:;" onclick="location.href='?id=88&servicestart=pyload'"
+                <td class="text-center"><a href="javascript:;" onclick="submitServiceStart('pyload')" 
                     class="btn btn-xs btn-default"><i class="fa fa-refresh text-info"></i> <?php echo T('REFRESH'); ?></a>
                 </td>
                 <td class="text-center"><a href="javascript:;" onclick="viewLogs('pyload')" class="btn btn-xs btn-info"><i
@@ -352,7 +352,7 @@ include('../inc/card.menu.php');
                     <?php echo "$cbodyrad"; ?>
                   </div>
                 </td>
-                <td class="text-center"><a href="javascript:;" onclick="location.href='?id=88&servicestart=radarr'"
+                <td class="text-center"><a href="javascript:;" onclick="submitServiceStart('radarr')" 
                     class="btn btn-xs btn-default"><i class="fa fa-refresh text-info"></i> <?php echo T('REFRESH'); ?></a>
                 </td>
                 <td class="text-center"><a href="javascript:;" onclick="viewLogs('radarr')" class="btn btn-xs btn-info"><i
@@ -368,7 +368,7 @@ include('../inc/card.menu.php');
                     <?php echo "$cbodysz"; ?>
                   </div>
                 </td>
-                <td class="text-center"><a href="javascript:;" onclick="location.href='?id=88&servicestart=sabnzbd'"
+                <td class="text-center"><a href="javascript:;" onclick="submitServiceStart('sabnzbd')" 
                     class="btn btn-xs btn-default"><i class="fa fa-refresh text-info"></i> <?php echo T('REFRESH'); ?></a>
                 </td>
                 <td class="text-center"><a href="javascript:;" onclick="viewLogs('sabnzbd')" class="btn btn-xs btn-info"><i
@@ -384,7 +384,7 @@ include('../inc/card.menu.php');
                     <?php echo "$cbodysg"; ?>
                   </div>
                 </td>
-                <td class="text-center"><a href="javascript:;" onclick="location.href='?id=88&servicestart=sickgear'"
+                <td class="text-center"><a href="javascript:;" onclick="submitServiceStart('sickgear')" 
                     class="btn btn-xs btn-default"><i class="fa fa-refresh text-info"></i> <?php echo T('REFRESH'); ?></a>
                 </td>
                 <td class="text-center"><a href="javascript:;" onclick="viewLogs('sickgear')" class="btn btn-xs btn-info"><i
@@ -400,7 +400,7 @@ include('../inc/card.menu.php');
                     <?php echo "$cbodysr"; ?>
                   </div>
                 </td>
-                <td class="text-center"><a href="javascript:;" onclick="location.href='?id=88&servicestart=sickrage'"
+                <td class="text-center"><a href="javascript:;" onclick="submitServiceStart('sickrage')" 
                     class="btn btn-xs btn-default"><i class="fa fa-refresh text-info"></i> <?php echo T('REFRESH'); ?></a>
                 </td>
                 <td class="text-center"><a href="javascript:;" onclick="viewLogs('sickrage')" class="btn btn-xs btn-info"><i
@@ -416,7 +416,7 @@ include('../inc/card.menu.php');
                     <?php echo "$cbodys"; ?>
                   </div>
                 </td>
-                <td class="text-center"><a href="javascript:;" onclick="location.href='?id=88&servicestart=sonarr'"
+                <td class="text-center"><a href="javascript:;" onclick="submitServiceStart('sonarr')" 
                     class="btn btn-xs btn-default"><i class="fa fa-refresh text-info"></i> <?php echo T('REFRESH'); ?></a>
                 </td>
                 <td class="text-center"><a href="javascript:;" onclick="viewLogs('sonarr')" class="btn btn-xs btn-info"><i
@@ -432,7 +432,7 @@ include('../inc/card.menu.php');
                     <?php echo "$cbodyss"; ?>
                   </div>
                 </td>
-                <td class="text-center"><a href="javascript:;" onclick="location.href='?id=88&servicestart=subsonic'"
+                <td class="text-center"><a href="javascript:;" onclick="submitServiceStart('subsonic')" 
                     class="btn btn-xs btn-default"><i class="fa fa-refresh text-info"></i> <?php echo T('REFRESH'); ?></a>
                 </td>
                 <td class="text-center"><a href="javascript:;" onclick="viewLogs('subsonic')" class="btn btn-xs btn-info"><i
@@ -448,7 +448,7 @@ include('../inc/card.menu.php');
                     <?php echo "$cbodyst"; ?>
                   </div>
                 </td>
-                <td class="text-center"><a href="javascript:;" onclick="location.href='?id=88&servicestart=syncthing'"
+                <td class="text-center"><a href="javascript:;" onclick="submitServiceStart('syncthing')" 
                     class="btn btn-xs btn-default"><i class="fa fa-refresh text-info"></i> <?php echo T('REFRESH'); ?></a>
                 </td>
                 <td class="text-center"><a href="javascript:;" onclick="viewLogs('syncthing')"
@@ -464,7 +464,7 @@ include('../inc/card.menu.php');
                     <?php echo "$samplebody"; ?>
                   </div>
                 </td>
-                <td class="text-center"><a href="javascript:;" onclick="location.href='?id=88&servicestart=sample'"
+                <td class="text-center"><a href="javascript:;" onclick="submitServiceStart('sample')" 
                     class="btn btn-xs btn-default"><i class="fa fa-refresh text-info"></i> <?php echo T('REFRESH'); ?></a>
                 </td>
                 <td class="text-center"><?php echo "$samplebody"; ?></td>

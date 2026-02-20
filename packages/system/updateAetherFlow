@@ -466,7 +466,7 @@ local_themes=/opt/MediaNexus/themes/
 local_rtheme=/opt/MediaNexus/rttheme/
 
 IFACE=$(ip link show|grep -i broadcast|grep -m1 UP|cut -d: -f 2|cut -d@ -f 1|sed -e 's/ //g');
-A1=$(cat /etc/apache2/master.txt) >> /dev/null 2>&1
+A1=$(cat /etc/apache2/master.txt 2>/dev/null)
 rutorrent=/srv/rutorrent/
 usrbin=/usr/local/bin/
 

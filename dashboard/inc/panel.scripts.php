@@ -1020,35 +1020,68 @@ $option[] = array('file' => 'aetherflow', 'title' => 'AetherFlow'); { ?>
         sticky: true
       });
     });
-    // QuotaRemove
-    $('#quotaRemove').click(function () {
-      $.gritter.add({
-        title: '<?php echo T('UNINSTALLING_TITLE'); ?> user quotas',
-        text: '<?php echo T('UNINSTALLING_TXT_1'); ?> Quota <?php echo T('UNINSTALLING_TXT_2'); ?>',
-        class_name: 'with-icon times-circle danger',
-        sticky: true
-      });
-    });
-    // x2goRemove
-    $('#x2goRemove').click(function () {
-      $.gritter.add({
-        title: '<?php echo T('UNINSTALLING_TITLE'); ?> x2go',
-        text: '<?php echo T('UNINSTALLING_TXT_1'); ?> x2go <?php echo T('UNINSTALLING_TXT_2'); ?>',
-        class_name: 'with-icon times-circle danger',
-        sticky: true
-      });
-    });
-    // ZNCRemove
-    $('#zncRemove').click(function () {
-      $.gritter.add({
-        title: 'Uninstalling ZNC',
-        text: '<?php echo T('UNINSTALLING_TXT_1'); ?> ZNC <?php echo T('UNINSTALLING_TXT_2'); ?>',
-        class_name: 'with-icon times-circle danger',
-        sticky: true
-      });
-    });
 
   });
+</script>
+<script>
+  // AetherFlow Form Interceptor Script
+  // Replaces legacy GET links with secure POST form submissions for CSRF compatibility
+  $(document).ready(function () {
+    function createPostForm(actionKey, pkgName) {
+      var csrfToken = document.querySelector('meta[name="csrf-token"]');
+      if (!csrfToken) {
+        alert('CSRF token missing');
+        return;
+      }
+      var $form = $('<form>').attr({ method: 'POST', action: '/' });
+      $form.append($('<input>').attr({ type: 'hidden', name: '_csrf_token', value: csrfToken.content }));
+      $form.append($('<input>').attr({ type: 'hidden', name: actionKey, value: pkgName }));
+      $('body').append($form);
+      $form.submit();
+    }
+
+    $(document).on('click', 'a[href^="?installpackage-"]', function (e) {
+      e.preventDefault();
+      var pkg = $(this).attr('href').replace('?installpackage-', '').replace('=true', '');
+      createPostForm('install_package', pkg);
+    });
+
+    $(document).on('click', 'a[href^="?removepackage-"]', function (e) {
+      e.preventDefault();
+      var pkg = $(this).attr('href').replace('?removepackage-', '').replace('=true', '');
+      createPostForm('remove_package', pkg);
+    });
+  });
+</script>
+// QuotaRemove
+$('#quotaRemove').click(function () {
+$.gritter.add({
+title: '<?php echo T('UNINSTALLING_TITLE'); ?> user quotas',
+text: '<?php echo T('UNINSTALLING_TXT_1'); ?> Quota <?php echo T('UNINSTALLING_TXT_2'); ?>',
+class_name: 'with-icon times-circle danger',
+sticky: true
+});
+});
+// x2goRemove
+$('#x2goRemove').click(function () {
+$.gritter.add({
+title: '<?php echo T('UNINSTALLING_TITLE'); ?> x2go',
+text: '<?php echo T('UNINSTALLING_TXT_1'); ?> x2go <?php echo T('UNINSTALLING_TXT_2'); ?>',
+class_name: 'with-icon times-circle danger',
+sticky: true
+});
+});
+// ZNCRemove
+$('#zncRemove').click(function () {
+$.gritter.add({
+title: 'Uninstalling ZNC',
+text: '<?php echo T('UNINSTALLING_TXT_1'); ?> ZNC <?php echo T('UNINSTALLING_TXT_2'); ?>',
+class_name: 'with-icon times-circle danger',
+sticky: true
+});
+});
+
+});
 </script>
 
 <script>

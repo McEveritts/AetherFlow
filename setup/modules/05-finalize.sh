@@ -183,9 +183,8 @@ EOF
 		systemctl enable "${i}" >>"${OUTTO}" 2>&1
 	done
 	rm -rf /root/tmp/
-	echo -ne "  Do you wish to reboot (recommended!): (Default ${green}Y${normal})"
-	echo -ne "  Do you wish to reboot (recommended!): (Default ${green}Y${normal})"
-	read reboot_response
+	echo -ne "  Do you wish to reboot (recommended!): (Default ${green}Y${normal}) "
+	read -r reboot_response
 	case $reboot_response in
 	[yY] | [yY][Ee][Ss] | "") systemctl reboot ;;
 	[nN] | [nN][Oo]) echo "  ${cyan}Skipping reboot${normal} ... " ;;

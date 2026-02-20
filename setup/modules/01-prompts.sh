@@ -4,7 +4,7 @@
 # shellcheck disable=2162
 function _askquota() {
 	echo -ne "${bold}${yellow}Do you wish to use user quotas?${normal} (Default: ${green}${bold}Y${normal}) "
-	read input
+	read -r input
 	case ${input} in
 	[yY] | [yY][Ee][Ss] | "")
 		quota="yes"
@@ -24,7 +24,7 @@ function _askquota() {
 # shellcheck disable=2162
 function _ask10g() {
 	echo -ne "${bold}${yellow}Is this a 10 gigabit server?${normal} (Default: ${green}${bold}N${normal}) "
-	read input
+	read -r input
 	case ${input} in
 	[yY] | [yY][Ee][Ss])
 		if [[ -d /install ]]; then cd /; else mkdir -p /install; fi
@@ -62,7 +62,7 @@ function _askpartition() {
 		echo -e "${bold}${yellow}1)${normal} / - ${green}root mount${normal}"
 		echo -e "${bold}${yellow}2)${normal} /home - ${green}home mount${normal}"
 		echo -ne "${bold}${yellow}What is your mount point for user quotas?${normal} (Default ${green}1${normal}): "
-		read version
+		read -r version
 		case $version in
 		1 | "") primaryroot=root ;;
 		2) primaryroot=home ;;
@@ -77,7 +77,7 @@ function _askpartition() {
 function _askcontinue() {
 	echo
 	echo "Press ${standout}${green}ENTER${normal} when you're ready to begin or ${standout}${red}Ctrl+Z${normal} to cancel"
-	read input
+	read -r input
 	echo
 }
 
@@ -87,7 +87,7 @@ function _askdashtheme() {
 	echo -e "1) AetherFlow - ${green}smoked${normal} :: Dark theme"
 	echo -e "2) AetherFlow - ${green}defaulted${normal} :: Light theme"
 	echo -ne "${bold}${yellow}Pick your AetherFlow Dashboard Theme${normal} (Default ${green}1${normal}): "
-	read version
+	read -r version
 	case $version in
 	1 | "") dash_theme=smoked ;;
 	2) dash_theme=defaulted ;;
@@ -105,7 +105,7 @@ function _askrtorrent() {
 	echo -e "3) rtorrent ${green}0.9.4 (with ipv6 support)${normal}"
 	echo -e "4) rtorrent ${green}0.9.3${normal}"
 	echo -ne "${bold}${yellow}What version of rtorrent do you want?${normal} (Default ${green}1${normal}): "
-	read version
+	read -r version
 	case $version in
 	1 | "")
 		RTVERSION="0.9.7"
@@ -136,7 +136,7 @@ function _askqb() {
 	echo -e "${green}0)${normal} Do not install qBittorrent${normal}"
 	echo -e "${green}1)${normal} Install qBittorrent (latest repo version)${normal}"
 	echo -ne "${bold}${yellow}Which version of qBittorrent do you want?${normal} (Default ${green}0${normal}): "
-	read -e version
+	read -r -e version
 	case $version in
 	0) QBVERSION=no ;;
 	1) QBVERSION=yes ;;
@@ -155,7 +155,7 @@ function _askqb() {
 # shellcheck disable=2162
 function _asktr() {
 	echo -ne "${bold}${yellow}Would you like to install transmission? ${normal} [y]es or [${green}n${normal}]o: "
-	read response
+	read -r response
 	case ${response} in
 	[yY] | [yY][Ee][Ss]) tr="yes" ;;
 	[nN] | [nN][Oo] | "") tr="no" ;;
@@ -172,11 +172,11 @@ function _adduser() {
 	theshell="/bin/bash"
 	echo "${bold}${yellow}Add a Master Account user to sudoers${normal}"
 	echo -n "Username: "
-	read user
+	read -r user
 	username=$(echo "${user}" | sed 's/.*/\L&/')
 	/usr/sbin/useradd "${username}" -m -G www-data -s "${theshell}"
 	echo -n "Password: (hit enter to generate a password) "
-	read 'password'
+	read -r password
 	if [[ -n "${password}" ]]; then
 		echo "setting password to ${password}"
 		passwd=${password}
@@ -197,7 +197,7 @@ function _adduser() {
 # shellcheck disable=2162
 function _askffmpeg() {
 	echo -ne "${bold}${yellow}Would you like to install ffmpeg? (Used for screenshots)${normal} [${green}y${normal}]es or [n]o: "
-	read response
+	read -r response
 	case ${response} in
 	[yY] | [yY][Ee][Ss] | "") ffmpeg=yes ;;
 	[nN] | [nN][Oo]) ffmpeg=no ;;
@@ -212,7 +212,7 @@ function _askvsftpd() {
 	local DEFAULTIP
 	DEFAULTIP=$(ifconfig | grep -Eo 'inet (addr:)?([0-9]*\.){3}[0-9]*' | grep -Eo '([0-9]*\.){3}[0-9]*' | grep -v '127.0.0.1')
 	echo -ne "${bold}${yellow}Please, write your public server IP (used for ftp)${normal} (Default: ${green}${bold}${DEFAULTIP}${normal}) "
-	read input
+	read -r input
 	if [[ -z "${input}" ]]; then
 		IP=${DEFAULTIP}
 	else
@@ -226,7 +226,7 @@ function _askvsftpd() {
 # shellcheck disable=2162
 function _askbbr() {
 	echo -ne "${bold}${yellow}Would you like to install bbr? (Used for Congestion Control)${normal} [${green}y${normal}]es or [n]o: "
-	read response
+	read -r response
 	case ${response} in
 	[yY] | [yY][Ee][Ss] | "") bbr=yes ;;
 	[nN] | [nN][Oo]) bbr=no ;;
@@ -250,7 +250,7 @@ function _askshell() {
 	#  *) theshell="yes" ;;
 	#esac
 	echo -ne "${bold}${yellow}Add user to /etc/sudoers${normal} [${green}y${normal}]es or [n]o: "
-	read answer
+	read -r answer
 	case $answer in
 	[yY] | [yY][Ee][Ss] | "") sudoers="yes" ;;
 	[nN] | [nN][Oo]) sudoers="no" ;;

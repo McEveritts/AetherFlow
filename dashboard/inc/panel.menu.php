@@ -429,10 +429,17 @@ $current_vs = "<span id=\"version-result\"></span>";
                   </li>
                   <?php foreach ($plugins as $plugin) { ?>
                     <li>
-                      <?php if (file_exists('/srv/rutorrent/plugins/' . $plugin . '/plugin.info')) {
-                        echo "<a href=\"javascript:void()\">$plugin</a> <div class=\"toggle-wrapper float-end\" style=\"margin-right: -10px; margin-top: 5px;\"> <div class=\"toggle-pen toggle-modern\" onclick=\"location.href='?removeplugin-$plugin=true'\"></div></div>";
+                      <?php
+                      $form_id = "plugin_form_" . preg_replace('/[^a-zA-Z0-9]/', '', $plugin);
+                      $csrf = generateCsrfToken();
+                      if (file_exists('/srv/rutorrent/plugins/' . $plugin . '/plugin.info')) {
+                        echo "<a href=\"javascript:void(0)\">$plugin</a> 
+                        <form id=\"$form_id\" method=\"POST\" style=\"display:none;\"><input type=\"hidden\" name=\"_csrf_token\" value=\"$csrf\"><input type=\"hidden\" name=\"remove_plugin\" value=\"$plugin\"></form>
+                        <div class=\"toggle-wrapper float-end\" style=\"margin-right: -10px; margin-top: 5px;\"> <div class=\"toggle-pen toggle-modern\" onclick=\"document.getElementById('$form_id').submit();\"></div></div>";
                       } else {
-                        echo "<a href=\"javascript:void()\">$plugin</a> <div class=\"toggle-wrapper float-end\" style=\"margin-right: -10px; margin-top: 5px;\"> <div class=\"toggle-pdis toggle-modern\" onclick=\"location.href='?installplugin-$plugin=true'\"></div></div>";
+                        echo "<a href=\"javascript:void(0)\">$plugin</a> 
+                        <form id=\"$form_id\" method=\"POST\" style=\"display:none;\"><input type=\"hidden\" name=\"_csrf_token\" value=\"$csrf\"><input type=\"hidden\" name=\"install_plugin\" value=\"$plugin\"></form>
+                        <div class=\"toggle-wrapper float-end\" style=\"margin-right: -10px; margin-top: 5px;\"> <div class=\"toggle-pdis toggle-modern\" onclick=\"document.getElementById('$form_id').submit();\"></div></div>";
                       } ?>
                     </li>
                   <?php } ?>

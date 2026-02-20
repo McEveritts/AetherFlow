@@ -44,7 +44,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['install_package'])) {
         }
 
         $script = basename($pkgDef[0]['installScript']); // Extra safety
-        shell_exec("sudo /usr/local/bin/aetherflow/package/install/{$script}");
+        shell_exec("sudo /usr/local/bin/AetherFlow/package/install/{$script}");
         header('Location: /');
         exit;
 }
@@ -66,7 +66,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['remove_package'])) {
         }
 
         $script = basename($pkgDef[0]['removeScript']);
-        shell_exec("sudo /usr/local/bin/aetherflow/package/remove/{$script}");
+        shell_exec("sudo /usr/local/bin/AetherFlow/package/remove/{$script}");
         header('Location: /');
         exit;
 }

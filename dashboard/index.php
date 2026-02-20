@@ -1,7 +1,7 @@
 <?php
 include('inc/config.php');
-include('inc/card.header.php');
-include('inc/card.menu.php');
+include('inc/panel.header.php');
+include('inc/panel.menu.php');
 ?>
 
 <div class="mainpanel">
@@ -207,6 +207,6 @@ include('inc/card.menu.php');
 </div><!-- mainpanel -->
 
 <?php
-include('inc/card.scripts.php');
-include('inc/card.end.php');
+include('inc/panel.scripts.php');
+include('inc/panel.end.php');
 ?>

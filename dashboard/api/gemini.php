@@ -40,6 +40,9 @@ if (!isset($_SESSION['user'])) {
     die(json_encode(['error' => 'Unauthorized']));
 }
 
+require_once($_SERVER['DOCUMENT_ROOT'] . '/inc/csrf.php');
+requireCsrfToken();
+
 header('Content-Type: application/json');
 
 // ── OAuth Authentication ──────────────────────────────────────────────

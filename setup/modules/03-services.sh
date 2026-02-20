@@ -115,7 +115,6 @@ function _insTr() {
 
 # shellcheck disable=2120,2312
 function _insTrWeb() {
-	#!/bin/sh
 	ROOT_FOLDER="$1"
 	WEB_FOLDER=""
 	ORG_INDEX_FILE="index.original.html"
@@ -223,7 +222,7 @@ function _insTrWeb() {
 
 	main
 
-	rm -rf "${tmpFolder}"
+	rm -rf "${TMP_FOLDER}"
 	#touch /install/.transmission.lock
 	#cd ${local_dashboard}/custom
 	#patch -p1 < ${local_setup}templates/tr-php.patch >>"${OUTTO}" 2>&1

@@ -104,7 +104,7 @@ $(document).ready(function () {
             data: {
                 action: 'mark_read',
                 id: id,
-                csrf_token: $('meta[name="csrf-token"]').attr('content')
+                _csrf_token: $('meta[name="csrf-token"]').attr('content')
             },
             success: function () {
                 fetchNotifications();
@@ -118,7 +118,7 @@ $(document).ready(function () {
             method: 'POST',
             data: {
                 action: 'mark_all_read',
-                csrf_token: $('meta[name="csrf-token"]').attr('content')
+                _csrf_token: $('meta[name="csrf-token"]').attr('content')
             },
             success: function () {
                 fetchNotifications();

@@ -81,7 +81,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['install_plugin'])) {
         }
 
         $safePlugin = basename($plugin);
-        shell_exec("sudo /usr/local/bin/aetherflow/plugin/install/installplugin-{$safePlugin}");
+        shell_exec("sudo /usr/local/bin/AetherFlow/plugin/install/installplugin-{$safePlugin}");
         header('Location: /');
         exit;
 }
@@ -97,7 +97,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['remove_plugin'])) {
         }
 
         $safePlugin = basename($plugin);
-        shell_exec("sudo /usr/local/bin/aetherflow/plugin/remove/removeplugin-{$safePlugin}");
+        shell_exec("sudo /usr/local/bin/AetherFlow/plugin/remove/removeplugin-{$safePlugin}");
         header('Location: /');
         exit;
 }

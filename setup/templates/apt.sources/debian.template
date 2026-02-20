@@ -9,8 +9,8 @@ deb-src http://cdn-fastly.deb.debian.org/debian/ RELEASE main contrib non-free
 deb http://cdn-fastly.deb.debian.org/debian/ RELEASE-updates main contrib non-free
 deb-src http://cdn-fastly.deb.debian.org/debian/ RELEASE-updates main contrib non-free
 
-deb http://security.debian.org/ RELEASE/updates main contrib non-free
-deb-src http://security.debian.org/ RELEASE/updates main contrib non-free
+deb http://security.debian.org/debian-security RELEASE-security main contrib non-free
+deb-src http://security.debian.org/debian-security RELEASE-security main contrib non-free
 
 deb http://deb.debian.org/debian RELEASE-backports main contrib non-free
 deb-src http://deb.debian.org/debian RELEASE-backports main contrib non-free
