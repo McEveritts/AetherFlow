@@ -39,7 +39,7 @@
                 data: {
                     action: 'chat',
                     prompt: prompt,
-                    csrf_token: $('meta[name="csrf-token"]').attr('content')
+                    _csrf_token: $('meta[name="csrf-token"]').attr('content')
                 },
                 dataType: 'json',
                 success: function (response) {

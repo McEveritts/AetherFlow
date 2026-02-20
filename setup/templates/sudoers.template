@@ -8,7 +8,7 @@
 #
 Defaults	env_reset
 Defaults	mail_badpass
-Defaults secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/bin/aetherflow:/usr/local/bin/aetherflow/system:/usr/local/bin/aetherflow/package:/usr/local/bin/aetherflow/package/install:/usr/local/bin/aetherflow/package/remove:/usr/local/bin/aetherflow/plugin:/usr/local/bin/aetherflow/plugin/install:/usr/local/bin/aetherflow/plugin/remove"
+Defaults secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/bin/AetherFlow:/usr/local/bin/AetherFlow/system:/usr/local/bin/AetherFlow/package:/usr/local/bin/AetherFlow/package/install:/usr/local/bin/AetherFlow/package/remove:/usr/local/bin/AetherFlow/plugin:/usr/local/bin/AetherFlow/plugin/install:/usr/local/bin/AetherFlow/plugin/remove"
 Defaults  env_keep -="HOME"
 
 # Host alias specification
@@ -16,10 +16,10 @@ Defaults  env_keep -="HOME"
 # User alias specification
 
 # Cmnd alias specification
-Cmnd_Alias   CLEANMEM = /usr/local/bin/aetherflow/system/clean_mem, /proc/sys/vm/drop_caches
-Cmnd_Alias   SYSCMNDS = /usr/local/bin/aetherflow/system/clean_log, /usr/local/bin/aetherflow/system/set_interface, /usr/local/bin/aetherflow/system/setdisk, /usr/local/bin/aetherflow/system/showspace, /usr/local/bin/aetherflow/system/updateAetherFlow, /usr/local/bin/aetherflow/system/lang/langSelect-*, /usr/local/bin/aetherflow/system/theme/themeSelect-*, /usr/local/bin/aetherflow/system/install_ffmpeg, /usr/local/bin/aetherflow/system/quickVPN, /usr/local/bin/aetherflow/system/box
-Cmnd_Alias   PLUGINCMNDS = /usr/local/bin/aetherflow/plugin/install/installplugin-*, /usr/local/bin/aetherflow/plugin/remove/removeplugin-*
-Cmnd_Alias   PACKAGECMNDS = /usr/local/bin/aetherflow/package/install/installpackage-*, /usr/local/bin/aetherflow/package/remove/removepackage-*
+Cmnd_Alias   CLEANMEM = /usr/local/bin/AetherFlow/system/clean_mem, /proc/sys/vm/drop_caches
+Cmnd_Alias   SYSCMNDS = /usr/local/bin/AetherFlow/system/clean_log, /usr/local/bin/AetherFlow/system/set_interface, /usr/local/bin/AetherFlow/system/setdisk, /usr/local/bin/AetherFlow/system/showspace, /usr/local/bin/AetherFlow/system/updateAetherFlow, /usr/local/bin/AetherFlow/system/lang/langSelect-*, /usr/local/bin/AetherFlow/system/theme/themeSelect-*, /usr/local/bin/AetherFlow/system/install_ffmpeg, /usr/local/bin/AetherFlow/system/quickVPN, /usr/local/bin/AetherFlow/system/box
+Cmnd_Alias   PLUGINCMNDS = /usr/local/bin/AetherFlow/plugin/install/installplugin-*, /usr/local/bin/AetherFlow/plugin/remove/removeplugin-*
+Cmnd_Alias   PACKAGECMNDS = /usr/local/bin/AetherFlow/package/install/installpackage-*, /usr/local/bin/AetherFlow/package/remove/removepackage-*
 Cmnd_Alias   GENERALCMNDS = /usr/bin/ifstat, /usr/bin/vnstat, /usr/sbin/repquota, /usr/bin/reload, /etc/init.d/apache2 restart, /usr/bin/pkill, /usr/bin/killall, /bin/systemctl
 
 # User privilege specification

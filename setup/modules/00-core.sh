@@ -88,7 +88,7 @@ function _checkkernel() {
 		echo -e "Your server is currently running with kernel version: $(uname -r)"
 		echo -e "Kernels with ${bold}grsec${normal} are not supported"
 		echo -ne "${bold}${yellow}Would you like AetherFlow to install the distribution kernel?${normal} (Default: ${green}${bold}Y${normal}) "
-		read input
+		read -r input
 		case ${input} in
 		[yY] | [yY][Ee][Ss] | "")
 			kernel=yes
@@ -124,7 +124,7 @@ function _checkkernel() {
 # shellcheck disable=2162
 function _logcheck() {
 	echo -ne "${bold}${yellow}Do you wish to write to a log file?${normal} (Default: ${green}${bold}Y${normal}) "
-	read input
+	read -r input
 	case ${input} in
 	[yY] | [yY][Ee][Ss] | "")
 		OUTTO="/root/AetherFlow.${PPID}.log"
@@ -149,7 +149,7 @@ function _logcheck() {
 # shellcheck disable=2162
 function _hostname() {
 	echo -ne "Please enter a hostname for this server (${bold}Hit ${standout}${green}ENTER${normal} to make no changes${normal}): "
-	read input
+	read -r input
 	if [[ -z ${input} ]]; then
 		echo "No hostname supplied, no changes made!!"
 	else

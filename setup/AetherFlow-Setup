@@ -213,11 +213,11 @@ spinner $!
 echo
 
 if [[ ${tr} == "yes" ]]; then
-	echo -n "Configuring Transmisson ... "
+	echo -n "Configuring Transmission ... "
 	_insTr &
 	spinner $!
 	echo
-	echo -n "Installing Transmisson Web Control ... "
+	echo -n "Installing Transmission Web Control ... "
 	_insTrWeb &
 	spinner $!
 	echo

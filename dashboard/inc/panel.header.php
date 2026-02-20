@@ -31,7 +31,8 @@ header('Permissions-Policy: camera=(), microphone=(), geolocation=()');
       if (e.ctrlKey && e.key === 'k') {
         var cmd = prompt("AetherFlow Command Center:");
         if (cmd) {
-          $.post('api/command.php', { command: cmd }, function (res) {
+          var csrfToken = document.querySelector('meta[name=\"csrf-token\"]').content;
+          $.post('api/command.php', { command: cmd, _csrf_token: csrfToken }, function (res) {
             alert(res.message);
           });
         }
@@ -73,7 +74,8 @@ header('Permissions-Policy: camera=(), microphone=(), geolocation=()');
   <link rel="stylesheet" href="skins/lobipanel.css" />
   <link rel="stylesheet" href="css/vision_pro_toggles.css">
   <!-- BOOTSTRAP 5 CSS OVERRIDE -->
-  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet" crossorigin="anonymous">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"
+    crossorigin="anonymous">
   <link rel="stylesheet" href="skins/bootstrap5-fixes.css">
   <!-- JAVASCRIPT -->
   <script src="lib/jquery/jquery.js"></script>

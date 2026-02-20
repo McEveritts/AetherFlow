@@ -205,14 +205,14 @@ if [[ $1 == upgrade ]]; then
     if [[ -d /etc/AetherFlow ]]; then
       bash /etc/AetherFlow/packages/system/updateAetherFlow
     else
-      git clone --recursive https://github.com/AetherFlow/AetherFlow /etc/AetherFlow
+      git clone --recursive https://github.com/McEveritts/AetherFlow /etc/AetherFlow
       bash /etc/AetherFlow/packages/system/updateAetherFlow
     fi
   else
     if [[ -d /etc/AetherFlow ]]; then
       bash /etc/AetherFlow/packages/system/updateAetherFlow
     else
-      git clone --recursive --branch "development" https://github.com/AetherFlow/AetherFlow /etc/AetherFlow
+      git clone --recursive --branch "development" https://github.com/McEveritts/AetherFlow /etc/AetherFlow
       bash /etc/AetherFlow/packages/system/updateAetherFlow
     fi
   fi

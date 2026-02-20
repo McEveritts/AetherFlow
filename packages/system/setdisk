@@ -22,9 +22,9 @@ echo "Example - Good: 711GB OR 2TB, Example - Bad: 711.5GB OR 2.5TB"
 echo "================================================================================="
 echo
 echo -n "Username: "
-read username
+read -r username
 echo "Quota size for user: (EX: 500GB): "
-read SIZE
+read -r SIZE
 case $SIZE in
   *TB)
     QUOTASIZE=$(echo $SIZE|cut -d'T' -f1)
@@ -43,7 +43,7 @@ case $SIZE in
   ;;
   *)
     echo "================================================================================="
-    echo "Disk Space MUST be in GB/TB - Do not attempt to add deciamals in space settings,"
+    echo "Disk Space MUST be in GB/TB - Do not attempt to add decimals in space settings,"
     echo "Example - Good: 711GB OR 2TB, Example - Bad: 711.5GB OR 2.5TB"
     echo "Exiting script, type bash $0 and try again"
     echo "=================================================================================";exit 0

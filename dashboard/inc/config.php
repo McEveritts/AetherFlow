@@ -545,24 +545,34 @@ function isEnabled($process, $username)
     file_exists('/etc/systemd/system/multi-user.target.wants/' . $process . '.service')
   );
 
+  $csrf = generateCsrfToken();
   if ($is_enabled) {
     // It is currently ENABLED. Toggle should show CHECKED. 
     // Action: Clicking it should sending servicedisable command.
-    $action_url = "?id=77&servicedisable=$service";
+    $id = 77;
+    $action_name = "servicedisable";
     $checked = 'checked';
   } else {
     // It is currently DISABLED. Toggle should show UNCHECKED.
     // Action: Clicking it should sending serviceenable command.
-    $action_url = "?id=66&serviceenable=$service";
+    $id = 66;
+    $action_name = "serviceenable";
     $checked = '';
   }
 
+  $form_id = "form_" . preg_replace('/[^a-zA-Z0-9]/', '', $service);
+
   return "
   <div class=\"toggle-wrapper text-end\">
-    <label class=\"vp-toggle\">
-      <input type=\"checkbox\" $checked onchange=\"location.href='$action_url'\">
-      <span class=\"vp-slider\"></span>
-    </label>
+    <form id=\"$form_id\" method=\"POST\" style=\"margin:0;padding:0;display:inline\">
+      <input type=\"hidden\" name=\"_csrf_token\" value=\"$csrf\">
+      <input type=\"hidden\" name=\"id\" value=\"$id\">
+      <input type=\"hidden\" name=\"$action_name\" value=\"$service\">
+      <label class=\"vp-toggle\">
+        <input type=\"checkbox\" $checked onchange=\"document.getElementById('$form_id').submit();\">
+        <span class=\"vp-slider\"></span>
+      </label>
+    </form>
   </div>";
 }
 /* check for services */

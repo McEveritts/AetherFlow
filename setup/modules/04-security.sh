@@ -13,7 +13,7 @@ function _ssdpblock() {
 # shellcheck disable=2249,2162
 function _denyhosts() {
 	echo -ne "${bold}${yellow}Block Public Trackers?${normal}: [${green}y${normal}]es or [n]o: "
-	read response
+	read -r response
 	case ${response} in
 	[yY] | [yY][Ee][Ss] | "")
 
@@ -38,7 +38,7 @@ function _lshell() {
 	cd /root || { printf -- "%s" "Unable to enter /root" && return 1; }
 	git clone https://github.com/ghantoos/lshell.git lshell >>/dev/null 2>&1
 	cd lshell || { printf -- "%s" "Unable to enter lshell" && return 1; }
-	python2 setup.py install --no-compile --install-scripts=/usr/bin/ >>/dev/null 2>&1
+	python3 setup.py install --no-compile --install-scripts=/usr/bin/ >>/dev/null 2>&1
 	if [[ "${CODENAME}" == "focal" || "${CODENAME}" == "bionic" ]]; then
 		\cp -f ${local_setup}templates/lshell.conf-focal.template /etc/lshell.conf
 	else
@@ -106,7 +106,7 @@ function _apacheconf() {
 # function to fix cert
 # add by EFS
 function _fix_cert() {
-	if [[ ! -f /etc/ssl/certs/ssl-cert-snakeoila.pem ]]; then
+	if [[ ! -f /etc/ssl/certs/ssl-cert-snakeoil.pem ]]; then
 		openssl req -x509 -nodes -days 3650 -newkey rsa:2048 -keyout /etc/ssl/private/ssl-cert-snakeoil.key -out /etc/ssl/certs/ssl-cert-snakeoil.pem -subj "/C=CN/ST=BJ/L=PRC/O=IT/CN=www.example.com" >>"${OUTTO}" 2>&1
 	fi
 }
