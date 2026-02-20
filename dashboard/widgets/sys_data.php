@@ -18,10 +18,13 @@ if (!isAdmin()) {
         return;
 }
 
+require_once($_SERVER['DOCUMENT_ROOT'] . '/inc/SystemInterface.php');
+$sys = \AetherFlow\Inc\SystemInterface::getInstance();
+
 // Clean memory cache
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['clean_mem'])) {
         requireCsrfToken();
-        shell_exec('sudo /usr/local/bin/aetherflow/system/clean_mem');
+        $sys->execute_admin_action('sudo /usr/local/bin/aetherflow/system/clean_mem');
         header('Location: /');
         exit;
 }
@@ -29,7 +32,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['clean_mem'])) {
 // Clean system logs
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['clean_log'])) {
         requireCsrfToken();
-        shell_exec('sudo /usr/local/bin/aetherflow/system/clean_log');
+        $sys->execute_admin_action('sudo /usr/local/bin/aetherflow/system/clean_log');
         header('Location: /');
         exit;
 }
@@ -37,7 +40,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['clean_log'])) {
 // System upgrade — disabled, will be replaced with custom release system
 // if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['updateAetherFlow'])) {
 //     requireCsrfToken();
-//     shell_exec('sudo /usr/local/bin/aetherflow/system/af upgrade');
+//     $sys->execute_admin_action('sudo /usr/local/bin/aetherflow/system/af upgrade');
 //     header('Location: /');
 //     exit;
 // }

@@ -10,7 +10,7 @@ if (!isAdmin()) {
         return;
 }
 
-$validThemes = ['defaulted', 'smoked', 'glass', 'aetherflow'];
+$validThemes = ['glassmorphism', 'slate_stone', 'glass', 'aetherflow'];
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['theme_select'])) {
         requireCsrfToken();

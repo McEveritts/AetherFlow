@@ -1,15 +1,15 @@
 <?php
-include('..inc/config.php');
-include('..inc/panel.header.php');
-include('..inc/panel.menu.php');
+include('../inc/config.php');
+include('../inc/card.header.php');
+include('../inc/card.menu.php');
 ?>
 
 <!--SERVICE CONTROL CENTER-->
-<div class="panel panel-inverse">
-  <div class="panel-heading">
-    <h4 class="panel-title"><?php echo T('SERVICE_CONTROL_CENTER'); ?></h4>
+<div class="card card-inverse">
+  <div class="card-header">
+    <h4 class="card-title"><?php echo T('SERVICE_CONTROL_CENTER'); ?></h4>
   </div>
-  <div class="panel-body" style="padding: 0">
+  <div class="card-body" style="padding: 0">
     <div class="table-responsive">
       <table class="table table-hover nomargin" style="font-size:14px">
         <thead>
@@ -476,7 +476,7 @@ include('..inc/panel.menu.php');
       </table>
     </div><!-- table-responsive -->
   </div>
-</div><!-- panel -->
+</div><!-- card -->
 
 <!-- Service Log Modal -->
 <div class="modal fade" id="serviceLogModal" tabindex="-1" role="dialog" aria-labelledby="serviceLogModalLabel">

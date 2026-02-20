@@ -105,50 +105,17 @@ $web_path = substr($php_self, 0, strrpos($php_self, '/') + 1);
 $time = microtime(true);
 $start = $time;
 
-if (file_exists('/install/.quota.lock')) {
-  $safeUser = escapeshellarg($safeUsername);
-  $dftotal = shell_exec("sudo /usr/sbin/repquota / | /bin/grep ^{$safeUser} | /usr/bin/awk '{printf \$4/1024/1024}'");
-  $dffree = shell_exec("sudo /usr/sbin/repquota / | /bin/grep ^{$safeUser} | /usr/bin/awk '{printf \$4-\$3/1024/1024}'"); // fixed awk logic slightly?
-  // Original: awk '{printf ($4-$3)/1024/1024}' - I should keep original
-  $dffree = shell_exec("sudo /usr/sbin/repquota / | /bin/grep ^{$safeUser} | /usr/bin/awk '{printf (\$4-\$3)/1024/1024}'");
-  $dfused = shell_exec("sudo /usr/sbin/repquota / | /bin/grep ^{$safeUser} | /usr/bin/awk '{printf \$3/1024/1024}'");
-  $perused = sprintf('%1.0f', $dfused / $dftotal * 100);
-} else {
-  $bytesfree = disk_free_space('/home');
-  $bytestotal = disk_total_space($location);
-  $bytesused = $bytestotal - $bytesfree;
-  $class = min((int) log($bytesfree, $base), count($si_prefix) - 1);
+require_once($_SERVER['DOCUMENT_ROOT'] . '/inc/SystemInterface.php');
+use AetherFlow\Inc\SystemInterface;
 
-  try {
-    $diskStatus = new DiskStatus('/home');
-    $freeSpace = $diskStatus->freeSpace();
-    $totalSpace = $diskStatus->totalSpace();
-    $barWidth = ($diskStatus->usedSpace() / 500) * 500;
-  } catch (RuntimeException $e) {
-    error_log('DiskStatus error: ' . $e->getMessage());
-    $freeSpace = '0 B';
-    $totalSpace = '0 B';
-    $barWidth = 0;
-  }
+$sys = SystemInterface::getInstance();
+$diskStats = $sys->get_disk_space();
 
-  // Disk space calculations — no @ suppression
-  $rawTotal = disk_total_space('.');
-  $rawFree = disk_free_space('.');
+$dftotal = number_format($diskStats['total'], 3);
+$dfused = number_format($diskStats['used'], 3);
+$dffree = number_format($diskStats['free'], 3);
+$perused = ($diskStats['total'] > 0) ? round(($diskStats['used'] / $diskStats['total']) * 100, 2) : 0;
 
-  if ($rawTotal !== false && $rawFree !== false) {
-    $dftotal = number_format(round($rawTotal / (1024 * 1024 * 1024), 3));
-    $dffree = number_format(round($rawFree / (1024 * 1024 * 1024), 3));
-    $dfused = number_format(round(($rawTotal - $rawFree) / (1024 * 1024 * 1024), 3));
-
-    $dptotal = round($rawTotal / (1024 * 1024 * 1024), 3);
-    $dpfree = round($rawFree / (1024 * 1024 * 1024), 3);
-    $dpused = $dptotal - $dpfree;
-    $perused = ($dptotal != 0) ? round($dpused / $dptotal * 100, 2) : 0;
-  } else {
-    $dftotal = $dffree = $dfused = '0';
-    $perused = 0;
-  }
-}
 
 if (file_exists("/home/{$safeUsername}/.sessions/rtorrent.lock")) {
   $rtorrents = countFiles("/home/{$safeUsername}/.sessions/*.torrent");
@@ -163,7 +130,7 @@ if (file_exists("/home/{$safeUsername}/.sessions/rtorrent.lock")) {
     style="font-weight: 700; position: absolute; left: 100px;"><?php echo "$dftotal"; ?> <b>GB</b></span></p>
 <div class="row">
   <div class="col-sm-8">
-    <!--h4 class="panel-title text-success">Disk Space</h4-->
+    <!--h4 class="card-title text-success">Disk Space</h4-->
     <h3><?php echo T('DISK_SPACE'); ?></h3>
     <div class="progress">
       <?php
@@ -186,7 +153,7 @@ if (file_exists("/home/{$safeUsername}/.sessions/rtorrent.lock")) {
       <?php echo T('PERCENTAGE_TXT_2'); ?>
     </p>
   </div>
-  <div class="col-sm-4 text-right">
+  <div class="col-sm-4 text-end">
     <?php
     if ($perused < "70") {
       $diskcolor = "disk-good";

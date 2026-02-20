@@ -1,12 +1,12 @@
 <!-- AETHERFLOW STORE WIDGET -->
-<div class="panel panel-main panel-inverse" id="aetherflow-store">
-    <div class="panel-heading">
-        <h4 class="panel-title">AetherFlow Store</h4>
-        <div class="panel-btns">
+<div class="card card-main card-inverse" id="aetherflow-store">
+    <div class="card-header">
+        <h4 class="card-title">AetherFlow Store</h4>
+        <div class="card-btns">
             <button class="btn btn-xs btn-primary" onclick="loadStore()">Refresh Catalog</button>
         </div>
     </div>
-    <div class="panel-body">
+    <div class="card-body">
         <div id="store-grid" class="row">
             <!-- Cards will be injected here -->
             <div class="col-md-12 text-center text-muted">Loading Store...</div>
