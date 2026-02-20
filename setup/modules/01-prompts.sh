@@ -128,64 +128,26 @@ function _askrtorrent() {
 	echo
 }
 
-# ask deluge version (if wanted) (9.2)
-# shellcheck disable=2250,2162
-function _askdeluge() {
-	if [[ "${CODENAME}" =~ ("bionic"|"focal"|"jammy"|"noble"|"bullseye"|"bookworm"|"trixie") ]]; then
-		echo "Detected modern OS (${DISTRO} ${CODENAME}). Forcing Deluge installation from Repository (version 2.x) as source build requires Python 2."
-		DELUGE="REPO"
-	else
-		echo -e "1) Deluge ${green}repo${normal} (fastest installing)"
-		echo -e "2) Deluge with ${green}libtorrent 1.0.x (stable)${normal}"
-		echo -e "3) Deluge with ${green}libtorrent 1.1.x (stable)${normal}"
-		echo -e "4) Do not install Deluge"
-		echo -ne "${bold}${yellow}What version of Deluge do you want?${normal} (Default ${green}1${normal}): "
-		read version
-		case $version in
-		1 | "") DELUGE=REPO ;;
-		2) DELUGE="1.0.11" ;;
-		3) DELUGE="1.1.3" ;;
-		4) DELUGE="NO" ;;
-		*) DELUGE="REPO" ;;
-		esac
-	fi
-	echo "We will be using Deluge: ${DELUGE}"
-	echo
-}
 
-# install qbittorrent question (9.3)
+
+# install qBittorrent question (9.3)
 # shellcheck disable=2215,2312,2250,2162
 function _askqb() {
-	echo -e "${green}00)${normal} Do not install qBittorrent${normal}"
-	echo -e "${green}01)${normal} qBittorrent ${green}3.3.16${normal}"
-	echo -e "${green}02)${normal} qBittorrent ${green}4.0.4${normal}"
-	echo -e "${green}03)${normal} qBittorrent ${green}4.1.3${normal}"
-	echo -e "${green}04)${normal} qBittorrent ${bold}${green}latest version${normal}"
+	echo -e "${green}0)${normal} Do not install qBittorrent${normal}"
+	echo -e "${green}1)${normal} Install qBittorrent (latest repo version)${normal}"
 	echo -ne "${bold}${yellow}Which version of qBittorrent do you want?${normal} (Default ${green}0${normal}): "
 	read -e version
-	# shellcheck disable=2221,2222
 	case $version in
-	00 | 0) QBVERSION=no ;;
-	01 | 1)
-		QBVERSION="3.3.16"
-		qbburst="no"
-		;;
-	02 | 2)
-		QBVERSION="4.0.4"
-		qbburst="no"
-		;;
-	03 | 3)
-		QBVERSION="4.1.3"
-		qbburst="no"
-		;;
-	04 | 4)
-		QBVERSION=$(curl -i -s https://www.qbittorrent.org/ | grep -Eo "Latest:.*" | grep -Eo "[0-9.]+")
-		qbburst=no
-		;;
+	0) QBVERSION=no ;;
+	1) QBVERSION=yes ;;
 	* | "") QBVERSION=no ;;
 	esac
 
-	echo "${bold}${green}qBittorrent ${QBVERSION}${normal} ${bold}will be installed${normal}"
+	if [[ ${QBVERSION} == "yes" ]]; then
+		echo "${bold}${green}qBittorrent ${normal} ${bold}will be installed from repositories${normal}"
+	else
+		echo "${bold}${green}qBittorrent ${normal} ${bold}will NOT be installed${normal}"
+	fi
 	echo
 }
 
@@ -245,7 +207,6 @@ function _askffmpeg() {
 }
 
 # ask user for vsftpd conf (12)
-apt-get install -y net-tools
 # shellcheck disable=2162,2312
 function _askvsftpd() {
 	local DEFAULTIP

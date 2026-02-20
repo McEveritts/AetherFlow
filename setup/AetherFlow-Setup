@@ -131,7 +131,7 @@ clear
 _askpartition
 _ask10g
 _askrtorrent
-_askdeluge
+
 _asktr
 apt-get install -q -y curl >>"${OUTTO}" 2>&1
 _askqb
@@ -211,16 +211,7 @@ echo -n "Installing rutorrent plugins ... "
 _rutorrent-plugins &
 spinner $!
 echo
-if [[ ${DELUGE} != NO ]]; then
-	echo -n "Installing deluge ... "
-	_deluge &
-	spinner $!
-	echo
-	echo -n "Setting up deluge Web Reverse Proxy ... "
-	_insdwApache &
-	spinner $!
-	echo
-fi
+
 if [[ ${tr} == "yes" ]]; then
 	echo -n "Configuring Transmisson ... "
 	_insTr &
@@ -245,10 +236,7 @@ if [[ ${QBVERSION} != "no" ]]; then
 	spinner $!
 	echo
 fi
-echo -n "Installing mktorrent from source ... "
-_mktorrent &
-spinner $!
-echo
+
 echo -n "Installing AetherFlow dashboard ... "
 _dashboard &
 spinner $!
