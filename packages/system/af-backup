@@ -89,16 +89,27 @@ function restore_backup() {
     fi
     
     echo "Restoring from $FILE..."
-    # Extract to root /
-    tar -xzf "$FILE" -C /
+    local STAGE_DIR="/tmp/af-restore"
+    mkdir -p "$STAGE_DIR"
     
-    if [ $? -eq 0 ]; then
-        echo "Restore complete."
-        # Optional: Restart services if needed
-        # systemctl restart rtorrent@$USER
-    else
-        echo "Error during restore."
+    tar -xzf "$FILE" -C "$STAGE_DIR" || { echo "Extraction failed"; return 1; }
+    
+    if [ -d "$STAGE_DIR/etc/AetherFlow" ]; then
+        rsync -aP "$STAGE_DIR/etc/AetherFlow/" /etc/AetherFlow/
     fi
+    if [ -f "$STAGE_DIR/var/www/html/dashboard/inc/config.php" ]; then
+        mkdir -p /var/www/html/dashboard/inc
+        cp -a "$STAGE_DIR/var/www/html/dashboard/inc/config.php" /var/www/html/dashboard/inc/config.php
+    fi
+    if [ -d "$STAGE_DIR/var/www/html/dashboard/custom" ]; then
+        rsync -aP "$STAGE_DIR/var/www/html/dashboard/custom/" /var/www/html/dashboard/custom/
+    fi
+    if [ -f "$STAGE_DIR/home/${SUDO_USER:-$USER}/.rtorrent.rc" ]; then
+        cp -a "$STAGE_DIR/home/${SUDO_USER:-$USER}/.rtorrent.rc" "/home/${SUDO_USER:-$USER}/.rtorrent.rc"
+    fi
+    
+    rm -rf "$STAGE_DIR"
+    echo "Restore complete."
 }
 
 case "$1" in

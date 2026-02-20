@@ -1,2 +1,21 @@
 
-setup/sources/plexmediaserver_0\.9\.17\.3\.2239-fe07491_amd64\.deb
+setup/sources/plexmediaserver_0.9.17.3.2239-fe07491_amd64.deb
+
+# Environment files
+.env
+.env.local
+
+# Dependency directories
+node_modules/
+vendor/
+
+# Security - Ignore all generic JSON keys (e.g. Service Account Key)
+*.json
+!package.json
+!tsconfig.json
+!composer.json
+
+# Next.js Build output
+.next/
+out/
+build/

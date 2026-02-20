@@ -1,4 +1,5 @@
 #!/bin/bash
+set -euo pipefail
 #
 # [AetherFlow :: AetherFlow Package Manager Batch CLI Installer `af`]
 # `af -h` for commands and info
@@ -118,7 +119,7 @@ function _updateqb() {
   echo -e "Updating AetherFlow local repository"
   if [[ ! -f /install/.developer.lock ]]; then
     if [[ -d /etc/AetherFlow ]]; then
-      cd /etc/AetherFlow
+      cd /etc/AetherFlow || { echo "Critical: /etc/AetherFlow not found!"; exit 1; }
       git submodule foreach git checkout master
       git submodule foreach git reset --hard origin/master
       git submodule foreach git pull
@@ -127,7 +128,7 @@ function _updateqb() {
     fi
   else
     if [[ -d /etc/AetherFlow ]]; then
-      cd /etc/AetherFlow
+      cd /etc/AetherFlow || { echo "Critical: /etc/AetherFlow not found!"; exit 1; }
       git submodule foreach git checkout development
       git submodule foreach git reset --hard origin/development
       git submodule foreach git pull
