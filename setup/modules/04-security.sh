@@ -6,7 +6,7 @@
 # DDoS masked attacks. Only remove this function if you absolutely
 # need port 1900. In most cases, this is a junk port.
 function _ssdpblock() {
-	iptables -I INPUT 1 -p udp -m udp --dport 1900 -j DROP
+	/sbin/iptables -I INPUT 1 -p udp -m udp --dport 1900 -j DROP
 }
 
 # ban public trackers [iptables option] (11)
