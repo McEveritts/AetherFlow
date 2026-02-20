@@ -15,7 +15,7 @@ function _ftpdconfig() {
 	sed -i 's/^\(pasv_min_port=\).*/\110090/' /etc/vsftpd.conf
 	sed -i 's/^\(pasv_max_port=\).*/\110100/' /etc/vsftpd.conf
 	echo "pasv_address="${IP} >>/etc/vsftpd.conf
-	iptables -I INPUT -p tcp --destination-port 10090:10100 -j ACCEPT
+	/sbin/iptables -I INPUT -p tcp --destination-port 10090:10100 -j ACCEPT
 
 	echo "" >/etc/vsftpd.chroot_list
 }
