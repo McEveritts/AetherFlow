@@ -14,27 +14,31 @@
 
 ## Features
 
-*   **AetherFlow Dashboard**: A comprehensive web interface to manage your server.
-*   **Multi-User Environment**: Secure isolation for multiple users.
+*   **AetherFlow Decoupled Dashboard**: A lightning-fast, modern web interface.
+    *   **Frontend**: Next.js (React) Single Page Application utilizing a custom `Glassmorphism Engine` built on tailwind and Bootstrap 5.
+    *   **Backend API**: High-performance Go (Golang) REST API.
+    *   **Legacy Bridge**: Secured PHP-FPM abstraction layer for legacy OS interactions.
+*   **Multi-User Environment**: Secure isolation for multiple users and resource quotas.
 *   **App Store**: One-click installation for popular apps:
     *   **Media Servers**: Plex, Emby, Jellyfin
     *   **Downloaders**: rTorrent, Deluge, qBittorrent, SABnzbd
     *   **Automation**: Sonarr, Radarr, Lidarr, Bazarr, Readarr
-    *   **Utilities**: Tautulli, Ombi, Jackett, Prowlarr
-*   **System Monitoring**: Real-time stats for CPU, RAM, Disk, and Bandwidth.
-*   **Optimization**: Enhanced process monitoring for low-latency dashboard performance.
+*   **Intelligent System Monitoring**: Go-native hardware telemetry (reads `/proc` asynchronously) for zero-impact CPU, RAM, and Disk polling.
+*   **AI Integration**: Features an OAuth 2.0 secured proxy to Google's Gemini Ultra AI for AI-assisted command generation.
 
 ---
 
 ## Installation
 
-To install AetherFlow, run the following command as root:
+AetherFlow uses an intelligent, self-bootstrapping installer that automatically deploys the Next.js and Go components, alongside the web server (Nginx/Apache), PM2 daemons, and package managers.
+
+To install the entire ecosystem, login as root and run the following command:
 
 ```bash
 wget -qO AetherFlow-Setup https://raw.githubusercontent.com/McEveritts/AetherFlow/master/setup/AetherFlow-Setup && bash AetherFlow-Setup
 ```
 
-This will download the latest setup script and initiate the installation process.
+*Note: The script will automatically clone the repository to `/opt/MediaNexus` and compile the dashboard from source.*
 
 ---
 
