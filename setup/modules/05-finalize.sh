@@ -123,7 +123,7 @@ function _insbbr() {
 function _insbcm() {
 	mkdir -p ${local_setup}/bcm
 	cd ${local_setup}/bcm
-	git clone git://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git >>"${OUTTO}" 2>&1
+	git clone https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git >>"${OUTTO}" 2>&1
 	mkdir -p /lib/firmware/bnx2/
 	\cp -rf ${local_setup}/bcm/linux-firmware/bnx2/ /lib/firmware
 }

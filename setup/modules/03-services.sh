@@ -83,115 +83,7 @@ function _rtorrent() {
 	touch /install/.rtorrent.lock
 }
 
-# deluge function
-# shellcheck disable=2215,2312,2250
-function _deluge() {
-	if [[ ${DELUGE} == REPO ]]; then
-		apt-get -q -y update >>"${OUTTO}" 2>&1
-		apt-get -q -y install deluged deluge-web >>"${OUTTO}" 2>&1
-		systemctl stop deluged
-		update-rc.d deluged remove
-		rm /etc/init.d/deluged
-	elif [[ ${DELUGE} == "1.0.11" ]] || [[ ${DELUGE} == "1.1.3" ]]; then
-		if [[ ${DELUGE} == "1.0.11" ]]; then
-			LTRC=RC_1_0
-		elif [[ ${DELUGE} == "1.1.3" ]]; then
-			LTRC=RC_1_1
-		fi
-		apt-get -qy update >/dev/null 2>&1
-		LIST='build-essential checkinstall libgeoip-dev 
-  python python-twisted python-openssl python-setuptools intltool python-xdg python-chardet geoip-database python-notify python-pygame
-  python-glade2 librsvg2-common xdg-utils python-mako'
-		for depend in ${LIST}; do
-			apt-get -qq -y install "${depend}" >>"${OUTTO}" 2>&1
-		done
-		LIST='libboost-dev libboost-system-dev libboost-chrono-dev libboost-random-dev libboost-python-dev'
-		for depend in ${LIST}; do
-			apt-get -qq -y install "${depend}" >>"${OUTTO}" 2>&1
-		done
-		function version_qb() { test "$(echo "$@" | tr " " "\n" | sort -V | head -n 1)" != "$1"; }
-		if [[ ${QBVERSION} != "no" ]] && (version_qb "${QBVERSION}" 4.1.3); then
-			LTRC=RC_1_1
-		fi
-		cd "${local_packages}" || exit 1
-		git clone -b "${LTRC}" https://github.com/arvidn/libtorrent.git >>"${OUTTO}" 2>&1
-		cd libtorrent || exit 1
-		\cp -rf ${local_setup}sources/libtorrent-rasterbar-"${LTRC}".patch .
-		patch -p1 <libtorrent-rasterbar-"${LTRC}".patch >>"${OUTTO}" 2>&1
-		ltversion=$(cat configure.ac | grep -Eo "AC_INIT\(\[libtorrent-rasterbar\],.*" | grep -Eo "[0-9.]+" | head -n1)
-		./autotool.sh >>"${OUTTO}" 2>&1
-		./configure --enable-python-binding --disable-debug --enable-encryption --with-libgeoip=system --with-libiconv CXXFLAGS=-std=c++11 >>"${OUTTO}" 2>&1
-		make -j$(nproc) >>"${OUTTO}" 2>&1
-		checkinstall -y --pkgversion=${ltversion} >>"${OUTTO}" 2>&1
-		ldconfig
-		cd ..
-		wget -q http://download.deluge-torrent.org/source/deluge-1.3.15.tar.gz
-		tar -zxvf deluge-1.3.15.tar.gz >>"${OUTTO}" 2>&1
-		cd deluge-1.3.15 || exit 1
-		python setup.py build >>"${OUTTO}" 2>&1
-		python setup.py install --install-layout=deb >>"${OUTTO}" 2>&1
-		python setup.py install_data >>"${OUTTO}" 2>&1
-		cd ..
-		rm -r {deluge-1.3.15,libtorrent}
-		rm -rf deluge-1.3.15.tar.gz
-	fi
-	n=$RANDOM
-	DPORT=$((n % 59000 + 10024))
-	DWSALT=$(head /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 32 | head -n 1)
-	DWP=$(python3 ${local_packages}/system/deluge.Userpass.py ${passwd} ${DWSALT})
-	DUDID=$(python3 ${local_packages}/system/deluge.addHost.py)
-	# -- Secondary awk command -- #
-	#DPORT=$(awk -v min=59000 -v max=69024 'BEGIN{srand(); print int(min+rand()*(max-min+1))}')
-	DWPORT=$(shuf -i 10001-11000 -n 1)
-	mkdir -p /home/${username}/.config/deluge/plugins
-	if [[ ! -f /home/${username}/.config/deluge/plugins/ltConfig-0.2.5.0-py2.7.egg ]]; then
-		cd /home/${username}/.config/deluge/plugins/
-		wget -q https://github.com/ratanakvlun/deluge-ltconfig/releases/download/v0.3.1/ltConfig-0.3.1-py2.7.egg
-		wget -q https://bitbucket.org/bendikro/deluge-yarss-plugin/downloads/YaRSS2-1.4.3-py2.7.egg
-	fi
-	chmod 755 /home/${username}/.config
-	chmod 755 /home/${username}/.config/deluge
-	\cp -f ${local_setup}templates/core.conf.template /home/${username}/.config/deluge/core.conf
-	\cp -f ${local_setup}templates/web.conf.template /home/${username}/.config/deluge/web.conf
-	\cp -f ${local_setup}templates/hostlist.conf.1.2.template /home/${username}/.config/deluge/hostlist.conf.1.2
-	\cp -f ${local_setup}templates/ltconfig.conf.template /home/${username}/.config/deluge/ltconfig.conf
-	sed -i "s/USERNAME/${username}/g" /home/${username}/.config/deluge/core.conf
-	sed -i "s/DPORT/${DPORT}/g" /home/${username}/.config/deluge/core.conf
-	sed -i "s/XX/${ip}/g" /home/${username}/.config/deluge/core.conf
-	sed -i "s/DWPORT/${DWPORT}/g" /home/${username}/.config/deluge/web.conf
-	sed -i "s/DWSALT/${DWSALT}/g" /home/${username}/.config/deluge/web.conf
-	sed -i "s/DWP/${DWP}/g" /home/${username}/.config/deluge/web.conf
-	sed -i "s/DUDID/${DUDID}/g" /home/${username}/.config/deluge/hostlist.conf.1.2
-	sed -i "s/DPORT/${DPORT}/g" /home/${username}/.config/deluge/hostlist.conf.1.2
-	sed -i "s/USERNAME/${username}/g" /home/${username}/.config/deluge/hostlist.conf.1.2
-	sed -i "s/PASSWD/${passwd}/g" /home/${username}/.config/deluge/hostlist.conf.1.2
-	echo "${username}:${passwd}:10" >/home/${username}/.config/deluge/auth
-	chmod 600 /home/${username}/.config/deluge/auth
-	chown -R ${username}.${username} /home/${username}/.config/
-	mkdir -p /home/${username}/dwatch
-	chown ${username}: /home/${username}/dwatch
-	mkdir -p /home/${username}/torrents/deluge
-	chown ${username}: /home/${username}/torrents/deluge
-}
 
-# shellcheck disable=2312
-function _insdwApache() {
-	APPNAME='deluge'
-	APPDPORT=$(cat /home/${username}/.config/deluge/web.conf | grep -E ".*port.*" | grep -Eo "[0-9]+")
-	cat >/etc/apache2/sites-enabled/deluge.conf <<DELCONF
-ProxyPass /${APPNAME} http://localhost:${APPDPORT}/
-
-<Location /${APPNAME}>
-	ProxyPassReverse /
-	ProxyPassReverseCookiePath / /${APPNAME}
-	RequestHeader set X-Deluge-Base "/${APPNAME}/"
-	Order allow,deny
-	Allow from all
-</Location>
-DELCONF
-	touch /install/.deluge.lock
-	chown www-data:www-data /etc/apache2/sites-enabled/deluge.conf
-}
 
 # Transmission function
 # shellcheck disable=2024
@@ -360,65 +252,23 @@ EOF
 # shellcheck disable=2312
 function _qbittorrent() {
 	apt-get -qy update >>"${OUTTO}" 2>&1
-	LIST='build-essential checkinstall pkg-config libgl1-mesa-dev libjpeg-dev libpng-dev automake libtool libgeoip-dev python3-dev python3-pip'
-	for depend in ${LIST}; do
-		apt-get -qq -y install "${depend}" >>"${OUTTO}" 2>&1
-	done
-	LIST='libboost-dev libboost-system-dev libboost-chrono-dev libboost-random-dev libboost-python-dev'
-	for depend in ${LIST}; do
-		apt-get -qq -y install "${depend}" >>"${OUTTO}" 2>&1
-	done
-	cd ${local_packages} || exit 1
-	if [[ ! -e /usr/local/lib/libtorrent-rasterbar.so ]]; then
-		function version_qb() { test "$(echo "$@" | tr " " "\n" | sort -V | head -n 1)" != "$1"; }
-		if [[ ${QBVERSION} != "no" ]] && (version_qb "${QBVERSION}" 4.1.3); then
-			LTRC=RC_1_1
-		fi
-		git clone -b "${LTRC}" https://github.com/arvidn/libtorrent.git >>"${OUTTO}" 2>&1
-		cd libtorrent || exit 1
-		\cp -f ${local_setup}sources/libtorrent-rasterbar-"${LTRC}".patch .
-		patch -p1 <libtorrent-rasterbar-"${LTRC}".patch >>"${OUTTO}" 2>&1
-		ltversion=$(cat configure.ac | grep -Eo "AC_INIT\(\[libtorrent-rasterbar\],.*" | grep -Eo "[0-9.]+" | head -n1)
-		./autotool.sh >>"${OUTTO}" 2>&1
-		./configure --enable-python-binding --disable-debug --enable-encryption --with-libgeoip=system --with-libiconv CXXFLAGS=-std=c++11 >>"${OUTTO}" 2>&1
-		make -j$(nproc) >>"${OUTTO}" 2>&1
-		checkinstall -y --pkgversion=${ltversion} >>"${OUTTO}" 2>&1
-	fi
-	ldconfig >>"${OUTTO}" 2>&1
-	apt-get -qy update >>"${OUTTO}" 2>&1
-	LIST='qtbase5-dev qttools5-dev-tools libqt5svg5-dev'
-	for depend in ${LIST}; do
-		apt-get -qq -y install "${depend}" >>"${OUTTO}" 2>&1
-	done
-	cd ${local_packages} || exit 1
-	git clone https://github.com/qbittorrent/qBittorrent >>"${OUTTO}" 2>&1
-	cd qBittorrent || exit 1
-	git checkout release-"${QBVERSION}" >>"${OUTTO}" 2>&1
-	./configure --disable-gui --disable-debug >>"${OUTTO}" 2>&1
-	make -j$(nproc) >>"${OUTTO}" 2>&1
-	checkinstall -y --pkgname=qbittorrent-headless --pkgversion="${QBVERSION}" --pkggroup qbittorrent >>"${OUTTO}" 2>&1
-	export LD_LIBRARY_PATH=/usr/local/lib:${LD_LIBRARY_PATH}
+	apt-get -y install qbittorrent-nox >>"${OUTTO}" 2>&1
+	
 	if [[ ! -d /home/${username}/.config/qBittorrent ]]; then
 		mkdir -p /home/${username}/.config/qBittorrent
 	fi
 	chmod -R 755 /home/${username}/.config
-	chown -R ${username}.${username} /home/${username}/.config/
+	chown -R ${username}:${username} /home/${username}/.config/
 	\cp -f ${local_setup}templates/sysd/qbittorrent.template /etc/systemd/system/qbittorrent@.service >/dev/null 2>&1
-	if [[ ! -d /home/${username}/.config/qBittorrent ]]; then
-		mkdir -p /home/${username}/.config/qBittorrent
-	fi
 	\cp -f ${local_setup}templates/qBittorrent.conf.template /home/${username}/.config/qBittorrent/qBittorrent.conf
 	sed -i "s/admin/${username}/g" /home/${username}/.config/qBittorrent/qBittorrent.conf
 	sed -i "s/5ebe2294ecd0e0f08eab7690d2a6ee69/${ha1pass}/g" /home/${username}/.config/qBittorrent/qBittorrent.conf
 	sed -i "s/mySavePath/\/home\/${username}\/torrents\/qbittorrent/g" /home/${username}/.config/qBittorrent/qBittorrent.conf
 	chmod -R 755 /home/${username}/.config/
-	chown -R ${username}.${username} /home/${username}/.config/
 	mkdir -p /home/${username}/torrents/qbittorrent
 	chown ${username}: /home/${username}/torrents/qbittorrent
 	systemctl enable qbittorrent@${username} >/dev/null 2>&1
 	systemctl start qbittorrent@${username} >/dev/null 2>&1
-	cd ${local_packages} || exit 1
-	rm -rf qBittorrent
 }
 
 function _insqBApache() {
@@ -438,19 +288,7 @@ EOF
 # scgi enable function (22-nixed)
 # function _scgi() { ln -s /etc/apache2/mods-available/scgi.load /etc/apache2/mods-enabled/scgi.load >>"${OUTTO}" 2>&1 ; }
 
-# mktorrent function
-function _mktorrent() {
-	if [[ -d /tmp ]]; then rm -r tmp; fi
-	mkdir -p /tmp && cd /tmp || exit 1
-	mktorrent_version=1.1
-	wget --quiet https://github.com/Rudde/mktorrent/archive/v"${mktorrent_version}".zip -O mktorrent.zip >>"${OUTTO}" 2>&1
-	unzip -o mktorrent.zip >>"${OUTTO}" 2>&1
-	cd mktorrent-1.1 || exit 1
-	make >>"${OUTTO}" 2>&1
-	make install >>"${OUTTO}" 2>&1
-	cd ..
-	rm -rf mktorrent-1.1 && rm -f mktorrent.zip
-}
+
 
 # function to install rutorrent
 function _rutorrent() {
@@ -533,12 +371,7 @@ function _plugins() {
 	sed -i 's/homeDirectory/topDirectory/g' /srv/rutorrent/plugins/filemanager/flm.class.php
 	sed -i 's/homeDirectory/topDirectory/g' /srv/rutorrent/plugins/filemanager/settings.js.php
 	sed -i 's/showhidden: true,/showhidden: false,/g' "${rutorrent}plugins/filemanager/init.js"
-	chown -R www-data.www-data "${rutorrent}"
-	cd ${rutorrent}plugins/theme/themes/
-	git clone https://github.com/AetherFlow/club-AetherFlow club-AetherFlow >>"${OUTTO}" 2>&1
-	chown -R www-data:www-data club-AetherFlow
-	cd ${rutorrent}plugins
-	perl -pi -e "s/\$defaultTheme \= \"\"\;/\$defaultTheme \= \"club-AetherFlow\"\;/g" ${rutorrent}plugins/theme/conf.php
+	chown -R www-data:www-data "${rutorrent}"
 	rm -rf ${rutorrent}plugins/tracklabels/labels/nlb.png
 
 	# Needed for fileupload
