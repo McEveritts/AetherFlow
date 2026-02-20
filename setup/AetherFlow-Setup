@@ -57,6 +57,14 @@ if [[ ! -d "${SCRIPT_DIR}/modules" ]]; then
     exit 0
 fi
 
+# We are in the correct bootstrapped setup directory
+BASE_DIR="$(dirname "${SCRIPT_DIR}")"
+local_setup="${SCRIPT_DIR}/"
+local_packages="${BASE_DIR}/packages/"
+local_rutorrent="${BASE_DIR}/rutorrent/"
+local_rplugins="${BASE_DIR}/rtplugins/"
+local_dashboard="${BASE_DIR}/dashboard/"
+
 # Load Modules
 for module in "${SCRIPT_DIR}/modules/"*.sh; do
     # shellcheck disable=1090
@@ -81,21 +89,9 @@ spinner() {
 	printf "    \b\b\b\b"
 	echo -ne "${OK}"
 }
-if [[ -f "${SCRIPT_DIR}/AetherFlow-Setup" ]]; then
-    # We are in the setup directory of the repo/install
-    BASE_DIR="$(dirname "${SCRIPT_DIR}")"
-    local_setup="${SCRIPT_DIR}/"
-    local_packages="${BASE_DIR}/packages/"
-    local_rutorrent="${BASE_DIR}/rutorrent/"
-    local_rplugins="${BASE_DIR}/rtplugins/"
-    local_dashboard="${BASE_DIR}/dashboard/"
-else
-    # Fallback to default locations
-    local_setup="/opt/MediaNexus/setup/"
-    local_packages="/opt/MediaNexus/packages/"
-    local_rutorrent="/opt/MediaNexus/rutorrent/"
-    local_rplugins="/opt/MediaNexus/rtplugins/"
-    local_dashboard="/opt/MediaNexus/dashboard/"
+if [[ ! -d "${local_setup}" ]]; then
+    echo "Critical Error: Setup paths failed to resolve."
+    exit 1
 fi
 # shellcheck disable=2312
 IFACE=$(ip link show | grep -i broadcast | grep -m1 UP | cut -d: -f 2 | cut -d@ -f 1 | sed -e 's/ //g')
