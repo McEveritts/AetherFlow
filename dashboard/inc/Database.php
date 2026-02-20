@@ -41,7 +41,7 @@ class Database
         } catch (PDOException $e) {
             error_log("AetherFlow Database Error: " . $e->getMessage());
             // In production we might not want to die here, but for now it's critical
-            die("Database connection failed. Check error logs.");
+            throw new \Exception("Database connection failed. Check error logs.");
         }
     }
 

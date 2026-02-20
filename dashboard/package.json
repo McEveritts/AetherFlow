@@ -1,0 +1,15 @@
+{
+    "name": "aetherflow-dashboard-ui",
+    "version": "3.0.1",
+    "description": "Frontend dependencies for AetherFlow Dashboard",
+    "private": true,
+    "scripts": {
+        "audit": "npm audit",
+        "update": "npm update"
+    },
+    "dependencies": {
+        "jquery": "^3.7.1",
+        "jquery-ui": "^1.13.2",
+        "bootstrap": "^3.4.1"
+    }
+}

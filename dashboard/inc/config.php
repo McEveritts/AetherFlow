@@ -15,11 +15,11 @@ require_once($_SERVER['DOCUMENT_ROOT'] . '/inc/Cache.php');
 require_once($_SERVER['DOCUMENT_ROOT'] . '/inc/localize.php');
 
 // Theme Selection Logic
-$theme_options = ['slate_stone', 'glass', 'aetherflow'];
-// Check session or cookie for theme, default to 'slate_stone'
-$user_theme = $_SESSION['theme'] ?? $_COOKIE['theme'] ?? 'slate_stone';
+$theme_options = ['glassmorphism', 'slate_stone', 'glass', 'aetherflow'];
+// Check session or cookie for theme, default to 'glassmorphism'
+$user_theme = $_SESSION['theme'] ?? $_COOKIE['theme'] ?? 'glassmorphism';
 if (!in_array($user_theme, $theme_options)) {
-  $user_theme = 'slate_stone';
+  $user_theme = 'glassmorphism';
 }
 $theme_css = "skins/{$user_theme}.css";
 
@@ -86,7 +86,7 @@ function search($data, $find, $end)
 
 define('HTTP_HOST', preg_replace('~^www\.~i', '', $_SERVER['HTTP_HOST']));
 
-$panel = array(
+$card = array(
   'name' => 'AetherFlow Seedbox',
   'author' => 'Everyone that contributes to the open AetherFlow project!',
   'robots' => 'noindex, nofollow',
@@ -324,11 +324,11 @@ for ($i = 2; $i < count($strs); $i++) {
 }
 
 //Real-time refresh ajax calls
-if ($_GET['act'] == "rt") {
+if (isset($_GET['act']) && $_GET['act'] === "rt") {
   $arr = array('NetOut2' => "$NetOut[2]", 'NetOut3' => "$NetOut[3]", 'NetOut4' => "$NetOut[4]", 'NetOut5' => "$NetOut[5]", 'NetOut6' => "$NetOut[6]", 'NetOut7' => "$NetOut[7]", 'NetOut8' => "$NetOut[8]", 'NetOut9' => "$NetOut[9]", 'NetOut10' => "$NetOut[10]", 'NetInput2' => "$NetInput[2]", 'NetInput3' => "$NetInput[3]", 'NetInput4' => "$NetInput[4]", 'NetInput5' => "$NetInput[5]", 'NetInput6' => "$NetInput[6]", 'NetInput7' => "$NetInput[7]", 'NetInput8' => "$NetInput[8]", 'NetInput9' => "$NetInput[9]", 'NetInput10' => "$NetInput[10]", 'NetOutSpeed2' => "$NetOutSpeed[2]", 'NetOutSpeed3' => "$NetOutSpeed[3]", 'NetOutSpeed4' => "$NetOutSpeed[4]", 'NetOutSpeed5' => "$NetOutSpeed[5]", 'NetInputSpeed2' => "$NetInputSpeed[2]", 'NetInputSpeed3' => "$NetInputSpeed[3]", 'NetInputSpeed4' => "$NetInputSpeed[4]", 'NetInputSpeed5' => "$NetInputSpeed[5]");
   $jarr = json_encode($arr);
-  $_GET['callback'] = htmlspecialchars($_GET['callback']);
-  echo $_GET['callback'], '(', $jarr, ')';
+  $callback = isset($_GET['callback']) ? preg_replace('/[^a-zA-Z0-9_]/', '', $_GET['callback']) : 'callback';
+  echo $callback, '(', $jarr, ')';
   exit;
 }
 
@@ -558,7 +558,7 @@ function isEnabled($process, $username)
   }
 
   return "
-  <div class=\"toggle-wrapper text-right\">
+  <div class=\"toggle-wrapper text-end\">
     <label class=\"vp-toggle\">
       <input type=\"checkbox\" $checked onchange=\"location.href='$action_url'\">
       <span class=\"vp-slider\"></span>
@@ -678,12 +678,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['id']) && isAdmin()) {
       case 66:
         $process = escapeshellarg($_POST['serviceenable'] ?? '');
         if ($process == "'$c'") {
+          $safeC = escapeshellarg($c);
+          $safeUser = escapeshellarg($username);
           if (file_exists('/etc/systemd/system/' . $c . '@.service') || file_exists('/etc/systemd/system/' . $c . '@' . $username . '.service') || file_exists('/etc/systemd/system/multi-user.target.wants/' . $c . '@' . $username . '.service')) {
-            shell_exec("sudo systemctl enable $c@$username");
-            shell_exec("sudo systemctl start $c@$username");
+            shell_exec("sudo systemctl enable {$safeC}@{$safeUser}");
+            shell_exec("sudo systemctl start {$safeC}@{$safeUser}");
           } elseif (file_exists('/etc/systemd/system/' . $c . '.service') || file_exists('/lib/systemd/system/' . $c . '.service')) {
-            shell_exec("sudo systemctl enable $c");
-            shell_exec("sudo systemctl start $c");
+            shell_exec("sudo systemctl enable {$safeC}");
+            shell_exec("sudo systemctl start {$safeC}");
           }
           header("Location: /");
           exit;
@@ -693,12 +695,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['id']) && isAdmin()) {
       case 77:
         $process = escapeshellarg($_POST['servicedisable'] ?? '');
         if ($process == "'$c'") {
+          $safeC = escapeshellarg($c);
+          $safeUser = escapeshellarg($username);
           if (file_exists('/etc/systemd/system/' . $c . '@.service') || file_exists('/etc/systemd/system/' . $c . '@' . $username . '.service') || file_exists('/etc/systemd/system/multi-user.target.wants/' . $c . '@' . $username . '.service')) {
-            shell_exec("sudo systemctl stop $c@$username");
-            shell_exec("sudo systemctl disable $c@$username");
+            shell_exec("sudo systemctl stop {$safeC}@{$safeUser}");
+            shell_exec("sudo systemctl disable {$safeC}@{$safeUser}");
           } elseif (file_exists('/etc/systemd/system/' . $c . '.service') || file_exists('/lib/systemd/system/' . $c . '.service')) {
-            shell_exec("sudo systemctl stop $c");
-            shell_exec("sudo systemctl disable $c");
+            shell_exec("sudo systemctl stop {$safeC}");
+            shell_exec("sudo systemctl disable {$safeC}");
           }
           header("Location: /");
           exit;
@@ -708,12 +712,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['id']) && isAdmin()) {
       case 88:
         $process = escapeshellarg($_POST['servicestart'] ?? '');
         if ($process == "'$c'") {
+          $safeC = escapeshellarg($c);
+          $safeUser = escapeshellarg($username);
           if (file_exists('/etc/systemd/system/' . $c . '@.service') || file_exists('/etc/systemd/system/' . $c . '@' . $username . '.service') || file_exists('/etc/systemd/system/multi-user.target.wants/' . $c . '@' . $username . '.service')) {
-            shell_exec("sudo systemctl enable $c@$username");
-            shell_exec("sudo systemctl restart $c@$username");
+            shell_exec("sudo systemctl enable {$safeC}@{$safeUser}");
+            shell_exec("sudo systemctl restart {$safeC}@{$safeUser}");
           } elseif (file_exists('/etc/systemd/system/' . $c . '.service') || file_exists('/lib/systemd/system/' . $c . '.service')) {
-            shell_exec("sudo systemctl enable $c");
-            shell_exec("sudo systemctl restart $c");
+            shell_exec("sudo systemctl enable {$safeC}");
+            shell_exec("sudo systemctl restart {$safeC}");
           }
           header("Location: /");
           exit;

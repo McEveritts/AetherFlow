@@ -9,22 +9,25 @@ if (!isAdmin()) {
     exit;
 }
 
-$input = $_POST['command'] ?? '';
+$input = strtolower(trim($_POST['command'] ?? ''));
 $response = ['success' => false, 'message' => 'Command not understood'];
 
-// Simple Regex Intent Parser
-if (preg_match('/(restart|reload)\s+(web|nginx|php)/i', $input)) {
-    // shell_exec("sudo systemctl restart nginx php7.4-fpm"); 
-    $response = ['success' => true, 'message' => 'Restarting Web Services...'];
-} elseif (preg_match('/(restart|fix)\s+(plex|media)/i', $input)) {
-    // shell_exec("sudo systemctl restart plexmediaserver");
-    $response = ['success' => true, 'message' => 'Restarting Plex...'];
-} elseif (preg_match('/(clean|clear)\s+(cache|logs)/i', $input)) {
-    // shell_exec("sudo /usr/local/bin/aetherflow/system/clean_log");
-    $response = ['success' => true, 'message' => 'System logs and cache cleaned.'];
-} elseif (preg_match('/(status|check)\s+(disk|space)/i', $input)) {
-    $df = shell_exec("df -h / | awk 'NR==2 {print $5}'");
-    $response = ['success' => true, 'message' => 'Disk usage is at ' . trim($df)];
+$allowedCommands = [
+    'restart web' => ['cmd' => "sudo systemctl restart nginx php8.1-fpm", 'msg' => 'Restarting Web Services...'],
+    'restart plex' => ['cmd' => "sudo systemctl restart plexmediaserver", 'msg' => 'Restarting Plex...'],
+    'clean logs' => ['cmd' => "sudo /usr/local/bin/aetherflow/system/clean_log", 'msg' => 'System logs and cache cleaned.']
+];
+
+if (array_key_exists($input, $allowedCommands)) {
+    shell_exec($allowedCommands[$input]['cmd']);
+    $response = ['success' => true, 'message' => $allowedCommands[$input]['msg']];
+} elseif (strpos($input, 'disk space') !== false || strpos($input, 'status disk') !== false) {
+    if (PHP_OS === 'Linux') {
+        $df = shell_exec("df -h / | awk 'NR==2 {print $5}'") ?? '';
+        $response = ['success' => true, 'message' => 'Disk usage is at ' . trim($df)];
+    } else {
+        $response = ['success' => true, 'message' => 'Disk usage check not supported on this OS.'];
+    }
 }
 
 echo json_encode($response);

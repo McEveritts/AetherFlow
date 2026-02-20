@@ -14,7 +14,7 @@
 (function ($) {
     'use strict';
 
-    // Read CSRF token from meta tag (set in panel.header.php)
+    // Read CSRF token from meta tag (set in card.header.php)
     var csrfToken = $('meta[name="csrf-token"]').attr('content') || '';
 
     // Setup CSRF token for all jQuery AJAX requests

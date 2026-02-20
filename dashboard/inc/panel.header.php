@@ -13,10 +13,10 @@ header('Permissions-Policy: camera=(), microphone=(), geolocation=()');
   <!-- META -->
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
-  <meta name="description" content="<?php echo $panel['description'] ?>">
-  <meta name="author" content="<?php echo $panel['author'] ?>">
-  <title><?php echo $panel['title'] ?></title>
-  <meta name="robots" content="<?php echo $panel['robots'] ?>">
+  <meta name="description" content="<?php echo $card['description'] ?>">
+  <meta name="author" content="<?php echo $card['author'] ?>">
+  <title><?php echo $card['title'] ?></title>
+  <meta name="robots" content="<?php echo $card['robots'] ?>">
   <meta name="theme-color" content="#ffffff">
   <!-- FAVICON ASSETTS -->
   <link rel="apple-touch-icon" sizes="180x180" href="img/favicon/apple-touch-icon.png">
@@ -72,6 +72,9 @@ header('Permissions-Policy: camera=(), microphone=(), geolocation=()');
   <link rel="stylesheet" href="<?php echo $theme_css; ?>">
   <link rel="stylesheet" href="skins/lobipanel.css" />
   <link rel="stylesheet" href="css/vision_pro_toggles.css">
+  <!-- BOOTSTRAP 5 CSS OVERRIDE -->
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet" crossorigin="anonymous">
+  <link rel="stylesheet" href="skins/bootstrap5-fixes.css">
   <!-- JAVASCRIPT -->
   <script src="lib/jquery/jquery.js"></script>
   <script src="lib/chartjs/chart.umd.js"></script>
@@ -259,7 +262,7 @@ header('Permissions-Policy: camera=(), microphone=(), geolocation=()');
     });
   </script>
 
-  <!-- <script type="text/javascript" src="inc/panel.app_status.ajax.js"></script> -->
+  <!-- <script type="text/javascript" src="inc/card.app_status.ajax.js"></script> -->
   <script type="text/javascript" src="js/service_monitor.js"></script>
 
   <script type="text/javascript">

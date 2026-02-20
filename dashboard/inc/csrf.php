@@ -51,6 +51,7 @@ function requireCsrfToken(): void
 {
     $token = $_POST['_csrf_token']
         ?? $_SERVER['HTTP_X_CSRF_TOKEN']
+        ?? $_SERVER['X_CSRF_TOKEN']
         ?? '';
 
     if (!validateCsrfToken($token)) {

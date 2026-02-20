@@ -57,30 +57,21 @@ if (!is_readable($logPath)) {
     exit;
 }
 
-// Read last 100 lines
-// Use simple file logic or tail command
-$lines = [];
-$fp = fopen($logPath, "r");
-if ($fp) {
-    // Seek to end - 10KB ?
-    $fsize = filesize($logPath);
-    $offset = max(0, $fsize - 50000); // Read last 50KB to ensure we get 100 lines
-    fseek($fp, $offset);
-    while (!feof($fp)) {
-        $lines[] = fgets($fp);
-    }
-    fclose($fp);
+// Use native OS tail for safety and performance
+$safePath = escapeshellarg($logPath);
+$output = shell_exec("tail -n 100 $safePath 2>&1");
 
-    // Slice last 100
-    $lines = array_slice($lines, -100);
-} else {
+if ($output === null) {
     echo json_encode(['error' => T('ERROR_OPEN_LOG')]);
     exit;
 }
 
+$lines = explode("\n", trim($output));
+
 // Strip ansi codes if any?
 // Use array_map utf8_encode just in case
 $lines = array_map(function ($l) {
-    return trim($l); }, $lines);
+    return trim($l);
+}, $lines);
 
 echo json_encode(['logs' => $lines]);

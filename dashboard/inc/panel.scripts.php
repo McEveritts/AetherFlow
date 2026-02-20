@@ -647,7 +647,8 @@ $option[] = array('file' => 'aetherflow', 'title' => 'AetherFlow'); { ?>
 <!--script src="js/script.js"></script-->
 <script src="lib/jquery-ui/jquery-ui.js"></script>
 <script src="lib/jquery.ui.touch-punch.min.js"></script>
-<script src="lib/bootstrap/js/bootstrap.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"
+  crossorigin="anonymous"></script>
 <script src="lib/jquery-toggles/toggles.js"></script>
 <script src="lib/jquery-knob/jquery.knob.js"></script>
 <script src="lib/jquery.gritter/jquery.gritter.js"></script>
@@ -661,8 +662,8 @@ $option[] = array('file' => 'aetherflow', 'title' => 'AetherFlow'); { ?>
     // Initialize sortable on the columns containing panels
     $('.col-md-8, .col-md-4').sortable({
       connectWith: '.col-md-8, .col-md-4',
-      handle: '.panel-heading',
-      placeholder: 'panel-placeholder',
+      handle: '.card-heading',
+      placeholder: 'card-placeholder',
       forcePlaceholderSize: true,
       opacity: 0.8,
       stop: function (event, ui) {
@@ -672,7 +673,7 @@ $option[] = array('file' => 'aetherflow', 'title' => 'AetherFlow'); { ?>
       }
     });
 
-    $('.panel').lobiPanel({
+    $('.card').lobiPanel({
       reload: {
         icon: 'fa fa-refresh'
       },
@@ -709,7 +710,7 @@ $option[] = array('file' => 'aetherflow', 'title' => 'AetherFlow'); { ?>
 <script>
   $(function () {
     $('#rutorrent').on('loaded.lobiPanel', function (ev, lobiPanel) {
-      var $body = lobiPanel.$el.find('.panel-body');
+      var $body = lobiPanel.$el.find('.card-body');
       $body.html('<div>' + $body.html() + '</div>');
     });
   });
