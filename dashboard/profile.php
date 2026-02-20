@@ -1,7 +1,7 @@
 <?php
 include('inc/config.php');
-include('inc/panel.header.php');
-include('inc/panel.menu.php');
+include('inc/card.header.php');
+include('inc/card.menu.php');
 
 // Handle Password Change
 $password_feedback = "";
@@ -80,11 +80,11 @@ try {
         <div class="row">
             <!-- Account Info Column (Left) -->
             <div class="col-md-4">
-                <div class="panel panel-default">
-                    <div class="panel-heading">
-                        <h4 class="panel-title">Account Information</h4>
+                <div class="card">
+                    <div class="card-header">
+                        <h4 class="card-title">Account Information</h4>
                     </div>
-                    <div class="panel-body">
+                    <div class="card-body">
                         <div class="text-center" style="margin-bottom: 20px;">
                             <img src="<?php echo htmlspecialchars($_SESSION['user']['avatar_url'] ?? 'img/default-avatar.png'); ?>" 
                                  alt="Avatar" class="img-circle" style="width: 100px; height: 100px; border: 3px solid #eee;">
@@ -92,19 +92,19 @@ try {
                         <ul class="list-group list-group-flush">
                             <li class="list-group-item">
                                 <strong>Username</strong>
-                                <span class="pull-right text-muted"><?php echo htmlspecialchars($_SESSION['user']['username']); ?></span>
+                                <span class="float-end text-muted"><?php echo htmlspecialchars($_SESSION['user']['username']); ?></span>
                             </li>
                             <li class="list-group-item">
                                 <strong>Email</strong>
-                                <span class="pull-right text-muted"><?php echo htmlspecialchars($_SESSION['user']['email']); ?></span>
+                                <span class="float-end text-muted"><?php echo htmlspecialchars($_SESSION['user']['email']); ?></span>
                             </li>
                             <li class="list-group-item">
                                 <strong>Role</strong>
-                                <span class="pull-right text-muted"><?php echo htmlspecialchars(ucfirst($_SESSION['user']['role'])); ?></span>
+                                <span class="float-end text-muted"><?php echo htmlspecialchars(ucfirst($_SESSION['user']['role'])); ?></span>
                             </li>
                             <li class="list-group-item">
                                 <strong>Google ID</strong>
-                                <span class="pull-right text-muted" title="<?php echo htmlspecialchars($_SESSION['user']['google_id']); ?>">
+                                <span class="float-end text-muted" title="<?php echo htmlspecialchars($_SESSION['user']['google_id']); ?>">
                                     <?php echo substr($_SESSION['user']['google_id'], 0, 8) . '...'; ?>
                                 </span>
                             </li>
@@ -113,11 +113,11 @@ try {
                 </div>
 
                 <!-- Widget Settings (Phase 15 Placeholder) -->
-                <div class="panel panel-default">
-                    <div class="panel-heading">
-                        <h4 class="panel-title"><?php echo T('WIDGET_SETTINGS'); ?></h4>
+                <div class="card">
+                    <div class="card-header">
+                        <h4 class="card-title"><?php echo T('WIDGET_SETTINGS'); ?></h4>
                     </div>
-                    <div class="panel-body">
+                    <div class="card-body">
                         <p class="small text-muted">Toggle visibility of dashboard widgets.</p>
                         <form action="api/save_widget_pref.php" method="POST">
                             <?php csrfField(); ?>
@@ -125,7 +125,7 @@ try {
                                 <?php foreach ($widgetsList as $widget): ?>
                                 <li class="list-group-item" style="padding: 10px 15px;">
                                     <?php echo T($widget['title_key']); ?>
-                                    <div class="pull-right">
+                                    <div class="float-end">
                                         <label class="switch-sm">
                                             <input type="checkbox" name="widgets[]" value="<?php echo htmlspecialchars($widget['name']); ?>" 
                                             <?php echo isWidgetVisible($widget['name']) ? 'checked' : ''; ?>>
@@ -143,11 +143,11 @@ try {
             </div>
 
             <!-- Notification Settings -->
-            <div class="panel panel-default">
-                <div class="panel-heading">
-                    <h4 class="panel-title">Notification Settings</h4>
+            <div class="card">
+                <div class="card-header">
+                    <h4 class="card-title">Notification Settings</h4>
                 </div>
-                <div class="panel-body">
+                <div class="card-body">
                     <form method="POST">
                         <?php csrfField(); ?>
                         <div class="form-group">
@@ -168,12 +168,12 @@ try {
             <div class="col-md-8">
                 
                 <!-- System Password Change -->
-                <div class="panel panel-default">
-                    <div class="panel-heading">
-                        <h4 class="panel-title">System Password</h4>
+                <div class="card">
+                    <div class="card-header">
+                        <h4 class="card-title">System Password</h4>
                         <p class="small text-muted" style="margin-bottom:0">Change your Linux system password (affects SSH, FTP, etc).</p>
                     </div>
-                    <div class="panel-body">
+                    <div class="card-body">
                         <?php if (!empty($password_feedback)) echo $password_feedback; ?>
                         
                         <form method="POST" class="form-horizontal">
@@ -190,7 +190,7 @@ try {
                             </div>
                             
                             <div class="form-group">
-                                <div class="col-sm-offset-3 col-sm-6">
+                                <div class="offset-sm-3 col-sm-6">
                                     <button type="submit" name="change_password" value="true" class="btn btn-danger">
                                         Update System Password
                                     </button>
@@ -201,12 +201,12 @@ try {
                 </div>
 
                 <!-- Login History -->
-                <div class="panel panel-default">
-                    <div class="panel-heading">
-                        <h4 class="panel-title">Login History</h4>
+                <div class="card">
+                    <div class="card-header">
+                        <h4 class="card-title">Login History</h4>
                         <p class="small text-muted" style="margin-bottom:0">Recent access to your account.</p>
                     </div>
-                    <div class="panel-body">
+                    <div class="card-body">
                         <div class="table-responsive">
                             <table class="table table-hover table-striped">
                                 <thead>
@@ -251,6 +251,6 @@ try {
 </div>
 
 <?php
-include('inc/panel.scripts.php');
-include('inc/panel.end.php');
+include('inc/card.scripts.php');
+include('inc/card.end.php');
 ?>

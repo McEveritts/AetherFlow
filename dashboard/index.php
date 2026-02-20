@@ -1,7 +1,7 @@
 <?php
 include('inc/config.php');
-include('inc/panel.header.php');
-include('inc/panel.menu.php');
+include('inc/card.header.php');
+include('inc/card.menu.php');
 ?>
 
 <div class="mainpanel">
@@ -14,20 +14,23 @@ include('inc/panel.menu.php');
 
       <div class="col-md-8">
 
+        <!-- GEMINI WIDGET -->
+        <?php include('widgets/gemini_chat.php'); ?>
+
         <!--BANDWIDTH CHART & DATA-->
         <?php if (isWidgetVisible('bandwidth_data')) { ?>
-          <div class="panel panel-main panel-inverse">
-            <div class="panel-heading">
-              <h4 class="panel-title">
+          <div class="card card-main card-inverse">
+            <div class="card-header">
+              <h4 class="card-title">
                 <?php echo T('BANDWIDTH_DATA'); ?>
               </h4>
             </div>
-            <div class="panel-body text-center" style="padding:0 0 0 5px; overflow: hidden !important">
+            <div class="card-body text-center" style="padding:0 0 0 5px; overflow: hidden !important">
               <div style="margin-right: -30px">
                 <div style="width:100%;height:350px;"><canvas id="mainbw"></canvas></div>
               </div>
             </div>
-            <div class="row panel-footer panel-statistics" style="padding:0">
+            <div class="row card-footer card-statistics" style="padding:0">
               <div class="col-md-12">
                 <div class="table-responsive">
                   <table class="table table-hover table-bordered nomargin">
@@ -65,13 +68,13 @@ include('inc/panel.menu.php');
               </div>
             </div>
           </div>
-          <div class="panel panel-inverse">
-            <div class="panel-heading">
-              <h4 class="panel-title">
+          <div class="card card-inverse">
+            <div class="card-header">
+              <h4 class="card-title">
                 <?php echo T('VIEW_ADDITIONAL_BANDWIDTH_DETAILS'); ?>
               </h4>
             </div>
-            <div class="panel-body" style="padding:0">
+            <div class="card-body" style="padding:0">
               <div class="row" style="padding: 0; margin: 0">
                 <div id="bw_tables" style="padding:0;margin:0;"></div>
               </div>
@@ -82,20 +85,20 @@ include('inc/panel.menu.php');
         <!--SERVICE CONTROL CENTER-->
         <?php if (isWidgetVisible('service_control'))
           include('widgets/service_control.php'); ?>
-        <!-- panel -->
+        <!-- card -->
 
         <?php if (isAdmin()) { ?>
           <!--PACKAGE MANAGEMENT CENTER-->
           <?php if (isWidgetVisible('package_control'))
             include('widgets/pmc.php'); ?>
-          <!-- panel -->
+          <!-- card -->
 
           <!-- AETHERFLOW STORE -->
           <?php include('widgets/store_ui.php'); ?>
 
           <!--BACKUP CONTROL CENTER-->
           <?php include('widgets/backup_control.php'); ?>
-          <!-- panel -->
+          <!-- card -->
         <?php } ?>
 
       </div>
@@ -103,14 +106,14 @@ include('inc/panel.menu.php');
       <div class="col-md-4 dash-right">
         <div class="row">
           <div class="col-sm-12">
-            <div class="panel panel-side panel-inverse-full panel-updates">
+            <div class="card card-side card-inverse-full card-updates">
               <?php if (isWidgetVisible('server_load')) { ?>
-                <div class="panel-heading">
-                  <h4 class="panel-title text-success">
+                <div class="card-header">
+                  <h4 class="card-title text-success">
                     <?php echo T('SERVER_LOAD'); ?>
                   </h4>
                 </div>
-                <div class="panel-body">
+                <div class="card-body">
                   <div class="row">
                     <div class="col-sm-9">
                       <h4><span id="cpuload"></span></h4>
@@ -118,7 +121,7 @@ include('inc/panel.menu.php');
                         <?php echo T('SL_TXT'); ?>
                       </p>
                     </div>
-                    <div class="col-sm-3 text-right">
+                    <div class="col-sm-3 text-end">
                       <i class="fa fa-heartbeat text-danger" style="font-size: 70px"></i>
                     </div>
                     <div class="row">
@@ -131,45 +134,45 @@ include('inc/panel.menu.php');
                   </div>
                 </div>
               <?php } ?>
-            </div><!-- panel -->
+            </div><!-- card -->
           </div><!-- SERVER LOAD WIDGET -->
           <div class="col-sm-12">
-            <div class="panel panel-side panel-inverse">
+            <div class="card card-side card-inverse">
               <?php if (isWidgetVisible('disk_data')) { ?>
-                <div class="panel-heading">
-                  <h4 class="panel-title">
+                <div class="card-header">
+                  <h4 class="card-title">
                     <?php echo T('YOUR_DISK_STATUS'); ?>
                   </h4>
                 </div>
-                <div class="panel-body">
+                <div class="card-body">
                   <div id="disk_data"></div>
                 </div>
               <?php } ?>
             </div>
           </div><!-- DISK WIDGET -->
           <div class="col-sm-12">
-            <div class="panel panel-side panel-inverse">
+            <div class="card card-side card-inverse">
               <?php if (isWidgetVisible('ram_status')) { ?>
-                <div class="panel-heading">
-                  <h4 class="panel-title">
+                <div class="card-header">
+                  <h4 class="card-title">
                     <?php echo T('SYSTEM_RAM_STATUS'); ?>
                   </h4>
                 </div>
-                <div class="panel-body">
+                <div class="card-body">
                   <div id="meterram"></div>
                 </div>
               <?php } ?>
             </div>
           </div><!-- RAM WIDGET -->
           <div class="col-sm-12">
-            <div class="panel panel-side panel-inverse">
+            <div class="card card-side card-inverse">
               <?php if (isWidgetVisible('cpu_status')) { ?>
-                <div class="panel-heading">
-                  <h4 class="panel-title">
+                <div class="card-header">
+                  <h4 class="card-title">
                     <?php echo T('CPU_STATUS'); ?>
                   </h4>
                 </div>
-                <div class="panel-body" style="overflow:hidden">
+                <div class="card-body" style="overflow:hidden">
                   <div style="padding:0;margin:-15px -30 -15px -15px">
                     <div style="width:100%;height:200px;"><canvas id="flot-placeholder1"></canvas></div>
                     <!--div id="metercpu"></div-->
@@ -187,8 +190,8 @@ include('inc/panel.menu.php');
           </div><!-- CPU WIDGET -->
           <?php if (isAdmin()) { ?>
             <div class="col-sm-12">
-              <div id="project-commits" class="panel panel-inverse">
-                <div class="panel-body ps-container" style="max-height: 350px; padding: 0;">
+              <div id="project-commits" class="card card-inverse">
+                <div class="card-body ps-container" style="max-height: 350px; padding: 0;">
                   <button class="btn btn-default btn-quirk btn-block" disabled>
                     <i class="fa fa-bell text-muted"></i>
                     <?php echo T('UPDATE'); ?> — Coming Soon
@@ -204,6 +207,6 @@ include('inc/panel.menu.php');
 </div><!-- mainpanel -->
 
 <?php
-include('inc/panel.scripts.php');
-include('inc/panel.end.php');
+include('inc/card.scripts.php');
+include('inc/card.end.php');
 ?>

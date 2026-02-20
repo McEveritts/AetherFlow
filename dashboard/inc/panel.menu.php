@@ -36,7 +36,7 @@ $current_vs = "<span id=\"version-result\"></span>";
                   <button class="btn" data-toggle="dropdown">
                     <i class="fa fa-menu"></i> AetherFlow Menu <span class="caret"></span>
                   </button>
-                  <div id="noticeDropdown" class="dropdown-menu dm-notice pull-right">
+                  <div id="noticeDropdown" class="dropdown-menu dm-notice float-end">
                     <div role="tabpanel">
                       <!-- Nav tabs -->
                       <ul class="nav nav-tabs nav-justified" role="tablist">
@@ -51,7 +51,7 @@ $current_vs = "<span id=\"version-result\"></span>";
                           <ul class="list-group">
                             <li class="list-group-item">
                               <div class="row">
-                                <div class="col-xs-12">
+                                <div class="col-12">
                                   <h5>AetherFlow :: <span
                                       style="color: #fff;text-shadow: 0px 0px 6px #fff;"><?php echo "$version"; ?></span>
                                   </h5>
@@ -69,10 +69,10 @@ $current_vs = "<span id=\"version-result\"></span>";
                       <ul class="list-group notice-list">
                         <li class="list-group-item" style="padding-top: 10px;">
                           <div class="row">
-                            <div class="col-xs-2">
+                            <div class="col-2">
                               <i class="fa fa-comment"></i>
                             </div>
-                            <div class="col-xs-10">
+                            <div class="col-10">
                               <h5><?php echo T('JOIN_US_TXT'); ?></h5>
                               <small style="color:#fff"><strong style="color: #4CD4B0">host:</strong> chat.aetherflow.io</small>
                               <small style="color:#fff"><strong style="color: #4CD4B0">chan:</strong> #AetherFlow</small>
@@ -87,8 +87,8 @@ $current_vs = "<span id=\"version-result\"></span>";
                           <ul class="list-group">
                             <li class="list-group-item">
                               <div class="row">
-                                <div class="col-xs-12">
-                                  <div class="col-xs-12 col-md-6" style="padding: 0">
+                                <div class="col-12">
+                                  <div class="col-12 col-md-6" style="padding: 0">
                                     <?php $language = array();
                                     $language[] = array('file' => 'lang_zh', 'title' => 'Chinese');
                                     $language[] = array('file' => 'lang_dk', 'title' => 'Danish');
@@ -103,7 +103,7 @@ $current_vs = "<span id=\"version-result\"></span>";
                                       <?php } ?>
                                     <?php } ?>
                                   </div>
-                                  <div class="col-xs-12 col-md-6" style="padding: 0">
+                                  <div class="col-12 col-md-6" style="padding: 0">
                                     <?php $option = array();
                                     $option[] = array('file' => 'defaulted', 'title' => 'Defaulted');
                                     $option[] = array('file' => 'smoked', 'title' => 'Smoked');
@@ -136,14 +136,14 @@ $current_vs = "<span id=\"version-result\"></span>";
                 <i class="fa fa-bell"></i>
                 <span class="badge badge-danger" id="notif-count" style="display:none;">0</span>
               </a>
-              <ul class="dropdown-menu dm-icon pull-right" id="notif-dropdown">
+              <ul class="dropdown-menu dm-icon float-end" id="notif-dropdown">
                 <li>
-                  <div class="panel panel-default" style="margin-bottom:0; width: 300px;">
-                    <div class="panel-heading">
+                  <div class="card" style="margin-bottom:0; width: 300px;">
+                    <div class="card-header">
                       Notifications
-                      <a href="#" id="mark-all-read" class="pull-right" style="font-size: 11px;">Mark all read</a>
+                      <a href="#" id="mark-all-read" class="float-end" style="font-size: 11px;">Mark all read</a>
                     </div>
-                    <div class="panel-body" id="notif-list" style="max-height: 300px; overflow-y: auto; padding: 0;">
+                    <div class="card-body" id="notif-list" style="max-height: 300px; overflow-y: auto; padding: 0;">
                       <!-- Notifications will be loaded here -->
                       <div class="text-center" style="padding: 10px; color: #777;">Loading...</div>
                     </div>
@@ -161,7 +161,7 @@ $current_vs = "<span id=\"version-result\"></span>";
                   <?php echo "$username"; ?>
                   <span class="caret"></span>
                 </button>
-                <ul class="dropdown-menu pull-right" style="min-width:160px">
+                <ul class="dropdown-menu float-end" style="min-width:160px">
                   <li><a href="profile.php"><i class="fa fa-user"></i> <?php echo T('PROFILE'); ?></a></li>
                   <li class="divider"></li>
                   <li><a href="/auth/logout.php"><i class="fa fa-sign-out"></i> Sign Out</a></li>
@@ -175,7 +175,7 @@ $current_vs = "<span id=\"version-result\"></span>";
     </div><!-- header-->
   </header>
   <section>
-    <div class="leftpanel ps-container">
+    <div class="leftcard ps-container">
       <div class="leftpanelinner">
         <ul class="nav nav-tabs nav-justified nav-sidebar">
           <li class="tooltips active" data-toggle="tooltip" title="<?php echo T('MAIN_MENU'); ?>"
@@ -430,9 +430,9 @@ $current_vs = "<span id=\"version-result\"></span>";
                   <?php foreach ($plugins as $plugin) { ?>
                     <li>
                       <?php if (file_exists('/srv/rutorrent/plugins/' . $plugin . '/plugin.info')) {
-                        echo "<a href=\"javascript:void()\">$plugin</a> <div class=\"toggle-wrapper pull-right\" style=\"margin-right: -10px; margin-top: 5px;\"> <div class=\"toggle-pen toggle-modern\" onclick=\"location.href='?removeplugin-$plugin=true'\"></div></div>";
+                        echo "<a href=\"javascript:void()\">$plugin</a> <div class=\"toggle-wrapper float-end\" style=\"margin-right: -10px; margin-top: 5px;\"> <div class=\"toggle-pen toggle-modern\" onclick=\"location.href='?removeplugin-$plugin=true'\"></div></div>";
                       } else {
-                        echo "<a href=\"javascript:void()\">$plugin</a> <div class=\"toggle-wrapper pull-right\" style=\"margin-right: -10px; margin-top: 5px;\"> <div class=\"toggle-pdis toggle-modern\" onclick=\"location.href='?installplugin-$plugin=true'\"></div></div>";
+                        echo "<a href=\"javascript:void()\">$plugin</a> <div class=\"toggle-wrapper float-end\" style=\"margin-right: -10px; margin-top: 5px;\"> <div class=\"toggle-pdis toggle-modern\" onclick=\"location.href='?installplugin-$plugin=true'\"></div></div>";
                       } ?>
                     </li>
                   <?php } ?>

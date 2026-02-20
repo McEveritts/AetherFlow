@@ -18,6 +18,7 @@ if (!empty($filename)) {
 
 function runBackupCmd($cmd)
 {
+    global $filename;
     // Requires sudoers entry: www-data ALL=(ALL) NOPASSWD: /usr/local/bin/AetherFlow/system/af-backup
     $output = [];
     $return_var = 0;
@@ -42,11 +43,13 @@ function runBackupCmd($cmd)
         if ($return_var !== 0)
             $output = ["Backup created successfully: mock-backup.tar.gz"];
     } elseif (strpos($cmd, 'delete') !== false) {
-        exec("sudo /usr/local/bin/AetherFlow/system/af-backup delete $filename", $output, $return_var);
+        $safeFile = escapeshellarg($filename);
+        exec("sudo /usr/local/bin/AetherFlow/system/af-backup delete $safeFile", $output, $return_var);
         if ($return_var !== 0)
             $output = ["Deleted $filename"];
     } elseif (strpos($cmd, 'restore') !== false) {
-        exec("sudo /usr/local/bin/AetherFlow/system/af-backup restore $filename", $output, $return_var);
+        $safeFile = escapeshellarg($filename);
+        exec("sudo /usr/local/bin/AetherFlow/system/af-backup restore $safeFile", $output, $return_var);
         if ($return_var !== 0)
             $output = ["Restore complete."];
     }

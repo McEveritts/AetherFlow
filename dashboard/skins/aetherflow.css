@@ -9162,7 +9162,7 @@ fieldset[disabled] .btn-info.active {
 .pager li {
   text-transform: uppercase;
   font-weight: 700;
-  font-family: 'Open Sans', 'Helvetica Neue', Helvetica, sans-serif;
+  font-family: 'Roboto', 'Helvetica Neue', Helvetica, sans-serif;
 }
 
 .pager li>a,
@@ -9209,7 +9209,7 @@ fieldset[disabled] .btn-info.active {
   font-weight: 400;
   color: #313745;
   letter-spacing: .2px;
-  font-family: 'Open Sans', 'Helvetica Neue', Helvetica, sans-serif;
+  font-family: 'Roboto', 'Helvetica Neue', Helvetica, sans-serif;
 }
 
 .panel-body {
@@ -9683,7 +9683,7 @@ fieldset[disabled] .btn-info.active {
   border-bottom: 0;
   padding: 15px 15px 0;
   text-transform: uppercase;
-  font-family: 'Open Sans', 'Helvetica Neue', Helvetica, sans-serif;
+  font-family: 'Roboto', 'Helvetica Neue', Helvetica, sans-serif;
 }
 
 .popover-content {
@@ -9726,7 +9726,7 @@ fieldset[disabled] .btn-info.active {
 
 .navbar-nav>li>a {
   text-transform: uppercase;
-  font-family: 'Open Sans', 'Helvetica Neue', Helvetica, sans-serif;
+  font-family: 'Roboto', 'Helvetica Neue', Helvetica, sans-serif;
   font-weight: 700;
   color: #818da7;
   padding-left: 15px;
@@ -9807,7 +9807,7 @@ fieldset[disabled] .btn-info.active {
   color: #fff !important;
   text-transform: uppercase;
   letter-spacing: .2px;
-  font-family: 'Open Sans', 'Helvetica Neue', Helvetica, sans-serif;
+  font-family: 'Roboto', 'Helvetica Neue', Helvetica, sans-serif;
   font-weight: 700;
   font-size: 12px;
   margin: 0;
@@ -9869,7 +9869,7 @@ fieldset[disabled] .btn-info.active {
   background-color: #1d1d1d;
   border-bottom: 0 none;
   color: #fff;
-  font-family: "Open Sans", "Helvetica Neue", Helvetica, sans-serif;
+  font-family: "Roboto", "Helvetica Neue", Helvetica, sans-serif;
   font-size: 12px;
   letter-spacing: 0.5px;
   padding-bottom: 11px;
@@ -10585,7 +10585,7 @@ a.text-danger:focus {
 .dropzone .dz-message {
   font-size: 14px;
   font-weight: 700;
-  font-family: 'Open Sans', 'Helvetica Neue', Helvetica, sans-serif;
+  font-family: 'Roboto', 'Helvetica Neue', Helvetica, sans-serif;
   text-transform: uppercase;
   color: #696c74;
   margin-top: 45px;
@@ -10682,7 +10682,7 @@ a.text-danger:focus {
   border-radius: 0;
   padding: 14px 25px;
   text-transform: uppercase;
-  font-family: 'Open Sans', 'Helvetica Neue', Helvetica, sans-serif;
+  font-family: 'Roboto', 'Helvetica Neue', Helvetica, sans-serif;
   font-weight: 700;
   font-size: 12px;
   background-color: #222;
@@ -11044,7 +11044,7 @@ ul.wysihtml5-toolbar a.btn.wysihtml5-command-active {
   font-weight: 700;
   text-shadow: none;
   text-transform: uppercase;
-  font-family: 'Open Sans', 'Helvetica Neue', Helvetica, sans-serif;
+  font-family: 'Roboto', 'Helvetica Neue', Helvetica, sans-serif;
   letter-spacing: .5px;
   font-size: 12px;
   color: #fff;
@@ -11316,7 +11316,7 @@ ul.wysihtml5-toolbar a.btn.wysihtml5-command-active {
 
 .dataTables_paginate .pagination>.paginate_button.next,
 .dataTables_paginate .pagination>.paginate_button.previous {
-  font-family: 'Open Sans', 'Helvetica Neue', Helvetica, sans-serif;
+  font-family: 'Roboto', 'Helvetica Neue', Helvetica, sans-serif;
   font-size: 12px;
   text-transform: uppercase;
 }
@@ -11720,7 +11720,7 @@ blockquote {
 
 .headermenu .dm-notice .nav-tabs>li>a {
   font-size: 12px;
-  font-family: 'Open Sans', 'Helvetica Neue', Helvetica, sans-serif;
+  font-family: 'Roboto', 'Helvetica Neue', Helvetica, sans-serif;
   text-transform: uppercase;
   font-weight: bold;
   letter-spacing: .5px;
@@ -11944,7 +11944,7 @@ blockquote {
   margin: 20px 0 5px;
   text-transform: uppercase;
   font-weight: bold;
-  font-family: 'Open Sans', 'Helvetica Neue', Helvetica, sans-serif;
+  font-family: 'Roboto', 'Helvetica Neue', Helvetica, sans-serif;
   color: #262b36;
 }
 
@@ -12120,7 +12120,7 @@ blockquote {
 .nav-quirk>li {
   border-top: 1px solid #2f2f2f;
   *text-transform: uppercase;
-  font-family: 'Open Sans', 'Helvetica Neue', Helvetica, sans-serif;
+  font-family: 'Roboto', 'Helvetica Neue', Helvetica, sans-serif;
 }
 
 .nav-quirk>li>a {
@@ -12460,7 +12460,7 @@ blockquote {
 .nav-quirk .children>li {
   margin-left: 21px;
   border-left: 1px solid #444;
-  font-family: "Open Sans", Helvetica, Arial, sans-serif;
+  font-family: "Roboto", Helvetica, Arial, sans-serif;
   text-transform: none;
   letter-spacing: normal;
   display: block;
@@ -13259,7 +13259,7 @@ blockquote {
   padding-right: 0;
   color: rgba(255, 255, 255, 0.7);
   text-transform: uppercase;
-  font-family: 'Open Sans', 'Helvetica Neue', Helvetica, sans-serif;
+  font-family: 'Roboto', 'Helvetica Neue', Helvetica, sans-serif;
   font-weight: 600;
   letter-spacing: .5px;
 }
@@ -14862,7 +14862,7 @@ div.error {
 .btn-quirk {
   text-transform: uppercase;
   font-weight: 700;
-  font-family: 'Open Sans', 'Helvetica Neue', Helvetica, sans-serif;
+  font-family: 'Roboto', 'Helvetica Neue', Helvetica, sans-serif;
   letter-spacing: .5px;
 }
 
@@ -15168,7 +15168,7 @@ fieldset[disabled] .btn-fb.active {
   border-radius: 0;
   text-transform: uppercase;
   color: rgba(255, 255, 255, 0.8);
-  font-family: 'Open Sans', 'Helvetica Neue', Helvetica, sans-serif;
+  font-family: 'Roboto', 'Helvetica Neue', Helvetica, sans-serif;
   font-size: 12px;
 }
 
@@ -16168,7 +16168,7 @@ fieldset[disabled] .btn-fb.active {
 }
 
 .nomail {
-  font-family: 'Open Sans', 'Helvetica Neue', Helvetica, sans-serif;
+  font-family: 'Roboto', 'Helvetica Neue', Helvetica, sans-serif;
   font-weight: 300;
   color: #bdc3d1;
   position: absolute;
@@ -16986,7 +16986,7 @@ fieldset[disabled] .btn-fb.active {
   padding: 10px 25px;
   text-transform: uppercase;
   font-weight: 600;
-  font-family: 'Open Sans', 'Helvetica Neue', Helvetica, sans-serif;
+  font-family: 'Roboto', 'Helvetica Neue', Helvetica, sans-serif;
   color: #fff;
   text-align: center;
   letter-spacing: .5px;
@@ -17325,7 +17325,7 @@ fieldset[disabled] .btn-fb.active {
   font-size: 200px;
   font-weight: 700;
   line-height: 160px;
-  font-family: 'Open Sans', 'Helvetica Neue', Helvetica, sans-serif;
+  font-family: 'Roboto', 'Helvetica Neue', Helvetica, sans-serif;
   color: #3b4354;
   margin: 0 0 20px;
 }
@@ -17661,7 +17661,7 @@ fieldset[disabled] .btn-fb.active {
 
 .signup .sign-sidebar .reason {
   font-weight: 700;
-  font-family: 'Open Sans', 'Helvetica Neue', Helvetica, sans-serif;
+  font-family: 'Roboto', 'Helvetica Neue', Helvetica, sans-serif;
   font-size: 13px;
   text-transform: uppercase;
   letter-spacing: 1px;
@@ -17871,7 +17871,7 @@ fieldset[disabled] .btn-fb.active {
   border-top-left-radius: 2px;
   text-transform: uppercase;
   font-size: 12px;
-  font-family: 'Open Sans', 'Helvetica Neue', Helvetica, sans-serif;
+  font-family: 'Roboto', 'Helvetica Neue', Helvetica, sans-serif;
   margin-bottom: 1px;
   color: rgba(255, 255, 255, 0.9);
   text-align: center;
@@ -18465,4 +18465,54 @@ img.grayscale:hover {
   to {
     text-shadow: 0 0 0 rgba(229, 88, 105, 0.2), 0 0 5x rgba(229, 88, 105, 0.2), 0 0 7px rgba(229, 88, 105, 0.2), 0 0 10px rgba(229, 88, 105, 0.2), 0 0 17px rgba(229, 88, 105, 0.2), 0 0 20px rgba(229, 88, 105, 0.2), 0 0 25px rgba(229, 88, 105, 0.2), 0 0 37px rgba(229, 88, 105, 0.2);
   }
+}
+
+/* ==========================================================================
+   Bootstrap 5 Card Overrides (Legacy Panel Migration)
+   ========================================================================== */
+
+/* Base Card (replaces .panel) */
+.card {
+  background-color: var(--bg-primary, #ffffff);
+  border: 1px solid var(--border-color, #dddddd);
+  border-radius: 4px;
+  /* Matches legacy BS3 panel radius */
+  margin-bottom: 20px;
+  box-shadow: 0 1px 1px rgba(0, 0, 0, 0.05);
+  /* Legacy panel shadow */
+}
+
+/* Card Header (replaces .panel-heading) */
+.card-header {
+  background-color: var(--bg-secondary, #f5f5f5);
+  border-bottom: 1px solid var(--border-color, #dddddd);
+  padding: 10px 15px;
+  border-top-left-radius: 3px;
+  border-top-right-radius: 3px;
+}
+
+/* Card Body (replaces .panel-body) */
+.card-body {
+  padding: 15px;
+}
+
+/* Card Footer (replaces .panel-footer) */
+.card-footer {
+  background-color: var(--bg-secondary, #f5f5f5);
+  border-top: 1px solid var(--border-color, #dddddd);
+  padding: 10px 15px;
+  border-bottom-left-radius: 3px;
+  border-bottom-right-radius: 3px;
+}
+
+/* Dark Mode Overrides (Assumes a generic .dark-mode or [data-theme="dark"] selector) */
+[data-theme="dark"] .card {
+  background-color: #2b2b2b;
+  border-color: #444444;
+}
+
+[data-theme="dark"] .card-header,
+[data-theme="dark"] .card-footer {
+  background-color: #333333;
+  border-color: #444444;
 }

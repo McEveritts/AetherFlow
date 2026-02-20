@@ -72,7 +72,7 @@ $(document).ready(function () {
 
     /****** PULSE A QUICK ACCESS PANEL ******/
 
-    $('.panel-quick-page .panel').hover(function () {
+    $('.card-quick-page .card').hover(function () {
         $(this).addClass('flip animated');
     }, function () {
         $(this).removeClass('flip animated');
@@ -153,19 +153,19 @@ $(document).ready(function () {
     });
 
 
-    // Close panel
-    $('.panel-remove').click(function () {
-        $(this).closest('.panel').fadeOut(function () {
+    // Close card
+    $('.card-remove').click(function () {
+        $(this).closest('.card').fadeOut(function () {
             $(this).remove();
         });
     });
 
-    // Minimize panel
-    $('.panel-minimize').click(function () {
-        var parent = $(this).closest('.panel');
+    // Minimize card
+    $('.card-minimize').click(function () {
+        var parent = $(this).closest('.card');
 
-        parent.find('.panel-body').slideToggle(function () {
-            var panelHeading = parent.find('.panel-heading');
+        parent.find('.card-body').slideToggle(function () {
+            var panelHeading = parent.find('.card-heading');
 
             if (panelHeading.hasClass('min')) {
                 panelHeading.removeClass('min');
@@ -212,7 +212,7 @@ $(document).ready(function () {
         return curr_date + sup + " " + m_names[curr_month] + " " + curr_year;
     }
 
-    /* This function will reposition search form to the left panel when viewed
+    /* This function will reposition search form to the left card when viewed
      * in screens smaller than 767px and will return to top when viewed higher
      * than 767px
      */
@@ -240,7 +240,7 @@ $(document).ready(function () {
                 if ($('.leftpanel .nav-bracket').length == 2) {
                     $('.nav-horizontal').insertAfter('.nav-bracket:eq(1)');
                 } else {
-                    // only add to bottom if .nav-horizontal is not yet in the left panel
+                    // only add to bottom if .nav-horizontal is not yet in the left card
                     if ($('.leftpanel .nav-horizontal').length == 0)
                         $('.nav-horizontal').appendTo('.leftpanelinner');
                 }

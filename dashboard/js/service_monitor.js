@@ -1,5 +1,5 @@
 // Service Monitor - Dynamic Polling for AetherFlow
-// Replaces legacy panel.app_status.ajax.js
+// Replaces legacy card.app_status.ajax.js
 
 const POLLING_INTERVAL = 3000; // 3 seconds
 

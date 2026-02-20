@@ -1619,7 +1619,7 @@ var accordion = $.widget( "ui.accordion", {
 	_getCreateEventData: function() {
 		return {
 			header: this.active,
-			panel: !this.active.length ? $() : this.active.next()
+			card: !this.active.length ? $() : this.active.next()
 		};
 	},
 
@@ -1695,7 +1695,7 @@ var accordion = $.widget( "ui.accordion", {
 
 		this._super( key, value );
 
-		// setting collapsible: false while collapsed; open first panel
+		// setting collapsible: false while collapsed; open first card
 		if ( key === "collapsible" && !value && this.options.active === false ) {
 			this._activate( 0 );
 		}
@@ -1767,24 +1767,24 @@ var accordion = $.widget( "ui.accordion", {
 		var options = this.options;
 		this._processPanels();
 
-		// was collapsed or no panel
+		// was collapsed or no card
 		if ( ( options.active === false && options.collapsible === true ) || !this.headers.length ) {
 			options.active = false;
 			this.active = $();
 		// active false only when collapsible is true
 		} else if ( options.active === false ) {
 			this._activate( 0 );
-		// was active, but active panel is gone
+		// was active, but active card is gone
 		} else if ( this.active.length && !$.contains( this.element[ 0 ], this.active[ 0 ] ) ) {
-			// all remaining panel are disabled
+			// all remaining card are disabled
 			if ( this.headers.length === this.headers.find(".ui-state-disabled").length ) {
 				options.active = false;
 				this.active = $();
-			// activate previous panel
+			// activate previous card
 			} else {
 				this._activate( Math.max( 0, options.active - 1 ) );
 			}
-		// was active, active panel still exists
+		// was active, active card still exists
 		} else {
 			// make sure active index is correct
 			options.active = this.headers.index( this.active );
@@ -1832,10 +1832,10 @@ var accordion = $.widget( "ui.accordion", {
 			.each(function() {
 				var header = $( this ),
 					headerId = header.uniqueId().attr( "id" ),
-					panel = header.next(),
-					panelId = panel.uniqueId().attr( "id" );
+					card = header.next(),
+					panelId = card.uniqueId().attr( "id" );
 				header.attr( "aria-controls", panelId );
-				panel.attr( "aria-labelledby", headerId );
+				card.attr( "aria-labelledby", headerId );
 			})
 			.next()
 				.attr( "role", "tabpanel" );
@@ -1907,7 +1907,7 @@ var accordion = $.widget( "ui.accordion", {
 	_activate: function( index ) {
 		var active = this._findActive( index )[ 0 ];
 
-		// trying to activate the already active panel
+		// trying to activate the already active card
 		if ( active === this.active[ 0 ] ) {
 			return;
 		}
@@ -2004,7 +2004,7 @@ var accordion = $.widget( "ui.accordion", {
 		var toShow = data.newPanel,
 			toHide = this.prevShow.length ? this.prevShow : data.oldPanel;
 
-		// handle activating a panel during the animation for another activation
+		// handle activating a card during the animation for another activation
 		this.prevShow.add( this.prevHide ).stop( true, true );
 		this.prevShow = toShow;
 		this.prevHide = toHide;
@@ -3888,7 +3888,7 @@ function Datepicker() {
 		altField: "", // Selector for an alternate field to store selected dates into
 		altFormat: "", // The date format to use for the alternate field
 		constrainInput: true, // The input is constrained by the current date format
-		showButtonPanel: false, // True to show button panel, false to not show it
+		showButtonPanel: false, // True to show button card, false to not show it
 		autoSize: false, // True to size the input for the date format, false to leave as is
 		disabled: false // The initial disabled state
 	};
@@ -15421,7 +15421,7 @@ var tabs = $.widget( "ui.tabs", {
 	_getCreateEventData: function() {
 		return {
 			tab: this.active,
-			panel: !this.active.length ? $() : this._getPanelForTab( this.active )
+			card: !this.active.length ? $() : this._getPanelForTab( this.active )
 		};
 	},
 
@@ -15554,7 +15554,7 @@ var tabs = $.widget( "ui.tabs", {
 
 		if ( key === "collapsible" ) {
 			this.element.toggleClass( "ui-tabs-collapsible", value );
-			// Setting collapsible: false while collapsed; open first panel
+			// Setting collapsible: false while collapsed; open first card
 			if ( !value && this.options.active === false ) {
 				this._activate( 0 );
 			}
@@ -15691,7 +15691,7 @@ var tabs = $.widget( "ui.tabs", {
 		this.panels = $();
 
 		this.anchors.each(function( i, anchor ) {
-			var selector, panel, panelId,
+			var selector, card, panelId,
 				anchorId = $( anchor ).uniqueId().attr( "id" ),
 				tab = $( anchor ).closest( "li" ),
 				originalAriaControls = tab.attr( "aria-controls" );
@@ -15700,23 +15700,23 @@ var tabs = $.widget( "ui.tabs", {
 			if ( that._isLocal( anchor ) ) {
 				selector = anchor.hash;
 				panelId = selector.substring( 1 );
-				panel = that.element.find( that._sanitizeSelector( selector ) );
+				card = that.element.find( that._sanitizeSelector( selector ) );
 			// remote tab
 			} else {
 				// If the tab doesn't already have aria-controls,
 				// generate an id by using a throw-away element
 				panelId = tab.attr( "aria-controls" ) || $( {} ).uniqueId()[ 0 ].id;
 				selector = "#" + panelId;
-				panel = that.element.find( selector );
-				if ( !panel.length ) {
-					panel = that._createPanel( panelId );
-					panel.insertAfter( that.panels[ i - 1 ] || that.tablist );
+				card = that.element.find( selector );
+				if ( !card.length ) {
+					card = that._createPanel( panelId );
+					card.insertAfter( that.panels[ i - 1 ] || that.tablist );
 				}
-				panel.attr( "aria-live", "polite" );
+				card.attr( "aria-live", "polite" );
 			}
 
-			if ( panel.length) {
-				that.panels = that.panels.add( panel );
+			if ( card.length) {
+				that.panels = that.panels.add( card );
 			}
 			if ( originalAriaControls ) {
 				tab.data( "ui-tabs-aria-controls", originalAriaControls );
@@ -15725,11 +15725,11 @@ var tabs = $.widget( "ui.tabs", {
 				"aria-controls": panelId,
 				"aria-labelledby": anchorId
 			});
-			panel.attr( "aria-labelledby", anchorId );
+			card.attr( "aria-labelledby", anchorId );
 		});
 
 		this.panels
-			.addClass( "ui-tabs-panel ui-widget-content ui-corner-bottom" )
+			.addClass( "ui-tabs-card ui-widget-content ui-corner-bottom" )
 			.attr( "role", "tabpanel" );
 
 		// Avoid memory leaks (#10056)
@@ -15748,7 +15748,7 @@ var tabs = $.widget( "ui.tabs", {
 	_createPanel: function( id ) {
 		return $( "<div>" )
 			.attr( "id", id )
-			.addClass( "ui-tabs-panel ui-widget-content ui-corner-bottom" )
+			.addClass( "ui-tabs-card ui-widget-content ui-corner-bottom" )
 			.data( "ui-tabs-destroy", true );
 	},
 
@@ -15947,7 +15947,7 @@ var tabs = $.widget( "ui.tabs", {
 		var anchor,
 			active = this._findActive( index );
 
-		// trying to activate the already active panel
+		// trying to activate the already active card
 		if ( active[ 0 ] === this.active[ 0 ] ) {
 			return;
 		}
@@ -16003,7 +16003,7 @@ var tabs = $.widget( "ui.tabs", {
 			} else {
 				$( this )
 					.removeClass( "ui-state-default ui-state-active ui-state-disabled " +
-						"ui-corner-top ui-corner-bottom ui-widget-content ui-tabs-active ui-tabs-panel" )
+						"ui-corner-top ui-corner-bottom ui-widget-content ui-tabs-active ui-tabs-card" )
 					.removeAttr( "tabIndex" )
 					.removeAttr( "aria-live" )
 					.removeAttr( "aria-busy" )
@@ -16084,10 +16084,10 @@ var tabs = $.widget( "ui.tabs", {
 		var that = this,
 			tab = this.tabs.eq( index ),
 			anchor = tab.find( ".ui-tabs-anchor" ),
-			panel = this._getPanelForTab( tab ),
+			card = this._getPanelForTab( tab ),
 			eventData = {
 				tab: tab,
-				panel: panel
+				card: card
 			},
 			complete = function( jqXHR, status ) {
 				if ( status === "abort" ) {
@@ -16095,7 +16095,7 @@ var tabs = $.widget( "ui.tabs", {
 				}
 
 				tab.removeClass( "ui-tabs-loading" );
-				panel.removeAttr( "aria-busy" );
+				card.removeAttr( "aria-busy" );
 
 				if ( jqXHR === that.xhr ) {
 					delete that.xhr;
@@ -16114,14 +16114,14 @@ var tabs = $.widget( "ui.tabs", {
 		// but as of 1.8, $.ajax() always returns a jqXHR object.
 		if ( this.xhr && this.xhr.statusText !== "canceled" ) {
 			tab.addClass( "ui-tabs-loading" );
-			panel.attr( "aria-busy", "true" );
+			card.attr( "aria-busy", "true" );
 
 			this.xhr
 				.done(function( response, status, jqXHR ) {
 					// support: jQuery <1.8
 					// http://bugs.jquery.com/ticket/11778
 					setTimeout(function() {
-						panel.html( response );
+						card.html( response );
 						that._trigger( "load", event, eventData );
 
 						complete( jqXHR, status );
