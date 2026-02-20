@@ -17,7 +17,7 @@
 
 # If not running interactively, don't do anything
 [ -z "$PS1" ] && return
-AETHERFLOW_VERSION=2.5.8
+AETHERFLOW_VERSION=3.0.1
 
 export TERM=xterm;TERM=xterm
 export PATH=$PATH:/usr/local/sbin:/usr/sbin:/sbin:/usr/local/bin:/usr/bin:/bin:/usr/local/games:/usr/games:/home/AetherFlow/.bin/:/usr/local/bin/AetherFlow/:/usr/local/bin/AetherFlow/package/:/usr/local/bin/AetherFlow/package/install/:/usr/local/bin/AetherFlow/package/remove/:/usr/local/bin/AetherFlow/plugin/:/usr/local/bin/AetherFlow/plugin/install/:/usr/local/bin/AetherFlow/plugin/remove/:/usr/local/bin/AetherFlow/system/:/usr/local/bin/AetherFlow/system/lang/

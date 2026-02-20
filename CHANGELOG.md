@@ -7,6 +7,21 @@ _Changelog updated February 18, 2026_
 * **Version**: Set to `v3.0.1`.
 * **System**: Initial Stable Release.
 
+### Security & Core Fixes (v3.0.1 Audit)
+* **Frontend/Backend Synchronization**:
+  * Transitioned all legacy toggle links from insecure `GET` to secure `POST` requests.
+  * Implemented `csrf-interceptor.js` to automatically attach CSRF tokens to legacy forms.
+  * Secured Gemini API proxy endpoint with CSRF middleware validation (`api/gemini.php`).
+* **UI/UX Refinements (Glassmorphism)**:
+  * Overhauled `slate_stone.css` with advanced backdrop blur, custom scrollbars, glowing borders, and improved accessibility (contrast).
+  * Removed deprecated "JMSolo" and donation assets from the `login.php` experience to complete the rebranding.
+* **Modernization Scaffolding**:
+  * Scaffolded Native Go API (`backend/main.go`) structured to read `/proc` directly.
+  * Scaffolded Native Next.js App (`frontend/src/app`) mirroring the Glassmorphism aesthetic for the upcoming complete dashboard rewrite.
+* **Installer Enhancements**:
+  * Corrected bash path detection resulting in execution failures during setup.
+  * Corrected binary case issues (e.g. `aetherflow` to `AetherFlow`) preventing package uninstalls from `data.php` hooks.
+
 ---
 
 ## CHANGELOG v3.0.0 - AetherFlow Modernization
