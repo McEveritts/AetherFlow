@@ -2,13 +2,10 @@
 
 $username = $_SESSION['user'] ?? '';
 
+require_once($_SERVER['DOCUMENT_ROOT'] . '/inc/SystemInterface.php');
 function processExists($processName, $username) {
-  $exists= false;
-  exec("ps axo user:20,pid,pcpu,pmem,vsz,rss,tty,stat,start,time,comm,cmd|grep " . escapeshellarg($username) . " | grep -iE " . escapeshellarg($processName) . " | grep -v grep", $pids);
-  if (count($pids) > 0) {
-    $exists = true;
-  }
-  return $exists;
+  $sys = \\AetherFlow\\Inc\\SystemInterface::getInstance();
+  return $sys->is_process_running($processName, $username);
 }
 
 $deluged = processExists("deluged",$username);

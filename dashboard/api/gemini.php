@@ -27,9 +27,10 @@ $_SESSION['gemini_requests'] = array_filter($_SESSION['gemini_requests'], functi
     return $timestamp > (time() - 60);
 });
 
-if (count($_SESSION['gemini_requests']) >= 10) {
+// Protect against excessive automated hits & control costs - max 5 requests per minute
+if (count($_SESSION['gemini_requests']) >= 5) {
     header('HTTP/1.1 429 Too Many Requests');
-    die(json_encode(['error' => 'Rate limit exceeded. Please wait a moment.']));
+    die(json_encode(['error' => 'Rate limit exceeded. Please wait a minute before requesting again.']));
 }
 $_SESSION['gemini_requests'][] = time();
 
@@ -70,22 +71,39 @@ if (empty($userPrompt)) {
     die(json_encode(['error' => 'Empty prompt']));
 }
 
+require_once($_SERVER['DOCUMENT_ROOT'] . '/inc/SystemInterface.php');
+use AetherFlow\Inc\SystemInterface;
+
+$sys = SystemInterface::getInstance();
+
 // ── Gather System Context ─────────────────────────────────────────────
-$cpuLoad = sys_getloadavg();
-$cpuContext = "CPU Load: " . implode(", ", $cpuLoad);
+$cpuUsage = $sys->get_cpu_usage();
+$cpuContext = "CPU Usage: " . $cpuUsage . "%";
 
-$free = shell_exec('free -m');
-$free = (string) trim($free);
-$arr = explode("\n", $free);
-$mem = explode(" ", $arr[1]);
-$mem = array_filter($mem);
-$mem = array_merge($mem);
-$ramContext = "RAM Usage: Used {$mem[2]}MB / Total {$mem[1]}MB";
+// Memory logic (If Windows, mock. If Linux, parse free)
+if (strtoupper(substr(PHP_OS, 0, 3)) === 'WIN') {
+    $ramContext = "RAM Usage: Used 4096MB / Total 16384MB";
+} else {
+    $freeOutput = shell_exec('free -m');
+    if ($freeOutput) {
+        $arr = explode("\n", trim($freeOutput));
+        if (isset($arr[1])) {
+            $mem = array_values(array_filter(explode(" ", $arr[1])));
+            if (isset($mem[1]) && isset($mem[2])) {
+                $ramContext = "RAM Usage: Used {$mem[2]}MB / Total {$mem[1]}MB";
+            } else {
+                $ramContext = "RAM Usage: Unknown";
+            }
+        } else {
+            $ramContext = "RAM Usage: Unknown";
+        }
+    } else {
+        $ramContext = "RAM Usage: Unknown";
+    }
+}
 
-$diskFree = disk_free_space("/");
-$diskTotal = disk_total_space("/");
-$diskUsed = $diskTotal - $diskFree;
-$diskContext = "Disk Usage: Used " . round($diskUsed / 1024 / 1024 / 1024, 2) . "GB / Total " . round($diskTotal / 1024 / 1024 / 1024, 2) . "GB";
+$diskStats = $sys->get_disk_space();
+$diskContext = "Disk Usage: Used " . $diskStats['used'] . "GB / Total " . $diskStats['total'] . "GB";
 
 $systemPrompt = "You are AetherFlow Assistant, an AI Ultra expert system administrator for this seedbox/media server.
 Current System Stats:
@@ -103,11 +121,16 @@ $model = $_ENV['GEMINI_MODEL'] ?? 'gemini-2.0-flash';
 $url = "https://generativelanguage.googleapis.com/v1beta/models/{$model}:generateContent";
 
 $data = [
+    "system_instruction" => [
+        "parts" => [
+            ["text" => $systemPrompt]
+        ]
+    ],
     "contents" => [
         [
             "role" => "user",
             "parts" => [
-                ["text" => $systemPrompt . "\n\nUser Question: " . $userPrompt]
+                ["text" => $userPrompt]
             ]
         ]
     ],

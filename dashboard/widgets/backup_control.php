@@ -1,18 +1,18 @@
 <!-- BACKUP CONTROL WIDGET -->
-<div class="panel panel-main panel-inverse">
-    <div class="panel-heading">
-        <h4 class="panel-title">Backup & Recovery</h4>
-        <div class="panel-btns">
+<div class="card card-main card-inverse">
+    <div class="card-header">
+        <h4 class="card-title">Backup & Recovery</h4>
+        <div class="card-btns">
             <button class="btn btn-xs btn-primary" onclick="createBackup()">Create Snapshot</button>
         </div>
     </div>
-    <div class="panel-body">
+    <div class="card-body">
         <div class="table-responsive">
             <table class="table table-hover nomargin">
                 <thead>
                     <tr>
                         <th>Snapshot Name</th>
-                        <th class="text-right">Actions</th>
+                        <th class="text-end">Actions</th>
                     </tr>
                 </thead>
                 <tbody id="backup-list">
@@ -37,7 +37,7 @@
 
                     rows += '<tr>' +
                         '<td><i class="fa fa-archive text-warning"></i> ' + line + '</td>' +
-                        '<td class="text-right">' +
+                        '<td class="text-end">' +
                         '<button class="btn btn-xs btn-success btn-icon" onclick="restoreBackup(\'' + filename + '\')" title="Restore"><i class="fa fa-rotate-left"></i></button> ' +
                         '<button class="btn btn-xs btn-danger btn-icon" onclick="deleteBackup(\'' + filename + '\')" title="Delete"><i class="fa fa-trash"></i></button>' +
                         '</td>' +
@@ -54,7 +54,7 @@
         if (!confirm('Create a new system snapshot? This may take a few moments.')) return;
 
         // UI Feedback
-        var btn = $('.panel-btns button');
+        var btn = $('.card-btns button');
         var originalText = btn.text();
         btn.text('Creating...').prop('disabled', true);
 

@@ -115,10 +115,10 @@ function write_data_table_s($caption, $tab) {
   print "<table class=\"table table-hover table-default nomargin\" width=\"100%\" cellspacing=\"0\">";
   print "<thead>";
   print "<tr>";
-  print "<th class=\"text-right\" style=\"width:25%;\">$caption</th>";
-  print "<th class=\"text-right\" style=\"width:24.5%;\">".T('Out')."</th>";
-  print "<th class=\"text-left\" style=\"width:24.5%;\">".T('In')."</th>";
-  print "<th class=\"text-left\" style=\"width:24.5%;\">".T('Total')."</th>";
+  print "<th class=\"text-end\" style=\"width:25%;\">$caption</th>";
+  print "<th class=\"text-end\" style=\"width:24.5%;\">".T('Out')."</th>";
+  print "<th class=\"text-start\" style=\"width:24.5%;\">".T('In')."</th>";
+  print "<th class=\"text-start\" style=\"width:24.5%;\">".T('Total')."</th>";
   print "</tr>";
   print "</thead>";
   print "<tbody>\n";
@@ -147,10 +147,10 @@ function write_data_table_t($caption, $tab) {
   print "<table class=\"table table-hover table-default nomargin\" width=\"100%\" cellspacing=\"0\">";
   print "<thead>";
   print "<tr>";
-  print "<th class=\"text-right\" style=\"width:25%;\">$caption</th>";
-  print "<th class=\"text-right\" style=\"width:24.5%;\">".T('Out')."</th>";
-  print "<th class=\"text-left\" style=\"width:24.5%;\">".T('In')."</th>";
-  print "<th class=\"text-left\" style=\"width:24.5%;\">".T('Total')."</th>";
+  print "<th class=\"text-end\" style=\"width:25%;\">$caption</th>";
+  print "<th class=\"text-end\" style=\"width:24.5%;\">".T('Out')."</th>";
+  print "<th class=\"text-start\" style=\"width:24.5%;\">".T('In')."</th>";
+  print "<th class=\"text-start\" style=\"width:24.5%;\">".T('Total')."</th>";
   print "</tr>";
   print "</thead>";
 

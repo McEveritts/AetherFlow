@@ -1,16 +1,16 @@
 <?php
-include('..inc/config.php');
-include('..inc/panel.header.php');
-include('..inc/panel.menu.php');
+include('../inc/config.php');
+include('../inc/card.header.php');
+include('../inc/card.menu.php');
 ?>
 
 
 <!--PACKAGE MANAGEMENT CENTER-->
-<div class="panel panel-main panel-inverse">
-  <div class="panel-heading">
-    <h4 class="panel-title"><?php echo T('PACKAGE_MANAGEMENT_CENTER'); ?></h4>
+<div class="card card-main card-inverse">
+  <div class="card-header">
+    <h4 class="card-title"><?php echo T('PACKAGE_MANAGEMENT_CENTER'); ?></h4>
   </div>
-  <div class="panel-body text-center" style="padding:0;">
+  <div class="card-body text-center" style="padding:0;">
     <div class="alert alert-danger">
       <button type="button" class="close" data-dismiss="alert" aria-hidden="true">&times;</button>
       <div align="center"><?php echo T('PMC_NOTICE_TXT'); ?></div>
@@ -426,4 +426,4 @@ include('..inc/panel.menu.php');
       </table>
     </div>
   </div>
-</div><!-- package center panel -->
+</div><!-- package center card -->
