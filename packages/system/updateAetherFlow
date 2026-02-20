@@ -35,26 +35,22 @@ function _logcheck() {
 
 function _directorycheck() {
   if [[ ! -f /install/.developer.lock ]]; then
-    if [[ -d /etc/AetherFlow ]]; then
-      #rm -rf /etc/AetherFlow
-      #git clone https://github.com/McEveritts/AetherFlow /etc/AetherFlow
-      cd /etc/AetherFlow || { echo "Critical: /etc/AetherFlow not found!"; exit 1; }
+    if [[ -d /opt/MediaNexus ]]; then
+      cd /opt/MediaNexus || { echo "Critical: /opt/MediaNexus not found!"; exit 1; }
       git checkout master >>"${OUTTO}" 2>&1;
       git reset --hard origin/master
       git pull >>"${OUTTO}" 2>&1;
     else
-      git clone https://github.com/McEveritts/AetherFlow /etc/AetherFlow
+      git clone https://github.com/McEveritts/AetherFlow /opt/MediaNexus
     fi
   else
-    if [[ -d /etc/AetherFlow ]]; then
-      #rm -rf /etc/AetherFlow
-      #git clone --branch "development" https://github.com/McEveritts/AetherFlow /etc/AetherFlow
-      cd /etc/AetherFlow || { echo "Critical: /etc/AetherFlow not found!"; exit 1; }
+    if [[ -d /opt/MediaNexus ]]; then
+      cd /opt/MediaNexus || { echo "Critical: /opt/MediaNexus not found!"; exit 1; }
       git checkout development >>"${OUTTO}" 2>&1;
       git reset --hard origin/development
       git pull >>"${OUTTO}" 2>&1;
     else
-      git clone --branch "development" https://github.com/McEveritts/AetherFlow /etc/AetherFlow
+      git clone --branch "development" https://github.com/McEveritts/AetherFlow /opt/MediaNexus
     fi
   fi
 }
@@ -62,7 +58,7 @@ function _directorycheck() {
 function _downloadrepos() {
 if [[ ! -f /install/.developer.lock ]]; then
   echo >>"${OUTTO}" 2>&1;
-  cd /etc/AetherFlow || { echo "Critical: /etc/AetherFlow not found!"; exit 1; }
+  cd /opt/MediaNexus || { echo "Critical: /opt/MediaNexus not found!"; exit 1; }
   git checkout master >>"${OUTTO}" 2>&1;
   git pull >>"${OUTTO}" 2>&1;
   echo
@@ -70,7 +66,7 @@ if [[ ! -f /install/.developer.lock ]]; then
 else
 
   echo >>"${OUTTO}" 2>&1;
-  cd /etc/AetherFlow || { echo "Critical: /etc/AetherFlow not found!"; exit 1; }
+  cd /opt/MediaNexus || { echo "Critical: /opt/MediaNexus not found!"; exit 1; }
   git checkout development >>"${OUTTO}" 2>&1;
   git pull >>"${OUTTO}" 2>&1;
   echo
@@ -367,6 +363,31 @@ function _perms() {
   chmod -R 755 ${rutorrent}plugins/filemanager/scripts
 }
 
+function _buildmodernstack() {
+    # Compile Go API
+    if [ -d "/opt/MediaNexus/backend" ]; then
+        cd /opt/MediaNexus/backend
+        export GOOS=linux
+        export GOARCH=amd64
+        /usr/local/go/bin/go build -o medianexus-api main.go >>"${OUTTO}" 2>&1
+        
+        # Restart Go API via PM2
+        pm2 restart medianexus-api || pm2 start ./medianexus-api --name "medianexus-api" >>"${OUTTO}" 2>&1
+    fi
+
+    # Build Next.js Frontend
+    if [ -d "/opt/MediaNexus/frontend" ]; then
+        cd /opt/MediaNexus/frontend
+        npm install >>"${OUTTO}" 2>&1
+        npm run build >>"${OUTTO}" 2>&1
+        
+        # Restart Next.js via PM2
+        pm2 restart medianexus-frontend || pm2 start npm --name "medianexus-frontend" -- start >>"${OUTTO}" 2>&1
+    fi
+
+    pm2 save >>"${OUTTO}" 2>&1
+}
+
 function _fin() {
   service apache2 reload >/dev/null 2>&1
   source ~/.profile
@@ -436,13 +457,13 @@ function _updatecronfile() {
 ################################################################################
 
 
-local_setup=/etc/AetherFlow/setup/
-local_packages=/etc/AetherFlow/packages/
-local_rutorrent=/etc/AetherFlow/rutorrent/
-local_rplugins=/etc/AetherFlow/rtplugins/
-local_dashboard=/etc/AetherFlow/dashboard/
-local_themes=/etc/AetherFlow/themes/
-local_rtheme=/etc/AetherFlow/rttheme/
+local_setup=/opt/MediaNexus/setup/
+local_packages=/opt/MediaNexus/packages/
+local_rutorrent=/opt/MediaNexus/rutorrent/
+local_rplugins=/opt/MediaNexus/rtplugins/
+local_dashboard=/opt/MediaNexus/dashboard/
+local_themes=/opt/MediaNexus/themes/
+local_rtheme=/opt/MediaNexus/rttheme/
 
 IFACE=$(ip link show|grep -i broadcast|grep -m1 UP|cut -d: -f 2|cut -d@ -f 1|sed -e 's/ //g');
 A1=$(cat /etc/apache2/master.txt) >> /dev/null 2>&1
@@ -465,6 +486,7 @@ echo "Checking apache aliases ... " >>"${OUTTO}" 2>&1;_updateapachealias;echo
 echo "Updating the rutorrent directory ... " >>"${OUTTO}" 2>&1;_updaterutorrent;echo
 echo "Updating all rutorrent plugins ... " >>"${OUTTO}" 2>&1;_updaterutorrent-plugins;echo
 echo "Updating the AetherFlow Dashboard ... " >>"${OUTTO}" 2>&1;_updatedashboard;echo
+echo "Building the Modern Go API and Next.js Frontend ... " >>"${OUTTO}" 2>&1;_buildmodernstack;echo
 echo "Updating club-AetherFlow ruTorrent Theme ... " >>"${OUTTO}" 2>&1;_updaterttheme;echo
 echo "Updating the AetherFlow Sudoers template ... " >>"${OUTTO}" 2>&1;_updatesudo;echo
 _updateznc
