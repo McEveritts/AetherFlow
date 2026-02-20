@@ -4,7 +4,7 @@ $username = $_SESSION['user'] ?? '';
 
 require_once($_SERVER['DOCUMENT_ROOT'] . '/inc/SystemInterface.php');
 function processExists($processName, $username) {
-  $sys = \\AetherFlow\\Inc\\SystemInterface::getInstance();
+  $sys = \AetherFlow\Inc\SystemInterface::getInstance();
   return $sys->is_process_running($processName, $username);
 }
 
