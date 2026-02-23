@@ -1,4 +1,4 @@
-import { Sparkles, Settings, Bot, User, ChevronRight, Lock } from 'lucide-react';
+import { Sparkles, Settings, Bot, User, ChevronRight, Lock, ChevronDown } from 'lucide-react';
 import { TabId } from '@/types/dashboard';
 import { useState, useRef, useEffect, FormEvent } from 'react';
 
@@ -11,19 +11,43 @@ interface ChatMessage {
     text: string;
 }
 
+const AI_MODELS = [
+    { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro', tier: 'latest' },
+    { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash', tier: 'latest' },
+    { id: 'gemini-2.0-flash', name: 'Gemini 2.0 Flash', tier: 'stable' },
+    { id: 'gemini-1.5-pro', name: 'Gemini 1.5 Pro', tier: 'stable' },
+    { id: 'gemini-1.5-flash', name: 'Gemini 1.5 Flash', tier: 'stable' },
+];
+
 export default function AiChatTab({ setActiveTab }: AiChatTabProps) {
     const [messages, setMessages] = useState<ChatMessage[]>([
         { role: 'assistant', text: "Hello! I am FlowAI, your localized infrastructure management assistant. I'm connected to your system metrics, docker containers, and media pipelines.\n\nHow can I help you today?" }
     ]);
     const [input, setInput] = useState('');
     const [isTyping, setIsTyping] = useState(false);
+    const [selectedModel, setSelectedModel] = useState('gemini-2.5-pro');
+    const [showModelPicker, setShowModelPicker] = useState(false);
     const scrollRef = useRef<HTMLDivElement>(null);
+    const modelPickerRef = useRef<HTMLDivElement>(null);
 
     useEffect(() => {
         if (scrollRef.current) {
             scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
         }
     }, [messages, isTyping]);
+
+    // Close model picker when clicking outside
+    useEffect(() => {
+        const handleClickOutside = (e: MouseEvent) => {
+            if (modelPickerRef.current && !modelPickerRef.current.contains(e.target as Node)) {
+                setShowModelPicker(false);
+            }
+        };
+        document.addEventListener('mousedown', handleClickOutside);
+        return () => document.removeEventListener('mousedown', handleClickOutside);
+    }, []);
+
+    const currentModel = AI_MODELS.find(m => m.id === selectedModel) || AI_MODELS[0];
 
     const handleSendMessage = async (e?: FormEvent) => {
         if (e) e.preventDefault();
@@ -39,7 +63,7 @@ export default function AiChatTab({ setActiveTab }: AiChatTabProps) {
             const res = await fetch('/api/ai/chat', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ message: text, history: messages })
+                body: JSON.stringify({ message: text, history: messages, model: selectedModel })
             });
 
             if (!res.ok) throw new Error('Failed to get response');
@@ -76,13 +100,57 @@ export default function AiChatTab({ setActiveTab }: AiChatTabProps) {
                         <h2 className="text-lg font-bold text-slate-200 tracking-tight">FlowAI Assistant</h2>
                         <div className="flex items-center gap-2 mt-0.5">
                             <span className="relative flex h-1.5 w-1.5"><span className="absolute inline-flex h-full w-full rounded-full bg-indigo-400 opacity-75"></span><span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-indigo-500"></span></span>
-                            <span className="text-xs text-slate-400 font-medium tracking-wide">Ready via Selected Google AI Model</span>
+                            <span className="text-xs text-slate-400 font-medium tracking-wide">Ready · {currentModel.name}</span>
                         </div>
                     </div>
                 </div>
-                <button onClick={() => setActiveTab('settings')} className="p-2 text-slate-400 hover:text-white hover:bg-white/10 rounded-lg transition-colors">
-                    <Settings size={18} />
-                </button>
+                <div className="flex items-center gap-2">
+                    {/* Model Selector */}
+                    <div className="relative" ref={modelPickerRef}>
+                        <button
+                            onClick={() => setShowModelPicker(!showModelPicker)}
+                            className="flex items-center gap-2 px-3 py-2 bg-white/[0.04] border border-white/10 rounded-xl text-sm text-slate-300 hover:bg-white/[0.08] hover:border-indigo-500/30 transition-all"
+                        >
+                            <Sparkles size={14} className="text-indigo-400" />
+                            <span className="font-medium">{currentModel.name}</span>
+                            <ChevronDown size={14} className={`text-slate-500 transition-transform ${showModelPicker ? 'rotate-180' : ''}`} />
+                        </button>
+
+                        {showModelPicker && (
+                            <div className="absolute right-0 top-full mt-2 w-64 bg-slate-900/95 backdrop-blur-xl border border-white/10 rounded-xl shadow-2xl z-50 overflow-hidden">
+                                <div className="p-2 border-b border-white/[0.05]">
+                                    <p className="text-[10px] uppercase tracking-wider text-slate-500 font-bold px-2 py-1">Select Model</p>
+                                </div>
+                                <div className="p-1.5">
+                                    {AI_MODELS.map((model) => (
+                                        <button
+                                            key={model.id}
+                                            onClick={() => { setSelectedModel(model.id); setShowModelPicker(false); }}
+                                            className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg text-sm transition-all ${selectedModel === model.id
+                                                    ? 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/30'
+                                                    : 'text-slate-300 hover:bg-white/[0.06] border border-transparent'
+                                                }`}
+                                        >
+                                            <div className="flex items-center gap-2.5">
+                                                <div className={`h-2 w-2 rounded-full ${selectedModel === model.id ? 'bg-indigo-400' : 'bg-slate-600'}`}></div>
+                                                <span className="font-medium">{model.name}</span>
+                                            </div>
+                                            <span className={`text-[10px] uppercase tracking-wider font-bold px-1.5 py-0.5 rounded ${model.tier === 'latest'
+                                                    ? 'bg-indigo-500/20 text-indigo-400'
+                                                    : 'bg-slate-700/50 text-slate-500'
+                                                }`}>
+                                                {model.tier}
+                                            </span>
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                    <button onClick={() => setActiveTab('settings')} className="p-2 text-slate-400 hover:text-white hover:bg-white/10 rounded-lg transition-colors">
+                        <Settings size={18} />
+                    </button>
+                </div>
             </div>
 
             {/* Chat Area */}

@@ -49,13 +49,14 @@ func InitDB() {
 	_, err = DB.Exec(`
 		CREATE TABLE IF NOT EXISTS settings (
 			id INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
-			ai_model TEXT DEFAULT 'gemini-1.5-ultra',
+			ai_model TEXT DEFAULT 'gemini-2.5-pro',
 			system_prompt TEXT DEFAULT 'You are FlowAI, a highly intelligent infrastructure assistant connected to a local Next.js + Go Nexus environment. Always prioritize safe and performant configurations.',
 			language TEXT DEFAULT 'en',
 			timezone TEXT DEFAULT 'UTC',
 			update_channel TEXT DEFAULT 'stable',
 			default_dashboard TEXT DEFAULT 'overview',
 			setup_completed BOOLEAN DEFAULT 0,
+			gemini_api_key TEXT DEFAULT '',
 			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 		)
 	`)
@@ -65,6 +66,7 @@ func InitDB() {
 
 	// Migrate existing database to have setup_completed column if it didn't exist
 	_, _ = DB.Exec(`ALTER TABLE settings ADD COLUMN setup_completed BOOLEAN DEFAULT 0;`)
+	_, _ = DB.Exec(`ALTER TABLE settings ADD COLUMN gemini_api_key TEXT DEFAULT '';`)
 
 	// Ensure there is at least one row
 	DB.Exec(`INSERT OR IGNORE INTO settings (id) VALUES (1)`)

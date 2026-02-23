@@ -21,6 +21,7 @@ type ChatMessage struct {
 type ChatRequest struct {
 	Message string        `json:"message" binding:"required"`
 	History []ChatMessage `json:"history"`
+	Model   string        `json:"model"`
 }
 
 type ChatResponse struct {
@@ -34,20 +35,29 @@ func handleAiChat(c *gin.Context) {
 		return
 	}
 
-	apiKey := os.Getenv("GEMINI_API_KEY")
+	// Try to get API key from database settings first, then fall back to env
+	apiKey := ""
+	db.DB.QueryRow("SELECT COALESCE(gemini_api_key, '') FROM settings WHERE id = 1").Scan(&apiKey)
 	if apiKey == "" {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "GEMINI_API_KEY is not configured in .env"})
+		apiKey = os.Getenv("GEMINI_API_KEY")
+	}
+	if apiKey == "" {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Gemini API key not configured. Set it in Settings → FlowAI Engine."})
 		return
 	}
 
-	// Fetch Settings
+	// Fetch Settings for default model and system prompt
 	var aiModel, systemPrompt string
 	err := db.DB.QueryRow("SELECT ai_model, system_prompt FROM settings WHERE id = 1").Scan(&aiModel, &systemPrompt)
 	if err != nil {
-		// Fallbacks if db is unreachable
 		aiModel = "gemini-2.5-pro"
 		systemPrompt = "You are FlowAI, a helpful server assistant."
 		log.Printf("Warning: Using fallback AI settings. DB Error: %v", err)
+	}
+
+	// Per-request model override from the chat selector
+	if req.Model != "" {
+		aiModel = req.Model
 	}
 
 	ctx := context.Background()

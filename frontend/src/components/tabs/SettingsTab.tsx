@@ -1,4 +1,4 @@
-import { Settings, Sparkles, ChevronRight, DownloadCloud, AlertCircle } from 'lucide-react';
+import { Settings, Sparkles, ChevronRight, DownloadCloud, AlertCircle, Eye, EyeOff, Key } from 'lucide-react';
 import { useState, FormEvent } from 'react';
 import useSWR from 'swr';
 import { useToast } from '@/contexts/ToastContext';
@@ -7,8 +7,10 @@ const fetcher = (url: string) => fetch(url).then((res) => res.json());
 
 export default function SettingsTab() {
     const { addToast } = useToast();
-    const [model, setModel] = useState('gemini-1.5-ultra');
+    const [model, setModel] = useState('gemini-2.5-pro');
     const [prompt, setPrompt] = useState("You are FlowAI, a highly intelligent infrastructure assistant connected to a local Next.js + Go Nexus environment. Always prioritize safe and performant configurations.");
+    const [apiKey, setApiKey] = useState('');
+    const [showApiKey, setShowApiKey] = useState(false);
     const [isSaving, setIsSaving] = useState(false);
     const [isUpdating, setIsUpdating] = useState(false);
     const [updateMessage, setUpdateMessage] = useState('');
@@ -16,7 +18,7 @@ export default function SettingsTab() {
     const { data: updateData, error: updateError } = useSWR(
         '/api/system/update/check',
         fetcher,
-        { refreshInterval: 60000 } // Check every minute
+        { refreshInterval: 60000 }
     );
 
     const { data: settingsData } = useSWR(
@@ -27,6 +29,7 @@ export default function SettingsTab() {
             onSuccess: (data) => {
                 if (data.aiModel) setModel(data.aiModel);
                 if (data.systemPrompt) setPrompt(data.systemPrompt);
+                if (data.geminiApiKey) setApiKey(data.geminiApiKey);
             }
         }
     );
@@ -39,6 +42,7 @@ export default function SettingsTab() {
             const payload = {
                 aiModel: model,
                 systemPrompt: prompt,
+                geminiApiKey: apiKey,
                 language: settingsData?.language || 'en',
                 timezone: settingsData?.timezone || 'UTC',
                 updateChannel: settingsData?.updateChannel || 'stable',
@@ -102,23 +106,57 @@ export default function SettingsTab() {
                                 <Sparkles size={18} className="text-indigo-400" /> FlowAI Engine
                             </h3>
                             <div className="space-y-6">
+                                {/* API Key */}
                                 <div>
-                                    <label className="block text-sm font-semibold text-slate-300 mb-2">Active Language Model (Google OAuth)</label>
+                                    <label className="block text-sm font-semibold text-slate-300 mb-2 flex items-center gap-2">
+                                        <Key size={14} className="text-amber-400" /> Gemini API Key
+                                    </label>
+                                    <div className="relative">
+                                        <input
+                                            type={showApiKey ? 'text' : 'password'}
+                                            value={apiKey}
+                                            onChange={(e) => setApiKey(e.target.value)}
+                                            placeholder="Enter your Gemini API key..."
+                                            className="w-full bg-slate-900 border border-white/10 rounded-xl px-4 py-3.5 pr-12 text-slate-200 text-sm focus:outline-none focus:border-indigo-500/50 transition-colors font-mono"
+                                        />
+                                        <button
+                                            type="button"
+                                            onClick={() => setShowApiKey(!showApiKey)}
+                                            className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300 transition-colors"
+                                        >
+                                            {showApiKey ? <EyeOff size={16} /> : <Eye size={16} />}
+                                        </button>
+                                    </div>
+                                    <p className="text-xs text-slate-500 mt-2">
+                                        Get your key from <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer" className="text-indigo-400 hover:text-indigo-300 underline">Google AI Studio</a>. Your Ultra plan key gives access to all models.
+                                    </p>
+                                </div>
+
+                                {/* Model Selector */}
+                                <div>
+                                    <label className="block text-sm font-semibold text-slate-300 mb-2">Default Language Model</label>
                                     <div className="relative">
                                         <select
                                             value={model}
                                             onChange={(e) => setModel(e.target.value)}
                                             className="w-full bg-slate-900 border border-white/10 rounded-xl px-4 py-3.5 text-slate-200 text-sm focus:outline-none focus:border-indigo-500/50 transition-colors appearance-none cursor-pointer"
                                         >
-                                            <option value="gemini-1.5-ultra">Gemini 1.5 Ultra (Google OAuth Connected)</option>
-                                            <option value="gemini-1.5-pro">Gemini 1.5 Pro (Google OAuth Connected)</option>
-                                            <option value="gemini-1.0-pro">Gemini 1.0 Pro</option>
+                                            <optgroup label="Latest">
+                                                <option value="gemini-2.5-pro">Gemini 2.5 Pro</option>
+                                                <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
+                                            </optgroup>
+                                            <optgroup label="Stable">
+                                                <option value="gemini-2.0-flash">Gemini 2.0 Flash</option>
+                                                <option value="gemini-1.5-pro">Gemini 1.5 Pro</option>
+                                                <option value="gemini-1.5-flash">Gemini 1.5 Flash</option>
+                                            </optgroup>
                                         </select>
                                         <ChevronRight size={16} className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-500 rotate-90 pointer-events-none" />
                                     </div>
-                                    <p className="text-xs text-slate-500 mt-2">Select the underlying model for FlowAI computations. Ultra provides best performance for complex log analysis.</p>
+                                    <p className="text-xs text-slate-500 mt-2">Default model for FlowAI. Can be overridden per-chat via the model selector.</p>
                                 </div>
 
+                                {/* System Prompt */}
                                 <div>
                                     <label className="block text-sm font-semibold text-slate-300 mb-2">Default System Prompt</label>
                                     <textarea
