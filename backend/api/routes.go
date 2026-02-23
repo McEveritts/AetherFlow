@@ -100,9 +100,10 @@ func getServices(c *gin.Context) {
 func controlService(c *gin.Context) {
 	serviceName := c.Param("name")
 
-	// Payload should contain { action: "start" | "stop" | "restart" }
 	var req struct {
-		Action string `json:"action" binding:"required"`
+		Action    string `json:"action" binding:"required"`
+		ManagedBy string `json:"managed_by"` // "pm2" or "systemd" (default)
+		Process   string `json:"process"`    // actual process/service name
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -110,7 +111,19 @@ func controlService(c *gin.Context) {
 		return
 	}
 
-	err := services.ControlService(serviceName, req.Action)
+	// Use the process name if provided, otherwise use the URL param
+	target := req.Process
+	if target == "" {
+		target = serviceName
+	}
+
+	var err error
+	if req.ManagedBy == "pm2" {
+		err = services.ControlPM2Service(target, req.Action)
+	} else {
+		err = services.ControlService(target, req.Action)
+	}
+
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to " + req.Action + " service: " + err.Error()})
 		return

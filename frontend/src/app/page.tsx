@@ -54,7 +54,7 @@ export default function Dashboard() {
       );
     }
 
-    if (isError || !metrics || !services) {
+    if (isError || !metrics) {
       return (
         <div className="flex items-center justify-center h-full min-h-[50vh]">
           <div className="bg-red-500/10 border border-red-500/20 p-8 rounded-2xl flex flex-col items-center gap-4 text-center max-w-md backdrop-blur-md">
@@ -71,7 +71,7 @@ export default function Dashboard() {
       case 'overview':
         return <OverviewTab metrics={metrics} hardware={hardware} />;
       case 'services':
-        return <ServicesTab services={services} onDeployApp={() => handleTabChange('marketplace')} />;
+        return <ServicesTab />;
       case 'marketplace':
         return <MarketplaceTab />;
       case 'ai':
