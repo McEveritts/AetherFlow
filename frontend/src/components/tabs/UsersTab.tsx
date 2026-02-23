@@ -4,6 +4,7 @@ import { useToast } from '@/contexts/ToastContext';
 import { User } from '@/contexts/AuthContext';
 import { Shield, ShieldAlert, Trash2, Users, Check, X } from 'lucide-react';
 import SkeletonBox from '@/components/layout/SkeletonBox';
+import Image from 'next/image';
 
 const fetcher = (url: string) => {
     // Assuming cookies are sent automatically for same-origin if not we would need to pass credentials
@@ -38,7 +39,7 @@ export default function UsersTab() {
             } else {
                 addToast(data.error || 'Failed to update role', 'error');
             }
-        } catch (err) {
+        } catch (_err) {
             addToast('Network error updating role.', 'error');
         } finally {
             setActionLoading(null);
@@ -63,7 +64,7 @@ export default function UsersTab() {
             } else {
                 addToast(data.error || 'Failed to delete user', 'error');
             }
-        } catch (err) {
+        } catch (_err) {
             addToast('Network error deleting user.', 'error');
         } finally {
             setActionLoading(null);
@@ -139,7 +140,7 @@ export default function UsersTab() {
                                     <td className="p-4">
                                         <div className="flex items-center gap-3">
                                             {user.avatar_url ? (
-                                                <img src={user.avatar_url} alt="" className="w-8 h-8 rounded-full border border-white/10 shrink-0" />
+                                                <Image src={user.avatar_url} alt="" width={32} height={32} className="rounded-full border border-white/10 shrink-0" />
                                             ) : (
                                                 <div className="w-8 h-8 rounded-full bg-slate-800 border border-white/10 flex items-center justify-center shrink-0">
                                                     <Users size={14} className="text-slate-500" />
@@ -153,8 +154,8 @@ export default function UsersTab() {
                                     </td>
                                     <td className="p-4">
                                         <div className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold border ${user.role === 'admin'
-                                                ? 'bg-amber-500/10 text-amber-400 border-amber-500/20'
-                                                : 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
+                                            ? 'bg-amber-500/10 text-amber-400 border-amber-500/20'
+                                            : 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
                                             }`}>
                                             {user.role === 'admin' ? <Shield size={12} /> : <Users size={12} />}
                                             {user.role.toUpperCase()}
@@ -167,8 +168,8 @@ export default function UsersTab() {
                                                 disabled={actionLoading === user.id}
                                                 title={user.role === 'admin' ? 'Demote to User' : 'Promote to Admin'}
                                                 className={`p-2 rounded-lg border transition-all ${user.role === 'admin'
-                                                        ? 'bg-slate-900 border-white/10 text-slate-400 hover:text-white hover:bg-slate-800'
-                                                        : 'bg-indigo-500/10 border-indigo-500/20 text-indigo-400 hover:bg-indigo-500/20 hover:text-indigo-300'
+                                                    ? 'bg-slate-900 border-white/10 text-slate-400 hover:text-white hover:bg-slate-800'
+                                                    : 'bg-indigo-500/10 border-indigo-500/20 text-indigo-400 hover:bg-indigo-500/20 hover:text-indigo-300'
                                                     }`}
                                             >
                                                 {user.role === 'admin' ? <X size={16} /> : <Check size={16} />}

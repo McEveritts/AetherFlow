@@ -287,35 +287,20 @@ EOF
 # scgi enable function (22-nixed)
 # function _scgi() { ln -s /etc/apache2/mods-available/scgi.load /etc/apache2/mods-enabled/scgi.load >>"${OUTTO}" 2>&1 ; }
 
-
-
-# function to install rutorrent
-function _rutorrent() {
-	cd /srv
-	if [[ -d /srv/rutorrent ]]; then rm -rf rutorrent; fi
-	mkdir -p rutorrent
-	\cp -rf ${local_rutorrent}/. rutorrent
-}
-
-function _rutorrent-plugins() {
-	cd /srv/rutorrent
-	if [[ -d /srv/rutorrent/plugins ]]; then rm -rf plugins; fi
-	mkdir -p plugins
-	\cp -rf ${local_rplugins}/. plugins
-	apt-get install -y sox libsox-fmt-mp3 >>"${OUTTO}" 2>&1
-}
+# NOTE: _rutorrent and _rutorrent-plugins functions removed — ruTorrent integration sunset
 
 # function to install dashboard
 function _dashboard() {
-	cd && mkdir -p /srv/rutorrent/home
-	\cp -rf ${local_dashboard}. /srv/rutorrent/home
-	touch /srv/rutorrent/home/db/output.log
-	touch /srv/rutorrent/home/db/."${dash_theme}".lock
+	mkdir -p /srv/dashboard
+	\cp -rf ${local_dashboard}. /srv/dashboard
+	touch /srv/dashboard/db/output.log
+	touch /srv/dashboard/db/."${dash_theme}".lock
+	chown -R www-data:www-data /srv/dashboard
 }
 
 # function to install _h5ai file indexer
 function _fileindexer() {
-	cd /srv/rutorrent/home
+	cd /srv/dashboard
 	wget --quiet https://release.larsjung.de/h5ai/h5ai-0.29.0.zip >>"${OUTTO}" 2>&1
 	unzip h5ai-0.29.0.zip >>"${OUTTO}" 2>&1
 	rm -rf h5ai-0.29.0.zip >>"${OUTTO}" 2>&1
@@ -352,49 +337,7 @@ function _rconf() {
 	fi
 }
 
-# function to set proper diskspace plugin
-function _plugins() {
-	cd "${rutorrent}plugins/" || exit 1
-	if [[ ${primaryroot} == "root" ]]; then
-		rm -rf ${rutorrent}plugins/diskspaceh
-	else
-		rm -rf ${rutorrent}plugins/diskspace
-	fi
-
-	\cp -f /srv/rutorrent/home/fileshare/.htaccess /srv/rutorrent/plugins/fileshare/
-	cd /srv/rutorrent/home/fileshare/
-	rm -rf share.php
-	ln -s ../../plugins/fileshare/share.php
-	\cp -f ${local_setup}templates/rutorrent/plugins/fileshare/conf.php.template /srv/rutorrent/plugins/fileshare/conf.php
-
-	sed -i 's/homeDirectory/topDirectory/g' /srv/rutorrent/plugins/filemanager/flm.class.php
-	sed -i 's/homeDirectory/topDirectory/g' /srv/rutorrent/plugins/filemanager/settings.js.php
-	sed -i 's/showhidden: true,/showhidden: false,/g' "${rutorrent}plugins/filemanager/init.js"
-	chown -R www-data:www-data "${rutorrent}"
-	rm -rf ${rutorrent}plugins/tracklabels/labels/nlb.png
-
-	# Needed for fileupload
-	# wget http://ftp.nl.debian.org/debian/pool/main/p/plowshare/plowshare4_2.1.3-1_all.deb -O plowshare4.deb >>"${OUTTO}" 2>&1
-	# wget http://ftp.nl.debian.org/debian/pool/main/p/plowshare/plowshare_2.1.3-1_all.deb -O plowshare.deb >>"${OUTTO}" 2>&1
-	apt-get -y install plowshare >>"${OUTTO}" 2>&1
-	dpkg -i plowshare*.deb >>"${OUTTO}" 2>&1
-	rm -rf plowshare*.deb >>"${OUTTO}" 2>&1
-	cd /root
-	mkdir -p /root/bin
-	git clone https://github.com/mcrapet/plowshare.git ~/.plowshare-source >>"${OUTTO}" 2>&1
-	cd ~/.plowshare-source >>"${OUTTO}" 2>&1
-	make install PREFIX=/usr/local >>"${OUTTO}" 2>&1
-	cd && rm -rf .plowshare-source >>"${OUTTO}" 2>&1
-	apt-get -f install >>"${OUTTO}" 2>&1
-
-	mkdir -p /srv/rutorrent/conf/users/"${username}"/plugins/fileupload/
-	chmod 775 /srv/rutorrent/plugins/fileupload/scripts/upload
-	\cp -f /srv/rutorrent/plugins/fileupload/conf.php /srv/rutorrent/conf/users/"${username}"/plugins/fileupload/conf.php
-	chown -R www-data:www-data /srv/rutorrent/conf/users/"${username}"
-
-	# Set proper permissions to filemanager so it may execute commands
-	find /srv/rutorrent/plugins/filemanager/scripts -type f -exec chmod 755 {} \;
-}
+# NOTE: _plugins function removed — ruTorrent plugin configuration sunset
 
 # function autodl to install autodl irssi scripts
 # shellcheck disable=2312
@@ -438,24 +381,7 @@ function _makedirs() {
 #fi
 #}
 
-# function to configure first user config.php
-function _ruconf() {
-	mkdir -p ${rutorrent}conf/users/${username}/
-
-	\cp -f ${local_setup}templates/rutorrent.users.config.template ${rutorrent}conf/users/${username}/config.php
-
-	chown -R www-data.www-data "${rutorrent}conf/users/" >>"${OUTTO}" 2>&1
-	if [[ ${primaryroot} == "root" ]]; then
-		sed -i "/diskuser/c\$diskuser = \"\/\";" /srv/rutorrent/conf/users/${username}/config.php
-	else
-		sed -i "/diskuser/c\$diskuser = \"\/home\";" /srv/rutorrent/conf/users/${username}/config.php
-	fi
-	sed -i "/quotaUser/c\${quota}User = \"${username}\";" /srv/rutorrent/conf/users/${username}/config.php
-	sed -i "s/USERNAME/${username}/g" /srv/rutorrent/conf/users/${username}/config.php
-	sed -i "s/XXX/${PORT}/g" /srv/rutorrent/conf/users/${username}/config.php
-	sed -i "s/YYY/${AUTODLPORT}/g" /srv/rutorrent/conf/users/${username}/config.php
-	sed -i "s/ZZZ/\"${AUTODLPASSWORD}\"/g" /srv/rutorrent/conf/users/${username}/config.php
-}
+# NOTE: _ruconf function removed — ruTorrent user config sunset
 
 # function to install pure-ftpd
 function _installftpd() {

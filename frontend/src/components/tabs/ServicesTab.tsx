@@ -1,10 +1,15 @@
 import { RefreshCw, Box, Settings, Globe, RotateCcw, Square, Play } from 'lucide-react';
-import { SystemMetrics } from '@/types/dashboard';
 import { useState } from 'react';
 import { useToast } from '@/contexts/ToastContext';
 
+interface ServiceInfo {
+    status: string;
+    version: string;
+    uptime: string;
+}
+
 interface ServicesTabProps {
-    services: Record<string, any>;
+    services: Record<string, unknown>;
     onDeployApp?: () => void;
 }
 
@@ -27,9 +32,9 @@ export default function ServicesTab({ services, onDeployApp }: ServicesTabProps)
             }
 
             addToast(`Successfully executed '${action}' on ${name}.`, 'success');
-        } catch (err: any) {
+        } catch (err: unknown) {
             console.error(err);
-            addToast(err.message || 'An unknown error occurred.', 'error');
+            addToast(err instanceof Error ? err.message : 'An unknown error occurred.', 'error');
         } finally {
             setLoadingService(null);
         }
@@ -59,7 +64,8 @@ export default function ServicesTab({ services, onDeployApp }: ServicesTabProps)
             </div>
 
             <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-5">
-                {servicesEntries.map(([name, data]) => {
+                {servicesEntries.map(([name, rawData]) => {
+                    const data = rawData as ServiceInfo;
                     const isRunning = data.status === 'running';
                     const isError = data.status === 'error';
                     const isBusy = loadingService === name;

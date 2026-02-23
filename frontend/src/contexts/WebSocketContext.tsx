@@ -5,7 +5,7 @@ import { SystemMetrics } from '@/types/dashboard';
 
 interface WebSocketData {
     system: SystemMetrics | null;
-    services: any | null;
+    services: Record<string, unknown> | null;
 }
 
 interface WebSocketContextType {
@@ -73,6 +73,7 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
             if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
             if (wsRef.current) wsRef.current.close();
         };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
     return (

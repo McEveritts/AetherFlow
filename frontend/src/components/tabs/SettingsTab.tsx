@@ -1,4 +1,4 @@
-import { Settings, Sparkles, Shield, ChevronRight, Check, DownloadCloud, AlertCircle } from 'lucide-react';
+import { Settings, Sparkles, ChevronRight, DownloadCloud, AlertCircle } from 'lucide-react';
 import { useState, FormEvent } from 'react';
 import useSWR from 'swr';
 import { useToast } from '@/contexts/ToastContext';
@@ -56,8 +56,7 @@ export default function SettingsTab() {
             } else {
                 addToast('Failed to sync configuration', 'error');
             }
-        } catch (err) {
-            console.error('Failed to save settings:', err);
+        } catch (_err) {
             addToast('Network error saving configuration', 'error');
         } finally {
             setIsSaving(false);
@@ -78,7 +77,7 @@ export default function SettingsTab() {
                 setUpdateMessage(data.error || 'Failed to start update.');
                 setIsUpdating(false);
             }
-        } catch (err) {
+        } catch (_err) {
             setUpdateMessage('Network error triggering update.');
             setIsUpdating(false);
         }
@@ -127,7 +126,7 @@ export default function SettingsTab() {
                                         onChange={(e) => setPrompt(e.target.value)}
                                         className="w-full bg-slate-900 border border-white/10 rounded-xl px-4 py-3 text-slate-200 text-sm focus:outline-none focus:border-indigo-500/50 transition-colors min-h-[100px] resize-none"
                                     />
-                                    <p className="text-xs text-slate-500 mt-2">Tune the prompt to modify the assistant's behavior and strictness.</p>
+                                    <p className="text-xs text-slate-500 mt-2">Tune the prompt to modify the assistant&apos;s behavior and strictness.</p>
                                 </div>
                             </div>
                         </div>

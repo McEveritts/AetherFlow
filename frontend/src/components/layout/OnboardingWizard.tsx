@@ -3,7 +3,7 @@ import { useToast } from '@/contexts/ToastContext';
 import { Sparkles, ArrowRight, Check, Shield, Server, Box } from 'lucide-react';
 
 interface OnboardingWizardProps {
-    initialSettings: any;
+    initialSettings: Record<string, unknown>;
     onComplete: () => void;
 }
 
@@ -39,7 +39,7 @@ export default function OnboardingWizard({ initialSettings, onComplete }: Onboar
             } else {
                 addToast('Failed to complete setup.', 'error');
             }
-        } catch (err) {
+        } catch (_err) {
             addToast('Network error during setup completion.', 'error');
         } finally {
             setIsSaving(false);

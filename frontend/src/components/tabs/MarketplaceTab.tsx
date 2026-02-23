@@ -2,6 +2,7 @@ import { useState, useMemo } from 'react';
 import { Store, Search, Filter, Box, Download, AlertCircle, ChevronDown } from 'lucide-react';
 import { useMarketplace } from '@/hooks/useMarketplace';
 import { useToast } from '@/contexts/ToastContext';
+import Image from 'next/image';
 
 const AppIcon = ({ appId }: { appId: string }) => {
     const [error, setError] = useState(false);
@@ -11,10 +12,12 @@ const AppIcon = ({ appId }: { appId: string }) => {
     }
 
     return (
-        <img
+        <Image
             src={`/img/brands/${appId.toLowerCase()}.png`}
             alt={appId}
-            className="w-10 h-10 object-contain group-hover:scale-110 transition-transform duration-300"
+            width={40}
+            height={40}
+            className="object-contain group-hover:scale-110 transition-transform duration-300"
             onError={() => setError(true)}
         />
     );
@@ -38,8 +41,8 @@ export default function MarketplaceTab() {
             }
             addToast(`Installation started for ${id}`, 'success');
             mutate();
-        } catch (error: any) {
-            addToast(error.message || 'Network error.', 'error');
+        } catch (error: unknown) {
+            addToast(error instanceof Error ? error.message : 'Network error.', 'error');
         } finally {
             setOperatingApp(null);
         }
@@ -55,8 +58,8 @@ export default function MarketplaceTab() {
             }
             addToast(`Uninstallation started for ${id}`, 'success');
             mutate();
-        } catch (error: any) {
-            addToast(error.message || 'Network error.', 'error');
+        } catch (error: unknown) {
+            addToast(error instanceof Error ? error.message : 'Network error.', 'error');
         } finally {
             setOperatingApp(null);
         }

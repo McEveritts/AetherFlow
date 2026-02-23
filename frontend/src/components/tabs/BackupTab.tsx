@@ -34,8 +34,8 @@ export default function BackupTab() {
             } else {
                 throw new Error(data.error || 'Backup failed');
             }
-        } catch (err: any) {
-            setBackupState({ status: 'error', message: err.message || 'Network error triggering backup.' });
+        } catch (err: unknown) {
+            setBackupState({ status: 'error', message: err instanceof Error ? err.message : 'Network error triggering backup.' });
         }
     };
 
@@ -82,8 +82,8 @@ export default function BackupTab() {
                             onClick={handleRunBackup}
                             disabled={backupState.status === 'running'}
                             className={`w-full py-4 px-6 rounded-xl font-bold text-white shadow-xl transition-all flex items-center justify-center gap-3 ${backupState.status === 'running'
-                                    ? 'bg-emerald-600/50 cursor-not-allowed'
-                                    : 'bg-emerald-600 hover:bg-emerald-500 shadow-emerald-500/20 hover:scale-[1.02]'
+                                ? 'bg-emerald-600/50 cursor-not-allowed'
+                                : 'bg-emerald-600 hover:bg-emerald-500 shadow-emerald-500/20 hover:scale-[1.02]'
                                 }`}
                         >
                             {backupState.status === 'running' ? (

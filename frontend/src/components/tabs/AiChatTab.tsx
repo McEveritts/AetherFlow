@@ -46,7 +46,7 @@ export default function AiChatTab({ setActiveTab }: AiChatTabProps) {
             const data = await res.json();
 
             setMessages(prev => [...prev, { role: 'assistant', text: data.reply }]);
-        } catch (err) {
+        } catch (_err) {
             setMessages(prev => [...prev, { role: 'assistant', text: "Connection error: Unable to reach the FlowAI backend service." }]);
         } finally {
             setIsTyping(false);
@@ -96,8 +96,8 @@ export default function AiChatTab({ setActiveTab }: AiChatTabProps) {
                         )}
 
                         <div className={`p-5 rounded-2xl shadow-sm text-sm leading-relaxed whitespace-pre-wrap ${msg.role === 'user'
-                                ? 'bg-indigo-600 text-white rounded-tr-sm font-medium'
-                                : 'bg-white/[0.03] border border-white/[0.05] text-slate-200 rounded-tl-sm'
+                            ? 'bg-indigo-600 text-white rounded-tr-sm font-medium'
+                            : 'bg-white/[0.03] border border-white/[0.05] text-slate-200 rounded-tl-sm'
                             }`}>
                             {msg.text}
                         </div>
