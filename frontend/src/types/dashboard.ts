@@ -7,6 +7,16 @@ export interface ProcessInfo {
     mem: number;
 }
 
+export interface DiskPartition {
+    mount_point: string;
+    device: string;
+    fs_type: string;
+    total_gb: number;
+    used_gb: number;
+    free_gb: number;
+    used_pct: number;
+}
+
 export interface SystemMetrics {
     cpu_usage: number;
     per_core_cpu: number[];
@@ -16,6 +26,7 @@ export interface SystemMetrics {
         used: number;
         free: number;
     };
+    disks: DiskPartition[];
     disk_io: {
         read_bytes_sec: number;
         write_bytes_sec: number;
