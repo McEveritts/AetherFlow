@@ -40,6 +40,12 @@ pm2 restart aetherflow-frontend || pm2 start npm --name "aetherflow-frontend" --
 pm2 save
 
 # 4. Reload Apache
+# Ensure DocumentRoot exists
+mkdir -p /srv/aetherflow
+
+# Remove any stale SCGIMount directives from Apache configs
+sed -i '/SCGIMount/d' /etc/apache2/sites-enabled/*.conf 2>/dev/null || true
+
 systemctl restart apache2
 
 echo "Update complete! All systems are back up."
