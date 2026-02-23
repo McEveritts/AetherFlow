@@ -25,7 +25,7 @@ export default function Dashboard() {
   const [activeTab, setActiveTab] = useState<TabId>('overview');
   const [isSidebarHovered, setIsSidebarHovered] = useState(false);
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
-  const { metrics, services, isLoading, isError, error } = useMetrics();
+  const { metrics, services, hardware, isLoading, isError, error } = useMetrics();
 
   const { data: settingsData, mutate: mutateSettings } = useSWR(
     '/api/settings',
@@ -69,7 +69,7 @@ export default function Dashboard() {
 
     switch (activeTab) {
       case 'overview':
-        return <OverviewTab metrics={metrics} />;
+        return <OverviewTab metrics={metrics} hardware={hardware} />;
       case 'services':
         return <ServicesTab services={services} onDeployApp={() => handleTabChange('marketplace')} />;
       case 'marketplace':
