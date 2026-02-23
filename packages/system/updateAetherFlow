@@ -382,6 +382,7 @@ function _buildmodernstack() {
         cd /opt/AetherFlow/backend
         export GOOS=linux
         export GOARCH=amd64
+        /usr/local/go/bin/go mod tidy >>"${OUTTO}" 2>&1
         /usr/local/go/bin/go build -o aetherflow-api main.go >>"${OUTTO}" 2>&1
         
         # Restart Go API via PM2

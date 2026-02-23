@@ -65,6 +65,5 @@ SSLEngine on
         SetEnvIf User-Agent ".*MSIE.*" \
                  nokeepalive ssl-unclean-shutdown \
                  downgrade-1.0 force-response-1.0
-SCGIMount /USERNAME 127.0.0.1:PORT
 </Virtualhost>
 

@@ -22,6 +22,7 @@ git reset --hard origin/master
 echo "Rebuilding Go API Binary..."
 cd /opt/AetherFlow/backend || exit 1
 export CGO_ENABLED=1
+/usr/local/go/bin/go mod tidy
 /usr/local/go/bin/go build -o aetherflow-api main.go
 
 echo "Restarting API via PM2..."
