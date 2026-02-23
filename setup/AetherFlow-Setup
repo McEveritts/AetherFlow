@@ -209,7 +209,7 @@ _run_step_fg "checkroot" "Verifying root privileges" _checkroot
 _run_step_fg "logcheck" "Configuring log output" _logcheck
 _run_step_fg "checkkernel" "Checking kernel compatibility" _checkkernel
 _run_step_fg "hostname" "Setting hostname" _hostname
-_run_step_fg "askquota" "Quota preferences" _askquota
+
 _run_step_fg "askcontinue" "Ready to proceed" _askcontinue
 _run_step_fg "ssdpblock" "Blocking insecure SSDP port" _ssdpblock
 _run_step_fg "locale" "Setting locale" _locale
@@ -252,9 +252,7 @@ fi
 _run_step "syscommands" "Setting up system executables" _syscommands
 _run_step "skel" "Building required user directories" _skel
 
-if [[ ${quota} == "yes" ]]; then
-	_run_step "quota" "Setting up quotas for ${green}/(${primaryroot})${normal} mount" _qmount
-fi
+
 
 _run_step "lshell" "Setting up Limited Shell environment" _lshell
 
