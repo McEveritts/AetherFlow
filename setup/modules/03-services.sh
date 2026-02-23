@@ -289,35 +289,8 @@ EOF
 
 # NOTE: _rutorrent and _rutorrent-plugins functions removed — ruTorrent integration sunset
 
-# function to install dashboard
-function _dashboard() {
-	mkdir -p /srv/dashboard
-	\cp -rf ${local_dashboard}. /srv/dashboard
-	touch /srv/dashboard/db/output.log
-	touch /srv/dashboard/db/."${dash_theme}".lock
-	chown -R www-data:www-data /srv/dashboard
-}
-
-# function to install _h5ai file indexer
-function _fileindexer() {
-	cd /srv/dashboard
-	wget --quiet https://release.larsjung.de/h5ai/h5ai-0.29.0.zip >>"${OUTTO}" 2>&1
-	unzip h5ai-0.29.0.zip >>"${OUTTO}" 2>&1
-	rm -rf h5ai-0.29.0.zip >>"${OUTTO}" 2>&1
-	chmod 775 -R _h5ai/private/cache && chmod 775 -R _h5ai/public/cache
-	apt -y install imagemagick >>"${OUTTO}" 2>&1
-	echo "#DirectoryIndex index.html index.php /_h5ai/public/index.php" >>/etc/apache2/apache2.conf
-	ln -s /home/${username}/torrents/rtorrent/ ${username}.rtorrent.downloads
-	if [[ ${DELUGE} != NO ]]; then
-		ln -s /home/${username}/torrents/deluge/ ${username}.deluge.downloads
-	fi
-	if [[ ${tr} == "yes" ]]; then
-		ln -s /home/${username}/torrents/transmission/ ${username}.transmission.downloads
-	fi
-	if [[ ${QBVERSION} != "no" ]]; then
-		ln -s /home/${username}/torrents/qbittorrent/ ${username}.qbittorrent.downloads
-	fi
-}
+# NOTE: _dashboard and _fileindexer functions removed — legacy PHP dashboard sunset
+# The Next.js frontend now serves as the primary UI
 
 # function to configure first user config
 function _rconf() {

@@ -22,28 +22,7 @@ function _ftpdconfig() {
 
 # The following function makes necessary changes to Network and TZ settings needed for
 # the proper functionality of the AetherFlow Dashboard.
-function _quickstats() {
-	# Dynamically adjust to use the servers active network adapter
-	IFACE=$(ip route get 8.8.8.8 | awk 'NR==1 {print $5}')
-	printf "${IFACE}" >/srv/dashboard/db/interface.txt
-	sed -i "s/INETFACE/${IFACE}/g" /srv/dashboard/inc/config.php
-	printf "${username}" >/srv/dashboard/db/master.txt
-	# Use server timezone
-	cd /usr/share/zoneinfo
-	find ./* -type f -exec sh -c "diff -q /etc/localtime '{}' > /dev/null && echo {}" \; >~/tz.txt
-	cd ~
-	LOCALE=en_GB.UTF-8
-	LANG=lang_en
-	sed -i "s/LOCALE/${LOCALE}/g" /srv/dashboard/inc/localize.php
-	sed -i "s/LANG/${LANG}/g" /srv/dashboard/inc/localize.php
-	if [[ ${primaryroot} == "home" ]]; then
-		cd /srv/dashboard/widgets && rm disk_data.php
-		mv disk_datah.php disk_data.php
-		chown -R www-data:www-data /srv/dashboard/widgets
-	else
-		rm /srv/dashboard/widgets/disk_datah.php
-	fi
-}
+# NOTE: _quickstats function removed — legacy PHP dashboard sunset
 
 # initializing console info
 # shellcheck disable=2312
@@ -100,7 +79,6 @@ function _perms() {
 	sudo -u ${username} chmod 755 /home/${username}/ >>"${OUTTO}" 2>&1
 	chmod +x /etc/cron.daily/denypublic >/dev/null 2>&1
 	chmod 777 /home/${username}/.sessions >/dev/null 2>&1
-	chown -R www-data:www-data /srv/dashboard >/dev/null 2>&1
 	if [[ ${tr} == "yes" ]]; then
 		chown -R ${username}:debian-transmission /home/${username}/torrents/transmission >/dev/null 2>&1
 		service transmission-daemon reload >>"${OUTTO}" 2>&1
