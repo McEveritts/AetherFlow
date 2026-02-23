@@ -1,5 +1,5 @@
-import { HardDriveDownload, Archive, CheckCircle2, Clock, ShieldCheck, Database } from 'lucide-react';
-import { useState } from 'react';
+import { HardDriveDownload, Archive, CheckCircle2, Clock, ShieldCheck, Database, Download } from 'lucide-react';
+import { useState, useEffect } from 'react';
 
 interface BackupProgress {
     status: 'idle' | 'running' | 'success' | 'error';
@@ -11,8 +11,35 @@ interface BackupProgress {
     }
 }
 
+interface BackupFile {
+    filename: string;
+    size: number;
+    timestamp: string;
+}
+
 export default function BackupTab() {
     const [backupState, setBackupState] = useState<BackupProgress>({ status: 'idle', message: 'System healthy. Ready for manual snapshot.' });
+    const [backups, setBackups] = useState<BackupFile[]>([]);
+    const [isLoadingBackups, setIsLoadingBackups] = useState(true);
+
+    const fetchBackups = async () => {
+        setIsLoadingBackups(true);
+        try {
+            const res = await fetch('/api/backup/list');
+            if (res.ok) {
+                const data = await res.json();
+                setBackups(data.sort((a: BackupFile, b: BackupFile) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()));
+            }
+        } catch (err) {
+            console.error("Failed to fetch backups", err);
+        } finally {
+            setIsLoadingBackups(false);
+        }
+    };
+
+    useEffect(() => {
+        fetchBackups();
+    }, []);
 
     const handleRunBackup = async () => {
         setBackupState({ status: 'running', message: 'Initiating AetherFlow database snapshot...' });
@@ -31,6 +58,7 @@ export default function BackupTab() {
                         timestamp: data.timestamp
                     }
                 });
+                fetchBackups();
             } else {
                 throw new Error(data.error || 'Backup failed');
             }
@@ -100,59 +128,66 @@ export default function BackupTab() {
                         </button>
                     </div>
 
-                    {/* Status Console */}
-                    <div className="bg-slate-900 border border-white/5 rounded-3xl p-8 shadow-inner flex flex-col">
-                        <h3 className="text-sm font-bold text-slate-500 uppercase tracking-wider mb-6 flex items-center gap-2">
-                            <Clock size={16} /> Operation Status
+                    {/* Status Console & Previous Backups */}
+                    <div className="bg-slate-900 border border-white/5 rounded-3xl p-8 flex flex-col h-[500px]">
+                        <h3 className="text-sm font-bold text-slate-500 uppercase tracking-wider mb-6 flex justify-between items-center">
+                            <span className="flex items-center gap-2"><Clock size={16} /> Archive Snapshots</span>
+                            <span className="text-xs bg-slate-800 px-2 py-1 rounded-md">{backups.length} Total</span>
                         </h3>
 
-                        <div className="flex-1 flex flex-col justify-center">
-                            {backupState.status === 'idle' && (
-                                <div className="text-center text-slate-500">
-                                    <HardDriveDownload size={48} className="mx-auto mb-4 opacity-50 text-slate-600" />
-                                    <p>{backupState.message}</p>
+                        {/* Recent Status (if acting) */}
+                        {backupState.status !== 'idle' && (
+                            <div className={`mb-6 p-4 rounded-xl border ${backupState.status === 'success' ? 'bg-emerald-500/10 border-emerald-500/20' : backupState.status === 'error' ? 'bg-red-500/10 border-red-500/20' : 'bg-slate-800/50 border-white/10'} flex items-center gap-4`}>
+                                {backupState.status === 'running' && <div className="w-6 h-6 border-2 border-emerald-500/30 border-t-emerald-500 rounded-full animate-spin"></div>}
+                                {backupState.status === 'success' && <CheckCircle2 size={24} className="text-emerald-400" />}
+                                {backupState.status === 'error' && <div className="text-red-400 font-bold text-xl">!</div>}
+
+                                <div>
+                                    <h4 className={`font-bold text-sm ${backupState.status === 'error' ? 'text-red-400' : 'text-slate-200'}`}>
+                                        {backupState.status === 'running' ? 'Snapshotting...' : backupState.status === 'error' ? 'Operation Failed' : 'Backup Successful'}
+                                    </h4>
+                                    <p className="text-xs text-slate-400">{backupState.message}</p>
                                 </div>
-                            )}
+                            </div>
+                        )}
 
-                            {backupState.status === 'running' && (
-                                <div className="flex flex-col items-center justify-center animate-pulse text-emerald-400">
-                                    <Database size={48} className="mb-4" />
-                                    <p className="font-mono text-sm">{backupState.message}</p>
+                        <div className="flex-1 overflow-y-auto pr-2 space-y-3 custom-scrollbar">
+                            {isLoadingBackups ? (
+                                <div className="text-center text-slate-500 py-10">
+                                    <div className="w-8 h-8 border-2 border-slate-500/30 border-t-slate-500 rounded-full animate-spin mx-auto mb-4"></div>
+                                    <p>Loading archives...</p>
                                 </div>
-                            )}
-
-                            {backupState.status === 'success' && backupState.details && (
-                                <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-2xl p-6 relative overflow-hidden animate-fade-in">
-                                    <div className="absolute top-0 right-0 w-32 h-32 bg-emerald-500/20 rounded-full blur-3xl"></div>
-                                    <div className="flex items-start gap-4 relative z-10">
-                                        <div className="mt-1">
-                                            <CheckCircle2 size={24} className="text-emerald-400" />
-                                        </div>
-                                        <div>
-                                            <h4 className="text-emerald-400 font-bold text-lg mb-1">Backup Successful</h4>
-                                            <p className="text-slate-300 text-sm mb-4">Database safely archived.</p>
-
-                                            <div className="space-y-2 text-sm">
-                                                <div className="flex justify-between border-b border-emerald-500/10 pb-2">
-                                                    <span className="text-slate-500">Archive Name</span>
-                                                    <span className="text-slate-200 font-mono text-xs">{backupState.details.filename}</span>
-                                                </div>
-                                                <div className="flex justify-between border-b border-emerald-500/10 pb-2">
-                                                    <span className="text-slate-500">Payload Size</span>
-                                                    <span className="text-slate-200 font-mono">{formatBytes(backupState.details.size)}</span>
+                            ) : backups.length === 0 ? (
+                                <div className="text-center text-slate-500 py-10">
+                                    <Archive size={48} className="mx-auto mb-4 opacity-50 text-slate-600" />
+                                    <p>No snapshots found.</p>
+                                </div>
+                            ) : (
+                                backups.map((bk) => (
+                                    <div key={bk.filename} className="bg-slate-800/50 hover:bg-slate-800 border border-white/5 hover:border-white/10 rounded-xl p-4 flex items-center justify-between transition-colors group">
+                                        <div className="flex items-center gap-4">
+                                            <div className="w-10 h-10 bg-slate-900 rounded-lg flex items-center justify-center text-slate-400 border border-white/5">
+                                                <Database size={18} />
+                                            </div>
+                                            <div>
+                                                <h4 className="text-slate-200 font-mono text-xs mb-1">{bk.filename}</h4>
+                                                <div className="flex gap-3 text-xs text-slate-500">
+                                                    <span>{formatBytes(bk.size)}</span>
+                                                    <span>&bull;</span>
+                                                    <span>{new Date(bk.timestamp).toLocaleString()}</span>
                                                 </div>
                                             </div>
                                         </div>
+                                        <a
+                                            href={`/api/backup/download/${encodeURIComponent(bk.filename)}`}
+                                            download
+                                            className="w-8 h-8 rounded-lg bg-emerald-500/10 text-emerald-400 flex items-center justify-center hover:bg-emerald-500 hover:text-white transition-colors opacity-0 group-hover:opacity-100 focus:opacity-100"
+                                            title="Download SQLite Archive"
+                                        >
+                                            <Download size={16} />
+                                        </a>
                                     </div>
-                                </div>
-                            )}
-
-                            {backupState.status === 'error' && (
-                                <div className="bg-red-500/10 border border-red-500/20 rounded-2xl p-6 text-center animate-fade-in">
-                                    <div className="w-12 h-12 bg-red-500/20 text-red-400 rounded-full flex items-center justify-center mx-auto mb-4 text-2xl font-bold">!</div>
-                                    <h4 className="text-red-400 font-bold mb-2">Operation Failed</h4>
-                                    <p className="text-slate-400 text-sm">{backupState.message}</p>
-                                </div>
+                                ))
                             )}
                         </div>
                     </div>

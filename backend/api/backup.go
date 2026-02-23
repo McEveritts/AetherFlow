@@ -77,3 +77,55 @@ func RunBackup(c *gin.Context) {
 		"timestamp": time.Now().Format(time.RFC3339),
 	})
 }
+
+type BackupFile struct {
+	Filename  string `json:"filename"`
+	Size      int64  `json:"size"`
+	Timestamp string `json:"timestamp"`
+}
+
+func GetBackupsList(c *gin.Context) {
+	dbPath := getActiveDbPath()
+	backupDir := filepath.Join(filepath.Dir(dbPath), "backups")
+
+	entries, err := os.ReadDir(backupDir)
+	if err != nil {
+		c.JSON(http.StatusOK, []BackupFile{})
+		return
+	}
+
+	var backups []BackupFile
+	for _, entry := range entries {
+		if !entry.IsDir() && filepath.Ext(entry.Name()) == ".sqlite" {
+			info, err := entry.Info()
+			if err == nil {
+				backups = append(backups, BackupFile{
+					Filename:  entry.Name(),
+					Size:      info.Size(),
+					Timestamp: info.ModTime().Format(time.RFC3339),
+				})
+			}
+		}
+	}
+
+	c.JSON(http.StatusOK, backups)
+}
+
+func DownloadBackup(c *gin.Context) {
+	filename := c.Param("filename")
+	if filename == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Filename required"})
+		return
+	}
+
+	filename = filepath.Base(filename)
+	dbPath := getActiveDbPath()
+	filePath := filepath.Join(filepath.Dir(dbPath), "backups", filename)
+
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Backup file not found"})
+		return
+	}
+
+	c.FileAttachment(filePath, filename)
+}

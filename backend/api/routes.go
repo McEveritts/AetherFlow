@@ -33,14 +33,17 @@ func RegisterRoutes(r *gin.Engine) {
 		apiGroup.GET("/fileshare", GetFilesList)
 		apiGroup.POST("/fileshare/upload", UploadFile)
 
-		// Backup
-		apiGroup.POST("/backup/run", RunBackup)
-
 		// Admin-only routes
 		adminGroup := apiGroup.Group("")
 		adminGroup.Use(AdminOnly())
 		{
+			// Backup
+			adminGroup.POST("/backup/run", RunBackup)
+			adminGroup.GET("/backup/list", GetBackupsList)
+			adminGroup.GET("/backup/download/:filename", DownloadBackup)
+
 			adminGroup.PUT("/settings", updateSettings)
+			adminGroup.POST("/settings/test-ai", TestAiConnection)
 
 			// User Management
 			adminGroup.GET("/users", GetUsers)

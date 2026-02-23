@@ -103,3 +103,38 @@ func handleAiChat(c *gin.Context) {
 
 	c.JSON(http.StatusOK, ChatResponse{Reply: replyText})
 }
+
+func TestAiConnection(c *gin.Context) {
+	var req struct {
+		ApiKey string `json:"gemini_api_key" binding:"required"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Missing gemini_api_key in request body"})
+		return
+	}
+
+	ctx := context.Background()
+	client, err := genai.NewClient(ctx, option.WithAPIKey(req.ApiKey))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Initialization error: %v", err)})
+		return
+	}
+	defer client.Close()
+
+	model := client.GenerativeModel("gemini-1.5-flash") // Use simple fast model for ping
+	resp, err := model.GenerateContent(ctx, genai.Text("Reply with the exact word: SUCCESS"))
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "API Key is invalid or quota exceeded"})
+		return
+	}
+
+	for _, part := range resp.Candidates[0].Content.Parts {
+		if _, ok := part.(genai.Text); ok {
+			c.JSON(http.StatusOK, gin.H{"message": "Connection successful"})
+			return
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Connection successful but unrecognized response"})
+}

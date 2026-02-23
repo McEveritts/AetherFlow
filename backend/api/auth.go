@@ -93,10 +93,13 @@ func LocalLogin(c *gin.Context) {
 
 	var user models.User
 	var passwordHash string
+	var googleId sql.NullString
 	err := db.DB.QueryRow(
-		"SELECT id, username, email, avatar_url, role, COALESCE(password_hash, '') FROM users WHERE username = ?",
+		"SELECT id, username, email, avatar_url, role, COALESCE(password_hash, ''), google_id FROM users WHERE username = ?",
 		req.Username,
-	).Scan(&user.ID, &user.Username, &user.Email, &user.AvatarURL, &user.Role, &passwordHash)
+	).Scan(&user.ID, &user.Username, &user.Email, &user.AvatarURL, &user.Role, &passwordHash, &googleId)
+    
+    user.IsOAuth = googleId.Valid && googleId.String != ""
 
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid username or password"})
@@ -353,8 +356,11 @@ func GetSession(c *gin.Context) {
 	userId := int(claims["user_id"].(float64))
 
 	var user models.User
-	err = db.DB.QueryRow("SELECT id, username, email, avatar_url, role FROM users WHERE id = ?", userId).
-		Scan(&user.ID, &user.Username, &user.Email, &user.AvatarURL, &user.Role)
+	var googleId sql.NullString
+	err = db.DB.QueryRow("SELECT id, username, email, avatar_url, role, google_id FROM users WHERE id = ?", userId).
+		Scan(&user.ID, &user.Username, &user.Email, &user.AvatarURL, &user.Role, &googleId)
+    
+    user.IsOAuth = googleId.Valid && googleId.String != ""
 
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "User not found"})

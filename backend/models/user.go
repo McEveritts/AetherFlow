@@ -7,4 +7,5 @@ type User struct {
 	AvatarURL string `json:"avatar_url"`
 	Role      string `json:"role"`
 	GoogleID  string `json:"-"`
+	IsOAuth   bool   `json:"is_oauth"`
 }
