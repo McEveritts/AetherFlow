@@ -77,13 +77,47 @@ func GetSystemMetricsCore() models.SystemMetrics {
 		swapUsed = float64(swapMem.Used) / (1024 * 1024 * 1024)
 	}
 
-	// 3. Disk (Root)
-	diskPath := "/"
-	dStat, err := disk.Usage(diskPath)
+	// 3. Disk Partitions (all real mounts)
+	var diskPartitions []models.DiskPartition
+	parts, err := disk.Partitions(false) // false = only real devices, no virtual
 	if err == nil {
-		totalDisk = float64(dStat.Total) / (1024 * 1024 * 1024)
-		usedDisk = float64(dStat.Used) / (1024 * 1024 * 1024)
-		freeDisk = float64(dStat.Free) / (1024 * 1024 * 1024)
+		seen := make(map[string]bool)
+		for _, p := range parts {
+			// Skip snap/squashfs/tmpfs/devtmpfs mounts
+			if p.Fstype == "squashfs" || p.Fstype == "tmpfs" || p.Fstype == "devtmpfs" || p.Fstype == "overlay" {
+				continue
+			}
+			// Deduplicate by mount point
+			if seen[p.Mountpoint] {
+				continue
+			}
+			seen[p.Mountpoint] = true
+
+			usage, err := disk.Usage(p.Mountpoint)
+			if err != nil || usage.Total == 0 {
+				continue
+			}
+			totalGB := float64(usage.Total) / (1024 * 1024 * 1024)
+			usedGB := float64(usage.Used) / (1024 * 1024 * 1024)
+			freeGB := float64(usage.Free) / (1024 * 1024 * 1024)
+
+			diskPartitions = append(diskPartitions, models.DiskPartition{
+				MountPoint: p.Mountpoint,
+				Device:     p.Device,
+				FSType:     p.Fstype,
+				TotalGB:    totalGB,
+				UsedGB:     usedGB,
+				FreeGB:     freeGB,
+				UsedPct:    usage.UsedPercent,
+			})
+
+			// Legacy: keep root partition in DiskSpace for backward compat
+			if p.Mountpoint == "/" {
+				totalDisk = totalGB
+				usedDisk = usedGB
+				freeDisk = freeGB
+			}
+		}
 	}
 
 	// 3b. Disk I/O
@@ -230,6 +264,7 @@ func GetSystemMetricsCore() models.SystemMetrics {
 			"used":  usedDisk,
 			"free":  freeDisk,
 		},
+		Disks: diskPartitions,
 		DiskIO: map[string]float64{
 			"read_bytes_sec":  readBytesPerSec,
 			"write_bytes_sec": writeBytesPerSec,
