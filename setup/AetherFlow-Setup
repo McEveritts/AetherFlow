@@ -142,6 +142,9 @@ if [[ -f "${CONFIG_FILE}" ]]; then
     source "${CONFIG_FILE}" 2>/dev/null
 fi
 
+# Failsafe: ensure OUTTO always has a valid value
+OUTTO="${OUTTO:-/dev/null}"
+
 # Handle --list-steps
 if [[ "${LIST_ONLY}" == "true" ]]; then
     _list_steps

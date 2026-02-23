@@ -1,6 +1,9 @@
 #!/bin/bash
 # Module: 05-finalize.sh
 
+# Failsafe: ensure OUTTO has a default value
+OUTTO="${OUTTO:-/dev/null}"
+
 
 # function to configure pure-ftpd
 function _ftpdconfig() {
@@ -154,8 +157,8 @@ function _finished() {
 EOF
 	rm -rf "$0" >>"${OUTTO}" 2>&1
 	for i in ssh apache2 vsftpd fail2ban memcached cron; do
-		service "${i}" restart >>"${OUTTO}" 2>&1
-		systemctl enable "${i}" >>"${OUTTO}" 2>&1
+		systemctl restart "${i}" >>/dev/null 2>&1 || true
+		systemctl enable "${i}" >>/dev/null 2>&1 || true
 	done
 	rm -rf /root/tmp/
 	echo -ne "  Do you wish to reboot (recommended!): (Default ${green}Y${normal}) "
