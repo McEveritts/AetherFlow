@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"log"
 	"net/http"
 	"sync"
@@ -157,7 +158,7 @@ func broadcastMetricsLoop() {
 			},
 		}
 
-		message, err := gin.H(payload).MarshalJSON()
+		message, err := json.Marshal(payload)
 		if err == nil {
 			WSHub.broadcast <- message
 		}
