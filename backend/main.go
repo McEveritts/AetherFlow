@@ -5,12 +5,22 @@ import (
 	"os"
 
 	"aetherflow/api"
+	"aetherflow/db"
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
+	"github.com/joho/godotenv"
 )
 
 func main() {
+	// Try loading .env from local or parent directory
+	if err := godotenv.Load("../.env"); err != nil {
+		godotenv.Load() // fallback to current dir if any
+	}
+
+	// Initialize the Database
+	db.InitDB()
+
 	r := gin.Default()
 
 	// Enable Wide CORS for local frontend development
