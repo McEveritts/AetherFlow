@@ -50,16 +50,29 @@ func GetPackages() []models.Package {
 			continue
 		}
 
-		// 2. Fallback to Disk State (LockFile)
-		lockPath := pkgs[i].LockFile
-		if lockPath != "" {
-			if _, err := os.Stat(lockPath); err == nil {
+		// 2. Fallback to Disk State or Systemd
+		if pkgs[i].ServiceType == "systemd" && pkgs[i].ServiceName != "" {
+			status, _, _ := GetServiceInfo(pkgs[i].ServiceName)
+			if status == "running" || status == "stopped" || status == "error" {
 				pkgs[i].Status = "installed"
+				if status == "running" {
+					pkgs[i].Status = "installed (running)"
+				}
 			} else {
 				pkgs[i].Status = "uninstalled"
 			}
 		} else {
-			pkgs[i].Status = "uninstalled"
+			// Legacy lock file check
+			lockPath := pkgs[i].LockFile
+			if lockPath != "" {
+				if _, err := os.Stat(lockPath); err == nil {
+					pkgs[i].Status = "installed"
+				} else {
+					pkgs[i].Status = "uninstalled"
+				}
+			} else {
+				pkgs[i].Status = "uninstalled"
+			}
 		}
 	}
 
