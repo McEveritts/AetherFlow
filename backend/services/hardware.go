@@ -24,6 +24,10 @@ var (
 	lastDiskReadBytes  uint64
 	lastDiskWriteBytes uint64
 	lastDiskCheck      time.Time
+	// Process cache — refreshed every 5 seconds to avoid expensive /proc scan each tick
+	cachedProcesses     []models.ProcessInfo
+	lastProcessScan     time.Time
+	processCacheInterval = 5 * time.Second
 )
 
 func GetSystemMetricsCore() models.SystemMetrics {
@@ -168,47 +172,51 @@ func GetSystemMetricsCore() models.SystemMetrics {
 		loadAvg = []float64{0.0, 0.0, 0.0}
 	}
 
-	// 7. Top Processes (top 10 by CPU)
-	var topProcs []models.ProcessInfo
-	procs, err := process.Processes()
-	if err == nil {
-		type procEntry struct {
-			pid  int32
-			name string
-			cpu  float64
-			mem  float32
-		}
-		var entries []procEntry
-		for _, p := range procs {
-			name, err := p.Name()
-			if err != nil || name == "" {
-				continue
+	// 7. Top Processes — cached, refreshed every 5 seconds
+	if time.Since(lastProcessScan) > processCacheInterval || cachedProcesses == nil {
+		var freshProcs []models.ProcessInfo
+		procs, err := process.Processes()
+		if err == nil {
+			type procEntry struct {
+				pid  int32
+				name string
+				cpu  float64
+				mem  float32
 			}
-			cpuPct, err := p.CPUPercent()
-			if err != nil {
-				cpuPct = 0
+			var entries []procEntry
+			for _, p := range procs {
+				name, err := p.Name()
+				if err != nil || name == "" {
+					continue
+				}
+				cpuPct, err := p.CPUPercent()
+				if err != nil {
+					cpuPct = 0
+				}
+				memPct, err := p.MemoryPercent()
+				if err != nil {
+					memPct = 0
+				}
+				entries = append(entries, procEntry{pid: p.Pid, name: name, cpu: cpuPct, mem: memPct})
 			}
-			memPct, err := p.MemoryPercent()
-			if err != nil {
-				memPct = 0
-			}
-			entries = append(entries, procEntry{pid: p.Pid, name: name, cpu: cpuPct, mem: memPct})
-		}
-		sort.Slice(entries, func(i, j int) bool {
-			return entries[i].cpu > entries[j].cpu
-		})
-		limit := 10
-		if len(entries) < limit {
-			limit = len(entries)
-		}
-		for _, e := range entries[:limit] {
-			topProcs = append(topProcs, models.ProcessInfo{
-				PID:  e.pid,
-				Name: e.name,
-				CPU:  e.cpu,
-				Mem:  float64(e.mem),
+			sort.Slice(entries, func(i, j int) bool {
+				return entries[i].cpu > entries[j].cpu
 			})
+			limit := 10
+			if len(entries) < limit {
+				limit = len(entries)
+			}
+			for _, e := range entries[:limit] {
+				freshProcs = append(freshProcs, models.ProcessInfo{
+					PID:  e.pid,
+					Name: e.name,
+					CPU:  e.cpu,
+					Mem:  float64(e.mem),
+				})
+			}
 		}
+		cachedProcesses = freshProcs
+		lastProcessScan = time.Now()
 	}
 
 	servicesMap := make(map[string]bool)
@@ -245,7 +253,7 @@ func GetSystemMetricsCore() models.SystemMetrics {
 		},
 		Uptime:      uptimeStr,
 		LoadAverage: loadAvg,
-		Processes:   topProcs,
+		Processes:   cachedProcesses,
 		Services:    servicesMap,
 	}
 }

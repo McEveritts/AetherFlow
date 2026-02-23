@@ -48,9 +48,9 @@ export function useMetrics() {
 
     const metrics = wsData?.system as SystemMetrics | null;
     if (metrics) {
-        // Only push if the last timestamp is different (avoid double-push on re-render)
+        // Throttle history pushes to every 500ms — live values update at 100ms but sparklines don't need that much data
         const lastTs = historyRef.current.timestamps[historyRef.current.timestamps.length - 1];
-        if (!lastTs || Date.now() - lastTs > 1000) {
+        if (!lastTs || Date.now() - lastTs > 500) {
             pushHistory(metrics);
         }
     }
