@@ -1,6 +1,7 @@
 #!/bin/bash
 # Update installed apps to new reverse proxy configurations
 
+source /opt/AetherFlow/packages/common.sh
 function _couchpotato() {
   if [[ ! -f /etc/apache2/sites-enabled/couchpotato.conf ]]; then
     service couchpotato@${MASTER} stop
@@ -11,9 +12,9 @@ function _couchpotato() {
 <Location /couchpotato>
 ProxyPass http://localhost:5050/couchpotato
 ProxyPassReverse http://localhost:5050/couchpotato
-AuthType Digest
-AuthName "rutorrent"
-AuthUserFile '/etc/htpasswd'
+#AuthType Digest
+#AuthName "rutorrent"
+#AuthUserFile '/etc/htpasswd'
 Require user ${MASTER}
 </Location>
 EOF
@@ -60,9 +61,9 @@ cat > /etc/apache2/sites-enabled/jackett.conf <<EOF
 <Location /jackett>
 ProxyPass http://localhost:9117/jackett
 ProxyPassReverse http://localhost:9117/jackett
-AuthType Digest
-AuthName "rutorrent"
-AuthUserFile '/etc/htpasswd'
+#AuthType Digest
+#AuthName "rutorrent"
+#AuthUserFile '/etc/htpasswd'
 Require user ${MASTER}
 </Location>
 EOF
@@ -82,9 +83,9 @@ function _Tautulli() {
   <Location /Tautulli>
   ProxyPass http://localhost:8181/tautulli
   ProxyPassReverse http://localhost:8181/autulli
-  AuthType Digest
-  AuthName "rutorrent"
-  AuthUserFile '/etc/htpasswd'
+#  AuthType Digest
+#  AuthName "rutorrent"
+#  AuthUserFile '/etc/htpasswd'
   Require user ${MASTER}
   </Location>
 EOF
@@ -133,9 +134,9 @@ EOF
 <Location /sabnzbd>
 ProxyPass http://localhost:65080/sabnzbd
 ProxyPassReverse http://localhost:65080/sabnzbd
-AuthType Digest
-AuthName "rutorrent"
-AuthUserFile '/etc/htpasswd'
+#AuthType Digest
+#AuthName "rutorrent"
+#AuthUserFile '/etc/htpasswd'
 Require user ${MASTER}
 </Location>
 EOF
@@ -155,9 +156,9 @@ function _sickrage() {
 <Location /sickrage>
   ProxyPass http://localhost:8081/sickrage
   ProxyPassReverse http://localhost:8081/sickrage
-  AuthType Digest
-  AuthName "rutorrent"
-  AuthUserFile '/etc/htpasswd'
+#  AuthType Digest
+#  AuthName "rutorrent"
+#  AuthUserFile '/etc/htpasswd'
   Require user ${MASTER}
 </Location>
 EOF
@@ -199,9 +200,9 @@ ProxyRequests Off
         AddDefaultCharset Off
         Order deny,allow
         Allow from all
-        AuthType Digest
-        AuthName "rutorrent"
-        AuthUserFile '/etc/htpasswd'
+#        AuthType Digest
+#        AuthName "rutorrent"
+#        AuthUserFile '/etc/htpasswd'
         Require user ${MASTER}
 </Proxy>
 ProxyPass /medusa/ws wss://127.0.0.1:8082/medusa/ws keepalive=On timeout=600 retry=1 acquire=3000
@@ -227,9 +228,9 @@ function _sonarr() {
 <Location /sonarr>
 ProxyPass http://localhost:8989/sonarr
 ProxyPassReverse http://localhost:8989/sonarr
-AuthType Digest
-AuthName "rutorrent"
-AuthUserFile '/etc/htpasswd'
+#AuthType Digest
+#AuthName "rutorrent"
+#AuthUserFile '/etc/htpasswd'
 Require user ${MASTER}
 </Location>
 EOF
@@ -255,9 +256,9 @@ function _subsonic() {
 <Location /subsonic>
 ProxyPass http://localhost:4040/subsonic
 ProxyPassReverse http://localhost:4040/subsonic
-AuthType Digest
-AuthName "rutorrent"
-AuthUserFile '/etc/htpasswd'
+#AuthType Digest
+#AuthName "rutorrent"
+#AuthUserFile '/etc/htpasswd'
 Require user ${MASTER}
 </Location>
 EOF
@@ -277,9 +278,9 @@ function _syncthing() {
 <Location /syncthing>
 ProxyPass http://localhost:8384
 ProxyPassReverse http://localhost:8384
-AuthType Digest
-AuthName "rutorrent"
-AuthUserFile '/etc/htpasswd'
+#AuthType Digest
+#AuthName "rutorrent"
+#AuthUserFile '/etc/htpasswd'
 Require user ${MASTER}
 </Location>
 EOF
@@ -290,8 +291,9 @@ EOF
   fi
 }
 
-local_setup=/etc/AetherFlow/setup/
-MASTER=$(cat /srv/rutorrent/home/db/master.txt)
+local_setup=/opt/AetherFlow/setup/
+# LEGACY REMOVED: master.txt
+MASTER="$AETHERFLOW_USER"
 
 if [[ -f /install/.couchpotato.lock ]]; then _couchpotato; fi
 if [[ -f /install/.emby.lock ]]; then _emby; fi

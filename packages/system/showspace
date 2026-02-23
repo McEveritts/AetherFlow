@@ -4,6 +4,7 @@
 #  USAGE: showspace (bytes)
 #  ABSTRACT: Converts a numeric parameter to a human readable format.
 ######################################################################
+source /opt/AetherFlow/packages/common.sh
 function showspace() { # Divides by 2^10 until < 1024 and then append metric suffix
 declare -a METRIC=('B' 'KB' 'MB' 'GB' 'TB' 'XB' 'PB') # Array of suffixes
 MAGNITUDE=0  # magnitude of 2^10

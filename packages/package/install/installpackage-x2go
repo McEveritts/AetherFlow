@@ -50,7 +50,7 @@ function _x2go() {
 		echo ${ok}
 }
 
-OUTTO=/srv/rutorrent/home/db/output.log
+OUTTO=$LOGFILE
 distribution=$(lsb_release -is)
 release=$(lsb_release -cs)
 ok=$(echo -e "[ \e[0;32mDONE\e[00m ]")

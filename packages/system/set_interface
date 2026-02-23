@@ -15,7 +15,8 @@
 #   under the GPL along with build & install instructions.
 #
 
-ADAPT=$(cat /srv/rutorrent/home/db/interface.txt);
+source /opt/AetherFlow/packages/common.sh
+ADAPT=$(cat /opt/AetherFlow/config/interface.txt);
 
 
 sed -i "s/INETFACE/${ADAPT}/g" /srv/rutorrent/home/widgets/stat.php;

@@ -18,6 +18,7 @@
 #   under the GPL along with build & install instructions.
 #
 
+source /opt/AetherFlow/packages/common.sh
 locale='zh.UTF-8'
 language='lang_zh'
 

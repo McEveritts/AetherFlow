@@ -58,7 +58,7 @@ function _installquota(){
 }
 
 
-OUTTO=/srv/rutorrent/home/db/output.log
+OUTTO=$LOGFILE
 DISTRO=$(lsb_release -is)
 primaryroot=root
 

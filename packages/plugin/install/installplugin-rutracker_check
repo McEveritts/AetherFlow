@@ -19,11 +19,13 @@
 #   including (via compiler) GPL-licensed code must also be made available
 #   under the GPL along with build & install instructions.
 #
-OUTTO=/srv/rutorrent/home/db/output.log
+source /opt/AetherFlow/packages/common.sh
+OUTTO=$LOGFILE
 
 function _installplugin-rutracker_check() {
   username=$(whoami);
-  rutorrent="/srv/rutorrent/";
+  # LEGACY: rutorrent path no longer used
+# rutorrent="/srv/rutorrent/";
   echo "Accessing rutracker_check in the plugin vault ... " >>"${OUTTO}" 2>&1;
   PLUGINVAULT="/etc/AetherFlow/rtplugins/"; cd "${rutorrent}plugins"
   sleep 5

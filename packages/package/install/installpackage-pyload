@@ -140,8 +140,9 @@ function _installpyLoad9() {
 
 
 ip=$(curl -s http://whatismyip.akamai.com)
-MASTER=$(cat /srv/rutorrent/home/db/master.txt)
-OUTTO=/srv/rutorrent/home/db/output.log
+source /opt/AetherFlow/packages/common.sh
+MASTER=$AETHERFLOW_USER
+OUTTO=$LOGFILE
 
 
 echo "Installing any additional dependencies needed for pyLoad ... " >>"${OUTTO}" 2>&1;_installpyLoad1

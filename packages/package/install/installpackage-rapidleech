@@ -17,8 +17,9 @@
 #   including (via compiler) GPL-licensed code must also be made available
 #   under the GPL along with build & install instructions.
 #
-MASTER=$(cat /srv/rutorrent/home/db/master.txt)
-OUTTO=/srv/rutorrent/home/db/output.log
+source /opt/AetherFlow/packages/common.sh
+MASTER=$AETHERFLOW_USER
+OUTTO=$LOGFILE
 
 function _installRapidleech1() {
   sudo git clone https://github.com/Th3-822/rapidleech.git  /home/"${MASTER}"/rapidleech >/dev/null 2>&1
@@ -32,9 +33,9 @@ cat >/etc/apache2/sites-enabled/"${MASTER}".rapidleech.conf<<EOF
 Alias /rapidleech "/home/${MASTER}/rapidleech/"
 <Directory "/home/${MASTER}/rapidleech/">
   Options Indexes FollowSymLinks MultiViews
-  AuthType Digest
-  AuthName "rutorrent"
-  AuthUserFile '/etc/htpasswd'
+#  AuthType Digest
+#  AuthName "rutorrent"
+#  AuthUserFile '/etc/htpasswd'
   Require valid-user
   AllowOverride None
   Order allow,deny

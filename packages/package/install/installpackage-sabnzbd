@@ -56,10 +56,10 @@ cat > /etc/apache2/sites-enabled/sabnzbd.conf <<EOF
 <Location /sabnzbd>
 ProxyPass http://localhost:65080/sabnzbd
 ProxyPassReverse http://localhost:65080/sabnzbd
-AuthType Digest
-AuthName "rutorrent"
-AuthUserFile '/etc/htpasswd'
-Require user ${username}
+#AuthType Digest
+#AuthName "rutorrent"
+#AuthUserFile '/etc/htpasswd'
+#Require user ${username}
 </Location>
 EOF
 chown www-data: /etc/apache2/sites-enabled/sabnzbd.conf
@@ -85,9 +85,10 @@ _sabnzbdexit() {
   exit
 }
 
-username=$(cat /srv/rutorrent/home/db/master.txt)
+source /opt/AetherFlow/packages/common.sh
+username=$AETHERFLOW_USER
 PUBLICIP=$(ip route get 8.8.8.8 | awk 'NR==1 {print $NF}')
-OUTTO=/srv/rutorrent/home/db/output.log
+OUTTO=$LOGFILE
 
 echo "Installing sabnzbd ... " >>"${OUTTO}" 2>&1;_sab
 echo "Creating sabnzbd systemd template ... " >>"${OUTTO}" 2>&1;_upstart

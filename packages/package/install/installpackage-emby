@@ -19,9 +19,10 @@
 
 DISTRO=$(lsb_release -is)
 CODENAME=$(lsb_release -cs)
-OUTTO=/srv/rutorrent/home/db/output.log
-username=$(cat /srv/rutorrent/home/db/master.txt)
-local_setup=/etc/AetherFlow/setup/
+OUTTO=$LOGFILE
+source /opt/AetherFlow/packages/common.sh
+username=$AETHERFLOW_USER
+local_setup=/opt/AetherFlow/setup/
 
 echo "Setting up emby apache configuration ... " >>"${OUTTO}" 2>&1
 cp ${local_setup}templates/emby.conf.template /etc/apache2/sites-enabled/emby.conf

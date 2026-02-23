@@ -45,9 +45,9 @@ cat > /etc/apache2/sites-enabled/couchpotato.conf <<EOF
 <Location /couchpotato>
 ProxyPass http://localhost:5050/couchpotato
 ProxyPassReverse http://localhost:5050/couchpotato
-AuthType Digest
-AuthName "rutorrent"
-AuthUserFile '/etc/htpasswd'
+#AuthType Digest
+#AuthName "rutorrent"
+#AuthUserFile '/etc/htpasswd'
 Require user ${MASTER}
 </Location>
 EOF
@@ -61,9 +61,10 @@ echo >>"${OUTTO}" 2>&1;
 echo "Close this dialog box to refresh your browser" >>"${OUTTO}" 2>&1;
 }
 
-local_setup=/etc/AetherFlow/setup/
-OUTTO=/srv/rutorrent/home/db/output.log
-MASTER=$(cat /srv/rutorrent/home/db/master.txt)
+local_setup=/opt/AetherFlow/setup/
+OUTTO=$LOGFILE
+source /opt/AetherFlow/packages/common.sh
+MASTER=$AETHERFLOW_USER
 _install
 _services
 

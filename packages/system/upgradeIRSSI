@@ -10,6 +10,7 @@
 #
 # VARIABLES
 #
+source /opt/AetherFlow/packages/common.sh
 _bold=$(tput bold)
 _underline=$(tput sgr 0 1)
 _reset=$(tput sgr0)

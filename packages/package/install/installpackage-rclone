@@ -17,9 +17,10 @@
 #   including (via compiler) GPL-licensed code must also be made available
 #   under the GPL along with build & install instructions.
 
-local_setup=/etc/AetherFlow/setup/
-OUTTO=/srv/rutorrent/home/db/output.log
-MASTER=$(cat /srv/rutorrent/home/db/master.txt)
+local_setup=/opt/AetherFlow/setup/
+OUTTO=$LOGFILE
+source /opt/AetherFlow/packages/common.sh
+MASTER=$AETHERFLOW_USER
 arch=$(arch)
 
 echo "Downloading rclone ... " >>"${OUTTO}" 2>&1;

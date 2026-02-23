@@ -2,6 +2,7 @@
 # AetherFlow Backup Manager
 # Location: /usr/local/bin/AetherFlow/system/af-backup
 
+source /opt/AetherFlow/packages/common.sh
 BACKUP_DIR="/home/${SUDO_USER:-$USER}/AetherFlow_Backups"
 DATE=$(date +%Y-%m-%d-%H%M)
 FILENAME="aetherflow-backup-${DATE}.tar.gz"

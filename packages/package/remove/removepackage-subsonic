@@ -18,6 +18,7 @@
 #   under the GPL along with build & install instructions.
 #
 
+source /opt/AetherFlow/packages/common.sh
 dpkg -r subsonic
 rm /etc/systemd/system/subsonic.service
 rm -rf /srv/subsonic

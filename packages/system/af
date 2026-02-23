@@ -1,4 +1,5 @@
 #!/bin/bash
+source /opt/AetherFlow/packages/common.sh
 set -euo pipefail
 #
 # [AetherFlow :: AetherFlow Package Manager Batch CLI Installer `af`]
@@ -224,7 +225,7 @@ if [[ $1 == upgrade ]]; then
       bash /opt/AetherFlow/packages/system/updateAetherFlow
     fi
   fi
-  #printf "" > /srv/rutorrent/home/db/output.log
+  #printf "" > "$LOGFILE"
   exit 0
 fi
 if [[ $1 == list ]]; then

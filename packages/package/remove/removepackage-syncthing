@@ -1,5 +1,7 @@
 #!/bin/bash
-MASTER=$(cat /srv/rutorrent/home/db/master.txt)
+source /opt/AetherFlow/packages/common.sh
+# LEGACY REMOVED: master.txt
+MASTER="$AETHERFLOW_USER"
 systemctl stop syncthing@${MASTER}
 apt-get -q -y purge syncthing
 rm /etc/systemd/system/syncthing@.service

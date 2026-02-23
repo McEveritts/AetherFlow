@@ -23,6 +23,7 @@
 #   with a summary of your project as well as its intended use for moentization.
 #
 
+source /opt/AetherFlow/packages/common.sh
 function _removepackage-tr() {
 	# Disable and Stop Transmission services
 	systemctl disable transmission@${username} > /dev/null 2>&1
@@ -43,8 +44,9 @@ function _removepackage-tr() {
 	service apache2 reload
 }
 
-username=$(cat /srv/rutorrent/home/db/master.txt)
-OUTTO="/srv/rutorrent/home/db/output.log"
+# LEGACY REMOVED: master.txt
+MASTER="$AETHERFLOW_USER"
+OUTTO=$LOGFILE
 
 _removepackage-tr
 

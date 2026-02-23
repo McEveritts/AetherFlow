@@ -18,9 +18,10 @@
 #   under the GPL along with build & install instructions.
 #
 
-OUTTO=/srv/rutorrent/home/db/output.log
-local_setup=/etc/AetherFlow/setup/
-MASTER=$(cat /srv/rutorrent/home/db/master.txt)
+OUTTO=$LOGFILE
+local_setup=/opt/AetherFlow/setup/
+source /opt/AetherFlow/packages/common.sh
+MASTER=$AETHERFLOW_USER
 
 
 echo "Creating subsonic-tmp install directory ... " >>"${OUTTO}" 2>&1;
@@ -54,9 +55,9 @@ cat > /etc/apache2/sites-enabled/subsonic.conf <<EOF
 <Location /subsonic>
 ProxyPass http://localhost:4040/subsonic
 ProxyPassReverse http://localhost:4040/subsonic
-AuthType Digest
-AuthName "rutorrent"
-AuthUserFile '/etc/htpasswd'
+#AuthType Digest
+#AuthName "rutorrent"
+#AuthUserFile '/etc/htpasswd'
 Require user ${MASTER}
 </Location>
 EOF

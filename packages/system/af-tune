@@ -4,6 +4,7 @@
 
 # This script analyzes system resources and adjusts configurations dynamically
 
+source /opt/AetherFlow/packages/common.sh
 LOG_FILE="/var/log/aetherflow/ai_tuner.log"
 RTORRENT_RC="/home/${SUDO_USER:-$USER}/.rtorrent.rc"
 

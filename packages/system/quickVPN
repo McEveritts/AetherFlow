@@ -19,6 +19,7 @@
 #
 #################################################################################
 #Script Console Colors
+source /opt/AetherFlow/packages/common.sh
 black=$(tput setaf 0); red=$(tput setaf 1); green=$(tput setaf 2); yellow=$(tput setaf 3);
 blue=$(tput setaf 4); magenta=$(tput setaf 5); cyan=$(tput setaf 6); white=$(tput setaf 7);
 on_red=$(tput setab 1); on_green=$(tput setab 2); on_yellow=$(tput setab 3); on_blue=$(tput setab 4);
@@ -190,10 +191,10 @@ cat >>/etc/apache2/apache2.conf<<'APA'
 UserDir public_html
 <Directory /home/*/public_html/>
 Options Indexes FollowSymLinks MultiViews
-AuthType Digest
-AuthName "rutorrent"
-AuthUserFile '/etc/htpasswd'
-Require valid-user
+#AuthType Digest
+#AuthName "rutorrent"
+#AuthUserFile '/etc/htpasswd'
+#Require valid-user
 AllowOverride None
 Order allow,deny
 allow from all

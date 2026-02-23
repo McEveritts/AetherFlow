@@ -18,10 +18,12 @@
 #   under the GPL along with build & install instructions.
 #
 
+source /opt/AetherFlow/packages/common.sh
 function _removepackage-autodl() {
   username=$(whoami);
   users=($(cat /etc/htpasswd | cut -d ":" -f 1))
-  rutorrent="/srv/rutorrent/";
+  # LEGACY: rutorrent path no longer used
+# rutorrent="/srv/rutorrent/";
   PLUGIN="autodl-irssi"
     for i in $PLUGIN; do
       rm -rf "${rutorrent}/plugins/$i"
