@@ -1,11 +1,24 @@
 export type TabId = 'overview' | 'services' | 'marketplace' | 'fileshare' | 'ai' | 'backups' | 'security' | 'profile' | 'settings' | 'users' | 'logout';
 
+export interface ProcessInfo {
+    pid: number;
+    name: string;
+    cpu: number;
+    mem: number;
+}
+
 export interface SystemMetrics {
     cpu_usage: number;
+    per_core_cpu: number[];
+    cpu_freq_mhz: number;
     disk_space: {
         total: number;
         used: number;
         free: number;
+    };
+    disk_io: {
+        read_bytes_sec: number;
+        write_bytes_sec: number;
     };
     is_windows: boolean;
     services: {
@@ -15,13 +28,32 @@ export interface SystemMetrics {
         total: number;
         used: number;
     };
+    swap: {
+        total: number;
+        used: number;
+    };
     network: {
         down: string;
         up: string;
         active_connections: number;
     };
+    total_net_bytes: {
+        rx: number;
+        tx: number;
+    };
     uptime: string;
     load_average: [number, number, number];
+    processes: ProcessInfo[];
+}
+
+export interface MetricsHistory {
+    cpu: number[];
+    memory: number[];
+    netDown: number[];
+    netUp: number[];
+    diskRead: number[];
+    diskWrite: number[];
+    timestamps: number[];
 }
 
 export interface CPUInfo {

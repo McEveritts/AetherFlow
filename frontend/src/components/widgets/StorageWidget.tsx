@@ -7,56 +7,52 @@ interface StorageWidgetProps {
 }
 
 export default function StorageWidget({ metrics, hardware }: StorageWidgetProps) {
-    // Graceful fallback for single disk if hardware ID array is empty
-    const disk1 = hardware?.storage?.[0];
-    const disk2 = hardware?.storage?.[1];
+    const disks = hardware?.storage || [];
+    const usedPct = metrics.disk_space.total > 0 ? (metrics.disk_space.used / metrics.disk_space.total) * 100 : 0;
 
     return (
-        <div className="md:col-span-2 lg:col-span-3 bg-white/[0.02] border border-white/[0.05] rounded-3xl p-6 relative overflow-hidden group backdrop-blur-xl">
-            <div className="flex items-center justify-between mb-8">
-                <h2 className="text-base font-semibold text-slate-200 flex items-center gap-2">
-                    <HardDrive size={18} className="text-amber-400" />
-                    {disk1 ? 'Physical Attached Storage' : 'ZFS Storage Pools'}
+        <div className="bg-white/[0.02] border border-white/[0.05] rounded-2xl p-5 relative overflow-hidden backdrop-blur-xl">
+            <div className="flex items-center justify-between mb-4">
+                <h2 className="text-sm font-semibold text-slate-200 flex items-center gap-2">
+                    <HardDrive size={16} className="text-amber-400" /> Storage
                 </h2>
+                <span className="text-2xl font-bold tracking-tighter text-amber-400">{usedPct.toFixed(1)}%</span>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-                {/* Pool 1 */}
-                <div>
-                    <div className="flex justify-between items-end mb-3">
-                        <div>
-                            <h3 className="text-sm font-bold text-slate-200 truncate max-w-[200px]" title={disk1?.name ? `/dev/${disk1.name}` : '/mnt/tank (Media)'}>{disk1?.name ? `/dev/${disk1.name} (Primary)` : '/mnt/tank (Media)'}</h3>
-                            <p className="text-xs text-slate-500 mt-0.5 truncate max-w-[200px]">{disk1?.drive_type ? `${disk1.drive_type} \u2022 ${disk1.model}` : `RAID-Z2 \u2022 ${metrics.disk_space.total.toFixed(0)} GB Total`}</p>
-                        </div>
-                        <span className="text-2xl font-bold tracking-tight text-amber-400">{((metrics.disk_space.used / metrics.disk_space.total) * 100).toFixed(1)}%</span>
-                    </div>
-                    <div className="h-4 w-full bg-slate-800/80 rounded-full overflow-hidden shadow-inner flex mb-2">
-                        <div className="h-full bg-gradient-to-r from-amber-600 to-amber-400" style={{ width: `${(metrics.disk_space.used / metrics.disk_space.total) * 100}%` }} />
-                    </div>
-                    <div className="flex justify-between text-xs text-slate-400">
-                        <span>{metrics.disk_space.used.toFixed(1)} GB Used</span>
-                        <span>{metrics.disk_space.free.toFixed(1)} GB Free</span>
-                    </div>
+            {/* Main disk usage */}
+            <div className="mb-4">
+                <div className="flex justify-between text-[10px] text-slate-400 font-semibold uppercase tracking-wider mb-1.5">
+                    <span>{metrics.disk_space.used.toFixed(1)} GB used</span>
+                    <span>{metrics.disk_space.free.toFixed(1)} GB free</span>
                 </div>
-
-                {/* Pool 2 (Mock Data) */}
-                <div>
-                    <div className="flex justify-between items-end mb-3">
-                        <div>
-                            <h3 className="text-sm font-bold text-slate-200 truncate max-w-[200px]" title={disk2?.name ? `/dev/${disk2.name}` : '/ (Root)'}>{disk2?.name ? `/dev/${disk2.name} (Secondary)` : '/ (Root)'}</h3>
-                            <p className="text-xs text-slate-500 mt-0.5 truncate max-w-[200px]">{disk2?.drive_type ? `${disk2.drive_type} \u2022 ${disk2.model}` : `NVMe SSD \u2022 512 GB Total`}</p>
-                        </div>
-                        <span className="text-2xl font-bold tracking-tight text-slate-300">18.4%</span>
-                    </div>
-                    <div className="h-4 w-full bg-slate-800/80 rounded-full overflow-hidden shadow-inner flex mb-2">
-                        <div className="h-full bg-slate-500" style={{ width: `18.4%` }} />
-                    </div>
-                    <div className="flex justify-between text-xs text-slate-400">
-                        <span>94.2 GB Used</span>
-                        <span>417.8 GB Free</span>
-                    </div>
+                <div className="h-3 w-full bg-slate-800/80 rounded-full overflow-hidden flex">
+                    <div
+                        className="h-full bg-gradient-to-r from-amber-600 to-amber-400 transition-all duration-500 rounded-full"
+                        style={{ width: `${usedPct}%` }}
+                    />
                 </div>
+                <div className="text-[10px] text-slate-500 mt-1">{metrics.disk_space.total.toFixed(0)} GB total</div>
             </div>
+
+            {/* Physical drives */}
+            {disks.length > 0 && (
+                <div className="space-y-2">
+                    <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider">Physical Drives</span>
+                    <div className="space-y-1.5">
+                        {disks.map((disk, i) => (
+                            <div key={i} className="flex items-center justify-between bg-slate-900/50 rounded-lg px-3 py-2 border border-white/[0.03]">
+                                <div className="min-w-0">
+                                    <span className="text-xs font-medium text-slate-300 block truncate">/dev/{disk.name}</span>
+                                    <span className="text-[10px] text-slate-500 truncate block">{disk.model} · {disk.drive_type}</span>
+                                </div>
+                                <span className="text-xs font-bold text-slate-400 whitespace-nowrap ml-2">
+                                    {(disk.size_bytes / (1024 * 1024 * 1024)).toFixed(0)} GB
+                                </span>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            )}
         </div>
     );
 }
