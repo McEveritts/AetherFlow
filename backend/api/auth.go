@@ -55,9 +55,12 @@ func GoogleLogin(c *gin.Context) {
 }
 
 func GoogleCallback(c *gin.Context) {
+	// Dynamically build base URL from request
+	baseURL := getBaseURL(c)
+
 	errParam := c.Query("error")
 	if errParam != "" {
-		c.Redirect(http.StatusTemporaryRedirect, "http://localhost:3000/login?error="+errParam)
+		c.Redirect(http.StatusTemporaryRedirect, baseURL+"/login?error="+errParam)
 		return
 	}
 
@@ -66,7 +69,7 @@ func GoogleCallback(c *gin.Context) {
 
 	cookieState, err := c.Cookie("oauth2_state")
 	if err != nil || state != cookieState {
-		c.Redirect(http.StatusTemporaryRedirect, "http://localhost:3000/login?error=invalid_state")
+		c.Redirect(http.StatusTemporaryRedirect, baseURL+"/login?error=invalid_state")
 		return
 	}
 
@@ -84,13 +87,13 @@ func GoogleCallback(c *gin.Context) {
 
 	resp, err := http.PostForm("https://oauth2.googleapis.com/token", data)
 	if err != nil {
-		c.Redirect(http.StatusTemporaryRedirect, "http://localhost:3000/login?error=token_exchange_failed")
+		c.Redirect(http.StatusTemporaryRedirect, baseURL+"/login?error=token_exchange_failed")
 		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		c.Redirect(http.StatusTemporaryRedirect, "http://localhost:3000/login?error=token_exchange_failed")
+		c.Redirect(http.StatusTemporaryRedirect, baseURL+"/login?error=token_exchange_failed")
 		return
 	}
 
@@ -103,7 +106,7 @@ func GoogleCallback(c *gin.Context) {
 	req.Header.Add("Authorization", "Bearer "+accessToken)
 	infoResp, err := http.DefaultClient.Do(req)
 	if err != nil || infoResp.StatusCode != 200 {
-		c.Redirect(http.StatusTemporaryRedirect, "http://localhost:3000/login?error=userinfo_failed")
+		c.Redirect(http.StatusTemporaryRedirect, baseURL+"/login?error=userinfo_failed")
 		return
 	}
 	defer infoResp.Body.Close()
@@ -118,7 +121,7 @@ func GoogleCallback(c *gin.Context) {
 	avatarUrl, _ := userInfo["picture"].(string)
 
 	if googleId == "" {
-		c.Redirect(http.StatusTemporaryRedirect, "http://localhost:3000/login?error=no_google_id")
+		c.Redirect(http.StatusTemporaryRedirect, baseURL+"/login?error=no_google_id")
 		return
 	}
 
@@ -155,7 +158,7 @@ func GoogleCallback(c *gin.Context) {
 		
 		if err != nil {
 			log.Printf("User creation err: %v", err)
-			c.Redirect(http.StatusTemporaryRedirect, "http://localhost:3000/login?error=db_error")
+			c.Redirect(http.StatusTemporaryRedirect, baseURL+"/login?error=db_error")
 			return
 		}
 		
@@ -172,7 +175,7 @@ func GoogleCallback(c *gin.Context) {
 		user.AvatarURL = avatarUrl
 	} else {
 		log.Printf("DB error: %v", err)
-		c.Redirect(http.StatusTemporaryRedirect, "http://localhost:3000/login?error=db_error")
+		c.Redirect(http.StatusTemporaryRedirect, baseURL+"/login?error=db_error")
 		return
 	}
 
@@ -189,12 +192,30 @@ func GoogleCallback(c *gin.Context) {
 
 	tokenString, err := token.SignedString(getJWTSecret())
 	if err != nil {
-		c.Redirect(http.StatusTemporaryRedirect, "http://localhost:3000/login?error=jwt_failed")
+		c.Redirect(http.StatusTemporaryRedirect, baseURL+"/login?error=jwt_failed")
 		return
 	}
 
 	c.SetCookie("aetherflow_session", tokenString, 3600*24*30, "/", "", false, true)
-	c.Redirect(http.StatusTemporaryRedirect, "http://localhost:3000/")
+	c.Redirect(http.StatusTemporaryRedirect, baseURL+"/")
+}
+
+// getBaseURL determines the scheme + host from the incoming request
+func getBaseURL(c *gin.Context) string {
+	scheme := "https"
+	if c.Request.TLS == nil {
+		// Check X-Forwarded-Proto from Apache proxy
+		if proto := c.GetHeader("X-Forwarded-Proto"); proto != "" {
+			scheme = proto
+		} else {
+			scheme = "http"
+		}
+	}
+	host := c.GetHeader("X-Forwarded-Host")
+	if host == "" {
+		host = c.Request.Host
+	}
+	return scheme + "://" + host
 }
 
 func GetSession(c *gin.Context) {
