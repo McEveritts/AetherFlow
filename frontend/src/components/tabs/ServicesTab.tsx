@@ -7,6 +7,44 @@ import { useToast } from '@/contexts/ToastContext';
 
 const fetcher = (url: string) => fetch(url).then((res) => res.json());
 
+// Maps service process names to their web UI ports/paths
+const SERVICE_WEB_PORTS: Record<string, number | string> = {
+    'plexmediaserver': 32400,
+    'jellyfin': 8096,
+    'emby-server': 8096,
+    'sonarr': 8989,
+    'radarr': 7878,
+    'lidarr': 8686,
+    'readarr': 8787,
+    'prowlarr': 9696,
+    'bazarr': 6767,
+    'overseerr': 5055,
+    'ombi': 5000,
+    'tautulli': 8181,
+    'jackett': 9117,
+    'navidrome': 4533,
+    'qbittorrent': 8180,
+    'deluged': 8112,
+    'transmission-daemon': 9091,
+    'sabnzbd': 8080,
+    'nzbget': 6789,
+    'flood': 3001,
+    'autobrr': 7474,
+    'syncthing': 8384,
+    'filebrowser': 8085,
+    'grafana-server': 3000,
+    'prometheus': 9090,
+    'netdata': 19999,
+    'uptime-kuma': 3009,
+    'home-assistant@homeassistant': 8123,
+    'portainer': 9443,
+    'gitea': 3000,
+    'pihole-FTL': '/admin',
+    'apache2': 443,
+    'aetherflow-frontend': '/',
+    'aetherflow-api': '/api/services',
+};
+
 interface ServiceInfo {
     status: string;
     version: string;
@@ -119,7 +157,23 @@ export default function ServicesTab() {
                 <div className="flex gap-2">
                     {isRunning ? (
                         <>
-                            <button className="flex-1 py-2 bg-slate-800/80 hover:bg-slate-700 text-slate-300 text-xs font-semibold rounded-lg transition-colors flex items-center justify-center gap-2 disabled:opacity-50" disabled={isBusy}>
+                            <button
+                                onClick={() => {
+                                    const process = data.process || name;
+                                    const portOrPath = SERVICE_WEB_PORTS[process];
+                                    if (portOrPath != null) {
+                                        const host = window.location.hostname;
+                                        const url = typeof portOrPath === 'string'
+                                            ? portOrPath.startsWith('/') ? `${window.location.protocol}//${host}${portOrPath}` : portOrPath
+                                            : `${window.location.protocol}//${host}:${portOrPath}`;
+                                        window.open(url, '_blank');
+                                    } else {
+                                        addToast('No web UI configured for this service.', 'info');
+                                    }
+                                }}
+                                className="flex-1 py-2 bg-slate-800/80 hover:bg-slate-700 text-slate-300 text-xs font-semibold rounded-lg transition-colors flex items-center justify-center gap-2 disabled:opacity-50"
+                                disabled={isBusy}
+                            >
                                 <Globe size={14} /> Web UI
                             </button>
                             <button
