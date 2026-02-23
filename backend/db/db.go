@@ -64,11 +64,43 @@ func InitDB() {
 		log.Printf("Error ensuring settings table exists: %v", err)
 	}
 
-	// Migrate existing database to have setup_completed column if it didn't exist
+	// Create users table if it doesn't exist
+	_, err = DB.Exec(`
+		CREATE TABLE IF NOT EXISTS users (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			username TEXT UNIQUE NOT NULL,
+			password_hash TEXT DEFAULT '',
+			google_id TEXT DEFAULT '',
+			email TEXT DEFAULT '',
+			avatar_url TEXT DEFAULT '',
+			role TEXT DEFAULT 'user',
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		)
+	`)
+	if err != nil {
+		log.Printf("Error ensuring users table exists: %v", err)
+	}
+
+	// Create login_history table
+	_, err = DB.Exec(`
+		CREATE TABLE IF NOT EXISTS login_history (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			user_id INTEGER,
+			ip_address TEXT,
+			user_agent TEXT,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		)
+	`)
+	if err != nil {
+		log.Printf("Error ensuring login_history table exists: %v", err)
+	}
+
+	// Migrate existing database columns
 	_, _ = DB.Exec(`ALTER TABLE settings ADD COLUMN setup_completed BOOLEAN DEFAULT 0;`)
 	_, _ = DB.Exec(`ALTER TABLE settings ADD COLUMN gemini_api_key TEXT DEFAULT '';`)
+	_, _ = DB.Exec(`ALTER TABLE users ADD COLUMN password_hash TEXT DEFAULT '';`)
 
-	// Ensure there is at least one row
+	// Ensure there is at least one row in settings
 	DB.Exec(`INSERT OR IGNORE INTO settings (id) VALUES (1)`)
 
 	log.Printf("Successfully connected to SQLite database at %s", dbPath)

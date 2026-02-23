@@ -19,6 +19,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
+	"golang.org/x/crypto/bcrypt"
 )
 
 var jwtSecret = []byte(os.Getenv("JWT_SECRET"))
@@ -28,6 +29,118 @@ func getJWTSecret() []byte {
 		jwtSecret = []byte("default_fallback_secret_do_not_use_in_prod")
 	}
 	return jwtSecret
+}
+
+// SetupAdmin creates the initial admin account (only works when no users exist)
+func SetupAdmin(c *gin.Context) {
+	var count int
+	db.DB.QueryRow("SELECT COUNT(*) FROM users").Scan(&count)
+	if count > 0 {
+		c.JSON(http.StatusConflict, gin.H{"error": "Admin account already exists"})
+		return
+	}
+
+	var req struct {
+		Username string `json:"username" binding:"required"`
+		Password string `json:"password" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if len(req.Password) < 6 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Password must be at least 6 characters"})
+		return
+	}
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to hash password"})
+		return
+	}
+
+	res, err := db.DB.Exec(
+		"INSERT INTO users (username, password_hash, role) VALUES (?, ?, 'admin')",
+		req.Username, string(hash),
+	)
+	if err != nil {
+		log.Printf("Setup admin error: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create admin account"})
+		return
+	}
+
+	id, _ := res.LastInsertId()
+
+	// Issue JWT
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+		"user_id": int(id),
+		"exp":     time.Now().Add(time.Hour * 24 * 30).Unix(),
+	})
+	tokenString, _ := token.SignedString(getJWTSecret())
+	c.SetCookie("aetherflow_session", tokenString, 3600*24*30, "/", "", false, true)
+
+	c.JSON(http.StatusOK, gin.H{"message": "Admin account created", "username": req.Username})
+}
+
+// LocalLogin authenticates with username + password
+func LocalLogin(c *gin.Context) {
+	var req struct {
+		Username string `json:"username" binding:"required"`
+		Password string `json:"password" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	var user models.User
+	var passwordHash string
+	err := db.DB.QueryRow(
+		"SELECT id, username, email, avatar_url, role, COALESCE(password_hash, '') FROM users WHERE username = ?",
+		req.Username,
+	).Scan(&user.ID, &user.Username, &user.Email, &user.AvatarURL, &user.Role, &passwordHash)
+
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid username or password"})
+		return
+	}
+
+	if passwordHash == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "This account uses Google OAuth. Use the Google login button."})
+		return
+	}
+
+	if err := bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(req.Password)); err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid username or password"})
+		return
+	}
+
+	// Log login
+	clientIP := c.ClientIP()
+	userAgent := c.Request.UserAgent()
+	db.DB.Exec("INSERT INTO login_history (user_id, ip_address, user_agent) VALUES (?, ?, ?)", user.ID, clientIP, userAgent)
+
+	// Issue JWT
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+		"user_id": user.ID,
+		"exp":     time.Now().Add(time.Hour * 24 * 30).Unix(),
+	})
+	tokenString, err := token.SignedString(getJWTSecret())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create session"})
+		return
+	}
+
+	c.SetCookie("aetherflow_session", tokenString, 3600*24*30, "/", "", false, true)
+	c.JSON(http.StatusOK, gin.H{"message": "Login successful", "user": user})
+}
+
+// CheckSetupNeeded returns whether initial setup is required
+func CheckSetupNeeded(c *gin.Context) {
+	var count int
+	db.DB.QueryRow("SELECT COUNT(*) FROM users").Scan(&count)
+	c.JSON(http.StatusOK, gin.H{"setupRequired": count == 0})
 }
 
 func GoogleLogin(c *gin.Context) {
