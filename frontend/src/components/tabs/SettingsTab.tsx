@@ -14,13 +14,13 @@ export default function SettingsTab() {
     const [updateMessage, setUpdateMessage] = useState('');
 
     const { data: updateData, error: updateError } = useSWR(
-        'http://localhost:8080/api/system/update/check',
+        '/api/system/update/check',
         fetcher,
         { refreshInterval: 60000 } // Check every minute
     );
 
     const { data: settingsData } = useSWR(
-        'http://localhost:8080/api/settings',
+        '/api/settings',
         fetcher,
         {
             revalidateOnFocus: false,
@@ -45,7 +45,7 @@ export default function SettingsTab() {
                 defaultDashboard: settingsData?.defaultDashboard || 'overview'
             };
 
-            const res = await fetch('http://localhost:8080/api/settings', {
+            const res = await fetch('/api/settings', {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload)
@@ -67,7 +67,7 @@ export default function SettingsTab() {
         setIsUpdating(true);
         setUpdateMessage('Initiating update sequence...');
         try {
-            const res = await fetch('http://localhost:8080/api/system/update/run', {
+            const res = await fetch('/api/system/update/run', {
                 method: 'POST'
             });
             const data = await res.json();

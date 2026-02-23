@@ -18,7 +18,7 @@ const fetcher = (url: string) => fetch(url).then(res => {
 
 export function useMarketplace() {
     const { data, error, isLoading, mutate } = useSWR<App[]>(
-        'http://localhost:8080/api/marketplace',
+        '/api/marketplace',
         fetcher,
         {
             revalidateOnFocus: false,

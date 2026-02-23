@@ -34,7 +34,7 @@ export default function MarketplaceTab() {
     const handleInstall = async (id: string) => {
         setOperatingApp(id);
         try {
-            const res = await fetch(`http://localhost:8080/api/packages/${id}/install`, { method: 'POST' });
+            const res = await fetch(`/api/packages/${id}/install`, { method: 'POST' });
             if (!res.ok) {
                 const data = await res.json().catch(() => ({}));
                 throw new Error(data.error || 'Installation request failed');
@@ -51,7 +51,7 @@ export default function MarketplaceTab() {
     const handleUninstall = async (id: string) => {
         setOperatingApp(id);
         try {
-            const res = await fetch(`http://localhost:8080/api/packages/${id}/uninstall`, { method: 'POST' });
+            const res = await fetch(`/api/packages/${id}/uninstall`, { method: 'POST' });
             if (!res.ok) {
                 const data = await res.json().catch(() => ({}));
                 throw new Error(data.error || 'Uninstallation request failed');

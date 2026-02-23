@@ -1,34 +1,7 @@
 #!/bin/bash
 # Module: 01-prompts.sh
 
-# shellcheck disable=2162
-function _askquota() {
-	# Resume: use saved config if available
-	local saved=$(_load_config quota)
-	if [[ -n "${saved}" ]]; then
-		quota="${saved}"
-		echo "Using saved preference: quota=${quota}"
-		return 0
-	fi
 
-	echo -ne "${bold}${yellow}Do you wish to use user quotas?${normal} (Default: ${green}${bold}Y${normal}) "
-	read -r input
-	case ${input} in
-	[yY] | [yY][Ee][Ss] | "")
-		quota="yes"
-		echo "${bold}Quotas will be installed${normal}"
-		;;
-	[nN] | [nN][Oo])
-		quota="no"
-		echo "${cyan}Quotas will not be installed${normal}"
-		;;
-	*)
-		quota="yes"
-		echo "${bold}Quotas will be installed${normal}"
-		;;
-	esac
-	_save_config quota "${quota}"
-}
 
 # shellcheck disable=2162
 function _ask10g() {

@@ -120,49 +120,7 @@ function _skel() {
 	fi
 }
 
-# Setup mount points for Quotas
-function _qmount() {
-	if [[ ${quota} == yes ]]; then
-		if [[ ${DISTRO} == Ubuntu ]]; then
-			if [[ ${primaryroot} == "root" ]]; then
-				sed -ie '/\/ / s/defaults/usrjquota=aquota.user,jqfmt=vfsv1,defaults/' /etc/fstab
-				sed -i 's/errors=remount-ro/usrjquota=aquota.user,jqfmt=vfsv1,errors=remount-ro/g' /etc/fstab
-				apt-get install -y linux-image-extra-virtual quota >>"${OUTTO}" 2>&1
-				mount -o remount / || mount -o remount /home >>"${OUTTO}" 2>&1
-				quotacheck -auMF vfsv1 >>"${OUTTO}" 2>&1
-				quotaon -uv / >>"${OUTTO}" 2>&1
-				service quota start >>"${OUTTO}" 2>&1
-			else
-				sed -ie '/\/home/ s/defaults/usrjquota=aquota.user,jqfmt=vfsv1,defaults/' /etc/fstab
-				sed -i 's/errors=remount-ro/usrjquota=aquota.user,jqfmt=vfsv1,errors=remount-ro/g' /etc/fstab
-				apt-get install -y linux-image-extra-virtual quota >>"${OUTTO}" 2>&1
-				mount -o remount /home >>"${OUTTO}" 2>&1
-				quotacheck -auMF vfsv1 >>"${OUTTO}" 2>&1
-				quotaon -uv /home >>"${OUTTO}" 2>&1
-				service quota start >>"${OUTTO}" 2>&1
-			fi
-		elif [[ ${DISTRO} == Debian ]]; then
-			if [[ ${primaryroot} == "root" ]]; then
-				sed -ie '/\/ / s/defaults/usrjquota=aquota.user,jqfmt=vfsv1,defaults/' /etc/fstab
-				sed -i 's/errors=remount-ro/usrjquota=aquota.user,jqfmt=vfsv1,errors=remount-ro/g' /etc/fstab
-				apt-get install -y quota >>"${OUTTO}" 2>&1
-				mount -o remount / || mount -o remount /home >>"${OUTTO}" 2>&1
-				quotacheck -auMF vfsv1 >>"${OUTTO}" 2>&1
-				quotaon -uv / >>"${OUTTO}" 2>&1
-				service quota start >>"${OUTTO}" 2>&1
-			else
-				sed -ie '/\/home/ s/defaults/usrjquota=aquota.user,jqfmt=vfsv1,defaults/' /etc/fstab
-				sed -i 's/errors=remount-ro/usrjquota=aquota.user,jqfmt=vfsv1,errors=remount-ro/g' /etc/fstab
-				apt-get install -y quota >>"${OUTTO}" 2>&1
-				mount -o remount /home >>"${OUTTO}" 2>&1
-				quotacheck -auMF vfsv1 >>"${OUTTO}" 2>&1
-				quotaon -uv /home >>"${OUTTO}" 2>&1
-				service quota start >>"${OUTTO}" 2>&1
-			fi
-		fi
-		touch /install/.quota.lock
-	fi
-}
+
 
 # build function for ffmpeg
 # shellcheck disable=2215,2312,2250

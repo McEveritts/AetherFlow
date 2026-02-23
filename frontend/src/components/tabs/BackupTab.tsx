@@ -18,7 +18,7 @@ export default function BackupTab() {
         setBackupState({ status: 'running', message: 'Initiating AetherFlow database snapshot...' });
 
         try {
-            const res = await fetch('http://localhost:8080/api/backup/run', { method: 'POST' });
+            const res = await fetch('/api/backup/run', { method: 'POST' });
             const data = await res.json();
 
             if (res.ok) {
