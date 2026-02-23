@@ -6,6 +6,7 @@ import (
 
 	"aetherflow/models"
 
+	"github.com/jaypipes/ghw"
 	"github.com/shirou/gopsutil/v3/cpu"
 	"github.com/shirou/gopsutil/v3/disk"
 	"github.com/shirou/gopsutil/v3/host"
@@ -157,4 +158,111 @@ func formatBytes(bytes float64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.1f %cB", bytes/float64(div), "KMGTPE"[exp])
+}
+
+// GetDetailedHardware uses the ghw library (which parses pci.ids and usb.ids natively inside Linux)
+// to return a robust, human-readable hardware identifier database format.
+func GetDetailedHardware() models.HardwareReport {
+	report := models.HardwareReport{}
+
+	// System / Baseboard
+	dmi, err := ghw.Baseboard()
+	if err == nil && dmi != nil {
+		report.SystemVendor = dmi.Vendor
+		report.SystemProduct = dmi.Product
+	}
+
+	// CPU
+	cpu, err := ghw.CPU()
+	if err == nil && cpu != nil && len(cpu.Processors) > 0 {
+		p := cpu.Processors[0]
+		report.CPU = &models.CPUInfo{
+			Vendor:  p.Vendor,
+			Model:   p.Model,
+			Cores:   cpu.TotalCores,
+			Threads: cpu.TotalThreads,
+		}
+	}
+
+	// Memory
+	mem, err := ghw.Memory()
+	if err == nil && mem != nil {
+		report.Memory = &models.MemoryInfo{
+			TotalBytes: mem.TotalPhysicalBytes,
+			// Not all systems expose bank details successfully, defaulting
+		}
+	}
+
+	// GPU
+	gpu, err := ghw.GPU()
+	if err == nil && gpu != nil {
+		for _, card := range gpu.GraphicsCards {
+			if card.DeviceInfo != nil {
+				vendor := "Unknown"
+				product := "Unknown"
+				if card.DeviceInfo.Vendor != nil {
+					vendor = card.DeviceInfo.Vendor.Name
+				}
+				if card.DeviceInfo.Product != nil {
+					product = card.DeviceInfo.Product.Name
+				}
+				report.GPUs = append(report.GPUs, models.GPUInfo{
+					Vendor:  vendor,
+					Product: product,
+				})
+			}
+		}
+	}
+
+	// Network
+	net, err := ghw.Network()
+	if err == nil && net != nil {
+		for _, nic := range net.NICs {
+			// Skip virtual loopbacks
+			if nic.IsVirtual {
+				continue
+			}
+
+			vendor := "Unknown"
+			product := "Unknown"
+			
+			if nic.PCIAddress != nil {
+				pci, err := ghw.PCI()
+				if err == nil && pci != nil {
+					info := pci.GetDevice(*nic.PCIAddress)
+					if info != nil {
+						if info.Vendor != nil {
+							vendor = info.Vendor.Name
+						}
+						if info.Product != nil {
+							product = info.Product.Name
+						}
+					}
+				}
+			}
+
+			report.Network = append(report.Network, models.NetworkInfo{
+				Name:    nic.Name,
+				MAC:     nic.MacAddress,
+				Vendor:  vendor,
+				Product: product,
+			})
+		}
+	}
+
+	// Storage Blocks
+	block, err := ghw.Block()
+	if err == nil && block != nil {
+		for _, disk := range block.Disks {
+			report.Storage = append(report.Storage, models.StorageInfo{
+				Name:       disk.Name,
+				Model:      disk.Model,
+				SizeBytes:  disk.SizeBytes,
+				DriveType:  disk.DriveType.String(),
+				IsRemovable: disk.IsRemovable,
+			})
+		}
+	}
+
+	return report
 }
