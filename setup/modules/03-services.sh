@@ -9,10 +9,10 @@ function _xmlrpc() {
 	\cp -rf ${local_setup}sources/xmlrpc-c_1-39-13/ .
 	cd xmlrpc-c_1-39-13 || exit 1
 	chmod +x configure
-	./configure --prefix=/usr --disable-cplusplus >>"${OUTTO}" 2>&1
-	make >>"${OUTTO}" 2>&1
+	./configure --prefix=/usr --disable-cplusplus >>"${OUTTO}" 2>&1 || return 1
+	make >>"${OUTTO}" 2>&1 || return 1
 	chmod +x install-sh
-	make install >>"${OUTTO}" 2>&1
+	make install >>"${OUTTO}" 2>&1 || return 1
 }
 
 # libtorrent function
@@ -48,8 +48,8 @@ function _libtorrent() {
 	else
 		./configure --disable-debug --prefix=/usr >>"${OUTTO}" 2>&1
 	fi
-	make -j${MAXCPUS} >>"${OUTTO}" 2>&1
-	make install >>"${OUTTO}" 2>&1
+	make -j${MAXCPUS} >>"${OUTTO}" 2>&1 || return 1
+	make install >>"${OUTTO}" 2>&1 || return 1
 }
 
 # rtorrent function
@@ -75,8 +75,8 @@ function _rtorrent() {
 	else
 		./configure --disable-debug --prefix=/usr --with-xmlrpc-c >>"${OUTTO}" 2>&1
 	fi
-	make -j${MAXCPUS} >>"${OUTTO}" 2>&1
-	make install >>"${OUTTO}" 2>&1
+	make -j${MAXCPUS} >>"${OUTTO}" 2>&1 || return 1
+	make install >>"${OUTTO}" 2>&1 || return 1
 	cd /tmp || exit 1
 	ldconfig >>"${OUTTO}" 2>&1
 	rm -rf /tmp/rtorrent-"${RTVERSION}"* >>"${OUTTO}" 2>&1

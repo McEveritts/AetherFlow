@@ -62,12 +62,99 @@ BASE_DIR="$(dirname "${SCRIPT_DIR}")"
 local_setup="${SCRIPT_DIR}/"
 local_packages="${BASE_DIR}/packages/"
 
-# Load Modules
+# Load Modules (06-state.sh loads first due to sort order after 05-)
 for module in "${SCRIPT_DIR}/modules/"*.sh; do
     # shellcheck disable=1090
     source "$module"
 done
 
+################################################################################
+# CLI Argument Parsing
+################################################################################
+
+REPAIR_STEPS=""
+FRESH_INSTALL=false
+RESUME_MODE=false
+LIST_ONLY=false
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --resume)
+            RESUME_MODE=true
+            shift
+            ;;
+        --repair)
+            shift
+            # Collect all repair step IDs until next flag or end
+            while [[ $# -gt 0 && ! "$1" =~ ^-- ]]; do
+                REPAIR_STEPS="${REPAIR_STEPS} $1"
+                shift
+            done
+            ;;
+        --fresh)
+            FRESH_INSTALL=true
+            shift
+            ;;
+        --list-steps)
+            LIST_ONLY=true
+            shift
+            ;;
+        --help|-h)
+            echo ""
+            echo "AetherFlow Installer"
+            echo "===================="
+            echo ""
+            echo "Usage: bash AetherFlow-Setup [OPTIONS]"
+            echo ""
+            echo "Options:"
+            echo "  --resume         Resume from last successful step (default if state exists)"
+            echo "  --repair <step>  Force re-run specific step(s) by ID"
+            echo "  --fresh          Wipe all state and start from scratch"
+            echo "  --list-steps     Show all steps and their completion status"
+            echo "  --help, -h       Show this help message"
+            echo ""
+            echo "Examples:"
+            echo "  bash AetherFlow-Setup                    # Fresh install or auto-resume"
+            echo "  bash AetherFlow-Setup --resume            # Resume after failure"
+            echo "  bash AetherFlow-Setup --repair build_modern  # Re-run just the build step"
+            echo "  bash AetherFlow-Setup --repair xmlrpc libtorrent rtorrent"
+            echo "  bash AetherFlow-Setup --list-steps        # See progress"
+            echo ""
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1 (try --help)"
+            exit 1
+            ;;
+    esac
+done
+
+# Export for use in 06-state.sh functions
+export REPAIR_STEPS
+export FRESH_INSTALL
+
+################################################################################
+# State Initialization
+################################################################################
+
+_init_state
+
+# Handle --list-steps
+if [[ "${LIST_ONLY}" == "true" ]]; then
+    _list_steps
+    exit 0
+fi
+
+# Handle --fresh
+if [[ "${FRESH_INSTALL}" == "true" ]]; then
+    echo "Wiping previous installation state..."
+    _cleanup_state
+fi
+
+# Detect previous install (auto-resume)
+if [[ -z "${REPAIR_STEPS}" ]] && [[ "${FRESH_INSTALL}" == "false" ]]; then
+    _detect_previous_install
+fi
 
 clear
 
@@ -95,10 +182,10 @@ IFACE=$(ip link show | grep -i broadcast | grep -m1 UP | cut -d: -f 2 | cut -d@ 
 PORT=$(shuf -i 2000-61000 -n 1)
 PORTEND=$((${PORT} + 1500))
 # shellcheck disable=2312
-while [[ "$(netstat -ln | grep ':'"${PORT}"'' | grep -c 'LISTEN')" -eq "1" ]]; do PORT="$(shuf -i 2000-61000 -n 1)"; done
+while [[ "$(netstat -ln | grep ':'${PORT}'' | grep -c 'LISTEN')" -eq "1" ]]; do PORT="$(shuf -i 2000-61000 -n 1)"; done
 RPORT=$(shuf -i 2000-61000 -n 1)
 # shellcheck disable=2312
-while [[ "$(netstat -ln | grep ':'"${RPORT}"'' | grep -c 'LISTEN')" -eq "1" ]]; do RPORT="$(shuf -i 2000-61000 -n 1)"; done
+while [[ "$(netstat -ln | grep ':'${RPORT}'' | grep -c 'LISTEN')" -eq "1" ]]; do RPORT="$(shuf -i 2000-61000 -n 1)"; done
 S=$(date +%s)
 OK=$(echo -e "[ ${bold}${green}DONE${normal} ]")
 genpass=$(_string)
@@ -111,189 +198,117 @@ ip=$(ip route get 8.8.8.8 | awk 'NR==1 {print $7}')
 export DEBIAN_FRONTEND=noninteractive
 cd
 
-# AetherFlow STRUCTURE
-_bashrc
-_intro
-_checkroot
-_logcheck
-_checkkernel
-_hostname
-_askquota
-_askcontinue
-_ssdpblock
-_locale
+################################################################################
+# PHASE 1: System Checks & User Prompts
+#   These run in the foreground since they require user interaction
+################################################################################
+
+_run_step_fg "bashrc" "Setting up shell environment" _bashrc
+_run_step_fg "intro" "Checking distribution compatibility" _intro
+_run_step_fg "checkroot" "Verifying root privileges" _checkroot
+_run_step_fg "logcheck" "Configuring log output" _logcheck
+_run_step_fg "checkkernel" "Checking kernel compatibility" _checkkernel
+_run_step_fg "hostname" "Setting hostname" _hostname
+_run_step_fg "askquota" "Quota preferences" _askquota
+_run_step_fg "askcontinue" "Ready to proceed" _askcontinue
+_run_step_fg "ssdpblock" "Blocking insecure SSDP port" _ssdpblock
+_run_step_fg "locale" "Setting locale" _locale
 clear
 
-_askpartition
-_ask10g
-_askrtorrent
+_run_step_fg "askpartition" "Partition selection" _askpartition
+_run_step_fg "ask10g" "10G network check" _ask10g
+_run_step_fg "askrtorrent" "rTorrent version selection" _askrtorrent
 
-_asktr
+_run_step_fg "asktr" "Transmission preference" _asktr
 apt-get install -q -y curl >>"${OUTTO}" 2>&1
-_askqb
-_askdashtheme
-_adduser
-_askffmpeg
-_askvsftpd
-_denyhosts
-_askbbr
+_run_step_fg "askqb" "qBittorrent preference" _askqb
+_run_step_fg "askdashtheme" "Dashboard theme" _askdashtheme
+_run_step_fg "adduser" "Adding master user" _adduser
+_run_step_fg "askffmpeg" "FFmpeg preference" _askffmpeg
+_run_step_fg "askvsftpd" "FTP configuration" _askvsftpd
+_run_step_fg "denyhosts" "Public tracker blocking" _denyhosts
+_run_step_fg "askbbr" "BBR congestion control preference" _askbbr
 clear
+
+################################################################################
+# PHASE 2: Installation
+#   These run backgrounded with spinner animation
+################################################################################
 
 echo
 echo ""
 echo "${bold}${magenta}AetherFlow will now install, this may take between${normal}"
 echo "${bold}${magenta}10 and 45 minutes depending on your systems specs${normal}"
 echo ""
-echo -n "Pulling AetherFlow Ecosystem ... "
-_repos &
-spinner $!
-echo
-echo -n "Updating system ... "
-_updates &
-spinner $!
-echo
-echo -n "Installing all needed dependencies ... "
-_depends &
-spinner $!
-echo
+
+_run_step "repos" "Pulling AetherFlow Ecosystem" _repos
+_run_step "updates" "Updating system" _updates
+_run_step "depends" "Installing all needed dependencies" _depends
+
 if [[ ${RTVERSION} != 0.9.7 ]]; then
-	echo -n "Installing openssl ... "
-	_openssl &
-	spinner $!
-	echo
+	_run_step "openssl" "Installing openssl" _openssl
 fi
-echo -n "Setting up system executables ... "
-_syscommands &
-spinner $!
-echo
-echo -n "Building required user directories ... "
-_skel &
-spinner $!
-echo
+
+_run_step "syscommands" "Setting up system executables" _syscommands
+_run_step "skel" "Building required user directories" _skel
+
 if [[ ${quota} == "yes" ]]; then
-	echo -n "Setting up quotas for ${green}/(${primaryroot})${normal} mount ... "
-	_qmount &
-	spinner $!
-	echo
+	_run_step "quota" "Setting up quotas for ${green}/(${primaryroot})${normal} mount" _qmount
 fi
-echo -n "Setting up Limited Shell environment ... "
-_lshell &
-spinner $!
-echo
+
+_run_step "lshell" "Setting up Limited Shell environment" _lshell
+
 if [[ ${ffmpeg} == "yes" ]]; then
-	echo -n "Building ffmpeg from source for screenshots ... "
-	_ffmpeg &
-	spinner $!
-	echo
+	_run_step "ffmpeg" "Building ffmpeg from source for screenshots" _ffmpeg
 fi
-_apachesudo
-echo -n "Installing xmlrpc-c ... "
-_xmlrpc &
-spinner $!
-echo
-echo -n "Installing libtorrent-rakshasa ${green}${LTORRENT}${normal} ... "
-_libtorrent &
-spinner $!
-echo
-echo -n "Installing rtorrent-${green}${RTVERSION}${normal} ... "
-_rtorrent &
-spinner $!
-echo
+
+_run_step_fg "apachesudo" "Configuring Apache sudo" _apachesudo
+_run_step "xmlrpc" "Installing xmlrpc-c" _xmlrpc
+_run_step "libtorrent" "Installing libtorrent-rakshasa ${green}${LTORRENT}${normal}" _libtorrent
+_run_step "rtorrent" "Installing rtorrent-${green}${RTVERSION}${normal}" _rtorrent
+
 # NOTE: ruTorrent installation removed — sunset in favor of Next.js frontend
 
 if [[ ${tr} == "yes" ]]; then
-	echo -n "Configuring Transmission ... "
-	_insTr &
-	spinner $!
-	echo
-	echo -n "Installing Transmission Web Control ... "
-	_insTrWeb &
-	spinner $!
-	echo
-	echo -n "Setting up Transmission Reverse Proxy ... "
-	_insTrApache &
-	spinner $!
-	echo
+	_run_step "transmission" "Configuring Transmission" _insTr
+	_run_step "transmission_web" "Installing Transmission Web Control" _insTrWeb
+	_run_step "transmission_apache" "Setting up Transmission Reverse Proxy" _insTrApache
 fi
 if [[ ${QBVERSION} != "no" ]]; then
-	echo -n "Installing qBittorrent ... "
-	_qbittorrent &
-	spinner $!
-	echo
-	echo -n "Setting up qBittorrent Reverse Proxy ... "
-	_insqBApache &
-	spinner $!
-	echo
+	_run_step "qbittorrent" "Installing qBittorrent" _qbittorrent
+	_run_step "qbittorrent_apache" "Setting up qBittorrent Reverse Proxy" _insqBApache
 fi
 
 # NOTE: Legacy PHP dashboard removed — Next.js frontend is the sole UI
-echo -n "Installing Go and Node.js for modern stack ... "
-_install_go &
-spinner $!
-_install_node &
-spinner $!
-echo
-echo -n "Building Next.js and Go API ... "
-_build_modern_stack &
-spinner $!
-echo
-echo -n "Setting up seedbox.conf for apache ... "
-_apacheconf &
-spinner $!
-echo
-echo -n "Fix SSL Cert for apache ... "
-_fix_cert &
-spinner $!
-echo
-echo -n "Installing .rtorrent.rc for ${username} ... "
-_rconf &
-spinner $!
-echo
+_run_step "install_go" "Installing Go compiler" _install_go
+_run_step "install_node" "Installing Node.js and PM2" _install_node
+_run_step "build_modern" "Building Next.js and Go API" _build_modern_stack
+
+_run_step "apacheconf" "Setting up seedbox.conf for apache" _apacheconf
+_run_step "fix_cert" "Fix SSL Cert for apache" _fix_cert
+_run_step "rconf" "Installing .rtorrent.rc for ${username}" _rconf
 # NOTE: ruTorrent plugin configuration removed
-echo -n "Installing autodl-irssi ... "
-_autodl &
-spinner $!
-echo
-echo -n "Making ${username} directory structure ... "
-_makedirs &
-spinner $!
-echo
+_run_step "autodl" "Installing autodl-irssi" _autodl
+_run_step "makedirs" "Making ${username} directory structure" _makedirs
 # NOTE: ruTorrent user config removed
-echo -n "Installing vsftpd ... "
-_installftpd &
-spinner $!
-echo
-echo -n "Setting up vsftpd ... "
-_ftpdconfig &
-spinner $!
-echo
+_run_step "installftpd" "Installing vsftpd" _installftpd
+_run_step "ftpdconfig" "Setting up vsftpd" _ftpdconfig
 # NOTE: _quickstats removed — legacy PHP dashboard sunset
-_quickconsole
-echo -n "Setting irssi/rtorrent to start on boot ... "
-_boot &
-spinner $!
-echo
-echo -n "Setting permissions on ${username} ... "
-_perms &
-spinner $!
-echo
+_run_step_fg "quickconsole" "Setting up web console" _quickconsole
+_run_step "boot" "Setting irssi/rtorrent to start on boot" _boot
+_run_step "perms" "Setting permissions on ${username}" _perms
+
 if [[ ${bbr} == "yes" ]]; then
-	echo -n "install BBR ... "
-	_insbbr &
-	spinner $!
-	echo
+	_run_step "bbr" "Installing BBR" _insbbr
 fi
 # shellcheck disable=2312
 if lspci | grep -i bcm >/dev/null; then
-	echo -n "Installing firmware for BCM NIC ... "
-	_insbcm &
-	spinner $!
-	echo
+	_run_step "bcm" "Installing firmware for BCM NIC" _insbcm
 fi
+
 cd
 E=$(date +%s)
 DIFF=$(echo "${E}" - "${S}" | bc)
 FIN=$(echo "${DIFF}" / 60 | bc)
 clear
 _finished
-
