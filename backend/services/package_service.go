@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"math/rand"
 	"os"
+	"os/exec"
 	"path/filepath"
 )
 
@@ -50,10 +51,17 @@ func GetPackages() []models.Package {
 			continue
 		}
 
-		// 2. Fallback to Disk State or Systemd
+		// 2. For systemd services, check if the unit actually exists on the system
 		if pkgs[i].ServiceType == "systemd" && pkgs[i].ServiceName != "" {
-			status, _, _ := GetServiceInfo(pkgs[i].ServiceName)
-			if status == "running" || status == "stopped" || status == "error" {
+			// Check if the systemd unit file exists (not just its status)
+			unitExists := false
+			checkCmd := exec.Command("systemctl", "cat", pkgs[i].ServiceName)
+			if err := checkCmd.Run(); err == nil {
+				unitExists = true
+			}
+
+			if unitExists {
+				status, _, _ := GetServiceInfo(pkgs[i].ServiceName)
 				pkgs[i].Status = "installed"
 				if status == "running" {
 					pkgs[i].Status = "installed (running)"

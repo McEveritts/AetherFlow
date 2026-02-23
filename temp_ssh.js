@@ -40,11 +40,13 @@ conn.on('ready', () => {
                         'cd /opt/AetherFlow/backend',
                         'go mod tidy',
                         'go build -o api-server main.go',
-                        'pm2 restart aetherflow-api',
+                        'pm2 delete aetherflow-api 2>/dev/null; cd /opt/AetherFlow/backend && pm2 start ./api-server --name aetherflow-api',
                         'cd /opt/AetherFlow/frontend',
                         'npm install',
                         'npm run build',
                         'pm2 restart 0',
+                        'sleep 3',
+                        'curl -s http://localhost:8080/api/services | head -c 500',
                         'echo DEPLOY_OK'
                     ].join(' && ');
                     stream.write(cmds + '\n');
