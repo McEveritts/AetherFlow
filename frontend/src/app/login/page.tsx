@@ -63,7 +63,7 @@ export default function LoginPage() {
                             disabled={isLoading}
                             className="w-full py-3.5 bg-indigo-500 hover:bg-indigo-400 text-white rounded-xl text-sm font-bold tracking-wide transition-all shadow-lg shadow-indigo-500/20 disabled:opacity-70 disabled:cursor-not-allowed flex items-center justify-center gap-2"
                         >
-                            {isLoading ? 'Authenticating...' : 'Establish Connection'}
+                            {isLoading ? 'Unlocking...' : 'Unlock the Aether'}
                         </button>
                     </form>
 
