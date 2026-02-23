@@ -483,7 +483,7 @@ include('../inc/card.menu.php');
   <div class="modal-dialog modal-lg" role="document">
     <div class="modal-content">
       <div class="modal-header">
-        <button type="button" class="close" data-dismiss="modal" aria-label="Close"><span
+        <button type="button" class="close" data-bs-dismiss="modal" aria-label="Close"><span
             aria-hidden="true">&times;</span></button>
         <h4 class="modal-title" id="serviceLogModalLabel"><?php echo T('LOGS'); ?>: <span id="logServiceTitle"></span>
         </h4>
@@ -493,7 +493,7 @@ include('../inc/card.menu.php');
           style="height: 400px; overflow-y: scroll; background: #222; color: #fff; border: none;"></pre>
       </div>
       <div class="modal-footer">
-        <button type="button" class="btn btn-default" data-dismiss="modal"><?php echo T('CLOSE'); ?></button>
+        <button type="button" class="btn btn-default" data-bs-dismiss="modal"><?php echo T('CLOSE'); ?></button>
       </div>
     </div>
   </div>

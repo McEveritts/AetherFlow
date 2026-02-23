@@ -383,7 +383,7 @@ if ($sysInfo['memTotal'] < 1024) {
 <h3><?php echo T('TOTAL_RAM'); ?></h3>
 <h4 class="nomargin"><?php echo $memTotal; ?>
   <?php if (isAdmin()) { ?>
-    <a href="?clean_mem=true" id="cleanmem" data-toggle="modal" data-target="#sysResponse" style="margin: 0 auto"> <button
+    <a href="?clean_mem=true" id="cleanmem" data-bs-toggle="modal" data-bs-target="#sysResponse" style="margin: 0 auto"> <button
         class="btn btn-xs btn-default float-end"><?php echo T('CLEAR_CACHE'); ?></button></a>
   <?php } ?>
 </h4>
