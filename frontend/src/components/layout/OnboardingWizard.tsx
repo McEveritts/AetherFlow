@@ -27,7 +27,7 @@ export default function OnboardingWizard({ initialSettings, onComplete }: Onboar
                 setupCompleted: true
             };
 
-            const res = await fetch('http://localhost:8080/api/settings', {
+            const res = await fetch('/api/settings', {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload)

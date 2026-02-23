@@ -26,9 +26,10 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
     const connect = () => {
         if (wsRef.current?.readyState === WebSocket.OPEN) return;
 
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const wsUrl = process.env.NEXT_PUBLIC_API_URL
             ? process.env.NEXT_PUBLIC_API_URL.replace('http', 'ws') + '/api/ws'
-            : 'ws://localhost:8080/api/ws';
+            : `${protocol}//${window.location.host}/api/ws`;
 
         const ws = new WebSocket(wsUrl);
 

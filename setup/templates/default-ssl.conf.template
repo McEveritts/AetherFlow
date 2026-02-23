@@ -37,7 +37,6 @@ SSLEngine on
         <Directory "/srv/aetherflow/">
                 Options +Indexes +FollowSymLinks +MultiViews
                 AllowOverride All AuthConfig
-                Order allow,deny
                 Require all granted
                 AuthType Digest
                 AuthName "REALM"

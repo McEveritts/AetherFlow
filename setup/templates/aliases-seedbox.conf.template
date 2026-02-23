@@ -6,8 +6,6 @@ Alias /downloads "/srv/aetherflow/downloads"
   AuthUserFile '/etc/htpasswd'
   Require valid-user
   AllowOverride None
-  Order allow,deny
-  allow from all
 </Directory>
 Alias /USERNAME.rtorrent.downloads "/home/USERNAME/torrents/rtorrent/"
 <Directory "/home/USERNAME/torrents/rtorrent/">
@@ -17,9 +15,6 @@ Alias /USERNAME.rtorrent.downloads "/home/USERNAME/torrents/rtorrent/"
   AuthUserFile '/etc/htpasswd'
   Require user USERNAME
   AllowOverride None
-  Order allow,deny
-  allow from all
-  php_admin_value engine Off
 </Directory>
 Alias /USERNAME.deluge.downloads "/home/USERNAME/torrents/deluge/"
 <Directory "/home/USERNAME/torrents/deluge/">
@@ -29,9 +24,6 @@ Alias /USERNAME.deluge.downloads "/home/USERNAME/torrents/deluge/"
   AuthUserFile '/etc/htpasswd'
   Require user USERNAME
   AllowOverride None
-  Order allow,deny
-  allow from all
-  php_admin_value engine Off
 </Directory>
 <Location "/USERNAME">
     AuthType Digest

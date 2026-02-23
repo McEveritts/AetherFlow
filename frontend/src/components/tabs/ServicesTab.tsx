@@ -21,7 +21,7 @@ export default function ServicesTab({ services, onDeployApp }: ServicesTabProps)
     const handleServiceControl = async (name: string, action: 'start' | 'stop' | 'restart') => {
         setLoadingService(name);
         try {
-            const res = await fetch(`http://localhost:8080/api/services/${encodeURIComponent(name)}/control`, {
+            const res = await fetch(`/api/services/${encodeURIComponent(name)}/control`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ action })

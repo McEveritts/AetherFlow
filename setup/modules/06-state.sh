@@ -5,9 +5,9 @@
 # Provides checkpoint/resume capability so failed installs can be
 # resumed without a full OS reinstall.
 
-STATE_FILE="/install/.aetherflow.state"
-CONFIG_FILE="/install/.aetherflow.conf"
-INSTALL_LOG="/install/.aetherflow.install.log"
+STATE_FILE="${STATE_FILE:-/install/.aetherflow.state}"
+CONFIG_FILE="${CONFIG_FILE:-/install/.aetherflow.conf}"
+INSTALL_LOG="${INSTALL_LOG:-/install/.aetherflow.install.log}"
 
 # REPAIR_STEPS is set by --repair flag parsing in the main script
 # It is a space-separated list of step IDs to force re-run
@@ -20,7 +20,7 @@ FRESH_INSTALL="${FRESH_INSTALL:-false}"
 
 # Ensure /install directory exists
 _init_state() {
-    mkdir -p /install
+    mkdir -p "$(dirname "${STATE_FILE}")"
     touch "${STATE_FILE}" 2>/dev/null
     touch "${CONFIG_FILE}" 2>/dev/null
 }
@@ -209,9 +209,9 @@ _run_step_fg() {
 # All known step IDs in order
 ALL_STEPS=(
     bashrc intro checkroot logcheck checkkernel hostname locale
-    ssdpblock askquota askcontinue askpartition ask10g askrtorrent
+    ssdpblock askcontinue askpartition ask10g askrtorrent
     asktr askqb askdashtheme adduser askffmpeg askvsftpd denyhosts askbbr
-    repos updates depends openssl syscommands skel quota lshell ffmpeg
+    repos updates depends openssl syscommands skel lshell ffmpeg
     apachesudo xmlrpc libtorrent rtorrent
     transmission transmission_web transmission_apache
     qbittorrent qbittorrent_apache

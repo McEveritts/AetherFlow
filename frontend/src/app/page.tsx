@@ -28,7 +28,7 @@ export default function Dashboard() {
   const { metrics, services, isLoading, isError, error } = useMetrics();
 
   const { data: settingsData, mutate: mutateSettings } = useSWR(
-    'http://localhost:8080/api/settings',
+    '/api/settings',
     fetcher,
     { revalidateOnFocus: false }
   );

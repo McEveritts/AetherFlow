@@ -36,7 +36,7 @@ export default function AiChatTab({ setActiveTab }: AiChatTabProps) {
         setIsTyping(true);
 
         try {
-            const res = await fetch('http://localhost:8080/api/ai/chat', {
+            const res = await fetch('/api/ai/chat', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ message: text, history: messages })

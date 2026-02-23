@@ -144,7 +144,7 @@ function _finished() {
 	echo "#   ${cyan}(Also works for FTP:5757/SSH:4747)${normal}"
 	echo "#   If you need to restart rtorrent/irssi, you can type 'reload'"
 	echo "#   https://${username}:${passwd}@${ip} (Also works for FTP:5757/SSH:4747)" >${username}.info
-	echo "#   Reloading: ${green}sshd${normal}, ${green}apache${normal}, ${green}memcached${normal}, ${green}php${PHP_VER}${normal}, ${green}vsftpd${normal} and ${green}fail2ban${normal}"
+	echo "#   Reloading: ${green}sshd${normal}, ${green}apache${normal}, ${green}memcached${normal}, ${green}vsftpd${normal} and ${green}fail2ban${normal}"
 	echo '################################################################################################'
 	echo
 	cat >/root/information.info <<EOF
@@ -153,7 +153,7 @@ function _finished() {
   https://${username}:${passwd}@${ip} (Also works for FTP:5757/SSH:4747)
 EOF
 	rm -rf "$0" >>"${OUTTO}" 2>&1
-	for i in ssh apache2 php"${PHP_VER}"-fpm vsftpd fail2ban quota memcached cron; do
+	for i in ssh apache2 vsftpd fail2ban memcached cron; do
 		service "${i}" restart >>"${OUTTO}" 2>&1
 		systemctl enable "${i}" >>"${OUTTO}" 2>&1
 	done

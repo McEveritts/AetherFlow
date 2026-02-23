@@ -37,7 +37,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
         const checkSession = async () => {
             try {
                 // We use credentials: 'include' to send HTTPOnly cookies cross-origin (if necessary)
-                const res = await fetch('http://localhost:8080/api/auth/session', { credentials: 'include' });
+                const res = await fetch('/api/auth/session', { credentials: 'include' });
                 if (res.ok) {
                     const userData = await res.json();
                     setUser(userData);
@@ -59,12 +59,12 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
 
     const login = () => {
         // Redirect to the Go backend to start the OAuth2 flow
-        window.location.href = 'http://localhost:8080/api/auth/google/login';
+        window.location.href = '/api/auth/google/login';
     };
 
     const logout = async () => {
         try {
-            await fetch('http://localhost:8080/api/auth/logout', {
+            await fetch('/api/auth/logout', {
                 method: 'POST',
                 credentials: 'include'
             });

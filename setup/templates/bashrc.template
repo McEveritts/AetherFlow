@@ -419,21 +419,7 @@ alias dashboard='cd /srv/aetherflow'
 alias syscommands='cd /usr/local/bin/aetherflow'
 
 # -> Performs some quick adjustments for certain conditions.
-home_diskwidget() {
-  rm -f /srv/aetherflow/widgets/disk_data.php
-  cp /etc/AetherFlow/dashboard/widgets/disk_datah.php /srv/aetherflow/widgets/disk_data.php
-  chown www-data:www-data /srv/aetherflow/widgets/disk_data.php
-  service apache2 restart
-}
-root_diskwidget() {
-  rm -f /srv/aetherflow/widgets/disk_data.php
-  cp /etc/AetherFlow/dashboard/widgets/disk_data.php /srv/aetherflow/widgets/disk_data.php
-  chown www-data:www-data /srv/aetherflow/widgets/disk_data.php
-  service apache2 restart
-}
-
-alias fix-disk_widget_home='home_diskwidget'
-alias fix-disk_widget_root='root_diskwidget'
+# Legacy php widgets and aliases removed
 
 #-------------------------------------------------------------
 # The 'ls' family (this assumes you use a recent GNU ls).
@@ -1167,27 +1153,7 @@ echo -n "Username: "; read username
       echo "${username} : $passwd " >/root/${username}.info
     fi
     printf "${username}:${passwd}" > /root/"$username".info.db
-  if [[ -f /install/.quota.lock ]]; then
-  echo "Quota size for user: (EX: 500GB): "
-  read SIZE
-  case $SIZE in
-    *TB)
-      QUOTASIZE=$(echo $SIZE|cut -d'T' -f1)
-      DISKSIZE=$(($QUOTASIZE * 1024 * 1024 * 1024))
-      setquota -u ${username} ${DISKSIZE} ${DISKSIZE} 0 0 -a
-      echo "$SIZE" >>/root/${username}.info
-    ;;
-    *GB)
-      QUOTASIZE=$(echo $SIZE|cut -d'G' -f1)
-      DISKSIZE=$(($QUOTASIZE * 1024 * 1024))
-      setquota -u ${username} ${DISKSIZE} ${DISKSIZE} 0 0 -a
-      echo "$SIZE" >>/root/${username}.info
-    ;;
-    *)
-      echo "Disk Space MUST be in GB/TB, Example: 711GB OR 2.5TB, Exiting script, type bash $0 and try again";exit 0
-    ;;
-  esac
-fi
+
 echo -n "writing $username to vsftpd.chroot_list..."
 echo "$username" >> /etc/vsftpd.chroot_list
 echo $OK
@@ -1242,40 +1208,6 @@ echo -n "setting permissions ... "
   chown -R www-data:www-data /srv/aetherflow/conf/users/"${username}" >/dev/null 2>&1
   sudo -u $username chmod 750 /home/$username/ >/dev/null 2>&1
   chown -R $username:www-data /home/${username} >/dev/null 2>&1
-echo $OK
-
-echo -n "writing $username user config.php ... "
-  mkdir $ruconf/$username >/dev/null 2>&1
-cat >$ruconf/$username/config.php<<DH
-<?php
-  @define('HTTP_USER_AGENT', 'Mozilla/5.0 (Windows NT 6.0; WOW64; rv:12.0) Gecko/20100101 Firefox/12.0', true);
-  @define('HTTP_TIME_OUT', 30, true);
-  @define('HTTP_USE_GZIP', true, true);
-  \$httpIP = null;
-  @define('RPC_TIME_OUT', 5, true);
-  @define('LOG_RPC_CALLS', false, true);
-  @define('LOG_RPC_FAULTS', true, true);
-  @define('PHP_USE_GZIP', false, true);
-  @define('PHP_GZIP_LEVEL', 2, true);
-  \$schedule_rand = 10;
-  \$do_diagnostic = true;
-  \$log_file = '/tmp/errors.log';
-  \$saveUploadedTorrents = true;
-  \$overwriteUploadedTorrents = false;
-  \$topDirectory = '/home/$username/';
-  \$forbidUserSettings = false;
-  \$scgi_port = $RPORT;
-  \$scgi_host = "localhost";
-  \$XMLRPCMountPoint = "/RPC2";
-  \$pathToExternals = array("php" => '',"curl" => '',"gzip" => '',"id" => '',"stat" => '',);
-  \$localhosts = array("127.0.0.1", "localhost",);
-  \$profilePath = '../share';
-  \$profileMask = 0777;
-  \$diskuser = '/';
-  \$quotaUser = '${username}';
-  \$autodlPort = $IRSSI_PORT;
-  \$autodlPassword = "$IRSSI_PASS";
-DH
 echo $OK
 
 fi
@@ -1480,8 +1412,6 @@ cat >/etc/apache2/sites-enabled/alias.${username}.download.conf<<AS
           AuthName "aetherflow"
           AuthUserFile '/etc/htpasswd'
           Require user ${username}
-    Order allow,deny
-    Allow from all
     php_admin_value engine Off
   </Directory>
 #Alias /${username}.deluge.downloads "/home/${username}/torrents/deluge"
@@ -1492,8 +1422,6 @@ cat >/etc/apache2/sites-enabled/alias.${username}.download.conf<<AS
           AuthName "aetherflow"
           AuthUserFile '/etc/htpasswd'
           Require user ${username}
-    Order allow,deny
-    Allow from all
     php_admin_value engine Off
   </Directory>
   <Location "/${username}">
@@ -1534,8 +1462,6 @@ SC
 #  AuthUserFile '/etc/htpasswd'
 #  Require valid-user
 #  AllowOverride None
-#  Order allow,deny
-#  allow from all
 #</Directory>
 #CS
 ################################################################################

@@ -5,8 +5,6 @@ LoadModule proxy_http_module /usr/lib/apache2/modules/mod_proxy_http.so
   ProxyPreserveHost On
   <Proxy *>
     AddDefaultCharset Off
-    Order deny,allow
-    Allow from all
     AuthType Digest
     AuthName "aetherflow"
     AuthUserFile '/etc/htpasswd'
