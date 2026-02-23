@@ -18,8 +18,8 @@
 #   under the GPL along with build & install instructions.
 
 local_setup=/opt/AetherFlow/setup/
-OUTTO=$LOGFILE
 source /opt/AetherFlow/packages/common.sh
+OUTTO=$LOGFILE
 MASTER=$AETHERFLOW_USER
 
 echo "Adding Syncthing Repository ... " >>"${OUTTO}" 2>&1;

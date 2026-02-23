@@ -62,8 +62,8 @@ echo "Close this dialog box to refresh your browser" >>"${OUTTO}" 2>&1;
 }
 
 local_setup=/opt/AetherFlow/setup/
-OUTTO=$LOGFILE
 source /opt/AetherFlow/packages/common.sh
+OUTTO=$LOGFILE
 MASTER=$AETHERFLOW_USER
 _install
 _services

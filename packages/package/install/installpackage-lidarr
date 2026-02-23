@@ -144,10 +144,10 @@ function _installLidarrExit() {
 	exit 0
 }
 
+source /opt/AetherFlow/packages/common.sh
 OUTTO=$LOGFILE
 local_setup=/opt/AetherFlow/setup/
 local_packages=/etc/AetherFlow/packages/
-source /opt/AetherFlow/packages/common.sh
 username=$AETHERFLOW_USER
 distribution=$(lsb_release -is)
 ip=$(curl -s http://whatismyip.akamai.com)
