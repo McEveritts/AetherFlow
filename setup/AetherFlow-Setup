@@ -138,6 +138,9 @@ export FRESH_INSTALL
 ################################################################################
 
 _init_state
+if [[ -f "${CONFIG_FILE}" ]]; then
+    source "${CONFIG_FILE}" 2>/dev/null
+fi
 
 # Handle --list-steps
 if [[ "${LIST_ONLY}" == "true" ]]; then

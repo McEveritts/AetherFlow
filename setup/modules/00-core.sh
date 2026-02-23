@@ -66,6 +66,7 @@ function _intro() {
 		PHP_VER="8.2"
 	fi
 	export PHP_VER
+	_save_config PHP_VER "${PHP_VER}"
 	echo "Selected PHP Version: ${PHP_VER}"
 }
 
@@ -131,7 +132,7 @@ function _logcheck() {
 		echo "${bold}Output is being sent to /root/AetherFlow.${magenta}${PPID}${normal}${bold}.log${normal}"
 		;;
 	[nN] | [nN][Oo])
-		OUTTO="/dev/null 2>&1"
+		OUTTO="/dev/null"
 		echo "${cyan}NO output will be logged${normal}"
 		;;
 	*)
@@ -139,6 +140,8 @@ function _logcheck() {
 		echo "${bold}Output is being sent to /root/AetherFlow.${magenta}${PPID}${normal}${bold}.log${normal}"
 		;;
 	esac
+
+	_save_config OUTTO "${OUTTO}"
 	if [[ ! -d /root/tmp ]]; then
 		sed -i 's/noexec,//g' /etc/fstab
 		mount -o remount /tmp >>"${OUTTO}" 2>&1
