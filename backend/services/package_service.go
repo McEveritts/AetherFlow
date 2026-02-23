@@ -6,7 +6,6 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
-	"runtime"
 )
 
 // GetPackages reads the packages.json and determines installation status
@@ -16,7 +15,7 @@ func GetPackages() []models.Package {
 	configPaths := []string{
 		filepath.Join("..", "dashboard", "config", "packages.json"),
 		filepath.Join("dashboard", "config", "packages.json"),
-		filepath.Join("C:\\", "Users", "armyw", "OneDrive", "Documents", "Antigravity", "Projects", "AetherFlow", "dashboard", "config", "packages.json"),
+		filepath.Join("/opt", "AetherFlow", "dashboard", "config", "packages.json"),
 	}
 
 	var data []byte
@@ -52,13 +51,8 @@ func GetPackages() []models.Package {
 		}
 
 		// 2. Fallback to Disk State (LockFile)
-		// On windows this will typically fail since AetherFlow uses /install/.app.lock,
-		// but we mock it to `tmp/.app.lock` for Windows dev.
 		lockPath := pkgs[i].LockFile
 		if lockPath != "" {
-			if runtime.GOOS == "windows" {
-				lockPath = filepath.Join("tmp", filepath.Base(lockPath))
-			}
 			if _, err := os.Stat(lockPath); err == nil {
 				pkgs[i].Status = "installed"
 			} else {

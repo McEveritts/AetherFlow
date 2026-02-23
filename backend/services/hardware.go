@@ -3,7 +3,6 @@ package services
 import (
 	"fmt"
 	"math/rand"
-	"runtime"
 	"time"
 
 	"aetherflow/models"
@@ -23,7 +22,6 @@ var (
 )
 
 func GetSystemMetricsCore() models.SystemMetrics {
-	isWindows := runtime.GOOS == "windows"
 
 	var cpuUsage float64
 	var totalDisk, usedDisk, freeDisk float64
@@ -47,11 +45,8 @@ func GetSystemMetricsCore() models.SystemMetrics {
 		usedMem = float64(vMem.Used) / (1024 * 1024 * 1024)
 	}
 
-	// 3. Disk (Root or Custom Path)
+	// 3. Disk (Root)
 	diskPath := "/"
-	if isWindows {
-		diskPath = "C:\\"
-	}
 	dStat, err := disk.Usage(diskPath)
 	if err == nil {
 		// Convert bytes to GB
@@ -115,34 +110,14 @@ func GetSystemMetricsCore() models.SystemMetrics {
 		uptimeStr = "Unknown"
 	}
 
-	// 6. Load Average (Linux mostly, fallback on Windows)
 	loadStat, err := load.Avg()
 	if err == nil {
 		loadAvg = []float64{loadStat.Load1, loadStat.Load5, loadStat.Load15}
-	} else if isWindows {
-		// Mock load averages for Windows dev since gopsutil often fails load avg on Windows
-		loadAvg = []float64{0.45, 0.40, 0.35}
 	} else {
 		loadAvg = []float64{0.0, 0.0, 0.0}
 	}
 
-	// If in Windows development env and values are empty/0, fill with mock data for visual testing
-	if isWindows {
-		if totalDisk == 0 {
-			totalDisk = 500.0
-			usedDisk = 250.0
-			freeDisk = 250.0
-		}
-		if totalMem == 0 {
-			totalMem = 16.0
-			usedMem = 8.5
-		}
-		if downSpeed == "" || downSpeed == "0 B/s" {
-			downSpeed = fmt.Sprintf("%.1f MB/s", rand.Float64()*10)
-			upSpeed = fmt.Sprintf("%.1f MB/s", rand.Float64()*2)
-			activeConnections = rand.Intn(100) + 10
-		}
-	}
+
 
 	// We no longer scan /proc here manually for Services since service_manager.go handles it now.
 	// We'll leave the map empty so it can be populated downstream, or just return an empty map
@@ -168,7 +143,7 @@ func GetSystemMetricsCore() models.SystemMetrics {
 		},
 		Uptime: uptimeStr,
 		LoadAverage: loadAvg,
-		IsWindows: isWindows,
+		IsWindows: false,
 		Services:  servicesMap, // Deprecated at this layer, used service_manager instead
 	}
 }
