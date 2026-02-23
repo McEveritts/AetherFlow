@@ -166,7 +166,7 @@ export default function SettingsTab() {
                                             {isTesting ? (
                                                 <><div className="w-3 h-3 border-2 border-slate-400/30 border-t-slate-400 rounded-full animate-spin"></div> Testing...</>
                                             ) : (
-                                                <><Sparkles size={14} className="text-amber-400" /> Test Connection</>
+                                                <><Sparkles size={14} className="text-amber-400" /> Test API</>
                                             )}
                                         </button>
                                     </div>

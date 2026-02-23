@@ -34,7 +34,7 @@ func main() {
 	session.Stdout = &b
 	session.Stderr = &os.Stderr
 	
-	err = session.Run("pm2 logs aetherflow-api --lines 100 --nostream")
+	err = session.Run("cd /opt/AetherFlow && git pull origin master && cd /opt/AetherFlow/backend && go build -o api-server main.go && sudo pm2 restart aetherflow-api && cd /opt/AetherFlow/frontend && npm install && npm run build && sudo pm2 restart aetherflow-web")
 	if err != nil {
 		log.Printf("Failed to run: %s", err)
 	}

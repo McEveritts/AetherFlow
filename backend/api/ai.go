@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 
 	"aetherflow/db"
 	"github.com/gin-gonic/gin"
@@ -106,33 +107,44 @@ func handleAiChat(c *gin.Context) {
 
 func TestAiConnection(c *gin.Context) {
 	var req struct {
-		ApiKey string `json:"gemini_api_key" binding:"required"`
+		ApiKey string `json:"gemini_api_key"`
 	}
 
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Missing gemini_api_key in request body"})
-		return
+	c.ShouldBindJSON(&req)
+
+	// If key is masked or empty, read the real key from the database
+	keyToTest := req.ApiKey
+	if keyToTest == "" || strings.HasPrefix(keyToTest, "****") {
+		var savedKey string
+		err := db.DB.QueryRow("SELECT COALESCE(gemini_api_key, '') FROM settings WHERE id = 1").Scan(&savedKey)
+		if err != nil || savedKey == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "No API key saved. Please enter and save a key first."})
+			return
+		}
+		keyToTest = savedKey
 	}
 
 	ctx := context.Background()
-	client, err := genai.NewClient(ctx, option.WithAPIKey(req.ApiKey))
+	client, err := genai.NewClient(ctx, option.WithAPIKey(keyToTest))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Initialization error: %v", err)})
 		return
 	}
 	defer client.Close()
 
-	model := client.GenerativeModel("gemini-1.5-flash") // Use simple fast model for ping
+	model := client.GenerativeModel("gemini-2.0-flash")
 	resp, err := model.GenerateContent(ctx, genai.Text("Reply with the exact word: SUCCESS"))
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "API Key is invalid or quota exceeded"})
 		return
 	}
 
-	for _, part := range resp.Candidates[0].Content.Parts {
-		if _, ok := part.(genai.Text); ok {
-			c.JSON(http.StatusOK, gin.H{"message": "Connection successful"})
-			return
+	if resp != nil && len(resp.Candidates) > 0 && resp.Candidates[0].Content != nil {
+		for _, part := range resp.Candidates[0].Content.Parts {
+			if _, ok := part.(genai.Text); ok {
+				c.JSON(http.StatusOK, gin.H{"message": "Connection successful"})
+				return
+			}
 		}
 	}
 
