@@ -1,1 +1,0 @@
-<a href="#"><img src="img/logo-aetherflow-light.png" alt="AetherFlow Seedbox" class="logo-image" height="50" /></a>
