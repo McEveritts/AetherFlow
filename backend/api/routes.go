@@ -8,11 +8,75 @@ import (
 )
 
 func RegisterRoutes(r *gin.Engine) {
-	api := r.Group("/api")
+	apiGroup := r.Group("/api")
 	{
-		api.GET("/system/metrics", getSystemMetrics)
-		api.GET("/services", getServices)
-		api.POST("/services/:name/control", controlService)
+		apiGroup.GET("/ws", HandleWebSocket)
+		apiGroup.POST("/ai/chat", handleAiChat)
+
+		// Authentication
+		apiGroup.GET("/auth/google/login", GoogleLogin)
+		apiGroup.GET("/auth/google/callback", GoogleCallback)
+		apiGroup.GET("/auth/session", GetSession)
+		apiGroup.POST("/auth/logout", Logout)
+
+		// User profile (self-service)
+		apiGroup.PUT("/auth/profile", UpdateProfile)
+		apiGroup.GET("/user/quota/:id", GetUserQuota)
+
+		// Settings (Open for GET, Admin Only for PUT)
+		apiGroup.GET("/settings", GetSettings) // Open so UI can configure
+
+		// File Share
+		apiGroup.GET("/fileshare", GetFilesList)
+		apiGroup.POST("/fileshare/upload", UploadFile)
+
+		// Backup
+		apiGroup.POST("/backup/run", RunBackup)
+
+		// Admin-only routes
+		adminGroup := apiGroup.Group("")
+		adminGroup.Use(AdminOnly())
+		{
+			adminGroup.PUT("/settings", updateSettings)
+
+			// User Management
+			adminGroup.GET("/users", GetUsers)
+			adminGroup.PUT("/users/:id/role", UpdateUserRole)
+			adminGroup.DELETE("/users/:id", DeleteUser)
+		}
+
+		// Services API
+		apiGroup.GET("/services", getServices) // Renamed from GetServices to match existing
+		apiGroup.POST("/services/:name/control", controlService) // Renamed from ControlService to match existing
+
+		// Marketplace API
+		apiGroup.GET("/marketplace", GetMarketplaceApps) // Kept existing route
+		apiGroup.POST("/packages/:id/install", InstallPackage) // Kept existing route
+		apiGroup.POST("/packages/:id/uninstall", UninstallPackage) // Kept existing route
+
+		// Updater API
+		apiGroup.GET("/system/update/check", CheckUpdate)
+		apiGroup.POST("/system/update/run", RunUpdate)
+
+		// System Hardware Stats (Existing)
+		apiGroup.GET("/system/metrics", func(c *gin.Context) {
+			// In the future this might call actual sh commands
+			// For now, it returns a stub for the frontend to consume
+			c.JSON(http.StatusOK, gin.H{
+				"cpu": 45.2,
+				"memory": gin.H{
+					"total": 16,
+					"used": 8.5,
+					"free": 7.5,
+				},
+				"disk": gin.H{
+					"total": 500,
+					"used": 250,
+					"free": 250,
+				},
+				"uptime": "14 days, 2 hours",
+			})
+		})
 	}
 }
 
@@ -22,23 +86,7 @@ func getSystemMetrics(c *gin.Context) {
 }
 
 func getServices(c *gin.Context) {
-	// For now, return the mock services data structure expected by the frontend
-	// In the future, this should actually query PM2 or Systemctl dynamically
-	servicesList := map[string]interface{}{
-		"Plex Media Server":   gin.H{"status": "running", "uptime": "14d 2h", "version": "1.32.5"},
-		"rTorrent":            gin.H{"status": "running", "uptime": "45d 1h", "version": "0.9.8"},
-		"Sonarr":              gin.H{"status": "running", "uptime": "12d 5h", "version": "3.0.9"},
-		"Radarr":              gin.H{"status": "running", "uptime": "12d 5h", "version": "4.3.2"},
-		"Lidarr":              gin.H{"status": "stopped", "uptime": "-", "version": "1.0.2"},
-		"Readarr":             gin.H{"status": "running", "uptime": "5d 10h", "version": "0.1.1"},
-		"Tautulli":            gin.H{"status": "running", "uptime": "45d 1h", "version": "2.14.3"},
-		"Overseerr":           gin.H{"status": "running", "uptime": "30d 12h", "version": "1.33.2"},
-		"Nginx Proxy Manager": gin.H{"status": "running", "uptime": "80d 4h", "version": "2.9.18"},
-		"Docker Engine":       gin.H{"status": "running", "uptime": "80d 5h", "version": "24.0.2"},
-		"WireGuard VPN":       gin.H{"status": "error", "uptime": "-", "version": "1.0.20210914"},
-		"Jackett":             gin.H{"status": "running", "uptime": "10d 2h", "version": "0.21.1"},
-	}
-
+	servicesList := services.GetActiveServices()
 	c.JSON(http.StatusOK, servicesList)
 }
 
@@ -55,11 +103,14 @@ func controlService(c *gin.Context) {
 		return
 	}
 
-	// TODO: Actually execute the systemctl/pm2 command here
-	// exec.Command("systemctl", req.Action, serviceName).Run()
+	err := services.ControlService(serviceName, req.Action)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to " + req.Action + " service: " + err.Error()})
+		return
+	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"message": "Service control command queued successfully",
+		"message": "Service control command executed successfully",
 		"service": serviceName,
 		"action":  req.Action,
 	})
