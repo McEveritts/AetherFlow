@@ -14,6 +14,7 @@ vendor/
 !package.json
 !tsconfig.json
 !composer.json
+!dashboard/config/packages.json
 
 # Next.js Build output
 .next/
