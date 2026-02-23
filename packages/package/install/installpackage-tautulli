@@ -17,9 +17,9 @@
 #   including (via compiler) GPL-licensed code must also be made available
 #   under the GPL along with build & install instructions.
 #
+source /opt/AetherFlow/packages/common.sh
 OUTTO=$LOGFILE
 local_setup=/opt/AetherFlow/setup/
-source /opt/AetherFlow/packages/common.sh
 MASTER=$AETHERFLOW_USER
 
 

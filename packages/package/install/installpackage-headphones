@@ -29,8 +29,8 @@ ENDCOLOR='\033[0m'
 CYAN='\e[96m'
 GREEN='\e[92m'
 
-OUTTO=$LOGFILE
 source /opt/AetherFlow/packages/common.sh
+OUTTO=$LOGFILE
 USERNAME=$AETHERFLOW_USER
 PASSWD=$(cat /root/$USERNAME.info | cut -d ":" -f 3 | cut -d "@" -f 1)
 local_setup=/opt/AetherFlow/setup/

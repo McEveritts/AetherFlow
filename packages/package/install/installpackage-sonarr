@@ -1,11 +1,11 @@
 #!/bin/bash
 #
-# [Quick Box :: Install Sonarr-NzbDrone package]
+# [AetherFlow :: Install Sonarr package]
 #
 # GITHUB REPOS
 # GitHub _ packages  :   https://github.com/AetherFlow/AetherFlow_packages
 # LOCAL REPOS
-# Local _ packages   :   /etc/AetherFlow/packages
+# Local _ packages   :   /opt/AetherFlow/packages
 # Author             :   McEveritts
 # URL                :   https://AetherFlow.io
 #
@@ -18,124 +18,139 @@
 #   under the GPL along with build & install instructions.
 #
 #################################################################################
-function _string() { perl -le 'print map {(a..z,A..Z,0..9)[rand 62] } 0..pop' 15 ; }
+
+# Source shared variables FIRST so $LOGFILE and $AETHERFLOW_USER are available
+source /opt/AetherFlow/packages/common.sh
+
+OUTTO=$LOGFILE
+local_setup=/opt/AetherFlow/setup/
+username=$AETHERFLOW_USER
+distribution=$(lsb_release -is)
+
 #################################################################################
 
 function _installSonarrintro() {
-  echo "Sonarr will now be installed." >>"${OUTTO}" 2>&1;
-  echo "This process may take up to 2 minutes." >>"${OUTTO}" 2>&1;
-  echo "Please wait until install is completed." >>"${OUTTO}" 2>&1;
-  # output to box
+  echo "Sonarr will now be installed." >>"${OUTTO}" 2>&1
+  echo "This process may take up to 2 minutes." >>"${OUTTO}" 2>&1
+  echo "Please wait until install is completed." >>"${OUTTO}" 2>&1
   echo "Sonarr will now be installed."
   echo "This process may take up to 2 minutes."
   echo "Please wait until install is completed."
   echo
-  sleep 5
 }
 
-function _installSonarr1() {
-    if [[ ! -f /etc/apt/sources.list.d/mono-official-stable.list ]]; then
-      if [[ $distribution == "Ubuntu" ]]; then
-        apt-key adv --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys 3FA7E0328081BFF6A14DA29AA6A19B38D3D831EF >/dev/null 2>&1
-      elif [[ $distribution == "Debian" ]]; then
-          #exit
-      fi
-      echo "deb https://download.mono-project.com/repo/ubuntu stable-xenial main" | sudo tee /etc/apt/sources.list.d/mono-official-stable.list >/dev/null 2>&1
+function _addSonarrRepo() {
+  # Add the Sonarr v3/v4 repository (modern method)
+  echo "Adding Sonarr repository ..." >>"${OUTTO}" 2>&1
+  echo "Adding Sonarr repository ..."
+
+  # Install prerequisites
+  apt-get install -y curl gnupg ca-certificates >>"${OUTTO}" 2>&1
+
+  # Import Sonarr GPG key
+  if [[ ! -f /usr/share/keyrings/sonarr-keyring.gpg ]]; then
+    curl -sL "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x2009837cbffd68f45bc180471f4f90de2a9b4bf8" | \
+      gpg --dearmor -o /usr/share/keyrings/sonarr-keyring.gpg >>"${OUTTO}" 2>&1
+  fi
+
+  # Add the Sonarr apt source
+  echo "deb [signed-by=/usr/share/keyrings/sonarr-keyring.gpg] https://apt.sonarr.tv/debian testing main" \
+    > /etc/apt/sources.list.d/sonarr.list
+
+  apt-get update -y >>"${OUTTO}" 2>&1
+}
+
+function _installSonarrPkg() {
+  echo "Installing Sonarr ..." >>"${OUTTO}" 2>&1
+  echo "Installing Sonarr ..."
+
+  # Install Sonarr non-interactively
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get install -y sonarr >>"${OUTTO}" 2>&1
+
+  if [[ $? -ne 0 ]]; then
+    echo "ERROR: Sonarr apt install failed, check logs." >>"${OUTTO}" 2>&1
+    echo "ERROR: Sonarr apt install failed."
+    # Try alternative method: install mono + nzbdrone as fallback
+    echo "Trying fallback install via mono + NzbDrone ..." >>"${OUTTO}" 2>&1
+    apt-get install -y mono-devel mediainfo sqlite3 >>"${OUTTO}" 2>&1
+    
+    if [[ ! -d /opt/NzbDrone ]]; then
+      curl -sL "https://services.sonarr.tv/v1/download/main/latest?version=3&os=linux" -o /tmp/sonarr.tar.gz >>"${OUTTO}" 2>&1
+      tar -xzf /tmp/sonarr.tar.gz -C /opt/ >>"${OUTTO}" 2>&1
+      rm -f /tmp/sonarr.tar.gz
     fi
-}
+  fi
 
-function _installSonarr2() {
-  apt-get update -y >/dev/null 2>&1
-  apt-get install -y mono-devel apt-transport-https >/dev/null 2>&1
-  sudo apt-key adv --keyserver keyserver.ubuntu.com --recv-keys FDA5DFFC >/dev/null 2>&1
-  echo "deb https://apt.sonarr.tv/ master main" | sudo tee -a /etc/apt/sources.list.d/sonarr.list >/dev/null 2>&1
-}
-
-function _installSonarr3() {
-  sudo apt-get -y update && apt-get -y upgrade >/dev/null 2>&1
-  #if [[ $distribution == Debian ]]; then
-  #  sudo apt-get install -y mono-devel >/dev/null 2>&1
-  #fi
-}
-
-function _installSonarr4() {
-  sudo apt-get install -y nzbdrone >/dev/null 2>&1
   touch /install/.sonarr.lock
 }
 
-function _installSonarr5() {
-  sudo chown -R "${username}":"${username}" /opt/NzbDrone
+function _configureSonarr() {
+  echo "Setting permissions ..." >>"${OUTTO}" 2>&1
+  echo "Setting permissions ..."
+
+  # Set ownership based on what was installed
+  if [[ -d /opt/Sonarr ]]; then
+    chown -R "${username}":"${username}" /opt/Sonarr
+  elif [[ -d /opt/NzbDrone ]]; then
+    chown -R "${username}":"${username}" /opt/NzbDrone
+  fi
 }
 
-function _installSonarr6() {
-  cp ${local_setup}templates/sysd/sonarr.template /etc/systemd/system/sonarr@.service
-  systemctl enable sonarr@${username} >/dev/null 2>&1
-  systemctl start sonarr@${username}
-  sleep 10
+function _setupService() {
+  echo "Setting up Sonarr as a service ..." >>"${OUTTO}" 2>&1
+  echo "Setting up Sonarr as a service ..."
 
-  rm -rf /home/${username}/.config/NzbDrone/config.xml
-  cp ${local_setup}configs/Sonarr/config.xml /home/${username}/.config/NzbDrone/config.xml
-  chown ${username}:${username} /home/${username}/.config/NzbDrone/config.xml
-
-  systemctl stop sonarr@{$username}.service
-  sleep 10
-
-  if [[ -f /home/${username}/.config/NzbDrone/config.xml ]]; then
-    #sed -i "s/<UrlBase>.*/<UrlBase>sonarr<\/UrlBase>/g" /home/${username}/.config/NzbDrone/config.xml
-    #sed -i "s/<BindAddress>.*/<BindAddress>127.0.0.1<\/BindAddress>/g" /home/${username}/.config/NzbDrone/config.xml
-    service apache2 reload
+  # Check if the new Sonarr package installed its own systemd service
+  if systemctl cat sonarr.service >/dev/null 2>&1; then
+    # Sonarr v3/v4 package creates its own service
+    systemctl enable sonarr >/dev/null 2>&1
+    systemctl start sonarr
+    echo "Using Sonarr's built-in systemd service." >>"${OUTTO}" 2>&1
   else
-    # output to dashboard
-    echo "ERROR INSTALLING - COULD NOT FIND config.xml in /home/${username}/.config/NzbDrone/config.xml" >> "${OUTTO}" 2>&1
-    # output to box
-    echo "ERROR INSTALLING - COULD NOT FIND config.xml in /home/${username}/.config/NzbDrone/config.xml"
-    exit 1
+    # Fallback: use our template
+    if [[ -f ${local_setup}templates/sysd/sonarr.template ]]; then
+      cp "${local_setup}templates/sysd/sonarr.template" /etc/systemd/system/sonarr@.service
+      systemctl daemon-reload
+      systemctl enable "sonarr@${username}" >/dev/null 2>&1
+      systemctl start "sonarr@${username}"
+    else
+      echo "WARNING: No systemd template found at ${local_setup}templates/sysd/sonarr.template" >>"${OUTTO}" 2>&1
+    fi
   fi
 
-  systemctl stop sonarr@${username}
+  # Wait for Sonarr to generate its config
+  sleep 10
+}
+
+function _setupReverseProxy() {
+  echo "Setting up reverse proxy ..." >>"${OUTTO}" 2>&1
+  echo "Setting up reverse proxy ..."
 
   cat > /etc/apache2/sites-enabled/sonarr.conf <<EOF
 <Location /sonarr>
 ProxyPass http://localhost:8989/sonarr
 ProxyPassReverse http://localhost:8989/sonarr
-#AuthType Digest
-#AuthName "rutorrent"
-#AuthUserFile '/etc/htpasswd'
-#Require user ${username}
 </Location>
 EOF
   chown www-data: /etc/apache2/sites-enabled/sonarr.conf
   service apache2 reload
-  systemctl start sonarr@${username}
+}
+
+function _installSonarrComplete() {
+  echo "Sonarr Install Complete!" >>"${OUTTO}" 2>&1
+  echo "Sonarr Install Complete!"
+  echo >>"${OUTTO}" 2>&1
+  echo >>"${OUTTO}" 2>&1
+  echo "Close this dialog box to refresh your browser" >>"${OUTTO}" 2>&1
 }
 
 
-function _installSonarr9() {
-  echo "Sonarr Install Complete!" >>"${OUTTO}" 2>&1;
-  echo >>"${OUTTO}" 2>&1;
-  echo >>"${OUTTO}" 2>&1;
-  echo "Close this dialog box to refresh your browser" >>"${OUTTO}" 2>&1;
-}
-
-function _installSonarr10() {
-  exit
-}
-
-
-OUTTO=$LOGFILE
-local_setup=/opt/AetherFlow/setup/
-local_packages=/etc/AetherFlow/packages/
-source /opt/AetherFlow/packages/common.sh
-username=$AETHERFLOW_USER
-distribution=$(lsb_release -is)
-
+# ---- Main execution ----
 _installSonarrintro
-echo "Installing latest mono source repository ... " >>"${OUTTO}" 2>&1;_installSonarr1
-echo "Adding source repositories for Sonarr-Nzbdrone ... " >>"${OUTTO}" 2>&1;_installSonarr2
-echo "Updating your system with new sources ... " >>"${OUTTO}" 2>&1;_installSonarr3
-echo "Installing Sonarr-Nzbdrone ... " >>"${OUTTO}" 2>&1;_installSonarr4
-echo "Setting permissions to ${username} ... " >>"${OUTTO}" 2>&1;_installSonarr5
-echo "Setting up Sonarr as a service and enabling ... " >>"${OUTTO}" 2>&1;_installSonarr6
-_installSonarr9
-_installSonarr10
-
+_addSonarrRepo
+_installSonarrPkg
+_configureSonarr
+_setupService
+_setupReverseProxy
+_installSonarrComplete

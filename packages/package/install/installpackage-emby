@@ -19,8 +19,8 @@
 
 DISTRO=$(lsb_release -is)
 CODENAME=$(lsb_release -cs)
-OUTTO=$LOGFILE
 source /opt/AetherFlow/packages/common.sh
+OUTTO=$LOGFILE
 username=$AETHERFLOW_USER
 local_setup=/opt/AetherFlow/setup/
 
