@@ -5,17 +5,21 @@ import (
 	"aetherflow/services"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 )
 
 type App struct {
-	Id       string `json:"id"`
-	Name     string `json:"name"`
-	Desc     string `json:"desc"`
-	Hits     int    `json:"hits"`
-	Category string `json:"category"`
-	Status   string `json:"status"` // e.g., "uninstalled", "installed", "installing"
+	Id        string  `json:"id"`
+	Name      string  `json:"name"`
+	Desc      string  `json:"desc"`
+	Hits      int     `json:"hits"`
+	Category  string  `json:"category"`
+	Status    string  `json:"status"`
+	Progress  int     `json:"progress"`            // 0-100 estimated install progress
+	StartedAt *string `json:"started_at,omitempty"` // ISO timestamp when install started
+	LogLine   string  `json:"log_line,omitempty"`   // most recent log line
 }
 
 // GetMarketplaceApps returns the list of marketplace apps
@@ -24,14 +28,24 @@ func GetMarketplaceApps(c *gin.Context) {
 
 	var apps []App
 	for _, p := range pkgs {
-		apps = append(apps, App{
+		app := App{
 			Id:       p.Name,
 			Name:     p.Label,
 			Desc:     p.Description,
 			Hits:     p.Hits,
 			Category: p.Category,
 			Status:   p.Status,
-		})
+		}
+
+		// Enrich with live progress data if job is active
+		if jobInfo := services.GetPackageJobInfo(p.Name); jobInfo != nil {
+			app.Progress = jobInfo.Progress
+			ts := jobInfo.StartedAt.Format(time.RFC3339)
+			app.StartedAt = &ts
+			app.LogLine = jobInfo.LastLine
+		}
+
+		apps = append(apps, app)
 	}
 
 	c.JSON(http.StatusOK, apps)
@@ -95,5 +109,27 @@ func UninstallPackage(c *gin.Context) {
 		"message": "Uninstallation started successfully",
 		"package": pkgId,
 		"status":  "uninstalling",
+	})
+}
+
+// PackageProgress returns real-time progress data for an active install/uninstall
+func PackageProgress(c *gin.Context) {
+	pkgId := c.Param("id")
+
+	jobInfo := services.GetPackageJobInfo(pkgId)
+	if jobInfo == nil {
+		c.JSON(http.StatusOK, gin.H{
+			"status":   "idle",
+			"progress": 0,
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"status":     jobInfo.Status,
+		"progress":   jobInfo.Progress,
+		"started_at": jobInfo.StartedAt.Format(time.RFC3339),
+		"log_line":   jobInfo.LastLine,
+		"log_lines":  jobInfo.LogLines,
 	})
 }

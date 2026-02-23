@@ -1,6 +1,6 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { Store, Search, Filter, Box, Download, AlertCircle, ChevronDown } from 'lucide-react';
-import { useMarketplace } from '@/hooks/useMarketplace';
+import { useMarketplace, App } from '@/hooks/useMarketplace';
 import { useToast } from '@/contexts/ToastContext';
 import Image from 'next/image';
 
@@ -22,6 +22,102 @@ const AppIcon = ({ appId }: { appId: string }) => {
         />
     );
 };
+
+/* ---------- SVG Circular Progress Ring ---------- */
+interface ProgressRingProps {
+    progress: number;      // 0-100
+    status: string;        // "installing" | "uninstalling"
+    logLine?: string;
+    startedAt?: string;
+}
+
+function ProgressRing({ progress, status, logLine, startedAt }: ProgressRingProps) {
+    const [elapsed, setElapsed] = useState('0s');
+
+    useEffect(() => {
+        if (!startedAt) return;
+        const start = new Date(startedAt).getTime();
+        const update = () => {
+            const diff = Math.floor((Date.now() - start) / 1000);
+            if (diff < 60) setElapsed(`${diff}s`);
+            else setElapsed(`${Math.floor(diff / 60)}m ${diff % 60}s`);
+        };
+        update();
+        const interval = setInterval(update, 1000);
+        return () => clearInterval(interval);
+    }, [startedAt]);
+
+    const size = 72;
+    const stroke = 4;
+    const radius = (size - stroke) / 2;
+    const circumference = 2 * Math.PI * radius;
+    const offset = circumference - (progress / 100) * circumference;
+    const isUninstalling = status === 'uninstalling';
+    const color = isUninstalling ? '#ef4444' : '#818cf8'; // red for uninstall, indigo for install
+    const glowColor = isUninstalling ? 'rgba(239,68,68,0.5)' : 'rgba(99,102,241,0.5)';
+    const label = isUninstalling ? 'Removing' : 'Installing';
+
+    // Truncate log line for display
+    const displayLine = logLine && logLine.length > 40 ? logLine.slice(0, 37) + '...' : logLine;
+
+    return (
+        <div className="flex flex-col items-center gap-2 animate-fade-in">
+            <div className="relative" style={{ width: size, height: size }}>
+                {/* Glow effect */}
+                <div
+                    className="absolute inset-0 rounded-full animate-pulse"
+                    style={{
+                        boxShadow: `0 0 20px ${glowColor}, 0 0 40px ${glowColor}`,
+                        opacity: 0.4,
+                    }}
+                />
+                <svg width={size} height={size} className="transform -rotate-90">
+                    {/* Background track */}
+                    <circle
+                        cx={size / 2}
+                        cy={size / 2}
+                        r={radius}
+                        fill="none"
+                        stroke="rgba(255,255,255,0.06)"
+                        strokeWidth={stroke}
+                    />
+                    {/* Progress arc */}
+                    <circle
+                        cx={size / 2}
+                        cy={size / 2}
+                        r={radius}
+                        fill="none"
+                        stroke={color}
+                        strokeWidth={stroke}
+                        strokeLinecap="round"
+                        strokeDasharray={circumference}
+                        strokeDashoffset={offset}
+                        style={{
+                            transition: 'stroke-dashoffset 0.6s ease-out',
+                            filter: `drop-shadow(0 0 6px ${glowColor})`,
+                        }}
+                    />
+                </svg>
+                {/* Percentage text */}
+                <div className="absolute inset-0 flex items-center justify-center">
+                    <span className="text-base font-bold text-white tabular-nums">
+                        {progress}%
+                    </span>
+                </div>
+            </div>
+            <div className="text-center space-y-0.5">
+                <div className="text-[10px] font-semibold uppercase tracking-widest text-slate-400">
+                    {label} · {elapsed}
+                </div>
+                {displayLine && (
+                    <div className="text-[9px] text-slate-500 max-w-[180px] truncate">
+                        {displayLine}
+                    </div>
+                )}
+            </div>
+        </div>
+    );
+}
 
 export default function MarketplaceTab() {
     const { apps, isLoading, isError, mutate } = useMarketplace();
@@ -80,6 +176,10 @@ export default function MarketplaceTab() {
             return matchesSearch && matchesCategory;
         });
     }, [apps, searchQuery, activeCategory]);
+
+    const isAppBusy = (app: App): boolean => {
+        return app.status === 'installing' || app.status === 'uninstalling' || operatingApp === app.id;
+    };
 
     return (
         <div className="space-y-6 animate-fade-in relative z-10 w-full min-h-screen">
@@ -160,7 +260,20 @@ export default function MarketplaceTab() {
             {!isLoading && !isError && apps && filteredApps.length > 0 && (
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 relative z-10">
                     {filteredApps.map((app) => (
-                        <div key={app.id} className="bg-slate-950/80 border border-white/10 rounded-2xl p-6 backdrop-blur-xl hover:border-indigo-500/50 transition-all group flex flex-col justify-between h-full">
+                        <div key={app.id} className={`relative bg-slate-950/80 border rounded-2xl p-6 backdrop-blur-xl transition-all group flex flex-col justify-between h-full ${isAppBusy(app) ? 'border-indigo-500/30' : 'border-white/10 hover:border-indigo-500/50'}`}>
+
+                            {/* Progress overlay when installing/uninstalling */}
+                            {isAppBusy(app) && (
+                                <div className="absolute inset-0 bg-slate-950/80 backdrop-blur-sm rounded-2xl z-20 flex items-center justify-center">
+                                    <ProgressRing
+                                        progress={app.progress || 0}
+                                        status={app.status}
+                                        logLine={app.log_line}
+                                        startedAt={app.started_at}
+                                    />
+                                </div>
+                            )}
+
                             <div>
                                 <div className="flex items-start justify-between mb-4">
                                     <div className="h-14 w-14 bg-white/5 rounded-xl border border-white/10 flex items-center justify-center shadow-inner overflow-hidden">
@@ -192,19 +305,19 @@ export default function MarketplaceTab() {
                                             </button>
                                             <button
                                                 onClick={() => handleUninstall(app.id)}
-                                                disabled={operatingApp === app.id}
+                                                disabled={isAppBusy(app)}
                                                 className="px-4 py-1.5 bg-red-500/10 text-red-500 hover:bg-red-500 hover:text-white disabled:opacity-50 text-xs font-semibold rounded-lg transition-colors border border-red-500/20"
                                             >
-                                                {operatingApp === app.id ? 'Working...' : 'Uninstall'}
+                                                Uninstall
                                             </button>
                                         </>
                                     ) : (
                                         <button
                                             onClick={() => handleInstall(app.id)}
-                                            disabled={app.status === 'installing' || operatingApp === app.id}
+                                            disabled={isAppBusy(app)}
                                             className="px-4 py-1.5 bg-indigo-500 hover:bg-indigo-400 disabled:bg-slate-800 disabled:text-slate-500 text-white text-xs font-semibold rounded-lg shadow-sm transition-all group-hover:shadow-[0_0_15px_rgba(99,102,241,0.4)] disabled:group-hover:shadow-none"
                                         >
-                                            {app.status === 'installing' || operatingApp === app.id ? 'Installing...' : 'Install'}
+                                            Install
                                         </button>
                                     )}
                                 </div>

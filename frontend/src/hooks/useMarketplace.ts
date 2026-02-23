@@ -7,6 +7,9 @@ export interface App {
     hits: number;
     category: string;
     status: string;
+    progress: number;
+    started_at?: string;
+    log_line?: string;
 }
 
 const fetcher = (url: string) => fetch(url).then(res => {

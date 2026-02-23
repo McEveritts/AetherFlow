@@ -56,9 +56,10 @@ func RegisterRoutes(r *gin.Engine) {
 		apiGroup.POST("/services/:name/control", controlService) // Renamed from ControlService to match existing
 
 		// Marketplace API
-		apiGroup.GET("/marketplace", GetMarketplaceApps) // Kept existing route
-		apiGroup.POST("/packages/:id/install", InstallPackage) // Kept existing route
-		apiGroup.POST("/packages/:id/uninstall", UninstallPackage) // Kept existing route
+		apiGroup.GET("/marketplace", GetMarketplaceApps)
+		apiGroup.POST("/packages/:id/install", InstallPackage)
+		apiGroup.POST("/packages/:id/uninstall", UninstallPackage)
+		apiGroup.GET("/packages/:id/progress", PackageProgress)
 
 		// Updater API
 		apiGroup.GET("/system/update/check", CheckUpdate)
