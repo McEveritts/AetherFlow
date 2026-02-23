@@ -19,16 +19,16 @@ SSLCryptoDevice builtin
 
         # Route Next.js Frontend
         ProxyPreserveHost On
+
+        # Route Go Backend API (MUST come before catch-all /)
+        ProxyPass /api/ http://127.0.0.1:8080/api/
+        ProxyPassReverse /api/ http://127.0.0.1:8080/api/
+
         ProxyPass /_next/ http://127.0.0.1:3000/_next/
         ProxyPassReverse /_next/ http://127.0.0.1:3000/_next/
         
         ProxyPass / http://127.0.0.1:3000/
         ProxyPassReverse / http://127.0.0.1:3000/
-
-        # Route Go Backend API
-        ProxyPass /api/system/ http://127.0.0.1:8080/api/system/
-        ProxyPassReverse /api/system/ http://127.0.0.1:8080/api/system/
-SCGIMount /USERNAME 127.0.0.1:PORT
 </VirtualHost>
 <VirtualHost *:443>
 Options +Indexes +MultiViews +FollowSymLinks
@@ -46,15 +46,16 @@ SSLEngine on
 
         # Route Next.js Frontend
         ProxyPreserveHost On
+
+        # Route Go Backend API (MUST come before catch-all /)
+        ProxyPass /api/ http://127.0.0.1:8080/api/
+        ProxyPassReverse /api/ http://127.0.0.1:8080/api/
+
         ProxyPass /_next/ http://127.0.0.1:3000/_next/
         ProxyPassReverse /_next/ http://127.0.0.1:3000/_next/
         
         ProxyPass / http://127.0.0.1:3000/
         ProxyPassReverse / http://127.0.0.1:3000/
-
-        # Route Go Backend API
-        ProxyPass /api/system/ http://127.0.0.1:8080/api/system/
-        ProxyPassReverse /api/system/ http://127.0.0.1:8080/api/system/
         SSLEngine on
         SSLProtocol ALL -SSLv2 -SSLv3
         SSLHonorCipherOrder On
@@ -66,4 +67,4 @@ SSLEngine on
                  downgrade-1.0 force-response-1.0
 SCGIMount /USERNAME 127.0.0.1:PORT
 </Virtualhost>
-SCGIMount /USERNAME 127.0.0.1:PORT
+
