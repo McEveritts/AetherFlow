@@ -19,7 +19,7 @@
 
 DISTRO=$(lsb_release -is)
 CODENAME=$(lsb_release -cs)
-OUTTO=/srv/rutorrent/home/db/output.log
+OUTTO=$LOGFILE
 
 echo "Installing ZNC. Please wait ... " >> ${OUTTO} 2>&1
 echo "" >> ${OUTTO} 2>&1

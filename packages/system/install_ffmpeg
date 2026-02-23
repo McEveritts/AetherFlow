@@ -20,6 +20,7 @@
 #
 #################################################################################
 #Script Console Colors
+source /opt/AetherFlow/packages/common.sh
 NOTICE=$(tput setaf 3);
 OK=$(tput setaf 2);
 NC=$(tput sgr0);
@@ -95,7 +96,7 @@ spinner() {
 }
 
 
-OUTTO="/srv/rutorrent/home/db/ffmpeg.output.log"
+OUTTO=$LOGFILE
 DISTRO=$(lsb_release -is)
 
 echo -n "${NOTICE}Installing ffmpeg, please hold as this may take some time${NC} ... ";_ffmpeg & spinner $!;echo

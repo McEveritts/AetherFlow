@@ -2,6 +2,7 @@
 #
 # [AetherFlow :: Remove organizr]
 #
+source /opt/AetherFlow/packages/common.sh
 set -e
 
 LOGFILE="/opt/AetherFlow/logs/installer.log"

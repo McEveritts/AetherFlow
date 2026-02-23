@@ -18,6 +18,7 @@
 #   under the GPL along with build & install instructions.
 #
 
+source /opt/AetherFlow/packages/common.sh
 function _removecron() {
 for i in "${users[@]}"; do
   sudo -u ${i} crontab -l | sed '/.startup/d' | crontab -u ${i} -  > /dev/null 2>&1
@@ -70,9 +71,10 @@ echo "systemd installation complete! "
 echo "Reboot recommended ... "
 }
 
-local_setup=/etc/AetherFlow/setup/
+local_setup=/opt/AetherFlow/setup/
 users=($(cat /etc/htpasswd | cut -d ":" -f 1))
-master=($(cat /srv/rutorrent/home/db/master.txt))
+# LEGACY REMOVED: master.txt
+MASTER="$AETHERFLOW_USER"
 _removecron
 _installd
 

@@ -2,6 +2,7 @@
 # AetherFlow AI Self-Healing Grid
 # Location: /usr/local/bin/AetherFlow/system/af-heal
 
+source /opt/AetherFlow/packages/common.sh
 LOG_FILE="/var/log/aetherflow/self_healing.log"
 SERVICES=("rtorrent" "nginx" "php7.4-fpm" "deluged")
 

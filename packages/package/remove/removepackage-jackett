@@ -1,6 +1,8 @@
 #!/bin/bash
 
-username=$(cat /srv/rutorrent/home/db/master.txt)
+source /opt/AetherFlow/packages/common.sh
+# LEGACY REMOVED: master.txt
+MASTER="$AETHERFLOW_USER"
 
 rm -rf /opt/${username}/Jackett
 rm -rf /home/${username}/Jackett

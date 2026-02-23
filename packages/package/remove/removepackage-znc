@@ -1,5 +1,6 @@
 #!/bin/bash
 
+source /opt/AetherFlow/packages/common.sh
 sudo -u znc crontab -l | sed '/znc/d' | crontab -u znc -
 apt-get remove -y -q znc
 userdel -rf znc

@@ -19,11 +19,13 @@
 #   including (via compiler) GPL-licensed code must also be made available
 #   under the GPL along with build & install instructions.
 #
-OUTTO=/srv/rutorrent/home/db/output.log
+source /opt/AetherFlow/packages/common.sh
+OUTTO=$LOGFILE
 
 function _removeplugin-tracklabels() {
   username=$(whoami);
-  rutorrent="/srv/rutorrent/";
+  # LEGACY: rutorrent path no longer used
+# rutorrent="/srv/rutorrent/";
   echo "Uninstalling the tracklabels plugin ... " >>"${OUTTO}" 2>&1;
   PLUGIN="tracklabels"
     for i in $PLUGIN; do

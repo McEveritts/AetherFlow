@@ -1,4 +1,5 @@
 #!/bin/bash
+source /opt/AetherFlow/packages/common.sh
 systemctl stop Tautulli
 systemctl disable Tautulli
 rm -rf /opt/Tautulli

@@ -162,8 +162,9 @@ OUTTO=/etc/AetherFlow.csf-install.log
 HOSTNAME1=$(hostname -s)
 PUBLICIP=$(ip route get 8.8.8.8 | awk 'NR==1 {print $NF}')
 #EMAIL=$(cat /srv/rutorrent/home/db/masteremail.txt)
-local_setup=/etc/AetherFlow/setup/
-username=$(cat /srv/rutorrent/home/db/master.txt)
+local_setup=/opt/AetherFlow/setup/
+source /opt/AetherFlow/packages/common.sh
+username=$AETHERFLOW_USER
 passwd=$(cat /root/${username}.info | cut -d ":" -f 3 | cut -d "@" -f 1)
 
 _installCSF

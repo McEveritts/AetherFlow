@@ -194,10 +194,11 @@ function _insTrExit() {
 }
 
 
-username=$(cat /srv/rutorrent/home/db/master.txt)
+source /opt/AetherFlow/packages/common.sh
+username=$AETHERFLOW_USER
 passwd=$(cat /root/${username}.info | cut -d ":" -f 3 | cut -d "@" -f 1)
-OUTTO="/srv/rutorrent/home/db/output.log"
-local_setup=/etc/AetherFlow/setup/
+OUTTO=$LOGFILE
+local_setup=/opt/AetherFlow/setup/
 local_dashboard=/etc/AetherFlow/dashboard/
 
 APPNAME='transmission'

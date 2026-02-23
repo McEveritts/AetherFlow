@@ -19,11 +19,13 @@
 #   including (via compiler) GPL-licensed code must also be made available
 #   under the GPL along with build & install instructions.
 #
+source /opt/AetherFlow/packages/common.sh
 OUTTO=/srv/AetherFlow/db/output.log
 
 function _removeplugin-spectrogram() {
   username=$(whoami);
-  rutorrent="/srv/rutorrent/";
+  # LEGACY: rutorrent path no longer used
+# rutorrent="/srv/rutorrent/";
   echo "Uninstalling the spectrogram plugin ... " >>"${OUTTO}" 2>&1;
   PLUGIN="spectrogram"
     for i in $PLUGIN; do

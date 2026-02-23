@@ -47,11 +47,12 @@ function _installQuassel2() {
   exit
 }
 
-local_setup=/etc/AetherFlow/setup/
-OUTTO=/srv/rutorrent/home/db/output.log
+local_setup=/opt/AetherFlow/setup/
+OUTTO=$LOGFILE
 distribution=$(lsb_release -is)
 IP=$(ip route get 8.8.8.8 | awk 'NR==1 {print $NF}')
-MASTER=$(cat /srv/rutorrent/home/db/master.txt)
+source /opt/AetherFlow/packages/common.sh
+MASTER=$AETHERFLOW_USER
 
 echo "Installing Quassel PPA (Ubuntu) or grabbing latest backport (Debian) ... " >>"${OUTTO}" 2>&1;_installQuassel1;echo
 echo "Quassel has now been installed! "

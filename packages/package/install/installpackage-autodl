@@ -24,11 +24,12 @@
 #
 function _string() { perl -le 'print map {(a..z,A..Z,0..9)[rand 62] } 0..pop' 15 ; }
 
-MASTER=$(cat /srv/rutorrent/home/db/master.txt)
+source /opt/AetherFlow/packages/common.sh
+MASTER=$AETHERFLOW_USER
 IRSSIIP=$(curl -s http://ipecho.net/plain || curl -s http://ifconfig.me/ip ; echo)
 
 OUTTO="/root/quick-box.log"
-local_setup=/etc/AetherFlow/setup/
+local_setup=/opt/AetherFlow/setup/
 
 
 function _installautodl() {

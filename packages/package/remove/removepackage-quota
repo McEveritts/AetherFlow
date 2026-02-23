@@ -18,7 +18,9 @@
 #   under the GPL along with build & install instructions.
 #
 #################################################################################
-username=$(cat /srv/rutorrent/home/db/master.txt)
+source /opt/AetherFlow/packages/common.sh
+# LEGACY REMOVED: master.txt
+MASTER="$AETHERFLOW_USER"
 
 sed -i 's/usrjquota=aquota.user,jqfmt=vfsv1,//g' /etc/fstab
 apt-get remove -y -q quota >/dev/null 2>&1

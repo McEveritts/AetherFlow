@@ -1,6 +1,8 @@
 #!/bin/bash
-OUTTO=/srv/rutorrent/home/db/output.log
-USERNAME=$(cat /srv/rutorrent/home/db/master.txt)
+source /opt/AetherFlow/packages/common.sh
+OUTTO=$LOGFILE
+# LEGACY REMOVED: master.txt
+MASTER="$AETHERFLOW_USER"
 APPNAME='headphones'
 APPPATH='/home/'$USERNAME'/.headphones'
 APPTITLE='Headphones'

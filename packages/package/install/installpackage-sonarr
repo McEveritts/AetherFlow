@@ -38,7 +38,7 @@ function _installSonarr1() {
       if [[ $distribution == "Ubuntu" ]]; then
         apt-key adv --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys 3FA7E0328081BFF6A14DA29AA6A19B38D3D831EF >/dev/null 2>&1
       elif [[ $distribution == "Debian" ]]; then
-          exit
+          #exit
       fi
       echo "deb https://download.mono-project.com/repo/ubuntu stable-xenial main" | sudo tee /etc/apt/sources.list.d/mono-official-stable.list >/dev/null 2>&1
     fi
@@ -98,10 +98,10 @@ function _installSonarr6() {
 <Location /sonarr>
 ProxyPass http://localhost:8989/sonarr
 ProxyPassReverse http://localhost:8989/sonarr
-AuthType Digest
-AuthName "rutorrent"
-AuthUserFile '/etc/htpasswd'
-Require user ${username}
+#AuthType Digest
+#AuthName "rutorrent"
+#AuthUserFile '/etc/htpasswd'
+#Require user ${username}
 </Location>
 EOF
   chown www-data: /etc/apache2/sites-enabled/sonarr.conf
@@ -122,10 +122,11 @@ function _installSonarr10() {
 }
 
 
-OUTTO=/srv/rutorrent/home/db/output.log
-local_setup=/etc/AetherFlow/setup/
+OUTTO=$LOGFILE
+local_setup=/opt/AetherFlow/setup/
 local_packages=/etc/AetherFlow/packages/
-username=$(cat /srv/rutorrent/home/db/master.txt)
+source /opt/AetherFlow/packages/common.sh
+username=$AETHERFLOW_USER
 distribution=$(lsb_release -is)
 
 _installSonarrintro

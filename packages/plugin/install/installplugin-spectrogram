@@ -20,6 +20,7 @@
 #
 
 # To get most output from commands that are run, set to nothing
+source /opt/AetherFlow/packages/common.sh
 MIN_OUTPUT=  #yes
 
 # To print to shell, set to nothing, otherwise output to LOGFILE
@@ -27,7 +28,8 @@ USE_LOGFILE=yes
 LOGFILE=/srv/rutorrent/home/db/output.log # AetherFlow logfile
 
 # To print to shell, set to nothing, otherwise output to LOGFILE
-rutorrent=/srv/rutorrent/
+# LEGACY: rutorrent path no longer used
+# rutorrent=/srv/rutorrent/
 
 # Location of AetherFlow ruTorrent plugins on localhost
 PLUGINVAULT=/etc/AetherFlow/rtplugins/

@@ -17,9 +17,10 @@
 #   including (via compiler) GPL-licensed code must also be made available
 #   under the GPL along with build & install instructions.
 #
-MASTER=$(cat /srv/rutorrent/home/db/master.txt)
-OUTTO=/srv/rutorrent/home/db/output.log
-local_setup=/etc/AetherFlow/setup/
+source /opt/AetherFlow/packages/common.sh
+MASTER=$AETHERFLOW_USER
+OUTTO=$LOGFILE
+local_setup=/opt/AetherFlow/setup/
 
 function _installMedusa1() {
   sudo git clone https://github.com/pymedusa/Medusa.git  /home/"${MASTER}"/.medusa >/dev/null 2>&1
@@ -68,9 +69,9 @@ ProxyRequests Off
         AddDefaultCharset Off
         Order deny,allow
         Allow from all
-        AuthType Digest
-        AuthName "rutorrent"
-        AuthUserFile '/etc/htpasswd'
+#        AuthType Digest
+#        AuthName "rutorrent"
+#        AuthUserFile '/etc/htpasswd'
         Require user ${MASTER}
 </Proxy>
 ProxyPass /medusa/ws wss://127.0.0.1:8082/medusa/ws keepalive=On timeout=600 retry=1 acquire=3000

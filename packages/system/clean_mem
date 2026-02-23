@@ -18,7 +18,8 @@
 #   under the GPL along with build & install instructions.
 #
 #################################################################################
-OUTTO=/srv/rutorrent/home/db/output.log
+source /opt/AetherFlow/packages/common.sh
+OUTTO=$LOGFILE
 
 function _cleanmemcache() {
   echo "Cleaning system memory cache ... " >>"${OUTTO}" 2>&1;

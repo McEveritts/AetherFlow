@@ -18,5 +18,6 @@
 #   under the GPL along with build & install instructions.
 #
 
-printf "" > /srv/rutorrent/home/db/output.log
+source /opt/AetherFlow/packages/common.sh
+printf "" > "$LOGFILE"
 

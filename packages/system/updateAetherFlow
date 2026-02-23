@@ -1,4 +1,5 @@
 #!/bin/bash
+source /opt/AetherFlow/packages/common.sh
 set -euo pipefail
 #
 # [Quick Box :: EcoSystem Update Script]
@@ -30,7 +31,7 @@ function _oscheck() {
 }
 
 function _logcheck() {
-  OUTTO=/srv/rutorrent/home/db/output.log
+  OUTTO=$LOGFILE
 }
 
 function _directorycheck() {
@@ -158,9 +159,9 @@ Alias /${i}.rtorrent.downloads "/home/${i}/torrents/rtorrent"
 <Directory "/home/${i}/torrents/rtorrent">
  Options Indexes FollowSymLinks MultiViews
   AllowOverride None
-        AuthType Digest
-        AuthName "rutorrent"
-        AuthUserFile '/etc/htpasswd'
+#        AuthType Digest
+#        AuthName "rutorrent"
+#        AuthUserFile '/etc/htpasswd'
         Require user ${i}
   Order allow,deny
   Allow from all
@@ -170,18 +171,18 @@ Alias /${i}.deluge.downloads "/home/${i}/torrents/deluge"
 <Directory "/home/${i}/torrents/deluge">
   Options Indexes FollowSymLinks MultiViews
   AllowOverride None
-        AuthType Digest
-        AuthName "rutorrent"
-        AuthUserFile '/etc/htpasswd'
+#        AuthType Digest
+#        AuthName "rutorrent"
+#        AuthUserFile '/etc/htpasswd'
         Require user ${i}
   Order allow,deny
   Allow from all
   php_admin_value engine Off
 </Directory>
 <Location "/${i}">
-        AuthType Digest
-        AuthName "rutorrent"
-        AuthUserFile "/etc/htpasswd"
+#        AuthType Digest
+#        AuthName "rutorrent"
+#        AuthUserFile "/etc/htpasswd"
     Require user ${i}
 </Location>
 AS
@@ -439,10 +440,10 @@ function _updateuserhome() {
 }
 
 function _updateplex() {
-  OUTTO="/srv/rutorrent/home/db/output.log"
+  OUTTO=$LOGFILE
   HOSTNAME1=$(hostname -s)
   PUBLICIP=$(ip route get 8.8.8.8 | awk 'NR==1 {print $NF}')
-  local_setup=/etc/AetherFlow/setup/
+  local_setup=/opt/AetherFlow/setup/
   if [[ -f /etc/init.d/plexmediaserver ]]; then
     mv /etc/init.d/plexmediaserver /etc/init.d/plexmediaserver.BAK
     cp ${local_setup}templates/sysd/plexmediaserver.template /lib/systemd/system/plexmediaserver.service
@@ -480,8 +481,10 @@ local_themes=/opt/AetherFlow/themes/
 local_rtheme=/opt/AetherFlow/rttheme/
 
 IFACE=$(ip link show|grep -i broadcast|grep -m1 UP|cut -d: -f 2|cut -d@ -f 1|sed -e 's/ //g');
-A1=$(cat /etc/apache2/master.txt 2>/dev/null)
-rutorrent=/srv/rutorrent/
+# LEGACY REMOVED: master.txt
+A1="$AETHERFLOW_USER"
+# LEGACY: rutorrent path no longer used
+# rutorrent=/srv/rutorrent/
 usrbin=/usr/local/bin/
 
 # AetherFlow Update STRUCTURE
