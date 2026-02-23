@@ -1,0 +1,20 @@
+#!/bin/bash
+#
+# [AetherFlow :: Remove overseerr]
+#
+set -e
+
+LOGFILE="/opt/AetherFlow/logs/installer.log"
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [remove-overseerr] $1" | tee -a "$LOGFILE"; }
+
+log "Stopping overseerr..."
+systemctl stop overseerr; systemctl disable overseerr
+
+log "Removing overseerr files and configuration..."
+rm -rf /opt/overseerr /etc/systemd/system/overseerr.service /etc/apache2/sites-enabled/overseerr.conf; userdel overseerr 2>/dev/null
+
+systemctl daemon-reload 2>/dev/null
+service apache2 reload 2>/dev/null
+rm -f /install/.overseerr.lock
+
+log "overseerr has been completely removed."

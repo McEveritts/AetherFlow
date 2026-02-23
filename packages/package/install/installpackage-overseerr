@@ -1,0 +1,87 @@
+#!/bin/bash
+#
+# [AetherFlow :: Install Overseerr]
+# Request management and media discovery for Plex
+#
+# Author : McEveritts
+# URL    : https://AetherFlow.io
+# License: GPL-3.0
+#
+set -e
+
+LOGFILE="/opt/AetherFlow/logs/installer.log"
+mkdir -p /opt/AetherFlow/logs /install
+
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [overseerr] $1" | tee -a "$LOGFILE"; }
+
+# ── Dependencies ──────────────────────────────────────────────────────────────
+log "Installing Node.js (if not present)..."
+if ! command -v node &>/dev/null; then
+    curl -fsSL https://deb.nodesource.com/setup_20.x | bash - >>"$LOGFILE" 2>&1
+    apt-get install -y nodejs >>"$LOGFILE" 2>&1
+fi
+
+log "Installing build dependencies..."
+apt-get install -y git >>"$LOGFILE" 2>&1
+
+# ── Install Overseerr ─────────────────────────────────────────────────────────
+log "Cloning Overseerr repository..."
+if [[ -d /opt/overseerr ]]; then
+    rm -rf /opt/overseerr
+fi
+git clone https://github.com/sct/overseerr.git /opt/overseerr >>"$LOGFILE" 2>&1
+cd /opt/overseerr
+
+log "Installing Overseerr npm dependencies (this may take several minutes)..."
+npm install --production >>"$LOGFILE" 2>&1
+
+log "Building Overseerr..."
+npx next build >>"$LOGFILE" 2>&1
+
+# ── Create dedicated user ────────────────────────────────────────────────────
+if ! id -u overseerr &>/dev/null; then
+    useradd -r -s /usr/sbin/nologin -d /opt/overseerr overseerr
+fi
+chown -R overseerr:overseerr /opt/overseerr
+
+# ── Systemd service ──────────────────────────────────────────────────────────
+log "Creating systemd service..."
+cat > /etc/systemd/system/overseerr.service <<'EOF'
+[Unit]
+Description=Overseerr - Request management for Plex
+After=network.target
+
+[Service]
+Type=simple
+User=overseerr
+Group=overseerr
+WorkingDirectory=/opt/overseerr
+ExecStart=/usr/bin/node /opt/overseerr/dist/index.js
+Restart=on-failure
+RestartSec=10
+Environment=NODE_ENV=production
+Environment=PORT=5055
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable overseerr.service >>"$LOGFILE" 2>&1
+systemctl start overseerr.service
+
+# ── Apache reverse proxy ─────────────────────────────────────────────────────
+log "Configuring Apache reverse proxy..."
+cat > /etc/apache2/sites-enabled/overseerr.conf <<'EOF'
+<Location /overseerr>
+    ProxyPass http://localhost:5055/overseerr
+    ProxyPassReverse http://localhost:5055/overseerr
+</Location>
+EOF
+chown www-data:www-data /etc/apache2/sites-enabled/overseerr.conf
+a2enmod proxy proxy_http >>/dev/null 2>&1
+service apache2 reload >>"$LOGFILE" 2>&1
+
+# ── Finalize ─────────────────────────────────────────────────────────────────
+touch /install/.overseerr.lock
+log "Overseerr installation complete! Access at http://your-server:5055"

@@ -1,0 +1,20 @@
+#!/bin/bash
+#
+# [AetherFlow :: Remove jellyfin]
+#
+set -e
+
+LOGFILE="/opt/AetherFlow/logs/installer.log"
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [remove-jellyfin] $1" | tee -a "$LOGFILE"; }
+
+log "Stopping jellyfin..."
+systemctl stop jellyfin; systemctl disable jellyfin
+
+log "Removing jellyfin files and configuration..."
+apt-get remove -y --purge jellyfin* >/dev/null 2>&1; rm -f /etc/apt/sources.list.d/jellyfin.sources /etc/apt/keyrings/jellyfin.gpg /etc/apache2/sites-enabled/jellyfin.conf
+
+systemctl daemon-reload 2>/dev/null
+service apache2 reload 2>/dev/null
+rm -f /install/.jellyfin.lock
+
+log "jellyfin has been completely removed."

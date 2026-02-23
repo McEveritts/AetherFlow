@@ -1,0 +1,20 @@
+#!/bin/bash
+#
+# [AetherFlow :: Remove flaresolverr]
+#
+set -e
+
+LOGFILE="/opt/AetherFlow/logs/installer.log"
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [remove-flaresolverr] $1" | tee -a "$LOGFILE"; }
+
+log "Stopping flaresolverr..."
+docker stop flaresolverr; docker rm flaresolverr
+
+log "Removing flaresolverr files and configuration..."
+
+
+systemctl daemon-reload 2>/dev/null
+service apache2 reload 2>/dev/null
+rm -f /install/.flaresolverr.lock
+
+log "flaresolverr has been completely removed."

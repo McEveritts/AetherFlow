@@ -1,0 +1,66 @@
+#!/bin/bash
+#
+# [AetherFlow :: Install Jellyfin]
+# Free and open-source media server
+#
+# Author : McEveritts
+# URL    : https://AetherFlow.io
+# License: GPL-3.0
+#
+set -e
+
+LOGFILE="/opt/AetherFlow/logs/installer.log"
+mkdir -p /opt/AetherFlow/logs /install
+
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [jellyfin] $1" | tee -a "$LOGFILE"; }
+
+# ── Add Jellyfin official repository ─────────────────────────────────────────
+log "Adding Jellyfin GPG key and repository..."
+apt-get install -y curl gnupg >>"$LOGFILE" 2>&1
+
+# Add GPG key
+mkdir -p /etc/apt/keyrings
+curl -fsSL https://repo.jellyfin.org/jellyfin_team.gpg.key | gpg --dearmor -o /etc/apt/keyrings/jellyfin.gpg 2>>"$LOGFILE"
+
+# Determine architecture and codename
+ARCH=$(dpkg --print-architecture)
+CODENAME=$(lsb_release -cs 2>/dev/null || echo "bookworm")
+
+# Add repository
+cat > /etc/apt/sources.list.d/jellyfin.sources <<EOF
+Types: deb
+URIs: https://repo.jellyfin.org/debian
+Suites: ${CODENAME}
+Components: main
+Architectures: ${ARCH}
+Signed-By: /etc/apt/keyrings/jellyfin.gpg
+EOF
+
+# ── Install Jellyfin ─────────────────────────────────────────────────────────
+log "Updating package lists..."
+apt-get update >>"$LOGFILE" 2>&1
+
+log "Installing Jellyfin server..."
+apt-get install -y jellyfin >>"$LOGFILE" 2>&1
+
+# ── Configure and start ──────────────────────────────────────────────────────
+log "Enabling and starting Jellyfin..."
+systemctl daemon-reload
+systemctl enable jellyfin.service >>"$LOGFILE" 2>&1
+systemctl start jellyfin.service
+
+# ── Apache reverse proxy ─────────────────────────────────────────────────────
+log "Configuring Apache reverse proxy..."
+cat > /etc/apache2/sites-enabled/jellyfin.conf <<'EOF'
+<Location /jellyfin>
+    ProxyPass http://localhost:8096/jellyfin
+    ProxyPassReverse http://localhost:8096/jellyfin
+</Location>
+EOF
+chown www-data:www-data /etc/apache2/sites-enabled/jellyfin.conf
+a2enmod proxy proxy_http >>/dev/null 2>&1
+service apache2 reload >>"$LOGFILE" 2>&1
+
+# ── Finalize ─────────────────────────────────────────────────────────────────
+touch /install/.jellyfin.lock
+log "Jellyfin installation complete! Access at http://your-server:8096"

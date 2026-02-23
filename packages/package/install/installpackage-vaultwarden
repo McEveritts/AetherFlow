@@ -1,0 +1,57 @@
+#!/bin/bash
+#
+# [AetherFlow :: Install Vaultwarden]
+# Lightweight Bitwarden-compatible password manager
+#
+# Author : McEveritts
+# URL    : https://AetherFlow.io
+# License: GPL-3.0
+#
+set -e
+
+LOGFILE="/opt/AetherFlow/logs/installer.log"
+mkdir -p /opt/AetherFlow/logs /install
+
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [vaultwarden] $1" | tee -a "$LOGFILE"; }
+
+# ── Install Docker if not present ────────────────────────────────────────────
+if ! command -v docker &>/dev/null; then
+    log "Docker not found — installing Docker Engine..."
+    curl -fsSL https://get.docker.com | sh >>"$LOGFILE" 2>&1
+    systemctl enable docker >>"$LOGFILE" 2>&1
+    systemctl start docker
+fi
+
+# ── Create data directory ────────────────────────────────────────────────────
+log "Creating data directory..."
+mkdir -p /opt/vaultwarden/data
+
+# ── Deploy Vaultwarden container ─────────────────────────────────────────────
+log "Pulling and starting Vaultwarden container..."
+docker rm -f vaultwarden 2>/dev/null || true
+docker run -d \
+    --name vaultwarden \
+    --restart=always \
+    -p 8343:80 \
+    -v /opt/vaultwarden/data:/data \
+    -e WEBSOCKET_ENABLED=true \
+    -e SIGNUPS_ALLOWED=true \
+    -e ADMIN_TOKEN="$(openssl rand -base64 48)" \
+    vaultwarden/server:latest >>"$LOGFILE" 2>&1
+
+# ── Apache reverse proxy ─────────────────────────────────────────────────────
+log "Configuring Apache reverse proxy..."
+cat > /etc/apache2/sites-enabled/vaultwarden.conf <<'EOF'
+<Location /vaultwarden>
+    ProxyPass http://localhost:8343
+    ProxyPassReverse http://localhost:8343
+    ProxyPreserveHost On
+</Location>
+EOF
+chown www-data:www-data /etc/apache2/sites-enabled/vaultwarden.conf
+a2enmod proxy proxy_http proxy_wstunnel >>/dev/null 2>&1
+service apache2 reload >>"$LOGFILE" 2>&1
+
+# ── Finalize ─────────────────────────────────────────────────────────────────
+touch /install/.vaultwarden.lock
+log "Vaultwarden installation complete! Access at http://your-server:8343"

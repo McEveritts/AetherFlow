@@ -1,0 +1,35 @@
+#!/bin/bash
+#
+# [AetherFlow :: Install Netdata]
+# Real-time performance and health monitoring
+#
+# Author : McEveritts
+# URL    : https://AetherFlow.io
+# License: GPL-3.0
+#
+set -e
+
+LOGFILE="/opt/AetherFlow/logs/installer.log"
+mkdir -p /opt/AetherFlow/logs /install
+
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [netdata] $1" | tee -a "$LOGFILE"; }
+
+# ── Install Netdata using official kickstart ─────────────────────────────────
+log "Running Netdata kickstart installer..."
+curl -fsSL https://get.netdata.cloud/kickstart.sh | sh -s -- --non-interactive --dont-wait >>"$LOGFILE" 2>&1
+
+# ── Apache reverse proxy ─────────────────────────────────────────────────────
+log "Configuring Apache reverse proxy..."
+cat > /etc/apache2/sites-enabled/netdata.conf <<'EOF'
+<Location /netdata>
+    ProxyPass http://localhost:19999
+    ProxyPassReverse http://localhost:19999
+</Location>
+EOF
+chown www-data:www-data /etc/apache2/sites-enabled/netdata.conf
+a2enmod proxy proxy_http >>/dev/null 2>&1
+service apache2 reload >>"$LOGFILE" 2>&1
+
+# ── Finalize ─────────────────────────────────────────────────────────────────
+touch /install/.netdata.lock
+log "Netdata installation complete! Access at http://your-server:19999"

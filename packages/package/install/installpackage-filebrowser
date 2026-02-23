@@ -1,0 +1,63 @@
+#!/bin/bash
+#
+# [AetherFlow :: Install File Browser]
+# Web file manager with a sleek interface
+#
+# Author : McEveritts
+# URL    : https://AetherFlow.io
+# License: GPL-3.0
+#
+set -e
+
+LOGFILE="/opt/AetherFlow/logs/installer.log"
+mkdir -p /opt/AetherFlow/logs /install
+
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [filebrowser] $1" | tee -a "$LOGFILE"; }
+
+# ── Download and install File Browser ────────────────────────────────────────
+log "Downloading File Browser..."
+curl -fsSL https://raw.githubusercontent.com/filebrowser/get/master/get.sh | bash >>"$LOGFILE" 2>&1
+
+# ── Create data directory ────────────────────────────────────────────────────
+log "Setting up File Browser data directory..."
+mkdir -p /opt/filebrowser
+filebrowser config init --address 0.0.0.0 --port 8085 --root / --database /opt/filebrowser/filebrowser.db >>"$LOGFILE" 2>&1
+filebrowser users add admin admin --database /opt/filebrowser/filebrowser.db >>"$LOGFILE" 2>&1
+
+# ── Systemd service ──────────────────────────────────────────────────────────
+log "Creating systemd service..."
+cat > /etc/systemd/system/filebrowser.service <<'EOF'
+[Unit]
+Description=File Browser
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/filebrowser --database /opt/filebrowser/filebrowser.db --address 0.0.0.0 --port 8085 --root /
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable filebrowser.service >>"$LOGFILE" 2>&1
+systemctl start filebrowser.service
+
+# ── Apache reverse proxy ─────────────────────────────────────────────────────
+log "Configuring Apache reverse proxy..."
+cat > /etc/apache2/sites-enabled/filebrowser.conf <<'EOF'
+<Location /filebrowser>
+    ProxyPass http://localhost:8085
+    ProxyPassReverse http://localhost:8085
+</Location>
+EOF
+chown www-data:www-data /etc/apache2/sites-enabled/filebrowser.conf
+a2enmod proxy proxy_http >>/dev/null 2>&1
+service apache2 reload >>"$LOGFILE" 2>&1
+
+# ── Finalize ─────────────────────────────────────────────────────────────────
+touch /install/.filebrowser.lock
+log "File Browser installation complete! Default login: admin / admin"
+log "Access at http://your-server:8085"

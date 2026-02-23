@@ -1,167 +1,90 @@
 #!/bin/bash
 #
-# [Quick Box :: Install Deluge package]
+# [AetherFlow :: Install Deluge]
+# Feature-rich BitTorrent client with web UI
 #
-# GITHUB REPOS
-# GitHub _ packages  :   https://github.com/AetherFlow/AetherFlow_packages
-# LOCAL REPOS
-# Local _ packages   :   /etc/AetherFlow/packages
-# Author             :   AetherFlow.IO | liara
-# URL                :   https://AetherFlow.io
+# Author : McEveritts
+# URL    : https://AetherFlow.io
+# License: GPL-3.0
 #
-# AetherFlow Copyright (C) 2016
-# Licensed under GNU General Public License v3.0 GPL-3 (in short)
-#
-#   You may copy, distribute and modify the software as long as you track
-#   changes/dates in source files. Any modifications to our software
-#   including (via compiler) GPL-licensed code must also be made available
-#   under the GPL along with build & install instructions.
-#
-#################################################################################
-function _string() { perl -le 'print map {(a..z,A..Z,0..9)[rand 62] } 0..pop' 15 ; }
-#################################################################################
+set -e
 
-OUTTO=/srv/rutorrent/home/db/output.log
-local_setup=/etc/AetherFlow/setup/
-local_packages=/etc/AetherFlow/packages/
-username=$(cat /srv/rutorrent/home/db/master.txt)
-passwd=$(cat /root/${username}.info | cut -d ":" -f 3 | cut -d "@" -f 1)
-ip=$(ip route get 8.8.8.8 | awk 'NR==1 {print $7}')
-LTRC=RC_1_0
+LOGFILE="/opt/AetherFlow/logs/installer.log"
+mkdir -p /opt/AetherFlow/logs /install
 
-function _installDeluge1() {
-  sudo apt-get -qy update >/dev/null 2>&1
-  LIST='build-essential checkinstall libgeoip-dev 
-  python python-twisted python-openssl python-setuptools intltool python-xdg python-chardet geoip-database python-notify python-pygame
-  python-glade2 librsvg2-common xdg-utils python-mako'
-  for depend in $LIST; do
-    sudo apt-get -qq -y install $depend >>"${OUTTO}" 2>&1
-  done
-  LIST='libboost-dev libboost-system-dev libboost-chrono-dev libboost-random-dev libboost-python-dev'
-  for depend in $LIST; do
-    apt-get -qq -y install $depend >>"${OUTTO}" 2>&1
-  done
-  cd ${local_packages}
-  if [ ! -e /usr/local/lib/libtorrent-rasterbar.so ]; then
-    LTRC=RC_1_1
-    git clone -b ${LTRC} https://github.com/arvidn/libtorrent.git >>"${OUTTO}" 2>&1;
-    cd libtorrent
-	  cp ${local_setup}sources/libtorrent-rasterbar-${LTRC}.patch .
-    patch -p1 < libtorrent-rasterbar-${LTRC}.patch >>"${OUTTO}" 2>&1
-    if [[ -e /install/.qbittorrent.lock ]]; then
-		  cp -f ${local_setup}templates/session.lt.template ./src/session.cpp
-		  cp -f ${local_setup}templates/torrent.lt.template ./include/libtorrent/torrent.hpp
-    fi
-    ./autotool.sh >>"${OUTTO}" 2>&1;
-    ./configure --enable-python-binding --disable-debug --enable-encryption --with-libgeoip=system --with-libiconv CXXFLAGS=-std=c++11 >>"${OUTTO}" 2>&1;
-    make -j$(nproc) >>"${OUTTO}" 2>&1;
-    checkinstall -y --pkgversion=1.0.11 >>"${OUTTO}" 2>&1;
-  fi
-  ldconfig
-  cd ..
-  wget -q http://download.deluge-torrent.org/source/deluge-1.3.15.tar.gz
-  tar -zxvf deluge-1.3.15.tar.gz >>"${OUTTO}" 2>&1
-  cd deluge-1.3.15
-  python setup.py build >>"${OUTTO}" 2>&1
-  python setup.py install --install-layout=deb >>"${OUTTO}" 2>&1
-  python setup.py install_data >>"${OUTTO}" 2>&1
-  cd ..
-  rm -r {deluge-1.3.15,libtorrent}
-  rm -rf deluge-1.3.15.tar.gz
-}
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [deluge] $1" | tee -a "$LOGFILE"; }
 
-function _installDeluge2() {
-  n=$RANDOM
-  DPORT=$((n%59000+10024))
-  DWPORT=$(shuf -i 10001-11000 -n 1)
-  DWSALT=$(head /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 32 | head -n 1)
-  DWP=$(python ${local_packages}system/deluge.Userpass.py ${passwd} ${DWSALT})
-  DUDID=$(python ${local_packages}system/deluge.addHost.py)
-  mkdir -p /home/${username}/.config/deluge/
-  mkdir -p /home/${username}/.config/deluge/plugins
-  if [[ ! -f /home/${username}/.config/deluge/plugins/ltConfig-0.2.5.0-py2.7.egg ]]; then
-    cd /home/${username}/.config/deluge/plugins/
-    wget -q https://github.com/ratanakvlun/deluge-ltconfig/releases/download/v0.3.1/ltConfig-0.3.1-py2.7.egg
-    wget -q https://bitbucket.org/bendikro/deluge-yarss-plugin/downloads/YaRSS2-1.4.3-py2.7.egg
-  fi
-  chmod 755 /home/${username}/.config
-  chmod 755 /home/${username}/.config/deluge
-  cp ${local_setup}templates/core.conf.template /home/${username}/.config/deluge/core.conf
-  cp ${local_setup}templates/web.conf.template /home/${username}/.config/deluge/web.conf
-  cp ${local_setup}templates/hostlist.conf.1.2.template /home/${username}/.config/deluge/hostlist.conf.1.2
-  cp ${local_setup}templates/ltconfig.conf.template /home/${username}/.config/deluge/ltconfig.conf
-  sed -i "s/USERNAME/${username}/g" /home/${username}/.config/deluge/core.conf
-  sed -i "s/DPORT/${DPORT}/g" /home/${username}/.config/deluge/core.conf
-  sed -i "s/XX/${ip}/g" /home/${username}/.config/deluge/core.conf
-  sed -i "s/DWPORT/${DWPORT}/g" /home/${username}/.config/deluge/web.conf
-  sed -i "s/DWSALT/${DWSALT}/g" /home/${username}/.config/deluge/web.conf
-  sed -i "s/DWP/${DWP}/g" /home/${username}/.config/deluge/web.conf
-  sed -i "s/DUDID/${DUDID}/g" /home/${username}/.config/deluge/hostlist.conf.1.2
-  sed -i "s/DPORT/${DPORT}/g" /home/${username}/.config/deluge/hostlist.conf.1.2
-  sed -i "s/USERNAME/${username}/g" /home/${username}/.config/deluge/hostlist.conf.1.2
-  sed -i "s/PASSWD/${passwd}/g" /home/${username}/.config/deluge/hostlist.conf.1.2
-  echo "${username}:${passwd}:10" > /home/${username}/.config/deluge/auth
-  chmod 600 /home/${username}/.config/deluge/auth
-  cd /srv/rutorrent/home
-  ln -s /home/${username}/torrents/deluge/ ${username}.deluge.downloads
-}
-function _installDeluge3() {
-  chown -R ${username}.${username} /home/${username}/.config/
-  mkdir /home/${username}/dwatch
-  chown ${username}: /home/${username}/dwatch
-  mkdir -p /home/${username}/torrents/deluge
-  chown ${username}: /home/${username}/torrents/deluge
-  touch /install/.deluge.lock
-}
-function _installDeluge4() {
-  #cp "${local_setup}"templates/startup.template /home/"${username}"/.startup
-  #sed -i 's/DELUGEWEB_CLIENT=no/DELUGEWEB_CLIENT=yes/g' /home/"${username}"/.startup
-  #sed -i 's/DELUGED_CLIENT=no/DELUGED_CLIENT=yes/g' /home/"${username}"/.startup
-  cp ${local_setup}templates/sysd/deluged.template /etc/systemd/system/deluged@.service
-  cp ${local_setup}templates/sysd/deluge-web.template /etc/systemd/system/deluge-web@.service
-  systemctl enable deluged@${username}
-  systemctl enable deluge-web@${username}
-  systemctl start deluged@${username}
-  systemctl start deluge-web@${username}
-}
+# ── Install Deluge ───────────────────────────────────────────────────────────
+log "Installing Deluge daemon and web UI..."
+apt-get update >>"$LOGFILE" 2>&1
+apt-get install -y deluged deluge-web deluge-console >>"$LOGFILE" 2>&1
 
-function _insdwApache() {
-APPNAME='deluge'
-APPDPORT=`cat /home/${username}/.config/deluge/web.conf | grep -E ".*port.*" | grep -Eo [0-9]+`
-  cat > /etc/apache2/sites-enabled/deluge.conf <<EOF
-ProxyPass /$APPNAME http://localhost:$APPDPORT/
+# ── Create deluge user ───────────────────────────────────────────────────────
+if ! id -u deluge &>/dev/null; then
+    useradd -r -s /usr/sbin/nologin -m -d /home/deluge deluge
+fi
+mkdir -p /home/deluge/Downloads /home/deluge/.config/deluge
+chown -R deluge:deluge /home/deluge
 
-<Location /$APPNAME>
-    ProxyPassReverse /
-    ProxyPassReverseCookiePath / /$APPNAME              
-    RequestHeader set X-Deluge-Base "/$APPNAME/"          
-    Order allow,deny
-    Allow from all
-</Location>
+# ── Systemd services (daemon + web) ─────────────────────────────────────────
+log "Creating systemd services..."
+cat > /etc/systemd/system/deluged.service <<'EOF'
+[Unit]
+Description=Deluge Bittorrent Client Daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=deluge
+Group=deluge
+ExecStart=/usr/bin/deluged -d -l /var/log/deluge/daemon.log -L warning
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
 EOF
 
-  chown www-data: /etc/apache2/sites-enabled/deluge.conf
-  service apache2 reload
-}
+cat > /etc/systemd/system/deluge-web.service <<'EOF'
+[Unit]
+Description=Deluge Bittorrent Client Web Interface
+After=network-online.target deluged.service
+Wants=deluged.service
 
-function _installDeluge5() {
-  echo "Deluge Install Complete!" >>"${OUTTO}" 2>&1;
-  sleep 5
-  echo >>"${OUTTO}" 2>&1;
-  echo >>"${OUTTO}" 2>&1;
-  echo "Close this dialog box to refresh your browser" >>"${OUTTO}" 2>&1;
-}
-function _installDeluge6() {
-  exit
-}
+[Service]
+Type=simple
+User=deluge
+Group=deluge
+ExecStart=/usr/bin/deluge-web -d -l /var/log/deluge/web.log -L warning
+Restart=on-failure
+RestartSec=5
 
+[Install]
+WantedBy=multi-user.target
+EOF
 
+mkdir -p /var/log/deluge
+chown -R deluge:deluge /var/log/deluge
+systemctl daemon-reload
+systemctl enable deluged.service deluge-web.service >>"$LOGFILE" 2>&1
+systemctl start deluged.service
+sleep 2
+systemctl start deluge-web.service
 
-echo "Installing deluge ... " >>"${OUTTO}" 2>&1;_installDeluge1
-echo "Setting up deluge configurations ... " >>"${OUTTO}" 2>&1;_installDeluge2
-echo "Setting up deluge permissions ... " >>"${OUTTO}" 2>&1;_installDeluge3
-echo "Setting up services and starting deluge ... " >>"${OUTTO}" 2>&1;_installDeluge4
-_insdwApache
-_installDeluge5
-_installDeluge6
+# ── Apache reverse proxy ─────────────────────────────────────────────────────
+log "Configuring Apache reverse proxy..."
+cat > /etc/apache2/sites-enabled/deluge.conf <<'EOF'
+<Location /deluge>
+    ProxyPass http://localhost:8112/deluge
+    ProxyPassReverse http://localhost:8112/deluge
+</Location>
+EOF
+chown www-data:www-data /etc/apache2/sites-enabled/deluge.conf
+a2enmod proxy proxy_http >>/dev/null 2>&1
+service apache2 reload >>"$LOGFILE" 2>&1
 
+# ── Finalize ─────────────────────────────────────────────────────────────────
+touch /install/.deluge.lock
+log "Deluge installation complete! Default web password: deluge"
+log "Access at http://your-server:8112"

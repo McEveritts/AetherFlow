@@ -1,0 +1,20 @@
+#!/bin/bash
+#
+# [AetherFlow :: Remove netdata]
+#
+set -e
+
+LOGFILE="/opt/AetherFlow/logs/installer.log"
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [remove-netdata] $1" | tee -a "$LOGFILE"; }
+
+log "Stopping netdata..."
+systemctl stop netdata; systemctl disable netdata
+
+log "Removing netdata files and configuration..."
+curl -fsSL https://get.netdata.cloud/kickstart.sh 2>/dev/null | sh -s -- --uninstall --non-interactive 2>/dev/null; rm -f /etc/apache2/sites-enabled/netdata.conf
+
+systemctl daemon-reload 2>/dev/null
+service apache2 reload 2>/dev/null
+rm -f /install/.netdata.lock
+
+log "netdata has been completely removed."

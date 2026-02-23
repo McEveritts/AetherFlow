@@ -1,0 +1,96 @@
+#!/bin/bash
+#
+# [AetherFlow :: Install Prowlarr]
+# Indexer manager/proxy for the *arr stack
+#
+# Author : McEveritts
+# URL    : https://AetherFlow.io
+# License: GPL-3.0
+#
+set -e
+
+LOGFILE="/opt/AetherFlow/logs/installer.log"
+mkdir -p /opt/AetherFlow/logs /install
+
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [prowlarr] $1" | tee -a "$LOGFILE"; }
+
+# ── Dependencies ─────────────────────────────────────────────────────────────
+log "Installing dependencies..."
+apt-get update >>"$LOGFILE" 2>&1
+apt-get install -y curl sqlite3 libicu-dev >>"$LOGFILE" 2>&1
+
+# ── Download Prowlarr ────────────────────────────────────────────────────────
+log "Downloading latest Prowlarr release..."
+ARCH=$(dpkg --print-architecture)
+case "$ARCH" in
+    amd64) PROWLARR_ARCH="x64" ;;
+    arm64) PROWLARR_ARCH="arm64" ;;
+    armhf) PROWLARR_ARCH="arm" ;;
+    *) PROWLARR_ARCH="x64" ;;
+esac
+
+PROWLARR_URL=$(curl -sL "https://prowlarr.servarr.com/v1/update/master/updatefile?os=linux&runtime=netcore&arch=${PROWLARR_ARCH}" | grep -oP 'https://[^"]+\.tar\.gz' | head -1)
+if [[ -z "$PROWLARR_URL" ]]; then
+    PROWLARR_URL="https://github.com/Prowlarr/Prowlarr/releases/latest/download/Prowlarr.master.0.0.0.0.linux-core-${PROWLARR_ARCH}.tar.gz"
+fi
+
+mkdir -p /tmp/AetherFlow
+cd /tmp/AetherFlow
+curl -sL "$PROWLARR_URL" -o prowlarr.tar.gz >>"$LOGFILE" 2>&1 || \
+wget -q "https://prowlarr.servarr.com/v1/update/master/updatefile?os=linux&runtime=netcore&arch=${PROWLARR_ARCH}" -O prowlarr.tar.gz >>"$LOGFILE" 2>&1
+
+log "Extracting Prowlarr..."
+rm -rf /opt/Prowlarr
+tar -xzf prowlarr.tar.gz -C /opt >>"$LOGFILE" 2>&1
+rm -f prowlarr.tar.gz
+
+# ── Create prowlarr user ─────────────────────────────────────────────────────
+if ! id -u prowlarr &>/dev/null; then
+    useradd -r -s /usr/sbin/nologin -d /opt/Prowlarr prowlarr
+fi
+chown -R prowlarr:prowlarr /opt/Prowlarr
+mkdir -p /home/prowlarr/.config/Prowlarr
+chown -R prowlarr:prowlarr /home/prowlarr 2>/dev/null || true
+
+# ── Systemd service ──────────────────────────────────────────────────────────
+log "Creating systemd service..."
+cat > /etc/systemd/system/prowlarr.service <<'EOF'
+[Unit]
+Description=Prowlarr Indexer Manager
+After=syslog.target network.target
+
+[Service]
+User=prowlarr
+Group=prowlarr
+Type=simple
+ExecStart=/opt/Prowlarr/Prowlarr -nobrowser -data=/var/lib/prowlarr/
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=20
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+mkdir -p /var/lib/prowlarr
+chown -R prowlarr:prowlarr /var/lib/prowlarr
+systemctl daemon-reload
+systemctl enable prowlarr.service >>"$LOGFILE" 2>&1
+systemctl start prowlarr.service
+
+# ── Apache reverse proxy ─────────────────────────────────────────────────────
+log "Configuring Apache reverse proxy..."
+cat > /etc/apache2/sites-enabled/prowlarr.conf <<'EOF'
+<Location /prowlarr>
+    ProxyPass http://localhost:9696/prowlarr
+    ProxyPassReverse http://localhost:9696/prowlarr
+</Location>
+EOF
+chown www-data:www-data /etc/apache2/sites-enabled/prowlarr.conf
+a2enmod proxy proxy_http >>/dev/null 2>&1
+service apache2 reload >>"$LOGFILE" 2>&1
+
+# ── Finalize ─────────────────────────────────────────────────────────────────
+touch /install/.prowlarr.lock
+log "Prowlarr installation complete! Access at http://your-server:9696"

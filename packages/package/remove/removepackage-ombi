@@ -1,10 +1,20 @@
 #!/bin/bash
-systemctl stop ombi
-systemctl disable ombi
-rm /etc/systemd/system/ombi.service
-rm -f /etc/apache2/sites-enabled/ombi.conf
-service apache2 reload
-rm -rf /opt/Ombi
-rm -rf /etc/Ombi
-rm /install/.ombi.lock
+#
+# [AetherFlow :: Remove ombi]
+#
+set -e
 
+LOGFILE="/opt/AetherFlow/logs/installer.log"
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [remove-ombi] $1" | tee -a "$LOGFILE"; }
+
+log "Stopping ombi..."
+systemctl stop ombi; systemctl disable ombi
+
+log "Removing ombi files and configuration..."
+rm -rf /opt/Ombi /etc/systemd/system/ombi.service /etc/apache2/sites-enabled/ombi.conf; userdel ombi 2>/dev/null
+
+systemctl daemon-reload 2>/dev/null
+service apache2 reload 2>/dev/null
+rm -f /install/.ombi.lock
+
+log "ombi has been completely removed."

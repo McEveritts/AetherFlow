@@ -1,0 +1,20 @@
+#!/bin/bash
+#
+# [AetherFlow :: Remove wireguard]
+#
+set -e
+
+LOGFILE="/opt/AetherFlow/logs/installer.log"
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [remove-wireguard] $1" | tee -a "$LOGFILE"; }
+
+log "Stopping wireguard..."
+systemctl stop wg-quick@wg0; systemctl disable wg-quick@wg0
+
+log "Removing wireguard files and configuration..."
+apt-get remove -y wireguard wireguard-tools >/dev/null 2>&1; rm -rf /etc/wireguard
+
+systemctl daemon-reload 2>/dev/null
+service apache2 reload 2>/dev/null
+rm -f /install/.wireguard.lock
+
+log "wireguard has been completely removed."

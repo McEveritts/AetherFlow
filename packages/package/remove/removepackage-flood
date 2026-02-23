@@ -1,0 +1,20 @@
+#!/bin/bash
+#
+# [AetherFlow :: Remove flood]
+#
+set -e
+
+LOGFILE="/opt/AetherFlow/logs/installer.log"
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [remove-flood] $1" | tee -a "$LOGFILE"; }
+
+log "Stopping flood..."
+systemctl stop flood; systemctl disable flood
+
+log "Removing flood files and configuration..."
+npm uninstall -g flood 2>/dev/null; rm -rf /etc/systemd/system/flood.service /etc/apache2/sites-enabled/flood.conf; userdel flood 2>/dev/null
+
+systemctl daemon-reload 2>/dev/null
+service apache2 reload 2>/dev/null
+rm -f /install/.flood.lock
+
+log "flood has been completely removed."

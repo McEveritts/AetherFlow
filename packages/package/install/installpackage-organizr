@@ -1,0 +1,62 @@
+#!/bin/bash
+#
+# [AetherFlow :: Install Organizr]
+# HTPC/Homelab services organizer
+#
+# Author : McEveritts
+# URL    : https://AetherFlow.io
+# License: GPL-3.0
+#
+set -e
+
+LOGFILE="/opt/AetherFlow/logs/installer.log"
+mkdir -p /opt/AetherFlow/logs /install
+
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [organizr] $1" | tee -a "$LOGFILE"; }
+
+# ── Dependencies ─────────────────────────────────────────────────────────────
+log "Installing PHP and web dependencies..."
+apt-get update >>"$LOGFILE" 2>&1
+apt-get install -y php php-sqlite3 php-curl php-xml php-zip php-mbstring \
+    php-ldap php-fpm php-json git >>"$LOGFILE" 2>&1
+
+# ── Download Organizr ────────────────────────────────────────────────────────
+log "Cloning Organizr v2..."
+rm -rf /var/www/organizr
+git clone https://github.com/causefx/Organizr.git /var/www/organizr >>"$LOGFILE" 2>&1
+
+# ── Set permissions ──────────────────────────────────────────────────────────
+log "Setting permissions..."
+chown -R www-data:www-data /var/www/organizr
+chmod -R 775 /var/www/organizr
+
+# ── Apache virtual host ──────────────────────────────────────────────────────
+log "Configuring Apache virtual host..."
+cat > /etc/apache2/sites-enabled/organizr.conf <<'EOF'
+Alias /organizr /var/www/organizr
+
+<Directory /var/www/organizr>
+    Options -Indexes +FollowSymLinks
+    AllowOverride All
+    Require all granted
+
+    <IfModule mod_rewrite.c>
+        RewriteEngine On
+        RewriteCond %{REQUEST_FILENAME} !-f
+        RewriteCond %{REQUEST_FILENAME} !-d
+        RewriteRule ^ index.php [QSA,L]
+    </IfModule>
+
+    <IfModule mod_php.c>
+        php_value upload_max_filesize 10M
+        php_value post_max_size 10M
+    </IfModule>
+</Directory>
+EOF
+chown www-data:www-data /etc/apache2/sites-enabled/organizr.conf
+a2enmod rewrite >>/dev/null 2>&1
+service apache2 reload >>"$LOGFILE" 2>&1
+
+# ── Finalize ─────────────────────────────────────────────────────────────────
+touch /install/.organizr.lock
+log "Organizr installation complete! Access at http://your-server/organizr"

@@ -1,3 +1,20 @@
-# Install script contains removal instructions
-bash /usr/local/bin/AetherFlow/package/install/installpackage-nzbget remove
+#!/bin/bash
+#
+# [AetherFlow :: Remove nzbget]
+#
+set -e
 
+LOGFILE="/opt/AetherFlow/logs/installer.log"
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [remove-nzbget] $1" | tee -a "$LOGFILE"; }
+
+log "Stopping nzbget..."
+systemctl stop nzbget; systemctl disable nzbget
+
+log "Removing nzbget files and configuration..."
+rm -rf /opt/nzbget /etc/systemd/system/nzbget.service /etc/apache2/sites-enabled/nzbget.conf; userdel nzbget 2>/dev/null
+
+systemctl daemon-reload 2>/dev/null
+service apache2 reload 2>/dev/null
+rm -f /install/.nzbget.lock
+
+log "nzbget has been completely removed."

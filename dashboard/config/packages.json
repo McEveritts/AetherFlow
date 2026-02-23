@@ -1,21 +1,12 @@
 [
     {
-        "name": "overseerr",
-        "label": "Overseerr",
-        "description": "Request management and media discovery tool for your Plex ecosystem.",
-        "lock_file": "/install/.overseerr.lock",
+        "name": "plex",
+        "label": "Plex Media Server",
+        "description": "Organize, transcode, and stream your personal media to any device.",
+        "lock_file": "/install/.plex.lock",
         "category": "Media",
         "service_type": "systemd",
-        "service_name": "overseerr"
-    },
-    {
-        "name": "nextcloud",
-        "label": "Nextcloud",
-        "description": "Self-hosted productivity platform with file sync, calendars, and more.",
-        "lock_file": "/install/.nextcloud.lock",
-        "category": "Cloud",
-        "service_type": "systemd",
-        "service_name": "apache2"
+        "service_name": "plexmediaserver"
     },
     {
         "name": "jellyfin",
@@ -27,40 +18,13 @@
         "service_name": "jellyfin"
     },
     {
-        "name": "pihole",
-        "label": "Pi-hole",
-        "description": "Network-wide ad blocking via your own DNS sinkhole.",
-        "lock_file": "/install/.pihole.lock",
-        "category": "Network",
-        "service_type": "systemd",
-        "service_name": "pihole-FTL"
-    },
-    {
-        "name": "homeassistant",
-        "label": "Home Assistant",
-        "description": "Open source home automation platform. Control your smart home devices.",
-        "lock_file": "/install/.homeassistant.lock",
-        "category": "Automation",
-        "service_type": "systemd",
-        "service_name": "home-assistant@homeassistant"
-    },
-    {
-        "name": "portainer",
-        "label": "Portainer",
-        "description": "Lightweight container management UI for Docker environments.",
-        "lock_file": "/install/.portainer.lock",
-        "category": "DevOps",
-        "service_type": "docker",
-        "service_name": "portainer"
-    },
-    {
-        "name": "radarr",
-        "label": "Radarr",
-        "description": "Movie collection manager for Usenet and BitTorrent users.",
-        "lock_file": "/install/.radarr.lock",
+        "name": "emby",
+        "label": "Emby",
+        "description": "Personal media server with live TV, DVR, and automatic organization.",
+        "lock_file": "/install/.emby.lock",
         "category": "Media",
         "service_type": "systemd",
-        "service_name": "radarr"
+        "service_name": "emby-server"
     },
     {
         "name": "sonarr",
@@ -72,6 +36,33 @@
         "service_name": "sonarr"
     },
     {
+        "name": "radarr",
+        "label": "Radarr",
+        "description": "Movie collection manager for Usenet and BitTorrent users.",
+        "lock_file": "/install/.radarr.lock",
+        "category": "Media",
+        "service_type": "systemd",
+        "service_name": "radarr"
+    },
+    {
+        "name": "lidarr",
+        "label": "Lidarr",
+        "description": "Music collection manager for Usenet and BitTorrent users.",
+        "lock_file": "/install/.lidarr.lock",
+        "category": "Media",
+        "service_type": "systemd",
+        "service_name": "lidarr"
+    },
+    {
+        "name": "readarr",
+        "label": "Readarr",
+        "description": "Book and audiobook collection manager for Usenet and BitTorrent.",
+        "lock_file": "/install/.readarr.lock",
+        "category": "Media",
+        "service_type": "systemd",
+        "service_name": "readarr"
+    },
+    {
         "name": "prowlarr",
         "label": "Prowlarr",
         "description": "Indexer manager/proxy built on the popular arr .net stack.",
@@ -81,22 +72,85 @@
         "service_name": "prowlarr"
     },
     {
-        "name": "plex",
-        "label": "Plex Media Server",
-        "description": "Organize, transcode, and stream your personal media to any device.",
-        "lock_file": "/install/.plex.lock",
+        "name": "bazarr",
+        "label": "Bazarr",
+        "description": "Companion application to Sonarr and Radarr for managing subtitles.",
+        "lock_file": "/install/.bazarr.lock",
         "category": "Media",
         "service_type": "systemd",
-        "service_name": "plexmediaserver"
+        "service_name": "bazarr"
     },
     {
-        "name": "sabnzbd",
-        "label": "SABnzbd",
-        "description": "Free and easy binary newsreader with a web interface.",
-        "lock_file": "/install/.sabnzbd.lock",
+        "name": "overseerr",
+        "label": "Overseerr",
+        "description": "Request management and media discovery tool for your Plex ecosystem.",
+        "lock_file": "/install/.overseerr.lock",
+        "category": "Media",
+        "service_type": "systemd",
+        "service_name": "overseerr"
+    },
+    {
+        "name": "ombi",
+        "label": "Ombi",
+        "description": "Media request management for Plex, Emby, and Jellyfin users.",
+        "lock_file": "/install/.ombi.lock",
+        "category": "Media",
+        "service_type": "systemd",
+        "service_name": "ombi"
+    },
+    {
+        "name": "tautulli",
+        "label": "Tautulli",
+        "description": "Monitoring and tracking tool for Plex Media Server usage statistics.",
+        "lock_file": "/install/.tautulli.lock",
+        "category": "Media",
+        "service_type": "systemd",
+        "service_name": "tautulli"
+    },
+    {
+        "name": "jackett",
+        "label": "Jackett",
+        "description": "API support for your favorite torrent trackers, works with Sonarr/Radarr.",
+        "lock_file": "/install/.jackett.lock",
+        "category": "Media",
+        "service_type": "systemd",
+        "service_name": "jackett"
+    },
+    {
+        "name": "flaresolverr",
+        "label": "FlareSolverr",
+        "description": "Proxy server to bypass Cloudflare and DDoS-GUARD protection.",
+        "lock_file": "/install/.flaresolverr.lock",
+        "category": "Media",
+        "service_type": "docker",
+        "service_name": "flaresolverr"
+    },
+    {
+        "name": "navidrome",
+        "label": "Navidrome",
+        "description": "Modern music server and streamer compatible with Subsonic clients.",
+        "lock_file": "/install/.navidrome.lock",
+        "category": "Media",
+        "service_type": "systemd",
+        "service_name": "navidrome"
+    },
+    {
+        "name": "qbittorrent",
+        "label": "qBittorrent",
+        "description": "Lightweight and feature-rich BitTorrent client with a web UI.",
+        "lock_file": "/install/.qbittorrent.lock",
         "category": "Downloaders",
         "service_type": "systemd",
-        "service_name": "sabnzbd"
+        "service_name": "qbittorrent"
+    },
+    {
+        "name": "deluge",
+        "label": "Deluge",
+        "description": "Feature-rich BitTorrent client daemon with a web interface.",
+        "lock_file": "/install/.deluge.lock",
+        "category": "Downloaders",
+        "service_type": "systemd",
+        "service_name": "deluged"
     },
     {
         "name": "transmission",
@@ -108,49 +162,49 @@
         "service_name": "transmission-daemon"
     },
     {
-        "name": "wireguard",
-        "label": "WireGuard",
-        "description": "Fast, modern, and secure VPN tunnel for your server.",
-        "lock_file": "/install/.wireguard.lock",
-        "category": "Network",
+        "name": "sabnzbd",
+        "label": "SABnzbd",
+        "description": "Free and easy binary newsreader with a web interface.",
+        "lock_file": "/install/.sabnzbd.lock",
+        "category": "Downloaders",
         "service_type": "systemd",
-        "service_name": "wg-quick@wg0"
+        "service_name": "sabnzbd"
     },
     {
-        "name": "grafana",
-        "label": "Grafana",
-        "description": "Open-source analytics and interactive visualization platform.",
-        "lock_file": "/install/.grafana.lock",
-        "category": "Monitoring",
+        "name": "nzbget",
+        "label": "NZBGet",
+        "description": "Efficient Usenet downloader written in C++ for maximum performance.",
+        "lock_file": "/install/.nzbget.lock",
+        "category": "Downloaders",
         "service_type": "systemd",
-        "service_name": "grafana-server"
+        "service_name": "nzbget"
     },
     {
-        "name": "prometheus",
-        "label": "Prometheus",
-        "description": "Systems monitoring and alerting toolkit for time-series data.",
-        "lock_file": "/install/.prometheus.lock",
-        "category": "Monitoring",
+        "name": "flood",
+        "label": "Flood",
+        "description": "Modern web UI for rTorrent, qBittorrent, Deluge, and Transmission.",
+        "lock_file": "/install/.flood.lock",
+        "category": "Downloaders",
         "service_type": "systemd",
-        "service_name": "prometheus"
+        "service_name": "flood"
     },
     {
-        "name": "gitea",
-        "label": "Gitea",
-        "description": "Painless self-hosted Git service. Lightweight and fast.",
-        "lock_file": "/install/.gitea.lock",
-        "category": "DevOps",
+        "name": "autobrr",
+        "label": "Autobrr",
+        "description": "Modern download automation for torrents and Usenet.",
+        "lock_file": "/install/.autobrr.lock",
+        "category": "Downloaders",
         "service_type": "systemd",
-        "service_name": "gitea"
+        "service_name": "autobrr"
     },
     {
-        "name": "vaultwarden",
-        "label": "Vaultwarden",
-        "description": "Lightweight Bitwarden-compatible password manager server.",
-        "lock_file": "/install/.vaultwarden.lock",
-        "category": "Security",
-        "service_type": "docker",
-        "service_name": "vaultwarden"
+        "name": "nextcloud",
+        "label": "Nextcloud",
+        "description": "Self-hosted productivity platform with file sync, calendars, and more.",
+        "lock_file": "/install/.nextcloud.lock",
+        "category": "Cloud",
+        "service_type": "systemd",
+        "service_name": "apache2"
     },
     {
         "name": "syncthing",
@@ -171,22 +225,103 @@
         "service_name": "filebrowser"
     },
     {
-        "name": "lidarr",
-        "label": "Lidarr",
-        "description": "Music collection manager for Usenet and BitTorrent users.",
-        "lock_file": "/install/.lidarr.lock",
-        "category": "Media",
+        "name": "wireguard",
+        "label": "WireGuard",
+        "description": "Fast, modern, and secure VPN tunnel for your server.",
+        "lock_file": "/install/.wireguard.lock",
+        "category": "Network",
         "service_type": "systemd",
-        "service_name": "lidarr"
+        "service_name": "wg-quick@wg0"
     },
     {
-        "name": "bazarr",
-        "label": "Bazarr",
-        "description": "Companion application to Sonarr and Radarr for managing subtitles.",
-        "lock_file": "/install/.bazarr.lock",
-        "category": "Media",
+        "name": "pihole",
+        "label": "Pi-hole",
+        "description": "Network-wide ad blocking via your own DNS sinkhole.",
+        "lock_file": "/install/.pihole.lock",
+        "category": "Network",
         "service_type": "systemd",
-        "service_name": "bazarr"
+        "service_name": "pihole-FTL"
+    },
+    {
+        "name": "fail2ban",
+        "label": "Fail2ban",
+        "description": "Intrusion prevention — scans logs and bans IPs with too many failures.",
+        "lock_file": "/install/.fail2ban.lock",
+        "category": "Security",
+        "service_type": "systemd",
+        "service_name": "fail2ban"
+    },
+    {
+        "name": "vaultwarden",
+        "label": "Vaultwarden",
+        "description": "Lightweight Bitwarden-compatible password manager server.",
+        "lock_file": "/install/.vaultwarden.lock",
+        "category": "Security",
+        "service_type": "docker",
+        "service_name": "vaultwarden"
+    },
+    {
+        "name": "grafana",
+        "label": "Grafana",
+        "description": "Open-source analytics and interactive visualization platform.",
+        "lock_file": "/install/.grafana.lock",
+        "category": "Monitoring",
+        "service_type": "systemd",
+        "service_name": "grafana-server"
+    },
+    {
+        "name": "prometheus",
+        "label": "Prometheus",
+        "description": "Systems monitoring and alerting toolkit for time-series data.",
+        "lock_file": "/install/.prometheus.lock",
+        "category": "Monitoring",
+        "service_type": "systemd",
+        "service_name": "prometheus"
+    },
+    {
+        "name": "netdata",
+        "label": "Netdata",
+        "description": "Real-time performance and health monitoring for your server.",
+        "lock_file": "/install/.netdata.lock",
+        "category": "Monitoring",
+        "service_type": "systemd",
+        "service_name": "netdata"
+    },
+    {
+        "name": "uptimekuma",
+        "label": "Uptime Kuma",
+        "description": "Self-hosted monitoring tool like Uptime Robot. Check HTTP, TCP, DNS, and more.",
+        "lock_file": "/install/.uptimekuma.lock",
+        "category": "Monitoring",
+        "service_type": "systemd",
+        "service_name": "uptime-kuma"
+    },
+    {
+        "name": "homeassistant",
+        "label": "Home Assistant",
+        "description": "Open source home automation platform. Control your smart home devices.",
+        "lock_file": "/install/.homeassistant.lock",
+        "category": "Automation",
+        "service_type": "systemd",
+        "service_name": "home-assistant@homeassistant"
+    },
+    {
+        "name": "portainer",
+        "label": "Portainer",
+        "description": "Lightweight container management UI for Docker environments.",
+        "lock_file": "/install/.portainer.lock",
+        "category": "DevOps",
+        "service_type": "docker",
+        "service_name": "portainer"
+    },
+    {
+        "name": "gitea",
+        "label": "Gitea",
+        "description": "Painless self-hosted Git service. Lightweight and fast.",
+        "lock_file": "/install/.gitea.lock",
+        "category": "DevOps",
+        "service_type": "systemd",
+        "service_name": "gitea"
     },
     {
         "name": "organizr",
@@ -196,14 +331,5 @@
         "category": "Utilities",
         "service_type": "systemd",
         "service_name": "apache2"
-    },
-    {
-        "name": "tautulli",
-        "label": "Tautulli",
-        "description": "Monitoring and tracking tool for Plex Media Server usage statistics.",
-        "lock_file": "/install/.tautulli.lock",
-        "category": "Media",
-        "service_type": "systemd",
-        "service_name": "tautulli"
     }
 ]

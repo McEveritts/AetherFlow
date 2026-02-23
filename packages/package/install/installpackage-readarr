@@ -1,0 +1,88 @@
+#!/bin/bash
+#
+# [AetherFlow :: Install Readarr]
+# Book collection manager for Usenet and BitTorrent
+#
+# Author : McEveritts
+# URL    : https://AetherFlow.io
+# License: GPL-3.0
+#
+set -e
+
+LOGFILE="/opt/AetherFlow/logs/installer.log"
+mkdir -p /opt/AetherFlow/logs /install
+
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [readarr] $1" | tee -a "$LOGFILE"; }
+
+# ── Dependencies ─────────────────────────────────────────────────────────────
+log "Installing dependencies..."
+apt-get update >>"$LOGFILE" 2>&1
+apt-get install -y curl sqlite3 libicu-dev >>"$LOGFILE" 2>&1
+
+# ── Download Readarr ─────────────────────────────────────────────────────────
+log "Downloading latest Readarr..."
+ARCH=$(dpkg --print-architecture)
+case "$ARCH" in
+    amd64) READARR_ARCH="x64" ;;
+    arm64) READARR_ARCH="arm64" ;;
+    armhf) READARR_ARCH="arm" ;;
+    *) READARR_ARCH="x64" ;;
+esac
+
+mkdir -p /tmp/AetherFlow
+cd /tmp/AetherFlow
+curl -sL "https://readarr.servarr.com/v1/update/develop/updatefile?os=linux&runtime=netcore&arch=${READARR_ARCH}" -o readarr.tar.gz >>"$LOGFILE" 2>&1
+
+log "Extracting Readarr..."
+rm -rf /opt/Readarr
+tar -xzf readarr.tar.gz -C /opt >>"$LOGFILE" 2>&1
+rm -f readarr.tar.gz
+
+# ── Create readarr user ─────────────────────────────────────────────────────
+if ! id -u readarr &>/dev/null; then
+    useradd -r -s /usr/sbin/nologin -d /opt/Readarr readarr
+fi
+chown -R readarr:readarr /opt/Readarr
+mkdir -p /var/lib/readarr
+chown -R readarr:readarr /var/lib/readarr
+
+# ── Systemd service ──────────────────────────────────────────────────────────
+log "Creating systemd service..."
+cat > /etc/systemd/system/readarr.service <<'EOF'
+[Unit]
+Description=Readarr Book Manager
+After=syslog.target network.target
+
+[Service]
+User=readarr
+Group=readarr
+Type=simple
+ExecStart=/opt/Readarr/Readarr -nobrowser -data=/var/lib/readarr/
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=20
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable readarr.service >>"$LOGFILE" 2>&1
+systemctl start readarr.service
+
+# ── Apache reverse proxy ─────────────────────────────────────────────────────
+log "Configuring Apache reverse proxy..."
+cat > /etc/apache2/sites-enabled/readarr.conf <<'EOF'
+<Location /readarr>
+    ProxyPass http://localhost:8787/readarr
+    ProxyPassReverse http://localhost:8787/readarr
+</Location>
+EOF
+chown www-data:www-data /etc/apache2/sites-enabled/readarr.conf
+a2enmod proxy proxy_http >>/dev/null 2>&1
+service apache2 reload >>"$LOGFILE" 2>&1
+
+# ── Finalize ─────────────────────────────────────────────────────────────────
+touch /install/.readarr.lock
+log "Readarr installation complete! Access at http://your-server:8787"

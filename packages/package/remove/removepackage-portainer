@@ -1,0 +1,20 @@
+#!/bin/bash
+#
+# [AetherFlow :: Remove portainer]
+#
+set -e
+
+LOGFILE="/opt/AetherFlow/logs/installer.log"
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [remove-portainer] $1" | tee -a "$LOGFILE"; }
+
+log "Stopping portainer..."
+docker stop portainer; docker rm portainer
+
+log "Removing portainer files and configuration..."
+docker volume rm portainer_data 2>/dev/null; rm -f /etc/apache2/sites-enabled/portainer.conf
+
+systemctl daemon-reload 2>/dev/null
+service apache2 reload 2>/dev/null
+rm -f /install/.portainer.lock
+
+log "portainer has been completely removed."

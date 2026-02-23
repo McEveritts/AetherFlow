@@ -1,0 +1,74 @@
+#!/bin/bash
+#
+# [AetherFlow :: Install Flood]
+# Modern web UI for rTorrent, qBittorrent, Deluge, Transmission
+#
+# Author : McEveritts
+# URL    : https://AetherFlow.io
+# License: GPL-3.0
+#
+set -e
+
+LOGFILE="/opt/AetherFlow/logs/installer.log"
+mkdir -p /opt/AetherFlow/logs /install
+
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [flood] $1" | tee -a "$LOGFILE"; }
+
+# ── Install Node.js if not present ───────────────────────────────────────────
+if ! command -v node &>/dev/null; then
+    log "Installing Node.js..."
+    curl -fsSL https://deb.nodesource.com/setup_20.x | bash - >>"$LOGFILE" 2>&1
+    apt-get install -y nodejs >>"$LOGFILE" 2>&1
+fi
+
+# ── Install Flood globally ──────────────────────────────────────────────────
+log "Installing Flood via npm..."
+npm install -g flood >>"$LOGFILE" 2>&1
+
+# ── Create flood user ────────────────────────────────────────────────────────
+if ! id -u flood &>/dev/null; then
+    useradd -r -s /usr/sbin/nologin -m -d /home/flood flood
+fi
+mkdir -p /home/flood/.config/flood
+chown -R flood:flood /home/flood
+
+# ── Systemd service ──────────────────────────────────────────────────────────
+log "Creating systemd service..."
+cat > /etc/systemd/system/flood.service <<'EOF'
+[Unit]
+Description=Flood - Torrent Client Web UI
+After=network.target
+
+[Service]
+Type=simple
+User=flood
+Group=flood
+ExecStart=/usr/bin/flood --host 0.0.0.0 --port 3001 --rundir /home/flood/.config/flood
+Restart=on-failure
+RestartSec=5
+Environment=NODE_ENV=production
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable flood.service >>"$LOGFILE" 2>&1
+systemctl start flood.service
+
+# ── Apache reverse proxy ─────────────────────────────────────────────────────
+log "Configuring Apache reverse proxy..."
+cat > /etc/apache2/sites-enabled/flood.conf <<'EOF'
+<Location /flood>
+    ProxyPass http://localhost:3001
+    ProxyPassReverse http://localhost:3001
+    ProxyPreserveHost On
+</Location>
+EOF
+chown www-data:www-data /etc/apache2/sites-enabled/flood.conf
+a2enmod proxy proxy_http >>/dev/null 2>&1
+service apache2 reload >>"$LOGFILE" 2>&1
+
+# ── Finalize ─────────────────────────────────────────────────────────────────
+touch /install/.flood.lock
+log "Flood installation complete! Access at http://your-server:3001"
