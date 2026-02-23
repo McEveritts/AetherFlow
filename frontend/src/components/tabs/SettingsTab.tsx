@@ -14,6 +14,32 @@ export default function SettingsTab() {
     const [isSaving, setIsSaving] = useState(false);
     const [isUpdating, setIsUpdating] = useState(false);
     const [updateMessage, setUpdateMessage] = useState('');
+    const [isTesting, setIsTesting] = useState(false);
+
+    const handleTestConnection = async () => {
+        if (!apiKey) {
+            addToast('Please enter an API key to test.', 'error');
+            return;
+        }
+        setIsTesting(true);
+        try {
+            const res = await fetch('/api/settings/test-ai', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ gemini_api_key: apiKey }),
+            });
+            const data = await res.json();
+            if (res.ok) {
+                addToast(data.message || 'Connection successful!', 'success');
+            } else {
+                addToast(data.error || 'Connection failed.', 'error');
+            }
+        } catch (_err) {
+            addToast('Network error testing connection.', 'error');
+        } finally {
+            setIsTesting(false);
+        }
+    };
 
     const { data: updateData, error: updateError } = useSWR(
         '/api/system/update/check',
@@ -130,6 +156,20 @@ export default function SettingsTab() {
                                     <p className="text-xs text-slate-500 mt-2">
                                         Get your key from <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer" className="text-indigo-400 hover:text-indigo-300 underline">Google AI Studio</a>. Your Ultra plan key gives access to all models.
                                     </p>
+                                    <div className="mt-3">
+                                        <button
+                                            type="button"
+                                            onClick={handleTestConnection}
+                                            disabled={isTesting || !apiKey}
+                                            className="px-4 py-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 border border-white/10 rounded-lg text-xs font-semibold text-slate-300 transition-colors flex items-center gap-2"
+                                        >
+                                            {isTesting ? (
+                                                <><div className="w-3 h-3 border-2 border-slate-400/30 border-t-slate-400 rounded-full animate-spin"></div> Testing...</>
+                                            ) : (
+                                                <><Sparkles size={14} className="text-amber-400" /> Test Connection</>
+                                            )}
+                                        </button>
+                                    </div>
                                 </div>
 
                                 {/* Model Selector */}

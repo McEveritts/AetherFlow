@@ -81,7 +81,9 @@ export default function ProfileTab() {
                                 <span className="bg-purple-500/10 text-purple-400 text-xs font-bold px-3 py-1 rounded-full uppercase tracking-widest border border-purple-500/20">
                                     {user.role}
                                 </span>
-                                <span className="text-slate-500 text-sm">OAuth Connected</span>
+                                <span className={`text-sm ${user.is_oauth ? 'text-slate-500' : 'text-slate-500'}`}>
+                                    {user.is_oauth ? 'OAuth Connected' : 'Local Account'}
+                                </span>
                             </div>
                         </div>
                     </div>
@@ -156,15 +158,17 @@ export default function ProfileTab() {
                         )}
                     </div>
 
-                    <div className="mt-12 bg-red-500/5 border border-red-500/20 rounded-2xl p-6">
-                        <div className="flex gap-4">
-                            <AlertCircle className="text-red-400 shrink-0" size={24} />
-                            <div>
-                                <h3 className="text-lg font-bold text-slate-200 mb-2">Danger Zone</h3>
-                                <p className="text-sm text-slate-400 mb-4">You are currently logged in via Google OAuth. To delete this account, revoke access from your Google Account settings, which will lock you out of this dashboard.</p>
+                    {user.is_oauth && (
+                        <div className="mt-12 bg-red-500/5 border border-red-500/20 rounded-2xl p-6">
+                            <div className="flex gap-4">
+                                <AlertCircle className="text-red-400 shrink-0" size={24} />
+                                <div>
+                                    <h3 className="text-lg font-bold text-slate-200 mb-2">Danger Zone</h3>
+                                    <p className="text-sm text-slate-400 mb-4">You are currently logged in via Google OAuth. To delete this account, revoke access from your Google Account settings, which will lock you out of this dashboard.</p>
+                                </div>
                             </div>
                         </div>
-                    </div>
+                    )}
                 </div>
             </div>
         </div>
