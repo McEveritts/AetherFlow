@@ -16,6 +16,7 @@ interface AuthContextType {
     isLoading: boolean;
     user: User | null;
     login: () => void;
+    loginLocal: () => void;
     logout: () => void;
 }
 
@@ -24,6 +25,7 @@ const AuthContext = createContext<AuthContextType>({
     isLoading: true,
     user: null,
     login: () => { },
+    loginLocal: () => { },
     logout: () => { },
 });
 
@@ -33,33 +35,39 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     const [user, setUser] = useState<User | null>(null);
     const router = useRouter();
 
-    useEffect(() => {
-        const checkSession = async () => {
-            try {
-                // We use credentials: 'include' to send HTTPOnly cookies cross-origin (if necessary)
-                const res = await fetch('/api/auth/session', { credentials: 'include' });
-                if (res.ok) {
-                    const userData = await res.json();
-                    setUser(userData);
-                    setIsAuthenticated(true);
-                } else {
-                    setIsAuthenticated(false);
-                    setUser(null);
-                }
-            } catch (err) {
-                console.error("Auth check failed:", err);
+    const checkSession = async () => {
+        try {
+            const res = await fetch('/api/auth/session', { credentials: 'include' });
+            if (res.ok) {
+                const userData = await res.json();
+                setUser(userData);
+                setIsAuthenticated(true);
+            } else {
                 setIsAuthenticated(false);
-            } finally {
-                setIsLoading(false);
+                setUser(null);
             }
-        };
+        } catch (err) {
+            console.error("Auth check failed:", err);
+            setIsAuthenticated(false);
+        } finally {
+            setIsLoading(false);
+        }
+    };
 
+    useEffect(() => {
         checkSession();
     }, []);
 
     const login = () => {
         // Redirect to the Go backend to start the OAuth2 flow
         window.location.href = '/api/auth/google/login';
+    };
+
+    const loginLocal = () => {
+        // Re-check session after local login set the cookie, then redirect
+        checkSession().then(() => {
+            router.push('/');
+        });
     };
 
     const logout = async () => {
@@ -77,10 +85,11 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     };
 
     return (
-        <AuthContext.Provider value={{ isAuthenticated, isLoading, user, login, logout }}>
+        <AuthContext.Provider value={{ isAuthenticated, isLoading, user, login, loginLocal, logout }}>
             {children}
         </AuthContext.Provider>
     );
 };
 
 export const useAuth = () => useContext(AuthContext);
+
