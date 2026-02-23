@@ -1,13 +1,39 @@
 import { RefreshCw, Box, Settings, Globe, RotateCcw, Square, Play } from 'lucide-react';
 import { SystemMetrics } from '@/types/dashboard';
+import { useState } from 'react';
+import { useToast } from '@/contexts/ToastContext';
 
 interface ServicesTabProps {
-    metrics: SystemMetrics;
+    services: Record<string, any>;
     onDeployApp?: () => void;
 }
 
-export default function ServicesTab({ metrics, onDeployApp }: ServicesTabProps) {
-    const servicesEntries = Object.entries(metrics.services);
+export default function ServicesTab({ services, onDeployApp }: ServicesTabProps) {
+    const servicesEntries = Object.entries(services || {});
+    const [loadingService, setLoadingService] = useState<string | null>(null);
+    const { addToast } = useToast();
+
+    const handleServiceControl = async (name: string, action: 'start' | 'stop' | 'restart') => {
+        setLoadingService(name);
+        try {
+            const res = await fetch(`http://localhost:8080/api/services/${encodeURIComponent(name)}/control`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ action })
+            });
+            if (!res.ok) {
+                const data = await res.json().catch(() => ({}));
+                throw new Error(data.error || 'Failed to control service');
+            }
+
+            addToast(`Successfully executed '${action}' on ${name}.`, 'success');
+        } catch (err: any) {
+            console.error(err);
+            addToast(err.message || 'An unknown error occurred.', 'error');
+        } finally {
+            setLoadingService(null);
+        }
+    };
 
     return (
         <div className="space-y-6 animate-fade-in">
@@ -36,6 +62,7 @@ export default function ServicesTab({ metrics, onDeployApp }: ServicesTabProps) 
                 {servicesEntries.map(([name, data]) => {
                     const isRunning = data.status === 'running';
                     const isError = data.status === 'error';
+                    const isBusy = loadingService === name;
 
                     return (
                         <div key={name} className="bg-white/[0.02] border border-white/[0.05] rounded-2xl p-6 hover:bg-white/[0.04] transition-all hover:border-white/10 group cursor-default relative overflow-hidden">
@@ -78,19 +105,31 @@ export default function ServicesTab({ metrics, onDeployApp }: ServicesTabProps) 
                             <div className="flex gap-2">
                                 {isRunning ? (
                                     <>
-                                        <button className="flex-1 py-2 bg-slate-800/80 hover:bg-slate-700 text-slate-300 text-xs font-semibold rounded-lg transition-colors flex items-center justify-center gap-2">
+                                        <button className="flex-1 py-2 bg-slate-800/80 hover:bg-slate-700 text-slate-300 text-xs font-semibold rounded-lg transition-colors flex items-center justify-center gap-2 disabled:opacity-50" disabled={isBusy}>
                                             <Globe size={14} /> Web UI
                                         </button>
-                                        <button className="p-2 bg-slate-800/80 hover:bg-amber-500/20 hover:text-amber-400 text-slate-400 rounded-lg transition-colors">
-                                            <RotateCcw size={16} />
+                                        <button
+                                            onClick={() => handleServiceControl(name, 'restart')}
+                                            disabled={isBusy}
+                                            className="p-2 bg-slate-800/80 hover:bg-amber-500/20 hover:text-amber-400 text-slate-400 rounded-lg transition-colors disabled:opacity-50"
+                                        >
+                                            <RotateCcw size={16} className={isBusy ? 'animate-spin' : ''} />
                                         </button>
-                                        <button className="p-2 bg-slate-800/80 hover:bg-red-500/20 hover:text-red-400 text-slate-400 rounded-lg transition-colors">
+                                        <button
+                                            onClick={() => handleServiceControl(name, 'stop')}
+                                            disabled={isBusy}
+                                            className="p-2 bg-slate-800/80 hover:bg-red-500/20 hover:text-red-400 text-slate-400 rounded-lg transition-colors disabled:opacity-50"
+                                        >
                                             <Square size={16} className="fill-current" />
                                         </button>
                                     </>
                                 ) : (
-                                    <button className="w-full py-2 bg-indigo-500/20 hover:bg-indigo-500 text-indigo-300 hover:text-white text-xs font-semibold rounded-lg transition-colors flex items-center justify-center gap-2 border border-indigo-500/30">
-                                        <Play size={14} className="fill-current" /> Start Service
+                                    <button
+                                        onClick={() => handleServiceControl(name, 'start')}
+                                        disabled={isBusy}
+                                        className="w-full py-2 bg-indigo-500/20 hover:bg-indigo-500 text-indigo-300 hover:text-white text-xs font-semibold rounded-lg transition-colors flex items-center justify-center gap-2 border border-indigo-500/30 disabled:opacity-50"
+                                    >
+                                        <Play size={14} className="fill-current" /> {isBusy ? 'Starting...' : 'Start Service'}
                                     </button>
                                 )}
                             </div>

@@ -1,11 +1,65 @@
 import { Sparkles, Settings, Bot, User, ChevronRight, Lock } from 'lucide-react';
 import { TabId } from '@/types/dashboard';
+import { useState, useRef, useEffect, FormEvent } from 'react';
 
 interface AiChatTabProps {
     setActiveTab: (tab: TabId) => void;
 }
 
+interface ChatMessage {
+    role: 'user' | 'assistant';
+    text: string;
+}
+
 export default function AiChatTab({ setActiveTab }: AiChatTabProps) {
+    const [messages, setMessages] = useState<ChatMessage[]>([
+        { role: 'assistant', text: "Hello! I am FlowAI, your localized infrastructure management assistant. I'm connected to your system metrics, docker containers, and media pipelines.\n\nHow can I help you today?" }
+    ]);
+    const [input, setInput] = useState('');
+    const [isTyping, setIsTyping] = useState(false);
+    const scrollRef = useRef<HTMLDivElement>(null);
+
+    useEffect(() => {
+        if (scrollRef.current) {
+            scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+        }
+    }, [messages, isTyping]);
+
+    const handleSendMessage = async (e?: FormEvent) => {
+        if (e) e.preventDefault();
+
+        const text = input.trim();
+        if (!text || isTyping) return;
+
+        setInput('');
+        setMessages(prev => [...prev, { role: 'user', text }]);
+        setIsTyping(true);
+
+        try {
+            const res = await fetch('http://localhost:8080/api/ai/chat', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ message: text, history: messages })
+            });
+
+            if (!res.ok) throw new Error('Failed to get response');
+            const data = await res.json();
+
+            setMessages(prev => [...prev, { role: 'assistant', text: data.reply }]);
+        } catch (err) {
+            setMessages(prev => [...prev, { role: 'assistant', text: "Connection error: Unable to reach the FlowAI backend service." }]);
+        } finally {
+            setIsTyping(false);
+        }
+    };
+
+    const handleKeyDown = (e: React.KeyboardEvent) => {
+        if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            handleSendMessage();
+        }
+    };
+
     return (
         <div className="h-[calc(100vh-10rem)] flex flex-col bg-white/[0.01] border border-white/[0.03] rounded-3xl relative overflow-hidden animate-fade-in shadow-2xl backdrop-blur-xl">
 
@@ -31,71 +85,70 @@ export default function AiChatTab({ setActiveTab }: AiChatTabProps) {
                 </button>
             </div>
 
-            {/* Chat Area Mockup */}
-            <div className="flex-1 overflow-y-auto p-8 space-y-8 relative z-10 no-scrollbar">
-                {/* Assistant Intro */}
-                <div className="flex gap-4 max-w-3xl">
-                    <div className="h-8 w-8 rounded-full bg-indigo-500/20 border border-indigo-500/30 flex items-center justify-center shrink-0 mt-1">
-                        <Bot size={16} className="text-indigo-400" />
-                    </div>
-                    <div className="space-y-2">
-                        <div className="bg-white/[0.03] border border-white/[0.05] p-5 rounded-2xl rounded-tl-sm text-slate-200 text-sm leading-relaxed shadow-sm">
-                            Hello! I am FlowAI, your localized infrastructure management assistant. I'm connected to your system metrics, docker containers, and media pipelines.
-                            <br /><br />
-                            I noticed **WireGuard VPN** is currently returning an <span className="text-red-400 font-mono bg-red-500/10 px-1 py-0.5 rounded">error</span> state. Would you like me to pull the trace logs for you, or restart the container?
-                        </div>
-                        <div className="flex gap-2">
-                            <button className="px-3 py-1.5 bg-white/[0.03] hover:bg-white/[0.08] border border-white/10 rounded-md text-[11px] font-medium text-slate-300 transition-colors">Pull Trace Logs</button>
-                            <button className="px-3 py-1.5 bg-white/[0.03] hover:bg-white/[0.08] border border-white/10 rounded-md text-[11px] font-medium text-slate-300 transition-colors">Force Restart</button>
-                        </div>
-                    </div>
-                </div>
+            {/* Chat Area */}
+            <div ref={scrollRef} className="flex-1 overflow-y-auto p-8 space-y-8 relative z-10 no-scrollbar scroll-smooth">
+                {messages.map((msg, index) => (
+                    <div key={index} className={`flex gap-4 max-w-3xl ${msg.role === 'user' ? 'ml-auto justify-end' : ''}`}>
+                        {msg.role === 'assistant' && (
+                            <div className="h-8 w-8 rounded-full bg-indigo-500/20 border border-indigo-500/30 flex items-center justify-center shrink-0 mt-1">
+                                <Bot size={16} className="text-indigo-400" />
+                            </div>
+                        )}
 
-                {/* User Message */}
-                <div className="flex gap-4 max-w-3xl ml-auto justify-end">
-                    <div className="bg-indigo-600 p-5 rounded-2xl rounded-tr-sm text-white text-sm leading-relaxed shadow-md font-medium">
-                        Actually, let's look at the storage. How is the cache drive holding up?
-                    </div>
-                    <div className="h-8 w-8 rounded-full bg-slate-700/50 border border-white/10 flex items-center justify-center shrink-0 mt-1">
-                        <User size={16} className="text-slate-300" />
-                    </div>
-                </div>
-
-                {/* Assistant Reply */}
-                <div className="flex gap-4 max-w-3xl">
-                    <div className="h-8 w-8 rounded-full bg-indigo-500/20 border border-indigo-500/30 flex items-center justify-center shrink-0 mt-1">
-                        <Bot size={16} className="text-indigo-400" />
-                    </div>
-                    <div className="bg-white/[0.03] border border-white/[0.05] p-5 rounded-2xl rounded-tl-sm text-slate-200 text-sm leading-relaxed shadow-sm space-y-4">
-                        <p>Your NVMe cache drive (`/` Root) is currently in excellent condition. It is at **18.4% capacity** (94.2 GB used out of 512 GB).</p>
-
-                        <div className="p-4 bg-slate-900/50 rounded-xl border border-white/5 font-mono text-xs text-slate-400">
-                            $ df -h /<br />
-                            Filesystem      Size  Used Avail Use% Mounted on<br />
-                            /dev/nvme0n1p2  512G   94G  418G  19% /
+                        <div className={`p-5 rounded-2xl shadow-sm text-sm leading-relaxed whitespace-pre-wrap ${msg.role === 'user'
+                                ? 'bg-indigo-600 text-white rounded-tr-sm font-medium'
+                                : 'bg-white/[0.03] border border-white/[0.05] text-slate-200 rounded-tl-sm'
+                            }`}>
+                            {msg.text}
                         </div>
-                        <p className="text-slate-400 italic text-xs">I can configure an automated alert if capacity exceeds 80%. Should I set that up?</p>
+
+                        {msg.role === 'user' && (
+                            <div className="h-8 w-8 rounded-full bg-slate-700/50 border border-white/10 flex items-center justify-center shrink-0 mt-1">
+                                <User size={16} className="text-slate-300" />
+                            </div>
+                        )}
                     </div>
-                </div>
+                ))}
+
+                {isTyping && (
+                    <div className="flex gap-4 max-w-3xl">
+                        <div className="h-8 w-8 rounded-full bg-indigo-500/20 border border-indigo-500/30 flex items-center justify-center shrink-0 mt-1">
+                            <Bot size={16} className="text-indigo-400" />
+                        </div>
+                        <div className="bg-white/[0.03] border border-white/[0.05] p-5 rounded-2xl rounded-tl-sm text-slate-200 flex items-center gap-2">
+                            <span className="w-2 h-2 rounded-full bg-indigo-500 animate-bounce cursor-default" style={{ animationDelay: '0ms' }}></span>
+                            <span className="w-2 h-2 rounded-full bg-indigo-500 animate-bounce cursor-default" style={{ animationDelay: '150ms' }}></span>
+                            <span className="w-2 h-2 rounded-full bg-indigo-500 animate-bounce cursor-default" style={{ animationDelay: '300ms' }}></span>
+                        </div>
+                    </div>
+                )}
             </div>
 
             {/* Input Area */}
             <div className="p-6 bg-slate-950/80 backdrop-blur-xl border-t border-white/[0.05] relative z-10 w-full">
-                <div className="relative max-w-4xl mx-auto flex items-end overflow-hidden rounded-2xl bg-white/[0.02] border border-white/10 focus-within:border-indigo-500/50 focus-within:bg-white/[0.04] transition-all shadow-inner">
+                <form onSubmit={handleSendMessage} className="relative max-w-4xl mx-auto flex items-end overflow-hidden rounded-2xl bg-white/[0.02] border border-white/10 focus-within:border-indigo-500/50 focus-within:bg-white/[0.04] transition-all shadow-inner">
                     <textarea
+                        value={input}
+                        onChange={(e) => setInput(e.target.value)}
+                        onKeyDown={handleKeyDown}
                         placeholder="Ask FlowAI about your system..."
-                        className="w-full bg-transparent py-4 pl-6 pr-16 text-slate-200 placeholder:text-slate-500 focus:outline-none resize-none overflow-hidden min-h-[56px] text-sm"
+                        className="w-full bg-transparent py-4 pl-6 pr-16 text-slate-200 placeholder:text-slate-500 focus:outline-none resize-none overflow-hidden min-h-[56px] max-h-32 text-sm"
                         rows={1}
+                        disabled={isTyping}
                     />
                     <div className="absolute right-2 bottom-2 flex gap-2">
-                        <button className="p-2 text-slate-400 hover:text-white hover:bg-white/10 rounded-xl transition-colors">
+                        <button type="button" className="p-2 text-slate-400 hover:text-white hover:bg-white/10 rounded-xl transition-colors">
                             <Lock size={18} />
                         </button>
-                        <button className="p-2 bg-indigo-500 rounded-xl text-white hover:bg-indigo-400 shadow-md transition-colors">
+                        <button
+                            type="submit"
+                            disabled={!input.trim() || isTyping}
+                            className="p-2 bg-indigo-500 rounded-xl text-white hover:bg-indigo-400 shadow-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
                             <ChevronRight size={18} />
                         </button>
                     </div>
-                </div>
+                </form>
                 <div className="text-center mt-3">
                     <p className="text-[10px] text-slate-500 font-medium">FlowAI can make mistakes. Verify critical configuration changes before applying.</p>
                 </div>
