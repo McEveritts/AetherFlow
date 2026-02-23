@@ -20,6 +20,12 @@ SSLCryptoDevice builtin
         # Route Next.js Frontend
         ProxyPreserveHost On
 
+        # WebSocket support for /api/ws
+        RewriteEngine On
+        RewriteCond %{HTTP:Upgrade} websocket [NC]
+        RewriteCond %{HTTP:Connection} upgrade [NC]
+        RewriteRule ^/api/ws$ ws://127.0.0.1:8080/api/ws [P,L]
+
         # Route Go Backend API (MUST come before catch-all /)
         ProxyPass /api/ http://127.0.0.1:8080/api/
         ProxyPassReverse /api/ http://127.0.0.1:8080/api/
@@ -46,6 +52,12 @@ SSLCryptoDevice builtin
 
         # Route Next.js Frontend
         ProxyPreserveHost On
+
+        # WebSocket support for /api/ws
+        RewriteEngine On
+        RewriteCond %{HTTP:Upgrade} websocket [NC]
+        RewriteCond %{HTTP:Connection} upgrade [NC]
+        RewriteRule ^/api/ws$ ws://127.0.0.1:8080/api/ws [P,L]
 
         # Route Go Backend API (MUST come before catch-all /)
         ProxyPass /api/ http://127.0.0.1:8080/api/
