@@ -49,6 +49,7 @@ func updateSettings(c *gin.Context) {
 	}
 
 	// Only update API key if it's not the masked version
+	var err error
 	if strings.HasPrefix(req.GeminiApiKey, "****") || req.GeminiApiKey == "" {
 		// Don't overwrite existing key
 		_, err = db.DB.Exec(`
