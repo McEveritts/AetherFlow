@@ -11,10 +11,7 @@ export default function LoginPage() {
     const handleLogin = (e: FormEvent) => {
         e.preventDefault();
         setIsLoading(true);
-        // Simulate network request
-        setTimeout(() => {
-            login();
-        }, 800);
+        login();
     };
 
     return (
@@ -73,6 +70,7 @@ export default function LoginPage() {
                     <div className="mt-8 pt-6 border-t border-white/5 relative">
                         <button
                             type="button"
+                            onClick={() => login()}
                             className="w-full py-3 bg-white/[0.03] hover:bg-white/[0.08] border border-white/10 text-slate-300 rounded-xl text-sm font-semibold transition-all flex items-center justify-center gap-2"
                         >
                             <Sparkles size={16} className="text-indigo-400" />

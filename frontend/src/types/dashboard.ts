@@ -1,4 +1,4 @@
-export type TabId = 'overview' | 'services' | 'marketplace' | 'ai' | 'security' | 'settings' | 'logout';
+export type TabId = 'overview' | 'services' | 'marketplace' | 'fileshare' | 'ai' | 'backups' | 'security' | 'profile' | 'settings' | 'users' | 'logout';
 
 export interface SystemMetrics {
     cpu_usage: number;

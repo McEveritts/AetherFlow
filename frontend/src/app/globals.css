@@ -2,6 +2,13 @@
 
 @theme {
   --font-sans: var(--font-inter);
+  
+  --animate-toast-slide-up: toast-slide-up 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  
+  --keyframes-toast-slide-up: {
+    0% { opacity: 0; transform: translateY(20px) scale(0.95); }
+    100% { opacity: 1; transform: translateY(0) scale(1); }
+  };
 }
 
 @layer base {
