@@ -14,17 +14,16 @@
 
 ## Features
 
-*   **AetherFlow Decoupled Dashboard**: A lightning-fast, modern web interface.
-    *   **Frontend**: Next.js (React) Single Page Application utilizing a custom `Glassmorphism Engine` built on tailwind and Bootstrap 5.
-    *   **Backend API**: High-performance Go (Golang) REST API.
-    *   **Legacy Bridge**: Secured PHP-FPM abstraction layer for legacy OS interactions.
-*   **Multi-User Environment**: Secure isolation for multiple users and resource quotas.
-*   **App Store**: One-click installation for popular apps:
-    *   **Media Servers**: Plex, Emby, Jellyfin
-    *   **Downloaders**: rTorrent, Deluge, qBittorrent, SABnzbd
-    *   **Automation**: Sonarr, Radarr, Lidarr, Bazarr, Readarr
-*   **Intelligent System Monitoring**: Go-native hardware telemetry (reads `/proc` asynchronously) for zero-impact CPU, RAM, and Disk polling.
-*   **AI Integration**: Features an OAuth 2.0 secured proxy to Google's Gemini Ultra AI for AI-assisted command generation.
+* **AetherFlow Decoupled Dashboard**: A lightning-fast, modern web interface.
+  * **Frontend**: Next.js (React) Single Page Application utilizing a custom `Glassmorphism Engine` built on tailwind and Bootstrap 5.
+  * **Backend API**: High-performance Go (Golang) REST API.
+* **Multi-User Environment**: Secure isolation for multiple users and resource quotas.
+* **App Store**: One-click installation for popular apps:
+  * **Media Servers**: Plex, Emby, Jellyfin
+  * **Downloaders**: rTorrent, Deluge, qBittorrent, SABnzbd
+  * **Automation**: Sonarr, Radarr, Lidarr, Bazarr, Readarr
+* **Intelligent System Monitoring**: Go-native hardware telemetry (reads `/proc` asynchronously) for zero-impact CPU, RAM, and Disk polling.
+* **AI Integration**: Features an OAuth 2.0 secured proxy to Google's Gemini Ultra AI for AI-assisted command generation.
 
 ---
 
@@ -38,7 +37,7 @@ To install the entire ecosystem, login as root and run the following command:
 wget -qO AetherFlow-Setup https://raw.githubusercontent.com/McEveritts/AetherFlow/master/setup/AetherFlow-Setup && bash AetherFlow-Setup
 ```
 
-*Note: The script will automatically clone the repository to `/opt/MediaNexus` and compile the dashboard from source.*
+*Note: The script will automatically clone the repository to `/opt/AetherFlow` and compile the Next.js frontend and Go API from source.*
 
 ---
 
@@ -46,12 +45,12 @@ wget -qO AetherFlow-Setup https://raw.githubusercontent.com/McEveritts/AetherFlo
 
 After installation, you can use these commands in your terminal:
 
-*   `af install <package>`: Install an application (e.g., `af install plex`).
-*   `af remove <package>`: Remove an application.
-*   `setdisk`: Manage user disk quotas.
-*   `createSeedboxUser`: Add a new user.
-*   `changeUserpass`: Update passwords.
-*   `upgradeBox`: Update AetherFlow to the latest version `v3.0.1`.
+* `af install <package>`: Install an application (e.g., `af install plex`).
+* `af remove <package>`: Remove an application.
+* `setdisk`: Manage user disk quotas.
+* `createSeedboxUser`: Add a new user.
+* `changeUserpass`: Update passwords.
+* `upgradeBox`: Update AetherFlow to the latest version `v3.0.1`.
 
 ---
 

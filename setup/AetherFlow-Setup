@@ -48,11 +48,11 @@ if [[ ! -d "${SCRIPT_DIR}/modules" ]]; then
     apt-get update -y >/dev/null 2>&1
     apt-get install -y git bc curl >/dev/null 2>&1
     
-    rm -rf /opt/MediaNexus
-    git clone https://github.com/McEveritts/AetherFlow.git /opt/MediaNexus >/dev/null 2>&1
+    rm -rf /opt/AetherFlow
+    git clone https://github.com/McEveritts/AetherFlow.git /opt/AetherFlow >/dev/null 2>&1
     
     # Relaunch from the proper directory
-    cd /opt/MediaNexus/setup || exit 1
+    cd /opt/AetherFlow/setup || exit 1
     exec bash AetherFlow-Setup "$@"
     exit 0
 fi
@@ -61,9 +61,6 @@ fi
 BASE_DIR="$(dirname "${SCRIPT_DIR}")"
 local_setup="${SCRIPT_DIR}/"
 local_packages="${BASE_DIR}/packages/"
-local_rutorrent="${BASE_DIR}/rutorrent/"
-local_rplugins="${BASE_DIR}/rtplugins/"
-local_dashboard="${BASE_DIR}/dashboard/"
 
 # Load Modules
 for module in "${SCRIPT_DIR}/modules/"*.sh; do
@@ -106,8 +103,7 @@ S=$(date +%s)
 OK=$(echo -e "[ ${bold}${green}DONE${normal} ]")
 genpass=$(_string)
 HTPASSWD="/etc/htpasswd"
-rutorrent="/srv/rutorrent/"
-REALM="rutorrent"
+REALM="aetherflow"
 AUTODLPASSWORD=$(_string)
 AUTODLPORT=$(shuf -i 2000-61000 -n 1)
 # shellcheck disable=2312
@@ -203,14 +199,7 @@ echo -n "Installing rtorrent-${green}${RTVERSION}${normal} ... "
 _rtorrent &
 spinner $!
 echo
-echo -n "Installing rutorrent into /srv ... "
-_rutorrent &
-spinner $!
-echo
-echo -n "Installing rutorrent plugins ... "
-_rutorrent-plugins &
-spinner $!
-echo
+# NOTE: ruTorrent installation removed — sunset in favor of Next.js frontend
 
 if [[ ${tr} == "yes" ]]; then
 	echo -n "Configuring Transmission ... "
@@ -237,10 +226,7 @@ if [[ ${QBVERSION} != "no" ]]; then
 	echo
 fi
 
-echo -n "Installing AetherFlow dashboard ... "
-_dashboard &
-spinner $!
-echo
+# NOTE: Legacy PHP dashboard removed — Next.js frontend is the sole UI
 echo -n "Installing Go and Node.js for modern stack ... "
 _install_go &
 spinner $!
@@ -263,10 +249,7 @@ echo -n "Installing .rtorrent.rc for ${username} ... "
 _rconf &
 spinner $!
 echo
-echo -n "Adjusting fileupload & filemanager plugins ... "
-_plugins &
-spinner $!
-echo
+# NOTE: ruTorrent plugin configuration removed
 echo -n "Installing autodl-irssi ... "
 _autodl &
 spinner $!
@@ -275,10 +258,7 @@ echo -n "Making ${username} directory structure ... "
 _makedirs &
 spinner $!
 echo
-echo -n "Writing ${username} rutorrent config.php file ... "
-_ruconf &
-spinner $!
-echo
+# NOTE: ruTorrent user config removed
 echo -n "Installing vsftpd ... "
 _installftpd &
 spinner $!
@@ -287,7 +267,7 @@ echo -n "Setting up vsftpd ... "
 _ftpdconfig &
 spinner $!
 echo
-_quickstats
+# NOTE: _quickstats removed — legacy PHP dashboard sunset
 _quickconsole
 echo -n "Setting irssi/rtorrent to start on boot ... "
 _boot &

@@ -1,5 +1,5 @@
 #!/bin/sh
-MASTER=$(cat /srv/rutorrent/home/db/master.txt)
+MASTER=$(cat /srv/aetherflow/db/master.txt)
 SUBSONICIP=$(ip route get 8.8.8.8 | awk 'NR==1 {print $NF}')
 
 SUBSONIC_HOME=/srv/subsonic

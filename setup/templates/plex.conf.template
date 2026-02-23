@@ -8,7 +8,7 @@ LoadModule proxy_http_module /usr/lib/apache2/modules/mod_proxy_http.so
     Order deny,allow
     Allow from all
     AuthType Digest
-    AuthName "rutorrent"
+    AuthName "aetherflow"
     AuthUserFile '/etc/htpasswd'
     Require valid-user
   </Proxy>
