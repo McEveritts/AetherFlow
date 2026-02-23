@@ -1,0 +1,20 @@
+#!/bin/bash
+#
+# [AetherFlow :: Remove readarr]
+#
+set -e
+
+LOGFILE="/opt/AetherFlow/logs/installer.log"
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [remove-readarr] $1" | tee -a "$LOGFILE"; }
+
+log "Stopping readarr..."
+systemctl stop readarr; systemctl disable readarr
+
+log "Removing readarr files and configuration..."
+rm -rf /opt/Readarr /var/lib/readarr /etc/systemd/system/readarr.service /etc/apache2/sites-enabled/readarr.conf; userdel readarr 2>/dev/null
+
+systemctl daemon-reload 2>/dev/null
+service apache2 reload 2>/dev/null
+rm -f /install/.readarr.lock
+
+log "readarr has been completely removed."

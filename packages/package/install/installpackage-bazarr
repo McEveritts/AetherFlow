@@ -1,0 +1,91 @@
+#!/bin/bash
+#
+# [AetherFlow :: Install Bazarr]
+# Subtitle management companion for Sonarr and Radarr
+#
+# Author : McEveritts
+# URL    : https://AetherFlow.io
+# License: GPL-3.0
+#
+set -e
+
+LOGFILE="/opt/AetherFlow/logs/installer.log"
+mkdir -p /opt/AetherFlow/logs /install
+
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [bazarr] $1" | tee -a "$LOGFILE"; }
+
+# ── Dependencies ─────────────────────────────────────────────────────────────
+log "Installing dependencies..."
+apt-get update >>"$LOGFILE" 2>&1
+apt-get install -y python3 python3-pip python3-venv git unrar-free ffmpeg >>"$LOGFILE" 2>&1
+
+# ── Create bazarr user ───────────────────────────────────────────────────────
+if ! id -u bazarr &>/dev/null; then
+    useradd -r -s /usr/sbin/nologin -d /opt/bazarr bazarr
+fi
+
+# ── Download Bazarr ──────────────────────────────────────────────────────────
+log "Downloading latest Bazarr release..."
+BAZARR_URL=$(curl -sL https://api.github.com/repos/morpheus65535/bazarr/releases/latest | grep "zipball_url" | cut -d '"' -f 4)
+if [[ -z "$BAZARR_URL" ]]; then
+    BAZARR_URL="https://github.com/morpheus65535/bazarr/releases/latest/download/bazarr.zip"
+fi
+
+mkdir -p /opt/bazarr
+cd /tmp
+rm -f bazarr.zip
+curl -sL "$BAZARR_URL" -o bazarr.zip >>"$LOGFILE" 2>&1 || \
+wget -q "https://github.com/morpheus65535/bazarr/releases/latest/download/bazarr.zip" -O bazarr.zip >>"$LOGFILE" 2>&1
+
+log "Extracting Bazarr..."
+apt-get install -y unzip >>"$LOGFILE" 2>&1
+unzip -o bazarr.zip -d /opt/bazarr >>"$LOGFILE" 2>&1
+rm -f bazarr.zip
+
+# ── Install Python dependencies ──────────────────────────────────────────────
+log "Installing Python dependencies..."
+cd /opt/bazarr
+python3 -m pip install -r requirements.txt >>"$LOGFILE" 2>&1 || \
+python3 -m pip install --break-system-packages -r requirements.txt >>"$LOGFILE" 2>&1
+
+chown -R bazarr:bazarr /opt/bazarr
+
+# ── Systemd service ──────────────────────────────────────────────────────────
+log "Creating systemd service..."
+cat > /etc/systemd/system/bazarr.service <<'EOF'
+[Unit]
+Description=Bazarr Subtitle Manager
+After=syslog.target network.target sonarr.service radarr.service
+
+[Service]
+Type=simple
+User=bazarr
+Group=bazarr
+WorkingDirectory=/opt/bazarr
+ExecStart=/usr/bin/python3 /opt/bazarr/bazarr.py
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable bazarr.service >>"$LOGFILE" 2>&1
+systemctl start bazarr.service
+
+# ── Apache reverse proxy ─────────────────────────────────────────────────────
+log "Configuring Apache reverse proxy..."
+cat > /etc/apache2/sites-enabled/bazarr.conf <<'EOF'
+<Location /bazarr>
+    ProxyPass http://localhost:6767/bazarr
+    ProxyPassReverse http://localhost:6767/bazarr
+</Location>
+EOF
+chown www-data:www-data /etc/apache2/sites-enabled/bazarr.conf
+a2enmod proxy proxy_http >>/dev/null 2>&1
+service apache2 reload >>"$LOGFILE" 2>&1
+
+# ── Finalize ─────────────────────────────────────────────────────────────────
+touch /install/.bazarr.lock
+log "Bazarr installation complete! Access at http://your-server:6767"

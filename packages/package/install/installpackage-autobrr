@@ -1,0 +1,91 @@
+#!/bin/bash
+#
+# [AetherFlow :: Install Autobrr]
+# Modern download automation for torrents and usenet
+#
+# Author : McEveritts
+# URL    : https://AetherFlow.io
+# License: GPL-3.0
+#
+set -e
+
+LOGFILE="/opt/AetherFlow/logs/installer.log"
+mkdir -p /opt/AetherFlow/logs /install
+
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [autobrr] $1" | tee -a "$LOGFILE"; }
+
+# ── Download Autobrr ─────────────────────────────────────────────────────────
+log "Downloading latest Autobrr..."
+ARCH=$(dpkg --print-architecture)
+case "$ARCH" in
+    amd64) AUTOBRR_ARCH="linux_x86_64" ;;
+    arm64) AUTOBRR_ARCH="linux_arm64" ;;
+    armhf) AUTOBRR_ARCH="linux_armv6" ;;
+    *) AUTOBRR_ARCH="linux_x86_64" ;;
+esac
+
+AUTOBRR_VERSION=$(curl -sL https://api.github.com/repos/autobrr/autobrr/releases/latest | grep '"tag_name"' | sed -E 's/.*"v([^"]+)".*/\1/')
+if [[ -z "$AUTOBRR_VERSION" ]]; then
+    AUTOBRR_VERSION="1.42.0"
+fi
+
+mkdir -p /opt/autobrr /tmp/AetherFlow
+cd /tmp/AetherFlow
+curl -sL "https://github.com/autobrr/autobrr/releases/download/v${AUTOBRR_VERSION}/autobrr_${AUTOBRR_VERSION}_${AUTOBRR_ARCH}.tar.gz" -o autobrr.tar.gz >>"$LOGFILE" 2>&1
+tar -xzf autobrr.tar.gz -C /opt/autobrr >>"$LOGFILE" 2>&1
+rm -f autobrr.tar.gz
+chmod +x /opt/autobrr/autobrr
+
+# ── Create autobrr user ─────────────────────────────────────────────────────
+if ! id -u autobrr &>/dev/null; then
+    useradd -r -s /usr/sbin/nologin -d /opt/autobrr autobrr
+fi
+
+# ── Initial configuration ────────────────────────────────────────────────────
+mkdir -p /home/autobrr/.config/autobrr
+cat > /home/autobrr/.config/autobrr/config.toml <<'EOF'
+host = "0.0.0.0"
+port = 7474
+logLevel = "DEBUG"
+sessionSecret = "autobrr-secret-change-me"
+EOF
+chown -R autobrr:autobrr /opt/autobrr /home/autobrr 2>/dev/null || true
+
+# ── Systemd service ──────────────────────────────────────────────────────────
+log "Creating systemd service..."
+cat > /etc/systemd/system/autobrr.service <<'EOF'
+[Unit]
+Description=Autobrr - Download Automation
+After=syslog.target network.target
+
+[Service]
+Type=simple
+User=autobrr
+Group=autobrr
+ExecStart=/opt/autobrr/autobrr --config /home/autobrr/.config/autobrr
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable autobrr.service >>"$LOGFILE" 2>&1
+systemctl start autobrr.service
+
+# ── Apache reverse proxy ─────────────────────────────────────────────────────
+log "Configuring Apache reverse proxy..."
+cat > /etc/apache2/sites-enabled/autobrr.conf <<'EOF'
+<Location /autobrr>
+    ProxyPass http://localhost:7474
+    ProxyPassReverse http://localhost:7474
+</Location>
+EOF
+chown www-data:www-data /etc/apache2/sites-enabled/autobrr.conf
+a2enmod proxy proxy_http >>/dev/null 2>&1
+service apache2 reload >>"$LOGFILE" 2>&1
+
+# ── Finalize ─────────────────────────────────────────────────────────────────
+touch /install/.autobrr.lock
+log "Autobrr installation complete! Access at http://your-server:7474"

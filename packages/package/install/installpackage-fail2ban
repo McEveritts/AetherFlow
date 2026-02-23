@@ -1,0 +1,57 @@
+#!/bin/bash
+#
+# [AetherFlow :: Install Fail2ban]
+# Intrusion prevention and log monitoring
+#
+# Author : McEveritts
+# URL    : https://AetherFlow.io
+# License: GPL-3.0
+#
+set -e
+
+LOGFILE="/opt/AetherFlow/logs/installer.log"
+mkdir -p /opt/AetherFlow/logs /install
+
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [fail2ban] $1" | tee -a "$LOGFILE"; }
+
+# ── Install Fail2ban ─────────────────────────────────────────────────────────
+log "Installing Fail2ban..."
+apt-get update >>"$LOGFILE" 2>&1
+apt-get install -y fail2ban >>"$LOGFILE" 2>&1
+
+# ── Configure ────────────────────────────────────────────────────────────────
+log "Creating local configuration..."
+cat > /etc/fail2ban/jail.local <<'EOF'
+[DEFAULT]
+bantime = 3600
+findtime = 600
+maxretry = 5
+backend = systemd
+banaction = iptables-multiport
+
+[sshd]
+enabled = true
+port = ssh
+filter = sshd
+logpath = /var/log/auth.log
+maxretry = 3
+bantime = 86400
+
+[apache-auth]
+enabled = true
+port = http,https
+filter = apache-auth
+logpath = /var/log/apache2/*error.log
+maxretry = 5
+EOF
+
+# ── Enable and start ─────────────────────────────────────────────────────────
+log "Starting Fail2ban..."
+systemctl daemon-reload
+systemctl enable fail2ban >>"$LOGFILE" 2>&1
+systemctl restart fail2ban
+
+# ── Finalize ─────────────────────────────────────────────────────────────────
+touch /install/.fail2ban.lock
+log "Fail2ban installation complete!"
+log "SSH jail: 3 attempts, 24h ban. Apache auth: 5 attempts, 1h ban."

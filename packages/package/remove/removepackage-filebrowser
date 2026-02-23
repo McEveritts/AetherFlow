@@ -1,0 +1,20 @@
+#!/bin/bash
+#
+# [AetherFlow :: Remove filebrowser]
+#
+set -e
+
+LOGFILE="/opt/AetherFlow/logs/installer.log"
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [remove-filebrowser] $1" | tee -a "$LOGFILE"; }
+
+log "Stopping filebrowser..."
+systemctl stop filebrowser; systemctl disable filebrowser
+
+log "Removing filebrowser files and configuration..."
+rm -rf /opt/filebrowser /usr/local/bin/filebrowser /etc/systemd/system/filebrowser.service /etc/apache2/sites-enabled/filebrowser.conf
+
+systemctl daemon-reload 2>/dev/null
+service apache2 reload 2>/dev/null
+rm -f /install/.filebrowser.lock
+
+log "filebrowser has been completely removed."

@@ -1,0 +1,20 @@
+#!/bin/bash
+#
+# [AetherFlow :: Remove vaultwarden]
+#
+set -e
+
+LOGFILE="/opt/AetherFlow/logs/installer.log"
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [remove-vaultwarden] $1" | tee -a "$LOGFILE"; }
+
+log "Stopping vaultwarden..."
+docker stop vaultwarden; docker rm vaultwarden
+
+log "Removing vaultwarden files and configuration..."
+rm -rf /opt/vaultwarden /etc/apache2/sites-enabled/vaultwarden.conf
+
+systemctl daemon-reload 2>/dev/null
+service apache2 reload 2>/dev/null
+rm -f /install/.vaultwarden.lock
+
+log "vaultwarden has been completely removed."

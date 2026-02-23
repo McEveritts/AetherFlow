@@ -1,127 +1,88 @@
 #!/bin/bash
 #
-# [Quick Box :: Install Ombi (formerly Plex Request.NET) package]
+# [AetherFlow :: Install Ombi]
+# Media request management for Plex/Emby/Jellyfin
 #
-# GITHUB REPOS
-# GitHub _ packages  :   https://github.com/AetherFlow/AetherFlow_packages
-# LOCAL REPOS
-# Local _ packages   :   /etc/AetherFlow/packages
-# Author             :   AetherFlow.IO | liza
-# URL                :   https://AetherFlow.io
+# Author : McEveritts
+# URL    : https://AetherFlow.io
+# License: GPL-3.0
 #
-# AetherFlow Copyright (C) 2016
-# Licensed under GNU General Public License v3.0 GPL-3 (in short)
-#
-#   You may copy, distribute and modify the software as long as you track
-#   changes/dates in source files. Any modifications to our software
-#   including (via compiler) GPL-licensed code must also be made available
-#   under the GPL along with build & install instructions.
-#
+set -e
 
-function _depends() {
-  apt-get update -q -y >/dev/null 2>&1
-  apt-get install -q -y libunwind8 libicu-dev libcurl4-openssl-dev unzip screen sqlite3 >/dev/null 2>&1
-}
+LOGFILE="/opt/AetherFlow/logs/installer.log"
+mkdir -p /opt/AetherFlow/logs /install
 
-function _install() {
-  #if [[ ! -f /etc/apt/sources.list.d/ombi.list ]]; then
-  #  echo "deb [arch=amd64,armhf] http://repo.ombi.turd.me/stable/ jessie main" > "/etc/apt/sources.list.d/ombi.list"
-  #  wget --no-check-certificate -qO - https://repo.ombi.turd.me/pubkey.txt | sudo apt-key add - >/dev/null 2>&1
-  #fi
-  cd /opt/
-  if [[ ! -d /opt/Ombi ]]; then
-    mkdir -p Ombi
-    chown -R ${user}: /opt/Ombi
-  fi
-  if [[ ! -d /etc/Ombi ]]; then
-    mkdir -p /etc/Ombi
-  fi
-  #ombiversion=$(wget https://github.com/tidusjar/Ombi/releases/latest -O - | grep -E \/tag\/ | grep -v repository | awk -F "[><]" '{print $3}' | sed s/"Ombi\\ "/""/g)
-  #wget https://github.com/tidusjar/Ombi/releases/download/$ombiversion/linux.tar.gz >/dev/null 2>&1
-  ombiversion=$(wget -q https://github.com/Ombi-io/Ombi.Releases/releases/latest -O - | grep -E \/tag\/ | awk -F "[><]" '{print $3}' | head -n 1)
-  wget -q https://github.com/Ombi-io/Ombi.Releases/releases/download/${ombiversion}/linux-x64.tar.gz
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [ombi] $1" | tee -a "$LOGFILE"; }
 
-  tar -zxf linux-x64.tar.gz -C /opt/Ombi >/dev/null 2>&1
-  chmod +x /opt/Ombi/Ombi
-  rm -f linux-x64.tar.gz
-  chown -R ${user}:${user} /opt/Ombi
-}
+# ── Dependencies ─────────────────────────────────────────────────────────────
+log "Installing dependencies..."
+apt-get update >>"$LOGFILE" 2>&1
+apt-get install -y curl libicu-dev >>"$LOGFILE" 2>&1
 
-function _services() {
-  cp ${local_setup}templates/sysd/ombi.template /etc/systemd/system/ombi.service
-  sed -i "s/USER/${user}/g" /etc/systemd/system/ombi.service
-  systemctl enable ombi >/dev/null 2>&1
-  systemctl start ombi
-  systemctl stop ombi
+# ── Download Ombi ────────────────────────────────────────────────────────────
+log "Downloading latest Ombi..."
+ARCH=$(dpkg --print-architecture)
+case "$ARCH" in
+    amd64) OMBI_ARCH="linux-x64" ;;
+    arm64) OMBI_ARCH="linux-arm64" ;;
+    *) OMBI_ARCH="linux-x64" ;;
+esac
 
-  useradd -M -N -r -s /bin/false ombi >/dev/null 2>&1
-  groupadd nogroup >/dev/null 2>&1
-  chown -R ${user}:${user} /etc/Ombi
-  chown -R ${user}:${user} /opt/Ombi
+OMBI_URL=$(curl -sL https://api.github.com/repos/Ombi-app/Ombi/releases/latest | grep "browser_download_url.*${OMBI_ARCH}.tar.gz" | head -1 | cut -d '"' -f 4)
+if [[ -z "$OMBI_URL" ]]; then
+    log "Could not determine latest Ombi URL, using latest tag..."
+    OMBI_VERSION=$(curl -sL https://api.github.com/repos/Ombi-app/Ombi/releases/latest | grep '"tag_name"' | sed -E 's/.*"v([^"]+)".*/\1/')
+    OMBI_URL="https://github.com/Ombi-app/Ombi/releases/download/v${OMBI_VERSION}/linux-x64.tar.gz"
+fi
 
-  systemctl daemon-reload
-  systemctl start ombi
+mkdir -p /opt/Ombi /tmp/AetherFlow
+cd /tmp/AetherFlow
+curl -sL "$OMBI_URL" -o ombi.tar.gz >>"$LOGFILE" 2>&1
+tar -xzf ombi.tar.gz -C /opt/Ombi >>"$LOGFILE" 2>&1
+rm -f ombi.tar.gz
 
-  touch /install/.ombi.lock
-  cat > /etc/apache2/sites-enabled/ombi.conf <<EOF
+# ── Create ombi user ─────────────────────────────────────────────────────────
+if ! id -u ombi &>/dev/null; then
+    useradd -r -s /usr/sbin/nologin -d /opt/Ombi ombi
+fi
+chown -R ombi:ombi /opt/Ombi
+
+# ── Systemd service ──────────────────────────────────────────────────────────
+log "Creating systemd service..."
+cat > /etc/systemd/system/ombi.service <<'EOF'
+[Unit]
+Description=Ombi - Media Request Manager
+After=network.target
+
+[Service]
+Type=simple
+User=ombi
+Group=ombi
+WorkingDirectory=/opt/Ombi
+ExecStart=/opt/Ombi/Ombi --host http://0.0.0.0:5000 --storage /opt/Ombi
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable ombi.service >>"$LOGFILE" 2>&1
+systemctl start ombi.service
+
+# ── Apache reverse proxy ─────────────────────────────────────────────────────
+log "Configuring Apache reverse proxy..."
+cat > /etc/apache2/sites-enabled/ombi.conf <<'EOF'
 <Location /ombi>
-Allow from 0.0.0.0 
-ProxyPass "http://127.0.0.1:5000/ombi" connectiontimeout=5 timeout=30 keepalive=on 
-ProxyPassReverse "http://127.0.0.1:5000/ombi"
-Require all granted
+    ProxyPass http://localhost:5000/ombi
+    ProxyPassReverse http://localhost:5000/ombi
 </Location>
 EOF
-  chown www-data: /etc/apache2/sites-enabled/ombi.conf
-  service apache2 reload
-}
+chown www-data:www-data /etc/apache2/sites-enabled/ombi.conf
+a2enmod proxy proxy_http >>/dev/null 2>&1
+service apache2 reload >>"$LOGFILE" 2>&1
 
-spinner() {
-    local pid=$1
-    local delay=0.25
-    local spinstr='|/-\'
-    while [ "$(ps a | awk '{print $1}' | grep $pid)" ]; do
-        local temp=${spinstr#?}
-        printf " [${bold}${yellow}%c${normal}]  " "$spinstr"
-        local spinstr=$temp${spinstr%"$temp"}
-        sleep $delay
-        printf "\b\b\b\b\b\b"
-    done
-    printf "    \b\b\b\b"
-    echo -ne "${OK}"
-}
-
-OUTTO=/srv/rutorrent/home/db/output.log
-local_setup=/etc/AetherFlow/setup/
-user=$(cat /srv/rutorrent/home/db/master.txt)
-
-echo "////////////////////////////////////////////////////">>"${OUTTO}" 2>&1;
-echo "///  Additional setup is required for Ombi." >>"${OUTTO}" 2>&1;
-echo "///  ">>"${OUTTO}" 2>&1;
-echo "///  After install is complete,
-///  navigate to http://localhost:5000
-///  and complete the Setup Wizard." >>"${OUTTO}" 2>&1;
-echo "///  ">>"${OUTTO}" 2>&1;
-echo "///  Once the Setup Wizard is completed,
-///  navigate to http://localhost:5000/Settings/Ombi" >>"${OUTTO}" 2>&1;
-echo "///  and configure the base url to /ombi ." >>"${OUTTO}" 2>&1;
-echo "///  ">>"${OUTTO}" 2>&1;
-echo "///  You will then be able to use the provided
-///  Ombi link on your dashboard menu." >>"${OUTTO}" 2>&1;
-echo "////////////////////////////////////////////////////">>"${OUTTO}" 2>&1;
-echo >>"${OUTTO}" 2>&1;
-echo >>"${OUTTO}" 2>&1;
-echo "Updating dependencies (this could take a bit) ... " >>"${OUTTO}" 2>&1;
-echo -en "\rUpdating dependencies (this could take a bit) ... ";_depends
-echo "Installing Ombi ... " >>"${OUTTO}" 2>&1;
-echo -en "\rInstalling Ombi ... ";_install
-echo "Initializing Ombi service ... " >>"${OUTTO}" 2>&1;
-echo -en "\rInitializing Ombi service ... ";_services
-echo "Ombi Installation Complete!" >>"${OUTTO}" 2>&1;
-echo -en "\rOmbi Installation Complete!"
-  sleep 5
-echo >>"${OUTTO}" 2>&1;
-echo >>"${OUTTO}" 2>&1;
-echo "Close this dialog box to refresh your browser" >>"${OUTTO}" 2>&1;
-
-echo ""
-
+# ── Finalize ─────────────────────────────────────────────────────────────────
+touch /install/.ombi.lock
+log "Ombi installation complete! Access at http://your-server:5000"

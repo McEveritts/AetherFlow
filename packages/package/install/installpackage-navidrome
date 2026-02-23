@@ -1,0 +1,103 @@
+#!/bin/bash
+#
+# [AetherFlow :: Install Navidrome]
+# Modern music server and streamer (Subsonic compatible)
+#
+# Author : McEveritts
+# URL    : https://AetherFlow.io
+# License: GPL-3.0
+#
+set -e
+
+LOGFILE="/opt/AetherFlow/logs/installer.log"
+mkdir -p /opt/AetherFlow/logs /install
+
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [navidrome] $1" | tee -a "$LOGFILE"; }
+
+# ── Dependencies ─────────────────────────────────────────────────────────────
+log "Installing dependencies..."
+apt-get update >>"$LOGFILE" 2>&1
+apt-get install -y ffmpeg >>"$LOGFILE" 2>&1
+
+# ── Create navidrome user ────────────────────────────────────────────────────
+if ! id -u navidrome &>/dev/null; then
+    useradd -r -s /usr/sbin/nologin -d /opt/navidrome navidrome
+fi
+
+# ── Download Navidrome ───────────────────────────────────────────────────────
+log "Downloading latest Navidrome..."
+ARCH=$(dpkg --print-architecture)
+case "$ARCH" in
+    amd64) NAV_ARCH="amd64" ;;
+    arm64) NAV_ARCH="arm64" ;;
+    armhf) NAV_ARCH="armv7" ;;
+    *) NAV_ARCH="amd64" ;;
+esac
+
+NAV_VERSION=$(curl -sL https://api.github.com/repos/navidrome/navidrome/releases/latest | grep '"tag_name"' | sed -E 's/.*"v([^"]+)".*/\1/')
+if [[ -z "$NAV_VERSION" ]]; then
+    NAV_VERSION="0.52.5"
+fi
+
+mkdir -p /opt/navidrome /var/lib/navidrome /tmp/AetherFlow
+cd /tmp/AetherFlow
+curl -sL "https://github.com/navidrome/navidrome/releases/download/v${NAV_VERSION}/navidrome_${NAV_VERSION}_linux_${NAV_ARCH}.tar.gz" -o navidrome.tar.gz >>"$LOGFILE" 2>&1
+tar -xzf navidrome.tar.gz -C /opt/navidrome >>"$LOGFILE" 2>&1
+rm -f navidrome.tar.gz
+chmod +x /opt/navidrome/navidrome
+
+# ── Configuration ────────────────────────────────────────────────────────────
+log "Writing configuration..."
+mkdir -p /var/lib/navidrome /music
+cat > /opt/navidrome/navidrome.toml <<'EOF'
+MusicFolder = "/music"
+DataFolder = "/var/lib/navidrome"
+Address = "0.0.0.0"
+Port = 4533
+LogLevel = "info"
+ScanSchedule = "@every 1m"
+EOF
+
+chown -R navidrome:navidrome /opt/navidrome /var/lib/navidrome
+
+# ── Systemd service ──────────────────────────────────────────────────────────
+log "Creating systemd service..."
+cat > /etc/systemd/system/navidrome.service <<'EOF'
+[Unit]
+Description=Navidrome Music Server
+After=network.target
+
+[Service]
+Type=simple
+User=navidrome
+Group=navidrome
+WorkingDirectory=/opt/navidrome
+ExecStart=/opt/navidrome/navidrome --configfile /opt/navidrome/navidrome.toml
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable navidrome.service >>"$LOGFILE" 2>&1
+systemctl start navidrome.service
+
+# ── Apache reverse proxy ─────────────────────────────────────────────────────
+log "Configuring Apache reverse proxy..."
+cat > /etc/apache2/sites-enabled/navidrome.conf <<'EOF'
+<Location /navidrome>
+    ProxyPass http://localhost:4533
+    ProxyPassReverse http://localhost:4533
+</Location>
+EOF
+chown www-data:www-data /etc/apache2/sites-enabled/navidrome.conf
+a2enmod proxy proxy_http >>/dev/null 2>&1
+service apache2 reload >>"$LOGFILE" 2>&1
+
+# ── Finalize ─────────────────────────────────────────────────────────────────
+touch /install/.navidrome.lock
+log "Navidrome installation complete! Access at http://your-server:4533"
+log "Point your music to /music on the server."

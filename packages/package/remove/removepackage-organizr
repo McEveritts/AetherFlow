@@ -1,0 +1,20 @@
+#!/bin/bash
+#
+# [AetherFlow :: Remove organizr]
+#
+set -e
+
+LOGFILE="/opt/AetherFlow/logs/installer.log"
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [remove-organizr] $1" | tee -a "$LOGFILE"; }
+
+log "Stopping organizr..."
+
+
+log "Removing organizr files and configuration..."
+rm -rf /var/www/organizr /etc/apache2/sites-enabled/organizr.conf
+
+systemctl daemon-reload 2>/dev/null
+service apache2 reload 2>/dev/null
+rm -f /install/.organizr.lock
+
+log "organizr has been completely removed."

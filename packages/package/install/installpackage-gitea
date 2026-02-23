@@ -1,0 +1,89 @@
+#!/bin/bash
+#
+# [AetherFlow :: Install Gitea]
+# Painless self-hosted Git service
+#
+# Author : McEveritts
+# URL    : https://AetherFlow.io
+# License: GPL-3.0
+#
+set -e
+
+LOGFILE="/opt/AetherFlow/logs/installer.log"
+mkdir -p /opt/AetherFlow/logs /install
+
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [gitea] $1" | tee -a "$LOGFILE"; }
+
+# ── Dependencies ─────────────────────────────────────────────────────────────
+log "Installing dependencies..."
+apt-get update >>"$LOGFILE" 2>&1
+apt-get install -y git sqlite3 >>"$LOGFILE" 2>&1
+
+# ── Create gitea user ────────────────────────────────────────────────────────
+log "Creating gitea system user..."
+if ! id -u gitea &>/dev/null; then
+    adduser --system --shell /bin/bash --gecos 'Gitea' --group --disabled-password --home /home/gitea gitea >>"$LOGFILE" 2>&1
+fi
+
+# ── Download Gitea binary ────────────────────────────────────────────────────
+log "Downloading latest Gitea..."
+ARCH=$(dpkg --print-architecture)
+
+GITEA_VERSION=$(curl -sL https://api.github.com/repos/go-gitea/gitea/releases/latest | grep '"tag_name"' | sed -E 's/.*"v([^"]+)".*/\1/')
+if [[ -z "$GITEA_VERSION" ]]; then
+    GITEA_VERSION="1.22.0"
+fi
+
+curl -sL "https://dl.gitea.com/gitea/${GITEA_VERSION}/gitea-${GITEA_VERSION}-linux-${ARCH}" -o /usr/local/bin/gitea >>"$LOGFILE" 2>&1
+chmod +x /usr/local/bin/gitea
+
+# ── Create required directories ──────────────────────────────────────────────
+log "Setting up directories..."
+mkdir -p /etc/gitea /var/lib/gitea/{custom,data,log}
+chown -R gitea:gitea /var/lib/gitea
+chmod 750 /var/lib/gitea
+chown root:gitea /etc/gitea
+chmod 770 /etc/gitea
+
+# ── Systemd service ──────────────────────────────────────────────────────────
+log "Creating systemd service..."
+cat > /etc/systemd/system/gitea.service <<'EOF'
+[Unit]
+Description=Gitea - Git with a cup of tea
+After=syslog.target network.target
+
+[Service]
+Type=simple
+User=gitea
+Group=gitea
+WorkingDirectory=/var/lib/gitea
+ExecStart=/usr/local/bin/gitea web --config /etc/gitea/app.ini
+Restart=on-failure
+RestartSec=10
+Environment=USER=gitea HOME=/home/gitea GITEA_WORK_DIR=/var/lib/gitea
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable gitea.service >>"$LOGFILE" 2>&1
+systemctl start gitea.service
+
+# ── Apache reverse proxy ─────────────────────────────────────────────────────
+log "Configuring Apache reverse proxy..."
+cat > /etc/apache2/sites-enabled/gitea.conf <<'EOF'
+<Location /gitea>
+    ProxyPass http://localhost:3000
+    ProxyPassReverse http://localhost:3000
+    ProxyPreserveHost On
+</Location>
+EOF
+chown www-data:www-data /etc/apache2/sites-enabled/gitea.conf
+a2enmod proxy proxy_http >>/dev/null 2>&1
+service apache2 reload >>"$LOGFILE" 2>&1
+
+# ── Finalize ─────────────────────────────────────────────────────────────────
+touch /install/.gitea.lock
+log "Gitea installation complete! Access at http://your-server:3000"
+log "Complete setup via the web installer on first visit."

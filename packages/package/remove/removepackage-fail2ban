@@ -1,0 +1,20 @@
+#!/bin/bash
+#
+# [AetherFlow :: Remove fail2ban]
+#
+set -e
+
+LOGFILE="/opt/AetherFlow/logs/installer.log"
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [remove-fail2ban] $1" | tee -a "$LOGFILE"; }
+
+log "Stopping fail2ban..."
+systemctl stop fail2ban; systemctl disable fail2ban
+
+log "Removing fail2ban files and configuration..."
+apt-get remove -y --purge fail2ban >/dev/null 2>&1; rm -f /etc/fail2ban/jail.local
+
+systemctl daemon-reload 2>/dev/null
+service apache2 reload 2>/dev/null
+rm -f /install/.fail2ban.lock
+
+log "fail2ban has been completely removed."

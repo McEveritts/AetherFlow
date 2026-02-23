@@ -1,0 +1,58 @@
+#!/bin/bash
+#
+# [AetherFlow :: Install Grafana]
+# Analytics and interactive visualization platform
+#
+# Author : McEveritts
+# URL    : https://AetherFlow.io
+# License: GPL-3.0
+#
+set -e
+
+LOGFILE="/opt/AetherFlow/logs/installer.log"
+mkdir -p /opt/AetherFlow/logs /install
+
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [grafana] $1" | tee -a "$LOGFILE"; }
+
+# ── Add Grafana official repository ──────────────────────────────────────────
+log "Adding Grafana GPG key and repository..."
+apt-get install -y apt-transport-https software-properties-common gnupg2 curl >>"$LOGFILE" 2>&1
+
+mkdir -p /etc/apt/keyrings
+curl -fsSL https://apt.grafana.com/gpg.key | gpg --dearmor -o /etc/apt/keyrings/grafana.gpg 2>>"$LOGFILE"
+
+echo "deb [signed-by=/etc/apt/keyrings/grafana.gpg] https://apt.grafana.com stable main" > /etc/apt/sources.list.d/grafana.list
+
+# ── Install Grafana ──────────────────────────────────────────────────────────
+log "Updating package lists and installing Grafana..."
+apt-get update >>"$LOGFILE" 2>&1
+apt-get install -y grafana >>"$LOGFILE" 2>&1
+
+# ── Configure Grafana ────────────────────────────────────────────────────────
+log "Configuring Grafana..."
+# Set root URL for reverse proxy
+sed -i 's|;root_url = .*|root_url = %(protocol)s://%(domain)s:%(http_port)s/grafana/|' /etc/grafana/grafana.ini
+sed -i 's|;serve_from_sub_path = .*|serve_from_sub_path = true|' /etc/grafana/grafana.ini
+
+# ── Enable and start ─────────────────────────────────────────────────────────
+log "Enabling and starting Grafana..."
+systemctl daemon-reload
+systemctl enable grafana-server >>"$LOGFILE" 2>&1
+systemctl start grafana-server
+
+# ── Apache reverse proxy ─────────────────────────────────────────────────────
+log "Configuring Apache reverse proxy..."
+cat > /etc/apache2/sites-enabled/grafana.conf <<'EOF'
+<Location /grafana>
+    ProxyPass http://localhost:3000/grafana
+    ProxyPassReverse http://localhost:3000/grafana
+</Location>
+EOF
+chown www-data:www-data /etc/apache2/sites-enabled/grafana.conf
+a2enmod proxy proxy_http >>/dev/null 2>&1
+service apache2 reload >>"$LOGFILE" 2>&1
+
+# ── Finalize ─────────────────────────────────────────────────────────────────
+touch /install/.grafana.lock
+log "Grafana installation complete! Default login: admin / admin"
+log "Access at http://your-server:3000"

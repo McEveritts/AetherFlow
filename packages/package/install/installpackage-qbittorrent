@@ -1,128 +1,82 @@
 #!/bin/bash
-function _qbittorrent() {
-  apt-get -qy update >>"${OUTTO}" 2>&1;
-  LIST='build-essential checkinstall pkg-config python3-pip python3-dev automake screen libtool libgeoip-dev git'
-  for depend in $LIST; do
-    apt-get -qq -y install $depend >>"${OUTTO}" 2>&1;
-  done
-  LIST='libboost-dev libboost-system-dev libboost-chrono-dev libboost-random-dev libboost-python-dev'
-  for depend in $LIST; do
-    apt-get -qq -y install $depend >>"${OUTTO}" 2>&1
-  done
-  cd ${local_packages}
-  if [ -e /usr/local/lib/libtorrent-rasterbar.so.8 ]; then
-    dpkg -r libtorrent >>"${OUTTO}" 2>&1;
-  fi
-  if [ ! -e /usr/local/lib/libtorrent-rasterbar.so ]; then
-    LTRC=RC_1_1
-    git clone -b ${LTRC} https://github.com/arvidn/libtorrent.git >>"${OUTTO}" 2>&1;
-    cd libtorrent
-	  cp ${local_setup}sources/libtorrent-rasterbar-${LTRC}.patch .
-    patch -p1 < libtorrent-rasterbar-${LTRC}.patch >>"${OUTTO}" 2>&1
-    ltversion=`cat configure.ac | grep -Eo "AC_INIT\(\[libtorrent-rasterbar\],.*" | grep -Eo "[0-9.]+" | head -n1`
-    ./autotool.sh >>"${OUTTO}" 2>&1;
-    ./configure --enable-python-binding --disable-debug --enable-encryption --with-libgeoip=system --with-libiconv CXXFLAGS=-std=c++11 >>"${OUTTO}" 2>&1;
-    make -j$(nproc) >>"${OUTTO}" 2>&1;
-    checkinstall -y --pkgversion=${ltversion} >>"${OUTTO}" 2>&1;
-    ldconfig >>"${OUTTO}" 2>&1;
-    if [ -e /install/.deluge.lock ]; then
-      systemctl stop deluged@${username}
-      sleep 5
-      cd ${local_packages}
-      wget -q http://download.deluge-torrent.org/source/deluge-1.3.15.tar.gz
-      tar -zxvf deluge-1.3.15.tar.gz >>"${OUTTO}" 2>&1
-      cd deluge-1.3.15
-      python setup.py build >>"${OUTTO}" 2>&1
-      python setup.py install --install-layout=deb >>"${OUTTO}" 2>&1
-      python setup.py install_data >>"${OUTTO}" 2>&1
-      rm -rf {deluge-1.3.15,libtorrent}
-      rm -rf deluge-1.3.15.tar.gz
-      systemctl start deluged@${username}
-    fi
-  fi
-  CODENAME=$(lsb_release -cs)
-  apt-get -qy update >>"${OUTTO}" 2>&1;
-  LIST='qtbase5-dev qttools5-dev-tools libqt5svg5-dev'
-  for depend in $LIST; do
-    apt-get -qq -y install $depend >>"${OUTTO}" 2>&1;
-  done
-  cd ${local_packages}
-  git clone https://github.com/qbittorrent/qBittorrent >>"${OUTTO}" 2>&1;
-  cd qBittorrent
-  qbversion=`curl -i -s https://www.qbittorrent.org/ | grep -Eo "Latest:.*" | grep -Eo "[0-9.]+"`
-  git checkout release-${qbversion}
-  ./configure --disable-gui >>"${OUTTO}" 2>&1;
-  make -j$(nproc) >>"${OUTTO}" 2>&1;
-  checkinstall -y --pkgversion=${qbversion} --pkgname=qbittorrent-headless --pkggroup qbittorrent >>"${OUTTO}" 2>&1;
-  export LD_LIBRARY_PATH=/usr/local/lib:${LD_LIBRARY_PATH}
-  if [[ ! -d /home/${username}/.config/qBittorrent ]]; then
-    mkdir -p /home/${username}/.config/qBittorrent
-  fi
-  chmod -R 755 /home/${username}/.config
-  chown -R ${username}.${username} /home/${username}/.config/
-  cp ${local_setup}templates/sysd/qbittorrent.template  /etc/systemd/system/qbittorrent@.service >/dev/null 2>&1
-  cp -f ${local_setup}templates/qBittorrent.conf.template /home/${username}/.config/qBittorrent/qBittorrent.conf
-  sed -i "s/admin/${username}/g" /home/${username}/.config/qBittorrent/qBittorrent.conf
-  sed -i "s/5ebe2294ecd0e0f08eab7690d2a6ee69/${ha1pass}/g" /home/${username}/.config/qBittorrent/qBittorrent.conf
-  sed -i "s/mySavePath/\/home\/${username}\/torrents\/qbittorrent/g" /home/${username}/.config/qBittorrent/qBittorrent.conf
-  chmod -R 755 /home/${username}/.config/
-  chown -R ${username}.${username} /home/${username}/.config/
-  mkdir -p /home/${username}/torrents/qbittorrent
-  chown ${username}: /home/${username}/torrents/qbittorrent
-  cd /srv/rutorrent/home
-  ln -s /home/${username}/torrents/qbittorrent/ ${username}.qbittorrent.downloads
-  systemctl enable qbittorrent@${username} >/dev/null 2>&1
-  systemctl start qbittorrent@${username} >/dev/null 2>&1
-  cd ${local_packages}
-  rm -rf qBittorrent
-}
+#
+# [AetherFlow :: Install qBittorrent]
+# Lightweight and feature-rich BitTorrent client
+#
+# Author : McEveritts
+# URL    : https://AetherFlow.io
+# License: GPL-3.0
+#
+set -e
 
-function _insqBApache() {
-APPNAME='qbittorrent'
-APPDPORT='8086'
-  cat > /etc/apache2/sites-enabled/qbittorrent.conf <<EOF
-<Location /$APPNAME>
-ProxyPass http://localhost:$APPDPORT
-ProxyPassReverse http://localhost:$APPDPORT
-Require all granted
-</Location>
+LOGFILE="/opt/AetherFlow/logs/installer.log"
+mkdir -p /opt/AetherFlow/logs /install
+
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [qbittorrent] $1" | tee -a "$LOGFILE"; }
+
+# ── Install qBittorrent-nox ──────────────────────────────────────────────────
+log "Installing qBittorrent-nox (headless)..."
+apt-get update >>"$LOGFILE" 2>&1
+apt-get install -y qbittorrent-nox >>"$LOGFILE" 2>&1
+
+# ── Create qbittorrent user ─────────────────────────────────────────────────
+if ! id -u qbittorrent &>/dev/null; then
+    useradd -r -s /usr/sbin/nologin -m -d /home/qbittorrent qbittorrent
+fi
+
+# ── Create required directories ──────────────────────────────────────────────
+mkdir -p /home/qbittorrent/Downloads /home/qbittorrent/.config/qBittorrent
+chown -R qbittorrent:qbittorrent /home/qbittorrent
+
+# ── Initial configuration ────────────────────────────────────────────────────
+log "Writing initial configuration..."
+cat > /home/qbittorrent/.config/qBittorrent/qBittorrent.conf <<'EOF'
+[Preferences]
+WebUI\Port=8180
+WebUI\Address=0.0.0.0
+WebUI\Username=admin
+WebUI\CSRFProtection=false
+Downloads\SavePath=/home/qbittorrent/Downloads
+Connection\PortRangeMin=6881
+EOF
+chown -R qbittorrent:qbittorrent /home/qbittorrent/.config
+
+# ── Systemd service ──────────────────────────────────────────────────────────
+log "Creating systemd service..."
+cat > /etc/systemd/system/qbittorrent.service <<'EOF'
+[Unit]
+Description=qBittorrent-nox Daemon
+After=network.target
+
+[Service]
+Type=simple
+User=qbittorrent
+Group=qbittorrent
+ExecStart=/usr/bin/qbittorrent-nox --webui-port=8180
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
 EOF
 
-  touch /install/.qbittorrent.lock
-  chown www-data: /etc/apache2/sites-enabled/qbittorrent.conf
-  
-  service apache2 reload
-}
+systemctl daemon-reload
+systemctl enable qbittorrent.service >>"$LOGFILE" 2>&1
+systemctl start qbittorrent.service
 
-function _insqBComplete() {
-  echo "qBittorrent Install Complete!" >>"${OUTTO}" 2>&1;
-  sleep 5
-  echo >>"${OUTTO}" 2>&1;
-  echo >>"${OUTTO}" 2>&1;
-  echo "Close this dialog box to refresh your browser" >>"${OUTTO}" 2>&1;
-}
-function _insqBExit() {
-  exit
-}
+# ── Apache reverse proxy ─────────────────────────────────────────────────────
+log "Configuring Apache reverse proxy..."
+cat > /etc/apache2/sites-enabled/qbittorrent.conf <<'EOF'
+<Location /qbittorrent>
+    ProxyPass http://localhost:8180
+    ProxyPassReverse http://localhost:8180
+</Location>
+EOF
+chown www-data:www-data /etc/apache2/sites-enabled/qbittorrent.conf
+a2enmod proxy proxy_http >>/dev/null 2>&1
+service apache2 reload >>"$LOGFILE" 2>&1
 
-
-username=$(cat /srv/rutorrent/home/db/master.txt)
-passwd=$(cat /root/${username}.info | cut -d ":" -f 3 | cut -d "@" -f 1)
-ha1pass=`echo -n "${passwd}"|md5sum |cut -f1 -d' '`
-OUTTO="/srv/rutorrent/home/db/output.log"
-local_setup=/etc/AetherFlow/setup/
-local_packages=/etc/AetherFlow/packages/
-local_dashboard=/etc/AetherFlow/dashboard/
-
-echo "Configuring qBittorrent ... " >> ${OUTTO} 2>&1
-echo -en "\rConfiguring qBittorrent ... ";_qbittorrent
-echo "Setting up qBittorrent Reverse Proxy and Reloading Apache2 ... " >> ${OUTTO} 2>&1
-echo -en "\rSetting up qBittorrent Reverse Proxy and Reloading Apache2 ... ";_insqBApache
-sleep 5
-echo >>"${OUTTO}" 2>&1;
-echo >>"${OUTTO}" 2>&1;
-_insqBComplete
-_insqBExit
-
-echo ""
-
+# ── Finalize ─────────────────────────────────────────────────────────────────
+touch /install/.qbittorrent.lock
+log "qBittorrent installation complete! Default login: admin / adminadmin"
+log "Access at http://your-server:8180"

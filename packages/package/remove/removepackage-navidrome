@@ -1,0 +1,20 @@
+#!/bin/bash
+#
+# [AetherFlow :: Remove navidrome]
+#
+set -e
+
+LOGFILE="/opt/AetherFlow/logs/installer.log"
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [remove-navidrome] $1" | tee -a "$LOGFILE"; }
+
+log "Stopping navidrome..."
+systemctl stop navidrome; systemctl disable navidrome
+
+log "Removing navidrome files and configuration..."
+rm -rf /opt/navidrome /var/lib/navidrome /etc/systemd/system/navidrome.service /etc/apache2/sites-enabled/navidrome.conf; userdel navidrome 2>/dev/null
+
+systemctl daemon-reload 2>/dev/null
+service apache2 reload 2>/dev/null
+rm -f /install/.navidrome.lock
+
+log "navidrome has been completely removed."

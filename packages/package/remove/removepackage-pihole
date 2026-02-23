@@ -1,0 +1,20 @@
+#!/bin/bash
+#
+# [AetherFlow :: Remove pihole]
+#
+set -e
+
+LOGFILE="/opt/AetherFlow/logs/installer.log"
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [remove-pihole] $1" | tee -a "$LOGFILE"; }
+
+log "Stopping pihole..."
+
+
+log "Removing pihole files and configuration..."
+pihole uninstall 2>/dev/null; rm -rf /etc/pihole /opt/pihole /etc/apache2/sites-enabled/pihole.conf
+
+systemctl daemon-reload 2>/dev/null
+service apache2 reload 2>/dev/null
+rm -f /install/.pihole.lock
+
+log "pihole has been completely removed."

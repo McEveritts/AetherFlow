@@ -1,0 +1,20 @@
+#!/bin/bash
+#
+# [AetherFlow :: Remove gitea]
+#
+set -e
+
+LOGFILE="/opt/AetherFlow/logs/installer.log"
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [remove-gitea] $1" | tee -a "$LOGFILE"; }
+
+log "Stopping gitea..."
+systemctl stop gitea; systemctl disable gitea
+
+log "Removing gitea files and configuration..."
+rm -rf /var/lib/gitea /etc/gitea /usr/local/bin/gitea /etc/systemd/system/gitea.service /etc/apache2/sites-enabled/gitea.conf; userdel gitea 2>/dev/null
+
+systemctl daemon-reload 2>/dev/null
+service apache2 reload 2>/dev/null
+rm -f /install/.gitea.lock
+
+log "gitea has been completely removed."

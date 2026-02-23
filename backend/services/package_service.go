@@ -61,11 +61,7 @@ func GetPackages() []models.Package {
 			}
 
 			if unitExists {
-				status, _, _ := GetServiceInfo(pkgs[i].ServiceName)
 				pkgs[i].Status = "installed"
-				if status == "running" {
-					pkgs[i].Status = "installed (running)"
-				}
 			} else {
 				pkgs[i].Status = "uninstalled"
 			}

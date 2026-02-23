@@ -1,0 +1,20 @@
+#!/bin/bash
+#
+# [AetherFlow :: Remove grafana]
+#
+set -e
+
+LOGFILE="/opt/AetherFlow/logs/installer.log"
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [remove-grafana] $1" | tee -a "$LOGFILE"; }
+
+log "Stopping grafana..."
+systemctl stop grafana-server; systemctl disable grafana-server
+
+log "Removing grafana files and configuration..."
+apt-get remove -y --purge grafana >/dev/null 2>&1; rm -f /etc/apt/sources.list.d/grafana.list /etc/apt/keyrings/grafana.gpg /etc/apache2/sites-enabled/grafana.conf
+
+systemctl daemon-reload 2>/dev/null
+service apache2 reload 2>/dev/null
+rm -f /install/.grafana.lock
+
+log "grafana has been completely removed."
