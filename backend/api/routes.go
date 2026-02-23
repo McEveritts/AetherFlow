@@ -16,6 +16,9 @@ func RegisterRoutes(r *gin.Engine) {
 		// Authentication
 		apiGroup.GET("/auth/google/login", GoogleLogin)
 		apiGroup.GET("/auth/google/callback", GoogleCallback)
+		apiGroup.POST("/auth/login", LocalLogin)
+		apiGroup.POST("/auth/setup", SetupAdmin)
+		apiGroup.GET("/auth/setup/check", CheckSetupNeeded)
 		apiGroup.GET("/auth/session", GetSession)
 		apiGroup.POST("/auth/logout", Logout)
 

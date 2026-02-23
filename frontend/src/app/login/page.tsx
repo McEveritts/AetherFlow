@@ -32,7 +32,7 @@ export default function LoginPage() {
                             <div className="absolute inset-0 bg-[url('data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI4IiBoZWlnaHQ9IjgiPgo8cmVjdCB3aWR0aD0iOCIgaGVpZ2h0PSI4IiBmaWxsPSIjZmZmIiBmaWxsLW9wYWNpdHk9IjAuMSIvPgo8L3N2Zz4=')] opacity-30 mix-blend-overlay"></div>
                             <span className="font-extrabold text-white text-3xl tracking-tighter mix-blend-screen drop-shadow-md">A</span>
                         </div>
-                        <h1 className="text-2xl font-bold text-slate-100 tracking-tight">Access Nexus</h1>
+                        <h1 className="text-2xl font-bold text-slate-100 tracking-tight">Unlock the Aether</h1>
                         <p className="text-slate-400 text-sm mt-2">AetherFlow Unified Dashboard</p>
                     </div>
 
@@ -63,7 +63,7 @@ export default function LoginPage() {
                             disabled={isLoading}
                             className="w-full py-3.5 bg-indigo-500 hover:bg-indigo-400 text-white rounded-xl text-sm font-bold tracking-wide transition-all shadow-lg shadow-indigo-500/20 disabled:opacity-70 disabled:cursor-not-allowed flex items-center justify-center gap-2"
                         >
-                            {isLoading ? 'Unlocking...' : 'Unlock the Aether'}
+                            {isLoading ? 'Signing in...' : 'Sign in'}
                         </button>
                     </form>
 
