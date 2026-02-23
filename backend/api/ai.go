@@ -45,7 +45,7 @@ func handleAiChat(c *gin.Context) {
 	err := db.DB.QueryRow("SELECT ai_model, system_prompt FROM settings WHERE id = 1").Scan(&aiModel, &systemPrompt)
 	if err != nil {
 		// Fallbacks if db is unreachable
-		aiModel = "gemini-1.5-ultra"
+		aiModel = "gemini-2.5-pro"
 		systemPrompt = "You are FlowAI, a helpful server assistant."
 		log.Printf("Warning: Using fallback AI settings. DB Error: %v", err)
 	}
@@ -57,11 +57,6 @@ func handleAiChat(c *gin.Context) {
 		return
 	}
 	defer client.Close()
-
-	// Handle the 'ultra' mapping if needed, as standard is 'pro' or 'flash'
-	if aiModel == "gemini-1.5-ultra" {
-		aiModel = "gemini-1.5-pro" // Fallback to pro if ultra isn't strictly available in standard API keys
-	}
 
 	model := client.GenerativeModel(aiModel)
 	model.SystemInstruction = genai.NewUserContent(genai.Text(systemPrompt))
