@@ -25,26 +25,23 @@ function _ftpdconfig() {
 function _quickstats() {
 	# Dynamically adjust to use the servers active network adapter
 	IFACE=$(ip route get 8.8.8.8 | awk 'NR==1 {print $5}')
-	printf "${IFACE}" >/srv/rutorrent/home/db/interface.txt
-	sed -i "s/INETFACE/${IFACE}/g" /srv/rutorrent/home/inc/config.php
-	printf "${username}" >/srv/rutorrent/home/db/master.txt
+	printf "${IFACE}" >/srv/dashboard/db/interface.txt
+	sed -i "s/INETFACE/${IFACE}/g" /srv/dashboard/inc/config.php
+	printf "${username}" >/srv/dashboard/db/master.txt
 	# Use server timezone
 	cd /usr/share/zoneinfo
 	find ./* -type f -exec sh -c "diff -q /etc/localtime '{}' > /dev/null && echo {}" \; >~/tz.txt
 	cd ~
 	LOCALE=en_GB.UTF-8
 	LANG=lang_en
-	sed -i "s/LOCALE/${LOCALE}/g" /srv/rutorrent/home/inc/localize.php
-	sed -i "s/LANG/${LANG}/g" /srv/rutorrent/home/inc/localize.php
-	#echo "  date_default_timezone_set('$(cat tz.txt)');" >> /srv/rutorrent/home/widgets/config.php
-	#echo "" >> /srv/rutorrent/home/widgets/config.php
-	#echo "?>" >> /srv/rutorrent/home/widgets/config.php
+	sed -i "s/LOCALE/${LOCALE}/g" /srv/dashboard/inc/localize.php
+	sed -i "s/LANG/${LANG}/g" /srv/dashboard/inc/localize.php
 	if [[ ${primaryroot} == "home" ]]; then
-		cd /srv/rutorrent/home/widgets && rm disk_data.php
+		cd /srv/dashboard/widgets && rm disk_data.php
 		mv disk_datah.php disk_data.php
-		chown -R www-data:www-data /srv/rutorrent/home/widgets
+		chown -R www-data:www-data /srv/dashboard/widgets
 	else
-		rm /srv/rutorrent/home/widgets/disk_datah.php
+		rm /srv/dashboard/widgets/disk_datah.php
 	fi
 }
 
@@ -103,7 +100,7 @@ function _perms() {
 	sudo -u ${username} chmod 755 /home/${username}/ >>"${OUTTO}" 2>&1
 	chmod +x /etc/cron.daily/denypublic >/dev/null 2>&1
 	chmod 777 /home/${username}/.sessions >/dev/null 2>&1
-	chown -R www-data:www-data /srv/rutorrent/home >/dev/null 2>&1
+	chown -R www-data:www-data /srv/dashboard >/dev/null 2>&1
 	if [[ ${tr} == "yes" ]]; then
 		chown -R ${username}:debian-transmission /home/${username}/torrents/transmission >/dev/null 2>&1
 		service transmission-daemon reload >>"${OUTTO}" 2>&1
@@ -151,7 +148,7 @@ function _finished() {
 	echo
 	echo -e " ${green}createSeedboxUser${normal} - creates a shelled seedbox user"
 	echo -e " ${green}deleteSeedboxUser${normal} - deletes a created seedbox user and their directories"
-	echo -e " ${green}changeUserpass${normal} - change users SSH/FTP/ruTorrent password"
+	echo -e " ${green}changeUserpass${normal} - change users SSH/FTP password"
 	echo -e " ${green}setdisk${normal} - set your disk quota for any given user"
 	echo -e " ${green}showspace${normal} - shows the amount of space used by all users on the server"
 	echo -e " ${green}reload${normal} - restarts your seedbox services, i.e; rtorrent & irssi"

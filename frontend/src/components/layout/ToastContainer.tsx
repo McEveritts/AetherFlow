@@ -2,7 +2,7 @@
 
 import { useToast, ToastMessage } from '@/contexts/ToastContext';
 import { CheckCircle, AlertCircle, Info, X } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 
 export default function ToastContainer() {
     const { toasts, removeToast } = useToast();

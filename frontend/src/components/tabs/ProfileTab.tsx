@@ -1,9 +1,10 @@
 import { useAuth } from '@/contexts/AuthContext';
 import { useToast } from '@/contexts/ToastContext';
-import { UserCircle, Mail, Shield, AlertCircle, Save, HardDrive } from 'lucide-react';
+import { UserCircle, Mail, AlertCircle, Save, HardDrive } from 'lucide-react';
 import { useState, useEffect } from 'react';
 import useSWR from 'swr';
 import SkeletonBox from '@/components/layout/SkeletonBox';
+import Image from 'next/image';
 
 const fetcher = (url: string) => fetch(url).then(r => r.json());
 
@@ -40,7 +41,7 @@ export default function ProfileTab() {
             } else {
                 addToast(data.error || 'Failed to update profile', 'error');
             }
-        } catch (err) {
+        } catch (_err) {
             addToast('Network error updating profile', 'error');
         } finally {
             setIsSaving(false);
@@ -67,10 +68,12 @@ export default function ProfileTab() {
 
                 <div className="max-w-2xl relative z-10">
                     <div className="flex items-start gap-8 mb-10 pb-10 border-b border-white/5">
-                        <img
+                        <Image
                             src={user.avatar_url || 'https://via.placeholder.com/150'}
                             alt="Profile Avatar"
-                            className="w-24 h-24 rounded-2xl shadow-lg border border-white/10"
+                            width={96}
+                            height={96}
+                            className="rounded-2xl shadow-lg border border-white/10"
                         />
                         <div>
                             <h3 className="text-2xl font-bold text-slate-200">{user.username}</h3>
@@ -138,8 +141,8 @@ export default function ProfileTab() {
                                 <div className="h-4 w-full bg-slate-900 border border-white/10 rounded-full overflow-hidden">
                                     <div
                                         className={`h-full transition-all duration-1000 flex items-center justify-end px-2 text-[10px] font-bold ${quota.percentage > 90 ? 'bg-red-500 shadow-[0_0_10px_rgba(239,68,68,0.5)]' :
-                                                quota.percentage > 75 ? 'bg-amber-500 shadow-[0_0_10px_rgba(245,158,11,0.5)]' :
-                                                    'bg-indigo-500 shadow-[0_0_10px_rgba(99,102,241,0.5)]'
+                                            quota.percentage > 75 ? 'bg-amber-500 shadow-[0_0_10px_rgba(245,158,11,0.5)]' :
+                                                'bg-indigo-500 shadow-[0_0_10px_rgba(99,102,241,0.5)]'
                                             }`}
                                         style={{ width: `${Math.min(quota.percentage, 100)}%` }}
                                     ></div>
