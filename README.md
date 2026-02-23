@@ -8,7 +8,7 @@
 
 **AetherFlow** is a powerful, lightweight, and modern seedbox management environment. Optimized for performance and ease of use, it serves as the central "Dock" for your media universe.
 
-> **Note:** This project is a modernized fork of the AetherFlow Community Edition, tailored for streamlined performance and enhanced UI aesthetics.
+> **Note:** This project is a modernized fork of the QuickBox Community Edition, tailored for streamlined performance and enhanced UI aesthetics. There is hardly any leftover QB code in our new project. 
 
 ---
 
