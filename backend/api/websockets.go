@@ -130,7 +130,7 @@ func HandleWebSocket(c *gin.Context) {
 }
 
 func broadcastMetricsLoop() {
-	ticker := time.NewTicker(2 * time.Second)
+	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 
 	for {
