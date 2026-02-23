@@ -7,7 +7,7 @@ ProxyRequests Off
 	Order deny,allow
 	Allow from all
 	AuthType Digest
-	AuthName "rutorrent"
+	AuthName "aetherflow"
 	AuthUserFile '/etc/htpasswd'
 	Require valid-user
 </Proxy>

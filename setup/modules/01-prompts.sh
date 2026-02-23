@@ -83,18 +83,10 @@ function _askcontinue() {
 
 # ask what theme version (8)
 # shellcheck disable=2250,2162
+# NOTE: _askdashtheme removed — legacy PHP dashboard sunset
+# Default theme variable set for any remaining references
 function _askdashtheme() {
-	echo -e "1) AetherFlow - ${green}smoked${normal} :: Dark theme"
-	echo -e "2) AetherFlow - ${green}defaulted${normal} :: Light theme"
-	echo -ne "${bold}${yellow}Pick your AetherFlow Dashboard Theme${normal} (Default ${green}1${normal}): "
-	read -r version
-	case $version in
-	1 | "") dash_theme=smoked ;;
-	2) dash_theme=defaulted ;;
-	*) dash_theme=smoked ;;
-	esac
-	echo "We will be using AetherFlow Theme : ${green}$dash_theme${normal}"
-	echo
+	dash_theme=smoked
 }
 
 # ask what rtorrent version (9.1)
@@ -167,7 +159,7 @@ function _asktr() {
 # adduser function (10)
 # shellcheck disable=2215,2312,2250,2162
 function _adduser() {
-	local REALM="rutorrent"
+	local REALM="aetherflow"
 	local HTPASSWD="/etc/htpasswd"
 	theshell="/bin/bash"
 	echo "${bold}${yellow}Add a Master Account user to sudoers${normal}"

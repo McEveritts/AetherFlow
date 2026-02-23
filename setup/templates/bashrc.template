@@ -409,26 +409,26 @@ alias df='df -kTh'
 # -> Navigates to set AetherFlow trees.
 alias Qsetup='cd ~/AetherFlow/setup'
 alias Qpackages='cd ~/AetherFlow/packages'
-alias Qrutorrent='cd ~/AetherFlow/rutorrent'
-alias Qdashboard='cd ~/AetherFlow/dashboard'
-alias Qrtplugins='cd ~/AetherFlow/rtplugins'
+# alias Qrutorrent removed - rutorrent sunset
+# alias Qdashboard removed - dashboard sunset
+# alias Qrtplugins removed - rtplugins sunset
 
 # -> Navigates to set AetherFlow directories.
-alias rutorrent='cd /srv/rutorrent'
-alias dashboard='cd /srv/rutorrent/home'
+# alias rutorrent removed - rutorrent sunset
+alias dashboard='cd /srv/aetherflow'
 alias syscommands='cd /usr/local/bin/aetherflow'
 
 # -> Performs some quick adjustments for certain conditions.
 home_diskwidget() {
-  rm -f /srv/rutorrent/home/widgets/disk_data.php
-  cp /etc/AetherFlow/dashboard/widgets/disk_datah.php /srv/rutorrent/home/widgets/disk_data.php
-  chown www-data:www-data /srv/rutorrent/home/widgets/disk_data.php
+  rm -f /srv/aetherflow/widgets/disk_data.php
+  cp /etc/AetherFlow/dashboard/widgets/disk_datah.php /srv/aetherflow/widgets/disk_data.php
+  chown www-data:www-data /srv/aetherflow/widgets/disk_data.php
   service apache2 restart
 }
 root_diskwidget() {
-  rm -f /srv/rutorrent/home/widgets/disk_data.php
-  cp /etc/AetherFlow/dashboard/widgets/disk_data.php /srv/rutorrent/home/widgets/disk_data.php
-  chown www-data:www-data /srv/rutorrent/home/widgets/disk_data.php
+  rm -f /srv/aetherflow/widgets/disk_data.php
+  cp /etc/AetherFlow/dashboard/widgets/disk_data.php /srv/aetherflow/widgets/disk_data.php
+  chown www-data:www-data /srv/aetherflow/widgets/disk_data.php
   service apache2 restart
 }
 
@@ -1073,9 +1073,9 @@ if [ -e /etc/bash_completion ] && ! shopt -oq posix; then source /etc/bash_compl
 if [ -e ~/.custom ]; then source ~/.custom; fi
 
 function changeUserpass() {
-REALM=rutorrent
+REALM=aetherflow
 HTPASSWD=/etc/htpasswd
-master=$(cat /srv/rutorrent/home/db/master.txt)
+master=$(cat /srv/aetherflow/db/master.txt)
 genpass=$(perl -le 'print map {(a..z,A..Z,0..9)[rand 62] } 0..pop' 15)
 echo -n "Username: "; read user
         username=$(echo "$user"|sed 's/.*/\L&/')
@@ -1127,10 +1127,10 @@ echo -n "Username: "; read user
 
 function createSeedboxUser() {
 OK=`echo -e "[\e[0;32mOK\e[00m]"`
-realm="rutorrent"
+realm="aetherflow"
 htpasswd="/etc/htpasswd"
 genpass=$(perl -le 'print map {(a..z,A..Z,0..9)[rand 62] } 0..pop' 15)
-ruconf="/srv/rutorrent/conf/users"
+ruconf="/srv/aetherflow/conf/users"
 IRSSI_PASS=$(perl -le 'print map {(a..z,A..Z,0..9)[rand 62] } 0..pop' 15)
 IRSSI_PORT=$((RANDOM%64025+1024))
 PORT=$(shuf -i 2000-61000 -n 1)
@@ -1152,7 +1152,7 @@ echo -n "Username: "; read username
     useradd -m -k /etc/skel/ $username -s /usr/bin/lshell
     echo -n "Password: (hit enter to generate a password) ";read 'password'
     chown ${username}:www-data /home/$username >/dev/null 2>&1
-    cp $htpasswd /root/rutorrent-htpasswd.`date +'%d.%m.%y-%S'`
+    cp $htpasswd /root/aetherflow-htpasswd.`date +'%d.%m.%y-%S'`
     if [[ "$password" == "" ]]; then
       echo "setting password to $genpass"
       passwd=$genpass
@@ -1236,15 +1236,15 @@ echo -n "setting permissions ... "
   chown ${username}:plex /home/${username} >/dev/null 2>&1
   chmod 750 /home/${username} >/dev/null 2>&1
   setfacl -m g:${username}:rwx /home/${username} >/dev/null 2>&1
-  mkdir "/srv/rutorrent/conf/users/${username}" >/dev/null 2>&1
-  mkdir -p /srv/rutorrent/conf/users/"${username}"/plugins/fileupload/ >/dev/null 2>&1
-  cp /srv/rutorrent/plugins/fileupload/conf.php /srv/rutorrent/conf/users/"${username}"/plugins/fileupload/conf.php
-  chown -R www-data:www-data /srv/rutorrent/conf/users/"${username}" >/dev/null 2>&1
+  mkdir "/srv/aetherflow/conf/users/${username}" >/dev/null 2>&1
+  mkdir -p /srv/aetherflow/conf/users/"${username}"/plugins/fileupload/ >/dev/null 2>&1
+  cp /srv/aetherflow/plugins/fileupload/conf.php /srv/aetherflow/conf/users/"${username}"/plugins/fileupload/conf.php
+  chown -R www-data:www-data /srv/aetherflow/conf/users/"${username}" >/dev/null 2>&1
   sudo -u $username chmod 750 /home/$username/ >/dev/null 2>&1
   chown -R $username:www-data /home/${username} >/dev/null 2>&1
 echo $OK
 
-echo -n "writing $username rutorrent config.php ... "
+echo -n "writing $username user config.php ... "
   mkdir $ruconf/$username >/dev/null 2>&1
 cat >$ruconf/$username/config.php<<DH
 <?php
@@ -1477,7 +1477,7 @@ cat >/etc/apache2/sites-enabled/alias.${username}.download.conf<<AS
    Options Indexes FollowSymLinks MultiViews
     AllowOverride None
           AuthType Digest
-          AuthName "rutorrent"
+          AuthName "aetherflow"
           AuthUserFile '/etc/htpasswd'
           Require user ${username}
     Order allow,deny
@@ -1489,7 +1489,7 @@ cat >/etc/apache2/sites-enabled/alias.${username}.download.conf<<AS
     Options Indexes FollowSymLinks MultiViews
     AllowOverride None
           AuthType Digest
-          AuthName "rutorrent"
+          AuthName "aetherflow"
           AuthUserFile '/etc/htpasswd'
           Require user ${username}
     Order allow,deny
@@ -1498,14 +1498,14 @@ cat >/etc/apache2/sites-enabled/alias.${username}.download.conf<<AS
   </Directory>
   <Location "/${username}">
       AuthType Digest
-      AuthName "rutorrent"
+      AuthName "aetherflow"
       AuthUserFile "/etc/htpasswd"
       Require user ${username}
   </Location>
 AS
 
 echo -n "Setting up modern file-system indexer (h5ai) for $username ... "
-  cd /srv/rutorrent/home
+  cd /srv/aetherflow
   ln -s /home/${username}/torrents/rtorrent/ ${username}.rtorrent.downloads
   ln -s /home/${username}/torrents/deluge/ ${username}.deluge.downloads
 
@@ -1530,7 +1530,7 @@ SC
 #<Directory "/home/${username}/.console/">
 #  Options Indexes FollowSymLinks MultiViews
 #  AuthType Digest
-#  AuthName "rutorrent"
+#  AuthName "aetherflow"
 #  AuthUserFile '/etc/htpasswd'
 #  Require valid-user
 #  AllowOverride None
@@ -1546,7 +1546,7 @@ service apache2 reload >/dev/null 2>&1
 
 function deleteSeedboxUser() {
 
-rutorrent="/srv/rutorrent"
+srvdir="/srv/aetherflow"
 htpasswd="/etc/htpasswd"
 OK=$(echo -e "[ \e[0;32mDONE\e[00m ]")
 
@@ -1555,7 +1555,7 @@ read username
 if [[ -z ${username} ]]
   then echo "you want me to delete nothing? next time enter a username";exit
 fi
-echo -n "Deleting ${username} /home and rutorrent data ... "
+echo -n "Deleting ${username} /home and user data ... "
 if [[ ! -f /install/.cron.lock ]]; then
   systemctl stop rtorrent@${username}
   systemctl stop irssi@${username}
@@ -1566,7 +1566,7 @@ if [[ ! -f /install/.cron.lock ]]; then
     systemctl stop deluge-web@${username}
     systemctl disable deluged@${username}
     systemctl disable deluge-web@${username}
-    rm -rf ${rutorrent}/home/${username}.deluge.downloads >/dev/null 2>&1
+    rm -rf ${srvdir}/home/${username}.deluge.downloads >/dev/null 2>&1
   fi
 fi
 killall -u ${username}
@@ -1576,9 +1576,9 @@ sed -i "/${username}/d" /etc/apache2/sites-enabled/scgimount.conf
 sed -i "/${username}/d" ${htpasswd}
 rm -rf /etc/apache2/sites-enabled/alias.${username}.console.conf  >/dev/null 2>&1
 rm -rf /etc/apache2/sites-enabled/alias.${username}.download.conf  >/dev/null 2>&1
-rm -rf ${rutorrent}/conf/users/${username} >/dev/null 2>&1
-rm -rf ${rutorrent}/share/users/${username} >/dev/null 2>&1
-rm -rf ${rutorrent}/home/${username}.rtorrent.downloads >/dev/null 2>&1
+rm -rf ${srvdir}/conf/users/${username} >/dev/null 2>&1
+rm -rf ${srvdir}/share/users/${username} >/dev/null 2>&1
+rm -rf ${srvdir}/home/${username}.rtorrent.downloads >/dev/null 2>&1
 rm -rf /var/spool/cron/crontabs/${username} >/dev/null 2>&1
 rm -rf /home/${username} >/dev/null 2>&1
 rm -rf /root/${username}.info.db >/dev/null 2>&1
@@ -1938,7 +1938,7 @@ done
 
 function upgradeJackett() { 
   OK=$(echo -e "[ \e[0;32mUpgrade Complete\e[00m ]")
-  username=$(cat /srv/rutorrent/home/db/master.txt)
+  username=$(cat /srv/aetherflow/db/master.txt)
   echo "Stopping Jackett..."
   systemctl stop jackett@${username}
   jackettver=$(curl -i -s https://github.com/Jackett/Jackett/releases/latest | grep -Eo "<a\ href=\".*>" | grep -v repository | grep -E \/tag\/ | grep -Eo "v[0-9.]+" | tail -n1)
@@ -1987,7 +1987,7 @@ JCKSYS
 
 function upgradeSABnzbd() {
   OK=$(echo -e "[ \e[0;32mUpgrade Complete\e[00m ]")
-  username=$(cat /srv/rutorrent/home/db/master.txt)
+  username=$(cat /srv/aetherflow/db/master.txt)
   echo "Stopping Sabnzbd..."
   systemctl stop sabnzbd@${username}
   cd /home/${username}/SABnzbd
@@ -2003,7 +2003,7 @@ function upgradeSABnzbd() {
 }
 
 function setup-pyLoad() {
-  username=$(cat /srv/rutorrent/home/db/master.txt)
+  username=$(cat /srv/aetherflow/db/master.txt)
   if [ -d /home/${username}/.pyload ]; then
     cd /home/${username}/.pyload
     /usr/bin/python /home/${username}/.pyload/pyLoadCore.py --setup --config=/home/${username}/.pyload
@@ -2018,7 +2018,7 @@ function setup-pyLoad() {
 
 function upgradepyLoad() {
   OK=$(echo -e "[ \e[0;32mUpgrade Complete\e[00m ]")
-  username=$(cat /srv/rutorrent/home/db/master.txt)
+  username=$(cat /srv/aetherflow/db/master.txt)
   if [ -d /home/${username}/.pyload ]; then
     cd /home/${username}/.pyload
     echo "Setting up latest version of pyLoad..."

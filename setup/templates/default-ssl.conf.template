@@ -10,8 +10,8 @@ SSLCryptoDevice builtin
         RewriteCond %{HTTPS} !=on
         RewriteRule ^/?(.*) https://%{SERVER_NAME}/$1 [R,L]
         # Serve Legacy Files (Fallback)
-        DocumentRoot "/srv/rutorrent/home"
-        <Directory "/srv/rutorrent/home/">
+        DocumentRoot "/srv/aetherflow"
+        <Directory "/srv/aetherflow/">
                 Options None
                 AllowOverride None
                 Require all granted
@@ -33,8 +33,8 @@ SCGIMount /USERNAME 127.0.0.1:PORT
 <VirtualHost *:443>
 Options +Indexes +MultiViews +FollowSymLinks
 SSLEngine on
-        DocumentRoot "/srv/rutorrent/home"
-        <Directory "/srv/rutorrent/home/">
+        DocumentRoot "/srv/aetherflow"
+        <Directory "/srv/aetherflow/">
                 Options +Indexes +FollowSymLinks +MultiViews
                 AllowOverride All AuthConfig
                 Order allow,deny

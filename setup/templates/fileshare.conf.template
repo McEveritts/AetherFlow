@@ -1,4 +1,4 @@
-<Directory "/srv/rutorrent/home/fileshare">
+<Directory "/srv/aetherflow/fileshare">
     Options -Indexes
     AllowOverride All
     Satisfy Any
