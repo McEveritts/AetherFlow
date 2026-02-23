@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -63,14 +64,52 @@ type PM2Process struct {
 	} `json:"monit"`
 }
 
+// findPM2Binary locates the pm2 binary on the system
+func findPM2Binary() string {
+	// Try common locations
+	paths := []string{
+		"/usr/local/bin/pm2",
+		"/usr/bin/pm2",
+		"/root/.nvm/versions/node/*/bin/pm2", // nvm installs
+	}
+
+	for _, p := range paths {
+		// Handle glob patterns
+		if matches, err := filepath.Glob(p); err == nil && len(matches) > 0 {
+			return matches[0]
+		}
+	}
+
+	// Try which command
+	if out, err := exec.Command("which", "pm2").Output(); err == nil {
+		p := strings.TrimSpace(string(out))
+		if p != "" {
+			return p
+		}
+	}
+
+	// Last resort: try PATH
+	if p, err := exec.LookPath("pm2"); err == nil {
+		return p
+	}
+
+	return ""
+}
+
 // GetPM2Services queries PM2 for running processes and returns a map of name -> PM2Process
 func GetPM2Services() map[string]PM2Process {
 	result := make(map[string]PM2Process)
 
-	cmd := exec.Command("pm2", "jlist")
+	pm2Path := findPM2Binary()
+	if pm2Path == "" {
+		log.Printf("[PM2] pm2 binary not found on system")
+		return result
+	}
+
+	cmd := exec.Command(pm2Path, "jlist")
 	output, err := cmd.Output()
 	if err != nil {
-		log.Printf("[PM2] Failed to query pm2 jlist: %v", err)
+		log.Printf("[PM2] Failed to query pm2 jlist (%s): %v", pm2Path, err)
 		return result
 	}
 
@@ -80,7 +119,9 @@ func GetPM2Services() map[string]PM2Process {
 		return result
 	}
 
+	log.Printf("[PM2] Found %d processes", len(processes))
 	for _, p := range processes {
+		log.Printf("[PM2] Process: %s (status: %s)", p.Name, p.PM2Env.Status)
 		result[p.Name] = p
 	}
 	return result
@@ -135,8 +176,12 @@ func ControlService(serviceName, action string) error {
 
 // ControlPM2Service executes start, stop, or restart on a PM2 process.
 func ControlPM2Service(processName, action string) error {
-	log.Printf("[PM2] Executing: pm2 %s %s", action, processName)
-	cmd := exec.Command("pm2", action, processName)
+	pm2Path := findPM2Binary()
+	if pm2Path == "" {
+		return fmt.Errorf("pm2 binary not found")
+	}
+	log.Printf("[PM2] Executing: %s %s %s", pm2Path, action, processName)
+	cmd := exec.Command(pm2Path, action, processName)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		log.Printf("Failed to %s PM2 process %s: %v\nOutput: %s", action, processName, err, string(output))
