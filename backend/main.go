@@ -23,9 +23,8 @@ func main() {
 
 	r := gin.Default()
 
-	// Enable Wide CORS for local frontend development
-	// Ensure we only allow strictly defined origins via Env
-	allowedOrigins := []string{"http://127.0.0.1:3000", "http://localhost:3000"}
+	// CORS: Allow configured origins only (set ALLOWED_CORS_ORIGIN in production)
+	allowedOrigins := []string{}
 	if customOrigin := os.Getenv("ALLOWED_CORS_ORIGIN"); customOrigin != "" {
 		allowedOrigins = append(allowedOrigins, customOrigin)
 	}

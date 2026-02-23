@@ -1,6 +1,6 @@
 # AetherFlow
 
-[![AetherFlow](https://ptpimg.me/1l3y37.png) "AetherFlow")](https://github.com/AetherFlow/MediaNexus)
+[![AetherFlow](https://ptpimg.me/1l3y37.png) "AetherFlow"](https://github.com/McEveritts/AetherFlow)
 
 ---
 

@@ -3,18 +3,12 @@ package services
 import (
 	"os"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 )
 
 // CheckProcessRunning natively scans /proc without spawning the shell
 func CheckProcessRunning(processName string) bool {
-	if runtime.GOOS == "windows" {
-		// Mock Data for Windows
-		return true
-	}
-
 	procNameLower := strings.ToLower(processName)
 
 	files, err := os.ReadDir("/proc")

@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"runtime"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -83,13 +82,6 @@ func CheckUpdate(c *gin.Context) {
 
 // RunUpdate triggers the bash script to pull and restart the application
 func RunUpdate(c *gin.Context) {
-	// Validate current OS. The update script is designed for Linux
-	if runtime.GOOS != "linux" {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": "Automated updates are only supported on Linux native environments.",
-		})
-		return
-	}
 
 	// We'll invoke a bash script asynchronously so the API can return a success message
 	// before the PM2 process gets killed by the script.
