@@ -24,18 +24,22 @@ func main() {
 	r := gin.Default()
 
 	// CORS: Allow configured origins only (set ALLOWED_CORS_ORIGIN in production)
-	allowedOrigins := []string{}
-	if customOrigin := os.Getenv("ALLOWED_CORS_ORIGIN"); customOrigin != "" {
-		allowedOrigins = append(allowedOrigins, customOrigin)
-	}
-
-	r.Use(cors.New(cors.Config{
-		AllowOrigins:     allowedOrigins,
+	corsConfig := cors.Config{
 		AllowMethods:     []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
 		AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "Authorization"},
 		ExposeHeaders:    []string{"Content-Length"},
 		AllowCredentials: true,
-	}))
+	}
+
+	if customOrigin := os.Getenv("ALLOWED_CORS_ORIGIN"); customOrigin != "" {
+		corsConfig.AllowOrigins = []string{customOrigin}
+	} else {
+		// Default: allow all origins (safe because API is bound to localhost behind Apache proxy)
+		corsConfig.AllowAllOrigins = true
+		corsConfig.AllowCredentials = false // AllowCredentials must be false with AllowAllOrigins
+	}
+
+	r.Use(cors.New(corsConfig))
 
 	// Register all API routes from the api package
 	api.RegisterRoutes(r)
