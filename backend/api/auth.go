@@ -49,11 +49,8 @@ func SetupAdmin(c *gin.Context) {
 		return
 	}
 
-	if len(req.Password) < 6 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Password must be at least 6 characters"})
-		return
-	}
-
+	// Password length check removed to allow 4-char pins
+	
 	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to hash password"})
