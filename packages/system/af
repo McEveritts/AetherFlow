@@ -116,24 +116,31 @@ function _clr() {
 }
 
 function _updateqb() {
-  echo -e "Updating AetherFlow local repository"
+  echo -e "Updating MediaNexus local repository"
   if [[ ! -f /install/.developer.lock ]]; then
-    if [[ -d /etc/AetherFlow ]]; then
-      cd /etc/AetherFlow || { echo "Critical: /etc/AetherFlow not found!"; exit 1; }
-      git submodule foreach git checkout master
-      git submodule foreach git reset --hard origin/master
-      git submodule foreach git pull
+    if [[ -d /opt/MediaNexus ]]; then
+      cd /opt/MediaNexus || { echo "Critical: /opt/MediaNexus not found!"; exit 1; }
+      git fetch --all
+      git checkout -f master
+      git reset --hard origin/master
     else
-      git clone --recursive https://github.com/McEveritts/AetherFlow /etc/AetherFlow
+      git clone --recursive https://github.com/McEveritts/AetherFlow /opt/MediaNexus
     fi
   else
-    if [[ -d /etc/AetherFlow ]]; then
-      cd /etc/AetherFlow || { echo "Critical: /etc/AetherFlow not found!"; exit 1; }
-      git submodule foreach git checkout development
-      git submodule foreach git reset --hard origin/development
-      git submodule foreach git pull
+    if [[ -d /opt/MediaNexus ]]; then
+      cd /opt/MediaNexus || { echo "Critical: /opt/MediaNexus not found!"; exit 1; }
+      git fetch --all
+      if git rev-parse --verify origin/development >/dev/null 2>&1; then
+        git checkout -f development
+        git reset --hard origin/development
+      else
+        echo "[WARN] development branch not found on remote, falling back to master"
+        git checkout -f master
+        git reset --hard origin/master
+      fi
     else
-      git clone --recursive --branch "development" https://github.com/McEveritts/AetherFlow /etc/AetherFlow
+      git clone --recursive --branch "development" https://github.com/McEveritts/AetherFlow /opt/MediaNexus 2>/dev/null || \
+        git clone --recursive https://github.com/McEveritts/AetherFlow /opt/MediaNexus
     fi
   fi
 }
@@ -202,18 +209,19 @@ if [[ $1 == upgrade ]]; then
   _updateqb
   echo "Upgrading AetherFlow ... This may take a moment"
   if [[ ! -f /install/.developer.lock ]]; then
-    if [[ -d /etc/AetherFlow ]]; then
-      bash /etc/AetherFlow/packages/system/updateAetherFlow
+    if [[ -d /opt/MediaNexus ]]; then
+      bash /opt/MediaNexus/packages/system/updateAetherFlow
     else
-      git clone --recursive https://github.com/McEveritts/AetherFlow /etc/AetherFlow
-      bash /etc/AetherFlow/packages/system/updateAetherFlow
+      git clone --recursive https://github.com/McEveritts/AetherFlow /opt/MediaNexus
+      bash /opt/MediaNexus/packages/system/updateAetherFlow
     fi
   else
-    if [[ -d /etc/AetherFlow ]]; then
-      bash /etc/AetherFlow/packages/system/updateAetherFlow
+    if [[ -d /opt/MediaNexus ]]; then
+      bash /opt/MediaNexus/packages/system/updateAetherFlow
     else
-      git clone --recursive --branch "development" https://github.com/McEveritts/AetherFlow /etc/AetherFlow
-      bash /etc/AetherFlow/packages/system/updateAetherFlow
+      git clone --recursive --branch "development" https://github.com/McEveritts/AetherFlow /opt/MediaNexus 2>/dev/null || \
+        git clone --recursive https://github.com/McEveritts/AetherFlow /opt/MediaNexus
+      bash /opt/MediaNexus/packages/system/updateAetherFlow
     fi
   fi
   #printf "" > /srv/rutorrent/home/db/output.log

@@ -3,7 +3,7 @@ set -euo pipefail
 #
 # [Quick Box :: EcoSystem Update Script]
 #
-# AetherFlow:   https://github.com/AetherFlow/AetherFlow_packages
+# AetherFlow:   https://github.com/McEveritts/AetherFlow
 # Local   :   /etc/AetherFlow/packages
 # Author  :   AetherFlow.io
 # URL     :   https://AetherFlow.io
@@ -37,20 +37,27 @@ function _directorycheck() {
   if [[ ! -f /install/.developer.lock ]]; then
     if [[ -d /opt/MediaNexus ]]; then
       cd /opt/MediaNexus || { echo "Critical: /opt/MediaNexus not found!"; exit 1; }
-      git checkout master >>"${OUTTO}" 2>&1;
-      git reset --hard origin/master
-      git pull >>"${OUTTO}" 2>&1;
+      git fetch --all >>"${OUTTO}" 2>&1;
+      git checkout -f master >>"${OUTTO}" 2>&1;
+      git reset --hard origin/master >>"${OUTTO}" 2>&1;
     else
       git clone https://github.com/McEveritts/AetherFlow /opt/MediaNexus
     fi
   else
     if [[ -d /opt/MediaNexus ]]; then
       cd /opt/MediaNexus || { echo "Critical: /opt/MediaNexus not found!"; exit 1; }
-      git checkout development >>"${OUTTO}" 2>&1;
-      git reset --hard origin/development
-      git pull >>"${OUTTO}" 2>&1;
+      git fetch --all >>"${OUTTO}" 2>&1;
+      if git rev-parse --verify origin/development >>"${OUTTO}" 2>&1; then
+        git checkout -f development >>"${OUTTO}" 2>&1;
+        git reset --hard origin/development >>"${OUTTO}" 2>&1;
+      else
+        echo "[WARN] development branch not found on remote, falling back to master" >>"${OUTTO}" 2>&1;
+        git checkout -f master >>"${OUTTO}" 2>&1;
+        git reset --hard origin/master >>"${OUTTO}" 2>&1;
+      fi
     else
-      git clone --branch "development" https://github.com/McEveritts/AetherFlow /opt/MediaNexus
+      git clone --branch "development" https://github.com/McEveritts/AetherFlow /opt/MediaNexus 2>>"${OUTTO}" || \
+        git clone https://github.com/McEveritts/AetherFlow /opt/MediaNexus
     fi
   fi
 }
@@ -67,8 +74,14 @@ else
 
   echo >>"${OUTTO}" 2>&1;
   cd /opt/MediaNexus || { echo "Critical: /opt/MediaNexus not found!"; exit 1; }
-  git checkout development >>"${OUTTO}" 2>&1;
-  git pull >>"${OUTTO}" 2>&1;
+  if git rev-parse --verify origin/development >>"${OUTTO}" 2>&1; then
+    git checkout development >>"${OUTTO}" 2>&1;
+    git pull >>"${OUTTO}" 2>&1;
+  else
+    echo "[WARN] development branch not found, using master" >>"${OUTTO}" 2>&1;
+    git checkout master >>"${OUTTO}" 2>&1;
+    git pull >>"${OUTTO}" 2>&1;
+  fi
   echo
 
 fi
