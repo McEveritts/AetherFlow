@@ -26,8 +26,16 @@ _build_modern_stack() {
     # Compile Go API
     if [ -d "/opt/AetherFlow/backend" ]; then
         cd /opt/AetherFlow/backend || return 1
+
+        # go-sqlite3 requires CGO (gcc)
+        apt-get install -y gcc build-essential >>/dev/null 2>&1
+
+        # Ensure database directory exists
+        mkdir -p /opt/AetherFlow/dashboard/db
+
         export GOOS=linux
         export GOARCH=amd64
+        export CGO_ENABLED=1
         /usr/local/go/bin/go build -o aetherflow-api main.go || return 1
         
         # Start Go API via PM2 (stop first if already running)

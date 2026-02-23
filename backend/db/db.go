@@ -18,7 +18,7 @@ func InitDB() {
 		paths := []string{
 			filepath.Join("..", "dashboard", "db", "aetherflow.sqlite"),
 			filepath.Join("dashboard", "db", "aetherflow.sqlite"),
-			filepath.Join("C:\\", "Users", "armyw", "OneDrive", "Documents", "Antigravity", "Projects", "AetherFlow", "dashboard", "db", "aetherflow.sqlite"),
+			filepath.Join("/opt", "AetherFlow", "dashboard", "db", "aetherflow.sqlite"),
 		}
 		
 		for _, p := range paths {
