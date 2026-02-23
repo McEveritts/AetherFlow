@@ -3,6 +3,14 @@
 
 # shellcheck disable=2162
 function _askquota() {
+	# Resume: use saved config if available
+	local saved=$(_load_config quota)
+	if [[ -n "${saved}" ]]; then
+		quota="${saved}"
+		echo "Using saved preference: quota=${quota}"
+		return 0
+	fi
+
 	echo -ne "${bold}${yellow}Do you wish to use user quotas?${normal} (Default: ${green}${bold}Y${normal}) "
 	read -r input
 	case ${input} in
@@ -19,10 +27,21 @@ function _askquota() {
 		echo "${bold}Quotas will be installed${normal}"
 		;;
 	esac
+	_save_config quota "${quota}"
 }
 
 # shellcheck disable=2162
 function _ask10g() {
+	local saved=$(_load_config is10g)
+	if [[ -n "${saved}" ]]; then
+		if [[ "${saved}" == "yes" ]]; then
+			mkdir -p /install
+			touch /install/.10g.lock
+		fi
+		echo "Using saved preference: 10g=${saved}"
+		return 0
+	fi
+
 	echo -ne "${bold}${yellow}Is this a 10 gigabit server?${normal} (Default: ${green}${bold}N${normal}) "
 	read -r input
 	case ${input} in
@@ -30,9 +49,16 @@ function _ask10g() {
 		if [[ -d /install ]]; then cd /; else mkdir -p /install; fi
 		touch /install/.10g.lock
 		echo "${bold}The devs are officially jealous${normal}"
+		_save_config is10g "yes"
 		;;
-	[nN] | [nN][Oo] | "") echo "${cyan}Who can afford that stuff anyway?${normal}" ;;
-	*) echo "${cyan}Who can afford that stuff anyway?${normal}" ;;
+	[nN] | [nN][Oo] | "")
+		echo "${cyan}Who can afford that stuff anyway?${normal}"
+		_save_config is10g "no"
+		;;
+	*)
+		echo "${cyan}Who can afford that stuff anyway?${normal}"
+		_save_config is10g "no"
+		;;
 	esac
 	echo
 }
@@ -41,6 +67,13 @@ function _ask10g() {
 # shellcheck disable=2250,2162
 function _askpartition() {
 	if [[ ${quota} == yes ]]; then
+		local saved=$(_load_config primaryroot)
+		if [[ -n "${saved}" ]]; then
+			primaryroot="${saved}"
+			echo "Using saved preference: primaryroot=${primaryroot}"
+			return 0
+		fi
+
 		echo
 		echo "##################################################################################"
 		echo "#${bold} By default the AetherFlow script will initiate a build using ${green}/${normal} ${bold}as the${normal}"
@@ -70,15 +103,23 @@ function _askpartition() {
 		esac
 		echo "Using ${green}$primaryroot mount${normal} for quotas"
 		echo
+		_save_config primaryroot "${primaryroot}"
 	fi
 }
 
 # shellcheck disable=2162
 function _askcontinue() {
+	# If resuming, skip the "press enter" prompt
+	local saved=$(_load_config continued)
+	if [[ -n "${saved}" ]]; then
+		return 0
+	fi
+
 	echo
 	echo "Press ${standout}${green}ENTER${normal} when you're ready to begin or ${standout}${red}Ctrl+Z${normal} to cancel"
 	read -r input
 	echo
+	_save_config continued "yes"
 }
 
 # ask what theme version (8)
@@ -92,6 +133,15 @@ function _askdashtheme() {
 # ask what rtorrent version (9.1)
 # shellcheck disable=2250,2162
 function _askrtorrent() {
+	local saved_rt=$(_load_config RTVERSION)
+	local saved_lt=$(_load_config LTORRENT)
+	if [[ -n "${saved_rt}" && -n "${saved_lt}" ]]; then
+		RTVERSION="${saved_rt}"
+		LTORRENT="${saved_lt}"
+		echo "Using saved preference: rtorrent-${green}${RTVERSION}${normal}/libtorrent-${green}${LTORRENT}${normal}"
+		return 0
+	fi
+
 	echo -e "1) rtorrent ${green}0.9.7 (with ipv6 support)${normal}"
 	echo -e "2) rtorrent ${green}0.9.6 (with ipv6 support)${normal}"
 	echo -e "3) rtorrent ${green}0.9.4 (with ipv6 support)${normal}"
@@ -118,6 +168,8 @@ function _askrtorrent() {
 	esac
 	echo "We will be using rtorrent-${green}${RTVERSION}${normal}/libtorrent-${green}${LTORRENT}${normal}"
 	echo
+	_save_config RTVERSION "${RTVERSION}"
+	_save_config LTORRENT "${LTORRENT}"
 }
 
 
@@ -125,6 +177,13 @@ function _askrtorrent() {
 # install qBittorrent question (9.3)
 # shellcheck disable=2215,2312,2250,2162
 function _askqb() {
+	local saved=$(_load_config QBVERSION)
+	if [[ -n "${saved}" ]]; then
+		QBVERSION="${saved}"
+		echo "Using saved preference: qBittorrent=${QBVERSION}"
+		return 0
+	fi
+
 	echo -e "${green}0)${normal} Do not install qBittorrent${normal}"
 	echo -e "${green}1)${normal} Install qBittorrent (latest repo version)${normal}"
 	echo -ne "${bold}${yellow}Which version of qBittorrent do you want?${normal} (Default ${green}0${normal}): "
@@ -141,11 +200,19 @@ function _askqb() {
 		echo "${bold}${green}qBittorrent ${normal} ${bold}will NOT be installed${normal}"
 	fi
 	echo
+	_save_config QBVERSION "${QBVERSION}"
 }
 
 # install transmission question (9.4)
 # shellcheck disable=2162
 function _asktr() {
+	local saved=$(_load_config tr)
+	if [[ -n "${saved}" ]]; then
+		tr="${saved}"
+		echo "Using saved preference: transmission=${tr}"
+		return 0
+	fi
+
 	echo -ne "${bold}${yellow}Would you like to install transmission? ${normal} [y]es or [${green}n${normal}]o: "
 	read -r response
 	case ${response} in
@@ -154,11 +221,34 @@ function _asktr() {
 	*) tr="no" ;;
 	esac
 	echo
+	_save_config tr "${tr}"
 }
 
 # adduser function (10)
 # shellcheck disable=2215,2312,2250,2162
 function _adduser() {
+	# Check for saved user credentials
+	local saved_user=$(_load_config username)
+	local saved_pass=$(_load_config passwd)
+	local saved_ha1=$(_load_config ha1pass)
+	if [[ -n "${saved_user}" && -n "${saved_pass}" ]]; then
+		username="${saved_user}"
+		passwd="${saved_pass}"
+		ha1pass="${saved_ha1}"
+		echo "Using saved user: ${username}"
+		# Ensure user exists on system (idempotent)
+		if ! id "${username}" &>/dev/null; then
+			/usr/sbin/useradd "${username}" -m -G www-data -s "/bin/bash" 2>/dev/null
+			echo "${username}:${passwd}" | /usr/sbin/chpasswd >>"${OUTTO}" 2>&1
+		fi
+		# Ensure htpasswd entry exists
+		if ! grep -q "^${username}:" "${HTPASSWD}" 2>/dev/null; then
+			local REALM="aetherflow"
+			(echo -n "${username}:${REALM}:" && echo -n "${username}:${REALM}:${passwd}" | md5sum | awk '{print $1}') >>"${HTPASSWD}"
+		fi
+		return 0
+	fi
+
 	local REALM="aetherflow"
 	local HTPASSWD="/etc/htpasswd"
 	theshell="/bin/bash"
@@ -183,11 +273,23 @@ function _adduser() {
 	printf "${username}:${passwd}" >/root/"${username}".info.db
 	echo
 	ha1pass=$(echo -n "${passwd}" | md5sum | cut -f1 -d' ')
+
+	# Persist credentials for resume
+	_save_config username "${username}"
+	_save_config passwd "${passwd}"
+	_save_config ha1pass "${ha1pass}"
 }
 
 # install ffmpeg question (11)
 # shellcheck disable=2162
 function _askffmpeg() {
+	local saved=$(_load_config ffmpeg)
+	if [[ -n "${saved}" ]]; then
+		ffmpeg="${saved}"
+		echo "Using saved preference: ffmpeg=${ffmpeg}"
+		return 0
+	fi
+
 	echo -ne "${bold}${yellow}Would you like to install ffmpeg? (Used for screenshots)${normal} [${green}y${normal}]es or [n]o: "
 	read -r response
 	case ${response} in
@@ -196,11 +298,19 @@ function _askffmpeg() {
 	*) ffmpeg=yes ;;
 	esac
 	echo
+	_save_config ffmpeg "${ffmpeg}"
 }
 
 # ask user for vsftpd conf (12)
 # shellcheck disable=2162,2312
 function _askvsftpd() {
+	local saved=$(_load_config IP)
+	if [[ -n "${saved}" ]]; then
+		IP="${saved}"
+		echo "Using saved preference: IP=${IP}"
+		return 0
+	fi
+
 	local DEFAULTIP
 	DEFAULTIP=$(ifconfig | grep -Eo 'inet (addr:)?([0-9]*\.){3}[0-9]*' | grep -Eo '([0-9]*\.){3}[0-9]*' | grep -v '127.0.0.1')
 	echo -ne "${bold}${yellow}Please, write your public server IP (used for ftp)${normal} (Default: ${green}${bold}${DEFAULTIP}${normal}) "
@@ -212,11 +322,19 @@ function _askvsftpd() {
 	fi
 
 	echo
+	_save_config IP "${IP}"
 }
 
 # install bbr question (x)
 # shellcheck disable=2162
 function _askbbr() {
+	local saved=$(_load_config bbr)
+	if [[ -n "${saved}" ]]; then
+		bbr="${saved}"
+		echo "Using saved preference: bbr=${bbr}"
+		return 0
+	fi
+
 	echo -ne "${bold}${yellow}Would you like to install bbr? (Used for Congestion Control)${normal} [${green}y${normal}]es or [n]o: "
 	read -r response
 	case ${response} in
@@ -225,6 +343,7 @@ function _askbbr() {
 	*) bbr=yes ;;
 	esac
 	echo
+	_save_config bbr "${bbr}"
 }
 ################################################################################
 #   //BEGIN UNUSED FUNCTIONS//
