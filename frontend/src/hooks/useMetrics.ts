@@ -1,16 +1,20 @@
+import useSWR from 'swr';
 import { useWebSocket } from '@/contexts/WebSocketContext';
-import { SystemMetrics } from '@/types/dashboard';
+import { SystemMetrics, HardwareReport } from '@/types/dashboard';
+
+const fetcher = (url: string) => fetch(url).then(res => res.json());
 
 export function useMetrics() {
     const { data: wsData, isConnected, error } = useWebSocket();
+    const { data: hardware, error: hwError } = useSWR<HardwareReport>('/api/system/hardware', fetcher, { revalidateOnFocus: false });
 
-    // Map the WebSocket state back to the expected properties
-    // Services uses this indirectly depending on component logic 
     return {
         metrics: wsData?.system as SystemMetrics | null,
         services: wsData?.services || null,
+        hardware: hardware || null,
         isLoading: !isConnected && !error,
         isError: !!error,
         error
     };
 }
+

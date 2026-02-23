@@ -1,5 +1,5 @@
 import { Clock, Activity, Globe, Zap } from 'lucide-react';
-import { SystemMetrics } from '@/types/dashboard';
+import { SystemMetrics, HardwareReport } from '@/types/dashboard';
 import CpuWidget from '@/components/widgets/CpuWidget';
 import MemoryWidget from '@/components/widgets/MemoryWidget';
 import NetworkWidget from '@/components/widgets/NetworkWidget';
@@ -7,9 +7,10 @@ import StorageWidget from '@/components/widgets/StorageWidget';
 
 interface OverviewTabProps {
     metrics: SystemMetrics;
+    hardware: HardwareReport | null;
 }
 
-export default function OverviewTab({ metrics }: OverviewTabProps) {
+export default function OverviewTab({ metrics, hardware }: OverviewTabProps) {
     return (
         <div className="space-y-6 animate-fade-in">
             {/* Quick Stats Row */}
@@ -45,10 +46,10 @@ export default function OverviewTab({ metrics }: OverviewTabProps) {
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                <CpuWidget metrics={metrics} />
-                <MemoryWidget metrics={metrics} />
-                <NetworkWidget metrics={metrics} />
-                <StorageWidget metrics={metrics} />
+                <CpuWidget metrics={metrics} hardware={hardware} />
+                <MemoryWidget metrics={metrics} hardware={hardware} />
+                <NetworkWidget metrics={metrics} hardware={hardware} />
+                <StorageWidget metrics={metrics} hardware={hardware} />
             </div>
         </div>
     );

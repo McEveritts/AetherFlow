@@ -1,18 +1,19 @@
 import { MemoryStick } from 'lucide-react';
-import { SystemMetrics } from '@/types/dashboard';
+import { SystemMetrics, HardwareReport } from '@/types/dashboard';
 
 interface MemoryWidgetProps {
     metrics: SystemMetrics;
+    hardware: HardwareReport | null;
 }
 
-export default function MemoryWidget({ metrics }: MemoryWidgetProps) {
+export default function MemoryWidget({ metrics, hardware }: MemoryWidgetProps) {
     return (
         <div className="bg-white/[0.02] border border-white/[0.05] rounded-3xl p-6 relative overflow-hidden group hover:bg-white/[0.04] transition-colors backdrop-blur-xl">
             <div className="flex items-center justify-between mb-6">
                 <h2 className="text-base font-semibold text-slate-200 flex items-center gap-2">
                     <MemoryStick size={18} className="text-purple-400" /> Memory Usage
                 </h2>
-                <span className="text-xs font-medium px-2.5 py-1 bg-white/5 rounded-full text-slate-400">DDR5</span>
+                <span className="text-xs font-medium px-2.5 py-1 bg-white/5 rounded-full text-slate-400">{hardware?.memory?.type || 'System RAM'}</span>
             </div>
             <div className="flex items-end space-x-2 mt-4">
                 <span className="text-5xl font-bold tracking-tighter text-purple-400 relative z-10 w-24">

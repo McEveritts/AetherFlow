@@ -1,18 +1,21 @@
 import { Cpu } from 'lucide-react';
-import { SystemMetrics } from '@/types/dashboard';
+import { SystemMetrics, HardwareReport } from '@/types/dashboard';
 
 interface CpuWidgetProps {
     metrics: SystemMetrics;
+    hardware: HardwareReport | null;
 }
 
-export default function CpuWidget({ metrics }: CpuWidgetProps) {
+export default function CpuWidget({ metrics, hardware }: CpuWidgetProps) {
     return (
         <div className="bg-white/[0.02] border border-white/[0.05] rounded-3xl p-6 relative overflow-hidden group hover:bg-white/[0.04] transition-colors backdrop-blur-xl">
             <div className="flex items-center justify-between mb-6">
                 <h2 className="text-base font-semibold text-slate-200 flex items-center gap-2">
                     <Cpu size={18} className="text-blue-400" /> CPU Allocation
                 </h2>
-                <span className="text-xs font-medium px-2.5 py-1 bg-white/5 rounded-full text-slate-400">AMD EPYC</span>
+                <span className="text-xs font-medium px-2.5 py-1 bg-white/5 rounded-full text-slate-400 max-w-[200px] truncate" title={hardware?.cpu?.model || 'Unknown CPU'}>
+                    {hardware?.cpu?.model || 'Unknown CPU'}
+                </span>
             </div>
 
             <div className="flex flex-col items-center justify-center py-4 relative">
