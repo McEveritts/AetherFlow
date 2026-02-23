@@ -33,16 +33,16 @@ $current_vs = "<span id=\"version-result\"></span>";
             <?php if (isAdmin()) { ?>
               <li>
                 <div id="noticePanel" class="btn-group">
-                  <button class="btn" data-toggle="dropdown">
+                  <button class="btn" data-bs-toggle="dropdown">
                     <i class="fa fa-menu"></i> AetherFlow Menu <span class="caret"></span>
                   </button>
                   <div id="noticeDropdown" class="dropdown-menu dm-notice float-end">
                     <div role="tabpanel">
                       <!-- Nav tabs -->
                       <ul class="nav nav-tabs nav-justified" role="tablist">
-                        <li class="active"><a data-target="#quickplus" data-toggle="tab">AetherFlow+</a></li>
-                        <!--li><a data-target="#chat" data-toggle="tab">Chat</a></li-->
-                        <li><a data-target="#dashadjust" data-toggle="tab">Dashboard</a></li>
+                        <li class="active"><a data-bs-target="#quickplus" data-bs-toggle="tab">AetherFlow+</a></li>
+                        <!--li><a data-bs-target="#chat" data-bs-toggle="tab">Chat</a></li-->
+                        <li><a data-bs-target="#dashadjust" data-bs-toggle="tab">Dashboard</a></li>
                       </ul>
 
                       <!-- Tab panes -->
@@ -111,8 +111,8 @@ $current_vs = "<span id=\"version-result\"></span>";
                                     $option[] = array('file' => 'aetherflow', 'title' => 'AetherFlow'); { ?>
                                       <h5><?php echo T('THEME_SELECT'); ?></h5>
                                       <?php foreach ($option as $theme) { ?>
-                                        <small><a href="javascript:void()" data-toggle="modal"
-                                            data-target="#themeSelect<?php echo $theme['file'] ?>Confirm"><img
+                                        <small><a href="javascript:void()" data-bs-toggle="modal"
+                                            data-bs-target="#themeSelect<?php echo $theme['file'] ?>Confirm"><img
                                               class='lang-flag'
                                               src='img/themes/opt_<?php echo $theme['file'] ?>.png' /><?php echo $theme['title'] ?></a></small>
                                       <?php } ?>
@@ -132,7 +132,7 @@ $current_vs = "<span id=\"version-result\"></span>";
             <?php } ?>
             <!-- Notification Bell -->
             <li class="dropdown" id="notification-li">
-              <a href="#" class="dropdown-toggle" data-toggle="dropdown" aria-expanded="false">
+              <a href="#" class="dropdown-toggle" data-bs-toggle="dropdown" aria-expanded="false">
                 <i class="fa fa-bell"></i>
                 <span class="badge badge-danger" id="notif-count" style="display:none;">0</span>
               </a>
@@ -153,7 +153,7 @@ $current_vs = "<span id=\"version-result\"></span>";
             </li>
             <li>
               <div class="btn-group">
-                <button type="button" class="btn btn-logged" data-toggle="dropdown">
+                <button type="button" class="btn btn-logged" data-bs-toggle="dropdown">
                   <?php if (function_exists('getCurrentUserAvatar') && getCurrentUserAvatar()): ?>
                     <img src="<?php echo htmlspecialchars(getCurrentUserAvatar()); ?>" alt=""
                       style="width:20px;height:20px;border-radius:50%;margin-right:4px;vertical-align:middle;">
@@ -178,15 +178,15 @@ $current_vs = "<span id=\"version-result\"></span>";
     <div class="leftcard ps-container">
       <div class="leftpanelinner">
         <ul class="nav nav-tabs nav-justified nav-sidebar">
-          <li class="tooltips active" data-toggle="tooltip" title="<?php echo T('MAIN_MENU'); ?>"
-            data-placement="bottom"><a data-toggle="tab" data-target="#mainmenu"><i
+          <li class="tooltips active" data-bs-toggle="tooltip" title="<?php echo T('MAIN_MENU'); ?>"
+            data-placement="bottom"><a data-bs-toggle="tab" data-bs-target="#mainmenu"><i
                 class="tooltips fa fa-ellipsis-h"></i></a></li>
           <?php if (isAdmin()) { ?>
-            <li class="tooltips" data-toggle="tooltip" title="<?php echo T('RPLUGIN_MENU'); ?>" data-placement="bottom"><a
-                data-toggle="tab" data-target="#plugins"><i class="tooltips fa fa-puzzle-piece"></i></a></li>
+            <li class="tooltips" data-bs-toggle="tooltip" title="<?php echo T('RPLUGIN_MENU'); ?>" data-placement="bottom"><a
+                data-bs-toggle="tab" data-bs-target="#plugins"><i class="tooltips fa fa-puzzle-piece"></i></a></li>
           <?php } ?>
-          <li class="tooltips" data-toggle="tooltip" title="<?php echo T('HELP_COMMANDS'); ?>" data-placement="bottom">
-            <a data-toggle="tab" data-target="#help"><i class="tooltips fa fa-question-circle"></i></a>
+          <li class="tooltips" data-bs-toggle="tooltip" title="<?php echo T('HELP_COMMANDS'); ?>" data-placement="bottom">
+            <a data-bs-toggle="tab" data-bs-target="#help"><i class="tooltips fa fa-question-circle"></i></a>
           </li>
         </ul>
         <div class="tab-content">

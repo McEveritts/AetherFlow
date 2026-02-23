@@ -6,14 +6,14 @@
   <div class="modal-dialog">
     <div class="modal-content">
       <div class="modal-header">
-        <button type="button" class="close" data-dismiss="modal" aria-hidden="true">&times;</button>
+        <button type="button" class="close" data-bs-dismiss="modal" aria-hidden="true">&times;</button>
         <h4 class="modal-title" id="BTSyncRemovalConfirm"><?php echo T('UNINSTALL_TITLE'); ?> BTSync?</h4>
       </div>
       <div class="modal-body">
         <?php echo T('UNINSTALL_BTSYNC_TXT'); ?>
       </div>
       <div class="modal-footer">
-        <button type="button" class="btn btn-default" data-dismiss="modal"><?php echo T('CANCEL'); ?></button>
+        <button type="button" class="btn btn-default" data-bs-dismiss="modal"><?php echo T('CANCEL'); ?></button>
         <a href="?removepackage-btsync=true" id="btsyncRemove" class="btn btn-primary"><?php echo T('AGREE'); ?></a>
       </div>
     </div><!-- modal-content -->
@@ -25,14 +25,14 @@
   <div class="modal-dialog">
     <div class="modal-content">
       <div class="modal-header">
-        <button type="button" class="close" data-dismiss="modal" aria-hidden="true">&times;</button>
+        <button type="button" class="close" data-bs-dismiss="modal" aria-hidden="true">&times;</button>
         <h4 class="modal-title" id="CSFRemovalConfirm"><?php echo T('UNINSTALL_TITLE'); ?> Config Server Firewall?</h4>
       </div>
       <div class="modal-body">
         <?php echo T('UNINSTALL_CSF_TXT'); ?>
       </div>
       <div class="modal-footer">
-        <button type="button" class="btn btn-default" data-dismiss="modal"><?php echo T('CANCEL'); ?></button>
+        <button type="button" class="btn btn-default" data-bs-dismiss="modal"><?php echo T('CANCEL'); ?></button>
         <a href="?removepackage-csf=true" id="csfRemove" class="btn btn-primary"><?php echo T('AGREE'); ?></a>
       </div>
     </div><!-- modal-content -->
@@ -44,14 +44,14 @@
   <div class="modal-dialog">
     <div class="modal-content">
       <div class="modal-header">
-        <button type="button" class="close" data-dismiss="modal" aria-hidden="true">&times;</button>
+        <button type="button" class="close" data-bs-dismiss="modal" aria-hidden="true">&times;</button>
         <h4 class="modal-title" id="CouchPotatoRemovalConfirm"><?php echo T('UNINSTALL_TITLE'); ?> CouchPotato?</h4>
       </div>
       <div class="modal-body">
         <?php echo T('UNINSTALL_COUCHPOTATO_TXT'); ?>
       </div>
       <div class="modal-footer">
-        <button type="button" class="btn btn-default" data-dismiss="modal"><?php echo T('CANCEL'); ?></button>
+        <button type="button" class="btn btn-default" data-bs-dismiss="modal"><?php echo T('CANCEL'); ?></button>
         <a href="?removepackage-couchpotato=true" id="couchpotatoRemove"
           class="btn btn-primary"><?php echo T('AGREE'); ?></a>
       </div>
@@ -64,14 +64,14 @@
   <div class="modal-dialog">
     <div class="modal-content">
       <div class="modal-header">
-        <button type="button" class="close" data-dismiss="modal" aria-hidden="true">&times;</button>
+        <button type="button" class="close" data-bs-dismiss="modal" aria-hidden="true">&times;</button>
         <h4 class="modal-title" id="DelugeRemovalConfirm"><?php echo T('UNINSTALL_TITLE'); ?> Deluge?</h4>
       </div>
       <div class="modal-body">
         <?php echo T('UNINSTALL_DELUGE_TXT'); ?>
       </div>
       <div class="modal-footer">
-        <button type="button" class="btn btn-default" data-dismiss="modal"><?php echo T('CANCEL'); ?></button>
+        <button type="button" class="btn btn-default" data-bs-dismiss="modal"><?php echo T('CANCEL'); ?></button>
         <a href="?removepackage-deluge=true" id="delugeRemove" class="btn btn-primary"><?php echo T('AGREE'); ?></a>
       </div>
     </div><!-- modal-content -->
@@ -83,14 +83,14 @@
   <div class="modal-dialog">
     <div class="modal-content">
       <div class="modal-header">
-        <button type="button" class="close" data-dismiss="modal" aria-hidden="true">&times;</button>
+        <button type="button" class="close" data-bs-dismiss="modal" aria-hidden="true">&times;</button>
         <h4 class="modal-title" id="EmbyRemovalConfirm"><?php echo T('UNINSTALL_TITLE'); ?> Emby-Server?</h4>
       </div>
       <div class="modal-body">
         <?php echo T('UNINSTALL_EMBY_TXT'); ?>
       </div>
       <div class="modal-footer">
-        <button type="button" class="btn btn-default" data-dismiss="modal"><?php echo T('CANCEL'); ?></button>
+        <button type="button" class="btn btn-default" data-bs-dismiss="modal"><?php echo T('CANCEL'); ?></button>
         <a href="?removepackage-emby=true" id="embyRemove" class="btn btn-primary"><?php echo T('AGREE'); ?></a>
       </div>
     </div><!-- modal-content -->
@@ -102,14 +102,14 @@
   <div class="modal-dialog">
     <div class="modal-content">
       <div class="modal-header">
-        <button type="button" class="close" data-dismiss="modal" aria-hidden="true">&times;</button>
+        <button type="button" class="close" data-bs-dismiss="modal" aria-hidden="true">&times;</button>
         <h4 class="modal-title" id="HeadphonesRemovalConfirm"><?php echo T('UNINSTALL_TITLE'); ?> Headphones?</h4>
       </div>
       <div class="modal-body">
         <?php echo T('UNINSTALL_HEADPHONES_TXT'); ?>
       </div>
       <div class="modal-footer">
-        <button type="button" class="btn btn-default" data-dismiss="modal"><?php echo T('CANCEL'); ?></button>
+        <button type="button" class="btn btn-default" data-bs-dismiss="modal"><?php echo T('CANCEL'); ?></button>
         <a href="?removepackage-headphones=true" id="headphonesRemove"
           class="btn btn-primary"><?php echo T('AGREE'); ?></a>
       </div>
@@ -122,14 +122,14 @@
   <div class="modal-dialog">
     <div class="modal-content">
       <div class="modal-header">
-        <button type="button" class="close" data-dismiss="modal" aria-hidden="true">&times;</button>
+        <button type="button" class="close" data-bs-dismiss="modal" aria-hidden="true">&times;</button>
         <h4 class="modal-title" id="JackettRemovalConfirm"><?php echo T('UNINSTALL_TITLE'); ?> Jackett?</h4>
       </div>
       <div class="modal-body">
         <?php echo T('UNINSTALL_JACKETT_TXT'); ?>
       </div>
       <div class="modal-footer">
-        <button type="button" class="btn btn-default" data-dismiss="modal"><?php echo T('CANCEL'); ?></button>
+        <button type="button" class="btn btn-default" data-bs-dismiss="modal"><?php echo T('CANCEL'); ?></button>
         <a href="?removepackage-jackett=true" id="jackettRemove" class="btn btn-primary"><?php echo T('AGREE'); ?></a>
       </div>
     </div><!-- modal-content -->
@@ -141,14 +141,14 @@
   <div class="modal-dialog">
     <div class="modal-content">
       <div class="modal-header">
-        <button type="button" class="close" data-dismiss="modal" aria-hidden="true">&times;</button>
+        <button type="button" class="close" data-bs-dismiss="modal" aria-hidden="true">&times;</button>
         <h4 class="modal-title" id="LidarrRemovalConfirm"><?php echo T('UNINSTALL_TITLE'); ?> Lidarr?</h4>
       </div>
       <div class="modal-body">
         <?php echo T('UNINSTALL_LIDARR_TXT'); ?>
       </div>
       <div class="modal-footer">
-        <button type="button" class="btn btn-default" data-dismiss="modal"><?php echo T('CANCEL'); ?></button>
+        <button type="button" class="btn btn-default" data-bs-dismiss="modal"><?php echo T('CANCEL'); ?></button>
         <a href="?removepackage-lidarr=true" id="lidarrRemove" class="btn btn-primary"><?php echo T('AGREE'); ?></a>
       </div>
     </div><!-- modal-content -->
@@ -160,14 +160,14 @@
   <div class="modal-dialog">
     <div class="modal-content">
       <div class="modal-header">
-        <button type="button" class="close" data-dismiss="modal" aria-hidden="true">&times;</button>
+        <button type="button" class="close" data-bs-dismiss="modal" aria-hidden="true">&times;</button>
         <h4 class="modal-title" id="MedusaRemovalConfirm"><?php echo T('UNINSTALL_TITLE'); ?> Medusa?</h4>
       </div>
       <div class="modal-body">
         <?php echo T('UNINSTALL_MEDUSA_TXT'); ?>
       </div>
       <div class="modal-footer">
-        <button type="button" class="btn btn-default" data-dismiss="modal"><?php echo T('CANCEL'); ?></button>
+        <button type="button" class="btn btn-default" data-bs-dismiss="modal"><?php echo T('CANCEL'); ?></button>
         <a href="?removepackage-medusa=true" id="medusaRemove" class="btn btn-primary"><?php echo T('AGREE'); ?></a>
       </div>
     </div><!-- modal-content -->
@@ -179,14 +179,14 @@
   <div class="modal-dialog">
     <div class="modal-content">
       <div class="modal-header">
-        <button type="button" class="close" data-dismiss="modal" aria-hidden="true">&times;</button>
+        <button type="button" class="close" data-bs-dismiss="modal" aria-hidden="true">&times;</button>
         <h4 class="modal-title" id="NextCloudRemovalConfirm"><?php echo T('UNINSTALL_TITLE'); ?> NextCloud?</h4>
       </div>
       <div class="modal-body">
         <?php echo T('UNINSTALL_NEXTCLOUD_TXT'); ?>
       </div>
       <div class="modal-footer">
-        <button type="button" class="btn btn-default" data-dismiss="modal"><?php echo T('CANCEL'); ?></button>
+        <button type="button" class="btn btn-default" data-bs-dismiss="modal"><?php echo T('CANCEL'); ?></button>
         <a href="?removepackage-nextcloud=true" id="nextcloudRemove"
           class="btn btn-primary"><?php echo T('AGREE'); ?></a>
       </div>
@@ -199,14 +199,14 @@
   <div class="modal-dialog">
     <div class="modal-content">
       <div class="modal-header">
-        <button type="button" class="close" data-dismiss="modal" aria-hidden="true">&times;</button>
+        <button type="button" class="close" data-bs-dismiss="modal" aria-hidden="true">&times;</button>
         <h4 class="modal-title" id="NZBGetRemovalConfirm"><?php echo T('UNINSTALL_TITLE'); ?> NZBGet?</h4>
       </div>
       <div class="modal-body">
         <?php echo T('UNINSTALL_NZBGET_TXT'); ?>
       </div>
       <div class="modal-footer">
-        <button type="button" class="btn btn-default" data-dismiss="modal"><?php echo T('CANCEL'); ?></button>
+        <button type="button" class="btn btn-default" data-bs-dismiss="modal"><?php echo T('CANCEL'); ?></button>
         <a href="?removepackage-nzbget=true" id="nzbgetRemove" class="btn btn-primary"><?php echo T('AGREE'); ?></a>
       </div>
     </div><!-- modal-content -->
@@ -218,14 +218,14 @@
   <div class="modal-dialog">
     <div class="modal-content">
       <div class="modal-header">
-        <button type="button" class="close" data-dismiss="modal" aria-hidden="true">&times;</button>
+        <button type="button" class="close" data-bs-dismiss="modal" aria-hidden="true">&times;</button>
         <h4 class="modal-title" id="NZBHydraRemovalConfirm"><?php echo T('UNINSTALL_TITLE'); ?> NZBHydra?</h4>
       </div>
       <div class="modal-body">
         <?php echo T('UNINSTALL_NZBHYDRA_TXT'); ?>
       </div>
       <div class="modal-footer">
-        <button type="button" class="btn btn-default" data-dismiss="modal"><?php echo T('CANCEL'); ?></button>
+        <button type="button" class="btn btn-default" data-bs-dismiss="modal"><?php echo T('CANCEL'); ?></button>
         <a href="?removepackage-nzbhydra=true" id="nzbhydraRemove" class="btn btn-primary"><?php echo T('AGREE'); ?></a>
       </div>
     </div><!-- modal-content -->
@@ -237,14 +237,14 @@
   <div class="modal-dialog">
     <div class="modal-content">
       <div class="modal-header">
-        <button type="button" class="close" data-dismiss="modal" aria-hidden="true">&times;</button>
+        <button type="button" class="close" data-bs-dismiss="modal" aria-hidden="true">&times;</button>
         <h4 class="modal-title" id="OmbiRemovalConfirm"><?php echo T('UNINSTALL_TITLE'); ?> Ombi?</h4>
       </div>
       <div class="modal-body">
         <?php echo T('UNINSTALL_OMBI_TXT'); ?>
       </div>
       <div class="modal-footer">
-        <button type="button" class="btn btn-default" data-dismiss="modal"><?php echo T('CANCEL'); ?></button>
+        <button type="button" class="btn btn-default" data-bs-dismiss="modal"><?php echo T('CANCEL'); ?></button>
         <a href="?removepackage-ombi=true" id="ombiRemove" class="btn btn-primary"><?php echo T('AGREE'); ?></a>
       </div>
     </div><!-- modal-content -->
@@ -256,14 +256,14 @@
   <div class="modal-dialog">
     <div class="modal-content">
       <div class="modal-header">
-        <button type="button" class="close" data-dismiss="modal" aria-hidden="true">&times;</button>
+        <button type="button" class="close" data-bs-dismiss="modal" aria-hidden="true">&times;</button>
         <h4 class="modal-title" id="PlexRemovalConfirm"><?php echo T('UNINSTALL_TITLE'); ?> Plex?</h4>
       </div>
       <div class="modal-body">
         <?php echo T('UNINSTALL_PLEX_TXT'); ?>
       </div>
       <div class="modal-footer">
-        <button type="button" class="btn btn-default" data-dismiss="modal"><?php echo T('CANCEL'); ?></button>
+        <button type="button" class="btn btn-default" data-bs-dismiss="modal"><?php echo T('CANCEL'); ?></button>
         <a href="?removepackage-plex=true" id="plexRemove" class="btn btn-primary"><?php echo T('AGREE'); ?></a>
       </div>
     </div><!-- modal-content -->
@@ -275,14 +275,14 @@
   <div class="modal-dialog">
     <div class="modal-content">
       <div class="modal-header">
-        <button type="button" class="close" data-dismiss="modal" aria-hidden="true">&times;</button>
+        <button type="button" class="close" data-bs-dismiss="modal" aria-hidden="true">&times;</button>
         <h4 class="modal-title" id="TautulliRemovalConfirm"><?php echo T('UNINSTALL_TITLE'); ?> Tautulli?</h4>
       </div>
       <div class="modal-body">
         <?php echo T('UNINSTALL_TAUTULLI_TXT'); ?>
       </div>
       <div class="modal-footer">
-        <button type="button" class="btn btn-default" data-dismiss="modal"><?php echo T('CANCEL'); ?></button>
+        <button type="button" class="btn btn-default" data-bs-dismiss="modal"><?php echo T('CANCEL'); ?></button>
         <a href="?removepackage-Tautulli=true" id="TautulliRemove" class="btn btn-primary"><?php echo T('AGREE'); ?></a>
       </div>
     </div><!-- modal-content -->
@@ -294,14 +294,14 @@
   <div class="modal-dialog">
     <div class="modal-content">
       <div class="modal-header">
-        <button type="button" class="close" data-dismiss="modal" aria-hidden="true">&times;</button>
+        <button type="button" class="close" data-bs-dismiss="modal" aria-hidden="true">&times;</button>
         <h4 class="modal-title" id="pyLoadRemovalConfirm"><?php echo T('UNINSTALL_TITLE'); ?> pyLoad?</h4>
       </div>
       <div class="modal-body">
         <?php echo T('UNINSTALL_PYLOAD_TXT'); ?>
       </div>
       <div class="modal-footer">
-        <button type="button" class="btn btn-default" data-dismiss="modal"><?php echo T('CANCEL'); ?></button>
+        <button type="button" class="btn btn-default" data-bs-dismiss="modal"><?php echo T('CANCEL'); ?></button>
         <a href="?removepackage-pyload=true" id="pyloadRemove" class="btn btn-primary"><?php echo T('AGREE'); ?></a>
       </div>
     </div><!-- modal-content -->
@@ -313,14 +313,14 @@
   <div class="modal-dialog">
     <div class="modal-content">
       <div class="modal-header">
-        <button type="button" class="close" data-dismiss="modal" aria-hidden="true">&times;</button>
+        <button type="button" class="close" data-bs-dismiss="modal" aria-hidden="true">&times;</button>
         <h4 class="modal-title" id="quasselRemovalConfirm"><?php echo T('UNINSTALL_TITLE'); ?> Quassel?</h4>
       </div>
       <div class="modal-body">
         <?php echo T('UNINSTALL_QUASSEL_TXT'); ?>
       </div>
       <div class="modal-footer">
-        <button type="button" class="btn btn-default" data-dismiss="modal"><?php echo T('CANCEL'); ?></button>
+        <button type="button" class="btn btn-default" data-bs-dismiss="modal"><?php echo T('CANCEL'); ?></button>
         <a href="?removepackage-quassel=true" id="quasselRemove" class="btn btn-primary"><?php echo T('AGREE'); ?></a>
       </div>
     </div><!-- modal-content -->
@@ -332,14 +332,14 @@
   <div class="modal-dialog">
     <div class="modal-content">
       <div class="modal-header">
-        <button type="button" class="close" data-dismiss="modal" aria-hidden="true">&times;</button>
+        <button type="button" class="close" data-bs-dismiss="modal" aria-hidden="true">&times;</button>
         <h4 class="modal-title" id="quotaRemovalConfirm"><?php echo T('UNINSTALL_TITLE'); ?> Quotas?</h4>
       </div>
       <div class="modal-body">
         <?php echo T('UNINSTALL_QUOTAS_TXT'); ?>
       </div>
       <div class="modal-footer">
-        <button type="button" class="btn btn-default" data-dismiss="modal"><?php echo T('CANCEL'); ?></button>
+        <button type="button" class="btn btn-default" data-bs-dismiss="modal"><?php echo T('CANCEL'); ?></button>
         <a href="?removepackage-quota=true" id="quotaRemove" class="btn btn-primary"><?php echo T('AGREE'); ?></a>
       </div>
     </div><!-- modal-content -->
@@ -351,14 +351,14 @@
   <div class="modal-dialog">
     <div class="modal-content">
       <div class="modal-header">
-        <button type="button" class="close" data-dismiss="modal" aria-hidden="true">&times;</button>
+        <button type="button" class="close" data-bs-dismiss="modal" aria-hidden="true">&times;</button>
         <h4 class="modal-title" id="RadarrRemovalConfirm"><?php echo T('UNINSTALL_TITLE'); ?> Radarr?</h4>
       </div>
       <div class="modal-body">
         <?php echo T('UNINSTALL_RADARR_TXT'); ?>
       </div>
       <div class="modal-footer">
-        <button type="button" class="btn btn-default" data-dismiss="modal"><?php echo T('CANCEL'); ?></button>
+        <button type="button" class="btn btn-default" data-bs-dismiss="modal"><?php echo T('CANCEL'); ?></button>
         <a href="?removepackage-radarr=true" id="radarrRemove" class="btn btn-primary"><?php echo T('AGREE'); ?></a>
       </div>
     </div><!-- modal-content -->
@@ -370,14 +370,14 @@
   <div class="modal-dialog">
     <div class="modal-content">
       <div class="modal-header">
-        <button type="button" class="close" data-dismiss="modal" aria-hidden="true">&times;</button>
+        <button type="button" class="close" data-bs-dismiss="modal" aria-hidden="true">&times;</button>
         <h4 class="modal-title" id="RapidleechRemovalConfirm"><?php echo T('UNINSTALL_TITLE'); ?> Rapidleech?</h4>
       </div>
       <div class="modal-body">
         <?php echo T('UNINSTALL_RAPIDLEECH_TXT'); ?>
       </div>
       <div class="modal-footer">
-        <button type="button" class="btn btn-default" data-dismiss="modal"><?php echo T('CANCEL'); ?></button>
+        <button type="button" class="btn btn-default" data-bs-dismiss="modal"><?php echo T('CANCEL'); ?></button>
         <a href="?removepackage-rapidleech=true" id="rapidleechRemove"
           class="btn btn-primary"><?php echo T('AGREE'); ?></a>
       </div>
@@ -390,14 +390,14 @@
   <div class="modal-dialog">
     <div class="modal-content">
       <div class="modal-header">
-        <button type="button" class="close" data-dismiss="modal" aria-hidden="true">&times;</button>
+        <button type="button" class="close" data-bs-dismiss="modal" aria-hidden="true">&times;</button>
         <h4 class="modal-title" id="SABnzbdRemovalConfirm"><?php echo T('UNINSTALL_TITLE'); ?> SABnzbd?</h4>
       </div>
       <div class="modal-body">
         <?php echo T('UNINSTALL_SABNZBD_TXT'); ?>
       </div>
       <div class="modal-footer">
-        <button type="button" class="btn btn-default" data-dismiss="modal"><?php echo T('CANCEL'); ?></button>
+        <button type="button" class="btn btn-default" data-bs-dismiss="modal"><?php echo T('CANCEL'); ?></button>
         <a href="?removepackage-sabnzbd=true" id="sabnzbdRemove" class="btn btn-primary"><?php echo T('AGREE'); ?></a>
       </div>
     </div><!-- modal-content -->
@@ -409,14 +409,14 @@
   <div class="modal-dialog">
     <div class="modal-content">
       <div class="modal-header">
-        <button type="button" class="close" data-dismiss="modal" aria-hidden="true">&times;</button>
+        <button type="button" class="close" data-bs-dismiss="modal" aria-hidden="true">&times;</button>
         <h4 class="modal-title" id="SickGearRemovalConfirm"><?php echo T('UNINSTALL_TITLE'); ?> SickGear?</h4>
       </div>
       <div class="modal-body">
         <?php echo T('UNINSTALL_SICKGEAR_TXT'); ?>
       </div>
       <div class="modal-footer">
-        <button type="button" class="btn btn-default" data-dismiss="modal"><?php echo T('CANCEL'); ?></button>
+        <button type="button" class="btn btn-default" data-bs-dismiss="modal"><?php echo T('CANCEL'); ?></button>
         <a href="?removepackage-sickgear=true" id="sickgearRemove" class="btn btn-primary"><?php echo T('AGREE'); ?></a>
       </div>
     </div><!-- modal-content -->
@@ -428,14 +428,14 @@
   <div class="modal-dialog">
     <div class="modal-content">
       <div class="modal-header">
-        <button type="button" class="close" data-dismiss="modal" aria-hidden="true">&times;</button>
+        <button type="button" class="close" data-bs-dismiss="modal" aria-hidden="true">&times;</button>
         <h4 class="modal-title" id="SickRageRemovalConfirm"><?php echo T('UNINSTALL_TITLE'); ?> SickRage?</h4>
       </div>
       <div class="modal-body">
         <?php echo T('UNINSTALL_SICKRAGE_TXT'); ?>
       </div>
       <div class="modal-footer">
-        <button type="button" class="btn btn-default" data-dismiss="modal"><?php echo T('CANCEL'); ?></button>
+        <button type="button" class="btn btn-default" data-bs-dismiss="modal"><?php echo T('CANCEL'); ?></button>
         <a href="?removepackage-sickrage=true" id="sickrageRemove" class="btn btn-primary"><?php echo T('AGREE'); ?></a>
       </div>
     </div><!-- modal-content -->
@@ -447,14 +447,14 @@
   <div class="modal-dialog">
     <div class="modal-content">
       <div class="modal-header">
-        <button type="button" class="close" data-dismiss="modal" aria-hidden="true">&times;</button>
+        <button type="button" class="close" data-bs-dismiss="modal" aria-hidden="true">&times;</button>
         <h4 class="modal-title" id="SonarrRemovalConfirm"><?php echo T('UNINSTALL_TITLE'); ?> Sonarr-NzbDrone?</h4>
       </div>
       <div class="modal-body">
         <?php echo T('UNINSTALL_SONARR_TXT'); ?>
       </div>
       <div class="modal-footer">
-        <button type="button" class="btn btn-default" data-dismiss="modal"><?php echo T('CANCEL'); ?></button>
+        <button type="button" class="btn btn-default" data-bs-dismiss="modal"><?php echo T('CANCEL'); ?></button>
         <a href="?removepackage-sonarr=true" id="sonarrRemove" class="btn btn-primary"><?php echo T('AGREE'); ?></a>
       </div>
     </div><!-- modal-content -->
@@ -466,14 +466,14 @@
   <div class="modal-dialog">
     <div class="modal-content">
       <div class="modal-header">
-        <button type="button" class="close" data-dismiss="modal" aria-hidden="true">&times;</button>
+        <button type="button" class="close" data-bs-dismiss="modal" aria-hidden="true">&times;</button>
         <h4 class="modal-title" id="SubsonicRemovalConfirm"><?php echo T('UNINSTALL_TITLE'); ?> Subsonic?</h4>
       </div>
       <div class="modal-body">
         <?php echo T('UNINSTALL_SUBSONIC_TXT'); ?>
       </div>
       <div class="modal-footer">
-        <button type="button" class="btn btn-default" data-dismiss="modal"><?php echo T('CANCEL'); ?></button>
+        <button type="button" class="btn btn-default" data-bs-dismiss="modal"><?php echo T('CANCEL'); ?></button>
         <a href="?removepackage-subsonic=true" id="subsonicRemove" class="btn btn-primary"><?php echo T('AGREE'); ?></a>
       </div>
     </div><!-- modal-content -->
@@ -485,14 +485,14 @@
   <div class="modal-dialog">
     <div class="modal-content">
       <div class="modal-header">
-        <button type="button" class="close" data-dismiss="modal" aria-hidden="true">&times;</button>
+        <button type="button" class="close" data-bs-dismiss="modal" aria-hidden="true">&times;</button>
         <h4 class="modal-title" id="SyncthingRemovalConfirm"><?php echo T('UNINSTALL_TITLE'); ?> Syncthing?</h4>
       </div>
       <div class="modal-body">
         <?php echo T('UNINSTALL_SYNCTHING_TXT'); ?>
       </div>
       <div class="modal-footer">
-        <button type="button" class="btn btn-default" data-dismiss="modal"><?php echo T('CANCEL'); ?></button>
+        <button type="button" class="btn btn-default" data-bs-dismiss="modal"><?php echo T('CANCEL'); ?></button>
         <a href="?removepackage-syncthing=true" id="syncthingRemove"
           class="btn btn-primary"><?php echo T('AGREE'); ?></a>
       </div>
@@ -505,14 +505,14 @@
   <div class="modal-dialog">
     <div class="modal-content">
       <div class="modal-header">
-        <button type="button" class="close" data-dismiss="modal" aria-hidden="true">&times;</button>
+        <button type="button" class="close" data-bs-dismiss="modal" aria-hidden="true">&times;</button>
         <h4 class="modal-title" id="TransmissionRemovalConfirm"><?php echo T('UNINSTALL_TITLE'); ?> Transmission?</h4>
       </div>
       <div class="modal-body">
         <?php echo T('UNINSTALL_TRANSMISSION_TXT'); ?>
       </div>
       <div class="modal-footer">
-        <button type="button" class="btn btn-default" data-dismiss="modal"><?php echo T('CANCEL'); ?></button>
+        <button type="button" class="btn btn-default" data-bs-dismiss="modal"><?php echo T('CANCEL'); ?></button>
         <a href="?removepackage-transmission=true" id="transmissionRemove"
           class="btn btn-primary"><?php echo T('AGREE'); ?></a>
       </div>
@@ -525,14 +525,14 @@
   <div class="modal-dialog">
     <div class="modal-content">
       <div class="modal-header">
-        <button type="button" class="close" data-dismiss="modal" aria-hidden="true">&times;</button>
+        <button type="button" class="close" data-bs-dismiss="modal" aria-hidden="true">&times;</button>
         <h4 class="modal-title" id="qBittorrentRemovalConfirm"><?php echo T('UNINSTALL_TITLE'); ?> qBittorrent?</h4>
       </div>
       <div class="modal-body">
         <?php echo T('UNINSTALL_QBITTORRENT_TXT'); ?>
       </div>
       <div class="modal-footer">
-        <button type="button" class="btn btn-default" data-dismiss="modal"><?php echo T('CANCEL'); ?></button>
+        <button type="button" class="btn btn-default" data-bs-dismiss="modal"><?php echo T('CANCEL'); ?></button>
         <a href="?removepackage-qbittorrent=true" id="qbittorrentRemove"
           class="btn btn-primary"><?php echo T('AGREE'); ?></a>
       </div>
@@ -545,14 +545,14 @@
   <div class="modal-dialog">
     <div class="modal-content">
       <div class="modal-header">
-        <button type="button" class="close" data-dismiss="modal" aria-hidden="true">&times;</button>
+        <button type="button" class="close" data-bs-dismiss="modal" aria-hidden="true">&times;</button>
         <h4 class="modal-title" id="x2goRemovalConfirm"><?php echo T('UNINSTALL_TITLE'); ?> x2go?</h4>
       </div>
       <div class="modal-body">
         <?php echo T('UNINSTALL_X2GO_TXT'); ?>
       </div>
       <div class="modal-footer">
-        <button type="button" class="btn btn-default" data-dismiss="modal"><?php echo T('CANCEL'); ?></button>
+        <button type="button" class="btn btn-default" data-bs-dismiss="modal"><?php echo T('CANCEL'); ?></button>
         <a href="?removepackage-x2go=true" id="x2goRemove" class="btn btn-primary"><?php echo T('AGREE'); ?></a>
       </div>
     </div><!-- modal-content -->
@@ -564,14 +564,14 @@
   <div class="modal-dialog">
     <div class="modal-content">
       <div class="modal-header">
-        <button type="button" class="close" data-dismiss="modal" aria-hidden="true">&times;</button>
+        <button type="button" class="close" data-bs-dismiss="modal" aria-hidden="true">&times;</button>
         <h4 class="modal-title" id="ZNCRemovalConfirm"><?php echo T('UNINSTALL_TITLE'); ?> ZNC?</h4>
       </div>
       <div class="modal-body">
         <?php echo T('UNINSTALL_ZNC_TXT'); ?>
       </div>
       <div class="modal-footer">
-        <button type="button" class="btn btn-default" data-dismiss="modal"><?php echo T('CANCEL'); ?></button>
+        <button type="button" class="btn btn-default" data-bs-dismiss="modal"><?php echo T('CANCEL'); ?></button>
         <a href="?removepackage-znc=true" id="zncRemove" class="btn btn-primary"><?php echo T('AGREE'); ?></a>
       </div>
     </div><!-- modal-content -->
@@ -589,14 +589,14 @@ $option[] = array('file' => 'aetherflow', 'title' => 'AetherFlow'); { ?>
       <div class="modal-dialog">
         <div class="modal-content">
           <div class="modal-header">
-            <button type="button" class="close" data-dismiss="modal" aria-hidden="true">&times;</button>
+            <button type="button" class="close" data-bs-dismiss="modal" aria-hidden="true">&times;</button>
             <h4 class="modal-title" id="ThemeSelect<?php echo $theme['file'] ?>Confirm"><?php echo $theme['title'] ?></h4>
           </div>
           <div class="modal-body">
             <?php echo T('THEME_CHANGE_TXT'); ?>
           </div>
           <div class="modal-footer">
-            <button type="button" class="btn btn-default" data-dismiss="modal"><?php echo T('CANCEL'); ?></button>
+            <button type="button" class="btn btn-default" data-bs-dismiss="modal"><?php echo T('CANCEL'); ?></button>
             <a href="?themeSelect-<?php echo $theme['file'] ?>=true" id="themeSelect<?php echo $theme['file'] ?>Go"
               class="btn btn-primary"><?php echo T('AGREE'); ?></a>
           </div>
@@ -629,7 +629,7 @@ $option[] = array('file' => 'aetherflow', 'title' => 'AetherFlow'); { ?>
   <div class="modal-dialog">
     <div class="modal-content">
       <div class="modal-header">
-        <button type="button" class="close" data-dismiss="modal" aria-hidden="true">&times;</button>
+        <button type="button" class="close" data-bs-dismiss="modal" aria-hidden="true">&times;</button>
         <h4 class="modal-title" id="VersionChecker">System Updates</h4>
       </div>
       <div class="modal-body">
@@ -637,7 +637,7 @@ $option[] = array('file' => 'aetherflow', 'title' => 'AetherFlow'); { ?>
         <p class="text-muted">A new release-based update mechanism is coming soon. Stay tuned!</p>
       </div>
       <div class="modal-footer">
-        <button type="button" class="btn btn-default" data-dismiss="modal">Close</button>
+        <button type="button" class="btn btn-default" data-bs-dismiss="modal">Close</button>
       </div>
     </div>
   </div>
