@@ -1,7 +1,7 @@
 'use client';
 
-import { useEffect, useState } from 'react';
-import { TabId, SystemMetrics } from '@/types/dashboard';
+import { useState } from 'react';
+import { TabId } from '@/types/dashboard';
 import Sidebar from '@/components/layout/Sidebar';
 import Header from '@/components/layout/Header';
 import OverviewTab from '@/components/tabs/OverviewTab';
@@ -9,106 +9,85 @@ import ServicesTab from '@/components/tabs/ServicesTab';
 import MarketplaceTab from '@/components/tabs/MarketplaceTab';
 import AiChatTab from '@/components/tabs/AiChatTab';
 import SettingsTab from '@/components/tabs/SettingsTab';
+import SecurityTab from '@/components/tabs/SecurityTab';
+import FileshareTab from '@/components/tabs/FileshareTab';
+import BackupTab from '@/components/tabs/BackupTab';
+import ProfileTab from '@/components/tabs/ProfileTab';
+import UsersTab from '@/components/tabs/UsersTab';
+import { useMetrics } from '@/hooks/useMetrics';
+import { OverviewSkeleton } from '@/components/layout/SkeletonBox';
+import OnboardingWizard from '@/components/layout/OnboardingWizard';
+import useSWR from 'swr';
 
-const MOCK_DATA: SystemMetrics = {
-  cpu_usage: 24.8,
-  disk_space: {
-    total: 4096.0,
-    used: 2145.5,
-    free: 1950.5
-  },
-  is_windows: false,
-  services: {
-    'Plex Media Server': { status: 'running', uptime: '14d 2h', version: '1.32.5' },
-    'rTorrent': { status: 'running', uptime: '45d 1h', version: '0.9.8' },
-    'Sonarr': { status: 'running', uptime: '12d 5h', version: '3.0.9' },
-    'Radarr': { status: 'running', uptime: '12d 5h', version: '4.3.2' },
-    'Lidarr': { status: 'stopped', uptime: '-', version: '1.0.2' },
-    'Readarr': { status: 'running', uptime: '5d 10h', version: '0.1.1' },
-    'Tautulli': { status: 'running', uptime: '45d 1h', version: '2.14.3' },
-    'Overseerr': { status: 'running', uptime: '30d 12h', version: '1.33.2' },
-    'Nginx Proxy Manager': { status: 'running', uptime: '80d 4h', version: '2.9.18' },
-    'Docker Engine': { status: 'running', uptime: '80d 5h', version: '24.0.2' },
-    'WireGuard VPN': { status: 'error', uptime: '-', version: '1.0.20210914' },
-    'Jackett': { status: 'running', uptime: '10d 2h', version: '0.21.1' }
-  },
-  memory: {
-    total: 64.0,
-    used: 14.2
-  },
-  network: {
-    down: "125.4 MB/s",
-    up: "12.2 MB/s",
-    active_connections: 342
-  },
-  uptime: "80 Days, 5 Hours",
-  load_average: [1.25, 2.10, 1.85]
-};
+const fetcher = (url: string) => fetch(url).then((res) => res.json());
 
 export default function Dashboard() {
-  const [metrics, setMetrics] = useState<SystemMetrics>(MOCK_DATA);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<TabId>('overview');
   const [isSidebarHovered, setIsSidebarHovered] = useState(false);
-  const [isLive, setIsLive] = useState(false);
+  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
+  const { metrics, services, isLoading, isError, error } = useMetrics();
 
-  useEffect(() => {
-    let isMounted = true;
-    const controller = new AbortController();
+  const { data: settingsData, mutate: mutateSettings } = useSWR(
+    'http://localhost:8080/api/settings',
+    fetcher,
+    { revalidateOnFocus: false }
+  );
 
-    const fetchMetrics = async () => {
-      try {
-        const res = await fetch('http://localhost:8080/api/system/metrics', {
-          signal: controller.signal
-        });
-        if (!res.ok) throw new Error('API server unavailable.');
-
-        const data = await res.json();
-        if (isMounted) {
-          setMetrics({
-            ...MOCK_DATA,
-            cpu_usage: data.cpu_usage || MOCK_DATA.cpu_usage,
-            disk_space: data.disk_space || MOCK_DATA.disk_space
-          });
-          setError(null);
-          setIsLive(true);
-        }
-      } catch (err: any) {
-        if (err.name !== 'AbortError' && isMounted) {
-          setError("Backend Offline. Displaying Representative Environment.");
-          setMetrics(MOCK_DATA);
-          setIsLive(false);
-        }
-      } finally {
-        if (isMounted) {
-          setLoading(false);
-        }
-      }
-    };
-
-    fetchMetrics();
-    const interval = setInterval(fetchMetrics, 5000);
-
-    return () => {
-      isMounted = false;
-      clearInterval(interval);
-      controller.abort();
-    };
-  }, []);
+  const handleTabChange = (tab: TabId) => {
+    setActiveTab(tab);
+    setIsMobileMenuOpen(false); // Close sidebar automatically on mobile picking a tab
+  };
 
   const renderContent = () => {
+    if (isLoading) {
+      if (activeTab === 'overview') {
+        return <OverviewSkeleton />;
+      }
+
+      return (
+        <div className="flex items-center justify-center h-full min-h-[50vh]">
+          <div className="flex flex-col items-center gap-4 text-slate-400">
+            <div className="w-10 h-10 border-4 border-indigo-500/20 border-t-indigo-500 rounded-full animate-spin"></div>
+            <p className="font-medium tracking-wide">Establishing Nexus Link...</p>
+          </div>
+        </div>
+      );
+    }
+
+    if (isError || !metrics || !services) {
+      return (
+        <div className="flex items-center justify-center h-full min-h-[50vh]">
+          <div className="bg-red-500/10 border border-red-500/20 p-8 rounded-2xl flex flex-col items-center gap-4 text-center max-w-md backdrop-blur-md">
+            <div className="w-12 h-12 bg-red-500/20 rounded-full flex items-center justify-center text-red-400 text-2xl font-bold">!</div>
+            <h3 className="text-lg font-bold text-slate-200">System Offline</h3>
+            <p className="text-sm text-slate-400">Unable to connect to the AetherFlow backend API. Make sure the Go service is running.</p>
+            <p className="text-xs text-red-400/80 font-mono bg-red-500/10 px-2 py-1 rounded truncate max-w-full">{error?.message || 'Connection refused'}</p>
+          </div>
+        </div>
+      );
+    }
+
     switch (activeTab) {
       case 'overview':
         return <OverviewTab metrics={metrics} />;
       case 'services':
-        return <ServicesTab metrics={metrics} onDeployApp={() => setActiveTab('marketplace')} />;
+        return <ServicesTab services={services} onDeployApp={() => handleTabChange('marketplace')} />;
       case 'marketplace':
         return <MarketplaceTab />;
       case 'ai':
-        return <AiChatTab setActiveTab={setActiveTab} />;
+        return <AiChatTab setActiveTab={handleTabChange} />;
       case 'settings':
         return <SettingsTab />;
+      case 'security':
+        return <SecurityTab />;
+      case 'users':
+        return <UsersTab />;
+      case 'fileshare':
+        return <FileshareTab />;
+      case 'backups':
+        return <BackupTab />;
+      case 'profile':
+        return <ProfileTab />;
       default:
         return <div className="text-slate-400">Please select an option from the sidebar.</div>;
     }
@@ -116,6 +95,13 @@ export default function Dashboard() {
 
   return (
     <div className="flex min-h-screen bg-slate-950 text-slate-50 overflow-hidden font-sans selection:bg-indigo-500/30">
+
+      {settingsData && !settingsData.setupCompleted && (
+        <OnboardingWizard
+          initialSettings={settingsData}
+          onComplete={() => mutateSettings({ ...settingsData, setupCompleted: true })}
+        />
+      )}
 
       {/* Background ambient lighting */}
       <div className="fixed top-0 left-1/2 -translate-x-1/2 w-full max-w-7xl h-full pointer-events-none z-0">
@@ -125,16 +111,18 @@ export default function Dashboard() {
 
       <Sidebar
         activeTab={activeTab}
-        setActiveTab={setActiveTab}
+        setActiveTab={handleTabChange}
         isSidebarHovered={isSidebarHovered}
         setIsSidebarHovered={setIsSidebarHovered}
+        isMobileMenuOpen={isMobileMenuOpen}
+        setIsMobileMenuOpen={setIsMobileMenuOpen}
       />
 
-      <main className={`flex-1 transition-all duration-300 ease-[cubic-bezier(0.4,0,0.2,1)] relative z-10 h-screen overflow-y-auto no-scrollbar ${isSidebarHovered ? 'ml-64' : 'ml-20'}`}>
-        <Header activeTab={activeTab} error={error} />
+      <main className={`flex-1 transition-all duration-300 ease-[cubic-bezier(0.4,0,0.2,1)] relative z-10 h-screen overflow-y-auto no-scrollbar ${isSidebarHovered ? 'md:ml-64' : 'md:ml-20'} ml-0`}>
+        <Header activeTab={activeTab} error={isError ? "API Offline" : null} toggleMobileMenu={() => setIsMobileMenuOpen(!isMobileMenuOpen)} />
 
         {/* Scrollable Content */}
-        <div className="p-10 max-w-[1600px] mx-auto min-h-[calc(100vh-5rem)]">
+        <div className="p-4 md:p-10 max-w-[1600px] mx-auto min-h-[calc(100vh-5rem)]">
           {renderContent()}
         </div>
       </main>
