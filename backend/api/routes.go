@@ -62,6 +62,7 @@ func RegisterRoutes(r *gin.Engine) {
 		apiGroup.POST("/system/update/run", RunUpdate)
 
 		// System Hardware Stats (Existing)
+		apiGroup.GET("/system/hardware", GetHardwareInfo)
 		apiGroup.GET("/system/metrics", func(c *gin.Context) {
 			// In the future this might call actual sh commands
 			// For now, it returns a stub for the frontend to consume
