@@ -12,7 +12,7 @@ import ToastContainer from '@/components/layout/ToastContainer';
 const inter = Inter({ subsets: ['latin'] })
 
 export const metadata: Metadata = {
-  title: 'MediaNexus | AetherFlow',
+  title: 'AetherFlow Dashboard',
   description: 'Next-Generation Decoupled Dashboard',
 }
 

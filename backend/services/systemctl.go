@@ -3,16 +3,11 @@ package services
 import (
 	"log"
 	"os/exec"
-	"runtime"
 	"strings"
 )
 
 // GetServiceInfo queries systemctl for the status, uptime (via ActiveEnterTimestamp), and version of a given service.
 func GetServiceInfo(serviceName string) (status, uptime, version string) {
-	if runtime.GOOS == "windows" {
-		// Mock Data for Windows dev environment
-		return "running", "Mocked Uptime", "1.0.0-mock"
-	}
 
 	// Default values
 	status = "stopped"
@@ -58,10 +53,6 @@ func GetServiceInfo(serviceName string) (status, uptime, version string) {
 
 // ControlService safely executes start, stop, or restart on a given service.
 func ControlService(serviceName, action string) error {
-	if runtime.GOOS == "windows" {
-		log.Printf("[Mock Systemctl] %s triggered on %s", action, serviceName)
-		return nil
-	}
 
 	log.Printf("[Systemctl] Executing: sudo systemctl %s %s", action, serviceName)
 	cmd := exec.Command("sudo", "systemctl", action, serviceName)

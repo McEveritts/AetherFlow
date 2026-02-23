@@ -11,28 +11,35 @@ echo "Starting AetherFlow Update Sequence"
 echo "Date: $(date)"
 echo "========================================"
 
-# In a real environment, this would:
-# 1. Download the latest tarball from GitHub
-# 2. Extract over /opt/AetherFlow
-# 3. Handle data migrations
+# 1. Pull latest code from GitHub
+echo "Pulling latest code from master branch..."
+cd /opt/AetherFlow || exit 1
+git fetch --all
+git checkout -f master
+git reset --hard origin/master
 
-echo "Simulating code pull from branch main..."
-sleep 2
-
+# 2. Rebuild Go API Binary
 echo "Rebuilding Go API Binary..."
-cd /opt/AetherFlow/backend || exit
-# /usr/local/go/bin/go build -o aetherflow-api main.go
-sleep 2
+cd /opt/AetherFlow/backend || exit 1
+export CGO_ENABLED=1
+/usr/local/go/bin/go build -o aetherflow-api main.go
+
 echo "Restarting API via PM2..."
-# pm2 restart aetherflow-api
+pm2 restart aetherflow-api || pm2 start ./aetherflow-api --name "aetherflow-api"
 
+# 3. Rebuild Next.js Frontend
 echo "Rebuilding Next.js Frontend Bundle..."
-cd /opt/AetherFlow/frontend || exit
-# npm install
-# npm run build
-sleep 2
-echo "Restarting Frontend via PM2..."
-# pm2 restart aetherflow-frontend
+cd /opt/AetherFlow/frontend || exit 1
+npm install
+npm run build
 
-echo "Update complete! Systems are coming back up."
+echo "Restarting Frontend via PM2..."
+pm2 restart aetherflow-frontend || pm2 start npm --name "aetherflow-frontend" -- start
+
+pm2 save
+
+# 4. Reload Apache
+systemctl restart apache2
+
+echo "Update complete! All systems are back up."
 echo "========================================"

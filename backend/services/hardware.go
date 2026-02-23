@@ -143,7 +143,6 @@ func GetSystemMetricsCore() models.SystemMetrics {
 		},
 		Uptime: uptimeStr,
 		LoadAverage: loadAvg,
-		IsWindows: false,
 		Services:  servicesMap, // Deprecated at this layer, used service_manager instead
 	}
 }
