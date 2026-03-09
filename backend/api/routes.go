@@ -34,9 +34,8 @@ func RegisterRoutes(r *gin.Engine) {
 		// Settings (Open for GET, Admin Only for PUT)
 		apiGroup.GET("/settings", GetSettings) // Open so UI can configure
 
-		// File Share
+		// File Share (listing is read-only, upload requires admin)
 		apiGroup.GET("/fileshare", GetFilesList)
-		apiGroup.POST("/fileshare/upload", UploadFile)
 
 		// Admin-only routes
 		adminGroup := apiGroup.Group("")
@@ -64,6 +63,9 @@ func RegisterRoutes(r *gin.Engine) {
 
 			// System Update (admin-only)
 			adminGroup.POST("/system/update/run", RunUpdate)
+
+			// File Share Upload (admin-only)
+			adminGroup.POST("/fileshare/upload", UploadFile)
 		}
 
 		// Services API (read-only: public, mutating: admin-only)

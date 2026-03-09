@@ -121,23 +121,39 @@ function _updateqb() {
   if [[ ! -f /install/.developer.lock ]]; then
     if [[ -d /opt/AetherFlow ]]; then
       cd /opt/AetherFlow || { echo "Critical: /opt/AetherFlow not found!"; exit 1; }
-      git fetch --all
-      git checkout -f master
-      git reset --hard origin/master
+      git stash --include-untracked -m "af-update-$(date +%s)" 2>/dev/null || true
+      git checkout master 2>/dev/null
+      if ! git pull --ff-only 2>/dev/null; then
+        echo "[WARN] Fast-forward failed, attempting rebase..."
+        if ! git pull --rebase 2>/dev/null; then
+          echo "[ERROR] Rebase failed (conflicts). Aborting update."
+          git rebase --abort 2>/dev/null
+          return 1
+        fi
+      fi
     else
       git clone --recursive https://github.com/McEveritts/AetherFlow /opt/AetherFlow
     fi
   else
     if [[ -d /opt/AetherFlow ]]; then
       cd /opt/AetherFlow || { echo "Critical: /opt/AetherFlow not found!"; exit 1; }
-      git fetch --all
+      git stash --include-untracked -m "af-update-dev-$(date +%s)" 2>/dev/null || true
       if git rev-parse --verify origin/development >/dev/null 2>&1; then
-        git checkout -f development
-        git reset --hard origin/development
+        git checkout development 2>/dev/null
+        if ! git pull --ff-only 2>/dev/null; then
+          echo "[WARN] Fast-forward failed, attempting rebase..."
+          if ! git pull --rebase 2>/dev/null; then
+            echo "[ERROR] Rebase failed (conflicts). Aborting update."
+            git rebase --abort 2>/dev/null
+            return 1
+          fi
+        fi
       else
         echo "[WARN] development branch not found on remote, falling back to master"
-        git checkout -f master
-        git reset --hard origin/master
+        git checkout master 2>/dev/null
+        if ! git pull --ff-only 2>/dev/null; then
+          git pull --rebase 2>/dev/null || { git rebase --abort 2>/dev/null; return 1; }
+        fi
       fi
     else
       git clone --recursive --branch "development" https://github.com/McEveritts/AetherFlow /opt/AetherFlow 2>/dev/null || \
