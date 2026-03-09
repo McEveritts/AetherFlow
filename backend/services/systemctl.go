@@ -161,8 +161,25 @@ func GetPM2ServiceInfo(pm2Processes map[string]PM2Process, processName string) (
 	return
 }
 
+// allowedServiceActions is the set of permitted service control verbs.
+var allowedServiceActions = map[string]bool{"start": true, "stop": true, "restart": true}
+
+// validateServiceName rejects names containing shell metacharacters.
+func validateServiceName(name string) error {
+	if strings.ContainsAny(name, " \t\n;&|`$(){}") {
+		return fmt.Errorf("invalid service name: %q", name)
+	}
+	return nil
+}
+
 // ControlService safely executes start, stop, or restart on a given systemd service.
 func ControlService(serviceName, action string) error {
+	if !allowedServiceActions[action] {
+		return fmt.Errorf("disallowed action: %s", action)
+	}
+	if err := validateServiceName(serviceName); err != nil {
+		return err
+	}
 	log.Printf("[Systemctl] Executing: sudo systemctl %s %s", action, serviceName)
 	cmd := exec.Command("sudo", "systemctl", action, serviceName)
 	output, err := cmd.CombinedOutput()
@@ -176,6 +193,12 @@ func ControlService(serviceName, action string) error {
 
 // ControlPM2Service executes start, stop, or restart on a PM2 process.
 func ControlPM2Service(processName, action string) error {
+	if !allowedServiceActions[action] {
+		return fmt.Errorf("disallowed action: %s", action)
+	}
+	if err := validateServiceName(processName); err != nil {
+		return err
+	}
 	pm2Path := findPM2Binary()
 	if pm2Path == "" {
 		return fmt.Errorf("pm2 binary not found")

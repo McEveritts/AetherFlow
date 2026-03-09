@@ -57,7 +57,7 @@ func GetFilesList(c *gin.Context) {
 		if err != nil {
 			continue
 		}
-		
+
 		fileList = append(fileList, FileInfo{
 			Name:      info.Name(),
 			Size:      info.Size(),
@@ -77,7 +77,14 @@ func UploadFile(c *gin.Context) {
 	}
 
 	uploadDir := getUploadDir()
-	dst := filepath.Join(uploadDir, file.Filename)
+
+	// Sanitize: strip directory components to prevent path traversal
+	safeName := filepath.Base(file.Filename)
+	if safeName == "." || safeName == ".." || safeName == string(filepath.Separator) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid filename"})
+		return
+	}
+	dst := filepath.Join(uploadDir, safeName)
 
 	if err := c.SaveUploadedFile(file, dst); err != nil {
 		log.Printf("Failed to save uploaded file: %v", err)
@@ -86,7 +93,7 @@ func UploadFile(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"message": "File uploaded successfully",
-		"filename": file.Filename,
+		"message":  "File uploaded successfully",
+		"filename": safeName,
 	})
 }

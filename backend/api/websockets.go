@@ -4,10 +4,12 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
 	"aetherflow/services"
+
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 )
@@ -15,9 +17,14 @@ import (
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
-	// Allow any origin for local dashboard purposes
+	// Validate that the Origin header matches the Host (same-origin policy)
 	CheckOrigin: func(r *http.Request) bool {
-		return true
+		origin := r.Header.Get("Origin")
+		if origin == "" {
+			return true // Non-browser clients (curl, server-side, etc.)
+		}
+		host := r.Host
+		return strings.HasSuffix(origin, "://"+host)
 	},
 }
 
@@ -135,7 +142,7 @@ func broadcastMetricsLoop() {
 
 	for {
 		<-ticker.C
-		
+
 		// Wait until there's at least one client connected to save CPU cycles
 		WSHub.mu.Lock()
 		clientCount := len(WSHub.clients)
@@ -146,14 +153,14 @@ func broadcastMetricsLoop() {
 		}
 
 		metrics := services.GetSystemMetricsCore()
-		
+
 		// Query actual systemctl and OS packages
 		servicesList := services.GetActiveServices()
 
 		payload := map[string]interface{}{
 			"type": "METRICS_UPDATE",
 			"data": map[string]interface{}{
-				"system": metrics,
+				"system":   metrics,
 				"services": servicesList,
 			},
 		}

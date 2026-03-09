@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"aetherflow/services"
+
 	"github.com/gin-gonic/gin"
 )
 
@@ -49,21 +50,27 @@ func RegisterRoutes(r *gin.Engine) {
 			adminGroup.GET("/users", GetUsers)
 			adminGroup.PUT("/users/:id/role", UpdateUserRole)
 			adminGroup.DELETE("/users/:id", DeleteUser)
+
+			// Service Control (admin-only)
+			adminGroup.POST("/services/:name/control", controlService)
+
+			// Package Install/Uninstall (admin-only)
+			adminGroup.POST("/packages/:id/install", InstallPackage)
+			adminGroup.POST("/packages/:id/uninstall", UninstallPackage)
+
+			// System Update (admin-only)
+			adminGroup.POST("/system/update/run", RunUpdate)
 		}
 
-		// Services API
-		apiGroup.GET("/services", getServices) // Renamed from GetServices to match existing
-		apiGroup.POST("/services/:name/control", controlService) // Renamed from ControlService to match existing
+		// Services API (read-only: public, mutating: admin-only)
+		apiGroup.GET("/services", getServices)
 
-		// Marketplace API
+		// Marketplace API (read-only: public, mutating: admin-only)
 		apiGroup.GET("/marketplace", GetMarketplaceApps)
-		apiGroup.POST("/packages/:id/install", InstallPackage)
-		apiGroup.POST("/packages/:id/uninstall", UninstallPackage)
 		apiGroup.GET("/packages/:id/progress", PackageProgress)
 
-		// Updater API
+		// Updater API (read-only: public, mutating: admin-only)
 		apiGroup.GET("/system/update/check", CheckUpdate)
-		apiGroup.POST("/system/update/run", RunUpdate)
 
 		// System Hardware Stats (Existing)
 		apiGroup.GET("/system/hardware", GetHardwareInfo)
@@ -74,13 +81,13 @@ func RegisterRoutes(r *gin.Engine) {
 				"cpu": 45.2,
 				"memory": gin.H{
 					"total": 16,
-					"used": 8.5,
-					"free": 7.5,
+					"used":  8.5,
+					"free":  7.5,
 				},
 				"disk": gin.H{
 					"total": 500,
-					"used": 250,
-					"free": 250,
+					"used":  250,
+					"free":  250,
 				},
 				"uptime": "14 days, 2 hours",
 			})
@@ -98,6 +105,9 @@ func getServices(c *gin.Context) {
 	c.JSON(http.StatusOK, servicesList)
 }
 
+// allowedActions is the set of permitted service control actions.
+var allowedActions = map[string]bool{"start": true, "stop": true, "restart": true}
+
 func controlService(c *gin.Context) {
 	serviceName := c.Param("name")
 
@@ -109,6 +119,12 @@ func controlService(c *gin.Context) {
 
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Validate action against allowlist
+	if !allowedActions[req.Action] {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid action. Allowed: start, stop, restart"})
 		return
 	}
 
