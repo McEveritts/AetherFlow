@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"aetherflow/db"
+
 	"github.com/gin-gonic/gin"
 	"github.com/google/generative-ai-go/genai"
 	"google.golang.org/api/option"
@@ -17,6 +18,16 @@ import (
 type ChatMessage struct {
 	Role string `json:"role"`
 	Text string `json:"text"`
+}
+
+// allowedAIModels is the set of valid Gemini model identifiers.
+var allowedAIModels = map[string]bool{
+	"gemini-2.0-flash":      true,
+	"gemini-2.0-flash-lite": true,
+	"gemini-2.5-pro":        true,
+	"gemini-2.5-flash":      true,
+	"gemini-1.5-pro":        true,
+	"gemini-1.5-flash":      true,
 }
 
 type ChatRequest struct {
@@ -58,6 +69,10 @@ func handleAiChat(c *gin.Context) {
 
 	// Per-request model override from the chat selector
 	if req.Model != "" {
+		if !allowedAIModels[req.Model] {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid AI model. Check settings for available models."})
+			return
+		}
 		aiModel = req.Model
 	}
 
@@ -96,10 +111,15 @@ func handleAiChat(c *gin.Context) {
 	}
 
 	var replyText string
-	for _, part := range resp.Candidates[0].Content.Parts {
-		if text, ok := part.(genai.Text); ok {
-			replyText += string(text)
+	if resp != nil && len(resp.Candidates) > 0 && resp.Candidates[0].Content != nil {
+		for _, part := range resp.Candidates[0].Content.Parts {
+			if text, ok := part.(genai.Text); ok {
+				replyText += string(text)
+			}
 		}
+	}
+	if replyText == "" {
+		replyText = "I received an empty response. Please try again."
 	}
 
 	c.JSON(http.StatusOK, ChatResponse{Reply: replyText})

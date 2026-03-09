@@ -1,8 +1,8 @@
 package api
 
 import (
+	"aetherflow/db"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"os"
@@ -33,7 +33,7 @@ func getActiveDbPath() string {
 
 func RunBackup(c *gin.Context) {
 	dbPath := getActiveDbPath()
-	
+
 	// Create backup dir relative to db location
 	backupDir := filepath.Join(filepath.Dir(dbPath), "backups")
 	if err := os.MkdirAll(backupDir, 0755); err != nil {
@@ -44,36 +44,25 @@ func RunBackup(c *gin.Context) {
 	timestamp := time.Now().Format("2006-01-02_15-04-05")
 	backupFile := filepath.Join(backupDir, fmt.Sprintf("aetherflow_%s.sqlite", timestamp))
 
-	source, err := os.Open(dbPath)
+	// Use SQLite's VACUUM INTO for a consistent backup (safe even while DB is being written)
+	_, err := db.DB.Exec(fmt.Sprintf(`VACUUM INTO '%s'`, backupFile))
 	if err != nil {
-		log.Printf("Backup failed to open source: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to read database file"})
-		return
-	}
-	defer source.Close()
-
-	destination, err := os.Create(backupFile)
-	if err != nil {
-		log.Printf("Backup failed to create dest: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create backup file"})
-		return
-	}
-	defer destination.Close()
-
-	bytesCopied, err := io.Copy(destination, source)
-	if err != nil {
-		log.Printf("Backup failed to copy: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "File copy failed"})
+		log.Printf("Backup VACUUM INTO failed: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Backup failed: " + err.Error()})
 		return
 	}
 
-	// Simulate secondary snapshot tasks (e.g. Docker configs)
-	time.Sleep(1 * time.Second)
+	// Get the backup file size
+	info, err := os.Stat(backupFile)
+	var fileSize int64
+	if err == nil {
+		fileSize = info.Size()
+	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"message": "Backup completed successfully",
-		"filename": filepath.Base(backupFile),
-		"size": bytesCopied,
+		"message":   "Backup completed successfully",
+		"filename":  filepath.Base(backupFile),
+		"size":      fileSize,
 		"timestamp": time.Now().Format(time.RFC3339),
 	})
 }

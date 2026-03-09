@@ -13,7 +13,7 @@ export default function OnboardingWizard({ initialSettings, onComplete }: Onboar
     const [isSaving, setIsSaving] = useState(false);
 
     // We only expose a few settings for onboarding to keep it simple
-    const [aiModel, setAiModel] = useState(initialSettings?.aiModel || 'gemini-1.5-ultra');
+    const [aiModel, setAiModel] = useState(initialSettings?.aiModel || 'gemini-2.5-pro');
 
     const handleNext = () => setStep(s => Math.min(s + 1, 3));
     const handlePrev = () => setStep(s => Math.max(s - 1, 1));
@@ -109,7 +109,7 @@ export default function OnboardingWizard({ initialSettings, onComplete }: Onboar
                             <div className="bg-slate-950/50 border border-white/10 rounded-2xl p-6 mt-6">
                                 <label className="block text-sm font-semibold text-slate-300 mb-3">Primary Language Model</label>
                                 <div className="space-y-3">
-                                    {['gemini-1.5-ultra', 'gemini-1.5-pro', 'gemini-1.0-pro'].map((m) => (
+                                    {['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.0-flash'].map((m) => (
                                         <button
                                             key={m}
                                             onClick={() => setAiModel(m)}

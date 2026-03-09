@@ -11,12 +11,37 @@ echo "Starting AetherFlow Update Sequence"
 echo "Date: $(date)"
 echo "========================================"
 
-# 1. Pull latest code from GitHub
+# 1. Pull latest code from GitHub (preserve local changes)
 echo "Pulling latest code from master branch..."
 cd /opt/AetherFlow || exit 1
 git fetch --all
-git checkout -f master
-git reset --hard origin/master
+
+# Stash any local changes before updating
+LOCAL_CHANGES=$(git status --porcelain)
+if [ -n "$LOCAL_CHANGES" ]; then
+    echo "Stashing local changes..."
+    git stash save "auto-stash-before-update-$(date +%Y%m%d%H%M%S)"
+fi
+
+# Try fast-forward merge first; fall back to rebase if needed
+if ! git pull --ff-only origin master 2>/dev/null; then
+    echo "Fast-forward not possible, attempting rebase..."
+    if ! git pull --rebase origin master; then
+        echo "ERROR: Merge conflicts detected. Aborting update."
+        git rebase --abort 2>/dev/null
+        # Restore stashed changes
+        if [ -n "$LOCAL_CHANGES" ]; then
+            git stash pop 2>/dev/null
+        fi
+        exit 1
+    fi
+fi
+
+# Restore stashed changes if any
+if [ -n "$LOCAL_CHANGES" ]; then
+    echo "Restoring local changes..."
+    git stash pop 2>/dev/null || echo "Warning: Could not restore stashed changes (may have conflicts)"
+fi
 
 # 2. Rebuild Go API Binary
 echo "Rebuilding Go API Binary..."

@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"time"
 
 	"aetherflow/services"
 
@@ -14,11 +15,14 @@ func RegisterRoutes(r *gin.Engine) {
 		apiGroup.GET("/ws", HandleWebSocket)
 		apiGroup.POST("/ai/chat", handleAiChat)
 
-		// Authentication
+		// Apply rate limiting: strict on auth endpoints, moderate on general API
+		authLimiter := RateLimitMiddleware(5, 1*time.Minute)
+
+		// Authentication (rate-limited to prevent brute force)
 		apiGroup.GET("/auth/google/login", GoogleLogin)
 		apiGroup.GET("/auth/google/callback", GoogleCallback)
-		apiGroup.POST("/auth/login", LocalLogin)
-		apiGroup.POST("/auth/setup", SetupAdmin)
+		apiGroup.POST("/auth/login", authLimiter, LocalLogin)
+		apiGroup.POST("/auth/setup", authLimiter, SetupAdmin)
 		apiGroup.GET("/auth/setup/check", CheckSetupNeeded)
 		apiGroup.GET("/auth/session", GetSession)
 		apiGroup.POST("/auth/logout", Logout)

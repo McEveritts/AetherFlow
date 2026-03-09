@@ -18,11 +18,17 @@ log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [filebrowser] $1" | tee -a "$LOGFIL
 log "Downloading File Browser..."
 curl -fsSL https://raw.githubusercontent.com/filebrowser/get/master/get.sh | bash >>"$LOGFILE" 2>&1
 
-# ── Create data directory ────────────────────────────────────────────────────
+# ── Create data directory and initial admin with random password ──────────────
 log "Setting up File Browser data directory..."
 mkdir -p /opt/filebrowser
 filebrowser config init --address 0.0.0.0 --port 8085 --root / --database /opt/filebrowser/filebrowser.db >>"$LOGFILE" 2>&1
-filebrowser users add admin admin --database /opt/filebrowser/filebrowser.db >>"$LOGFILE" 2>&1
+
+# Generate a secure random password instead of default 'admin/admin'
+FB_PASS=$(head -c 32 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 16)
+filebrowser users add admin "$FB_PASS" --database /opt/filebrowser/filebrowser.db >>"$LOGFILE" 2>&1
+echo "$FB_PASS" > /opt/filebrowser/initial_password.txt
+chmod 600 /opt/filebrowser/initial_password.txt
+log "File Browser admin password: $FB_PASS (also saved to /opt/filebrowser/initial_password.txt)"
 
 # ── Systemd service ──────────────────────────────────────────────────────────
 log "Creating systemd service..."

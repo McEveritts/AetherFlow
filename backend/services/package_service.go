@@ -3,7 +3,6 @@ package services
 import (
 	"aetherflow/models"
 	"encoding/json"
-	"math/rand"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -40,9 +39,6 @@ func GetPackages() []models.Package {
 	// Iterate and check status
 	for i := range pkgs {
 		pkgId := pkgs[i].Name
-		
-		// Mock hit counter
-		pkgs[i].Hits = rand.Intn(50000)
 
 		// 1. Check in-memory Installer Service Queue for active operations
 		activeStatus := GetPackageJobStatus(pkgId)
