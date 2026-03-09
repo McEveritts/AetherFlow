@@ -1,7 +1,7 @@
 #!/bin/bash
 # /opt/AetherFlow/packages/common.sh
 # Shared variables and functions for AetherFlow install scripts
-
+set -euo pipefail
 export AETHERFLOW_USER="${AETHERFLOW_USER:-$(whoami)}"
 export LOGFILE="/var/log/aetherflow/install.log"
 export LOCK_DIR="/install"
