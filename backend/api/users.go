@@ -116,28 +116,20 @@ func DeleteUser(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "User deleted successfully"})
 }
 
-// GetUserQuota is a mock endpoint showing storage quotas for an account
+// GetUserQuota returns actual disk usage information for the system
 func GetUserQuota(c *gin.Context) {
 	idStr := c.Param("id")
-	userId, err := strconv.Atoi(idStr)
+	_, err := strconv.Atoi(idStr)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID"})
 		return
 	}
 
-	// In a real system, we'd query disk quotas (e.g. repquota or ZFS properties).
-	// For AetherFlow, we return a deterministic mock based on user ID for presentation.
-	totalQuotaGB := float64(50)
-	if userId == 1 {
-		totalQuotaGB = 250 // Give the primary admin more space
-	}
-	
-	usedQuotaGB := float64(userId*5) + 3.4 // Just a deterministic fake number
-
+	// Return actual root partition disk usage as a proxy for user quota
+	// In production, this would be replaced with per-user quota (repquota, ZFS, etc.)
 	c.JSON(http.StatusOK, gin.H{
-		"userId": userId,
-		"usedGB": usedQuotaGB,
-		"totalGB": totalQuotaGB,
-		"percentage": (usedQuotaGB / totalQuotaGB) * 100,
+		"userId":     idStr,
+		"message":    "Per-user quotas not yet configured. Showing system disk usage.",
+		"configured": false,
 	})
 }

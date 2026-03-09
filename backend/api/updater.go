@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -65,10 +66,8 @@ func CheckUpdate(c *gin.Context) {
 		return
 	}
 
-	updateAvailable := currentVersion != release.TagName
-
-	// If the current version contains "dev" or has a structural mismatch, it may be greater,
-	// but for this MVP, a simple string comparison inequality indicates an update is available.
+	// Proper semver comparison: only flag update if remote > local
+	updateAvailable := isNewerVersion(currentVersion, release.TagName)
 
 	c.JSON(http.StatusOK, gin.H{
 		"updateAvailable": updateAvailable,
@@ -79,22 +78,57 @@ func CheckUpdate(c *gin.Context) {
 	})
 }
 
+// isNewerVersion returns true if remote is strictly newer than local.
+// Handles versions like "v3.1.0", "3.1.0", "v3.2.0-beta".
+func isNewerVersion(local, remote string) bool {
+	parseVersion := func(v string) (int, int, int) {
+		v = strings.TrimPrefix(v, "v")
+		// Strip any pre-release suffix (e.g., "-beta", "-rc1")
+		if idx := strings.IndexByte(v, '-'); idx != -1 {
+			v = v[:idx]
+		}
+		parts := strings.Split(v, ".")
+		major, minor, patch := 0, 0, 0
+		if len(parts) >= 1 {
+			major, _ = strconv.Atoi(parts[0])
+		}
+		if len(parts) >= 2 {
+			minor, _ = strconv.Atoi(parts[1])
+		}
+		if len(parts) >= 3 {
+			patch, _ = strconv.Atoi(parts[2])
+		}
+		return major, minor, patch
+	}
+
+	lMaj, lMin, lPat := parseVersion(local)
+	rMaj, rMin, rPat := parseVersion(remote)
+
+	if rMaj != lMaj {
+		return rMaj > lMaj
+	}
+	if rMin != lMin {
+		return rMin > lMin
+	}
+	return rPat > lPat
+}
+
 // RunUpdate initiates the background bash script that pulls code and restarts PM2
 func RunUpdate(c *gin.Context) {
 	// Execute the update script asynchronously so the HTTP request can complete seamlessly
 	go func() {
 		log.Println("Initiating over-the-air update sequence...")
-		
+
 		cmd := exec.Command("/bin/bash", updateScriptPath)
 		// Redirect output so it doesn't wait on pipes
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
-		
+
 		if err := cmd.Start(); err != nil {
 			log.Printf("Failed to start update script: %v", err)
 			return
 		}
-		
+
 		// Optional: wait in goroutine
 		err := cmd.Wait()
 		if err != nil {

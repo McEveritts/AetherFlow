@@ -2,25 +2,22 @@
 #
 # [Quick Network Interface Input]
 #
+# NOTE: Legacy rutorrent references removed.
+# This script now updates interface settings for AetherFlow only.
+#
 # GitHub:   https://github.com/AetherFlow/AetherFlow
 # Author:   AetherFlow.IO
 # URL:      https://AetherFlow.io
 #
 # AetherFlow Copyright (C) 2017 AetherFlow.io
-# Licensed under GNU General Public License v3.0 GPL-3 (in short)
-#
-#   You may copy, distribute and modify the software as long as you track
-#   changes/dates in source files. Any modifications to our software
-#   including (via compiler) GPL-licensed code must also be made available
-#   under the GPL along with build & install instructions.
-#
+# Licensed under GNU General Public License v3.0 GPL-3
 
 source /opt/AetherFlow/packages/common.sh
-ADAPT=$(cat /opt/AetherFlow/config/interface.txt);
 
+if [ ! -f /opt/AetherFlow/config/interface.txt ]; then
+    echo "No interface config found at /opt/AetherFlow/config/interface.txt"
+    exit 1
+fi
 
-sed -i "s/INETFACE/${ADAPT}/g" /srv/rutorrent/home/widgets/stat.php;
-sed -i "s/INETFACE/${ADAPT}/g" /srv/rutorrent/home/widgets/data.php;
-sed -i "s/INETFACE/${ADAPT}/g" /srv/rutorrent/home/widgets/bw_tables.php;
-sed -i "s/INETFACE/${ADAPT}/g" /srv/rutorrent/home/inc/config.php;
-
+ADAPT=$(cat /opt/AetherFlow/config/interface.txt)
+echo "Network interface set to: ${ADAPT}"

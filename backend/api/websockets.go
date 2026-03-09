@@ -137,37 +137,48 @@ func HandleWebSocket(c *gin.Context) {
 }
 
 func broadcastMetricsLoop() {
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
+	metricsTicker := time.NewTicker(3 * time.Second)
+	serviceTicker := time.NewTicker(15 * time.Second)
+	defer metricsTicker.Stop()
+	defer serviceTicker.Stop()
+
+	// Cache the last services result so we include it in every metrics push
+	var cachedServices interface{}
 
 	for {
-		<-ticker.C
+		select {
+		case <-serviceTicker.C:
+			// Refresh services list on the slower interval (systemctl + pm2 are expensive)
+			WSHub.mu.Lock()
+			clientCount := len(WSHub.clients)
+			WSHub.mu.Unlock()
+			if clientCount > 0 {
+				cachedServices = services.GetActiveServices()
+			}
 
-		// Wait until there's at least one client connected to save CPU cycles
-		WSHub.mu.Lock()
-		clientCount := len(WSHub.clients)
-		WSHub.mu.Unlock()
+		case <-metricsTicker.C:
+			WSHub.mu.Lock()
+			clientCount := len(WSHub.clients)
+			WSHub.mu.Unlock()
 
-		if clientCount == 0 {
-			continue
-		}
+			if clientCount == 0 {
+				continue
+			}
 
-		metrics := services.GetSystemMetricsCore()
+			metrics := services.GetSystemMetricsCore()
 
-		// Query actual systemctl and OS packages
-		servicesList := services.GetActiveServices()
+			payload := map[string]interface{}{
+				"type": "METRICS_UPDATE",
+				"data": map[string]interface{}{
+					"system":   metrics,
+					"services": cachedServices,
+				},
+			}
 
-		payload := map[string]interface{}{
-			"type": "METRICS_UPDATE",
-			"data": map[string]interface{}{
-				"system":   metrics,
-				"services": servicesList,
-			},
-		}
-
-		message, err := json.Marshal(payload)
-		if err == nil {
-			WSHub.broadcast <- message
+			message, err := json.Marshal(payload)
+			if err == nil {
+				WSHub.broadcast <- message
+			}
 		}
 	}
 }

@@ -23,8 +23,9 @@ OUTTO=$LOGFILE
 MASTER=$AETHERFLOW_USER
 
 echo "Adding Syncthing Repository ... " >>"${OUTTO}" 2>&1;
-curl -s https://syncthing.net/release-key.txt | sudo apt-key add - > /dev/null 2>&1
-echo "deb http://apt.syncthing.net/ syncthing release" > /etc/apt/sources.list.d/syncthing.list
+# Use modern signed-by keyring instead of deprecated apt-key
+curl -sL https://syncthing.net/release-key.gpg -o /usr/share/keyrings/syncthing-archive-keyring.gpg 2>/dev/null
+echo "deb [signed-by=/usr/share/keyrings/syncthing-archive-keyring.gpg] https://apt.syncthing.net/ syncthing stable" > /etc/apt/sources.list.d/syncthing.list
 
 echo "Installing Syncthing ... " >>"${OUTTO}" 2>&1;
 sudo apt-get -q update > /dev/null 2>&1
@@ -39,9 +40,6 @@ cat > /etc/apache2/sites-enabled/syncthing.conf <<EOF
 <Location /syncthing>
 ProxyPass http://localhost:8384
 ProxyPassReverse http://localhost:8384
-#AuthType Digest
-#AuthName "rutorrent"
-#AuthUserFile '/etc/htpasswd'
 Require user ${MASTER}
 </Location>
 EOF

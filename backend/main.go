@@ -92,6 +92,9 @@ func main() {
 
 	r := gin.Default()
 
+	// P5: Limit upload size to 50MB to prevent DoS
+	r.MaxMultipartMemory = 50 << 20 // 50 MB
+
 	// CORS Configuration
 	corsConfig := cors.Config{
 		AllowMethods:     []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
@@ -120,7 +123,7 @@ func main() {
 	}
 
 	log.Printf("AetherFlow Backend listening on 127.0.0.1:%s", port)
-	
+
 	// Bind to localhost to prevent direct internet exposure
 	if err := r.Run("127.0.0.1:" + port); err != nil {
 		log.Fatalf("Failed to run server: %v", err)

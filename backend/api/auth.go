@@ -56,7 +56,7 @@ func SetupAdmin(c *gin.Context) {
 	}
 
 	// Password length check removed to allow 4-char pins
-	
+
 	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to hash password"})
@@ -104,8 +104,8 @@ func LocalLogin(c *gin.Context) {
 		"SELECT id, username, email, avatar_url, role, COALESCE(password_hash, ''), google_id FROM users WHERE username = ?",
 		req.Username,
 	).Scan(&user.ID, &user.Username, &user.Email, &user.AvatarURL, &user.Role, &passwordHash, &googleId)
-    
-    user.IsOAuth = googleId.Valid && googleId.String != ""
+
+	user.IsOAuth = googleId.Valid && googleId.String != ""
 
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid username or password"})
@@ -218,7 +218,11 @@ func GoogleCallback(c *gin.Context) {
 
 	var tokenRes map[string]interface{}
 	json.NewDecoder(resp.Body).Decode(&tokenRes)
-	accessToken := tokenRes["access_token"].(string)
+	accessToken, ok := tokenRes["access_token"].(string)
+	if !ok || accessToken == "" {
+		c.Redirect(http.StatusTemporaryRedirect, baseURL+"/login?error=no_access_token")
+		return
+	}
 
 	// Fetch user info
 	req, _ := http.NewRequest("GET", "https://www.googleapis.com/oauth2/v2/userinfo", nil)
@@ -255,7 +259,7 @@ func GoogleCallback(c *gin.Context) {
 		if i := strings.Index(email, "@"); i != -1 {
 			username = email[:i]
 		}
-		
+
 		// Clean username
 		username = strings.Map(func(r rune) rune {
 			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '.' || r == '-' {
@@ -266,7 +270,7 @@ func GoogleCallback(c *gin.Context) {
 
 		var count int
 		db.DB.QueryRow("SELECT COUNT(*) FROM users").Scan(&count)
-		
+
 		role := "user"
 		if count == 0 || email == os.Getenv("ADMIN_EMAIL") {
 			role = "admin"
@@ -274,13 +278,13 @@ func GoogleCallback(c *gin.Context) {
 
 		res, err := db.DB.Exec("INSERT INTO users (username, google_id, email, avatar_url, role) VALUES (?, ?, ?, ?, ?)",
 			username, googleId, email, avatarUrl, role)
-		
+
 		if err != nil {
 			log.Printf("User creation err: %v", err)
 			c.Redirect(http.StatusTemporaryRedirect, baseURL+"/login?error=db_error")
 			return
 		}
-		
+
 		id, _ := res.LastInsertId()
 		user.ID = int(id)
 		user.Username = username
@@ -358,15 +362,18 @@ func GetSession(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
 		return
 	}
-
-	userId := int(claims["user_id"].(float64))
-
+	userIdFloat, ok := claims["user_id"].(float64)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid token claims"})
+		return
+	}
+	userId := int(userIdFloat)
 	var user models.User
 	var googleId sql.NullString
 	err = db.DB.QueryRow("SELECT id, username, email, avatar_url, role, google_id FROM users WHERE id = ?", userId).
 		Scan(&user.ID, &user.Username, &user.Email, &user.AvatarURL, &user.Role, &googleId)
-    
-    user.IsOAuth = googleId.Valid && googleId.String != ""
+
+	user.IsOAuth = googleId.Valid && googleId.String != ""
 
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "User not found"})
@@ -404,10 +411,15 @@ func AdminOnly() gin.HandlerFunc {
 			return
 		}
 
-		userId := int(claims["user_id"].(float64))
+		userIdFloat, ok := claims["user_id"].(float64)
+		if !ok {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Invalid token claims"})
+			return
+		}
+		userId := int(userIdFloat)
 		var role string
 		err = db.DB.QueryRow("SELECT role FROM users WHERE id = ?", userId).Scan(&role)
-		
+
 		if err != nil || role != "admin" {
 			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "Forbidden: Admin access required"})
 			return
@@ -439,7 +451,12 @@ func UpdateProfile(c *gin.Context) {
 		return
 	}
 
-	userId := int(claims["user_id"].(float64))
+	userIdFloat, ok := claims["user_id"].(float64)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid token claims"})
+		return
+	}
+	userId := int(userIdFloat)
 
 	var req struct {
 		Email string `json:"email" binding:"required"`
