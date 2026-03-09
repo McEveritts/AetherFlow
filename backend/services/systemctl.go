@@ -121,7 +121,6 @@ func GetPM2Services() map[string]PM2Process {
 
 	log.Printf("[PM2] Found %d processes", len(processes))
 	for _, p := range processes {
-		log.Printf("[PM2] Process: %s (status: %s)", p.Name, p.PM2Env.Status)
 		result[p.Name] = p
 	}
 	return result

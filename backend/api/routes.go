@@ -78,26 +78,9 @@ func RegisterRoutes(r *gin.Engine) {
 		// Updater API (read-only: public, mutating: admin-only)
 		apiGroup.GET("/system/update/check", CheckUpdate)
 
-		// System Hardware Stats (Existing)
+		// System Hardware Stats
 		apiGroup.GET("/system/hardware", GetHardwareInfo)
-		apiGroup.GET("/system/metrics", func(c *gin.Context) {
-			// In the future this might call actual sh commands
-			// For now, it returns a stub for the frontend to consume
-			c.JSON(http.StatusOK, gin.H{
-				"cpu": 45.2,
-				"memory": gin.H{
-					"total": 16,
-					"used":  8.5,
-					"free":  7.5,
-				},
-				"disk": gin.H{
-					"total": 500,
-					"used":  250,
-					"free":  250,
-				},
-				"uptime": "14 days, 2 hours",
-			})
-		})
+		apiGroup.GET("/system/metrics", getSystemMetrics)
 	}
 }
 
