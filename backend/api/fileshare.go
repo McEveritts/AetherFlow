@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -84,6 +85,18 @@ func UploadFile(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid filename"})
 		return
 	}
+
+	// Block dangerous file extensions
+	ext := strings.ToLower(filepath.Ext(safeName))
+	blockedExts := map[string]bool{
+		".exe": true, ".sh": true, ".bat": true, ".cmd": true,
+		".ps1": true, ".php": true, ".jsp": true, ".cgi": true,
+	}
+	if blockedExts[ext] {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "File type not allowed: " + ext})
+		return
+	}
+
 	dst := filepath.Join(uploadDir, safeName)
 
 	if err := c.SaveUploadedFile(file, dst); err != nil {

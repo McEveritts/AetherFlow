@@ -38,23 +38,39 @@ function _directorycheck() {
   if [[ ! -f /install/.developer.lock ]]; then
     if [[ -d /opt/AetherFlow ]]; then
       cd /opt/AetherFlow || { echo "Critical: /opt/AetherFlow not found!"; exit 1; }
-      git fetch --all >>"${OUTTO}" 2>&1;
-      git checkout -f master >>"${OUTTO}" 2>&1;
-      git reset --hard origin/master >>"${OUTTO}" 2>&1;
+      git stash --include-untracked -m "update-$(date +%s)" >>"${OUTTO}" 2>&1 || true
+      git checkout master >>"${OUTTO}" 2>&1
+      if ! git pull --ff-only >>"${OUTTO}" 2>&1; then
+        echo "[WARN] Fast-forward failed, attempting rebase..." >>"${OUTTO}" 2>&1
+        if ! git pull --rebase >>"${OUTTO}" 2>&1; then
+          echo "[ERROR] Rebase failed. Aborting." >>"${OUTTO}" 2>&1
+          git rebase --abort >>"${OUTTO}" 2>&1
+          return 1
+        fi
+      fi
     else
       git clone https://github.com/McEveritts/AetherFlow /opt/AetherFlow
     fi
   else
     if [[ -d /opt/AetherFlow ]]; then
       cd /opt/AetherFlow || { echo "Critical: /opt/AetherFlow not found!"; exit 1; }
-      git fetch --all >>"${OUTTO}" 2>&1;
+      git stash --include-untracked -m "update-dev-$(date +%s)" >>"${OUTTO}" 2>&1 || true
       if git rev-parse --verify origin/development >>"${OUTTO}" 2>&1; then
-        git checkout -f development >>"${OUTTO}" 2>&1;
-        git reset --hard origin/development >>"${OUTTO}" 2>&1;
+        git checkout development >>"${OUTTO}" 2>&1
+        if ! git pull --ff-only >>"${OUTTO}" 2>&1; then
+          echo "[WARN] Fast-forward failed, attempting rebase..." >>"${OUTTO}" 2>&1
+          if ! git pull --rebase >>"${OUTTO}" 2>&1; then
+            echo "[ERROR] Rebase failed. Aborting." >>"${OUTTO}" 2>&1
+            git rebase --abort >>"${OUTTO}" 2>&1
+            return 1
+          fi
+        fi
       else
         echo "[WARN] development branch not found on remote, falling back to master" >>"${OUTTO}" 2>&1;
-        git checkout -f master >>"${OUTTO}" 2>&1;
-        git reset --hard origin/master >>"${OUTTO}" 2>&1;
+        git checkout master >>"${OUTTO}" 2>&1
+        if ! git pull --ff-only >>"${OUTTO}" 2>&1; then
+          git pull --rebase >>"${OUTTO}" 2>&1 || { git rebase --abort >>"${OUTTO}" 2>&1; return 1; }
+        fi
       fi
     else
       git clone --branch "development" https://github.com/McEveritts/AetherFlow /opt/AetherFlow 2>>"${OUTTO}" || \
