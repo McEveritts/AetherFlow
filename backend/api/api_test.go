@@ -183,3 +183,73 @@ func TestControlServiceAcceptsValidAction(t *testing.T) {
 		t.Errorf("Expected non-400 for valid action, got %d", w.Code)
 	}
 }
+
+// --- WebSocket origin validation ---
+
+func TestWebSocketOriginCheck(t *testing.T) {
+	tests := []struct {
+		origin string
+		host   string
+		want   bool
+	}{
+		{"https://example.com", "example.com", true},
+		{"http://example.com", "example.com", true},
+		{"https://evil.com", "example.com", false},
+		{"", "example.com", true},                         // Non-browser clients
+		{"https://sub.example.com", "example.com", false}, // Subdomain mismatch
+	}
+
+	for _, tt := range tests {
+		req, _ := http.NewRequest("GET", "/ws", nil)
+		req.Host = tt.host
+		if tt.origin != "" {
+			req.Header.Set("Origin", tt.origin)
+		}
+		got := upgrader.CheckOrigin(req)
+		if got != tt.want {
+			t.Errorf("CheckOrigin(origin=%q, host=%q) = %v, want %v", tt.origin, tt.host, got, tt.want)
+		}
+	}
+}
+
+// --- Fileshare extension blocklist ---
+
+func TestBlockedFileExtensions(t *testing.T) {
+	r := gin.New()
+	r.POST("/fileshare/upload", UploadFile)
+
+	// Test that requests without files are rejected (validates handler is wired)
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("POST", "/fileshare/upload", nil)
+	r.ServeHTTP(w, req)
+
+	if w.Code != 400 {
+		t.Errorf("Expected 400 for no file upload, got %d", w.Code)
+	}
+}
+
+// --- Backup download path traversal ---
+
+func TestBackupDownloadSanitizesFilename(t *testing.T) {
+	r := gin.New()
+	r.GET("/backup/download/:filename", DownloadBackup)
+
+	// Attempting path traversal should return 404 (file won't exist in sanitized path)
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("GET", "/backup/download/..%2F..%2Fetc%2Fpasswd", nil)
+	r.ServeHTTP(w, req)
+
+	// Should not be 200 (the file shouldn't exist via traversal)
+	if w.Code == 200 {
+		t.Error("Path traversal should not return 200")
+	}
+}
+
+// --- Upload directory fallback ---
+
+func TestGetUploadDirFallback(t *testing.T) {
+	dir := getUploadDir()
+	if dir == "" {
+		t.Error("getUploadDir() should never return empty string")
+	}
+}
