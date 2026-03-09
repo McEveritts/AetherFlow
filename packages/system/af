@@ -172,16 +172,17 @@ function _help() {
 function _list() {
   repo=($(find /usr/local/bin/AetherFlow/package/install -type f -printf "%f\n" | cut -d "-" -f 2 | sort -d))
   for i in "${repo[@]}"; do
-    locale=$(cat /srv/rutorrent/home/inc/localize.php | grep language | cut -d "'" -f 2)
     app=$i
-    if [[ $i == ombi ]]; then app=ombi; fi
     sgformat="${bold}%-15s${normal}"
     spacing=$(echo $'\t' | pr -Te15)
-    description=$(cat /srv/rutorrent/home/lang/$locale | grep -i -m 1 \\\[\'$app | cut -d= -f2 | sed "s/ '//g" | sed "s/';//g" | sed "s/\\\'/'/g")
-    if [[ -z $description ]]; then description="Description missing";fi
+    # Check installation status
+    if [[ -f /install/.${app}.lock ]]; then
+      status="[installed]"
+    else
+      status="[available]"
+    fi
     printf "${sgformat}" "$i"
-    echo -e "${description}\n" | fmt --goal=50 | sed -e "2,\$s/^/$spacing/"
-
+    echo -e "${status}\n" | fmt --goal=50 | sed -e "2,\$s/^/$spacing/"
   done
 }
 
