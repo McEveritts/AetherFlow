@@ -201,24 +201,9 @@ done
   service apache2 reload  >> /dev/null 2>&1
 }
 
-function _updaterutorrent() {
-  cd /srv
-  rsync -aP ${local_rutorrent}* rutorrent
-}
-
-function _updaterutorrent-plugins() {
-  plugins=($(find ${local_rplugins} -maxdepth 1 -type d -printf "%f\n"))
-  for i in "${plugins[@]}"; do
-    if [[ -d /srv/rutorrent/plugins/$i ]]; then
-      if [[ -d /srv/rutorrent/plugins/$i ]]; then rm -rf /srv/rutorrent/plugins/${i}/${i}; fi
-      rsync -aP --exclude=autotools/conf.php ${local_rplugins}${i} /srv/rutorrent/plugins/
-    fi
-  done
-  cp /srv/rutorrent/home/fileshare/.htaccess /srv/rutorrent/plugins/fileshare/
-  cd /srv/rutorrent/home/fileshare/
-  rm -rf share.php
-  ln -s ../../plugins/fileshare/share.php
-}
+# LEGACY: rutorrent update functions removed — AetherFlow no longer uses rutorrent
+function _updaterutorrent() { :; }
+function _updaterutorrent-plugins() { :; }
 
 function _updatedeluge() {
   if [[ -f /install/.deluge.lock ]]; then
@@ -260,58 +245,9 @@ function _updateznc() {
   fi
 }
 
-# function to update dashboard
-function _updatedashboard() {
-  #\cp -fR ${local_dashboard}* ${rutorrent}home
-  cd ${rutorrent}
-  if [[ -f /srv/rutorrent/home/db/.smoked.lock ]]; then
-    if [[ -n $(find /srv/rutorrent/home/db -name "branding-*.php") ]]; then
-      rsync -aP --exclude=disk_*.php --exclude=branding-l.php --exclude=share.php --exclude=custom.menu.php --exclude=url.override.php --exclude=custom.css ${local_dashboard}* ${rutorrent}home
-      rsync -aP ${local_themes}smoked/* ${rutorrent}home
-      #rm -f /srv/rutorrent/home/lang/*.php
-    else
-      rsync -aP --exclude=disk_*.php --exclude=share.php --exclude=custom.menu.php --exclude=url.override.php --exclude=custom.css ${local_dashboard}. ${rutorrent}home
-      #rm -f /srv/rutorrent/home/lang/*.php
-    fi
-  elif [[ -f /srv/rutorrent/home/db/.defaulted.lock ]]; then
-    if [[ -n $(find /srv/rutorrent/home/db -name "branding-*.php") ]]; then
-      rm -rf /srv/rutorrent/home/db/.smoked.lock
-      rsync -aP --exclude=disk_*.php --exclude=branding-l.php --exclude=share.php --exclude=custom.menu.php --exclude=url.override.php --exclude=custom.css ${local_dashboard}* ${rutorrent}home
-      rsync -aP ${local_themes}defaulted/* ${rutorrent}home
-      #rm -f /srv/rutorrent/home/lang/*.php
-    else
-      rsync -aP --exclude=disk_*.php --exclude=share.php --exclude=custom.menu.php --exclude=url.override.php --exclude=custom.css ${local_dashboard}* ${rutorrent}home
-        #rm -f /srv/rutorrent/home/lang/*.php
-    fi
-  else
-    if [[ -n $(find /srv/rutorrent/home/db -name "branding-*.php") ]]; then
-      rsync -aP --exclude=disk_*.php --exclude=branding-l.php --exclude=share.php --exclude=custom.menu.php --exclude=url.override.php --exclude=custom.css ${local_dashboard}* ${rutorrent}home
-      #rm -f /srv/rutorrent/home/lang/*.php
-      touch /srv/rutorrent/home/db/.smoked.lock
-    else
-      rsync -aP --exclude=disk_*.php --exclude=share.php --exclude=custom.menu.php --exclude=url.override.php --exclude=custom.css ${local_dashboard}* ${rutorrent}home
-      #rm -f /srv/rutorrent/home/lang/*.php
-      touch /srv/rutorrent/home/db/.smoked.lock
-    fi
-  fi
-
-}
-
-# function to update club-AetherFlow ruTorrent Theme
-function _updaterttheme() {
-  THEME=club-AetherFlow
-  cd ${rutorrent}plugins/theme/themes
-  if [ ! -d "$THEME" ]; then
-    git clone https://github.com/AetherFlow/club-AetherFlow.git club-AetherFlow >/dev/null 2>&1
-    chown -R www-data: club-AetherFlow
-  else
-    cd $THEME
-    git checkout master
-    git pull
-  fi
-  cd
-
-}
+# LEGACY: dashboard and theme functions removed — AetherFlow uses Next.js frontend
+function _updatedashboard() { :; }
+function _updaterttheme() { :; }
 
 
 function _updatesudo() {
@@ -364,17 +300,12 @@ EOF
   fi
 }
 
-# adjust permissions function (9)
+# adjust permissions function (modernized — no rutorrent paths)
 function _perms() {
-  chown -R www-data ${rutorrent}*
-  chgrp -R www-data ${rutorrent}*
-  chmod -R g+rw ${rutorrent}*
-  sh -c 'find /srv/rutorrent/* -type d -print0 | sudo xargs -0 chmod g+s'
-  chmod +x /etc/cron.d/set_interface
-  find /home/*/.config/deluge -name "auth" -exec chmod 600 {} \;
-  find /usr/local/bin/AetherFlow -type f -exec chmod 755 {} \;
-  chmod +x $(find /usr/local/bin/AetherFlow -type f) >/dev/null 2>&1
-  chmod -R 755 ${rutorrent}plugins/filemanager/scripts
+  chmod +x /etc/cron.d/set_interface 2>/dev/null || true
+  find /home/*/.config/deluge -name "auth" -exec chmod 600 {} \; 2>/dev/null || true
+  find /usr/local/bin/AetherFlow -type f -exec chmod 755 {} \; 2>/dev/null || true
+  chmod +x $(find /usr/local/bin/AetherFlow -type f) >/dev/null 2>&1 || true
 }
 
 function _buildmodernstack() {
@@ -474,17 +405,10 @@ function _updatecronfile() {
 
 local_setup=/opt/AetherFlow/setup/
 local_packages=/opt/AetherFlow/packages/
-local_rutorrent=/opt/AetherFlow/rutorrent/
-local_rplugins=/opt/AetherFlow/rtplugins/
-local_dashboard=/opt/AetherFlow/dashboard/
 local_themes=/opt/AetherFlow/themes/
-local_rtheme=/opt/AetherFlow/rttheme/
 
 IFACE=$(ip link show|grep -i broadcast|grep -m1 UP|cut -d: -f 2|cut -d@ -f 1|sed -e 's/ //g');
-# LEGACY REMOVED: master.txt
 A1="$AETHERFLOW_USER"
-# LEGACY: rutorrent path no longer used
-# rutorrent=/srv/rutorrent/
 usrbin=/usr/local/bin/
 
 # AetherFlow Update STRUCTURE
@@ -499,12 +423,7 @@ echo "Updating AetherFlow System Commands & Packages ... " >>"${OUTTO}" 2>&1;_up
 echo "Updating the useradd skeleton directories ... " >>"${OUTTO}" 2>&1;_updateskel;echo
 echo "Updating mktorrent if necessary ... " >>"${OUTTO}" 2>&1;_updatemktorrent;echo
 echo "Checking apache aliases ... " >>"${OUTTO}" 2>&1;_updateapachealias;echo
-#echo "Reorganizing home directory of ${A1} ... " >>"${OUTTO}" 2>&1;_updateuserhome;echo
-echo "Updating the rutorrent directory ... " >>"${OUTTO}" 2>&1;_updaterutorrent;echo
-echo "Updating all rutorrent plugins ... " >>"${OUTTO}" 2>&1;_updaterutorrent-plugins;echo
-echo "Updating the AetherFlow Dashboard ... " >>"${OUTTO}" 2>&1;_updatedashboard;echo
 echo "Building the Modern Go API and Next.js Frontend ... " >>"${OUTTO}" 2>&1;_buildmodernstack;echo
-echo "Updating club-AetherFlow ruTorrent Theme ... " >>"${OUTTO}" 2>&1;_updaterttheme;echo
 echo "Updating the AetherFlow Sudoers template ... " >>"${OUTTO}" 2>&1;_updatesudo;echo
 _updateznc
 #_updateplex

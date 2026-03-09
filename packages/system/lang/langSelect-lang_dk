@@ -1,46 +1,23 @@
 #!/bin/bash
 #
-# [Quick Box :: Set French Language function]
+# [AetherFlow :: Set Danish Language/Locale]
 #
-# AetherFlow REPOS
-# AetherFlow _ packages  :   https://github.com/AetherFlow/AetherFlow_packages
-# LOCAL REPOS
-# Local _ packages   :   /etc/AetherFlow/packages
-# Author             :   McEveritts
-# URL                :   https://AetherFlow.io
+# NOTE: Legacy rutorrent PHP localization removed.
+# AetherFlow now uses Next.js frontend with browser-native i18n.
+# This script sets the system locale only.
 #
-# AetherFlow Copyright (C) 2017 AetherFlow.io
-# Licensed under GNU General Public License v3.0 GPL-3 (in short)
-#
-#   You may copy, distribute and modify the software as long as you track
-#   changes/dates in source files. Any modifications to our software
-#   including (via compiler) GPL-licensed code must also be made available
-#   under the GPL along with build & install instructions.
-#
+# Author: McEveritts | URL: https://AetherFlow.io
+# Licensed under GNU General Public License v3.0 GPL-3
 
 source /opt/AetherFlow/packages/common.sh
 locale='da_DK.UTF-8'
-language='lang_dk'
 
-cat >/srv/rutorrent/home/inc/localize.php<<LCL
-<?php
-    \$locale = 'da_DK.UTF-8';
-    \$language = 'lang_dk';
-    setlocale(LC_ALL, $locale);
-    require (\$_SERVER['DOCUMENT_ROOT']."/lang/$language");
+echo "[AetherFlow] Setting system locale to ${locale}"
+export LANG=${locale}
+export LC_ALL=${locale}
 
-    function T(\$str)
-    {
-        global \$L;
-        if (isset(\$L[\$str]))
-            return \$L[\$str];
-        else
-            return \$str;
-    }
+if command -v update-locale &>/dev/null; then
+    update-locale LANG=${locale} LC_ALL=${locale} 2>/dev/null || true
+fi
 
-?>
-LCL
-
-chown www-data: /srv/rutorrent/home/inc/localize.php
-service apache2 reload
-
+echo "[AetherFlow] Locale set to ${locale}. Dashboard language is managed in Settings."

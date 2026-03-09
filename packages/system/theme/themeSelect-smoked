@@ -1,49 +1,19 @@
 #!/bin/bash
 #
-# [Quick Box :: Set Defaulted Theme function]
+# [AetherFlow :: Set Smoked Theme function]
 #
-# AetherFlow REPOS
-# AetherFlow _ packages  :   https://github.com/McEveritts/MediaNexus/packages
-# LOCAL REPOS
-# Local _ packages   :   /etc/AetherFlow/packages
+# NOTE: Legacy rutorrent theme system removed.
+# AetherFlow now uses the Next.js frontend dashboard.
+# This script is retained for backward compatibility but is a no-op.
+#
 # Author             :   McEveritts
 # URL                :   https://AetherFlow.io
 #
 # AetherFlow Copyright (C) 2017 AetherFlow.io
-# Licensed under GNU General Public License v3.0 GPL-3 (in short)
-#
-#   You may copy, distribute and modify the software as long as you track
-#   changes/dates in source files. Any modifications to our software
-#   including (via compiler) GPL-licensed code must also be made available
-#   under the GPL along with build & install instructions.
-#
+# Licensed under GNU General Public License v3.0 GPL-3
+
 source /opt/AetherFlow/packages/common.sh
-function _updatedashboard() {
-  cd ${rutorrent}
-  #  if [[ -n $(find /srv/rutorrent/home/db -name "branding-*.php") ]]; then
-  #    rsync -aP --exclude=disk_*.php --exclude=branding-l.php --exclude=share.php --exclude=custom.menu.php --exclude=url.override.php --exclude=custom.css ${local_themes}smoked/* ${rutorrent}home
-  #    rm -f /srv/rutorrent/home/lang/*.php
-  #    rm -rf /srv/rutorrent/home/db/.defaulted.lock >/dev/null 2>&1
-  #    printf "" > /srv/rutorrent/home/db/.smoked.lock
-  #  else
-  #    rsync -aP --exclude=disk_*.php --exclude=share.php --exclude=custom.menu.php --exclude=url.override.php --exclude=custom.css ${local_themes}smoked/* ${rutorrent}home
-  #    rm -f /srv/rutorrent/home/lang/*.php
-  #    rm -rf /srv/rutorrent/home/db/.defaulted.lock >/dev/null 2>&1
-  #    printf "" > /srv/rutorrent/home/db/.smoked.lock
-  #  fi
 
-  \cp -fR  ${local_themes}smoked/skins/* ${rutorrent}home/skins
-  \cp -fR  ${local_themes}smoked/inc/* ${rutorrent}home/inc
-  rm -rf /srv/rutorrent/home/db/.defaulted.lock >/dev/null 2>&1
-  printf "" > /srv/rutorrent/home/db/.smoked.lock
-  service apache2 reload
-  sleep 5
-
-}
-
-local_themes=/etc/AetherFlow/themes/
-# LEGACY: rutorrent path no longer used
-# rutorrent=/srv/rutorrent/
-
-_updatedashboard
-
+echo "[AetherFlow] Theme system has been migrated to the Next.js dashboard."
+echo "[AetherFlow] Theme preferences can be configured in Settings > Appearance."
+service apache2 reload >/dev/null 2>&1
