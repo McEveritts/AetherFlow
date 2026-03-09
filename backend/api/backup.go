@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -44,8 +45,23 @@ func RunBackup(c *gin.Context) {
 	timestamp := time.Now().Format("2006-01-02_15-04-05")
 	backupFile := filepath.Join(backupDir, fmt.Sprintf("aetherflow_%s.sqlite", timestamp))
 
+	// Validate that the resolved path stays within the backup directory (defense-in-depth)
+	absBackup, err := filepath.Abs(backupFile)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Invalid backup path"})
+		return
+	}
+	absDir, _ := filepath.Abs(backupDir)
+	if !strings.HasPrefix(absBackup, absDir) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid backup path"})
+		return
+	}
+
+	// Escape single quotes in the path for VACUUM INTO (which does not support parameterized queries)
+	safePath := strings.ReplaceAll(absBackup, "'", "''")
+
 	// Use SQLite's VACUUM INTO for a consistent backup (safe even while DB is being written)
-	_, err := db.DB.Exec(fmt.Sprintf(`VACUUM INTO '%s'`, backupFile))
+	_, err = db.DB.Exec(fmt.Sprintf(`VACUUM INTO '%s'`, safePath))
 	if err != nil {
 		log.Printf("Backup VACUUM INTO failed: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Backup failed: " + err.Error()})
