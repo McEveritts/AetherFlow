@@ -26,9 +26,15 @@ var jwtSecret = []byte(os.Getenv("JWT_SECRET"))
 
 func getJWTSecret() []byte {
 	if len(jwtSecret) == 0 {
-		jwtSecret = []byte("default_fallback_secret_do_not_use_in_prod")
+		log.Fatal("FATAL: JWT_SECRET environment variable is not set. Refusing to start with an insecure default.")
 	}
 	return jwtSecret
+}
+
+// secureCookie returns whether cookies should have the Secure flag set.
+// Defaults to true (HTTPS-only). Set COOKIE_SECURE=false in env for local HTTP dev.
+func secureCookie() bool {
+	return strings.ToLower(os.Getenv("COOKIE_SECURE")) != "false"
 }
 
 // SetupAdmin creates the initial admin account (only works when no users exist)
@@ -75,7 +81,7 @@ func SetupAdmin(c *gin.Context) {
 		"exp":     time.Now().Add(time.Hour * 24 * 30).Unix(),
 	})
 	tokenString, _ := token.SignedString(getJWTSecret())
-	c.SetCookie("aetherflow_session", tokenString, 3600*24*30, "/", "", false, true)
+	c.SetCookie("aetherflow_session", tokenString, 3600*24*30, "/", "", secureCookie(), true)
 
 	c.JSON(http.StatusOK, gin.H{"message": "Admin account created", "username": req.Username})
 }
@@ -132,7 +138,7 @@ func LocalLogin(c *gin.Context) {
 		return
 	}
 
-	c.SetCookie("aetherflow_session", tokenString, 3600*24*30, "/", "", false, true)
+	c.SetCookie("aetherflow_session", tokenString, 3600*24*30, "/", "", secureCookie(), true)
 	c.JSON(http.StatusOK, gin.H{"message": "Login successful", "user": user})
 }
 
@@ -158,7 +164,7 @@ func GoogleLogin(c *gin.Context) {
 	state := hex.EncodeToString(stateBytes)
 
 	// Set state cookie
-	c.SetCookie("oauth2_state", state, 600, "/", "", false, true)
+	c.SetCookie("oauth2_state", state, 600, "/", "", secureCookie(), true)
 
 	scopes := []string{"openid", "email", "profile"}
 	authUrl := fmt.Sprintf("https://accounts.google.com/o/oauth2/v2/auth?client_id=%s&redirect_uri=%s&response_type=code&scope=%s&state=%s&access_type=offline&prompt=consent",
@@ -309,7 +315,7 @@ func GoogleCallback(c *gin.Context) {
 		return
 	}
 
-	c.SetCookie("aetherflow_session", tokenString, 3600*24*30, "/", "", false, true)
+	c.SetCookie("aetherflow_session", tokenString, 3600*24*30, "/", "", secureCookie(), true)
 	c.Redirect(http.StatusTemporaryRedirect, baseURL+"/")
 }
 
@@ -371,7 +377,7 @@ func GetSession(c *gin.Context) {
 }
 
 func Logout(c *gin.Context) {
-	c.SetCookie("aetherflow_session", "", -1, "/", "", false, true)
+	c.SetCookie("aetherflow_session", "", -1, "/", "", secureCookie(), true)
 	c.JSON(http.StatusOK, gin.H{"message": "Logged out"})
 }
 

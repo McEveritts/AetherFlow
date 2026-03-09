@@ -20,3 +20,8 @@ vendor/
 .next/
 out/
 build/
+
+# Security - never commit SSH helper scripts with creds
+temp_ssh*
+ssh_tool.py
+ssh_pty.py
