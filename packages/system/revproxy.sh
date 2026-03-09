@@ -13,7 +13,7 @@ function _couchpotato() {
 ProxyPass http://localhost:5050/couchpotato
 ProxyPassReverse http://localhost:5050/couchpotato
 #AuthType Digest
-#AuthName "rutorrent"
+#AuthName "AetherFlow"
 #AuthUserFile '/etc/htpasswd'
 Require user ${MASTER}
 </Location>
@@ -62,7 +62,7 @@ cat > /etc/apache2/sites-enabled/jackett.conf <<EOF
 ProxyPass http://localhost:9117/jackett
 ProxyPassReverse http://localhost:9117/jackett
 #AuthType Digest
-#AuthName "rutorrent"
+#AuthName "AetherFlow"
 #AuthUserFile '/etc/htpasswd'
 Require user ${MASTER}
 </Location>
@@ -135,7 +135,7 @@ EOF
 ProxyPass http://localhost:65080/sabnzbd
 ProxyPassReverse http://localhost:65080/sabnzbd
 #AuthType Digest
-#AuthName "rutorrent"
+#AuthName "AetherFlow"
 #AuthUserFile '/etc/htpasswd'
 Require user ${MASTER}
 </Location>
@@ -229,7 +229,7 @@ function _sonarr() {
 ProxyPass http://localhost:8989/sonarr
 ProxyPassReverse http://localhost:8989/sonarr
 #AuthType Digest
-#AuthName "rutorrent"
+#AuthName "AetherFlow"
 #AuthUserFile '/etc/htpasswd'
 Require user ${MASTER}
 </Location>
@@ -257,7 +257,7 @@ function _subsonic() {
 ProxyPass http://localhost:4040/subsonic
 ProxyPassReverse http://localhost:4040/subsonic
 #AuthType Digest
-#AuthName "rutorrent"
+#AuthName "AetherFlow"
 #AuthUserFile '/etc/htpasswd'
 Require user ${MASTER}
 </Location>
@@ -279,7 +279,7 @@ function _syncthing() {
 ProxyPass http://localhost:8384
 ProxyPassReverse http://localhost:8384
 #AuthType Digest
-#AuthName "rutorrent"
+#AuthName "AetherFlow"
 #AuthUserFile '/etc/htpasswd'
 Require user ${MASTER}
 </Location>

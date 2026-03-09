@@ -208,7 +208,7 @@ function _insTrWeb() {
 	download() {
 		cd "${TMP_FOLDER}"
 		echo "Downloading Transmission Web Control..." >>"${OUTTO}" 2>&1
-		wget -q "${DOWNLOAD_URL}" --no-check-certificate
+		wget -q "${DOWNLOAD_URL}"
 	}
 
 	installed() {
@@ -317,8 +317,13 @@ function _rconf() {
 function _autodl() {
 	mkdir -p "/home/${username}/.irssi/scripts/autorun/" >>"${OUTTO}" 2>&1
 	cd "/home/${username}/.irssi/scripts/"
-	# Grab the most recent version of AutoDL-trackers
-	curl -sL "http://git.io/vlcND" | grep -Po '(?<="browser_download_url": ")(.*-v[\d.]+.zip)' | xargs wget --quiet -O autodl-irssi.zip '{}'
+	# Fetch latest AutoDL-irssi release from GitHub API (git.io is deprecated)
+	AUTODL_URL=$(curl -sL "https://api.github.com/repos/autodl-community/autodl-irssi/releases/latest" | grep -Po '(?<="browser_download_url": ")(.*\.zip)' | head -1)
+	if [[ -n "$AUTODL_URL" ]]; then
+		wget --quiet -O autodl-irssi.zip "$AUTODL_URL"
+	else
+		echo "[WARN] Failed to fetch autodl-irssi release URL" >>"${OUTTO}" 2>&1
+	fi
 	unzip -o autodl-irssi.zip >>"${OUTTO}" 2>&1
 	rm autodl-irssi.zip
 	\cp -f autodl-irssi.pl autorun/
