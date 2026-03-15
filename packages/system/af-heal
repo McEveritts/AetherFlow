@@ -1,40 +1,141 @@
 #!/bin/bash
-# AetherFlow AI Self-Healing Grid
-# Location: /usr/local/bin/AetherFlow/system/af-heal
 
-source /opt/AetherFlow/packages/common.sh
-LOG_FILE="/var/log/aetherflow/self_healing.log"
-SERVICES=("rtorrent" "nginx" "php7.4-fpm" "deluged")
+set -euo pipefail
 
-log() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+COMMON_SH="/opt/AetherFlow/packages/common.sh"
+if [[ -f "${COMMON_SH}" ]]; then
+    # shellcheck disable=SC1091
+    source "${COMMON_SH}"
+else
+    # shellcheck disable=SC1091
+    source "${SELF_DIR}/../common.sh"
+fi
+
+LOGFILE="${LOGFILE:-/var/log/aetherflow/self_healing.log}"
+STATE_DIR="${STATE_DIR:-/var/lib/aetherflow/heal}"
+TMP_USAGE_THRESHOLD="${TMP_USAGE_THRESHOLD:-85}"
+TMP_PURGE_AGE_MINUTES="${TMP_PURGE_AGE_MINUTES:-180}"
+
+mkdir -p "$(dirname "${LOGFILE}")" "${STATE_DIR}"
+
+heal_log() {
+    local message="$1"
+    printf '[%s] %s\n' "$(timestamp)" "${message}" >>"${LOGFILE}"
 }
 
-check_and_heal() {
-    for SERVICE in "${SERVICES[@]}"; do
-        if ! pgrep -x "$SERVICE" > /dev/null && ! systemctl is-active --quiet "$SERVICE"; then
-            log "ALERT: Service $SERVICE is down. Attempting healing..."
-            systemctl restart "$SERVICE"
-            
-            if [ $? -eq 0 ]; then
-                log "SUCCESS: $SERVICE successfully restarted."
-                # Future: Send notification via API
-            else
-                log "CRITICAL: Failed to restart $SERVICE."
-            fi
-        else
-            # Service is running fine
-            :
+purge_tmp_pressure() {
+    local tmp_used
+    tmp_used="$(df -P /tmp 2>/dev/null | awk 'NR==2 {gsub("%","",$5); print $5}')"
+    if [[ -z "${tmp_used}" || "${tmp_used}" -lt "${TMP_USAGE_THRESHOLD}" ]]; then
+        return 0
+    fi
+
+    heal_log "TMP pressure at ${tmp_used}% - clearing stale AetherFlow build artefacts"
+
+    find /tmp -mindepth 1 -maxdepth 1 \
+        \( -name 'aetherflow-*' \
+        -o -name 'AetherFlow*' \
+        -o -name 'ffmpeg' \
+        -o -name 'libtorrent' \
+        -o -name 'rtorrent-*' \
+        -o -name 'xmlrpc-c*' \
+        -o -name 'tr-web-control' \
+        -o -name 'go-build*' \
+        -o -name 'npm-*' \
+        -o -name 'pip-*' \) \
+        -mmin +"${TMP_PURGE_AGE_MINUTES}" -exec rm -rf {} + >/dev/null 2>&1 || true
+
+    systemd-tmpfiles --clean >/dev/null 2>&1 || true
+}
+
+remove_orphaned_rtorrent_locks() {
+    local removed=0
+
+    while IFS= read -r lockfile; do
+        local owner
+        owner="$(printf '%s\n' "${lockfile}" | awk -F/ '{print $3}')"
+        if [[ -z "${owner}" ]]; then
+            continue
+        fi
+
+        if pgrep -u "${owner}" -x rtorrent >/dev/null 2>&1; then
+            continue
+        fi
+
+        rm -f "${lockfile}"
+        removed=$((removed + 1))
+        heal_log "Removed orphaned rTorrent session lock: ${lockfile}"
+    done < <(find /home -maxdepth 3 -type f -path '*/.sessions/rtorrent.lock' 2>/dev/null)
+
+    if [[ "${removed}" -eq 0 ]]; then
+        return 0
+    fi
+}
+
+remove_orphaned_tmp_locks() {
+    while IFS= read -r lockfile; do
+        rm -f "${lockfile}"
+        heal_log "Removed stale temporary lockfile: ${lockfile}"
+    done < <(
+        find /tmp -maxdepth 2 -type f \
+            \( -name 'aetherflow*.lock' \
+            -o -name 'AetherFlow*.lock' \
+            -o -name 'rtorrent*.lock' \
+            -o -name 'qbittorrent*.lock' \
+            -o -name 'deluge*.lock' \) \
+            -mmin +"${TMP_PURGE_AGE_MINUTES}" 2>/dev/null
+    )
+}
+
+restart_hung_rtorrent_units() {
+    local units=()
+    local line
+
+    while IFS= read -r line; do
+        [[ -n "${line}" ]] && units+=("${line}")
+    done < <(systemctl list-units --type=service --all 'rtorrent@*.service' --no-legend --no-pager 2>/dev/null | awk '{print $1}')
+
+    local unit
+    for unit in "${units[@]}"; do
+        local state main_pid proc_state
+        state="$(systemctl is-active "${unit}" 2>/dev/null || true)"
+        main_pid="$(systemctl show "${unit}" -p MainPID --value 2>/dev/null || true)"
+
+        if [[ "${state}" != "active" || -z "${main_pid}" || "${main_pid}" == "0" ]]; then
+            heal_log "Restarting unhealthy rTorrent unit ${unit} (state=${state}, pid=${main_pid:-0})"
+            systemctl restart "${unit}" >/dev/null 2>&1 || true
+            continue
+        fi
+
+        proc_state="$(ps -o state= -p "${main_pid}" 2>/dev/null | tr -d '[:space:]')"
+        case "${proc_state}" in
+            D|T|Z)
+                heal_log "Restarting hung rTorrent unit ${unit} (process state=${proc_state})"
+                systemctl restart "${unit}" >/dev/null 2>&1 || true
+                ;;
+        esac
+    done
+}
+
+restart_failed_services() {
+    local service
+    for service in apache2 fail2ban deluged deluge-web; do
+        if systemctl is-failed --quiet "${service}" 2>/dev/null; then
+            heal_log "Restarting failed service ${service}"
+            systemctl restart "${service}" >/dev/null 2>&1 || true
         fi
     done
 }
 
-clean_logs() {
-    # Rotate logs larger than 50MB
-    find /var/log/aetherflow -name "*.log" -size +50M -exec truncate -s 0 {} \;
+main() {
+    heal_log "Running AetherFlow self-heal cycle"
+    purge_tmp_pressure
+    remove_orphaned_rtorrent_locks
+    remove_orphaned_tmp_locks
+    restart_hung_rtorrent_units
+    restart_failed_services
+    heal_log "Self-heal cycle complete"
 }
 
-# Main Loop
-log "Running diagnostics..."
-check_and_heal
-clean_logs
+main "$@"

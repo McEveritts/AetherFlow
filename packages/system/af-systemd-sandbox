@@ -1,0 +1,196 @@
+#!/bin/bash
+
+set -euo pipefail
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+COMMON_SH="/opt/AetherFlow/packages/common.sh"
+if [[ -f "${COMMON_SH}" ]]; then
+    # shellcheck disable=SC1091
+    source "${COMMON_SH}"
+else
+    # shellcheck disable=SC1091
+    source "${SELF_DIR}/../common.sh"
+fi
+
+usage() {
+    cat <<'EOF'
+Usage:
+  af-systemd-sandbox apply --profile <profile> [--rw <path>]... <unit> [<unit>...]
+
+Profiles:
+  native, go, python, node, mono, dotnet, java
+EOF
+}
+
+normalize_unit() {
+    local unit="$1"
+    case "${unit}" in
+        *.service|*.timer|*.socket) printf '%s\n' "${unit}" ;;
+        *) printf '%s.service\n' "${unit}" ;;
+    esac
+}
+
+service_user_for_unit() {
+    local unit="$1"
+    local service_user
+    service_user="$(systemctl show "${unit}" -p User --value 2>/dev/null || true)"
+    if [[ -z "${service_user}" ]]; then
+        service_user="root"
+    fi
+    printf '%s\n' "${service_user}"
+}
+
+service_home_for_user() {
+    local service_user="$1"
+    local entry
+    entry="$(getent passwd "${service_user}" 2>/dev/null || true)"
+    if [[ -n "${entry}" ]]; then
+        printf '%s\n' "${entry}" | cut -d: -f6
+        return
+    fi
+
+    printf '/home/%s\n' "${service_user}"
+}
+
+expand_rw_path() {
+    local raw_path="$1"
+    local service_user="$2"
+    local service_home="$3"
+    local expanded="${raw_path}"
+    expanded="${expanded//\{\{SERVICE_USER\}\}/${service_user}}"
+    expanded="${expanded//\{\{SERVICE_HOME\}\}/${service_home}}"
+    printf '%s\n' "${expanded}"
+}
+
+profile_block() {
+    local profile="$1"
+
+    cat <<EOF
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectProc=invisible
+ProcSubset=pid
+LockPersonality=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0077
+EOF
+
+    case "${profile}" in
+        node|mono|dotnet|java)
+            ;;
+        *)
+            echo "MemoryDenyWriteExecute=yes"
+            ;;
+    esac
+}
+
+apply_sandbox_dropin() {
+    local profile="$1"
+    local unit="$2"
+    shift 2
+
+    local service_user service_home dropin_dir dropin_file
+    service_user="$(service_user_for_unit "${unit}")"
+    service_home="$(service_home_for_user "${service_user}")"
+    dropin_dir="/etc/systemd/system/${unit}.d"
+    dropin_file="${dropin_dir}/10-aetherflow-sandbox.conf"
+
+    mkdir -p "${dropin_dir}"
+
+    {
+        echo "[Service]"
+        profile_block "${profile}"
+
+        if [[ "$#" -gt 0 ]]; then
+            local expanded_paths=()
+            local raw_path
+            for raw_path in "$@"; do
+                expanded_paths+=("$(expand_rw_path "${raw_path}" "${service_user}" "${service_home}")")
+            done
+
+            printf 'ReadWritePaths='
+            printf '%s ' "${expanded_paths[@]}"
+            printf '\n'
+        fi
+    } > "${dropin_file}"
+
+    log_info "Applied sandbox profile ${profile} to ${unit}"
+}
+
+restart_if_active() {
+    local unit="$1"
+    if systemctl is-active --quiet "${unit}"; then
+        systemctl restart "${unit}" >/dev/null 2>&1 || true
+    fi
+}
+
+command_name="${1:-}"
+if [[ -z "${command_name}" ]]; then
+    usage
+    exit 1
+fi
+shift || true
+
+case "${command_name}" in
+    apply)
+        profile="native"
+        rw_paths=()
+        units=()
+
+        while [[ "$#" -gt 0 ]]; do
+            case "$1" in
+                --profile)
+                    profile="${2:-}"
+                    shift 2
+                    ;;
+                --rw)
+                    rw_paths+=("${2:-}")
+                    shift 2
+                    ;;
+                --help|-h)
+                    usage
+                    exit 0
+                    ;;
+                *)
+                    units+=("$(normalize_unit "$1")")
+                    shift
+                    ;;
+            esac
+        done
+
+        if [[ "${#units[@]}" -eq 0 ]]; then
+            usage
+            exit 1
+        fi
+
+        for unit in "${units[@]}"; do
+            apply_sandbox_dropin "${profile}" "${unit}" "${rw_paths[@]}"
+        done
+
+        systemctl daemon-reload >/dev/null 2>&1 || true
+        for unit in "${units[@]}"; do
+            restart_if_active "${unit}"
+        done
+        ;;
+    --help|-h)
+        usage
+        ;;
+    *)
+        usage
+        exit 1
+        ;;
+esac
