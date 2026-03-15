@@ -1,0 +1,135 @@
+syntax = "proto3";
+
+package cluster;
+
+option go_package = "aetherflow/cluster/pb";
+
+// ClusterService defines the gRPC interface for Master-Worker communication.
+service ClusterService {
+  // RegisterWorker enrolls a new worker node with the master.
+  rpc RegisterWorker(RegisterRequest) returns (RegisterResponse);
+
+  // Heartbeat is a bidirectional stream: worker sends periodic health updates,
+  // master can send back commands.
+  rpc Heartbeat(stream HeartbeatPing) returns (stream HeartbeatPong);
+
+  // GetMetrics retrieves current system metrics from a worker.
+  rpc GetMetrics(MetricsRequest) returns (MetricsResponse);
+
+  // ExecuteCommand sends a remote command to a worker for execution.
+  rpc ExecuteCommand(CommandRequest) returns (CommandResponse);
+}
+
+// --- Registration ---
+
+message RegisterRequest {
+  string hostname = 1;
+  string address = 2;
+  string psk = 3; // Pre-shared key for enrollment authentication
+  string version = 4;
+  SystemInfo system_info = 5;
+}
+
+message RegisterResponse {
+  string node_id = 1;
+  bool accepted = 2;
+  string message = 3;
+}
+
+message SystemInfo {
+  string os = 1;
+  string arch = 2;
+  int32 cpu_cores = 3;
+  int64 total_memory_bytes = 4;
+  int64 total_disk_bytes = 5;
+}
+
+// --- Heartbeat ---
+
+message HeartbeatPing {
+  string node_id = 1;
+  int64 timestamp = 2;
+  WorkerMetrics metrics = 3;
+  repeated ServiceStatus services = 4;
+}
+
+message HeartbeatPong {
+  int64 timestamp = 1;
+  bool acknowledged = 2;
+  // Optional command to execute on the worker
+  RemoteCommand command = 3;
+}
+
+message RemoteCommand {
+  string id = 1;
+  string type = 2; // "restart_service", "run_script", "update", etc.
+  map<string, string> params = 3;
+}
+
+message WorkerMetrics {
+  double cpu_usage = 1;
+  double memory_used_gb = 2;
+  double memory_total_gb = 3;
+  double disk_used_gb = 4;
+  double disk_total_gb = 5;
+  string network_rx_speed = 6;
+  string network_tx_speed = 7;
+  string uptime = 8;
+  repeated double load_average = 9;
+}
+
+message ServiceStatus {
+  string name = 1;
+  string status = 2; // "running", "stopped", "error"
+  string uptime = 3;
+  string managed_by = 4; // "systemd", "pm2", "docker"
+}
+
+// --- Metrics (on-demand pull) ---
+
+message MetricsRequest {
+  string node_id = 1;
+  bool include_processes = 2;
+  bool include_disks = 3;
+}
+
+message MetricsResponse {
+  string node_id = 1;
+  WorkerMetrics metrics = 2;
+  repeated ServiceStatus services = 3;
+  repeated ProcessInfo processes = 4;
+  repeated DiskInfo disks = 5;
+}
+
+message ProcessInfo {
+  int32 pid = 1;
+  string name = 2;
+  double cpu_percent = 3;
+  double mem_percent = 4;
+}
+
+message DiskInfo {
+  string mount_point = 1;
+  string device = 2;
+  string fs_type = 3;
+  double total_gb = 4;
+  double used_gb = 5;
+  double free_gb = 6;
+  double used_pct = 7;
+}
+
+// --- Remote Command Execution ---
+
+message CommandRequest {
+  string node_id = 1;
+  string command_id = 2;
+  string type = 3;
+  map<string, string> params = 4;
+}
+
+message CommandResponse {
+  string command_id = 1;
+  bool success = 2;
+  string output = 3;
+  string error = 4;
+}
