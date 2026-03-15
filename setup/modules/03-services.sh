@@ -231,18 +231,28 @@ function _insTrWeb() {
 function _insTrApache() {
 	APPNAME='transmission'
 	APPDPORT='9091'
-	cat >/etc/apache2/sites-enabled/transmission.conf <<EOF
+	local conf_target="/etc/apache2/sites-enabled/transmission.conf"
+
+	# Only write the Apache config if it doesn't exist (idempotent)
+	if [[ ! -f "${conf_target}" ]]; then
+		cat >"${conf_target}" <<EOF
 <Location /${APPNAME}>
 ProxyPass http://localhost:${APPDPORT}/${APPNAME}
 ProxyPassReverse http://localhost:${APPDPORT}/${APPNAME}
 </Location>
 EOF
+		chown www-data:www-data "${conf_target}"
+	fi
+
 	touch /install/.transmission.lock
-	chown www-data:www-data /etc/apache2/sites-enabled/transmission.conf
 	cat >/usr/share/transmission/web/.htaccess <<EOF
 allow from all
 EOF
-	\cp -f ${local_setup}templates/sysd/transmission.template /etc/systemd/system/transmission@.service >/dev/null 2>&1
+
+	# Use safe overlay for systemd unit
+	_safe_overlay_config "${local_setup}templates/sysd/transmission.template" \
+		/etc/systemd/system/transmission@.service
+	systemctl daemon-reload >/dev/null 2>&1 || true
 	systemctl enable transmission@${username} >/dev/null 2>&1
 	systemctl start transmission@${username} >/dev/null 2>&1
 }
@@ -258,7 +268,8 @@ function _qbittorrent() {
 	fi
 	chmod -R 755 /home/${username}/.config
 	chown -R ${username}:${username} /home/${username}/.config/
-	\cp -f ${local_setup}templates/sysd/qbittorrent.template /etc/systemd/system/qbittorrent@.service >/dev/null 2>&1
+	_safe_overlay_config "${local_setup}templates/sysd/qbittorrent.template" \
+		/etc/systemd/system/qbittorrent@.service
 	\cp -f ${local_setup}templates/qBittorrent.conf.template /home/${username}/.config/qBittorrent/qBittorrent.conf
 	sed -i "s/admin/${username}/g" /home/${username}/.config/qBittorrent/qBittorrent.conf
 	sed -i "s/5ebe2294ecd0e0f08eab7690d2a6ee69/${ha1pass}/g" /home/${username}/.config/qBittorrent/qBittorrent.conf
@@ -273,15 +284,21 @@ function _qbittorrent() {
 function _insqBApache() {
 	APPNAME='qbittorrent'
 	APPDPORT='8086'
-	cat >/etc/apache2/sites-enabled/qbittorrent.conf <<EOF
+	local conf_target="/etc/apache2/sites-enabled/qbittorrent.conf"
+
+	# Only write the Apache config if it doesn't exist (idempotent)
+	if [[ ! -f "${conf_target}" ]]; then
+		cat >"${conf_target}" <<EOF
 <Location /${APPNAME}>
 ProxyPass http://localhost:${APPDPORT}
 ProxyPassReverse http://localhost:${APPDPORT}
 Require all granted
 </Location>
 EOF
+		chown www-data:www-data "${conf_target}"
+	fi
+
 	touch /install/.qbittorrent.lock
-	chown www-data:www-data /etc/apache2/sites-enabled/qbittorrent.conf
 }
 
 # scgi enable function (22-nixed)
