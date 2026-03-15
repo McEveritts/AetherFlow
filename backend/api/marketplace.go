@@ -11,15 +11,21 @@ import (
 )
 
 type App struct {
-	Id        string  `json:"id"`
-	Name      string  `json:"name"`
-	Desc      string  `json:"desc"`
-	Hits      int     `json:"hits"`
-	Category  string  `json:"category"`
-	Status    string  `json:"status"`
-	Progress  int     `json:"progress"`            // 0-100 estimated install progress
-	StartedAt *string `json:"started_at,omitempty"` // ISO timestamp when install started
-	LogLine   string  `json:"log_line,omitempty"`   // most recent log line
+	Id               string  `json:"id"`
+	Name             string  `json:"name"`
+	Desc             string  `json:"desc"`
+	Hits             int     `json:"hits"`
+	Category         string  `json:"category"`
+	Status           string  `json:"status"`
+	Progress         int     `json:"progress"`              // 0-100 estimated install progress
+	StartedAt        *string `json:"started_at,omitempty"`  // ISO timestamp when install started
+	LogLine          string  `json:"log_line,omitempty"`    // most recent log line
+	InstalledVersion string  `json:"installed_version,omitempty"`
+	LatestVersion    string  `json:"latest_version,omitempty"`
+	UpdateAvailable  bool    `json:"update_available"`
+	UpdateCheckedAt  string  `json:"update_checked_at,omitempty"`
+	UpdateURL        string  `json:"update_url,omitempty"`
+	UpdateError      string  `json:"update_error,omitempty"`
 }
 
 // GetMarketplaceApps returns the list of marketplace apps
@@ -29,12 +35,18 @@ func GetMarketplaceApps(c *gin.Context) {
 	var apps []App
 	for _, p := range pkgs {
 		app := App{
-			Id:       p.Name,
-			Name:     p.Label,
-			Desc:     p.Description,
-			Hits:     p.Hits,
-			Category: p.Category,
-			Status:   p.Status,
+			Id:               p.Name,
+			Name:             p.Label,
+			Desc:             p.Description,
+			Hits:             p.Hits,
+			Category:         p.Category,
+			Status:           p.Status,
+			InstalledVersion: p.InstalledVersion,
+			LatestVersion:    p.LatestVersion,
+			UpdateAvailable:  p.UpdateAvailable,
+			UpdateCheckedAt:  p.UpdateCheckedAt,
+			UpdateURL:        p.UpdateURL,
+			UpdateError:      p.UpdateError,
 		}
 
 		// Enrich with live progress data if job is active
