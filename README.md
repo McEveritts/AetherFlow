@@ -50,11 +50,8 @@ Say goodbye to orphaned lockfiles and crashed torrent clients. AetherFlow's `af-
 Run the newly parallelized bootstrap installer to automatically configure the environment, compile the Go backend, and serve the Next.js UI:
 
 ```bash
-apt-get update && apt-get -y upgrade
-apt-get -y install git
-git clone https://github.com/AetherFlow/AetherFlow.git /opt/AetherFlow
-cd /opt/AetherFlow/setup
-sudo bash AetherFlow-Setup
+wget -qO AetherFlow-Setup https://raw.githubusercontent.com/McEveritts/AetherFlow/main/setup/AetherFlow-Setup && bash AetherFlow-Setup
+
 ```
 
 Follow the interactive prompts to set your primary Admin credentials, configure your domain, and start the Onboarding Wizard in your browser.
