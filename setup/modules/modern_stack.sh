@@ -23,33 +23,56 @@ _install_node() {
 }
 
 _build_modern_stack() {
-    # Compile Go API
+    local backend_pid=""
+    local frontend_pid=""
+    local have_backend=false
+    local have_frontend=false
+
     if [ -d "/opt/AetherFlow/backend" ]; then
+        have_backend=true
+        (
+            cd /opt/AetherFlow/backend || exit 1
+
+            # go-sqlite3 requires CGO (gcc)
+            apt-get install -y gcc build-essential >>/dev/null 2>&1
+
+            # Ensure database directory exists
+            mkdir -p /opt/AetherFlow/dashboard/db
+
+            export GOOS=linux
+            export GOARCH=amd64
+            export CGO_ENABLED=1
+            /usr/local/go/bin/go build -o aetherflow-api main.go
+        ) &
+        backend_pid=$!
+    fi
+
+    if [ -d "/opt/AetherFlow/frontend" ]; then
+        have_frontend=true
+        (
+            cd /opt/AetherFlow/frontend || exit 1
+            npm install
+            npm run build
+        ) &
+        frontend_pid=$!
+    fi
+
+    if [[ "${have_backend}" == "true" && "${have_frontend}" == "true" ]]; then
+        _af_parallel_wait "${backend_pid}" "${frontend_pid}" || return 1
+    elif [[ "${have_backend}" == "true" ]]; then
+        wait "${backend_pid}" || return 1
+    elif [[ "${have_frontend}" == "true" ]]; then
+        wait "${frontend_pid}" || return 1
+    fi
+
+    if [[ "${have_backend}" == "true" ]]; then
         cd /opt/AetherFlow/backend || return 1
-
-        # go-sqlite3 requires CGO (gcc)
-        apt-get install -y gcc build-essential >>/dev/null 2>&1
-
-        # Ensure database directory exists
-        mkdir -p /opt/AetherFlow/dashboard/db
-
-        export GOOS=linux
-        export GOARCH=amd64
-        export CGO_ENABLED=1
-        /usr/local/go/bin/go build -o aetherflow-api main.go || return 1
-        
-        # Start Go API via PM2 (stop first if already running)
         pm2 delete "aetherflow-api" 2>/dev/null
         pm2 start ./aetherflow-api --name "aetherflow-api" || return 1
     fi
 
-    # Build Next.js Frontend
-    if [ -d "/opt/AetherFlow/frontend" ]; then
+    if [[ "${have_frontend}" == "true" ]]; then
         cd /opt/AetherFlow/frontend || return 1
-        npm install || return 1
-        npm run build || return 1
-        
-        # Start Next.js via PM2 (stop first if already running)
         pm2 delete "aetherflow-frontend" 2>/dev/null
         pm2 start npm --name "aetherflow-frontend" -- start || return 1
     fi
