@@ -6,20 +6,20 @@ Audit date: 2026-03-15
 - Go backend: `backend/` — Gin router, JWT auth, WebSocket, SQLite, service management
 - Next.js frontend: `frontend/src/` — React 19, Zustand, SWR, Tailwind CSS
 - Setup/provisioning: `setup/`, `packages/`, `scripts/`
-- Configuration: `backend/config/packages.json` (canonical), env vars
+- Configuration: `backend/config/packages.json`, `backend/config/package_automation.json`, embedded OpenAPI spec, env vars
 
 ## Architecture
 
-### Backend (Go 1.24 / Gin)
+### Backend (Go 1.25 / Gin)
 | Layer | Files |
 |-------|-------|
 | Entry/CORS | `backend/main.go` |
-| Routing/Auth | `backend/api/routes.go`, `backend/api/auth.go` |
+| Routing/Auth | `backend/api/routes.go`, `backend/api/auth.go`, `backend/api/versioning.go` |
 | WebSocket (authenticated) | `backend/api/websockets.go` |
-| Features | `backend/api/` — services, marketplace, fileshare, backup, updater, AI, settings |
-| System execution | `backend/services/systemctl.go`, `backend/services/installer.go` |
+| Features | `backend/api/` — services, marketplace, fileshare, backup, updater, AI, settings, quotas, billing |
+| System execution | `backend/services/systemctl.go`, `backend/services/installer.go`, `backend/services/quota_manager.go` |
 | Database | `backend/db/db.go` (SQLite, canonical path: `backend/data/`) |
-| Config | `backend/config/packages.json` |
+| Config | `backend/config/packages.json`, `backend/config/package_automation.json`, `backend/api/spec/openapi-v1.yaml` |
 
 ### Frontend (Next.js 16 / React 19)
 | Layer | Files |
@@ -32,6 +32,7 @@ Audit date: 2026-03-15
 | WebSocket lifecycle | `frontend/src/contexts/WebSocketContext.tsx` — exponential backoff, heartbeat, fallback polling |
 | Metrics hook | `frontend/src/hooks/useMetrics.ts` — SWR + WebSocket fusion, globalMutate for services |
 | Auth | `frontend/src/contexts/AuthContext.tsx` |
+| E2E/Visual tests | `frontend/playwright.config.ts`, `frontend/tests/e2e/*` |
 | Tabs | `frontend/src/components/tabs/*` — zero-prop components using Zustand |
 
 ### Provisioning
@@ -40,6 +41,7 @@ Audit date: 2026-03-15
 | Installer | `setup/AetherFlow-Setup`, `setup/modules/*.sh` |
 | Package lifecycle | `packages/package/install/*`, `packages/package/remove/*` |
 | System CLI | `packages/system/*` |
+| Plugin SDK | `plugins/sdk-template/`, `scripts/create-plugin-sdk.sh` |
 
 ## Security audit (v4.0)
 
@@ -84,7 +86,9 @@ Audit date: 2026-03-15
 | API auth | `backend/api/auth.go`, `backend/api/routes.go` |
 | WebSocket | `backend/api/websockets.go` |
 | Service control | `backend/services/systemctl.go` |
-| Package pipeline | `backend/api/marketplace.go`, `backend/services/installer.go`, `backend/config/packages.json` |
+| Package pipeline | `backend/api/marketplace.go`, `backend/services/installer.go`, `backend/config/packages.json`, `backend/config/package_automation.json` |
+| API versioning | `backend/api/versioning.go`, `backend/api/spec/openapi-v1.yaml`, `backend/api/openapi.go` |
+| Quotas & billing | `backend/api/quota_handlers.go`, `backend/services/quota_manager.go`, `packages/system/setdisk`, `packages/system/showspace` |
 | Update pipeline | `backend/api/updater.go`, `scripts/update.sh` |
 | Database | `backend/db/db.go` |
 | File uploads | `backend/api/fileshare.go` |
@@ -93,3 +97,4 @@ Audit date: 2026-03-15
 | Frontend data | `frontend/src/hooks/useMetrics.ts`, `frontend/src/hooks/useMarketplace.ts`, `frontend/src/lib/fetcher.ts` |
 | Frontend WS | `frontend/src/contexts/WebSocketContext.tsx` |
 | Frontend layout | `frontend/src/app/layout.tsx`, `frontend/src/app/page.tsx` |
+| Frontend tests | `frontend/tests/e2e/login.spec.ts`, `frontend/tests/e2e/navigation.spec.ts`, `frontend/tests/e2e/marketplace.install.spec.ts`, `frontend/tests/e2e/visual.spec.ts` |
