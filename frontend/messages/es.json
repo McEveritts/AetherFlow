@@ -1,0 +1,24 @@
+{
+  "Settings": {
+    "title": "Configuración del Sistema y configuración de IA",
+    "interfacePreferences": "Preferencias de Interfaz",
+    "displayTheme": "Tema de Pantalla",
+    "themeSystem": "Predeterminado del Sistema",
+    "themeDark": "Modo Oscuro",
+    "themeLight": "Modo Claro",
+    "language": "Idioma",
+    "flowAIEngine": "Motor FlowAI",
+    "apiKeyTitle": "Clave de API de Gemini",
+    "apiKeyPlaceholder": "Introduce tu clave API de Gemini...",
+    "testApi": "Probar API",
+    "testing": "Probando...",
+    "defaultModel": "Modelo de Lenguaje Predeterminado",
+    "defaultPrompt": "Prompt de Sistema Predeterminado",
+    "saveConfig": "Guardar Configuración",
+    "saving": "Guardando...",
+    "systemUpdates": "Actualizaciones del Sistema",
+    "updateAvailable": "Actualización Disponible",
+    "checkingUpdates": "Comprobando actualizaciones...",
+    "upToDate": "Su sistema está actualizado."
+  }
+}

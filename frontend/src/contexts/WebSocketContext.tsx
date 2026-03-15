@@ -4,6 +4,13 @@ import React, { createContext, useContext, useEffect, useState, useRef, useCallb
 import { SystemMetrics } from '@/types/dashboard';
 import { useConnectionStore, ConnectionState } from '@/store/useConnectionStore';
 import { useToast } from '@/contexts/ToastContext';
+import { mutate as globalMutate } from 'swr';
+
+declare global {
+    interface Window {
+        __AF_DISABLE_WS__?: boolean;
+    }
+}
 
 // ── Configuration ──────────────────────────────────────────────
 const BACKOFF_BASE_MS = 1000;
@@ -41,6 +48,10 @@ function buildWsUrl(): string {
     return process.env.NEXT_PUBLIC_API_URL
         ? process.env.NEXT_PUBLIC_API_URL.replace('http', 'ws') + '/api/ws'
         : `${protocol}//${window.location.host}/api/ws`;
+}
+
+function isWebSocketDisabled(): boolean {
+    return typeof window !== 'undefined' && window.__AF_DISABLE_WS__ === true;
 }
 
 // ── Provider ───────────────────────────────────────────────────
@@ -104,10 +115,12 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
         }
     }, []);
 
-    const startPolling = useCallback(() => {
+    const startPolling = useCallback((silent = false) => {
         stopPolling();
         setConnectionState('FALLBACK');
-        addToast('Live connection unavailable — switched to polling mode', 'info');
+        if (!silent) {
+            addToast('Live connection unavailable — switched to polling mode', 'info');
+        }
 
         const poll = async () => {
             try {
@@ -173,6 +186,8 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
                         system: message.data.system,
                         services: message.data.services,
                     });
+                } else if (message.type === 'MARKETPLACE_UPDATE') {
+                    globalMutate('/api/marketplace');
                 }
                 // PONG and other message types are silently consumed
             } catch (err) {
@@ -229,6 +244,15 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
     // ── Lifecycle ──────────────────────────────────────────────
     useEffect(() => {
         isMountedRef.current = true;
+        if (isWebSocketDisabled()) {
+            startPolling(true);
+            return () => {
+                isMountedRef.current = false;
+                clearHeartbeat();
+                stopPolling();
+            };
+        }
+
         connect();
 
         return () => {

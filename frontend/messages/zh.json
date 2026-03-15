@@ -1,0 +1,24 @@
+{
+  "Settings": {
+    "title": "系统设置与AI配置",
+    "interfacePreferences": "界面偏好",
+    "displayTheme": "显示主题",
+    "themeSystem": "系统默认",
+    "themeDark": "深色模式",
+    "themeLight": "浅色模式",
+    "language": "语言",
+    "flowAIEngine": "FlowAI 引擎",
+    "apiKeyTitle": "Gemini API 密钥",
+    "apiKeyPlaceholder": "输入您的 Gemini API 密钥...",
+    "testApi": "测试 API",
+    "testing": "测试中...",
+    "defaultModel": "默认语言模型",
+    "defaultPrompt": "默认系统提示词",
+    "saveConfig": "保存配置",
+    "saving": "保存中...",
+    "systemUpdates": "系统更新",
+    "updateAvailable": "有可用更新",
+    "checkingUpdates": "正在检查更新...",
+    "upToDate": "您的系统已是最新版本。"
+  }
+}

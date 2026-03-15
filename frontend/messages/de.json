@@ -1,0 +1,24 @@
+{
+  "Settings": {
+    "title": "Systemeinstellungen & KI-Konfiguration",
+    "interfacePreferences": "Schnittstellenpräferenzen",
+    "displayTheme": "Anzeige-Design",
+    "themeSystem": "Systemstandard",
+    "themeDark": "Dunkler Modus",
+    "themeLight": "Heller Modus",
+    "language": "Sprache",
+    "flowAIEngine": "FlowAI-Engine",
+    "apiKeyTitle": "Gemini API-Schlüssel",
+    "apiKeyPlaceholder": "Geben Sie Ihren Gemini API-Schlüssel ein...",
+    "testApi": "API Testen",
+    "testing": "Prüfen...",
+    "defaultModel": "Standard-Sprachmodell",
+    "defaultPrompt": "Standard-System-Prompt",
+    "saveConfig": "Konfiguration Speichern",
+    "saving": "Speichern...",
+    "systemUpdates": "System-Updates",
+    "updateAvailable": "Update Verfügbar",
+    "checkingUpdates": "Nach Updates suchen...",
+    "upToDate": "Ihr System ist auf dem neuesten Stand."
+  }
+}

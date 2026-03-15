@@ -1,0 +1,24 @@
+{
+  "Settings": {
+    "title": "Systemindstillinger & AI-konfiguration",
+    "interfacePreferences": "Grænsefladepræferencer",
+    "displayTheme": "Skærmtema",
+    "themeSystem": "Systemstandard",
+    "themeDark": "Mørk tilstand",
+    "themeLight": "Lys tilstand",
+    "language": "Sprog",
+    "flowAIEngine": "FlowAI-motor",
+    "apiKeyTitle": "Gemini API-nøgle",
+    "apiKeyPlaceholder": "Indtast din Gemini API-nøgle...",
+    "testApi": "Test API",
+    "testing": "Tester...",
+    "defaultModel": "Standard sprogmodel",
+    "defaultPrompt": "Standard System-prompt",
+    "saveConfig": "Gem Konfiguration",
+    "saving": "Gemmer...",
+    "systemUpdates": "Systemopdateringer",
+    "updateAvailable": "Opdatering Tilgængelig",
+    "checkingUpdates": "Søger efter opdateringer...",
+    "upToDate": "Dit system er opdateret."
+  }
+}
