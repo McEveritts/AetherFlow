@@ -2,6 +2,10 @@
 # Module: 00-core.sh
 
 function _string() { perl -le 'print map {(a..z,A..Z,0..9)[rand 62] } 0..pop' 15; }
+
+function _version_ge() {
+	[[ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -n1)" == "$2" ]]
+}
 #################################################################################
 # shellcheck disable=2005,2034,2120,2215,2164,2312
 
@@ -19,6 +23,7 @@ function _intro() {
 	DISTRO=$(lsb_release -is)
 	CODENAME=$(lsb_release -cs)
 	SETNAME=$(lsb_release -rc)
+	VERSION_ID=$(lsb_release -rs)
 	echo
 	echo
 	echo "[${repo_title}AetherFlow${normal}] ${title} AetherFlow Seedbox Installation ${normal}  "
@@ -36,13 +41,22 @@ function _intro() {
 	fi
 	echo "$(lsb_release -a)"
 	echo
-	if [[ ! "${DISTRO}" =~ ("Ubuntu"|"Debian") ]]; then
-		echo "${DISTRO}: ${alert} It looks like you are running ${DISTRO}, which is not supported by AetherFlow ${normal} "
+	if [[ "${DISTRO}" != "Ubuntu" && "${DISTRO}" != "Debian" ]]; then
+		echo "${DISTRO}: ${alert} It looks like you are running ${DISTRO}, which is not supported by AetherFlow ${normal}"
 		echo 'Exiting...'
 		exit 1
-	elif [[ ! "${CODENAME}" =~ ("bionic"|"focal"|"jammy"|"noble"|"bullseye"|"bookworm"|"trixie") ]]; then
-		echo "Oh drats! You do not appear to be running a supported ${DISTRO} release."
-		echo "${bold}${SETNAME}${normal}"
+	fi
+
+	if [[ "${DISTRO}" == "Ubuntu" ]] && ! _version_ge "${VERSION_ID}" "20.04"; then
+		echo "Unsupported Ubuntu release: ${SETNAME}."
+		echo "AetherFlow requires Ubuntu 20.04 or newer."
+		echo 'Exiting...'
+		exit 1
+	fi
+
+	if [[ "${DISTRO}" == "Debian" ]] && ! _version_ge "${VERSION_ID}" "11"; then
+		echo "Unsupported Debian release: ${SETNAME}."
+		echo "AetherFlow requires Debian 11 or newer."
 		echo 'Exiting...'
 		exit 1
 	fi
@@ -156,7 +170,7 @@ function _hostname() {
 	if [[ -z ${input} ]]; then
 		echo "No hostname supplied, no changes made!!"
 	else
-		hostname ${input}
+		hostname "${input}"
 		echo "${input}" >/etc/hostname
 		echo "127.0.0.1 ${input}" >/etc/hosts
 		echo "Hostname set to ${input}"

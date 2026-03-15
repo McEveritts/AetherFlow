@@ -1,18 +1,18 @@
-LoadModule proxy_module /usr/lib/apache2/modules/mod_proxy.so
-LoadModule proxy_http_module /usr/lib/apache2/modules/mod_proxy_http.so
 <VirtualHost *:31400>
+  ServerName _
   ProxyRequests Off
   ProxyPreserveHost On
-  <Proxy *>
-    AddDefaultCharset Off
+  RequestHeader set X-Forwarded-Proto "https"
+  RequestHeader set X-Forwarded-Port "443"
+
+  <Location "/">
     AuthType Digest
     AuthName "aetherflow"
-    AuthUserFile '/etc/htpasswd'
+    AuthUserFile "/etc/htpasswd"
     Require valid-user
-  </Proxy>
-  ProxyPass / http://PUBLICIP:32400/
-  ProxyPassReverse / http://PUBLICIP:32400/
+    ProxyPass "http://PUBLICIP:32400/" retry=0 timeout=300
+    ProxyPassReverse "http://PUBLICIP:32400/"
+  </Location>
 </VirtualHost>
-<IfModule mod_proxy.c>
-    Listen 31400
-</IfModule>
+
+Listen 31400

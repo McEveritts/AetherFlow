@@ -1,12 +1,15 @@
-import { Settings, Sparkles, ChevronRight, DownloadCloud, AlertCircle, Eye, EyeOff, Key } from 'lucide-react';
+import { Settings, Sparkles, ChevronRight, DownloadCloud, AlertCircle, Eye, EyeOff, Key, Monitor, Globe } from 'lucide-react';
 import { useState, FormEvent } from 'react';
 import useSWR from 'swr';
 import { useToast } from '@/contexts/ToastContext';
-
-const fetcher = (url: string) => fetch(url).then((res) => res.json());
+import { useSystemStore } from '@/store/useSystemStore';
+import { useTranslations } from 'next-intl';
+import { SettingsSkeleton } from '@/components/layout/SkeletonBox';
 
 export default function SettingsTab() {
+    const t = useTranslations('Settings');
     const { addToast } = useToast();
+    const { theme, setTheme, language, setLanguage } = useSystemStore();
     const [model, setModel] = useState('gemini-2.5-pro');
     const [prompt, setPrompt] = useState("You are FlowAI, a highly intelligent infrastructure assistant connected to a local Next.js + Go Nexus environment. Always prioritize safe and performant configurations.");
     const [apiKey, setApiKey] = useState('');
@@ -43,16 +46,13 @@ export default function SettingsTab() {
 
     const { data: updateData, error: updateError } = useSWR(
         '/api/system/update/check',
-        fetcher,
         { refreshInterval: 60000 }
     );
 
-    const { data: settingsData } = useSWR(
+    const { data: settingsData, isLoading, mutate: mutateSettings } = useSWR(
         '/api/settings',
-        fetcher,
         {
-            revalidateOnFocus: false,
-            onSuccess: (data) => {
+            onSuccess: (data: Record<string, string>) => {
                 if (data.aiModel) setModel(data.aiModel);
                 if (data.systemPrompt) setPrompt(data.systemPrompt);
                 if (data.geminiApiKey) setApiKey(data.geminiApiKey);
@@ -60,21 +60,28 @@ export default function SettingsTab() {
         }
     );
 
+    if (isLoading) return <SettingsSkeleton />;
+
     const handleSave = async (e: FormEvent) => {
         e.preventDefault();
         setIsSaving(true);
 
-        try {
-            const payload = {
-                aiModel: model,
-                systemPrompt: prompt,
-                geminiApiKey: apiKey,
-                language: settingsData?.language || 'en',
-                timezone: settingsData?.timezone || 'UTC',
-                updateChannel: settingsData?.updateChannel || 'stable',
-                defaultDashboard: settingsData?.defaultDashboard || 'overview'
-            };
+        const payload = {
+            aiModel: model,
+            systemPrompt: prompt,
+            geminiApiKey: apiKey,
+            language: language,
+            theme: theme,
+            timezone: settingsData?.timezone || 'UTC',
+            updateChannel: settingsData?.updateChannel || 'stable',
+            defaultDashboard: settingsData?.defaultDashboard || 'overview'
+        };
 
+        // Optimistic update
+        const prevData = settingsData;
+        mutateSettings({ ...settingsData, ...payload }, false);
+
+        try {
             const res = await fetch('/api/settings', {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
@@ -83,10 +90,13 @@ export default function SettingsTab() {
 
             if (res.ok) {
                 addToast('Configuration synced to AetherFlow Engine', 'success');
+                mutateSettings(); // revalidate from server
             } else {
+                mutateSettings(prevData, false); // rollback
                 addToast('Failed to sync configuration', 'error');
             }
         } catch (_err) {
+            mutateSettings(prevData, false); // rollback
             addToast('Network error saving configuration', 'error');
         } finally {
             setIsSaving(false);
@@ -121,28 +131,75 @@ export default function SettingsTab() {
 
                 <h2 className="text-2xl font-bold text-slate-100 flex items-center gap-3 mb-8 pb-4 border-b border-white/5 relative z-10">
                     <Settings size={24} className="text-slate-400" />
-                    System Settings & AI Configuration
+                    {t('title')}
                 </h2>
 
                 <div className="max-w-2xl space-y-8 relative z-10">
                     <form onSubmit={handleSave} className="space-y-8">
+                        {/* Preferences Block */}
+                        <div className="bg-slate-950/50 border border-white/10 rounded-2xl p-6">
+                            <h3 className="text-lg font-bold text-slate-200 mb-6 flex items-center gap-2">
+                                <Monitor size={18} className="text-blue-400" /> {t('interfacePreferences')}
+                            </h3>
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                {/* Theme Selector */}
+                                <div>
+                                    <label className="block text-sm font-semibold text-slate-300 mb-2">{t('displayTheme')}</label>
+                                    <div className="relative">
+                                        <select
+                                            value={theme}
+                                            onChange={(e) => setTheme(e.target.value as 'light' | 'dark' | 'system')}
+                                            className="w-full bg-slate-900 border border-white/10 rounded-xl px-4 py-3.5 text-slate-200 text-sm focus:outline-none focus:border-indigo-500/50 transition-colors appearance-none cursor-pointer"
+                                        >
+                                            <option value="system">{t('themeSystem')}</option>
+                                            <option value="dark">{t('themeDark')}</option>
+                                            <option value="light">{t('themeLight')}</option>
+                                        </select>
+                                        <ChevronRight size={16} className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-500 rotate-90 pointer-events-none" />
+                                    </div>
+                                </div>
+
+                                {/* Language Selector */}
+                                <div>
+                                    <label className="block text-sm font-semibold text-slate-300 mb-2 flex items-center gap-2">
+                                        <Globe size={14} className="text-slate-400" /> {t('language')}
+                                    </label>
+                                    <div className="relative">
+                                        <select
+                                            value={language}
+                                            onChange={(e) => setLanguage(e.target.value)}
+                                            className="w-full bg-slate-900 border border-white/10 rounded-xl px-4 py-3.5 text-slate-200 text-sm focus:outline-none focus:border-indigo-500/50 transition-colors appearance-none cursor-pointer"
+                                        >
+                                            <option value="en">English</option>
+                                            <option value="zh">中文 (Chinese)</option>
+                                            <option value="es">Español (Spanish)</option>
+                                            <option value="de">Deutsch (German)</option>
+                                            <option value="fr">Français (French)</option>
+                                            <option value="dk">Dansk (Danish)</option>
+                                        </select>
+                                        <ChevronRight size={16} className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-500 rotate-90 pointer-events-none" />
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
                         {/* FlowAI Config block */}
                         <div className="bg-slate-950/50 border border-white/10 rounded-2xl p-6">
                             <h3 className="text-lg font-bold text-slate-200 mb-6 flex items-center gap-2">
-                                <Sparkles size={18} className="text-indigo-400" /> FlowAI Engine
+                                <Sparkles size={18} className="text-indigo-400" /> {t('flowAIEngine')}
                             </h3>
                             <div className="space-y-6">
                                 {/* API Key */}
                                 <div>
                                     <label className="block text-sm font-semibold text-slate-300 mb-2 flex items-center gap-2">
-                                        <Key size={14} className="text-amber-400" /> Gemini API Key
+                                        <Key size={14} className="text-amber-400" /> {t('apiKeyTitle')}
                                     </label>
                                     <div className="relative">
                                         <input
                                             type={showApiKey ? 'text' : 'password'}
                                             value={apiKey}
                                             onChange={(e) => setApiKey(e.target.value)}
-                                            placeholder="Enter your Gemini API key..."
+                                            placeholder={t('apiKeyPlaceholder')}
                                             className="w-full bg-slate-900 border border-white/10 rounded-xl px-4 py-3.5 pr-12 text-slate-200 text-sm focus:outline-none focus:border-indigo-500/50 transition-colors font-mono"
                                         />
                                         <button
@@ -164,9 +221,9 @@ export default function SettingsTab() {
                                             className="px-4 py-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 border border-white/10 rounded-lg text-xs font-semibold text-slate-300 transition-colors flex items-center gap-2"
                                         >
                                             {isTesting ? (
-                                                <><div className="w-3 h-3 border-2 border-slate-400/30 border-t-slate-400 rounded-full animate-spin"></div> Testing...</>
+                                                <><div className="w-3 h-3 border-2 border-slate-400/30 border-t-slate-400 rounded-full animate-spin"></div> {t('testing')}</>
                                             ) : (
-                                                <><Sparkles size={14} className="text-amber-400" /> Test API</>
+                                                <><Sparkles size={14} className="text-amber-400" /> {t('testApi')}</>
                                             )}
                                         </button>
                                     </div>
@@ -174,7 +231,7 @@ export default function SettingsTab() {
 
                                 {/* Model Selector */}
                                 <div>
-                                    <label className="block text-sm font-semibold text-slate-300 mb-2">Default Language Model</label>
+                                    <label className="block text-sm font-semibold text-slate-300 mb-2">{t('defaultModel')}</label>
                                     <div className="relative">
                                         <select
                                             value={model}
@@ -198,7 +255,7 @@ export default function SettingsTab() {
 
                                 {/* System Prompt */}
                                 <div>
-                                    <label className="block text-sm font-semibold text-slate-300 mb-2">Default System Prompt</label>
+                                    <label className="block text-sm font-semibold text-slate-300 mb-2">{t('defaultPrompt')}</label>
                                     <textarea
                                         value={prompt}
                                         onChange={(e) => setPrompt(e.target.value)}
@@ -215,7 +272,7 @@ export default function SettingsTab() {
                                 disabled={isSaving}
                                 className="px-8 py-3 bg-indigo-500 hover:bg-indigo-400 disabled:bg-indigo-500/50 rounded-xl text-sm font-bold text-white transition-all shadow-lg shadow-indigo-500/20 flex items-center gap-2"
                             >
-                                {isSaving ? 'Saving...' : 'Save Configuration'}
+                                {isSaving ? t('saving') : t('saveConfig')}
                             </button>
                         </div>
                     </form>
@@ -224,11 +281,11 @@ export default function SettingsTab() {
                     <div className="bg-slate-950/50 border border-white/10 rounded-2xl p-6">
                         <div className="flex items-center justify-between mb-6">
                             <h3 className="text-lg font-bold text-slate-200 flex items-center gap-2">
-                                <DownloadCloud size={18} className="text-blue-400" /> System Updates
+                                <DownloadCloud size={18} className="text-blue-400" /> {t('systemUpdates')}
                             </h3>
                             {updateData && updateData.updateAvailable && (
                                 <span className="bg-blue-500/20 text-blue-400 text-xs font-bold px-3 py-1 rounded-full uppercase tracking-wider animate-pulse">
-                                    Update Available
+                                    {t('updateAvailable')}
                                 </span>
                             )}
                         </div>
@@ -241,7 +298,7 @@ export default function SettingsTab() {
                             ) : !updateData ? (
                                 <div className="flex items-center gap-2 text-slate-500">
                                     <div className="w-4 h-4 border-2 border-slate-500/30 border-t-slate-500 rounded-full animate-spin"></div>
-                                    Checking for updates...
+                                    {t('checkingUpdates')}
                                 </div>
                             ) : (
                                 <>

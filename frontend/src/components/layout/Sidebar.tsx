@@ -1,5 +1,6 @@
 import { TabId } from '@/types/dashboard';
 import { useAuth } from '@/contexts/AuthContext';
+import { useSystemStore } from '@/store/useSystemStore';
 import {
     LayoutDashboard,
     Server,
@@ -31,24 +32,9 @@ export const BOTTOM_NAVIGATION = [
     { id: 'logout' as TabId, label: 'Log Out', icon: <LogOut size={18} /> },
 ];
 
-interface SidebarProps {
-    activeTab: TabId;
-    setActiveTab: (tab: TabId) => void;
-    isSidebarHovered: boolean;
-    setIsSidebarHovered: (hovered: boolean) => void;
-    isMobileMenuOpen: boolean;
-    setIsMobileMenuOpen: (open: boolean) => void;
-}
-
-export default function Sidebar({
-    activeTab,
-    setActiveTab,
-    isSidebarHovered,
-    setIsSidebarHovered,
-    isMobileMenuOpen,
-    setIsMobileMenuOpen,
-}: SidebarProps) {
+export default function Sidebar() {
     const { user, logout } = useAuth();
+    const { activeTab, setActiveTab, isSidebarHovered, setIsSidebarHovered, isMobileMenuOpen, setIsMobileMenuOpen } = useSystemStore();
 
     return (
         <>
@@ -61,9 +47,9 @@ export default function Sidebar({
             )}
 
             <aside
-                className={`fixed inset-y-0 left-0 z-50 flex flex-col bg-slate-950 border-r border-white/5 transition-all duration-300 ease-[cubic-bezier(0.4,0,0.2,1)] shadow-2xl 
+                className={`fixed inset-y-0 left-0 z-50 flex flex-col glass-panel border-r border-white/[0.05] transition-all duration-300 ease-[cubic-bezier(0.4,0,0.2,1)] shadow-[4px_0_24px_rgba(0,0,0,0.2)]
                 ${isMobileMenuOpen ? 'translate-x-0 w-64' : '-translate-x-full'} 
-                md:translate-x-0 md:bg-slate-950/80 md:backdrop-blur-2xl ${isSidebarHovered ? 'md:w-64' : 'md:w-20'}`}
+                md:translate-x-0 ${isSidebarHovered ? 'md:w-64' : 'md:w-20'}`}
                 onMouseEnter={() => setIsSidebarHovered(true)}
                 onMouseLeave={() => setIsSidebarHovered(false)}
             >

@@ -16,9 +16,12 @@ func InitDB() {
 	if dbPath == "" {
 		// Fallback paths, looking for aetherflow.sqlite
 		paths := []string{
-			filepath.Join("..", "dashboard", "db", "aetherflow.sqlite"),
-			filepath.Join("dashboard", "db", "aetherflow.sqlite"),
-			filepath.Join("/opt", "AetherFlow", "dashboard", "db", "aetherflow.sqlite"),
+			filepath.Join("data", "aetherflow.sqlite"),                                   // Canonical: backend/data/
+			filepath.Join("..", "backend", "data", "aetherflow.sqlite"),                  // From project root
+			filepath.Join("/opt", "AetherFlow", "backend", "data", "aetherflow.sqlite"), // Production
+			filepath.Join("..", "dashboard", "db", "aetherflow.sqlite"),                  // Legacy fallback
+			filepath.Join("dashboard", "db", "aetherflow.sqlite"),                        // Legacy fallback (alt)
+			filepath.Join("/opt", "AetherFlow", "dashboard", "db", "aetherflow.sqlite"), // Legacy production fallback
 		}
 		
 		for _, p := range paths {

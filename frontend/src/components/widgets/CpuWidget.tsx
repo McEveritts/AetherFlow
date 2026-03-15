@@ -21,7 +21,7 @@ export default function CpuWidget({ metrics, hardware, history }: CpuWidgetProps
     const cores = metrics.per_core_cpu || [];
 
     return (
-        <div className="bg-white/[0.02] border border-white/[0.05] rounded-2xl p-5 relative overflow-hidden group hover:bg-white/[0.04] transition-colors backdrop-blur-xl">
+        <div className="glass-card p-5 relative overflow-hidden group hover:bg-white/[0.04] transition-colors">
             {/* Header */}
             <div className="flex items-center justify-between mb-3">
                 <h2 className="text-sm font-semibold text-slate-200 flex items-center gap-2">

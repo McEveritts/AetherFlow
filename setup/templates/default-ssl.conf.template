@@ -1,80 +1,70 @@
-SSLPassPhraseDialog  builtin
-SSLSessionCache         shmcb:/var/cache/mod_ssl/scache(512000)
-SSLSessionCacheTimeout  300
-#SSLMutex default
-SSLRandomSeed startup file:/dev/urandom  256
+SSLPassPhraseDialog builtin
+SSLSessionCache shmcb:/var/cache/mod_ssl/scache(512000)
+SSLSessionCacheTimeout 300
+SSLRandomSeed startup file:/dev/urandom 256
 SSLRandomSeed connect builtin
 SSLCryptoDevice builtin
+
 <VirtualHost *:80>
+        ServerName _
         RewriteEngine On
-        RewriteCond %{HTTPS} !=on
-        RewriteRule ^/?(.*) https://%{SERVER_NAME}/$1 [R,L]
-        # Serve Legacy Files (Fallback)
+        RewriteRule ^/?(.*)$ https://%{HTTP_HOST}/$1 [R=301,L]
+
         DocumentRoot "/srv/aetherflow"
         <Directory "/srv/aetherflow/">
-                Options None
+                Options -Indexes -Includes -ExecCGI
                 AllowOverride None
                 Require all granted
         </Directory>
-
-        # Route Next.js Frontend
-        ProxyPreserveHost On
-
-        # WebSocket support for /api/ws
-        RewriteEngine On
-        RewriteCond %{HTTP:Upgrade} websocket [NC]
-        RewriteCond %{HTTP:Connection} upgrade [NC]
-        RewriteRule ^/api/ws$ ws://127.0.0.1:8080/api/ws [P,L]
-
-        # Route Go Backend API (MUST come before catch-all /)
-        ProxyPass /api/ http://127.0.0.1:8080/api/
-        ProxyPassReverse /api/ http://127.0.0.1:8080/api/
-
-        ProxyPass /_next/ http://127.0.0.1:3000/_next/
-        ProxyPassReverse /_next/ http://127.0.0.1:3000/_next/
-        
-        ProxyPass / http://127.0.0.1:3000/
-        ProxyPassReverse / http://127.0.0.1:3000/
 </VirtualHost>
+
 <VirtualHost *:443>
-        Options +Indexes +MultiViews +FollowSymLinks
+        ServerName _
         SSLEngine on
+        SSLProtocol -all +TLSv1.2 +TLSv1.3
+        SSLHonorCipherOrder off
+        SSLCipherSuite HIGH:!aNULL:!MD5:!3DES
+        SSLCompression off
+        SSLSessionTickets off
+        SSLUseStapling On
+        SSLStaplingCache shmcb:/var/cache/mod_ssl/stapling_cache(128000)
+
+        SSLCertificateFile /etc/ssl/certs/ssl-cert-snakeoil.pem
+        SSLCertificateKeyFile /etc/ssl/private/ssl-cert-snakeoil.key
+
+        Header always set Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
+        Header always set X-Content-Type-Options "nosniff"
+        Header always set X-Frame-Options "SAMEORIGIN"
+        Header always set Referrer-Policy "strict-origin-when-cross-origin"
+        Header always set Permissions-Policy "geolocation=(), microphone=(), camera=()"
+
         DocumentRoot "/srv/aetherflow"
         <Directory "/srv/aetherflow/">
-                Options +Indexes +FollowSymLinks +MultiViews
-                AllowOverride All AuthConfig
-                Require all granted
+                Options -Indexes -Includes -ExecCGI
+                AllowOverride None
                 AuthType Digest
                 AuthName "REALM"
-                AuthUserFile 'HTPASSWD'
+                AuthUserFile "/etc/htpasswd"
                 Require valid-user
         </Directory>
 
-        # Route Next.js Frontend
+        ProxyRequests Off
         ProxyPreserveHost On
+        ProxyTimeout 300
+        RequestHeader set X-Forwarded-Proto "https"
+        RequestHeader set X-Forwarded-Port "443"
 
-        # WebSocket support for /api/ws
         RewriteEngine On
-        RewriteCond %{HTTP:Upgrade} websocket [NC]
+        RewriteCond %{HTTP:Upgrade} =websocket [NC]
         RewriteCond %{HTTP:Connection} upgrade [NC]
         RewriteRule ^/api/ws$ ws://127.0.0.1:8080/api/ws [P,L]
 
-        # Route Go Backend API (MUST come before catch-all /)
-        ProxyPass /api/ http://127.0.0.1:8080/api/
+        ProxyPass /api/ http://127.0.0.1:8080/api/ retry=0 timeout=300
         ProxyPassReverse /api/ http://127.0.0.1:8080/api/
 
-        ProxyPass /_next/ http://127.0.0.1:3000/_next/
+        ProxyPass /_next/ http://127.0.0.1:3000/_next/ retry=0 timeout=300
         ProxyPassReverse /_next/ http://127.0.0.1:3000/_next/
-        
-        ProxyPass / http://127.0.0.1:3000/
-        ProxyPassReverse / http://127.0.0.1:3000/
-        SSLProtocol ALL -SSLv2 -SSLv3
-        SSLHonorCipherOrder On
-        SSLCipherSuite ECDH+AESGCM:DH+AESGCM:ECDH+AES256:DH+AES256:ECDH+AES128:DH+AES:RSA+AESGCM:RSA+AES:!aNULL:!MD5:!DSS
-        SSLCertificateFile /etc/ssl/certs/ssl-cert-snakeoil.pem
-        SSLCertificateKeyFile /etc/ssl/private/ssl-cert-snakeoil.key
-        SetEnvIf User-Agent ".*MSIE.*" \
-                 nokeepalive ssl-unclean-shutdown \
-                 downgrade-1.0 force-response-1.0
-</Virtualhost>
 
+        ProxyPass / http://127.0.0.1:3000/ retry=0 timeout=300
+        ProxyPassReverse / http://127.0.0.1:3000/
+</VirtualHost>

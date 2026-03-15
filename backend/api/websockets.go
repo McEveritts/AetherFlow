@@ -4,27 +4,31 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
-	"strings"
+	"net/url"
 	"sync"
 	"time"
 
 	"aetherflow/services"
 
 	"github.com/gin-gonic/gin"
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/gorilla/websocket"
 )
 
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
-	// Validate that the Origin header matches the Host (same-origin policy)
+	// Strict origin check: parse the Origin header properly and compare host
 	CheckOrigin: func(r *http.Request) bool {
 		origin := r.Header.Get("Origin")
 		if origin == "" {
 			return true // Non-browser clients (curl, server-side, etc.)
 		}
-		host := r.Host
-		return strings.HasSuffix(origin, "://"+host)
+		parsed, err := url.Parse(origin)
+		if err != nil {
+			return false
+		}
+		return parsed.Host == r.Host
 	},
 }
 
@@ -80,8 +84,19 @@ func (h *Hub) run() {
 	}
 }
 
+const (
+	// Time allowed to write a message to the peer.
+	writeWait = 10 * time.Second
+
+	// Send pings to peer with this period. Must be less than pongWait.
+	pingPeriod = 54 * time.Second
+
+	// Time allowed to read the next pong message from the peer.
+	pongWait = 70 * time.Second
+)
+
 func (c *Client) writePump() {
-	ticker := time.NewTicker(54 * time.Second)
+	ticker := time.NewTicker(pingPeriod)
 	defer func() {
 		ticker.Stop()
 		c.conn.Close()
@@ -89,7 +104,7 @@ func (c *Client) writePump() {
 	for {
 		select {
 		case message, ok := <-c.send:
-			c.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if !ok {
 				// The hub closed the channel.
 				c.conn.WriteMessage(websocket.CloseMessage, []byte{})
@@ -106,11 +121,38 @@ func (c *Client) writePump() {
 				return
 			}
 		case <-ticker.C:
-			c.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
 				return
 			}
 		}
+	}
+}
+
+// readPump reads messages from the WebSocket connection.
+// It resets the read deadline on every pong, detecting dead clients.
+func (c *Client) readPump() {
+	defer func() {
+		c.hub.unregister <- c
+		c.conn.Close()
+	}()
+
+	c.conn.SetReadDeadline(time.Now().Add(pongWait))
+	c.conn.SetPongHandler(func(string) error {
+		c.conn.SetReadDeadline(time.Now().Add(pongWait))
+		return nil
+	})
+
+	for {
+		_, _, err := c.conn.ReadMessage()
+		if err != nil {
+			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseNormalClosure) {
+				log.Printf("WebSocket unexpected close: %v", err)
+			}
+			break
+		}
+		// Client messages (e.g., PING from frontend) are acknowledged via pong handler above.
+		// No application-level messages are expected from the client.
 	}
 }
 
@@ -122,7 +164,28 @@ func init() {
 	go broadcastMetricsLoop()
 }
 
+// HandleWebSocket authenticates the request via JWT cookie before upgrading.
 func HandleWebSocket(c *gin.Context) {
+	// Require valid session cookie for WebSocket connections
+	cookie, err := c.Cookie("aetherflow_session")
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "WebSocket requires authentication"})
+		return
+	}
+
+	token, err := jwt.Parse(cookie, func(token *jwt.Token) (interface{}, error) {
+		// Prevent algorithm confusion: only accept HMAC signing
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, jwt.ErrSignatureInvalid
+		}
+		return getJWTSecret(), nil
+	})
+
+	if err != nil || !token.Valid {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid or expired session"})
+		return
+	}
+
 	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
 		log.Println("Upgrade Error:", err)
@@ -131,9 +194,9 @@ func HandleWebSocket(c *gin.Context) {
 	client := &Client{hub: WSHub, conn: conn, send: make(chan []byte, 256)}
 	client.hub.register <- client
 
-	// Allow collection of memory referenced by the caller by doing all work in
-	// new goroutines.
+	// Start both pumps in goroutines
 	go client.writePump()
+	go client.readPump()
 }
 
 func broadcastMetricsLoop() {

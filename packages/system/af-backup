@@ -1,132 +1,297 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # AetherFlow Backup Manager
 # Location: /usr/local/bin/AetherFlow/system/af-backup
 
-source /opt/AetherFlow/packages/common.sh
-BACKUP_DIR="/home/${SUDO_USER:-$USER}/AetherFlow_Backups"
-DATE=$(date +%Y-%m-%d-%H%M)
-FILENAME="aetherflow-backup-${DATE}.tar.gz"
+set -euo pipefail
 
-function show_help() {
-    echo "AetherFlow Backup Manager"
-    echo "Usage: af-backup [command]"
-    echo ""
-    echo "Commands:"
-    echo "  create      Create a new system snapshot"
-    echo "  list        List available snapshots"
-    echo "  restore     [filename] Restore a specific snapshot"
-    echo "  delete      [filename] Delete a specific snapshot"
-    echo "  help        Show this help message"
+source /opt/AetherFlow/packages/common.sh
+
+OWNER_USER="${SUDO_USER:-$USER}"
+OWNER_HOME="$(getent passwd "$OWNER_USER" 2>/dev/null | cut -d: -f6 || true)"
+OWNER_HOME="${OWNER_HOME:-/home/${OWNER_USER}}"
+BACKUP_DIR="${BACKUP_DIR:-${OWNER_HOME}/AetherFlow_Backups}"
+DATE="$(date +%Y-%m-%d-%H%M%S)"
+FILENAME="aetherflow-backup-${DATE}.tar.gz"
+DEFAULT_CHUNK_SIZE="${AF_BACKUP_CHUNK_SIZE:-1024M}"
+
+TARGETS=(
+    "/etc/AetherFlow"
+    "/var/www/html/dashboard/inc/config.php"
+    "/var/www/html/dashboard/custom"
+    "${OWNER_HOME}/.rtorrent.rc"
+)
+
+show_help() {
+    cat <<'EOF'
+AetherFlow Backup Manager
+Usage: af-backup [command] [args]
+
+Commands:
+  create [chunk-size]       Create a new backup; optional split size (e.g. 512M)
+  list                      List available backups and checksum status
+  verify [filename]         Verify SHA-256 checksum for a backup
+  restore [filename]        Restore from a backup (checksum verified first)
+  delete [filename]         Delete backup + checksum + chunk files
+  chunk [filename] [size]   Split an existing backup into chunks
+  assemble [filename]       Rebuild backup from chunk files
+  help                      Show this help message
+EOF
 }
 
-function create_backup() {
-    echo "Creating backup..."
+ensure_backup_dir() {
     mkdir -p "$BACKUP_DIR"
-    
-    # Define directories to backup
-    # Adjust these paths based on actual AetherFlow structure
-    TARGETS=(
-        "/etc/AetherFlow"
-        "/var/www/html/dashboard/inc/config.php"
-        "/var/www/html/dashboard/custom"
-        "/home/${SUDO_USER:-$USER}/.rtorrent.rc"
-    )
-    
-    VALID_TARGETS=()
+}
+
+checksum_file_for() {
+    local file="$1"
+    printf '%s.sha256\n' "$file"
+}
+
+write_checksum() {
+    local file="$1"
+    sha256sum "$file" >"$(checksum_file_for "$file")"
+}
+
+verify_checksum() {
+    local file="$1"
+    local checksum_file
+    checksum_file="$(checksum_file_for "$file")"
+
+    if [[ ! -f "$file" ]]; then
+        print_error "Backup file not found: ${file}"
+        return 1
+    fi
+
+    if [[ ! -f "$checksum_file" ]]; then
+        print_error "Missing checksum file: ${checksum_file}"
+        return 1
+    fi
+
+    if sha256sum -c "$checksum_file" >/dev/null 2>&1; then
+        print_info "Checksum verification passed for $(basename "$file")"
+        return 0
+    fi
+
+    print_error "Checksum verification failed for $(basename "$file")"
+    return 1
+}
+
+get_valid_targets() {
+    local valid=()
+    local target
     for target in "${TARGETS[@]}"; do
-        if [ -e "$target" ]; then
-            VALID_TARGETS+=("$target")
+        if [[ -e "$target" ]]; then
+            valid+=("$target")
         fi
     done
-    
-    if [ ${#VALID_TARGETS[@]} -eq 0 ]; then
-        echo "Error: No configuration files found to backup."
+    printf '%s\n' "${valid[@]}"
+}
+
+chunk_backup() {
+    local file="$1"
+    local chunk_size="${2:-$DEFAULT_CHUNK_SIZE}"
+
+    if [[ ! -f "$file" ]]; then
+        print_error "Backup file not found: $file"
         return 1
     fi
 
-    tar -czf "$BACKUP_DIR/$FILENAME" "${VALID_TARGETS[@]}" 2>/dev/null
-    
-    if [ $? -eq 0 ]; then
-        echo "Backup created successfully: $BACKUP_DIR/$FILENAME"
-        chown "${SUDO_USER:-$USER}:${SUDO_USER:-$USER}" "$BACKUP_DIR/$FILENAME"
+    rm -f "${file}.part."*
+    split -b "$chunk_size" -d -a 5 -- "$file" "${file}.part."
+    print_info "Split into chunks: ${file}.part.* (${chunk_size})"
+}
+
+assemble_backup() {
+    local filename="$1"
+    local file="${BACKUP_DIR}/${filename}"
+
+    if compgen -G "${file}.part.*" >/dev/null; then
+        cat "${file}.part."* >"$file"
+        print_info "Reassembled backup: ${file}"
+        verify_checksum "$file"
     else
-        echo "Error creating backup."
+        print_error "No chunk files found for: ${filename}"
+        return 1
     fi
 }
 
-function list_backups() {
-    if [ -d "$BACKUP_DIR" ]; then
-        ls -lh "$BACKUP_DIR"/*.tar.gz 2>/dev/null | awk '{print $9, "(" $5 ")"}'
+create_backup() {
+    local maybe_chunk_size="${1:-}"
+    local file="${BACKUP_DIR}/${FILENAME}"
+    local targets=()
+    local target
+    local do_chunk=false
+
+    ensure_backup_dir
+
+    while IFS= read -r target; do
+        [[ -n "$target" ]] && targets+=("$target")
+    done < <(get_valid_targets)
+
+    if [[ ${#targets[@]} -eq 0 ]]; then
+        print_error "No configuration files found to backup."
+        return 1
+    fi
+
+    print_info "Creating backup: ${file}"
+    if command_exists pv; then
+        local total_bytes=0
+        total_bytes="$(du -sb -- "${targets[@]}" 2>/dev/null | awk '{sum += $1} END {print sum + 0}')"
+        tar -cf - -- "${targets[@]}" | pv -s "${total_bytes}" | gzip -1 >"$file"
     else
-        echo "No backup directory found."
+        tar -czf "$file" -- "${targets[@]}"
+    fi
+
+    write_checksum "$file"
+    chown "${OWNER_USER}:${OWNER_USER}" "$file" "$(checksum_file_for "$file")" || true
+    print_info "Backup complete: ${file}"
+
+    if [[ -n "$maybe_chunk_size" ]]; then
+        do_chunk=true
+    fi
+
+    if [[ "${do_chunk}" == "true" ]]; then
+        chunk_backup "$file" "$maybe_chunk_size"
     fi
 }
 
-function delete_backup() {
-    if [ -z "$1" ]; then
-        echo "Error: details needed. Usage: af-backup delete [filename]"
-        return 1
-    fi
-    
-    if [ -f "$BACKUP_DIR/$1" ]; then
-        rm "$BACKUP_DIR/$1"
-        echo "Deleted $1"
-    else
-        echo "File not found: $1"
+list_backups() {
+    ensure_backup_dir
+    shopt -s nullglob
+    local found=false
+
+    for file in "$BACKUP_DIR"/*.tar.gz; do
+        found=true
+        local base size checksum_state chunk_count
+        base="$(basename "$file")"
+        size="$(du -h "$file" | awk '{print $1}')"
+        checksum_state="missing"
+        chunk_count="0"
+
+        if [[ -f "$(checksum_file_for "$file")" ]]; then
+            checksum_state="present"
+        fi
+        if compgen -G "${file}.part.*" >/dev/null; then
+            chunk_count="$(ls "${file}.part."* | wc -l | tr -d ' ')"
+        fi
+
+        printf '%s (%s) checksum=%s chunks=%s\n' "$base" "$size" "$checksum_state" "$chunk_count"
+    done
+
+    if [[ "$found" == "false" ]]; then
+        echo "No backups found."
     fi
 }
 
-function restore_backup() {
-    if [ -z "$1" ]; then
-        echo "Error: filename needed. Usage: af-backup restore [filename]"
+delete_backup() {
+    local filename="${1:-}"
+    local file
+
+    if [[ -z "$filename" ]]; then
+        print_error "Usage: af-backup delete [filename]"
         return 1
     fi
-    
-    FILE="$BACKUP_DIR/$1"
-    
-    if [ ! -f "$FILE" ]; then
-        echo "Backup file not found: $FILE"
+
+    file="${BACKUP_DIR}/${filename}"
+    if [[ ! -f "$file" ]]; then
+        print_error "File not found: ${file}"
         return 1
     fi
-    
-    echo "Restoring from $FILE..."
-    local STAGE_DIR="/tmp/af-restore"
-    mkdir -p "$STAGE_DIR"
-    
-    tar -xzf "$FILE" -C "$STAGE_DIR" || { echo "Extraction failed"; return 1; }
-    
-    if [ -d "$STAGE_DIR/etc/AetherFlow" ]; then
-        rsync -aP "$STAGE_DIR/etc/AetherFlow/" /etc/AetherFlow/
+
+    rm -f "$file" "$(checksum_file_for "$file")" "${file}.part."*
+    print_info "Deleted ${filename}"
+}
+
+restore_backup() {
+    local filename="${1:-}"
+    local file stage_dir
+
+    if [[ -z "$filename" ]]; then
+        print_error "Usage: af-backup restore [filename]"
+        return 1
     fi
-    if [ -f "$STAGE_DIR/var/www/html/dashboard/inc/config.php" ]; then
+
+    file="${BACKUP_DIR}/${filename}"
+    if [[ ! -f "$file" ]]; then
+        print_error "Backup file not found: ${file}"
+        return 1
+    fi
+
+    verify_checksum "$file"
+
+    stage_dir="$(mktemp -d /tmp/af-restore.XXXXXX)"
+    trap 'rm -rf "$stage_dir"' RETURN
+
+    print_info "Extracting backup to staging area..."
+    if command_exists pv; then
+        pv "$file" | tar -xzf - -C "$stage_dir"
+    else
+        tar -xzf "$file" -C "$stage_dir"
+    fi
+
+    if [[ -d "${stage_dir}/etc/AetherFlow" ]]; then
+        rsync -a --delete "${stage_dir}/etc/AetherFlow/" /etc/AetherFlow/
+    fi
+    if [[ -f "${stage_dir}/var/www/html/dashboard/inc/config.php" ]]; then
         mkdir -p /var/www/html/dashboard/inc
-        cp -a "$STAGE_DIR/var/www/html/dashboard/inc/config.php" /var/www/html/dashboard/inc/config.php
+        cp -a "${stage_dir}/var/www/html/dashboard/inc/config.php" /var/www/html/dashboard/inc/config.php
     fi
-    if [ -d "$STAGE_DIR/var/www/html/dashboard/custom" ]; then
-        rsync -aP "$STAGE_DIR/var/www/html/dashboard/custom/" /var/www/html/dashboard/custom/
+    if [[ -d "${stage_dir}/var/www/html/dashboard/custom" ]]; then
+        rsync -a --delete "${stage_dir}/var/www/html/dashboard/custom/" /var/www/html/dashboard/custom/
     fi
-    if [ -f "$STAGE_DIR/home/${SUDO_USER:-$USER}/.rtorrent.rc" ]; then
-        cp -a "$STAGE_DIR/home/${SUDO_USER:-$USER}/.rtorrent.rc" "/home/${SUDO_USER:-$USER}/.rtorrent.rc"
+    if [[ -f "${stage_dir}${OWNER_HOME}/.rtorrent.rc" ]]; then
+        cp -a "${stage_dir}${OWNER_HOME}/.rtorrent.rc" "${OWNER_HOME}/.rtorrent.rc"
+    elif [[ -f "${stage_dir}/home/${OWNER_USER}/.rtorrent.rc" ]]; then
+        cp -a "${stage_dir}/home/${OWNER_USER}/.rtorrent.rc" "${OWNER_HOME}/.rtorrent.rc"
     fi
-    
-    rm -rf "$STAGE_DIR"
-    echo "Restore complete."
+
+    print_info "Restore complete."
 }
 
-case "$1" in
-    create)
-        create_backup
-        ;;
-    list)
-        list_backups
-        ;;
-    delete)
-        delete_backup "$2"
-        ;;
-    restore)
-        restore_backup "$2"
-        ;;
-    *)
-        show_help
-        ;;
-esac
+main() {
+    local cmd="${1:-help}"
+    case "$cmd" in
+        create)
+            create_backup "${2:-}"
+            ;;
+        list)
+            list_backups
+            ;;
+        verify)
+            if [[ -z "${2:-}" ]]; then
+                print_error "Usage: af-backup verify [filename]"
+                return 1
+            fi
+            verify_checksum "${BACKUP_DIR}/${2}"
+            ;;
+        delete)
+            delete_backup "${2:-}"
+            ;;
+        restore)
+            restore_backup "${2:-}"
+            ;;
+        chunk)
+            if [[ -z "${2:-}" ]]; then
+                print_error "Usage: af-backup chunk [filename] [size]"
+                return 1
+            fi
+            chunk_backup "${BACKUP_DIR}/${2}" "${3:-$DEFAULT_CHUNK_SIZE}"
+            ;;
+        assemble)
+            if [[ -z "${2:-}" ]]; then
+                print_error "Usage: af-backup assemble [filename]"
+                return 1
+            fi
+            assemble_backup "${2}"
+            ;;
+        help|--help|-h)
+            show_help
+            ;;
+        *)
+            show_help
+            return 1
+            ;;
+    esac
+}
+
+main "$@"

@@ -4,8 +4,7 @@ import { RefreshCw, Box, Settings, Globe, RotateCcw, Square, Play, Server, Cpu }
 import { useState } from 'react';
 import useSWR from 'swr';
 import { useToast } from '@/contexts/ToastContext';
-
-const fetcher = (url: string) => fetch(url).then((res) => res.json());
+import { ServicesSkeleton } from '@/components/layout/SkeletonBox';
 
 // Maps service process names to their web UI ports/paths
 const SERVICE_WEB_PORTS: Record<string, number | string> = {
@@ -59,12 +58,22 @@ export default function ServicesTab() {
 
     const { data: services, mutate, isLoading } = useSWR<Record<string, ServiceInfo>>(
         '/api/services',
-        fetcher,
         { refreshInterval: 15000 }
     );
 
     const handleServiceControl = async (name: string, data: ServiceInfo, action: 'start' | 'stop' | 'restart') => {
         setLoadingService(name);
+
+        // Optimistic update — instantly reflect the pending state in the UI
+        const optimisticStatus = action === 'stop' ? 'stopping' : action === 'start' ? 'starting' : 'restarting';
+        const prevData = services;
+        if (services) {
+            mutate(
+                { ...services, [name]: { ...data, status: optimisticStatus } },
+                false // don't revalidate yet
+            );
+        }
+
         try {
             const res = await fetch(`/api/services/${encodeURIComponent(name)}/control`, {
                 method: 'POST',
@@ -80,9 +89,11 @@ export default function ServicesTab() {
                 throw new Error(d.error || 'Failed to control service');
             }
             addToast(`Successfully executed '${action}' on ${name}.`, 'success');
-            // Auto-refresh after a short delay to let the service state change
+            // Revalidate to get actual server state
             setTimeout(() => mutate(), 1500);
         } catch (err: unknown) {
+            // Rollback optimistic update on error
+            mutate(prevData, false);
             addToast(err instanceof Error ? err.message : 'An unknown error occurred.', 'error');
         } finally {
             setLoadingService(null);
@@ -206,14 +217,7 @@ export default function ServicesTab() {
     };
 
     if (isLoading) {
-        return (
-            <div className="flex items-center justify-center h-full min-h-[50vh]">
-                <div className="flex flex-col items-center gap-4 text-slate-400">
-                    <div className="w-10 h-10 border-4 border-indigo-500/20 border-t-indigo-500 rounded-full animate-spin"></div>
-                    <p className="font-medium tracking-wide">Scanning Services...</p>
-                </div>
-            </div>
-        );
+        return <ServicesSkeleton />;
     }
 
     return (

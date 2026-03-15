@@ -3,6 +3,8 @@ package api
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -251,5 +253,30 @@ func TestGetUploadDirFallback(t *testing.T) {
 	dir := getUploadDir()
 	if dir == "" {
 		t.Error("getUploadDir() should never return empty string")
+	}
+}
+
+func TestSafeBackupPathRejectsTraversal(t *testing.T) {
+	base := filepath.Join(os.TempDir(), "af-backups-test")
+	path, err := safeBackupPath(base, "../../etc/passwd")
+	if err != nil {
+		t.Fatalf("Expected traversal input to be sanitized, got error: %v", err)
+	}
+	expected := filepath.Join(base, "passwd")
+	if path != expected {
+		t.Fatalf("Expected sanitized path %q, got %q", expected, path)
+	}
+}
+
+func TestUploadBackupChunkRequiresChunkParams(t *testing.T) {
+	r := gin.New()
+	r.POST("/backup/upload/:filename", UploadBackupChunk)
+
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("POST", "/backup/upload/test.sqlite", strings.NewReader("abc"))
+	r.ServeHTTP(w, req)
+
+	if w.Code != 400 {
+		t.Errorf("Expected 400 when chunk params are missing, got %d", w.Code)
 	}
 }

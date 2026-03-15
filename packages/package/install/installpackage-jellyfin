@@ -1,66 +1,126 @@
-#!/bin/bash
+#!/usr/bin/env bash
 #
 # [AetherFlow :: Install Jellyfin]
-# Free and open-source media server
 #
-# Author : McEveritts
-# URL    : https://AetherFlow.io
-# License: GPL-3.0
-#
-set -e
 
-LOGFILE="/opt/AetherFlow/logs/installer.log"
-mkdir -p /opt/AetherFlow/logs /install
+set -euo pipefail
 
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [jellyfin] $1" | tee -a "$LOGFILE"; }
+source /opt/AetherFlow/packages/common.sh
 
-# ── Add Jellyfin official repository ─────────────────────────────────────────
-log "Adding Jellyfin GPG key and repository..."
-apt-get install -y curl gnupg >>"$LOGFILE" 2>&1
+PACKAGE_NAME="jellyfin"
+JELLYFIN_SOURCES="/etc/apt/sources.list.d/jellyfin.sources"
+JELLYFIN_KEYRING="/etc/apt/keyrings/jellyfin.gpg"
+APACHE_SITE="/etc/apache2/sites-enabled/jellyfin.conf"
 
-# Add GPG key
+ROLLBACK_RESTORE=()
+ROLLBACK_REMOVE=()
+PACKAGE_WAS_PRESENT=false
+
+track_file() {
+    local path="$1"
+    if [[ -e "$path" ]]; then
+        cp -a "$path" "${path}.bak-af"
+        ROLLBACK_RESTORE+=("$path")
+    else
+        ROLLBACK_REMOVE+=("$path")
+    fi
+}
+
+rollback_changes() {
+    local exit_code="$1"
+    set +e
+    if [[ "$exit_code" -eq 0 ]]; then
+        for path in "${ROLLBACK_RESTORE[@]}"; do
+            rm -f "${path}.bak-af"
+        done
+        return 0
+    fi
+
+    print_error "Jellyfin installation failed. Rolling back changes."
+    remove_lock "$PACKAGE_NAME"
+
+    for path in "${ROLLBACK_RESTORE[@]}"; do
+        if [[ -f "${path}.bak-af" ]]; then
+            mv -f "${path}.bak-af" "$path"
+        fi
+    done
+
+    for path in "${ROLLBACK_REMOVE[@]}"; do
+        rm -f "$path"
+    done
+
+    if [[ "$PACKAGE_WAS_PRESENT" == "false" ]] && dpkg -s jellyfin >/dev/null 2>&1; then
+        apt-get remove -y jellyfin >>"$LOGFILE" 2>&1 || true
+    fi
+
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl restart apache2 >/dev/null 2>&1 || true
+    return "$exit_code"
+}
+
+trap 'rollback_changes "$?"' EXIT
+
+require_root
+print_info "Starting Jellyfin installation..."
+
+if dpkg -s jellyfin >/dev/null 2>&1; then
+    PACKAGE_WAS_PRESENT=true
+    print_info "Jellyfin already installed. Re-applying configuration."
+fi
+
 mkdir -p /etc/apt/keyrings
-curl -fsSL https://repo.jellyfin.org/jellyfin_team.gpg.key | gpg --dearmor -o /etc/apt/keyrings/jellyfin.gpg 2>>"$LOGFILE"
+apt-get update >>"$LOGFILE" 2>&1
+apt-get install -y curl gnupg ca-certificates >>"$LOGFILE" 2>&1
 
-# Determine architecture and codename
-ARCH=$(dpkg --print-architecture)
-CODENAME=$(lsb_release -cs 2>/dev/null || echo "bookworm")
+if [[ -e "$JELLYFIN_KEYRING" ]]; then
+    track_file "$JELLYFIN_KEYRING"
+else
+    ROLLBACK_REMOVE+=("$JELLYFIN_KEYRING")
+fi
+curl -fsSL https://repo.jellyfin.org/jellyfin_team.gpg.key | gpg --dearmor --yes -o "$JELLYFIN_KEYRING"
 
-# Add repository
-cat > /etc/apt/sources.list.d/jellyfin.sources <<EOF
+ARCH="$(dpkg --print-architecture)"
+CODENAME="$(. /etc/os-release && printf '%s' "${VERSION_CODENAME:-bookworm}")"
+
+track_file "$JELLYFIN_SOURCES"
+cat >"$JELLYFIN_SOURCES" <<EOF
 Types: deb
 URIs: https://repo.jellyfin.org/debian
 Suites: ${CODENAME}
 Components: main
 Architectures: ${ARCH}
-Signed-By: /etc/apt/keyrings/jellyfin.gpg
+Signed-By: ${JELLYFIN_KEYRING}
 EOF
 
-# ── Install Jellyfin ─────────────────────────────────────────────────────────
-log "Updating package lists..."
 apt-get update >>"$LOGFILE" 2>&1
+if [[ "$PACKAGE_WAS_PRESENT" == "false" ]]; then
+    apt-get install -y jellyfin >>"$LOGFILE" 2>&1
+fi
 
-log "Installing Jellyfin server..."
-apt-get install -y jellyfin >>"$LOGFILE" 2>&1
-
-# ── Configure and start ──────────────────────────────────────────────────────
-log "Enabling and starting Jellyfin..."
-systemctl daemon-reload
+systemctl daemon-reload >>"$LOGFILE" 2>&1
 systemctl enable jellyfin.service >>"$LOGFILE" 2>&1
-systemctl start jellyfin.service
+systemctl restart jellyfin.service >>"$LOGFILE" 2>&1
 
-# ── Apache reverse proxy ─────────────────────────────────────────────────────
-log "Configuring Apache reverse proxy..."
-cat > /etc/apache2/sites-enabled/jellyfin.conf <<'EOF'
+track_file "$APACHE_SITE"
+cat >"$APACHE_SITE" <<'EOF'
 <Location /jellyfin>
-    ProxyPass http://localhost:8096/jellyfin
-    ProxyPassReverse http://localhost:8096/jellyfin
+    ProxyPreserveHost On
+    RequestHeader set X-Forwarded-Proto "https"
+    ProxyPass http://127.0.0.1:8096/jellyfin retry=0 timeout=120
+    ProxyPassReverse http://127.0.0.1:8096/jellyfin
+</Location>
+
+<Location /jellyfin/socket>
+    ProxyPass ws://127.0.0.1:8096/jellyfin/socket
+    ProxyPassReverse ws://127.0.0.1:8096/jellyfin/socket
 </Location>
 EOF
-chown www-data:www-data /etc/apache2/sites-enabled/jellyfin.conf
-a2enmod proxy proxy_http >>/dev/null 2>&1
-service apache2 reload >>"$LOGFILE" 2>&1
 
-# ── Finalize ─────────────────────────────────────────────────────────────────
-touch /install/.jellyfin.lock
-log "Jellyfin installation complete! Access at http://your-server:8096"
+chown www-data:www-data "$APACHE_SITE"
+a2enmod proxy proxy_http proxy_wstunnel headers >>"$LOGFILE" 2>&1
+systemctl reload apache2 >>"$LOGFILE" 2>&1
+
+write_lock "$PACKAGE_NAME"
+print_info "Jellyfin installation completed successfully."
+
+exit 0

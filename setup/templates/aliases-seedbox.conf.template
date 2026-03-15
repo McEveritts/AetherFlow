@@ -1,6 +1,6 @@
 Alias /downloads "/srv/aetherflow/downloads"
 <Directory "/srv/aetherflow/downloads">
-  Options Indexes FollowSymLinks MultiViews
+  Options Indexes FollowSymLinks
   AuthType Digest
   AuthName "aetherflow"
   AuthUserFile '/etc/htpasswd'
@@ -9,7 +9,7 @@ Alias /downloads "/srv/aetherflow/downloads"
 </Directory>
 Alias /USERNAME.rtorrent.downloads "/home/USERNAME/torrents/rtorrent/"
 <Directory "/home/USERNAME/torrents/rtorrent/">
-  Options Indexes FollowSymLinks MultiViews
+  Options Indexes FollowSymLinks
   AuthType Digest
   AuthName "aetherflow"
   AuthUserFile '/etc/htpasswd'
@@ -18,7 +18,7 @@ Alias /USERNAME.rtorrent.downloads "/home/USERNAME/torrents/rtorrent/"
 </Directory>
 Alias /USERNAME.deluge.downloads "/home/USERNAME/torrents/deluge/"
 <Directory "/home/USERNAME/torrents/deluge/">
-  Options Indexes FollowSymLinks MultiViews
+  Options Indexes FollowSymLinks
   AuthType Digest
   AuthName "aetherflow"
   AuthUserFile '/etc/htpasswd'

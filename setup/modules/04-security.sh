@@ -73,7 +73,10 @@ function _apacheconf() {
 	a2enmod rewrite >>"${OUTTO}" 2>&1
 	a2enmod proxy >>"${OUTTO}" 2>&1
 	a2enmod proxy_http >>"${OUTTO}" 2>&1
-	mv /etc/apache2/sites-enabled/000-default.conf /etc/apache2/ >>"${OUTTO}" 2>&1
+	a2enmod proxy_wstunnel >>"${OUTTO}" 2>&1
+	if [[ -f /etc/apache2/sites-enabled/000-default.conf ]]; then
+		mv /etc/apache2/sites-enabled/000-default.conf /etc/apache2/ >>"${OUTTO}" 2>&1
+	fi
 	\cp -f ${local_setup}templates/default-ssl.conf.template /etc/apache2/sites-enabled/default-ssl.conf
 	sed -i "s/USERNAME/${username}/g" /etc/apache2/sites-enabled/default-ssl.conf
 	sed -i "s/\"REALM\"/\"${REALM}\"/g" /etc/apache2/sites-enabled/default-ssl.conf

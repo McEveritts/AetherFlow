@@ -55,7 +55,11 @@ func SetupAdmin(c *gin.Context) {
 		return
 	}
 
-	// Password length check removed to allow 4-char pins
+	// Enforce minimum password length for security
+	if len(req.Password) < 8 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Password must be at least 8 characters"})
+		return
+	}
 
 	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
 	if err != nil {
@@ -81,6 +85,7 @@ func SetupAdmin(c *gin.Context) {
 		"exp":     time.Now().Add(time.Hour * 24 * 30).Unix(),
 	})
 	tokenString, _ := token.SignedString(getJWTSecret())
+	c.SetSameSite(http.SameSiteLaxMode)
 	c.SetCookie("aetherflow_session", tokenString, 3600*24*30, "/", "", secureCookie(), true)
 
 	c.JSON(http.StatusOK, gin.H{"message": "Admin account created", "username": req.Username})
@@ -138,6 +143,7 @@ func LocalLogin(c *gin.Context) {
 		return
 	}
 
+	c.SetSameSite(http.SameSiteLaxMode)
 	c.SetCookie("aetherflow_session", tokenString, 3600*24*30, "/", "", secureCookie(), true)
 	c.JSON(http.StatusOK, gin.H{"message": "Login successful", "user": user})
 }
@@ -164,6 +170,7 @@ func GoogleLogin(c *gin.Context) {
 	state := hex.EncodeToString(stateBytes)
 
 	// Set state cookie
+	c.SetSameSite(http.SameSiteLaxMode)
 	c.SetCookie("oauth2_state", state, 600, "/", "", secureCookie(), true)
 
 	scopes := []string{"openid", "email", "profile"}
@@ -319,6 +326,7 @@ func GoogleCallback(c *gin.Context) {
 		return
 	}
 
+	c.SetSameSite(http.SameSiteLaxMode)
 	c.SetCookie("aetherflow_session", tokenString, 3600*24*30, "/", "", secureCookie(), true)
 	c.Redirect(http.StatusTemporaryRedirect, baseURL+"/")
 }
@@ -349,6 +357,10 @@ func GetSession(c *gin.Context) {
 	}
 
 	token, err := jwt.Parse(cookie, func(token *jwt.Token) (interface{}, error) {
+		// Prevent algorithm confusion attacks: only accept HMAC signing
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, jwt.ErrSignatureInvalid
+		}
 		return getJWTSecret(), nil
 	})
 
@@ -384,6 +396,7 @@ func GetSession(c *gin.Context) {
 }
 
 func Logout(c *gin.Context) {
+	c.SetSameSite(http.SameSiteLaxMode)
 	c.SetCookie("aetherflow_session", "", -1, "/", "", secureCookie(), true)
 	c.JSON(http.StatusOK, gin.H{"message": "Logged out"})
 }
@@ -397,6 +410,10 @@ func AdminOnly() gin.HandlerFunc {
 		}
 
 		token, err := jwt.Parse(cookie, func(token *jwt.Token) (interface{}, error) {
+			// Prevent algorithm confusion attacks: only accept HMAC signing
+			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+				return nil, jwt.ErrSignatureInvalid
+			}
 			return getJWTSecret(), nil
 		})
 
@@ -437,6 +454,10 @@ func UpdateProfile(c *gin.Context) {
 	}
 
 	token, err := jwt.Parse(cookie, func(token *jwt.Token) (interface{}, error) {
+		// Prevent algorithm confusion attacks: only accept HMAC signing
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, jwt.ErrSignatureInvalid
+		}
 		return getJWTSecret(), nil
 	})
 
