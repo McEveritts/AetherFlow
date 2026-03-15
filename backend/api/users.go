@@ -115,21 +115,3 @@ func DeleteUser(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{"message": "User deleted successfully"})
 }
-
-// GetUserQuota returns actual disk usage information for the system
-func GetUserQuota(c *gin.Context) {
-	idStr := c.Param("id")
-	_, err := strconv.Atoi(idStr)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID"})
-		return
-	}
-
-	// Return actual root partition disk usage as a proxy for user quota
-	// In production, this would be replaced with per-user quota (repquota, ZFS, etc.)
-	c.JSON(http.StatusOK, gin.H{
-		"userId":     idStr,
-		"message":    "Per-user quotas not yet configured. Showing system disk usage.",
-		"configured": false,
-	})
-}
