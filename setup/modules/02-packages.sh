@@ -85,6 +85,8 @@ function _syscommands() {
 	find /usr/local/bin/AetherFlow -type f -print0 | xargs -0 dos2unix >>"${OUTTO}" 2>&1
 	find /usr/local/bin/AetherFlow -type f -print0 | xargs -0 chmod +x >>"${OUTTO}" 2>&1
 	\cp -f /usr/local/bin/AetherFlow/system/reload /usr/bin/reload
+	\cp -f /usr/local/bin/AetherFlow/system/af-heal /usr/bin/af-heal
+	\cp -f /usr/local/bin/AetherFlow/system/af-systemd-sandbox /usr/bin/af-systemd-sandbox
 }
 
 # install skel template
@@ -129,15 +131,19 @@ function _ffmpeg() {
 		apt-get -qy update >>"${OUTTO}" 2>&1
 		LIST='autotools-dev autoconf automake cmake cmake-curses-gui build-essential mercurial libass-dev'
 		apt-get -qq -y install ${LIST} >>"${OUTTO}" 2>&1
-		MAXCPUS=$(echo "$(nproc) / 2" | bc)
+		MAXCPUS="$(_af_build_jobs)"
 		mkdir -p /tmp
 		cd /tmp || exit 1
 		if [[ -d /tmp/ffmpeg ]]; then rm -rf ffmpeg; fi
 		git clone --depth 1 -b release/4.4 https://github.com/FFmpeg/FFmpeg.git ffmpeg >>"${OUTTO}" 2>&1
-		git clone https://github.com/yasm/yasm.git ffmpeg/yasm >>"${OUTTO}" 2>&1
-		git clone https://github.com/yixia/x264.git ffmpeg/x264 >>"${OUTTO}" 2>&1
+		git clone https://github.com/yasm/yasm.git ffmpeg/yasm >>"${OUTTO}" 2>&1 &
+		yasm_clone_pid=$!
+		git clone https://github.com/yixia/x264.git ffmpeg/x264 >>"${OUTTO}" 2>&1 &
+		x264_clone_pid=$!
 		#hg clone https://bitbucket.org/multicoreware/x265 ffmpeg/x265 >>"${OUTTO}" 2>&1
-		git clone https://bitbucket.org/multicoreware/x265_git.git ffmpeg/x265 >>"${OUTTO}" 2>&1
+		git clone https://bitbucket.org/multicoreware/x265_git.git ffmpeg/x265 >>"${OUTTO}" 2>&1 &
+		x265_clone_pid=$!
+		_af_parallel_wait "${yasm_clone_pid}" "${x264_clone_pid}" "${x265_clone_pid}" || return 1
 		############################################################################
 		####---- Github Mirror source ----####
 		#git clone https://git.ffmpeg.org/ffmpeg.git ffmpeg >>"${OUTTO}" 2>&1
@@ -155,15 +161,22 @@ function _ffmpeg() {
 		./configure >>"${OUTTO}" 2>&1
 		make >>"${OUTTO}" 2>&1
 		make install >>"${OUTTO}" 2>&1
-		cd ../x264 || exit 1
-		PKG_CONFIG_PATH="$PKG_CONFIG_PATH:/tmp/ffmpeg/lib/pkgconfig" ./configure --prefix="/tmp/ffmpeg" --enable-static --enable-pic >>"${OUTTO}" 2>&1
-		make -j${MAXCPUS} >>"${OUTTO}" 2>&1
-		make install >>"${OUTTO}" 2>&1
-		cd ../x265/build/linux || exit 1
-		#./make-Makefiles.bash >>"${OUTTO}" 2>&1
-		cmake -G "Unix Makefiles" /tmp/ffmpeg/x265/source -DCMAKE_INSTALL_PREFIX="/tmp/ffmpeg" -DENABLE_SHARED:bool=off >>"${OUTTO}" 2>&1
-		make -j${MAXCPUS} >>"${OUTTO}" 2>&1
-		make install >>"${OUTTO}" 2>&1
+		(
+			cd ../x264 || exit 1
+			PKG_CONFIG_PATH="$PKG_CONFIG_PATH:/tmp/ffmpeg/lib/pkgconfig" ./configure --prefix="/tmp/ffmpeg" --enable-static --enable-pic >>"${OUTTO}" 2>&1
+			make -j${MAXCPUS} >>"${OUTTO}" 2>&1
+			make install >>"${OUTTO}" 2>&1
+		) &
+		x264_build_pid=$!
+		(
+			cd ../x265/build/linux || exit 1
+			#./make-Makefiles.bash >>"${OUTTO}" 2>&1
+			cmake -G "Unix Makefiles" /tmp/ffmpeg/x265/source -DCMAKE_INSTALL_PREFIX="/tmp/ffmpeg" -DENABLE_SHARED:bool=off >>"${OUTTO}" 2>&1
+			make -j${MAXCPUS} >>"${OUTTO}" 2>&1
+			make install >>"${OUTTO}" 2>&1
+		) &
+		x265_build_pid=$!
+		_af_parallel_wait "${x264_build_pid}" "${x265_build_pid}" || return 1
 		ldconfig >>"${OUTTO}" 2>&1
 		cd /tmp/ffmpeg || exit 1
 		export FC_CONFIG_DIR=/etc/fonts

@@ -1,0 +1,19 @@
+{
+  "id": "{{PLUGIN_ID}}",
+  "name": "{{PLUGIN_NAME}}",
+  "version": "0.1.0",
+  "description": "Describe what this plugin adds to AetherFlow.",
+  "author": "Community Developer",
+  "permissions": [
+    "marketplace:read",
+    "system:metrics:read"
+  ],
+  "backend": {
+    "entry": "backend/main.go",
+    "health_path": "/healthz"
+  },
+  "frontend": {
+    "entry": "frontend/src/index.tsx",
+    "slot": "marketplace"
+  }
+}

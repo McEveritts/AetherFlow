@@ -70,8 +70,12 @@ function _boot() {
 	\cp -f ${local_setup}templates/sysd/autodlirssi.template /etc/systemd/system/irssi@.service >/dev/null 2>&1
 	\cp -f ${local_setup}templates/sysd/deluged.template /etc/systemd/system/deluged@.service >/dev/null 2>&1
 	\cp -f ${local_setup}templates/sysd/deluge-web.template /etc/systemd/system/deluge-web@.service >/dev/null 2>&1
+	\cp -f ${local_setup}templates/sysd/aetherflow-heal.service /etc/systemd/system/aetherflow-heal.service >/dev/null 2>&1
+	\cp -f ${local_setup}templates/sysd/aetherflow-heal.timer /etc/systemd/system/aetherflow-heal.timer >/dev/null 2>&1
+	systemctl daemon-reload >/dev/null 2>&1
 	systemctl enable {rtorrent,irssi,deluged,deluge-web}@${username} >/dev/null 2>&1
 	systemctl start {rtorrent,irssi,deluged,deluge-web}@${username} >/dev/null 2>&1
+	systemctl enable --now aetherflow-heal.timer >/dev/null 2>&1 || true
 	#fi
 
 	echo "*/1 * * * * root bash /usr/local/bin/AetherFlow/system/set_interface" >/etc/cron.d/set_interface
