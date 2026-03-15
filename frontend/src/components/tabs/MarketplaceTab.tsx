@@ -1,5 +1,5 @@
 import { useState, useMemo, useEffect } from 'react';
-import { Store, Search, Filter, Box, Download, AlertCircle, ChevronDown } from 'lucide-react';
+import { Store, Search, Filter, Box, Download, AlertCircle, ChevronDown, RefreshCw } from 'lucide-react';
 import { useMarketplace, App } from '@/hooks/useMarketplace';
 import { useToast } from '@/contexts/ToastContext';
 import Image from 'next/image';
@@ -285,9 +285,39 @@ export default function MarketplaceTab() {
                                 </div>
                                 <h3 className="text-lg font-bold text-slate-200 group-hover:text-white transition-colors">
                                     {app.name}
-                                    {app.status === 'installed' && <span className="ml-2 text-[10px] bg-emerald-500/20 text-emerald-400 px-2 py-0.5 rounded-full border border-emerald-500/30 uppercase tracking-widest align-middle">Installed</span>}
                                 </h3>
                                 <p className="text-sm text-slate-400 mt-2 line-clamp-2 leading-relaxed">{app.desc}</p>
+                                <div className="mt-3 flex flex-wrap gap-2">
+                                    {app.status === 'installed' && (
+                                        <span className="text-[10px] bg-emerald-500/20 text-emerald-400 px-2 py-0.5 rounded-full border border-emerald-500/30 uppercase tracking-widest">
+                                            Installed
+                                        </span>
+                                    )}
+                                    {app.update_available && (
+                                        app.update_url ? (
+                                            <a
+                                                href={app.update_url}
+                                                target="_blank"
+                                                rel="noreferrer"
+                                                className="inline-flex items-center gap-1 text-[10px] bg-amber-500/15 text-amber-300 px-2 py-0.5 rounded-full border border-amber-400/20 uppercase tracking-widest"
+                                            >
+                                                <RefreshCw size={10} />
+                                                Update {app.latest_version || 'available'}
+                                            </a>
+                                        ) : (
+                                            <span className="inline-flex items-center gap-1 text-[10px] bg-amber-500/15 text-amber-300 px-2 py-0.5 rounded-full border border-amber-400/20 uppercase tracking-widest">
+                                                <RefreshCw size={10} />
+                                                Update {app.latest_version || 'available'}
+                                            </span>
+                                        )
+                                    )}
+                                </div>
+                                {(app.installed_version || app.latest_version) && (
+                                    <p className="text-[11px] text-slate-500 mt-3">
+                                        {app.installed_version ? `Installed ${app.installed_version}` : 'Installed version unavailable'}
+                                        {app.latest_version ? ` • Latest ${app.latest_version}` : ''}
+                                    </p>
+                                )}
                             </div>
 
                             <div className="mt-8 pt-4 border-t border-white/5 flex items-center justify-between">

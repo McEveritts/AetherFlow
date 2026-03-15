@@ -1,10 +1,12 @@
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
 import useSWR from 'swr';
 import { useToast } from '@/contexts/ToastContext';
 import { User } from '@/contexts/AuthContext';
 import { Shield, ShieldAlert, Trash2, Users, Check, X } from 'lucide-react';
 import { UsersSkeleton } from '@/components/layout/SkeletonBox';
 import Image from 'next/image';
+import { DataGrid } from '@/components/ui/DataGrid';
+import { ColumnDef } from '@tanstack/react-table';
 
 export default function UsersTab() {
     const { addToast } = useToast();
@@ -63,6 +65,85 @@ export default function UsersTab() {
         }
     };
 
+    const columns = useMemo<ColumnDef<User>[]>(() => [
+        {
+            accessorKey: 'id',
+            header: 'ID',
+            cell: info => <span className="text-slate-500 font-mono">#{info.getValue() as number}</span>,
+            size: 80,
+        },
+        {
+            id: 'user',
+            header: 'User',
+            cell: ({ row }) => {
+                const user = row.original;
+                return (
+                    <div className="flex items-center gap-3">
+                        {user.avatar_url ? (
+                            <Image src={user.avatar_url} alt="" width={32} height={32} className="rounded-full border border-white/10 shrink-0" />
+                        ) : (
+                            <div className="w-8 h-8 rounded-full bg-slate-800 border border-white/10 flex items-center justify-center shrink-0">
+                                <Users size={14} className="text-slate-500" />
+                            </div>
+                        )}
+                        <div>
+                            <div className="font-semibold text-slate-200">{user.username}</div>
+                            <div className="text-xs text-slate-500">{user.email}</div>
+                        </div>
+                    </div>
+                );
+            },
+        },
+        {
+            accessorKey: 'role',
+            header: 'Role',
+            cell: info => {
+                const role = info.getValue() as string;
+                return (
+                    <div className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold border ${role === 'admin'
+                        ? 'bg-amber-500/10 text-amber-400 border-amber-500/20'
+                        : 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
+                        }`}>
+                        {role === 'admin' ? <Shield size={12} /> : <Users size={12} />}
+                        {role.toUpperCase()}
+                    </div>
+                );
+            },
+        },
+        {
+            id: 'actions',
+            header: () => <div className="text-right w-full">Actions</div>,
+            cell: ({ row }) => {
+                const user = row.original;
+                return (
+                    <div className="flex items-center justify-end gap-2 opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity">
+                        <button
+                            onClick={() => toggleRole(user.id, user.role)}
+                            disabled={actionLoading === user.id}
+                            title={user.role === 'admin' ? 'Demote to User' : 'Promote to Admin'}
+                            className={`p-2 rounded-lg border transition-all ${user.role === 'admin'
+                                ? 'bg-slate-900 border-white/10 text-slate-400 hover:text-white hover:bg-slate-800'
+                                : 'bg-indigo-500/10 border-indigo-500/20 text-indigo-400 hover:bg-indigo-500/20 hover:text-indigo-300'
+                                }`}
+                        >
+                            {user.role === 'admin' ? <X size={16} /> : <Check size={16} />}
+                        </button>
+
+                        <button
+                            onClick={() => deleteUser(user.id)}
+                            disabled={actionLoading === user.id}
+                            title="Delete User"
+                            className="p-2 rounded-lg bg-red-500/10 border border-red-500/20 text-red-400 hover:bg-red-500/20 hover:text-red-300 transition-all"
+                        >
+                            <Trash2 size={16} />
+                        </button>
+                    </div>
+                );
+            },
+            size: 150,
+        }
+    ], [actionLoading]);
+
     if (isLoading) {
         return <UsersSkeleton />;
     }
@@ -94,75 +175,11 @@ export default function UsersTab() {
                 </div>
             </div>
 
-            <div className="bg-white/[0.02] backdrop-blur-xl border border-white/[0.05] rounded-3xl overflow-hidden shadow-2xl">
-                <div className="overflow-x-auto">
-                    <table className="w-full text-left border-collapse">
-                        <thead>
-                            <tr className="bg-slate-950/50 border-b border-white/5">
-                                <th className="p-4 text-xs font-semibold text-slate-400 uppercase tracking-wider pl-6">ID</th>
-                                <th className="p-4 text-xs font-semibold text-slate-400 uppercase tracking-wider">User</th>
-                                <th className="p-4 text-xs font-semibold text-slate-400 uppercase tracking-wider">Role</th>
-                                <th className="p-4 text-xs font-semibold text-slate-400 uppercase tracking-wider text-right pr-6">Actions</th>
-                            </tr>
-                        </thead>
-                        <tbody className="divide-y divide-white/5 text-sm">
-                            {users.map((user) => (
-                                <tr key={user.id} className="hover:bg-white/[0.02] transition-colors group">
-                                    <td className="p-4 pl-6 text-slate-500 font-mono">#{user.id}</td>
-                                    <td className="p-4">
-                                        <div className="flex items-center gap-3">
-                                            {user.avatar_url ? (
-                                                <Image src={user.avatar_url} alt="" width={32} height={32} className="rounded-full border border-white/10 shrink-0" />
-                                            ) : (
-                                                <div className="w-8 h-8 rounded-full bg-slate-800 border border-white/10 flex items-center justify-center shrink-0">
-                                                    <Users size={14} className="text-slate-500" />
-                                                </div>
-                                            )}
-                                            <div>
-                                                <div className="font-semibold text-slate-200">{user.username}</div>
-                                                <div className="text-xs text-slate-500">{user.email}</div>
-                                            </div>
-                                        </div>
-                                    </td>
-                                    <td className="p-4">
-                                        <div className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold border ${user.role === 'admin'
-                                            ? 'bg-amber-500/10 text-amber-400 border-amber-500/20'
-                                            : 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
-                                            }`}>
-                                            {user.role === 'admin' ? <Shield size={12} /> : <Users size={12} />}
-                                            {user.role.toUpperCase()}
-                                        </div>
-                                    </td>
-                                    <td className="p-4 pr-6 text-right">
-                                        <div className="flex items-center justify-end gap-2 opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity">
-                                            <button
-                                                onClick={() => toggleRole(user.id, user.role)}
-                                                disabled={actionLoading === user.id}
-                                                title={user.role === 'admin' ? 'Demote to User' : 'Promote to Admin'}
-                                                className={`p-2 rounded-lg border transition-all ${user.role === 'admin'
-                                                    ? 'bg-slate-900 border-white/10 text-slate-400 hover:text-white hover:bg-slate-800'
-                                                    : 'bg-indigo-500/10 border-indigo-500/20 text-indigo-400 hover:bg-indigo-500/20 hover:text-indigo-300'
-                                                    }`}
-                                            >
-                                                {user.role === 'admin' ? <X size={16} /> : <Check size={16} />}
-                                            </button>
-
-                                            <button
-                                                onClick={() => deleteUser(user.id)}
-                                                disabled={actionLoading === user.id}
-                                                title="Delete User"
-                                                className="p-2 rounded-lg bg-red-500/10 border border-red-500/20 text-red-400 hover:bg-red-500/20 hover:text-red-300 transition-all"
-                                            >
-                                                <Trash2 size={16} />
-                                            </button>
-                                        </div>
-                                    </td>
-                                </tr>
-                            ))}
-                        </tbody>
-                    </table>
-                </div>
-            </div>
+            <DataGrid
+                columns={columns}
+                data={users}
+                className="w-full"
+            />
 
             <div className="bg-blue-500/10 border border-blue-500/20 rounded-2xl p-4 flex gap-3 text-sm text-blue-200">
                 <Shield className="text-blue-400 shrink-0 mt-0.5" size={18} />

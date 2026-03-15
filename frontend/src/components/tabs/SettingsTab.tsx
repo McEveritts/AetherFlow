@@ -9,7 +9,7 @@ import { SettingsSkeleton } from '@/components/layout/SkeletonBox';
 export default function SettingsTab() {
     const t = useTranslations('Settings');
     const { addToast } = useToast();
-    const { theme, setTheme, language, setLanguage } = useSystemStore();
+    const { theme, setTheme, language, setLanguage, ambientColor1, setAmbientColor1, ambientColor2, setAmbientColor2 } = useSystemStore();
     const [model, setModel] = useState('gemini-2.5-pro');
     const [prompt, setPrompt] = useState("You are FlowAI, a highly intelligent infrastructure assistant connected to a local Next.js + Go Nexus environment. Always prioritize safe and performant configurations.");
     const [apiKey, setApiKey] = useState('');
@@ -72,6 +72,8 @@ export default function SettingsTab() {
             geminiApiKey: apiKey,
             language: language,
             theme: theme,
+            ambientColor1: ambientColor1,
+            ambientColor2: ambientColor2,
             timezone: settingsData?.timezone || 'UTC',
             updateChannel: settingsData?.updateChannel || 'stable',
             defaultDashboard: settingsData?.defaultDashboard || 'overview'
@@ -179,6 +181,32 @@ export default function SettingsTab() {
                                         </select>
                                         <ChevronRight size={16} className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-500 rotate-90 pointer-events-none" />
                                     </div>
+                                </div>
+
+                                {/* Ambient Colors */}
+                                <div className="col-span-1 md:col-span-2">
+                                    <label className="block text-sm font-semibold text-slate-300 mb-2">Ambient Light Blends</label>
+                                    <div className="flex gap-4">
+                                        <div className="flex-1 flex items-center gap-3 bg-slate-900 border border-white/10 rounded-xl px-4 py-3">
+                                            <input 
+                                                type="color" 
+                                                value={ambientColor1} 
+                                                onChange={(e) => setAmbientColor1(e.target.value)}
+                                                className="w-8 h-8 rounded cursor-pointer bg-transparent border-none p-0"
+                                            />
+                                            <span className="text-sm text-slate-300 font-mono">{ambientColor1}</span>
+                                        </div>
+                                        <div className="flex-1 flex items-center gap-3 bg-slate-900 border border-white/10 rounded-xl px-4 py-3">
+                                            <input 
+                                                type="color" 
+                                                value={ambientColor2} 
+                                                onChange={(e) => setAmbientColor2(e.target.value)}
+                                                className="w-8 h-8 rounded cursor-pointer bg-transparent border-none p-0"
+                                            />
+                                            <span className="text-sm text-slate-300 font-mono">{ambientColor2}</span>
+                                        </div>
+                                    </div>
+                                    <p className="text-xs text-slate-500 mt-2">Customize the ambient background lighting gradients. Changes preview instantly and apply globally.</p>
                                 </div>
                             </div>
                         </div>
