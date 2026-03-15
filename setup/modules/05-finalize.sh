@@ -61,22 +61,35 @@ EOF
 
 # seedbox boot for first user
 function _boot() {
-	#if [[ $cron == yes ]]; then
-	#  touch /install/.cron.lock
-	#  command1="*/1 * * * * /home/${username}/.startup >/dev/null 2>&1"
-	#  cat <(fgrep -iv "${command1}" <(sh -c 'sudo -u ${username} crontab -l' >/dev/null 2>&1)) <(echo "${command1}") | sudo -u ${username} crontab -
-	#elif [[ $cron == no ]]; then
-	\cp -f ${local_setup}templates/sysd/rtorrent.template /etc/systemd/system/rtorrent@.service >/dev/null 2>&1
-	\cp -f ${local_setup}templates/sysd/autodlirssi.template /etc/systemd/system/irssi@.service >/dev/null 2>&1
-	\cp -f ${local_setup}templates/sysd/deluged.template /etc/systemd/system/deluged@.service >/dev/null 2>&1
-	\cp -f ${local_setup}templates/sysd/deluge-web.template /etc/systemd/system/deluge-web@.service >/dev/null 2>&1
-	\cp -f ${local_setup}templates/sysd/aetherflow-heal.service /etc/systemd/system/aetherflow-heal.service >/dev/null 2>&1
-	\cp -f ${local_setup}templates/sysd/aetherflow-heal.timer /etc/systemd/system/aetherflow-heal.timer >/dev/null 2>&1
+	# Use safe overlay for all systemd unit files — preserves user modifications
+	_safe_overlay_config "${local_setup}templates/sysd/rtorrent.template" \
+		/etc/systemd/system/rtorrent@.service
+	_safe_overlay_config "${local_setup}templates/sysd/autodlirssi.template" \
+		/etc/systemd/system/irssi@.service
+	_safe_overlay_config "${local_setup}templates/sysd/deluged.template" \
+		/etc/systemd/system/deluged@.service
+	_safe_overlay_config "${local_setup}templates/sysd/deluge-web.template" \
+		/etc/systemd/system/deluge-web@.service
+	_safe_overlay_config "${local_setup}templates/sysd/aetherflow-heal.service" \
+		/etc/systemd/system/aetherflow-heal.service
+	_safe_overlay_config "${local_setup}templates/sysd/aetherflow-heal.timer" \
+		/etc/systemd/system/aetherflow-heal.timer
+
+	# Install Next.js and Go API systemd service files
+	_safe_overlay_config "${local_setup}templates/sysd/aetherflow-api.template" \
+		/etc/systemd/system/aetherflow-api.service
+	_safe_overlay_config "${local_setup}templates/sysd/aetherflow-frontend.template" \
+		/etc/systemd/system/aetherflow-frontend.service
+
 	systemctl daemon-reload >/dev/null 2>&1
 	systemctl enable {rtorrent,irssi,deluged,deluge-web}@${username} >/dev/null 2>&1
 	systemctl start {rtorrent,irssi,deluged,deluge-web}@${username} >/dev/null 2>&1
 	systemctl enable --now aetherflow-heal.timer >/dev/null 2>&1 || true
-	#fi
+
+	# Enable (but don't start) the modern stack services — they're managed by PM2
+	# during initial install, but the units are available for manual switchover.
+	systemctl enable aetherflow-api.service >/dev/null 2>&1 || true
+	systemctl enable aetherflow-frontend.service >/dev/null 2>&1 || true
 
 	echo "*/1 * * * * root bash /usr/local/bin/AetherFlow/system/set_interface" >/etc/cron.d/set_interface
 	/usr/local/bin/AetherFlow/system/set_interface >/dev/null 2>&1
@@ -87,11 +100,119 @@ function _perms() {
 	chown -R ${username}.${username} /home/${username}/ >>"${OUTTO}" 2>&1
 	sudo -u ${username} chmod 755 /home/${username}/ >>"${OUTTO}" 2>&1
 	chmod +x /etc/cron.daily/denypublic >/dev/null 2>&1
-	chmod 777 /home/${username}/.sessions >/dev/null 2>&1
+	# Tightened from 777 → 770 (owner + group only, no world access)
+	chmod 770 /home/${username}/.sessions >/dev/null 2>&1
 	if [[ ${tr} == "yes" ]]; then
 		chown -R ${username}:debian-transmission /home/${username}/torrents/transmission >/dev/null 2>&1
 		service transmission-daemon reload >>"${OUTTO}" 2>&1
 	fi
+}
+
+################################################################################
+# Permission Bounding — Principle of Least Privilege
+################################################################################
+
+# Create the dedicated aetherflow system user for running services
+_ensure_aetherflow_user() {
+	if ! id -u aetherflow >/dev/null 2>&1; then
+		useradd --system --shell /usr/sbin/nologin \
+			--home-dir /opt/AetherFlow \
+			--comment "AetherFlow service account" \
+			aetherflow >>"${OUTTO}" 2>&1
+		echo "[$(date '+%Y-%m-%d %H:%M:%S')] Created system user: aetherflow" >> "${INSTALL_LOG}"
+	fi
+}
+
+# Comprehensive permission hardening across /opt/AetherFlow
+_harden_permissions() {
+	local af_root="/opt/AetherFlow"
+
+	# Ensure the service user exists
+	_ensure_aetherflow_user
+
+	# Ownership: aetherflow:aetherflow for the entire tree
+	if [[ -d "${af_root}" ]]; then
+		chown -R aetherflow:aetherflow "${af_root}" >>"${OUTTO}" 2>&1
+
+		# Directories: 755 (rwxr-xr-x)
+		find "${af_root}" -type d -exec chmod 755 {} + >>"${OUTTO}" 2>&1
+
+		# Regular files: 644 (rw-r--r--)
+		find "${af_root}" -type f -exec chmod 644 {} + >>"${OUTTO}" 2>&1
+
+		# Executables: restore execute permission on known binaries
+		if [[ -f "${af_root}/backend/aetherflow-api" ]]; then
+			chmod 755 "${af_root}/backend/aetherflow-api"
+		fi
+
+		# Node binaries in node_modules/.bin need execute
+		if [[ -d "${af_root}/frontend/node_modules/.bin" ]]; then
+			find "${af_root}/frontend/node_modules/.bin" -type f -exec chmod 755 {} + 2>/dev/null || true
+			find "${af_root}/frontend/node_modules/.bin" -type l -exec chmod 755 {} + 2>/dev/null || true
+		fi
+
+		# Shell scripts in setup need execute
+		if [[ -d "${af_root}/setup" ]]; then
+			find "${af_root}/setup" -name "*.sh" -type f -exec chmod 755 {} + 2>/dev/null || true
+			if [[ -f "${af_root}/setup/AetherFlow-Setup" ]]; then
+				chmod 755 "${af_root}/setup/AetherFlow-Setup"
+			fi
+		fi
+
+		# Database directory: writable by the service user
+		if [[ -d "${af_root}/dashboard/db" ]]; then
+			chmod 750 "${af_root}/dashboard/db"
+		fi
+
+		# Remove any world-writable files
+		find "${af_root}" -perm -002 -type f -exec chmod o-w {} + 2>/dev/null || true
+		find "${af_root}" -perm -002 -type d -exec chmod o-w {} + 2>/dev/null || true
+	fi
+
+	echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✓ Permission hardening complete for ${af_root}" >> "${INSTALL_LOG}"
+}
+
+# Post-check: warn if any AetherFlow services are running as root
+_validate_no_root_services() {
+	local warnings=0
+
+	# Check PM2 processes
+	if command -v pm2 >/dev/null 2>&1; then
+		local pm2_root_procs
+		pm2_root_procs="$(pm2 jlist 2>/dev/null | grep -o '"pm_exec_path":"[^"]*aetherflow[^"]*"' | head -5)" || true
+		if [[ -n "${pm2_root_procs}" ]] && [[ "$(whoami)" == "root" ]]; then
+			echo ""
+			echo -e "[ ${yellow:-\033[33m}WARN${normal:-\033[0m} ] AetherFlow PM2 processes are running as root."
+			echo "         Consider switching to systemd units (aetherflow-api.service,"
+			echo "         aetherflow-frontend.service) which run as the 'aetherflow' user."
+			echo ""
+			echo "[$(date '+%Y-%m-%d %H:%M:%S')] ⚠ WARNING: PM2 AetherFlow processes running as root" >> "${INSTALL_LOG}"
+			((warnings++))
+		fi
+	fi
+
+	# Check systemd units if active
+	for unit in aetherflow-api.service aetherflow-frontend.service; do
+		if systemctl is-active "${unit}" >/dev/null 2>&1; then
+			local exec_user
+			exec_user="$(systemctl show -p MainPID "${unit}" --value 2>/dev/null)"
+			if [[ -n "${exec_user}" ]] && [[ "${exec_user}" != "0" ]]; then
+				local running_user
+				running_user="$(ps -o user= -p "${exec_user}" 2>/dev/null)" || true
+				if [[ "${running_user}" == "root" ]]; then
+					echo -e "[ ${yellow:-\033[33m}WARN${normal:-\033[0m} ] ${unit} is running as root!"
+					echo "[$(date '+%Y-%m-%d %H:%M:%S')] ⚠ WARNING: ${unit} running as root" >> "${INSTALL_LOG}"
+					((warnings++))
+				fi
+			fi
+		fi
+	done
+
+	if [[ ${warnings} -eq 0 ]]; then
+		echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✓ No AetherFlow services running as root" >> "${INSTALL_LOG}"
+	fi
+
+	return 0
 }
 
 # BBR function
@@ -126,40 +247,32 @@ function _finished() {
 	ip=$(ip route get 8.8.8.8 | awk 'NR==1 {print $7}')
 	echo
 	echo
-	echo -e " ${black}${on_green}    [AetherFlow] Seedbox & GUI Installation Completed    ${normal} "
-	echo -e "        ${standout}    INSTALLATION COMPLETED in ${FIN}/min    ${normal}             "
+	echo -e " ╭──────────────────────────────────────────────────────────╮"
+	echo -e " │ ${bold}${green}    [AetherFlow] Installation Successfully Completed!    ${normal}│"
+	echo -e " │──────────────────────────────────────────────────────────│"
+	echo -e " │ ${cyan}Time elapsed:${normal} ${FIN} minutes                                  │"
+	echo -e " │                                                          │"
+	echo -e " │ ${bold}Next Steps:${normal}                                              │"
+	echo -e " │ Please complete the setup using the web onboarding UI:   │"
+	echo -e " │                                                          │"
+	echo -e " │ 👉 ${bold}${magenta}http://${ip}:3000${normal}                              │"
+	echo -e " │                                                          │"
+	echo -e " │ Log in using the administrator credentials you created   │"
+	echo -e " │ during this setup process.                               │"
+	echo -e " ╰──────────────────────────────────────────────────────────╯"
 	echo
+	echo -e "  Useful CLI Commands:  "
+	echo '  ----------------------'
+	echo -e "  ${green}aetherflow logs${normal}    - View real-time system logs"
+	echo -e "  ${green}aetherflow restart${normal} - Restart all AetherFlow services"
+	echo -e "  ${green}aetherflow status${normal}  - Check status of backend & frontend"
 	echo
-	echo "  Valid Commands:  "
-	echo '  -------------------'
-	echo
-	echo -e " ${green}createSeedboxUser${normal} - creates a shelled seedbox user"
-	echo -e " ${green}deleteSeedboxUser${normal} - deletes a created seedbox user and their directories"
-	echo -e " ${green}changeUserpass${normal} - change users SSH/FTP password"
-	echo -e " ${green}setdisk${normal} - set your disk quota for any given user"
-	echo -e " ${green}showspace${normal} - shows the amount of space used by all users on the server"
-	echo -e " ${green}reload${normal} - restarts your seedbox services, i.e; rtorrent & irssi"
-	echo -e " ${green}upgradeBTSync${normal} - upgrades BTSync when new version is available"
-	echo -e " ${green}upgradeOmbi${normal} - upgrades Ombi when new version is available"
-	echo -e " ${green}upgradePlex${normal} - upgrades Plex when new version is available"
-	echo -e " ${green}box install letsencrypt${normal} - installs a valid SSL certificate to be used with "
-	echo -e "                           a valid domain name. "
-	echo -e " ${green}box${normal} - type 'box -h' for a summary of how to use box!"
-	echo
-	echo
-	echo
-	echo '################################################################################################'
-	echo "#   Seedbox can be found at https://${username}:${passwd}@${ip} "
-	echo "#   ${cyan}(Also works for FTP:5757/SSH:4747)${normal}"
-	echo "#   If you need to restart rtorrent/irssi, you can type 'reload'"
-	echo "#   https://${username}:${passwd}@${ip} (Also works for FTP:5757/SSH:4747)" >${username}.info
-	echo "#   Reloading: ${green}sshd${normal}, ${green}apache${normal}, ${green}memcached${normal}, ${green}vsftpd${normal} and ${green}fail2ban${normal}"
-	echo '################################################################################################'
-	echo
+	
 	cat >/root/information.info <<EOF
-  Seedbox can be found at https://${username}:${passwd}@${ip} (Also works for FTP:5757/SSH:4747)
-  If you need to restart rtorrent/irssi, you can type 'reload'
-  https://${username}:${passwd}@${ip} (Also works for FTP:5757/SSH:4747)
+AetherFlow Seedbox Initialized successfully.
+Dashboard Onboarding: http://${ip}:3000
+Admin Username: ${username}
+Admin Password: ${passwd}
 EOF
 	rm -rf "$0" >>"${OUTTO}" 2>&1
 	for i in ssh apache2 vsftpd fail2ban memcached cron; do
@@ -167,8 +280,22 @@ EOF
 		systemctl enable "${i}" >>/dev/null 2>&1 || true
 	done
 	rm -rf /root/tmp/
-	echo -ne "  Do you wish to reboot (recommended!): (Default ${green}Y${normal}) "
-	read -r reboot_response
+	local reboot_response
+	local saved_reboot
+	saved_reboot="$(_load_config reboot_after_install)"
+	if [[ -n "${saved_reboot}" ]]; then
+		reboot_response="$(_af_normalize_yes_no "${saved_reboot}" "no")"
+		echo "  Using saved reboot preference: ${reboot_response}"
+	elif [[ "${UNATTENDED:-false}" == "true" ]]; then
+		reboot_response="no"
+		echo "  Unattended mode: skipping automatic reboot."
+		_save_config reboot_after_install "${reboot_response}"
+	else
+		echo -ne "  Do you wish to reboot (recommended!): (Default ${green}Y${normal}) "
+		read -r reboot_response
+		reboot_response="$(_af_normalize_yes_no "${reboot_response}" "yes")"
+		_save_config reboot_after_install "${reboot_response}"
+	fi
 	case $reboot_response in
 	[yY] | [yY][Ee][Ss] | "") systemctl reboot ;;
 	[nN] | [nN][Oo]) echo "  ${cyan}Skipping reboot${normal} ... " ;;
