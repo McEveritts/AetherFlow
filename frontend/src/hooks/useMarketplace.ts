@@ -10,6 +10,12 @@ export interface App {
     progress: number;
     started_at?: string;
     log_line?: string;
+    installed_version?: string;
+    latest_version?: string;
+    update_available: boolean;
+    update_checked_at?: string;
+    update_url?: string;
+    update_error?: string;
 }
 
 export function useMarketplace() {

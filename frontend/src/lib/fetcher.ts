@@ -3,7 +3,12 @@
  * Used as the global default in SWRProvider and available for direct import.
  */
 export async function fetcher<T = unknown>(url: string): Promise<T> {
-    const res = await fetch(url);
+    const res = await fetch(url, {
+        headers: {
+            'X-API-Version': 'v1',
+            'Accept': 'application/vnd.aetherflow.v1+json, application/json',
+        },
+    });
 
     if (!res.ok) {
         const error = new Error(`Request failed: ${res.status} ${res.statusText}`);

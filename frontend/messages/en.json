@@ -1,0 +1,24 @@
+{
+  "Settings": {
+    "title": "System Settings & AI Configuration",
+    "interfacePreferences": "Interface Preferences",
+    "displayTheme": "Display Theme",
+    "themeSystem": "System Default",
+    "themeDark": "Dark Mode",
+    "themeLight": "Light Mode",
+    "language": "Language",
+    "flowAIEngine": "FlowAI Engine",
+    "apiKeyTitle": "Gemini API Key",
+    "apiKeyPlaceholder": "Enter your Gemini API key...",
+    "testApi": "Test API",
+    "testing": "Testing...",
+    "defaultModel": "Default Language Model",
+    "defaultPrompt": "Default System Prompt",
+    "saveConfig": "Save Configuration",
+    "saving": "Saving...",
+    "systemUpdates": "System Updates",
+    "updateAvailable": "Update Available",
+    "checkingUpdates": "Checking for updates...",
+    "upToDate": "Your system is up to date."
+  }
+}
