@@ -15,6 +15,13 @@ function _ask10g() {
 		return 0
 	fi
 
+	if [[ "${UNATTENDED:-false}" == "true" ]]; then
+		echo "${cyan}Unattended mode: assuming this is not a 10 gigabit server.${normal}"
+		_save_config is10g "no"
+		echo
+		return 0
+	fi
+
 	echo -ne "${bold}${yellow}Is this a 10 gigabit server?${normal} (Default: ${green}${bold}N${normal}) "
 	read -r input
 	case ${input} in
@@ -44,6 +51,13 @@ function _askpartition() {
 		if [[ -n "${saved}" ]]; then
 			primaryroot="${saved}"
 			echo "Using saved preference: primaryroot=${primaryroot}"
+			return 0
+		fi
+
+		if [[ "${UNATTENDED:-false}" == "true" ]]; then
+			primaryroot="root"
+			echo "Unattended mode: using root mount for quotas."
+			_save_config primaryroot "${primaryroot}"
 			return 0
 		fi
 
@@ -88,6 +102,11 @@ function _askcontinue() {
 		return 0
 	fi
 
+	if [[ "${UNATTENDED:-false}" == "true" ]]; then
+		_save_config continued "yes"
+		return 0
+	fi
+
 	echo
 	echo "Press ${standout}${green}ENTER${normal} when you're ready to begin or ${standout}${red}Ctrl+Z${normal} to cancel"
 	read -r input
@@ -112,6 +131,15 @@ function _askrtorrent() {
 		RTVERSION="${saved_rt}"
 		LTORRENT="${saved_lt}"
 		echo "Using saved preference: rtorrent-${green}${RTVERSION}${normal}/libtorrent-${green}${LTORRENT}${normal}"
+		return 0
+	fi
+
+	if [[ "${UNATTENDED:-false}" == "true" ]]; then
+		RTVERSION="0.9.7"
+		LTORRENT="0.13.7"
+		echo "Unattended mode: using rtorrent-${green}${RTVERSION}${normal}/libtorrent-${green}${LTORRENT}${normal}"
+		_save_config RTVERSION "${RTVERSION}"
+		_save_config LTORRENT "${LTORRENT}"
 		return 0
 	fi
 
@@ -157,6 +185,14 @@ function _askqb() {
 		return 0
 	fi
 
+	if [[ "${UNATTENDED:-false}" == "true" ]]; then
+		QBVERSION="no"
+		echo "${bold}${green}qBittorrent ${normal}${bold}will NOT be installed${normal}"
+		echo
+		_save_config QBVERSION "${QBVERSION}"
+		return 0
+	fi
+
 	echo -e "${green}0)${normal} Do not install qBittorrent${normal}"
 	echo -e "${green}1)${normal} Install qBittorrent (latest repo version)${normal}"
 	echo -ne "${bold}${yellow}Which version of qBittorrent do you want?${normal} (Default ${green}0${normal}): "
@@ -186,6 +222,13 @@ function _asktr() {
 		return 0
 	fi
 
+	if [[ "${UNATTENDED:-false}" == "true" ]]; then
+		tr="no"
+		echo
+		_save_config tr "${tr}"
+		return 0
+	fi
+
 	echo -ne "${bold}${yellow}Would you like to install transmission? ${normal} [y]es or [${green}n${normal}]o: "
 	read -r response
 	case ${response} in
@@ -204,48 +247,87 @@ function _adduser() {
 	local saved_user=$(_load_config username)
 	local saved_pass=$(_load_config passwd)
 	local saved_ha1=$(_load_config ha1pass)
+	local REALM="aetherflow"
+	local HTPASSWD="/etc/htpasswd"
+	local theshell="/bin/bash"
+
+	if [[ "${UNATTENDED:-false}" == "true" ]]; then
+		if [[ -z "${saved_user}" ]]; then
+			saved_user="${username:-admin}"
+		fi
+		if [[ -z "${saved_pass}" ]]; then
+			saved_pass="${passwd:-${password:-${genpass}}}"
+		fi
+		if [[ -z "${saved_ha1}" && -n "${saved_pass}" ]]; then
+			saved_ha1=$(printf '%s' "${saved_pass}" | md5sum | awk '{print $1}')
+		fi
+		_save_config username "${saved_user}"
+		_save_config passwd "${saved_pass}"
+		_save_config ha1pass "${saved_ha1}"
+	fi
+
 	if [[ -n "${saved_user}" && -n "${saved_pass}" ]]; then
 		username="${saved_user}"
 		passwd="${saved_pass}"
 		ha1pass="${saved_ha1}"
 		echo "Using saved user: ${username}"
 		# Ensure user exists on system (idempotent)
-		if ! id "${username}" &>/dev/null; then
+		if id "${username}" &>/dev/null; then
+			/usr/sbin/usermod -a -G www-data -s "${theshell}" "${username}" 2>/dev/null || true
+		else
 			/usr/sbin/useradd "${username}" -m -G www-data -s "/bin/bash" 2>/dev/null
 			echo "${username}:${passwd}" | /usr/sbin/chpasswd >>"${OUTTO}" 2>&1
 		fi
-		# Ensure htpasswd entry exists
-		if ! grep -q "^${username}:" "${HTPASSWD}" 2>/dev/null; then
-			local REALM="aetherflow"
-			(echo -n "${username}:${REALM}:" && echo -n "${username}:${REALM}:${passwd}" | md5sum | awk '{print $1}') >>"${HTPASSWD}"
-		fi
+		sed -i "/^${username}:/d" "${HTPASSWD}" 2>/dev/null || true
+		(echo -n "${username}:${REALM}:" && echo -n "${username}:${REALM}:${passwd}" | md5sum | awk '{print $1}') >>"${HTPASSWD}"
+		printf '%s:%s' "${username}" "${passwd}" >/root/"${username}".info.db
+		_save_config username "${username}"
+		_save_config passwd "${passwd}"
+		_save_config ha1pass "${ha1pass}"
 		return 0
 	fi
 
-	local REALM="aetherflow"
-	local HTPASSWD="/etc/htpasswd"
-	theshell="/bin/bash"
-	echo "${bold}${yellow}Add a Master Account user to sudoers${normal}"
-	echo -n "Username: "
+	echo ""
+	echo " ╭──────────────────────────────────────────────────────────╮"
+	echo " │ ${bold}${cyan}Administrator Account Setup${normal}                                │"
+	echo " │──────────────────────────────────────────────────────────│"
+	echo " │ Please enter a username for your master admin account.   │"
+	echo " │ This user will have sudo privileges and access to the    │"
+	echo " │ web dashboard.                                           │"
+	echo " ╰──────────────────────────────────────────────────────────╯"
+	echo -ne "   ${bold}${magenta}Username:${normal} "
 	read -r user
-	username=$(echo "${user}" | sed 's/.*/\L&/')
-	/usr/sbin/useradd "${username}" -m -G www-data -s "${theshell}"
-	echo -n "Password: (hit enter to generate a password) "
-	read -r password
+	username=$(printf '%s' "${user}" | tr '[:upper:]' '[:lower:]')
+	if ! id "${username}" &>/dev/null; then
+		/usr/sbin/useradd "${username}" -m -G www-data -s "${theshell}"
+	fi
+	
+	echo ""
+	echo " ╭──────────────────────────────────────────────────────────╮"
+	echo " │ ${bold}${cyan}Secure Password Configuration${normal}                              │"
+	echo " │──────────────────────────────────────────────────────────│"
+	echo " │ Type a strong password or press [ENTER] to autogenerate. │"
+	echo " │ Security Requirements:                                   │"
+	echo " │  • Minimum 8 characters in length                        │"
+	echo " │  • Mix of uppercase, lowercase, and numbers              │"
+	echo " ╰──────────────────────────────────────────────────────────╯"
+	echo -ne "   ${bold}${magenta}Password:${normal} "
+	read -rs password
+	echo ""
 	if [[ -n "${password}" ]]; then
-		echo "setting password to ${password}"
+		echo "   ${green}✓ Password manually provided.${normal}"
 		passwd=${password}
 		echo "${username}:${passwd}" | /usr/sbin/chpasswd >>"${OUTTO}" 2>&1
-		(echo -n "${username}:${REALM}:" && echo -n "${username}:${REALM}:${passwd}" | md5sum | awk '{print $1}') >>"${HTPASSWD}"
 	else
-		echo "setting password to ${genpass}"
 		passwd=${genpass}
+		echo "   ${green}✓ Password autogenerated:${normal} ${bold}${passwd}${normal}"
 		echo "${username}:${passwd}" | /usr/sbin/chpasswd >>"${OUTTO}" 2>&1
-		(echo -n "${username}:${REALM}:" && echo -n "${username}:${REALM}:${passwd}" | md5sum | awk '{print $1}') >>"${HTPASSWD}"
 	fi
-	printf "${username}:${passwd}" >/root/"${username}".info.db
+	sed -i "/^${username}:/d" "${HTPASSWD}" 2>/dev/null || true
+	(echo -n "${username}:${REALM}:" && echo -n "${username}:${REALM}:${passwd}" | md5sum | awk '{print $1}') >>"${HTPASSWD}"
+	printf '%s:%s' "${username}" "${passwd}" >/root/"${username}".info.db
 	echo
-	ha1pass=$(echo -n "${passwd}" | md5sum | cut -f1 -d' ')
+	ha1pass=$(printf '%s' "${passwd}" | md5sum | cut -f1 -d' ')
 
 	# Persist credentials for resume
 	_save_config username "${username}"
@@ -260,6 +342,13 @@ function _askffmpeg() {
 	if [[ -n "${saved}" ]]; then
 		ffmpeg="${saved}"
 		echo "Using saved preference: ffmpeg=${ffmpeg}"
+		return 0
+	fi
+
+	if [[ "${UNATTENDED:-false}" == "true" ]]; then
+		ffmpeg="yes"
+		echo
+		_save_config ffmpeg "${ffmpeg}"
 		return 0
 	fi
 
@@ -286,6 +375,13 @@ function _askvsftpd() {
 
 	local DEFAULTIP
 	DEFAULTIP=$(ifconfig | grep -Eo 'inet (addr:)?([0-9]*\.){3}[0-9]*' | grep -Eo '([0-9]*\.){3}[0-9]*' | grep -v '127.0.0.1')
+	if [[ "${UNATTENDED:-false}" == "true" ]]; then
+		IP=${DEFAULTIP}
+		echo "Unattended mode: using detected public IP ${IP}"
+		echo
+		_save_config IP "${IP}"
+		return 0
+	fi
 	echo -ne "${bold}${yellow}Please, write your public server IP (used for ftp)${normal} (Default: ${green}${bold}${DEFAULTIP}${normal}) "
 	read -r input
 	if [[ -z "${input}" ]]; then
@@ -305,6 +401,13 @@ function _askbbr() {
 	if [[ -n "${saved}" ]]; then
 		bbr="${saved}"
 		echo "Using saved preference: bbr=${bbr}"
+		return 0
+	fi
+
+	if [[ "${UNATTENDED:-false}" == "true" ]]; then
+		bbr="yes"
+		echo
+		_save_config bbr "${bbr}"
 		return 0
 	fi
 
