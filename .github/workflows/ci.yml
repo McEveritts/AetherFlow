@@ -77,6 +77,12 @@ jobs:
       - name: Unit Tests
         run: npm run test:ci
 
+      - name: Install Playwright Browsers
+        run: npx playwright install --with-deps
+
+      - name: E2E Tests
+        run: npm run test:e2e
+
       - name: Static Export Build
         env:
           NEXT_STATIC_EXPORT: "1"
