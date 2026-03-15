@@ -1,0 +1,46 @@
+[Unit]
+Description=AetherFlow Next.js Frontend
+After=network-online.target aetherflow-api.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=aetherflow
+Group=aetherflow
+WorkingDirectory=/opt/AetherFlow/frontend
+ExecStart=/usr/local/bin/node /opt/AetherFlow/frontend/node_modules/.bin/next start -p 3000
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# Environment
+Environment=NODE_ENV=production
+Environment=PORT=3000
+
+# Security Hardening
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectProc=invisible
+ProcSubset=pid
+LockPersonality=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0027
+ReadWritePaths=/opt/AetherFlow/frontend/.next
+
+[Install]
+WantedBy=multi-user.target

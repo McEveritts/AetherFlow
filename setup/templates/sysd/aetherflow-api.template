@@ -1,0 +1,46 @@
+[Unit]
+Description=AetherFlow Go API Backend
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=aetherflow
+Group=aetherflow
+WorkingDirectory=/opt/AetherFlow/backend
+ExecStart=/opt/AetherFlow/backend/aetherflow-api
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# Environment
+Environment=GIN_MODE=release
+Environment=AETHERFLOW_DB_PATH=/opt/AetherFlow/dashboard/db/aetherflow.db
+
+# Security Hardening
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectProc=invisible
+ProcSubset=pid
+LockPersonality=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0027
+ReadWritePaths=/opt/AetherFlow/dashboard/db
+
+[Install]
+WantedBy=multi-user.target
