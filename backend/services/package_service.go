@@ -8,32 +8,99 @@ import (
 	"path/filepath"
 )
 
-// GetPackages reads the packages.json and determines installation status
-func GetPackages() []models.Package {
-	// Paths might vary based on where the Go binary is run from.
-	// We'll try relative to backend/ first, then relative to root.
-	configPaths := []string{}
-	if customPath := os.Getenv("AETHERFLOW_PACKAGES_CONFIG"); customPath != "" {
-		configPaths = append(configPaths, customPath)
+func resolveConfigPaths(envKey, fileName string) []string {
+	paths := []string{}
+	if customPath := os.Getenv(envKey); customPath != "" {
+		paths = append(paths, customPath)
 	}
-	configPaths = append(configPaths, []string{
-		filepath.Join("config", "packages.json"),                                      // Canonical: backend/config/
-		filepath.Join("..", "backend", "config", "packages.json"),                     // From project root
-		filepath.Join("/opt", "AetherFlow", "backend", "config", "packages.json"),    // Production
-		filepath.Join("..", "dashboard", "config", "packages.json"),                   // Legacy fallback
-		filepath.Join("dashboard", "config", "packages.json"),                         // Legacy fallback (alt)
-		filepath.Join("/opt", "AetherFlow", "dashboard", "config", "packages.json"),  // Legacy production fallback
-	}...)
 
-	var data []byte
-	var err error
-	for _, p := range configPaths {
+	return append(paths, []string{
+		filepath.Join("config", fileName),                                     // Canonical: backend/config/
+		filepath.Join("..", "backend", "config", fileName),                    // From project root
+		filepath.Join("/opt", "AetherFlow", "backend", "config", fileName),   // Production
+		filepath.Join("..", "dashboard", "config", fileName),                  // Legacy fallback
+		filepath.Join("dashboard", "config", fileName),                        // Legacy fallback (alt)
+		filepath.Join("/opt", "AetherFlow", "dashboard", "config", fileName), // Legacy production fallback
+	}...)
+}
+
+func readFirstConfigFile(paths []string) ([]byte, error) {
+	var (
+		data []byte
+		err  error
+	)
+
+	for _, p := range paths {
 		data, err = os.ReadFile(p)
 		if err == nil {
-			break
+			return data, nil
 		}
 	}
 
+	return nil, err
+}
+
+func loadPackageAutomation() map[string]models.PackageAutomation {
+	data, err := readFirstConfigFile(resolveConfigPaths("AETHERFLOW_PACKAGE_AUTOMATION_CONFIG", "package_automation.json"))
+	if err != nil {
+		return nil
+	}
+
+	var automation map[string]models.PackageAutomation
+	if err := json.Unmarshal(data, &automation); err != nil {
+		return nil
+	}
+
+	return automation
+}
+
+func mergePackageAutomation(pkgs []models.Package, automation map[string]models.PackageAutomation) {
+	if len(automation) == 0 {
+		return
+	}
+
+	for i := range pkgs {
+		entry, ok := automation[pkgs[i].Name]
+		if !ok {
+			continue
+		}
+
+		pkgs[i].UpdateSource = entry.UpdateSource
+		pkgs[i].UpdateRepo = entry.UpdateRepo
+		pkgs[i].UpdateRepoURL = entry.UpdateRepoURL
+		pkgs[i].UpdatePackage = entry.UpdatePackage
+		pkgs[i].VersionCommand = append([]string(nil), entry.VersionCommand...)
+		pkgs[i].VersionRegex = entry.VersionRegex
+		pkgs[i].SandboxProfile = entry.SandboxProfile
+		pkgs[i].SandboxReadWrite = append([]string(nil), entry.SandboxReadWrite...)
+		pkgs[i].SandboxServiceIDs = append([]string(nil), entry.SandboxServiceIDs...)
+	}
+}
+
+func mergePackageUpdateState(pkgs []models.Package) {
+	updateMap := GetPackageUpdateMap()
+	if len(updateMap) == 0 {
+		return
+	}
+
+	for i := range pkgs {
+		update, ok := updateMap[pkgs[i].Name]
+		if !ok {
+			continue
+		}
+
+		pkgs[i].InstalledVersion = update.InstalledVersion
+		pkgs[i].LatestVersion = update.LatestVersion
+		pkgs[i].UpdateAvailable = update.UpdateAvailable
+		pkgs[i].UpdateCheckedAt = update.CheckedAt
+		pkgs[i].UpdateURL = update.URL
+		pkgs[i].UpdateError = update.LastError
+	}
+}
+
+// GetPackages reads the packages.json and determines installation status.
+func GetPackages() []models.Package {
+	data, err := readFirstConfigFile(resolveConfigPaths("AETHERFLOW_PACKAGES_CONFIG", "packages.json"))
 	if err != nil {
 		return nil
 	}
@@ -42,6 +109,8 @@ func GetPackages() []models.Package {
 	if err := json.Unmarshal(data, &pkgs); err != nil {
 		return nil
 	}
+
+	mergePackageAutomation(pkgs, loadPackageAutomation())
 
 	// Iterate and check status
 	for i := range pkgs {
@@ -82,6 +151,8 @@ func GetPackages() []models.Package {
 			}
 		}
 	}
+
+	mergePackageUpdateState(pkgs)
 
 	return pkgs
 }
