@@ -374,7 +374,7 @@ function _askvsftpd() {
 	fi
 
 	local DEFAULTIP
-	DEFAULTIP=$(ifconfig | grep -Eo 'inet (addr:)?([0-9]*\.){3}[0-9]*' | grep -Eo '([0-9]*\.){3}[0-9]*' | grep -v '127.0.0.1')
+	DEFAULTIP=$(ip -4 addr show | grep -oP 'inet \K[0-9.]+' | grep -v '127.0.0.1' | head -1)
 	if [[ "${UNATTENDED:-false}" == "true" ]]; then
 		IP=${DEFAULTIP}
 		echo "Unattended mode: using detected public IP ${IP}"
