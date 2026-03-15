@@ -1,0 +1,142 @@
+{
+  "autobrr": {
+    "update_source": "github",
+    "update_repo": "autobrr/autobrr",
+    "version_command": ["/opt/autobrr/autobrr", "--version"],
+    "sandbox_profile": "go",
+    "sandbox_rw_paths": ["/opt/autobrr", "/home/autobrr"],
+    "sandbox_service_units": ["autobrr.service"]
+  },
+  "bazarr": {
+    "sandbox_profile": "python",
+    "sandbox_rw_paths": ["/opt/bazarr"],
+    "sandbox_service_units": ["bazarr.service"]
+  },
+  "deluge": {
+    "update_source": "apt",
+    "update_package": "deluged",
+    "sandbox_profile": "python",
+    "sandbox_rw_paths": ["/home/deluge", "/var/log/deluge"],
+    "sandbox_service_units": ["deluged.service", "deluge-web.service"]
+  },
+  "emby": {
+    "update_source": "apt",
+    "update_package": "emby-server"
+  },
+  "filebrowser": {
+    "update_source": "github",
+    "update_repo": "filebrowser/filebrowser",
+    "version_command": ["/usr/local/bin/filebrowser", "version"]
+  },
+  "gitea": {
+    "update_source": "github",
+    "update_repo": "go-gitea/gitea",
+    "version_command": ["/usr/local/bin/gitea", "--version"],
+    "sandbox_profile": "go",
+    "sandbox_rw_paths": ["/etc/gitea", "/var/lib/gitea", "/home/gitea"],
+    "sandbox_service_units": ["gitea.service"]
+  },
+  "grafana": {
+    "update_source": "apt",
+    "update_package": "grafana"
+  },
+  "jellyfin": {
+    "update_source": "apt",
+    "update_package": "jellyfin"
+  },
+  "lidarr": {
+    "sandbox_profile": "mono",
+    "sandbox_rw_paths": ["/opt/Lidarr", "/home/{{SERVICE_USER}}/.config/Lidarr"],
+    "sandbox_service_units": ["lidarr.service"]
+  },
+  "navidrome": {
+    "update_source": "github",
+    "update_repo": "navidrome/navidrome",
+    "version_command": ["/opt/navidrome/navidrome", "--version"],
+    "sandbox_profile": "go",
+    "sandbox_rw_paths": ["/opt/navidrome", "/var/lib/navidrome", "/music"],
+    "sandbox_service_units": ["navidrome.service"]
+  },
+  "nzbget": {
+    "update_source": "github",
+    "update_repo": "nzbgetcom/nzbget",
+    "version_command": ["bash", "-lc", "/opt/nzbget/nzbget --version 2>/dev/null || /opt/nzbget/nzbget -V 2>/dev/null"],
+    "sandbox_profile": "native",
+    "sandbox_rw_paths": ["/opt/nzbget", "/home/nzbget"],
+    "sandbox_service_units": ["nzbget.service"]
+  },
+  "ombi": {
+    "update_source": "github",
+    "update_repo": "Ombi-app/Ombi",
+    "version_command": ["/opt/Ombi/Ombi", "--version"],
+    "sandbox_profile": "dotnet",
+    "sandbox_rw_paths": ["/opt/Ombi"],
+    "sandbox_service_units": ["ombi.service"]
+  },
+  "overseerr": {
+    "update_source": "git_tags",
+    "update_repo": "sct/overseerr",
+    "update_repo_url": "https://github.com/sct/overseerr.git",
+    "version_command": ["git", "-C", "/opt/overseerr", "describe", "--tags", "--abbrev=0"],
+    "sandbox_profile": "node",
+    "sandbox_rw_paths": ["/opt/overseerr"],
+    "sandbox_service_units": ["overseerr.service"]
+  },
+  "prometheus": {
+    "update_source": "github",
+    "update_repo": "prometheus/prometheus",
+    "version_command": ["/opt/prometheus/prometheus", "--version"],
+    "sandbox_profile": "go",
+    "sandbox_rw_paths": ["/opt/prometheus", "/etc/prometheus", "/var/lib/prometheus"],
+    "sandbox_service_units": ["prometheus.service", "node_exporter.service"]
+  },
+  "prowlarr": {
+    "update_source": "github",
+    "update_repo": "Prowlarr/Prowlarr",
+    "version_command": ["/opt/Prowlarr/Prowlarr", "--version"],
+    "sandbox_profile": "dotnet",
+    "sandbox_rw_paths": ["/opt/Prowlarr", "/var/lib/prowlarr", "/home/prowlarr"],
+    "sandbox_service_units": ["prowlarr.service"]
+  },
+  "qbittorrent": {
+    "update_source": "apt",
+    "update_package": "qbittorrent-nox",
+    "sandbox_profile": "native",
+    "sandbox_rw_paths": ["/home/qbittorrent"],
+    "sandbox_service_units": ["qbittorrent.service"]
+  },
+  "radarr": {
+    "sandbox_profile": "mono",
+    "sandbox_rw_paths": ["/opt/Radarr", "/home/{{SERVICE_USER}}/.config/Radarr"],
+    "sandbox_service_units": ["radarr.service"]
+  },
+  "readarr": {
+    "update_source": "github",
+    "update_repo": "Readarr/Readarr",
+    "version_command": ["/opt/Readarr/Readarr", "--version"],
+    "sandbox_profile": "dotnet",
+    "sandbox_rw_paths": ["/opt/Readarr", "/var/lib/readarr"],
+    "sandbox_service_units": ["readarr.service"]
+  },
+  "sonarr": {
+    "update_source": "apt",
+    "update_package": "sonarr"
+  },
+  "syncthing": {
+    "update_source": "apt",
+    "update_package": "syncthing"
+  },
+  "transmission": {
+    "update_source": "apt",
+    "update_package": "transmission-daemon"
+  },
+  "uptimekuma": {
+    "update_source": "git_tags",
+    "update_repo": "louislam/uptime-kuma",
+    "update_repo_url": "https://github.com/louislam/uptime-kuma.git",
+    "version_command": ["git", "-C", "/opt/uptime-kuma", "describe", "--tags", "--abbrev=0"],
+    "sandbox_profile": "node",
+    "sandbox_rw_paths": ["/opt/uptime-kuma"],
+    "sandbox_service_units": ["uptime-kuma.service"]
+  }
+}

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log"
@@ -11,12 +12,16 @@ import (
 	"time"
 
 	"aetherflow/api"
+	"aetherflow/cluster"
 	"aetherflow/db"
+	"aetherflow/services"
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
 )
+
+var version = "dev"
 
 // discoverOrigins auto-detects local and public IPs and builds CORS origin list
 func discoverOrigins() []string {
@@ -90,6 +95,84 @@ func main() {
 	// Initialize the Database
 	db.InitDB()
 
+	// Initialize the Cluster Manager
+	cluster.Init()
+
+	// Initialize the Log Aggregator (Phase 8)
+	services.InitLogAggregator()
+
+	// Initialize the Notification Engine (Phase 9)
+	services.InitNotificationEngine(func(n services.Notification) {
+		// Bridge: dispatch notifications via the WebSocket hub
+		api.BroadcastNotification(n)
+	})
+
+	// Initialize the installed-app update watcher (Phase 12)
+	services.InitAppUpdateWatcher(func(changed []string) {
+		api.BroadcastMarketplaceUpdates(changed)
+	})
+
+		// Initialize the Metrics Recorder (Phase 19 — Predictive Resource Scaling)
+	services.InitMetricsRecorder()
+
+	// Initialize the Smart Backup Scheduler (Phase 20)
+	services.InitSmartBackupScheduler()
+
+	// Phase 22 — warn if billing webhook secrets are not configured.
+	// The POST /billing/webhooks/:provider endpoint is intentionally outside
+	// AdminOnly (billing providers can't hold a session), so the HMAC/bearer
+	// secret is the sole authentication gate.  Alert operators at boot time.
+	if os.Getenv("WHMCS_WEBHOOK_SECRET") == "" && os.Getenv("BLESTA_WEBHOOK_SECRET") == "" && os.Getenv("BILLING_WEBHOOK_SECRET") == "" {
+		log.Println("⚠  WARNING: No billing webhook secret configured (WHMCS_WEBHOOK_SECRET / BLESTA_WEBHOOK_SECRET / BILLING_WEBHOOK_SECRET). " +
+			"The POST /billing/webhooks/:provider endpoint will reject all requests until a secret is set.")
+	}
+
+	// Start gRPC server/client based on cluster mode
+	clusterMode := os.Getenv("CLUSTER_MODE")
+	switch clusterMode {
+	case "master":
+		go func() {
+			srv, err := cluster.NewGRPCServer()
+			if err != nil {
+				log.Printf("Failed to create gRPC server: %v", err)
+				return
+			}
+			if err := srv.Start(); err != nil {
+				log.Printf("gRPC server error: %v", err)
+			}
+		}()
+		log.Println("Cluster mode: MASTER — gRPC server starting")
+	case "worker":
+		masterAddr := os.Getenv("CLUSTER_MASTER_ADDR")
+		if masterAddr == "" {
+			log.Fatal("CLUSTER_MODE=worker requires CLUSTER_MASTER_ADDR to be set")
+		}
+		go func() {
+			client, err := cluster.NewGRPCClient(masterAddr)
+			if err != nil {
+				log.Printf("Failed to connect to master: %v", err)
+				return
+			}
+			defer client.Close()
+
+			hostname, _ := os.Hostname()
+			psk := os.Getenv("CLUSTER_PSK")
+
+			if err := client.Register(hostname, fmt.Sprintf("%s:%s", hostname, os.Getenv("PORT")), psk, version); err != nil {
+				log.Printf("Cluster registration failed: %v", err)
+				return
+			}
+
+			ctx := context.Background()
+			if err := client.StartHeartbeat(ctx); err != nil {
+				log.Printf("Cluster heartbeat loop ended: %v", err)
+			}
+		}()
+		log.Printf("Cluster mode: WORKER — connecting to master at %s", os.Getenv("CLUSTER_MASTER_ADDR"))
+	default:
+		log.Println("Cluster mode: STANDALONE (set CLUSTER_MODE=master|worker to enable clustering)")
+	}
+
 	r := gin.Default()
 
 	// P5: Limit upload size to 50MB to prevent DoS
@@ -98,8 +181,8 @@ func main() {
 	// CORS Configuration
 	corsConfig := cors.Config{
 		AllowMethods:     []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
-		AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "Authorization"},
-		ExposeHeaders:    []string{"Content-Length"},
+		AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "Authorization", "X-API-Version", "X-AetherFlow-Signature", "X-WHMCS-Signature", "X-BLESTA-Signature"},
+		ExposeHeaders:    []string{"Content-Length", "X-API-Version", "Deprecation", "Link"},
 		AllowCredentials: true,
 	}
 

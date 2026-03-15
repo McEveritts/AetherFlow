@@ -111,6 +111,18 @@ func RunPackageAction(action, pkgId, scriptName, lockFile string) {
 		return
 	}
 
+	switch action {
+	case "install":
+		if err := ApplyPackageSandbox(pkgId); err != nil {
+			log.Printf("[install] sandbox hardening warning for %s: %v", pkgId, err)
+		}
+		RefreshPackageUpdateByID(pkgId)
+	case "remove":
+		if err := DeletePackageUpdateRecord(pkgId); err != nil {
+			log.Printf("[remove] failed to clear update state for %s: %v", pkgId, err)
+		}
+	}
+
 	job.Progress = 100
 	job.LastLine = "Complete!"
 	log.Printf("[%s] Successfully executed script %s (%d lines)", action, scriptName, lineCount)
