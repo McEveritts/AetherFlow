@@ -19,22 +19,22 @@
 
 @layer components {
   .glass-card {
-    @apply bg-white/[0.02] backdrop-blur-xl border border-white/[0.05] rounded-2xl shadow-2xl;
+    @apply bg-white/[0.03] backdrop-blur-2xl border border-white/[0.08] rounded-2xl shadow-[0_8px_32px_rgba(0,0,0,0.3)];
   }
   
   .glass-panel {
-    @apply bg-slate-950/40 backdrop-blur-2xl border border-white/[0.05] shadow-2xl;
+    @apply bg-slate-950/50 backdrop-blur-3xl border border-white/[0.08] shadow-[0_8px_32px_rgba(0,0,0,0.5)];
   }
   
   .glass-button {
-    @apply bg-white/5 hover:bg-white/10 text-white border border-white/10 rounded-xl transition-all duration-300 backdrop-blur-lg shadow-[0_4px_30px_rgba(0,0,0,0.1)];
+    @apply bg-white/[0.06] hover:bg-white/[0.12] text-white border border-white/[0.12] rounded-xl transition-all duration-300 backdrop-blur-lg shadow-[0_4px_24px_rgba(0,0,0,0.2)] active:scale-95;
   }
   
   .glass-button-primary {
-    @apply bg-indigo-500/80 hover:bg-indigo-500 text-white border border-indigo-400/30 rounded-xl transition-all duration-300 backdrop-blur-lg shadow-[0_0_15px_rgba(99,102,241,0.4)];
+    @apply bg-indigo-500/80 hover:bg-indigo-400 text-white border border-indigo-400/40 rounded-xl transition-all duration-300 backdrop-blur-lg shadow-[0_4px_24px_rgba(99,102,241,0.4)] active:scale-95;
   }
 
   .glass-input {
-    @apply bg-slate-900/50 backdrop-blur-xl border border-white/10 text-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500/50 focus:border-indigo-500/50 transition-all placeholder-slate-500;
+    @apply bg-slate-900/60 backdrop-blur-2xl border border-white/10 text-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500/60 focus:border-indigo-500/60 transition-all placeholder-slate-500 shadow-inner hover:border-white/20;
   }
 }
