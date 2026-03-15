@@ -54,7 +54,7 @@ export function ServicesSkeleton() {
                 <SkeletonBox className="h-5 w-32 rounded-md bg-white/5" animated={false} />
                 <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-5">
                     {[...Array(6)].map((_, i) => (
-                        <SkeletonBox key={i} className="h-48 w-full rounded-2xl" />
+                        <SkeletonBox key={i} className="h-[238px] w-full rounded-2xl" />
                     ))}
                 </div>
             </div>
@@ -90,7 +90,9 @@ export function SettingsSkeleton() {
     return (
         <div className="space-y-6 animate-fade-in relative z-10 w-full">
             <div className="bg-white/[0.02] border border-white/[0.05] rounded-3xl p-10 backdrop-blur-xl">
-                <SkeletonBox className="h-8 w-64 rounded-md mb-8 bg-white/10" animated={false} />
+                <div className="mb-8 pb-4 border-b border-white/5">
+                    <SkeletonBox className="h-8 w-64 rounded-md bg-white/10" animated={false} />
+                </div>
                 <div className="max-w-2xl space-y-8">
                     <div className="bg-slate-950/50 border border-white/10 rounded-2xl p-6 space-y-6">
                         <SkeletonBox className="h-6 w-48 rounded-md bg-white/5" animated={false} />
@@ -108,6 +110,18 @@ export function SettingsSkeleton() {
                     </div>
                     
                     <SkeletonBox className="h-12 w-48 rounded-xl bg-indigo-500/20" animated={false} />
+
+                    {/* System Updates Skeleton */}
+                    <div className="bg-slate-950/50 border border-white/10 rounded-2xl p-6 space-y-6">
+                        <div className="flex justify-between items-center">
+                            <SkeletonBox className="h-6 w-40 rounded-md bg-white/5" animated={false} />
+                            <SkeletonBox className="h-6 w-24 rounded-full bg-white/5" animated={false} />
+                        </div>
+                        <div className="p-4 bg-white/5 rounded-xl border border-white/5 space-y-4">
+                            <SkeletonBox className="h-5 w-full rounded-md bg-white/5" animated={false} />
+                            <SkeletonBox className="h-5 w-3/4 rounded-md bg-white/5" animated={false} />
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>
