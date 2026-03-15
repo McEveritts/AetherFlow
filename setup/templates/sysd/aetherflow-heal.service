@@ -1,0 +1,30 @@
+[Unit]
+Description=AetherFlow self-healing maintenance
+After=network.target
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/local/bin/AetherFlow/system/af-heal
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectProc=invisible
+ProcSubset=pid
+LockPersonality=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0077
+ReadWritePaths=/tmp /var/log/aetherflow /var/lib/aetherflow /home /install
