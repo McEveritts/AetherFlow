@@ -245,3 +245,40 @@ func broadcastMetricsLoop() {
 		}
 	}
 }
+
+// BroadcastNotification sends a notification to all connected WebSocket clients.
+func BroadcastNotification(n services.Notification) {
+	payload := map[string]interface{}{
+		"type": "NOTIFICATION",
+		"data": map[string]interface{}{
+			"id":         n.ID,
+			"level":      string(n.Level),
+			"title":      n.Title,
+			"message":    n.Message,
+			"created_at": n.CreatedAt,
+		},
+	}
+
+	message, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+
+	WSHub.broadcast <- message
+}
+
+func BroadcastMarketplaceUpdates(packages []string) {
+	payload := map[string]interface{}{
+		"type": "MARKETPLACE_UPDATE",
+		"data": map[string]interface{}{
+			"packages": packages,
+		},
+	}
+
+	message, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+
+	WSHub.broadcast <- message
+}
