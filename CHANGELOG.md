@@ -1,3 +1,41 @@
+## CHANGELOG v3.1.0 - Gold Release Candidate
+_Generated March 15, 2026 from commits since `v3.0.1`._
+
+---
+
+### Release Summary
+* **Version**: Promoted the repository to `v3.1.0` for the Gold release candidate.
+* **Scope**: Consolidated the post-`v3.0.1` modernization work across the Go control plane, Linux installer/runtime scripts, and the Next.js dashboard.
+* **Focus**: Elevated bare-metal readiness, tightened security defaults, and completed the UI transition away from the legacy PHP surface.
+
+### Features
+* **Go Platform Expansion**:
+  * Expanded the Go backend with auth, services, marketplace, updater, WebSocket, backup, AI, and clustering capabilities.
+  * Added local username/password onboarding, dynamic OAuth redirect handling, safer SQLite backup/export flows, and richer package/service verification.
+* **Operational Depth**:
+  * Grew the marketplace catalog to 37 managed applications with improved install/remove coverage and Web UI routing.
+  * Added installer recovery/resume behavior, smarter updater flows that preserve local changes, and broader Debian/Ubuntu hardening across setup templates and service scripts.
+* **Observability & Intelligence**:
+  * Introduced hardware identifier discovery, real package/service status checks, and AI model selection improvements for Gemini-powered workflows.
+
+### Security Hardening
+* **Legacy PHP Removal**:
+  * Removed the remaining legacy PHP codepaths, deleted the PHP dashboard, and completed the transition to the Next.js frontend as the sole supported UI surface.
+* **JWT & Session Controls**:
+  * Hardened JWT handling by refusing to start without `JWT_SECRET`, tightening session-cookie defaults, and reinforcing auth-sensitive/admin-only routes.
+* **Defense in Depth**:
+  * Closed critical audit findings across service action allowlists, WebSocket origin validation, upload/path traversal protection, dangerous file-extension blocking, backup path validation, and runtime secret hygiene.
+
+### UI/UX Enhancements
+* **Dashboard Maturity**:
+  * Added missing security, backup, fileshare, profile, and users tabs, along with stronger marketplace and services workflows.
+  * Introduced onboarding, skeleton loaders, toast notifications, and more polished authentication flows across the Next.js application.
+* **Polish & Responsiveness**:
+  * Delivered a Netdata-style dashboard with sparklines, heatmaps, process visibility, disk I/O, swap telemetry, and dynamic hardware identity widgets.
+  * Added circular install progress states, cleaner login copy, and broader frontend lint/build cleanup to stabilize the release candidate.
+
+---
+
 ## CHANGELOG v3.0.1 - Initial Stable Release
 _Changelog updated February 18, 2026_
 

@@ -9,17 +9,19 @@ setup/sources/plexmediaserver_0.9.17.3.2239-fe07491_amd64.deb
 node_modules/
 vendor/
 
-# Security - Ignore all generic JSON keys (e.g. Service Account Key)
-*.json
-!package.json
-!tsconfig.json
-!composer.json
-!dashboard/config/packages.json
+# Security - Ignore service account keys and sensitive JSON credentials
+**/service-account*.json
+**/credentials*.json
+**/secrets*.json
+**/key*.json
+# Allow known project JSON files (package.json, tsconfig.json, etc.)
 
 # Next.js Build output
 .next/
 out/
 build/
+frontend/playwright-report/
+frontend/test-results/
 
 # Security - never commit SSH helper scripts with creds
 temp_ssh*
