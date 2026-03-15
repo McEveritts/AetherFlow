@@ -41,15 +41,77 @@ message_title=${white}${on_magenta}
 # Check if running from setup directory or installed location
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
+version_ge() {
+    # Returns 0 when $1 >= $2 (version sort aware).
+    [[ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -n1)" == "$2" ]]
+}
+
+bootstrap_check_supported_os() {
+    if [[ ! -r /etc/os-release ]]; then
+        echo "Unable to determine operating system (missing /etc/os-release)."
+        exit 1
+    fi
+
+    # shellcheck disable=1091
+    . /etc/os-release
+    local distro="${ID:-unknown}"
+    local version="${VERSION_ID:-0}"
+
+    case "$distro" in
+        ubuntu)
+            if ! version_ge "$version" "20.04"; then
+                echo "Unsupported Ubuntu version: ${version}. AetherFlow requires Ubuntu 20.04 or newer."
+                exit 1
+            fi
+            ;;
+        debian)
+            if ! version_ge "$version" "11"; then
+                echo "Unsupported Debian version: ${version}. AetherFlow requires Debian 11 or newer."
+                exit 1
+            fi
+            ;;
+        *)
+            echo "Unsupported distribution: ${distro}. AetherFlow supports Ubuntu 20.04+ and Debian 11+."
+            exit 1
+            ;;
+    esac
+}
+
 # Auto-Bootstrap if downloaded as a single script via the GitHub one-liner
 if [[ ! -d "${SCRIPT_DIR}/modules" ]]; then
     echo "Bootstrapping AetherFlow Installer Environment..."
+    bootstrap_check_supported_os
     export DEBIAN_FRONTEND=noninteractive
+    BOOTSTRAP_TARBALL="/tmp/aetherflow-bootstrap.tar.gz"
+
+    (
+        curl -fsSL --retry 3 --output "${BOOTSTRAP_TARBALL}" \
+            "https://codeload.github.com/McEveritts/AetherFlow/tar.gz/refs/heads/master" >/dev/null 2>&1 || true
+    ) &
+    prefetch_pid=$!
+
     apt-get update -y >/dev/null 2>&1
-    apt-get install -y git bc curl >/dev/null 2>&1
+    apt-get install -y git bc curl ca-certificates >/dev/null 2>&1
+    wait "${prefetch_pid}" 2>/dev/null || true
     
     rm -rf /opt/AetherFlow
-    git clone https://github.com/McEveritts/AetherFlow.git /opt/AetherFlow >/dev/null 2>&1
+
+    if [[ -s "${BOOTSTRAP_TARBALL}" ]]; then
+        mkdir -p /opt/AetherFlow
+        bootstrap_tmp="/tmp/aetherflow-bootstrap.$$"
+        rm -rf "${bootstrap_tmp}"
+        mkdir -p "${bootstrap_tmp}"
+        tar -xzf "${BOOTSTRAP_TARBALL}" -C "${bootstrap_tmp}" >/dev/null 2>&1 || true
+        bootstrap_source="$(find "${bootstrap_tmp}" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
+        if [[ -n "${bootstrap_source}" ]]; then
+            cp -a "${bootstrap_source}/." /opt/AetherFlow/
+        else
+            git clone https://github.com/McEveritts/AetherFlow.git /opt/AetherFlow >/dev/null 2>&1
+        fi
+        rm -rf "${bootstrap_tmp}" "${BOOTSTRAP_TARBALL}"
+    else
+        git clone https://github.com/McEveritts/AetherFlow.git /opt/AetherFlow >/dev/null 2>&1
+    fi
     
     # Relaunch from the proper directory
     cd /opt/AetherFlow/setup || exit 1
@@ -169,7 +231,7 @@ spinner() {
 	local pid=$1
 	local delay=0.25
 	local spinstr='|/-\'
-	while [[ "$(ps a | awk '{print $1}' | grep ${pid})" ]]; do
+	while kill -0 "${pid}" 2>/dev/null; do
 		local temp=${spinstr#?}
 		printf " [${bold}${yellow}%c${normal}]  " "${spinstr}"
 		local spinstr=${temp}${spinstr%"${temp}"}

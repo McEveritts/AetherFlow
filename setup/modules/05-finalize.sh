@@ -17,7 +17,9 @@ function _ftpdconfig() {
 	# Enabling passive mode
 	sed -i 's/^\(pasv_min_port=\).*/\110090/' /etc/vsftpd.conf
 	sed -i 's/^\(pasv_max_port=\).*/\110100/' /etc/vsftpd.conf
-	echo "pasv_address="${IP} >>/etc/vsftpd.conf
+	local passive_ip
+	passive_ip="$(ip route get 8.8.8.8 | awk 'NR==1 {print $7}')"
+	echo "pasv_address=${passive_ip}" >>/etc/vsftpd.conf
 	/sbin/iptables -I INPUT -p tcp --destination-port 10090:10100 -j ACCEPT
 
 	echo "" >/etc/vsftpd.chroot_list

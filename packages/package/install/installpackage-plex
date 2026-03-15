@@ -1,72 +1,125 @@
-#!/bin/bash
+#!/usr/bin/env bash
 #
-# [Quick Box :: Install plexmediaserver package]
+# [AetherFlow :: Install plexmediaserver package]
 #
-# GITHUB REPOS
-# GitHub _ packages  :   https://github.com/PastaGringo/scripts
-# LOCAL REPOS        :
-# Local _ packages   :   /etc/AetherFlow/packages
-# Author             :   PastaGringo
-# URL                :   https://plaza.AetherFlow.io
-#
-# AetherFlow Copyright (C) 2017 AetherFlow.io
-# Licensed under GNU General Public License v3.0 GPL-3 (in short)
-#
-#   You may copy, distribute and modify the software as long as you track
-#   changes/dates in source files. Any modifications to our software
-#   including (via compiler) GPL-licensed code must also be made available
-#   under the GPL along with build & install instructions.
-#
-OUTTO=$LOGFILE
-HOSTNAME1=$(hostname -s)
-PUBLICIP=$(ip route get 8.8.8.8 | awk 'NR==1 {print $NF}')
-local_setup=/opt/AetherFlow/setup/
 
-echo "Setting up hostname for plex ... "
-    echo -ne "ServerName ${HOSTNAME1}" | sudo tee /etc/apache2/conf-available/fqdn.conf >/dev/null 2>&1
-    sudo a2enconf fqdn >> /dev/null 2>&1
-    echo
+set -euo pipefail
 
-echo "Setting up plex apache configuration ... "
-  cp ${local_setup}templates/plex.conf.template /etc/apache2/sites-enabled/plex.conf
-  chown www-data: /etc/apache2/sites-enabled/plex.conf
-  a2enmod proxy >/dev/null 2>&1
-  sed -i "s/PUBLICIP/${PUBLICIP}/g" /etc/apache2/sites-enabled/plex.conf
+source /opt/AetherFlow/packages/common.sh
 
+PACKAGE_NAME="plex"
+LOCAL_SETUP="/opt/AetherFlow/setup/"
+APACHE_SITE="/etc/apache2/sites-enabled/plex.conf"
+FQDN_CONF="/etc/apache2/conf-available/fqdn.conf"
+PLEX_LIST="/etc/apt/sources.list.d/plexmediaserver.list"
+PLEX_KEYRING="/etc/apt/keyrings/plex.gpg"
+SYSTEMD_UNIT="/lib/systemd/system/plexmediaserver.service"
+SYSTEMD_TEMPLATE="${LOCAL_SETUP}templates/sysd/plexmediaserver.template"
 
-echo "Installing plex keys and sources ... "
-    #wget -O - http://shell.ninthgate.se/packages/shell.ninthgate.se.gpg.key | apt-key add - #MODIFIED
-    #echo "deb http://shell.ninthgate.se/packages/debian jessie main" > /etc/apt/sources.list.d/plexmediaserver.list #MODIFIED
-    wget -q https://downloads.plex.tv/plex-keys/PlexSign.key -O - | sudo apt-key add -
-    echo "deb https://downloads.plex.tv/repo/deb/ ./public main" > /etc/apt/sources.list.d/plexmediaserver.list
-    echo
+ROLLBACK_RESTORE=()
+ROLLBACK_REMOVE=()
+PACKAGE_WAS_PRESENT=false
 
-echo "Updating system ... "
-    apt-get install apt-transport-https -y >/dev/null 2>&1
-    apt-get -y update >/dev/null 2>&1
-    apt-get install -o Dpkg::Options::="--force-confold" -y -f plexmediaserver >/dev/null 2>&1
-    #DEBIAN_FRONTEND=noninteractive DEBIAN_PRIORITY=critical apt-get -q -y -o -f "Dpkg::Options::=--force-confdef" -o "Dpkg::Options::=--force-confold" install plexmediaserver >/dev/null 2>&1
-    echo
-
-    if [[ ! -d /var/lib/plexmediaserver ]]; then
-      mkdir -p /var/lib/plexmediaserver
+track_file() {
+    local path="$1"
+    if [[ -e "$path" ]]; then
+        cp -a "$path" "${path}.bak-af"
+        ROLLBACK_RESTORE+=("$path")
+    else
+        ROLLBACK_REMOVE+=("$path")
     fi
-    perm=$(stat -c '%U' /var/lib/plexmediaserver/)
-    if [[ ! $perm == plex ]]; then
-      chown -R plex:plex /var/lib/plexmediaserver
+}
+
+rollback_changes() {
+    local exit_code="$1"
+    set +e
+    if [[ "$exit_code" -eq 0 ]]; then
+        for path in "${ROLLBACK_RESTORE[@]}"; do
+            rm -f "${path}.bak-af"
+        done
+        return 0
     fi
-    cp ${local_setup}templates/sysd/plexmediaserver.template /lib/systemd/system/plexmediaserver.service
-    systemctl daemon-reload >/dev/null 2>&1
-    systemctl restart plexmediaserver >/dev/null 2>&1
-    touch /install/.plex.lock
-    echo
 
-echo "Plex Install Complete!" >>"${OUTTO}" 2>&1;
-    sleep 5
-    echo >>"${OUTTO}" 2>&1;
-    echo >>"${OUTTO}" 2>&1;
-    echo "Close this dialog box to refresh your browser" >>"${OUTTO}" 2>&1;
-    service apache2 reload >/dev/null 2>&1
+    print_error "Plex installation failed. Rolling back changes."
+    remove_lock "$PACKAGE_NAME"
 
-    exit
+    for path in "${ROLLBACK_RESTORE[@]}"; do
+        if [[ -f "${path}.bak-af" ]]; then
+            mv -f "${path}.bak-af" "$path"
+        fi
+    done
 
+    for path in "${ROLLBACK_REMOVE[@]}"; do
+        rm -f "$path"
+    done
+
+    if [[ "$PACKAGE_WAS_PRESENT" == "false" ]] && dpkg -s plexmediaserver >/dev/null 2>&1; then
+        apt-get remove -y plexmediaserver >>"$LOGFILE" 2>&1 || true
+    fi
+
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl restart apache2 >/dev/null 2>&1 || true
+    return "$exit_code"
+}
+
+trap 'rollback_changes "$?"' EXIT
+
+require_root
+print_info "Starting Plex installation..."
+
+if dpkg -s plexmediaserver >/dev/null 2>&1; then
+    PACKAGE_WAS_PRESENT=true
+    print_info "Plex already installed. Re-applying configuration."
+fi
+
+HOSTNAME_SHORT="$(hostname -s)"
+PUBLIC_IP="$(ip route get 8.8.8.8 | awk 'NR==1 {print $NF}')"
+
+mkdir -p /etc/apt/keyrings
+apt-get update >>"$LOGFILE" 2>&1
+apt-get install -y curl gnupg apt-transport-https >>"$LOGFILE" 2>&1
+
+track_file "$FQDN_CONF"
+printf 'ServerName %s\n' "$HOSTNAME_SHORT" >"$FQDN_CONF"
+a2enconf fqdn >>"$LOGFILE" 2>&1
+
+track_file "$APACHE_SITE"
+cp "${LOCAL_SETUP}templates/plex.conf.template" "$APACHE_SITE"
+chown www-data: "$APACHE_SITE"
+sed -i "s/PUBLICIP/${PUBLIC_IP}/g" "$APACHE_SITE"
+a2enmod proxy proxy_http >>"$LOGFILE" 2>&1
+
+track_file "$PLEX_LIST"
+printf 'deb [signed-by=%s] https://downloads.plex.tv/repo/deb public main\n' "$PLEX_KEYRING" >"$PLEX_LIST"
+
+if [[ -e "$PLEX_KEYRING" ]]; then
+    track_file "$PLEX_KEYRING"
+else
+    ROLLBACK_REMOVE+=("$PLEX_KEYRING")
+fi
+curl -fsSL https://downloads.plex.tv/plex-keys/PlexSign.key | gpg --dearmor --yes -o "$PLEX_KEYRING"
+
+apt-get update >>"$LOGFILE" 2>&1
+if [[ "$PACKAGE_WAS_PRESENT" == "false" ]]; then
+    apt-get install -y -o Dpkg::Options::="--force-confold" plexmediaserver >>"$LOGFILE" 2>&1
+fi
+
+mkdir -p /var/lib/plexmediaserver
+if id -u plex >/dev/null 2>&1; then
+    chown -R plex:plex /var/lib/plexmediaserver
+fi
+
+if [[ -f "$SYSTEMD_TEMPLATE" ]]; then
+    track_file "$SYSTEMD_UNIT"
+    cp "$SYSTEMD_TEMPLATE" "$SYSTEMD_UNIT"
+fi
+
+systemctl daemon-reload >>"$LOGFILE" 2>&1
+systemctl enable plexmediaserver >>"$LOGFILE" 2>&1
+systemctl restart plexmediaserver >>"$LOGFILE" 2>&1
+systemctl reload apache2 >>"$LOGFILE" 2>&1
+
+write_lock "$PACKAGE_NAME"
+print_info "Plex installation completed successfully."
+
+exit 0

@@ -45,6 +45,7 @@ func RegisterRoutes(r *gin.Engine) {
 			adminGroup.POST("/backup/run", RunBackup)
 			adminGroup.GET("/backup/list", GetBackupsList)
 			adminGroup.GET("/backup/download/:filename", DownloadBackup)
+			adminGroup.POST("/backup/upload/:filename", UploadBackupChunk)
 
 			adminGroup.PUT("/settings", updateSettings)
 			adminGroup.POST("/settings/test-ai", TestAiConnection)

@@ -12,19 +12,10 @@ export interface App {
     log_line?: string;
 }
 
-const fetcher = (url: string) => fetch(url).then(res => {
-    if (!res.ok) {
-        throw new Error('Failed to fetch marketplace catalog.');
-    }
-    return res.json();
-});
-
 export function useMarketplace() {
     const { data, error, isLoading, mutate } = useSWR<App[]>(
         '/api/marketplace',
-        fetcher,
         {
-            revalidateOnFocus: false,
             refreshInterval: (currentData) => {
                 if (!currentData) return 0;
                 const hasActiveJobs = currentData.some(

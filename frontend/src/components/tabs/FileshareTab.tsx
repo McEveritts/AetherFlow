@@ -2,8 +2,6 @@ import { useState, useRef } from 'react';
 import useSWR from 'swr';
 import { FolderUp, File as FileIcon, UploadCloud, Download, HardDrive } from 'lucide-react';
 
-const fetcher = (url: string) => fetch(url).then(res => res.json());
-
 interface FetchedFile {
     name: string;
     size: number;
@@ -12,7 +10,7 @@ interface FetchedFile {
 }
 
 export default function FileshareTab() {
-    const { data: files, error, mutate } = useSWR<FetchedFile[]>('/api/fileshare', fetcher);
+    const { data: files, error, mutate } = useSWR<FetchedFile[]>('/api/fileshare');
     const [isDragging, setIsDragging] = useState(false);
     const [isUploading, setIsUploading] = useState(false);
     const fileInputRef = useRef<HTMLInputElement>(null);

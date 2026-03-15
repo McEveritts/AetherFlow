@@ -1,6 +1,7 @@
 'use client';
 
-import { useMemo } from 'react';
+import { useMemo, useId } from 'react';
+import { AreaChart, Area, ResponsiveContainer, Tooltip as RechartsTooltip } from 'recharts';
 
 interface SparklineProps {
     data: number[];
@@ -8,7 +9,7 @@ interface SparklineProps {
     gradientFrom?: string;
     gradientTo?: string;
     height?: number;
-    width?: number;
+    width?: number; // Kept for compatibility, but ignored in ResponsiveContainer
     strokeWidth?: number;
     showArea?: boolean;
     className?: string;
@@ -23,33 +24,12 @@ interface SparklineProps {
     currentValue2?: string;
 }
 
-function buildPath(data: number[], width: number, height: number, padding: number): string {
-    if (data.length < 2) return '';
-    const maxVal = Math.max(...data, 1);
-    const step = width / (data.length - 1);
-
-    return data.map((val, i) => {
-        const x = i * step;
-        const y = height - padding - ((val / maxVal) * (height - padding * 2));
-        return `${i === 0 ? 'M' : 'L'}${x.toFixed(2)},${y.toFixed(2)}`;
-    }).join(' ');
-}
-
-function buildAreaPath(data: number[], width: number, height: number, padding: number): string {
-    if (data.length < 2) return '';
-    const linePath = buildPath(data, width, height, padding);
-    const step = width / (data.length - 1);
-    const lastX = (data.length - 1) * step;
-    return `${linePath} L${lastX.toFixed(2)},${(height - padding).toFixed(2)} L0,${(height - padding).toFixed(2)} Z`;
-}
-
 export default function Sparkline({
     data,
     color = '#6366f1',
     gradientFrom,
     gradientTo,
     height = 80,
-    width = 300,
     strokeWidth = 2,
     showArea = true,
     className = '',
@@ -62,13 +42,18 @@ export default function Sparkline({
     currentValue,
     currentValue2,
 }: SparklineProps) {
-    const id = useMemo(() => `spark-${Math.random().toString(36).slice(2, 9)}`, []);
-    const padding = 4;
-
-    const path1 = useMemo(() => buildPath(data, width, height, padding), [data, width, height]);
-    const area1 = useMemo(() => showArea ? buildAreaPath(data, width, height, padding) : '', [data, width, height, showArea]);
-    const path2 = useMemo(() => data2 ? buildPath(data2, width, height, padding) : '', [data2, width, height]);
-    const area2 = useMemo(() => data2 && showArea ? buildAreaPath(data2, width, height, padding) : '', [data2, width, height, showArea]);
+    const rawId = useId();
+    const id = useMemo(() => rawId.replace(/:/g, ''), [rawId]);
+    
+    // Convert array of numbers to array of objects for Recharts
+    const chartData = useMemo(() => {
+        if (!data || data.length === 0) return [{ name: 'P0', val1: 0, val2: 0 }];
+        return data.map((val, i) => ({
+            name: `P${i}`,
+            val1: val,
+            val2: data2 ? data2[i] : undefined,
+        }));
+    }, [data, data2]);
 
     const gFrom = gradientFrom || color;
     const gTo = gradientTo || 'transparent';
@@ -76,9 +61,9 @@ export default function Sparkline({
     const gTo2 = gradientTo2 || 'transparent';
 
     return (
-        <div className={`relative ${className}`}>
+        <div className={`relative ${className}`} style={{ height: height + (label || label2 ? 24 : 0) }}>
             {(label || label2) && (
-                <div className="flex items-center gap-4 mb-2 px-1">
+                <div className="flex items-center gap-4 mb-2 px-2 z-10 relative pointer-events-none">
                     {label && (
                         <div className="flex items-center gap-1.5">
                             <div className="w-2 h-2 rounded-full" style={{ backgroundColor: color }} />
@@ -95,43 +80,63 @@ export default function Sparkline({
                     )}
                 </div>
             )}
-            <svg
-                viewBox={`0 0 ${width} ${height}`}
-                preserveAspectRatio="none"
-                className="w-full"
-                style={{ height }}
-            >
-                <defs>
-                    <linearGradient id={`${id}-g1`} x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="0%" stopColor={gFrom} stopOpacity="0.3" />
-                        <stop offset="100%" stopColor={gTo} stopOpacity="0" />
-                    </linearGradient>
-                    {data2 && (
-                        <linearGradient id={`${id}-g2`} x1="0" y1="0" x2="0" y2="1">
-                            <stop offset="0%" stopColor={gFrom2} stopOpacity="0.3" />
-                            <stop offset="100%" stopColor={gTo2} stopOpacity="0" />
-                        </linearGradient>
-                    )}
-                </defs>
-                {/* Grid lines */}
-                {[0.25, 0.5, 0.75].map(pct => (
-                    <line
-                        key={pct}
-                        x1="0"
-                        y1={height * pct}
-                        x2={width}
-                        y2={height * pct}
-                        stroke="rgba(255,255,255,0.04)"
-                        strokeWidth="1"
-                    />
-                ))}
-                {/* Area fills */}
-                {showArea && area1 && <path d={area1} fill={`url(#${id}-g1)`} />}
-                {showArea && area2 && <path d={area2} fill={`url(#${id}-g2)`} />}
-                {/* Lines */}
-                {path1 && <path d={path1} fill="none" stroke={color} strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round" />}
-                {path2 && <path d={path2} fill="none" stroke={color2} strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round" />}
-            </svg>
+            <div style={{ height: height }} className="w-full">
+                <ResponsiveContainer width="100%" height="100%">
+                    <AreaChart data={chartData} margin={{ top: 5, right: 0, left: 0, bottom: 0 }}>
+                        <defs>
+                            <linearGradient id={`${id}-g1`} x1="0" y1="0" x2="0" y2="1">
+                                <stop offset="5%" stopColor={gFrom} stopOpacity={0.3} />
+                                <stop offset="95%" stopColor={gTo} stopOpacity={0} />
+                            </linearGradient>
+                            {data2 && (
+                                <linearGradient id={`${id}-g2`} x1="0" y1="0" x2="0" y2="1">
+                                    <stop offset="5%" stopColor={gFrom2} stopOpacity={0.3} />
+                                    <stop offset="95%" stopColor={gTo2} stopOpacity={0} />
+                                </linearGradient>
+                            )}
+                        </defs>
+                        
+                        <RechartsTooltip 
+                            contentStyle={{ 
+                                backgroundColor: 'rgba(15, 23, 42, 0.9)', 
+                                border: '1px solid rgba(255,255,255,0.1)',
+                                borderRadius: '12px',
+                                boxShadow: '0 10px 25px -5px rgba(0, 0, 0, 0.5)',
+                                backdropFilter: 'blur(16px)'
+                            }}
+                            itemStyle={{ color: '#f8fafc', fontSize: '12px', fontWeight: 'bold' }}
+                            labelStyle={{ display: 'none' }}
+                            cursor={{ stroke: 'rgba(255,255,255,0.1)', strokeWidth: 1, strokeDasharray: '4 4' }}
+                            animationDuration={200}
+                        />
+
+                        {data2 && (
+                            <Area 
+                                type="monotone" 
+                                dataKey="val2" 
+                                stroke={color2} 
+                                strokeWidth={strokeWidth}
+                                fillOpacity={1} 
+                                fill={showArea ? `url(#${id}-g2)` : "none"} 
+                                isAnimationActive={true}
+                                animationDuration={500}
+                                name={label2 || 'Metric 2'}
+                            />
+                        )}
+                        <Area 
+                            type="monotone" 
+                            dataKey="val1" 
+                            stroke={color} 
+                            strokeWidth={strokeWidth}
+                            fillOpacity={1} 
+                            fill={showArea ? `url(#${id}-g1)` : "none"} 
+                            isAnimationActive={true}
+                            animationDuration={500}
+                            name={label || 'Metric 1'}
+                        />
+                    </AreaChart>
+                </ResponsiveContainer>
+            </div>
         </div>
     );
 }

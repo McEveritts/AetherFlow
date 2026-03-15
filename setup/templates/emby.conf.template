@@ -1,13 +1,19 @@
 <Location /emby>
-  Satisfy Any
-  Require all granted
-  ProxyPass http://localhost:8096/emby
-  ProxyPassReverse http://localhost:8096/emby
+  AuthType Digest
+  AuthName "aetherflow"
+  AuthUserFile "/etc/htpasswd"
+  Require valid-user
+  ProxyPreserveHost On
+  RequestHeader set X-Forwarded-Proto "https"
+  ProxyPass http://127.0.0.1:8096/emby retry=0 timeout=120
+  ProxyPassReverse http://127.0.0.1:8096/emby
 </Location>
 
 <Location /embyws>
-  Satisfy Any
-  Require all granted
-  ProxyPass ws://localhost:8096/embyws
-  ProxyPassReverse ws://localhost:8096/embyws
+  AuthType Digest
+  AuthName "aetherflow"
+  AuthUserFile "/etc/htpasswd"
+  Require valid-user
+  ProxyPass ws://127.0.0.1:8096/embyws
+  ProxyPassReverse ws://127.0.0.1:8096/embyws
 </Location>

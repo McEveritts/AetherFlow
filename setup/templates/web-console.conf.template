@@ -1,13 +1,13 @@
-LoadModule proxy_module /usr/lib/apache2/modules/mod_proxy.so
-LoadModule proxy_http_module /usr/lib/apache2/modules/mod_proxy_http.so
-
 ProxyRequests Off
-<Proxy *>
-	AddDefaultCharset Off
-	AuthType Digest
-	AuthName "aetherflow"
-	AuthUserFile '/etc/htpasswd'
-	Require valid-user
-</Proxy>
-ProxyPass /USER.console http://PUBLICIP:4224
-ProxyPassReverse /USER.console http://PUBLICIP:4224
+ProxyPreserveHost On
+RequestHeader set X-Forwarded-Proto "https"
+RequestHeader set X-Forwarded-Port "443"
+
+<Location "/USER.console">
+    AuthType Digest
+    AuthName "aetherflow"
+    AuthUserFile "/etc/htpasswd"
+    Require valid-user
+    ProxyPass "http://PUBLICIP:4224/"
+    ProxyPassReverse "http://PUBLICIP:4224/"
+</Location>

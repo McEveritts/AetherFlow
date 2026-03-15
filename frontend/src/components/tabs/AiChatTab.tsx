@@ -1,10 +1,6 @@
 import { Sparkles, Settings, Bot, User, ChevronRight, Lock, ChevronDown } from 'lucide-react';
-import { TabId } from '@/types/dashboard';
 import { useState, useRef, useEffect, FormEvent } from 'react';
-
-interface AiChatTabProps {
-    setActiveTab: (tab: TabId) => void;
-}
+import { useSystemStore } from '@/store/useSystemStore';
 
 interface ChatMessage {
     role: 'user' | 'assistant';
@@ -19,7 +15,8 @@ const AI_MODELS = [
     { id: 'gemini-1.5-flash', name: 'Gemini 1.5 Flash', tier: 'stable' },
 ];
 
-export default function AiChatTab({ setActiveTab }: AiChatTabProps) {
+export default function AiChatTab() {
+    const { setActiveTab } = useSystemStore();
     const [messages, setMessages] = useState<ChatMessage[]>([
         { role: 'assistant', text: "Hello! I am FlowAI, your localized infrastructure management assistant. I'm connected to your system metrics, docker containers, and media pipelines.\n\nHow can I help you today?" }
     ]);

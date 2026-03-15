@@ -3,20 +3,12 @@ import useSWR from 'swr';
 import { useToast } from '@/contexts/ToastContext';
 import { User } from '@/contexts/AuthContext';
 import { Shield, ShieldAlert, Trash2, Users, Check, X } from 'lucide-react';
-import SkeletonBox from '@/components/layout/SkeletonBox';
+import { UsersSkeleton } from '@/components/layout/SkeletonBox';
 import Image from 'next/image';
-
-const fetcher = (url: string) => {
-    // Assuming cookies are sent automatically for same-origin if not we would need to pass credentials
-    return fetch(url).then((res) => {
-        if (!res.ok) throw new Error('API Error');
-        return res.json();
-    });
-};
 
 export default function UsersTab() {
     const { addToast } = useToast();
-    const { data: users, error, isLoading, mutate } = useSWR<User[]>('/api/users', fetcher);
+    const { data: users, error, isLoading, mutate } = useSWR<User[]>('/api/users');
 
     const [actionLoading, setActionLoading] = useState<number | null>(null);
 
@@ -72,27 +64,7 @@ export default function UsersTab() {
     };
 
     if (isLoading) {
-        return (
-            <div className="space-y-6 animate-fade-in max-w-5xl">
-                <div className="flex items-center gap-3">
-                    <div className="p-3 bg-indigo-500/10 text-indigo-400 rounded-xl">
-                        <Users size={24} />
-                    </div>
-                    <div>
-                        <h2 className="text-2xl font-bold tracking-tight text-white">User Management</h2>
-                        <p className="text-sm text-slate-400">Loading user database...</p>
-                    </div>
-                </div>
-
-                <div className="bg-white/[0.02] border border-white/[0.05] rounded-2xl overflow-hidden p-6">
-                    <div className="space-y-4">
-                        {[1, 2, 3].map(i => (
-                            <SkeletonBox key={i} className="h-16 w-full" />
-                        ))}
-                    </div>
-                </div>
-            </div>
-        );
+        return <UsersSkeleton />;
     }
 
     if (error || !users) {

@@ -82,8 +82,8 @@ function _openssl() {
 function _syscommands() {
 	mkdir -p /usr/local/bin/AetherFlow
 	\cp -rf ${local_packages}/. /usr/local/bin/AetherFlow
-	dos2unix $(find /usr/local/bin/AetherFlow -type f) >>"${OUTTO}" 2>&1
-	chmod +x $(find /usr/local/bin/AetherFlow -type f) >>"${OUTTO}" 2>&1
+	find /usr/local/bin/AetherFlow -type f -print0 | xargs -0 dos2unix >>"${OUTTO}" 2>&1
+	find /usr/local/bin/AetherFlow -type f -print0 | xargs -0 chmod +x >>"${OUTTO}" 2>&1
 	\cp -f /usr/local/bin/AetherFlow/system/reload /usr/bin/reload
 }
 

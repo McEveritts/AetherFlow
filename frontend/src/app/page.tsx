@@ -1,7 +1,6 @@
 'use client';
 
-import { useState } from 'react';
-import { TabId } from '@/types/dashboard';
+import { useSystemStore } from '@/store/useSystemStore';
 import Sidebar from '@/components/layout/Sidebar';
 import Header from '@/components/layout/Header';
 import OverviewTab from '@/components/tabs/OverviewTab';
@@ -19,24 +18,11 @@ import { OverviewSkeleton } from '@/components/layout/SkeletonBox';
 import OnboardingWizard from '@/components/layout/OnboardingWizard';
 import useSWR from 'swr';
 
-const fetcher = (url: string) => fetch(url).then((res) => res.json());
-
 export default function Dashboard() {
-  const [activeTab, setActiveTab] = useState<TabId>('overview');
-  const [isSidebarHovered, setIsSidebarHovered] = useState(false);
-  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
-  const { metrics, services, hardware, history, isLoading, isError, error } = useMetrics();
+  const { activeTab, isSidebarHovered } = useSystemStore();
+  const { metrics, hardware, history, isLoading, isError, connectionState } = useMetrics();
 
-  const { data: settingsData, mutate: mutateSettings } = useSWR(
-    '/api/settings',
-    fetcher,
-    { revalidateOnFocus: false }
-  );
-
-  const handleTabChange = (tab: TabId) => {
-    setActiveTab(tab);
-    setIsMobileMenuOpen(false); // Close sidebar automatically on mobile picking a tab
-  };
+  const { data: settingsData, mutate: mutateSettings } = useSWR('/api/settings');
 
   const renderContent = () => {
     if (isLoading) {
@@ -61,7 +47,9 @@ export default function Dashboard() {
             <div className="w-12 h-12 bg-red-500/20 rounded-full flex items-center justify-center text-red-400 text-2xl font-bold">!</div>
             <h3 className="text-lg font-bold text-slate-200">System Offline</h3>
             <p className="text-sm text-slate-400">Unable to connect to the AetherFlow backend API. Make sure the Go service is running.</p>
-            <p className="text-xs text-red-400/80 font-mono bg-red-500/10 px-2 py-1 rounded truncate max-w-full">{error?.message || 'Connection refused'}</p>
+            <p className="text-xs text-red-400/80 font-mono bg-red-500/10 px-2 py-1 rounded truncate max-w-full">
+              {connectionState === 'RECONNECTING' ? 'Reconnecting...' : 'Connection refused'}
+            </p>
           </div>
         </div>
       );
@@ -75,7 +63,7 @@ export default function Dashboard() {
       case 'marketplace':
         return <MarketplaceTab />;
       case 'ai':
-        return <AiChatTab setActiveTab={handleTabChange} />;
+        return <AiChatTab />;
       case 'settings':
         return <SettingsTab />;
       case 'security':
@@ -109,17 +97,10 @@ export default function Dashboard() {
         <div className="absolute top-[20%] right-[-10%] w-[40%] h-[40%] bg-blue-900/10 rounded-full blur-[100px]"></div>
       </div>
 
-      <Sidebar
-        activeTab={activeTab}
-        setActiveTab={handleTabChange}
-        isSidebarHovered={isSidebarHovered}
-        setIsSidebarHovered={setIsSidebarHovered}
-        isMobileMenuOpen={isMobileMenuOpen}
-        setIsMobileMenuOpen={setIsMobileMenuOpen}
-      />
+      <Sidebar />
 
       <main className={`flex-1 transition-all duration-300 ease-[cubic-bezier(0.4,0,0.2,1)] relative z-10 h-screen overflow-y-auto no-scrollbar ${isSidebarHovered ? 'md:ml-64' : 'md:ml-20'} ml-0`}>
-        <Header activeTab={activeTab} error={isError ? "API Offline" : null} toggleMobileMenu={() => setIsMobileMenuOpen(!isMobileMenuOpen)} />
+        <Header />
 
         {/* Scrollable Content */}
         <div className="p-4 md:p-10 max-w-[1600px] mx-auto min-h-[calc(100vh-5rem)]">

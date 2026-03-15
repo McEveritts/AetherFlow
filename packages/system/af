@@ -43,7 +43,7 @@ function _function() {
 
 function _install() {
   installa=()
-  locks=($(find /usr/local/bin/AetherFlow/package/install -type f -printf "%f\n" | cut -d "-" -f 2 | sort -d))
+  mapfile -t locks < <(find /usr/local/bin/AetherFlow/package/install -type f -printf "%f\n" | cut -d "-" -f 2 | sort -d)
   for i in "${locks[@]}"; do
     app=${i}
     if [[ $i == autodl ]]; then app=autodlirssi; fi
@@ -51,19 +51,22 @@ function _install() {
       installa+=("$i" '""')
     fi
   done
-	whiptail --title "Install Software" --checklist --noitem --separate-output "Make some choices:" 15 26 7 "${installa[@]}" 2>results
-  readarray packages < results
+  local results_file
+  results_file="$(mktemp)"
+	whiptail --title "Install Software" --checklist --noitem --separate-output "Make some choices:" 15 26 7 "${installa[@]}" 2>"${results_file}"
+  readarray packages < "${results_file}"
+  rm -f "${results_file}"
   for i in "${packages[@]}"; do
-    echo -e "Installing $i ";
-    bash /usr/local/bin/AetherFlow/package/install/installpackage-$i
+    i="${i//\"/}"
+    echo -e "Installing $i "
+    bash "/usr/local/bin/AetherFlow/package/install/installpackage-$i"
   done
-  rm results
   _function
 }
 
 function _remove() {
 removea=()
-locks=($(find /usr/local/bin/AetherFlow/package/remove -type f -printf "%f\n" | cut -d "-" -f 2 | sort -d))
+mapfile -t locks < <(find /usr/local/bin/AetherFlow/package/remove -type f -printf "%f\n" | cut -d "-" -f 2 | sort -d)
 for i in "${locks[@]}"; do
   app=${i}
   if [[ $i == autodl ]]; then app=autodlirssi; fi
@@ -71,29 +74,32 @@ for i in "${locks[@]}"; do
     removea+=("$i" '""')
   fi
 done
-whiptail --title "Remove Software" --noitem --checklist --separate-output "Make some choices:" 15 26 7 "${removea[@]}" 2>results
-readarray packages < results
+local results_file
+results_file="$(mktemp)"
+whiptail --title "Remove Software" --noitem --checklist --separate-output "Make some choices:" 15 26 7 "${removea[@]}" 2>"${results_file}"
+readarray packages < "${results_file}"
+rm -f "${results_file}"
 for i in "${packages[@]}"; do
-  echo -e "Removing $i ";
-  bash /usr/local/bin/AetherFlow/package/remove/removepackage-$i
+  i="${i//\"/}"
+  echo -e "Removing $i "
+  bash "/usr/local/bin/AetherFlow/package/remove/removepackage-$i"
 done
-rm results
 _function
 }
 
 function _cli() {
   arg=("$@")
   packages=("${arg[@]:1}")
-  repo=($(find /usr/local/bin/AetherFlow/package/install -type f -printf "%f\n" | cut -d "-" -f 2))
+  mapfile -t repo < <(find /usr/local/bin/AetherFlow/package/install -type f -printf "%f\n" | cut -d "-" -f 2)
   for i in "${packages[@]}"; do
     app=${i}
     if [[ $i == autodl ]]; then app=autodlirssi; fi
     if [[ -f /install/.${app}.lock ]]; then
       echo -e "Package $i already installed"
     else
-      if [[ "${repo[@]}" =~ $i ]]; then
+      if printf '%s\n' "${repo[@]}" | grep -Fxq "$i"; then
         echo -e "Installing $i "
-        bash /usr/local/bin/AetherFlow/package/install/installpackage-$i
+        bash "/usr/local/bin/AetherFlow/package/install/installpackage-$i"
       else
         echo -e "Package $i not found"
       fi
@@ -109,7 +115,7 @@ function _clr() {
     if [[ $i == autodl ]]; then app=autodlirssi; fi
     if [[ -f /install/.$app.lock ]]; then
       echo -e "Removing $i "
-      bash /usr/local/bin/AetherFlow/package/remove/removepackage-$i
+      bash "/usr/local/bin/AetherFlow/package/remove/removepackage-$i"
     else
       echo -e "Package $i not installed"
     fi
@@ -166,9 +172,9 @@ function _help() {
   sgformat="${bold}%-15s${normal}"
   spacing=$(echo $'\t' | pr -Te15)
 
-  echo -e "Usage: `basename $0` [ install | remove ] ${bold}pkg1 pkg2 [...]${normal}\n"
-  echo -e "       `basename $0` [ list | update | upgrade ]\n"
-  echo -e "       `basename $0`\n"
+  echo -e "Usage: $(basename "$0") [ install | remove ] ${bold}pkg1 pkg2 [...]${normal}\n"
+  echo -e "       $(basename "$0") [ list | update | upgrade ]\n"
+  echo -e "       $(basename "$0")\n"
   echo -e "Note: Only install and remove functions accept package arguments. List and update must be run without modifiers\n" | fmt --goal=66 --tagged-paragraph
   echo -e "\n"
   printf "${sgformat}" "install"
@@ -186,7 +192,7 @@ function _help() {
 }
 
 function _list() {
-  repo=($(find /usr/local/bin/AetherFlow/package/install -type f -printf "%f\n" | cut -d "-" -f 2 | sort -d))
+  mapfile -t repo < <(find /usr/local/bin/AetherFlow/package/install -type f -printf "%f\n" | cut -d "-" -f 2 | sort -d)
   for i in "${repo[@]}"; do
     app=$i
     sgformat="${bold}%-15s${normal}"
@@ -205,7 +211,7 @@ function _list() {
 normal=$(tput sgr0)
 yellow=$(tput setaf 3)
 bold=$(tput bold)
-if [[ -z $1 ]]; then
+if [[ -z "${1:-}" ]]; then
   _intro
   _function
   exit 0
@@ -214,7 +220,7 @@ if [[ "$1" == "-h" ]]; then
   _help "$0"
   exit 0
 fi
-if [[ ! $1 =~ ("install"|"list"|"remove"|"update"|"upgrade") ]]; then
+if [[ ! "${1}" =~ ("install"|"list"|"remove"|"update"|"upgrade") ]]; then
   echo "Error: $1 invalid command"
   exit 0
 fi
@@ -249,7 +255,7 @@ if [[ $1 == list ]]; then
   _list
   exit 0
 fi
-if [[ -n $1 ]] && [[ -z $2 ]]; then
+if [[ -n "${1:-}" ]] && [[ -z "${2:-}" ]]; then
   echo "Error: You must choose some packages"
   exit 0
 fi
@@ -261,4 +267,3 @@ if [[ $1 == remove ]]; then
   _clr "$@"
   exit 0
 fi
-

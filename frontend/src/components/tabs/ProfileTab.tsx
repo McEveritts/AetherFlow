@@ -6,8 +6,6 @@ import useSWR from 'swr';
 import SkeletonBox from '@/components/layout/SkeletonBox';
 import Image from 'next/image';
 
-const fetcher = (url: string) => fetch(url).then(r => r.json());
-
 export default function ProfileTab() {
     const { user } = useAuth();
     const { addToast } = useToast();
@@ -15,8 +13,7 @@ export default function ProfileTab() {
     const [isSaving, setIsSaving] = useState(false);
 
     const { data: quota, isLoading: isQuotaLoading } = useSWR(
-        user ? `/api/user/quota/${user.id}` : null,
-        fetcher
+        user ? `/api/user/quota/${user.id}` : null
     );
 
     useEffect(() => {

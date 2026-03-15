@@ -12,11 +12,18 @@ import (
 func GetPackages() []models.Package {
 	// Paths might vary based on where the Go binary is run from.
 	// We'll try relative to backend/ first, then relative to root.
-	configPaths := []string{
-		filepath.Join("..", "dashboard", "config", "packages.json"),
-		filepath.Join("dashboard", "config", "packages.json"),
-		filepath.Join("/opt", "AetherFlow", "dashboard", "config", "packages.json"),
+	configPaths := []string{}
+	if customPath := os.Getenv("AETHERFLOW_PACKAGES_CONFIG"); customPath != "" {
+		configPaths = append(configPaths, customPath)
 	}
+	configPaths = append(configPaths, []string{
+		filepath.Join("config", "packages.json"),                                      // Canonical: backend/config/
+		filepath.Join("..", "backend", "config", "packages.json"),                     // From project root
+		filepath.Join("/opt", "AetherFlow", "backend", "config", "packages.json"),    // Production
+		filepath.Join("..", "dashboard", "config", "packages.json"),                   // Legacy fallback
+		filepath.Join("dashboard", "config", "packages.json"),                         // Legacy fallback (alt)
+		filepath.Join("/opt", "AetherFlow", "dashboard", "config", "packages.json"),  // Legacy production fallback
+	}...)
 
 	var data []byte
 	var err error
