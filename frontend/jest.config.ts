@@ -15,7 +15,7 @@ const customJestConfig = {
     "!src/**/*.d.ts",
     "!src/app/**",
   ],
-  testPathIgnorePatterns: ["/node_modules/", "/.next/"],
+  testPathIgnorePatterns: ["/node_modules/", "/.next/", "/tests/e2e/"],
 };
 
 export default createJestConfig(customJestConfig);
