@@ -2,30 +2,142 @@
 # Module: 04-security.sh
 
 
-# This function blocks an insecure port 1900 that may lead to
-# DDoS masked attacks. Only remove this function if you absolutely
-# need port 1900. In most cases, this is a junk port.
+# Strict firewall enforcement during bootstrap.
+# Allows ONLY: SSH (22), HTTP (80), HTTPS (443), Next.js (3000).
+# Uses UFW as preferred firewall, with iptables fallback.
+#
+# This replaces the old _ssdpblock() which only blocked port 1900.
 function _ssdpblock() {
-	/sbin/iptables -I INPUT 1 -p udp -m udp --dport 1900 -j DROP
+	# Retained as a no-op for backward compatibility with state files
+	# that already have "ssdpblock" marked as done. Actual firewall
+	# work is now handled by _setup_firewall.
+	return 0
+}
+
+_fw_allowed_ports() {
+	echo "22/tcp 80/tcp 443/tcp 3000/tcp"
+}
+
+_setup_firewall() {
+	local allowed_ports
+	allowed_ports="$(_fw_allowed_ports)"
+
+	# Try UFW first
+	if _setup_firewall_ufw "${allowed_ports}"; then
+		echo "[$(date '+%Y-%m-%d %H:%M:%S')] Firewall configured via UFW" >> "${INSTALL_LOG}"
+		return 0
+	fi
+
+	# Fallback to raw iptables
+	echo "[INFO] UFW unavailable — falling back to iptables"
+	_setup_firewall_iptables "${allowed_ports}"
+	echo "[$(date '+%Y-%m-%d %H:%M:%S')] Firewall configured via iptables" >> "${INSTALL_LOG}"
+}
+
+_setup_firewall_ufw() {
+	local allowed_ports="$1"
+
+	# Install UFW if not present
+	if ! command -v ufw >/dev/null 2>&1; then
+		DEBIAN_FRONTEND=noninteractive apt-get -yqq install ufw >>"${OUTTO}" 2>&1 || return 1
+	fi
+
+	# Verify it installed
+	command -v ufw >/dev/null 2>&1 || return 1
+
+	# Set defaults — idempotent by nature in UFW
+	ufw default deny incoming >>"${OUTTO}" 2>&1
+	ufw default allow outgoing >>"${OUTTO}" 2>&1
+
+	# Allow required ports — UFW handles duplicates gracefully
+	local port_spec
+	for port_spec in ${allowed_ports}; do
+		ufw allow "${port_spec}" >>"${OUTTO}" 2>&1
+	done
+
+	# Block SSDP (port 1900 UDP) — migrated from old _ssdpblock()
+	ufw deny 1900/udp >>"${OUTTO}" 2>&1
+
+	# Enable non-interactively
+	echo "y" | ufw enable >>"${OUTTO}" 2>&1
+
+	# Verify
+	ufw status verbose >>"${OUTTO}" 2>&1
+	return 0
+}
+
+_setup_firewall_iptables() {
+	local allowed_ports="$1"
+
+	# Flush existing rules for a clean slate (only INPUT chain)
+	# Preserve existing ESTABLISHED connections
+	iptables -F INPUT 2>/dev/null || true
+
+	# Default policies
+	iptables -P INPUT DROP 2>/dev/null
+	iptables -P FORWARD DROP 2>/dev/null
+	iptables -P OUTPUT ACCEPT 2>/dev/null
+
+	# Allow loopback
+	iptables -A INPUT -i lo -j ACCEPT 2>/dev/null
+
+	# Allow established connections
+	iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT 2>/dev/null
+
+	# Allow required ports
+	local port_spec port proto
+	for port_spec in ${allowed_ports}; do
+		port="${port_spec%%/*}"
+		proto="${port_spec##*/}"
+		# Check if rule already exists before adding (true idempotency)
+		if ! iptables -C INPUT -p "${proto}" --dport "${port}" -j ACCEPT 2>/dev/null; then
+			iptables -A INPUT -p "${proto}" --dport "${port}" -j ACCEPT 2>/dev/null
+		fi
+	done
+
+	# Block SSDP (port 1900 UDP) — migrated from old _ssdpblock()
+	if ! iptables -C INPUT -p udp --dport 1900 -j DROP 2>/dev/null; then
+		iptables -A INPUT -p udp --dport 1900 -j DROP 2>/dev/null
+	fi
+
+	# Persist iptables rules if possible
+	if command -v iptables-save >/dev/null 2>&1; then
+		iptables-save > /etc/iptables.rules 2>/dev/null || true
+	fi
 }
 
 # ban public trackers [iptables option] (11)
 # shellcheck disable=2249,2162
 function _denyhosts() {
-	echo -ne "${bold}${yellow}Block Public Trackers?${normal}: [${green}y${normal}]es or [n]o: "
-	read -r response
+	local response
+	local saved_response
+	saved_response="$(_load_config denyhosts)"
+	if [[ -n "${saved_response}" ]]; then
+		response="${saved_response}"
+		echo "Using saved preference: denyhosts=${response}"
+	elif [[ "${UNATTENDED:-false}" == "true" ]]; then
+		response="yes"
+		echo "Unattended mode: blocking public trackers."
+		_save_config denyhosts "${response}"
+	else
+		echo -ne "${bold}${yellow}Block Public Trackers?${normal}: [${green}y${normal}]es or [n]o: "
+		read -r response
+	fi
+
 	case ${response} in
 	[yY] | [yY][Ee][Ss] | "")
 
 		echo "[ ${red}-  Blocking public trackers  -${normal} ]"
-		\cp -f ${local_setup}templates/trackers.template /etc/trackers
-		\cp -f ${local_setup}templates/denypublic.template /etc/cron.daily/denypublic
+		\cp -f "${local_setup}templates/trackers.template" /etc/trackers
+		\cp -f "${local_setup}templates/denypublic.template" /etc/cron.daily/denypublic
 		chmod +x /etc/cron.daily/denypublic
-		cat ${local_setup}templates/hostsTrackers.template >>/etc/hosts
+		cat "${local_setup}templates/hostsTrackers.template" >>/etc/hosts
+		_save_config denyhosts "yes"
 		;;
 
 	[nN] | [nN][Oo])
 		echo "[ ${green}+  Allowing public trackers  +${normal} ]"
+		_save_config denyhosts "no"
 		;;
 	esac
 	echo
