@@ -40,11 +40,288 @@ message_title=${white}${on_magenta}
 
 # Check if running from setup directory or installed location
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+CALLER_DIR="$(pwd -P)"
+ORIGINAL_ARGS=("$@")
+
+REPAIR_STEPS=""
+FRESH_INSTALL=false
+RESUME_MODE=false
+LIST_ONLY=false
+UNATTENDED=false
+ENV_SEED_FILE=""
+CLI_USERNAME=""
+CLI_PASSWORD=""
+CLI_DOMAIN=""
+
+af_die() {
+    echo "$1" >&2
+    exit 1
+}
+
+af_usage() {
+    echo ""
+    echo "AetherFlow Installer"
+    echo "===================="
+    echo ""
+    echo "Usage: bash AetherFlow-Setup [OPTIONS]"
+    echo ""
+    echo "Options:"
+    echo "  --resume               Resume from last successful step (default if state exists)"
+    echo "  --repair <step...>     Force re-run specific step(s) by ID"
+    echo "  --fresh                Wipe all state and start from scratch"
+    echo "  --list-steps           Show all steps and their completion status"
+    echo "  --unattended           Skip interactive prompts and use seeded/default values"
+    echo "  --username <name>      Seed the master account username"
+    echo "  --password <secret>    Seed the master account password"
+    echo "  --domain <hostname>    Seed the installer hostname/domain value"
+    echo "  --env-seed <path>      Source a .env.seed file before prompting"
+    echo "  --help, -h             Show this help message"
+    echo ""
+    echo "Examples:"
+    echo "  bash AetherFlow-Setup"
+    echo "  bash AetherFlow-Setup --resume"
+    echo "  bash AetherFlow-Setup --repair build_modern"
+    echo "  bash AetherFlow-Setup --repair xmlrpc libtorrent rtorrent"
+    echo "  bash AetherFlow-Setup --unattended --username admin --password secret --domain aether.local"
+    echo "  bash AetherFlow-Setup --env-seed /root/.env.seed --unattended"
+    echo ""
+}
+
+af_truthy() {
+    case "${1,,}" in
+        1|true|yes|y|on) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+af_normalize_yes_no() {
+    local value="${1:-}"
+    local default_value="${2:-no}"
+
+    if [[ -z "${value}" ]]; then
+        printf '%s' "${default_value}"
+        return 0
+    fi
+
+    if af_truthy "${value}"; then
+        printf '%s' "yes"
+        return 0
+    fi
+
+    case "${value,,}" in
+        0|false|no|n|off) printf '%s' "no" ;;
+        *) printf '%s' "${default_value}" ;;
+    esac
+}
+
+af_first_nonempty() {
+    local candidate
+    for candidate in "$@"; do
+        if [[ -n "${candidate}" ]]; then
+            printf '%s' "${candidate}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+af_resolve_seed_path() {
+    local candidate="$1"
+    local resolved_dir=""
+
+    if [[ -z "${candidate}" ]]; then
+        return 1
+    fi
+
+    if [[ -f "${candidate}" ]]; then
+        resolved_dir="$(cd "$(dirname "${candidate}")" && pwd -P)"
+        printf '%s/%s' "${resolved_dir}" "$(basename "${candidate}")"
+        return 0
+    fi
+
+    if [[ -f "${CALLER_DIR}/${candidate}" ]]; then
+        resolved_dir="$(cd "${CALLER_DIR}" && pwd -P)"
+        printf '%s/%s' "${resolved_dir}" "${candidate}"
+        return 0
+    fi
+
+    if [[ -f "${SCRIPT_DIR}/${candidate}" ]]; then
+        resolved_dir="$(cd "${SCRIPT_DIR}" && pwd -P)"
+        printf '%s/%s' "${resolved_dir}" "${candidate}"
+        return 0
+    fi
+
+    if [[ -f "$(dirname "${SCRIPT_DIR}")/${candidate}" ]]; then
+        resolved_dir="$(cd "$(dirname "${SCRIPT_DIR}")" && pwd -P)"
+        printf '%s/%s' "${resolved_dir}" "${candidate}"
+        return 0
+    fi
+
+    return 1
+}
+
+af_find_env_seed() {
+    local resolved_seed=""
+    local candidate=""
+
+    if [[ -n "${ENV_SEED_FILE}" ]]; then
+        resolved_seed="$(af_resolve_seed_path "${ENV_SEED_FILE}")" || af_die "Unable to locate env seed file: ${ENV_SEED_FILE}"
+        printf '%s' "${resolved_seed}"
+        return 0
+    fi
+
+    if [[ -n "${AETHERFLOW_ENV_SEED:-}" ]]; then
+        resolved_seed="$(af_resolve_seed_path "${AETHERFLOW_ENV_SEED}")" || af_die "Unable to locate env seed file: ${AETHERFLOW_ENV_SEED}"
+        printf '%s' "${resolved_seed}"
+        return 0
+    fi
+
+    for candidate in \
+        "${CALLER_DIR}/.env.seed" \
+        "${SCRIPT_DIR}/.env.seed" \
+        "$(dirname "${SCRIPT_DIR}")/.env.seed" \
+        "/root/.env.seed"
+    do
+        if resolved_seed="$(af_resolve_seed_path "${candidate}")"; then
+            printf '%s' "${resolved_seed}"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+parse_args() {
+    local -a translated=()
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --resume)
+                translated+=(-r)
+                ;;
+            --repair)
+                shift
+                local -a repair_values=()
+                while [[ $# -gt 0 && "$1" != --* && "$1" != -* ]]; do
+                    repair_values+=("$1")
+                    shift
+                done
+                [[ ${#repair_values[@]} -gt 0 ]] || af_die "Option --repair requires at least one step ID."
+                translated+=(-p "${repair_values[*]}")
+                continue
+                ;;
+            --repair=*)
+                translated+=(-p "${1#*=}")
+                ;;
+            --fresh)
+                translated+=(-f)
+                ;;
+            --list-steps)
+                translated+=(-l)
+                ;;
+            --unattended)
+                translated+=(-u)
+                ;;
+            --username)
+                [[ $# -ge 2 ]] || af_die "Option --username requires a value."
+                translated+=(-U "$2")
+                shift
+                ;;
+            --username=*)
+                translated+=(-U "${1#*=}")
+                ;;
+            --password)
+                [[ $# -ge 2 ]] || af_die "Option --password requires a value."
+                translated+=(-P "$2")
+                shift
+                ;;
+            --password=*)
+                translated+=(-P "${1#*=}")
+                ;;
+            --domain)
+                [[ $# -ge 2 ]] || af_die "Option --domain requires a value."
+                translated+=(-D "$2")
+                shift
+                ;;
+            --domain=*)
+                translated+=(-D "${1#*=}")
+                ;;
+            --env-seed)
+                [[ $# -ge 2 ]] || af_die "Option --env-seed requires a value."
+                translated+=(-E "$2")
+                shift
+                ;;
+            --env-seed=*)
+                translated+=(-E "${1#*=}")
+                ;;
+            --help)
+                translated+=(-h)
+                ;;
+            -p|-U|-P|-D|-E)
+                [[ $# -ge 2 ]] || af_die "Option $1 requires a value."
+                translated+=("$1" "$2")
+                shift
+                ;;
+            -r|-f|-l|-h|-u)
+                translated+=("$1")
+                ;;
+            --)
+                shift
+                break
+                ;;
+            -*)
+                af_die "Unknown option: $1 (try --help)"
+                ;;
+            *)
+                translated+=("$1")
+                ;;
+        esac
+        shift
+    done
+
+    if [[ $# -gt 0 ]]; then
+        translated+=("$@")
+    fi
+
+    set -- "${translated[@]}"
+    OPTIND=1
+    while getopts ":rfhlup:U:P:D:E:" opt; do
+        case "${opt}" in
+            r) RESUME_MODE=true ;;
+            p) REPAIR_STEPS="${OPTARG}" ;;
+            f) FRESH_INSTALL=true ;;
+            l) LIST_ONLY=true ;;
+            h)
+                af_usage
+                exit 0
+                ;;
+            u) UNATTENDED=true ;;
+            U) CLI_USERNAME="${OPTARG}" ;;
+            P) CLI_PASSWORD="${OPTARG}" ;;
+            D) CLI_DOMAIN="${OPTARG}" ;;
+            E) ENV_SEED_FILE="${OPTARG}" ;;
+            :)
+                af_die "Option -${OPTARG} requires a value."
+                ;;
+            \?)
+                af_die "Unknown option: -${OPTARG} (try --help)"
+                ;;
+        esac
+    done
+    shift $((OPTIND - 1))
+
+    [[ $# -eq 0 ]] || af_die "Unknown argument: $1 (try --help)"
+}
 
 version_ge() {
     # Returns 0 when $1 >= $2 (version sort aware).
     [[ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -n1)" == "$2" ]]
 }
+
+parse_args "$@"
+if af_truthy "${AETHERFLOW_UNATTENDED:-}"; then
+    UNATTENDED=true
+fi
 
 bootstrap_check_supported_os() {
     if [[ ! -r /etc/os-release ]]; then
@@ -81,6 +358,13 @@ bootstrap_check_supported_os() {
 if [[ ! -d "${SCRIPT_DIR}/modules" ]]; then
     echo "Bootstrapping AetherFlow Installer Environment..."
     bootstrap_check_supported_os
+    if bootstrap_env_seed="$(af_find_env_seed)"; then
+        export AETHERFLOW_ENV_SEED="${bootstrap_env_seed}"
+        UNATTENDED=true
+    fi
+    if [[ "${UNATTENDED}" == "true" ]]; then
+        export AETHERFLOW_UNATTENDED=true
+    fi
     export DEBIAN_FRONTEND=noninteractive
     BOOTSTRAP_TARBALL="/tmp/aetherflow-bootstrap.tar.gz"
 
@@ -115,7 +399,7 @@ if [[ ! -d "${SCRIPT_DIR}/modules" ]]; then
     
     # Relaunch from the proper directory
     cd /opt/AetherFlow/setup || exit 1
-    exec bash AetherFlow-Setup "$@"
+    exec bash AetherFlow-Setup "${ORIGINAL_ARGS[@]}"
     exit 0
 fi
 
@@ -131,76 +415,139 @@ for module in "${SCRIPT_DIR}/modules/"*.sh; do
 done
 
 ################################################################################
-# CLI Argument Parsing
+# Seed Handling
 ################################################################################
 
-REPAIR_STEPS=""
-FRESH_INSTALL=false
-RESUME_MODE=false
-LIST_ONLY=false
+_load_env_seed_file() {
+    local resolved_seed=""
+    local source_exit=0
 
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --resume)
-            RESUME_MODE=true
-            shift
-            ;;
-        --repair)
-            shift
-            # Collect all repair step IDs until next flag or end
-            while [[ $# -gt 0 && ! "$1" =~ ^-- ]]; do
-                REPAIR_STEPS="${REPAIR_STEPS} $1"
-                shift
-            done
-            ;;
-        --fresh)
-            FRESH_INSTALL=true
-            shift
-            ;;
-        --list-steps)
-            LIST_ONLY=true
-            shift
-            ;;
-        --help|-h)
-            echo ""
-            echo "AetherFlow Installer"
-            echo "===================="
-            echo ""
-            echo "Usage: bash AetherFlow-Setup [OPTIONS]"
-            echo ""
-            echo "Options:"
-            echo "  --resume         Resume from last successful step (default if state exists)"
-            echo "  --repair <step>  Force re-run specific step(s) by ID"
-            echo "  --fresh          Wipe all state and start from scratch"
-            echo "  --list-steps     Show all steps and their completion status"
-            echo "  --help, -h       Show this help message"
-            echo ""
-            echo "Examples:"
-            echo "  bash AetherFlow-Setup                    # Fresh install or auto-resume"
-            echo "  bash AetherFlow-Setup --resume            # Resume after failure"
-            echo "  bash AetherFlow-Setup --repair build_modern  # Re-run just the build step"
-            echo "  bash AetherFlow-Setup --repair xmlrpc libtorrent rtorrent"
-            echo "  bash AetherFlow-Setup --list-steps        # See progress"
-            echo ""
-            exit 0
-            ;;
-        *)
-            echo "Unknown option: $1 (try --help)"
-            exit 1
-            ;;
-    esac
-done
+    if resolved_seed="$(af_find_env_seed)"; then
+        ENV_SEED_FILE="${resolved_seed}"
+        export AETHERFLOW_ENV_SEED="${ENV_SEED_FILE}"
+        echo "Loaded environment seed from ${ENV_SEED_FILE}"
+        set -a
+        # shellcheck disable=1090
+        source "${ENV_SEED_FILE}"
+        source_exit=$?
+        set +a
+        [[ ${source_exit} -eq 0 ]] || af_die "Unable to source env seed file: ${ENV_SEED_FILE}"
+        UNATTENDED=true
+    fi
+}
+
+_save_seed_value() {
+    local key="$1"
+    local value="$2"
+    if [[ -n "${value}" ]]; then
+        _save_config "${key}" "${value}"
+    fi
+}
+
+_save_seed_yes_no() {
+    local key="$1"
+    local value="$2"
+    local default_value="$3"
+    if [[ -n "${value}" ]]; then
+        _save_config "${key}" "$(af_normalize_yes_no "${value}" "${default_value}")"
+    fi
+}
+
+_apply_seed_config() {
+    local seeded_username=""
+    local seeded_password=""
+    local seeded_hostname=""
+    local seeded_public_ip=""
+    local seeded_log_file=""
+    local seeded_primaryroot=""
+    local seeded_kernel=""
+    local seeded_10g=""
+    local seeded_rt=""
+    local seeded_lt=""
+    local seeded_tr=""
+    local seeded_qb=""
+    local seeded_ffmpeg=""
+    local seeded_bbr=""
+    local seeded_denyhosts=""
+    local seeded_reboot=""
+
+    seeded_username="$(af_first_nonempty "${CLI_USERNAME}" "${AETHERFLOW_USERNAME:-}" "${INSTALL_USERNAME:-}" "${username:-}")"
+    seeded_password="$(af_first_nonempty "${CLI_PASSWORD}" "${AETHERFLOW_PASSWORD:-}" "${INSTALL_PASSWORD:-}" "${passwd:-${password:-}}")"
+    seeded_hostname="$(af_first_nonempty "${CLI_DOMAIN}" "${AETHERFLOW_HOSTNAME:-}" "${AETHERFLOW_DOMAIN:-}" "${hostname_value:-${domain:-}}")"
+    seeded_public_ip="$(af_first_nonempty "${AETHERFLOW_PUBLIC_IP:-}" "${AETHERFLOW_IP:-}" "${IP:-}")"
+    seeded_log_file="$(af_first_nonempty "${AETHERFLOW_LOG_FILE:-}" "${OUTTO:-}")"
+    seeded_primaryroot="$(af_first_nonempty "${AETHERFLOW_PRIMARYROOT:-}" "${primaryroot:-}")"
+    seeded_kernel="$(af_first_nonempty "${AETHERFLOW_INSTALL_DISTRIBUTION_KERNEL:-}" "${kernel:-}")"
+    seeded_10g="$(af_first_nonempty "${AETHERFLOW_IS_10G:-}" "${AETHERFLOW_10G:-}" "${is10g:-}")"
+    seeded_rt="$(af_first_nonempty "${AETHERFLOW_RTORRENT_VERSION:-}" "${RTVERSION:-}")"
+    seeded_lt="$(af_first_nonempty "${AETHERFLOW_LIBTORRENT_VERSION:-}" "${LTORRENT:-}")"
+    seeded_tr="$(af_first_nonempty "${AETHERFLOW_TRANSMISSION:-}" "${tr:-}")"
+    seeded_qb="$(af_first_nonempty "${AETHERFLOW_QBITTORRENT:-}" "${QBVERSION:-}")"
+    seeded_ffmpeg="$(af_first_nonempty "${AETHERFLOW_FFMPEG:-}" "${ffmpeg:-}")"
+    seeded_bbr="$(af_first_nonempty "${AETHERFLOW_BBR:-}" "${bbr:-}")"
+    seeded_denyhosts="$(af_first_nonempty "${AETHERFLOW_BLOCK_PUBLIC_TRACKERS:-}" "${denyhosts:-}")"
+    seeded_reboot="$(af_first_nonempty "${AETHERFLOW_REBOOT:-}" "${reboot_after_install:-}")"
+
+    _save_seed_value username "${seeded_username}"
+    _save_seed_value passwd "${seeded_password}"
+    _save_seed_value hostname_value "${seeded_hostname}"
+    _save_seed_value domain "${seeded_hostname}"
+    _save_seed_value IP "${seeded_public_ip}"
+    _save_seed_value OUTTO "${seeded_log_file}"
+    _save_seed_value primaryroot "${seeded_primaryroot}"
+    _save_seed_value RTVERSION "${seeded_rt}"
+    _save_seed_value LTORRENT "${seeded_lt}"
+    _save_seed_yes_no kernel "${seeded_kernel}" "yes"
+    _save_seed_yes_no is10g "${seeded_10g}" "no"
+    _save_seed_yes_no tr "${seeded_tr}" "no"
+    _save_seed_yes_no QBVERSION "${seeded_qb}" "no"
+    _save_seed_yes_no ffmpeg "${seeded_ffmpeg}" "yes"
+    _save_seed_yes_no bbr "${seeded_bbr}" "yes"
+    _save_seed_yes_no denyhosts "${seeded_denyhosts}" "yes"
+    _save_seed_yes_no reboot_after_install "${seeded_reboot}" "no"
+
+    if [[ "${UNATTENDED}" == "true" ]]; then
+        _save_config continued "yes"
+        [[ -n "${seeded_log_file}" ]] || _save_config OUTTO "/root/AetherFlow.${PPID}.log"
+        [[ -n "${seeded_username}" ]] || _save_config username "admin"
+        [[ -n "${seeded_10g}" ]] || _save_config is10g "no"
+        [[ -n "${seeded_primaryroot}" ]] || _save_config primaryroot "root"
+        [[ -n "${seeded_rt}" ]] || _save_config RTVERSION "0.9.7"
+        [[ -n "${seeded_lt}" ]] || _save_config LTORRENT "0.13.7"
+        [[ -n "${seeded_tr}" ]] || _save_config tr "no"
+        [[ -n "${seeded_qb}" ]] || _save_config QBVERSION "no"
+        [[ -n "${seeded_ffmpeg}" ]] || _save_config ffmpeg "yes"
+        [[ -n "${seeded_bbr}" ]] || _save_config bbr "yes"
+        [[ -n "${seeded_denyhosts}" ]] || _save_config denyhosts "yes"
+        [[ -n "${seeded_reboot}" ]] || _save_config reboot_after_install "no"
+        [[ -n "${seeded_kernel}" ]] || _save_config kernel "yes"
+    fi
+}
 
 # Export for use in 06-state.sh functions
 export REPAIR_STEPS
 export FRESH_INSTALL
+export UNATTENDED
 
 ################################################################################
 # State Initialization
 ################################################################################
 
 _init_state
+_load_env_seed_file
+
+# Acquire exclusive lockfile — prevents concurrent installer instances
+_acquire_lock
+_setup_lock_trap
+
+# Handle --fresh
+if [[ "${FRESH_INSTALL}" == "true" ]]; then
+    echo "Wiping previous installation state..."
+    _cleanup_state
+fi
+_apply_seed_config
 if [[ -f "${CONFIG_FILE}" ]]; then
+    # shellcheck disable=1090
     source "${CONFIG_FILE}" 2>/dev/null
 fi
 
@@ -213,12 +560,6 @@ if [[ "${LIST_ONLY}" == "true" ]]; then
     exit 0
 fi
 
-# Handle --fresh
-if [[ "${FRESH_INSTALL}" == "true" ]]; then
-    echo "Wiping previous installation state..."
-    _cleanup_state
-fi
-
 # Detect previous install (auto-resume)
 if [[ -z "${REPAIR_STEPS}" ]] && [[ "${FRESH_INSTALL}" == "false" ]]; then
     _detect_previous_install
@@ -229,33 +570,41 @@ clear
 # shellcheck disable=2312,2243,1003
 spinner() {
 	local pid=$1
-	local delay=0.25
-	local spinstr='|/-\'
+	local delay=0.1
+	local -a spinstr=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+	local i=0
 	while kill -0 "${pid}" 2>/dev/null; do
-		local temp=${spinstr#?}
-		printf " [${bold}${yellow}%c${normal}]  " "${spinstr}"
-		local spinstr=${temp}${spinstr%"${temp}"}
+		printf " [${bold}${magenta}%s${normal}]  " "${spinstr[i]}"
+		i=$(((i + 1) % 10))
 		sleep "${delay}"
 		printf "\b\b\b\b\b\b"
 	done
 	printf "    \b\b\b\b"
 	echo -ne "${OK}"
 }
+
+port_is_listening() {
+    local port="$1"
+    netstat -ln 2>/dev/null | awk -v port=":${port}" '$0 ~ port && $0 ~ /LISTEN/ { found=1; exit } END { exit(found ? 0 : 1) }'
+}
+
 if [[ ! -d "${local_setup}" ]]; then
     echo "Critical Error: Setup paths failed to resolve."
     exit 1
 fi
 # shellcheck disable=2312
-IFACE=$(ip link show | grep -i broadcast | grep -m1 UP | cut -d: -f 2 | cut -d@ -f 1 | sed -e 's/ //g')
-PORT=$(shuf -i 2000-61000 -n 1)
+IFACE="$(ip link show | grep -i broadcast | grep -m1 UP | cut -d: -f 2 | cut -d@ -f 1 | sed -e 's/ //g')"
+PORT="$(shuf -i 2000-61000 -n 1)"
 PORTEND=$((${PORT} + 1500))
-# shellcheck disable=2312
-while [[ "$(netstat -ln | grep ':'${PORT}'' | grep -c 'LISTEN')" -eq "1" ]]; do PORT="$(shuf -i 2000-61000 -n 1)"; done
-RPORT=$(shuf -i 2000-61000 -n 1)
-# shellcheck disable=2312
-while [[ "$(netstat -ln | grep ':'${RPORT}'' | grep -c 'LISTEN')" -eq "1" ]]; do RPORT="$(shuf -i 2000-61000 -n 1)"; done
+while port_is_listening "${PORT}"; do
+    PORT="$(shuf -i 2000-61000 -n 1)"
+done
+RPORT="$(shuf -i 2000-61000 -n 1)"
+while port_is_listening "${RPORT}"; do
+    RPORT="$(shuf -i 2000-61000 -n 1)"
+done
 S=$(date +%s)
-OK=$(echo -e "[ ${bold}${green}DONE${normal} ]")
+OK="$(printf '[ %sDONE%s ]' "${bold}${green}" "${normal}")"
 genpass=$(_string)
 HTPASSWD="/etc/htpasswd"
 REALM="aetherflow"
@@ -288,7 +637,6 @@ _run_step_fg "ask10g" "10G network check" _ask10g
 _run_step_fg "askrtorrent" "rTorrent version selection" _askrtorrent
 
 _run_step_fg "asktr" "Transmission preference" _asktr
-apt-get install -q -y curl >>"${OUTTO}" 2>&1
 _run_step_fg "askqb" "qBittorrent preference" _askqb
 _run_step_fg "askdashtheme" "Dashboard theme" _askdashtheme
 _run_step_fg "adduser" "Adding master user" _adduser
@@ -362,6 +710,8 @@ _run_step "ftpdconfig" "Setting up vsftpd" _ftpdconfig
 # NOTE: _quickstats removed — legacy PHP dashboard sunset
 _run_step_fg "quickconsole" "Setting up web console" _quickconsole
 _run_step "boot" "Setting irssi/rtorrent to start on boot" _boot
+_run_step "firewall" "Configuring firewall (UFW)" _setup_firewall
+_run_step "harden_perms" "Hardening file permissions" _harden_permissions
 _run_step "perms" "Setting permissions on ${username}" _perms
 
 if [[ ${bbr} == "yes" ]]; then
@@ -371,6 +721,9 @@ fi
 if lspci | grep -i bcm >/dev/null; then
 	_run_step "bcm" "Installing firmware for BCM NIC" _insbcm
 fi
+
+# Post-installation security validation
+_validate_no_root_services
 
 cd
 E=$(date +%s)
