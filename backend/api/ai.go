@@ -3,9 +3,7 @@ package api
 import (
 	"context"
 	"fmt"
-	"log"
 	"net/http"
-	"os"
 	"strings"
 
 	"aetherflow/db"
@@ -36,61 +34,56 @@ type ChatRequest struct {
 	Model   string        `json:"model"`
 }
 
+// SupportChatRequest extends ChatRequest with context mode for support-aware chat.
+type SupportChatRequest struct {
+	ChatRequest
+	ContextMode string `json:"context_mode"` // "logs", "metrics", "full"
+}
+
 type ChatResponse struct {
 	Reply string `json:"reply"`
 }
 
-func handleAiChat(c *gin.Context) {
-	var req ChatRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
+// allowedContextModes is the set of valid support context modes.
+var allowedContextModes = map[string]bool{
+	"logs":    true,
+	"metrics": true,
+	"full":    true,
+}
 
-	// Try to get API key from database settings first, then fall back to env
-	apiKey := ""
-	db.DB.QueryRow("SELECT COALESCE(gemini_api_key, '') FROM settings WHERE id = 1").Scan(&apiKey)
-	if apiKey == "" {
-		apiKey = os.Getenv("GEMINI_API_KEY")
-	}
-	if apiKey == "" {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Gemini API key not configured. Set it in Settings → FlowAI Engine."})
-		return
-	}
-
-	// Fetch Settings for default model and system prompt
-	var aiModel, systemPrompt string
-	err := db.DB.QueryRow("SELECT ai_model, system_prompt FROM settings WHERE id = 1").Scan(&aiModel, &systemPrompt)
+// runChatSession is a shared helper that executes a Gemini chat session with the given
+// system prompt, model override, history, and message. Used by both handleAiChat and handleAiSupport.
+func runChatSession(c *gin.Context, systemPrompt string, modelOverride string, history []ChatMessage, message string) {
+	ctx := context.Background()
+	bundle, err := getGeminiBundle(ctx)
 	if err != nil {
-		aiModel = "gemini-2.5-pro"
-		systemPrompt = "You are FlowAI, a helpful server assistant."
-		log.Printf("Warning: Using fallback AI settings. DB Error: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
 	}
+	defer bundle.Client.Close()
 
-	// Per-request model override from the chat selector
-	if req.Model != "" {
-		if !allowedAIModels[req.Model] {
+	aiModel := bundle.DefaultModel
+	if modelOverride != "" {
+		if !allowedAIModels[modelOverride] {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid AI model. Check settings for available models."})
 			return
 		}
-		aiModel = req.Model
+		aiModel = modelOverride
 	}
 
-	ctx := context.Background()
-	client, err := genai.NewClient(ctx, option.WithAPIKey(apiKey))
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to initialize Gemini client: %v", err)})
-		return
+	// Use provided system prompt, or fall back to bundle default
+	prompt := systemPrompt
+	if prompt == "" {
+		prompt = bundle.SystemPrompt
 	}
-	defer client.Close()
 
-	model := client.GenerativeModel(aiModel)
-	model.SystemInstruction = genai.NewUserContent(genai.Text(systemPrompt))
+	model := bundle.Client.GenerativeModel(aiModel)
+	model.SystemInstruction = genai.NewUserContent(genai.Text(prompt))
 
 	session := model.StartChat()
 
 	// Pre-load history
-	for _, hm := range req.History {
+	for _, hm := range history {
 		if hm.Role == "user" {
 			session.History = append(session.History, &genai.Content{
 				Parts: []genai.Part{genai.Text(hm.Text)},
@@ -104,7 +97,7 @@ func handleAiChat(c *gin.Context) {
 		}
 	}
 
-	resp, err := session.SendMessage(ctx, genai.Text(req.Message))
+	resp, err := session.SendMessage(ctx, genai.Text(message))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Generation error: %v", err)})
 		return
@@ -123,6 +116,66 @@ func handleAiChat(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, ChatResponse{Reply: replyText})
+}
+
+func handleAiChat(c *gin.Context) {
+	var req ChatRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	runChatSession(c, "", req.Model, req.History, req.Message)
+}
+
+// handleAiSupport handles the AI support chatbot endpoint.
+// It auto-injects recent system logs and/or metrics into the AI prompt context
+// to help users troubleshoot seedbox errors.
+func handleAiSupport(c *gin.Context) {
+	var req SupportChatRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Default to full context if not specified
+	if req.ContextMode == "" {
+		req.ContextMode = "full"
+	}
+	if !allowedContextModes[req.ContextMode] {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid context_mode. Allowed: logs, metrics, full"})
+		return
+	}
+
+	// Build context-enriched system prompt
+	ctx := context.Background()
+	bundle, err := getGeminiBundle(ctx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	bundle.Client.Close() // We only needed settings; runChatSession creates its own client
+
+	var contextBlock strings.Builder
+	contextBlock.WriteString(bundle.SystemPrompt)
+	contextBlock.WriteString("\n\nYou are in SUPPORT MODE. The user is troubleshooting a server issue. ")
+	contextBlock.WriteString("Use the following live system data to help diagnose problems:\n\n")
+
+	switch req.ContextMode {
+	case "logs":
+		contextBlock.WriteString(getRecentLogContext(50))
+	case "metrics":
+		contextBlock.WriteString(getSystemMetricsContext())
+	case "full":
+		contextBlock.WriteString(getRecentLogContext(30))
+		contextBlock.WriteString("\n")
+		contextBlock.WriteString(getSystemMetricsContext())
+	}
+
+	contextBlock.WriteString("\nAnalyze the above data in context of the user's question. ")
+	contextBlock.WriteString("Provide specific, actionable troubleshooting steps. Reference specific log entries or metrics when relevant.")
+
+	runChatSession(c, contextBlock.String(), req.Model, req.History, req.Message)
 }
 
 func TestAiConnection(c *gin.Context) {
