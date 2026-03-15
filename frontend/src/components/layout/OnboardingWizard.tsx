@@ -10,8 +10,16 @@ interface OnboardingWizardProps {
 
 const slideVariants = {
     hidden: { opacity: 0, y: 20 },
-    visible: { opacity: 1, y: 0, transition: { duration: 0.5 } },
-    exit: { opacity: 0, y: -20, transition: { duration: 0.3 } }
+    visible: { 
+        opacity: 1, 
+        y: 0, 
+        transition: { duration: 0.4, ease: 'circOut' as const } 
+    },
+    exit: { 
+        opacity: 0, 
+        y: -15, 
+        transition: { duration: 0.3, ease: 'easeIn' as const } 
+    }
 };
 
 export default function OnboardingWizard({ initialSettings, onComplete }: OnboardingWizardProps) {
@@ -55,7 +63,10 @@ export default function OnboardingWizard({ initialSettings, onComplete }: Onboar
 
     return (
         <motion.div 
-            initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+            initial={{ opacity: 0 }} 
+            animate={{ opacity: 1 }} 
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.3, ease: 'easeOut' }}
             className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/80 backdrop-blur-md p-4"
         >
             {/* Ambient Background Glows */}
