@@ -6,6 +6,7 @@ import NetworkWidget from '@/components/widgets/NetworkWidget';
 import DiskIOWidget from '@/components/widgets/DiskIOWidget';
 import ProcessWidget from '@/components/widgets/ProcessWidget';
 import StorageWidget from '@/components/widgets/StorageWidget';
+import AppTopologyMap from '@/components/widgets/AppTopologyMap';
 
 interface OverviewTabProps {
     metrics: SystemMetrics;
@@ -101,6 +102,11 @@ export default function OverviewTab({ metrics, hardware, history }: OverviewTabP
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
                 <ProcessWidget processes={metrics.processes} />
                 <StorageWidget metrics={metrics} hardware={hardware} />
+            </div>
+
+            {/* Application Topology Map */}
+            <div className="w-full mt-5">
+                <AppTopologyMap metrics={metrics} />
             </div>
         </div>
     );
