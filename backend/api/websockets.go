@@ -13,7 +13,6 @@ import (
 	"aetherflow/services"
 
 	"github.com/gin-gonic/gin"
-	"github.com/golang-jwt/jwt/v5"
 	"github.com/gorilla/websocket"
 )
 
@@ -201,37 +200,21 @@ func IssueWSTicket(c *gin.Context) {
 // HandleWebSocket authenticates the request via WS ticket first, falling back to session cookies.
 func HandleWebSocket(c *gin.Context) {
 	ticket := c.Query("ticket")
-	if ticket != "" {
-		wsTicketsMu.Lock()
-		_, ok := wsTickets[ticket]
-		if ok {
-			delete(wsTickets, ticket) // single-use token consumed
-		}
-		wsTicketsMu.Unlock()
+	if ticket == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Missing ticket"})
+		return
+	}
 
-		if !ok {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid or expired ticket"})
-			return
-		}
-	} else {
-		// Fallback to older session mechanisms (Phase out once frontend entirely uses tickets)
-		cookie, err := c.Cookie("aetherflow_session")
-		if err != nil {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "WebSocket requires authentication"})
-			return
-		}
+	wsTicketsMu.Lock()
+	_, ok := wsTickets[ticket]
+	if ok {
+		delete(wsTickets, ticket) // single-use token consumed
+	}
+	wsTicketsMu.Unlock()
 
-		token, err := jwt.Parse(cookie, func(token *jwt.Token) (interface{}, error) {
-			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-				return nil, jwt.ErrSignatureInvalid
-			}
-			return getJWTSecret(), nil
-		})
-
-		if err != nil || !token.Valid {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid or expired session"})
-			return
-		}
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid or expired ticket"})
+		return
 	}
 
 	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)

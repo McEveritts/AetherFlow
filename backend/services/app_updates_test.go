@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -43,11 +44,15 @@ func TestAppUpdateWatcherRefreshesGitHubPackage(t *testing.T) {
 	    "category": "Downloaders"
 	  }
 	]`
+	cmdLine := `["bash", "-lc", "printf '1.0.0\n'"]`
+	if runtime.GOOS == "windows" {
+		cmdLine = `["cmd", "/c", "echo 1.0.0"]`
+	}
 	automationJSON := `{
 	  "autobrr": {
 	    "update_source": "github",
 	    "update_repo": "example/autobrr",
-	    "version_command": ["bash", "-lc", "printf '1.0.0\n'"]
+	    "version_command": ` + cmdLine + `
 	  }
 	}`
 

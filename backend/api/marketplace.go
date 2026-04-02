@@ -31,8 +31,12 @@ type App struct {
 // GetMarketplaceApps returns the list of marketplace apps
 func GetMarketplaceApps(c *gin.Context) {
 	pkgs := services.GetPackages()
+	if pkgs == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load package catalog configuration"})
+		return
+	}
 
-	var apps []App
+	apps := []App{}
 	for _, p := range pkgs {
 		app := App{
 			Id:               p.Name,

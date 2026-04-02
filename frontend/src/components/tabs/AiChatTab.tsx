@@ -1,6 +1,7 @@
 import { Sparkles, Settings, Bot, User, ChevronRight, Lock, ChevronDown, Wrench, Activity, FileText, Layers } from 'lucide-react';
 import { useState, useRef, useEffect, FormEvent } from 'react';
 import { useSystemStore } from '@/store/useSystemStore';
+import { apiFetch } from '@/lib/fetcher';
 
 interface ChatMessage {
     role: 'user' | 'assistant';
@@ -71,7 +72,7 @@ export default function AiChatTab() {
         setIsTyping(true);
 
         try {
-            const endpoint = supportMode ? '/api/v1/admin/ai/support' : '/api/v1/admin/ai/chat';
+            const endpoint = supportMode ? '/api/v1/auth/ai/support' : '/api/v1/auth/ai/chat';
             const body: Record<string, unknown> = {
                 message: text,
                 history: messages,
@@ -81,7 +82,7 @@ export default function AiChatTab() {
                 body.context_mode = contextMode;
             }
 
-            const res = await fetch(endpoint, {
+            const res = await apiFetch(endpoint, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(body)

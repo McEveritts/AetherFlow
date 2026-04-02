@@ -123,11 +123,13 @@ func mergePackageUpdateState(pkgs []models.Package) {
 func GetPackages() []models.Package {
 	data, err := readFirstConfigFile(resolveConfigPaths("AETHERFLOW_PACKAGES_CONFIG", "packages.json"))
 	if err != nil {
+		log.Printf("[packages] ERROR: completely failed to load packages.json: %v", err)
 		return nil
 	}
 
 	var pkgs []models.Package
 	if err := json.Unmarshal(data, &pkgs); err != nil {
+		log.Printf("[packages] ERROR: failed to parse packages.json: %v", err)
 		return nil
 	}
 

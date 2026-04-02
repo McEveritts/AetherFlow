@@ -1,5 +1,6 @@
 import { HardDriveDownload, Archive, CheckCircle2, Clock, ShieldCheck, Database, Download, BrainCircuit, Loader2, ToggleLeft, ToggleRight } from 'lucide-react';
 import { useState, useEffect } from 'react';
+import { apiFetch } from '@/lib/fetcher';
 
 interface BackupProgress {
     status: 'idle' | 'running' | 'success' | 'error';
@@ -42,7 +43,7 @@ export default function BackupTab() {
     const fetchBackups = async () => {
         setIsLoadingBackups(true);
         try {
-            const res = await fetch('/api/v1/admin/backup/list');
+            const res = await apiFetch('/api/v1/admin/backup/list');
             if (res.ok) {
                 const data = await res.json();
                 setBackups(data.sort((a: BackupFile, b: BackupFile) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()));
@@ -56,7 +57,7 @@ export default function BackupTab() {
 
     const fetchSchedule = async () => {
         try {
-            const res = await fetch('/api/v1/admin/ai/backup/optimal-window');
+            const res = await apiFetch('/api/v1/admin/ai/backup/optimal-window');
             if (res.ok) {
                 const data: ScheduleStatus = await res.json();
                 setSchedule(data);
@@ -75,7 +76,7 @@ export default function BackupTab() {
         setBackupState({ status: 'running', message: 'Initiating AetherFlow database snapshot...' });
 
         try {
-            const res = await fetch('/api/v1/admin/backup/run', { method: 'POST' });
+            const res = await apiFetch('/api/v1/admin/backup/run', { method: 'POST' });
             const data = await res.json();
 
             if (res.ok) {
@@ -102,7 +103,7 @@ export default function BackupTab() {
         setIsTogglingSchedule(true);
         const newMode = schedule.mode === 'smart' ? 'manual' : 'smart';
         try {
-            const res = await fetch('/api/v1/admin/ai/backup/schedule', {
+            const res = await apiFetch('/api/v1/admin/ai/backup/schedule', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ mode: newMode })
@@ -209,6 +210,18 @@ export default function BackupTab() {
                                         </p>
                                         <p className="text-xs text-slate-400 mt-2 leading-relaxed">{schedule.optimal_window.reasoning}</p>
                                     </div>
+
+                                    {schedule.next_backup_at && (
+                                        <div className="bg-slate-900/50 border border-slate-800 rounded-xl p-4">
+                                            <div className="flex items-center justify-between mb-2">
+                                                <span className="text-[10px] uppercase tracking-wider text-slate-500 font-bold">Next Scheduled</span>
+                                                <Clock size={12} className="text-slate-500" />
+                                            </div>
+                                            <p className="text-sm font-medium text-slate-300">
+                                                {new Date(schedule.next_backup_at).toLocaleString()}
+                                            </p>
+                                        </div>
+                                    )}
                                 </div>
                             )}
                         </div>
@@ -282,7 +295,7 @@ export default function BackupTab() {
                                             </div>
                                         </div>
                                         <a
-                                            href={`/api/backup/download/${encodeURIComponent(bk.filename)}`}
+                                            href={`/api/v1/admin/backup/download/${encodeURIComponent(bk.filename)}`}
                                             download
                                             className="w-8 h-8 rounded-lg bg-emerald-500/10 text-emerald-400 flex items-center justify-center hover:bg-emerald-500 hover:text-white transition-colors opacity-0 group-hover:opacity-100 focus:opacity-100"
                                             title="Download SQLite Archive"

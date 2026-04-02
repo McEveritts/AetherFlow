@@ -65,29 +65,6 @@ func QuotaUploadGuard() gin.HandlerFunc {
 	}
 }
 
-func GetUserQuota(c *gin.Context) {
-	userID, err := strconv.Atoi(c.Param("id"))
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID"})
-		return
-	}
-
-	// IDOR protection: users can only view their own quota; admins can view any.
-	authedUserID, _ := c.Get("user_id")
-	authedRole, _ := c.Get("user_role")
-	if authedUserID != userID && authedRole != "admin" {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Forbidden: You can only view your own quota"})
-		return
-	}
-
-	record, err := services.GetUserQuotaRecord(userID)
-	if err != nil {
-		c.JSON(quotaErrorStatus(err), gin.H{"error": err.Error()})
-		return
-	}
-
-	c.JSON(http.StatusOK, record)
-}
 
 // GetOwnQuota returns the authenticated user's own quota — no URL parameter,
 // no IDOR risk. Bound to GET /user/quota.

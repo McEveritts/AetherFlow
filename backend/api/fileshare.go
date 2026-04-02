@@ -191,3 +191,25 @@ func UploadFile(c *gin.Context) {
 		"filename": safeName,
 	})
 }
+
+// DownloadFile securely serves downloaded files using paths validated by sanitizeFilename
+func DownloadFile(c *gin.Context) {
+	filename := c.Param("filename")
+
+	// Ensure no path traversal and valid naming occurs
+	safeName, err := sanitizeFilename(filename)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	uploadDir := getUploadDir()
+	filePath := filepath.Join(uploadDir, safeName)
+
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "File not found"})
+		return
+	}
+
+	c.FileAttachment(filePath, safeName)
+}

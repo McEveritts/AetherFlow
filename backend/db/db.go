@@ -5,8 +5,9 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 )
 
 var DB *sql.DB
@@ -26,6 +27,10 @@ func migrate(version int, description string, stmts ...string) {
 
 	for _, stmt := range stmts {
 		if _, err := DB.Exec(stmt); err != nil {
+			if strings.Contains(err.Error(), "duplicate column name") {
+				log.Printf("Migration v%d ALREADY APPLIED (duplicate column): %.80s", version, stmt)
+				continue
+			}
 			log.Printf("Migration v%d FAILED on [%.80s]: %v", version, stmt, err)
 			return // stop this migration; do not mark as applied
 		}
@@ -59,7 +64,7 @@ func InitDB() {
 	}
 
 	var err error
-	DB, err = sql.Open("sqlite3", dbPath)
+	DB, err = sql.Open("sqlite", dbPath)
 	if err != nil {
 		log.Fatalf("Failed to open SQLite database at %s: %v", dbPath, err)
 	}
@@ -205,6 +210,21 @@ func InitDB() {
 		log.Printf("Error ensuring oidc_refresh_tokens table exists: %v", err)
 	}
 
+	_, err = DB.Exec(`
+		CREATE TABLE IF NOT EXISTS oidc_device_codes (
+			device_code TEXT PRIMARY KEY,
+			user_code TEXT NOT NULL,
+			client_id TEXT NOT NULL,
+			scope TEXT DEFAULT 'openid profile email',
+			user_id INTEGER,
+			expires_at DATETIME NOT NULL,
+			status TEXT DEFAULT 'pending'
+		)
+	`)
+	if err != nil {
+		log.Printf("Error ensuring oidc_device_codes table exists: %v", err)
+	}
+
 	// Log bookmarks (Phase 8)
 	_, err = DB.Exec(`
 		CREATE TABLE IF NOT EXISTS log_bookmarks (
@@ -301,21 +321,6 @@ func InitDB() {
 	`)
 	if err != nil {
 		log.Printf("Error ensuring billing_webhook_events table exists: %v", err)
-	}
-
-	// VPN configs (Phase 10)
-	_, err = DB.Exec(`
-		CREATE TABLE IF NOT EXISTS vpn_configs (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			type TEXT NOT NULL,
-			name TEXT NOT NULL,
-			config TEXT NOT NULL,
-			enabled BOOLEAN DEFAULT 1,
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-		)
-	`)
-	if err != nil {
-		log.Printf("Error ensuring vpn_configs table exists: %v", err)
 	}
 
 	// App updates (Phase 12)
@@ -415,6 +420,8 @@ func InitDB() {
 		"CREATE INDEX IF NOT EXISTS idx_oidc_auth_codes_client ON oidc_auth_codes(client_id);",
 		"CREATE INDEX IF NOT EXISTS idx_oidc_auth_codes_expires ON oidc_auth_codes(expires_at);",
 		"CREATE INDEX IF NOT EXISTS idx_oidc_refresh_client ON oidc_refresh_tokens(client_id);",
+		"CREATE INDEX IF NOT EXISTS idx_oidc_device_codes_user_code ON oidc_device_codes(user_code);",
+		"CREATE INDEX IF NOT EXISTS idx_oidc_device_codes_expires ON oidc_device_codes(expires_at);",
 		// Cluster: status queries + heartbeat staleness detection
 		"CREATE INDEX IF NOT EXISTS idx_cluster_nodes_status ON cluster_nodes(status);",
 		// Billing webhooks: dedup lookups

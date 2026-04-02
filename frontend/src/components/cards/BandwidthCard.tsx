@@ -1,5 +1,6 @@
 import { Gauge, Wifi, Zap, Loader2, CheckCircle2, AlertTriangle, ArrowUpCircle, ArrowDownCircle } from 'lucide-react';
 import { useState } from 'react';
+import { apiFetch } from '@/lib/fetcher';
 
 interface BandwidthRecommendation {
     recommended_upload_kbps: number;
@@ -12,14 +13,17 @@ interface BandwidthRecommendation {
 
 export default function BandwidthCard() {
     const [isAnalyzing, setIsAnalyzing] = useState(false);
+    const [isApplying, setIsApplying] = useState(false);
+    const [applySuccess, setApplySuccess] = useState(false);
     const [recommendation, setRecommendation] = useState<BandwidthRecommendation | null>(null);
     const [error, setError] = useState('');
 
     const analyze = async () => {
         setIsAnalyzing(true);
+        setApplySuccess(false);
         setError('');
         try {
-            const res = await fetch('/api/v1/admin/ai/bandwidth/analyze', { method: 'POST' });
+            const res = await apiFetch('/api/v1/admin/ai/bandwidth/analyze', { method: 'POST' });
             const data = await res.json();
             if (!res.ok) throw new Error(data.error);
             setRecommendation(data);
@@ -27,6 +31,30 @@ export default function BandwidthCard() {
             setError(err instanceof Error ? err.message : 'Analysis failed');
         } finally {
             setIsAnalyzing(false);
+        }
+    };
+
+    const applyLimits = async () => {
+        if (!recommendation) return;
+        setIsApplying(true);
+        setError('');
+        setApplySuccess(false);
+        try {
+            const res = await apiFetch('/api/v1/admin/ai/bandwidth/apply', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    upload_kbps: recommendation.recommended_upload_kbps,
+                    download_kbps: recommendation.recommended_download_kbps
+                })
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || 'Apply failed');
+            setApplySuccess(true);
+        } catch (err) {
+            setError(err instanceof Error ? err.message : 'Apply failed');
+        } finally {
+            setIsApplying(false);
         }
     };
 
@@ -132,6 +160,23 @@ export default function BandwidthCard() {
                             ))}
                         </div>
                     )}
+
+                    {/* Apply Success Message */}
+                    {applySuccess && (
+                        <div className="p-3 bg-emerald-500/10 border border-emerald-500/20 rounded-lg text-sm text-emerald-400 flex items-center gap-2 mt-2">
+                            <CheckCircle2 size={14} /> Limits applied successfully to daemon
+                        </div>
+                    )}
+
+                    {/* Apply Button */}
+                    <button
+                        onClick={applyLimits}
+                        disabled={isApplying || applySuccess}
+                        className="w-full py-2 bg-emerald-600 hover:bg-emerald-500 disabled:bg-emerald-600/50 text-white text-xs font-bold rounded-lg transition-all flex items-center justify-center gap-1.5 mt-2"
+                    >
+                        {isApplying ? <Loader2 size={14} className="animate-spin" /> : <CheckCircle2 size={14} />}
+                        {isApplying ? 'Applying Limits...' : applySuccess ? 'Applied' : 'Apply Optimal Limits'}
+                    </button>
                 </div>
             )}
 

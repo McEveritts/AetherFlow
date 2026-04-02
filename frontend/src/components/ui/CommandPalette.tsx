@@ -20,7 +20,7 @@ import { useSystemStore } from '@/store/useSystemStore';
 import { TabId } from '@/types/dashboard';
 import { useToast } from '@/contexts/ToastContext';
 
-type ActionType = 'navigate' | 'task';
+type ActionType = 'navigate';
 
 interface PaletteAction {
   id: string;
@@ -28,8 +28,6 @@ interface PaletteAction {
   icon: React.ElementType;
   type: ActionType;
   tab?: TabId;
-  taskTitle?: string;
-  taskDuration?: number;
 }
 
 const actions: PaletteAction[] = [
@@ -42,10 +40,6 @@ const actions: PaletteAction[] = [
   { id: 'nav-users', title: 'Manage Users', icon: Users, type: 'navigate', tab: 'users' },
   { id: 'nav-settings', title: 'Go to Settings', icon: Settings, type: 'navigate', tab: 'settings' },
 
-  // Background Tasks
-  { id: 'task-backup', title: 'Start Database Backup', icon: Database, type: 'task', taskTitle: 'Database Backup', taskDuration: 5000 },
-  { id: 'task-cache', title: 'Clear System Cache', icon: Trash2, type: 'task', taskTitle: 'Cache Clearance', taskDuration: 2000 },
-  { id: 'task-restart', title: 'Restart AetherFlow API', icon: RefreshCw, type: 'task', taskTitle: 'API Restart', taskDuration: 8000 },
 ];
 
 export function CommandPalette() {
@@ -53,7 +47,7 @@ export function CommandPalette() {
   const [query, setQuery] = useState('');
   const [selectedIndex, setSelectedIndex] = useState(0);
 
-  const { setActiveTab, addTask, updateTaskProgress, removeTask } = useSystemStore();
+  const { setActiveTab } = useSystemStore();
   const { addToast } = useToast();
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -85,30 +79,9 @@ export function CommandPalette() {
 
   // Removed effect that cascades sets
 
-  const executeTask = (title: string, duration: number) => {
-    const id = Date.now().toString();
-    addTask({ id, description: title, progress: 0 });
-    
-    let progress = 0;
-    const interval = setInterval(() => {
-      progress += 10;
-      if (progress >= 100) {
-        clearInterval(interval);
-        updateTaskProgress(id, 100);
-        setTimeout(() => removeTask(id), 1000);
-        addToast(`${title} completed successfully`, 'success');
-      } else {
-        updateTaskProgress(id, progress);
-      }
-    }, duration / 10);
-  };
-
   const executeAction = (action: PaletteAction) => {
     if (action.type === 'navigate' && action.tab) {
       setActiveTab(action.tab);
-    } else if (action.type === 'task' && action.taskTitle && action.taskDuration) {
-      executeTask(action.taskTitle, action.taskDuration);
-      addToast(`Started task: ${action.taskTitle}`, 'info');
     }
     setIsOpen(false);
   };
@@ -191,10 +164,8 @@ export function CommandPalette() {
                           <Icon className="h-4 w-4" />
                         </div>
                         <span className="flex-1 font-medium">{action.title}</span>
-                        {action.type === 'navigate' ? (
+                        {action.type === 'navigate' && (
                           <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500">Jump To</span>
-                        ) : (
-                          <span className="text-[10px] font-bold uppercase tracking-wider text-amber-500">Run Task</span>
                         )}
                       </button>
                     );

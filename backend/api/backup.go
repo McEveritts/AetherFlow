@@ -148,11 +148,17 @@ func ensureStoredChecksum(filePath string) (string, error) {
 	return sum, nil
 }
 
-func RunBackup(c *gin.Context) {
+type BackupFile struct {
+	Filename  string `json:"filename"`
+	Size      int64  `json:"size"`
+	Timestamp string `json:"timestamp"`
+	Checksum  string `json:"checksum,omitempty"`
+}
+
+func PerformSystemBackup() (BackupFile, error) {
 	backupDir := getBackupDir()
 	if err := os.MkdirAll(backupDir, 0755); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create backup directory"})
-		return
+		return BackupFile{}, errors.New("Failed to create backup directory")
 	}
 
 	timestamp := time.Now().Format("2006-01-02_15-04-05")
@@ -160,14 +166,12 @@ func RunBackup(c *gin.Context) {
 
 	// Strict whitelist validation for backup filename (CWE-89 defense-in-depth)
 	if !isValidBackupFilename(filename) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid backup filename"})
-		return
+		return BackupFile{}, errors.New("Invalid backup filename")
 	}
 
 	backupFile, err := safeBackupPath(backupDir, filename)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
+		return BackupFile{}, err
 	}
 
 	// Escape single quotes in the path for VACUUM INTO.
@@ -175,40 +179,43 @@ func RunBackup(c *gin.Context) {
 	_, err = db.DB.Exec(fmt.Sprintf(`VACUUM INTO '%s'`, safePath))
 	if err != nil {
 		log.Printf("Backup VACUUM INTO failed: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Backup failed: " + err.Error()})
-		return
+		return BackupFile{}, errors.New("Backup failed: " + err.Error())
 	}
 
 	info, err := os.Stat(backupFile)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Backup created but file metadata is unavailable"})
-		return
+		return BackupFile{}, errors.New("Backup created but file metadata is unavailable")
 	}
 
 	checksum, err := computeFileSHA256(backupFile)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Backup created but checksum failed: " + err.Error()})
-		return
+		return BackupFile{}, errors.New("Backup created but checksum failed: " + err.Error())
 	}
 	if err := writeStoredChecksum(backupFile, checksum); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Backup created but checksum write failed: " + err.Error()})
-		return
+		return BackupFile{}, errors.New("Backup created but checksum write failed: " + err.Error())
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"message":   "Backup completed successfully",
-		"filename":  filepath.Base(backupFile),
-		"size":      info.Size(),
-		"checksum":  checksum,
-		"timestamp": time.Now().Format(time.RFC3339),
-	})
+	return BackupFile{
+		Filename:  filepath.Base(backupFile),
+		Size:      info.Size(),
+		Timestamp: time.Now().Format(time.RFC3339),
+		Checksum:  checksum,
+	}, nil
 }
 
-type BackupFile struct {
-	Filename  string `json:"filename"`
-	Size      int64  `json:"size"`
-	Timestamp string `json:"timestamp"`
-	Checksum  string `json:"checksum,omitempty"`
+func RunBackup(c *gin.Context) {
+	bf, err := PerformSystemBackup()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"message":   "Backup completed successfully",
+		"filename":  bf.Filename,
+		"size":      bf.Size,
+		"checksum":  bf.Checksum,
+		"timestamp": bf.Timestamp,
+	})
 }
 
 func GetBackupsList(c *gin.Context) {

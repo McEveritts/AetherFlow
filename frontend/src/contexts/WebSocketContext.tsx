@@ -5,6 +5,7 @@ import { SystemMetrics } from '@/types/dashboard';
 import { useConnectionStore, ConnectionState } from '@/store/useConnectionStore';
 import { useToast } from '@/contexts/ToastContext';
 import { mutate as globalMutate } from 'swr';
+import { apiFetch } from '@/lib/fetcher';
 
 declare global {
     interface Window {
@@ -43,11 +44,12 @@ function getBackoffDelay(attempt: number): number {
     return Math.min(delay + jitter, BACKOFF_MAX_MS);
 }
 
-function buildWsUrl(): string {
+function buildWsUrl(ticket: string): string {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    return process.env.NEXT_PUBLIC_API_URL
+    const base = process.env.NEXT_PUBLIC_API_URL
         ? process.env.NEXT_PUBLIC_API_URL.replace('http', 'ws') + '/api/v1/auth/ws'
-        : `${protocol}//${window.location.host}/api/ws`;
+        : `${protocol}//${window.location.host}/api/v1/auth/ws`;
+    return `${base}?ticket=${encodeURIComponent(ticket)}`;
 }
 
 function isWebSocketDisabled(): boolean {
@@ -141,7 +143,7 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
     }, [stopPolling, setConnectionState, setLastMessageAt, addToast]);
 
     // ── Core Connect Logic ─────────────────────────────────────
-    const connect = useCallback(() => {
+    const connect = useCallback(async () => {
         // Clean up any existing connection
         if (wsRef.current) {
             isManualCloseRef.current = true;
@@ -152,7 +154,28 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
         const stateLabel = attemptRef.current === 0 ? 'CONNECTING' : 'RECONNECTING';
         setConnectionState(stateLabel);
 
-        const ws = new WebSocket(buildWsUrl());
+        let wsUrl: string;
+        try {
+            const res = await apiFetch('/api/v1/auth/ws/ticket');
+            if (!res.ok) throw new Error('Failed to fetch ticket');
+            const data = await res.json();
+            wsUrl = buildWsUrl(data.ticket);
+        } catch (err) {
+            console.error('[WS] Failed to obtain connection ticket', err);
+            attemptRef.current += 1;
+            setReconnectAttempt(attemptRef.current);
+            if (attemptRef.current >= MAX_RECONNECT_BEFORE_FALLBACK) {
+                startPolling();
+                reconnectTimerRef.current = setTimeout(connect, BACKOFF_MAX_MS);
+            } else {
+                setConnectionState('RECONNECTING');
+                const delay = getBackoffDelay(attemptRef.current - 1);
+                reconnectTimerRef.current = setTimeout(connect, delay);
+            }
+            return;
+        }
+
+        const ws = new WebSocket(wsUrl);
 
         ws.onopen = () => {
             if (!isMountedRef.current) return;

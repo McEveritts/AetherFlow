@@ -3,6 +3,7 @@ import { Store, Search, Filter, Box, Download, AlertCircle, ChevronDown, Refresh
 import { useMarketplace, App } from '@/hooks/useMarketplace';
 import { useToast } from '@/contexts/ToastContext';
 import Image from 'next/image';
+import { apiFetch } from '@/lib/fetcher';
 
 const AppIcon = ({ appId }: { appId: string }) => {
     const [error, setError] = useState(false);
@@ -130,7 +131,7 @@ export default function MarketplaceTab() {
     const handleInstall = async (id: string) => {
         setOperatingApp(id);
         try {
-            const res = await fetch(`/api/packages/${id}/install`, { method: 'POST' });
+            const res = await apiFetch(`/api/v1/admin/packages/${id}/install`, { method: 'POST' });
             if (!res.ok) {
                 const data = await res.json().catch(() => ({}));
                 throw new Error(data.error || 'Installation request failed');
@@ -147,7 +148,7 @@ export default function MarketplaceTab() {
     const handleUninstall = async (id: string) => {
         setOperatingApp(id);
         try {
-            const res = await fetch(`/api/packages/${id}/uninstall`, { method: 'POST' });
+            const res = await apiFetch(`/api/v1/admin/packages/${id}/uninstall`, { method: 'POST' });
             if (!res.ok) {
                 const data = await res.json().catch(() => ({}));
                 throw new Error(data.error || 'Uninstallation request failed');

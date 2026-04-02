@@ -31,6 +31,7 @@ type SmartBackupScheduler struct {
 	lastWindow   *BackupWindow
 	nextBackupAt *time.Time
 	keyResolver  func() (string, error) // injected from api layer to avoid circular import
+	executor     func() error           // injected executor
 }
 
 // Global scheduler instance.
@@ -38,9 +39,10 @@ var BackupScheduler *SmartBackupScheduler
 
 // InitSmartBackupScheduler starts the smart backup scheduler.
 // keyResolver should be a function that returns the decrypted Gemini API key.
-func InitSmartBackupScheduler(keyResolver func() (string, error)) {
+func InitSmartBackupScheduler(keyResolver func() (string, error), executor func() error) {
 	BackupScheduler = &SmartBackupScheduler{
 		keyResolver: keyResolver,
+		executor:    executor,
 	}
 
 	// Check if smart scheduling is enabled
@@ -62,7 +64,62 @@ func InitSmartBackupScheduler(keyResolver func() (string, error)) {
 	}
 
 	go BackupScheduler.schedulerLoop()
+	go BackupScheduler.executorLoop()
 	log.Println("Smart backup scheduler initialized")
+}
+
+func (sbs *SmartBackupScheduler) executorLoop() {
+	ticker := time.NewTicker(1 * time.Minute)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		sbs.mu.RLock()
+		window := sbs.lastWindow
+		sbs.mu.RUnlock()
+
+		if window == nil {
+			continue
+		}
+
+		var mode string
+		db.DB.QueryRow("SELECT COALESCE(backup_schedule_mode, 'manual') FROM settings WHERE id = 1").Scan(&mode)
+		if mode != "smart" {
+			continue
+		}
+
+		now := time.Now().UTC()
+
+		sbs.mu.Lock()
+		if sbs.nextBackupAt == nil {
+			next := time.Date(now.Year(), now.Month(), now.Day(), window.OptimalHour, 0, 0, 0, time.UTC)
+			if now.After(next) || now.Equal(next) {
+				next = next.Add(24 * time.Hour)
+			}
+			sbs.nextBackupAt = &next
+			sbs.mu.Unlock()
+			continue
+		}
+
+		timeToRun := now.After(*sbs.nextBackupAt) || now.Equal(*sbs.nextBackupAt)
+		sbs.mu.Unlock()
+
+		if timeToRun {
+			log.Println("Smart backup: Initiating background system backup...")
+			if sbs.executor != nil {
+				err := sbs.executor()
+				if err != nil {
+					log.Printf("Smart backup: Background backup failed: %v", err)
+				} else {
+					log.Println("Smart backup: Background backup completed successfully")
+				}
+			}
+
+			sbs.mu.Lock()
+			next := sbs.nextBackupAt.Add(24 * time.Hour)
+			sbs.nextBackupAt = &next
+			sbs.mu.Unlock()
+		}
+	}
 }
 
 func (sbs *SmartBackupScheduler) schedulerLoop() {

@@ -5,6 +5,7 @@ import { useState, useEffect } from 'react';
 import useSWR from 'swr';
 import SkeletonBox from '@/components/layout/SkeletonBox';
 import Image from 'next/image';
+import { apiFetch } from '@/lib/fetcher';
 
 export default function ProfileTab() {
     const { user } = useAuth();
@@ -13,7 +14,7 @@ export default function ProfileTab() {
     const [isSaving, setIsSaving] = useState(false);
 
     const { data: quota, isLoading: isQuotaLoading } = useSWR(
-        user ? `/api/user/quota/${user.id}` : null
+        user ? `/api/v1/auth/user/quota` : null
     );
 
     useEffect(() => {
@@ -25,11 +26,10 @@ export default function ProfileTab() {
         setIsSaving(true);
 
         try {
-            const res = await fetch('/api/v1/auth/profile', {
+            const res = await apiFetch('/api/v1/auth/profile', {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ email }),
-                credentials: 'include'
+                body: JSON.stringify({ email })
             });
 
             const data = await res.json();

@@ -1,6 +1,7 @@
 import { useState, useRef } from 'react';
 import useSWR from 'swr';
 import { FolderUp, File as FileIcon, UploadCloud, Download, HardDrive } from 'lucide-react';
+import { apiFetch } from '@/lib/fetcher';
 
 interface FetchedFile {
     name: string;
@@ -10,7 +11,7 @@ interface FetchedFile {
 }
 
 export default function FileshareTab() {
-    const { data: files, error, mutate } = useSWR<FetchedFile[]>('/api/v1/auth/fileshare');
+    const { data: files, error, mutate } = useSWR<FetchedFile[]>('/api/v1/admin/fileshare');
     const [isDragging, setIsDragging] = useState(false);
     const [isUploading, setIsUploading] = useState(false);
     const fileInputRef = useRef<HTMLInputElement>(null);
@@ -20,7 +21,7 @@ export default function FileshareTab() {
         const formData = new FormData();
         formData.append('file', file);
         try {
-            const res = await fetch('/api/v1/auth/fileshare/upload', {
+            const res = await apiFetch('/api/v1/admin/fileshare/upload', {
                 method: 'POST',
                 body: formData
             });
@@ -132,9 +133,14 @@ export default function FileshareTab() {
                                                 </div>
                                             </div>
                                         </div>
-                                        <button className="p-2 text-slate-400 hover:text-white hover:bg-white/10 rounded-lg transition-colors opacity-0 group-hover:opacity-100">
+                                        <a 
+                                            href={`/api/v1/admin/fileshare/download/${encodeURIComponent(file.name)}`}
+                                            download
+                                            className="p-2 text-slate-400 hover:text-white hover:bg-white/10 rounded-lg transition-colors opacity-0 group-hover:opacity-100 flex items-center justify-center"
+                                            title="Download File"
+                                        >
                                             <Download size={18} />
-                                        </button>
+                                        </a>
                                     </div>
                                 ))
                             )}

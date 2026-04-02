@@ -5,6 +5,7 @@ import { useState } from 'react';
 import useSWR from 'swr';
 import { useToast } from '@/contexts/ToastContext';
 import { ServicesSkeleton } from '@/components/layout/SkeletonBox';
+import { apiFetch } from '@/lib/fetcher';
 
 // Maps service process names to their web UI ports/paths
 const SERVICE_WEB_PORTS: Record<string, number | string> = {
@@ -41,7 +42,7 @@ const SERVICE_WEB_PORTS: Record<string, number | string> = {
     'pihole-FTL': '/admin',
     'apache2': 443,
     'aetherflow-frontend': '/',
-    'aetherflow-api': '/api/v1/auth/services',
+    'aetherflow-api': '/api/v1/admin/services',
 };
 
 interface ServiceInfo {
@@ -57,7 +58,7 @@ export default function ServicesTab() {
     const [loadingService, setLoadingService] = useState<string | null>(null);
 
     const { data: services, mutate, isLoading } = useSWR<Record<string, ServiceInfo>>(
-        '/api/v1/auth/services',
+        '/api/v1/admin/services',
         { refreshInterval: 15000 }
     );
 
@@ -75,7 +76,7 @@ export default function ServicesTab() {
         }
 
         try {
-            const res = await fetch(`/api/v1/auth/services/${encodeURIComponent(name)}/control`, {
+            const res = await apiFetch(`/api/v1/admin/services/${encodeURIComponent(name)}/control`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({

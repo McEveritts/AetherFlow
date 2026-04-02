@@ -5,6 +5,7 @@ import { useToast } from '@/contexts/ToastContext';
 import { useSystemStore } from '@/store/useSystemStore';
 import { useTranslations } from 'next-intl';
 import { SettingsSkeleton } from '@/components/layout/SkeletonBox';
+import { apiFetch } from '@/lib/fetcher';
 
 export default function SettingsTab() {
     const t = useTranslations('Settings');
@@ -26,7 +27,7 @@ export default function SettingsTab() {
         }
         setIsTesting(true);
         try {
-            const res = await fetch('/api/v1/auth/settings/test-ai', {
+            const res = await apiFetch('/api/v1/admin/settings/test-ai', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ gemini_api_key: apiKey }),
@@ -45,12 +46,12 @@ export default function SettingsTab() {
     };
 
     const { data: updateData, error: updateError } = useSWR(
-        '/api/v1/auth/system/update/check',
+        '/api/v1/admin/system/update/check',
         { refreshInterval: 60000 }
     );
 
     const { data: settingsData, isLoading, mutate: mutateSettings } = useSWR(
-        '/api/v1/auth/settings',
+        '/api/v1/admin/settings',
         {
             onSuccess: (data: Record<string, string>) => {
                 if (data.aiModel) setModel(data.aiModel);
@@ -84,7 +85,7 @@ export default function SettingsTab() {
         mutateSettings({ ...settingsData, ...payload }, false);
 
         try {
-            const res = await fetch('/api/v1/auth/settings', {
+            const res = await apiFetch('/api/v1/admin/settings', {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload)
@@ -109,7 +110,7 @@ export default function SettingsTab() {
         setIsUpdating(true);
         setUpdateMessage('Initiating update sequence...');
         try {
-            const res = await fetch('/api/v1/admin/system/update/run', {
+            const res = await apiFetch('/api/v1/admin/system/update/run', {
                 method: 'POST'
             });
             const data = await res.json();

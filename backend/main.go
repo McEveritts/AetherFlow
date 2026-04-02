@@ -144,7 +144,10 @@ func main() {
 	services.InitMetricsRecorder()
 
 	// Initialize the Smart Backup Scheduler (Phase 20)
-	services.InitSmartBackupScheduler(api.GetDecryptedGeminiKey)
+	services.InitSmartBackupScheduler(api.GetDecryptedGeminiKey, func() error {
+		_, err := api.PerformSystemBackup()
+		return err
+	})
 
 	// Phase 22 — warn if billing webhook secrets are not configured.
 	// The POST /billing/webhooks/:provider endpoint is intentionally outside

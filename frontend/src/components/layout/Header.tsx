@@ -1,11 +1,26 @@
-import { Wifi, WifiOff, Radio, User, Menu } from 'lucide-react';
+import { Wifi, WifiOff, Radio, User, Menu, LogOut, ChevronDown } from 'lucide-react';
 import { NAVIGATION, BOTTOM_NAVIGATION } from './Sidebar';
 import { useSystemStore } from '@/store/useSystemStore';
 import { useConnectionStore } from '@/store/useConnectionStore';
+import { useAuth } from '@/contexts/AuthContext';
+import { useState, useRef, useEffect } from 'react';
 
 export default function Header() {
     const { activeTab, isMobileMenuOpen, setIsMobileMenuOpen } = useSystemStore();
     const connectionState = useConnectionStore((s) => s.connectionState);
+    const { user, logout } = useAuth();
+    const [dropdownOpen, setDropdownOpen] = useState(false);
+    const dropdownRef = useRef<HTMLDivElement>(null);
+
+    useEffect(() => {
+        const handleClickOutside = (event: MouseEvent) => {
+            if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
+                setDropdownOpen(false);
+            }
+        };
+        document.addEventListener('mousedown', handleClickOutside);
+        return () => document.removeEventListener('mousedown', handleClickOutside);
+    }, []);
 
     const getTabLabel = () => {
         if (activeTab === 'settings' || activeTab === 'security' || activeTab === 'logout') {
@@ -47,11 +62,44 @@ export default function Header() {
                     </span>
                 </div>
 
-                {/* User Profile Mock */}
-                <button className="h-10 w-10 md:h-11 md:w-11 rounded-full glass-button p-0 flex items-center justify-center overflow-hidden hover:border-indigo-500/50 group">
-                    <div className="absolute inset-0 bg-gradient-to-tr from-indigo-500/20 to-blue-500/20 group-hover:opacity-100 transition-opacity"></div>
-                    <User size={20} className="text-slate-300 group-hover:text-indigo-300 transition-colors relative z-10" />
-                </button>
+                {/* User Profile Dropdown */}
+                <div className="relative" ref={dropdownRef}>
+                    <button 
+                        onClick={() => setDropdownOpen(!dropdownOpen)}
+                        className="flex items-center gap-2 rounded-full glass-button pl-1 pr-3 md:pr-4 py-1 hover:border-indigo-500/50 group transition-all"
+                    >
+                        <div className="h-8 w-8 md:h-9 md:w-9 rounded-full bg-slate-900 border border-white/10 flex items-center justify-center overflow-hidden">
+                            {user?.avatar_url ? (
+                                <img src={user.avatar_url} alt="Avatar" className="h-full w-full object-cover" />
+                            ) : (
+                                <User size={16} className="text-slate-400 group-hover:text-indigo-300 transition-colors" />
+                            )}
+                        </div>
+                        <div className="hidden md:block text-left">
+                            <div className="text-xs font-bold text-slate-200">{user?.username || 'Admin'}</div>
+                            <div className="text-[10px] text-slate-500 uppercase tracking-widest">{user?.role || 'User'}</div>
+                        </div>
+                        <ChevronDown size={14} className={`text-slate-500 transition-transform ${dropdownOpen ? 'rotate-180' : ''}`} />
+                    </button>
+
+                    {dropdownOpen && (
+                        <div className="absolute right-0 mt-2 w-56 bg-slate-900 border border-white/10 rounded-2xl shadow-xl shadow-black/50 overflow-hidden z-50 animate-fade-in-up">
+                            <div className="p-4 border-b border-white/5 bg-white/[0.02]">
+                                <p className="text-sm font-bold text-slate-200">{user?.username || 'Admin'}</p>
+                                <p className="text-xs text-slate-400 truncate">{user?.email || 'admin@aetherflow.local'}</p>
+                            </div>
+                            <div className="p-2">
+                                <button
+                                    onClick={logout}
+                                    className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-semibold text-red-400 hover:bg-red-500/10 hover:text-red-300 transition-colors"
+                                >
+                                    <LogOut size={16} />
+                                    Sign Out
+                                </button>
+                            </div>
+                        </div>
+                    )}
+                </div>
             </div>
         </header>
     );

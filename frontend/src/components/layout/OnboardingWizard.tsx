@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useToast } from '@/contexts/ToastContext';
 import { Sparkles, ArrowRight, Check, Shield, Server, Box } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
+import { apiFetch } from '@/lib/fetcher';
 
 interface OnboardingWizardProps {
     initialSettings: Record<string, unknown>;
@@ -42,7 +43,7 @@ export default function OnboardingWizard({ initialSettings, onComplete }: Onboar
                 setupCompleted: true
             };
 
-            const res = await fetch('/api/v1/auth/settings', {
+            const res = await apiFetch('/api/v1/admin/settings', {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload)
