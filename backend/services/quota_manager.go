@@ -1,6 +1,7 @@
 package services
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -16,6 +17,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"aetherflow/db"
 	"aetherflow/models"
@@ -75,6 +77,17 @@ type billingEvent struct {
 }
 
 var humanSizePattern = regexp.MustCompile(`(?i)^\s*([0-9]+(?:\.[0-9]+)?)\s*([kmgtp]?b)\s*$`)
+
+// safeUsername strictly bounds the character set and length of usernames passed to shell commands.
+var safeUsername = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,31}$`)
+
+// validateUsername rejects names that don't match the strict allowlist.
+func validateUsername(name string) error {
+	if !safeUsername.MatchString(name) {
+		return fmt.Errorf("invalid username format: %q", name)
+	}
+	return nil
+}
 
 // ParseHumanSize converts values like 500GB or 2TB into raw bytes.
 func ParseHumanSize(input string) (int64, error) {
@@ -306,8 +319,15 @@ func getStoredUserQuota(userID int) (UserQuotaRecord, error) {
 }
 
 func DetectUserUsageBytes(username string) (int64, error) {
+	if err := validateUsername(username); err != nil {
+		return 0, fmt.Errorf("DetectUserUsageBytes: %w", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	scriptPath := showspaceScriptPath()
-	output, err := exec.Command("bash", scriptPath, "--user", username, "--json").CombinedOutput()
+	output, err := exec.CommandContext(ctx, "bash", scriptPath, "--user", username, "--json").CombinedOutput()
 	if err != nil {
 		return 0, fmt.Errorf("showspace failed: %w (%s)", err, strings.TrimSpace(string(output)))
 	}
@@ -328,9 +348,17 @@ func SetQuotaForUserID(userID int, quotaBytes int64, source, provider, externalI
 		return UserQuotaRecord{}, err
 	}
 
+	if err := validateUsername(user.Username); err != nil {
+		return UserQuotaRecord{}, fmt.Errorf("SetQuotaForUserID: %w", err)
+	}
+
 	quotaArg := quotaScriptSize(quotaBytes)
 	scriptPath := setdiskScriptPath()
-	output, err := exec.Command("bash", scriptPath, "--username", user.Username, "--size", quotaArg, "--json").CombinedOutput()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	output, err := exec.CommandContext(ctx, "bash", scriptPath, "--username", user.Username, "--size", quotaArg, "--json").CombinedOutput()
 	if err != nil {
 		return UserQuotaRecord{}, fmt.Errorf("setdisk failed: %w (%s)", err, strings.TrimSpace(string(output)))
 	}

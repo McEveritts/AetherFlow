@@ -49,10 +49,29 @@ func RunPackageAction(action, pkgId, scriptName, lockFile string) {
 		log.Printf("[%s] Action finalized for %s. Removed from active queues.", action, pkgId)
 	}()
 
-	// Resolve script path
-	scriptPath := filepath.Join("/opt", "AetherFlow", "packages", "package", action, scriptName)
-	if _, err := os.Stat(scriptPath); os.IsNotExist(err) {
-		scriptPath = filepath.Join("packages", "package", action, scriptName)
+	// Resolve script path — try multiple locations so this works from any CWD
+	candidates := []string{
+		filepath.Join("/opt", "AetherFlow", "packages", "package", action, scriptName),
+	}
+	if exeDir != "" {
+		// Executable lives in backend/, so packages/ is ../packages/ relative to it
+		candidates = append(candidates, filepath.Join(exeDir, "..", "packages", "package", action, scriptName))
+	}
+	candidates = append(candidates,
+		filepath.Join("packages", "package", action, scriptName),       // CWD is project root
+		filepath.Join("..", "packages", "package", action, scriptName), // CWD is backend/
+	)
+
+	scriptPath := ""
+	for _, c := range candidates {
+		if _, err := os.Stat(c); err == nil {
+			scriptPath = c
+			break
+		}
+	}
+	if scriptPath == "" {
+		log.Printf("[%s] ERROR: install script not found for %s; tried: %v", action, pkgId, candidates)
+		return
 	}
 
 	log.Printf("[%s] Executing script: %s", action, scriptPath)

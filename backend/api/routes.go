@@ -2,6 +2,8 @@ package api
 
 import (
 	"net/http"
+	"os"
+	"strings"
 	"time"
 
 	"aetherflow/services"
@@ -23,29 +25,70 @@ func RegisterRoutes(r *gin.Engine) {
 }
 
 func registerV1Routes(apiGroup *gin.RouterGroup) {
-	apiGroup.GET("/openapi.yaml", GetOpenAPISpec)
-	apiGroup.GET("/ws", HandleWebSocket)
-	apiGroup.POST("/ai/chat", handleAiChat)
-	apiGroup.POST("/ai/support", handleAiSupport)
+	// Apply Host Validation to protect against Open Redirects globally
+	apiGroup.Use(HostValidationMiddleware())
+
+	// ── Public routes (no authentication required) ──
+	publicGroup := apiGroup.Group("/public")
+	publicGroup.GET("/openapi.yaml", GetOpenAPISpec)
+	publicGroup.GET("/csrf-token", issueCSRFToken)
 
 	authLimiter := RateLimitMiddleware(5, 1*time.Minute)
 
-	apiGroup.GET("/auth/google/login", GoogleLogin)
-	apiGroup.GET("/auth/google/callback", GoogleCallback)
-	apiGroup.POST("/auth/login", authLimiter, LocalLogin)
-	apiGroup.POST("/auth/setup", authLimiter, SetupAdmin)
-	apiGroup.GET("/auth/setup/check", CheckSetupNeeded)
-	apiGroup.GET("/auth/session", GetSession)
-	apiGroup.POST("/auth/logout", Logout)
-	apiGroup.PUT("/auth/profile", UpdateProfile)
+	publicGroup.GET("/auth/google/login", GoogleLogin)
+	publicGroup.GET("/auth/google/callback", GoogleCallback)
+	publicGroup.POST("/auth/login", authLimiter, LocalLogin)
+	publicGroup.POST("/auth/setup", authLimiter, SetupAdmin)
+	publicGroup.GET("/auth/setup/check", CheckSetupNeeded)
 
-	apiGroup.GET("/user/quota/:id", GetUserQuota)
+	publicGroup.POST("/billing/webhooks/:provider", HandleBillingWebhook)
 
-	apiGroup.GET("/settings", GetSettings)
-	apiGroup.GET("/fileshare", GetFilesList)
+	publicGroup.GET("/marketplace", GetMarketplaceApps)
 
-	adminGroup := apiGroup.Group("")
-	adminGroup.Use(AdminOnly())
+	publicGroup.GET("/oidc/jwks", OIDCJwks)
+	publicGroup.GET("/oidc/authorize", OIDCAuthorize)
+	publicGroup.POST("/oidc/token", OIDCToken)
+	publicGroup.GET("/oidc/userinfo", OIDCUserInfo)
+	publicGroup.POST("/oidc/revoke", OIDCRevoke)
+
+	// ── Authenticated routes (require valid JWT session) ──
+	authGroup := apiGroup.Group("/auth")
+	authGroup.Use(AuthMiddleware())
+	if strings.ToLower(os.Getenv("CSRF_ENABLED")) == "true" {
+		authGroup.Use(CSRFMiddleware())
+	}
+	{
+		authGroup.GET("/ws", HandleWebSocket)
+		authGroup.POST("/ai/chat", handleAiChat)
+		authGroup.POST("/ai/support", handleAiSupport)
+
+		authGroup.GET("/auth/session", GetSession)
+		authGroup.POST("/auth/logout", Logout)
+		authGroup.PUT("/auth/profile", UpdateProfile)
+
+		authGroup.GET("/user/quota/:id", GetUserQuota)
+
+		authGroup.GET("/settings", GetSettings)
+		authGroup.GET("/fileshare", GetFilesList)
+
+		authGroup.GET("/services", getServices)
+
+		authGroup.GET("/packages/:id/progress", PackageProgress)
+
+		authGroup.GET("/system/update/check", CheckUpdate)
+		authGroup.GET("/system/hardware", GetHardwareInfo)
+		authGroup.GET("/system/metrics", getSystemMetrics)
+
+		authGroup.GET("/notifications", GetNotifications)
+		authGroup.PUT("/notifications/:id/read", MarkNotificationRead)
+		authGroup.POST("/notifications/dismiss-all", DismissAllNotifications)
+
+		authGroup.GET("/ws/logs", HandleLogWebSocket)
+	}
+
+	// ── Admin routes (require valid JWT session + admin role) ──
+	adminGroup := apiGroup.Group("/admin")
+	adminGroup.Use(AuthMiddleware(), AdminOnly())
 	{
 		adminGroup.POST("/backup/run", RunBackup)
 		adminGroup.GET("/backup/list", GetBackupsList)
@@ -115,29 +158,6 @@ func registerV1Routes(apiGroup *gin.RouterGroup) {
 		adminGroup.GET("/network/tailscale/peers", GetTailscalePeers)
 		adminGroup.POST("/network/tailscale/routes", AdvertiseTailscaleRoutes)
 	}
-
-	apiGroup.POST("/billing/webhooks/:provider", HandleBillingWebhook)
-
-	apiGroup.GET("/services", getServices)
-
-	apiGroup.GET("/marketplace", GetMarketplaceApps)
-	apiGroup.GET("/packages/:id/progress", PackageProgress)
-
-	apiGroup.GET("/system/update/check", CheckUpdate)
-	apiGroup.GET("/system/hardware", GetHardwareInfo)
-	apiGroup.GET("/system/metrics", getSystemMetrics)
-
-	apiGroup.GET("/oidc/jwks", OIDCJwks)
-	apiGroup.GET("/oidc/authorize", OIDCAuthorize)
-	apiGroup.POST("/oidc/token", OIDCToken)
-	apiGroup.GET("/oidc/userinfo", OIDCUserInfo)
-	apiGroup.POST("/oidc/revoke", OIDCRevoke)
-
-	apiGroup.GET("/ws/logs", HandleLogWebSocket)
-
-	apiGroup.GET("/notifications", GetNotifications)
-	apiGroup.PUT("/notifications/:id/read", MarkNotificationRead)
-	apiGroup.POST("/notifications/dismiss-all", DismissAllNotifications)
 }
 
 func getSystemMetrics(c *gin.Context) {

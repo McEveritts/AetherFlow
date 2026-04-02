@@ -55,6 +55,7 @@ type NotificationChannel struct {
 // NotificationEngine manages rules, evaluation, and dispatch.
 type NotificationEngine struct {
 	mu             sync.RWMutex
+	evalMu         sync.Mutex   // Dedicated lock for the background evaluation loop
 	rules          []NotificationRule
 	channels       []NotificationChannel
 	dispatchFn     func(Notification) // callback to broadcast via WebSocket
@@ -195,6 +196,10 @@ func (ne *NotificationEngine) evaluationLoop() {
 
 // evaluateRules checks all active rules against the current system metrics.
 func (ne *NotificationEngine) evaluateRules() {
+	// Acquire the dedicated evaluation lock to prevent concurrent map access panics
+	ne.evalMu.Lock()
+	defer ne.evalMu.Unlock()
+
 	metrics := GetSystemMetricsCore()
 
 	ne.mu.RLock()

@@ -14,8 +14,10 @@ import (
 
 // --- Notification Endpoints ---
 
-// GetNotifications returns notification history for the current user.
+// GetNotifications returns notification history for the current authenticated user.
 func GetNotifications(c *gin.Context) {
+	userID, _ := c.Get("user_id")
+
 	limit := 50
 	if l, err := strconv.Atoi(c.Query("limit")); err == nil && l > 0 && l <= 200 {
 		limit = l
@@ -27,8 +29,8 @@ func GetNotifications(c *gin.Context) {
 	}
 
 	rows, err := db.DB.Query(
-		"SELECT id, user_id, level, title, message, read, created_at FROM notifications ORDER BY created_at DESC LIMIT ? OFFSET ?",
-		limit, offset,
+		"SELECT id, user_id, level, title, message, read, created_at FROM notifications WHERE user_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
+		userID, limit, offset,
 	)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query notifications"})
@@ -49,9 +51,9 @@ func GetNotifications(c *gin.Context) {
 		notifications = []services.Notification{}
 	}
 
-	// Get unread count
+	// Get unread count scoped to the authenticated user
 	var unreadCount int
-	db.DB.QueryRow("SELECT COUNT(*) FROM notifications WHERE read = 0").Scan(&unreadCount)
+	db.DB.QueryRow("SELECT COUNT(*) FROM notifications WHERE user_id = ? AND read = 0", userID).Scan(&unreadCount)
 
 	c.JSON(http.StatusOK, gin.H{
 		"notifications": notifications,
@@ -59,20 +61,27 @@ func GetNotifications(c *gin.Context) {
 	})
 }
 
-// MarkNotificationRead marks a specific notification as read.
+// MarkNotificationRead marks a specific notification as read (scoped to the authenticated user).
 func MarkNotificationRead(c *gin.Context) {
+	userID, _ := c.Get("user_id")
 	id := c.Param("id")
-	_, err := db.DB.Exec("UPDATE notifications SET read = 1 WHERE id = ?", id)
+	result, err := db.DB.Exec("UPDATE notifications SET read = 1 WHERE id = ? AND user_id = ?", id, userID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update notification"})
+		return
+	}
+	rowsAffected, _ := result.RowsAffected()
+	if rowsAffected == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Notification not found"})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"message": "Notification marked as read"})
 }
 
-// DismissAllNotifications marks all notifications as read.
+// DismissAllNotifications marks all of the authenticated user's notifications as read.
 func DismissAllNotifications(c *gin.Context) {
-	_, err := db.DB.Exec("UPDATE notifications SET read = 1 WHERE read = 0")
+	userID, _ := c.Get("user_id")
+	_, err := db.DB.Exec("UPDATE notifications SET read = 1 WHERE user_id = ? AND read = 0", userID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to dismiss notifications"})
 		return

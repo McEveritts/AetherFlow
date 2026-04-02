@@ -280,3 +280,33 @@ func TestUploadBackupChunkRequiresChunkParams(t *testing.T) {
 		t.Errorf("Expected 400 when chunk params are missing, got %d", w.Code)
 	}
 }
+
+// --- P23: Admin Route Bleeding Integration Test ---
+
+func TestAdminRouteBlocksStandardUser(t *testing.T) {
+	r := gin.New()
+	
+	// Set up the routes exactly as they are in production
+	adminGroup := r.Group("/admin")
+	
+	// Mock AuthMiddleware to set standard user role
+	mockAuth := func(c *gin.Context) {
+		c.Set("user_id", 123)
+		c.Set("user_role", "user") // Standard user
+		c.Next()
+	}
+	
+	adminGroup.Use(mockAuth, AdminOnly())
+	adminGroup.GET("/metrics", func(c *gin.Context) {
+		c.JSON(200, gin.H{"ok": true})
+	})
+	
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("GET", "/admin/metrics", nil)
+	r.ServeHTTP(w, req)
+	
+	if w.Code != http.StatusForbidden {
+		t.Errorf("Expected 403 Forbidden for standard user accessing admin route, got %d", w.Code)
+	}
+}
+

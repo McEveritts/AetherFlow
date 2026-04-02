@@ -6,6 +6,7 @@ import (
 	"log"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -161,12 +162,15 @@ func GetPM2ServiceInfo(pm2Processes map[string]PM2Process, processName string) (
 }
 
 // allowedServiceActions is the set of permitted service control verbs.
-var allowedServiceActions = map[string]bool{"start": true, "stop": true, "restart": true}
+var allowedServiceActions = map[string]bool{"start": true, "stop": true, "restart": true, "status": true}
 
-// validateServiceName rejects names containing shell metacharacters.
+// safeServiceName strictly bounds the character set and length of service names.
+var safeServiceName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9@._-]{0,63}$`)
+
+// validateServiceName rejects names that don't match the strict allowlist.
 func validateServiceName(name string) error {
-	if strings.ContainsAny(name, " \t\n;&|`$(){}") {
-		return fmt.Errorf("invalid service name: %q", name)
+	if !safeServiceName.MatchString(name) {
+		return fmt.Errorf("invalid service name format: %q", name)
 	}
 	return nil
 }
@@ -179,8 +183,8 @@ func ControlService(serviceName, action string) error {
 	if err := validateServiceName(serviceName); err != nil {
 		return err
 	}
-	log.Printf("[Systemctl] Executing: sudo systemctl %s %s", action, serviceName)
-	cmd := exec.Command("sudo", "systemctl", action, serviceName)
+	log.Printf("[Systemctl] Executing: sudo systemctl %s -- %s", action, serviceName)
+	cmd := exec.Command("sudo", "systemctl", action, "--", serviceName)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		log.Printf("Failed to %s service %s: %v\nOutput: %s", action, serviceName, err, string(output))

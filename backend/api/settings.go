@@ -34,6 +34,13 @@ func GetSettings(c *gin.Context) {
 		return
 	}
 
+	// Decrypt the API key before masking
+	if s.GeminiApiKey != "" {
+		if decrypted, err := DecryptKey(s.GeminiApiKey); err == nil {
+			s.GeminiApiKey = decrypted
+		}
+	}
+
 	// Mask the API key for security - only show last 4 chars
 	if len(s.GeminiApiKey) > 4 {
 		s.GeminiApiKey = "****" + s.GeminiApiKey[len(s.GeminiApiKey)-4:]
@@ -65,6 +72,11 @@ func updateSettings(c *gin.Context) {
 			WHERE id = 1
 		`, req.AiModel, req.SystemPrompt, req.Language, req.Timezone, req.UpdateChannel, req.DefaultDashboard, req.SetupCompleted)
 	} else {
+		// Encrypt the API key before storing
+		encryptedKey := req.GeminiApiKey
+		if encrypted, err := EncryptKey(req.GeminiApiKey); err == nil {
+			encryptedKey = encrypted
+		}
 		_, err = db.DB.Exec(`
 			UPDATE settings SET 
 				ai_model = ?, 
@@ -77,7 +89,7 @@ func updateSettings(c *gin.Context) {
 				gemini_api_key = ?,
 				updated_at = CURRENT_TIMESTAMP
 			WHERE id = 1
-		`, req.AiModel, req.SystemPrompt, req.Language, req.Timezone, req.UpdateChannel, req.DefaultDashboard, req.SetupCompleted, req.GeminiApiKey)
+		`, req.AiModel, req.SystemPrompt, req.Language, req.Timezone, req.UpdateChannel, req.DefaultDashboard, req.SetupCompleted, encryptedKey)
 	}
 
 	if err != nil {
@@ -86,6 +98,8 @@ func updateSettings(c *gin.Context) {
 		return
 	}
 
+	// Return settings without raw API key
+	req.GeminiApiKey = ""
 	c.JSON(http.StatusOK, gin.H{
 		"message": "Settings saved successfully",
 		"data":    req,

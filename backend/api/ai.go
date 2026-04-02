@@ -194,6 +194,10 @@ func TestAiConnection(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "No API key saved. Please enter and save a key first."})
 			return
 		}
+		// Decrypt if stored encrypted
+		if decrypted, decErr := DecryptKey(savedKey); decErr == nil {
+			savedKey = decrypted
+		}
 		keyToTest = savedKey
 	}
 

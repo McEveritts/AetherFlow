@@ -28,6 +28,12 @@ func getGeminiBundle(ctx context.Context) (*GeminiClientBundle, error) {
 	// Resolve API key: DB first, then env
 	apiKey := ""
 	db.DB.QueryRow("SELECT COALESCE(gemini_api_key, '') FROM settings WHERE id = 1").Scan(&apiKey)
+	// Decrypt the API key if it was stored encrypted
+	if apiKey != "" {
+		if decrypted, err := DecryptKey(apiKey); err == nil {
+			apiKey = decrypted
+		}
+	}
 	if apiKey == "" {
 		apiKey = os.Getenv("GEMINI_API_KEY")
 	}
