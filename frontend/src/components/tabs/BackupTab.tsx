@@ -42,7 +42,7 @@ export default function BackupTab() {
     const fetchBackups = async () => {
         setIsLoadingBackups(true);
         try {
-            const res = await fetch('/api/backup/list');
+            const res = await fetch('/api/v1/admin/backup/list');
             if (res.ok) {
                 const data = await res.json();
                 setBackups(data.sort((a: BackupFile, b: BackupFile) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()));
@@ -56,7 +56,7 @@ export default function BackupTab() {
 
     const fetchSchedule = async () => {
         try {
-            const res = await fetch('/api/ai/backup/optimal-window');
+            const res = await fetch('/api/v1/admin/ai/backup/optimal-window');
             if (res.ok) {
                 const data: ScheduleStatus = await res.json();
                 setSchedule(data);
@@ -75,7 +75,7 @@ export default function BackupTab() {
         setBackupState({ status: 'running', message: 'Initiating AetherFlow database snapshot...' });
 
         try {
-            const res = await fetch('/api/backup/run', { method: 'POST' });
+            const res = await fetch('/api/v1/admin/backup/run', { method: 'POST' });
             const data = await res.json();
 
             if (res.ok) {
@@ -102,7 +102,7 @@ export default function BackupTab() {
         setIsTogglingSchedule(true);
         const newMode = schedule.mode === 'smart' ? 'manual' : 'smart';
         try {
-            const res = await fetch('/api/ai/backup/schedule', {
+            const res = await fetch('/api/v1/admin/ai/backup/schedule', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ mode: newMode })

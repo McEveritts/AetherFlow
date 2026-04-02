@@ -42,7 +42,7 @@ export default function OnboardingWizard({ initialSettings, onComplete }: Onboar
                 setupCompleted: true
             };
 
-            const res = await fetch('/api/settings', {
+            const res = await fetch('/api/v1/auth/settings', {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload)

@@ -25,7 +25,7 @@ export default function ProfileTab() {
         setIsSaving(true);
 
         try {
-            const res = await fetch('/api/auth/profile', {
+            const res = await fetch('/api/v1/auth/profile', {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ email }),

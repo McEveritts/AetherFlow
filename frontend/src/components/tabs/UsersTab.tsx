@@ -10,7 +10,7 @@ import { ColumnDef } from '@tanstack/react-table';
 
 export default function UsersTab() {
     const { addToast } = useToast();
-    const { data: users, error, isLoading, mutate } = useSWR<User[]>('/api/users');
+    const { data: users, error, isLoading, mutate } = useSWR<User[]>('/api/v1/admin/users');
 
     const [actionLoading, setActionLoading] = useState<number | null>(null);
 
@@ -19,7 +19,7 @@ export default function UsersTab() {
         setActionLoading(userId);
 
         try {
-            const res = await fetch(`/api/users/${userId}/role`, {
+            const res = await fetch(`/api/v1/admin/users/${userId}/role`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ role: newRole })
@@ -46,7 +46,7 @@ export default function UsersTab() {
         setActionLoading(userId);
 
         try {
-            const res = await fetch(`/api/users/${userId}`, {
+            const res = await fetch(`/api/v1/admin/users/${userId}`, {
                 method: 'DELETE'
             });
 

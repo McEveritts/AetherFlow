@@ -4,7 +4,6 @@
 
 set -euo pipefail
 
-export AETHERFLOW_USER="${AETHERFLOW_USER:-${SUDO_USER:-$(whoami)}}"
 export LOGFILE="${LOGFILE:-/var/log/aetherflow/install.log}"
 export LOCK_DIR="${LOCK_DIR:-/install}"
 
@@ -93,4 +92,44 @@ rollback_file() {
 cleanup_backup_file() {
     local target="$1"
     rm -f "${target}.bak-af"
+}
+
+fetch_and_run() {
+    local url="$1"
+    local checksum="$2"
+    shift 2
+
+    local tmp_script
+    tmp_script=$(mktemp /tmp/aetherflow-install-XXXXXX.sh)
+    
+    log_info "Downloading install script from $url"
+    if ! curl -fsSL -o "$tmp_script" "$url"; then
+        print_error "Failed to download $url"
+        rm -f "$tmp_script"
+        return 1
+    fi
+
+    if [[ -n "$checksum" && "$checksum" != "SKIP" ]]; then
+        local computed_hash
+        computed_hash=$(sha256sum "$tmp_script" | awk '{print $1}')
+        if [[ "$computed_hash" != "$checksum" ]]; then
+            print_error "Checksum validation failed for $url! Expected: $checksum, Got: $computed_hash"
+            rm -f "$tmp_script"
+            return 1
+        fi
+        log_info "Checksum validation passed."
+    else
+        log_warn "WARNING: Checksum validation skipped for $url (Hash pinned as SKIP or empty)."
+    fi
+
+    # Ensure executable and run
+    chmod +x "$tmp_script"
+    if ! "$tmp_script" "$@"; then
+        print_error "Script execution failed for $url"
+        rm -f "$tmp_script"
+        return 1
+    fi
+
+    rm -f "$tmp_script"
+    return 0
 }

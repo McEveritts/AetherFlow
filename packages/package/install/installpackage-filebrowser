@@ -16,7 +16,7 @@ log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [filebrowser] $1" | tee -a "$LOGFIL
 
 # ── Download and install File Browser ────────────────────────────────────────
 log "Downloading File Browser..."
-curl -fsSL https://raw.githubusercontent.com/filebrowser/get/master/get.sh | bash >>"$LOGFILE" 2>&1
+fetch_and_run "https://raw.githubusercontent.com/filebrowser/get/master/get.sh" "SKIP" >>"$LOGFILE" 2>&1
 
 # ── Create data directory and initial admin with random password ──────────────
 log "Setting up File Browser data directory..."

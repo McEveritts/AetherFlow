@@ -22,7 +22,7 @@ export default function Dashboard() {
   const { activeTab, isSidebarHovered } = useSystemStore();
   const { metrics, hardware, history, isLoading, isError, connectionState } = useMetrics();
 
-  const { data: settingsData, mutate: mutateSettings } = useSWR('/api/settings');
+  const { data: settingsData, mutate: mutateSettings } = useSWR('/api/v1/auth/settings');
 
   const renderContent = () => {
     if (isLoading) {

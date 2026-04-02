@@ -23,7 +23,7 @@ export default function PredictionsCard() {
         setIsAnalyzing(true);
         setError('');
         try {
-            const res = await fetch('/api/ai/predictions/analyze', { method: 'POST' });
+            const res = await fetch('/api/v1/admin/ai/predictions/analyze', { method: 'POST' });
             const data = await res.json();
             if (!res.ok) throw new Error(data.error);
             setReport(data);

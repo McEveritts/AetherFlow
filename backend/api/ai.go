@@ -147,6 +147,13 @@ func handleAiSupport(c *gin.Context) {
 		return
 	}
 
+	// Strictly verify admin role before allowing access to system logs or metrics context!
+	role, exists := c.Get("user_role")
+	if !exists || role != "admin" {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Forbidden: Admin access required for AI support diagnostics"})
+		return
+	}
+
 	// Build context-enriched system prompt
 	ctx := context.Background()
 	bundle, err := getGeminiBundle(ctx)

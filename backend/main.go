@@ -1,5 +1,24 @@
 package main
 
+// @title           AetherFlow API
+// @version         1.0
+// @description     This is the AetherFlow API server.
+// @termsOfService  http://swagger.io/terms/
+
+// @contact.name   API Support
+// @contact.url    http://www.swagger.io/support
+// @contact.email  support@swagger.io
+
+// @license.name  Apache 2.0
+// @license.url   http://www.apache.org/licenses/LICENSE-2.0.html
+
+// @host      localhost:8080
+// @BasePath  /api/v1
+
+// @securityDefinitions.apikey BearerAuth
+// @in header
+// @name Authorization
+
 import (
 	"context"
 	"fmt"
@@ -98,6 +117,11 @@ func main() {
 
 	// Initialize AES-256-GCM encryption for API key storage
 	api.InitAESKey()
+
+	// Phase 2: Migrate any plaintext DB secrets to versioned ciphertext
+	if err := api.MigrateLegacySecrets(); err != nil {
+		log.Printf("Warning: Failed to migrate legacy secrets: %v", err)
+	}
 
 	// Initialize the Cluster Manager
 	cluster.Init()

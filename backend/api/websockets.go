@@ -1,6 +1,8 @@
 package api
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -164,26 +166,72 @@ func init() {
 	go broadcastMetricsLoop()
 }
 
-// HandleWebSocket authenticates the request via JWT cookie before upgrading.
-func HandleWebSocket(c *gin.Context) {
-	// Require valid session cookie for WebSocket connections
-	cookie, err := c.Cookie("aetherflow_session")
-	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "WebSocket requires authentication"})
+var (
+	wsTickets   = make(map[string]int)
+	wsTicketsMu sync.Mutex
+)
+
+// IssueWSTicket generates a short-lived (30s) single-use ticket for WebSocket authentication.
+func IssueWSTicket(c *gin.Context) {
+	rawUserID, exists := c.Get("user_id")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
 		return
 	}
 
-	token, err := jwt.Parse(cookie, func(token *jwt.Token) (interface{}, error) {
-		// Prevent algorithm confusion: only accept HMAC signing
-		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-			return nil, jwt.ErrSignatureInvalid
-		}
-		return getJWTSecret(), nil
-	})
+	b := make([]byte, 16)
+	rand.Read(b)
+	ticket := hex.EncodeToString(b)
 
-	if err != nil || !token.Valid {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid or expired session"})
-		return
+	wsTicketsMu.Lock()
+	wsTickets[ticket] = rawUserID.(int)
+	wsTicketsMu.Unlock()
+
+	// 30 seconds expiry for ticket
+	go func(t string) {
+		time.Sleep(30 * time.Second)
+		wsTicketsMu.Lock()
+		delete(wsTickets, t)
+		wsTicketsMu.Unlock()
+	}(ticket)
+
+	c.JSON(http.StatusOK, gin.H{"ticket": ticket})
+}
+
+// HandleWebSocket authenticates the request via WS ticket first, falling back to session cookies.
+func HandleWebSocket(c *gin.Context) {
+	ticket := c.Query("ticket")
+	if ticket != "" {
+		wsTicketsMu.Lock()
+		_, ok := wsTickets[ticket]
+		if ok {
+			delete(wsTickets, ticket) // single-use token consumed
+		}
+		wsTicketsMu.Unlock()
+
+		if !ok {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid or expired ticket"})
+			return
+		}
+	} else {
+		// Fallback to older session mechanisms (Phase out once frontend entirely uses tickets)
+		cookie, err := c.Cookie("aetherflow_session")
+		if err != nil {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "WebSocket requires authentication"})
+			return
+		}
+
+		token, err := jwt.Parse(cookie, func(token *jwt.Token) (interface{}, error) {
+			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+				return nil, jwt.ErrSignatureInvalid
+			}
+			return getJWTSecret(), nil
+		})
+
+		if err != nil || !token.Valid {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid or expired session"})
+			return
+		}
 	}
 
 	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
@@ -194,53 +242,98 @@ func HandleWebSocket(c *gin.Context) {
 	client := &Client{hub: WSHub, conn: conn, send: make(chan []byte, 256)}
 	client.hub.register <- client
 
-	// Start both pumps in goroutines
 	go client.writePump()
 	go client.readPump()
 }
 
-func broadcastMetricsLoop() {
+var (
+	cachedServices   interface{}
+	cachedMetrics    interface{}
+	systemStateMutex sync.RWMutex
+)
+
+func maintainSystemState() {
 	metricsTicker := time.NewTicker(3 * time.Second)
 	serviceTicker := time.NewTicker(15 * time.Second)
-	defer metricsTicker.Stop()
-	defer serviceTicker.Stop()
 
-	// Cache the last services result so we include it in every metrics push
-	var cachedServices interface{}
+	// Keep services updated on its own cadence
+	go func() {
+		for {
+			<-serviceTicker.C
+			WSHub.mu.Lock()
+			clientCount := len(WSHub.clients)
+			WSHub.mu.Unlock()
+			
+			if clientCount > 0 {
+				s := services.GetActiveServices()
+				systemStateMutex.Lock()
+				cachedServices = s
+				systemStateMutex.Unlock()
+			}
+		}
+	}()
+
+	// Keep metrics updated on its own cadence
+	go func() {
+		for {
+			<-metricsTicker.C
+			WSHub.mu.Lock()
+			clientCount := len(WSHub.clients)
+			WSHub.mu.Unlock()
+			
+			if clientCount > 0 {
+				m := services.GetSystemMetricsCore()
+				systemStateMutex.Lock()
+				cachedMetrics = m
+				systemStateMutex.Unlock()
+			}
+		}
+	}()
+}
+
+func broadcastMetricsLoop() {
+	broadcastTicker := time.NewTicker(3 * time.Second)
+	defer broadcastTicker.Stop()
+
+	// Initial kick off for state maintenance
+	go maintainSystemState()
 
 	for {
-		select {
-		case <-serviceTicker.C:
-			// Refresh services list on the slower interval (systemctl + pm2 are expensive)
-			WSHub.mu.Lock()
-			clientCount := len(WSHub.clients)
-			WSHub.mu.Unlock()
-			if clientCount > 0 {
-				cachedServices = services.GetActiveServices()
-			}
+		<-broadcastTicker.C
+		
+		WSHub.mu.Lock()
+		clientCount := len(WSHub.clients)
+		WSHub.mu.Unlock()
 
-		case <-metricsTicker.C:
-			WSHub.mu.Lock()
-			clientCount := len(WSHub.clients)
-			WSHub.mu.Unlock()
+		if clientCount == 0 {
+			continue
+		}
 
-			if clientCount == 0 {
-				continue
-			}
+		systemStateMutex.RLock()
+		m := cachedMetrics
+		s := cachedServices
+		systemStateMutex.RUnlock()
 
-			metrics := services.GetSystemMetricsCore()
+		if m == nil {
+			// Not ready yet
+			continue
+		}
 
-			payload := map[string]interface{}{
-				"type": "METRICS_UPDATE",
-				"data": map[string]interface{}{
-					"system":   metrics,
-					"services": cachedServices,
-				},
-			}
+		payload := map[string]interface{}{
+			"type": "METRICS_UPDATE",
+			"data": map[string]interface{}{
+				"system":   m,
+				"services": s,
+			},
+		}
 
-			message, err := json.Marshal(payload)
-			if err == nil {
-				WSHub.broadcast <- message
+		message, err := json.Marshal(payload)
+		if err == nil {
+			// Non-blocking broadcast
+			select {
+			case WSHub.broadcast <- message:
+			default:
+				log.Printf("WARNING: WebSocket broadcast channel full, dropping metrics payload")
 			}
 		}
 	}

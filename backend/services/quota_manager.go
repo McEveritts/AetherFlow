@@ -36,6 +36,11 @@ type UserQuotaRecord struct {
 	BillingProvider   string  `json:"billing_provider,omitempty"`
 	BillingExternalID string  `json:"billing_external_id,omitempty"`
 	UpdatedAt         string  `json:"updated_at,omitempty"`
+	
+	// Next.js Frontend DTO Harmonization
+	UsedGB            float64 `json:"usedGB"`
+	TotalGB           float64 `json:"totalGB"`
+	Percentage        float64 `json:"percentage"`
 }
 
 type BillingWebhookAudit struct {
@@ -224,6 +229,12 @@ func normalizeQuotaRecord(record UserQuotaRecord) UserQuotaRecord {
 		}
 	}
 	record.UsagePct = quotaUsagePct(record.QuotaBytes, record.UsedBytes)
+	
+	// DTO harmonization for Next.js frontend
+	record.UsedGB = float64(record.UsedBytes) / (1024 * 1024 * 1024)
+	record.TotalGB = float64(record.QuotaBytes) / (1024 * 1024 * 1024)
+	record.Percentage = record.UsagePct
+
 	if record.Status == "" {
 		record.Status = "active"
 	}

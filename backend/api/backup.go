@@ -35,27 +35,36 @@ const (
 
 var backupUploadMu sync.Mutex
 
-// Helper to reliably find the current database path.
+// Helper to reliably find the current database path by anchoring to the executable path.
 func getActiveDbPath() string {
+	if override := os.Getenv("DB_PATH"); override != "" {
+		return override // Respect explicit environment variable first
+	}
+
+	exePath, err := os.Executable()
+	if err != nil {
+		log.Printf("Warning: Failed to determine executable path, fallback to working directory: %v", err)
+		exePath = "."
+	}
+	baseDir := filepath.Dir(exePath)
+
 	paths := []string{
-		os.Getenv("DB_PATH"),
-		filepath.Join("data", "aetherflow.sqlite"),                                   // Canonical: backend/data/
-		filepath.Join("..", "backend", "data", "aetherflow.sqlite"),                  // From project root
-		filepath.Join("/opt", "AetherFlow", "backend", "data", "aetherflow.sqlite"), // Production
-		filepath.Join("..", "dashboard", "db", "aetherflow.sqlite"),                  // Legacy fallback
-		filepath.Join("dashboard", "db", "aetherflow.sqlite"),                        // Legacy fallback (alt)
-		filepath.Join(".", "aetherflow.sqlite"),
+		filepath.Join(baseDir, "data", "aetherflow.sqlite"),                                   // Canonical: backend/data/
+		filepath.Join(baseDir, "..", "backend", "data", "aetherflow.sqlite"),                  // From project root
+		filepath.Join("/opt", "AetherFlow", "backend", "data", "aetherflow.sqlite"),          // Production absolute path
+		filepath.Join(baseDir, "..", "dashboard", "db", "aetherflow.sqlite"),                  // Legacy fallback
+		filepath.Join(baseDir, "dashboard", "db", "aetherflow.sqlite"),                        // Legacy fallback (alt)
+		filepath.Join(baseDir, "aetherflow.sqlite"),                                           // Base directory fallback
 	}
 
 	for _, p := range paths {
-		if p == "" {
-			continue
-		}
 		if _, err := os.Stat(p); err == nil {
 			return p
 		}
 	}
-	return "aetherflow.sqlite"
+	
+	// Ultimate fallback strictly anchored to execution root
+	return filepath.Join(baseDir, "data", "aetherflow.sqlite")
 }
 
 func getBackupDir() string {

@@ -38,8 +38,9 @@ func HandleBandwidthApply(c *gin.Context) {
 	}
 
 	// TODO: Integrate with transmission/rtorrent APIs when configured
-	c.JSON(http.StatusOK, gin.H{
-		"message":      "Bandwidth limits noted. Torrent client integration pending configuration.",
+	c.JSON(http.StatusNotImplemented, gin.H{
+		"error":        "Not Implemented",
+		"message":      "Bandwidth limits noted. Torrent client xmlrpc/rpc integration pending configuration.",
 		"upload_kbps":  req.UploadKBps,
 		"download_kbps": req.DownloadKBps,
 	})

@@ -1,9 +1,7 @@
 package api
 
 import (
-	"context"
 	"crypto/rand"
-	"time"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
@@ -14,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
 
 	"aetherflow/db"
 	"aetherflow/models"
@@ -394,6 +393,15 @@ func isAllowedHost(host string) bool {
 	return false
 }
 
+// GetSession godoc
+// @Summary      Get current session
+// @Description  Get information about the currently authenticated user session.
+// @Tags         auth
+// @Accept       json
+// @Produce      json
+// @Success      200  {object}  map[string]interface{}
+// @Failure      401  {object}  map[string]interface{}
+// @Router       /auth/session [get]
 func GetSession(c *gin.Context) {
 	authHeader := c.GetHeader("Authorization")
 	if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
@@ -505,15 +513,11 @@ func AuthMiddleware() gin.HandlerFunc {
 		}
 		userId := int(userIdFloat)
 
-		// Phase 11: Redis Fast Blacklist Lookup (O(1))
+		// Phase 11 & 12: Robust JWT Blacklist (Redis O(1) + LRU Fallback)
 		jti, hasJti := claims["jti"].(string)
-		if hasJti && db.RedisClient != nil {
-			ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-			defer cancel()
-			if db.RedisClient.Get(ctx, "blacklist:"+jti).Err() == nil {
-				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized: session revoked"})
-				return
-			}
+		if hasJti && db.IsTokenRevoked(jti) {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized: session revoked"})
+			return
 		}
 
 		// Verify the user still exists in the database

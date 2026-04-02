@@ -19,7 +19,7 @@ export default function BandwidthCard() {
         setIsAnalyzing(true);
         setError('');
         try {
-            const res = await fetch('/api/ai/bandwidth/analyze', { method: 'POST' });
+            const res = await fetch('/api/v1/admin/ai/bandwidth/analyze', { method: 'POST' });
             const data = await res.json();
             if (!res.ok) throw new Error(data.error);
             setRecommendation(data);

@@ -12,6 +12,8 @@ import (
 	"os"
 	"strings"
 
+	"aetherflow/db"
+
 	"github.com/gin-gonic/gin"
 )
 
@@ -84,7 +86,6 @@ func EncryptKey(plaintext string) (string, error) {
 
 // DecryptKey decrypts a versioned ciphertext produced by EncryptKey.
 // - "enc:v1:<base64>" → strict decryption; errors on tampered data
-// - No prefix → legacy plaintext (migration-safe passthrough)
 func DecryptKey(encoded string) (string, error) {
 	if !IsEncryptionEnabled() {
 		return encoded, nil // Passthrough when encryption is not configured.
@@ -100,19 +101,8 @@ func DecryptKey(encoded string) (string, error) {
 		return decryptGCM(data)
 	}
 
-	// Legacy support: try to decode as unversioned base64 (pre-v1 format)
-	data, err := base64.StdEncoding.DecodeString(encoded)
-	if err != nil {
-		// Not base64 — likely a plaintext key from before encryption was enabled.
-		return encoded, nil
-	}
-
-	// Attempt GCM decryption; if it fails, treat as legacy plaintext
-	result, err := decryptGCM(data)
-	if err != nil {
-		return encoded, nil
-	}
-	return result, nil
+	// If no match to our version, fail entirely. Legacy is no longer supported!
+	return "", errors.New("ciphertext tampered or missing required version prefix")
 }
 
 // decryptGCM performs the raw AES-GCM decryption on decoded bytes.
@@ -139,4 +129,27 @@ func decryptGCM(data []byte) (string, error) {
 	}
 
 	return string(plaintext), nil
+}
+
+// MigrateLegacySecrets scans the database for known sensitive keys that lack the enc:v1: prefix and encrypts them.
+func MigrateLegacySecrets() error {
+	if !IsEncryptionEnabled() {
+		return nil
+	}
+	var apiKey string
+	err := db.DB.QueryRow("SELECT COALESCE(gemini_api_key, '') FROM settings WHERE id = 1").Scan(&apiKey)
+	if err != nil {
+		return err
+	}
+	if apiKey != "" && !strings.HasPrefix(apiKey, ciphertextPrefix) {
+		enc, err := EncryptKey(apiKey)
+		if err != nil {
+			return err
+		}
+		if _, err := db.DB.Exec("UPDATE settings SET gemini_api_key = ? WHERE id = 1", enc); err != nil {
+			return err
+		}
+		log.Println("[crypto] Successfully migrated legacy gemini_api_key to enc:v1: format")
+	}
+	return nil
 }

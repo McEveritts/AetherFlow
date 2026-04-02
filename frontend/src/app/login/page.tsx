@@ -13,7 +13,7 @@ export default function LoginPage() {
     const [isSetup, setIsSetup] = useState(false);
 
     useEffect(() => {
-        fetch('/api/auth/setup/check')
+        fetch('/api/v1/public/auth/setup/check')
             .then(res => res.json())
             .then(data => setIsSetup(data.setupRequired))
             .catch(() => { });
@@ -27,7 +27,7 @@ export default function LoginPage() {
         setError('');
 
         try {
-            const endpoint = isSetup ? '/api/auth/setup' : '/api/auth/login';
+            const endpoint = isSetup ? '/api/v1/public/auth/setup' : '/api/v1/public/auth/login';
             const res = await fetch(endpoint, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },

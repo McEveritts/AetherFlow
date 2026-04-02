@@ -59,7 +59,7 @@ const useHistoryStore = create<{
 
 export function useMetrics() {
     const { data: wsData, connectionState } = useWebSocket();
-    const { data: hardware } = useSWR<HardwareReport>('/api/system/hardware');
+    const { data: hardware } = useSWR<HardwareReport>('/api/v1/auth/system/hardware');
 
     const history = useHistoryStore((s) => s.history);
     const pushMetrics = useHistoryStore((s) => s.pushMetrics);
@@ -81,7 +81,7 @@ export function useMetrics() {
     // so ServicesTab updates in real-time without its own polling
     useEffect(() => {
         if (wsData?.services) {
-            globalMutate('/api/services', wsData.services, false);
+            globalMutate('/api/v1/auth/services', wsData.services, false);
         }
     }, [wsData?.services]);
 

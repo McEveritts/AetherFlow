@@ -39,7 +39,7 @@ EOF
 
 # ── Install Pi-hole ──────────────────────────────────────────────────────────
 log "Downloading and running Pi-hole installer (unattended)..."
-curl -sSL https://install.pi-hole.net | bash /dev/stdin --unattended >>"$LOGFILE" 2>&1
+fetch_and_run "https://install.pi-hole.net" "SKIP" --unattended >>"$LOGFILE" 2>&1
 
 # ── Set a random web password ────────────────────────────────────────────────
 PIHOLE_PASS=$(openssl rand -base64 12)

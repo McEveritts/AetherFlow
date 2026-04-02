@@ -16,7 +16,7 @@ log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [netdata] $1" | tee -a "$LOGFILE"; 
 
 # ── Install Netdata using official kickstart ─────────────────────────────────
 log "Running Netdata kickstart installer..."
-curl -fsSL https://get.netdata.cloud/kickstart.sh | sh -s -- --non-interactive --dont-wait >>"$LOGFILE" 2>&1
+fetch_and_run "https://get.netdata.cloud/kickstart.sh" "SKIP" --non-interactive --dont-wait >>"$LOGFILE" 2>&1
 
 # ── Apache reverse proxy ─────────────────────────────────────────────────────
 log "Configuring Apache reverse proxy..."

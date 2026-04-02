@@ -46,7 +46,7 @@ function getBackoffDelay(attempt: number): number {
 function buildWsUrl(): string {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     return process.env.NEXT_PUBLIC_API_URL
-        ? process.env.NEXT_PUBLIC_API_URL.replace('http', 'ws') + '/api/ws'
+        ? process.env.NEXT_PUBLIC_API_URL.replace('http', 'ws') + '/api/v1/auth/ws'
         : `${protocol}//${window.location.host}/api/ws`;
 }
 
@@ -124,7 +124,7 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
 
         const poll = async () => {
             try {
-                const res = await fetch('/api/system/metrics');
+                const res = await fetch('/api/v1/admin/system/metrics');
                 if (!res.ok) return;
                 const metrics = await res.json();
                 if (isMountedRef.current) {
@@ -187,7 +187,7 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
                         services: message.data.services,
                     });
                 } else if (message.type === 'MARKETPLACE_UPDATE') {
-                    globalMutate('/api/marketplace');
+                    globalMutate('/api/v1/public/marketplace');
                 }
                 // PONG and other message types are silently consumed
             } catch (err) {

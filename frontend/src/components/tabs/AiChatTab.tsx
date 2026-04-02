@@ -71,7 +71,7 @@ export default function AiChatTab() {
         setIsTyping(true);
 
         try {
-            const endpoint = supportMode ? '/api/ai/support' : '/api/ai/chat';
+            const endpoint = supportMode ? '/api/v1/admin/ai/support' : '/api/v1/admin/ai/chat';
             const body: Record<string, unknown> = {
                 message: text,
                 history: messages,

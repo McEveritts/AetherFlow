@@ -26,7 +26,7 @@ export default function SettingsTab() {
         }
         setIsTesting(true);
         try {
-            const res = await fetch('/api/settings/test-ai', {
+            const res = await fetch('/api/v1/auth/settings/test-ai', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ gemini_api_key: apiKey }),
@@ -45,12 +45,12 @@ export default function SettingsTab() {
     };
 
     const { data: updateData, error: updateError } = useSWR(
-        '/api/system/update/check',
+        '/api/v1/auth/system/update/check',
         { refreshInterval: 60000 }
     );
 
     const { data: settingsData, isLoading, mutate: mutateSettings } = useSWR(
-        '/api/settings',
+        '/api/v1/auth/settings',
         {
             onSuccess: (data: Record<string, string>) => {
                 if (data.aiModel) setModel(data.aiModel);
@@ -84,7 +84,7 @@ export default function SettingsTab() {
         mutateSettings({ ...settingsData, ...payload }, false);
 
         try {
-            const res = await fetch('/api/settings', {
+            const res = await fetch('/api/v1/auth/settings', {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload)
@@ -109,7 +109,7 @@ export default function SettingsTab() {
         setIsUpdating(true);
         setUpdateMessage('Initiating update sequence...');
         try {
-            const res = await fetch('/api/system/update/run', {
+            const res = await fetch('/api/v1/admin/system/update/run', {
                 method: 'POST'
             });
             const data = await res.json();

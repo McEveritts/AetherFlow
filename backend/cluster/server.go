@@ -25,21 +25,21 @@ type GRPCServer struct {
 func NewGRPCServer() (*GRPCServer, error) {
 	var opts []grpc.ServerOption
 
-	// Configure mTLS if certificates are provided
+	// Enforce mTLS: certificates are MANDATORY
 	caCert := os.Getenv("CLUSTER_CA_CERT")
 	serverCert := os.Getenv("CLUSTER_SERVER_CERT")
 	serverKey := os.Getenv("CLUSTER_SERVER_KEY")
 
-	if caCert != "" && serverCert != "" && serverKey != "" {
-		tlsConfig, err := loadServerTLS(caCert, serverCert, serverKey)
-		if err != nil {
-			return nil, fmt.Errorf("failed to load TLS config: %w", err)
-		}
-		opts = append(opts, grpc.Creds(credentials.NewTLS(tlsConfig)))
-		log.Println("Cluster gRPC: mTLS enabled")
-	} else {
-		log.Println("Cluster gRPC: running without mTLS (⚠ not recommended for production)")
+	if caCert == "" || serverCert == "" || serverKey == "" {
+		return nil, fmt.Errorf("CLUSTER_CA_CERT, CLUSTER_SERVER_CERT, and CLUSTER_SERVER_KEY must be set to enable secure cluster mTLS")
 	}
+
+	tlsConfig, err := loadServerTLS(caCert, serverCert, serverKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load TLS config: %w", err)
+	}
+	opts = append(opts, grpc.Creds(credentials.NewTLS(tlsConfig)))
+	log.Println("Cluster gRPC: stricter mTLS enforced")
 
 	srv := grpc.NewServer(opts...)
 	s := &GRPCServer{server: srv}
@@ -55,12 +55,18 @@ func (s *GRPCServer) Start() error {
 		port = "50051"
 	}
 
-	lis, err := net.Listen("tcp", "0.0.0.0:"+port)
-	if err != nil {
-		return fmt.Errorf("failed to listen on gRPC port %s: %w", port, err)
+	// Phase 3: Bind to localhost to prevent external network exposure unless overridden
+	host := os.Getenv("GRPC_HOST")
+	if host == "" {
+		host = "127.0.0.1"
 	}
 
-	log.Printf("Cluster gRPC server listening on :%s", port)
+	lis, err := net.Listen("tcp", fmt.Sprintf("%s:%s", host, port))
+	if err != nil {
+		return fmt.Errorf("failed to listen on gRPC interface %s:%s: %w", host, port, err)
+	}
+
+	log.Printf("Cluster gRPC server securely listening on %s:%s", host, port)
 	return s.server.Serve(lis)
 }
 
@@ -75,6 +81,14 @@ func (s *GRPCServer) RegisterWorker(ctx context.Context, req *pb.RegisterRequest
 		return &pb.RegisterResponse{
 			Accepted: false,
 			Message:  "hostname, address, and psk are required",
+		}, nil
+	}
+
+	// Phase 3: Enforce strict PSK length
+	if len(req.Psk) < 32 {
+		return &pb.RegisterResponse{
+			Accepted: false,
+			Message:  "psk must be at least 32 characters for adequate security",
 		}, nil
 	}
 

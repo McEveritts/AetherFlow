@@ -20,7 +20,7 @@ export interface App {
 
 export function useMarketplace() {
     const { data, error, isLoading, mutate } = useSWR<App[]>(
-        '/api/marketplace',
+        '/api/v1/public/marketplace',
         {
             refreshInterval: (currentData) => {
                 if (!currentData) return 0;

@@ -114,11 +114,11 @@ func OIDCDiscovery(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{
 		"issuer":                 issuer,
-		"authorization_endpoint": issuer + "/api/v1/oidc/authorize",
-		"token_endpoint":         issuer + "/api/v1/oidc/token",
-		"userinfo_endpoint":      issuer + "/api/v1/oidc/userinfo",
-		"jwks_uri":               issuer + "/api/v1/oidc/jwks",
-		"revocation_endpoint":    issuer + "/api/v1/oidc/revoke",
+		"authorization_endpoint": issuer + "/api/v1/public/oidc/authorize",
+		"token_endpoint":         issuer + "/api/v1/public/oidc/token",
+		"userinfo_endpoint":      issuer + "/api/v1/public/oidc/userinfo",
+		"jwks_uri":               issuer + "/api/v1/public/oidc/jwks",
+		"revocation_endpoint":    issuer + "/api/v1/public/oidc/revoke",
 		"response_types_supported": []string{"code"},
 		"subject_types_supported":  []string{"public"},
 		"id_token_signing_alg_values_supported": []string{"RS256"},
@@ -195,9 +195,69 @@ func OIDCAuthorize(c *gin.Context) {
 		return
 	}
 
-	userID, err := extractUserIDFromJWT(cookie)
+	_, err = extractUserIDFromJWT(cookie)
 	if err != nil {
 		c.Redirect(http.StatusTemporaryRedirect, fmt.Sprintf("/login?return_to=%s", c.Request.URL.String()))
+		return
+	}
+
+	// Redirect to frontend consent screen instead of auto-approving.
+	// The frontend will prompt the user and then call POST /api/v1/auth/oidc/consent
+	consentURL := fmt.Sprintf("/oauth/consent?client_id=%s&redirect_uri=%s&response_type=%s&scope=%s&state=%s&code_challenge=%s&code_challenge_method=%s",
+		url.QueryEscape(clientID), url.QueryEscape(redirectURI), url.QueryEscape(responseType),
+		url.QueryEscape(scope), url.QueryEscape(state), url.QueryEscape(codeChallenge), url.QueryEscape(codeChallengeMethod))
+
+	c.Redirect(http.StatusTemporaryRedirect, consentURL)
+}
+
+// OIDCConsent is called by the frontend after the user approves the OAuth request.
+// It generates the authorization code and returns the redirect URL.
+func OIDCConsent(c *gin.Context) {
+	userId, exists := c.Get("user_id")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		return
+	}
+
+	var req struct {
+		ClientID            string `json:"client_id" binding:"required"`
+		RedirectURI         string `json:"redirect_uri" binding:"required"`
+		ResponseType        string `json:"response_type" binding:"required"`
+		Scope               string `json:"scope"`
+		State               string `json:"state"`
+		CodeChallenge       string `json:"code_challenge"`
+		CodeChallengeMethod string `json:"code_challenge_method"`
+		Approved            bool   `json:"approved"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if !req.Approved {
+		// User denied consent
+		sep := "?"
+		if strings.Contains(req.RedirectURI, "?") {
+			sep = "&"
+		}
+		redirectURL := fmt.Sprintf("%s%serror=access_denied&error_description=User+denied+access", req.RedirectURI, sep)
+		if req.State != "" {
+			redirectURL += "&state=" + url.QueryEscape(req.State)
+		}
+		c.JSON(http.StatusOK, gin.H{"redirect_url": redirectURL})
+		return
+	}
+
+	if req.ResponseType != "code" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "unsupported_response_type"})
+		return
+	}
+
+	var storedRedirectURIs string
+	err := db.DB.QueryRow("SELECT redirect_uris FROM oidc_clients WHERE id = ?", req.ClientID).Scan(&storedRedirectURIs)
+	if err != nil || !isAllowedRedirectURI(req.RedirectURI, storedRedirectURIs) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_client_or_redirect_uri"})
 		return
 	}
 
@@ -210,6 +270,7 @@ func OIDCAuthorize(c *gin.Context) {
 	}
 	code := hex.EncodeToString(codeBytes)
 
+	scope := req.Scope
 	if scope == "" {
 		scope = "openid profile email"
 	}
@@ -219,7 +280,7 @@ func OIDCAuthorize(c *gin.Context) {
 	_, err = db.DB.Exec(
 		`INSERT INTO oidc_auth_codes (code, client_id, user_id, redirect_uri, scope, code_challenge, code_challenge_method, expires_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		code, clientID, userID, redirectURI, scope, codeChallenge, codeChallengeMethod, expiresAt.Format(time.RFC3339),
+		code, req.ClientID, userId.(int), req.RedirectURI, scope, req.CodeChallenge, req.CodeChallengeMethod, expiresAt.Format(time.RFC3339),
 	)
 	if err != nil {
 		log.Printf("OIDC: failed to store auth code: %v", err)
@@ -229,15 +290,15 @@ func OIDCAuthorize(c *gin.Context) {
 
 	// Redirect back with code
 	sep := "?"
-	if strings.Contains(redirectURI, "?") {
+	if strings.Contains(req.RedirectURI, "?") {
 		sep = "&"
 	}
-	redirectURL := fmt.Sprintf("%s%scode=%s", redirectURI, sep, code)
-	if state != "" {
-		redirectURL += "&state=" + state
+	redirectURL := fmt.Sprintf("%s%scode=%s", req.RedirectURI, sep, code)
+	if req.State != "" {
+		redirectURL += "&state=" + url.QueryEscape(req.State)
 	}
 
-	c.Redirect(http.StatusTemporaryRedirect, redirectURL)
+	c.JSON(http.StatusOK, gin.H{"redirect_url": redirectURL})
 }
 
 // ---- Token Endpoint ----

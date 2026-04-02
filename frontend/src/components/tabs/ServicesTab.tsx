@@ -41,7 +41,7 @@ const SERVICE_WEB_PORTS: Record<string, number | string> = {
     'pihole-FTL': '/admin',
     'apache2': 443,
     'aetherflow-frontend': '/',
-    'aetherflow-api': '/api/services',
+    'aetherflow-api': '/api/v1/auth/services',
 };
 
 interface ServiceInfo {
@@ -57,7 +57,7 @@ export default function ServicesTab() {
     const [loadingService, setLoadingService] = useState<string | null>(null);
 
     const { data: services, mutate, isLoading } = useSWR<Record<string, ServiceInfo>>(
-        '/api/services',
+        '/api/v1/auth/services',
         { refreshInterval: 15000 }
     );
 
@@ -75,7 +75,7 @@ export default function ServicesTab() {
         }
 
         try {
-            const res = await fetch(`/api/services/${encodeURIComponent(name)}/control`, {
+            const res = await fetch(`/api/v1/auth/services/${encodeURIComponent(name)}/control`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({

@@ -32,18 +32,17 @@ func quotaErrorStatus(err error) int {
 // QuotaUploadGuard blocks uploads that would exceed the current user's configured quota.
 func QuotaUploadGuard() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		authHeader := c.GetHeader("Authorization")
-		if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
+		if c.Request.ContentLength <= 0 {
 			c.Next()
 			return
 		}
-		tokenString := strings.TrimPrefix(authHeader, "Bearer ")
 
-		userID, err := extractUserIDFromJWT(tokenString)
-		if err != nil || c.Request.ContentLength <= 0 {
-			c.Next()
+		rawUserID, exists := c.Get("user_id")
+		if !exists {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
 			return
 		}
+		userID := rawUserID.(int)
 
 		allowed, quota, err := services.HasQuotaHeadroom(userID, c.Request.ContentLength)
 		if err != nil {

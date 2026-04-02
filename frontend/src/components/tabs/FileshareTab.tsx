@@ -10,7 +10,7 @@ interface FetchedFile {
 }
 
 export default function FileshareTab() {
-    const { data: files, error, mutate } = useSWR<FetchedFile[]>('/api/fileshare');
+    const { data: files, error, mutate } = useSWR<FetchedFile[]>('/api/v1/auth/fileshare');
     const [isDragging, setIsDragging] = useState(false);
     const [isUploading, setIsUploading] = useState(false);
     const fileInputRef = useRef<HTMLInputElement>(null);
@@ -20,7 +20,7 @@ export default function FileshareTab() {
         const formData = new FormData();
         formData.append('file', file);
         try {
-            const res = await fetch('/api/fileshare/upload', {
+            const res = await fetch('/api/v1/auth/fileshare/upload', {
                 method: 'POST',
                 body: formData
             });

@@ -6,9 +6,12 @@ import (
 	"strings"
 	"time"
 
+	_ "aetherflow/docs"
 	"aetherflow/services"
 
 	"github.com/gin-gonic/gin"
+	swaggerFiles "github.com/swaggo/files"
+	ginSwagger "github.com/swaggo/gin-swagger"
 )
 
 func RegisterRoutes(r *gin.Engine) {
@@ -31,6 +34,7 @@ func registerV1Routes(apiGroup *gin.RouterGroup) {
 	// ── Public routes (no authentication required) ──
 	publicGroup := apiGroup.Group("/public")
 	publicGroup.GET("/openapi.yaml", GetOpenAPISpec)
+	publicGroup.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
 	publicGroup.GET("/csrf-token", issueCSRFToken)
 
 	authLimiter := RateLimitMiddleware(5, 1*time.Minute)
@@ -60,12 +64,14 @@ func registerV1Routes(apiGroup *gin.RouterGroup) {
 	}
 	{
 		authGroup.GET("/ws", HandleWebSocket)
+		authGroup.GET("/ws/ticket", IssueWSTicket)
+		authGroup.POST("/oidc/consent", OIDCConsent)
 		authGroup.POST("/ai/chat", handleAiChat)
 		authGroup.POST("/ai/support", handleAiSupport)
 
-		authGroup.GET("/auth/session", GetSession)
-		authGroup.POST("/auth/logout", Logout)
-		authGroup.PUT("/auth/profile", UpdateProfile)
+		authGroup.GET("/session", GetSession)
+		authGroup.POST("/logout", Logout)
+		authGroup.PUT("/profile", UpdateProfile)
 
 		authGroup.GET("/user/quota", GetOwnQuota)
 
