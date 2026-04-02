@@ -58,11 +58,11 @@ func TestDecryptWithWrongKey(t *testing.T) {
 	// Switch to a different key
 	aesMasterKey = []byte("different-key-exactly-32-bytes!!")
 
-	// DecryptKey should gracefully return the encrypted value (not crash)
-	// because GCM auth failure triggers the passthrough fallback.
+	// With versioned ciphertext (enc:v1: prefix), DecryptKey MUST error on wrong key.
+	// This is the security-critical behavior change: no silent fallback.
 	result, err := DecryptKey(encrypted)
-	if err != nil {
-		t.Fatalf("DecryptKey should not error (fallback): %v", err)
+	if err == nil {
+		t.Fatal("DecryptKey with wrong key should return error for versioned ciphertext")
 	}
 
 	// Should NOT decrypt to the original plaintext

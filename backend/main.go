@@ -120,7 +120,7 @@ func main() {
 	services.InitMetricsRecorder()
 
 	// Initialize the Smart Backup Scheduler (Phase 20)
-	services.InitSmartBackupScheduler()
+	services.InitSmartBackupScheduler(api.GetDecryptedGeminiKey)
 
 	// Phase 22 — warn if billing webhook secrets are not configured.
 	// The POST /billing/webhooks/:provider endpoint is intentionally outside
@@ -129,6 +129,18 @@ func main() {
 	if os.Getenv("WHMCS_WEBHOOK_SECRET") == "" && os.Getenv("BLESTA_WEBHOOK_SECRET") == "" && os.Getenv("BILLING_WEBHOOK_SECRET") == "" {
 		log.Println("⚠  WARNING: No billing webhook secret configured (WHMCS_WEBHOOK_SECRET / BLESTA_WEBHOOK_SECRET / BILLING_WEBHOOK_SECRET). " +
 			"The POST /billing/webhooks/:provider endpoint will reject all requests until a secret is set.")
+	}
+
+	// Warn if running in production without ALLOWED_HOSTS
+	if gin.Mode() == gin.ReleaseMode && os.Getenv("ALLOWED_HOSTS") == "" {
+		log.Println("⚠  WARNING: ALLOWED_HOSTS is not set in production mode. " +
+			"Host header validation is disabled, which may allow open redirect attacks (CWE-601).")
+	}
+
+	// CSRF default change notification
+	if os.Getenv("CSRF_DISABLED") == "" && os.Getenv("CSRF_ENABLED") != "" {
+		log.Println("ℹ  NOTE: CSRF_ENABLED is deprecated. CSRF is now ON by default. " +
+			"Set CSRF_DISABLED=true to disable for local development.")
 	}
 
 	// Start gRPC server/client based on cluster mode

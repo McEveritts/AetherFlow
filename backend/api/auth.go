@@ -543,38 +543,17 @@ func AdminOnly() gin.HandlerFunc {
 }
 
 func UpdateProfile(c *gin.Context) {
-	authHeader := c.GetHeader("Authorization")
-	if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
+	// Use the user_id already validated and set by AuthMiddleware()
+	rawUserID, exists := c.Get("user_id")
+	if !exists {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
 		return
 	}
-	tokenString := strings.TrimPrefix(authHeader, "Bearer ")
-
-	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
-		// Prevent algorithm confusion attacks: only accept HMAC signing
-		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-			return nil, jwt.ErrSignatureInvalid
-		}
-		return getJWTSecret(), nil
-	})
-
-	if err != nil || !token.Valid {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
-		return
-	}
-
-	claims, ok := token.Claims.(jwt.MapClaims)
+	userId, ok := rawUserID.(int)
 	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid user context"})
 		return
 	}
-
-	userIdFloat, ok := claims["user_id"].(float64)
-	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid token claims"})
-		return
-	}
-	userId := int(userIdFloat)
 
 	var req struct {
 		Email string `json:"email" binding:"required"`
@@ -585,7 +564,7 @@ func UpdateProfile(c *gin.Context) {
 		return
 	}
 
-	_, err = db.DB.Exec("UPDATE users SET email = ? WHERE id = ?", req.Email, userId)
+	_, err := db.DB.Exec("UPDATE users SET email = ? WHERE id = ?", req.Email, userId)
 	if err != nil {
 		log.Printf("Profile update error: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update profile"})

@@ -12,11 +12,20 @@ import (
 var RedisClient *redis.Client
 
 func InitRedis() {
+	addr := os.Getenv("REDIS_ADDR")
+	if addr == "" {
+		addr = "localhost:6379"
+	}
+
 	RedisClient = redis.NewClient(&redis.Options{
-		Addr:     "localhost:6379",
-		Password: os.Getenv("REDIS_PASSWORD"),
-		DB:       0,
-		PoolSize: 100, // Robust connection pool
+		Addr:         addr,
+		Password:     os.Getenv("REDIS_PASSWORD"),
+		DB:           0,
+		PoolSize:     100,
+		MinIdleConns: 10,
+		DialTimeout:  2 * time.Second,
+		ReadTimeout:  500 * time.Millisecond,
+		WriteTimeout: 500 * time.Millisecond,
 	})
 
 	// Graceful degradation check

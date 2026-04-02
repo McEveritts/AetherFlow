@@ -54,7 +54,8 @@ func registerV1Routes(apiGroup *gin.RouterGroup) {
 	// ── Authenticated routes (require valid JWT session) ──
 	authGroup := apiGroup.Group("/auth")
 	authGroup.Use(AuthMiddleware())
-	if strings.ToLower(os.Getenv("CSRF_ENABLED")) == "true" {
+	// CSRF protection is ON by default. Set CSRF_DISABLED=true for local dev only.
+	if strings.ToLower(os.Getenv("CSRF_DISABLED")) != "true" {
 		authGroup.Use(CSRFMiddleware())
 	}
 	{
@@ -66,7 +67,7 @@ func registerV1Routes(apiGroup *gin.RouterGroup) {
 		authGroup.POST("/auth/logout", Logout)
 		authGroup.PUT("/auth/profile", UpdateProfile)
 
-		authGroup.GET("/user/quota/:id", GetUserQuota)
+		authGroup.GET("/user/quota", GetOwnQuota)
 
 		authGroup.GET("/settings", GetSettings)
 		authGroup.GET("/fileshare", GetFilesList)
@@ -77,7 +78,6 @@ func registerV1Routes(apiGroup *gin.RouterGroup) {
 
 		authGroup.GET("/system/update/check", CheckUpdate)
 		authGroup.GET("/system/hardware", GetHardwareInfo)
-		authGroup.GET("/system/metrics", getSystemMetrics)
 
 		authGroup.GET("/notifications", GetNotifications)
 		authGroup.PUT("/notifications/:id/read", MarkNotificationRead)
@@ -157,6 +157,9 @@ func registerV1Routes(apiGroup *gin.RouterGroup) {
 		adminGroup.GET("/network/tailscale/status", GetTailscaleStatus)
 		adminGroup.GET("/network/tailscale/peers", GetTailscalePeers)
 		adminGroup.POST("/network/tailscale/routes", AdvertiseTailscaleRoutes)
+
+		// System metrics are admin-only to prevent information disclosure (CWE-284)
+		adminGroup.GET("/system/metrics", getSystemMetrics)
 	}
 }
 

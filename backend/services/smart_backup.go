@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -31,14 +30,18 @@ type SmartBackupScheduler struct {
 	running      bool
 	lastWindow   *BackupWindow
 	nextBackupAt *time.Time
+	keyResolver  func() (string, error) // injected from api layer to avoid circular import
 }
 
 // Global scheduler instance.
 var BackupScheduler *SmartBackupScheduler
 
 // InitSmartBackupScheduler starts the smart backup scheduler.
-func InitSmartBackupScheduler() {
-	BackupScheduler = &SmartBackupScheduler{}
+// keyResolver should be a function that returns the decrypted Gemini API key.
+func InitSmartBackupScheduler(keyResolver func() (string, error)) {
+	BackupScheduler = &SmartBackupScheduler{
+		keyResolver: keyResolver,
+	}
 
 	// Check if smart scheduling is enabled
 	var mode string
@@ -77,10 +80,14 @@ func (sbs *SmartBackupScheduler) schedulerLoop() {
 }
 
 func (sbs *SmartBackupScheduler) recalculate() {
-	apiKey := ""
-	db.DB.QueryRow("SELECT COALESCE(gemini_api_key, '') FROM settings WHERE id = 1").Scan(&apiKey)
-	if apiKey == "" {
-		apiKey = os.Getenv("GEMINI_API_KEY")
+	var apiKey string
+	var err error
+	if sbs.keyResolver != nil {
+		apiKey, err = sbs.keyResolver()
+		if err != nil {
+			log.Println("Smart backup: no API key, skipping window calculation")
+			return
+		}
 	}
 	if apiKey == "" {
 		log.Println("Smart backup: no API key, skipping window calculation")

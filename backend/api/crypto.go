@@ -10,6 +10,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 )
@@ -49,8 +50,13 @@ func IsEncryptionEnabled() bool {
 	return len(aesMasterKey) == 32
 }
 
+// ciphertextPrefix marks values encrypted by this module.
+// Values with this prefix are parsed strictly; tampered data returns an error.
+// Values WITHOUT this prefix are treated as legacy plaintext (migration-safe).
+const ciphertextPrefix = "enc:v1:"
+
 // EncryptKey encrypts plaintext using AES-256-GCM with a cryptographically random nonce.
-// Returns a base64-encoded string of (nonce || ciphertext).
+// Returns a versioned string: "enc:v1:<base64(nonce || ciphertext)>".
 func EncryptKey(plaintext string) (string, error) {
 	if !IsEncryptionEnabled() {
 		return plaintext, nil // Passthrough when encryption is not configured.
@@ -73,21 +79,44 @@ func EncryptKey(plaintext string) (string, error) {
 
 	// Seal appends the ciphertext to the nonce slice.
 	ciphertext := aesGCM.Seal(nonce, nonce, []byte(plaintext), nil)
-	return base64.StdEncoding.EncodeToString(ciphertext), nil
+	return ciphertextPrefix + base64.StdEncoding.EncodeToString(ciphertext), nil
 }
 
-// DecryptKey decrypts a base64-encoded (nonce || ciphertext) produced by EncryptKey.
+// DecryptKey decrypts a versioned ciphertext produced by EncryptKey.
+// - "enc:v1:<base64>" → strict decryption; errors on tampered data
+// - No prefix → legacy plaintext (migration-safe passthrough)
 func DecryptKey(encoded string) (string, error) {
 	if !IsEncryptionEnabled() {
 		return encoded, nil // Passthrough when encryption is not configured.
 	}
 
+	// Versioned ciphertext: strict decryption, no silent fallback
+	if strings.HasPrefix(encoded, ciphertextPrefix) {
+		payload := strings.TrimPrefix(encoded, ciphertextPrefix)
+		data, err := base64.StdEncoding.DecodeString(payload)
+		if err != nil {
+			return "", fmt.Errorf("versioned ciphertext base64 decode failed: %w", err)
+		}
+		return decryptGCM(data)
+	}
+
+	// Legacy support: try to decode as unversioned base64 (pre-v1 format)
 	data, err := base64.StdEncoding.DecodeString(encoded)
 	if err != nil {
 		// Not base64 — likely a plaintext key from before encryption was enabled.
 		return encoded, nil
 	}
 
+	// Attempt GCM decryption; if it fails, treat as legacy plaintext
+	result, err := decryptGCM(data)
+	if err != nil {
+		return encoded, nil
+	}
+	return result, nil
+}
+
+// decryptGCM performs the raw AES-GCM decryption on decoded bytes.
+func decryptGCM(data []byte) (string, error) {
 	block, err := aes.NewCipher(aesMasterKey)
 	if err != nil {
 		return "", fmt.Errorf("aes cipher creation failed: %w", err)
@@ -106,8 +135,7 @@ func DecryptKey(encoded string) (string, error) {
 	nonce, ciphertext := data[:nonceSize], data[nonceSize:]
 	plaintext, err := aesGCM.Open(nil, nonce, ciphertext, nil)
 	if err != nil {
-		// GCM authentication failed — could be a plaintext key stored before encryption.
-		return encoded, nil
+		return "", fmt.Errorf("gcm decryption failed: %w", err)
 	}
 
 	return string(plaintext), nil

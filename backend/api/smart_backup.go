@@ -3,7 +3,6 @@ package api
 import (
 	"encoding/json"
 	"net/http"
-	"os"
 
 	"aetherflow/db"
 	"aetherflow/services"
@@ -48,10 +47,9 @@ func HandleSetBackupSchedule(c *gin.Context) {
 
 	// If switching to smart mode, trigger an immediate window calculation
 	if req.Mode == "smart" {
-		apiKey := ""
-		db.DB.QueryRow("SELECT COALESCE(gemini_api_key, '') FROM settings WHERE id = 1").Scan(&apiKey)
-		if apiKey == "" {
-			apiKey = os.Getenv("GEMINI_API_KEY")
+		apiKey, keyErr := GetDecryptedGeminiKey()
+		if keyErr != nil {
+			apiKey = "" // No key available, skip
 		}
 		if apiKey != "" {
 			go func() {

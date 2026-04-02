@@ -22,11 +22,13 @@ type GeminiClientBundle struct {
 	SystemPrompt string
 }
 
-// getGeminiBundle resolves the API key, default model, and system prompt,
-// then creates a ready-to-use Gemini client. Caller must defer bundle.Client.Close().
-func getGeminiBundle(ctx context.Context) (*GeminiClientBundle, error) {
-	// Resolve API key: DB first, then env
-	apiKey := ""
+// GetDecryptedGeminiKey resolves the Gemini API key through a single path:
+// 1. Read from SQLite settings
+// 2. Decrypt (if encryption is enabled)
+// 3. Fall back to GEMINI_API_KEY env var
+// All consumers of the Gemini API key MUST use this function.
+func GetDecryptedGeminiKey() (string, error) {
+	var apiKey string
 	db.DB.QueryRow("SELECT COALESCE(gemini_api_key, '') FROM settings WHERE id = 1").Scan(&apiKey)
 	// Decrypt the API key if it was stored encrypted
 	if apiKey != "" {
@@ -38,12 +40,22 @@ func getGeminiBundle(ctx context.Context) (*GeminiClientBundle, error) {
 		apiKey = os.Getenv("GEMINI_API_KEY")
 	}
 	if apiKey == "" {
-		return nil, fmt.Errorf("Gemini API key not configured. Set it in Settings → FlowAI Engine.")
+		return "", fmt.Errorf("Gemini API key not configured. Set it in Settings → FlowAI Engine.")
+	}
+	return apiKey, nil
+}
+
+// getGeminiBundle resolves the API key, default model, and system prompt,
+// then creates a ready-to-use Gemini client. Caller must defer bundle.Client.Close().
+func getGeminiBundle(ctx context.Context) (*GeminiClientBundle, error) {
+	apiKey, err := GetDecryptedGeminiKey()
+	if err != nil {
+		return nil, err
 	}
 
 	// Resolve default model and system prompt
 	var aiModel, systemPrompt string
-	err := db.DB.QueryRow("SELECT ai_model, system_prompt FROM settings WHERE id = 1").Scan(&aiModel, &systemPrompt)
+	err = db.DB.QueryRow("SELECT ai_model, system_prompt FROM settings WHERE id = 1").Scan(&aiModel, &systemPrompt)
 	if err != nil {
 		aiModel = "gemini-2.5-pro"
 		systemPrompt = "You are FlowAI, a helpful server assistant."

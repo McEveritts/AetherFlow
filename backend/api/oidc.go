@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -39,7 +40,15 @@ func init() {
 func loadOrGenerateOIDCKey() {
 	keyPath := os.Getenv("OIDC_KEY_PATH")
 	if keyPath == "" {
-		keyPath = "data/oidc_rsa.pem"
+		// Anchor to the executable's directory (not CWD) to prevent
+		// silent key regeneration when started from a different directory.
+		exe, exeErr := os.Executable()
+		if exeErr != nil {
+			log.Printf("OIDC: failed to resolve executable path: %v, using CWD fallback", exeErr)
+			keyPath = "data/oidc_rsa.pem"
+		} else {
+			keyPath = filepath.Join(filepath.Dir(exe), "data", "oidc_rsa.pem")
+		}
 	}
 
 	// Try to load existing key
@@ -67,8 +76,9 @@ func loadOrGenerateOIDCKey() {
 	oidcPrivateKey = key
 	oidcKeyID = computeKeyID(key)
 
-	// Persist to disk
-	os.MkdirAll("data", 0700)
+	// Persist to disk — create parent directory if needed
+	keyDir := filepath.Dir(keyPath)
+	os.MkdirAll(keyDir, 0700)
 	keyPEM := pem.EncodeToMemory(&pem.Block{
 		Type:  "RSA PRIVATE KEY",
 		Bytes: x509.MarshalPKCS1PrivateKey(key),

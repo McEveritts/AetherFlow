@@ -2,9 +2,7 @@ package api
 
 import (
 	"net/http"
-	"os"
 
-	"aetherflow/db"
 	"aetherflow/services"
 
 	"github.com/gin-gonic/gin"
@@ -12,13 +10,9 @@ import (
 
 // HandleGetPredictions returns the latest prediction report (or runs one on demand).
 func HandleGetPredictions(c *gin.Context) {
-	apiKey := ""
-	db.DB.QueryRow("SELECT COALESCE(gemini_api_key, '') FROM settings WHERE id = 1").Scan(&apiKey)
-	if apiKey == "" {
-		apiKey = os.Getenv("GEMINI_API_KEY")
-	}
-	if apiKey == "" {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Gemini API key not configured"})
+	apiKey, err := GetDecryptedGeminiKey()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 

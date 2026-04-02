@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"aetherflow/db"
 	"aetherflow/services"
 
 	"github.com/gin-gonic/gin"
@@ -42,14 +41,10 @@ func HandleMetadataScan(c *gin.Context) {
 		return
 	}
 
-	// Get API key
-	apiKey := ""
-	db.DB.QueryRow("SELECT COALESCE(gemini_api_key, '') FROM settings WHERE id = 1").Scan(&apiKey)
-	if apiKey == "" {
-		apiKey = os.Getenv("GEMINI_API_KEY")
-	}
-	if apiKey == "" {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Gemini API key not configured"})
+	// Get API key (always decrypted)
+	apiKey, err := GetDecryptedGeminiKey()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 

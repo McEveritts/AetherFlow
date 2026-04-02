@@ -90,6 +90,29 @@ func GetUserQuota(c *gin.Context) {
 	c.JSON(http.StatusOK, record)
 }
 
+// GetOwnQuota returns the authenticated user's own quota — no URL parameter,
+// no IDOR risk. Bound to GET /user/quota.
+func GetOwnQuota(c *gin.Context) {
+	rawUserID, exists := c.Get("user_id")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Authentication required"})
+		return
+	}
+	userID, ok := rawUserID.(int)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Invalid user context"})
+		return
+	}
+
+	record, err := services.GetUserQuotaRecord(userID)
+	if err != nil {
+		c.JSON(quotaErrorStatus(err), gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, record)
+}
+
 func ListUserQuotas(c *gin.Context) {
 	records, err := services.ListUserQuotaRecords()
 	if err != nil {
