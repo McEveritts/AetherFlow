@@ -41,28 +41,21 @@ func migrate(version int, description string, stmts ...string) {
 func InitDB() {
 	dbPath := os.Getenv("DB_PATH")
 	if dbPath == "" {
-		// Fallback paths, looking for aetherflow.sqlite
-		paths := []string{
-			filepath.Join("data", "aetherflow.sqlite"),                                   // Canonical: backend/data/
-			filepath.Join("..", "backend", "data", "aetherflow.sqlite"),                   // From project root
-			filepath.Join("/opt", "AetherFlow", "backend", "data", "aetherflow.sqlite"),  // Production
-			filepath.Join("..", "dashboard", "db", "aetherflow.sqlite"),                   // Legacy fallback
-			filepath.Join("dashboard", "db", "aetherflow.sqlite"),                         // Legacy fallback (alt)
-			filepath.Join("/opt", "AetherFlow", "dashboard", "db", "aetherflow.sqlite"),  // Legacy production fallback
+		// Anchor the database path to the executable's directory, not the CWD.
+		// This prevents accidental creation of a new empty DB in a random directory.
+		exe, exeErr := os.Executable()
+		if exeErr != nil {
+			log.Fatalf("CRITICAL: Failed to resolve executable path for DB init: %v", exeErr)
+		}
+		exeDir := filepath.Dir(exe)
+
+		dbDir := filepath.Join(exeDir, "data")
+		if mkErr := os.MkdirAll(dbDir, 0700); mkErr != nil {
+			log.Fatalf("CRITICAL: Failed to create database directory at %s: %v", dbDir, mkErr)
 		}
 
-		for _, p := range paths {
-			if _, err := os.Stat(p); err == nil {
-				dbPath = p
-				break
-			}
-		}
-	}
-
-	if dbPath == "" {
-		log.Printf("Warning: SQLite database file not found. Set DB_PATH explicitly.")
-		// We'll still try to open it so it creates a new one, but this is a fallback.
-		dbPath = "aetherflow.sqlite"
+		dbPath = filepath.Join(dbDir, "aetherflow.sqlite")
+		log.Printf("[database] Anchored database path to %s", dbPath)
 	}
 
 	var err error

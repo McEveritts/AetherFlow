@@ -3,10 +3,23 @@ package services
 import (
 	"aetherflow/models"
 	"encoding/json"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 )
+
+// exeDir caches the directory containing the running executable so config
+// files that live next to the binary are always discoverable regardless of
+// the process's current working directory.
+var exeDir string
+
+func init() {
+	if exe, err := os.Executable(); err == nil {
+		exeDir = filepath.Dir(exe)
+		log.Printf("[config] executable dir resolved to: %s", exeDir)
+	}
+}
 
 func resolveConfigPaths(envKey, fileName string) []string {
 	paths := []string{}
@@ -14,9 +27,15 @@ func resolveConfigPaths(envKey, fileName string) []string {
 		paths = append(paths, customPath)
 	}
 
+	// Executable-relative: always works no matter the CWD
+	if exeDir != "" {
+		paths = append(paths, filepath.Join(exeDir, "config", fileName))
+	}
+
 	return append(paths, []string{
-		filepath.Join("config", fileName),                                     // Canonical: backend/config/
-		filepath.Join("..", "backend", "config", fileName),                    // From project root
+		filepath.Join("config", fileName),                                     // CWD is backend/
+		filepath.Join("backend", "config", fileName),                          // CWD is project root
+		filepath.Join("..", "backend", "config", fileName),                    // CWD is a sibling dir
 		filepath.Join("/opt", "AetherFlow", "backend", "config", fileName),   // Production
 		filepath.Join("..", "dashboard", "config", fileName),                  // Legacy fallback
 		filepath.Join("dashboard", "config", fileName),                        // Legacy fallback (alt)
@@ -33,10 +52,12 @@ func readFirstConfigFile(paths []string) ([]byte, error) {
 	for _, p := range paths {
 		data, err = os.ReadFile(p)
 		if err == nil {
+			log.Printf("[config] loaded config from: %s", p)
 			return data, nil
 		}
 	}
 
+	log.Printf("[config] WARNING: could not find config file; tried paths: %v", paths)
 	return nil, err
 }
 

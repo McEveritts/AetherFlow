@@ -97,6 +97,30 @@ func TestVerifyBillingWebhookRequestWithBearerToken(t *testing.T) {
 	}
 }
 
+func TestValidateUsername(t *testing.T) {
+	tests := []struct {
+		name    string
+		wantErr bool
+	}{
+		{name: "alice", wantErr: false},
+		{name: "bob.smith", wantErr: false},
+		{name: "user-42", wantErr: false},
+		{name: "bad user", wantErr: true},
+		{name: "bad;rm -rf /", wantErr: true},
+		{name: "bad$(cmd)", wantErr: true},
+		{name: "-starts-with-dash", wantErr: true},
+		{name: "", wantErr: true},
+		{name: "a" + string(make([]byte, 32)), wantErr: true}, // > 32 chars
+	}
+
+	for _, tt := range tests {
+		err := validateUsername(tt.name)
+		if (err != nil) != tt.wantErr {
+			t.Fatalf("validateUsername(%q) error=%v wantErr=%v", tt.name, err, tt.wantErr)
+		}
+	}
+}
+
 func TestBillingSecretFallsBackToGlobalSecret(t *testing.T) {
 	t.Setenv("BLESTA_WEBHOOK_SECRET", "")
 	t.Setenv("BILLING_WEBHOOK_SECRET", "fallback-secret")

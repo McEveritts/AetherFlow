@@ -14,9 +14,13 @@ func TestValidateServiceName(t *testing.T) {
 		{name: "apache2", wantErr: false},
 		{name: "docker.service", wantErr: false},
 		{name: "nginx-1", wantErr: false},
+		{name: "user@1000.service", wantErr: false},
 		{name: "bad name", wantErr: true},
 		{name: "bad;rm -rf /", wantErr: true},
 		{name: "bad$(cmd)", wantErr: true},
+		{name: "-starts-with-dash", wantErr: true},           // flag injection
+		{name: "", wantErr: true},                              // empty
+		{name: "a" + string(make([]byte, 64)), wantErr: true}, // > 64 chars
 	}
 
 	for _, tt := range tests {

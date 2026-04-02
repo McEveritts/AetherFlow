@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -18,6 +19,15 @@ import (
 
 	"github.com/gin-gonic/gin"
 )
+
+// validBackupFilenameRe strictly allows alphanumeric, underscore, hyphen, and dot,
+// ending with .sqlite extension. Blocks path traversal and null bytes.
+var validBackupFilenameRe = regexp.MustCompile(`^[a-zA-Z0-9_.-]+\.sqlite$`)
+
+// isValidBackupFilename checks that a filename matches the strict whitelist pattern.
+func isValidBackupFilename(name string) bool {
+	return validBackupFilenameRe.MatchString(name)
+}
 
 const (
 	defaultBackupChunkSize int64 = 10 * 1024 * 1024 // 10 MiB
@@ -138,6 +148,13 @@ func RunBackup(c *gin.Context) {
 
 	timestamp := time.Now().Format("2006-01-02_15-04-05")
 	filename := fmt.Sprintf("aetherflow_%s.sqlite", timestamp)
+
+	// Strict whitelist validation for backup filename (CWE-89 defense-in-depth)
+	if !isValidBackupFilename(filename) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid backup filename"})
+		return
+	}
+
 	backupFile, err := safeBackupPath(backupDir, filename)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})

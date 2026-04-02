@@ -94,6 +94,10 @@ func main() {
 
 	// Initialize the Database
 	db.InitDB()
+	db.InitRedis()
+
+	// Initialize AES-256-GCM encryption for API key storage
+	api.InitAESKey()
 
 	// Initialize the Cluster Manager
 	cluster.Init()

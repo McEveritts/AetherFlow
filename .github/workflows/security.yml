@@ -1,0 +1,78 @@
+name: Security Gate
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master, development]
+    paths:
+      - 'backend/**'
+      - '.github/workflows/security.yml'
+  pull_request:
+    branches: [main, master, development]
+    paths:
+      - 'backend/**'
+      - '.github/workflows/security.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  security-checks:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+
+      - name: Install security tools
+        run: |
+          go install github.com/securego/gosec/v2/cmd/gosec@latest
+          go install honnef.co/go/tools/cmd/staticcheck@latest
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      - name: Dependency verification
+        run: |
+          go mod tidy
+          go mod verify
+
+      - name: Vulnerability scan (govulncheck)
+        run: govulncheck ./...
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: staticcheck
+        run: staticcheck ./...
+
+      - name: gosec (SAST)
+        run: gosec -severity medium -confidence medium ./...
+
+      - name: Unit & integration tests
+        env:
+          JWT_SECRET: ci-test-secret-exactly-32bytes!!
+          AES_MASTER_KEY: ci-test-aes-key-exactly-32bytes!
+          REDIS_ADDR: localhost:6379
+          ALLOWED_HOSTS: localhost:8080,127.0.0.1:8080
+        run: go test -v -count=1 -race ./...
+
+      - name: Build verification
+        run: go build ./...

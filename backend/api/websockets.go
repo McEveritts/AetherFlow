@@ -48,7 +48,7 @@ type Hub struct {
 
 func newHub() *Hub {
 	return &Hub{
-		broadcast:  make(chan []byte),
+		broadcast:  make(chan []byte, 256),
 		register:   make(chan *Client),
 		unregister: make(chan *Client),
 		clients:    make(map[*Client]bool),
@@ -264,7 +264,11 @@ func BroadcastNotification(n services.Notification) {
 		return
 	}
 
-	WSHub.broadcast <- message
+	select {
+	case WSHub.broadcast <- message:
+	default:
+		log.Printf("WARNING: WebSocket broadcast channel full, dropping notification: %s", n.Title)
+	}
 }
 
 func BroadcastMarketplaceUpdates(packages []string) {
@@ -280,5 +284,9 @@ func BroadcastMarketplaceUpdates(packages []string) {
 		return
 	}
 
-	WSHub.broadcast <- message
+	select {
+	case WSHub.broadcast <- message:
+	default:
+		log.Printf("WARNING: WebSocket broadcast channel full, dropping marketplace update")
+	}
 }

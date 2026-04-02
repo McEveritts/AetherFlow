@@ -1,14 +1,17 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"log"
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 )
@@ -20,8 +23,27 @@ type GitHubRelease struct {
 	HtmlUrl string `json:"html_url"`
 }
 
-var versionFilePath = "../.version"
-var updateScriptPath = "../scripts/update.sh"
+var versionFilePath string
+var updateScriptPath string
+
+func init() {
+	// Resolve script paths relative to the executable directory to prevent
+	// CWE-78 attacks from working directory manipulation.
+	execPath, err := os.Executable()
+	if err != nil {
+		log.Printf("WARNING: Could not resolve executable path, using relative paths: %v", err)
+		versionFilePath = "../.version"
+		updateScriptPath = "../scripts/update.sh"
+		return
+	}
+	execDir := filepath.Dir(execPath)
+	versionFilePath = filepath.Clean(filepath.Join(execDir, "..", ".version"))
+	updateScriptPath = filepath.Clean(filepath.Join(execDir, "..", "scripts", "update.sh"))
+}
+
+// httpClient is a timeout-bound HTTP client for outbound requests.
+// Prevents goroutine/thread leaks if the upstream API hangs.
+var httpClient = &http.Client{Timeout: 10 * time.Second}
 
 func getLocalVersion() string {
 	versionBytes, err := os.ReadFile(versionFilePath)
@@ -36,8 +58,8 @@ func getLocalVersion() string {
 func CheckUpdate(c *gin.Context) {
 	currentVersion := getLocalVersion()
 
-	// Use McEveritts/AetherFlow
-	resp, err := http.Get("https://api.github.com/repos/McEveritts/AetherFlow/releases/latest")
+	// Use McEveritts/AetherFlow with a timeout-bound client
+	resp, err := httpClient.Get("https://api.github.com/repos/McEveritts/AetherFlow/releases/latest")
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reach GitHub API"})
 		return
@@ -119,7 +141,11 @@ func RunUpdate(c *gin.Context) {
 	go func() {
 		log.Println("Initiating over-the-air update sequence...")
 
-		cmd := exec.Command("/bin/bash", updateScriptPath)
+		// Bound the update script to 5 minutes to prevent infinite goroutine leaks
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+
+		cmd := exec.CommandContext(ctx, "/bin/bash", updateScriptPath)
 		// Redirect output so it doesn't wait on pipes
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
@@ -129,9 +155,11 @@ func RunUpdate(c *gin.Context) {
 			return
 		}
 
-		// Optional: wait in goroutine
+		// Wait in goroutine — context cancellation will kill the process if it exceeds 5 min
 		err := cmd.Wait()
-		if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			log.Printf("CRITICAL: Update script killed after 5-minute timeout")
+		} else if err != nil {
 			log.Printf("Update script finished with error: %v", err)
 		} else {
 			log.Println("Update script finished successfully.")

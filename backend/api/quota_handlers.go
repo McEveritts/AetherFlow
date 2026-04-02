@@ -32,13 +32,14 @@ func quotaErrorStatus(err error) int {
 // QuotaUploadGuard blocks uploads that would exceed the current user's configured quota.
 func QuotaUploadGuard() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		cookie, err := c.Cookie("aetherflow_session")
-		if err != nil {
+		authHeader := c.GetHeader("Authorization")
+		if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
 			c.Next()
 			return
 		}
+		tokenString := strings.TrimPrefix(authHeader, "Bearer ")
 
-		userID, err := extractUserIDFromJWT(cookie)
+		userID, err := extractUserIDFromJWT(tokenString)
 		if err != nil || c.Request.ContentLength <= 0 {
 			c.Next()
 			return
@@ -69,6 +70,14 @@ func GetUserQuota(c *gin.Context) {
 	userID, err := strconv.Atoi(c.Param("id"))
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID"})
+		return
+	}
+
+	// IDOR protection: users can only view their own quota; admins can view any.
+	authedUserID, _ := c.Get("user_id")
+	authedRole, _ := c.Get("user_role")
+	if authedUserID != userID && authedRole != "admin" {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Forbidden: You can only view your own quota"})
 		return
 	}
 

@@ -14,6 +14,7 @@ import (
 	"log"
 	"math/big"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -22,6 +23,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/google/uuid"
 )
 
 // ---- RSA Key Management ----
@@ -177,8 +179,9 @@ func OIDCAuthorize(c *gin.Context) {
 	// Check session — user must be logged in
 	cookie, err := c.Cookie("aetherflow_session")
 	if err != nil {
-		// Redirect to login with a return-to parameter
-		c.Redirect(http.StatusTemporaryRedirect, fmt.Sprintf("/login?return_to=%s", c.Request.URL.String()))
+	// Redirect to login — URL-encode return_to to prevent open redirect (CWE-601)
+		returnTo := url.QueryEscape(c.Request.URL.RequestURI())
+		c.Redirect(http.StatusTemporaryRedirect, "/login?return_to="+returnTo)
 		return
 	}
 
@@ -190,7 +193,11 @@ func OIDCAuthorize(c *gin.Context) {
 
 	// Generate authorization code
 	codeBytes := make([]byte, 32)
-	rand.Read(codeBytes)
+	if _, err := rand.Read(codeBytes); err != nil {
+		log.Printf("CRITICAL: crypto/rand failure during OIDC auth code generation: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
+		return
+	}
 	code := hex.EncodeToString(codeBytes)
 
 	if scope == "" {
@@ -307,7 +314,12 @@ func handleAuthCodeExchange(c *gin.Context, clientID string) {
 	}
 
 	// Check expiry
-	expTime, _ := time.Parse(time.RFC3339, expiresAt)
+	expTime, parseErr := time.Parse(time.RFC3339, expiresAt)
+	if parseErr != nil {
+		log.Printf("OIDC: failed to parse auth code expiry %q: %v", expiresAt, parseErr)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_grant", "error_description": "malformed expiry"})
+		return
+	}
 	if time.Now().After(expTime) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_grant", "error_description": "code expired"})
 		return
@@ -349,7 +361,12 @@ func handleRefreshTokenExchange(c *gin.Context, clientID string) {
 		return
 	}
 
-	expTime, _ := time.Parse(time.RFC3339, expiresAt)
+	expTime, parseErr := time.Parse(time.RFC3339, expiresAt)
+	if parseErr != nil {
+		log.Printf("OIDC: failed to parse refresh token expiry %q: %v", expiresAt, parseErr)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_grant", "error_description": "malformed expiry"})
+		return
+	}
 	if time.Now().After(expTime) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_grant", "error_description": "refresh token expired"})
 		return
@@ -372,8 +389,12 @@ func issueOIDCTokens(c *gin.Context, clientID string, userID int, scope string) 
 
 	// Fetch user info
 	var username, email, avatarURL, role string
-	db.DB.QueryRow("SELECT username, email, avatar_url, role FROM users WHERE id = ?", userID).
-		Scan(&username, &email, &avatarURL, &role)
+	if err := db.DB.QueryRow("SELECT username, email, avatar_url, role FROM users WHERE id = ?", userID).
+		Scan(&username, &email, &avatarURL, &role); err != nil {
+		log.Printf("OIDC: failed to fetch user info for user_id=%d during token issuance: %v", userID, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
+		return
+	}
 
 	now := time.Now()
 
@@ -420,7 +441,11 @@ func issueOIDCTokens(c *gin.Context, clientID string, userID int, scope string) 
 
 	// Refresh Token (long-lived, 30 days)
 	refreshBytes := make([]byte, 32)
-	rand.Read(refreshBytes)
+	if _, err := rand.Read(refreshBytes); err != nil {
+		log.Printf("CRITICAL: crypto/rand failure during OIDC refresh token generation: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "server_error"})
+		return
+	}
 	refreshToken := hex.EncodeToString(refreshBytes)
 
 	db.DB.Exec(
@@ -471,8 +496,12 @@ func OIDCUserInfo(c *gin.Context) {
 
 	sub, _ := claims["sub"].(string)
 	var username, email, avatarURL, role string
-	db.DB.QueryRow("SELECT username, email, avatar_url, role FROM users WHERE id = ?", sub).
-		Scan(&username, &email, &avatarURL, &role)
+	if err := db.DB.QueryRow("SELECT username, email, avatar_url, role FROM users WHERE id = ?", sub).
+		Scan(&username, &email, &avatarURL, &role); err != nil {
+		log.Printf("OIDC: failed to fetch user info for sub=%s during userinfo request: %v", sub, err)
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_token", "error_description": "user not found"})
+		return
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"sub":     sub,
@@ -485,15 +514,44 @@ func OIDCUserInfo(c *gin.Context) {
 
 // ---- Token Revocation ----
 
-// OIDCRevoke revokes a refresh token.
+// OIDCRevoke revokes a refresh token. Requires client authentication per RFC 7009.
 func OIDCRevoke(c *gin.Context) {
+	// Client authentication (same as OIDCToken)
+	clientID := c.PostForm("client_id")
+	clientSecret := c.PostForm("client_secret")
+	if clientID == "" {
+		basicClientID, basicSecret, ok := c.Request.BasicAuth()
+		if ok {
+			clientID = basicClientID
+			clientSecret = basicSecret
+		}
+	}
+
+	if clientID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_client", "error_description": "client authentication required"})
+		return
+	}
+
+	var storedSecretHash string
+	err := db.DB.QueryRow("SELECT client_secret_hash FROM oidc_clients WHERE id = ?", clientID).Scan(&storedSecretHash)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_client"})
+		return
+	}
+
+	secretHash := sha256.Sum256([]byte(clientSecret))
+	if hex.EncodeToString(secretHash[:]) != storedSecretHash {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid_client"})
+		return
+	}
+
 	token := c.PostForm("token")
 	if token == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_request"})
 		return
 	}
 
-	db.DB.Exec("UPDATE oidc_refresh_tokens SET revoked = 1 WHERE token = ?", token)
+	db.DB.Exec("UPDATE oidc_refresh_tokens SET revoked = 1 WHERE token = ? AND client_id = ?", token, clientID)
 	c.JSON(http.StatusOK, gin.H{}) // RFC 7009: 200 even if token doesn't exist
 }
 
@@ -557,15 +615,18 @@ func verifyPKCE(verifier, challenge, method string) bool {
 	}
 }
 
-// createStandardJWT creates a JWT with OIDC-standard claims (used internally).
-// This refactors the duplicated JWT creation pattern throughout auth.go.
+// createStandardJWT creates a JWT with a unique jti and short-lived expiry.
+// This is the single source of truth for session JWT creation.
 func createStandardJWT(userID int) (string, error) {
+	jti := uuid.New().String()
+
 	claims := jwt.MapClaims{
 		"user_id": userID,
 		"sub":     fmt.Sprintf("%d", userID),
 		"iss":     "aetherflow",
 		"iat":     time.Now().Unix(),
-		"exp":     time.Now().Add(time.Hour * 24 * 30).Unix(),
+		"exp":     time.Now().Add(15 * time.Minute).Unix(),
+		"jti":     jti,
 	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
