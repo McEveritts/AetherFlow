@@ -245,7 +245,7 @@ func OIDCConsent(c *gin.Context) {
 		if req.State != "" {
 			redirectURL += "&state=" + url.QueryEscape(req.State)
 		}
-		c.JSON(http.StatusOK, gin.H{"redirect_url": redirectURL})
+		c.JSON(http.StatusOK, gin.H{"redirect_uri": redirectURL, "redirect_url": redirectURL})
 		return
 	}
 
@@ -298,7 +298,7 @@ func OIDCConsent(c *gin.Context) {
 		redirectURL += "&state=" + url.QueryEscape(req.State)
 	}
 
-	c.JSON(http.StatusOK, gin.H{"redirect_url": redirectURL})
+	c.JSON(http.StatusOK, gin.H{"redirect_uri": redirectURL, "redirect_url": redirectURL})
 }
 
 // ---- Token Endpoint ----

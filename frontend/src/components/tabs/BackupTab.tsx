@@ -147,7 +147,7 @@ export default function BackupTab() {
                     </h2>
                     <div className="flex items-center gap-2 text-sm text-slate-400 bg-emerald-500/10 text-emerald-400 px-4 py-2 rounded-xl border border-emerald-500/20">
                         <ShieldCheck size={16} />
-                        {schedule?.mode === 'smart' ? 'AI-optimized scheduling active' : 'Automated weekly backups active'}
+                        {schedule?.mode === 'smart' ? 'Smart backup automation active' : 'Manual backup mode'}
                     </div>
                 </div>
 
@@ -211,14 +211,14 @@ export default function BackupTab() {
                                         <p className="text-xs text-slate-400 mt-2 leading-relaxed">{schedule.optimal_window.reasoning}</p>
                                     </div>
 
-                                    {schedule.next_backup_at && (
+                                    {schedule.mode === 'smart' && schedule.next_backup_at && (
                                         <div className="bg-slate-900/50 border border-slate-800 rounded-xl p-4">
                                             <div className="flex items-center justify-between mb-2">
-                                                <span className="text-[10px] uppercase tracking-wider text-slate-500 font-bold">Next Scheduled</span>
+                                                <span className="text-[10px] uppercase tracking-wider text-slate-500 font-bold">Next Scheduled Smart Backup</span>
                                                 <Clock size={12} className="text-slate-500" />
                                             </div>
                                             <p className="text-sm font-medium text-slate-300">
-                                                {new Date(schedule.next_backup_at).toLocaleString()}
+                                                Next scheduled smart backup: {new Date(schedule.next_backup_at).toLocaleString()}
                                             </p>
                                         </div>
                                     )}

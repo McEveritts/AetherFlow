@@ -11,7 +11,7 @@ interface FetchedFile {
 }
 
 export default function FileshareTab() {
-    const { data: files, error, mutate } = useSWR<FetchedFile[]>('/api/v1/admin/fileshare');
+    const { data: files, error, mutate } = useSWR<FetchedFile[]>('/api/v1/auth/fileshare');
     const [isDragging, setIsDragging] = useState(false);
     const [isUploading, setIsUploading] = useState(false);
     const fileInputRef = useRef<HTMLInputElement>(null);
@@ -133,8 +133,8 @@ export default function FileshareTab() {
                                                 </div>
                                             </div>
                                         </div>
-                                        <a 
-                                            href={`/api/v1/admin/fileshare/download/${encodeURIComponent(file.name)}`}
+                                        <a
+                                            href={`/api/v1/auth/fileshare/download/${encodeURIComponent(file.name)}`}
                                             download
                                             className="p-2 text-slate-400 hover:text-white hover:bg-white/10 rounded-lg transition-colors opacity-0 group-hover:opacity-100 flex items-center justify-center"
                                             title="Download File"

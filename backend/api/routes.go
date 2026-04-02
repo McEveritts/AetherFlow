@@ -81,6 +81,7 @@ func registerV1Routes(apiGroup *gin.RouterGroup) {
 
 		authGroup.GET("/settings", GetSettings)
 		authGroup.GET("/fileshare", GetFilesList)
+		authGroup.GET("/fileshare/download/:filename", HandleDownloadFile)
 
 		authGroup.GET("/services", getServices)
 
@@ -144,8 +145,9 @@ func registerV1Routes(apiGroup *gin.RouterGroup) {
 		// Requires admin context (Phase 8)
 		adminGroup.POST("/fileshare/upload", QuotaUploadGuard(), UploadFile)
 		// Requires admin context (Phase 8)
-		adminGroup.GET("/fileshare/download/:filename", DownloadFile)
+		adminGroup.GET("/fileshare/download/:filename", HandleDownloadFile)
 
+		// Headless Operator APIs - CLI/Automation Integration Only
 		// Requires admin context (Phase 8)
 		adminGroup.GET("/cluster/nodes", GetClusterNodes)
 		// Requires admin context (Phase 8)
@@ -192,6 +194,7 @@ func registerV1Routes(apiGroup *gin.RouterGroup) {
 		// Requires admin context (Phase 8)
 		adminGroup.GET("/logs/bookmarks", GetBookmarks)
 
+		// Headless Operator APIs - CLI/Automation Integration Only
 		// Requires admin context (Phase 8)
 		adminGroup.GET("/notifications/rules", GetNotificationRules)
 		// Requires admin context (Phase 8)
@@ -209,6 +212,7 @@ func registerV1Routes(apiGroup *gin.RouterGroup) {
 		// Requires admin context (Phase 8)
 		adminGroup.DELETE("/notifications/channels/:id", DeleteNotificationChannel)
 
+		// Headless Operator APIs - CLI/Automation Integration Only
 		// Requires admin context (Phase 8)
 		adminGroup.GET("/network/status", GetNetworkStatus)
 		// Requires admin context (Phase 8)
@@ -227,6 +231,7 @@ func registerV1Routes(apiGroup *gin.RouterGroup) {
 		adminGroup.POST("/network/tailscale/routes", AdvertiseTailscaleRoutes)
 
 		// System metrics are admin-only to prevent information disclosure (CWE-284)
+		// Headless Operator APIs - CLI/Automation Integration Only
 		// Requires admin context (Phase 8)
 		adminGroup.GET("/system/metrics", getSystemMetrics)
 	}

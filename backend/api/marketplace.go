@@ -30,8 +30,8 @@ type App struct {
 
 // GetMarketplaceApps returns the list of marketplace apps
 func GetMarketplaceApps(c *gin.Context) {
-	pkgs := services.GetPackages()
-	if pkgs == nil {
+	pkgs, err := services.GetPackages()
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load package catalog configuration"})
 		return
 	}
@@ -67,21 +67,28 @@ func GetMarketplaceApps(c *gin.Context) {
 	c.JSON(http.StatusOK, apps)
 }
 
-func getPackageById(pkgId string) *models.Package {
-	pkgs := services.GetPackages()
+func getPackageById(pkgId string) (*models.Package, error) {
+	pkgs, err := services.GetPackages()
+	if err != nil {
+		return nil, err
+	}
 	for _, p := range pkgs {
 		if p.Name == pkgId {
 			return &p
 		}
 	}
-	return nil
+	return nil, nil
 }
 
 func InstallPackage(c *gin.Context) {
 	pkgId := c.Param("id")
 	log.Printf("Received request to INSTALL package: %s", pkgId)
 
-	pkg := getPackageById(pkgId)
+	pkg, err := getPackageById(pkgId)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load package catalog configuration"})
+		return
+	}
 	if pkg == nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Package not found"})
 		return
@@ -106,7 +113,11 @@ func UninstallPackage(c *gin.Context) {
 	pkgId := c.Param("id")
 	log.Printf("Received request to UNINSTALL package: %s", pkgId)
 
-	pkg := getPackageById(pkgId)
+	pkg, err := getPackageById(pkgId)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load package catalog configuration"})
+		return
+	}
 	if pkg == nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Package not found"})
 		return

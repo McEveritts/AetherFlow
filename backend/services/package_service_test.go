@@ -48,7 +48,10 @@ func TestGetPackagesFromLocalConfigAndStatuses(t *testing.T) {
 
 	activeJobs.Store("pkg-active", &JobInfo{Status: "installing"})
 
-	pkgs := GetPackages()
+	pkgs, err := GetPackages()
+	if err != nil {
+		t.Fatalf("GetPackages() error = %v", err)
+	}
 	if len(pkgs) != 3 {
 		t.Fatalf("expected 3 packages, got %d", len(pkgs))
 	}
@@ -69,13 +72,17 @@ func TestGetPackagesFromLocalConfigAndStatuses(t *testing.T) {
 	}
 }
 
-func TestGetPackagesReturnsNilWhenConfigMissing(t *testing.T) {
+func TestGetPackagesReturnsErrorWhenConfigMissing(t *testing.T) {
 	if err := os.Setenv("AETHERFLOW_PACKAGES_CONFIG", filepath.Join(t.TempDir(), "missing-packages.json")); err != nil {
 		t.Fatalf("failed to set env override: %v", err)
 	}
 	defer func() { _ = os.Unsetenv("AETHERFLOW_PACKAGES_CONFIG") }()
 
-	if pkgs := GetPackages(); pkgs != nil {
+	pkgs, err := GetPackages()
+	if err == nil {
+		t.Fatal("expected GetPackages to return an error when config is missing")
+	}
+	if pkgs != nil {
 		t.Fatalf("expected nil packages when config is missing, got %v", pkgs)
 	}
 }

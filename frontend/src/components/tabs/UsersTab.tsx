@@ -7,6 +7,7 @@ import { UsersSkeleton } from '@/components/layout/SkeletonBox';
 import Image from 'next/image';
 import { DataGrid } from '@/components/ui/DataGrid';
 import { ColumnDef } from '@tanstack/react-table';
+import { apiFetch } from '@/lib/fetcher';
 
 export default function UsersTab() {
     const { addToast } = useToast();
@@ -19,7 +20,7 @@ export default function UsersTab() {
         setActionLoading(userId);
 
         try {
-            const res = await fetch(`/api/v1/admin/users/${userId}/role`, {
+            const res = await apiFetch(`/api/v1/admin/users/${userId}/role`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ role: newRole })
@@ -46,7 +47,7 @@ export default function UsersTab() {
         setActionLoading(userId);
 
         try {
-            const res = await fetch(`/api/v1/admin/users/${userId}`, {
+            const res = await apiFetch(`/api/v1/admin/users/${userId}`, {
                 method: 'DELETE'
             });
 

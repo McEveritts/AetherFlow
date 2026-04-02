@@ -11,7 +11,6 @@ import (
 	"aetherflow/services"
 
 	"github.com/gin-gonic/gin"
-	"github.com/golang-jwt/jwt/v5"
 	"github.com/gorilla/websocket"
 )
 
@@ -74,8 +73,13 @@ func GetLogSources(c *gin.Context) {
 
 // BookmarkLog saves a log entry bookmark for the current user.
 func BookmarkLog(c *gin.Context) {
-	userID, err := extractUserIDFromJWT(getCookieToken(c))
-	if err != nil {
+	rawUserID, exists := c.Get("user_id")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		return
+	}
+	userID, ok := rawUserID.(int)
+	if !ok {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
 		return
 	}
@@ -104,12 +108,6 @@ func BookmarkLog(c *gin.Context) {
 	c.JSON(http.StatusCreated, gin.H{"message": "Log bookmarked"})
 }
 
-// getCookieToken extracts the JWT token from the session cookie.
-func getCookieToken(c *gin.Context) string {
-	cookie, _ := c.Cookie("aetherflow_session")
-	return cookie
-}
-
 // HandleLogWebSocket provides real-time log streaming over WebSocket.
 func HandleLogWebSocket(c *gin.Context) {
 	if services.Logs == nil {
@@ -117,22 +115,8 @@ func HandleLogWebSocket(c *gin.Context) {
 		return
 	}
 
-	// Authenticate
-	cookie, err := c.Cookie("aetherflow_session")
-	if err != nil {
+	if _, exists := c.Get("user_id"); !exists {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "WebSocket requires authentication"})
-		return
-	}
-
-	token, err := jwt.Parse(cookie, func(token *jwt.Token) (interface{}, error) {
-		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-			return nil, jwt.ErrSignatureInvalid
-		}
-		return getJWTSecret(), nil
-	})
-
-	if err != nil || !token.Valid {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid session"})
 		return
 	}
 
@@ -187,11 +171,15 @@ func HandleLogWebSocket(c *gin.Context) {
 	}
 }
 
-
 // GetBookmarks retrieves log bookmarks for the current user.
 func GetBookmarks(c *gin.Context) {
-	userId, err := extractUserIDFromJWT(getCookieToken(c))
-	if err != nil {
+	rawUserID, exists := c.Get("user_id")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		return
+	}
+	userId, ok := rawUserID.(int)
+	if !ok {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
 		return
 	}

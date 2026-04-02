@@ -1,6 +1,7 @@
 package api
 
 import (
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -192,8 +193,8 @@ func UploadFile(c *gin.Context) {
 	})
 }
 
-// DownloadFile securely serves downloaded files using paths validated by sanitizeFilename
-func DownloadFile(c *gin.Context) {
+// HandleDownloadFile securely serves a fileshare download using paths validated by sanitizeFilename.
+func HandleDownloadFile(c *gin.Context) {
 	filename := c.Param("filename")
 
 	// Ensure no path traversal and valid naming occurs
@@ -211,5 +212,11 @@ func DownloadFile(c *gin.Context) {
 		return
 	}
 
-	c.FileAttachment(filePath, safeName)
+	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", safeName))
+	c.File(filePath)
+}
+
+// DownloadFile preserves the legacy admin handler name while delegating to the canonical auth-safe download path.
+func DownloadFile(c *gin.Context) {
+	HandleDownloadFile(c)
 }

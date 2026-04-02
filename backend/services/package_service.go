@@ -3,6 +3,7 @@ package services
 import (
 	"aetherflow/models"
 	"encoding/json"
+	"fmt"
 	"log"
 	"os"
 	"os/exec"
@@ -120,17 +121,19 @@ func mergePackageUpdateState(pkgs []models.Package) {
 }
 
 // GetPackages reads the packages.json and determines installation status.
-func GetPackages() []models.Package {
+func GetPackages() ([]models.Package, error) {
 	data, err := readFirstConfigFile(resolveConfigPaths("AETHERFLOW_PACKAGES_CONFIG", "packages.json"))
 	if err != nil {
-		log.Printf("[packages] ERROR: completely failed to load packages.json: %v", err)
-		return nil
+		wrapped := fmt.Errorf("load packages.json: %w", err)
+		log.Printf("[packages] ERROR: %v", wrapped)
+		return nil, wrapped
 	}
 
 	var pkgs []models.Package
 	if err := json.Unmarshal(data, &pkgs); err != nil {
-		log.Printf("[packages] ERROR: failed to parse packages.json: %v", err)
-		return nil
+		wrapped := fmt.Errorf("parse packages.json: %w", err)
+		log.Printf("[packages] ERROR: %v", wrapped)
+		return nil, wrapped
 	}
 
 	mergePackageAutomation(pkgs, loadPackageAutomation())
@@ -177,5 +180,5 @@ func GetPackages() []models.Package {
 
 	mergePackageUpdateState(pkgs)
 
-	return pkgs
+	return pkgs, nil
 }

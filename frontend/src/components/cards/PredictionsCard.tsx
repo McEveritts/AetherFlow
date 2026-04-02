@@ -1,5 +1,6 @@
 import { BrainCircuit, TrendingUp, AlertTriangle, Shield, Loader2, RefreshCw, ChevronDown, ChevronUp } from 'lucide-react';
 import { useState } from 'react';
+import { apiFetch } from '@/lib/fetcher';
 
 interface PredictionReport {
     trend_summary: string;
@@ -23,7 +24,7 @@ export default function PredictionsCard() {
         setIsAnalyzing(true);
         setError('');
         try {
-            const res = await fetch('/api/v1/admin/ai/predictions/analyze', { method: 'POST' });
+            const res = await apiFetch('/api/v1/admin/ai/predictions/analyze', { method: 'POST' });
             const data = await res.json();
             if (!res.ok) throw new Error(data.error);
             setReport(data);

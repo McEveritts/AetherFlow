@@ -3,6 +3,7 @@
 import { useAuth } from '@/contexts/AuthContext';
 import { Sparkles, KeyRound, LogIn } from 'lucide-react';
 import { FormEvent, useState, useEffect } from 'react';
+import { apiFetch } from '@/lib/fetcher';
 
 export default function LoginPage() {
     const { login, loginLocal } = useAuth();
@@ -13,7 +14,7 @@ export default function LoginPage() {
     const [isSetup, setIsSetup] = useState(false);
 
     useEffect(() => {
-        fetch('/api/v1/public/auth/setup/check')
+        apiFetch('/api/v1/public/auth/setup/check')
             .then(res => res.json())
             .then(data => setIsSetup(data.setupRequired))
             .catch(() => { });
@@ -28,10 +29,9 @@ export default function LoginPage() {
 
         try {
             const endpoint = isSetup ? '/api/v1/public/auth/setup' : '/api/v1/public/auth/login';
-            const res = await fetch(endpoint, {
+            const res = await apiFetch(endpoint, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                credentials: 'include',
                 body: JSON.stringify({ username: username.trim(), password: password.trim() })
             });
 

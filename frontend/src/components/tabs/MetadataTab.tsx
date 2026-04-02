@@ -1,5 +1,6 @@
 import { Sparkles, FolderSearch, Film, Music, Subtitles, Loader2, CheckCircle2, AlertCircle } from 'lucide-react';
 import { useState } from 'react';
+import { apiFetch } from '@/lib/fetcher';
 
 interface EnrichedMedia {
     id: number;
@@ -31,7 +32,7 @@ export default function MetadataTab() {
         if (!scanPath.trim()) return;
 
         try {
-            const res = await fetch('/api/v1/admin/ai/metadata/scan', {
+            const res = await apiFetch('/api/v1/admin/ai/metadata/scan', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ path: scanPath.trim() })
@@ -49,7 +50,7 @@ export default function MetadataTab() {
     const pollStatus = () => {
         const interval = setInterval(async () => {
             try {
-                const res = await fetch('/api/v1/admin/ai/metadata/status');
+                const res = await apiFetch('/api/v1/admin/ai/metadata/status');
                 const data: ScanStatus = await res.json();
                 setStatus(data);
 
@@ -66,7 +67,7 @@ export default function MetadataTab() {
     const fetchResults = async () => {
         setIsLoadingResults(true);
         try {
-            const res = await fetch('/api/v1/admin/ai/metadata/results');
+            const res = await apiFetch('/api/v1/admin/ai/metadata/results');
             const data = await res.json();
             setResults(data);
         } catch {

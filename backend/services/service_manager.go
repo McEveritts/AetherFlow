@@ -1,6 +1,7 @@
 package services
 
 import (
+	"log"
 	"os/exec"
 	"strings"
 	"time"
@@ -52,41 +53,44 @@ func GetActiveServices() map[string]interface{} {
 	}
 
 	// 3. Get Marketplace Packages — only installed ones
-	pkgs := GetPackages()
-	if pkgs != nil {
-		for _, pkg := range pkgs {
-			if pkg.Status != "installed" && pkg.Status != "running" {
-				continue
-			}
+	pkgs, err := GetPackages()
+	if err != nil {
+		log.Printf("[services] unable to load package catalog: %v", err)
+		return servicesList
+	}
 
-			// Use ServiceName from packages.json if available, else fall back to package name
-			serviceName := pkg.ServiceName
-			if serviceName == "" {
-				serviceName = pkg.Name
-			}
+	for _, pkg := range pkgs {
+		if pkg.Status != "installed" && pkg.Status != "running" {
+			continue
+		}
 
-			var status, uptime, version string
-			managedBy := "systemd"
+		// Use ServiceName from packages.json if available, else fall back to package name
+		serviceName := pkg.ServiceName
+		if serviceName == "" {
+			serviceName = pkg.Name
+		}
 
-			if pkg.ServiceType == "docker" {
-				// For Docker services, check docker container status
-				status, uptime, version = GetDockerServiceInfo(serviceName)
-				managedBy = "docker"
-			} else {
-				status, uptime, version = GetServiceInfo(serviceName)
-			}
+		var status, uptime, version string
+		managedBy := "systemd"
 
-			if version == "-" {
-				version = "latest"
-			}
+		if pkg.ServiceType == "docker" {
+			// For Docker services, check docker container status
+			status, uptime, version = GetDockerServiceInfo(serviceName)
+			managedBy = "docker"
+		} else {
+			status, uptime, version = GetServiceInfo(serviceName)
+		}
 
-			servicesList[pkg.Label] = gin.H{
-				"status":     status,
-				"uptime":     uptime,
-				"version":    version,
-				"managed_by": managedBy,
-				"process":    serviceName,
-			}
+		if version == "-" {
+			version = "latest"
+		}
+
+		servicesList[pkg.Label] = gin.H{
+			"status":     status,
+			"uptime":     uptime,
+			"version":    version,
+			"managed_by": managedBy,
+			"process":    serviceName,
 		}
 	}
 

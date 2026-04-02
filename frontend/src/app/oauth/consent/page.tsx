@@ -59,9 +59,10 @@ export default function ConsentPage() {
             });
 
             const data = await res.json();
-            if (res.ok && data.redirect_url) {
+            const redirectTarget = data.redirect_uri || data.redirect_url;
+            if (res.ok && redirectTarget) {
                 // Perform the OAuth redirect back to the client
-                window.location.href = data.redirect_url;
+                window.location.href = redirectTarget;
             } else {
                 setError(data.error || 'Consent submission failed');
                 setIsSubmitting(false); // only re-enable if we didn't redirect
@@ -110,7 +111,7 @@ export default function ConsentPage() {
                             Authorization Request
                         </h1>
                         <p className="text-slate-400 text-sm mt-2">
-                            An application is requesting access to your AetherFlow account.
+                            {clientId ? `Application ${clientId} is requesting access to your AetherFlow account.` : 'An application is requesting access to your AetherFlow account.'}
                         </p>
                     </div>
 

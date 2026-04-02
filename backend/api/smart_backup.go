@@ -13,10 +13,33 @@ import (
 // HandleGetOptimalWindow returns the AI-calculated optimal backup window.
 func HandleGetOptimalWindow(c *gin.Context) {
 	if services.BackupScheduler == nil {
-		c.JSON(http.StatusOK, gin.H{
-			"message":        "Smart backup scheduler not initialized",
-			"optimal_window": nil,
-		})
+		var (
+			mode       string
+			windowJSON string
+			nextRunRaw string
+		)
+		_ = db.DB.QueryRow(
+			`SELECT
+				COALESCE(backup_schedule_mode, 'manual'),
+				COALESCE(backup_optimal_window, ''),
+				COALESCE(backup_next_run_at, '')
+			FROM settings WHERE id = 1`,
+		).Scan(&mode, &windowJSON, &nextRunRaw)
+
+		payload := gin.H{
+			"mode":    mode,
+			"running": false,
+		}
+		if windowJSON != "" {
+			var window services.BackupWindow
+			if err := json.Unmarshal([]byte(windowJSON), &window); err == nil {
+				payload["optimal_window"] = &window
+			}
+		}
+		if nextRunRaw != "" {
+			payload["next_backup_at"] = nextRunRaw
+		}
+		c.JSON(http.StatusOK, payload)
 		return
 	}
 
@@ -45,25 +68,22 @@ func HandleSetBackupSchedule(c *gin.Context) {
 		return
 	}
 
-	// If switching to smart mode, trigger an immediate window calculation
-	if req.Mode == "smart" {
-		apiKey, keyErr := GetDecryptedGeminiKey()
-		if keyErr != nil {
-			apiKey = "" // No key available, skip
-		}
-		if apiKey != "" {
-			go func() {
-				window, err := services.FindOptimalBackupWindow(apiKey)
-				if err == nil {
-					windowJSON, _ := json.Marshal(window)
-					db.DB.Exec("UPDATE settings SET backup_optimal_window = ? WHERE id = 1", string(windowJSON))
-				}
-			}()
+	if services.BackupScheduler != nil {
+		services.BackupScheduler.SetMode(req.Mode)
+		if req.Mode == "smart" {
+			services.BackupScheduler.TriggerRecalculation()
 		}
 	}
 
-	c.JSON(http.StatusOK, gin.H{
+	payload := gin.H{
 		"message": "Backup schedule mode updated",
 		"mode":    req.Mode,
-	})
+	}
+	if services.BackupScheduler != nil {
+		for key, value := range services.BackupScheduler.GetScheduleStatus() {
+			payload[key] = value
+		}
+	}
+
+	c.JSON(http.StatusOK, payload)
 }

@@ -430,6 +430,9 @@ func InitDB() {
 		"CREATE INDEX IF NOT EXISTS idx_log_bookmarks_user ON log_bookmarks(user_id);",
 	)
 
+	migrate(6, "Persist smart backup next run time",
+		"ALTER TABLE settings ADD COLUMN backup_next_run_at TEXT DEFAULT '';")
+
 	// ─── Ensure singleton settings row ─────────────────────────────────
 	DB.Exec(`INSERT OR IGNORE INTO settings (id) VALUES (1)`)
 

@@ -2,6 +2,7 @@
 
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
+import { apiFetch } from '@/lib/fetcher';
 
 export interface User {
     id: number;
@@ -38,7 +39,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
 
     const checkSession = async () => {
         try {
-            const res = await fetch('/api/v1/auth/session', { credentials: 'include' });
+            const res = await apiFetch('/api/v1/auth/session');
             if (res.ok) {
                 const userData = await res.json();
                 setUser(userData);
@@ -73,10 +74,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
 
     const logout = async () => {
         try {
-            await fetch('/api/v1/auth/logout', {
-                method: 'POST',
-                credentials: 'include'
-            });
+            await apiFetch('/api/v1/auth/logout', { method: 'POST' });
         } catch (err) {
             console.error("Logout failed:", err);
         }

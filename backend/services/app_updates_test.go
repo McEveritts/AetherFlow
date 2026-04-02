@@ -124,7 +124,10 @@ func TestAppUpdateWatcherRefreshesGitHubPackage(t *testing.T) {
 		t.Fatalf("changed packages = %v, want [autobrr]", changed)
 	}
 
-	pkgs := GetPackages()
+	pkgs, err := GetPackages()
+	if err != nil {
+		t.Fatalf("GetPackages() error = %v", err)
+	}
 	if len(pkgs) != 1 {
 		t.Fatalf("expected 1 package, got %d", len(pkgs))
 	}

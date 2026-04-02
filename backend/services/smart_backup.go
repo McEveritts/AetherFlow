@@ -45,27 +45,17 @@ func InitSmartBackupScheduler(keyResolver func() (string, error), executor func(
 		executor:    executor,
 	}
 
-	// Check if smart scheduling is enabled
-	var mode string
-	err := db.DB.QueryRow("SELECT COALESCE(backup_schedule_mode, 'manual') FROM settings WHERE id = 1").Scan(&mode)
-	if err != nil || mode != "smart" {
-		log.Println("Smart backup scheduler: disabled (mode=manual)")
-		return
-	}
-
-	// Load cached optimal window
-	var windowJSON string
-	db.DB.QueryRow("SELECT COALESCE(backup_optimal_window, '') FROM settings WHERE id = 1").Scan(&windowJSON)
-	if windowJSON != "" {
-		var window BackupWindow
-		if err := json.Unmarshal([]byte(windowJSON), &window); err == nil {
-			BackupScheduler.lastWindow = &window
-		}
-	}
+	BackupScheduler.loadPersistedState()
 
 	go BackupScheduler.schedulerLoop()
 	go BackupScheduler.executorLoop()
-	log.Println("Smart backup scheduler initialized")
+
+	mode := BackupScheduler.currentMode()
+	if mode == "smart" && BackupScheduler.GetOptimalWindow() == nil {
+		BackupScheduler.TriggerRecalculation()
+	}
+
+	log.Printf("Smart backup scheduler initialized (mode=%s)", mode)
 }
 
 func (sbs *SmartBackupScheduler) executorLoop() {
@@ -73,36 +63,17 @@ func (sbs *SmartBackupScheduler) executorLoop() {
 	defer ticker.Stop()
 
 	for range ticker.C {
-		sbs.mu.RLock()
-		window := sbs.lastWindow
-		sbs.mu.RUnlock()
-
-		if window == nil {
-			continue
-		}
-
-		var mode string
-		db.DB.QueryRow("SELECT COALESCE(backup_schedule_mode, 'manual') FROM settings WHERE id = 1").Scan(&mode)
-		if mode != "smart" {
+		if sbs.currentMode() != "smart" {
 			continue
 		}
 
 		now := time.Now().UTC()
-
-		sbs.mu.Lock()
-		if sbs.nextBackupAt == nil {
-			next := time.Date(now.Year(), now.Month(), now.Day(), window.OptimalHour, 0, 0, 0, time.UTC)
-			if now.After(next) || now.Equal(next) {
-				next = next.Add(24 * time.Hour)
-			}
-			sbs.nextBackupAt = &next
-			sbs.mu.Unlock()
+		nextRun := sbs.ensureNextBackupAt(now)
+		if nextRun == nil {
 			continue
 		}
 
-		timeToRun := now.After(*sbs.nextBackupAt) || now.Equal(*sbs.nextBackupAt)
-		sbs.mu.Unlock()
-
+		timeToRun := now.After(*nextRun) || now.Equal(*nextRun)
 		if timeToRun {
 			log.Println("Smart backup: Initiating background system backup...")
 			if sbs.executor != nil {
@@ -114,10 +85,7 @@ func (sbs *SmartBackupScheduler) executorLoop() {
 				}
 			}
 
-			sbs.mu.Lock()
-			next := sbs.nextBackupAt.Add(24 * time.Hour)
-			sbs.nextBackupAt = &next
-			sbs.mu.Unlock()
+			sbs.advanceNextBackupAt(now)
 		}
 	}
 }
@@ -127,16 +95,32 @@ func (sbs *SmartBackupScheduler) schedulerLoop() {
 	ticker := time.NewTicker(24 * time.Hour)
 	defer ticker.Stop()
 
-	// Initial calculation after 5 minutes
-	time.Sleep(5 * time.Minute)
-	sbs.recalculate()
+	initialDelay := time.NewTimer(5 * time.Second)
+	defer initialDelay.Stop()
 
-	for range ticker.C {
-		sbs.recalculate()
+	for {
+		select {
+		case <-initialDelay.C:
+			if sbs.currentMode() == "smart" {
+				if sbs.GetOptimalWindow() == nil {
+					sbs.recalculate()
+				} else {
+					sbs.ensureNextBackupAt(time.Now().UTC())
+				}
+			}
+		case <-ticker.C:
+			if sbs.currentMode() == "smart" {
+				sbs.recalculate()
+			}
+		}
 	}
 }
 
 func (sbs *SmartBackupScheduler) recalculate() {
+	if sbs.currentMode() != "smart" {
+		return
+	}
+
 	var apiKey string
 	var err error
 	if sbs.keyResolver != nil {
@@ -159,11 +143,12 @@ func (sbs *SmartBackupScheduler) recalculate() {
 
 	sbs.mu.Lock()
 	sbs.lastWindow = window
+	nextRun := nextBackupTime(window, time.Now().UTC())
+	sbs.nextBackupAt = &nextRun
+	sbs.running = true
 	sbs.mu.Unlock()
 
-	// Cache in database
-	windowJSON, _ := json.Marshal(window)
-	db.DB.Exec("UPDATE settings SET backup_optimal_window = ? WHERE id = 1", string(windowJSON))
+	sbs.persistState(window, &nextRun)
 
 	log.Printf("Smart backup: optimal window calculated → %02d:00 UTC (confidence: %.0f%%)", window.OptimalHour, window.Confidence*100)
 }
@@ -180,12 +165,11 @@ func (sbs *SmartBackupScheduler) GetScheduleStatus() map[string]interface{} {
 	sbs.mu.RLock()
 	defer sbs.mu.RUnlock()
 
-	var mode string
-	db.DB.QueryRow("SELECT COALESCE(backup_schedule_mode, 'manual') FROM settings WHERE id = 1").Scan(&mode)
+	mode := sbs.currentMode()
 
 	result := map[string]interface{}{
 		"mode":    mode,
-		"running": sbs.running,
+		"running": mode == "smart" && sbs.running,
 	}
 
 	if sbs.lastWindow != nil {
@@ -196,6 +180,156 @@ func (sbs *SmartBackupScheduler) GetScheduleStatus() map[string]interface{} {
 	}
 
 	return result
+}
+
+// SetMode updates the in-memory scheduler state to match the persisted mode.
+func (sbs *SmartBackupScheduler) SetMode(mode string) {
+	if sbs == nil {
+		return
+	}
+
+	var nextRun *time.Time
+
+	sbs.mu.Lock()
+	sbs.running = mode == "smart"
+	if mode != "smart" {
+		sbs.nextBackupAt = nil
+	} else if sbs.lastWindow != nil {
+		next := nextBackupTime(sbs.lastWindow, time.Now().UTC())
+		sbs.nextBackupAt = &next
+		nextRun = &next
+	}
+	sbs.mu.Unlock()
+
+	sbs.persistState(nil, nextRun)
+}
+
+// TriggerRecalculation runs an asynchronous optimal-window refresh.
+func (sbs *SmartBackupScheduler) TriggerRecalculation() {
+	if sbs == nil {
+		return
+	}
+
+	go sbs.recalculate()
+}
+
+func (sbs *SmartBackupScheduler) loadPersistedState() {
+	var (
+		mode       string
+		windowJSON string
+		nextRunRaw string
+	)
+
+	err := db.DB.QueryRow(
+		`SELECT
+			COALESCE(backup_schedule_mode, 'manual'),
+			COALESCE(backup_optimal_window, ''),
+			COALESCE(backup_next_run_at, '')
+		FROM settings WHERE id = 1`,
+	).Scan(&mode, &windowJSON, &nextRunRaw)
+	if err != nil {
+		log.Printf("Smart backup: failed to load persisted state: %v", err)
+		return
+	}
+
+	sbs.mu.Lock()
+	defer sbs.mu.Unlock()
+
+	sbs.running = mode == "smart"
+
+	if windowJSON != "" {
+		var window BackupWindow
+		if err := json.Unmarshal([]byte(windowJSON), &window); err == nil {
+			sbs.lastWindow = &window
+		} else {
+			log.Printf("Smart backup: failed to parse cached optimal window: %v", err)
+		}
+	}
+
+	if nextRunRaw != "" {
+		nextRun, err := time.Parse(time.RFC3339, nextRunRaw)
+		if err == nil {
+			sbs.nextBackupAt = &nextRun
+		} else {
+			log.Printf("Smart backup: failed to parse cached next run time: %v", err)
+		}
+	}
+}
+
+func (sbs *SmartBackupScheduler) currentMode() string {
+	var mode string
+	if err := db.DB.QueryRow("SELECT COALESCE(backup_schedule_mode, 'manual') FROM settings WHERE id = 1").Scan(&mode); err != nil {
+		return "manual"
+	}
+	return mode
+}
+
+func (sbs *SmartBackupScheduler) ensureNextBackupAt(now time.Time) *time.Time {
+	sbs.mu.Lock()
+	defer sbs.mu.Unlock()
+
+	if sbs.lastWindow == nil {
+		return nil
+	}
+	if sbs.nextBackupAt == nil {
+		next := nextBackupTime(sbs.lastWindow, now)
+		sbs.nextBackupAt = &next
+		go sbs.persistState(nil, &next)
+	}
+
+	next := *sbs.nextBackupAt
+	return &next
+}
+
+func (sbs *SmartBackupScheduler) advanceNextBackupAt(now time.Time) {
+	sbs.mu.Lock()
+	defer sbs.mu.Unlock()
+
+	if sbs.lastWindow == nil {
+		return
+	}
+
+	next := nextBackupTime(sbs.lastWindow, now.Add(time.Minute))
+	sbs.nextBackupAt = &next
+	go sbs.persistState(nil, &next)
+}
+
+func (sbs *SmartBackupScheduler) persistState(window *BackupWindow, nextRun *time.Time) {
+	if db.DB == nil {
+		return
+	}
+
+	if window != nil {
+		windowJSON, _ := json.Marshal(window)
+		nextValue := ""
+		if nextRun != nil {
+			nextValue = nextRun.UTC().Format(time.RFC3339)
+		}
+		if _, err := db.DB.Exec(
+			"UPDATE settings SET backup_optimal_window = ?, backup_next_run_at = ? WHERE id = 1",
+			string(windowJSON), nextValue,
+		); err != nil {
+			log.Printf("Smart backup: failed to persist schedule state: %v", err)
+		}
+		return
+	}
+
+	nextValue := ""
+	if nextRun != nil {
+		nextValue = nextRun.UTC().Format(time.RFC3339)
+	}
+	if _, err := db.DB.Exec("UPDATE settings SET backup_next_run_at = ? WHERE id = 1", nextValue); err != nil {
+		log.Printf("Smart backup: failed to persist next backup time: %v", err)
+	}
+}
+
+func nextBackupTime(window *BackupWindow, now time.Time) time.Time {
+	current := now.UTC()
+	next := time.Date(current.Year(), current.Month(), current.Day(), window.OptimalHour, 0, 0, 0, time.UTC)
+	if current.After(next) || current.Equal(next) {
+		next = next.Add(24 * time.Hour)
+	}
+	return next
 }
 
 // FindOptimalBackupWindow analyzes historical I/O to determine the best backup time.

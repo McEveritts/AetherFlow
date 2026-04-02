@@ -121,7 +121,7 @@ function ProgressRing({ progress, status, logLine, startedAt }: ProgressRingProp
 }
 
 export default function MarketplaceTab() {
-    const { apps, isLoading, isError, mutate } = useMarketplace();
+    const { apps, isLoading, isError, error, mutate } = useMarketplace();
     const { addToast } = useToast();
     const [searchQuery, setSearchQuery] = useState('');
     const [activeCategory, setActiveCategory] = useState('All');
@@ -181,6 +181,9 @@ export default function MarketplaceTab() {
     const isAppBusy = (app: App): boolean => {
         return app.status === 'installing' || app.status === 'uninstalling' || operatingApp === app.id;
     };
+
+    const isCatalogMissing = isError && typeof error === 'object' && error !== null && 'status' in error
+        && (error as { status?: number }).status === 500;
 
     return (
         <div className="space-y-6 animate-fade-in relative z-10 w-full min-h-screen">
@@ -243,7 +246,16 @@ export default function MarketplaceTab() {
                 </div>
             )}
 
-            {isError && (
+            {isCatalogMissing && (
+                <div className="bg-amber-500/10 border border-amber-500/20 p-6 rounded-2xl flex flex-col items-center gap-3 text-center">
+                    <AlertCircle size={32} className="text-amber-400" />
+                    <h3 className="text-lg font-bold text-slate-200">Marketplace Configuration Missing</h3>
+                    <p className="text-sm text-slate-400">The package catalog could not be loaded from `packages.json`. Restore the marketplace configuration and retry.</p>
+                    <button onClick={() => mutate()} className="mt-2 px-4 py-2 bg-white/5 hover:bg-white/10 text-white text-sm rounded-lg transition-colors">Retry</button>
+                </div>
+            )}
+
+            {isError && !isCatalogMissing && (
                 <div className="bg-red-500/10 border border-red-500/20 p-6 rounded-2xl flex flex-col items-center gap-3 text-center">
                     <AlertCircle size={32} className="text-red-400" />
                     <h3 className="text-lg font-bold text-slate-200">Failed to load catalog</h3>

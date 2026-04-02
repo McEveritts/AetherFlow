@@ -111,7 +111,11 @@ func shouldTrackPackage(pkg models.Package) bool {
 }
 
 func (w *AppUpdateWatcher) RefreshInstalledPackages() {
-	pkgs := GetPackages()
+	pkgs, err := GetPackages()
+	if err != nil {
+		log.Printf("[updates] unable to load package catalog: %v", err)
+		return
+	}
 	if len(pkgs) == 0 {
 		return
 	}
@@ -156,7 +160,13 @@ func RefreshPackageUpdateByID(pkgID string) {
 		watcher = NewAppUpdateWatcher(nil, 0, nil)
 	}
 
-	for _, pkg := range GetPackages() {
+	pkgs, err := GetPackages()
+	if err != nil {
+		log.Printf("[updates] unable to load package catalog: %v", err)
+		return
+	}
+
+	for _, pkg := range pkgs {
 		if pkg.Name != pkgID || !shouldTrackPackage(pkg) {
 			continue
 		}

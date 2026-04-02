@@ -25,19 +25,27 @@ func resolveSandboxScriptPath() string {
 	return ""
 }
 
-func getPackageDefinition(pkgID string) *models.Package {
-	for _, pkg := range GetPackages() {
+func getPackageDefinition(pkgID string) (*models.Package, error) {
+	pkgs, err := GetPackages()
+	if err != nil {
+		return nil, err
+	}
+
+	for _, pkg := range pkgs {
 		if pkg.Name == pkgID {
 			copy := pkg
-			return &copy
+			return &copy, nil
 		}
 	}
 
-	return nil
+	return nil, nil
 }
 
 func ApplyPackageSandbox(pkgID string) error {
-	pkg := getPackageDefinition(pkgID)
+	pkg, err := getPackageDefinition(pkgID)
+	if err != nil {
+		return fmt.Errorf("load package definitions: %w", err)
+	}
 	if pkg == nil {
 		return fmt.Errorf("package %q not found", pkgID)
 	}
