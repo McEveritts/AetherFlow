@@ -21,13 +21,13 @@ export default function SecurityTab() {
 
                         <div className="space-y-4">
                             <button 
-                                disabled
+                                disabled={true}
                                 title="Coming in v2.0"
                                 className="w-full text-left px-4 py-3 bg-white/5 disabled:opacity-50 disabled:cursor-not-allowed rounded-xl text-sm font-semibold text-slate-300 transition-colors border border-white/5">
                                 Change Password (Coming in v2.0)
                             </button>
                             <button 
-                                disabled
+                                disabled={true}
                                 title="Coming in v2.0"
                                 className="w-full text-left px-4 py-3 bg-white/5 disabled:opacity-50 disabled:cursor-not-allowed rounded-xl text-sm font-semibold text-slate-300 transition-colors border border-white/5 flex items-center justify-between">
                                 Enforce 2FA <span className="text-[10px] bg-emerald-500/20 text-emerald-400 px-2 py-0.5 rounded uppercase tracking-wider">Enabled</span>
@@ -43,7 +43,7 @@ export default function SecurityTab() {
                         <p className="text-sm text-slate-400 mb-6">Tokens allowing external scripts to interact with the AetherFlow API.</p>
 
                         <button 
-                            disabled
+                            disabled={true}
                             title="Coming in v2.0"
                             className="w-full px-4 py-3 bg-indigo-500/50 text-white/50 cursor-not-allowed rounded-xl text-sm font-bold shadow-lg transition-all text-center">
                             Generate New Token (Coming in v2.0)
@@ -57,7 +57,7 @@ export default function SecurityTab() {
                                 <h3 className="text-lg font-bold text-slate-200 mb-2">Danger Zone</h3>
                                 <p className="text-sm text-slate-400 mb-4">Actions here can permanently alter or destroy access to your dashboard.</p>
                                 <button 
-                                    disabled
+                                    disabled={true}
                                     title="Coming in v2.0"
                                     className="px-6 py-2.5 bg-red-500/10 text-red-400/50 border border-red-500/10 rounded-lg text-sm font-bold transition-all cursor-not-allowed">
                                     Revoke All Sessions (Coming in v2.0)

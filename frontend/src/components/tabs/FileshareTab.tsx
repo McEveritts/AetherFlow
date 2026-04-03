@@ -27,35 +27,23 @@ export default function FileshareTab() {
                 method: 'POST',
                 body: formData
             });
-            if (res.ok) {
-                mutate();
+            const data = await res.json().catch(() => ({} as { error?: string }));
+            if (!res.ok) {
+                throw new Error(data.error || 'Upload failed');
             }
+
+            addToast('File uploaded successfully.', 'success');
+            mutate();
         } catch (err) {
             console.error("Upload failed", err);
+            addToast(err instanceof Error ? err.message : 'Upload failed', 'error');
         } finally {
             setIsUploading(false);
         }
     };
 
-    const handleDownload = async (filename: string) => {
-        try {
-            const res = await apiFetch(`/api/v1/auth/fileshare/download/${encodeURIComponent(filename)}`);
-            if (!res.ok) {
-                addToast('Download failed', 'error');
-                return;
-            }
-            const blob = await res.blob();
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = filename;
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
-            URL.revokeObjectURL(url);
-        } catch {
-            addToast('Network error downloading file', 'error');
-        }
+    const handleDownload = (filename: string) => {
+        window.location.assign(`/api/v1/auth/fileshare/download/${encodeURIComponent(filename)}`);
     };
 
     const formatBytes = (bytes: number, decimals = 2) => {

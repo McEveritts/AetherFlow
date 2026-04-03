@@ -1,7 +1,6 @@
 import { HardDriveDownload, Archive, CheckCircle2, Clock, ShieldCheck, Database, Download, BrainCircuit, Loader2, ToggleLeft, ToggleRight } from 'lucide-react';
 import { useState, useEffect } from 'react';
 import { apiFetch } from '@/lib/fetcher';
-import { useToast } from '@/contexts/ToastContext';
 
 interface BackupProgress {
     status: 'idle' | 'running' | 'success' | 'error';
@@ -40,7 +39,6 @@ export default function BackupTab() {
     const [isLoadingBackups, setIsLoadingBackups] = useState(true);
     const [schedule, setSchedule] = useState<ScheduleStatus | null>(null);
     const [isTogglingSchedule, setIsTogglingSchedule] = useState(false);
-    const { addToast } = useToast();
 
     const fetchBackups = async () => {
         setIsLoadingBackups(true);
@@ -100,25 +98,8 @@ export default function BackupTab() {
         }
     };
 
-    const handleDownloadBackup = async (filename: string) => {
-        try {
-            const res = await apiFetch(`/api/v1/admin/backup/download/${encodeURIComponent(filename)}`);
-            if (!res.ok) {
-                addToast('Backup download failed', 'error');
-                return;
-            }
-            const blob = await res.blob();
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = filename;
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
-            URL.revokeObjectURL(url);
-        } catch {
-            addToast('Network error downloading backup', 'error');
-        }
+    const handleDownloadBackup = (filename: string) => {
+        window.location.assign(`/api/v1/admin/backup/download/${encodeURIComponent(filename)}`);
     };
 
     const toggleSmartSchedule = async () => {

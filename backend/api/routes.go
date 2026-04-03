@@ -88,6 +88,8 @@ func registerV1Routes(apiGroup *gin.RouterGroup) {
 		authGroup.GET("/packages/:id/progress", PackageProgress)
 
 		authGroup.GET("/system/update/check", CheckUpdate)
+		// Read-only metrics endpoint used by browser fallback polling.
+		authGroup.GET("/system/metrics", getSystemMetrics)
 		authGroup.GET("/system/hardware", GetHardwareInfo)
 
 		authGroup.GET("/notifications", GetNotifications)
@@ -111,6 +113,8 @@ func registerV1Routes(apiGroup *gin.RouterGroup) {
 		adminGroup.POST("/backup/upload/:filename", UploadBackupChunk)
 
 		// Requires admin context (Phase 8)
+		adminGroup.GET("/settings", GetSettings)
+		// Requires admin context (Phase 8)
 		adminGroup.PUT("/settings", updateSettings)
 		// Requires admin context (Phase 8)
 		adminGroup.POST("/settings/test-ai", TestAiConnection)
@@ -132,6 +136,8 @@ func registerV1Routes(apiGroup *gin.RouterGroup) {
 		adminGroup.GET("/billing/webhooks", ListBillingWebhookEvents)
 
 		// Requires admin context (Phase 8)
+		adminGroup.GET("/services", getServices)
+		// Requires admin context (Phase 8)
 		adminGroup.POST("/services/:name/control", controlService)
 
 		// Requires admin context (Phase 8)
@@ -139,6 +145,8 @@ func registerV1Routes(apiGroup *gin.RouterGroup) {
 		// Requires admin context (Phase 8)
 		adminGroup.POST("/packages/:id/uninstall", UninstallPackage)
 
+		// Requires admin context (Phase 8)
+		adminGroup.GET("/system/update/check", CheckUpdate)
 		// Requires admin context (Phase 8)
 		adminGroup.POST("/system/update/run", RunUpdate)
 
@@ -230,7 +238,7 @@ func registerV1Routes(apiGroup *gin.RouterGroup) {
 		// Requires admin context (Phase 8)
 		adminGroup.POST("/network/tailscale/routes", AdvertiseTailscaleRoutes)
 
-		// System metrics are admin-only to prevent information disclosure (CWE-284)
+		// Admin alias retained for operator tooling and CLI automation.
 		// Headless Operator APIs - CLI/Automation Integration Only
 		// Requires admin context (Phase 8)
 		adminGroup.GET("/system/metrics", getSystemMetrics)

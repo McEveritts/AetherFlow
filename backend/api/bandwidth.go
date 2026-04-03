@@ -29,8 +29,7 @@ func HandleBandwidthAnalyze(c *gin.Context) {
 	c.JSON(http.StatusOK, rec)
 }
 
-// HandleBandwidthApply is a stub that accepts recommended limits.
-// Actual torrent client integration is user-configurable.
+// HandleBandwidthApply applies the recommended limits to the local Transmission RPC endpoint.
 func HandleBandwidthApply(c *gin.Context) {
 	var req struct {
 		UploadKBps   int `json:"upload_kbps"`

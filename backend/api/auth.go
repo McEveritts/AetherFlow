@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -23,6 +24,7 @@ import (
 )
 
 var jwtSecret = []byte(os.Getenv("JWT_SECRET"))
+var errUnauthorizedSession = errors.New("unauthorized session")
 
 func getJWTSecret() []byte {
 	if len(jwtSecret) == 0 {
@@ -393,6 +395,50 @@ func isAllowedHost(host string) bool {
 	return false
 }
 
+func validateSessionToken(tokenString string) (jwt.MapClaims, error) {
+	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+		// Prevent algorithm confusion attacks: only accept HMAC signing
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, jwt.ErrSignatureInvalid
+		}
+		return getJWTSecret(), nil
+	})
+	if err != nil || !token.Valid {
+		return nil, errUnauthorizedSession
+	}
+
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok {
+		return nil, errUnauthorizedSession
+	}
+
+	return claims, nil
+}
+
+func resolveSessionToken(c *gin.Context) (string, jwt.MapClaims, error) {
+	authHeader := strings.TrimSpace(c.GetHeader("Authorization"))
+	if strings.HasPrefix(authHeader, "Bearer ") {
+		tokenString := strings.TrimSpace(strings.TrimPrefix(authHeader, "Bearer "))
+		if tokenString != "" {
+			if claims, err := validateSessionToken(tokenString); err == nil {
+				return tokenString, claims, nil
+			}
+		}
+	}
+
+	cookie, err := c.Cookie("aetherflow_session")
+	if err == nil {
+		tokenString := strings.TrimSpace(cookie)
+		if tokenString != "" {
+			if claims, err := validateSessionToken(tokenString); err == nil {
+				return tokenString, claims, nil
+			}
+		}
+	}
+
+	return "", nil, errUnauthorizedSession
+}
+
 // GetSession godoc
 // @Summary      Get current session
 // @Description  Get information about the currently authenticated user session.
@@ -403,37 +449,12 @@ func isAllowedHost(host string) bool {
 // @Failure      401  {object}  map[string]interface{}
 // @Router       /auth/session [get]
 func GetSession(c *gin.Context) {
-	authHeader := c.GetHeader("Authorization")
-	var tokenString string
-	if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
-		cookie, err := c.Cookie("aetherflow_session")
-		if err != nil || cookie == "" {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
-			return
-		}
-		tokenString = cookie
-	} else {
-		tokenString = strings.TrimPrefix(authHeader, "Bearer ")
-	}
-
-	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
-		// Prevent algorithm confusion attacks: only accept HMAC signing
-		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-			return nil, jwt.ErrSignatureInvalid
-		}
-		return getJWTSecret(), nil
-	})
-
-	if err != nil || !token.Valid {
+	_, claims, err := resolveSessionToken(c)
+	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
 		return
 	}
 
-	claims, ok := token.Claims.(jwt.MapClaims)
-	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
-		return
-	}
 	userIdFloat, ok := claims["user_id"].(float64)
 	if !ok {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid token claims"})
@@ -457,21 +478,12 @@ func GetSession(c *gin.Context) {
 
 func Logout(c *gin.Context) {
 	// Attempt to revoke the token intelligently (Phase 10 integration)
-	authHeader := c.GetHeader("Authorization")
-	if authHeader != "" && strings.HasPrefix(authHeader, "Bearer ") {
-		tokenString := strings.TrimPrefix(authHeader, "Bearer ")
-		token, _ := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
-			return getJWTSecret(), nil
-		})
-		if token != nil && token.Valid {
-			if claims, ok := token.Claims.(jwt.MapClaims); ok {
-				if jti, ok := claims["jti"].(string); ok {
-					if exp, ok := claims["exp"].(float64); ok {
-						remaining := time.Until(time.Unix(int64(exp), 0))
-						if remaining > 0 {
-							db.RevokeToken(jti, remaining)
-						}
-					}
+	if _, claims, err := resolveSessionToken(c); err == nil {
+		if jti, ok := claims["jti"].(string); ok {
+			if exp, ok := claims["exp"].(float64); ok {
+				remaining := time.Until(time.Unix(int64(exp), 0))
+				if remaining > 0 {
+					db.RevokeToken(jti, remaining)
 				}
 			}
 		}
@@ -482,38 +494,12 @@ func Logout(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "Logged out"})
 }
 
-// AuthMiddleware validates the JWT session via Bearer token and sets "user_id" in the
-// Gin context for downstream handlers. Aborts with 401 on any auth failure.
+// AuthMiddleware validates the JWT session via Bearer token with cookie fallback
+// and sets "user_id" in the Gin context for downstream handlers.
 func AuthMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		authHeader := c.GetHeader("Authorization")
-		var tokenString string
-		if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
-			cookie, err := c.Cookie("aetherflow_session")
-			if err != nil || cookie == "" {
-				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
-				return
-			}
-			tokenString = cookie
-		} else {
-			tokenString = strings.TrimPrefix(authHeader, "Bearer ")
-		}
-
-		token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
-			// Prevent algorithm confusion attacks: only accept HMAC signing
-			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-				return nil, jwt.ErrSignatureInvalid
-			}
-			return getJWTSecret(), nil
-		})
-
-		if err != nil || !token.Valid {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
-			return
-		}
-
-		claims, ok := token.Claims.(jwt.MapClaims)
-		if !ok {
+		_, claims, err := resolveSessionToken(c)
+		if err != nil {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
 			return
 		}

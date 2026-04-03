@@ -175,7 +175,7 @@ export default function BandwidthCard() {
                         className="w-full py-2 bg-emerald-600 hover:bg-emerald-500 disabled:bg-emerald-600/50 text-white text-xs font-bold rounded-lg transition-all flex items-center justify-center gap-1.5 mt-2"
                     >
                         {isApplying ? <Loader2 size={14} className="animate-spin" /> : <CheckCircle2 size={14} />}
-                        {isApplying ? 'Applying Limits...' : applySuccess ? 'Applied' : 'Apply Optimal Limits'}
+                        {isApplying ? 'Applying Limits...' : applySuccess ? 'Applied' : 'Apply Recommendations'}
                     </button>
                 </div>
             )}

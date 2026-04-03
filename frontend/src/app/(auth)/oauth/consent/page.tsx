@@ -22,12 +22,10 @@ export default function ConsentPage() {
     const codeChallenge = searchParams.get('code_challenge');
     const codeChallengeMethod = searchParams.get('code_challenge_method');
 
-    // Parse scopes to show user-friendly labels
     const scopeList = scope.split(' ').map(s => s.trim()).filter(Boolean);
 
     useEffect(() => {
         if (!authLoading && !isAuthenticated) {
-            // Wait for auth to settle, if not authenticated -> login
             const returnTo = encodeURIComponent(window.location.pathname + window.location.search);
             router.replace(`/login?return_to=${returnTo}`);
         }
@@ -61,11 +59,10 @@ export default function ConsentPage() {
             const data = await res.json();
             const redirectTarget = data.redirect_uri || data.redirect_url;
             if (res.ok && redirectTarget) {
-                // Perform the OAuth redirect back to the client
                 window.location.href = redirectTarget;
             } else {
                 setError(data.error || 'Consent submission failed');
-                setIsSubmitting(false); // only re-enable if we didn't redirect
+                setIsSubmitting(false);
             }
         } catch (_err) {
             setError('Network error submitting consent.');

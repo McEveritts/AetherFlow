@@ -4,6 +4,7 @@ import { RefreshCw, Box, Settings, Globe, RotateCcw, Square, Play, Server, Cpu }
 import { useState } from 'react';
 import useSWR from 'swr';
 import { useToast } from '@/contexts/ToastContext';
+import { useAuth } from '@/contexts/AuthContext';
 import { ServicesSkeleton } from '@/components/layout/SkeletonBox';
 import { apiFetch } from '@/lib/fetcher';
 
@@ -55,14 +56,21 @@ interface ServiceInfo {
 
 export default function ServicesTab() {
     const { addToast } = useToast();
+    const { user } = useAuth();
     const [loadingService, setLoadingService] = useState<string | null>(null);
+    const canControlServices = user?.role === 'admin';
 
     const { data: services, mutate, isLoading } = useSWR<Record<string, ServiceInfo>>(
-        '/api/v1/admin/services',
+        '/api/v1/auth/services',
         { refreshInterval: 15000 }
     );
 
     const handleServiceControl = async (name: string, data: ServiceInfo, action: 'start' | 'stop' | 'restart') => {
+        if (!canControlServices) {
+            addToast('Admin access required to control services.', 'error');
+            return;
+        }
+
         setLoadingService(name);
 
         // Optimistic update — instantly reflect the pending state in the UI
@@ -120,6 +128,7 @@ export default function ServicesTab() {
         const isRunning = data.status === 'running';
         const isError = data.status === 'error';
         const isBusy = loadingService === name;
+        const controlDisabled = isBusy || !canControlServices;
 
         return (
             <div key={name} className="bg-white/[0.02] border border-white/[0.05] rounded-2xl p-6 hover:bg-white/[0.04] transition-all hover:border-white/10 group cursor-default relative overflow-hidden">
@@ -190,14 +199,16 @@ export default function ServicesTab() {
                             </button>
                             <button
                                 onClick={() => handleServiceControl(name, data, 'restart')}
-                                disabled={isBusy}
+                                disabled={controlDisabled}
+                                title={canControlServices ? 'Restart service' : 'Admin access required'}
                                 className="p-2 bg-slate-800/80 hover:bg-amber-500/20 hover:text-amber-400 text-slate-400 rounded-lg transition-colors disabled:opacity-50"
                             >
                                 <RotateCcw size={16} className={isBusy ? 'animate-spin' : ''} />
                             </button>
                             <button
                                 onClick={() => handleServiceControl(name, data, 'stop')}
-                                disabled={isBusy}
+                                disabled={controlDisabled}
+                                title={canControlServices ? 'Stop service' : 'Admin access required'}
                                 className="p-2 bg-slate-800/80 hover:bg-red-500/20 hover:text-red-400 text-slate-400 rounded-lg transition-colors disabled:opacity-50"
                             >
                                 <Square size={16} className="fill-current" />
@@ -206,7 +217,8 @@ export default function ServicesTab() {
                     ) : (
                         <button
                             onClick={() => handleServiceControl(name, data, 'start')}
-                            disabled={isBusy}
+                            disabled={controlDisabled}
+                            title={canControlServices ? 'Start service' : 'Admin access required'}
                             className="w-full py-2 bg-indigo-500/20 hover:bg-indigo-500 text-indigo-300 hover:text-white text-xs font-semibold rounded-lg transition-colors flex items-center justify-center gap-2 border border-indigo-500/30 disabled:opacity-50"
                         >
                             <Play size={14} className="fill-current" /> {isBusy ? 'Starting...' : 'Start Service'}

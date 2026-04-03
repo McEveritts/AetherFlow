@@ -46,12 +46,12 @@ export default function SettingsTab() {
     };
 
     const { data: updateData, error: updateError } = useSWR(
-        '/api/v1/admin/system/update/check',
+        '/api/v1/auth/system/update/check',
         { refreshInterval: 60000 }
     );
 
     const { data: settingsData, isLoading, mutate: mutateSettings } = useSWR(
-        '/api/v1/admin/settings',
+        '/api/v1/auth/settings',
         {
             onSuccess: (data: Record<string, string>) => {
                 if (data.aiModel) setModel(data.aiModel);

@@ -126,7 +126,7 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
 
         const poll = async () => {
             try {
-                const res = await apiFetch('/api/v1/admin/system/metrics');
+                const res = await apiFetch('/api/v1/auth/system/metrics');
                 if (!res.ok) return;
                 const metrics = await res.json();
                 if (isMountedRef.current) {
