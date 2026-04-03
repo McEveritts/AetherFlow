@@ -122,10 +122,22 @@ function _bashrc() {
 # intro function (1)
 # shellcheck disable=2005,2312
 function _intro() {
-	DISTRO=$(lsb_release -is)
-	CODENAME=$(lsb_release -cs)
-	SETNAME=$(lsb_release -rc)
-	VERSION_ID=$(lsb_release -rs)
+	if [[ -r /etc/os-release ]]; then
+		# shellcheck disable=1091
+		. /etc/os-release
+		if [[ "${ID}" == "ubuntu" ]]; then DISTRO="Ubuntu"; fi
+		if [[ "${ID}" == "debian" ]]; then DISTRO="Debian"; fi
+		CODENAME="${VERSION_CODENAME}"
+		VERSION_ID="${VERSION_ID}"
+		SETNAME="${VERSION_ID} ${VERSION_CODENAME}"
+	elif command -v lsb_release >/dev/null 2>&1; then
+		DISTRO=$(lsb_release -is)
+		CODENAME=$(lsb_release -cs)
+		SETNAME=$(lsb_release -rc)
+		VERSION_ID=$(lsb_release -rs)
+	else
+		DISTRO="Unknown"
+	fi
 	echo
 	echo
 	echo "[${repo_title}AetherFlow${normal}] ${title} AetherFlow Seedbox Installation ${normal}  "
@@ -136,12 +148,18 @@ function _intro() {
 	echo
 	echo
 	echo "${green}Checking distribution ...${normal}"
-	if [[ ! -x /usr/bin/lsb_release ]]; then
-		echo "It looks like you are running ${DISTRO}, which is not supported by AetherFlow."
+	
+	if [[ -z "${DISTRO}" || "${DISTRO}" == "Unknown" ]]; then
+		echo "It looks like you are running an unknown distribution, which is not supported by AetherFlow."
 		echo "Exiting..."
 		exit 1
 	fi
-	echo "$(lsb_release -a)"
+
+	if command -v lsb_release >/dev/null 2>&1; then
+		lsb_release -a
+	else
+		echo "Distribution: ${DISTRO} ${VERSION_ID} (${CODENAME})"
+	fi
 	echo
 	if [[ "${DISTRO}" != "Ubuntu" && "${DISTRO}" != "Debian" ]]; then
 		echo "${DISTRO}: ${alert} It looks like you are running ${DISTRO}, which is not supported by AetherFlow ${normal}"
