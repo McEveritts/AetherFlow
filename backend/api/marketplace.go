@@ -74,7 +74,7 @@ func getPackageById(pkgId string) (*models.Package, error) {
 	}
 	for _, p := range pkgs {
 		if p.Name == pkgId {
-			return &p
+			return &p, nil
 		}
 	}
 	return nil, nil

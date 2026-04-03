@@ -2,6 +2,7 @@ import { useState, useRef } from 'react';
 import useSWR from 'swr';
 import { FolderUp, File as FileIcon, UploadCloud, Download, HardDrive } from 'lucide-react';
 import { apiFetch } from '@/lib/fetcher';
+import { useToast } from '@/contexts/ToastContext';
 
 interface FetchedFile {
     name: string;
@@ -15,6 +16,7 @@ export default function FileshareTab() {
     const [isDragging, setIsDragging] = useState(false);
     const [isUploading, setIsUploading] = useState(false);
     const fileInputRef = useRef<HTMLInputElement>(null);
+    const { addToast } = useToast();
 
     const handleUpload = async (file: File) => {
         setIsUploading(true);
@@ -32,6 +34,27 @@ export default function FileshareTab() {
             console.error("Upload failed", err);
         } finally {
             setIsUploading(false);
+        }
+    };
+
+    const handleDownload = async (filename: string) => {
+        try {
+            const res = await apiFetch(`/api/v1/auth/fileshare/download/${encodeURIComponent(filename)}`);
+            if (!res.ok) {
+                addToast('Download failed', 'error');
+                return;
+            }
+            const blob = await res.blob();
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        } catch {
+            addToast('Network error downloading file', 'error');
         }
     };
 
@@ -128,19 +151,18 @@ export default function FileshareTab() {
                                                 <p className="text-sm font-bold text-slate-200">{file.name}</p>
                                                 <div className="flex gap-3 text-xs text-slate-500 mt-1">
                                                     <span>{formatBytes(file.size)}</span>
-                                                    <span>•</span>
+                                                    <span>&bull;</span>
                                                     <span>{new Date(file.modTime).toLocaleDateString()}</span>
                                                 </div>
                                             </div>
                                         </div>
-                                        <a
-                                            href={`/api/v1/auth/fileshare/download/${encodeURIComponent(file.name)}`}
-                                            download
+                                        <button
+                                            onClick={() => handleDownload(file.name)}
                                             className="p-2 text-slate-400 hover:text-white hover:bg-white/10 rounded-lg transition-colors opacity-0 group-hover:opacity-100 flex items-center justify-center"
                                             title="Download File"
                                         >
                                             <Download size={18} />
-                                        </a>
+                                        </button>
                                     </div>
                                 ))
                             )}

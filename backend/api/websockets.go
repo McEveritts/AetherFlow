@@ -165,8 +165,13 @@ func init() {
 	go broadcastMetricsLoop()
 }
 
+type wsTicketEntry struct {
+	UserID   int
+	ClientIP string
+}
+
 var (
-	wsTickets   = make(map[string]int)
+	wsTickets   = make(map[string]wsTicketEntry)
 	wsTicketsMu sync.Mutex
 )
 
@@ -183,7 +188,10 @@ func IssueWSTicket(c *gin.Context) {
 	ticket := hex.EncodeToString(b)
 
 	wsTicketsMu.Lock()
-	wsTickets[ticket] = rawUserID.(int)
+	wsTickets[ticket] = wsTicketEntry{
+		UserID:   rawUserID.(int),
+		ClientIP: c.ClientIP(),
+	}
 	wsTicketsMu.Unlock()
 
 	// 30 seconds expiry for ticket
@@ -197,7 +205,7 @@ func IssueWSTicket(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"ticket": ticket})
 }
 
-// HandleWebSocket authenticates the request via WS ticket first, falling back to session cookies.
+// HandleWebSocket authenticates the request via WS ticket with IP-binding validation.
 func HandleWebSocket(c *gin.Context) {
 	ticket := c.Query("ticket")
 	if ticket == "" {
@@ -206,9 +214,9 @@ func HandleWebSocket(c *gin.Context) {
 	}
 
 	wsTicketsMu.Lock()
-	_, ok := wsTickets[ticket]
+	entry, ok := wsTickets[ticket]
 	if ok {
-		delete(wsTickets, ticket) // single-use token consumed
+		delete(wsTickets, ticket) // single-use token consumed immediately
 	}
 	wsTicketsMu.Unlock()
 
@@ -216,6 +224,15 @@ func HandleWebSocket(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid or expired ticket"})
 		return
 	}
+
+	// IP-binding: reject tickets used from a different IP than issuance
+	if entry.ClientIP != "" && entry.ClientIP != c.ClientIP() {
+		log.Printf("WS ticket IP mismatch: issued to %s, used from %s", entry.ClientIP, c.ClientIP())
+		c.JSON(http.StatusForbidden, gin.H{"error": "Ticket IP mismatch"})
+		return
+	}
+
+	_ = entry.UserID // validated user — available for future per-user channel filtering
 
 	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {

@@ -96,7 +96,7 @@ func BookmarkLog(c *gin.Context) {
 		return
 	}
 
-	_, err = db.DB.Exec(
+	_, err := db.DB.Exec(
 		"INSERT INTO log_bookmarks (user_id, log_source, log_line, timestamp, note) VALUES (?, ?, ?, ?, ?)",
 		userID, req.LogSource, req.LogLine, req.Timestamp, req.Note,
 	)

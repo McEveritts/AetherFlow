@@ -166,6 +166,9 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
             setReconnectAttempt(attemptRef.current);
             if (attemptRef.current >= MAX_RECONNECT_BEFORE_FALLBACK) {
                 startPolling();
+                if (hasConnectedOnceRef.current) {
+                    addToast('WebSocket authentication failed \u2014 switched to polling mode', 'warning');
+                }
                 reconnectTimerRef.current = setTimeout(connect, BACKOFF_MAX_MS);
             } else {
                 setConnectionState('RECONNECTING');

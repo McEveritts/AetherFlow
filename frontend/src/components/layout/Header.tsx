@@ -34,6 +34,7 @@ export default function Header() {
         CONNECTING: { icon: <Radio size={16} className="text-amber-400 animate-pulse" />, label: 'Connecting...', className: '' },
         RECONNECTING: { icon: <WifiOff size={16} className="text-amber-400 animate-pulse" />, label: 'Reconnecting...', className: '' },
         FALLBACK: { icon: <Radio size={16} className="text-blue-400" />, label: 'Polling Mode', className: '' },
+        DISCONNECTED: { icon: <WifiOff size={16} className="text-red-400" />, label: 'Disconnected', className: '' },
     };
 
     const status = statusConfig[connectionState];

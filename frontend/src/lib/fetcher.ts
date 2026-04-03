@@ -104,6 +104,12 @@ export async function apiFetch(input: RequestInfo | URL, init?: RequestInit): Pr
     if (!headers.has('Accept')) {
         headers.set('Accept', 'application/vnd.aetherflow.v1+json');
     }
+    if (!headers.has('X-Requested-With')) {
+        headers.set('X-Requested-With', 'XMLHttpRequest');
+    }
+    if (!headers.has('Cache-Control')) {
+        headers.set('Cache-Control', 'no-store');
+    }
 
     if (shouldAttachCSRF(input, init, headers) && !headers.has('X-CSRF-Token')) {
         const csrfToken = await getCSRFToken();

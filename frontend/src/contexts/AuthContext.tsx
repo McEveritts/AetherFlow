@@ -3,6 +3,8 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { apiFetch } from '@/lib/fetcher';
+import { mutate as globalMutate } from 'swr';
+import { useConnectionStore } from '@/store/useConnectionStore';
 
 export interface User {
     id: number;
@@ -78,8 +80,17 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
         } catch (err) {
             console.error("Logout failed:", err);
         }
+
+        // Clear authentication state
         setIsAuthenticated(false);
         setUser(null);
+
+        // Reset WebSocket connection store to prevent stale connections
+        useConnectionStore.getState().reset();
+
+        // Clear all SWR cache to prevent stale data leaks across sessions
+        globalMutate(() => true, undefined, { revalidate: false });
+
         router.push('/login');
     };
 
@@ -91,4 +102,3 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
 };
 
 export const useAuth = () => useContext(AuthContext);
-
