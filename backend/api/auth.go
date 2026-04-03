@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"aetherflow/db"
@@ -23,13 +24,17 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-var jwtSecret = []byte(os.Getenv("JWT_SECRET"))
+var jwtSecret []byte
+var jwtSecretOnce sync.Once
 var errUnauthorizedSession = errors.New("unauthorized session")
 
 func getJWTSecret() []byte {
-	if len(jwtSecret) == 0 {
-		log.Fatal("FATAL: JWT_SECRET environment variable is not set. Refusing to start with an insecure default.")
-	}
+	jwtSecretOnce.Do(func() {
+		jwtSecret = []byte(os.Getenv("JWT_SECRET"))
+		if len(jwtSecret) == 0 {
+			log.Fatal("FATAL: JWT_SECRET environment variable is not set. Refusing to start with an insecure default.")
+		}
+	})
 	return jwtSecret
 }
 
