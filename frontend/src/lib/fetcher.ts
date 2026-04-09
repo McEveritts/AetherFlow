@@ -57,7 +57,7 @@ function shouldAttachCSRF(input: RequestInfo | URL, init: RequestInit | undefine
     }
 
     const path = getRequestPath(input);
-    return path.startsWith('/api/v1/auth/') || path.startsWith('/api/auth/');
+    return path.startsWith('/api/v1/auth/') || path.startsWith('/api/v1/public/auth/') || path.startsWith('/api/auth/');
 }
 
 async function getCSRFToken(): Promise<string | null> {

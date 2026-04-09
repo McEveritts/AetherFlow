@@ -38,10 +38,12 @@ export default function ThemeProvider({ children }: { children: React.ReactNode 
                     <div 
                         className="absolute top-0 right-0 w-[500px] h-[500px] blur-[100px] rounded-full translate-x-1/3 -translate-y-1/3 transition-colors duration-1000"
                         style={{ backgroundColor: '#2563eb', opacity: 0.15 }}
+                        suppressHydrationWarning
                     />
                     <div 
                         className="absolute bottom-0 left-0 w-[400px] h-[400px] blur-[100px] rounded-full -translate-x-1/3 translate-y-1/3 transition-colors duration-1000"
                         style={{ backgroundColor: '#4f46e5', opacity: 0.15 }}
+                        suppressHydrationWarning
                     />
                 </div>
                 {children}
@@ -55,10 +57,12 @@ export default function ThemeProvider({ children }: { children: React.ReactNode 
                 <div 
                     className="absolute top-0 right-0 w-[500px] h-[500px] blur-[100px] rounded-full translate-x-1/3 -translate-y-1/3 transition-colors duration-1000"
                     style={{ backgroundColor: ambientColor1, opacity: 0.15 }}
+                    suppressHydrationWarning
                 />
                 <div 
                     className="absolute bottom-0 left-0 w-[400px] h-[400px] blur-[100px] rounded-full -translate-x-1/3 translate-y-1/3 transition-colors duration-1000"
                     style={{ backgroundColor: ambientColor2, opacity: 0.15 }}
+                    suppressHydrationWarning
                 />
             </div>
             {children}

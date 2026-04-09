@@ -1,9 +1,11 @@
 'use client';
 
 import React, { createContext, useContext, useEffect, useState, useRef, useCallback } from 'react';
+import { usePathname } from 'next/navigation';
 import { SystemMetrics } from '@/types/dashboard';
 import { useConnectionStore, ConnectionState } from '@/store/useConnectionStore';
 import { useToast } from '@/contexts/ToastContext';
+import { useAuth } from '@/contexts/AuthContext';
 import { mutate as globalMutate } from 'swr';
 import { apiFetch } from '@/lib/fetcher';
 
@@ -59,6 +61,8 @@ function isWebSocketDisabled(): boolean {
 // ── Provider ───────────────────────────────────────────────────
 export function WebSocketProvider({ children }: { children: React.ReactNode }) {
     const [data, setData] = useState<WebSocketData>({ system: null, services: null });
+    const { isAuthenticated } = useAuth();
+    const pathname = usePathname();
 
     // Zustand connection store — powers header badge + any external consumer
     const {
@@ -167,7 +171,7 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
             if (attemptRef.current >= MAX_RECONNECT_BEFORE_FALLBACK) {
                 startPolling();
                 if (hasConnectedOnceRef.current) {
-                    addToast('WebSocket authentication failed \u2014 switched to polling mode', 'warning');
+                    addToast('WebSocket authentication failed \u2014 switched to polling mode', 'error');
                 }
                 reconnectTimerRef.current = setTimeout(connect, BACKOFF_MAX_MS);
             } else {
@@ -270,6 +274,14 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
     // ── Lifecycle ──────────────────────────────────────────────
     useEffect(() => {
         isMountedRef.current = true;
+
+        // Don't attempt WS connection if not authenticated or on login page
+        if (!isAuthenticated || pathname === '/login') {
+            return () => {
+                isMountedRef.current = false;
+            };
+        }
+
         if (isWebSocketDisabled()) {
             startPolling(true);
             return () => {
@@ -290,7 +302,7 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
             wsRef.current?.close();
         };
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, []);
+    }, [isAuthenticated, pathname]);
 
     return (
         <WebSocketContext.Provider value={{ data, connectionState, reconnectAttempt, manualReconnect }}>

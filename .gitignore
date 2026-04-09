@@ -27,3 +27,11 @@ frontend/test-results/
 temp_ssh*
 ssh_tool.py
 ssh_pty.py
+
+# Build outputs
+dist/
+
+# Databases
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
