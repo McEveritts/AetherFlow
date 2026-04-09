@@ -15,8 +15,8 @@ Object.assign(globalThis, {
 });
 
 if (typeof globalThis.fetch === "undefined") {
-  const undici = require("undici");
   // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const undici = require("undici");
   globalThis.fetch = undici.fetch as typeof fetch;
   globalThis.Request = undici.Request as typeof Request;
   globalThis.Response = undici.Response as typeof Response;
