@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 )
 
 // exeDir caches the directory containing the running executable so config
@@ -138,45 +139,64 @@ func GetPackages() ([]models.Package, error) {
 
 	mergePackageAutomation(pkgs, loadPackageAutomation())
 
-	// Iterate and check status
+	// Iterate and check status concurrently to eliminate CPU/IO wait blocking
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+
 	for i := range pkgs {
-		pkgId := pkgs[i].Name
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			
+			pkgId := pkgs[idx].Name
 
-		// 1. Check in-memory Installer Service Queue for active operations
-		activeStatus := GetPackageJobStatus(pkgId)
-		if activeStatus != "" {
-			pkgs[i].Status = activeStatus
-			continue
-		}
-
-		// 2. For systemd services, check if the unit actually exists on the system
-		if pkgs[i].ServiceType == "systemd" && pkgs[i].ServiceName != "" {
-			// Check if the systemd unit file exists (not just its status)
-			unitExists := false
-			checkCmd := exec.Command("systemctl", "cat", pkgs[i].ServiceName)
-			if err := checkCmd.Run(); err == nil {
-				unitExists = true
+			// 1. Check in-memory Installer Service Queue for active operations
+			activeStatus := GetPackageJobStatus(pkgId)
+			if activeStatus != "" {
+				mu.Lock()
+				pkgs[idx].Status = activeStatus
+				mu.Unlock()
+				return
 			}
 
-			if unitExists {
-				pkgs[i].Status = "installed"
-			} else {
-				pkgs[i].Status = "uninstalled"
-			}
-		} else {
-			// Legacy lock file check
-			lockPath := pkgs[i].LockFile
-			if lockPath != "" {
-				if _, err := os.Stat(lockPath); err == nil {
-					pkgs[i].Status = "installed"
-				} else {
-					pkgs[i].Status = "uninstalled"
+			// 2. For systemd services, check if the unit actually exists on the system
+			if pkgs[idx].ServiceType == "systemd" && pkgs[idx].ServiceName != "" {
+				// Check if the systemd unit file exists (not just its status)
+				unitExists := false
+				checkCmd := exec.Command("systemctl", "cat", pkgs[idx].ServiceName)
+				if err := checkCmd.Run(); err == nil {
+					unitExists = true
 				}
+
+				mu.Lock()
+				if unitExists {
+					pkgs[idx].Status = "installed"
+				} else {
+					pkgs[idx].Status = "uninstalled"
+				}
+				mu.Unlock()
 			} else {
-				pkgs[i].Status = "uninstalled"
+				// Legacy lock file check
+				lockPath := pkgs[idx].LockFile
+				if lockPath != "" {
+					if _, err := os.Stat(lockPath); err == nil {
+						mu.Lock()
+						pkgs[idx].Status = "installed"
+						mu.Unlock()
+					} else {
+						mu.Lock()
+						pkgs[idx].Status = "uninstalled"
+						mu.Unlock()
+					}
+				} else {
+					mu.Lock()
+					pkgs[idx].Status = "uninstalled"
+					mu.Unlock()
+				}
 			}
-		}
+		}(i)
 	}
+	wg.Wait()
 
 	mergePackageUpdateState(pkgs)
 

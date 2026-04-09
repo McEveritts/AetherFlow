@@ -5,7 +5,7 @@ import { User } from '@/contexts/AuthContext';
 import { Shield, ShieldAlert, Trash2, Users, Check, X } from 'lucide-react';
 import { UsersSkeleton } from '@/components/layout/SkeletonBox';
 import Image from 'next/image';
-import { DataGrid } from '@/components/ui/DataGrid';
+import { DataGrid } from '@aetherflow/ui';
 import { ColumnDef } from '@tanstack/react-table';
 import { apiFetch } from '@/lib/fetcher';
 

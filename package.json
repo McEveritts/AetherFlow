@@ -1,4 +1,10 @@
 {
+  "name": "aetherflow-monorepo",
+  "private": true,
+  "workspaces": [
+    "frontend",
+    "packages/ui"
+  ],
   "dependencies": {
     "ssh2": "^1.17.0"
   }

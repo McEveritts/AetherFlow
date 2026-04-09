@@ -26,6 +26,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"strings"
 	"time"
@@ -259,6 +260,17 @@ func main() {
 	}
 
 	log.Printf("AetherFlow Backend listening on 127.0.0.1:%s", port)
+
+	// Start Phase 14: Automated Auto-Heal Recovery process
+	services.StartHealWorker(10 * time.Second)
+
+	// Phase 12: Profiling & Optimization Listener
+	go func() {
+		log.Println("Pprof profiler listening on 127.0.0.1:6060")
+		if err := http.ListenAndServe("127.0.0.1:6060", nil); err != nil {
+			log.Printf("Pprof profiler error: %v", err)
+		}
+	}()
 
 	// Bind to localhost to prevent direct internet exposure
 	if err := r.Run("127.0.0.1:" + port); err != nil {

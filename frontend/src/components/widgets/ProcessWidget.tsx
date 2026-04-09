@@ -1,6 +1,6 @@
 import { Activity } from 'lucide-react';
 import { ProcessInfo } from '@/types/dashboard';
-import { DataGrid } from '@/components/ui/DataGrid';
+import { DataGrid } from '@aetherflow/ui';
 import { ColumnDef } from '@tanstack/react-table';
 import { useMemo } from 'react';
 

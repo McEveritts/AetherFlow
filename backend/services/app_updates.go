@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -121,6 +122,9 @@ func (w *AppUpdateWatcher) RefreshInstalledPackages() {
 	}
 
 	var changed []string
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+
 	for _, pkg := range pkgs {
 		if pkg.Status != "installed" && pkg.Status != "running" {
 			continue
@@ -129,21 +133,29 @@ func (w *AppUpdateWatcher) RefreshInstalledPackages() {
 			continue
 		}
 
-		record, notify, err := w.refreshPackage(pkg)
-		if err != nil {
-			log.Printf("[updates] %s: %v", pkg.Name, err)
-		}
-		if record != nil {
-			changed = append(changed, pkg.Name)
-		}
-		if notify && Notifier != nil {
-			Notifier.Dispatch(Notification{
-				Level:   NotifyInfo,
-				Title:   pkg.Label + " update available",
-				Message: fmt.Sprintf("Installed %s, latest %s.", record.InstalledVersion, record.LatestVersion),
-			})
-		}
+		wg.Add(1)
+		go func(p models.Package) {
+			defer wg.Done()
+			record, notify, err := w.refreshPackage(p)
+			if err != nil {
+				log.Printf("[updates] %s: %v", p.Name, err)
+			}
+			
+			mu.Lock()
+			if record != nil {
+				changed = append(changed, p.Name)
+			}
+			if notify && Notifier != nil {
+				Notifier.Dispatch(Notification{
+					Level:   NotifyInfo,
+					Title:   p.Label + " update available",
+					Message: fmt.Sprintf("Installed %s, latest %s.", record.InstalledVersion, record.LatestVersion),
+				})
+			}
+			mu.Unlock()
+		}(pkg)
 	}
+	wg.Wait()
 
 	if len(changed) > 0 && w.callback != nil {
 		w.callback(changed)

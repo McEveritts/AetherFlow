@@ -12,7 +12,7 @@ import ThemeProvider from '@/components/layout/ThemeProvider';
 import LanguageProvider from '@/components/layout/LanguageProvider';
 import PwaRegistry from '@/components/layout/PwaRegistry';
 import SWRProvider from '@/components/layout/SWRProvider';
-import { CommandPalette } from '@/components/ui/CommandPalette';
+import { GlobalCommandPalette } from '@/components/layout/GlobalCommandPalette';
 
 const inter = Inter({ subsets: ['latin'] })
 
@@ -52,7 +52,7 @@ export default function RootLayout({
             </AuthGuard>
           </AuthProvider>
           </SWRProvider>
-          <CommandPalette />
+          <GlobalCommandPalette />
           <ToastContainer />
         </ToastProvider>
         </LanguageProvider>
