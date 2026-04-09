@@ -59,7 +59,7 @@ export default function ConsentPage() {
             const data = await res.json();
             const redirectTarget = data.redirect_uri || data.redirect_url;
             if (res.ok && redirectTarget) {
-                window.location.href = redirectTarget;
+                window.location.assign(redirectTarget);
             } else {
                 setError(data.error || 'Consent submission failed');
                 setIsSubmitting(false);
