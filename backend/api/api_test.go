@@ -16,6 +16,13 @@ func init() {
 	gin.SetMode(gin.TestMode)
 }
 
+func TestMain(m *testing.M) {
+	if os.Getenv("JWT_SECRET") == "" {
+		os.Setenv("JWT_SECRET", "ci-test-secret-exactly-32bytes!!")
+	}
+	os.Exit(m.Run())
+}
+
 // --- P1: Type assertion safety ---
 
 func TestAllowedActions(t *testing.T) {

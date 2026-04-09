@@ -55,7 +55,7 @@ jobs:
           go mod verify
 
       - name: Vulnerability scan (govulncheck)
-        run: govulncheck ./... || exit 1
+        run: govulncheck ./...
 
       - name: go vet
         run: go vet ./...
@@ -64,7 +64,7 @@ jobs:
         run: staticcheck ./...
 
       - name: gosec (SAST)
-        run: gosec -severity medium -confidence medium ./... || exit 1
+        run: gosec -severity medium -confidence medium ./...
 
       - name: Unit & integration tests
         env:

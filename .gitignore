@@ -1,4 +1,3 @@
-
 setup/sources/plexmediaserver_0.9.17.3.2239-fe07491_amd64.deb
 
 # Environment files
@@ -14,22 +13,23 @@ vendor/
 **/credentials*.json
 **/secrets*.json
 **/key*.json
-# Allow known project JSON files (package.json, tsconfig.json, etc.)
+**/*.pem
 
-# Next.js Build output
+# Next.js build output
 .next/
 out/
 build/
 frontend/playwright-report/
 frontend/test-results/
 
+# Build outputs
+*.exe
+dist/
+
 # Security - never commit SSH helper scripts with creds
 temp_ssh*
 ssh_tool.py
 ssh_pty.py
-
-# Build outputs
-dist/
 
 # Databases
 *.sqlite

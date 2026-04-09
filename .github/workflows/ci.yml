@@ -37,6 +37,10 @@ jobs:
           cache-dependency-path: backend/go.sum
 
       - name: Unit Tests
+        env:
+          JWT_SECRET: ci-test-secret-exactly-32bytes!!
+          AES_MASTER_KEY: ci-test-aes-key-exactly-32bytes!
+          ALLOWED_HOSTS: localhost:8080,127.0.0.1:8080
         run: go test ./... -count=1
 
       - name: Build API Binary
@@ -76,12 +80,12 @@ jobs:
       - name: Lint Frontend
         run: |
           cd frontend
-          npm run lint || true
+          npm run lint
 
       - name: Unit Tests
         run: |
           cd frontend
-          npm run test:ci || true
+          npm run test:ci
 
       - name: Install Playwright Browsers
         run: npx playwright install --with-deps
@@ -89,7 +93,7 @@ jobs:
       - name: E2E Tests
         run: |
           cd frontend
-          npm run test:e2e || true
+          npm run test:e2e
 
       - name: Static Export Build
         env:
@@ -103,4 +107,4 @@ jobs:
         with:
           name: frontend-static-export
           path: frontend/out
-          if-no-files-found: ignore
+          if-no-files-found: error
