@@ -170,6 +170,16 @@ func main() {
 			"Set CSRF_DISABLED=true to disable for local development.")
 	}
 
+	// Environment Detection & Runtime Policy Evaluation
+	envPolicy := services.GetRuntimePolicy()
+	if envPolicy.IsWSL {
+		log.Println("Platform Detection: WSL (Windows Subsystem for Linux) instance detected")
+		log.Println("Runtime Policy: Sandbox mode is BYPASSED for WSL compatibility")
+	} else {
+		log.Println("Platform Detection: Bare Metal Linux instance detected")
+		log.Println("Runtime Policy: Native systemd Sandbox enforcement ACTIVE")
+	}
+
 	// Start gRPC server/client based on cluster mode
 	clusterMode := os.Getenv("CLUSTER_MODE")
 	switch clusterMode {

@@ -42,6 +42,12 @@ func getPackageDefinition(pkgID string) (*models.Package, error) {
 }
 
 func ApplyPackageSandbox(pkgID string) error {
+	policy := GetRuntimePolicy()
+	if !policy.SandboxEnabled {
+		// Bypass incompatible systemd sandboxing on WSL entirely
+		return nil
+	}
+
 	pkg, err := getPackageDefinition(pkgID)
 	if err != nil {
 		return fmt.Errorf("load package definitions: %w", err)
