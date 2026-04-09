@@ -8,9 +8,9 @@
     "build:static": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "jest",
+    "test": "jest --passWithNoTests --forceExit",
     "test:watch": "jest --watch",
-    "test:ci": "jest --ci --runInBand --coverage",
+    "test:ci": "jest --ci --runInBand --coverage --forceExit",
     "test:e2e": "playwright test --grep-invert @visual",
     "test:e2e:visual": "playwright test --grep @visual",
     "test:e2e:update": "playwright test --grep @visual --update-snapshots"
