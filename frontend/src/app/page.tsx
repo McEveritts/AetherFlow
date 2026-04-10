@@ -17,6 +17,8 @@ const FileshareTab = dynamic(() => import('@/components/tabs/FileshareTab'), { s
 const BackupTab = dynamic(() => import('@/components/tabs/BackupTab'), { ssr: false });
 const ProfileTab = dynamic(() => import('@/components/tabs/ProfileTab'), { ssr: false });
 const UsersTab = dynamic(() => import('@/components/tabs/UsersTab'), { ssr: false });
+const AuditTab = dynamic(() => import('@/components/tabs/AuditTab'), { ssr: false });
+const OIDCClientsTab = dynamic(() => import('@/components/tabs/OIDCClientsTab'), { ssr: false });
 import { useMetrics } from '@/hooks/useMetrics';
 import { OverviewSkeleton } from '@/components/layout/SkeletonBox';
 import OnboardingWizard from '@/components/layout/OnboardingWizard';
@@ -83,6 +85,10 @@ export default function Dashboard() {
         return <BackupTab />;
       case 'profile':
         return <ProfileTab />;
+      case 'audit':
+        return <AuditTab />;
+      case 'oidc-clients':
+        return <OIDCClientsTab />;
       default:
         return <div className="text-slate-400">Please select an option from the sidebar.</div>;
     }
