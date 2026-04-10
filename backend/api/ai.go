@@ -41,7 +41,19 @@ type SupportChatRequest struct {
 }
 
 type ChatResponse struct {
-	Reply string `json:"reply"`
+	Reply          string          `json:"reply"`
+	ProposedAction *ProposedAction `json:"proposed_action,omitempty"`
+}
+
+// ProposedAction is an AI-generated action proposal that requires operator approval.
+// When present, the action has already been queued in pending_actions.
+type ProposedAction struct {
+	Type        string `json:"type"`         // always "system_action"
+	ActionID    int    `json:"action_id"`    // ID in pending_actions table
+	Title       string `json:"title"`        // human-readable title
+	Description string `json:"description"` // what the action will do
+	DangerLevel string `json:"danger_level"` // "info", "warning", "critical"
+	Impact      string `json:"impact"`       // blast radius description
 }
 
 // allowedContextModes is the set of valid support context modes.
@@ -113,6 +125,27 @@ func runChatSession(c *gin.Context, systemPrompt string, modelOverride string, h
 	}
 	if replyText == "" {
 		replyText = "I received an empty response. Please try again."
+	}
+
+	// Check if the AI response contains an actionable proposal
+	proposal := extractProposedAction(replyText, message)
+
+	if proposal != nil {
+		// Queue the proposed action through the approval gate
+		actionID, needsApproval := db.QueueAction(
+			proposal.DangerLevel, // classification
+			"FlowAI",             // source
+			proposal.Title,       // action
+			proposal.Description, // reason
+		)
+		if needsApproval {
+			proposal.ActionID = int(actionID)
+			c.JSON(http.StatusOK, ChatResponse{
+				Reply:          replyText,
+				ProposedAction: proposal,
+			})
+			return
+		}
 	}
 
 	c.JSON(http.StatusOK, ChatResponse{Reply: replyText})
@@ -233,4 +266,88 @@ func TestAiConnection(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "Connection successful but unrecognized response"})
+}
+
+// ── Phase 18: AI → Action Gate Bridge ───────────────────────────────────
+
+// actionKeywords maps destructive operation keywords to their classification
+// and human-readable descriptions. The AI's reply is scanned for these patterns
+// to decide whether to create a proposed action for operator approval.
+var actionKeywords = []struct {
+	Keywords      []string
+	Classification string
+	TitleTemplate string
+	Impact        string
+}{
+	{
+		Keywords:      []string{"restart", "reboot"},
+		Classification: "warn",
+		TitleTemplate: "Restart %s",
+		Impact:        "Service will be temporarily unavailable during restart (5-30 seconds).",
+	},
+	{
+		Keywords:      []string{"stop", "shutdown"},
+		Classification: "warn",
+		TitleTemplate: "Stop %s",
+		Impact:        "Service will become unavailable until manually started.",
+	},
+	{
+		Keywords:      []string{"delete", "remove", "uninstall", "purge"},
+		Classification: "critical",
+		TitleTemplate: "Delete %s",
+		Impact:        "Data associated with this service may be permanently lost.",
+	},
+	{
+		Keywords:      []string{"update", "upgrade", "patch"},
+		Classification: "warn",
+		TitleTemplate: "Update %s",
+		Impact:        "Service will restart after update. Configuration may change.",
+	},
+}
+
+// extractProposedAction scans the AI reply and original user message for
+// destructive operation keywords. If a match is found, it constructs a
+// ProposedAction that will be queued via the action gate system.
+func extractProposedAction(aiReply string, userMessage string) *ProposedAction {
+	combined := strings.ToLower(aiReply + " " + userMessage)
+
+	for _, spec := range actionKeywords {
+		for _, kw := range spec.Keywords {
+			if !strings.Contains(combined, kw) {
+				continue
+			}
+
+			// Try to extract a service target from the user message
+			target := extractServiceTarget(userMessage)
+			title := fmt.Sprintf(spec.TitleTemplate, target)
+
+			return &ProposedAction{
+				Type:        "system_action",
+				Title:       title,
+				Description: fmt.Sprintf("AI-proposed: %s", title),
+				DangerLevel: spec.Classification,
+				Impact:      spec.Impact,
+			}
+		}
+	}
+
+	return nil
+}
+
+// extractServiceTarget attempts to identify a service name from the user's message.
+// Looks for common service names or returns "target service" as fallback.
+func extractServiceTarget(message string) string {
+	lower := strings.ToLower(message)
+	knownServices := []string{
+		"nginx", "docker", "postgres", "postgresql", "redis",
+		"qbittorrent", "sonarr", "radarr", "lidarr", "prowlarr",
+		"plex", "jellyfin", "emby", "transmission", "deluge",
+		"jackett", "wireguard", "tailscale", "caddy", "traefik",
+	}
+	for _, svc := range knownServices {
+		if strings.Contains(lower, svc) {
+			return svc
+		}
+	}
+	return "target service"
 }
