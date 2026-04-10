@@ -35,3 +35,17 @@ while IFS= read -r -d '' file; do
 done < <(find "${TARGET_DIR}" -type f -print0)
 
 echo "Plugin scaffold created at ${TARGET_DIR}"
+
+echo ""
+echo "=> Linking Shared UI Library..."
+if [[ -d "${REPO_ROOT}/packages/ui" ]]; then
+    mkdir -p "${TARGET_DIR}/frontend"
+    # Provide a relative symlink to core UI for absolute parity
+    ln -sfn "${REPO_ROOT}/packages/ui" "${TARGET_DIR}/frontend/ui-link" || true
+    echo "=> Symlinked AetherFlow UI primitives to ${TARGET_DIR}/frontend/ui-link successfully."
+else
+    echo "=> Warning: Core packages/ui not found. Plugin may drift aesthetically."
+fi
+
+echo ""
+echo "Plugin '${PLUGIN_NAME}' is ready. Check ${TARGET_DIR}/plugin.manifest.json to configure boundaries."

@@ -45,7 +45,18 @@ func secureCookie() bool {
 	return strings.ToLower(os.Getenv("COOKIE_SECURE")) != "false"
 }
 
-// SetupAdmin creates the initial admin account (only works when no users exist)
+// SetupAdmin godoc
+// @Summary      Create initial admin
+// @Description  Creates the initial admin account. Fails if any user already exists.
+// @Tags         auth
+// @Accept       json
+// @Produce      json
+// @Param        req body object true "Username and Password"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      409  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Router       /auth/setup [post]
 func SetupAdmin(c *gin.Context) {
 	var count int
 	if err := db.DB.QueryRow("SELECT COUNT(*) FROM users").Scan(&count); err != nil {
@@ -108,7 +119,17 @@ func SetupAdmin(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "Admin account created", "username": req.Username})
 }
 
-// LocalLogin authenticates with username + password
+// LocalLogin godoc
+// @Summary      Login
+// @Description  Authentates a user via username and password.
+// @Tags         auth
+// @Accept       json
+// @Produce      json
+// @Param        req body object true "Username and Password"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      401  {object}  map[string]interface{}
+// @Router       /auth/login [post]
 func LocalLogin(c *gin.Context) {
 	var req struct {
 		Username string `json:"username" binding:"required"`
@@ -172,7 +193,14 @@ func checkSetupNeeded() (bool, error) {
 	return count == 0, nil
 }
 
-// CheckSetupNeeded returns whether initial setup is required
+// CheckSetupNeeded godoc
+// @Summary      Check setup status
+// @Description  Returns whether initial admin setup is required.
+// @Tags         auth
+// @Produce      json
+// @Success      200  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Router       /auth/setup/check [get]
 func CheckSetupNeeded(c *gin.Context) {
 	needed, err := checkSetupNeeded()
 	if err != nil {
@@ -482,6 +510,14 @@ func GetSession(c *gin.Context) {
 	c.JSON(http.StatusOK, user)
 }
 
+// Logout godoc
+// @Summary      Logout
+// @Description  Clears the current session and revokes the JWT in Redis.
+// @Tags         auth
+// @Produce      json
+// @Security     ApiKeyAuth
+// @Success      200  {object}  map[string]interface{}
+// @Router       /auth/logout [post]
 func Logout(c *gin.Context) {
 	// Attempt to revoke the token intelligently (Phase 10 integration)
 	if _, claims, err := resolveSessionToken(c); err == nil {
@@ -566,6 +602,19 @@ func AdminOnly() gin.HandlerFunc {
 	}
 }
 
+// UpdateProfile godoc
+// @Summary      Update user profile
+// @Description  Update the email of the currently authenticated user.
+// @Tags         auth
+// @Accept       json
+// @Produce      json
+// @Security     ApiKeyAuth
+// @Param        req body object true "Email"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      401  {object}  map[string]interface{}
+// @Failure      500  {object}  map[string]interface{}
+// @Router       /auth/profile [put]
 func UpdateProfile(c *gin.Context) {
 	// Use the user_id already validated and set by AuthMiddleware()
 	rawUserID, exists := c.Get("user_id")

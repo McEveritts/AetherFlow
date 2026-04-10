@@ -61,6 +61,13 @@ Backend:
   - `MARKETPLACE_UPDATE`
   - `NOTIFICATION`
 
+## Observability & Auditing
+
+- `GET /metrics`
+  - Exposes process, system, and database metrics in Prometheus text exposition format.
+- `GET /api/admin/audit-log`
+  - Read paginated admin action trails (requires limit, offset, action, username filters).
+
 ## Services
 
 - `GET /api/v1/services`
@@ -158,6 +165,15 @@ Environment variables:
 - `POST /api/v1/oidc/revoke`
 - `GET /.well-known/openid-configuration`
   - Discovery now points clients at `/api/v1/oidc/*`.
+
+## Action Approval Gates
+
+- `GET /api/v1/actions/pending`
+  - List AI-proposed operations that require an admin's cryptographic resolution. Filterable by `status`.
+- `POST /api/v1/actions/:id/approve`
+  - Explicitly authorize an AI payload for execution. The supervising service then executes.
+- `POST /api/v1/actions/:id/reject`
+  - Dismiss an AI payload.
 
 ## AI
 

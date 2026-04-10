@@ -8,9 +8,18 @@
     "marketplace:read",
     "system:metrics:read"
   ],
+  "api_scopes": [
+    "/api/v1/system/*",
+    "/api/v1/marketplace/*"
+  ],
+  "lifecycle_hooks": {
+    "on_start": "backend/hooks/start.sh",
+    "on_stop": "backend/hooks/stop.sh"
+  },
   "backend": {
     "entry": "backend/main.go",
-    "health_path": "/healthz"
+    "health_path": "/healthz",
+    "port_allocation": "dynamic"
   },
   "frontend": {
     "entry": "frontend/src/index.tsx",
