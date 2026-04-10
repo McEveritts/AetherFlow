@@ -8,7 +8,9 @@ Type=simple
 User=aetherflow
 Group=aetherflow
 WorkingDirectory=/opt/AetherFlow/frontend
-ExecStart=/usr/local/bin/node /opt/AetherFlow/frontend/node_modules/.bin/next start -p 3000
+# Fix #6: Bypass npm and call the Next.js binary directly to avoid
+# permission errors inside /opt/AetherFlow/frontend.
+ExecStart=/usr/bin/node /opt/AetherFlow/node_modules/next/dist/bin/next start -p 3000 -H 0.0.0.0
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal

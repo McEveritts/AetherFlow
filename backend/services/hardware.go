@@ -2,6 +2,7 @@ package services
 
 import (
 	"fmt"
+	"math"
 	"sort"
 	"time"
 
@@ -130,10 +131,20 @@ func GetSystemMetricsCore() models.SystemMetrics {
 		}
 		now := time.Now()
 		if !lastDiskCheck.IsZero() {
+			// Fix #13: Enforce a minimum duration floor (10ms) to prevent
+			// division-by-zero yielding +Inf, which panics json.Marshal.
 			duration := now.Sub(lastDiskCheck).Seconds()
-			if duration > 0 {
-				readBytesPerSec = float64(totalRead-lastDiskReadBytes) / duration
-				writeBytesPerSec = float64(totalWrite-lastDiskWriteBytes) / duration
+			if duration < 0.01 {
+				duration = 0.01
+			}
+			readBytesPerSec = float64(totalRead-lastDiskReadBytes) / duration
+			writeBytesPerSec = float64(totalWrite-lastDiskWriteBytes) / duration
+			// Guard against +Inf / NaN from edge cases
+			if math.IsInf(readBytesPerSec, 0) || math.IsNaN(readBytesPerSec) {
+				readBytesPerSec = 0
+			}
+			if math.IsInf(writeBytesPerSec, 0) || math.IsNaN(writeBytesPerSec) {
+				writeBytesPerSec = 0
 			}
 		}
 		lastDiskReadBytes = totalRead
@@ -148,18 +159,29 @@ func GetSystemMetricsCore() models.SystemMetrics {
 		totalTx = netIO[0].BytesSent
 		now := time.Now()
 		if !lastNetCheck.IsZero() {
+			// Fix #13: Enforce a minimum duration floor (10ms) to prevent
+			// division-by-zero yielding +Inf in network speed strings.
 			duration := now.Sub(lastNetCheck).Seconds()
-			if duration > 0 {
-				recvDiff := netIO[0].BytesRecv - lastNetBytesRecv
-				sentDiff := netIO[0].BytesSent - lastNetBytesSent
-				downSpeed = formatBytes(float64(recvDiff) / duration) + "/s"
-				upSpeed = formatBytes(float64(sentDiff) / duration) + "/s"
+			if duration < 0.01 {
+				duration = 0.01
 			}
+			recvDiff := netIO[0].BytesRecv - lastNetBytesRecv
+			sentDiff := netIO[0].BytesSent - lastNetBytesSent
+			downSpeedVal := float64(recvDiff) / duration
+			upSpeedVal := float64(sentDiff) / duration
+			if math.IsInf(downSpeedVal, 0) || math.IsNaN(downSpeedVal) {
+				downSpeedVal = 0
+			}
+			if math.IsInf(upSpeedVal, 0) || math.IsNaN(upSpeedVal) {
+				upSpeedVal = 0
+			}
+			downSpeed = formatBytes(downSpeedVal) + "/s"
+			upSpeed = formatBytes(upSpeedVal) + "/s"
 		} else {
 			downSpeed = "0 B/s"
 			upSpeed = "0 B/s"
 		}
-		
+
 		lastNetBytesRecv = netIO[0].BytesRecv
 		lastNetBytesSent = netIO[0].BytesSent
 		lastNetCheck = now

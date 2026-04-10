@@ -253,9 +253,12 @@ func main() {
 	}
 
 	if customOrigin := os.Getenv("ALLOWED_CORS_ORIGIN"); customOrigin != "" {
-		// Manual override via env var
-		corsConfig.AllowOrigins = []string{customOrigin}
-		slog.Info("CORS manual override", "origin", customOrigin)
+		// Fix #9: Support comma-separated multiple custom origins
+		corsConfig.AllowOrigins = strings.Split(customOrigin, ",")
+		for i := range corsConfig.AllowOrigins {
+			corsConfig.AllowOrigins[i] = strings.TrimSpace(corsConfig.AllowOrigins[i])
+		}
+		slog.Info("CORS manual override", "origins", corsConfig.AllowOrigins)
 	} else {
 		// Auto-detect local + public IPs
 		corsConfig.AllowOrigins = discoverOrigins()

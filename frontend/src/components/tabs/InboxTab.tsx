@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Mail, CheckCircle, XCircle, AlertTriangle, ShieldAlert, Code, RefreshCw, Loader2, Maximize2 } from 'lucide-react';
 import { useToast } from '@/contexts/ToastContext';
 import { useActionGates } from '@/hooks/useActionGates';
+import { apiFetch } from '@/lib/fetcher';
 import { ActionDetailModal } from '@/components/tabs/ActionDetailModal';
 import type { PendingAction } from '@/types/api';
 

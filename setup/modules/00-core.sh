@@ -34,7 +34,7 @@ AF_RUNTIME_CACHE_DIR="${AF_RUNTIME_CACHE_DIR:-/tmp/aetherflow-runtime-cache}"
 AF_GO_VERSION="${AF_GO_VERSION:-1.25.0}"
 AF_GO_ARCHIVE="${AF_RUNTIME_CACHE_DIR}/go${AF_GO_VERSION}.linux-amd64.tar.gz"
 AF_GO_URL="${AF_GO_URL:-https://go.dev/dl/go${AF_GO_VERSION}.linux-amd64.tar.gz}"
-AF_NODE_VERSION="${AF_NODE_VERSION:-20.18.0}"
+AF_NODE_VERSION="${AF_NODE_VERSION:-22.12.0}"
 AF_NODE_ARCHIVE="${AF_RUNTIME_CACHE_DIR}/node-v${AF_NODE_VERSION}-linux-x64.tar.xz"
 AF_NODE_URL="${AF_NODE_URL:-https://nodejs.org/dist/v${AF_NODE_VERSION}/node-v${AF_NODE_VERSION}-linux-x64.tar.xz}"
 

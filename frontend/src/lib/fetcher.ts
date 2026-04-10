@@ -84,6 +84,11 @@ async function getCSRFToken(): Promise<string | null> {
                     return null;
                 }
                 const payload = await res.json().catch(() => ({} as { csrf_token?: string }));
+                // Fix #4: Explicitly persist the CSRF cookie when the Next.js
+                // proxy strips Set-Cookie headers from the backend response.
+                if (payload.csrf_token && typeof document !== 'undefined') {
+                    document.cookie = `csrf_token=${encodeURIComponent(payload.csrf_token)}; path=/; SameSite=Strict`;
+                }
                 return payload.csrf_token || getCookieValue('csrf_token');
             })
             .finally(() => {

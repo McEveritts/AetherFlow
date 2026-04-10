@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -19,7 +21,9 @@ import (
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
-	// Strict origin check: parse the Origin header properly and compare host
+	// Fix #12: Check Origin against ALLOWED_CORS_ORIGIN env var (comma-separated)
+	// in addition to the r.Host match. This handles the case where the Next.js
+	// http-proxy rewrites the WebSocket Origin header to 127.0.0.1:8080.
 	CheckOrigin: func(r *http.Request) bool {
 		origin := r.Header.Get("Origin")
 		if origin == "" {
@@ -29,7 +33,24 @@ var upgrader = websocket.Upgrader{
 		if err != nil {
 			return false
 		}
-		return parsed.Host == r.Host
+		// Direct host match (original check)
+		if parsed.Host == r.Host {
+			return true
+		}
+		// Check against allowed CORS origins
+		if allowed := os.Getenv("ALLOWED_CORS_ORIGIN"); allowed != "" {
+			for _, o := range strings.Split(allowed, ",") {
+				o = strings.TrimSpace(o)
+				allowedParsed, err := url.Parse(o)
+				if err != nil {
+					continue
+				}
+				if parsed.Host == allowedParsed.Host {
+					return true
+				}
+			}
+		}
+		return false
 	},
 }
 

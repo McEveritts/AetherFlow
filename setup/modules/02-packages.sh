@@ -5,7 +5,24 @@
 # package and repo addition (silently add php7) _add respo sources_
 # shellcheck disable=2312
 function _repos() {
-	DEBIAN_FRONTEND=noninteractive apt-get -yqq update >>"${OUTTO}" 2>&1 || return 1
+	# Fix #1: Gracefully handle broken / unsigned third-party APT lists.
+	# Try a clean update first. If it fails, disable offending third-party
+	# source lists (e.g., php.list, deb-multimedia.list) that Kali or other
+	# Debian derivatives may ship, then retry.
+	if ! DEBIAN_FRONTEND=noninteractive apt-get -yqq update >>"${OUTTO}" 2>&1; then
+		echo "Initial apt-get update failed — disabling broken third-party lists and retrying..." >>"${OUTTO}" 2>&1
+		for bad_list in /etc/apt/sources.list.d/php.list \
+		               /etc/apt/sources.list.d/deb-multimedia.list; do
+			if [[ -f "${bad_list}" ]]; then
+				mv "${bad_list}" "${bad_list}.disabled" 2>>"${OUTTO}" || true
+			fi
+		done
+		DEBIAN_FRONTEND=noninteractive apt-get -yqq \
+			-o Acquire::AllowInsecureRepositories=true \
+			-o Acquire::AllowDowngradeToInsecureRepositories=true \
+			--allow-releaseinfo-change \
+			update >>"${OUTTO}" 2>&1 || return 1
+	fi
 	_af_apt_install software-properties-common lsb-release sudo ca-certificates gnupg wget || return 1
 	if [[ ${DISTRO} == Ubuntu ]]; then
 		LC_ALL=en_US.UTF-8 apt-add-repository ppa:ondrej/php -y >>"${OUTTO}" 2>&1 || return 1

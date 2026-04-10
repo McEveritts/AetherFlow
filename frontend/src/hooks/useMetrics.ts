@@ -23,26 +23,48 @@ function parseSpeed(speed: string): number {
     return val * (multipliers[unit] || 1);
 }
 
-// Zustand store for metrics history — avoids React 19's setState-in-effect restriction
+// Helper: slice history to the visible window
+function sliceHistory(history: MetricsHistory, window: TimeWindow): MetricsHistory {
+    const limit = WINDOW_SIZES[window];
+    return {
+        cpu: history.cpu.slice(-limit),
+        memory: history.memory.slice(-limit),
+        netDown: history.netDown.slice(-limit),
+        netUp: history.netUp.slice(-limit),
+        diskRead: history.diskRead.slice(-limit),
+        diskWrite: history.diskWrite.slice(-limit),
+        timestamps: history.timestamps.slice(-limit),
+    };
+}
+
+const emptyHistory: MetricsHistory = {
+    cpu: [],
+    memory: [],
+    netDown: [],
+    netUp: [],
+    diskRead: [],
+    diskWrite: [],
+    timestamps: [],
+};
+
+// Fix #11: Zustand store stores pre-calculated visibleHistory in state
+// instead of computing it via a selector that returns a new reference
+// on every call (which caused React 18's useSyncExternalStore infinite loop).
 const useHistoryStore = create<{
     timeWindow: TimeWindow;
     setTimeWindow: (w: TimeWindow) => void;
     history: MetricsHistory;
+    visibleHistory: MetricsHistory;
     lastPushAt: number;
     pushMetrics: (metrics: SystemMetrics) => void;
-    getVisibleHistory: () => MetricsHistory;
 }>((set, get) => ({
     timeWindow: '5m', // Default to 5 minutes
-    setTimeWindow: (w: TimeWindow) => set({ timeWindow: w }),
-    history: {
-        cpu: [],
-        memory: [],
-        netDown: [],
-        netUp: [],
-        diskRead: [],
-        diskWrite: [],
-        timestamps: [],
-    },
+    setTimeWindow: (w: TimeWindow) => set((state) => ({
+        timeWindow: w,
+        visibleHistory: sliceHistory(state.history, w),
+    })),
+    history: emptyHistory,
+    visibleHistory: emptyHistory,
     lastPushAt: 0,
     pushMetrics: (metrics: SystemMetrics) => {
         const now = Date.now();
@@ -55,9 +77,8 @@ const useHistoryStore = create<{
             return newArr;
         };
 
-        set((state) => ({
-            lastPushAt: now,
-            history: {
+        set((state) => {
+            const newHistory: MetricsHistory = {
                 cpu: push(state.history.cpu, metrics.cpu_usage),
                 memory: push(state.history.memory, metrics.memory ? (metrics.memory.used / metrics.memory.total) * 100 : 0),
                 netDown: push(state.history.netDown, parseSpeed(metrics.network?.down as string)),
@@ -65,29 +86,22 @@ const useHistoryStore = create<{
                 diskRead: push(state.history.diskRead, metrics.disk_io?.read_bytes_sec || 0),
                 diskWrite: push(state.history.diskWrite, metrics.disk_io?.write_bytes_sec || 0),
                 timestamps: push(state.history.timestamps, now),
-            },
-        }));
+            };
+            return {
+                lastPushAt: now,
+                history: newHistory,
+                visibleHistory: sliceHistory(newHistory, state.timeWindow),
+            };
+        });
     },
-    getVisibleHistory: () => {
-        const { history, timeWindow } = get();
-        const limit = WINDOW_SIZES[timeWindow];
-        return {
-            cpu: history.cpu.slice(-limit),
-            memory: history.memory.slice(-limit),
-            netDown: history.netDown.slice(-limit),
-            netUp: history.netUp.slice(-limit),
-            diskRead: history.diskRead.slice(-limit),
-            diskWrite: history.diskWrite.slice(-limit),
-            timestamps: history.timestamps.slice(-limit),
-        };
-    }
 }));
 
 export function useMetrics() {
     const { data: wsData, connectionState } = useWebSocket();
     const { data: hardware } = useSWR<HardwareReport>('/api/v1/auth/system/hardware');
 
-    const visibleHistory = useHistoryStore((s) => s.getVisibleHistory());
+    // Fix #11: Selector returns a stable pre-computed reference from state
+    const visibleHistory = useHistoryStore((s) => s.visibleHistory);
     const timeWindow = useHistoryStore((s) => s.timeWindow);
     const setTimeWindow = useHistoryStore((s) => s.setTimeWindow);
     const pushMetrics = useHistoryStore((s) => s.pushMetrics);
