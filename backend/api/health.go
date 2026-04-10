@@ -33,7 +33,7 @@ func HealthCheck(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"status":        status,
 		"uptime":        time.Since(startTime).String(),
-		"version":       "3.1.0",
+		"version":       "4.0.0-rc1",
 		"database":      dbStatus,
 		"db_latency_ms": dbLatencyMs,
 	})
