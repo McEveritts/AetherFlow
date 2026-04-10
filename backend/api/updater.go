@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 
+	"aetherflow/db"
+
 	"github.com/gin-gonic/gin"
 )
 
@@ -165,6 +167,12 @@ func RunUpdate(c *gin.Context) {
 			slog.Info("Update script finished successfully.")
 		}
 	}()
+
+	userID, _ := c.Get("user_id")
+	username, _ := c.Get("username")
+	uid, _ := userID.(int)
+	uname, _ := username.(string)
+	db.RecordAudit(uid, uname, "system_update", "system", "ota", "", c.ClientIP(), c.Request.UserAgent())
 
 	c.JSON(http.StatusOK, gin.H{
 		"message": "Update sequence initiated. The dashboard will restart momentarily.",

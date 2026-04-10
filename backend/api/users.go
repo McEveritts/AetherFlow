@@ -78,6 +78,12 @@ func UpdateUserRole(c *gin.Context) {
 		return
 	}
 
+	actorID, _ := c.Get("user_id")
+	actorName, _ := c.Get("username")
+	aid, _ := actorID.(int)
+	aname, _ := actorName.(string)
+	db.RecordAudit(aid, aname, "user_role_change", "user", idStr, "role="+req.Role, c.ClientIP(), c.Request.UserAgent())
+
 	c.JSON(http.StatusOK, gin.H{"message": "Role updated successfully"})
 }
 
@@ -112,6 +118,12 @@ func DeleteUser(c *gin.Context) {
 		InternalError(c, "Failed to delete user")
 		return
 	}
+
+	actorID, _ := c.Get("user_id")
+	actorName, _ := c.Get("username")
+	aid, _ := actorID.(int)
+	aname, _ := actorName.(string)
+	db.RecordAudit(aid, aname, "user_delete", "user", idStr, "", c.ClientIP(), c.Request.UserAgent())
 
 	c.JSON(http.StatusOK, gin.H{"message": "User deleted successfully"})
 }

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	_ "aetherflow/docs"
+	"aetherflow/db"
 	"aetherflow/services"
 
 	"github.com/gin-gonic/gin"
@@ -37,6 +38,9 @@ func RegisterRoutes(r *gin.Engine) {
 	r.GET("/health", HealthCheck)
 	r.GET("/health/live", HealthLive)
 	r.GET("/health/ready", HealthReady)
+
+	// Phase 30: Prometheus-compatible metrics endpoint.
+	r.GET("/metrics", HandleMetrics)
 }
 
 func registerV1Routes(apiGroup *gin.RouterGroup) {
@@ -318,6 +322,12 @@ func controlService(c *gin.Context) {
 		InternalError(c, "Failed to " + req.Action + " service: " + err.Error())
 		return
 	}
+
+	userID, _ := c.Get("user_id")
+	username, _ := c.Get("username")
+	uid, _ := userID.(int)
+	uname, _ := username.(string)
+	db.RecordAudit(uid, uname, "service_"+req.Action, "service", target, req.ManagedBy, c.ClientIP(), c.Request.UserAgent())
 
 	c.JSON(http.StatusOK, gin.H{
 		"message": "Service control command executed successfully",
