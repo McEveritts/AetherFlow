@@ -2,10 +2,13 @@ import { Sparkles, Settings, Bot, User, ChevronRight, Lock, ChevronDown, Wrench,
 import { useState, useRef, useEffect, FormEvent } from 'react';
 import { useSystemStore } from '@/store/useSystemStore';
 import { apiFetch } from '@/lib/fetcher';
+import { useMetrics } from '@/hooks/useMetrics';
+import { useToast } from '@/contexts/ToastContext';
 
 interface ChatMessage {
     role: 'user' | 'assistant';
     text: string;
+    payload?: any;
 }
 
 const AI_MODELS = [
@@ -24,8 +27,13 @@ const CONTEXT_MODES = [
 
 export default function AiChatTab() {
     const { setActiveTab } = useSystemStore();
+    const { metrics } = useMetrics();
+    const { toasts } = useToast();
     const [messages, setMessages] = useState<ChatMessage[]>([
-        { role: 'assistant', text: "Hello! I am FlowAI, your localized infrastructure management assistant. I'm connected to your system metrics, docker containers, and media pipelines.\n\nHow can I help you today?" }
+        { 
+            role: 'assistant', 
+            text: "Hello! I am FlowAI, your localized infrastructure management assistant. I'm connected to your system metrics, docker containers, and media pipelines.\n\nI can analyze issues and even draft maintenance workflows directly into your Approval Inbox. How can I help you today?" 
+        }
     ]);
     const [input, setInput] = useState('');
     const [isTyping, setIsTyping] = useState(false);
@@ -80,6 +88,13 @@ export default function AiChatTab() {
             };
             if (supportMode) {
                 body.context_mode = contextMode;
+                // Dynamically inject local state boundaries into AI payload
+                if (contextMode === 'full' || contextMode === 'metrics') {
+                    body.metrics_snapshot = metrics;
+                }
+                if (contextMode === 'full' || contextMode === 'logs') {
+                    body.system_logs = toasts;
+                }
             }
 
             const res = await apiFetch(endpoint, {
@@ -88,10 +103,25 @@ export default function AiChatTab() {
                 body: JSON.stringify(body)
             });
 
-            if (!res.ok) throw new Error('Failed to get response');
-            const data = await res.json();
+            
+            let assistantReply = data.reply;
+            let actionPayload = undefined;
 
-            setMessages(prev => [...prev, { role: 'assistant', text: data.reply }]);
+            // Mock an action proposal if user asked to "restart"
+            if (text.toLowerCase().includes('restart') || text.toLowerCase().includes('reboot')) {
+                const target = text.includes('nginx') ? 'nginx' : 'Target Service';
+                assistantReply = `I understand you want to restart ${target}. Instead of doing this immediately, I have drafted an execution plan for you to review.\n\nHere is the proposed action:`;
+                actionPayload = {
+                    type: 'system_action',
+                    id: `act_${Date.now()}`,
+                    title: `Restart ${target}`,
+                    description: `Perform a graceful shutdown and restart of the ${target} daemon.`,
+                    danger_level: 'warning',
+                    impact: `Will cause ~2-5s of downtime for ${target} connections.`
+                };
+            }
+
+            setMessages(prev => [...prev, { role: 'assistant', text: assistantReply, payload: actionPayload }]);
         } catch (_err) {
             setMessages(prev => [...prev, { role: 'assistant', text: "Connection error: Unable to reach the FlowAI backend service." }]);
         } finally {
@@ -264,6 +294,34 @@ export default function AiChatTab() {
                             : 'bg-white/[0.03] border border-white/[0.05] text-slate-200 rounded-tl-sm'
                             }`}>
                             {msg.text}
+
+                            {/* Render Contextual Payload if present */}
+                            {msg.payload && msg.payload.type === 'system_action' && (
+                                <div className="mt-4 mt-4 bg-slate-950/80 border border-indigo-500/30 rounded-xl p-4 shadow-[0_0_15px_rgba(99,102,241,0.1)]">
+                                    <div className="flex items-center gap-3 mb-2">
+                                        <div className="bg-indigo-500/20 p-2 rounded-lg text-indigo-400">
+                                            <Wrench size={16} />
+                                        </div>
+                                        <span className="font-bold text-slate-100 flex-1">{msg.payload.title}</span>
+                                        <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-1 rounded border ${
+                                            msg.payload.danger_level === 'high' ? 'bg-red-500/20 text-red-400 border-red-500/30' :
+                                            msg.payload.danger_level === 'warning' ? 'bg-amber-500/20 text-amber-400 border-amber-500/30' :
+                                            'bg-emerald-500/20 text-emerald-400 border-emerald-500/30'
+                                        }`}>
+                                            {msg.payload.danger_level}
+                                        </span>
+                                    </div>
+                                    <p className="text-slate-400 text-xs mb-4 border-l-2 border-white/10 pl-3 ml-1">{msg.payload.description}</p>
+                                    <div className="flex justify-end pt-2 border-t border-white/5">
+                                        <button 
+                                            onClick={() => addToast('Action configuration forwarded to Approval Inbox.', 'success')}
+                                            className="px-3 py-1.5 bg-indigo-500 hover:bg-indigo-400 text-white text-xs font-semibold rounded-lg transition-colors flex items-center gap-2 shadow-sm"
+                                        >
+                                            Forward to Inbox <ChevronRight size={14} />
+                                        </button>
+                                    </div>
+                                </div>
+                            )}
                         </div>
 
                         {msg.role === 'user' && (

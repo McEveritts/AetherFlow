@@ -5,9 +5,10 @@ import { User } from '@/contexts/AuthContext';
 import { Shield, ShieldAlert, Trash2, Users, Check, X } from 'lucide-react';
 import { UsersSkeleton } from '@/components/layout/SkeletonBox';
 import Image from 'next/image';
-import { DataGrid } from '@aetherflow/ui';
+import { DataGrid } from '@/components/ui/DataGrid';
 import { ColumnDef } from '@tanstack/react-table';
 import { apiFetch } from '@/lib/fetcher';
+import RequireClaim from '@/components/auth/RequireClaim';
 
 export default function UsersTab() {
     const { addToast } = useToast();
@@ -18,6 +19,11 @@ export default function UsersTab() {
     const toggleRole = async (userId: number, currentRole: string) => {
         const newRole = currentRole === 'admin' ? 'user' : 'admin';
         setActionLoading(userId);
+
+        const optimisticData = users ? users.map(u => u.id === userId ? { ...u, role: newRole } : u) : [];
+        if (users) {
+            mutate(optimisticData, false);
+        }
 
         try {
             const res = await apiFetch(`/api/v1/admin/users/${userId}/role`, {
@@ -32,10 +38,12 @@ export default function UsersTab() {
                 addToast(`User role updated to ${newRole}`, 'success');
                 mutate();
             } else {
-                addToast(data.error || 'Failed to update role', 'error');
+                mutate(users, false);
+                addToast(data.error || 'Role enforcement denied', 'error');
             }
         } catch (_err) {
-            addToast('Network error updating role.', 'error');
+            mutate(users, false);
+            addToast('API dispatch failure: Role enforcement.', 'error');
         } finally {
             setActionLoading(null);
         }
@@ -45,6 +53,11 @@ export default function UsersTab() {
         if (!confirm('Are you sure you want to permanently delete this user?')) return;
 
         setActionLoading(userId);
+
+        const optimisticData = users ? users.filter(u => u.id !== userId) : [];
+        if (users) {
+            mutate(optimisticData, false);
+        }
 
         try {
             const res = await apiFetch(`/api/v1/admin/users/${userId}`, {
@@ -57,10 +70,12 @@ export default function UsersTab() {
                 addToast('User deleted successfully', 'success');
                 mutate();
             } else {
-                addToast(data.error || 'Failed to delete user', 'error');
+                mutate(users, false);
+                addToast(data.error || 'User purge sequence denied', 'error');
             }
         } catch (_err) {
-            addToast('Network error deleting user.', 'error');
+            mutate(users, false);
+            addToast('API dispatch failure: User purge.', 'error');
         } finally {
             setActionLoading(null);
         }
@@ -117,28 +132,30 @@ export default function UsersTab() {
             cell: ({ row }) => {
                 const user = row.original;
                 return (
-                    <div className="flex items-center justify-end gap-2 opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity">
-                        <button
-                            onClick={() => toggleRole(user.id, user.role)}
-                            disabled={actionLoading === user.id}
-                            title={user.role === 'admin' ? 'Demote to User' : 'Promote to Admin'}
-                            className={`p-2 rounded-lg border transition-all ${user.role === 'admin'
-                                ? 'bg-slate-900 border-white/10 text-slate-400 hover:text-white hover:bg-slate-800'
-                                : 'bg-indigo-500/10 border-indigo-500/20 text-indigo-400 hover:bg-indigo-500/20 hover:text-indigo-300'
-                                }`}
-                        >
-                            {user.role === 'admin' ? <X size={16} /> : <Check size={16} />}
-                        </button>
+                    <RequireClaim>
+                        <div className="flex items-center justify-end gap-2 opacity-100 md:opacity-0 md:group-hover:opacity-100 transition-opacity">
+                            <button
+                                onClick={() => toggleRole(user.id, user.role)}
+                                disabled={actionLoading === user.id}
+                                title={user.role === 'admin' ? 'Demote to User' : 'Promote to Admin'}
+                                className={`p-2 rounded-lg border transition-all ${user.role === 'admin'
+                                    ? 'bg-slate-900 border-white/10 text-slate-400 hover:text-white hover:bg-slate-800'
+                                    : 'bg-indigo-500/10 border-indigo-500/20 text-indigo-400 hover:bg-indigo-500/20 hover:text-indigo-300'
+                                    }`}
+                            >
+                                {user.role === 'admin' ? <X size={16} /> : <Check size={16} />}
+                            </button>
 
-                        <button
-                            onClick={() => deleteUser(user.id)}
-                            disabled={actionLoading === user.id}
-                            title="Delete User"
-                            className="p-2 rounded-lg bg-red-500/10 border border-red-500/20 text-red-400 hover:bg-red-500/20 hover:text-red-300 transition-all"
-                        >
-                            <Trash2 size={16} />
-                        </button>
-                    </div>
+                            <button
+                                onClick={() => deleteUser(user.id)}
+                                disabled={actionLoading === user.id}
+                                title="Delete User"
+                                className="p-2 rounded-lg bg-red-500/10 border border-red-500/20 text-red-400 hover:bg-red-500/20 hover:text-red-300 transition-all"
+                            >
+                                <Trash2 size={16} />
+                            </button>
+                        </div>
+                    </RequireClaim>
                 );
             },
             size: 150,

@@ -15,6 +15,13 @@ import (
 )
 
 func RegisterRoutes(r *gin.Engine) {
+	// Phase 17: Panic recovery with clean error responses
+	r.Use(RecoveryMiddleware())
+	// Phase 17: Request ID for tracing
+	r.Use(RequestIDMiddleware())
+	// Phase 21: Security headers on every response
+	r.Use(SecurityHeadersMiddleware())
+
 	legacyAPI := r.Group("/api")
 	legacyAPI.Use(APIVersionMiddleware(defaultAPIVersion))
 	registerV1Routes(legacyAPI)
@@ -25,6 +32,11 @@ func RegisterRoutes(r *gin.Engine) {
 
 	// OIDC Discovery must remain at the root.
 	r.GET("/.well-known/openid-configuration", OIDCDiscovery)
+
+	// Phase 23: Health endpoints — unauthenticated, for load balancers / uptime monitors.
+	r.GET("/health", HealthCheck)
+	r.GET("/health/live", HealthLive)
+	r.GET("/health/ready", HealthReady)
 }
 
 func registerV1Routes(apiGroup *gin.RouterGroup) {
@@ -38,6 +50,9 @@ func registerV1Routes(apiGroup *gin.RouterGroup) {
 	publicGroup.GET("/csrf-token", issueCSRFToken)
 
 	authLimiter := RateLimitMiddleware(5, 1*time.Minute)
+	oidcLimiter := RateLimitMiddleware(10, 1*time.Minute)
+	webhookLimiter := RateLimitMiddleware(30, 1*time.Minute)
+	aiLimiter := RateLimitMiddleware(20, 1*time.Minute)
 
 	publicGroup.GET("/auth/google/login", GoogleLogin)
 	publicGroup.GET("/auth/google/callback", GoogleCallback)
@@ -45,17 +60,18 @@ func registerV1Routes(apiGroup *gin.RouterGroup) {
 	publicGroup.POST("/auth/setup", authLimiter, SetupAdmin)
 	publicGroup.GET("/auth/setup/check", CheckSetupNeeded)
 
-	publicGroup.POST("/billing/webhooks/:provider", HandleBillingWebhook)
+	publicGroup.POST("/billing/webhooks/:provider", webhookLimiter, HandleBillingWebhook)
 
 	publicGroup.GET("/marketplace", GetMarketplaceApps)
 
 	publicGroup.GET("/oidc/jwks", OIDCJwks)
-	publicGroup.GET("/oidc/authorize", OIDCAuthorize)
-	publicGroup.POST("/oidc/token", OIDCToken)
-	publicGroup.GET("/oidc/userinfo", OIDCUserInfo)
-	publicGroup.POST("/oidc/revoke", OIDCRevoke)
+	publicGroup.GET("/oidc/authorize", oidcLimiter, OIDCAuthorize)
+	publicGroup.POST("/oidc/token", oidcLimiter, OIDCToken)
+	publicGroup.GET("/oidc/userinfo", oidcLimiter, OIDCUserInfo)
+	publicGroup.POST("/oidc/revoke", oidcLimiter, OIDCRevoke)
+	publicGroup.POST("/oidc/introspect", oidcLimiter, OIDCIntrospect)
 
-	publicGroup.POST("/oidc/device/authorize", OIDCDeviceAuthorize)
+	publicGroup.POST("/oidc/device/authorize", oidcLimiter, OIDCDeviceAuthorize)
 
 	// ── Authenticated routes (require valid JWT session) ──
 	authGroup := apiGroup.Group("/auth")
@@ -70,10 +86,12 @@ func registerV1Routes(apiGroup *gin.RouterGroup) {
 		authGroup.POST("/oidc/consent", OIDCConsent)
 		authGroup.POST("/oidc/device/verify", OIDCDeviceVerify)
 		authGroup.POST("/oidc/device/consent", OIDCDeviceConsent)
-		authGroup.POST("/ai/chat", handleAiChat)
-		authGroup.POST("/ai/support", handleAiSupport)
+		authGroup.POST("/ai/chat", aiLimiter, handleAiChat)
+		authGroup.POST("/ai/support", aiLimiter, handleAiSupport)
 
 		authGroup.GET("/session", GetSession)
+		authGroup.GET("/sessions", ListActiveSessions)
+		authGroup.DELETE("/sessions/:jti", RevokeSession)
 		authGroup.POST("/logout", Logout)
 		authGroup.PUT("/profile", UpdateProfile)
 
@@ -242,6 +260,14 @@ func registerV1Routes(apiGroup *gin.RouterGroup) {
 		// Headless Operator APIs - CLI/Automation Integration Only
 		// Requires admin context (Phase 8)
 		adminGroup.GET("/system/metrics", getSystemMetrics)
+
+		// Phase 9: Action Approval Gates
+		adminGroup.GET("/actions/pending", ListPendingActions)
+		adminGroup.POST("/actions/:id/approve", ApproveAction)
+		adminGroup.POST("/actions/:id/reject", RejectAction)
+
+		// Phase 28: Admin Audit Trail
+		adminGroup.GET("/audit-log", GetAuditLog)
 	}
 }
 

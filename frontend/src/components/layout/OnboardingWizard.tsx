@@ -3,25 +3,14 @@ import { useToast } from '@/contexts/ToastContext';
 import { Sparkles, ArrowRight, Check, Shield, Server, Box } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { apiFetch } from '@/lib/fetcher';
+import { MotionPresets } from '@/lib/design';
 
 interface OnboardingWizardProps {
     initialSettings: Record<string, unknown>;
     onComplete: () => void;
 }
 
-const slideVariants = {
-    hidden: { opacity: 0, y: 20 },
-    visible: { 
-        opacity: 1, 
-        y: 0, 
-        transition: { duration: 0.4, ease: 'circOut' as const } 
-    },
-    exit: { 
-        opacity: 0, 
-        y: -15, 
-        transition: { duration: 0.3, ease: 'easeIn' as const } 
-    }
-};
+// Imported MotionPresets instead
 
 export default function OnboardingWizard({ initialSettings, onComplete }: OnboardingWizardProps) {
     const { addToast } = useToast();
@@ -43,20 +32,32 @@ export default function OnboardingWizard({ initialSettings, onComplete }: Onboar
                 setupCompleted: true
             };
 
-            const res = await apiFetch('/api/v1/admin/settings', {
-                method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload)
-            });
+            let res = null;
+            let retries = 3;
+            
+            while (retries > 0) {
+                try {
+                    res = await apiFetch('/api/v1/admin/settings', {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+                    if (res.ok) break;
+                } catch (e) {
+                    console.warn(`Setup sync failed, retries left: ${retries - 1}`, e);
+                }
+                retries--;
+                if (retries > 0) await new Promise(r => setTimeout(r, 1000));
+            }
 
-            if (res.ok) {
+            if (res && res.ok) {
                 addToast('Welcome to AetherFlow! Nexus is ready.', 'success');
                 onComplete();
             } else {
-                addToast('Failed to complete setup.', 'error');
+                addToast('Failed to complete setup after multiple attempts.', 'error');
             }
         } catch (_err) {
-            addToast('Network error during setup completion.', 'error');
+            addToast('Fatal error during setup completion.', 'error');
         } finally {
             setIsSaving(false);
         }
@@ -90,7 +91,7 @@ export default function OnboardingWizard({ initialSettings, onComplete }: Onboar
                         {step === 1 && (
                             <motion.div 
                                 key="step1"
-                                variants={slideVariants}
+                                variants={MotionPresets.slideUp}
                                 initial="hidden" animate="visible" exit="exit"
                                 className="space-y-6"
                             >
@@ -124,7 +125,7 @@ export default function OnboardingWizard({ initialSettings, onComplete }: Onboar
                         {step === 2 && (
                             <motion.div 
                                 key="step2"
-                                variants={slideVariants}
+                                variants={MotionPresets.slideUp}
                                 initial="hidden" animate="visible" exit="exit"
                                 className="space-y-6"
                             >
@@ -161,7 +162,7 @@ export default function OnboardingWizard({ initialSettings, onComplete }: Onboar
                         {step === 3 && (
                             <motion.div 
                                 key="step3"
-                                variants={slideVariants}
+                                variants={MotionPresets.slideUp}
                                 initial="hidden" animate="visible" exit="exit"
                                 className="space-y-6 h-full flex flex-col justify-center py-8"
                             >

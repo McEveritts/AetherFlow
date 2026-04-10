@@ -3,19 +3,24 @@
 import { useSystemStore } from '@/store/useSystemStore';
 import Sidebar from '@/components/layout/Sidebar';
 import Header from '@/components/layout/Header';
-import OverviewTab from '@/components/tabs/OverviewTab';
-import ServicesTab from '@/components/tabs/ServicesTab';
-import MarketplaceTab from '@/components/tabs/MarketplaceTab';
-import AiChatTab from '@/components/tabs/AiChatTab';
-import SettingsTab from '@/components/tabs/SettingsTab';
-import SecurityTab from '@/components/tabs/SecurityTab';
-import FileshareTab from '@/components/tabs/FileshareTab';
-import BackupTab from '@/components/tabs/BackupTab';
-import ProfileTab from '@/components/tabs/ProfileTab';
-import UsersTab from '@/components/tabs/UsersTab';
+import GlobalBanners from '@/components/layout/GlobalBanners';
+import dynamic from 'next/dynamic';
+
+const OverviewTab = dynamic(() => import('@/components/tabs/OverviewTab'), { ssr: false, loading: () => <OverviewSkeleton /> });
+const InboxTab = dynamic(() => import('@/components/tabs/InboxTab'), { ssr: false });
+const ServicesTab = dynamic(() => import('@/components/tabs/ServicesTab'), { ssr: false });
+const MarketplaceTab = dynamic(() => import('@/components/tabs/MarketplaceTab'), { ssr: false });
+const AiChatTab = dynamic(() => import('@/components/tabs/AiChatTab'), { ssr: false });
+const SettingsTab = dynamic(() => import('@/components/tabs/SettingsTab'), { ssr: false });
+const SecurityTab = dynamic(() => import('@/components/tabs/SecurityTab'), { ssr: false });
+const FileshareTab = dynamic(() => import('@/components/tabs/FileshareTab'), { ssr: false });
+const BackupTab = dynamic(() => import('@/components/tabs/BackupTab'), { ssr: false });
+const ProfileTab = dynamic(() => import('@/components/tabs/ProfileTab'), { ssr: false });
+const UsersTab = dynamic(() => import('@/components/tabs/UsersTab'), { ssr: false });
 import { useMetrics } from '@/hooks/useMetrics';
 import { OverviewSkeleton } from '@/components/layout/SkeletonBox';
 import OnboardingWizard from '@/components/layout/OnboardingWizard';
+import { ErrorBoundary } from '@/components/ui/ErrorBoundary';
 import useSWR from 'swr';
 
 export default function Dashboard() {
@@ -58,6 +63,8 @@ export default function Dashboard() {
     switch (activeTab) {
       case 'overview':
         return <OverviewTab metrics={metrics} hardware={hardware} history={history} />;
+      case 'inbox':
+        return <InboxTab />;
       case 'services':
         return <ServicesTab />;
       case 'marketplace':
@@ -102,9 +109,15 @@ export default function Dashboard() {
       <main className={`flex-1 transition-all duration-300 ease-[cubic-bezier(0.4,0,0.2,1)] relative z-10 h-screen overflow-y-auto no-scrollbar ${isSidebarHovered ? 'md:ml-64' : 'md:ml-20'} ml-0`}>
         <Header />
 
+        <div className="mt-4">
+          <GlobalBanners />
+        </div>
+
         {/* Scrollable Content */}
-        <div className="p-4 md:p-10 max-w-[1600px] mx-auto min-h-[calc(100vh-5rem)]">
-          {renderContent()}
+        <div className="px-4 pb-4 md:px-10 md:pb-10 max-w-[1600px] mx-auto min-h-[calc(100vh-8rem)]">
+          <ErrorBoundary key={activeTab}>
+            {renderContent()}
+          </ErrorBoundary>
         </div>
       </main>
     </div>

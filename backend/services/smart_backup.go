@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -12,7 +12,6 @@ import (
 	"aetherflow/db"
 
 	"github.com/google/generative-ai-go/genai"
-	"google.golang.org/api/option"
 )
 
 // BackupWindow represents the AI-determined optimal backup time.
@@ -55,37 +54,44 @@ func InitSmartBackupScheduler(keyResolver func() (string, error), executor func(
 		BackupScheduler.TriggerRecalculation()
 	}
 
-	log.Printf("Smart backup scheduler initialized (mode=%s)", mode)
+	slog.Info("smart backup scheduler initialized", "mode", mode)
 }
 
 func (sbs *SmartBackupScheduler) executorLoop() {
 	ticker := time.NewTicker(1 * time.Minute)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		if sbs.currentMode() != "smart" {
-			continue
-		}
-
-		now := time.Now().UTC()
-		nextRun := sbs.ensureNextBackupAt(now)
-		if nextRun == nil {
-			continue
-		}
-
-		timeToRun := now.After(*nextRun) || now.Equal(*nextRun)
-		if timeToRun {
-			log.Println("Smart backup: Initiating background system backup...")
-			if sbs.executor != nil {
-				err := sbs.executor()
-				if err != nil {
-					log.Printf("Smart backup: Background backup failed: %v", err)
-				} else {
-					log.Println("Smart backup: Background backup completed successfully")
-				}
+	ctx := SubsystemContext()
+	for {
+		select {
+		case <-ctx.Done():
+			slog.Info("smart backup executor: shutdown signal received")
+			return
+		case <-ticker.C:
+			if sbs.currentMode() != "smart" {
+				continue
 			}
 
-			sbs.advanceNextBackupAt(now)
+			now := time.Now().UTC()
+			nextRun := sbs.ensureNextBackupAt(now)
+			if nextRun == nil {
+				continue
+			}
+
+			timeToRun := now.After(*nextRun) || now.Equal(*nextRun)
+			if timeToRun {
+				slog.Info("smart backup: initiating background backup")
+				if sbs.executor != nil {
+					err := sbs.executor()
+					if err != nil {
+						slog.Error("smart backup: background backup failed", "error", err)
+					} else {
+						slog.Info("smart backup: background backup completed")
+					}
+				}
+
+				sbs.advanceNextBackupAt(now)
+			}
 		}
 	}
 }
@@ -98,8 +104,12 @@ func (sbs *SmartBackupScheduler) schedulerLoop() {
 	initialDelay := time.NewTimer(5 * time.Second)
 	defer initialDelay.Stop()
 
+	ctx := SubsystemContext()
 	for {
 		select {
+		case <-ctx.Done():
+			slog.Info("smart backup scheduler: shutdown signal received")
+			return
 		case <-initialDelay.C:
 			if sbs.currentMode() == "smart" {
 				if sbs.GetOptimalWindow() == nil {
@@ -126,18 +136,18 @@ func (sbs *SmartBackupScheduler) recalculate() {
 	if sbs.keyResolver != nil {
 		apiKey, err = sbs.keyResolver()
 		if err != nil {
-			log.Println("Smart backup: no API key, skipping window calculation")
+			slog.Info("smart backup: no API key, skipping window calculation")
 			return
 		}
 	}
 	if apiKey == "" {
-		log.Println("Smart backup: no API key, skipping window calculation")
+		slog.Info("smart backup: no API key, skipping window calculation")
 		return
 	}
 
 	window, err := FindOptimalBackupWindow(apiKey)
 	if err != nil {
-		log.Printf("Smart backup: failed to calculate window: %v", err)
+		slog.Error("smart backup: failed to calculate window", "error", err)
 		return
 	}
 
@@ -150,7 +160,7 @@ func (sbs *SmartBackupScheduler) recalculate() {
 
 	sbs.persistState(window, &nextRun)
 
-	log.Printf("Smart backup: optimal window calculated → %02d:00 UTC (confidence: %.0f%%)", window.OptimalHour, window.Confidence*100)
+	slog.Info("smart backup: optimal window calculated", "hour_utc", window.OptimalHour, "confidence", window.Confidence)
 }
 
 // GetOptimalWindow returns the current cached optimal backup window.
@@ -228,7 +238,7 @@ func (sbs *SmartBackupScheduler) loadPersistedState() {
 		FROM settings WHERE id = 1`,
 	).Scan(&mode, &windowJSON, &nextRunRaw)
 	if err != nil {
-		log.Printf("Smart backup: failed to load persisted state: %v", err)
+		slog.Warn("smart backup: failed to load persisted state", "error", err)
 		return
 	}
 
@@ -242,7 +252,7 @@ func (sbs *SmartBackupScheduler) loadPersistedState() {
 		if err := json.Unmarshal([]byte(windowJSON), &window); err == nil {
 			sbs.lastWindow = &window
 		} else {
-			log.Printf("Smart backup: failed to parse cached optimal window: %v", err)
+			slog.Warn("smart backup: failed to parse cached optimal window", "error", err)
 		}
 	}
 
@@ -251,7 +261,7 @@ func (sbs *SmartBackupScheduler) loadPersistedState() {
 		if err == nil {
 			sbs.nextBackupAt = &nextRun
 		} else {
-			log.Printf("Smart backup: failed to parse cached next run time: %v", err)
+			slog.Warn("smart backup: failed to parse cached next run time", "error", err)
 		}
 	}
 }
@@ -309,7 +319,7 @@ func (sbs *SmartBackupScheduler) persistState(window *BackupWindow, nextRun *tim
 			"UPDATE settings SET backup_optimal_window = ?, backup_next_run_at = ? WHERE id = 1",
 			string(windowJSON), nextValue,
 		); err != nil {
-			log.Printf("Smart backup: failed to persist schedule state: %v", err)
+			slog.Error("smart backup: failed to persist schedule state", "error", err)
 		}
 		return
 	}
@@ -319,7 +329,7 @@ func (sbs *SmartBackupScheduler) persistState(window *BackupWindow, nextRun *tim
 		nextValue = nextRun.UTC().Format(time.RFC3339)
 	}
 	if _, err := db.DB.Exec("UPDATE settings SET backup_next_run_at = ? WHERE id = 1", nextValue); err != nil {
-		log.Printf("Smart backup: failed to persist next backup time: %v", err)
+		slog.Error("smart backup: failed to persist next backup time", "error", err)
 	}
 }
 
@@ -392,32 +402,18 @@ Respond ONLY with valid JSON (no markdown, no explanation):
 Choose the hour with the lowest combined CPU, Disk I/O, and load average.`, sb.String())
 
 	ctx := context.Background()
-	client, err := genai.NewClient(ctx, option.WithAPIKey(apiKey))
+	client, err := GetAIClient(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("Gemini client error: %v", err)
 	}
-	defer client.Close()
 
-	model := client.GenerativeModel("gemini-2.0-flash")
+	model := GetAIModel(client, "")
 	resp, err := model.GenerateContent(ctx, genai.Text(prompt))
 	if err != nil {
 		return nil, fmt.Errorf("generation error: %v", err)
 	}
 
-	var replyText string
-	if resp != nil && len(resp.Candidates) > 0 && resp.Candidates[0].Content != nil {
-		for _, part := range resp.Candidates[0].Content.Parts {
-			if text, ok := part.(genai.Text); ok {
-				replyText += string(text)
-			}
-		}
-	}
-
-	replyText = strings.TrimSpace(replyText)
-	replyText = strings.TrimPrefix(replyText, "```json")
-	replyText = strings.TrimPrefix(replyText, "```")
-	replyText = strings.TrimSuffix(replyText, "```")
-	replyText = strings.TrimSpace(replyText)
+	replyText := CleanJSONResponse(ExtractTextFromResponse(resp))
 
 	var window BackupWindow
 	if err := json.Unmarshal([]byte(replyText), &window); err != nil {

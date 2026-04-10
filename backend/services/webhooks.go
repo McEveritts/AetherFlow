@@ -17,7 +17,10 @@ func SendDiscordWebhook(webhookURL string, n Notification) {
 	if webhookURL == "" {
 		return
 	}
+	sendWebhookWithRetry(webhookURL, buildDiscordPayload(n))
+}
 
+func buildDiscordPayload(n Notification) map[string]interface{} {
 	color := 0x3498db // blue (info)
 	switch n.Level {
 	case NotifyWarning:
@@ -27,8 +30,7 @@ func SendDiscordWebhook(webhookURL string, n Notification) {
 	case NotifySuccess:
 		color = 0x2ecc71 // green
 	}
-
-	payload := map[string]interface{}{
+	return map[string]interface{}{
 		"embeds": []map[string]interface{}{
 			{
 				"title":       fmt.Sprintf("🔔 %s", n.Title),
@@ -41,8 +43,6 @@ func SendDiscordWebhook(webhookURL string, n Notification) {
 			},
 		},
 	}
-
-	sendWebhookWithRetry(webhookURL, payload)
 }
 
 // SendTelegramWebhook sends a notification via the Telegram Bot API.
@@ -50,7 +50,11 @@ func SendTelegramWebhook(botToken, chatID string, n Notification) {
 	if botToken == "" || chatID == "" {
 		return
 	}
+	url := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", botToken)
+	sendWebhookWithRetry(url, buildTelegramPayload(chatID, n))
+}
 
+func buildTelegramPayload(chatID string, n Notification) map[string]interface{} {
 	emoji := "ℹ️"
 	switch n.Level {
 	case NotifyWarning:
@@ -60,17 +64,11 @@ func SendTelegramWebhook(botToken, chatID string, n Notification) {
 	case NotifySuccess:
 		emoji = "✅"
 	}
-
-	text := fmt.Sprintf("%s *%s*\n%s", emoji, escapeMarkdown(n.Title), escapeMarkdown(n.Message))
-
-	url := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", botToken)
-	payload := map[string]interface{}{
+	return map[string]interface{}{
 		"chat_id":    chatID,
-		"text":       text,
+		"text":       fmt.Sprintf("%s *%s*\n%s", emoji, escapeMarkdown(n.Title), escapeMarkdown(n.Message)),
 		"parse_mode": "Markdown",
 	}
-
-	sendWebhookWithRetry(url, payload)
 }
 
 // SendSlackWebhook sends a notification as a Slack Block Kit message.
@@ -78,7 +76,10 @@ func SendSlackWebhook(webhookURL string, n Notification) {
 	if webhookURL == "" {
 		return
 	}
+	sendWebhookWithRetry(webhookURL, buildSlackPayload(n))
+}
 
+func buildSlackPayload(n Notification) map[string]interface{} {
 	emoji := ":information_source:"
 	switch n.Level {
 	case NotifyWarning:
@@ -88,8 +89,7 @@ func SendSlackWebhook(webhookURL string, n Notification) {
 	case NotifySuccess:
 		emoji = ":white_check_mark:"
 	}
-
-	payload := map[string]interface{}{
+	return map[string]interface{}{
 		"blocks": []map[string]interface{}{
 			{
 				"type": "section",
@@ -109,8 +109,6 @@ func SendSlackWebhook(webhookURL string, n Notification) {
 			},
 		},
 	}
-
-	sendWebhookWithRetry(webhookURL, payload)
 }
 
 // SendCustomWebhook sends a raw JSON POST to a custom URL.
@@ -118,27 +116,30 @@ func SendCustomWebhook(webhookURL string, n Notification) {
 	if webhookURL == "" {
 		return
 	}
+	sendWebhookWithRetry(webhookURL, buildCustomPayload(n))
+}
 
-	payload := map[string]interface{}{
+func buildCustomPayload(n Notification) map[string]interface{} {
+	return map[string]interface{}{
 		"level":     string(n.Level),
 		"title":     n.Title,
 		"message":   n.Message,
 		"timestamp": time.Now().Format(time.RFC3339),
 		"source":    "aetherflow",
 	}
-
-	sendWebhookWithRetry(webhookURL, payload)
 }
 
 // sendWebhookWithRetry sends a JSON POST with exponential backoff retry.
-func sendWebhookWithRetry(url string, payload interface{}) {
+// Returns the number of attempts made and any final error.
+func sendWebhookWithRetry(url string, payload interface{}) (int, error) {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		log.Printf("Webhook: failed to marshal payload: %v", err)
-		return
+		return 0, fmt.Errorf("marshal error: %w", err)
 	}
 
 	client := &http.Client{Timeout: webhookTimeout}
+	var lastErr error
 
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		if attempt > 0 {
@@ -149,18 +150,21 @@ func sendWebhookWithRetry(url string, payload interface{}) {
 		resp, err := client.Post(url, "application/json", bytes.NewReader(body))
 		if err != nil {
 			log.Printf("Webhook: attempt %d failed for %s: %v", attempt+1, truncateURL(url), err)
+			lastErr = err
 			continue
 		}
 		resp.Body.Close()
 
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-			return // Success
+			return attempt + 1, nil // Success
 		}
 
+		lastErr = fmt.Errorf("HTTP %d", resp.StatusCode)
 		log.Printf("Webhook: attempt %d returned %d for %s", attempt+1, resp.StatusCode, truncateURL(url))
 	}
 
 	log.Printf("Webhook: all %d attempts failed for %s", maxRetries, truncateURL(url))
+	return maxRetries, lastErr
 }
 
 // truncateURL returns a safe version of the URL for logging (hides secrets).

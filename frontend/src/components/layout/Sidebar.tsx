@@ -12,11 +12,13 @@ import {
     FolderUp,
     HardDriveDownload,
     UserCircle,
-    Users
+    Users,
+    Mail
 } from 'lucide-react';
 
 export const NAVIGATION = [
     { id: 'overview' as TabId, label: 'Overview', icon: <LayoutDashboard size={20} /> },
+    { id: 'inbox' as TabId, label: 'Approval Inbox', icon: <Mail size={20} /> },
     { id: 'services' as TabId, label: 'Services', icon: <Server size={20} /> },
     { id: 'marketplace' as TabId, label: 'Marketplace', icon: <Store size={20} /> },
     { id: 'fileshare' as TabId, label: 'File Share', icon: <FolderUp size={20} /> },

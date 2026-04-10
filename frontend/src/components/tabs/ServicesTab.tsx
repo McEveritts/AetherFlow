@@ -7,6 +7,9 @@ import { useToast } from '@/contexts/ToastContext';
 import { useAuth } from '@/contexts/AuthContext';
 import { ServicesSkeleton } from '@/components/layout/SkeletonBox';
 import { apiFetch } from '@/lib/fetcher';
+import RequireClaim from '@/components/auth/RequireClaim';
+import ServiceLogsModal from '@/components/tabs/ServiceLogsModal';
+import { Terminal } from 'lucide-react';
 
 // Maps service process names to their web UI ports/paths
 const SERVICE_WEB_PORTS: Record<string, number | string> = {
@@ -58,6 +61,7 @@ export default function ServicesTab() {
     const { addToast } = useToast();
     const { user } = useAuth();
     const [loadingService, setLoadingService] = useState<string | null>(null);
+    const [logsModalService, setLogsModalService] = useState<string | null>(null);
     const canControlServices = user?.role === 'admin';
 
     const { data: services, mutate, isLoading } = useSWR<Record<string, ServiceInfo>>(
@@ -67,7 +71,7 @@ export default function ServicesTab() {
 
     const handleServiceControl = async (name: string, data: ServiceInfo, action: 'start' | 'stop' | 'restart') => {
         if (!canControlServices) {
-            addToast('Admin access required to control services.', 'error');
+            addToast('Authorization constraint: Admin privileges required for daemon control.', 'error');
             return;
         }
 
@@ -95,7 +99,7 @@ export default function ServicesTab() {
             });
             if (!res.ok) {
                 const d = await res.json().catch(() => ({}));
-                throw new Error(d.error || 'Failed to control service');
+                throw new Error(d.error || 'Daemon control operation rejected.');
             }
             addToast(`Successfully executed '${action}' on ${name}.`, 'success');
             // Revalidate to get actual server state
@@ -103,7 +107,7 @@ export default function ServicesTab() {
         } catch (err: unknown) {
             // Rollback optimistic update on error
             mutate(prevData, false);
-            addToast(err instanceof Error ? err.message : 'An unknown error occurred.', 'error');
+            addToast(err instanceof Error ? err.message : 'Undefined system exception encountered.', 'error');
         } finally {
             setLoadingService(null);
         }
@@ -197,32 +201,44 @@ export default function ServicesTab() {
                             >
                                 <Globe size={14} /> Web UI
                             </button>
-                            <button
-                                onClick={() => handleServiceControl(name, data, 'restart')}
-                                disabled={controlDisabled}
-                                title={canControlServices ? 'Restart service' : 'Admin access required'}
-                                className="p-2 bg-slate-800/80 hover:bg-amber-500/20 hover:text-amber-400 text-slate-400 rounded-lg transition-colors disabled:opacity-50"
-                            >
-                                <RotateCcw size={16} className={isBusy ? 'animate-spin' : ''} />
-                            </button>
-                            <button
-                                onClick={() => handleServiceControl(name, data, 'stop')}
-                                disabled={controlDisabled}
-                                title={canControlServices ? 'Stop service' : 'Admin access required'}
-                                className="p-2 bg-slate-800/80 hover:bg-red-500/20 hover:text-red-400 text-slate-400 rounded-lg transition-colors disabled:opacity-50"
-                            >
-                                <Square size={16} className="fill-current" />
-                            </button>
+                            <RequireClaim>
+                                <button
+                                    onClick={() => setLogsModalService(name)}
+                                    disabled={controlDisabled}
+                                    title={canControlServices ? 'View live logs' : 'Admin access required'}
+                                    className="p-2 bg-slate-800/80 hover:bg-indigo-500/20 hover:text-indigo-400 text-slate-400 rounded-lg transition-colors disabled:opacity-50"
+                                >
+                                    <Terminal size={16} />
+                                </button>
+                                <button
+                                    onClick={() => handleServiceControl(name, data, 'restart')}
+                                    disabled={controlDisabled}
+                                    title={canControlServices ? 'Restart service' : 'Admin access required'}
+                                    className="p-2 bg-slate-800/80 hover:bg-amber-500/20 hover:text-amber-400 text-slate-400 rounded-lg transition-colors disabled:opacity-50"
+                                >
+                                    <RotateCcw size={16} className={isBusy ? 'animate-spin' : ''} />
+                                </button>
+                                <button
+                                    onClick={() => handleServiceControl(name, data, 'stop')}
+                                    disabled={controlDisabled}
+                                    title={canControlServices ? 'Stop service' : 'Admin access required'}
+                                    className="p-2 bg-slate-800/80 hover:bg-red-500/20 hover:text-red-400 text-slate-400 rounded-lg transition-colors disabled:opacity-50"
+                                >
+                                    <Square size={16} className="fill-current" />
+                                </button>
+                            </RequireClaim>
                         </>
                     ) : (
-                        <button
-                            onClick={() => handleServiceControl(name, data, 'start')}
-                            disabled={controlDisabled}
-                            title={canControlServices ? 'Start service' : 'Admin access required'}
-                            className="w-full py-2 bg-indigo-500/20 hover:bg-indigo-500 text-indigo-300 hover:text-white text-xs font-semibold rounded-lg transition-colors flex items-center justify-center gap-2 border border-indigo-500/30 disabled:opacity-50"
-                        >
-                            <Play size={14} className="fill-current" /> {isBusy ? 'Starting...' : 'Start Service'}
-                        </button>
+                        <RequireClaim>
+                            <button
+                                onClick={() => handleServiceControl(name, data, 'start')}
+                                disabled={controlDisabled}
+                                title={canControlServices ? 'Start service' : 'Admin access required'}
+                                className="w-full py-2 bg-indigo-500/20 hover:bg-indigo-500 text-indigo-300 hover:text-white text-xs font-semibold rounded-lg transition-colors flex items-center justify-center gap-2 border border-indigo-500/30 disabled:opacity-50"
+                            >
+                                <Play size={14} className="fill-current" /> {isBusy ? 'Starting...' : 'Start Service'}
+                            </button>
+                        </RequireClaim>
                     )}
                 </div>
             </div>
@@ -286,6 +302,11 @@ export default function ServicesTab() {
                     <p className="text-slate-500 text-sm">Install applications from the Marketplace to see them here.</p>
                 </div>
             )}
+
+            <ServiceLogsModal 
+                serviceName={logsModalService} 
+                onClose={() => setLogsModalService(null)} 
+            />
         </div>
     );
 }

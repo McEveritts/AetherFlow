@@ -4,12 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
-	"os"
 	"strings"
 
 	"github.com/google/generative-ai-go/genai"
-	"google.golang.org/api/option"
 )
 
 // BandwidthRecommendation holds the AI's bandwidth optimization suggestion.
@@ -24,10 +21,6 @@ type BandwidthRecommendation struct {
 
 // AnalyzeBandwidth gathers system metrics and asks Gemini for bandwidth optimization advice.
 func AnalyzeBandwidth(apiKey string) (*BandwidthRecommendation, error) {
-	if apiKey == "" {
-		return nil, fmt.Errorf("API key required")
-	}
-
 	metrics := GetSystemMetricsCore()
 
 	// Build metrics context
@@ -66,32 +59,19 @@ Respond ONLY with valid JSON (no markdown, no explanation):
 {"recommended_upload_kbps": 0, "recommended_download_kbps": 0, "reasoning": "...", "confidence": 0.0, "swarm_health": "healthy|congested|underutilized", "suggestions": ["..."]}`, sb.String())
 
 	ctx := context.Background()
-	client, err := genai.NewClient(ctx, option.WithAPIKey(apiKey))
+	client, err := GetAIClient(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("Gemini client error: %v", err)
 	}
-	defer client.Close()
+	// Do NOT defer client.Close() — shared singleton
 
-	model := client.GenerativeModel("gemini-2.0-flash")
+	model := GetAIModel(client, "")
 	resp, err := model.GenerateContent(ctx, genai.Text(prompt))
 	if err != nil {
 		return nil, fmt.Errorf("generation error: %v", err)
 	}
 
-	var replyText string
-	if resp != nil && len(resp.Candidates) > 0 && resp.Candidates[0].Content != nil {
-		for _, part := range resp.Candidates[0].Content.Parts {
-			if text, ok := part.(genai.Text); ok {
-				replyText += string(text)
-			}
-		}
-	}
-
-	replyText = strings.TrimSpace(replyText)
-	replyText = strings.TrimPrefix(replyText, "```json")
-	replyText = strings.TrimPrefix(replyText, "```")
-	replyText = strings.TrimSuffix(replyText, "```")
-	replyText = strings.TrimSpace(replyText)
+	replyText := CleanJSONResponse(ExtractTextFromResponse(resp))
 
 	var rec BandwidthRecommendation
 	if err := json.Unmarshal([]byte(replyText), &rec); err != nil {
@@ -99,15 +79,4 @@ Respond ONLY with valid JSON (no markdown, no explanation):
 	}
 
 	return &rec, nil
-}
-
-// getAIKey resolves the Gemini API key from DB or environment.
-func getAIKey() string {
-	var apiKey string
-	if db := os.Getenv("GEMINI_API_KEY"); db != "" {
-		return db
-	}
-	log.Printf("Bandwidth optimizer: no API key in env, will check DB at call time")
-	_ = apiKey
-	return ""
 }

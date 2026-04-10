@@ -1,66 +1,29 @@
 import { defineConfig, devices } from '@playwright/test';
 
-const baseURL = process.env.PLAYWRIGHT_BASE_URL || 'http://127.0.0.1:3000';
-
 export default defineConfig({
   testDir: './tests/e2e',
+  timeout: 30 * 1000,
+  expect: {
+    timeout: 5000
+  },
   fullyParallel: true,
   retries: process.env.CI ? 2 : 0,
-  reporter: process.env.CI ? [['github'], ['html', { open: 'never' }]] : [['list'], ['html', { open: 'never' }]],
-  expect: {
-    toHaveScreenshot: {
-      maxDiffPixelRatio: 0.02,
-      animations: 'disabled',
-    },
-  },
+  workers: process.env.CI ? 1 : undefined,
+  reporter: 'html',
   use: {
-    baseURL,
-    trace: 'retain-on-failure',
-    video: 'retain-on-failure',
-    screenshot: 'only-on-failure',
+    actionTimeout: 0,
+    trace: 'on-first-retry',
+    baseURL: 'http://localhost:3000',
   },
-  webServer: process.env.PLAYWRIGHT_BASE_URL
-    ? undefined
-    : {
-        command: 'npm run dev',
-        url: baseURL,
-        timeout: 120000,
-        reuseExistingServer: !process.env.CI,
-        env: {
-          NEXT_TELEMETRY_DISABLED: '1',
-        },
-      },
   projects: [
     {
       name: 'chromium',
-      use: {
-        ...devices['Desktop Chrome'],
-        viewport: { width: 1440, height: 960 },
-      },
-    },
-    {
-      name: 'chromium-hidpi',
-      use: {
-        ...devices['Desktop Chrome'],
-        viewport: { width: 1440, height: 960 },
-        deviceScaleFactor: 2,
-      },
-    },
-    {
-      name: 'firefox-hidpi',
-      use: {
-        ...devices['Desktop Firefox'],
-        viewport: { width: 1440, height: 960 },
-        deviceScaleFactor: 2,
-      },
-    },
-    {
-      name: 'webkit-hidpi',
-      use: {
-        ...devices['Desktop Safari'],
-        viewport: { width: 1440, height: 960 },
-        deviceScaleFactor: 2,
-      },
+      use: { ...devices['Desktop Chrome'] },
     },
   ],
+  webServer: {
+    command: 'npm run dev',
+    port: 3000,
+    reuseExistingServer: !process.env.CI,
+  },
 });

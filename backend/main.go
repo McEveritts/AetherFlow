@@ -24,16 +24,21 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"aetherflow/api"
 	"aetherflow/cluster"
+	"aetherflow/config"
 	"aetherflow/db"
+	"aetherflow/logging"
 	"aetherflow/services"
 
 	"github.com/gin-contrib/cors"
@@ -89,11 +94,11 @@ func discoverOrigins() []string {
 			if publicIP != "" {
 				origins[fmt.Sprintf("http://%s", publicIP)] = true
 				origins[fmt.Sprintf("https://%s", publicIP)] = true
-				log.Printf("Detected public IP: %s", publicIP)
+				slog.Info("detected public IP", "ip", publicIP)
 			}
 		}
 	} else {
-		log.Printf("Could not detect public IP (offline?): %v", err)
+		slog.Warn("could not detect public IP", "error", err)
 	}
 
 	// Convert map to slice
@@ -102,7 +107,7 @@ func discoverOrigins() []string {
 		result = append(result, origin)
 	}
 
-	log.Printf("CORS allowed origins: %v", result)
+	slog.Info("CORS origins configured", "count", len(result))
 	return result
 }
 
@@ -111,17 +116,26 @@ func main() {
 	if err := godotenv.Load("../.env"); err != nil {
 		godotenv.Load() // fallback to current dir if any
 	}
+	// Phase 18: Initialize structured logging
+	logging.Init()
+
+	// Phase 19: Centralized configuration — load all env vars into a typed struct
+	config.Load()
+	if err := config.Validate(); err != nil {
+		log.Fatalf("Configuration error: %v", err)
+	}
 
 	// Initialize the Database
 	db.InitDB()
 	db.InitRedis()
+	db.StartPruneLoop() // Phase 16: periodic cleanup of expired data
 
 	// Initialize AES-256-GCM encryption for API key storage
 	api.InitAESKey()
 
 	// Phase 2: Migrate any plaintext DB secrets to versioned ciphertext
 	if err := api.MigrateLegacySecrets(); err != nil {
-		log.Printf("Warning: Failed to migrate legacy secrets: %v", err)
+		slog.Warn("failed to migrate legacy secrets", "error", err)
 	}
 
 	// Initialize the Cluster Manager
@@ -155,30 +169,28 @@ func main() {
 	// AdminOnly (billing providers can't hold a session), so the HMAC/bearer
 	// secret is the sole authentication gate.  Alert operators at boot time.
 	if os.Getenv("WHMCS_WEBHOOK_SECRET") == "" && os.Getenv("BLESTA_WEBHOOK_SECRET") == "" && os.Getenv("BILLING_WEBHOOK_SECRET") == "" {
-		log.Println("⚠  WARNING: No billing webhook secret configured (WHMCS_WEBHOOK_SECRET / BLESTA_WEBHOOK_SECRET / BILLING_WEBHOOK_SECRET). " +
-			"The POST /billing/webhooks/:provider endpoint will reject all requests until a secret is set.")
+		slog.Warn("no billing webhook secret configured",
+			"hint", "set WHMCS_WEBHOOK_SECRET, BLESTA_WEBHOOK_SECRET, or BILLING_WEBHOOK_SECRET")
 	}
 
 	// Warn if running in production without ALLOWED_HOSTS
 	if gin.Mode() == gin.ReleaseMode && os.Getenv("ALLOWED_HOSTS") == "" {
-		log.Println("⚠  WARNING: ALLOWED_HOSTS is not set in production mode. " +
-			"Host header validation is disabled, which may allow open redirect attacks (CWE-601).")
+		slog.Warn("ALLOWED_HOSTS not set in production mode",
+			"risk", "open redirect attacks (CWE-601)")
 	}
 
 	// CSRF default change notification
 	if os.Getenv("CSRF_DISABLED") == "" && os.Getenv("CSRF_ENABLED") != "" {
-		log.Println("ℹ  NOTE: CSRF_ENABLED is deprecated. CSRF is now ON by default. " +
-			"Set CSRF_DISABLED=true to disable for local development.")
+		slog.Info("CSRF_ENABLED is deprecated — CSRF is now ON by default",
+			"hint", "set CSRF_DISABLED=true to disable for local development")
 	}
 
 	// Environment Detection & Runtime Policy Evaluation
 	envPolicy := services.GetRuntimePolicy()
 	if envPolicy.IsWSL {
-		log.Println("Platform Detection: WSL (Windows Subsystem for Linux) instance detected")
-		log.Println("Runtime Policy: Sandbox mode is BYPASSED for WSL compatibility")
+		slog.Info("platform detected", "type", "WSL", "sandbox", "bypassed")
 	} else {
-		log.Println("Platform Detection: Bare Metal Linux instance detected")
-		log.Println("Runtime Policy: Native systemd Sandbox enforcement ACTIVE")
+		slog.Info("platform detected", "type", "bare-metal", "sandbox", "active")
 	}
 
 	// Start gRPC server/client based on cluster mode
@@ -188,14 +200,14 @@ func main() {
 		go func() {
 			srv, err := cluster.NewGRPCServer()
 			if err != nil {
-				log.Printf("Failed to create gRPC server: %v", err)
+				slog.Error("failed to create gRPC server", "error", err)
 				return
 			}
 			if err := srv.Start(); err != nil {
-				log.Printf("gRPC server error: %v", err)
+				slog.Error("gRPC server error", "error", err)
 			}
 		}()
-		log.Println("Cluster mode: MASTER — gRPC server starting")
+		slog.Info("cluster mode active", "role", "master")
 	case "worker":
 		masterAddr := os.Getenv("CLUSTER_MASTER_ADDR")
 		if masterAddr == "" {
@@ -204,7 +216,7 @@ func main() {
 		go func() {
 			client, err := cluster.NewGRPCClient(masterAddr)
 			if err != nil {
-				log.Printf("Failed to connect to master: %v", err)
+				slog.Error("failed to connect to cluster master", "error", err, "addr", masterAddr)
 				return
 			}
 			defer client.Close()
@@ -213,18 +225,18 @@ func main() {
 			psk := os.Getenv("CLUSTER_PSK")
 
 			if err := client.Register(hostname, fmt.Sprintf("%s:%s", hostname, os.Getenv("PORT")), psk, version); err != nil {
-				log.Printf("Cluster registration failed: %v", err)
+				slog.Error("cluster registration failed", "error", err)
 				return
 			}
 
 			ctx := context.Background()
 			if err := client.StartHeartbeat(ctx); err != nil {
-				log.Printf("Cluster heartbeat loop ended: %v", err)
+				slog.Warn("cluster heartbeat loop ended", "error", err)
 			}
 		}()
-		log.Printf("Cluster mode: WORKER — connecting to master at %s", os.Getenv("CLUSTER_MASTER_ADDR"))
+		slog.Info("cluster mode active", "role", "worker", "master_addr", masterAddr)
 	default:
-		log.Println("Cluster mode: STANDALONE (set CLUSTER_MODE=master|worker to enable clustering)")
+		slog.Info("cluster mode active", "role", "standalone")
 	}
 
 	r := gin.Default()
@@ -243,7 +255,7 @@ func main() {
 	if customOrigin := os.Getenv("ALLOWED_CORS_ORIGIN"); customOrigin != "" {
 		// Manual override via env var
 		corsConfig.AllowOrigins = []string{customOrigin}
-		log.Printf("Using manual CORS origin: %s", customOrigin)
+		slog.Info("CORS manual override", "origin", customOrigin)
 	} else {
 		// Auto-detect local + public IPs
 		corsConfig.AllowOrigins = discoverOrigins()
@@ -259,21 +271,73 @@ func main() {
 		port = "8080"
 	}
 
-	log.Printf("AetherFlow Backend listening on 127.0.0.1:%s", port)
+	slog.Info("AetherFlow backend starting", "addr", "127.0.0.1:"+port, "version", version)
 
 	// Start Phase 14: Automated Auto-Heal Recovery process
 	services.StartHealWorker(10 * time.Second)
 
 	// Phase 12: Profiling & Optimization Listener
 	go func() {
-		log.Println("Pprof profiler listening on 127.0.0.1:6060")
+		slog.Info("pprof profiler listening", "addr", "127.0.0.1:6060")
 		if err := http.ListenAndServe("127.0.0.1:6060", nil); err != nil {
-			log.Printf("Pprof profiler error: %v", err)
+			slog.Error("pprof profiler error", "error", err)
 		}
 	}()
 
-	// Bind to localhost to prevent direct internet exposure
-	if err := r.Run("127.0.0.1:" + port); err != nil {
-		log.Fatalf("Failed to run server: %v", err)
+	// ── Phase 24: Graceful Shutdown ─────────────────────────────────────
+	// Use http.Server directly for proper lifecycle control
+	srv := &http.Server{
+		Addr:    "127.0.0.1:" + port,
+		Handler: r,
 	}
+
+	// Start HTTP server in a goroutine
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("Failed to run server: %v", err)
+		}
+	}()
+
+	// Wait for interrupt signal
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
+	sig := <-quit
+	slog.Info("shutdown signal received", "signal", sig.String())
+
+	// Deadline for in-flight request draining
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer shutdownCancel()
+
+	// 1. Stop accepting new connections, drain existing
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		slog.Error("HTTP server forced shutdown", "error", err)
+	}
+	slog.Info("HTTP server stopped")
+
+	// 2. Stop all background subsystems (af-heal, notifications, metrics, backup scheduler)
+	// Must happen before closing DB/Redis since subsystems may issue final writes.
+	services.StopAllSubsystems()
+	// Brief grace period for goroutines to exit their ticker loops
+	time.Sleep(500 * time.Millisecond)
+	slog.Info("background subsystems stopped")
+
+	// 3. Close database connections
+	if db.DB != nil {
+		if err := db.DB.Close(); err != nil {
+			slog.Error("database close error", "error", err)
+		} else {
+			slog.Info("database connection closed")
+		}
+	}
+
+	// 4. Close Redis connection
+	if db.RedisClient != nil {
+		if err := db.RedisClient.Close(); err != nil {
+			slog.Error("Redis close error", "error", err)
+		} else {
+			slog.Info("Redis connection closed")
+		}
+	}
+
+	slog.Info("AetherFlow backend shutdown complete")
 }

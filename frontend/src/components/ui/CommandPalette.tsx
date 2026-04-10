@@ -14,7 +14,8 @@ import {
   RefreshCw,
   Users,
   Store,
-  FolderOpen
+  FolderOpen,
+  Bot
 } from 'lucide-react';
 import { useSystemStore } from '@/store/useSystemStore';
 import { TabId } from '@/types/dashboard';
@@ -46,7 +47,25 @@ const actions: PaletteAction[] = [
   { id: 'task-backup', title: 'Start Database Backup', icon: Database, type: 'task', taskTitle: 'Database Backup', taskDuration: 5000 },
   { id: 'task-cache', title: 'Clear System Cache', icon: Trash2, type: 'task', taskTitle: 'Cache Clearance', taskDuration: 2000 },
   { id: 'task-restart', title: 'Restart AetherFlow API', icon: RefreshCw, type: 'task', taskTitle: 'API Restart', taskDuration: 8000 },
+
+  // AI Operations
+  { id: 'ai-analyze', title: 'Ask AI: Analyze System Logs', icon: Bot, type: 'task', taskTitle: 'AI Log Analysis', taskDuration: 12000 },
+  { id: 'ai-optimize', title: 'Ask AI: Run Deep Optimizer', icon: Bot, type: 'task', taskTitle: 'Deep Analytics Optimization', taskDuration: 15000 },
 ];
+
+function fuzzyMatch(pattern: string, str: string): boolean {
+  let patternIdx = 0;
+  let strIdx = 0;
+  const p = pattern.toLowerCase();
+  const s = str.toLowerCase();
+  while (patternIdx < p.length && strIdx < s.length) {
+    if (p[patternIdx] === s[strIdx]) {
+      patternIdx++;
+    }
+    strIdx++;
+  }
+  return patternIdx === p.length;
+}
 
 export function CommandPalette() {
   const [isOpen, setIsOpen] = useState(false);
@@ -57,10 +76,10 @@ export function CommandPalette() {
   const { addToast } = useToast();
   const inputRef = useRef<HTMLInputElement>(null);
 
-  // Filter actions based on search query
+  // Filter actions based on fuzzy search query
   const filteredActions = query === '' 
     ? actions 
-    : actions.filter((action) => action.title.toLowerCase().includes(query.toLowerCase()));
+    : actions.filter((action) => fuzzyMatch(query, action.title));
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {

@@ -6,6 +6,7 @@ interface MockOptions {
   authenticated?: boolean;
   setupRequired?: boolean;
   userRole?: UserRole;
+  enableWS?: boolean;
 }
 
 interface MockApp {
@@ -92,11 +93,13 @@ export async function installAetherFlowMocks(page: Page, options: MockOptions = 
     installPolls: 0,
   };
 
-  await page.addInitScript(() => {
-    (window as Window & { __AF_DISABLE_WS__?: boolean }).__AF_DISABLE_WS__ = true;
+  await page.addInitScript((options) => {
+    if (!options.enableWS) {
+      (window as Window & { __AF_DISABLE_WS__?: boolean }).__AF_DISABLE_WS__ = true;
+    }
     window.localStorage.clear();
     window.sessionStorage.clear();
-  });
+  }, { enableWS: options.enableWS });
 
   await page.route(/\/api(\/v1)?\/auth\/setup\/check/, async (route: Route) => {
     await json(route, { setupRequired: state.setupRequired });

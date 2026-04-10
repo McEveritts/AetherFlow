@@ -1,14 +1,19 @@
 import { Activity } from 'lucide-react';
 import { ProcessInfo } from '@/types/dashboard';
-import { DataGrid } from '@aetherflow/ui';
+import { DataGrid } from '@/components/ui/DataGrid';
 import { ColumnDef } from '@tanstack/react-table';
 import { useMemo } from 'react';
+import useSWR from 'swr';
+import { useSystemStore } from '@/store/useSystemStore';
 
 interface ProcessWidgetProps {
     processes: ProcessInfo[];
 }
 
 export default function ProcessWidget({ processes }: ProcessWidgetProps) {
+    const { data: services } = useSWR<Record<string, any>>('/api/v1/auth/services');
+    const setActiveTab = useSystemStore((state) => state.setActiveTab);
+
     const columns = useMemo<ColumnDef<ProcessInfo>[]>(() => [
         {
             accessorKey: 'pid',
@@ -19,7 +24,28 @@ export default function ProcessWidget({ processes }: ProcessWidgetProps) {
         {
             accessorKey: 'name',
             header: 'Process',
-            cell: info => <span className="font-medium text-slate-200 truncate block max-w-[180px]" title={info.getValue() as string}>{info.getValue() as string}</span>,
+            cell: info => {
+                const name = info.getValue() as string;
+                
+                let isService = false;
+                if (services) {
+                    isService = Object.entries(services).some(([serviceName, data]) => data.process === name || serviceName === name);
+                }
+
+                if (isService) {
+                    return (
+                        <button 
+                            onClick={() => setActiveTab('services')}
+                            className="font-medium text-emerald-400 hover:text-emerald-300 truncate block max-w-[180px] text-left hover:underline cursor-pointer transition-colors" 
+                            title={`Go to Service: ${name}`}
+                        >
+                            {name}
+                        </button>
+                    );
+                }
+
+                return <span className="font-medium text-slate-200 truncate block max-w-[180px]" title={name}>{name}</span>;
+            },
         },
         {
             accessorKey: 'cpu',
@@ -64,7 +90,7 @@ export default function ProcessWidget({ processes }: ProcessWidgetProps) {
             },
             size: 120,
         }
-    ], []);
+    ], [services, setActiveTab]);
 
     return (
         <div className="bg-white/[0.02] border border-white/[0.05] rounded-2xl p-5 relative overflow-hidden backdrop-blur-xl flex flex-col h-full">

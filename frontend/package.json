@@ -16,7 +16,6 @@
     "test:e2e:update": "playwright test --grep @visual --update-snapshots"
   },
   "dependencies": {
-    "@aetherflow/ui": "*",
     "@tanstack/react-table": "^8.21.3",
     "@tanstack/react-virtual": "^3.13.22",
     "@types/d3": "^7.4.3",
@@ -31,6 +30,7 @@
     "recharts": "^3.8.0",
     "swr": "^2.4.0",
     "tailwind-merge": "^3.5.0",
+    "zod": "^4.3.6",
     "zustand": "^5.0.11"
   },
   "devDependencies": {

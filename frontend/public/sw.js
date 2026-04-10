@@ -56,8 +56,18 @@ self.addEventListener('fetch', event => {
             // Clone the response because it's a one-time use stream
             const responseToCache = response.clone();
 
-            // Cache standard assets dynamically if desired (optional)
-            // But for this baseline, we focus on manual caching strategy
+            // Aggressively cache the UI shell (Next.js static assets, imagery, fonts)
+            const url = new URL(event.request.url);
+            if (
+              url.pathname.startsWith('/_next/static/') ||
+              url.pathname.startsWith('/img/') ||
+              url.pathname.match(/\.(woff2|css|js|svg|png|jpg)$/)
+            ) {
+              caches.open(CACHE_NAME)
+                .then(cache => {
+                  cache.put(event.request, responseToCache);
+                });
+            }
 
             return response;
           }

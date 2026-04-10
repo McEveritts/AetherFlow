@@ -8,6 +8,7 @@ import { WebSocketProvider } from '@/contexts/WebSocketContext';
 
 import { ToastProvider } from '@/contexts/ToastContext';
 import ToastContainer from '@/components/layout/ToastContainer';
+import NotificationDrawer from '@/components/layout/NotificationDrawer';
 import ThemeProvider from '@/components/layout/ThemeProvider';
 import LanguageProvider from '@/components/layout/LanguageProvider';
 import PwaRegistry from '@/components/layout/PwaRegistry';
@@ -54,6 +55,7 @@ export default function RootLayout({
           </SWRProvider>
           <GlobalCommandPalette />
           <ToastContainer />
+          <NotificationDrawer />
         </ToastProvider>
         </LanguageProvider>
         </ThemeProvider>

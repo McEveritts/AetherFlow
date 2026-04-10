@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"golang.org/x/crypto/bcrypt"
 )
 
 // validBackupFilenameRe strictly allows alphanumeric, underscore, hyphen, and dot,
@@ -195,6 +196,9 @@ func PerformSystemBackup() (BackupFile, error) {
 		return BackupFile{}, errors.New("Backup created but checksum write failed: " + err.Error())
 	}
 
+	// Phase 15: Enforce retention policy after successful backup
+	go PruneOldBackups()
+
 	return BackupFile{
 		Filename:  filepath.Base(backupFile),
 		Size:      info.Size(),
@@ -255,6 +259,35 @@ func GetBackupsList(c *gin.Context) {
 }
 
 func DownloadBackup(c *gin.Context) {
+	// Phase 28: Re-authentication check — backup download is a high-value
+	// exfiltration target, so we require the caller to prove session ownership
+	// via X-Reauth-Password header. This mitigates session riding (CSRF).
+	reauthPassword := c.GetHeader("X-Reauth-Password")
+	if reauthPassword == "" {
+		RespondError(c, http.StatusForbidden, ErrCodeForbidden, "Re-authentication required for backup download. Provide X-Reauth-Password header.")
+		return
+	}
+	rawUserID, _ := c.Get("user_id")
+	userID, ok := rawUserID.(int)
+	if !ok {
+		RespondError(c, http.StatusUnauthorized, ErrCodeUnauthorized, "Invalid session")
+		return
+	}
+	var passwordHash string
+	if err := db.DB.QueryRow("SELECT COALESCE(password_hash, '') FROM users WHERE id = ?", userID).Scan(&passwordHash); err != nil || passwordHash == "" {
+		RespondError(c, http.StatusForbidden, ErrCodeForbidden, "Re-authentication failed")
+		return
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(reauthPassword)); err != nil {
+		RespondError(c, http.StatusForbidden, ErrCodeForbidden, "Re-authentication failed: invalid password")
+		return
+	}
+
+	// Audit the backup download
+	var username string
+	db.DB.QueryRow("SELECT username FROM users WHERE id = ?", userID).Scan(&username)
+	db.RecordAudit(userID, username, "backup_download", "backup", c.Param("filename"), "", c.ClientIP(), c.Request.UserAgent())
+
 	filename := c.Param("filename")
 	if filename == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Filename required"})

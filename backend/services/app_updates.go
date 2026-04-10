@@ -91,8 +91,15 @@ func (w *AppUpdateWatcher) loop() {
 	ticker := time.NewTicker(w.interval)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		w.RefreshInstalledPackages()
+	ctx := SubsystemContext()
+	for {
+		select {
+		case <-ctx.Done():
+			log.Println("[updates] Shutdown signal received, stopping update watcher")
+			return
+		case <-ticker.C:
+			w.RefreshInstalledPackages()
+		}
 	}
 }
 

@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	"github.com/google/generative-ai-go/genai"
-	"google.golang.org/api/option"
 )
 
 // PredictionReport is the AI-generated resource prediction analysis.
@@ -26,9 +25,6 @@ type PredictionReport struct {
 
 // AnalyzeResourceTrends queries 30 days of metrics and sends them to Gemini for trend analysis.
 func AnalyzeResourceTrends(apiKey string) (*PredictionReport, error) {
-	if apiKey == "" {
-		return nil, fmt.Errorf("API key required")
-	}
 
 	snapshots, err := GetMetricsHistory(30)
 	if err != nil {
@@ -113,32 +109,18 @@ Provide your analysis as JSON ONLY (no markdown, no explanation):
 Be specific about cgroup limits, upgrade recommendations, and timeframes.`, sb.String())
 
 	ctx := context.Background()
-	client, err := genai.NewClient(ctx, option.WithAPIKey(apiKey))
+	client, err := GetAIClient(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("Gemini client error: %v", err)
 	}
-	defer client.Close()
 
-	model := client.GenerativeModel("gemini-2.5-flash")
+	model := GetAIModel(client, "")
 	resp, err := model.GenerateContent(ctx, genai.Text(prompt))
 	if err != nil {
 		return nil, fmt.Errorf("generation error: %v", err)
 	}
 
-	var replyText string
-	if resp != nil && len(resp.Candidates) > 0 && resp.Candidates[0].Content != nil {
-		for _, part := range resp.Candidates[0].Content.Parts {
-			if text, ok := part.(genai.Text); ok {
-				replyText += string(text)
-			}
-		}
-	}
-
-	replyText = strings.TrimSpace(replyText)
-	replyText = strings.TrimPrefix(replyText, "```json")
-	replyText = strings.TrimPrefix(replyText, "```")
-	replyText = strings.TrimSuffix(replyText, "```")
-	replyText = strings.TrimSpace(replyText)
+	replyText := CleanJSONResponse(ExtractTextFromResponse(resp))
 
 	var report PredictionReport
 	if err := json.Unmarshal([]byte(replyText), &report); err != nil {

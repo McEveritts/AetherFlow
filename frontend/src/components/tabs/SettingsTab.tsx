@@ -22,7 +22,7 @@ export default function SettingsTab() {
 
     const handleTestConnection = async () => {
         if (!apiKey) {
-            addToast('Please enter an API key to test.', 'error');
+            addToast('Constraint failure: Missing API token.', 'error');
             return;
         }
         setIsTesting(true);
@@ -36,10 +36,10 @@ export default function SettingsTab() {
             if (res.ok) {
                 addToast(data.message || 'Connection successful!', 'success');
             } else {
-                addToast(data.error || 'Connection failed.', 'error');
+                addToast(data.error || 'Remote connection refused.', 'error');
             }
         } catch (_err) {
-            addToast('Network error testing connection.', 'error');
+            addToast('API dispatch failure: Remote connection test.', 'error');
         } finally {
             setIsTesting(false);
         }
@@ -96,11 +96,11 @@ export default function SettingsTab() {
                 mutateSettings(); // revalidate from server
             } else {
                 mutateSettings(prevData, false); // rollback
-                addToast('Failed to sync configuration', 'error');
+                addToast('Configuration sync rejected', 'error');
             }
         } catch (_err) {
             mutateSettings(prevData, false); // rollback
-            addToast('Network error saving configuration', 'error');
+            addToast('API dispatch failure: Configuration flush.', 'error');
         } finally {
             setIsSaving(false);
         }
@@ -117,11 +117,11 @@ export default function SettingsTab() {
             if (res.ok) {
                 setUpdateMessage(data.message || 'Update started.');
             } else {
-                setUpdateMessage(data.error || 'Failed to start update.');
+                setUpdateMessage(data.error || 'Daemon update sequence rejected.');
                 setIsUpdating(false);
             }
         } catch (_err) {
-            setUpdateMessage('Network error triggering update.');
+            setUpdateMessage('API dispatch failure: Daemon update trigger.');
             setIsUpdating(false);
         }
     };

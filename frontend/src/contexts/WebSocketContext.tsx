@@ -8,6 +8,7 @@ import { useToast } from '@/contexts/ToastContext';
 import { useAuth } from '@/contexts/AuthContext';
 import { mutate as globalMutate } from 'swr';
 import { apiFetch } from '@/lib/fetcher';
+import { webSocketMessageSchema, metricsUpdateDataSchema } from '@/lib/schemas';
 
 declare global {
     interface Window {
@@ -210,14 +211,23 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
             resetHeartbeatTimeout();
 
             try {
-                const message = JSON.parse(event.data);
+                const rawMessage = JSON.parse(event.data);
+                const message = webSocketMessageSchema.parse(rawMessage);
                 if (message.type === 'METRICS_UPDATE') {
-                    setData({
-                        system: message.data.system,
-                        services: message.data.services,
-                    });
+                    const parsedData = metricsUpdateDataSchema.safeParse(message.data);
+                    if (parsedData.success) {
+                        setData({
+                            system: parsedData.data.system as SystemMetrics | null,
+                            services: parsedData.data.services as Record<string, unknown> | null,
+                        });
+                    } else {
+                        console.warn('[WS] Malformed metrics payload dropped', parsedData.error.format());
+                    }
                 } else if (message.type === 'MARKETPLACE_UPDATE') {
                     globalMutate('/api/v1/public/marketplace');
+                } else if (message.type === 'SYSTEM_HEAL') {
+                    const healData = message.data as { service?: string, reason?: string, action?: string };
+                    addToast(`Self-Healing: ${healData.action || 'Restarted'} ${healData.service || 'service'} (${healData.reason || 'unresponsive'})`, 'warning');
                 }
                 // PONG and other message types are silently consumed
             } catch (err) {

@@ -2,13 +2,18 @@ package services
 
 import (
 	"encoding/json"
-	"log"
+	"fmt"
+	"log/slog"
 	"strconv"
 	"sync"
 	"time"
 
 	"aetherflow/db"
+	"aetherflow/logging"
 )
+
+// notifLog is the domain-scoped structured logger for the notification engine.
+var notifLog *slog.Logger
 
 // NotificationType represents the severity level of a notification.
 type NotificationType string
@@ -77,14 +82,15 @@ func InitNotificationEngine(dispatchFn func(Notification)) {
 	// Start rule evaluator goroutine
 	go Notifier.evaluationLoop()
 
-	log.Println("Notification engine initialized")
+	notifLog = logging.ForDomain("notifications", "engine")
+	notifLog.Info("notification engine initialized")
 }
 
 // loadRules loads notification rules from the database.
 func (ne *NotificationEngine) loadRules() {
 	rows, err := db.DB.Query("SELECT id, name, condition_type, condition_value, level, enabled, created_at FROM notification_rules WHERE enabled = 1")
 	if err != nil {
-		log.Printf("Notification engine: failed to load rules: %v", err)
+		notifLog.Error("failed to load rules", "error", err)
 		return
 	}
 	defer rows.Close()
@@ -101,14 +107,14 @@ func (ne *NotificationEngine) loadRules() {
 		ne.rules = append(ne.rules, rule)
 	}
 
-	log.Printf("Notification engine: loaded %d active rules", len(ne.rules))
+	notifLog.Info("loaded active rules", "count", len(ne.rules))
 }
 
 // loadChannels loads notification channels from the database.
 func (ne *NotificationEngine) loadChannels() {
 	rows, err := db.DB.Query("SELECT id, name, type, config, enabled, created_at FROM notification_channels WHERE enabled = 1")
 	if err != nil {
-		log.Printf("Notification engine: failed to load channels: %v", err)
+		notifLog.Error("failed to load channels", "error", err)
 		return
 	}
 	defer rows.Close()
@@ -140,7 +146,7 @@ func (ne *NotificationEngine) Dispatch(n Notification) {
 		n.UserID, string(n.Level), n.Title, n.Message,
 	)
 	if err != nil {
-		log.Printf("Notification: failed to persist: %v", err)
+		notifLog.Error("failed to persist notification", "error", err)
 	} else {
 		id, _ := result.LastInsertId()
 		n.ID = int(id)
@@ -162,25 +168,58 @@ func (ne *NotificationEngine) Dispatch(n Notification) {
 	}
 }
 
-// sendToChannel dispatches a notification to a specific webhook channel.
+// sendToChannel dispatches a notification to a specific webhook channel
+// and records the delivery result in notification_delivery_log (Phase 13).
 func (ne *NotificationEngine) sendToChannel(ch NotificationChannel, n Notification) {
 	var config map[string]string
 	if err := json.Unmarshal([]byte(ch.Config), &config); err != nil {
-		log.Printf("Notification channel %s: invalid config: %v", ch.Name, err)
+		notifLog.Error("invalid channel config", "channel", ch.Name, "error", err)
+		recordDelivery(ch.ID, ch.Type, n.ID, "failed", 0, "invalid channel config: "+err.Error())
 		return
 	}
 
+	var attempts int
+	var deliveryErr error
+
 	switch ch.Type {
 	case "discord":
-		SendDiscordWebhook(config["url"], n)
+		attempts, deliveryErr = sendWebhookWithRetry(config["url"], buildDiscordPayload(n))
 	case "telegram":
-		SendTelegramWebhook(config["bot_token"], config["chat_id"], n)
+		if config["bot_token"] == "" || config["chat_id"] == "" {
+			recordDelivery(ch.ID, ch.Type, n.ID, "failed", 0, "missing bot_token or chat_id")
+			return
+		}
+		url := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", config["bot_token"])
+		attempts, deliveryErr = sendWebhookWithRetry(url, buildTelegramPayload(config["chat_id"], n))
 	case "slack":
-		SendSlackWebhook(config["url"], n)
+		attempts, deliveryErr = sendWebhookWithRetry(config["url"], buildSlackPayload(n))
 	case "custom":
-		SendCustomWebhook(config["url"], n)
+		attempts, deliveryErr = sendWebhookWithRetry(config["url"], buildCustomPayload(n))
 	default:
-		log.Printf("Notification channel %s: unknown type %s", ch.Name, ch.Type)
+		notifLog.Warn("unknown channel type", "channel", ch.Name, "type", ch.Type)
+		recordDelivery(ch.ID, ch.Type, n.ID, "failed", 0, "unknown channel type: "+ch.Type)
+		return
+	}
+
+	if deliveryErr != nil {
+		recordDelivery(ch.ID, ch.Type, n.ID, "failed", attempts, deliveryErr.Error())
+	} else {
+		recordDelivery(ch.ID, ch.Type, n.ID, "delivered", attempts, "")
+	}
+}
+
+// recordDelivery logs a webhook delivery attempt to the audit table (Phase 13).
+func recordDelivery(channelID int, channelType string, notificationID int, status string, attempts int, lastError string) {
+	completedAt := ""
+	if status == "delivered" || status == "failed" {
+		completedAt = time.Now().Format(time.RFC3339)
+	}
+	_, err := db.DB.Exec(
+		`INSERT INTO notification_delivery_log (channel_id, channel_type, notification_id, status, attempts, last_error, completed_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		channelID, channelType, notificationID, status, attempts, lastError, completedAt,
+	)
+	if err != nil {
+		notifLog.Error("failed to record delivery log", "error", err)
 	}
 }
 
@@ -189,8 +228,15 @@ func (ne *NotificationEngine) evaluationLoop() {
 	ticker := time.NewTicker(60 * time.Second)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		ne.evaluateRules()
+	ctx := SubsystemContext()
+	for {
+		select {
+		case <-ctx.Done():
+			notifLog.Info("shutdown signal received, stopping")
+			return
+		case <-ticker.C:
+			ne.evaluateRules()
+		}
 	}
 }
 

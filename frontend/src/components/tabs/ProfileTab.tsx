@@ -36,10 +36,10 @@ export default function ProfileTab() {
             if (res.ok) {
                 addToast('Profile updated. Please log out and back in to sync your active session cache.', 'success');
             } else {
-                addToast(data.error || 'Failed to update profile', 'error');
+                addToast(data.error || 'Profile state mutation rejected.', 'error');
             }
         } catch (_err) {
-            addToast('Network error updating profile', 'error');
+            addToast('API dispatch failure: Profile state mutation.', 'error');
         } finally {
             setIsSaving(false);
         }
@@ -150,7 +150,7 @@ export default function ProfileTab() {
                             </div>
                         ) : (
                             <div className="p-4 border border-red-500/20 bg-red-500/10 text-red-400 rounded-xl text-sm">
-                                Failed to fetch storage quotas.
+                                Quota telemetry unavailable.
                             </div>
                         )}
                     </div>

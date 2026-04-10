@@ -1,6 +1,6 @@
 import { useState, useRef } from 'react';
 import useSWR from 'swr';
-import { FolderUp, File as FileIcon, UploadCloud, Download, HardDrive } from 'lucide-react';
+import { FolderUp, File as FileIcon, UploadCloud, Download, HardDrive, FolderOpen, X, ChevronRight } from 'lucide-react';
 import { apiFetch } from '@/lib/fetcher';
 import { useToast } from '@/contexts/ToastContext';
 
@@ -9,36 +9,81 @@ interface FetchedFile {
     size: number;
     modTime: string;
     extension: string;
+    isDir?: boolean;
 }
 
 export default function FileshareTab() {
-    const { data: files, error, mutate } = useSWR<FetchedFile[]>('/api/v1/auth/fileshare');
+    const [currentPath, setCurrentPath] = useState('/');
+    
+    const { data: files, error, mutate } = useSWR<FetchedFile[]>(`/api/v1/auth/fileshare?path=${encodeURIComponent(currentPath)}`);
     const [isDragging, setIsDragging] = useState(false);
     const [isUploading, setIsUploading] = useState(false);
+    const [uploadProgress, setUploadProgress] = useState(0);
+    const abortControllerRef = useRef<AbortController | null>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
     const { addToast } = useToast();
 
     const handleUpload = async (file: File) => {
         setIsUploading(true);
-        const formData = new FormData();
-        formData.append('file', file);
+        setUploadProgress(0);
+        abortControllerRef.current = new AbortController();
+
+        const chunkSize = 50 * 1024 * 1024; // 50MB chunks
+        const totalChunks = Math.ceil(file.size / chunkSize);
+
         try {
-            const res = await apiFetch('/api/v1/admin/fileshare/upload', {
-                method: 'POST',
-                body: formData
-            });
-            const data = await res.json().catch(() => ({} as { error?: string }));
-            if (!res.ok) {
-                throw new Error(data.error || 'Upload failed');
+            const token = document.cookie.split('; ').find(row => row.startsWith('af_sid='))?.split('=')[1] || '';
+            
+            for (let i = 0; i < totalChunks; i++) {
+                if (abortControllerRef.current.signal.aborted) throw new Error('aborted');
+
+                const start = i * chunkSize;
+                const end = Math.min(start + chunkSize, file.size);
+                const chunk = file.slice(start, end);
+
+                const formData = new FormData();
+                formData.append('file', chunk);
+                
+                const res = await fetch('/api/v1/admin/fileshare/upload', {
+                    method: 'POST',
+                    body: formData,
+                    signal: abortControllerRef.current.signal,
+                    headers: {
+                        'Authorization': `Bearer ${token}`,
+                        'X-Chunk-Index': i.toString(),
+                        'X-Total-Chunks': totalChunks.toString(),
+                        'X-Target-Path': currentPath,
+                        'X-File-Name': file.name
+                    }
+                });
+
+                if (!res.ok) {
+                    const data = await res.json().catch(() => ({}));
+                    throw new Error(data.error || 'Chunk upload failed');
+                }
+
+                setUploadProgress(Math.round(((i + 1) / totalChunks) * 100));
             }
 
             addToast('File uploaded successfully.', 'success');
             mutate();
         } catch (err) {
-            console.error("Upload failed", err);
-            addToast(err instanceof Error ? err.message : 'Upload failed', 'error');
+            if (abortControllerRef.current?.signal.aborted || (err instanceof Error && err.message === 'aborted')) {
+                addToast('Upload cancelled.', 'info');
+            } else {
+                console.error("Upload failed", err);
+                addToast(err instanceof Error ? err.message : 'Upload failed', 'error');
+            }
         } finally {
             setIsUploading(false);
+            setUploadProgress(0);
+            abortControllerRef.current = null;
+        }
+    };
+
+    const cancelUpload = () => {
+        if (abortControllerRef.current) {
+            abortControllerRef.current.abort();
         }
     };
 
@@ -63,11 +108,27 @@ export default function FileshareTab() {
                 <div className="absolute top-0 right-0 w-[500px] h-[500px] bg-blue-500/10 rounded-full blur-[120px] pointer-events-none -translate-y-1/2 translate-x-1/3"></div>
 
                 <div className="flex items-center justify-between mb-8 pb-4 border-b border-white/5 relative z-10 shrink-0">
-                    <h2 className="text-2xl font-bold text-slate-100 flex items-center gap-3">
-                        <FolderUp size={24} className="text-blue-400" />
-                        Secure File Drop
-                    </h2>
-                    <div className="flex items-center gap-2 text-sm text-slate-400 bg-white/5 px-4 py-2 rounded-xl">
+                    <div>
+                        <h2 className="text-2xl font-bold text-slate-100 flex items-center gap-3">
+                            <FolderUp size={24} className="text-blue-400" />
+                            Secure File Drop
+                        </h2>
+                        {files && (
+                            <div className="mt-3 flex flex-col gap-1.5 w-[300px]">
+                                <div className="flex justify-between text-xs font-semibold text-slate-400">
+                                    <span>{formatBytes(files.reduce((acc, f) => acc + f.size, 0))} Used</span>
+                                    <span>50 GB Total</span>
+                                </div>
+                                <div className="h-1.5 w-full bg-white/5 rounded-full overflow-hidden">
+                                    <div 
+                                        className="h-full bg-blue-500 rounded-full transition-all duration-500" 
+                                        style={{ width: `${Math.min((files.reduce((acc, f) => acc + f.size, 0) / (50 * 1024 * 1024 * 1024)) * 100, 100)}%` }}
+                                    ></div>
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                    <div className="flex items-center gap-2 text-sm text-slate-400 bg-white/5 px-4 py-2 rounded-xl h-fit">
                         <HardDrive size={16} />
                         Local Storage
                     </div>
@@ -103,18 +164,49 @@ export default function FileshareTab() {
                                 }
                             }}
                         />
-                        <button
-                            onClick={() => fileInputRef.current?.click()}
-                            disabled={isUploading}
-                            className="px-6 py-3 bg-blue-600 hover:bg-blue-500 disabled:bg-blue-500/50 text-white font-bold rounded-xl transition-all shadow-lg shadow-blue-500/20"
-                        >
-                            {isUploading ? 'Uploading...' : 'Browse Local Files'}
-                        </button>
+                        <div className="flex flex-col gap-2 w-full">
+                            {isUploading ? (
+                                <div className="p-4 bg-white/[0.04] border border-white/10 rounded-xl relative overflow-hidden group">
+                                    <div className="flex items-center justify-between mb-2 z-10 relative">
+                                        <span className="text-sm font-bold text-blue-400">Uploading chunks...</span>
+                                        <div className="flex items-center gap-3">
+                                            <span className="text-xs text-slate-400 font-mono">{uploadProgress}%</span>
+                                            <button onClick={cancelUpload} className="p-1 rounded bg-white/5 hover:bg-red-500/20 hover:text-red-400 text-slate-400 transition-colors">
+                                                <X size={14} />
+                                            </button>
+                                        </div>
+                                    </div>
+                                    <div className="w-full bg-slate-900 rounded-full h-1.5 z-10 relative">
+                                        <div className="bg-blue-500 h-1.5 rounded-full transition-all duration-300" style={{ width: `${uploadProgress}%` }}></div>
+                                    </div>
+                                </div>
+                            ) : (
+                                <button
+                                    onClick={() => fileInputRef.current?.click()}
+                                    className="px-6 py-3 w-full bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-xl transition-all shadow-lg shadow-blue-500/20"
+                                >
+                                    Browse Local Files
+                                </button>
+                            )}
+                        </div>
                     </div>
 
                     {/* File List */}
                     <div className="flex-1 bg-slate-950/50 border border-white/10 rounded-3xl p-6 flex flex-col overflow-hidden">
-                        <h3 className="text-sm font-bold text-slate-400 uppercase tracking-wider mb-6 shrink-0">Network Drive Contents</h3>
+                        <div className="flex items-center gap-2 text-sm font-bold text-slate-400 uppercase tracking-wider mb-6 shrink-0 bg-white/[0.02] p-2 rounded-lg border border-white/5">
+                            <button onClick={() => setCurrentPath('/')} className="hover:text-blue-400 cursor-pointer">Root</button>
+                            {currentPath !== '/' && currentPath.split('/').filter(Boolean).map((part, idx, arr) => (
+                                <div key={idx} className="flex items-center gap-2">
+                                    <ChevronRight size={14} className="text-slate-600" />
+                                    <button 
+                                        onClick={() => setCurrentPath('/' + arr.slice(0, idx+1).join('/'))}
+                                        className="hover:text-blue-400 cursor-pointer"
+                                    >
+                                        {part}
+                                    </button>
+                                </div>
+                            ))}
+                        </div>
 
                         <div className="flex-1 overflow-y-auto pr-2 space-y-3 no-scrollbar transform translate-z-0">
                             {error ? (
@@ -131,26 +223,37 @@ export default function FileshareTab() {
                             ) : (
                                 files.map((file, i) => (
                                     <div key={i} className="flex items-center justify-between p-4 bg-white/[0.02] hover:bg-white/[0.04] border border-white/5 rounded-2xl transition-colors group">
-                                        <div className="flex items-center gap-4">
-                                            <div className="w-10 h-10 rounded-xl bg-blue-500/10 flex items-center justify-center text-blue-400">
-                                                <FileIcon size={20} />
+                                        <div className="flex items-center gap-4 flex-1">
+                                            <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${file.isDir ? 'bg-amber-500/10 text-amber-400' : 'bg-blue-500/10 text-blue-400'}`}>
+                                                {file.isDir ? <FolderOpen size={20} /> : <FileIcon size={20} />}
                                             </div>
-                                            <div>
-                                                <p className="text-sm font-bold text-slate-200">{file.name}</p>
+                                            <div className="flex-1">
+                                                {file.isDir ? (
+                                                    <button 
+                                                        onClick={() => setCurrentPath(currentPath === '/' ? `/${file.name}` : `${currentPath}/${file.name}`)}
+                                                        className="text-sm font-bold text-slate-200 hover:text-blue-400 transition-colors text-left"
+                                                    >
+                                                        {file.name}
+                                                    </button>
+                                                ) : (
+                                                    <p className="text-sm font-bold text-slate-200">{file.name}</p>
+                                                )}
                                                 <div className="flex gap-3 text-xs text-slate-500 mt-1">
-                                                    <span>{formatBytes(file.size)}</span>
-                                                    <span>&bull;</span>
+                                                    {!file.isDir && <span>{formatBytes(file.size)}</span>}
+                                                    {!file.isDir && <span>&bull;</span>}
                                                     <span>{new Date(file.modTime).toLocaleDateString()}</span>
                                                 </div>
                                             </div>
                                         </div>
-                                        <button
-                                            onClick={() => handleDownload(file.name)}
-                                            className="p-2 text-slate-400 hover:text-white hover:bg-white/10 rounded-lg transition-colors opacity-0 group-hover:opacity-100 flex items-center justify-center"
-                                            title="Download File"
-                                        >
-                                            <Download size={18} />
-                                        </button>
+                                        {!file.isDir && (
+                                            <button
+                                                onClick={() => handleDownload(file.name)}
+                                                className="p-2 text-slate-400 hover:text-white hover:bg-white/10 rounded-lg transition-colors opacity-0 group-hover:opacity-100 flex items-center justify-center"
+                                                title="Download File"
+                                            >
+                                                <Download size={18} />
+                                            </button>
+                                        )}
                                     </div>
                                 ))
                             )}

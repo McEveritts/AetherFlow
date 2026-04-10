@@ -14,7 +14,6 @@ import (
 	"aetherflow/db"
 
 	"github.com/google/generative-ai-go/genai"
-	"google.golang.org/api/option"
 )
 
 // validMediaExtensions is the set of file extensions to include in media scans.
@@ -207,11 +206,10 @@ func (me *MetadataEnricher) runEnrichment(scanPath string, apiKey string) {
 
 func (me *MetadataEnricher) enrichBatch(files []MediaFile, apiKey string) ([]EnrichedMedia, error) {
 	ctx := context.Background()
-	client, err := genai.NewClient(ctx, option.WithAPIKey(apiKey))
+	client, err := GetAIClient(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Gemini client: %v", err)
 	}
-	defer client.Close()
 
 	// Build file list for the prompt
 	var fileList strings.Builder
@@ -230,27 +228,14 @@ Respond with a JSON array ONLY (no markdown, no explanation). Each element must 
 
 If you cannot determine a field, use "unknown". For subtitle files (.srt, .ass, .vtt, etc.), identify the language from the filename.`, fileList.String())
 
-	model := client.GenerativeModel("gemini-2.0-flash")
+	model := GetAIModel(client, "")
 	resp, err := model.GenerateContent(ctx, genai.Text(prompt))
 	if err != nil {
 		return nil, fmt.Errorf("Gemini generation error: %v", err)
 	}
 
-	var replyText string
-	if resp != nil && len(resp.Candidates) > 0 && resp.Candidates[0].Content != nil {
-		for _, part := range resp.Candidates[0].Content.Parts {
-			if text, ok := part.(genai.Text); ok {
-				replyText += string(text)
-			}
-		}
-	}
-
 	// Parse JSON response
-	replyText = strings.TrimSpace(replyText)
-	replyText = strings.TrimPrefix(replyText, "```json")
-	replyText = strings.TrimPrefix(replyText, "```")
-	replyText = strings.TrimSuffix(replyText, "```")
-	replyText = strings.TrimSpace(replyText)
+	replyText := CleanJSONResponse(ExtractTextFromResponse(resp))
 
 	var parsed []struct {
 		Filename  string   `json:"filename"`

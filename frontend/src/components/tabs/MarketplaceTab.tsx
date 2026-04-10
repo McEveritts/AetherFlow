@@ -4,6 +4,9 @@ import { useMarketplace, App } from '@/hooks/useMarketplace';
 import { useToast } from '@/contexts/ToastContext';
 import Image from 'next/image';
 import { apiFetch } from '@/lib/fetcher';
+import { ProgressRing } from '@/components/ui/ProgressRing';
+import { Modal } from '@/components/ui/Modal';
+import { ShieldAlert, CheckCircle, XCircle } from 'lucide-react';
 
 const AppIcon = ({ appId }: { appId: string }) => {
     const [error, setError] = useState(false);
@@ -24,101 +27,7 @@ const AppIcon = ({ appId }: { appId: string }) => {
     );
 };
 
-/* ---------- SVG Circular Progress Ring ---------- */
-interface ProgressRingProps {
-    progress: number;      // 0-100
-    status: string;        // "installing" | "uninstalling"
-    logLine?: string;
-    startedAt?: string;
-}
 
-function ProgressRing({ progress, status, logLine, startedAt }: ProgressRingProps) {
-    const [elapsed, setElapsed] = useState('0s');
-
-    useEffect(() => {
-        if (!startedAt) return;
-        const start = new Date(startedAt).getTime();
-        const update = () => {
-            const diff = Math.floor((Date.now() - start) / 1000);
-            if (diff < 60) setElapsed(`${diff}s`);
-            else setElapsed(`${Math.floor(diff / 60)}m ${diff % 60}s`);
-        };
-        update();
-        const interval = setInterval(update, 1000);
-        return () => clearInterval(interval);
-    }, [startedAt]);
-
-    const size = 72;
-    const stroke = 4;
-    const radius = (size - stroke) / 2;
-    const circumference = 2 * Math.PI * radius;
-    const offset = circumference - (progress / 100) * circumference;
-    const isUninstalling = status === 'uninstalling';
-    const color = isUninstalling ? '#ef4444' : '#818cf8'; // red for uninstall, indigo for install
-    const glowColor = isUninstalling ? 'rgba(239,68,68,0.5)' : 'rgba(99,102,241,0.5)';
-    const label = isUninstalling ? 'Removing' : 'Installing';
-
-    // Truncate log line for display
-    const displayLine = logLine && logLine.length > 40 ? logLine.slice(0, 37) + '...' : logLine;
-
-    return (
-        <div className="flex flex-col items-center gap-2 animate-fade-in">
-            <div className="relative" style={{ width: size, height: size }}>
-                {/* Glow effect */}
-                <div
-                    className="absolute inset-0 rounded-full animate-pulse"
-                    style={{
-                        boxShadow: `0 0 20px ${glowColor}, 0 0 40px ${glowColor}`,
-                        opacity: 0.4,
-                    }}
-                />
-                <svg width={size} height={size} className="transform -rotate-90">
-                    {/* Background track */}
-                    <circle
-                        cx={size / 2}
-                        cy={size / 2}
-                        r={radius}
-                        fill="none"
-                        stroke="rgba(255,255,255,0.06)"
-                        strokeWidth={stroke}
-                    />
-                    {/* Progress arc */}
-                    <circle
-                        cx={size / 2}
-                        cy={size / 2}
-                        r={radius}
-                        fill="none"
-                        stroke={color}
-                        strokeWidth={stroke}
-                        strokeLinecap="round"
-                        strokeDasharray={circumference}
-                        strokeDashoffset={offset}
-                        style={{
-                            transition: 'stroke-dashoffset 0.6s ease-out',
-                            filter: `drop-shadow(0 0 6px ${glowColor})`,
-                        }}
-                    />
-                </svg>
-                {/* Percentage text */}
-                <div className="absolute inset-0 flex items-center justify-center">
-                    <span className="text-base font-bold text-white tabular-nums">
-                        {progress}%
-                    </span>
-                </div>
-            </div>
-            <div className="text-center space-y-0.5">
-                <div className="text-[10px] font-semibold uppercase tracking-widest text-slate-400">
-                    {label} · {elapsed}
-                </div>
-                {displayLine && (
-                    <div className="text-[9px] text-slate-500 max-w-[180px] truncate">
-                        {displayLine}
-                    </div>
-                )}
-            </div>
-        </div>
-    );
-}
 
 export default function MarketplaceTab() {
     const { apps, isLoading, isError, error, mutate } = useMarketplace();
@@ -128,15 +37,19 @@ export default function MarketplaceTab() {
     const [isFilterOpen, setIsFilterOpen] = useState(false);
     const [operatingApp, setOperatingApp] = useState<string | null>(null);
 
-    const handleInstall = async (id: string) => {
-        setOperatingApp(id);
+    const [pendingInstall, setPendingInstall] = useState<App | null>(null);
+    const [pendingUninstall, setPendingUninstall] = useState<App | null>(null);
+
+    const handleInstall = async (app: App) => {
+        setPendingInstall(null);
+        setOperatingApp(app.id);
         try {
-            const res = await apiFetch(`/api/v1/admin/packages/${id}/install`, { method: 'POST' });
+            const res = await apiFetch(`/api/v1/admin/packages/${app.id}/install`, { method: 'POST' });
             if (!res.ok) {
                 const data = await res.json().catch(() => ({}));
                 throw new Error(data.error || 'Installation request failed');
             }
-            addToast(`Installation started for ${id}`, 'success');
+            addToast(`Provisioning sequence initiated for ${app.id}`, 'info');
             mutate();
         } catch (error: unknown) {
             addToast(error instanceof Error ? error.message : 'Network error.', 'error');
@@ -145,15 +58,16 @@ export default function MarketplaceTab() {
         }
     };
 
-    const handleUninstall = async (id: string) => {
-        setOperatingApp(id);
+    const handleUninstall = async (app: App) => {
+        setPendingUninstall(null);
+        setOperatingApp(app.id);
         try {
-            const res = await apiFetch(`/api/v1/admin/packages/${id}/uninstall`, { method: 'POST' });
+            const res = await apiFetch(`/api/v1/admin/packages/${app.id}/uninstall`, { method: 'POST' });
             if (!res.ok) {
                 const data = await res.json().catch(() => ({}));
                 throw new Error(data.error || 'Uninstallation request failed');
             }
-            addToast(`Uninstallation started for ${id}`, 'success');
+            addToast(`Tear-down sequence initiated for ${app.id}`, 'info');
             mutate();
         } catch (error: unknown) {
             addToast(error instanceof Error ? error.message : 'Network error.', 'error');
@@ -347,7 +261,7 @@ export default function MarketplaceTab() {
                                                 Manage
                                             </button>
                                             <button
-                                                onClick={() => handleUninstall(app.id)}
+                                                onClick={() => setPendingUninstall(app)}
                                                 disabled={isAppBusy(app)}
                                                 className="px-4 py-1.5 bg-red-500/10 text-red-500 hover:bg-red-500 hover:text-white disabled:opacity-50 text-xs font-semibold rounded-lg transition-colors border border-red-500/20"
                                             >
@@ -356,7 +270,7 @@ export default function MarketplaceTab() {
                                         </>
                                     ) : (
                                         <button
-                                            onClick={() => handleInstall(app.id)}
+                                            onClick={() => setPendingInstall(app)}
                                             disabled={isAppBusy(app)}
                                             className="px-4 py-1.5 bg-indigo-500 hover:bg-indigo-400 disabled:bg-slate-800 disabled:text-slate-500 text-white text-xs font-semibold rounded-lg shadow-sm transition-all group-hover:shadow-[0_0_15px_rgba(99,102,241,0.4)] disabled:group-hover:shadow-none"
                                         >
@@ -369,6 +283,66 @@ export default function MarketplaceTab() {
                     ))}
                 </div>
             )}
+
+            {/* Install Boundary */}
+            <Modal isOpen={!!pendingInstall} onClose={() => setPendingInstall(null)}>
+                <div className="flex flex-col items-center text-center">
+                    <div className="h-16 w-16 bg-indigo-500/20 rounded-2xl border border-indigo-500/30 flex items-center justify-center mb-6 shadow-inner">
+                        <Box size={32} className="text-indigo-400" />
+                    </div>
+                    <h3 className="text-xl font-bold text-slate-100 mb-2">Authorize Provisioning</h3>
+                    <p className="text-sm text-slate-400 mb-6">
+                        You are about to deploy the <span className="text-indigo-300 font-bold">{pendingInstall?.name}</span> container stack to the bare-metal nexus. This will map required volumes and generic routes.
+                    </p>
+                    
+                    <div className="w-full flex gap-3">
+                        <button 
+                            onClick={() => pendingInstall && handleInstall(pendingInstall)}
+                            className="flex-1 glass-button-primary flex items-center justify-center gap-2 py-3 border-emerald-500/50 bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20"
+                        >
+                            <CheckCircle size={18} />
+                            <span className="font-bold tracking-wide">AUTHORIZE</span>
+                        </button>
+                        <button 
+                            onClick={() => setPendingInstall(null)}
+                            className="flex-1 glass-button flex items-center justify-center gap-2 py-3 text-slate-400 hover:text-slate-200"
+                        >
+                            <XCircle size={18} />
+                            <span className="font-bold tracking-wide">CANCEL</span>
+                        </button>
+                    </div>
+                </div>
+            </Modal>
+
+            {/* Uninstall Boundary */}
+            <Modal isOpen={!!pendingUninstall} onClose={() => setPendingUninstall(null)}>
+                <div className="flex flex-col items-center text-center">
+                    <div className="h-16 w-16 bg-red-500/20 rounded-2xl border border-red-500/30 flex items-center justify-center mb-6 shadow-inner">
+                        <ShieldAlert size={32} className="text-red-400" />
+                    </div>
+                    <h3 className="text-xl font-bold text-slate-100 mb-2">Destructive Action Required</h3>
+                    <p className="text-sm text-slate-400 mb-6">
+                        You are about to fully dismantle the <span className="text-red-300 font-bold">{pendingUninstall?.name}</span> infrastructure. This will tear down the container state. Persistent volume data will <span className="font-bold text-slate-200 underline">not</span> be deleted automatically.
+                    </p>
+                    
+                    <div className="w-full flex gap-3">
+                        <button 
+                            onClick={() => pendingUninstall && handleUninstall(pendingUninstall)}
+                            className="flex-1 glass-button-primary flex items-center justify-center gap-2 py-3 border-red-500/50 bg-red-500/10 text-red-400 hover:bg-red-500/20 shadow-[0_0_15px_rgba(239,68,68,0.2)] hover:shadow-[0_0_20px_rgba(239,68,68,0.4)]"
+                        >
+                            <CheckCircle size={18} />
+                            <span className="font-bold tracking-wide">CONFIRM TEAR-DOWN</span>
+                        </button>
+                        <button 
+                            onClick={() => setPendingUninstall(null)}
+                            className="flex-1 glass-button flex items-center justify-center gap-2 py-3 text-slate-400 hover:text-slate-200"
+                        >
+                            <XCircle size={18} />
+                            <span className="font-bold tracking-wide">CANCEL</span>
+                        </button>
+                    </div>
+                </div>
+            </Modal>
         </div>
     );
 }

@@ -3,6 +3,7 @@
  * Used as the global default in SWRProvider and available for direct import.
  */
 let csrfTokenPromise: Promise<string | null> | null = null;
+let refreshTokenPromise: Promise<boolean> | null = null;
 
 function getRequestMethod(input: RequestInfo | URL, init?: RequestInit): string {
     if (init?.method) {
@@ -118,11 +119,54 @@ export async function apiFetch(input: RequestInfo | URL, init?: RequestInit): Pr
         }
     }
 
-    return fetch(input, {
+    let res = await fetch(input, {
         ...init,
         headers,
         credentials: 'include',
     });
+
+    // Handle transparent silent token refreshing
+    if (res.status === 401) {
+        const path = getRequestPath(input);
+        
+        // Prevent infinite loops on auth endpoints
+        if (!path.startsWith('/api/v1/auth/session') && 
+            !path.startsWith('/api/v1/auth/refresh') && 
+            !path.startsWith('/api/v1/auth/login') && 
+            !path.startsWith('/api/v1/auth/logout')) {
+            
+            if (!refreshTokenPromise) {
+                refreshTokenPromise = fetch('/api/v1/auth/refresh', {
+                    method: 'POST',
+                    credentials: 'include',
+                    headers: { 'X-Requested-With': 'XMLHttpRequest' }
+                }).then(refreshRes => refreshRes.ok)
+                  .catch(() => false)
+                  .finally(() => { refreshTokenPromise = null; });
+            }
+
+            const refreshed = await refreshTokenPromise;
+
+            // If refresh succeeded, retry the original request
+            if (refreshed) {
+                res = await fetch(input, {
+                    ...init,
+                    headers,
+                    credentials: 'include',
+                });
+            }
+        }
+    }
+
+    // Broadcast session expiration for multi-tab sync if it's a hard 401
+    if (res.status === 401 && typeof window !== 'undefined') {
+        const path = getRequestPath(input);
+        if (path.startsWith('/api/v1/auth/session') || path.startsWith('/api/v1/auth/refresh')) {
+            window.localStorage.setItem('af_logout_sync', String(Date.now()));
+        }
+    }
+
+    return res;
 }
 
 export async function fetcher<T = unknown>(url: string): Promise<T> {

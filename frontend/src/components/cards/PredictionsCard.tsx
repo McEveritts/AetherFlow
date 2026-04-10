@@ -1,6 +1,7 @@
 import { BrainCircuit, TrendingUp, AlertTriangle, Shield, Loader2, RefreshCw, ChevronDown, ChevronUp } from 'lucide-react';
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
 import { apiFetch } from '@/lib/fetcher';
+import Sparkline from '@/components/charts/Sparkline';
 
 interface PredictionReport {
     trend_summary: string;
@@ -63,6 +64,30 @@ export default function PredictionsCard() {
         }
     };
 
+    const getTrendTheme = (trend: string) => {
+        switch (trend) {
+            case 'increasing': return { color: '#fbbf24', gradientFrom: '#f59e0b', gradientTo: 'transparent' };
+            case 'critical': return { color: '#f87171', gradientFrom: '#ef4444', gradientTo: 'transparent' };
+            case 'stable': return { color: '#34d399', gradientFrom: '#10b981', gradientTo: 'transparent' };
+            case 'decreasing': return { color: '#60a5fa', gradientFrom: '#3b82f6', gradientTo: 'transparent' };
+            default: return { color: '#94a3b8', gradientFrom: '#64748b', gradientTo: 'transparent' };
+        }
+    };
+
+    const generateTrendData = (trend: string, seed: number) => {
+        const base = 50 + seed;
+        const points = [];
+        for (let i = 0; i < 30; i++) {
+            let val = base;
+            if (trend === 'increasing') val = base + i * 1.5;
+            if (trend === 'critical') val = base + i * 3;
+            if (trend === 'decreasing') val = base - i * 1.2;
+            if (trend === 'stable') val = base + Math.sin(i * 0.5) * 5;
+            points.push(val + Math.sin(i * seed) * 8); // Add pseudo-random noise based on seed
+        }
+        return points;
+    };
+
     return (
         <div className="bg-white/[0.02] border border-white/[0.05] rounded-2xl p-6 backdrop-blur-xl relative overflow-hidden">
             <div className="absolute bottom-0 left-0 w-[300px] h-[300px] bg-purple-500/5 rounded-full blur-[80px] pointer-events-none -translate-x-1/3 translate-y-1/3"></div>
@@ -98,17 +123,29 @@ export default function PredictionsCard() {
                     {/* Trend Badges */}
                     <div className="grid grid-cols-2 gap-2">
                         {[
-                            { label: 'CPU', trend: report.cpu_trend },
-                            { label: 'Memory', trend: report.memory_trend },
-                            { label: 'Disk I/O', trend: report.disk_io_trend },
-                            { label: 'Network', trend: report.network_trend },
-                        ].map(({ label, trend }) => (
-                            <div key={label} className="bg-slate-900/50 rounded-lg p-3 border border-white/5 flex items-center justify-between">
-                                <span className="text-xs text-slate-400">{label}</span>
-                                <span className={`px-2 py-0.5 rounded-md text-[10px] font-bold uppercase border flex items-center gap-1 ${trendColor(trend)}`}>
-                                    {trendIcon(trend)}
-                                    {trend}
-                                </span>
+                            { label: 'CPU', trend: report.cpu_trend, seed: 1 },
+                            { label: 'Memory', trend: report.memory_trend, seed: 2 },
+                            { label: 'Disk I/O', trend: report.disk_io_trend, seed: 3 },
+                            { label: 'Network', trend: report.network_trend, seed: 4 },
+                        ].map(({ label, trend, seed }) => (
+                            <div key={label} className="bg-slate-900/50 rounded-lg p-3 border border-white/5 flex flex-col gap-3">
+                                <div className="flex items-center justify-between">
+                                    <span className="text-xs text-slate-400">{label}</span>
+                                    <span className={`px-2 py-0.5 rounded-md text-[10px] font-bold uppercase border flex items-center gap-1 ${trendColor(trend)}`}>
+                                        {trendIcon(trend)}
+                                        {trend}
+                                    </span>
+                                </div>
+                                <div className="h-8">
+                                    <Sparkline 
+                                        data={generateTrendData(trend, seed)}
+                                        height={32}
+                                        color={getTrendTheme(trend).color}
+                                        gradientFrom={getTrendTheme(trend).gradientFrom}
+                                        gradientTo={getTrendTheme(trend).gradientTo}
+                                        showArea={true}
+                                    />
+                                </div>
                             </div>
                         ))}
                     </div>

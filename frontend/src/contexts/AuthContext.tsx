@@ -60,6 +60,20 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
 
     useEffect(() => {
         checkSession();
+
+        // Multi-tab session synchronization listener
+        const handleStorageChange = (e: StorageEvent) => {
+            if (e.key === 'af_logout_sync') {
+                // Another tab either logged out or expired cleanly. Re-evaluate session state.
+                checkSession();
+            }
+            if (e.key === 'af_login_sync') {
+                checkSession();
+            }
+        };
+
+        window.addEventListener('storage', handleStorageChange);
+        return () => window.removeEventListener('storage', handleStorageChange);
     }, []);
 
     const login = () => {
@@ -70,6 +84,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     const loginLocal = () => {
         // Re-check session after local login set the cookie, then redirect
         checkSession().then(() => {
+            window.localStorage.setItem('af_login_sync', String(Date.now()));
             router.push('/');
         });
     };
@@ -80,6 +95,8 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
         } catch (err) {
             console.error("Logout failed:", err);
         }
+
+        window.localStorage.setItem('af_logout_sync', String(Date.now()));
 
         // Clear authentication state
         setIsAuthenticated(false);

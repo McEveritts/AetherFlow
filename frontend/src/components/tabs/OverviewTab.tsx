@@ -7,6 +7,16 @@ import DiskIOWidget from '@/components/widgets/DiskIOWidget';
 import ProcessWidget from '@/components/widgets/ProcessWidget';
 import StorageWidget from '@/components/widgets/StorageWidget';
 import AppTopologyMap from '@/components/widgets/AppTopologyMap';
+import React, { useState, useEffect, useRef } from 'react';
+
+// Memoize dashboard widgets to block parent render cascades
+const MemoCpuWidget = React.memo(CpuWidget);
+const MemoMemoryWidget = React.memo(MemoryWidget);
+const MemoNetworkWidget = React.memo(NetworkWidget);
+const MemoDiskIOWidget = React.memo(DiskIOWidget);
+const MemoProcessWidget = React.memo(ProcessWidget);
+const MemoStorageWidget = React.memo(StorageWidget);
+const MemoAppTopologyMap = React.memo(AppTopologyMap);
 
 interface OverviewTabProps {
     metrics: SystemMetrics;
@@ -27,6 +37,28 @@ function formatTotalBytes(bytes: number): string {
 }
 
 export default function OverviewTab({ metrics, hardware, history }: OverviewTabProps) {
+    // 1Hz render cycle throttling for charting arrays and intensive loops
+    const metricsRef = useRef(metrics);
+    const historyRef = useRef(history);
+    
+    // Always keep refs up-to-date with 500ms pulses
+    useEffect(() => {
+        metricsRef.current = metrics;
+        historyRef.current = history;
+    }, [metrics, history]);
+
+    const [tMetrics, setTMetrics] = useState(metrics);
+    const [tHistory, setTHistory] = useState(history);
+
+    // Commit snapshot to state every 1000ms triggering ONE memoized render
+    useEffect(() => {
+        const timer = setInterval(() => {
+            setTMetrics(metricsRef.current);
+            setTHistory(historyRef.current);
+        }, 1000);
+        return () => clearInterval(timer);
+    }, []);
+
     return (
         <div className="space-y-5 animate-fade-in">
             {/* Hero Stats Row */}
@@ -88,25 +120,25 @@ export default function OverviewTab({ metrics, hardware, history }: OverviewTabP
 
             {/* Main Metrics Grid — 2 columns */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-                <CpuWidget metrics={metrics} hardware={hardware} history={history} />
-                <MemoryWidget metrics={metrics} hardware={hardware} history={history} />
+                <MemoCpuWidget metrics={tMetrics} hardware={hardware} history={tHistory} />
+                <MemoMemoryWidget metrics={tMetrics} hardware={hardware} history={tHistory} />
             </div>
 
             {/* IO Grid — 2 columns */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-                <NetworkWidget metrics={metrics} hardware={hardware} history={history} />
-                <DiskIOWidget metrics={metrics} history={history} />
+                <MemoNetworkWidget metrics={tMetrics} hardware={hardware} history={tHistory} />
+                <MemoDiskIOWidget metrics={tMetrics} history={tHistory} />
             </div>
 
             {/* Processes + Storage */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-                <ProcessWidget processes={metrics.processes} />
-                <StorageWidget metrics={metrics} hardware={hardware} />
+                <MemoProcessWidget processes={tMetrics.processes} />
+                <MemoStorageWidget metrics={tMetrics} hardware={hardware} />
             </div>
 
             {/* Application Topology Map */}
             <div className="w-full mt-5">
-                <AppTopologyMap metrics={metrics} />
+                <MemoAppTopologyMap metrics={tMetrics} />
             </div>
         </div>
     );

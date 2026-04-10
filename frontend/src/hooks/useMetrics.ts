@@ -4,7 +4,14 @@ import { useWebSocket } from '@/contexts/WebSocketContext';
 import { SystemMetrics, HardwareReport, MetricsHistory } from '@/types/dashboard';
 import { create } from 'zustand';
 
-const HISTORY_SIZE = 60; // 60 data points = 2 minutes at 2s intervals
+export type TimeWindow = '1m' | '5m' | '1h';
+
+const MAX_HISTORY_SIZE = 1800; // 1800 data points = 1 hour at 2s intervals
+const WINDOW_SIZES: Record<TimeWindow, number> = {
+    '1m': 30,    // 1 min
+    '5m': 150,   // 5 min
+    '1h': 1800,  // 1 hour
+};
 
 function parseSpeed(speed: string): number {
     if (!speed) return 0;
@@ -18,10 +25,15 @@ function parseSpeed(speed: string): number {
 
 // Zustand store for metrics history — avoids React 19's setState-in-effect restriction
 const useHistoryStore = create<{
+    timeWindow: TimeWindow;
+    setTimeWindow: (w: TimeWindow) => void;
     history: MetricsHistory;
     lastPushAt: number;
     pushMetrics: (metrics: SystemMetrics) => void;
+    getVisibleHistory: () => MetricsHistory;
 }>((set, get) => ({
+    timeWindow: '5m', // Default to 5 minutes
+    setTimeWindow: (w: TimeWindow) => set({ timeWindow: w }),
     history: {
         cpu: [],
         memory: [],
@@ -37,8 +49,9 @@ const useHistoryStore = create<{
         if (now - get().lastPushAt < 500) return; // Throttle: max once per 500ms
 
         const push = (arr: number[], val: number): number[] => {
+            // Optimised push to avoid memory reallocation
             const newArr = [...arr, val];
-            if (newArr.length > HISTORY_SIZE) newArr.shift();
+            if (newArr.length > MAX_HISTORY_SIZE) newArr.shift();
             return newArr;
         };
 
@@ -55,13 +68,28 @@ const useHistoryStore = create<{
             },
         }));
     },
+    getVisibleHistory: () => {
+        const { history, timeWindow } = get();
+        const limit = WINDOW_SIZES[timeWindow];
+        return {
+            cpu: history.cpu.slice(-limit),
+            memory: history.memory.slice(-limit),
+            netDown: history.netDown.slice(-limit),
+            netUp: history.netUp.slice(-limit),
+            diskRead: history.diskRead.slice(-limit),
+            diskWrite: history.diskWrite.slice(-limit),
+            timestamps: history.timestamps.slice(-limit),
+        };
+    }
 }));
 
 export function useMetrics() {
     const { data: wsData, connectionState } = useWebSocket();
     const { data: hardware } = useSWR<HardwareReport>('/api/v1/auth/system/hardware');
 
-    const history = useHistoryStore((s) => s.history);
+    const visibleHistory = useHistoryStore((s) => s.getVisibleHistory());
+    const timeWindow = useHistoryStore((s) => s.timeWindow);
+    const setTimeWindow = useHistoryStore((s) => s.setTimeWindow);
     const pushMetrics = useHistoryStore((s) => s.pushMetrics);
 
     const metrics = wsData?.system as SystemMetrics | null;
@@ -91,7 +119,9 @@ export function useMetrics() {
         metrics,
         services: wsData?.services || null,
         hardware: hardware || null,
-        history: history,
+        history: visibleHistory, // Component consumers get the windowed slice
+        timeWindow,
+        setTimeWindow,
         isLoading: !isConnected && !metrics,
         isError: connectionState === 'RECONNECTING' && !metrics,
         connectionState,

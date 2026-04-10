@@ -209,7 +209,7 @@ func IssueWSTicket(c *gin.Context) {
 func HandleWebSocket(c *gin.Context) {
 	ticket := c.Query("ticket")
 	if ticket == "" {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Missing ticket"})
+		RespondError(c, http.StatusUnauthorized, "WS_MISSING_TICKET", "Missing ticket")
 		return
 	}
 
@@ -221,14 +221,14 @@ func HandleWebSocket(c *gin.Context) {
 	wsTicketsMu.Unlock()
 
 	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid or expired ticket"})
+		RespondError(c, http.StatusUnauthorized, "WS_INVALID_TICKET", "Invalid or expired ticket")
 		return
 	}
 
 	// IP-binding: reject tickets used from a different IP than issuance
 	if entry.ClientIP != "" && entry.ClientIP != c.ClientIP() {
 		log.Printf("WS ticket IP mismatch: issued to %s, used from %s", entry.ClientIP, c.ClientIP())
-		c.JSON(http.StatusForbidden, gin.H{"error": "Ticket IP mismatch"})
+		RespondError(c, http.StatusForbidden, "WS_IP_MISMATCH", "Ticket IP mismatch")
 		return
 	}
 

@@ -3,9 +3,11 @@ package db
 import (
 	"database/sql"
 	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -18,7 +20,7 @@ var DB *sql.DB
 func migrate(version int, description string, stmts ...string) {
 	var count int
 	if err := DB.QueryRow("SELECT COUNT(*) FROM schema_versions WHERE version = ?", version).Scan(&count); err != nil {
-		log.Printf("Migration v%d: failed to query schema_versions: %v", version, err)
+		slog.Error("migration: failed to query schema_versions", "version", version, "error", err)
 		return
 	}
 	if count > 0 {
@@ -28,18 +30,18 @@ func migrate(version int, description string, stmts ...string) {
 	for _, stmt := range stmts {
 		if _, err := DB.Exec(stmt); err != nil {
 			if strings.Contains(err.Error(), "duplicate column name") {
-				log.Printf("Migration v%d ALREADY APPLIED (duplicate column): %.80s", version, stmt)
+				slog.Info("migration already applied (duplicate column)", "version", version)
 				continue
 			}
-			log.Printf("Migration v%d FAILED on [%.80s]: %v", version, stmt, err)
+			slog.Error("migration failed", "version", version, "error", err)
 			return // stop this migration; do not mark as applied
 		}
 	}
 
 	if _, err := DB.Exec("INSERT INTO schema_versions (version, description) VALUES (?, ?)", version, description); err != nil {
-		log.Printf("Migration v%d: applied SQL but failed to record version: %v", version, err)
+		slog.Warn("migration: applied SQL but failed to record version", "version", version, "error", err)
 	} else {
-		log.Printf("Applied migration v%d: %s", version, description)
+		slog.Info("migration applied", "version", version, "description", description)
 	}
 }
 
@@ -60,7 +62,7 @@ func InitDB() {
 		}
 
 		dbPath = filepath.Join(dbDir, "aetherflow.sqlite")
-		log.Printf("[database] Anchored database path to %s", dbPath)
+		slog.Info("database path anchored", "path", dbPath)
 	}
 
 	var err error
@@ -92,7 +94,7 @@ func InitDB() {
 	}
 	for _, p := range pragmas {
 		if _, err := DB.Exec(p); err != nil {
-			log.Printf("Warning: PRAGMA failed: %s — %v", p, err)
+			slog.Warn("PRAGMA failed", "pragma", p, "error", err)
 		}
 	}
 
@@ -114,7 +116,7 @@ func InitDB() {
 		)
 	`)
 	if err != nil {
-		log.Printf("Error ensuring settings table exists: %v", err)
+		slog.Error("failed to create table", "table", "settings", "error", err)
 	}
 
 	// Users
@@ -131,7 +133,7 @@ func InitDB() {
 		)
 	`)
 	if err != nil {
-		log.Printf("Error ensuring users table exists: %v", err)
+		slog.Error("failed to create table", "table", "users", "error", err)
 	}
 
 	// Login history
@@ -145,7 +147,7 @@ func InitDB() {
 		)
 	`)
 	if err != nil {
-		log.Printf("Error ensuring login_history table exists: %v", err)
+		slog.Error("failed to create table", "table", "login_history", "error", err)
 	}
 
 	// Cluster nodes (Phase 6)
@@ -162,7 +164,7 @@ func InitDB() {
 		)
 	`)
 	if err != nil {
-		log.Printf("Error ensuring cluster_nodes table exists: %v", err)
+		slog.Error("failed to create table", "table", "cluster_nodes", "error", err)
 	}
 
 	// OIDC clients (Phase 7)
@@ -176,7 +178,7 @@ func InitDB() {
 		)
 	`)
 	if err != nil {
-		log.Printf("Error ensuring oidc_clients table exists: %v", err)
+		slog.Error("failed to create table", "table", "oidc_clients", "error", err)
 	}
 
 	_, err = DB.Exec(`
@@ -193,7 +195,7 @@ func InitDB() {
 		)
 	`)
 	if err != nil {
-		log.Printf("Error ensuring oidc_auth_codes table exists: %v", err)
+		slog.Error("failed to create table", "table", "oidc_auth_codes", "error", err)
 	}
 
 	_, err = DB.Exec(`
@@ -207,7 +209,7 @@ func InitDB() {
 		)
 	`)
 	if err != nil {
-		log.Printf("Error ensuring oidc_refresh_tokens table exists: %v", err)
+		slog.Error("failed to create table", "table", "oidc_refresh_tokens", "error", err)
 	}
 
 	_, err = DB.Exec(`
@@ -222,7 +224,7 @@ func InitDB() {
 		)
 	`)
 	if err != nil {
-		log.Printf("Error ensuring oidc_device_codes table exists: %v", err)
+		slog.Error("failed to create table", "table", "oidc_device_codes", "error", err)
 	}
 
 	// Log bookmarks (Phase 8)
@@ -238,7 +240,7 @@ func InitDB() {
 		)
 	`)
 	if err != nil {
-		log.Printf("Error ensuring log_bookmarks table exists: %v", err)
+		slog.Error("failed to create table", "table", "log_bookmarks", "error", err)
 	}
 
 	// Notifications (Phase 9)
@@ -254,7 +256,7 @@ func InitDB() {
 		)
 	`)
 	if err != nil {
-		log.Printf("Error ensuring notifications table exists: %v", err)
+		slog.Error("failed to create table", "table", "notifications", "error", err)
 	}
 
 	_, err = DB.Exec(`
@@ -269,7 +271,7 @@ func InitDB() {
 		)
 	`)
 	if err != nil {
-		log.Printf("Error ensuring notification_rules table exists: %v", err)
+		slog.Error("failed to create table", "table", "notification_rules", "error", err)
 	}
 
 	_, err = DB.Exec(`
@@ -283,7 +285,7 @@ func InitDB() {
 		)
 	`)
 	if err != nil {
-		log.Printf("Error ensuring notification_channels table exists: %v", err)
+		slog.Error("failed to create table", "table", "notification_channels", "error", err)
 	}
 
 	// User quotas & billing (Phase 11)
@@ -301,7 +303,7 @@ func InitDB() {
 		)
 	`)
 	if err != nil {
-		log.Printf("Error ensuring user_quotas table exists: %v", err)
+		slog.Error("failed to create table", "table", "user_quotas", "error", err)
 	}
 
 	_, err = DB.Exec(`
@@ -320,7 +322,7 @@ func InitDB() {
 		)
 	`)
 	if err != nil {
-		log.Printf("Error ensuring billing_webhook_events table exists: %v", err)
+		slog.Error("failed to create table", "table", "billing_webhook_events", "error", err)
 	}
 
 	// App updates (Phase 12)
@@ -336,7 +338,7 @@ func InitDB() {
 		)
 	`)
 	if err != nil {
-		log.Printf("Error ensuring app_updates table exists: %v", err)
+		slog.Error("failed to create table", "table", "app_updates", "error", err)
 	}
 
 	// Media metadata (Phase 17)
@@ -354,7 +356,7 @@ func InitDB() {
 		)
 	`)
 	if err != nil {
-		log.Printf("Error ensuring media_metadata table exists: %v", err)
+		slog.Error("failed to create table", "table", "media_metadata", "error", err)
 	}
 
 	// Metrics history (Phase 19)
@@ -374,7 +376,7 @@ func InitDB() {
 		)
 	`)
 	if err != nil {
-		log.Printf("Error ensuring metrics_history table exists: %v", err)
+		slog.Error("failed to create table", "table", "metrics_history", "error", err)
 	}
 
 	// ─── v3.1.0 Gold: Schema version tracking ─────────────────────────
@@ -386,7 +388,7 @@ func InitDB() {
 		)
 	`)
 	if err != nil {
-		log.Printf("Error ensuring schema_versions table exists: %v", err)
+		slog.Error("failed to create table", "table", "schema_versions", "error", err)
 	}
 
 	// ─── Versioned migrations (idempotent — safe for v3.0.x → v3.1.0) ─
@@ -433,8 +435,166 @@ func InitDB() {
 	migrate(6, "Persist smart backup next run time",
 		"ALTER TABLE settings ADD COLUMN backup_next_run_at TEXT DEFAULT '';")
 
+	migrate(7, "Add OIDC consent persistence",
+		`CREATE TABLE IF NOT EXISTS oidc_consents (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			user_id INTEGER NOT NULL,
+			client_id TEXT NOT NULL,
+			scope TEXT NOT NULL,
+			granted_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(user_id, client_id)
+		);`,
+		"CREATE INDEX IF NOT EXISTS idx_oidc_consents_user_client ON oidc_consents(user_id, client_id);")
+
+	migrate(8, "Add active sessions table for session tracking",
+		`CREATE TABLE IF NOT EXISTS active_sessions (
+			jti TEXT PRIMARY KEY,
+			user_id INTEGER NOT NULL,
+			ip_address TEXT DEFAULT '',
+			user_agent TEXT DEFAULT '',
+			expires_at DATETIME NOT NULL,
+			last_active DATETIME DEFAULT CURRENT_TIMESTAMP
+		);`,
+		"CREATE INDEX IF NOT EXISTS idx_active_sessions_user ON active_sessions(user_id);",
+		"CREATE INDEX IF NOT EXISTS idx_active_sessions_expires ON active_sessions(expires_at);")
+
+	// ─── Migration v9: Phase 9 — pending_actions for approval gates ────
+	migrate(9, `CREATE TABLE IF NOT EXISTS pending_actions (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		classification TEXT NOT NULL DEFAULT 'warn',
+		source TEXT NOT NULL,
+		action TEXT NOT NULL,
+		reason TEXT,
+		status TEXT NOT NULL DEFAULT 'pending',
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		resolved_at DATETIME,
+		resolved_by TEXT,
+		execution_log TEXT
+	);`,
+		"CREATE INDEX IF NOT EXISTS idx_pending_actions_status ON pending_actions(status);")
+
+	// ─── Migration v10: Phase 13 — notification delivery audit log ─────
+	migrate(10, `CREATE TABLE IF NOT EXISTS notification_delivery_log (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		channel_id INTEGER NOT NULL,
+		channel_type TEXT NOT NULL,
+		notification_id INTEGER,
+		status TEXT NOT NULL DEFAULT 'pending',
+		attempts INTEGER DEFAULT 0,
+		last_error TEXT,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		completed_at DATETIME
+	);`,
+		"CREATE INDEX IF NOT EXISTS idx_delivery_log_channel ON notification_delivery_log(channel_id);",
+		"CREATE INDEX IF NOT EXISTS idx_delivery_log_status ON notification_delivery_log(status);")
+
+	// ─── Migration v11: Phase 28 — Admin action audit trail ────────────
+	migrate(11, "Add admin audit trail for accountability",
+		`CREATE TABLE IF NOT EXISTS admin_audit_log (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		user_id INTEGER NOT NULL,
+		username TEXT NOT NULL,
+		action TEXT NOT NULL,
+		target_type TEXT NOT NULL DEFAULT '',
+		target_id TEXT NOT NULL DEFAULT '',
+		detail TEXT NOT NULL DEFAULT '',
+		ip_address TEXT NOT NULL DEFAULT '',
+		user_agent TEXT NOT NULL DEFAULT '',
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);`,
+		"CREATE INDEX IF NOT EXISTS idx_audit_log_user ON admin_audit_log(user_id);",
+		"CREATE INDEX IF NOT EXISTS idx_audit_log_action ON admin_audit_log(action);",
+		"CREATE INDEX IF NOT EXISTS idx_audit_log_created ON admin_audit_log(created_at);")
+
 	// ─── Ensure singleton settings row ─────────────────────────────────
 	DB.Exec(`INSERT OR IGNORE INTO settings (id) VALUES (1)`)
 
-	log.Printf("Successfully connected to SQLite database at %s", dbPath)
+	slog.Info("database connected", "path", dbPath)
+}
+
+// ── Phase 16: Database Layer Hardening ──────────────────────────────────
+
+// DBHealthCheck performs a lightweight health check on the database.
+// Returns a map of diagnostic information suitable for health endpoint rendering.
+func DBHealthCheck() (map[string]interface{}, error) {
+	start := time.Now()
+	var one int
+	if err := DB.QueryRow("SELECT 1").Scan(&one); err != nil {
+		return nil, err
+	}
+	latency := time.Since(start)
+
+	// Gather table row counts for diagnostics
+	tables := []string{"users", "active_sessions", "oidc_clients", "notifications", "metrics_history"}
+	counts := map[string]int{}
+	for _, t := range tables {
+		var c int
+		// Table names are hardcoded constants — no injection risk
+		if err := DB.QueryRow("SELECT COUNT(*) FROM " + t).Scan(&c); err == nil {
+			counts[t] = c
+		}
+	}
+
+	// Check WAL size
+	var walPages int
+	DB.QueryRow("PRAGMA wal_checkpoint(PASSIVE)").Scan(&walPages, nil, nil)
+
+	return map[string]interface{}{
+		"status":       "healthy",
+		"latency_ms":   latency.Milliseconds(),
+		"table_counts": counts,
+		"wal_pages":    walPages,
+	}, nil
+}
+
+// PruneExpiredData removes stale records across all tables with TTL semantics.
+// This should be called periodically (e.g., every 15 minutes from a background goroutine).
+func PruneExpiredData() {
+	now := time.Now().Format(time.RFC3339)
+
+	pruneTargets := []struct {
+		table string
+		query string
+	}{
+		{"oidc_auth_codes", "DELETE FROM oidc_auth_codes WHERE expires_at < ? OR used = 1"},
+		{"oidc_device_codes", "DELETE FROM oidc_device_codes WHERE expires_at < ?"},
+		{"oidc_refresh_tokens", "DELETE FROM oidc_refresh_tokens WHERE expires_at < ? OR revoked = 1"},
+		{"active_sessions", "DELETE FROM active_sessions WHERE expires_at < ?"},
+		// Keep 90 days of metrics history
+		{"metrics_history", "DELETE FROM metrics_history WHERE timestamp < datetime('now', '-90 days')"},
+		// Keep 90 days of login history
+		{"login_history", "DELETE FROM login_history WHERE created_at < datetime('now', '-90 days')"},
+		// Keep 30 days of billing webhook events
+		{"billing_webhook_events", "DELETE FROM billing_webhook_events WHERE processed_at < datetime('now', '-30 days')"},
+	}
+
+	for _, target := range pruneTargets {
+		var result sql.Result
+		var err error
+		if strings.Contains(target.query, "?") {
+			result, err = DB.Exec(target.query, now)
+		} else {
+			result, err = DB.Exec(target.query)
+		}
+		if err != nil {
+			slog.Error("prune error", "table", target.table, "error", err)
+			continue
+		}
+		if affected, _ := result.RowsAffected(); affected > 0 {
+			slog.Info("prune completed", "table", target.table, "rows_removed", affected)
+		}
+	}
+}
+
+// StartPruneLoop starts a background goroutine that periodically prunes expired data.
+func StartPruneLoop() {
+	go func() {
+		// Initial delay to let the system stabilize
+		time.Sleep(30 * time.Second)
+		for {
+			PruneExpiredData()
+			time.Sleep(15 * time.Minute)
+		}
+	}()
+	slog.Info("database prune loop started", "interval", "15m")
 }

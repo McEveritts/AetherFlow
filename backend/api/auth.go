@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -48,12 +49,12 @@ func secureCookie() bool {
 func SetupAdmin(c *gin.Context) {
 	var count int
 	if err := db.DB.QueryRow("SELECT COUNT(*) FROM users").Scan(&count); err != nil {
-		log.Printf("CRITICAL: Failed to query user count during admin setup: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database unavailable"})
+		slog.Error("failed to query user count during admin setup", "error", err)
+		RespondError(c, http.StatusInternalServerError, ErrCodeInternal, "Database unavailable")
 		return
 	}
 	if count > 0 {
-		c.JSON(http.StatusConflict, gin.H{"error": "Admin account already exists"})
+		RespondError(c, http.StatusConflict, ErrCodeConflict, "Admin account already exists")
 		return
 	}
 
@@ -62,19 +63,19 @@ func SetupAdmin(c *gin.Context) {
 		Password string `json:"password" binding:"required"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		RespondError(c, http.StatusBadRequest, ErrCodeValidation, err.Error())
 		return
 	}
 
 	// Enforce minimum password length for security
 	if len(req.Password) < 8 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Password must be at least 8 characters"})
+		RespondError(c, http.StatusBadRequest, ErrCodeValidation, "Password must be at least 8 characters")
 		return
 	}
 
 	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to hash password"})
+		RespondError(c, http.StatusInternalServerError, ErrCodeInternal, "Failed to hash password")
 		return
 	}
 
@@ -83,22 +84,22 @@ func SetupAdmin(c *gin.Context) {
 		req.Username, string(hash),
 	)
 	if err != nil {
-		log.Printf("Setup admin error: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create admin account"})
+		slog.Error("setup admin creation error", "error", err)
+		RespondError(c, http.StatusInternalServerError, ErrCodeInternal, "Failed to create admin account")
 		return
 	}
 
 	id, err := res.LastInsertId()
 	if err != nil || id == 0 {
-		log.Printf("CRITICAL: Failed to retrieve LastInsertId during admin creation: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify new user creation"})
+		slog.Error("failed to retrieve LastInsertId during admin creation", "error", err)
+		RespondError(c, http.StatusInternalServerError, ErrCodeInternal, "Failed to verify new user creation")
 		return
 	}
 
-	// Issue JWT via centralized factory (includes jti + short expiry)
-	tokenString, err := createStandardJWT(int(id))
+	// Issue JWT via centralized factory (includes jti + short expiry + client fingerprint)
+	tokenString, err := createStandardJWT(int(id), c)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create session"})
+		RespondError(c, http.StatusInternalServerError, ErrCodeInternal, "Failed to create session")
 		return
 	}
 	c.SetSameSite(http.SameSiteLaxMode)
@@ -114,7 +115,7 @@ func LocalLogin(c *gin.Context) {
 		Password string `json:"password" binding:"required"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		RespondError(c, http.StatusBadRequest, ErrCodeValidation, err.Error())
 		return
 	}
 
@@ -129,17 +130,17 @@ func LocalLogin(c *gin.Context) {
 	user.IsOAuth = googleId.Valid && googleId.String != ""
 
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid username or password"})
+		RespondError(c, http.StatusUnauthorized, ErrCodeUnauthorized, "Invalid username or password")
 		return
 	}
 
 	if passwordHash == "" {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "This account uses Google OAuth. Use the Google login button."})
+		RespondError(c, http.StatusUnauthorized, ErrCodeUnauthorized, "This account uses Google OAuth. Use the Google login button.")
 		return
 	}
 
 	if err := bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(req.Password)); err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid username or password"})
+		RespondError(c, http.StatusUnauthorized, ErrCodeUnauthorized, "Invalid username or password")
 		return
 	}
 
@@ -148,8 +149,8 @@ func LocalLogin(c *gin.Context) {
 	userAgent := c.Request.UserAgent()
 	db.DB.Exec("INSERT INTO login_history (user_id, ip_address, user_agent) VALUES (?, ?, ?)", user.ID, clientIP, userAgent)
 
-	// Issue JWT via centralized factory (includes jti + short expiry)
-	tokenString, err := createStandardJWT(user.ID)
+	// Issue JWT via centralized factory (includes jti + short expiry + client fingerprint)
+	tokenString, err := createStandardJWT(user.ID, c)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create session"})
 		return
@@ -165,7 +166,7 @@ func checkSetupNeeded() (bool, error) {
 	var count int
 	err := db.DB.QueryRow("SELECT COUNT(*) FROM users").Scan(&count)
 	if err != nil {
-		log.Printf("CRITICAL: Failed to query user count during setup check: %v", err)
+		slog.Error("failed to query user count during setup check", "error", err)
 		return false, fmt.Errorf("database unavailable: %w", err)
 	}
 	return count == 0, nil
@@ -193,7 +194,7 @@ func GoogleLogin(c *gin.Context) {
 	// Generate state
 	stateBytes := make([]byte, 32)
 	if _, err := rand.Read(stateBytes); err != nil {
-		log.Printf("CRITICAL: crypto/rand failure during OAuth state generation: %v", err)
+		slog.Error("crypto/rand failure during OAuth state generation", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate secure state"})
 		return
 	}
@@ -307,7 +308,7 @@ func GoogleCallback(c *gin.Context) {
 
 		var count int
 		if err := db.DB.QueryRow("SELECT COUNT(*) FROM users").Scan(&count); err != nil {
-			log.Printf("CRITICAL: Failed to query user count during OAuth: %v", err)
+			slog.Error("failed to query user count during OAuth", "error", err)
 			c.Redirect(http.StatusTemporaryRedirect, baseURL+"/login?error=db_error")
 			return
 		}
@@ -321,7 +322,7 @@ func GoogleCallback(c *gin.Context) {
 			username, googleId, email, avatarUrl, role)
 
 		if err != nil {
-			log.Printf("User creation err: %v", err)
+			slog.Error("user creation error during OAuth", "error", err)
 			c.Redirect(http.StatusTemporaryRedirect, baseURL+"/login?error=db_error")
 			return
 		}
@@ -338,7 +339,7 @@ func GoogleCallback(c *gin.Context) {
 		user.Email = email
 		user.AvatarURL = avatarUrl
 	} else {
-		log.Printf("DB error: %v", err)
+		slog.Error("database error during OAuth callback", "error", err)
 		c.Redirect(http.StatusTemporaryRedirect, baseURL+"/login?error=db_error")
 		return
 	}
@@ -348,8 +349,8 @@ func GoogleCallback(c *gin.Context) {
 	userAgent := c.Request.UserAgent()
 	db.DB.Exec("INSERT INTO login_history (user_id, ip_address, user_agent) VALUES (?, ?, ?)", user.ID, clientIP, userAgent)
 
-	// Issue JWT via centralized factory (includes jti + short expiry)
-	tokenString, err := createStandardJWT(user.ID)
+	// Issue JWT via centralized factory (includes jti + short expiry + client fingerprint)
+	tokenString, err := createStandardJWT(user.ID, c)
 	if err != nil {
 		c.Redirect(http.StatusTemporaryRedirect, baseURL+"/login?error=jwt_failed")
 		return
@@ -505,13 +506,13 @@ func AuthMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		_, claims, err := resolveSessionToken(c)
 		if err != nil {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+			c.AbortWithStatusJSON(http.StatusUnauthorized, APIError{Code: ErrCodeUnauthorized, Message: "Unauthorized"})
 			return
 		}
 
 		userIdFloat, ok := claims["user_id"].(float64)
 		if !ok {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Invalid token claims"})
+			c.AbortWithStatusJSON(http.StatusUnauthorized, APIError{Code: ErrCodeUnauthorized, Message: "Invalid token claims"})
 			return
 		}
 		userId := int(userIdFloat)
@@ -519,15 +520,31 @@ func AuthMiddleware() gin.HandlerFunc {
 		// Phase 11 & 12: Robust JWT Blacklist (Redis O(1) + LRU Fallback)
 		jti, hasJti := claims["jti"].(string)
 		if hasJti && db.IsTokenRevoked(jti) {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized: session revoked"})
+			c.AbortWithStatusJSON(http.StatusUnauthorized, APIError{Code: ErrCodeSessionExpired, Message: "Session revoked"})
 			return
 		}
 
 		// Verify the user still exists in the database
 		var role string
 		if err := db.DB.QueryRow("SELECT role FROM users WHERE id = ?", userId).Scan(&role); err != nil {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+			c.AbortWithStatusJSON(http.StatusUnauthorized, APIError{Code: ErrCodeUnauthorized, Message: "Unauthorized"})
 			return
+		}
+
+		// Phase 6: Validate client fingerprint to detect session hijacking.
+		// If the JWT contains a cfp claim, it must match the current client's fingerprint.
+		if cfp, hasCfp := claims["cfp"].(string); hasCfp {
+			expectedCfp := clientFingerprint(c)
+			if cfp != expectedCfp {
+				slog.Warn("session fingerprint mismatch",
+					"user_id", userId,
+					"expected", cfp[:8],
+					"got", expectedCfp[:8],
+					"ip", c.ClientIP(),
+				)
+				c.AbortWithStatusJSON(http.StatusUnauthorized, APIError{Code: ErrCodeSessionHijacked, Message: "Session bound to a different client"})
+				return
+			}
 		}
 
 		c.Set("user_id", userId)
@@ -542,7 +559,7 @@ func AdminOnly() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		role, exists := c.Get("user_role")
 		if !exists || role != "admin" {
-			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "Forbidden: Admin access required"})
+			c.AbortWithStatusJSON(http.StatusForbidden, APIError{Code: ErrCodeForbidden, Message: "Admin access required"})
 			return
 		}
 		c.Next()
@@ -573,7 +590,7 @@ func UpdateProfile(c *gin.Context) {
 
 	_, err := db.DB.Exec("UPDATE users SET email = ? WHERE id = ?", req.Email, userId)
 	if err != nil {
-		log.Printf("Profile update error: %v", err)
+		slog.Error("profile update error", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update profile"})
 		return
 	}
@@ -623,7 +640,11 @@ func CSRFMiddleware() gin.HandlerFunc {
 			token := c.GetHeader("X-CSRF-Token")
 			cookie, err := c.Cookie("csrf_token")
 			if err != nil || token == "" || token != cookie {
-				log.Printf("CSRF validation failed: method=%s path=%s ip=%s", c.Request.Method, c.Request.URL.Path, c.ClientIP())
+				slog.Warn("CSRF validation failed",
+					"method", c.Request.Method,
+					"path", c.Request.URL.Path,
+					"ip", c.ClientIP(),
+				)
 				c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "Invalid CSRF token"})
 				return
 			}
@@ -632,3 +653,101 @@ func CSRFMiddleware() gin.HandlerFunc {
 	}
 }
 
+// ---- Phase 6: Session Management ----
+
+// ListActiveSessions returns all non-expired sessions for the current user.
+func ListActiveSessions(c *gin.Context) {
+	rawUserID, _ := c.Get("user_id")
+	userID := rawUserID.(int)
+
+	// Clean up expired sessions first (best-effort)
+	db.DB.Exec("DELETE FROM active_sessions WHERE expires_at < CURRENT_TIMESTAMP")
+
+	rows, err := db.DB.Query(
+		`SELECT jti, ip_address, user_agent, expires_at, last_active
+		 FROM active_sessions WHERE user_id = ? ORDER BY last_active DESC`,
+		userID,
+	)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query sessions"})
+		return
+	}
+	defer rows.Close()
+
+	type sessionInfo struct {
+		JTI        string `json:"jti"`
+		IPAddress  string `json:"ip_address"`
+		UserAgent  string `json:"user_agent"`
+		ExpiresAt  string `json:"expires_at"`
+		LastActive string `json:"last_active"`
+		IsCurrent  bool   `json:"is_current"`
+	}
+
+	// Determine the current session's JTI
+	var currentJTI string
+	if _, claims, err := resolveSessionToken(c); err == nil {
+		if jti, ok := claims["jti"].(string); ok {
+			currentJTI = jti
+		}
+	}
+
+	var sessions []sessionInfo
+	for rows.Next() {
+		var s sessionInfo
+		if err := rows.Scan(&s.JTI, &s.IPAddress, &s.UserAgent, &s.ExpiresAt, &s.LastActive); err != nil {
+			continue
+		}
+		s.IsCurrent = s.JTI == currentJTI
+		// Mask JTI for security — client only sees first 8 chars for identification
+		if len(s.JTI) > 8 {
+			s.JTI = s.JTI[:8] + "..."
+		}
+		sessions = append(sessions, s)
+	}
+
+	if sessions == nil {
+		sessions = []sessionInfo{}
+	}
+
+	c.JSON(http.StatusOK, gin.H{"sessions": sessions, "count": len(sessions)})
+}
+
+// RevokeSession allows a user to invalidate one of their own sessions by JTI prefix.
+func RevokeSession(c *gin.Context) {
+	rawUserID, _ := c.Get("user_id")
+	userID := rawUserID.(int)
+	jtiPrefix := c.Param("jti")
+
+	if jtiPrefix == "" || len(jtiPrefix) < 8 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid session identifier"})
+		return
+	}
+
+	// Strip trailing "..." if the frontend sends the masked JTI
+	jtiPrefix = strings.TrimSuffix(jtiPrefix, "...")
+
+	// Look up the full JTI — scoped to USER to prevent IDOR
+	var fullJTI string
+	var expiresAt string
+	err := db.DB.QueryRow(
+		"SELECT jti, expires_at FROM active_sessions WHERE jti LIKE ? AND user_id = ?",
+		jtiPrefix+"%", userID,
+	).Scan(&fullJTI, &expiresAt)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Session not found"})
+		return
+	}
+
+	// Revoke the token via the blacklist
+	if expTime, err := time.Parse(time.RFC3339, expiresAt); err == nil {
+		remaining := time.Until(expTime)
+		if remaining > 0 {
+			db.RevokeToken(fullJTI, remaining)
+		}
+	}
+
+	// Remove from active sessions
+	db.DB.Exec("DELETE FROM active_sessions WHERE jti = ?", fullJTI)
+
+	c.JSON(http.StatusOK, gin.H{"message": "Session revoked"})
+}

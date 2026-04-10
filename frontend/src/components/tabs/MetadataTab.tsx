@@ -29,39 +29,63 @@ export default function MetadataTab() {
     const [isLoadingResults, setIsLoadingResults] = useState(false);
 
     const startScan = async () => {
-        if (!scanPath.trim()) return;
+        if (!scanPath.trim() || status?.scanning) return;
+
+        setStatus({ scanning: true, progress: 0, total: 0, done: 0, error: '' });
+        setResults([]);
 
         try {
-            const res = await apiFetch('/api/v1/admin/ai/metadata/scan', {
+            // Using raw fetch for streaming support to process NDJSON chunks actively
+            const token = document.cookie.split('; ').find(row => row.startsWith('af_sid='))?.split('=')[1] || '';
+            const res = await fetch('/api/v1/admin/ai/metadata/scan/stream', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: { 
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${token}` 
+                },
                 body: JSON.stringify({ path: scanPath.trim() })
             });
-            const data = await res.json();
-            if (!res.ok) throw new Error(data.error);
 
-            // Start polling status
-            pollStatus();
-        } catch (err) {
-            setStatus({ scanning: false, progress: 0, total: 0, done: 0, error: err instanceof Error ? err.message : 'Scan failed' });
-        }
-    };
-
-    const pollStatus = () => {
-        const interval = setInterval(async () => {
-            try {
-                const res = await apiFetch('/api/v1/admin/ai/metadata/status');
-                const data: ScanStatus = await res.json();
-                setStatus(data);
-
-                if (!data.scanning) {
-                    clearInterval(interval);
-                    fetchResults();
-                }
-            } catch {
-                clearInterval(interval);
+            if (!res.ok) {
+                const errData = await res.json().catch(() => ({}));
+                throw new Error(errData.error || `Invalid upstream response state: ${res.status}`);
             }
-        }, 2000);
+
+            if (!res.body) throw new Error('Client environment unsupported: Missing ReadableStream implementation.');
+
+            const reader = res.body.getReader();
+            const decoder = new TextDecoder();
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+
+                const chunk = decoder.decode(value, { stream: true });
+                const lines = chunk.split('\n').filter(l => l.trim() !== '');
+
+                for (const line of lines) {
+                    try {
+                        const data: ScanStatus = JSON.parse(line);
+                        setStatus(data);
+                    } catch {
+                        // ignore malformed mid-stream chunks
+                    }
+                }
+            }
+
+            // Stream fully consumed
+            setStatus(prev => prev ? { ...prev, scanning: false } : null);
+            fetchResults();
+
+        } catch (err) {
+            setStatus(prev => ({
+                scanning: false,
+                progress: prev?.progress || 0,
+                total: prev?.total || 0,
+                done: prev?.done || 0,
+                error: err instanceof Error ? err.message : 'Telemetry buffer exception encountered.'
+            }));
+        }
     };
 
     const fetchResults = async () => {

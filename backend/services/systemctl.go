@@ -3,7 +3,7 @@ package services
 import (
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"os/exec"
 	"path/filepath"
 	"regexp"
@@ -103,24 +103,24 @@ func GetPM2Services() map[string]PM2Process {
 
 	pm2Path := findPM2Binary()
 	if pm2Path == "" {
-		log.Printf("[PM2] pm2 binary not found on system")
+		slog.Warn("pm2 binary not found")
 		return result
 	}
 
 	cmd := exec.Command(pm2Path, "jlist")
 	output, err := cmd.Output()
 	if err != nil {
-		log.Printf("[PM2] Failed to query pm2 jlist (%s): %v", pm2Path, err)
+		slog.Error("PM2: failed to query jlist", "path", pm2Path, "error", err)
 		return result
 	}
 
 	var processes []PM2Process
 	if err := json.Unmarshal(output, &processes); err != nil {
-		log.Printf("[PM2] Failed to parse pm2 output: %v", err)
+		slog.Error("PM2: failed to parse output", "error", err)
 		return result
 	}
 
-	log.Printf("[PM2] Found %d processes", len(processes))
+	slog.Info("PM2 processes discovered", "count", len(processes))
 	for _, p := range processes {
 		result[p.Name] = p
 	}
@@ -183,14 +183,14 @@ func ControlService(serviceName, action string) error {
 	if err := validateServiceName(serviceName); err != nil {
 		return err
 	}
-	log.Printf("[Systemctl] Executing: sudo systemctl %s -- %s", action, serviceName)
+	slog.Info("systemctl executing", "action", action, "service", serviceName)
 	cmd := exec.Command("sudo", "systemctl", action, "--", serviceName)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		log.Printf("Failed to %s service %s: %v\nOutput: %s", action, serviceName, err, string(output))
+		slog.Error("systemctl action failed", "action", action, "service", serviceName, "error", err, "output", string(output))
 		return err
 	}
-	log.Printf("Successfully executed %s on %s", action, serviceName)
+	slog.Info("systemctl action succeeded", "action", action, "service", serviceName)
 	return nil
 }
 
@@ -206,14 +206,14 @@ func ControlPM2Service(processName, action string) error {
 	if pm2Path == "" {
 		return fmt.Errorf("pm2 binary not found")
 	}
-	log.Printf("[PM2] Executing: %s %s %s", pm2Path, action, processName)
+	slog.Info("PM2 executing", "action", action, "process", processName)
 	cmd := exec.Command(pm2Path, action, processName)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		log.Printf("Failed to %s PM2 process %s: %v\nOutput: %s", action, processName, err, string(output))
+		slog.Error("PM2 action failed", "action", action, "process", processName, "error", err, "output", string(output))
 		return err
 	}
-	log.Printf("Successfully executed %s on PM2 process %s", action, processName)
+	slog.Info("PM2 action succeeded", "action", action, "process", processName)
 	return nil
 }
 

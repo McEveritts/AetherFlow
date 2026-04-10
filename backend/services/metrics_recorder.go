@@ -1,11 +1,15 @@
 package services
 
 import (
-	"log"
+	"log/slog"
 	"time"
 
 	"aetherflow/db"
+	"aetherflow/logging"
 )
+
+// metricsLog is the domain-scoped structured logger for the metrics recorder.
+var metricsLog *slog.Logger
 
 // InitMetricsRecorder starts a background goroutine that samples system metrics
 // every 15 minutes and stores them in the metrics_history table for trend analysis.
@@ -18,12 +22,20 @@ func InitMetricsRecorder() {
 		ticker := time.NewTicker(15 * time.Minute)
 		defer ticker.Stop()
 
-		for range ticker.C {
-			recordMetricsSnapshot()
-			pruneOldMetrics()
+		ctx := SubsystemContext()
+		for {
+			select {
+			case <-ctx.Done():
+				metricsLog.Info("shutdown signal received, stopping")
+				return
+			case <-ticker.C:
+				recordMetricsSnapshot()
+				pruneOldMetrics()
+			}
 		}
 	}()
-	log.Println("Metrics recorder initialized (15-minute intervals)")
+	metricsLog = logging.ForDomain("telemetry", "metrics-recorder")
+	metricsLog.Info("metrics recorder initialized", "interval", "15m")
 }
 
 func recordMetricsSnapshot() {
@@ -70,7 +82,7 @@ func recordMetricsSnapshot() {
 		cpuAvg, memUsed, memTotal, diskRead, diskWrite, netRx, netTx, loadAvg1, activeConns,
 	)
 	if err != nil {
-		log.Printf("Metrics recorder: failed to store snapshot: %v", err)
+		metricsLog.Error("failed to store snapshot", "error", err)
 	}
 }
 
@@ -79,11 +91,11 @@ func pruneOldMetrics() {
 	cutoff := time.Now().AddDate(0, 0, -30).Format(time.RFC3339)
 	result, err := db.DB.Exec("DELETE FROM metrics_history WHERE timestamp < ?", cutoff)
 	if err != nil {
-		log.Printf("Metrics recorder: failed to prune old entries: %v", err)
+		metricsLog.Error("failed to prune old entries", "error", err)
 		return
 	}
 	if rows, _ := result.RowsAffected(); rows > 0 {
-		log.Printf("Metrics recorder: pruned %d entries older than 30 days", rows)
+		metricsLog.Info("pruned old entries", "count", rows, "retention", "30d")
 	}
 }
 

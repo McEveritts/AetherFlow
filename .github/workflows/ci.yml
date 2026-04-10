@@ -56,8 +56,11 @@ jobs:
           if-no-files-found: error
 
   frontend:
-    name: Frontend Monorepo Ecosystem
+    name: Frontend (Next.js)
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -70,37 +73,37 @@ jobs:
           cache-dependency-path: package-lock.json
 
       - name: Install Dependencies
+        working-directory: .
         run: npm ci
 
-      - name: Typecheck Workspace Packages
-        run: |
-          cd packages/ui
-          npm run typecheck
-
       - name: Lint Frontend
-        run: |
-          cd frontend
-          npm run lint
+        run: npm run lint
 
       - name: Unit Tests
-        run: |
-          cd frontend
-          npm run test:ci
+        run: npm run test:ci
+
+      - name: Cache Playwright Browsers
+        id: playwright-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
 
       - name: Install Playwright Browsers
-        run: npx playwright install --with-deps
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        run: npx playwright install --with-deps chromium
+
+      - name: Install Playwright System Deps
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+        run: npx playwright install-deps chromium
 
       - name: E2E Tests
-        run: |
-          cd frontend
-          npm run test:e2e
+        run: npm run test:e2e
 
       - name: Static Export Build
         env:
           NEXT_STATIC_EXPORT: "1"
-        run: |
-          cd frontend
-          npm run build
+        run: npm run build
 
       - name: Upload Frontend Artifact
         uses: actions/upload-artifact@v4
@@ -108,3 +111,4 @@ jobs:
           name: frontend-static-export
           path: frontend/out
           if-no-files-found: error
+
