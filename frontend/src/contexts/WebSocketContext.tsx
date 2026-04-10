@@ -228,6 +228,12 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
                 } else if (message.type === 'SYSTEM_HEAL') {
                     const healData = message.data as { service?: string, reason?: string, action?: string };
                     addToast(`Self-Healing: ${healData.action || 'Restarted'} ${healData.service || 'service'} (${healData.reason || 'unresponsive'})`, 'info');
+                } else if (message.type === 'ACTION_QUEUED') {
+                    // Phase 14: Real-time action gate notifications
+                    const actionData = message.data as { action_id?: number, classification?: string, source?: string, action?: string };
+                    // Revalidate the action gates SWR cache so InboxTab updates instantly
+                    globalMutate('/api/v1/admin/actions/pending?status=pending');
+                    addToast(`New action queued: ${actionData.action || 'Unknown'} (#${actionData.action_id || '?'})`, 'info');
                 }
                 // PONG and other message types are silently consumed
             } catch (err) {

@@ -140,6 +140,19 @@ func runChatSession(c *gin.Context, systemPrompt string, modelOverride string, h
 		)
 		if needsApproval {
 			proposal.ActionID = int(actionID)
+			// Phase 14: Broadcast to all connected clients for real-time inbox updates
+			BroadcastActionQueued(int64(actionID), proposal.DangerLevel, "FlowAI", proposal.Title)
+			// Phase 20: Record AI proposal in audit trail
+			db.RecordAudit(
+				resolveActorID(c),
+				resolveActorEmail(c),
+				"ai_action_proposed",
+				"pending_action",
+				fmt.Sprintf("%d", actionID),
+				fmt.Sprintf("classification=%s title=%s", proposal.DangerLevel, proposal.Title),
+				c.ClientIP(),
+				c.Request.UserAgent(),
+			)
 			c.JSON(http.StatusOK, ChatResponse{
 				Reply:          replyText,
 				ProposedAction: proposal,

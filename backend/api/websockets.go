@@ -383,3 +383,28 @@ func BroadcastMarketplaceUpdates(packages []string) {
 		slog.Warn("WebSocket broadcast channel full, dropping marketplace update")
 	}
 }
+
+// BroadcastActionQueued sends an ACTION_QUEUED WebSocket message to all connected clients.
+// This enables real-time Inbox updates without relying solely on polling.
+func BroadcastActionQueued(actionID int64, classification, source, action string) {
+	payload := map[string]interface{}{
+		"type": "ACTION_QUEUED",
+		"data": map[string]interface{}{
+			"action_id":      actionID,
+			"classification": classification,
+			"source":         source,
+			"action":         action,
+		},
+	}
+
+	message, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+
+	select {
+	case WSHub.broadcast <- message:
+	default:
+		slog.Warn("WebSocket broadcast channel full, dropping action queued event")
+	}
+}

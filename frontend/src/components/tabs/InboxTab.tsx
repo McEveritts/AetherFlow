@@ -1,7 +1,9 @@
 import { useState } from 'react';
-import { Mail, CheckCircle, XCircle, AlertTriangle, ShieldAlert, Code, RefreshCw, Loader2 } from 'lucide-react';
+import { Mail, CheckCircle, XCircle, AlertTriangle, ShieldAlert, Code, RefreshCw, Loader2, Maximize2 } from 'lucide-react';
 import { useToast } from '@/contexts/ToastContext';
 import { useActionGates } from '@/hooks/useActionGates';
+import { ActionDetailModal } from '@/components/tabs/ActionDetailModal';
+import type { PendingAction } from '@/types/api';
 
 const classificationColors: Record<string, string> = {
     safe: 'text-emerald-400 bg-emerald-500/10 border-emerald-500/30',
@@ -29,6 +31,7 @@ export default function InboxTab() {
     const { addToast } = useToast();
     const { actions, isLoading, isError, error, isValidating, approveAction, rejectAction, refresh } = useActionGates();
     const [processingIds, setProcessingIds] = useState<Set<number>>(new Set());
+    const [selectedAction, setSelectedAction] = useState<PendingAction | null>(null);
 
     const handleApprove = async (id: number, action: string) => {
         setProcessingIds(prev => new Set(prev).add(id));
@@ -135,7 +138,11 @@ export default function InboxTab() {
                     {!isError && actions.map(action => {
                         const isProcessing = processingIds.has(action.id);
                         return (
-                            <div key={action.id} className="bg-slate-900/60 border border-white/10 rounded-2xl p-6 transition-all hover:border-indigo-500/30">
+                            <div 
+                                key={action.id} 
+                                className="bg-slate-900/60 border border-white/10 rounded-2xl p-6 transition-all hover:border-indigo-500/30 cursor-pointer group"
+                                onClick={() => setSelectedAction(action)}
+                            >
                                 <div className="flex flex-col lg:flex-row justify-between items-start gap-6">
                                     
                                     {/* Left Content Area */}
@@ -149,6 +156,13 @@ export default function InboxTab() {
                                                 {action.classification === 'critical' && <ShieldAlert size={12} />}
                                                 {action.classification}
                                             </span>
+                                            <button 
+                                                onClick={(e) => { e.stopPropagation(); setSelectedAction(action); }}
+                                                className="ml-auto opacity-0 group-hover:opacity-100 transition-opacity text-slate-500 hover:text-indigo-400"
+                                                title="View Details"
+                                            >
+                                                <Maximize2 size={14} />
+                                            </button>
                                         </div>
 
                                         <h3 className="text-lg font-bold text-slate-200">{action.action}</h3>
@@ -175,7 +189,7 @@ export default function InboxTab() {
                                     </div>
 
                                     {/* Right Action Area */}
-                                    <div className="flex flex-row lg:flex-col gap-3 w-full lg:w-48 shrink-0">
+                                    <div className="flex flex-row lg:flex-col gap-3 w-full lg:w-48 shrink-0" onClick={(e) => e.stopPropagation()}>
                                         <button 
                                             onClick={() => handleApprove(action.id, action.action)}
                                             disabled={isProcessing}
@@ -200,6 +214,16 @@ export default function InboxTab() {
                     })}
                 </div>
             </div>
+
+            {/* Action Detail Modal */}
+            <ActionDetailModal
+                action={selectedAction}
+                isOpen={!!selectedAction}
+                onClose={() => setSelectedAction(null)}
+                onApprove={(id) => handleApprove(id, selectedAction?.action || '')}
+                onReject={handleReject}
+                isProcessing={selectedAction ? processingIds.has(selectedAction.id) : false}
+            />
         </div>
     );
 }
