@@ -17,7 +17,7 @@ import (
 // GetLogs queries the log aggregator with filters.
 func GetLogs(c *gin.Context) {
 	if services.Logs == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Log aggregator not initialized"})
+		RespondError(c, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Log aggregator not initialized")
 		return
 	}
 
@@ -59,7 +59,7 @@ func GetLogs(c *gin.Context) {
 // GetLogSources returns available log sources.
 func GetLogSources(c *gin.Context) {
 	if services.Logs == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Log aggregator not initialized"})
+		RespondError(c, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Log aggregator not initialized")
 		return
 	}
 
@@ -75,12 +75,12 @@ func GetLogSources(c *gin.Context) {
 func BookmarkLog(c *gin.Context) {
 	rawUserID, exists := c.Get("user_id")
 	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		Unauthorized(c, "Unauthorized")
 		return
 	}
 	userID, ok := rawUserID.(int)
 	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		Unauthorized(c, "Unauthorized")
 		return
 	}
 
@@ -92,7 +92,7 @@ func BookmarkLog(c *gin.Context) {
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		BadRequest(c, err.Error())
 		return
 	}
 
@@ -101,7 +101,7 @@ func BookmarkLog(c *gin.Context) {
 		userID, req.LogSource, req.LogLine, req.Timestamp, req.Note,
 	)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to bookmark log"})
+		InternalError(c, "Failed to bookmark log")
 		return
 	}
 
@@ -111,12 +111,12 @@ func BookmarkLog(c *gin.Context) {
 // HandleLogWebSocket provides real-time log streaming over WebSocket.
 func HandleLogWebSocket(c *gin.Context) {
 	if services.Logs == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Log aggregator not initialized"})
+		RespondError(c, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Log aggregator not initialized")
 		return
 	}
 
 	if _, exists := c.Get("user_id"); !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "WebSocket requires authentication"})
+		Unauthorized(c, "WebSocket requires authentication")
 		return
 	}
 
@@ -175,12 +175,12 @@ func HandleLogWebSocket(c *gin.Context) {
 func GetBookmarks(c *gin.Context) {
 	rawUserID, exists := c.Get("user_id")
 	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		Unauthorized(c, "Unauthorized")
 		return
 	}
 	userId, ok := rawUserID.(int)
 	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		Unauthorized(c, "Unauthorized")
 		return
 	}
 
@@ -189,7 +189,7 @@ func GetBookmarks(c *gin.Context) {
 		userId,
 	)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch bookmarks"})
+		InternalError(c, "Failed to fetch bookmarks")
 		return
 	}
 	defer rows.Close()

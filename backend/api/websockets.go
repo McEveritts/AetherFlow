@@ -179,7 +179,7 @@ var (
 func IssueWSTicket(c *gin.Context) {
 	rawUserID, exists := c.Get("user_id")
 	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		Unauthorized(c, "Unauthorized")
 		return
 	}
 

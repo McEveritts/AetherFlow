@@ -53,18 +53,18 @@ func HandleSetBackupSchedule(c *gin.Context) {
 		Mode string `json:"mode" binding:"required"` // "manual" or "smart"
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		BadRequest(c, err.Error())
 		return
 	}
 
 	if req.Mode != "manual" && req.Mode != "smart" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Mode must be 'manual' or 'smart'"})
+		BadRequest(c, "Mode must be 'manual' or 'smart'")
 		return
 	}
 
 	_, err := db.DB.Exec("UPDATE settings SET backup_schedule_mode = ? WHERE id = 1", req.Mode)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update schedule mode: " + err.Error()})
+		InternalError(c, "Failed to update schedule mode: " + err.Error())
 		return
 	}
 

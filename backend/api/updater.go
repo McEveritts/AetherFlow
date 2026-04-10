@@ -61,7 +61,7 @@ func CheckUpdate(c *gin.Context) {
 	// Use McEveritts/AetherFlow with a timeout-bound client
 	resp, err := httpClient.Get("https://api.github.com/repos/McEveritts/AetherFlow/releases/latest")
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reach GitHub API"})
+		InternalError(c, "Failed to reach GitHub API")
 		return
 	}
 	defer resp.Body.Close()
@@ -78,13 +78,13 @@ func CheckUpdate(c *gin.Context) {
 
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to read GitHub response"})
+		InternalError(c, "Failed to read GitHub response")
 		return
 	}
 
 	var release GitHubRelease
 	if err := json.Unmarshal(bodyBytes, &release); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse GitHub response"})
+		InternalError(c, "Failed to parse GitHub response")
 		return
 	}
 

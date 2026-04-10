@@ -12,13 +12,13 @@ import (
 func HandleGetPredictions(c *gin.Context) {
 	apiKey, err := GetDecryptedGeminiKey()
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		InternalError(c, err.Error())
 		return
 	}
 
 	report, err := services.AnalyzeResourceTrends(apiKey)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Prediction analysis failed: " + err.Error()})
+		InternalError(c, "Prediction analysis failed: " + err.Error())
 		return
 	}
 
@@ -34,7 +34,7 @@ func HandleAnalyzePredictions(c *gin.Context) {
 func HandleGetMetricsHistory(c *gin.Context) {
 	snapshots, err := services.GetMetricsHistory(30)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query metrics history: " + err.Error()})
+		InternalError(c, "Failed to query metrics history: " + err.Error())
 		return
 	}
 	if snapshots == nil {

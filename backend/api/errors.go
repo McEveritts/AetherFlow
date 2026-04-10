@@ -54,6 +54,39 @@ func RespondErrorWithDetails(c *gin.Context, status int, code, message string, d
 	})
 }
 
+// ── Shorthand Error Helpers ─────────────────────────────────────────────
+// These auto-set the correct HTTP status and error code for the most common cases.
+
+// BadRequest responds with 400 and BAD_REQUEST code.
+func BadRequest(c *gin.Context, message string) {
+	RespondError(c, http.StatusBadRequest, ErrCodeBadRequest, message)
+}
+
+// NotFoundError responds with 404 and NOT_FOUND code.
+func NotFoundError(c *gin.Context, message string) {
+	RespondError(c, http.StatusNotFound, ErrCodeNotFound, message)
+}
+
+// Unauthorized responds with 401 and UNAUTHORIZED code.
+func Unauthorized(c *gin.Context, message string) {
+	RespondError(c, http.StatusUnauthorized, ErrCodeUnauthorized, message)
+}
+
+// Forbidden responds with 403 and FORBIDDEN code.
+func Forbidden(c *gin.Context, message string) {
+	RespondError(c, http.StatusForbidden, ErrCodeForbidden, message)
+}
+
+// InternalError responds with 500 and INTERNAL_ERROR code.
+func InternalError(c *gin.Context, message string) {
+	RespondError(c, http.StatusInternalServerError, ErrCodeInternal, message)
+}
+
+// ConflictError responds with 409 and CONFLICT code.
+func ConflictError(c *gin.Context, message string) {
+	RespondError(c, http.StatusConflict, ErrCodeConflict, message)
+}
+
 // RecoveryMiddleware catches panics in handlers, logs the stack trace,
 // and returns a clean 500 response instead of crashing the process.
 func RecoveryMiddleware() gin.HandlerFunc {

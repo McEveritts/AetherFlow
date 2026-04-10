@@ -11,7 +11,7 @@ import (
 // GetClusterNodes returns a list of all registered worker nodes with their status and metrics.
 func GetClusterNodes(c *gin.Context) {
 	if cluster.Manager == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Cluster manager not initialized"})
+		RespondError(c, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Cluster manager not initialized")
 		return
 	}
 
@@ -27,13 +27,13 @@ func GetClusterNodes(c *gin.Context) {
 // EnrollWorker generates an enrollment token for a new worker node.
 func EnrollWorker(c *gin.Context) {
 	if cluster.Manager == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Cluster manager not initialized"})
+		RespondError(c, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Cluster manager not initialized")
 		return
 	}
 
 	token, err := cluster.Manager.GenerateEnrollmentToken()
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate enrollment token"})
+		InternalError(c, "Failed to generate enrollment token")
 		return
 	}
 
@@ -46,24 +46,24 @@ func EnrollWorker(c *gin.Context) {
 // RemoveWorker removes a worker node from the cluster.
 func RemoveWorker(c *gin.Context) {
 	if cluster.Manager == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Cluster manager not initialized"})
+		RespondError(c, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Cluster manager not initialized")
 		return
 	}
 
 	nodeID := c.Param("id")
 	if nodeID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Node ID is required"})
+		BadRequest(c, "Node ID is required")
 		return
 	}
 
 	node := cluster.Manager.GetNode(nodeID)
 	if node == nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Node not found"})
+		NotFoundError(c, "Node not found")
 		return
 	}
 
 	if err := cluster.Manager.RemoveWorker(nodeID); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to remove node: " + err.Error()})
+		InternalError(c, "Failed to remove node: " + err.Error())
 		return
 	}
 
@@ -73,19 +73,19 @@ func RemoveWorker(c *gin.Context) {
 // GetWorkerMetrics returns detailed metrics for a specific worker node.
 func GetWorkerMetrics(c *gin.Context) {
 	if cluster.Manager == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Cluster manager not initialized"})
+		RespondError(c, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Cluster manager not initialized")
 		return
 	}
 
 	nodeID := c.Param("id")
 	if nodeID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Node ID is required"})
+		BadRequest(c, "Node ID is required")
 		return
 	}
 
 	node := cluster.Manager.GetNode(nodeID)
 	if node == nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Node not found"})
+		NotFoundError(c, "Node not found")
 		return
 	}
 

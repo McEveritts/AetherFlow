@@ -16,7 +16,7 @@ func GetUsers(c *gin.Context) {
 	rows, err := db.DB.Query("SELECT id, username, email, avatar_url, role FROM users")
 	if err != nil {
 		slog.Error("querying users", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query users"})
+		InternalError(c, "Failed to query users")
 		return
 	}
 	defer rows.Close()
@@ -38,7 +38,7 @@ func UpdateUserRole(c *gin.Context) {
 	idStr := c.Param("id")
 	userId, err := strconv.Atoi(idStr)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID"})
+		BadRequest(c, "Invalid user ID")
 		return
 	}
 
@@ -47,12 +47,12 @@ func UpdateUserRole(c *gin.Context) {
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		BadRequest(c, err.Error())
 		return
 	}
 
 	if req.Role != "admin" && req.Role != "user" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid role specified. Must be 'admin' or 'user'."})
+		BadRequest(c, "Invalid role specified. Must be 'admin' or 'user'.")
 		return
 	}
 
@@ -65,7 +65,7 @@ func UpdateUserRole(c *gin.Context) {
 			var currentRole string
 			db.DB.QueryRow("SELECT role FROM users WHERE id = ?", userId).Scan(&currentRole)
 			if currentRole == "admin" {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "Cannot demote the last remaining admin."})
+				BadRequest(c, "Cannot demote the last remaining admin.")
 				return
 			}
 		}
@@ -74,7 +74,7 @@ func UpdateUserRole(c *gin.Context) {
 	_, err = db.DB.Exec("UPDATE users SET role = ? WHERE id = ?", req.Role, userId)
 	if err != nil {
 		slog.Error("updating user role", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update role"})
+		InternalError(c, "Failed to update role")
 		return
 	}
 
@@ -85,7 +85,7 @@ func DeleteUser(c *gin.Context) {
 	idStr := c.Param("id")
 	userId, err := strconv.Atoi(idStr)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID"})
+		BadRequest(c, "Invalid user ID")
 		return
 	}
 
@@ -93,7 +93,7 @@ func DeleteUser(c *gin.Context) {
 	var currentRole string
 	err = db.DB.QueryRow("SELECT role FROM users WHERE id = ?", userId).Scan(&currentRole)
 	if err == sql.ErrNoRows {
-		c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
+		NotFoundError(c, "User not found")
 		return
 	}
 
@@ -101,7 +101,7 @@ func DeleteUser(c *gin.Context) {
 		var count int
 		db.DB.QueryRow("SELECT COUNT(*) FROM users WHERE role = 'admin'").Scan(&count)
 		if count <= 1 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Cannot delete the last remaining admin."})
+			BadRequest(c, "Cannot delete the last remaining admin.")
 			return
 		}
 	}
@@ -109,7 +109,7 @@ func DeleteUser(c *gin.Context) {
 	_, err = db.DB.Exec("DELETE FROM users WHERE id = ?", userId)
 	if err != nil {
 		slog.Error("deleting user", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete user"})
+		InternalError(c, "Failed to delete user")
 		return
 	}
 

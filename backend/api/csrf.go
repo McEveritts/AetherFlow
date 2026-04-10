@@ -14,7 +14,7 @@ import (
 func issueCSRFToken(c *gin.Context) {
 	tokenBytes := make([]byte, 32)
 	if _, err := rand.Read(tokenBytes); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate CSRF token"})
+		InternalError(c, "Failed to generate CSRF token")
 		return
 	}
 	token := hex.EncodeToString(tokenBytes)

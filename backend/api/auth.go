@@ -152,7 +152,7 @@ func LocalLogin(c *gin.Context) {
 	// Issue JWT via centralized factory (includes jti + short expiry + client fingerprint)
 	tokenString, err := createStandardJWT(user.ID, c)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create session"})
+		InternalError(c, "Failed to create session")
 		return
 	}
 
@@ -176,7 +176,7 @@ func checkSetupNeeded() (bool, error) {
 func CheckSetupNeeded(c *gin.Context) {
 	needed, err := checkSetupNeeded()
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify setup state"})
+		InternalError(c, "Failed to verify setup state")
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"setupRequired": needed})
@@ -187,7 +187,7 @@ func GoogleLogin(c *gin.Context) {
 	redirectUri := os.Getenv("GOOGLE_REDIRECT_URI")
 
 	if clientId == "" || redirectUri == "" {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "OAuth not configured"})
+		InternalError(c, "OAuth not configured")
 		return
 	}
 
@@ -195,7 +195,7 @@ func GoogleLogin(c *gin.Context) {
 	stateBytes := make([]byte, 32)
 	if _, err := rand.Read(stateBytes); err != nil {
 		slog.Error("crypto/rand failure during OAuth state generation", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate secure state"})
+		InternalError(c, "Failed to generate secure state")
 		return
 	}
 	state := hex.EncodeToString(stateBytes)
@@ -457,13 +457,13 @@ func resolveSessionToken(c *gin.Context) (string, jwt.MapClaims, error) {
 func GetSession(c *gin.Context) {
 	_, claims, err := resolveSessionToken(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		Unauthorized(c, "Unauthorized")
 		return
 	}
 
 	userIdFloat, ok := claims["user_id"].(float64)
 	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid token claims"})
+		Unauthorized(c, "Invalid token claims")
 		return
 	}
 	userId := int(userIdFloat)
@@ -475,7 +475,7 @@ func GetSession(c *gin.Context) {
 	user.IsOAuth = googleId.Valid && googleId.String != ""
 
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "User not found"})
+		Unauthorized(c, "User not found")
 		return
 	}
 
@@ -570,12 +570,12 @@ func UpdateProfile(c *gin.Context) {
 	// Use the user_id already validated and set by AuthMiddleware()
 	rawUserID, exists := c.Get("user_id")
 	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		Unauthorized(c, "Unauthorized")
 		return
 	}
 	userId, ok := rawUserID.(int)
 	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid user context"})
+		Unauthorized(c, "Invalid user context")
 		return
 	}
 
@@ -584,14 +584,14 @@ func UpdateProfile(c *gin.Context) {
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		BadRequest(c, err.Error())
 		return
 	}
 
 	_, err := db.DB.Exec("UPDATE users SET email = ? WHERE id = ?", req.Email, userId)
 	if err != nil {
 		slog.Error("profile update error", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update profile"})
+		InternalError(c, "Failed to update profile")
 		return
 	}
 
@@ -669,7 +669,7 @@ func ListActiveSessions(c *gin.Context) {
 		userID,
 	)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query sessions"})
+		InternalError(c, "Failed to query sessions")
 		return
 	}
 	defer rows.Close()
@@ -719,7 +719,7 @@ func RevokeSession(c *gin.Context) {
 	jtiPrefix := c.Param("jti")
 
 	if jtiPrefix == "" || len(jtiPrefix) < 8 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid session identifier"})
+		BadRequest(c, "Invalid session identifier")
 		return
 	}
 
@@ -734,7 +734,7 @@ func RevokeSession(c *gin.Context) {
 		jtiPrefix+"%", userID,
 	).Scan(&fullJTI, &expiresAt)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Session not found"})
+		NotFoundError(c, "Session not found")
 		return
 	}
 

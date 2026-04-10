@@ -57,7 +57,7 @@ func GetFilesList(c *gin.Context) {
 	files, err := os.ReadDir(uploadDir)
 	if err != nil {
 		slog.Error("reading upload directory", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to read files directory"})
+		InternalError(c, "Failed to read files directory")
 		return
 	}
 
@@ -141,30 +141,30 @@ func UploadFile(c *gin.Context) {
 	file, err := c.FormFile("file")
 	if err != nil {
 		if err.Error() == "http: request body too large" {
-			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "File exceeds maximum allowed size of 50 MB"})
+			RespondError(c, http.StatusRequestEntityTooLarge, "PAYLOAD_TOO_LARGE", "File exceeds maximum allowed size of 50 MB")
 			return
 		}
-		c.JSON(http.StatusBadRequest, gin.H{"error": "No file uploaded or invalid payload"})
+		BadRequest(c, "No file uploaded or invalid payload")
 		return
 	}
 
 	// Enforce file size limit at header level too
 	if file.Size > maxUploadSize {
-		c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "File exceeds maximum allowed size of 50 MB"})
+		RespondError(c, http.StatusRequestEntityTooLarge, "PAYLOAD_TOO_LARGE", "File exceeds maximum allowed size of 50 MB")
 		return
 	}
 
 	// Sanitize filename (strips nulls, checks all extensions)
 	safeName, err := sanitizeFilename(file.Filename)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		BadRequest(c, err.Error())
 		return
 	}
 
 	// Content-type sniffing: read first 512 bytes to detect actual content type
 	src, err := file.Open()
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to read file"})
+		InternalError(c, "Failed to read file")
 		return
 	}
 	defer src.Close()
@@ -174,7 +174,7 @@ func UploadFile(c *gin.Context) {
 	detectedType := http.DetectContentType(sniffBuf[:n])
 
 	if blockedContentTypes[detectedType] {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "File content type not allowed: " + detectedType})
+		BadRequest(c, "File content type not allowed: " + detectedType)
 		return
 	}
 
@@ -183,7 +183,7 @@ func UploadFile(c *gin.Context) {
 
 	if err := c.SaveUploadedFile(file, dst); err != nil {
 		slog.Error("failed to save uploaded file", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save file securely"})
+		InternalError(c, "Failed to save file securely")
 		return
 	}
 
@@ -200,7 +200,7 @@ func HandleDownloadFile(c *gin.Context) {
 	// Ensure no path traversal and valid naming occurs
 	safeName, err := sanitizeFilename(filename)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		BadRequest(c, err.Error())
 		return
 	}
 
@@ -208,7 +208,7 @@ func HandleDownloadFile(c *gin.Context) {
 	filePath := filepath.Join(uploadDir, safeName)
 
 	if _, err := os.Stat(filePath); os.IsNotExist(err) {
-		c.JSON(http.StatusNotFound, gin.H{"error": "File not found"})
+		NotFoundError(c, "File not found")
 		return
 	}
 

@@ -32,7 +32,7 @@ type App struct {
 func GetMarketplaceApps(c *gin.Context) {
 	pkgs, err := services.GetPackages()
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load package catalog configuration"})
+		InternalError(c, "Failed to load package catalog configuration")
 		return
 	}
 
@@ -86,16 +86,16 @@ func InstallPackage(c *gin.Context) {
 
 	pkg, err := getPackageById(pkgId)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load package catalog configuration"})
+		InternalError(c, "Failed to load package catalog configuration")
 		return
 	}
 	if pkg == nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Package not found"})
+		NotFoundError(c, "Package not found")
 		return
 	}
 
 	if pkg.Status == "installing" || pkg.Status == "uninstalling" {
-		c.JSON(http.StatusConflict, gin.H{"error": "Package is already modifying state"})
+		ConflictError(c, "Package is already modifying state")
 		return
 	}
 
@@ -115,16 +115,16 @@ func UninstallPackage(c *gin.Context) {
 
 	pkg, err := getPackageById(pkgId)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load package catalog configuration"})
+		InternalError(c, "Failed to load package catalog configuration")
 		return
 	}
 	if pkg == nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Package not found"})
+		NotFoundError(c, "Package not found")
 		return
 	}
 
 	if pkg.Status == "installing" || pkg.Status == "uninstalling" {
-		c.JSON(http.StatusConflict, gin.H{"error": "Package is already modifying state"})
+		ConflictError(c, "Package is already modifying state")
 		return
 	}
 

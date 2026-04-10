@@ -20,31 +20,31 @@ type MetadataScanRequest struct {
 func HandleMetadataScan(c *gin.Context) {
 	var req MetadataScanRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		BadRequest(c, err.Error())
 		return
 	}
 
 	// Sanitize and validate path
 	cleanPath := filepath.Clean(req.Path)
 	if strings.Contains(cleanPath, "..") {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Path traversal not allowed"})
+		BadRequest(c, "Path traversal not allowed")
 		return
 	}
 
 	if _, err := os.Stat(cleanPath); os.IsNotExist(err) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Directory does not exist"})
+		BadRequest(c, "Directory does not exist")
 		return
 	}
 
 	if services.Enricher.IsScanning() {
-		c.JSON(http.StatusConflict, gin.H{"error": "A scan is already in progress"})
+		ConflictError(c, "A scan is already in progress")
 		return
 	}
 
 	// Get API key (always decrypted)
 	apiKey, err := GetDecryptedGeminiKey()
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		InternalError(c, err.Error())
 		return
 	}
 
@@ -65,7 +65,7 @@ func HandleMetadataStatus(c *gin.Context) {
 func HandleMetadataResults(c *gin.Context) {
 	results, err := services.GetStoredMetadata()
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query metadata: " + err.Error()})
+		InternalError(c, "Failed to query metadata: " + err.Error())
 		return
 	}
 	if results == nil {

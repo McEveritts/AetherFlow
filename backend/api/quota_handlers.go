@@ -29,6 +29,23 @@ func quotaErrorStatus(err error) int {
 	}
 }
 
+func quotaErrorCode(err error) string {
+	if err == nil {
+		return ""
+	}
+	message := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(message, "not found"), strings.Contains(message, "no rows"):
+		return ErrCodeNotFound
+	case strings.Contains(message, "invalid"):
+		return ErrCodeBadRequest
+	case strings.Contains(message, "quota"):
+		return ErrCodeQuotaExceeded
+	default:
+		return ErrCodeInternal
+	}
+}
+
 // QuotaUploadGuard blocks uploads that would exceed the current user's configured quota.
 func QuotaUploadGuard() gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -46,7 +63,7 @@ func QuotaUploadGuard() gin.HandlerFunc {
 
 		allowed, quota, err := services.HasQuotaHeadroom(userID, c.Request.ContentLength)
 		if err != nil {
-			slog.Error("quota upload guard fallback for user %d", "value", userID, "error", err)
+			slog.Error("quota upload guard check failed", "user_id", userID, "error", err)
 			c.Next()
 			return
 		}
@@ -71,18 +88,18 @@ func QuotaUploadGuard() gin.HandlerFunc {
 func GetOwnQuota(c *gin.Context) {
 	rawUserID, exists := c.Get("user_id")
 	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Authentication required"})
+		Unauthorized(c, "Authentication required")
 		return
 	}
 	userID, ok := rawUserID.(int)
 	if !ok {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Invalid user context"})
+		InternalError(c, "Invalid user context")
 		return
 	}
 
 	record, err := services.GetUserQuotaRecord(userID)
 	if err != nil {
-		c.JSON(quotaErrorStatus(err), gin.H{"error": err.Error()})
+		RespondError(c, quotaErrorStatus(err), quotaErrorCode(err), err.Error())
 		return
 	}
 
@@ -92,7 +109,7 @@ func GetOwnQuota(c *gin.Context) {
 func ListUserQuotas(c *gin.Context) {
 	records, err := services.ListUserQuotaRecords()
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query quota records"})
+		InternalError(c, "Failed to query quota records")
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"quotas": records})
@@ -101,7 +118,7 @@ func ListUserQuotas(c *gin.Context) {
 func UpdateUserQuota(c *gin.Context) {
 	userID, err := strconv.Atoi(c.Param("id"))
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID"})
+		BadRequest(c, "Invalid user ID")
 		return
 	}
 
@@ -113,7 +130,7 @@ func UpdateUserQuota(c *gin.Context) {
 		BillingExternalID string `json:"billing_external_id"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		BadRequest(c, err.Error())
 		return
 	}
 
@@ -121,19 +138,19 @@ func UpdateUserQuota(c *gin.Context) {
 	if quotaBytes <= 0 && strings.TrimSpace(req.Quota) != "" {
 		parsed, err := services.ParseHumanSize(req.Quota)
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			BadRequest(c, err.Error())
 			return
 		}
 		quotaBytes = parsed
 	}
 	if quotaBytes <= 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "quota_bytes or quota is required"})
+		BadRequest(c, "quota_bytes or quota is required")
 		return
 	}
 
 	record, err := services.SetQuotaForUserID(userID, quotaBytes, req.Source, req.BillingProvider, req.BillingExternalID)
 	if err != nil {
-		c.JSON(quotaErrorStatus(err), gin.H{"error": err.Error()})
+		RespondError(c, quotaErrorStatus(err), quotaErrorCode(err), err.Error())
 		return
 	}
 
@@ -146,13 +163,13 @@ func UpdateUserQuota(c *gin.Context) {
 func RefreshUserQuota(c *gin.Context) {
 	userID, err := strconv.Atoi(c.Param("id"))
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID"})
+		BadRequest(c, "Invalid user ID")
 		return
 	}
 
 	record, err := services.RefreshUserQuotaRecord(userID)
 	if err != nil {
-		c.JSON(quotaErrorStatus(err), gin.H{"error": err.Error()})
+		RespondError(c, quotaErrorStatus(err), quotaErrorCode(err), err.Error())
 		return
 	}
 
@@ -164,19 +181,19 @@ func HandleBillingWebhook(c *gin.Context) {
 	switch provider {
 	case "whmcs", "blesta":
 	default:
-		c.JSON(http.StatusNotFound, gin.H{"error": "Unsupported billing provider"})
+		NotFoundError(c, "Unsupported billing provider")
 		return
 	}
 
 	body, err := io.ReadAll(http.MaxBytesReader(c.Writer, c.Request.Body, 1<<20))
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to read webhook body"})
+		BadRequest(c, "Failed to read webhook body")
 		return
 	}
 
 	result, err := services.ProcessBillingWebhook(provider, c.Request.Header, body)
 	if err != nil {
-		c.JSON(quotaErrorStatus(err), gin.H{"error": err.Error()})
+		RespondError(c, quotaErrorStatus(err), quotaErrorCode(err), err.Error())
 		return
 	}
 
@@ -193,7 +210,7 @@ func ListBillingWebhookEvents(c *gin.Context) {
 
 	events, err := services.ListBillingWebhookAudits(limit)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load billing webhook events"})
+		InternalError(c, "Failed to load billing webhook events")
 		return
 	}
 

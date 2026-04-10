@@ -18,7 +18,7 @@ func GetNetworkStatus(c *gin.Context) {
 func GetWireGuardPeers(c *gin.Context) {
 	peers, err := services.GetWireGuardPeers()
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		InternalError(c, err.Error())
 		return
 	}
 
@@ -38,12 +38,12 @@ func AddWireGuardPeer(c *gin.Context) {
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		BadRequest(c, err.Error())
 		return
 	}
 
 	if err := services.AddWireGuardPeer(req.PublicKey, req.AllowedIPs, req.Endpoint); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		InternalError(c, err.Error())
 		return
 	}
 
@@ -54,12 +54,12 @@ func AddWireGuardPeer(c *gin.Context) {
 func RemoveWireGuardPeer(c *gin.Context) {
 	publicKey := c.Param("key")
 	if publicKey == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Public key is required"})
+		BadRequest(c, "Public key is required")
 		return
 	}
 
 	if err := services.RemoveWireGuardPeer(publicKey); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		InternalError(c, err.Error())
 		return
 	}
 
@@ -70,7 +70,7 @@ func RemoveWireGuardPeer(c *gin.Context) {
 func GenerateWireGuardKeys(c *gin.Context) {
 	keyPair, err := services.GenerateWireGuardKeyPair()
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		InternalError(c, err.Error())
 		return
 	}
 
@@ -81,7 +81,7 @@ func GenerateWireGuardKeys(c *gin.Context) {
 func GetTailscaleStatus(c *gin.Context) {
 	status := services.GetNetworkStatus()
 	if status.Tailscale == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Tailscale not available on this system"})
+		RespondError(c, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Tailscale not available on this system")
 		return
 	}
 
@@ -92,7 +92,7 @@ func GetTailscaleStatus(c *gin.Context) {
 func GetTailscalePeers(c *gin.Context) {
 	peers, err := services.GetTailscalePeers()
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		InternalError(c, err.Error())
 		return
 	}
 
@@ -110,12 +110,12 @@ func AdvertiseTailscaleRoutes(c *gin.Context) {
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		BadRequest(c, err.Error())
 		return
 	}
 
 	if err := services.AdvertiseTailscaleRoutes(req.Routes); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		InternalError(c, err.Error())
 		return
 	}
 

@@ -30,7 +30,7 @@ func GetSettings(c *gin.Context) {
 
 	if err != nil {
 		slog.Error("fetching settings", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load settings"})
+		InternalError(c, "Failed to load settings")
 		return
 	}
 
@@ -51,7 +51,7 @@ func GetSettings(c *gin.Context) {
 func updateSettings(c *gin.Context) {
 	var req SettingsPayload
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		BadRequest(c, err.Error())
 		return
 	}
 
@@ -94,7 +94,7 @@ func updateSettings(c *gin.Context) {
 
 	if err != nil {
 		slog.Error("updating settings", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save settings"})
+		InternalError(c, "Failed to save settings")
 		return
 	}
 

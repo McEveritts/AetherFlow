@@ -16,13 +16,13 @@ import (
 func HandleBandwidthAnalyze(c *gin.Context) {
 	apiKey, err := GetDecryptedGeminiKey()
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		InternalError(c, err.Error())
 		return
 	}
 
 	rec, err := services.AnalyzeBandwidth(apiKey)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Bandwidth analysis failed: " + err.Error()})
+		InternalError(c, "Bandwidth analysis failed: " + err.Error())
 		return
 	}
 
@@ -36,7 +36,7 @@ func HandleBandwidthApply(c *gin.Context) {
 		DownloadKBps int `json:"download_kbps"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		BadRequest(c, err.Error())
 		return
 	}
 
@@ -57,14 +57,14 @@ func HandleBandwidthApply(c *gin.Context) {
 
 	bodyBytes, err := json.Marshal(payload)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to marshal RPC payload"})
+		InternalError(c, "Failed to marshal RPC payload")
 		return
 	}
 
 	// Assuming a local Transmission daemon for this specific bridging
 	rpcReq, err := http.NewRequest("POST", "http://127.0.0.1:9091/transmission/rpc", bytes.NewBuffer(bodyBytes))
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to construct RPC request"})
+		InternalError(c, "Failed to construct RPC request")
 		return
 	}
 	rpcReq.Header.Set("Content-Type", "application/json")
@@ -75,7 +75,7 @@ func HandleBandwidthApply(c *gin.Context) {
 
 	resp, err := client.Do(rpcReq)
 	if err != nil {
-		c.JSON(http.StatusGatewayTimeout, gin.H{"error": "Torrent daemon RPC timeout or unreachable"})
+		RespondError(c, http.StatusGatewayTimeout, "GATEWAY_TIMEOUT", "Torrent daemon RPC timeout or unreachable")
 		return
 	}
 	defer resp.Body.Close()
@@ -84,12 +84,12 @@ func HandleBandwidthApply(c *gin.Context) {
 	lr := io.LimitReader(resp.Body, 1024*1024) // 1MB payload cap
 	respBody, err := io.ReadAll(lr)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to read bounded RPC payload"})
+		InternalError(c, "Failed to read bounded RPC payload")
 		return
 	}
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusConflict {
-		c.JSON(http.StatusBadGateway, gin.H{"error": "Torrent daemon rejected RPC request", "status": resp.StatusCode})
+		RespondErrorWithDetails(c, http.StatusBadGateway, "BAD_GATEWAY", "Torrent daemon rejected RPC request", gin.H{"status": resp.StatusCode})
 		return
 	}
 

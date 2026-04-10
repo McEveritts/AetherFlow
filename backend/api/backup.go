@@ -210,7 +210,7 @@ func PerformSystemBackup() (BackupFile, error) {
 func RunBackup(c *gin.Context) {
 	bf, err := PerformSystemBackup()
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		InternalError(c, err.Error())
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{
@@ -290,31 +290,31 @@ func DownloadBackup(c *gin.Context) {
 
 	filename := c.Param("filename")
 	if filename == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Filename required"})
+		BadRequest(c, "Filename required")
 		return
 	}
 
 	backupDir := getBackupDir()
 	filePath, err := safeBackupPath(backupDir, filename)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		BadRequest(c, err.Error())
 		return
 	}
 
 	file, err := os.Open(filePath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			c.JSON(http.StatusNotFound, gin.H{"error": "Backup file not found"})
+			NotFoundError(c, "Backup file not found")
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to open backup file"})
+		InternalError(c, "Failed to open backup file")
 		return
 	}
 	defer file.Close()
 
 	info, err := file.Stat()
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to read backup metadata"})
+		InternalError(c, "Failed to read backup metadata")
 		return
 	}
 
@@ -337,7 +337,7 @@ func DownloadBackup(c *gin.Context) {
 
 	chunkIndex, err := strconv.Atoi(chunkStr)
 	if err != nil || chunkIndex < 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid chunk index"})
+		BadRequest(c, "Invalid chunk index")
 		return
 	}
 
@@ -345,7 +345,7 @@ func DownloadBackup(c *gin.Context) {
 	if sizeStr := c.Query("chunk_size"); sizeStr != "" {
 		parsed, parseErr := strconv.ParseInt(sizeStr, 10, 64)
 		if parseErr != nil || parsed <= 0 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid chunk_size"})
+			BadRequest(c, "Invalid chunk_size")
 			return
 		}
 		chunkSize = parsed
@@ -353,7 +353,7 @@ func DownloadBackup(c *gin.Context) {
 
 	start := int64(chunkIndex) * chunkSize
 	if start >= info.Size() {
-		c.JSON(http.StatusRequestedRangeNotSatisfiable, gin.H{"error": "Chunk out of range"})
+		RespondError(c, http.StatusRequestedRangeNotSatisfiable, "RANGE_NOT_SATISFIABLE", "Chunk out of range")
 		return
 	}
 
@@ -365,7 +365,7 @@ func DownloadBackup(c *gin.Context) {
 	progress := float64(end+1) / float64(info.Size()) * 100
 
 	if _, err := file.Seek(start, io.SeekStart); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to seek backup file"})
+		InternalError(c, "Failed to seek backup file")
 		return
 	}
 
@@ -384,50 +384,50 @@ func DownloadBackup(c *gin.Context) {
 func UploadBackupChunk(c *gin.Context) {
 	filename := c.Param("filename")
 	if filename == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Filename required"})
+		BadRequest(c, "Filename required")
 		return
 	}
 
 	chunkIndex, err := strconv.Atoi(c.Query("chunk"))
 	if err != nil || chunkIndex < 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "chunk query must be a non-negative integer"})
+		BadRequest(c, "chunk query must be a non-negative integer")
 		return
 	}
 
 	totalChunks, err := strconv.Atoi(c.Query("total"))
 	if err != nil || totalChunks <= 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "total query must be a positive integer"})
+		BadRequest(c, "total query must be a positive integer")
 		return
 	}
 
 	backupDir := getBackupDir()
 	if err := os.MkdirAll(backupDir, 0755); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to prepare backup directory"})
+		InternalError(c, "Failed to prepare backup directory")
 		return
 	}
 
 	finalPath, err := safeBackupPath(backupDir, filename)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		BadRequest(c, err.Error())
 		return
 	}
 
 	uploadDir := filepath.Join(backupDir, ".upload-"+filepath.Base(filename))
 	if err := os.MkdirAll(uploadDir, 0755); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to prepare upload staging directory"})
+		InternalError(c, "Failed to prepare upload staging directory")
 		return
 	}
 
 	chunkPath := filepath.Join(uploadDir, fmt.Sprintf("%06d.part", chunkIndex))
 	chunkFile, err := os.Create(chunkPath)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create chunk file"})
+		InternalError(c, "Failed to create chunk file")
 		return
 	}
 	written, copyErr := io.Copy(chunkFile, c.Request.Body)
 	closeErr := chunkFile.Close()
 	if copyErr != nil || closeErr != nil || written == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to persist chunk payload"})
+		BadRequest(c, "Failed to persist chunk payload")
 		return
 	}
 
@@ -436,7 +436,7 @@ func UploadBackupChunk(c *gin.Context) {
 
 	entries, err := os.ReadDir(uploadDir)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to inspect upload state"})
+		InternalError(c, "Failed to inspect upload state")
 		return
 	}
 
@@ -463,7 +463,7 @@ func UploadBackupChunk(c *gin.Context) {
 	tempFinalPath := finalPath + ".uploading"
 	out, err := os.Create(tempFinalPath)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to build final backup file"})
+		InternalError(c, "Failed to build final backup file")
 		return
 	}
 
@@ -473,7 +473,7 @@ func UploadBackupChunk(c *gin.Context) {
 		if err != nil {
 			out.Close()
 			os.Remove(tempFinalPath)
-			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Missing chunk %d", i)})
+			BadRequest(c, fmt.Sprintf("Missing chunk %d", i))
 			return
 		}
 
@@ -481,7 +481,7 @@ func UploadBackupChunk(c *gin.Context) {
 			part.Close()
 			out.Close()
 			os.Remove(tempFinalPath)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to assemble backup file"})
+			InternalError(c, "Failed to assemble backup file")
 			return
 		}
 		part.Close()
@@ -489,14 +489,14 @@ func UploadBackupChunk(c *gin.Context) {
 
 	if err := out.Close(); err != nil {
 		os.Remove(tempFinalPath)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to finalize assembled backup file"})
+		InternalError(c, "Failed to finalize assembled backup file")
 		return
 	}
 
 	checksum, err := computeFileSHA256(tempFinalPath)
 	if err != nil {
 		os.Remove(tempFinalPath)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to compute assembled checksum"})
+		InternalError(c, "Failed to compute assembled checksum")
 		return
 	}
 
@@ -512,19 +512,19 @@ func UploadBackupChunk(c *gin.Context) {
 
 	if err := os.Rename(tempFinalPath, finalPath); err != nil {
 		os.Remove(tempFinalPath)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to activate assembled backup file"})
+		InternalError(c, "Failed to activate assembled backup file")
 		return
 	}
 
 	if err := writeStoredChecksum(finalPath, checksum); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Backup uploaded but checksum persistence failed"})
+		InternalError(c, "Backup uploaded but checksum persistence failed")
 		return
 	}
 
 	_ = os.RemoveAll(uploadDir)
 	info, statErr := os.Stat(finalPath)
 	if statErr != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Upload completed but file metadata lookup failed"})
+		InternalError(c, "Upload completed but file metadata lookup failed")
 		return
 	}
 

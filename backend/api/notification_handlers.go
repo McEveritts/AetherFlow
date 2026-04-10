@@ -33,7 +33,7 @@ func GetNotifications(c *gin.Context) {
 		userID, limit, offset,
 	)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query notifications"})
+		InternalError(c, "Failed to query notifications")
 		return
 	}
 	defer rows.Close()
@@ -67,12 +67,12 @@ func MarkNotificationRead(c *gin.Context) {
 	id := c.Param("id")
 	result, err := db.DB.Exec("UPDATE notifications SET read = 1 WHERE id = ? AND user_id = ?", id, userID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update notification"})
+		InternalError(c, "Failed to update notification")
 		return
 	}
 	rowsAffected, _ := result.RowsAffected()
 	if rowsAffected == 0 {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Notification not found"})
+		NotFoundError(c, "Notification not found")
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"message": "Notification marked as read"})
@@ -83,7 +83,7 @@ func DismissAllNotifications(c *gin.Context) {
 	userID, _ := c.Get("user_id")
 	_, err := db.DB.Exec("UPDATE notifications SET read = 1 WHERE user_id = ? AND read = 0", userID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to dismiss notifications"})
+		InternalError(c, "Failed to dismiss notifications")
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"message": "All notifications dismissed"})
@@ -95,7 +95,7 @@ func DismissAllNotifications(c *gin.Context) {
 func GetNotificationRules(c *gin.Context) {
 	rows, err := db.DB.Query("SELECT id, name, condition_type, condition_value, level, enabled, created_at FROM notification_rules ORDER BY created_at DESC")
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query rules"})
+		InternalError(c, "Failed to query rules")
 		return
 	}
 	defer rows.Close()
@@ -126,14 +126,14 @@ func CreateNotificationRule(c *gin.Context) {
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		BadRequest(c, err.Error())
 		return
 	}
 
 	// Validate condition type
 	validTypes := map[string]bool{"disk_usage": true, "cpu_usage": true, "memory_usage": true, "service_down": true}
 	if !validTypes[req.ConditionType] {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid condition_type. Allowed: disk_usage, cpu_usage, memory_usage, service_down"})
+		BadRequest(c, "Invalid condition_type. Allowed: disk_usage, cpu_usage, memory_usage, service_down")
 		return
 	}
 
@@ -146,7 +146,7 @@ func CreateNotificationRule(c *gin.Context) {
 		req.Name, req.ConditionType, req.ConditionValue, req.Level,
 	)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create rule"})
+		InternalError(c, "Failed to create rule")
 		return
 	}
 
@@ -173,7 +173,7 @@ func UpdateNotificationRule(c *gin.Context) {
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		BadRequest(c, err.Error())
 		return
 	}
 
@@ -203,7 +203,7 @@ func UpdateNotificationRule(c *gin.Context) {
 	}
 
 	if len(updates) == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "No fields to update"})
+		BadRequest(c, "No fields to update")
 		return
 	}
 
@@ -219,7 +219,7 @@ func UpdateNotificationRule(c *gin.Context) {
 
 	_, err := db.DB.Exec(query, args...)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update rule"})
+		InternalError(c, "Failed to update rule")
 		return
 	}
 
@@ -235,7 +235,7 @@ func DeleteNotificationRule(c *gin.Context) {
 	id := c.Param("id")
 	_, err := db.DB.Exec("DELETE FROM notification_rules WHERE id = ?", id)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete rule"})
+		InternalError(c, "Failed to delete rule")
 		return
 	}
 
@@ -252,7 +252,7 @@ func DeleteNotificationRule(c *gin.Context) {
 func GetNotificationChannels(c *gin.Context) {
 	rows, err := db.DB.Query("SELECT id, name, type, config, enabled, created_at FROM notification_channels ORDER BY created_at DESC")
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query channels"})
+		InternalError(c, "Failed to query channels")
 		return
 	}
 	defer rows.Close()
@@ -283,14 +283,14 @@ func CreateNotificationChannel(c *gin.Context) {
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		BadRequest(c, err.Error())
 		return
 	}
 
 	// Validate type
 	validTypes := map[string]bool{"discord": true, "telegram": true, "slack": true, "custom": true}
 	if !validTypes[req.Type] {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid channel type. Allowed: discord, telegram, slack, custom"})
+		BadRequest(c, "Invalid channel type. Allowed: discord, telegram, slack, custom")
 		return
 	}
 
@@ -300,7 +300,7 @@ func CreateNotificationChannel(c *gin.Context) {
 	)
 	if err != nil {
 		slog.Error("failed to create notification channel", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create channel"})
+		InternalError(c, "Failed to create channel")
 		return
 	}
 
@@ -321,7 +321,7 @@ func TestNotificationChannel(c *gin.Context) {
 	err := db.DB.QueryRow("SELECT id, name, type, config, enabled, created_at FROM notification_channels WHERE id = ?", id).
 		Scan(&ch.ID, &ch.Name, &ch.Type, &ch.Config, &ch.Enabled, &ch.CreatedAt)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Channel not found"})
+		NotFoundError(c, "Channel not found")
 		return
 	}
 
@@ -337,7 +337,7 @@ func DeleteNotificationChannel(c *gin.Context) {
 	id := c.Param("id")
 	_, err := db.DB.Exec("DELETE FROM notification_channels WHERE id = ?", id)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete channel"})
+		InternalError(c, "Failed to delete channel")
 		return
 	}
 

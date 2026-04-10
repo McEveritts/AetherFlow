@@ -293,12 +293,12 @@ func controlService(c *gin.Context) {
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		BadRequest(c, err.Error())
 		return
 	}
 
 	if !allowedActions[req.Action] {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid action. Allowed: start, stop, restart"})
+		BadRequest(c, "Invalid action. Allowed: start, stop, restart")
 		return
 	}
 
@@ -315,7 +315,7 @@ func controlService(c *gin.Context) {
 	}
 
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to " + req.Action + " service: " + err.Error()})
+		InternalError(c, "Failed to " + req.Action + " service: " + err.Error())
 		return
 	}
 

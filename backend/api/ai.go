@@ -57,7 +57,7 @@ func runChatSession(c *gin.Context, systemPrompt string, modelOverride string, h
 	ctx := context.Background()
 	bundle, err := getGeminiBundle(ctx)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		InternalError(c, err.Error())
 		return
 	}
 	defer bundle.Client.Close()
@@ -65,7 +65,7 @@ func runChatSession(c *gin.Context, systemPrompt string, modelOverride string, h
 	aiModel := bundle.DefaultModel
 	if modelOverride != "" {
 		if !allowedAIModels[modelOverride] {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid AI model. Check settings for available models."})
+			BadRequest(c, "Invalid AI model. Check settings for available models.")
 			return
 		}
 		aiModel = modelOverride
@@ -99,7 +99,7 @@ func runChatSession(c *gin.Context, systemPrompt string, modelOverride string, h
 
 	resp, err := session.SendMessage(ctx, genai.Text(message))
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Generation error: %v", err)})
+		InternalError(c, fmt.Sprintf("Generation error: %v", err))
 		return
 	}
 
@@ -121,7 +121,7 @@ func runChatSession(c *gin.Context, systemPrompt string, modelOverride string, h
 func handleAiChat(c *gin.Context) {
 	var req ChatRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		BadRequest(c, err.Error())
 		return
 	}
 
@@ -134,7 +134,7 @@ func handleAiChat(c *gin.Context) {
 func handleAiSupport(c *gin.Context) {
 	var req SupportChatRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		BadRequest(c, err.Error())
 		return
 	}
 
@@ -143,14 +143,14 @@ func handleAiSupport(c *gin.Context) {
 		req.ContextMode = "full"
 	}
 	if !allowedContextModes[req.ContextMode] {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid context_mode. Allowed: logs, metrics, full"})
+		BadRequest(c, "Invalid context_mode. Allowed: logs, metrics, full")
 		return
 	}
 
 	// Strictly verify admin role before allowing access to system logs or metrics context!
 	role, exists := c.Get("user_role")
 	if !exists || role != "admin" {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Forbidden: Admin access required for AI support diagnostics"})
+		Forbidden(c, "Forbidden: Admin access required for AI support diagnostics")
 		return
 	}
 
@@ -158,7 +158,7 @@ func handleAiSupport(c *gin.Context) {
 	ctx := context.Background()
 	bundle, err := getGeminiBundle(ctx)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		InternalError(c, err.Error())
 		return
 	}
 	bundle.Client.Close() // We only needed settings; runChatSession creates its own client
@@ -198,7 +198,7 @@ func TestAiConnection(c *gin.Context) {
 		var savedKey string
 		err := db.DB.QueryRow("SELECT COALESCE(gemini_api_key, '') FROM settings WHERE id = 1").Scan(&savedKey)
 		if err != nil || savedKey == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "No API key saved. Please enter and save a key first."})
+			BadRequest(c, "No API key saved. Please enter and save a key first.")
 			return
 		}
 		// Decrypt if stored encrypted
@@ -211,7 +211,7 @@ func TestAiConnection(c *gin.Context) {
 	ctx := context.Background()
 	client, err := genai.NewClient(ctx, option.WithAPIKey(keyToTest))
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Initialization error: %v", err)})
+		InternalError(c, fmt.Sprintf("Initialization error: %v", err))
 		return
 	}
 	defer client.Close()
@@ -219,7 +219,7 @@ func TestAiConnection(c *gin.Context) {
 	model := client.GenerativeModel("gemini-2.0-flash")
 	resp, err := model.GenerateContent(ctx, genai.Text("Reply with the exact word: SUCCESS"))
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "API Key is invalid or quota exceeded"})
+		Unauthorized(c, "API Key is invalid or quota exceeded")
 		return
 	}
 
