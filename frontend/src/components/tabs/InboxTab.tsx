@@ -1,66 +1,124 @@
-import { useState } from 'react';
-import { Mail, CheckCircle, XCircle, AlertTriangle, ShieldAlert, Code, ServerCrash } from 'lucide-react';
+import { useState, useEffect, useCallback } from 'react';
+import { Mail, CheckCircle, XCircle, AlertTriangle, ShieldAlert, Code, RefreshCw, Loader2 } from 'lucide-react';
 import { useToast } from '@/contexts/ToastContext';
+import { apiFetch } from '@/lib/fetcher';
 
 interface PendingAction {
-    id: string;
-    intent: string;
-    source: 'FlowAI' | 'Marketplace' | 'System';
-    timestamp: string;
-    impactLevel: 'low' | 'medium' | 'high' | 'critical';
-    blastRadius: string;
-    payloadDiff?: string;
+    id: number;
+    classification: string;
+    source: string;
+    action: string;
+    reason: string;
+    status: string;
+    created_at: string;
+    resolved_at?: string;
+    resolved_by?: string;
+    execution_log?: string;
 }
 
-const MOCK_ACTIONS: PendingAction[] = [
-    {
-        id: 'req_1092',
-        intent: 'Automated remediation: Restart crashing NGINX reverse-proxy container',
-        source: 'FlowAI',
-        timestamp: '2 mins ago',
-        impactLevel: 'medium',
-        blastRadius: 'Temporary disruption of external web traffic mapping (approx. 5-10 seconds drop).',
-    },
-    {
-        id: 'req_1093',
-        intent: 'Marketplace Install: Nextcloud Stack',
-        source: 'Marketplace',
-        timestamp: '14 mins ago',
-        impactLevel: 'high',
-        blastRadius: 'Provisions 3 new containers (DB, Redis, App) and modifies wildcard SSL routing rules.',
-        payloadDiff: `+ Add route: cloud.aetherflow.local -> 10.0.0.94:80
-+ Volume mount: /mnt/aether_pool/nextcloud_data
-- Remove route fallback (default)`
-    },
-    {
-        id: 'req_1094',
-        intent: 'Emergency Core Patch: CVE-2026-X1192',
-        source: 'System',
-        timestamp: '1 hr ago',
-        impactLevel: 'critical',
-        blastRadius: 'Requires full host orbital reboot. All services will go offline for 60-120 seconds.',
+interface ActionsResponse {
+    actions: PendingAction[];
+    filter: string;
+    count: number;
+}
+
+const classificationColors: Record<string, string> = {
+    safe: 'text-emerald-400 bg-emerald-500/10 border-emerald-500/30',
+    warn: 'text-amber-400 bg-amber-500/10 border-amber-500/30',
+    critical: 'text-red-400 bg-red-500/10 border-red-500/30',
+};
+
+function formatTimestamp(iso: string): string {
+    try {
+        const date = new Date(iso);
+        const now = new Date();
+        const diffMs = now.getTime() - date.getTime();
+        const diffMins = Math.floor(diffMs / 60000);
+        if (diffMins < 1) return 'Just now';
+        if (diffMins < 60) return `${diffMins} min${diffMins > 1 ? 's' : ''} ago`;
+        const diffHours = Math.floor(diffMins / 60);
+        if (diffHours < 24) return `${diffHours} hr${diffHours > 1 ? 's' : ''} ago`;
+        return date.toLocaleDateString();
+    } catch {
+        return iso;
     }
-];
+}
 
 export default function InboxTab() {
     const { addToast } = useToast();
-    const [actions, setActions] = useState<PendingAction[]>(MOCK_ACTIONS);
+    const [actions, setActions] = useState<PendingAction[]>([]);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState<string | null>(null);
+    const [processingIds, setProcessingIds] = useState<Set<number>>(new Set());
 
-    const handleApprove = (id: string, intent: string) => {
-        setActions(prev => prev.filter(a => a.id !== id));
-        addToast(`Execution authorized: ${intent}`, 'success');
+    const fetchActions = useCallback(async () => {
+        try {
+            setError(null);
+            const res = await apiFetch('/api/v1/admin/actions/pending?status=pending');
+            if (!res.ok) {
+                throw new Error(`Failed to fetch actions: ${res.status}`);
+            }
+            const data: ActionsResponse = await res.json();
+            setActions(data.actions || []);
+        } catch (err) {
+            const message = err instanceof Error ? err.message : 'Failed to load pending actions';
+            setError(message);
+        } finally {
+            setLoading(false);
+        }
+    }, []);
+
+    useEffect(() => {
+        fetchActions();
+        // Poll every 10 seconds for new actions
+        const interval = setInterval(fetchActions, 10_000);
+        return () => clearInterval(interval);
+    }, [fetchActions]);
+
+    const handleApprove = async (id: number, action: string) => {
+        setProcessingIds(prev => new Set(prev).add(id));
+        try {
+            const res = await apiFetch(`/api/v1/admin/actions/${id}/approve`, {
+                method: 'POST',
+            });
+            if (!res.ok) {
+                const data = await res.json().catch(() => ({}));
+                throw new Error(data.message || `Approval failed: ${res.status}`);
+            }
+            setActions(prev => prev.filter(a => a.id !== id));
+            addToast(`Execution authorized: ${action}`, 'success');
+        } catch (err) {
+            addToast(err instanceof Error ? err.message : 'Approval failed', 'error');
+        } finally {
+            setProcessingIds(prev => {
+                const next = new Set(prev);
+                next.delete(id);
+                return next;
+            });
+        }
     };
 
-    const handleReject = (id: string) => {
-        setActions(prev => prev.filter(a => a.id !== id));
-        addToast('Action rejected. Execution halted.', 'info');
-    };
-
-    const impactColors = {
-        low: 'text-emerald-400 bg-emerald-500/10 border-emerald-500/30',
-        medium: 'text-amber-400 bg-amber-500/10 border-amber-500/30',
-        high: 'text-orange-400 bg-orange-500/10 border-orange-500/30',
-        critical: 'text-red-400 bg-red-500/10 border-red-500/30',
+    const handleReject = async (id: number) => {
+        setProcessingIds(prev => new Set(prev).add(id));
+        try {
+            const res = await apiFetch(`/api/v1/admin/actions/${id}/reject`, {
+                method: 'POST',
+            });
+            if (!res.ok) {
+                const data = await res.json().catch(() => ({}));
+                throw new Error(data.message || `Rejection failed: ${res.status}`);
+            }
+            setActions(prev => prev.filter(a => a.id !== id));
+            addToast('Action rejected. Execution halted.', 'info');
+        } catch (err) {
+            addToast(err instanceof Error ? err.message : 'Rejection failed', 'error');
+        } finally {
+            setProcessingIds(prev => {
+                const next = new Set(prev);
+                next.delete(id);
+                return next;
+            });
+        }
     };
 
     return (
@@ -78,18 +136,56 @@ export default function InboxTab() {
                             </span>
                         )}
                     </h2>
-                    <p className="text-sm text-slate-400">Strict operator consent required.</p>
+                    <div className="flex items-center gap-3">
+                        <p className="text-sm text-slate-400">Strict operator consent required.</p>
+                        <button
+                            onClick={() => { setLoading(true); fetchActions(); }}
+                            className="glass-button p-2 rounded-xl hover:border-indigo-500/30"
+                            title="Refresh"
+                        >
+                            <RefreshCw size={16} className={loading ? 'animate-spin text-indigo-400' : 'text-slate-400'} />
+                        </button>
+                    </div>
                 </div>
 
                 <div className="space-y-6 relative z-10">
-                    {actions.length === 0 ? (
+                    {/* Loading state */}
+                    {loading && actions.length === 0 && !error && (
+                        <div className="flex flex-col items-center justify-center py-20 text-slate-500">
+                            <Loader2 size={48} className="text-indigo-500/30 mb-4 animate-spin" />
+                            <h3 className="text-lg font-bold text-slate-300">Loading Actions</h3>
+                            <p className="text-sm">Fetching pending actions from the trust spine...</p>
+                        </div>
+                    )}
+
+                    {/* Error state */}
+                    {error && (
+                        <div className="flex flex-col items-center justify-center py-20 text-slate-500">
+                            <AlertTriangle size={48} className="text-red-500/30 mb-4" />
+                            <h3 className="text-lg font-bold text-red-300">Connection Error</h3>
+                            <p className="text-sm mb-4">{error}</p>
+                            <button
+                                onClick={() => { setLoading(true); setError(null); fetchActions(); }}
+                                className="glass-button-primary px-4 py-2 rounded-xl text-sm"
+                            >
+                                Retry
+                            </button>
+                        </div>
+                    )}
+
+                    {/* Empty state */}
+                    {!loading && !error && actions.length === 0 && (
                         <div className="flex flex-col items-center justify-center py-20 text-slate-500">
                             <CheckCircle size={48} className="text-emerald-500/20 mb-4" />
                             <h3 className="text-lg font-bold text-slate-300">Queue Empty</h3>
                             <p className="text-sm">No pending automated actions require your authorization.</p>
                         </div>
-                    ) : (
-                        actions.map(action => (
+                    )}
+
+                    {/* Action list */}
+                    {!error && actions.map(action => {
+                        const isProcessing = processingIds.has(action.id);
+                        return (
                             <div key={action.id} className="bg-slate-900/60 border border-white/10 rounded-2xl p-6 transition-all hover:border-indigo-500/30">
                                 <div className="flex flex-col lg:flex-row justify-between items-start gap-6">
                                     
@@ -99,33 +195,31 @@ export default function InboxTab() {
                                             <span className="text-xs font-bold uppercase tracking-wider text-slate-400 border border-white/10 px-2 py-1 rounded bg-white/5">
                                                 {action.source}
                                             </span>
-                                            <span className="text-xs text-slate-500">{action.timestamp}</span>
-                                            <span className={`text-[10px] font-bold uppercase tracking-widest px-2 py-1 rounded border ${impactColors[action.impactLevel]} flex items-center gap-1`}>
-                                                {action.impactLevel === 'critical' && <ShieldAlert size={12} />}
-                                                {action.impactLevel} Impact Radius
+                                            <span className="text-xs text-slate-500">{formatTimestamp(action.created_at)}</span>
+                                            <span className={`text-[10px] font-bold uppercase tracking-widest px-2 py-1 rounded border ${classificationColors[action.classification] || classificationColors.warn} flex items-center gap-1`}>
+                                                {action.classification === 'critical' && <ShieldAlert size={12} />}
+                                                {action.classification}
                                             </span>
                                         </div>
 
-                                        <h3 className="text-lg font-bold text-slate-200">{action.intent}</h3>
+                                        <h3 className="text-lg font-bold text-slate-200">{action.action}</h3>
 
-                                        <div className="bg-white/5 rounded-xl p-4 border border-white/5">
-                                            <div className="text-xs font-bold text-slate-400 mb-1 flex items-center gap-2 uppercase tracking-wide">
-                                                <AlertTriangle size={14} className="text-amber-400" /> Blast Radius
+                                        {action.reason && (
+                                            <div className="bg-white/5 rounded-xl p-4 border border-white/5">
+                                                <div className="text-xs font-bold text-slate-400 mb-1 flex items-center gap-2 uppercase tracking-wide">
+                                                    <AlertTriangle size={14} className="text-amber-400" /> Reason
+                                                </div>
+                                                <p className="text-sm text-slate-300 left-border-accent">{action.reason}</p>
                                             </div>
-                                            <p className="text-sm text-slate-300 left-border-accent">{action.blastRadius}</p>
-                                        </div>
+                                        )}
 
-                                        {action.payloadDiff && (
+                                        {action.execution_log && (
                                             <div className="bg-slate-950 rounded-xl p-4 border border-white/5 overflow-x-auto">
                                                 <div className="text-xs font-bold text-slate-400 mb-2 flex items-center gap-2 uppercase tracking-wide">
-                                                    <Code size={14} className="text-indigo-400" /> Diff Matrix / Payload
+                                                    <Code size={14} className="text-indigo-400" /> Execution Log
                                                 </div>
                                                 <pre className="text-xs font-mono text-slate-300 whitespace-pre-wrap">
-                                                    {action.payloadDiff.split('\n').map((line, idx) => (
-                                                        <div key={idx} className={`${line.startsWith('+') ? 'text-emerald-400' : line.startsWith('-') ? 'text-red-400' : ''}`}>
-                                                            {line}
-                                                        </div>
-                                                    ))}
+                                                    {action.execution_log}
                                                 </pre>
                                             </div>
                                         )}
@@ -134,25 +228,27 @@ export default function InboxTab() {
                                     {/* Right Action Area */}
                                     <div className="flex flex-row lg:flex-col gap-3 w-full lg:w-48 shrink-0">
                                         <button 
-                                            onClick={() => handleApprove(action.id, action.intent)}
-                                            className="flex-1 glass-button-primary flex items-center justify-center gap-2 py-3 px-4 shadow-[0_0_15px_rgba(34,197,94,0.2)] hover:shadow-[0_0_20px_rgba(34,197,94,0.4)] border-emerald-500/50 bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20"
+                                            onClick={() => handleApprove(action.id, action.action)}
+                                            disabled={isProcessing}
+                                            className="flex-1 glass-button-primary flex items-center justify-center gap-2 py-3 px-4 shadow-[0_0_15px_rgba(34,197,94,0.2)] hover:shadow-[0_0_20px_rgba(34,197,94,0.4)] border-emerald-500/50 bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20 disabled:opacity-50 disabled:cursor-not-allowed"
                                         >
-                                            <CheckCircle size={18} />
+                                            {isProcessing ? <Loader2 size={18} className="animate-spin" /> : <CheckCircle size={18} />}
                                             <span className="font-bold tracking-wide">AUTHORIZE</span>
                                         </button>
                                         <button 
                                             onClick={() => handleReject(action.id)}
-                                            className="flex-1 glass-button flex items-center justify-center gap-2 py-3 px-4 border-red-500/30 text-red-400 hover:bg-red-500/10 hover:border-red-500/50"
+                                            disabled={isProcessing}
+                                            className="flex-1 glass-button flex items-center justify-center gap-2 py-3 px-4 border-red-500/30 text-red-400 hover:bg-red-500/10 hover:border-red-500/50 disabled:opacity-50 disabled:cursor-not-allowed"
                                         >
-                                            <XCircle size={18} />
+                                            {isProcessing ? <Loader2 size={18} className="animate-spin" /> : <XCircle size={18} />}
                                             <span className="font-bold tracking-wide">REJECT</span>
                                         </button>
                                     </div>
                                     
                                 </div>
                             </div>
-                        ))
-                    )}
+                        );
+                    })}
                 </div>
             </div>
         </div>

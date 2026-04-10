@@ -227,7 +227,7 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
                     globalMutate('/api/v1/public/marketplace');
                 } else if (message.type === 'SYSTEM_HEAL') {
                     const healData = message.data as { service?: string, reason?: string, action?: string };
-                    addToast(`Self-Healing: ${healData.action || 'Restarted'} ${healData.service || 'service'} (${healData.reason || 'unresponsive'})`, 'warning');
+                    addToast(`Self-Healing: ${healData.action || 'Restarted'} ${healData.service || 'service'} (${healData.reason || 'unresponsive'})`, 'info');
                 }
                 // PONG and other message types are silently consumed
             } catch (err) {

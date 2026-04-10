@@ -28,7 +28,7 @@ const CONTEXT_MODES = [
 export default function AiChatTab() {
     const { setActiveTab } = useSystemStore();
     const { metrics } = useMetrics();
-    const { toasts } = useToast();
+    const { toasts, addToast } = useToast();
     const [messages, setMessages] = useState<ChatMessage[]>([
         { 
             role: 'assistant', 
@@ -103,23 +103,10 @@ export default function AiChatTab() {
                 body: JSON.stringify(body)
             });
 
-            
-            let assistantReply = data.reply;
-            let actionPayload = undefined;
+            const data = await res.json();
 
-            // Mock an action proposal if user asked to "restart"
-            if (text.toLowerCase().includes('restart') || text.toLowerCase().includes('reboot')) {
-                const target = text.includes('nginx') ? 'nginx' : 'Target Service';
-                assistantReply = `I understand you want to restart ${target}. Instead of doing this immediately, I have drafted an execution plan for you to review.\n\nHere is the proposed action:`;
-                actionPayload = {
-                    type: 'system_action',
-                    id: `act_${Date.now()}`,
-                    title: `Restart ${target}`,
-                    description: `Perform a graceful shutdown and restart of the ${target} daemon.`,
-                    danger_level: 'warning',
-                    impact: `Will cause ~2-5s of downtime for ${target} connections.`
-                };
-            }
+            const assistantReply = data.reply || 'No response received.';
+            const actionPayload = data.proposed_action || undefined;
 
             setMessages(prev => [...prev, { role: 'assistant', text: assistantReply, payload: actionPayload }]);
         } catch (_err) {

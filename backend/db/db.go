@@ -459,7 +459,8 @@ func InitDB() {
 		"CREATE INDEX IF NOT EXISTS idx_active_sessions_expires ON active_sessions(expires_at);")
 
 	// ─── Migration v9: Phase 9 — pending_actions for approval gates ────
-	migrate(9, `CREATE TABLE IF NOT EXISTS pending_actions (
+	migrate(9, "Add pending_actions table for approval gates",
+		`CREATE TABLE IF NOT EXISTS pending_actions (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		classification TEXT NOT NULL DEFAULT 'warn',
 		source TEXT NOT NULL,
@@ -474,7 +475,8 @@ func InitDB() {
 		"CREATE INDEX IF NOT EXISTS idx_pending_actions_status ON pending_actions(status);")
 
 	// ─── Migration v10: Phase 13 — notification delivery audit log ─────
-	migrate(10, `CREATE TABLE IF NOT EXISTS notification_delivery_log (
+	migrate(10, "Add notification_delivery_log for delivery tracking",
+		`CREATE TABLE IF NOT EXISTS notification_delivery_log (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		channel_id INTEGER NOT NULL,
 		channel_type TEXT NOT NULL,
