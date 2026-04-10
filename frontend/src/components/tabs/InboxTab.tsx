@@ -1,26 +1,7 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState } from 'react';
 import { Mail, CheckCircle, XCircle, AlertTriangle, ShieldAlert, Code, RefreshCw, Loader2 } from 'lucide-react';
 import { useToast } from '@/contexts/ToastContext';
-import { apiFetch } from '@/lib/fetcher';
-
-interface PendingAction {
-    id: number;
-    classification: string;
-    source: string;
-    action: string;
-    reason: string;
-    status: string;
-    created_at: string;
-    resolved_at?: string;
-    resolved_by?: string;
-    execution_log?: string;
-}
-
-interface ActionsResponse {
-    actions: PendingAction[];
-    filter: string;
-    count: number;
-}
+import { useActionGates } from '@/hooks/useActionGates';
 
 const classificationColors: Record<string, string> = {
     safe: 'text-emerald-400 bg-emerald-500/10 border-emerald-500/30',
@@ -46,47 +27,18 @@ function formatTimestamp(iso: string): string {
 
 export default function InboxTab() {
     const { addToast } = useToast();
-    const [actions, setActions] = useState<PendingAction[]>([]);
-    const [loading, setLoading] = useState(true);
-    const [error, setError] = useState<string | null>(null);
+    const { actions, isLoading, isError, error, isValidating, approveAction, rejectAction, refresh } = useActionGates();
     const [processingIds, setProcessingIds] = useState<Set<number>>(new Set());
-
-    const fetchActions = useCallback(async () => {
-        try {
-            setError(null);
-            const res = await apiFetch('/api/v1/admin/actions/pending?status=pending');
-            if (!res.ok) {
-                throw new Error(`Failed to fetch actions: ${res.status}`);
-            }
-            const data: ActionsResponse = await res.json();
-            setActions(data.actions || []);
-        } catch (err) {
-            const message = err instanceof Error ? err.message : 'Failed to load pending actions';
-            setError(message);
-        } finally {
-            setLoading(false);
-        }
-    }, []);
-
-    useEffect(() => {
-        fetchActions();
-        // Poll every 10 seconds for new actions
-        const interval = setInterval(fetchActions, 10_000);
-        return () => clearInterval(interval);
-    }, [fetchActions]);
 
     const handleApprove = async (id: number, action: string) => {
         setProcessingIds(prev => new Set(prev).add(id));
         try {
-            const res = await apiFetch(`/api/v1/admin/actions/${id}/approve`, {
-                method: 'POST',
-            });
-            if (!res.ok) {
-                const data = await res.json().catch(() => ({}));
-                throw new Error(data.message || `Approval failed: ${res.status}`);
+            const success = await approveAction(id);
+            if (success) {
+                addToast(`Execution authorized: ${action}`, 'success');
+            } else {
+                addToast('Approval failed — action may already be resolved', 'error');
             }
-            setActions(prev => prev.filter(a => a.id !== id));
-            addToast(`Execution authorized: ${action}`, 'success');
         } catch (err) {
             addToast(err instanceof Error ? err.message : 'Approval failed', 'error');
         } finally {
@@ -101,15 +53,12 @@ export default function InboxTab() {
     const handleReject = async (id: number) => {
         setProcessingIds(prev => new Set(prev).add(id));
         try {
-            const res = await apiFetch(`/api/v1/admin/actions/${id}/reject`, {
-                method: 'POST',
-            });
-            if (!res.ok) {
-                const data = await res.json().catch(() => ({}));
-                throw new Error(data.message || `Rejection failed: ${res.status}`);
+            const success = await rejectAction(id);
+            if (success) {
+                addToast('Action rejected. Execution halted.', 'info');
+            } else {
+                addToast('Rejection failed — action may already be resolved', 'error');
             }
-            setActions(prev => prev.filter(a => a.id !== id));
-            addToast('Action rejected. Execution halted.', 'info');
         } catch (err) {
             addToast(err instanceof Error ? err.message : 'Rejection failed', 'error');
         } finally {
@@ -139,18 +88,18 @@ export default function InboxTab() {
                     <div className="flex items-center gap-3">
                         <p className="text-sm text-slate-400">Strict operator consent required.</p>
                         <button
-                            onClick={() => { setLoading(true); fetchActions(); }}
+                            onClick={() => refresh()}
                             className="glass-button p-2 rounded-xl hover:border-indigo-500/30"
                             title="Refresh"
                         >
-                            <RefreshCw size={16} className={loading ? 'animate-spin text-indigo-400' : 'text-slate-400'} />
+                            <RefreshCw size={16} className={isValidating ? 'animate-spin text-indigo-400' : 'text-slate-400'} />
                         </button>
                     </div>
                 </div>
 
                 <div className="space-y-6 relative z-10">
                     {/* Loading state */}
-                    {loading && actions.length === 0 && !error && (
+                    {isLoading && (
                         <div className="flex flex-col items-center justify-center py-20 text-slate-500">
                             <Loader2 size={48} className="text-indigo-500/30 mb-4 animate-spin" />
                             <h3 className="text-lg font-bold text-slate-300">Loading Actions</h3>
@@ -159,13 +108,13 @@ export default function InboxTab() {
                     )}
 
                     {/* Error state */}
-                    {error && (
+                    {isError && (
                         <div className="flex flex-col items-center justify-center py-20 text-slate-500">
                             <AlertTriangle size={48} className="text-red-500/30 mb-4" />
                             <h3 className="text-lg font-bold text-red-300">Connection Error</h3>
-                            <p className="text-sm mb-4">{error}</p>
+                            <p className="text-sm mb-4">{error instanceof Error ? error.message : 'Failed to load pending actions'}</p>
                             <button
-                                onClick={() => { setLoading(true); setError(null); fetchActions(); }}
+                                onClick={() => refresh()}
                                 className="glass-button-primary px-4 py-2 rounded-xl text-sm"
                             >
                                 Retry
@@ -174,7 +123,7 @@ export default function InboxTab() {
                     )}
 
                     {/* Empty state */}
-                    {!loading && !error && actions.length === 0 && (
+                    {!isLoading && !isError && actions.length === 0 && (
                         <div className="flex flex-col items-center justify-center py-20 text-slate-500">
                             <CheckCircle size={48} className="text-emerald-500/20 mb-4" />
                             <h3 className="text-lg font-bold text-slate-300">Queue Empty</h3>
@@ -183,7 +132,7 @@ export default function InboxTab() {
                     )}
 
                     {/* Action list */}
-                    {!error && actions.map(action => {
+                    {!isError && actions.map(action => {
                         const isProcessing = processingIds.has(action.id);
                         return (
                             <div key={action.id} className="bg-slate-900/60 border border-white/10 rounded-2xl p-6 transition-all hover:border-indigo-500/30">

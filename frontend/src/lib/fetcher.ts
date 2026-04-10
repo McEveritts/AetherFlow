@@ -173,8 +173,26 @@ export async function fetcher<T = unknown>(url: string): Promise<T> {
     const res = await apiFetch(url);
 
     if (!res.ok) {
-        const error = new Error(`Request failed: ${res.status} ${res.statusText}`);
-        // Attach status for downstream error handling
+        // Attempt to parse the backend's standardized APIError shape
+        let body: { code?: string; message?: string; details?: unknown } | null = null;
+        try {
+            body = await res.json();
+        } catch {
+            // Response body is not JSON — fall through to generic error
+        }
+
+        if (body && typeof body.code === 'string' && typeof body.message === 'string') {
+            // Lazy import to avoid circular dependency at module scope
+            const { APIError } = await import('@/types/api');
+            throw new APIError(res.status, {
+                code: body.code as import('@/types/api').APIErrorCode,
+                message: body.message,
+                details: body.details,
+            });
+        }
+
+        // Fallback: non-standard error body
+        const error = new Error(body?.message || `Request failed: ${res.status} ${res.statusText}`);
         (error as Error & { status: number }).status = res.status;
         throw error;
     }
