@@ -2,7 +2,7 @@ package services
 
 import (
 	"bufio"
-	"log"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -42,11 +42,11 @@ func RunPackageAction(action, pkgId, scriptName, lockFile string) {
 	}
 	activeJobs.Store(pkgId, job)
 
-	log.Printf("[%s] Starting asynchronous package action for %s...", action, pkgId)
+	slog.Info("starting package action", "action", action, "package", pkgId)
 
 	defer func() {
 		activeJobs.Delete(pkgId)
-		log.Printf("[%s] Action finalized for %s. Removed from active queues.", action, pkgId)
+		slog.Info("package action finalized", "action", action, "package", pkgId)
 	}()
 
 	// Resolve script path — try multiple locations so this works from any CWD
@@ -70,11 +70,11 @@ func RunPackageAction(action, pkgId, scriptName, lockFile string) {
 		}
 	}
 	if scriptPath == "" {
-		log.Printf("[%s] ERROR: install script not found for %s; tried: %v", action, pkgId, candidates)
+		slog.Error("install script not found", "action", action, "package", pkgId)
 		return
 	}
 
-	log.Printf("[%s] Executing script: %s", action, scriptPath)
+	slog.Info("executing script", "action", action, "path", scriptPath)
 
 	cmd := exec.Command("bash", scriptPath)
 	// Merge stderr into stdout so we get everything
@@ -83,18 +83,18 @@ func RunPackageAction(action, pkgId, scriptName, lockFile string) {
 	// Use a pipe to stream stdout line-by-line
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		log.Printf("[%s] Error creating stdout pipe for %s: %v", action, scriptName, err)
+		slog.Error("failed to create stdout pipe", "action", action, "script", scriptName, "error", err)
 		// Fallback to CombinedOutput
 		output, runErr := exec.Command("bash", scriptPath).CombinedOutput()
 		if runErr != nil {
-			log.Printf("[%s] Fallback error: %v, output: %s", action, runErr, string(output))
+			slog.Error("fallback execution error", "action", action, "error", runErr, "output", string(output))
 		}
 		return
 	}
 	cmd.Stderr = cmd.Stdout // merge stderr into stdout pipe
 
 	if err := cmd.Start(); err != nil {
-		log.Printf("[%s] Error starting script %s: %v", action, scriptName, err)
+		slog.Error("failed to start script", "action", action, "script", scriptName, "error", err)
 		return
 	}
 
@@ -120,11 +120,11 @@ func RunPackageAction(action, pkgId, scriptName, lockFile string) {
 		}
 		job.Progress = estimated
 
-		log.Printf("[%s:%s] line %d: %s", action, pkgId, lineCount, line)
+		slog.Debug("script output", "action", action, "package", pkgId, "line", lineCount, "text", line)
 	}
 
 	if err := cmd.Wait(); err != nil {
-		log.Printf("[%s] Script %s exited with error: %v", action, scriptName, err)
+		slog.Error("script exited with error", "action", action, "script", scriptName, "error", err)
 		job.LastLine = "Error: " + err.Error()
 		job.Progress = 100
 		return
@@ -133,18 +133,18 @@ func RunPackageAction(action, pkgId, scriptName, lockFile string) {
 	switch action {
 	case "install":
 		if err := ApplyPackageSandbox(pkgId); err != nil {
-			log.Printf("[install] sandbox hardening warning for %s: %v", pkgId, err)
+				slog.Warn("sandbox hardening warning", "package", pkgId, "error", err)
 		}
 		RefreshPackageUpdateByID(pkgId)
 	case "remove":
 		if err := DeletePackageUpdateRecord(pkgId); err != nil {
-			log.Printf("[remove] failed to clear update state for %s: %v", pkgId, err)
+			slog.Warn("failed to clear update state", "package", pkgId, "error", err)
 		}
 	}
 
 	job.Progress = 100
 	job.LastLine = "Complete!"
-	log.Printf("[%s] Successfully executed script %s (%d lines)", action, scriptName, lineCount)
+	slog.Info("script completed successfully", "action", action, "script", scriptName, "lines", lineCount)
 }
 
 // GetPackageJobStatus returns the simple status string for backward compat

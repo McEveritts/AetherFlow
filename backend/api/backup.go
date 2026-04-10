@@ -7,7 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -44,7 +44,7 @@ func getActiveDbPath() string {
 
 	exePath, err := os.Executable()
 	if err != nil {
-		log.Printf("Warning: Failed to determine executable path, fallback to working directory: %v", err)
+		slog.Warn("Failed to determine executable path, fallback to working directory", "error", err)
 		exePath = "."
 	}
 	baseDir := filepath.Dir(exePath)
@@ -179,7 +179,7 @@ func PerformSystemBackup() (BackupFile, error) {
 	safePath := strings.ReplaceAll(backupFile, "'", "''")
 	_, err = db.DB.Exec(fmt.Sprintf(`VACUUM INTO '%s'`, safePath))
 	if err != nil {
-		log.Printf("Backup VACUUM INTO failed: %v", err)
+		slog.Info("Backup VACUUM INTO failed", "value", err)
 		return BackupFile{}, errors.New("Backup failed: " + err.Error())
 	}
 
@@ -244,7 +244,7 @@ func GetBackupsList(c *gin.Context) {
 		filePath := filepath.Join(backupDir, entry.Name())
 		checksum, err := ensureStoredChecksum(filePath)
 		if err != nil {
-			log.Printf("Could not ensure checksum for %s: %v", filePath, err)
+			slog.Error("Could not ensure checksum for %s", "value", filePath, "error", err)
 		}
 
 		backups = append(backups, BackupFile{
@@ -377,7 +377,7 @@ func DownloadBackup(c *gin.Context) {
 	c.Status(http.StatusPartialContent)
 
 	if _, err := io.CopyN(c.Writer, file, toSend); err != nil && !errors.Is(err, io.EOF) {
-		log.Printf("Chunked download failed for %s: %v", filePath, err)
+		slog.Error("Chunked download failed for %s", "value", filePath, "error", err)
 	}
 }
 

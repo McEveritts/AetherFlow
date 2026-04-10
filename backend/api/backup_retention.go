@@ -1,7 +1,7 @@
 package api
 
 import (
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -27,7 +27,7 @@ func PruneOldBackups() {
 
 	entries, err := os.ReadDir(backupDir)
 	if err != nil {
-		log.Printf("[backup-retention] Failed to read backup directory: %v", err)
+		slog.Info("[backup-retention] Failed to read backup directory", "value", err)
 		return
 	}
 
@@ -74,18 +74,18 @@ func PruneOldBackups() {
 
 		// Remove backup file and its checksum
 		if err := os.Remove(backups[i].path); err != nil {
-			log.Printf("[backup-retention] Failed to remove %s: %v", backups[i].name, err)
+			slog.Error("[backup-retention] Failed to remove %s", "value", backups[i].name, "error", err)
 			continue
 		}
 		// Also remove checksum file if exists
 		os.Remove(backups[i].path + ".sha256")
 
-		log.Printf("[backup-retention] Pruned old backup: %s (age: %s)", backups[i].name,
-			time.Since(backups[i].modTime).Truncate(time.Hour))
+		slog.Info("pruned old backup", "name", backups[i].name,
+			"age", time.Since(backups[i].modTime).Truncate(time.Hour))
 		pruned++
 	}
 
 	if pruned > 0 {
-		log.Printf("[backup-retention] Completed: removed %d backups, retained %d", pruned, len(backups)-pruned)
+		slog.Info("backup retention completed", "pruned", pruned, "retained", len(backups)-pruned)
 	}
 }

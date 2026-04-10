@@ -2,7 +2,7 @@ package api
 
 import (
 	"database/sql"
-	"log"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -75,7 +75,7 @@ func ListPendingActions(c *gin.Context) {
 		var a PendingAction
 		if err := rows.Scan(&a.ID, &a.Classification, &a.Source, &a.Action, &a.Reason,
 			&a.Status, &a.CreatedAt, &a.ResolvedAt, &a.ResolvedBy); err != nil {
-			log.Printf("[action-gates] Row scan error: %v", err)
+			slog.Info("[action-gates] Row scan error", "value", err)
 			continue
 		}
 		actions = append(actions, a)
@@ -120,7 +120,7 @@ func ApproveAction(c *gin.Context) {
 		return
 	}
 
-	log.Printf("[action-gates] Action #%s approved by %s", actionID, resolvedBy)
+	slog.Info("action gate approved", "action_id", actionID, "resolved_by", resolvedBy)
 	db.RecordAudit(resolveActorID(c), resolvedBy, "action_approve", "pending_action", actionID, "", c.ClientIP(), c.Request.UserAgent())
 	c.JSON(http.StatusOK, gin.H{
 		"status":  "approved",
@@ -149,7 +149,7 @@ func RejectAction(c *gin.Context) {
 		return
 	}
 
-	log.Printf("[action-gates] Action #%s rejected by %s", actionID, resolvedBy)
+	slog.Info("action gate rejected", "action_id", actionID, "resolved_by", resolvedBy)
 	db.RecordAudit(resolveActorID(c), resolvedBy, "action_reject", "pending_action", actionID, "", c.ClientIP(), c.Request.UserAgent())
 	c.JSON(http.StatusOK, gin.H{"status": "rejected"})
 }

@@ -2,7 +2,7 @@ package api
 
 import (
 	"encoding/json"
-	"log"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"time"
@@ -123,7 +123,7 @@ func HandleLogWebSocket(c *gin.Context) {
 	// Upgrade to WebSocket
 	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
-		log.Println("Log WebSocket upgrade error:", err)
+		slog.Error("log WebSocket upgrade error", "error", err)
 		return
 	}
 	defer conn.Close()

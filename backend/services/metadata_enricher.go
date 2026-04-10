@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -172,7 +172,7 @@ func (me *MetadataEnricher) runEnrichment(scanPath string, apiKey string) {
 
 		enriched, err := me.enrichBatch(batch, apiKey)
 		if err != nil {
-			log.Printf("Metadata enrichment batch error: %v", err)
+			slog.Info("Metadata enrichment batch error", "value", err)
 			me.mu.Lock()
 			me.lastErr = fmt.Sprintf("Batch %d error: %v", i/batchSize, err)
 			me.mu.Unlock()
@@ -187,7 +187,7 @@ func (me *MetadataEnricher) runEnrichment(scanPath string, apiKey string) {
 				em.FilePath, em.Filename, em.Title, em.Year, em.Language, em.Quality, em.SubtitlesJSON, time.Now().Format(time.RFC3339),
 			)
 			if dbErr != nil {
-				log.Printf("Failed to store enriched metadata: %v", dbErr)
+				slog.Error("failed to store enriched metadata", "error", dbErr)
 			}
 		}
 
@@ -201,7 +201,7 @@ func (me *MetadataEnricher) runEnrichment(scanPath string, apiKey string) {
 		time.Sleep(2 * time.Second)
 	}
 
-	log.Printf("Metadata enrichment complete: %d files processed", me.total)
+	slog.Info("Metadata enrichment complete: files processed", "value", me.total)
 }
 
 func (me *MetadataEnricher) enrichBatch(files []MediaFile, apiKey string) ([]EnrichedMedia, error) {

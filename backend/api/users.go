@@ -2,7 +2,7 @@ package api
 
 import (
 	"database/sql"
-	"log"
+	"log/slog"
 	"net/http"
 	"strconv"
 
@@ -15,7 +15,7 @@ import (
 func GetUsers(c *gin.Context) {
 	rows, err := db.DB.Query("SELECT id, username, email, avatar_url, role FROM users")
 	if err != nil {
-		log.Printf("Error querying users: %v", err)
+		slog.Error("querying users", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query users"})
 		return
 	}
@@ -25,7 +25,7 @@ func GetUsers(c *gin.Context) {
 	for rows.Next() {
 		var u models.User
 		if err := rows.Scan(&u.ID, &u.Username, &u.Email, &u.AvatarURL, &u.Role); err != nil {
-			log.Printf("Error scanning user row: %v", err)
+			slog.Error("scanning user row", "error", err)
 			continue
 		}
 		users = append(users, u)
@@ -73,7 +73,7 @@ func UpdateUserRole(c *gin.Context) {
 
 	_, err = db.DB.Exec("UPDATE users SET role = ? WHERE id = ?", req.Role, userId)
 	if err != nil {
-		log.Printf("Error updating user role: %v", err)
+		slog.Error("updating user role", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update role"})
 		return
 	}
@@ -108,7 +108,7 @@ func DeleteUser(c *gin.Context) {
 
 	_, err = db.DB.Exec("DELETE FROM users WHERE id = ?", userId)
 	if err != nil {
-		log.Printf("Error deleting user: %v", err)
+		slog.Error("deleting user", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete user"})
 		return
 	}

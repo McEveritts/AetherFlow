@@ -3,7 +3,7 @@ package services
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 
 	"github.com/tetratelabs/wazero"
 	"github.com/tetratelabs/wazero/api"
@@ -23,7 +23,7 @@ func NewPluginManager(ctx context.Context) *PluginManager {
 	// Instantiate WASI, which provides isolated system call equivalents (e.g. clock, random).
 	// We do NOT expose arbitrary filesystem or network access here by default.
 	if _, err := wasi_snapshot_preview1.Instantiate(ctx, r); err != nil {
-		log.Printf("Failed to instantiate WASI: %v", err)
+		slog.Error("failed to instantiate WASI", "error", err)
 	}
 
 	// Mount a strictly controlled host function. Let's allow plugins to log safely to our backend console.
@@ -32,16 +32,16 @@ func NewPluginManager(ctx context.Context) *PluginManager {
 		WithFunc(func(ctx context.Context, mod api.Module, ptr uint32, len uint32) {
 			bytes, ok := mod.Memory().Read(ptr, len)
 			if !ok {
-				log.Printf("[Plugin] Could not read memory for host_log")
+				slog.Warn("plugin: could not read memory for host_log")
 				return
 			}
-			log.Printf("[Plugin Log]: %s", string(bytes))
+			slog.Info("[Plugin Log]", "value", string(bytes))
 		}).
 		Export("host_log").
 		Instantiate(ctx)
 
 	if err != nil {
-		log.Printf("Failed to instantiate env module: %v", err)
+		slog.Error("failed to instantiate env module", "error", err)
 	}
 
 	return &PluginManager{

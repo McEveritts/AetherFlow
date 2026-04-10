@@ -1,7 +1,7 @@
 package services
 
 import (
-	"log"
+	"log/slog"
 	"os/exec"
 	"strings"
 	"time"
@@ -55,7 +55,7 @@ func GetActiveServices() map[string]interface{} {
 	// 3. Get Marketplace Packages — only installed ones
 	pkgs, err := GetPackages()
 	if err != nil {
-		log.Printf("[services] unable to load package catalog: %v", err)
+		slog.Info("[services] unable to load package catalog", "value", err)
 		return servicesList
 	}
 

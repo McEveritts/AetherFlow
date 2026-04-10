@@ -5,7 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"log"
+	"log/slog"
 	"net/http"
 
 	"aetherflow/db"
@@ -87,7 +87,7 @@ func CreateOIDCClient(c *gin.Context) {
 		clientID, secretHashHex, req.Name, string(redirectURIsJSON),
 	)
 	if err != nil {
-		log.Printf("OIDC: failed to create client: %v", err)
+		slog.Info("OIDC: failed to create client", "value", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create client"})
 		return
 	}

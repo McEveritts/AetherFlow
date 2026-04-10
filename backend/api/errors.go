@@ -2,7 +2,7 @@ package api
 
 import (
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"runtime/debug"
 	"time"
@@ -61,7 +61,7 @@ func RecoveryMiddleware() gin.HandlerFunc {
 		defer func() {
 			if r := recover(); r != nil {
 				stack := string(debug.Stack())
-				log.Printf("PANIC: %v\n%s", r, stack)
+				slog.Error("panic recovered", "error", r, "stack", string(stack))
 				c.AbortWithStatusJSON(http.StatusInternalServerError, APIError{
 					Code:    ErrCodeInternal,
 					Message: "An unexpected error occurred",

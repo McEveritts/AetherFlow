@@ -6,7 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/exec"
@@ -95,7 +95,7 @@ func (w *AppUpdateWatcher) loop() {
 	for {
 		select {
 		case <-ctx.Done():
-			log.Println("[updates] Shutdown signal received, stopping update watcher")
+			slog.Info("[updates] Shutdown signal received, stopping update watcher")
 			return
 		case <-ticker.C:
 			w.RefreshInstalledPackages()
@@ -121,7 +121,7 @@ func shouldTrackPackage(pkg models.Package) bool {
 func (w *AppUpdateWatcher) RefreshInstalledPackages() {
 	pkgs, err := GetPackages()
 	if err != nil {
-		log.Printf("[updates] unable to load package catalog: %v", err)
+		slog.Info("[updates] unable to load package catalog", "value", err)
 		return
 	}
 	if len(pkgs) == 0 {
@@ -145,7 +145,7 @@ func (w *AppUpdateWatcher) RefreshInstalledPackages() {
 			defer wg.Done()
 			record, notify, err := w.refreshPackage(p)
 			if err != nil {
-				log.Printf("[updates] %s: %v", p.Name, err)
+				slog.Error("[updates] %s", "value", p.Name, "error", err)
 			}
 			
 			mu.Lock()
@@ -181,7 +181,7 @@ func RefreshPackageUpdateByID(pkgID string) {
 
 	pkgs, err := GetPackages()
 	if err != nil {
-		log.Printf("[updates] unable to load package catalog: %v", err)
+		slog.Info("[updates] unable to load package catalog", "value", err)
 		return
 	}
 
@@ -191,7 +191,7 @@ func RefreshPackageUpdateByID(pkgID string) {
 		}
 
 		if _, notify, err := watcher.refreshPackage(pkg); err != nil {
-			log.Printf("[updates] refresh %s failed: %v", pkgID, err)
+			slog.Error("[updates] refresh %s failed", "value", pkgID, "error", err)
 		} else if notify && Notifier != nil {
 			updateMap := GetPackageUpdateMap()
 			record := updateMap[pkg.Name]

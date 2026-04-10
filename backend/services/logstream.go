@@ -3,7 +3,7 @@ package services
 import (
 	"bufio"
 	"encoding/json"
-	"log"
+	"log/slog"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -55,10 +55,10 @@ func InitLogAggregator() {
 	if runtime.GOOS == "linux" {
 		go Logs.streamJournalctl()
 	} else {
-		log.Printf("Log aggregation: journalctl streaming not available on %s (running in read-only mode)", runtime.GOOS)
+		slog.Info("journalctl not available, running in read-only mode", "os", runtime.GOOS)
 	}
 
-	log.Println("Log aggregator initialized")
+	slog.Info("Log aggregator initialized")
 }
 
 // Subscribe creates a new channel that receives log entries in real-time.
@@ -195,18 +195,18 @@ func (la *LogAggregator) streamJournalctl() {
 		cmd := exec.Command("journalctl", "-f", "-o", "json", "--no-pager", "-n", "0")
 		stdout, err := cmd.StdoutPipe()
 		if err != nil {
-			log.Printf("Log aggregator: failed to create journalctl pipe: %v", err)
+			slog.Info("Log aggregator: failed to create journalctl pipe", "value", err)
 			time.Sleep(10 * time.Second)
 			continue
 		}
 
 		if err := cmd.Start(); err != nil {
-			log.Printf("Log aggregator: failed to start journalctl: %v", err)
+			slog.Info("Log aggregator: failed to start journalctl", "value", err)
 			time.Sleep(10 * time.Second)
 			continue
 		}
 
-		log.Println("Log aggregator: streaming from journalctl")
+		slog.Info("Log aggregator: streaming from journalctl")
 		scanner := bufio.NewScanner(stdout)
 		// Increase buffer size for long log lines
 		scanner.Buffer(make([]byte, 0, 64*1024), 256*1024)
@@ -265,10 +265,10 @@ func (la *LogAggregator) streamJournalctl() {
 		}
 
 		if err := cmd.Wait(); err != nil {
-			log.Printf("Log aggregator: journalctl exited: %v", err)
+			slog.Info("Log aggregator: journalctl exited", "value", err)
 		}
 
-		log.Println("Log aggregator: journalctl stream ended, restarting in 5s...")
+		slog.Info("Log aggregator: journalctl stream ended, restarting in 5s...")
 		time.Sleep(5 * time.Second)
 	}
 }

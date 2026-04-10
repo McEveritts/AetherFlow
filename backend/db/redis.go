@@ -2,7 +2,7 @@ package db
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"os"
 	"sync"
 	"time"
@@ -38,10 +38,10 @@ func InitRedis() {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	if err := RedisClient.Ping(ctx).Err(); err != nil {
-		log.Printf("WARNING: Redis is unavailable (%v). Falling back to in-memory JWT blacklist.", err)
+		slog.Warn("Redis unavailable, falling back to in-memory JWT blacklist", "error", err)
 		RedisClient = nil // Flag state to bypass Redis checks safely
 	} else {
-		log.Println("Redis connected successfully.")
+		slog.Info("Redis connected successfully.")
 	}
 
 	// Start background cleanup for localBlacklist

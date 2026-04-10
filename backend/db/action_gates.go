@@ -1,7 +1,7 @@
 package db
 
 import (
-	"log"
+	"log/slog"
 	"time"
 )
 
@@ -24,13 +24,18 @@ func QueueAction(classification, source, action, reason string) (int, bool) {
 		classification, source, action, reason,
 	)
 	if err != nil {
-		log.Printf("[action-gates] Failed to queue action: %v", err)
+		slog.Info("[action-gates] Failed to queue action", "value", err)
 		return 0, true // Fail-safe: assume approval needed if DB insert fails
 	}
 
 	id, _ := result.LastInsertId()
-	log.Printf("[action-gates] Queued %s action #%d from %s: %s (reason: %s)",
-		classification, id, source, action, reason)
+	slog.Info("action gate queued",
+		"classification", classification,
+		"action_id", id,
+		"source", source,
+		"action", action,
+		"reason", reason,
+	)
 	return int(id), true
 }
 
@@ -42,7 +47,7 @@ func MarkActionExecuted(actionID int, executionLog string) {
 		now, executionLog, actionID,
 	)
 	if err != nil {
-		log.Printf("[action-gates] Failed to mark action #%d as executed: %v", actionID, err)
+		slog.Error("failed to mark action as executed", "action_id", actionID, "error", err)
 	}
 }
 
@@ -54,7 +59,7 @@ func MarkActionFailed(actionID int, executionLog string) {
 		now, executionLog, actionID,
 	)
 	if err != nil {
-		log.Printf("[action-gates] Failed to mark action #%d as failed: %v", actionID, err)
+		slog.Error("failed to mark action as failed", "action_id", actionID, "error", err)
 	}
 }
 

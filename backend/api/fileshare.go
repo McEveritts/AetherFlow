@@ -2,7 +2,7 @@ package api
 
 import (
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -47,7 +47,7 @@ func getUploadDir() string {
 	// Create local upload folder if none exist
 	defaultPath := filepath.Join(".", "uploads")
 	if err := os.MkdirAll(defaultPath, 0755); err != nil {
-		log.Printf("Failed to create upload directory: %v", err)
+		slog.Error("failed to create upload directory", "error", err)
 	}
 	return defaultPath
 }
@@ -56,7 +56,7 @@ func GetFilesList(c *gin.Context) {
 	uploadDir := getUploadDir()
 	files, err := os.ReadDir(uploadDir)
 	if err != nil {
-		log.Printf("Error reading upload directory: %v", err)
+		slog.Error("reading upload directory", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to read files directory"})
 		return
 	}
@@ -182,7 +182,7 @@ func UploadFile(c *gin.Context) {
 	dst := filepath.Join(uploadDir, safeName)
 
 	if err := c.SaveUploadedFile(file, dst); err != nil {
-		log.Printf("Failed to save uploaded file: %v", err)
+		slog.Error("failed to save uploaded file", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save file securely"})
 		return
 	}

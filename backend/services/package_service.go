@@ -4,7 +4,7 @@ import (
 	"aetherflow/models"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,7 +19,7 @@ var exeDir string
 func init() {
 	if exe, err := os.Executable(); err == nil {
 		exeDir = filepath.Dir(exe)
-		log.Printf("[config] executable dir resolved to: %s", exeDir)
+		slog.Info("[config] executable dir resolved to", "value", exeDir)
 	}
 }
 
@@ -54,12 +54,12 @@ func readFirstConfigFile(paths []string) ([]byte, error) {
 	for _, p := range paths {
 		data, err = os.ReadFile(p)
 		if err == nil {
-			log.Printf("[config] loaded config from: %s", p)
+			slog.Info("[config] loaded config from", "value", p)
 			return data, nil
 		}
 	}
 
-	log.Printf("[config] WARNING: could not find config file; tried paths: %v", paths)
+	slog.Info("[config] WARNING: could not find config file; tried paths", "value", paths)
 	return nil, err
 }
 
@@ -126,14 +126,14 @@ func GetPackages() ([]models.Package, error) {
 	data, err := readFirstConfigFile(resolveConfigPaths("AETHERFLOW_PACKAGES_CONFIG", "packages.json"))
 	if err != nil {
 		wrapped := fmt.Errorf("load packages.json: %w", err)
-		log.Printf("[packages] ERROR: %v", wrapped)
+		slog.Info("[packages] ERROR", "value", wrapped)
 		return nil, wrapped
 	}
 
 	var pkgs []models.Package
 	if err := json.Unmarshal(data, &pkgs); err != nil {
 		wrapped := fmt.Errorf("parse packages.json: %w", err)
-		log.Printf("[packages] ERROR: %v", wrapped)
+		slog.Info("[packages] ERROR", "value", wrapped)
 		return nil, wrapped
 	}
 

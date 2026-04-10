@@ -2,7 +2,7 @@ package api
 
 import (
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -46,7 +46,7 @@ func QuotaUploadGuard() gin.HandlerFunc {
 
 		allowed, quota, err := services.HasQuotaHeadroom(userID, c.Request.ContentLength)
 		if err != nil {
-			log.Printf("quota upload guard fallback for user %d: %v", userID, err)
+			slog.Error("quota upload guard fallback for user %d", "value", userID, "error", err)
 			c.Next()
 			return
 		}

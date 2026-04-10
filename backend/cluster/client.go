@@ -5,7 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"runtime"
 	"time"
@@ -40,10 +40,10 @@ func NewGRPCClient(masterAddr string) (*GRPCClient, error) {
 			return nil, fmt.Errorf("failed to load client TLS: %w", err)
 		}
 		opts = append(opts, grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig)))
-		log.Println("Cluster client: mTLS enabled")
+		slog.Info("Cluster client: mTLS enabled")
 	} else {
 		opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
-		log.Println("Cluster client: connecting without mTLS (⚠ not recommended for production)")
+		slog.Info("Cluster client: connecting without mTLS (⚠ not recommended for production)")
 	}
 
 	conn, err := grpc.NewClient(masterAddr, opts...)
@@ -94,7 +94,7 @@ func (c *GRPCClient) Register(hostname, address, psk, version string) error {
 	}
 
 	c.nodeID = resp.NodeId
-	log.Printf("Cluster client: registered as %s", c.nodeID)
+	slog.Info("cluster client registered", "node_id", c.nodeID)
 	return nil
 }
 
@@ -134,19 +134,19 @@ func (c *GRPCClient) StartHeartbeat(ctx context.Context) error {
 			}
 
 			if err := stream.Send(ping); err != nil {
-				log.Printf("Cluster client: heartbeat send failed: %v", err)
+				slog.Info("Cluster client: heartbeat send failed", "value", err)
 				return err
 			}
 
 			// Receive pong (may include commands)
 			pong, err := stream.Recv()
 			if err != nil {
-				log.Printf("Cluster client: heartbeat recv failed: %v", err)
+				slog.Info("Cluster client: heartbeat recv failed", "value", err)
 				return err
 			}
 
 			if pong.Command != nil {
-				log.Printf("Cluster client: received command %s (type: %s)", pong.Command.Id, pong.Command.Type)
+				slog.Info("cluster client received command", "command_id", pong.Command.Id, "type", pong.Command.Type)
 				go c.executeCommand(pong.Command)
 			}
 		}
@@ -155,7 +155,7 @@ func (c *GRPCClient) StartHeartbeat(ctx context.Context) error {
 
 // executeCommand handles a remote command received from the master.
 func (c *GRPCClient) executeCommand(cmd *pb.RemoteCommand) {
-	log.Printf("Cluster client: executing command %s (type: %s)", cmd.Id, cmd.Type)
+	slog.Info("cluster client executing command", "command_id", cmd.Id, "type", cmd.Type)
 
 	switch cmd.Type {
 	case "restart_service":
@@ -167,7 +167,7 @@ func (c *GRPCClient) executeCommand(cmd *pb.RemoteCommand) {
 			services.ControlService(serviceName, "restart")
 		}
 	default:
-		log.Printf("Cluster client: unknown command type: %s", cmd.Type)
+		slog.Info("Cluster client: unknown command type", "value", cmd.Type)
 	}
 }
 

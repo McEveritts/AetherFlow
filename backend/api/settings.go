@@ -1,7 +1,7 @@
 package api
 
 import (
-	"log"
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -29,7 +29,7 @@ func GetSettings(c *gin.Context) {
 	`).Scan(&s.AiModel, &s.SystemPrompt, &s.Language, &s.Timezone, &s.UpdateChannel, &s.DefaultDashboard, &s.SetupCompleted, &s.GeminiApiKey)
 
 	if err != nil {
-		log.Printf("Error fetching settings: %v", err)
+		slog.Error("fetching settings", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load settings"})
 		return
 	}
@@ -93,7 +93,7 @@ func updateSettings(c *gin.Context) {
 	}
 
 	if err != nil {
-		log.Printf("Error updating settings: %v", err)
+		slog.Error("updating settings", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save settings"})
 		return
 	}

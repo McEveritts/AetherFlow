@@ -3,7 +3,7 @@ package services
 import (
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -174,7 +174,7 @@ func AddWireGuardPeer(publicKey, allowedIPs, endpoint string) error {
 		return fmt.Errorf("wg set failed: %s: %w", string(output), err)
 	}
 
-	log.Printf("WireGuard: added peer %s with allowed-ips %s", publicKey[:16]+"...", allowedIPs)
+	slog.Info("WireGuard peer added", "peer", publicKey[:16]+"...", "allowed_ips", allowedIPs)
 	return nil
 }
 
@@ -190,7 +190,7 @@ func RemoveWireGuardPeer(publicKey string) error {
 		return fmt.Errorf("wg remove peer failed: %s: %w", string(output), err)
 	}
 
-	log.Printf("WireGuard: removed peer %s", publicKey[:16]+"...")
+	slog.Info("WireGuard peer removed", "peer", publicKey[:16]+"...")
 	return nil
 }
 
@@ -329,6 +329,6 @@ func AdvertiseTailscaleRoutes(routes []string) error {
 		return fmt.Errorf("tailscale set routes failed: %s: %w", string(output), err)
 	}
 
-	log.Printf("Tailscale: advertising routes: %s", routeStr)
+	slog.Info("Tailscale: advertising routes", "value", routeStr)
 	return nil
 }

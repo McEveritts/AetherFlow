@@ -3,7 +3,7 @@ package api
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"strings"
 
@@ -59,7 +59,7 @@ func getGeminiBundle(ctx context.Context) (*GeminiClientBundle, error) {
 	if err != nil {
 		aiModel = "gemini-2.5-pro"
 		systemPrompt = "You are FlowAI, a helpful server assistant."
-		log.Printf("Warning: Using fallback AI settings. DB Error: %v", err)
+		slog.Warn("Using fallback AI settings. DB Error", "error", err)
 	}
 
 	client, err := genai.NewClient(ctx, option.WithAPIKey(apiKey))

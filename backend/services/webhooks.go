@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"time"
 )
@@ -134,7 +134,7 @@ func buildCustomPayload(n Notification) map[string]interface{} {
 func sendWebhookWithRetry(url string, payload interface{}) (int, error) {
 	body, err := json.Marshal(payload)
 	if err != nil {
-		log.Printf("Webhook: failed to marshal payload: %v", err)
+		slog.Info("Webhook: failed to marshal payload", "value", err)
 		return 0, fmt.Errorf("marshal error: %w", err)
 	}
 
@@ -149,7 +149,7 @@ func sendWebhookWithRetry(url string, payload interface{}) (int, error) {
 
 		resp, err := client.Post(url, "application/json", bytes.NewReader(body))
 		if err != nil {
-			log.Printf("Webhook: attempt %d failed for %s: %v", attempt+1, truncateURL(url), err)
+			slog.Info("Webhook: attempt %d failed for %s", "value", attempt+1, truncateURL(url), err)
 			lastErr = err
 			continue
 		}
@@ -160,10 +160,10 @@ func sendWebhookWithRetry(url string, payload interface{}) (int, error) {
 		}
 
 		lastErr = fmt.Errorf("HTTP %d", resp.StatusCode)
-		log.Printf("Webhook: attempt %d returned %d for %s", attempt+1, resp.StatusCode, truncateURL(url))
+		slog.Warn("webhook attempt returned non-2xx", "attempt", attempt+1, "status", resp.StatusCode, "url", truncateURL(url))
 	}
 
-	log.Printf("Webhook: all %d attempts failed for %s", maxRetries, truncateURL(url))
+	slog.Error("webhook: all attempts failed", "max_retries", maxRetries, "url", truncateURL(url))
 	return maxRetries, lastErr
 }
 

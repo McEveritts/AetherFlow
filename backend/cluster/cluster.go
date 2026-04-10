@@ -3,7 +3,7 @@ package cluster
 import (
 	"crypto/rand"
 	"encoding/hex"
-	"log"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -91,7 +91,7 @@ func Init() {
 	// Start heartbeat monitor goroutine
 	go Manager.heartbeatMonitor()
 
-	log.Println("Cluster manager initialized")
+	slog.Info("Cluster manager initialized")
 }
 
 // loadFromDB loads previously enrolled workers from the database.
@@ -100,7 +100,7 @@ func (cm *ClusterManager) loadFromDB() {
 		"SELECT id, hostname, address, role, status, last_heartbeat, enrolled_at FROM cluster_nodes",
 	)
 	if err != nil {
-		log.Printf("Cluster: could not load nodes from DB: %v", err)
+		slog.Info("Cluster: could not load nodes from DB", "value", err)
 		return
 	}
 	defer rows.Close()
@@ -113,7 +113,7 @@ func (cm *ClusterManager) loadFromDB() {
 		var lastHB, enrolledAt string
 		err := rows.Scan(&node.ID, &node.Hostname, &node.Address, &node.Role, &node.Status, &lastHB, &enrolledAt)
 		if err != nil {
-			log.Printf("Cluster: error scanning node row: %v", err)
+			slog.Info("Cluster: error scanning node row", "value", err)
 			continue
 		}
 		node.LastHeartbeat, _ = time.Parse(time.RFC3339, lastHB)
@@ -123,7 +123,7 @@ func (cm *ClusterManager) loadFromDB() {
 		cm.commands[node.ID] = make(chan *PendingCommand, 16)
 	}
 
-	log.Printf("Cluster: loaded %d nodes from database", len(cm.workers))
+	slog.Info("cluster nodes loaded", "count", len(cm.workers))
 }
 
 // GenerateEnrollmentToken creates a new random enrollment token and stores its hash.
@@ -173,7 +173,7 @@ func (cm *ClusterManager) EnrollWorker(id, hostname, address, psk, version strin
 	cm.commands[id] = make(chan *PendingCommand, 16)
 	cm.mu.Unlock()
 
-	log.Printf("Cluster: enrolled worker %s (%s) at %s", id, hostname, address)
+	slog.Info("cluster worker enrolled", "id", id, "hostname", hostname, "address", address)
 	return node, nil
 }
 
@@ -224,7 +224,7 @@ func (cm *ClusterManager) RemoveWorker(nodeID string) error {
 		return err
 	}
 
-	log.Printf("Cluster: removed worker %s", nodeID)
+	slog.Info("cluster worker removed", "node_id", nodeID)
 	return nil
 }
 
@@ -334,7 +334,7 @@ func (cm *ClusterManager) heartbeatMonitor() {
 		for id, node := range cm.workers {
 			if node.Status == "online" && time.Since(node.LastHeartbeat) > heartbeatTimeout {
 				node.Status = "offline"
-				log.Printf("Cluster: worker %s (%s) went offline", id, node.Hostname)
+				slog.Warn("cluster worker went offline", "id", id, "hostname", node.Hostname)
 				db.DB.Exec("UPDATE cluster_nodes SET status = 'offline' WHERE id = ?", id)
 			}
 		}

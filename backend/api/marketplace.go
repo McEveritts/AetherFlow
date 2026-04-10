@@ -3,7 +3,7 @@ package api
 import (
 	"aetherflow/models"
 	"aetherflow/services"
-	"log"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -82,7 +82,7 @@ func getPackageById(pkgId string) (*models.Package, error) {
 
 func InstallPackage(c *gin.Context) {
 	pkgId := c.Param("id")
-	log.Printf("Received request to INSTALL package: %s", pkgId)
+	slog.Info("Received request to INSTALL package", "value", pkgId)
 
 	pkg, err := getPackageById(pkgId)
 	if err != nil {
@@ -111,7 +111,7 @@ func InstallPackage(c *gin.Context) {
 
 func UninstallPackage(c *gin.Context) {
 	pkgId := c.Param("id")
-	log.Printf("Received request to UNINSTALL package: %s", pkgId)
+	slog.Info("Received request to UNINSTALL package", "value", pkgId)
 
 	pkg, err := getPackageById(pkgId)
 	if err != nil {

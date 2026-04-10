@@ -5,7 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"os"
 
@@ -39,7 +39,7 @@ func NewGRPCServer() (*GRPCServer, error) {
 		return nil, fmt.Errorf("failed to load TLS config: %w", err)
 	}
 	opts = append(opts, grpc.Creds(credentials.NewTLS(tlsConfig)))
-	log.Println("Cluster gRPC: stricter mTLS enforced")
+	slog.Info("Cluster gRPC: stricter mTLS enforced")
 
 	srv := grpc.NewServer(opts...)
 	s := &GRPCServer{server: srv}
@@ -66,7 +66,7 @@ func (s *GRPCServer) Start() error {
 		return fmt.Errorf("failed to listen on gRPC interface %s:%s: %w", host, port, err)
 	}
 
-	log.Printf("Cluster gRPC server securely listening on %s:%s", host, port)
+	slog.Info("cluster gRPC server listening", "host", host, "port", port)
 	return s.server.Serve(lis)
 }
 
@@ -108,7 +108,7 @@ func (s *GRPCServer) RegisterWorker(ctx context.Context, req *pb.RegisterRequest
 
 	node, err := Manager.EnrollWorker(nodeID, req.Hostname, req.Address, req.Psk, req.Version, sysInfo)
 	if err != nil {
-		log.Printf("Cluster: enrollment failed for %s: %v", req.Hostname, err)
+		slog.Error("Cluster: enrollment failed for %s", "value", req.Hostname, "error", err)
 		return &pb.RegisterResponse{
 			Accepted: false,
 			Message:  "enrollment failed: " + err.Error(),
@@ -127,7 +127,7 @@ func (s *GRPCServer) Heartbeat(stream pb.ClusterService_HeartbeatServer) error {
 	for {
 		ping, err := stream.Recv()
 		if err != nil {
-			log.Printf("Cluster: heartbeat stream closed for %s: %v", "unknown", err)
+			slog.Error("Cluster: heartbeat stream closed for %s", "value", "unknown", "error", err)
 			return err
 		}
 

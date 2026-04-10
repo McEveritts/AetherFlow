@@ -3,7 +3,7 @@ package services
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"strings"
 	"sync"
@@ -55,7 +55,7 @@ func GetAIClient(ctx context.Context) (*genai.Client, error) {
 	if aiClientSingleton != nil {
 		aiClientSingleton.Close()
 		aiClientSingleton = nil
-		log.Printf("AI client: API key changed, recreating client")
+		slog.Info("AI client: API key changed, recreating client")
 	}
 
 	client, err := genai.NewClient(ctx, option.WithAPIKey(apiKey))
@@ -65,7 +65,7 @@ func GetAIClient(ctx context.Context) (*genai.Client, error) {
 
 	aiClientSingleton = client
 	aiClientAPIKey = apiKey
-	log.Printf("AI client: initialized shared Gemini client")
+	slog.Info("AI client: initialized shared Gemini client")
 	return client, nil
 }
 

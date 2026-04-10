@@ -2,7 +2,7 @@ package api
 
 import (
 	"encoding/json"
-	"log"
+	"log/slog"
 	"net/http"
 	"strconv"
 
@@ -299,7 +299,7 @@ func CreateNotificationChannel(c *gin.Context) {
 		req.Name, req.Type, string(req.Config), true,
 	)
 	if err != nil {
-		log.Printf("Failed to create notification channel: %v", err)
+		slog.Error("failed to create notification channel", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create channel"})
 		return
 	}

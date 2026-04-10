@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"os"
 	"strings"
 
@@ -30,7 +31,7 @@ func InitAESKey() {
 			log.Fatal("FATAL: AES_MASTER_KEY is required in production (GIN_MODE=release). " +
 				"Set a 32-byte key (raw or base64-encoded) to enable API key encryption.")
 		}
-		log.Println("WARNING: AES_MASTER_KEY not set. API key encryption is disabled (dev/test mode only).")
+		slog.Info("WARNING: AES_MASTER_KEY not set. API key encryption is disabled (dev/test mode only).")
 		return
 	}
 
@@ -44,7 +45,7 @@ func InitAESKey() {
 		log.Fatal("FATAL: AES_MASTER_KEY must be exactly 32 bytes (AES-256). Got ", len(raw), " raw bytes.")
 	}
 
-	log.Println("AES-256-GCM encryption key loaded successfully.")
+	slog.Info("AES-256-GCM encryption key loaded successfully.")
 }
 
 // IsEncryptionEnabled returns whether AES encryption is configured.
@@ -149,7 +150,7 @@ func MigrateLegacySecrets() error {
 		if _, err := db.DB.Exec("UPDATE settings SET gemini_api_key = ? WHERE id = 1", enc); err != nil {
 			return err
 		}
-		log.Println("[crypto] Successfully migrated legacy gemini_api_key to enc:v1: format")
+		slog.Info("[crypto] Successfully migrated legacy gemini_api_key to enc:v1: format")
 	}
 	return nil
 }

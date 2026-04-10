@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/exec"
@@ -31,7 +31,7 @@ func init() {
 	// CWE-78 attacks from working directory manipulation.
 	execPath, err := os.Executable()
 	if err != nil {
-		log.Printf("WARNING: Could not resolve executable path, using relative paths: %v", err)
+		slog.Warn("Could not resolve executable path, using relative paths", "error", err)
 		versionFilePath = "../.version"
 		updateScriptPath = "../scripts/update.sh"
 		return
@@ -48,7 +48,7 @@ var httpClient = &http.Client{Timeout: 10 * time.Second}
 func getLocalVersion() string {
 	versionBytes, err := os.ReadFile(versionFilePath)
 	if err != nil {
-		log.Printf("Failed to read version file: %v. Defaulting to v3.0.0", err)
+		slog.Warn("failed to read version file, using default", "error", err, "default", "v3.0.0")
 		return "v3.0.0" // Fallback if file doesn't exist
 	}
 	return strings.TrimSpace(string(versionBytes))
@@ -139,7 +139,7 @@ func isNewerVersion(local, remote string) bool {
 func RunUpdate(c *gin.Context) {
 	// Execute the update script asynchronously so the HTTP request can complete seamlessly
 	go func() {
-		log.Println("Initiating over-the-air update sequence...")
+		slog.Info("Initiating over-the-air update sequence...")
 
 		// Bound the update script to 5 minutes to prevent infinite goroutine leaks
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
@@ -151,18 +151,18 @@ func RunUpdate(c *gin.Context) {
 		cmd.Stderr = os.Stderr
 
 		if err := cmd.Start(); err != nil {
-			log.Printf("Failed to start update script: %v", err)
+			slog.Error("failed to start update script", "error", err)
 			return
 		}
 
 		// Wait in goroutine — context cancellation will kill the process if it exceeds 5 min
 		err := cmd.Wait()
 		if ctx.Err() == context.DeadlineExceeded {
-			log.Printf("CRITICAL: Update script killed after 5-minute timeout")
+			slog.Error("update script killed after timeout", "timeout", "5m")
 		} else if err != nil {
-			log.Printf("Update script finished with error: %v", err)
+			slog.Info("Update script finished with error", "value", err)
 		} else {
-			log.Println("Update script finished successfully.")
+			slog.Info("Update script finished successfully.")
 		}
 	}()
 

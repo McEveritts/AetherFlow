@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"strings"
 
 	"github.com/google/generative-ai-go/genai"
@@ -124,7 +124,7 @@ Be specific about cgroup limits, upgrade recommendations, and timeframes.`, sb.S
 
 	var report PredictionReport
 	if err := json.Unmarshal([]byte(replyText), &report); err != nil {
-		log.Printf("Resource predictor: raw AI response: %s", replyText)
+		slog.Info("Resource predictor: raw AI response", "value", replyText)
 		return nil, fmt.Errorf("failed to parse AI response: %v", err)
 	}
 

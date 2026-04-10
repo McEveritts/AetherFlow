@@ -4,7 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
-	"log"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"sync"
@@ -148,7 +148,7 @@ func (c *Client) readPump() {
 		_, _, err := c.conn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseNormalClosure) {
-				log.Printf("WebSocket unexpected close: %v", err)
+				slog.Info("WebSocket unexpected close", "value", err)
 			}
 			break
 		}
@@ -227,7 +227,7 @@ func HandleWebSocket(c *gin.Context) {
 
 	// IP-binding: reject tickets used from a different IP than issuance
 	if entry.ClientIP != "" && entry.ClientIP != c.ClientIP() {
-		log.Printf("WS ticket IP mismatch: issued to %s, used from %s", entry.ClientIP, c.ClientIP())
+		slog.Warn("WS ticket IP mismatch", "issued_to", entry.ClientIP, "used_from", c.ClientIP())
 		RespondError(c, http.StatusForbidden, "WS_IP_MISMATCH", "Ticket IP mismatch")
 		return
 	}
@@ -236,7 +236,7 @@ func HandleWebSocket(c *gin.Context) {
 
 	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
-		log.Println("Upgrade Error:", err)
+		slog.Error("WebSocket upgrade error", "error", err)
 		return
 	}
 	client := &Client{hub: WSHub, conn: conn, send: make(chan []byte, 256)}
@@ -333,7 +333,7 @@ func broadcastMetricsLoop() {
 			select {
 			case WSHub.broadcast <- message:
 			default:
-				log.Printf("WARNING: WebSocket broadcast channel full, dropping metrics payload")
+				slog.Warn("WebSocket broadcast channel full, dropping metrics payload")
 			}
 		}
 	}
@@ -360,7 +360,7 @@ func BroadcastNotification(n services.Notification) {
 	select {
 	case WSHub.broadcast <- message:
 	default:
-		log.Printf("WARNING: WebSocket broadcast channel full, dropping notification: %s", n.Title)
+		slog.Info("WARNING: WebSocket broadcast channel full, dropping notification", "value", n.Title)
 	}
 }
 
@@ -380,6 +380,6 @@ func BroadcastMarketplaceUpdates(packages []string) {
 	select {
 	case WSHub.broadcast <- message:
 	default:
-		log.Printf("WARNING: WebSocket broadcast channel full, dropping marketplace update")
+		slog.Warn("WebSocket broadcast channel full, dropping marketplace update")
 	}
 }

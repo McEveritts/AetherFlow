@@ -1,7 +1,7 @@
 package db
 
 import (
-	"log"
+	"log/slog"
 )
 
 // AuditEntry represents a single admin audit log record.
@@ -36,7 +36,7 @@ func RecordAudit(userID int, username, action, targetType, targetID, detail, ipA
 		userID, username, action, targetType, targetID, detail, ipAddress, userAgent,
 	)
 	if err != nil {
-		log.Printf("[audit] Failed to record audit entry: action=%s target=%s err=%v", action, targetID, err)
+		slog.Error("failed to record audit entry", "action", action, "target_id", targetID, "error", err)
 	}
 }
 
