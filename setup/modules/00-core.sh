@@ -127,6 +127,8 @@ function _intro() {
 		. /etc/os-release
 		if [[ "${ID}" == "ubuntu" ]]; then DISTRO="Ubuntu"; fi
 		if [[ "${ID}" == "debian" ]]; then DISTRO="Debian"; fi
+		# Kali Linux is Debian-based (ID=kali, ID_LIKE=debian). Treat as Debian.
+		if [[ "${ID}" == "kali" ]]; then DISTRO="Debian"; fi
 		CODENAME="${VERSION_CODENAME}"
 		VERSION_ID="${VERSION_ID}"
 		SETNAME="${VERSION_ID} ${VERSION_CODENAME}"
@@ -144,7 +146,7 @@ function _intro() {
 	echo
 	echo "   ${title}              Heads Up!              ${normal} "
 	echo "   ${message_title}  AetherFlow works with the following  ${normal} "
-	echo "   ${message_title}  Ubuntu 20.04+ / Debian 11+ ${normal} "
+	echo "   ${message_title}  Ubuntu 20.04+ / Debian 11+ / Kali Linux ${normal} "
 	echo
 	echo
 	echo "${green}Checking distribution ...${normal}"
@@ -162,7 +164,7 @@ function _intro() {
 	fi
 	echo
 	if [[ "${DISTRO}" != "Ubuntu" && "${DISTRO}" != "Debian" ]]; then
-		echo "${DISTRO}: ${alert} It looks like you are running ${DISTRO}, which is not supported by AetherFlow ${normal}"
+		echo "${DISTRO}: ${alert} It looks like you are running ${DISTRO}, which is not supported by AetherFlow. Supported: Ubuntu 20.04+, Debian 11+, Kali Linux. ${normal}"
 		echo 'Exiting...'
 		exit 1
 	fi

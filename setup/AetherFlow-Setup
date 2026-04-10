@@ -347,8 +347,11 @@ bootstrap_check_supported_os() {
                 exit 1
             fi
             ;;
+        kali)
+            # Kali Linux is Debian-based (ID_LIKE=debian). Treat as Debian.
+            ;;
         *)
-            echo "Unsupported distribution: ${distro}. AetherFlow supports Ubuntu 20.04+ and Debian 11+."
+            echo "Unsupported distribution: ${distro}. AetherFlow supports Ubuntu 20.04+, Debian 11+, and Kali Linux."
             exit 1
             ;;
     esac

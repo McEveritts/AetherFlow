@@ -60,7 +60,7 @@
 ### Prerequisites
 - Go 1.22+ runtime
 - Node.js 20+ (frontend build only)
-- Linux (systemd) or WSL Debian
+- Linux (systemd): Ubuntu 20.04+, Debian 11+, or Kali Linux (rolling) — or WSL Debian
 
 ### Environment Variables
 

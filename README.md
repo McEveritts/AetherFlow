@@ -43,7 +43,8 @@ Say goodbye to orphaned lockfiles and crashed torrent clients. AetherFlow's `af-
 ## 🛠️ Getting Started
 
 ### Prerequisites
-*   OS: Ubuntu 20.04/22.04 LTS or Debian 11/12
+*   OS: Ubuntu 20.04/22.04 LTS, Debian 11/12, or Kali Linux (rolling)
+*   Kali Linux is supported as a Debian derivative — the installer auto-detects it and follows the Debian codepath.
 *   *A clean, fresh OS installation is highly recommended.*
 
 ### Installation
