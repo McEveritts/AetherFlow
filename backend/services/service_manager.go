@@ -55,7 +55,7 @@ func GetActiveServices() map[string]interface{} {
 	// 3. Get Marketplace Packages — only installed ones
 	pkgs, err := GetPackages()
 	if err != nil {
-		slog.Info("[services] unable to load package catalog", "value", err)
+		slog.Info("[services] unable to load package catalog", "error", err)
 		return servicesList
 	}
 

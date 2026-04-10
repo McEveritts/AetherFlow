@@ -160,7 +160,7 @@ func RunUpdate(c *gin.Context) {
 		if ctx.Err() == context.DeadlineExceeded {
 			slog.Error("update script killed after timeout", "timeout", "5m")
 		} else if err != nil {
-			slog.Info("Update script finished with error", "value", err)
+			slog.Info("Update script finished with error", "error", err)
 		} else {
 			slog.Info("Update script finished successfully.")
 		}

@@ -329,6 +329,6 @@ func AdvertiseTailscaleRoutes(routes []string) error {
 		return fmt.Errorf("tailscale set routes failed: %s: %w", string(output), err)
 	}
 
-	slog.Info("Tailscale: advertising routes", "value", routeStr)
+	slog.Info("Tailscale: advertising routes", "routes", routeStr)
 	return nil
 }

@@ -27,7 +27,7 @@ func PruneOldBackups() {
 
 	entries, err := os.ReadDir(backupDir)
 	if err != nil {
-		slog.Info("[backup-retention] Failed to read backup directory", "value", err)
+		slog.Info("[backup-retention] Failed to read backup directory", "error", err)
 		return
 	}
 
@@ -74,7 +74,7 @@ func PruneOldBackups() {
 
 		// Remove backup file and its checksum
 		if err := os.Remove(backups[i].path); err != nil {
-			slog.Error("[backup-retention] Failed to remove %s", "value", backups[i].name, "error", err)
+			slog.Error("failed to remove backup", "name", backups[i].name, "error", err)
 			continue
 		}
 		// Also remove checksum file if exists

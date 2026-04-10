@@ -121,7 +121,7 @@ func shouldTrackPackage(pkg models.Package) bool {
 func (w *AppUpdateWatcher) RefreshInstalledPackages() {
 	pkgs, err := GetPackages()
 	if err != nil {
-		slog.Info("[updates] unable to load package catalog", "value", err)
+		slog.Info("[updates] unable to load package catalog", "error", err)
 		return
 	}
 	if len(pkgs) == 0 {
@@ -145,7 +145,7 @@ func (w *AppUpdateWatcher) RefreshInstalledPackages() {
 			defer wg.Done()
 			record, notify, err := w.refreshPackage(p)
 			if err != nil {
-				slog.Error("[updates] %s", "value", p.Name, "error", err)
+				slog.Error("package update check failed", "package", p.Name, "error", err)
 			}
 			
 			mu.Lock()
@@ -181,7 +181,7 @@ func RefreshPackageUpdateByID(pkgID string) {
 
 	pkgs, err := GetPackages()
 	if err != nil {
-		slog.Info("[updates] unable to load package catalog", "value", err)
+		slog.Info("[updates] unable to load package catalog", "error", err)
 		return
 	}
 
@@ -191,7 +191,7 @@ func RefreshPackageUpdateByID(pkgID string) {
 		}
 
 		if _, notify, err := watcher.refreshPackage(pkg); err != nil {
-			slog.Error("[updates] refresh %s failed", "value", pkgID, "error", err)
+			slog.Error("package update refresh failed", "package", pkgID, "error", err)
 		} else if notify && Notifier != nil {
 			updateMap := GetPackageUpdateMap()
 			record := updateMap[pkg.Name]

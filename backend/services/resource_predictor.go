@@ -124,7 +124,7 @@ Be specific about cgroup limits, upgrade recommendations, and timeframes.`, sb.S
 
 	var report PredictionReport
 	if err := json.Unmarshal([]byte(replyText), &report); err != nil {
-		slog.Info("Resource predictor: raw AI response", "value", replyText)
+		slog.Info("Resource predictor: raw AI response", "response", replyText)
 		return nil, fmt.Errorf("failed to parse AI response: %v", err)
 	}
 

@@ -82,7 +82,7 @@ func getPackageById(pkgId string) (*models.Package, error) {
 
 func InstallPackage(c *gin.Context) {
 	pkgId := c.Param("id")
-	slog.Info("Received request to INSTALL package", "value", pkgId)
+	slog.Info("Received request to INSTALL package", "package", pkgId)
 
 	pkg, err := getPackageById(pkgId)
 	if err != nil {
@@ -111,7 +111,7 @@ func InstallPackage(c *gin.Context) {
 
 func UninstallPackage(c *gin.Context) {
 	pkgId := c.Param("id")
-	slog.Info("Received request to UNINSTALL package", "value", pkgId)
+	slog.Info("Received request to UNINSTALL package", "package", pkgId)
 
 	pkg, err := getPackageById(pkgId)
 	if err != nil {

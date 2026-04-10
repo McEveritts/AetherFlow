@@ -179,7 +179,7 @@ func PerformSystemBackup() (BackupFile, error) {
 	safePath := strings.ReplaceAll(backupFile, "'", "''")
 	_, err = db.DB.Exec(fmt.Sprintf(`VACUUM INTO '%s'`, safePath))
 	if err != nil {
-		slog.Info("Backup VACUUM INTO failed", "value", err)
+		slog.Info("Backup VACUUM INTO failed", "error", err)
 		return BackupFile{}, errors.New("Backup failed: " + err.Error())
 	}
 
@@ -244,7 +244,7 @@ func GetBackupsList(c *gin.Context) {
 		filePath := filepath.Join(backupDir, entry.Name())
 		checksum, err := ensureStoredChecksum(filePath)
 		if err != nil {
-			slog.Error("Could not ensure checksum for %s", "value", filePath, "error", err)
+			slog.Error("could not ensure checksum", "path", filePath, "error", err)
 		}
 
 		backups = append(backups, BackupFile{
@@ -377,7 +377,7 @@ func DownloadBackup(c *gin.Context) {
 	c.Status(http.StatusPartialContent)
 
 	if _, err := io.CopyN(c.Writer, file, toSend); err != nil && !errors.Is(err, io.EOF) {
-		slog.Error("Chunked download failed for %s", "value", filePath, "error", err)
+		slog.Error("chunked download failed", "path", filePath, "error", err)
 	}
 }
 

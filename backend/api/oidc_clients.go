@@ -87,7 +87,7 @@ func CreateOIDCClient(c *gin.Context) {
 		clientID, secretHashHex, req.Name, string(redirectURIsJSON),
 	)
 	if err != nil {
-		slog.Info("OIDC: failed to create client", "value", err)
+		slog.Info("OIDC: failed to create client", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create client"})
 		return
 	}

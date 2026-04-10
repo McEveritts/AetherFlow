@@ -108,7 +108,7 @@ func (s *GRPCServer) RegisterWorker(ctx context.Context, req *pb.RegisterRequest
 
 	node, err := Manager.EnrollWorker(nodeID, req.Hostname, req.Address, req.Psk, req.Version, sysInfo)
 	if err != nil {
-		slog.Error("Cluster: enrollment failed for %s", "value", req.Hostname, "error", err)
+		slog.Error("cluster enrollment failed", "hostname", req.Hostname, "error", err)
 		return &pb.RegisterResponse{
 			Accepted: false,
 			Message:  "enrollment failed: " + err.Error(),
@@ -127,7 +127,7 @@ func (s *GRPCServer) Heartbeat(stream pb.ClusterService_HeartbeatServer) error {
 	for {
 		ping, err := stream.Recv()
 		if err != nil {
-			slog.Error("Cluster: heartbeat stream closed for %s", "value", "unknown", "error", err)
+			slog.Error("cluster heartbeat stream closed", "error", err)
 			return err
 		}
 

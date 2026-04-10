@@ -134,7 +134,7 @@ func buildCustomPayload(n Notification) map[string]interface{} {
 func sendWebhookWithRetry(url string, payload interface{}) (int, error) {
 	body, err := json.Marshal(payload)
 	if err != nil {
-		slog.Info("Webhook: failed to marshal payload", "value", err)
+		slog.Info("Webhook: failed to marshal payload", "error", err)
 		return 0, fmt.Errorf("marshal error: %w", err)
 	}
 
@@ -149,7 +149,7 @@ func sendWebhookWithRetry(url string, payload interface{}) (int, error) {
 
 		resp, err := client.Post(url, "application/json", bytes.NewReader(body))
 		if err != nil {
-			slog.Info("Webhook: attempt %d failed for %s", "value", attempt+1, truncateURL(url), err)
+			slog.Warn("webhook attempt failed", "attempt", attempt+1, "url", truncateURL(url), "error", err)
 			lastErr = err
 			continue
 		}

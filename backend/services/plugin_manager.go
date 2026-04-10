@@ -35,7 +35,7 @@ func NewPluginManager(ctx context.Context) *PluginManager {
 				slog.Warn("plugin: could not read memory for host_log")
 				return
 			}
-			slog.Info("[Plugin Log]", "value", string(bytes))
+			slog.Info("[Plugin Log]", "message", string(bytes))
 		}).
 		Export("host_log").
 		Instantiate(ctx)

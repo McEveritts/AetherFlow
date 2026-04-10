@@ -148,7 +148,7 @@ func (c *Client) readPump() {
 		_, _, err := c.conn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseNormalClosure) {
-				slog.Info("WebSocket unexpected close", "value", err)
+				slog.Info("WebSocket unexpected close", "error", err)
 			}
 			break
 		}
@@ -360,7 +360,7 @@ func BroadcastNotification(n services.Notification) {
 	select {
 	case WSHub.broadcast <- message:
 	default:
-		slog.Info("WARNING: WebSocket broadcast channel full, dropping notification", "value", n.Title)
+		slog.Info("WARNING: WebSocket broadcast channel full, dropping notification", "title", n.Title)
 	}
 }
 

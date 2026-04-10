@@ -172,7 +172,7 @@ func (me *MetadataEnricher) runEnrichment(scanPath string, apiKey string) {
 
 		enriched, err := me.enrichBatch(batch, apiKey)
 		if err != nil {
-			slog.Info("Metadata enrichment batch error", "value", err)
+			slog.Info("Metadata enrichment batch error", "error", err)
 			me.mu.Lock()
 			me.lastErr = fmt.Sprintf("Batch %d error: %v", i/batchSize, err)
 			me.mu.Unlock()
@@ -201,7 +201,7 @@ func (me *MetadataEnricher) runEnrichment(scanPath string, apiKey string) {
 		time.Sleep(2 * time.Second)
 	}
 
-	slog.Info("Metadata enrichment complete: files processed", "value", me.total)
+	slog.Info("Metadata enrichment complete: files processed", "count", me.total)
 }
 
 func (me *MetadataEnricher) enrichBatch(files []MediaFile, apiKey string) ([]EnrichedMedia, error) {

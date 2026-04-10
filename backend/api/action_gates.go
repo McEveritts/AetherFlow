@@ -75,7 +75,7 @@ func ListPendingActions(c *gin.Context) {
 		var a PendingAction
 		if err := rows.Scan(&a.ID, &a.Classification, &a.Source, &a.Action, &a.Reason,
 			&a.Status, &a.CreatedAt, &a.ResolvedAt, &a.ResolvedBy); err != nil {
-			slog.Info("[action-gates] Row scan error", "value", err)
+			slog.Info("[action-gates] Row scan error", "error", err)
 			continue
 		}
 		actions = append(actions, a)

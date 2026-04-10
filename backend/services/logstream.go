@@ -195,13 +195,13 @@ func (la *LogAggregator) streamJournalctl() {
 		cmd := exec.Command("journalctl", "-f", "-o", "json", "--no-pager", "-n", "0")
 		stdout, err := cmd.StdoutPipe()
 		if err != nil {
-			slog.Info("Log aggregator: failed to create journalctl pipe", "value", err)
+			slog.Info("Log aggregator: failed to create journalctl pipe", "error", err)
 			time.Sleep(10 * time.Second)
 			continue
 		}
 
 		if err := cmd.Start(); err != nil {
-			slog.Info("Log aggregator: failed to start journalctl", "value", err)
+			slog.Info("Log aggregator: failed to start journalctl", "error", err)
 			time.Sleep(10 * time.Second)
 			continue
 		}
@@ -265,7 +265,7 @@ func (la *LogAggregator) streamJournalctl() {
 		}
 
 		if err := cmd.Wait(); err != nil {
-			slog.Info("Log aggregator: journalctl exited", "value", err)
+			slog.Info("Log aggregator: journalctl exited", "error", err)
 		}
 
 		slog.Info("Log aggregator: journalctl stream ended, restarting in 5s...")

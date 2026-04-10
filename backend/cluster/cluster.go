@@ -100,7 +100,7 @@ func (cm *ClusterManager) loadFromDB() {
 		"SELECT id, hostname, address, role, status, last_heartbeat, enrolled_at FROM cluster_nodes",
 	)
 	if err != nil {
-		slog.Info("Cluster: could not load nodes from DB", "value", err)
+		slog.Info("Cluster: could not load nodes from DB", "error", err)
 		return
 	}
 	defer rows.Close()
@@ -113,7 +113,7 @@ func (cm *ClusterManager) loadFromDB() {
 		var lastHB, enrolledAt string
 		err := rows.Scan(&node.ID, &node.Hostname, &node.Address, &node.Role, &node.Status, &lastHB, &enrolledAt)
 		if err != nil {
-			slog.Info("Cluster: error scanning node row", "value", err)
+			slog.Info("Cluster: error scanning node row", "error", err)
 			continue
 		}
 		node.LastHeartbeat, _ = time.Parse(time.RFC3339, lastHB)

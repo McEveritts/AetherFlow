@@ -134,14 +134,14 @@ func (c *GRPCClient) StartHeartbeat(ctx context.Context) error {
 			}
 
 			if err := stream.Send(ping); err != nil {
-				slog.Info("Cluster client: heartbeat send failed", "value", err)
+				slog.Info("Cluster client: heartbeat send failed", "error", err)
 				return err
 			}
 
 			// Receive pong (may include commands)
 			pong, err := stream.Recv()
 			if err != nil {
-				slog.Info("Cluster client: heartbeat recv failed", "value", err)
+				slog.Info("Cluster client: heartbeat recv failed", "error", err)
 				return err
 			}
 
@@ -167,7 +167,7 @@ func (c *GRPCClient) executeCommand(cmd *pb.RemoteCommand) {
 			services.ControlService(serviceName, "restart")
 		}
 	default:
-		slog.Info("Cluster client: unknown command type", "value", cmd.Type)
+		slog.Info("Cluster client: unknown command type", "type", cmd.Type)
 	}
 }
 

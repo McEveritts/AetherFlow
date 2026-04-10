@@ -24,7 +24,7 @@ func QueueAction(classification, source, action, reason string) (int, bool) {
 		classification, source, action, reason,
 	)
 	if err != nil {
-		slog.Info("[action-gates] Failed to queue action", "value", err)
+		slog.Info("[action-gates] Failed to queue action", "error", err)
 		return 0, true // Fail-safe: assume approval needed if DB insert fails
 	}
 
