@@ -2,7 +2,11 @@ openapi: 3.1.0
 info:
   title: AetherFlow API
   version: 3.1.0
-  description: Canonical schema for `/api/v1`; legacy `/api` remains available during migration.
+  description: >
+    **NON-AUTHORITATIVE / PENDING FINAL ROLLOUT**: The backend is currently migrating 
+    to a stricter `/api/v1/public`, `/api/v1/auth`, and `/api/v1/admin` namespacing model 
+    (see `route_inventory.md`). This schema provides a structural reference but paths may 
+    differ until the migration is finalize.
 servers:
   - { url: /api/v1, description: Canonical v1 }
   - { url: /api, description: Legacy compatibility }
@@ -116,7 +120,19 @@ components:
   responses:
     Error: { description: Error response, content: { application/json: { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
   schemas:
-    ErrorResponse: { type: object, required: [error], properties: { error: { type: string } } }
+    ErrorResponse: 
+      type: object
+      required: [code, message]
+      properties: 
+        code: 
+          type: string
+          description: Machine-readable error code (e.g. AUTH_EXPIRED)
+        message: 
+          type: string
+          description: Human-readable error description
+        details: 
+          type: object
+          description: Optional structured context
     MessageResponse: { type: object, properties: { message: { type: string } } }
     LoginRequest: { type: object, required: [username, password], properties: { username: { type: string }, password: { type: string } } }
     User: { type: object, properties: { id: { type: integer }, username: { type: string }, email: { type: string }, avatar_url: { type: string }, role: { type: string }, is_oauth: { type: boolean } } }

@@ -5,19 +5,30 @@ import { X, CheckCircle, AlertCircle, Info, Bell, Trash2, Box } from 'lucide-rea
 import { useEffect, useState } from 'react';
 import { useMarketplace } from '@/hooks/useMarketplace';
 import { ProgressRing } from '@/components/ui/ProgressRing';
+import useSWR from 'swr';
 
 export default function NotificationDrawer() {
     const { toasts, isDrawerOpen, toggleDrawer, clearAll } = useToast();
     const { apps } = useMarketplace();
     const [isVisible, setIsVisible] = useState(false);
 
+    const { data: serverData, mutate } = useSWR<{ notifications: any[], unread_count: number }>('/api/v1/auth/notifications', { refreshInterval: 5000 });
+    const serverNotifications = serverData?.notifications || [];
+
     const activeApps = apps ? apps.filter(app => app.status === 'installing' || app.status === 'uninstalling') : [];
 
-    // Provide a small animation delay mount
     useEffect(() => {
         if (isDrawerOpen) setIsVisible(true);
         else setTimeout(() => setIsVisible(false), 300);
     }, [isDrawerOpen]);
+
+    const handleClearAll = async () => {
+        clearAll();
+        if (serverNotifications.length > 0) {
+            await fetch('/api/v1/auth/notifications/dismiss-all', { method: 'POST' });
+            mutate();
+        }
+    };
 
     if (!isDrawerOpen && !isVisible) return null;
 
@@ -37,16 +48,16 @@ export default function NotificationDrawer() {
                     <div className="flex items-center gap-2 text-slate-100 font-bold">
                         <Bell size={18} className="text-indigo-400" />
                         <h2>Notifications</h2>
-                        {toasts.length > 0 && (
+                        {(toasts.length + serverNotifications.length) > 0 && (
                             <span className="bg-indigo-500/20 text-indigo-300 text-[10px] px-2 py-0.5 rounded-full ml-1">
-                                {toasts.length}
+                                {toasts.length + serverNotifications.length}
                             </span>
                         )}
                     </div>
                     <div className="flex items-center gap-2">
-                        {toasts.length > 0 && (
+                        {(toasts.length + serverNotifications.length) > 0 && (
                             <button 
-                                onClick={clearAll}
+                                onClick={handleClearAll}
                                 className="p-1.5 text-slate-400 hover:text-red-400 hover:bg-white/5 rounded-lg transition-colors"
                                 title="Clear All"
                             >
@@ -93,16 +104,47 @@ export default function NotificationDrawer() {
                         </div>
                     )}
 
-                    {toasts.length === 0 && activeApps.length === 0 && (
+                    {toasts.length === 0 && serverNotifications.length === 0 && activeApps.length === 0 && (
                         <div className="flex flex-col items-center justify-center h-full text-slate-500 gap-3">
                             <Bell size={32} className="opacity-20" />
                             <p className="text-sm">No new notifications</p>
                         </div>
                     )}
                     
-                    {toasts.length > 0 && (
+                    {(toasts.length > 0 || serverNotifications.length > 0) && (
                          <div className="space-y-3">
                             {activeApps.length > 0 && <h3 className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">Recent Notifications</h3>}
+                            
+                            {serverNotifications.map(notification => {
+                                const timeAgo = new Date(notification.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                                let icon, bg;
+                                switch (notification.level) {
+                                    case 'error': case 'critical':
+                                        icon = <AlertCircle size={16} className="text-red-400" />;
+                                        bg = 'bg-red-500/10 border-red-500/20'; break;
+                                    case 'warning':
+                                        icon = <AlertCircle size={16} className="text-amber-400" />;
+                                        bg = 'bg-amber-500/10 border-amber-500/20'; break;
+                                    case 'success':
+                                        icon = <CheckCircle size={16} className="text-emerald-400" />;
+                                        bg = 'bg-emerald-500/10 border-emerald-500/20'; break;
+                                    default:
+                                        icon = <Info size={16} className="text-blue-400" />;
+                                        bg = 'bg-blue-500/10 border-white/10';
+                                }
+
+                                return (
+                                    <div key={`server-${notification.id}`} className={`p-4 rounded-xl border flex items-start gap-3 backdrop-blur-md bg-white/[0.02] hover:bg-white/[0.04] transition-colors ${notification.read ? 'opacity-60' : ''} ${bg}`}>
+                                        <div className="mt-0.5">{icon}</div>
+                                        <div className="flex-1">
+                                            <p className="text-xs font-bold text-slate-400">{notification.title}</p>
+                                            <p className="text-sm font-medium text-slate-200">{notification.message}</p>
+                                            <p className="text-[10px] text-slate-500 mt-1">{timeAgo}</p>
+                                        </div>
+                                    </div>
+                                );
+                            })}
+
                             {toasts.map(toast => {
                                 const timeAgo = new Date(toast.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 

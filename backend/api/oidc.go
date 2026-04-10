@@ -198,7 +198,8 @@ func OIDCAuthorize(c *gin.Context) {
 
 	_, err = extractUserIDFromJWT(cookie)
 	if err != nil {
-		c.Redirect(http.StatusTemporaryRedirect, fmt.Sprintf("/login?return_to=%s", c.Request.URL.String()))
+		returnTo := url.QueryEscape(c.Request.URL.RequestURI())
+		c.Redirect(http.StatusTemporaryRedirect, "/login?return_to="+returnTo)
 		return
 	}
 

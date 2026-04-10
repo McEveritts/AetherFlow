@@ -72,6 +72,7 @@ var Notifier *NotificationEngine
 
 // InitNotificationEngine creates and starts the notification engine.
 func InitNotificationEngine(dispatchFn func(Notification)) {
+	notifLog = logging.ForDomain("notifications", "engine")
 	Notifier = &NotificationEngine{
 		dispatchFn:     dispatchFn,
 		lastEvaluation: make(map[string]time.Time),
@@ -82,7 +83,6 @@ func InitNotificationEngine(dispatchFn func(Notification)) {
 	// Start rule evaluator goroutine
 	go Notifier.evaluationLoop()
 
-	notifLog = logging.ForDomain("notifications", "engine")
 	notifLog.Info("notification engine initialized")
 }
 

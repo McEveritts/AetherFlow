@@ -15,14 +15,17 @@ export default function ServiceLogsModal({ serviceName, onClose }: ServiceLogsMo
     const bottomRef = useRef<HTMLDivElement>(null);
     const { addToast } = useToast();
     const [isAnalyzing, setIsAnalyzing] = useState(false);
-    const [aiAnalysis, setAiAnalysis] = useState<{ rootCause: string, recommendation: string, hasError: boolean } | null>(null);
+    const [aiAnalysis, setAiAnalysis] = useState<{ rootCause: string, recommendation: string, hasError: boolean, proposedAction?: any } | null>(null);
     const [showRemediationBoundary, setShowRemediationBoundary] = useState(false);
 
     // Using SWR to poll logs every 2 seconds
-    const { data: logs, error, isLoading, mutate } = useSWR<{ logs: string[] }>(
-        serviceName ? `/api/v1/admin/services/${encodeURIComponent(serviceName)}/logs` : null,
+    const { data: rawData, error, isLoading, mutate } = useSWR<{ logs: { message: string }[] }>(
+        serviceName ? `/api/v1/admin/logs?source=${encodeURIComponent(serviceName)}` : null,
         { refreshInterval: 2000, keepPreviousData: true } // Stream-like polling
     );
+    
+    // Map raw backend format to legacy string array until UI is updated
+    const logs = rawData ? { logs: rawData.logs.map(l => l.message) } : null;
 
     // Auto-scroll to bottom on fresh logs
     useEffect(() => {
@@ -44,29 +47,43 @@ export default function ServiceLogsModal({ serviceName, onClose }: ServiceLogsMo
         URL.revokeObjectURL(url);
     };
 
-    const runAiDiagnostic = () => {
+    const runAiDiagnostic = async () => {
         if (!logs?.logs || logs.logs.length === 0) return;
         setIsAnalyzing(true);
         setAiAnalysis(null);
         
-        // Mocking an AI diagnostic run
-        setTimeout(() => {
-            const hasError = logs.logs.some(l => l.toLowerCase().includes('error'));
-            setAiAnalysis({
-                rootCause: hasError 
-                    ? "Daemon failed to bind to designated network interface. Connection reset by peer detected on local socket."
-                    : "No critical errors detected. The daemon appears to be running gracefully in a stable state.",
-                recommendation: hasError
-                    ? `Draft a network-reset sequence for ${serviceName} to free up overlapping ports.`
-                    : "No immediate remediation required.",
-                hasError
+        try {
+            const prompt = `Analyze the following terminal output for the service '${serviceName}'. Identify the root cause of any errors and recommend remediation steps. Do not start a conversation, just provide the root cause and recommendation.\n\nLogs:\n${logs.logs.slice(-30).join('\n')}`;
+            
+            const res = await apiFetch('/api/v1/auth/ai/support', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ 
+                    message: prompt,
+                    context_mode: 'logs'
+                })
             });
+
+            if (!res.ok) throw new Error('AI analysis failed');
+            
+            const data = await res.json();
+            
+            setAiAnalysis({
+                rootCause: data.reply,
+                recommendation: data.proposed_action ? data.proposed_action.description : "No immediate remediation required.",
+                hasError: !!data.proposed_action,
+                proposedAction: data.proposed_action
+            });
+            
+        } catch (e) {
+            addToast('FlowAI diagnostic failed. Backend might be unreachable.', 'error');
+        } finally {
             setIsAnalyzing(false);
-        }, 2000);
+        }
     };
 
-    const handleApproveRemediation = () => {
-        addToast(`Remediation configured for ${serviceName} and forwarded to Approval Inbox.`, 'success');
+    const handleAcknowledgeRemediation = () => {
+        addToast(`Remediation was forwarded to your Approval Inbox.`, 'success');
         setShowRemediationBoundary(false);
     };
 
@@ -205,45 +222,27 @@ export default function ServiceLogsModal({ serviceName, onClose }: ServiceLogsMo
                     </div>
                     <h3 className="text-xl font-bold text-slate-100 mb-2">Remediation Proposed</h3>
                     <p className="text-sm text-slate-400 mb-6">
-                        FlowAI has drafted an executor sequence to resolve the error pattern matching <span className="text-amber-300 font-bold">"{serviceName} Socket Bind Failure"</span>. 
-                        No autonomous action has occurred. 
+                        FlowAI has drafted an executor sequence resolving this error pattern. {aiAnalysis?.proposedAction?.title && <span className="text-amber-300 font-bold ml-1">("{aiAnalysis.proposedAction.title}")</span>}
+                        The remediation was automatically forwarded to your Approval Inbox. No autonomous action has occurred.
                     </p>
 
                     <div className="bg-black/20 border border-white/5 rounded-xl w-full p-4 mb-6 text-left relative overflow-hidden">
                         <div className="absolute top-0 right-0 p-2 opacity-10">
                             <Wrench size={48} />
                         </div>
-                        <h4 className="text-[10px] uppercase font-bold text-slate-500 tracking-wider mb-3">Payload Preview</h4>
-                        <ul className="text-sm text-slate-300 space-y-2 font-mono relative z-10 w-full">
-                            <li className="flex items-start gap-2">
-                                <span className="text-emerald-400 shrink-0">1.</span>
-                                <span>`docker network disconnect aether ${serviceName}`</span>
-                            </li>
-                            <li className="flex items-start gap-2">
-                                <span className="text-emerald-400 shrink-0">2.</span>
-                                <span>`docker network connect aether ${serviceName}`</span>
-                            </li>
-                            <li className="flex items-start gap-2">
-                                <span className="text-emerald-400 shrink-0">3.</span>
-                                <span>`systemctl restart af-worker-${serviceName}`</span>
-                            </li>
-                        </ul>
+                        <h4 className="text-[10px] uppercase font-bold text-slate-500 tracking-wider mb-3">Proposed Action Details</h4>
+                        <div className="text-sm text-slate-300 space-y-2 font-mono relative z-10 w-full mb-3">
+                            <p className="text-emerald-400 break-words">{aiAnalysis?.proposedAction?.description || "Run orchestrated restart sequence."}</p>
+                        </div>
                     </div>
                     
                     <div className="w-full flex gap-3">
                         <button 
-                            onClick={handleApproveRemediation}
+                            onClick={handleAcknowledgeRemediation}
                             className="flex-1 glass-button-primary flex items-center justify-center gap-2 py-3 border-amber-500/50 bg-amber-500/10 text-amber-400 hover:bg-amber-500/20"
                         >
                             <CheckCircle size={18} />
-                            <span className="font-bold tracking-wide">FORWARD TO INBOX</span>
-                        </button>
-                        <button 
-                            onClick={() => setShowRemediationBoundary(false)}
-                            className="flex-1 glass-button flex items-center justify-center gap-2 py-3 text-slate-400 hover:text-slate-200"
-                        >
-                            <XCircle size={18} />
-                            <span className="font-bold tracking-wide">DECLINE</span>
+                            <span className="font-bold tracking-wide">ACKNOWLEDGE</span>
                         </button>
                     </div>
                 </div>

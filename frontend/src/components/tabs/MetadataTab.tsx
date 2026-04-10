@@ -37,7 +37,7 @@ export default function MetadataTab() {
         try {
             // Using raw fetch for streaming support to process NDJSON chunks actively
             const token = document.cookie.split('; ').find(row => row.startsWith('af_sid='))?.split('=')[1] || '';
-            const res = await fetch('/api/v1/admin/ai/metadata/scan/stream', {
+            const res = await fetch('/api/v1/admin/ai/metadata/scan', {
                 method: 'POST',
                 headers: { 
                     'Content-Type': 'application/json',

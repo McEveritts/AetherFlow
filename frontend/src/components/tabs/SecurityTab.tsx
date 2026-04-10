@@ -1,53 +1,46 @@
 import { Shield, Lock, AlertTriangle, KeyRound, MonitorSmartphone, Laptop, Search, MapPin, XCircle } from 'lucide-react';
 import { useToast } from '@/contexts/ToastContext';
-import { useState } from 'react';
+import useSWR from 'swr';
 
-// Mock session data for UI planning
-const mockSessions = [
-    {
-        id: 'sess_1',
-        isCurrent: true,
-        device: 'MacBook Pro, macOS',
-        browser: 'Chrome 120.0',
-        ip: '192.168.1.44',
-        location: 'Seattle, WA',
-        lastActive: 'Just now',
-        suspicious: false,
-    },
-    {
-        id: 'sess_2',
-        isCurrent: false,
-        device: 'iPhone 14 Pro, iOS',
-        browser: 'Safari 17.0',
-        ip: '10.0.0.12',
-        location: 'Seattle, WA',
-        lastActive: '2 hours ago',
-        suspicious: false,
-    },
-    {
-        id: 'sess_3',
-        isCurrent: false,
-        device: 'Unknown Linux Device',
-        browser: 'Firefox 115.0',
-        ip: '185.15.22.1',
-        location: 'Krakow, Poland',
-        lastActive: '14 mins ago',
-        suspicious: true,
-    }
-];
+interface SessionInfo {
+    jti: string;
+    ip_address: string;
+    user_agent: string;
+    expires_at: string;
+    last_active: string;
+    is_current: boolean;
+}
 
 export default function SecurityTab() {
     const { addToast } = useToast();
-    const [sessions, setSessions] = useState(mockSessions);
+    const { data: sessionData, mutate, error } = useSWR<{ sessions: SessionInfo[] }>('/api/v1/auth/sessions', {
+        refreshInterval: 10000,
+    });
 
-    const revokeSession = (id: string) => {
-        setSessions(prev => prev.filter(s => s.id !== id));
-        addToast('Session forcefully terminated.', 'success');
+    const sessions = sessionData?.sessions || [];
+
+    const revokeSession = async (jti: string) => {
+        try {
+            const res = await fetch(`/api/v1/auth/sessions/${encodeURIComponent(jti)}`, { method: 'DELETE' });
+            if (!res.ok) throw new Error('Failed to revoke session');
+            mutate();
+            addToast('Session forcefully terminated.', 'success');
+        } catch (err: any) {
+            addToast('Error revoking session.', 'error');
+        }
     };
 
-    const revokeAllOthers = () => {
-        setSessions(prev => prev.filter(s => s.isCurrent));
-        addToast('All unauthorized sessions revoked.', 'info');
+    const revokeAllOthers = async () => {
+        try {
+            const others = sessions.filter(s => !s.is_current);
+            await Promise.all(
+                others.map(s => fetch(`/api/v1/auth/sessions/${encodeURIComponent(s.jti)}`, { method: 'DELETE' }))
+            );
+            mutate();
+            addToast('All unauthorized sessions revoked.', 'info');
+        } catch (err: any) {
+            addToast('Error revoking some sessions.', 'error');
+        }
     };
 
     return (
@@ -80,35 +73,31 @@ export default function SecurityTab() {
 
                         <div className="space-y-4">
                             {sessions.map(session => (
-                                <div key={session.id} className={`flex flex-col md:flex-row items-start md:items-center justify-between gap-4 p-4 rounded-xl border ${session.isCurrent ? 'bg-indigo-500/10 border-indigo-500/30' : session.suspicious ? 'bg-red-500/10 border-red-500/30' : 'bg-white/[0.02] border-white/5'}`}>
+                                <div key={session.jti} className={`flex flex-col md:flex-row items-start md:items-center justify-between gap-4 p-4 rounded-xl border ${session.is_current ? 'bg-indigo-500/10 border-indigo-500/30' : 'bg-white/[0.02] border-white/5'}`}>
                                     <div className="flex gap-4">
-                                        <div className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 ${session.isCurrent ? 'bg-indigo-500/20 text-indigo-400' : session.suspicious ? 'bg-red-500/20 text-red-400' : 'bg-slate-800 text-slate-400'}`}>
+                                        <div className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 ${session.is_current ? 'bg-indigo-500/20 text-indigo-400' : 'bg-slate-800 text-slate-400'}`}>
                                             <Laptop size={20} />
                                         </div>
                                         <div>
                                             <div className="flex items-center gap-2">
-                                                <span className="font-semibold text-slate-200">{session.device}</span>
-                                                {session.isCurrent && (
+                                                <span className="font-semibold text-slate-200">
+                                                    {session.user_agent.length > 30 ? session.user_agent.substring(0, 30) + '...' : session.user_agent || 'Unknown Device'}
+                                                </span>
+                                                {session.is_current && (
                                                     <span className="text-[10px] bg-indigo-500/20 text-indigo-300 px-2 py-0.5 rounded uppercase tracking-wider font-bold">This Device</span>
-                                                )}
-                                                {session.suspicious && (
-                                                    <span className="text-[10px] bg-red-500/20 text-red-400 px-2 py-0.5 rounded uppercase tracking-wider font-bold flex items-center gap-1">
-                                                        <Search size={10} /> Unrecognized Node
-                                                    </span>
                                                 )}
                                             </div>
                                             <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-400 mt-1">
-                                                <span>{session.browser}</span>
-                                                <span className="flex items-center gap-1"><MapPin size={12} className="text-slate-500" /> {session.location}</span>
-                                                <span className="text-slate-500">{session.ip}</span>
+                                                <span className="text-slate-500" title={session.user_agent}>{session.user_agent.length > 50 ? session.user_agent.substring(0, 50) + '...' : session.user_agent || 'Unknown Browser'}</span>
+                                                <span className="text-slate-500">{session.ip_address}</span>
                                             </div>
-                                            <div className="text-xs text-slate-500 mt-1">Active: {session.lastActive}</div>
+                                            <div className="text-xs text-slate-500 mt-1">Active: {new Date(session.last_active).toLocaleString()}</div>
                                         </div>
                                     </div>
                                     
-                                    {!session.isCurrent && (
+                                    {!session.is_current && (
                                         <button 
-                                            onClick={() => revokeSession(session.id)}
+                                            onClick={() => revokeSession(session.jti)}
                                             className="text-slate-500 hover:text-red-400 transition-colors p-2 rounded-lg hover:bg-red-500/10 self-end md:self-auto shrink-0"
                                             title="Revoke Session"
                                         >

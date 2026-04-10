@@ -5,19 +5,20 @@ import { ToastProvider, useToast } from "@/contexts/ToastContext";
 
 function ToastProbe() {
   const { toasts, addToast, removeToast } = useToast();
+  const activeToasts = toasts.filter((t) => !t.dismissed);
 
   return (
     <div>
       <button onClick={() => addToast("Saved", "success")}>add</button>
       <button
         onClick={() => {
-          if (toasts[0]) removeToast(toasts[0].id);
+          if (activeToasts[0]) removeToast(activeToasts[0].id);
         }}
       >
         remove
       </button>
-      <span data-testid="count">{toasts.length}</span>
-      <span data-testid="message">{toasts[0]?.message ?? ""}</span>
+      <span data-testid="count">{activeToasts.length}</span>
+      <span data-testid="message">{activeToasts[0]?.message ?? ""}</span>
     </div>
   );
 }
@@ -28,7 +29,7 @@ describe("ToastContext", () => {
   });
 
   afterEach(() => {
-    jest.runOnlyPendingTimers();
+    jest.clearAllTimers();
     jest.useRealTimers();
   });
 

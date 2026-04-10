@@ -33,14 +33,35 @@ export default function InboxTab() {
     const [processingIds, setProcessingIds] = useState<Set<number>>(new Set());
     const [selectedAction, setSelectedAction] = useState<PendingAction | null>(null);
 
-    const handleApprove = async (id: number, action: string) => {
+    const handleApprove = async (id: number, actionTitle: string, source: string) => {
         setProcessingIds(prev => new Set(prev).add(id));
         try {
             const success = await approveAction(id);
             if (success) {
-                addToast(`Execution authorized: ${action}`, 'success');
+                // If it's an AI-proposed action, the UI explicitly triggers the executor
+                // to bridge the human-in-the-loop boundary and run the real backend logic.
+                if (source === 'FlowAI') {
+                    const match = actionTitle.match(/^(Restart|Stop|Start)\s+(.+)$/i);
+                    if (match) {
+                        const verb = match[1].toLowerCase();
+                        const target = match[2];
+                        try {
+                            const res = await apiFetch(`/api/v1/admin/services/${encodeURIComponent(target)}/control`, {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ action: verb, process: target })
+                            });
+                            if (!res.ok) {
+                                console.error("FlowAI executor failure", await res.text());
+                            }
+                        } catch (e) {
+                            console.error("FlowAI executor boundary exception", e);
+                        }
+                    }
+                }
+                addToast(`Execution authorized: ${actionTitle}`, 'success');
             } else {
-                addToast('Approval failed — action may already be resolved', 'error');
+                addToast('Approval failed — action may already be resolved or missing.', 'error');
             }
         } catch (err) {
             addToast(err instanceof Error ? err.message : 'Approval failed', 'error');
@@ -191,7 +212,7 @@ export default function InboxTab() {
                                     {/* Right Action Area */}
                                     <div className="flex flex-row lg:flex-col gap-3 w-full lg:w-48 shrink-0" onClick={(e) => e.stopPropagation()}>
                                         <button 
-                                            onClick={() => handleApprove(action.id, action.action)}
+                                            onClick={() => handleApprove(action.id, action.action, action.source)}
                                             disabled={isProcessing}
                                             className="flex-1 glass-button-primary flex items-center justify-center gap-2 py-3 px-4 shadow-[0_0_15px_rgba(34,197,94,0.2)] hover:shadow-[0_0_20px_rgba(34,197,94,0.4)] border-emerald-500/50 bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20 disabled:opacity-50 disabled:cursor-not-allowed"
                                         >
@@ -220,7 +241,7 @@ export default function InboxTab() {
                 action={selectedAction}
                 isOpen={!!selectedAction}
                 onClose={() => setSelectedAction(null)}
-                onApprove={(id) => handleApprove(id, selectedAction?.action || '')}
+                onApprove={(id) => handleApprove(id, selectedAction?.action || '', selectedAction?.source || '')}
                 onReject={handleReject}
                 isProcessing={selectedAction ? processingIds.has(selectedAction.id) : false}
             />
