@@ -1,4 +1,4 @@
-import { Shield, Lock, AlertTriangle, KeyRound, MonitorSmartphone, Laptop, Search, MapPin, XCircle } from 'lucide-react';
+import { Shield, Lock, KeyRound, MonitorSmartphone, Laptop, XCircle } from 'lucide-react';
 import { useToast } from '@/contexts/ToastContext';
 import useSWR from 'swr';
 
@@ -13,7 +13,7 @@ interface SessionInfo {
 
 export default function SecurityTab() {
     const { addToast } = useToast();
-    const { data: sessionData, mutate, error } = useSWR<{ sessions: SessionInfo[] }>('/api/v1/auth/sessions', {
+    const { data: sessionData, mutate } = useSWR<{ sessions: SessionInfo[] }>('/api/v1/auth/sessions', {
         refreshInterval: 10000,
     });
 
@@ -25,7 +25,7 @@ export default function SecurityTab() {
             if (!res.ok) throw new Error('Failed to revoke session');
             mutate();
             addToast('Session forcefully terminated.', 'success');
-        } catch (err: any) {
+        } catch {
             addToast('Error revoking session.', 'error');
         }
     };
@@ -38,7 +38,7 @@ export default function SecurityTab() {
             );
             mutate();
             addToast('All unauthorized sessions revoked.', 'info');
-        } catch (err: any) {
+        } catch {
             addToast('Error revoking some sessions.', 'error');
         }
     };

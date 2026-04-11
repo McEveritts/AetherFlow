@@ -1,10 +1,11 @@
 import { useEffect, useRef } from 'react';
 import useSWR from 'swr';
-import { Terminal, Loader2, Pause, Play, Download, Sparkles, AlertCircle, Wrench, CheckCircle, XCircle } from 'lucide-react';
+import { Terminal, Loader2, Play, Download, Sparkles, AlertCircle, Wrench, CheckCircle } from 'lucide-react';
 import { Modal } from '@/components/ui/Modal';
 import { apiFetch } from '@/lib/fetcher';
 import { useState } from 'react';
 import { useToast } from '@/contexts/ToastContext';
+import type { AIProposedAction } from '@/types/api';
 
 interface ServiceLogsModalProps {
     serviceName: string | null;
@@ -15,7 +16,7 @@ export default function ServiceLogsModal({ serviceName, onClose }: ServiceLogsMo
     const bottomRef = useRef<HTMLDivElement>(null);
     const { addToast } = useToast();
     const [isAnalyzing, setIsAnalyzing] = useState(false);
-    const [aiAnalysis, setAiAnalysis] = useState<{ rootCause: string, recommendation: string, hasError: boolean, proposedAction?: any } | null>(null);
+    const [aiAnalysis, setAiAnalysis] = useState<{ rootCause: string, recommendation: string, hasError: boolean, proposedAction?: AIProposedAction } | null>(null);
     const [showRemediationBoundary, setShowRemediationBoundary] = useState(false);
 
     // Using SWR to poll logs every 2 seconds
@@ -75,7 +76,7 @@ export default function ServiceLogsModal({ serviceName, onClose }: ServiceLogsMo
                 proposedAction: data.proposed_action
             });
             
-        } catch (e) {
+        } catch {
             addToast('FlowAI diagnostic failed. Backend might be unreachable.', 'error');
         } finally {
             setIsAnalyzing(false);
@@ -222,7 +223,7 @@ export default function ServiceLogsModal({ serviceName, onClose }: ServiceLogsMo
                     </div>
                     <h3 className="text-xl font-bold text-slate-100 mb-2">Remediation Proposed</h3>
                     <p className="text-sm text-slate-400 mb-6">
-                        FlowAI has drafted an executor sequence resolving this error pattern. {aiAnalysis?.proposedAction?.title && <span className="text-amber-300 font-bold ml-1">("{aiAnalysis.proposedAction.title}")</span>}
+                        FlowAI has drafted an executor sequence resolving this error pattern. {aiAnalysis?.proposedAction?.title && <span className="text-amber-300 font-bold ml-1">(&quot;{aiAnalysis.proposedAction.title}&quot;)</span>}
                         The remediation was automatically forwarded to your Approval Inbox. No autonomous action has occurred.
                     </p>
 

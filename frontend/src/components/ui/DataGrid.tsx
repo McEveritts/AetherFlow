@@ -34,6 +34,7 @@ export function DataGrid<TData, TValue>({
   const [sorting, setSorting] = useState<SortingState>([]);
   const [expanded, setExpanded] = useState<ExpandedState>({});
 
+  // eslint-disable-next-line react-hooks/incompatible-library -- TanStack Table is incompatible with React Compiler memoization by design
   const table = useReactTable({
     data,
     columns,

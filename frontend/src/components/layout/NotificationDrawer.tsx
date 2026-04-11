@@ -2,24 +2,45 @@
 
 import { useToast } from '@/contexts/ToastContext';
 import { X, CheckCircle, AlertCircle, Info, Bell, Trash2, Box } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useMarketplace } from '@/hooks/useMarketplace';
 import { ProgressRing } from '@/components/ui/ProgressRing';
 import useSWR from 'swr';
+
+interface ServerNotification {
+    id: number;
+    title: string;
+    message: string;
+    level: 'error' | 'critical' | 'warning' | 'success' | 'info';
+    read: boolean;
+    created_at: string;
+}
 
 export default function NotificationDrawer() {
     const { toasts, isDrawerOpen, toggleDrawer, clearAll } = useToast();
     const { apps } = useMarketplace();
     const [isVisible, setIsVisible] = useState(false);
+    const hideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-    const { data: serverData, mutate } = useSWR<{ notifications: any[], unread_count: number }>('/api/v1/auth/notifications', { refreshInterval: 5000 });
+    const { data: serverData, mutate } = useSWR<{ notifications: ServerNotification[], unread_count: number }>('/api/v1/auth/notifications', { refreshInterval: 5000 });
     const serverNotifications = serverData?.notifications || [];
 
     const activeApps = apps ? apps.filter(app => app.status === 'installing' || app.status === 'uninstalling') : [];
 
     useEffect(() => {
-        if (isDrawerOpen) setIsVisible(true);
-        else setTimeout(() => setIsVisible(false), 300);
+        if (hideTimerRef.current) {
+            clearTimeout(hideTimerRef.current);
+            hideTimerRef.current = null;
+        }
+        if (isDrawerOpen) {
+            // Use microtask to avoid synchronous setState in effect body
+            hideTimerRef.current = setTimeout(() => setIsVisible(true), 0);
+        } else {
+            hideTimerRef.current = setTimeout(() => setIsVisible(false), 300);
+        }
+        return () => {
+            if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
+        };
     }, [isDrawerOpen]);
 
     const handleClearAll = async () => {

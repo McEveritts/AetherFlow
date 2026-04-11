@@ -11,7 +11,7 @@ interface ProcessWidgetProps {
 }
 
 export default function ProcessWidget({ processes }: ProcessWidgetProps) {
-    const { data: services } = useSWR<Record<string, any>>('/api/v1/auth/services');
+    const { data: services } = useSWR<Record<string, { status: string; uptime: string; version: string; process?: string }>>('/api/v1/auth/services');
     const setActiveTab = useSystemStore((state) => state.setActiveTab);
 
     const columns = useMemo<ColumnDef<ProcessInfo>[]>(() => [

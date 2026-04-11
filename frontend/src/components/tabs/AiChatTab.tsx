@@ -8,7 +8,7 @@ import { useToast } from '@/contexts/ToastContext';
 interface ChatMessage {
     role: 'user' | 'assistant';
     text: string;
-    payload?: any;
+    payload?: Record<string, unknown>;
 }
 
 const AI_MODELS = [

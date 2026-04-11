@@ -4,7 +4,7 @@ import { useAuth } from '@/contexts/AuthContext';
 import { ShieldCheck, ShieldAlert, Check, X, Loader2, User, Mail, Database, Globe } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { MotionPresets } from '@/lib/design';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, type ComponentType } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { apiFetch } from '@/lib/fetcher';
 
@@ -126,7 +126,7 @@ export default function ConsentPage() {
                             </h3>
                             <ul className="space-y-3">
                                 {scopeList.map(s => {
-                                    const SCOPE_METADATA: Record<string, { desc: string, icon: any, alertLevel?: 'danger' | 'warning' | 'info' }> = {
+                                    const SCOPE_METADATA: Record<string, { desc: string, icon: ComponentType<{ size?: number; className?: string }>, alertLevel?: 'danger' | 'warning' | 'info' }> = {
                                         openid: { desc: 'Core federated identity context', icon: Globe, alertLevel: 'info' },
                                         profile: { desc: 'Basic identity attributes', icon: User, alertLevel: 'info' },
                                         email: { desc: 'Primary contact address visibility', icon: Mail, alertLevel: 'info' },

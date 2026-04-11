@@ -15,7 +15,7 @@ test('validates WebSocket connection drops and automatic reconnection UI durabil
   });
 
   // Mock the WebSocket Server
-  let mockSocket: any;
+  let mockSocket: { close: () => void } | undefined;
   await page.routeWebSocket(/\/api(\/v1)?\/auth\/ws/, ws => {
     mockSocket = ws;
     ws.onMessage(message => {
