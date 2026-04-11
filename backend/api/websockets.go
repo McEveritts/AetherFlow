@@ -21,9 +21,11 @@ import (
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
-	// Fix #12: Check Origin against ALLOWED_CORS_ORIGIN env var (comma-separated)
-	// in addition to the r.Host match. This handles the case where the Next.js
-	// http-proxy rewrites the WebSocket Origin header to 127.0.0.1:8080.
+	// Fix #12 + Public-IP: Check Origin against a multi-layer allowlist:
+	//   1. Empty origin (non-browser clients)
+	//   2. Direct host match
+	//   3. Loopback origins (backend is on 127.0.0.1 — always safe)
+	//   4. ALLOWED_CORS_ORIGIN env var (comma-separated)
 	CheckOrigin: func(r *http.Request) bool {
 		origin := r.Header.Get("Origin")
 		if origin == "" {
@@ -37,10 +39,19 @@ var upgrader = websocket.Upgrader{
 		if parsed.Host == r.Host {
 			return true
 		}
-		// Check against allowed CORS origins
+		// Always accept loopback origins — backend only listens on
+		// 127.0.0.1:8080 so the request has already been proxied.
+		host := parsed.Hostname()
+		if host == "localhost" || host == "127.0.0.1" || host == "::1" {
+			return true
+		}
+		// Check against allowed CORS origins (comma-separated)
 		if allowed := os.Getenv("ALLOWED_CORS_ORIGIN"); allowed != "" {
 			for _, o := range strings.Split(allowed, ",") {
 				o = strings.TrimSpace(o)
+				if o == "" {
+					continue
+				}
 				allowedParsed, err := url.Parse(o)
 				if err != nil {
 					continue
@@ -50,6 +61,10 @@ var upgrader = websocket.Upgrader{
 				}
 			}
 		}
+		slog.Warn("WebSocket origin rejected",
+			"origin", origin,
+			"request_host", r.Host,
+		)
 		return false
 	},
 }
@@ -349,13 +364,15 @@ func broadcastMetricsLoop() {
 		}
 
 		message, err := json.Marshal(payload)
-		if err == nil {
-			// Non-blocking broadcast
-			select {
-			case WSHub.broadcast <- message:
-			default:
-				slog.Warn("WebSocket broadcast channel full, dropping metrics payload")
-			}
+		if err != nil {
+			slog.Error("Failed to marshal metrics payload for WebSocket broadcast", "error", err)
+			continue
+		}
+		// Non-blocking broadcast
+		select {
+		case WSHub.broadcast <- message:
+		default:
+			slog.Warn("WebSocket broadcast channel full, dropping metrics payload")
 		}
 	}
 }

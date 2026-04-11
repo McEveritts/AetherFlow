@@ -48,14 +48,28 @@ export default function Dashboard() {
     }
 
     if (isError || !metrics) {
+      // Graduated error states instead of a single hard "System Offline" panel
+      const isReconnecting = connectionState === 'RECONNECTING';
+      const isFallback = connectionState === 'FALLBACK';
+
       return (
         <div className="flex items-center justify-center h-full min-h-[50vh]">
-          <div className="bg-red-500/10 border border-red-500/20 p-8 rounded-2xl flex flex-col items-center gap-4 text-center max-w-md backdrop-blur-md">
-            <div className="w-12 h-12 bg-red-500/20 rounded-full flex items-center justify-center text-red-400 text-2xl font-bold">!</div>
-            <h3 className="text-lg font-bold text-slate-200">System Offline</h3>
-            <p className="text-sm text-slate-400">Unable to connect to the AetherFlow backend API. Make sure the Go service is running.</p>
-            <p className="text-xs text-red-400/80 font-mono bg-red-500/10 px-2 py-1 rounded truncate max-w-full">
-              {connectionState === 'RECONNECTING' ? 'Reconnecting...' : 'Connection refused'}
+          <div className={`${isReconnecting ? 'bg-amber-500/10 border-amber-500/20' : isFallback ? 'bg-blue-500/10 border-blue-500/20' : 'bg-red-500/10 border-red-500/20'} border p-8 rounded-2xl flex flex-col items-center gap-4 text-center max-w-md backdrop-blur-md`}>
+            <div className={`w-12 h-12 ${isReconnecting ? 'bg-amber-500/20' : isFallback ? 'bg-blue-500/20' : 'bg-red-500/20'} rounded-full flex items-center justify-center text-2xl font-bold ${isReconnecting ? 'text-amber-400' : isFallback ? 'text-blue-400' : 'text-red-400'}`}>
+              {isReconnecting ? '⟳' : isFallback ? '◌' : '!'}
+            </div>
+            <h3 className="text-lg font-bold text-slate-200">
+              {isReconnecting ? 'Reconnecting...' : isFallback ? 'Degraded Mode' : 'System Offline'}
+            </h3>
+            <p className="text-sm text-slate-400">
+              {isReconnecting
+                ? 'Lost connection to AetherFlow backend. Attempting to reconnect automatically.'
+                : isFallback
+                  ? 'Live connection unavailable. Polling for system data...'
+                  : 'Unable to connect to the AetherFlow backend API. Make sure the Go service is running.'}
+            </p>
+            <p className={`text-xs font-mono px-2 py-1 rounded truncate max-w-full ${isReconnecting ? 'text-amber-400/80 bg-amber-500/10' : isFallback ? 'text-blue-400/80 bg-blue-500/10' : 'text-red-400/80 bg-red-500/10'}`}>
+              {isReconnecting ? `Attempt ${connectionState === 'RECONNECTING' ? 'in progress' : 'pending'}` : isFallback ? 'Waiting for data...' : 'Connection refused'}
             </p>
           </div>
         </div>

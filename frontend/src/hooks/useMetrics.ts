@@ -127,7 +127,12 @@ export function useMetrics() {
         }
     }, [wsData?.services]);
 
-    const isConnected = connectionState === 'CONNECTED' || connectionState === 'FALLBACK';
+    // CONNECTING = initial connect → show skeleton
+    // RECONNECTING = lost connection, trying to recover → show last-known data if available
+    // FALLBACK = polling mode → show polling data
+    // DEGRADED = stale data → show stale data with indicator
+    // DISCONNECTED = completely dead → show error only if no cached data
+    const isConnected = connectionState === 'CONNECTED' || connectionState === 'FALLBACK' || connectionState === 'DEGRADED';
 
     return {
         metrics,
@@ -136,8 +141,8 @@ export function useMetrics() {
         history: visibleHistory, // Component consumers get the windowed slice
         timeWindow,
         setTimeWindow,
-        isLoading: !isConnected && !metrics,
-        isError: connectionState === 'RECONNECTING' && !metrics,
+        isLoading: connectionState === 'CONNECTING' && !metrics,
+        isError: connectionState === 'DISCONNECTED' && !metrics,
         connectionState,
     };
 }

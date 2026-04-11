@@ -133,8 +133,21 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
             try {
                 const res = await apiFetch('/api/v1/auth/system/metrics');
                 if (!res.ok) return;
-                const metrics = await res.json();
-                if (isMountedRef.current) {
+                // Guard against empty body — backend may return 200 OK with
+                // no content when json.Marshal fails on +Inf/NaN values.
+                const text = await res.text();
+                if (!text || text.trim() === '') {
+                    console.warn('[WS] Metrics poll returned empty body — skipping');
+                    return;
+                }
+                let metrics;
+                try {
+                    metrics = JSON.parse(text);
+                } catch {
+                    console.warn('[WS] Metrics poll returned malformed JSON — skipping');
+                    return;
+                }
+                if (isMountedRef.current && metrics) {
                     setData({ system: metrics, services: null });
                     setLastMessageAt(Date.now());
                 }

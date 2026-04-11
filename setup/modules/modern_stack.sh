@@ -177,19 +177,40 @@ _build_modern_stack() {
     local jwt_secret
     jwt_secret="$(head -c 64 /dev/urandom | tr -dc 'A-Za-z0-9' | head -c 64)"
 
-    # ── Detect host IP for ALLOWED_HOSTS / CORS ──────────────────────────
-    # Fix #8: Inject the host's actual IP so HostValidationMiddleware passes
+    # ── Detect host IPs for ALLOWED_HOSTS / CORS ──────────────────────────
+    # Fix #8: Inject the host's actual LAN IP so HostValidationMiddleware passes
     local host_ip
     host_ip="$(ip route get 8.8.8.8 2>/dev/null | awk 'NR==1 {print $7}')"
     [[ -z "${host_ip}" ]] && host_ip="127.0.0.1"
 
+    # Public-IP fix: Also detect the public IP for remote access
+    local public_ip=""
+    public_ip="$(curl -4 -s --max-time 5 https://api.ipify.org 2>/dev/null || true)"
+    if [[ -n "${public_ip}" ]]; then
+        echo "Detected public IP: ${public_ip}"
+    fi
+    # Fallback: if public IP matches LAN IP or is empty, clear it
+    if [[ "${public_ip}" == "${host_ip}" ]]; then
+        public_ip=""
+    fi
+
     # ── Install systemd unit files from templates ────────────────────────
     local sysd_dir="/opt/AetherFlow/setup/templates/sysd"
     if [[ -f "${sysd_dir}/aetherflow-api.template" ]]; then
+        # Build public IP substitution — empty string if not detected
+        local public_ip_sed=""
+        if [[ -n "${public_ip}" ]]; then
+            public_ip_sed="${public_ip}"
+        fi
         sed -e "s|__AES_MASTER_KEY__|${aes_key}|g" \
             -e "s|__JWT_SECRET__|${jwt_secret}|g" \
             -e "s|__HOST_IP__|${host_ip}|g" \
+            -e "s|__PUBLIC_IP__|${public_ip_sed}|g" \
             "${sysd_dir}/aetherflow-api.template" > /etc/systemd/system/aetherflow-api.service
+        # Clean up any leftover empty entries from missing public IP
+        if [[ -z "${public_ip}" ]]; then
+            sed -i 's/,:8080//g; s/,http:\/\/:3000//g' /etc/systemd/system/aetherflow-api.service
+        fi
     fi
     if [[ -f "${sysd_dir}/aetherflow-frontend.template" ]]; then
         cp "${sysd_dir}/aetherflow-frontend.template" /etc/systemd/system/aetherflow-frontend.service

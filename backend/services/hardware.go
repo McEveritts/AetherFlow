@@ -31,6 +31,21 @@ var (
 	processCacheInterval = 5 * time.Second
 )
 
+// sanitizeFloat64 clamps +Inf and NaN to 0 so json.Marshal never panics.
+func sanitizeFloat64(v float64) float64 {
+	if math.IsInf(v, 0) || math.IsNaN(v) {
+		return 0
+	}
+	return v
+}
+
+// sanitizeFloat64Map sanitizes every value in a map[string]float64.
+func sanitizeFloat64Map(m map[string]float64) {
+	for k, v := range m {
+		m[k] = sanitizeFloat64(v)
+	}
+}
+
 func GetSystemMetricsCore() models.SystemMetrics {
 
 	var cpuUsage float64
@@ -276,6 +291,38 @@ func GetSystemMetricsCore() models.SystemMetrics {
 	}
 
 	servicesMap := make(map[string]bool)
+
+	// ── Final sanitization pass ─────────────────────────────────────────
+	// Clamp any +Inf / NaN float64 values to 0 so json.Marshal never
+	// emits "json: unsupported value: +Inf" and returns an empty body.
+	cpuUsage = sanitizeFloat64(cpuUsage)
+	cpuFreqMhz = sanitizeFloat64(cpuFreqMhz)
+	readBytesPerSec = sanitizeFloat64(readBytesPerSec)
+	writeBytesPerSec = sanitizeFloat64(writeBytesPerSec)
+
+	for i := range perCoreCPU {
+		perCoreCPU[i] = sanitizeFloat64(perCoreCPU[i])
+	}
+	for i := range loadAvg {
+		loadAvg[i] = sanitizeFloat64(loadAvg[i])
+	}
+	for i := range diskPartitions {
+		diskPartitions[i].TotalGB = sanitizeFloat64(diskPartitions[i].TotalGB)
+		diskPartitions[i].UsedGB = sanitizeFloat64(diskPartitions[i].UsedGB)
+		diskPartitions[i].FreeGB = sanitizeFloat64(diskPartitions[i].FreeGB)
+		diskPartitions[i].UsedPct = sanitizeFloat64(diskPartitions[i].UsedPct)
+	}
+	for i := range cachedProcesses {
+		cachedProcesses[i].CPU = sanitizeFloat64(cachedProcesses[i].CPU)
+		cachedProcesses[i].Mem = sanitizeFloat64(cachedProcesses[i].Mem)
+	}
+	totalDisk = sanitizeFloat64(totalDisk)
+	usedDisk = sanitizeFloat64(usedDisk)
+	freeDisk = sanitizeFloat64(freeDisk)
+	totalMem = sanitizeFloat64(totalMem)
+	usedMem = sanitizeFloat64(usedMem)
+	swapTotal = sanitizeFloat64(swapTotal)
+	swapUsed = sanitizeFloat64(swapUsed)
 
 	return models.SystemMetrics{
 		CPUUsage:   cpuUsage,

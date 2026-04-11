@@ -23,10 +23,10 @@ Environment=AES_MASTER_KEY=__AES_MASTER_KEY__
 Environment=JWT_SECRET=__JWT_SECRET__
 # Fix #7: Allow plain-HTTP session cookies for local/HTTP testing
 Environment=COOKIE_SECURE=false
-# Fix #8: ALLOWED_HOSTS (installer injects the host's actual IP/domain)
-Environment=ALLOWED_HOSTS=localhost:8080,127.0.0.1:8080,__HOST_IP__:8080
-# Fix #9: CORS origins including the frontend port
-Environment=ALLOWED_CORS_ORIGIN=http://localhost:3000,http://127.0.0.1:3000,http://__HOST_IP__:3000
+# Fix #8: ALLOWED_HOSTS (installer injects the host's LAN + public IP)
+Environment=ALLOWED_HOSTS=localhost:8080,127.0.0.1:8080,__HOST_IP__:8080,__PUBLIC_IP__:8080
+# Fix #9: CORS origins including the frontend port (LAN + public IP)
+Environment=ALLOWED_CORS_ORIGIN=http://localhost:3000,http://127.0.0.1:3000,http://__HOST_IP__:3000,http://__PUBLIC_IP__:3000
 
 # Security Hardening
 NoNewPrivileges=yes
