@@ -426,7 +426,7 @@ ALL_STEPS=(
     qbittorrent qbittorrent_apache
     install_go install_node build_modern
     apacheconf fix_cert rconf autodl makedirs
-    installftpd ftpdconfig quickconsole boot
+    installftpd ftpdconfig boot
     firewall harden_perms perms bbr bcm
 )
 

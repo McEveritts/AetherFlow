@@ -30,6 +30,8 @@ function _ftpdconfig() {
 # NOTE: _quickstats function removed — legacy PHP dashboard sunset
 
 # initializing console info
+# NOTE: shellinabox / web console removed from installer path.
+#       If needed, install separately via: apt-get install shellinabox
 # shellcheck disable=2312
 function _quickconsole() {
 	PUBLICIP=$(ip route get 8.8.8.8 | awk 'NR==1 {print $7}')
@@ -40,44 +42,6 @@ echo "    * Support:    https://plaza.AetherFlow.io"
 echo "    * Donate:     https://AetherFlow.io/donate"
 echo ""
 EOF
-
-	# ── Shellinabox (optional web console) ────────────────────────────────
-	# shellinabox may not be packaged on every distro/architecture.
-	# Install it best-effort; if it fails, warn and skip gracefully.
-	local shellinabox_ok=true
-	if ! dpkg -s shellinabox >/dev/null 2>&1; then
-		if ! apt-get -y install shellinabox >>"${OUTTO}" 2>&1; then
-			echo "[WARN] shellinabox package not available — skipping web console setup."
-			shellinabox_ok=false
-		fi
-	fi
-
-	if [[ "${shellinabox_ok}" == "true" ]]; then
-		# Ensure target directories exist before copying
-		mkdir -p /etc/shellinabox/options-enabled
-
-		if [[ -f "${local_setup}templates/sysd/shellinabox.template" ]]; then
-			\cp -f "${local_setup}templates/sysd/shellinabox.template" /etc/systemd/system/shellinabox.service
-		fi
-
-		if [[ -f "${local_setup}templates/quickconsole/00_QuickConsole.css.template" ]]; then
-			\cp -f "${local_setup}templates/quickconsole/00_QuickConsole.css.template" /etc/shellinabox/options-enabled/00_QuickConsole.css
-			chmod 755 /etc/shellinabox/options-enabled/00_QuickConsole.css
-		fi
-
-		systemctl daemon-reload >/dev/null 2>&1 || true
-		systemctl enable shellinabox.service >/dev/null 2>&1 || true
-		systemctl stop shellinabox.service >/dev/null 2>&1 || true
-		systemctl start shellinabox.service >/dev/null 2>&1 || true
-	fi
-
-	# Apache web-console reverse proxy (safe to configure even without shellinabox)
-	if [[ -f "${local_setup}templates/web-console.conf.template" ]]; then
-		\cp -f "${local_setup}templates/web-console.conf.template" "/etc/apache2/sites-enabled/${username}.console.conf"
-		sed -i "s/PUBLICIP/${PUBLICIP}/g" "/etc/apache2/sites-enabled/${username}.console.conf"
-		sed -i "s/USER/${username}/g" "/etc/apache2/sites-enabled/${username}.console.conf"
-	fi
-
 }
 
 # seedbox boot for first user

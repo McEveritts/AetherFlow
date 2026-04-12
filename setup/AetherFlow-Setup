@@ -711,7 +711,9 @@ _run_step "makedirs" "Making ${username} directory structure" _makedirs
 _run_step "installftpd" "Installing vsftpd" _installftpd
 _run_step "ftpdconfig" "Setting up vsftpd" _ftpdconfig
 # NOTE: _quickstats removed — legacy PHP dashboard sunset
-_run_step_fg "quickconsole" "Setting up web console" _quickconsole
+# NOTE: shellinabox web console removed from install path — it's optional
+# and kept breaking deploys. Install separately if needed.
+# _run_step_fg "quickconsole" "Setting up web console" _quickconsole
 _run_step "boot" "Setting irssi/rtorrent to start on boot" _boot
 _run_step "firewall" "Configuring firewall (UFW)" _setup_firewall
 _run_step "harden_perms" "Hardening file permissions" _harden_permissions
