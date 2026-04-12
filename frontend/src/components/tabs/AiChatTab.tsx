@@ -8,7 +8,7 @@ import { useToast } from '@/contexts/ToastContext';
 interface ChatMessage {
     role: 'user' | 'assistant';
     text: string;
-    payload?: Record<string, unknown>;
+    payload?: any;
 }
 
 const AI_MODELS = [
@@ -289,23 +289,23 @@ export default function AiChatTab() {
                                         <div className="bg-indigo-500/20 p-2 rounded-lg text-indigo-400">
                                             <Wrench size={16} />
                                         </div>
-                                        <span className="font-bold text-slate-100 flex-1">{msg.payload.title}</span>
+                                        <span className="font-bold text-slate-100 flex-1">{msg.payload.title as string}</span>
                                         <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-1 rounded border ${
                                             msg.payload.danger_level === 'critical' ? 'bg-red-500/20 text-red-400 border-red-500/30' :
                                             msg.payload.danger_level === 'warn' ? 'bg-amber-500/20 text-amber-400 border-amber-500/30' :
                                             'bg-emerald-500/20 text-emerald-400 border-emerald-500/30'
                                         }`}>
-                                            {msg.payload.danger_level}
+                                            {msg.payload.danger_level as string}
                                         </span>
                                     </div>
-                                    <p className="text-slate-400 text-xs mb-4 border-l-2 border-white/10 pl-3 ml-1">{msg.payload.description}</p>
+                                    <p className="text-slate-400 text-xs mb-4 border-l-2 border-white/10 pl-3 ml-1">{msg.payload.description as string}</p>
                                     <div className="flex items-center justify-between pt-2 border-t border-white/5">
                                         <span className="text-[10px] text-slate-500 font-mono">
-                                            {msg.payload.action_id ? `Action #${msg.payload.action_id} queued` : 'Queued for approval'}
+                                            {msg.payload.action_id ? `Action #${msg.payload.action_id as string} queued` : 'Queued for approval'}
                                         </span>
                                         <button 
                                             onClick={() => {
-                                                addToast(`Action #${msg.payload.action_id || '?'} is waiting in your Approval Inbox.`, 'success');
+                                                addToast(`Action #${(msg.payload.action_id as string) || '?'} is waiting in your Approval Inbox.`, 'success');
                                                 setActiveTab('inbox');
                                             }}
                                             className="px-3 py-1.5 bg-indigo-500 hover:bg-indigo-400 text-white text-xs font-semibold rounded-lg transition-colors flex items-center gap-2 shadow-sm"
