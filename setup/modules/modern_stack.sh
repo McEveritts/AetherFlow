@@ -133,21 +133,49 @@ _build_modern_stack() {
 
     if [ -d "/opt/AetherFlow/frontend" ]; then
         have_frontend=true
+        local frontend_build_log="/tmp/aetherflow-frontend-build.log"
         (
             cd /opt/AetherFlow/frontend || exit 1
             export PATH="/usr/local/nodejs/bin:${PATH}"
-            npm install --no-fund --no-audit
-            npm run build
+            # Increase heap for low-memory VMs (default V8 limit can OOM on 1GB boxes)
+            export NODE_OPTIONS="${NODE_OPTIONS:+${NODE_OPTIONS} }--max-old-space-size=1024"
+
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Starting npm install ..." >> "${frontend_build_log}" 2>&1
+            if ! npm install --no-fund --no-audit >> "${frontend_build_log}" 2>&1; then
+                echo "[FAIL] npm install failed. See ${frontend_build_log}" >&2
+                exit 1
+            fi
+
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Starting npm run build ..." >> "${frontend_build_log}" 2>&1
+            if ! npm run build >> "${frontend_build_log}" 2>&1; then
+                echo "[FAIL] npm run build failed. See ${frontend_build_log}" >&2
+                exit 1
+            fi
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Frontend build completed successfully." >> "${frontend_build_log}" 2>&1
         ) &
         frontend_pid=$!
     fi
 
+    local parallel_ok=true
     if [[ "${have_backend}" == "true" && "${have_frontend}" == "true" ]]; then
-        _af_parallel_wait "${backend_pid}" "${frontend_pid}" || return 1
+        _af_parallel_wait "${backend_pid}" "${frontend_pid}" || parallel_ok=false
     elif [[ "${have_backend}" == "true" ]]; then
-        wait "${backend_pid}" || return 1
+        wait "${backend_pid}" || parallel_ok=false
     elif [[ "${have_frontend}" == "true" ]]; then
-        wait "${frontend_pid}" || return 1
+        wait "${frontend_pid}" || parallel_ok=false
+    fi
+
+    if [[ "${parallel_ok}" == "false" ]]; then
+        echo ""
+        echo "══════════════════════════════════════════════════════════"
+        echo "  Build failed. Dumping last 50 lines of build logs:"
+        echo "══════════════════════════════════════════════════════════"
+        if [[ -f "/tmp/aetherflow-frontend-build.log" ]]; then
+            echo "── Frontend build log (/tmp/aetherflow-frontend-build.log):"
+            tail -n 50 /tmp/aetherflow-frontend-build.log
+        fi
+        echo "══════════════════════════════════════════════════════════"
+        return 1
     fi
 
     # ── Create system user for systemd services ──────────────────────────

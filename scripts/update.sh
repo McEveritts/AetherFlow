@@ -56,8 +56,20 @@ pm2 restart aetherflow-api || pm2 start ./aetherflow-api --name "aetherflow-api"
 # 3. Rebuild Next.js Frontend
 echo "Rebuilding Next.js Frontend Bundle..."
 cd /opt/AetherFlow/frontend || exit 1
-npm install
-npm run build
+
+# Increase heap for low-memory VMs
+export NODE_OPTIONS="${NODE_OPTIONS:+${NODE_OPTIONS} }--max-old-space-size=1024"
+
+if ! npm install --no-fund --no-audit >> "${LOG_FILE}" 2>&1; then
+    echo "ERROR: npm install failed for frontend. Check ${LOG_FILE} for details."
+    exit 1
+fi
+
+if ! npm run build >> "${LOG_FILE}" 2>&1; then
+    echo "ERROR: npm run build failed for frontend. Last 30 lines of log:"
+    tail -n 30 "${LOG_FILE}"
+    exit 1
+fi
 
 echo "Restarting Frontend via PM2..."
 pm2 restart aetherflow-frontend || pm2 start npm --name "aetherflow-frontend" -- start

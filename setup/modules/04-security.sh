@@ -197,11 +197,42 @@ function _apacheconf() {
 	sed -i "s/ServerTokens OS/ServerTokens Prod/g" /etc/apache2/conf-enabled/security.conf
 	sed -i "s/ServerSignature On/ServerSignature Off/g" /etc/apache2/conf-enabled/security.conf
 	\cp -f ${local_setup}templates/fileshare.conf.template /etc/apache2/sites-enabled/fileshare.conf
-	sed -i.bak -e "s/post_max_size = 8M/post_max_size = 64M/" -e "s/upload_max_filesize = 2M/upload_max_filesize = 92M/" -e "s/expose_php = On/expose_php = Off/" -e "s/128M/768M/" -e "s/;cgi.fix_pathinfo=1/cgi.fix_pathinfo=0/" -e "s/;opcache.enable=0/opcache.enable=1/" -e "s/;opcache.memory_consumption=64/opcache.memory_consumption=128/" -e "s/;opcache.max_accelerated_files=2000/opcache.max_accelerated_files=4000/" -e "s/;opcache.revalidate_freq=2/opcache.revalidate_freq=240/" /etc/php/"${PHP_VER}"/fpm/php.ini
-	sed -i.bak -e "s/post_max_size = 8M/post_max_size = 64M/" -e "s/upload_max_filesize = 2M/upload_max_filesize = 92M/" -e "s/expose_php = On/expose_php = Off/" -e "s/memory_limit = 128M/memory_limit = 768M/" -e "s/;cgi.fix_pathinfo=1/cgi.fix_pathinfo=0/" -e "s/;opcache.enable=0/opcache.enable=1/" -e "s/;opcache.memory_consumption=64/opcache.memory_consumption=128/" -e "s/;opcache.max_accelerated_files=2000/opcache.max_accelerated_files=4000/" -e "s/;opcache.revalidate_freq=2/opcache.revalidate_freq=240/" /etc/php/"${PHP_VER}"/apache2/php.ini
 
-	# ensure opcache module is activated
-	phpenmod -v "${PHP_VER}" opcache >>"${OUTTO}" 2>&1
+	# ── PHP ini hardening ─────────────────────────────────────────────────
+	# Dynamically detect PHP version if the codename-mapped version is missing
+	local _php_ver="${PHP_VER:-}"
+	if [[ -z "${_php_ver}" ]] || [[ ! -d "/etc/php/${_php_ver}" ]]; then
+		# Fall back to the highest installed PHP version
+		_php_ver="$(ls -1d /etc/php/*/fpm 2>/dev/null | sort -V | tail -n1 | grep -oP '/etc/php/\K[^/]+')" || true
+		if [[ -z "${_php_ver}" ]]; then
+			echo "[WARN] No PHP installation found under /etc/php/. Skipping PHP ini tuning."
+		else
+			echo "[INFO] PHP_VER=${PHP_VER:-unset} not found; using detected version: ${_php_ver}"
+		fi
+	fi
+
+	local _php_ini_fpm="/etc/php/${_php_ver}/fpm/php.ini"
+	local _php_ini_apache="/etc/php/${_php_ver}/apache2/php.ini"
+	local _php_sed_args=(-i.bak -e "s/post_max_size = 8M/post_max_size = 64M/" -e "s/upload_max_filesize = 2M/upload_max_filesize = 92M/" -e "s/expose_php = On/expose_php = Off/" -e "s/128M/768M/" -e "s/;cgi.fix_pathinfo=1/cgi.fix_pathinfo=0/" -e "s/;opcache.enable=0/opcache.enable=1/" -e "s/;opcache.memory_consumption=64/opcache.memory_consumption=128/" -e "s/;opcache.max_accelerated_files=2000/opcache.max_accelerated_files=4000/" -e "s/;opcache.revalidate_freq=2/opcache.revalidate_freq=240/")
+
+	if [[ -n "${_php_ver}" ]]; then
+		if [[ -f "${_php_ini_fpm}" ]]; then
+			sed "${_php_sed_args[@]}" "${_php_ini_fpm}"
+		else
+			echo "[WARN] ${_php_ini_fpm} not found — skipping FPM php.ini tuning."
+		fi
+
+		if [[ -f "${_php_ini_apache}" ]]; then
+			sed "${_php_sed_args[@]}" "${_php_ini_apache}"
+		else
+			echo "[WARN] ${_php_ini_apache} not found — skipping Apache php.ini tuning."
+		fi
+
+		# ensure opcache module is activated (only if phpenmod exists)
+		if command -v phpenmod >/dev/null 2>&1; then
+			phpenmod -v "${_php_ver}" opcache >>"${OUTTO}" 2>&1 || true
+		fi
+	fi
 
 	# these modules are purely experimental
 	#a2enmod proxy_fcgi >>"${OUTTO}" 2>&1
@@ -209,11 +240,13 @@ function _apacheconf() {
 	#a2enmod mpm_worker >>"${OUTTO}" 2>&1
 
 	# ensure fastcgi module is activated
-	a2enmod actions >>"${OUTTO}" 2>&1
-	a2enmod headers >>"${OUTTO}" 2>&1
-	a2enmod fastcgi >>"${OUTTO}" 2>&1
-	a2enmod proxy_fcgi setenvif >>"${OUTTO}" 2>&1
-	a2enconf php"${PHP_VER}"-fpm >>"${OUTTO}" 2>&1
+	a2enmod actions >>"${OUTTO}" 2>&1 || true
+	a2enmod headers >>"${OUTTO}" 2>&1 || true
+	a2enmod fastcgi >>"${OUTTO}" 2>&1 || true
+	a2enmod proxy_fcgi setenvif >>"${OUTTO}" 2>&1 || true
+	if [[ -n "${_php_ver}" ]]; then
+		a2enconf php"${_php_ver}"-fpm >>"${OUTTO}" 2>&1 || echo "[WARN] php${_php_ver}-fpm Apache config not available."
+	fi
 
 	#sed -i 's/memory_limit = 128M/memory_limit = 768M/g' /etc/php/${PHP_VER}/apache2/php.ini
 }
