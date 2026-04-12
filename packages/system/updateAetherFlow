@@ -276,6 +276,8 @@ function _updateappsproxy() {
   bash /usr/local/bin/AetherFlow/system/revproxy.sh
 }
 
+# NOTE: shellinabox / web console removed from update path.
+#       If needed, install separately via: apt-get install shellinabox
 function _quickconsole() {
   if [[ ! -f /install/.webconsole.lock ]]; then
     PUBLICIP=$(ip route get 8.8.8.8 | awk 'NR==1 {print $NF}')
@@ -289,30 +291,7 @@ echo ""
 echo ""
 EOF
 
-    apt-get -y install shellinabox >/dev/null 2>&1
-
-    cp ${local_setup}templates/sysd/shellinabox.template /etc/systemd/system/shellinabox.service
-    cp ${local_setup}templates/quickconsole/00_QuickConsole.css.template /etc/shellinabox/options-enabled/00_QuickConsole.css
-    cp ${local_setup}templates/web-console.conf.template /etc/apache2/sites-enabled/${A1}.console.conf
-
-    sed -i "s/PUBLICIP/${PUBLICIP}/g" /etc/apache2/sites-enabled/${A1}.console.conf
-    sed -i "s/USER/${A1}/g" /etc/apache2/sites-enabled/${A1}.console.conf
-
-    chmod +x /etc/shellinabox/options-enabled/00_QuickConsole.css
-    chmod 777 /etc/shellinabox/options-enabled/00_QuickConsole.css
-
-    mv /etc/init.d/shellinabox /etc/init.d/shellinabox.BAK
-
     touch /install/.webconsole.lock
-
-    systemctl enable shellinabox.service >/dev/null 2>&1
-    systemctl stop shellinabox.service >/dev/null 2>&1
-    systemctl daemon-reload >/dev/null 2>&1
-    systemctl start shellinabox.service >/dev/null 2>&1
-
-    service apache2 reload  >> /dev/null 2>&1
-    service memcached restart  >> /dev/null 2>&1
-
   fi
 }
 
@@ -444,7 +423,8 @@ echo "Updating the AetherFlow Sudoers template ... " >>"${OUTTO}" 2>&1;_updatesu
 _updateznc
 #_updateplex
 _updateappsproxy
-_quickconsole
+# NOTE: shellinabox removed from update path — install separately if needed
+# _quickconsole
 #echo "Updating ${A1}'s .startup cronfile... " >>"${OUTTO}" 2>&1;_updatecronfile;echo
 echo "Adjusting permissions ... " >>"${OUTTO}" 2>&1;_perms;echo
 _fin
