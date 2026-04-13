@@ -1,29 +1,29 @@
-import { useState, useMemo, useEffect } from 'react';
+import { useState, useMemo } from 'react';
 import { Store, Search, Filter, Box, Download, AlertCircle, ChevronDown, RefreshCw } from 'lucide-react';
 import { useMarketplace, App } from '@/hooks/useMarketplace';
 import { useToast } from '@/contexts/ToastContext';
-import Image from 'next/image';
 import { apiFetch } from '@/lib/fetcher';
 import { ProgressRing } from '@/components/ui/ProgressRing';
 import { Modal } from '@/components/ui/Modal';
 import { ShieldAlert, CheckCircle, XCircle } from 'lucide-react';
 
 const AppIcon = ({ appId }: { appId: string }) => {
-    const [error, setError] = useState(false);
-
-    if (error) {
-        return <Box size={28} className="text-slate-300 group-hover:text-indigo-400 transition-colors" />;
-    }
+    const [imgError, setImgError] = useState(false);
+    const iconUrl = `/img/brands/${appId}.png`;
 
     return (
-        <Image
-            src={`/img/brands/${appId.toLowerCase()}.png`}
-            alt={appId}
-            width={40}
-            height={40}
-            className="object-contain group-hover:scale-110 transition-transform duration-300"
-            onError={() => setError(true)}
-        />
+        <div className="relative flex h-12 w-12 items-center justify-center overflow-hidden rounded-lg bg-slate-800/50">
+            {imgError ? (
+                <Box className="h-6 w-6 text-slate-400" />
+            ) : (
+                <img
+                    src={iconUrl}
+                    alt={`${appId} icon`}
+                    className="h-full w-full object-contain transition-transform duration-300 hover:scale-110"
+                    onError={() => setImgError(true)}
+                />
+            )}
+        </div>
     );
 };
 
@@ -256,9 +256,10 @@ export default function MarketplaceTab() {
                                     {app.status === 'installed' ? (
                                         <>
                                             <button
+                                                onClick={() => window.open(`/${app.id}`, '_blank')}
                                                 className="px-4 py-1.5 bg-slate-800 text-slate-300 hover:text-white text-xs font-semibold rounded-lg transition-colors border border-white/10"
                                             >
-                                                Manage
+                                                Open
                                             </button>
                                             <button
                                                 onClick={() => setPendingUninstall(app)}
