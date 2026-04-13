@@ -8,7 +8,7 @@ import { useToast } from '@/contexts/ToastContext';
 interface ChatMessage {
     role: 'user' | 'assistant';
     text: string;
-    payload?: any;
+    payload?: Record<string, unknown>;
 }
 
 const AI_MODELS = [
@@ -109,7 +109,7 @@ export default function AiChatTab() {
             const actionPayload = data.proposed_action || undefined;
 
             setMessages(prev => [...prev, { role: 'assistant', text: assistantReply, payload: actionPayload }]);
-        } catch (_err) {
+        } catch {
             setMessages(prev => [...prev, { role: 'assistant', text: "Connection error: Unable to reach the FlowAI backend service." }]);
         } finally {
             setIsTyping(false);
@@ -305,7 +305,7 @@ export default function AiChatTab() {
                                         </span>
                                         <button 
                                             onClick={() => {
-                                                addToast(`Action #${(msg.payload.action_id as string) || '?'} is waiting in your Approval Inbox.`, 'success');
+                                                addToast(`Action #${(msg.payload?.action_id as string) || '?'} is waiting in your Approval Inbox.`, 'success');
                                                 setActiveTab('inbox');
                                             }}
                                             className="px-3 py-1.5 bg-indigo-500 hover:bg-indigo-400 text-white text-xs font-semibold rounded-lg transition-colors flex items-center gap-2 shadow-sm"

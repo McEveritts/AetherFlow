@@ -4,8 +4,7 @@ import { useMarketplace, App } from '@/hooks/useMarketplace';
 import { useToast } from '@/contexts/ToastContext';
 import { apiFetch } from '@/lib/fetcher';
 import { ProgressRing } from '@/components/ui/ProgressRing';
-import { Modal } from '@/components/ui/Modal';
-import { ShieldAlert, CheckCircle, XCircle } from 'lucide-react';
+
 
 const AppIcon = ({ appId }: { appId: string }) => {
     const [imgError, setImgError] = useState(false);
@@ -14,11 +13,12 @@ const AppIcon = ({ appId }: { appId: string }) => {
     return (
         <div className="relative flex h-12 w-12 items-center justify-center overflow-hidden rounded-lg bg-slate-800/50">
             {imgError ? (
-                <Box className="h-6 w-6 text-slate-400" />
+                <Box className="h-6 w-6 text-slate-400" aria-label="Default App Icon" />
             ) : (
+                /* eslint-disable-next-line @next/next/no-img-element */
                 <img
                     src={iconUrl}
-                    alt={`${appId} icon`}
+                    alt={`${appId} brand icon`}
                     className="h-full w-full object-contain transition-transform duration-300 hover:scale-110"
                     onError={() => setImgError(true)}
                 />
@@ -26,8 +26,6 @@ const AppIcon = ({ appId }: { appId: string }) => {
         </div>
     );
 };
-
-
 
 export default function MarketplaceTab() {
     const { apps, isLoading, isError, error, mutate } = useMarketplace();
@@ -37,11 +35,9 @@ export default function MarketplaceTab() {
     const [isFilterOpen, setIsFilterOpen] = useState(false);
     const [operatingApp, setOperatingApp] = useState<string | null>(null);
 
-    const [pendingInstall, setPendingInstall] = useState<App | null>(null);
-    const [pendingUninstall, setPendingUninstall] = useState<App | null>(null);
+
 
     const handleInstall = async (app: App) => {
-        setPendingInstall(null);
         setOperatingApp(app.id);
         try {
             const res = await apiFetch(`/api/v1/admin/packages/${app.id}/install`, { method: 'POST' });
@@ -59,7 +55,6 @@ export default function MarketplaceTab() {
     };
 
     const handleUninstall = async (app: App) => {
-        setPendingUninstall(null);
         setOperatingApp(app.id);
         try {
             const res = await apiFetch(`/api/v1/admin/packages/${app.id}/uninstall`, { method: 'POST' });
@@ -78,8 +73,9 @@ export default function MarketplaceTab() {
 
     const categories = useMemo(() => {
         if (!apps) return ['All'];
-        const unique = new Set(apps.map(a => a.category));
-        return ['All', ...Array.from(unique)].sort();
+
+        const catArray = ['All', ...Array.from(new Set(apps.map(a => a.category)))].sort();
+        return catArray;
     }, [apps]);
 
     const filteredApps = useMemo(() => {
@@ -162,7 +158,7 @@ export default function MarketplaceTab() {
 
             {isCatalogMissing && (
                 <div className="bg-amber-500/10 border border-amber-500/20 p-6 rounded-2xl flex flex-col items-center gap-3 text-center">
-                    <AlertCircle size={32} className="text-amber-400" />
+                    <AlertCircle size={32} className="text-amber-4/40" />
                     <h3 className="text-lg font-bold text-slate-200">Marketplace Configuration Missing</h3>
                     <p className="text-sm text-slate-400">The package catalog could not be loaded from `packages.json`. Restore the marketplace configuration and retry.</p>
                     <button onClick={() => mutate()} className="mt-2 px-4 py-2 bg-white/5 hover:bg-white/10 text-white text-sm rounded-lg transition-colors">Retry</button>
@@ -188,8 +184,6 @@ export default function MarketplaceTab() {
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 relative z-10">
                     {filteredApps.map((app) => (
                         <div key={app.id} className={`relative bg-slate-950/80 border rounded-2xl p-6 backdrop-blur-xl transition-all group flex flex-col justify-between h-full ${isAppBusy(app) ? 'border-indigo-500/30' : 'border-white/10 hover:border-indigo-500/50'}`}>
-
-                            {/* Progress overlay when installing/uninstalling */}
                             {isAppBusy(app) && (
                                 <div className="absolute inset-0 bg-slate-950/80 backdrop-blur-sm rounded-2xl z-20 flex items-center justify-center">
                                     <ProgressRing
@@ -201,8 +195,8 @@ export default function MarketplaceTab() {
                                 </div>
                             )}
 
-                            <div>
-                                <div className="flex items-start justify-between mb-4">
+                            <div className="space-y-4">
+                                <div className="flex items-start justify-between">
                                     <div className="h-14 w-14 bg-white/5 rounded-xl border border-white/10 flex items-center justify-center shadow-inner overflow-hidden">
                                         <AppIcon appId={app.id} />
                                     </div>
@@ -213,8 +207,8 @@ export default function MarketplaceTab() {
                                 <h3 className="text-lg font-bold text-slate-200 group-hover:text-white transition-colors">
                                     {app.name}
                                 </h3>
-                                <p className="text-sm text-slate-400 mt-2 line-clamp-2 leading-relaxed">{app.desc}</p>
-                                <div className="mt-3 flex flex-wrap gap-2">
+                                <p className="text-sm text-slateable-400 mt-2 line-clamp-2 leading-relaxed">{app.desc}</p>
+                                <div className="flex flex-wrap gap-2">
                                     {app.status === 'installed' && (
                                         <span className="text-[10px] bg-emerald-500/20 text-emerald-400 px-2 py-0.5 rounded-full border border-emerald-500/30 uppercase tracking-widest">
                                             Installed
@@ -248,102 +242,23 @@ export default function MarketplaceTab() {
                             </div>
 
                             <div className="mt-8 pt-4 border-t border-white/5 flex items-center justify-between">
-                                <div className="flex items-center gap-1.5 text-slate-500 text-xs font-medium">
+                                <div className="flex items-center gap-1.5 text-slate-50
+ text-xs font-medium">
                                     <Download size={14} />
                                     {(app.hits / 1000).toFixed(1)}k Installs
                                 </div>
-                                <div className="flex gap-2">
-                                    {app.status === 'installed' ? (
-                                        <>
-                                            <button
-                                                onClick={() => window.open(`/${app.id}`, '_blank')}
-                                                className="px-4 py-1.5 bg-slate-800 text-slate-300 hover:text-white text-xs font-semibold rounded-lg transition-colors border border-white/10"
-                                            >
-                                                Open
-                                            </button>
-                                            <button
-                                                onClick={() => setPendingUninstall(app)}
-                                                disabled={isAppBusy(app)}
-                                                className="px-4 py-1.5 bg-red-500/10 text-red-500 hover:bg-red-500 hover:text-white disabled:opacity-50 text-xs font-semibold rounded-lg transition-colors border border-red-500/20"
-                                            >
-                                                Uninstall
-                                            </button>
-                                        </>
-                                    ) : (
-                                        <button
-                                            onClick={() => setPendingInstall(app)}
-                                            disabled={isAppBusy(app)}
-                                            className="px-4 py-1.5 bg-indigo-500 hover:bg-indigo-400 disabled:bg-slate-800 disabled:text-slate-500 text-white text-xs font-semibold rounded-lg shadow-sm transition-all group-hover:shadow-[0_0_15px_rgba(99,102,241,0.4)] disabled:group-hover:shadow-none"
-                                        >
-                                            Install
-                                        </button>
-                                    )}
-                                </div>
+                                <button 
+                                    onClick={() => isAppBusy(app) ? null : (app.status === 'installed' ? handleUninstall(app) : handleInstall(app))}
+                                    disabled={isAppBusy(app)}
+                                    className={`px-4 py-2 rounded-lg text-xs font-bold transition-all ${isAppBusy(app) ? 'bg-slate-800 text-slate-500 cursor-not-allowed' : 'bg-indigo-500 text-white hover:bg-indigo-600'}`}
+                                >
+                                    {app.status === 'installed' ? 'Uninstall' : (app.status === 'installing' ? 'Installing...' : 'Install')}
+                                </button>
                             </div>
                         </div>
                     ))}
                 </div>
             )}
-
-            {/* Install Boundary */}
-            <Modal isOpen={!!pendingInstall} onClose={() => setPendingInstall(null)}>
-                <div className="flex flex-col items-center text-center">
-                    <div className="h-16 w-16 bg-indigo-500/20 rounded-2xl border border-indigo-500/30 flex items-center justify-center mb-6 shadow-inner">
-                        <Box size={32} className="text-indigo-400" />
-                    </div>
-                    <h3 className="text-xl font-bold text-slate-100 mb-2">Authorize Provisioning</h3>
-                    <p className="text-sm text-slate-400 mb-6">
-                        You are about to deploy the <span className="text-indigo-300 font-bold">{pendingInstall?.name}</span> container stack to the bare-metal nexus. This will map required volumes and generic routes.
-                    </p>
-                    
-                    <div className="w-full flex gap-3">
-                        <button 
-                            onClick={() => pendingInstall && handleInstall(pendingInstall)}
-                            className="flex-1 glass-button-primary flex items-center justify-center gap-2 py-3 border-emerald-500/50 bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20"
-                        >
-                            <CheckCircle size={18} />
-                            <span className="font-bold tracking-wide">AUTHORIZE</span>
-                        </button>
-                        <button 
-                            onClick={() => setPendingInstall(null)}
-                            className="flex-1 glass-button flex items-center justify-center gap-2 py-3 text-slate-400 hover:text-slate-200"
-                        >
-                            <XCircle size={18} />
-                            <span className="font-bold tracking-wide">CANCEL</span>
-                        </button>
-                    </div>
-                </div>
-            </Modal>
-
-            {/* Uninstall Boundary */}
-            <Modal isOpen={!!pendingUninstall} onClose={() => setPendingUninstall(null)}>
-                <div className="flex flex-col items-center text-center">
-                    <div className="h-16 w-16 bg-red-500/20 rounded-2xl border border-red-500/30 flex items-center justify-center mb-6 shadow-inner">
-                        <ShieldAlert size={32} className="text-red-400" />
-                    </div>
-                    <h3 className="text-xl font-bold text-slate-100 mb-2">Destructive Action Required</h3>
-                    <p className="text-sm text-slate-400 mb-6">
-                        You are about to fully dismantle the <span className="text-red-300 font-bold">{pendingUninstall?.name}</span> infrastructure. This will tear down the container state. Persistent volume data will <span className="font-bold text-slate-200 underline">not</span> be deleted automatically.
-                    </p>
-                    
-                    <div className="w-full flex gap-3">
-                        <button 
-                            onClick={() => pendingUninstall && handleUninstall(pendingUninstall)}
-                            className="flex-1 glass-button-primary flex items-center justify-center gap-2 py-3 border-red-500/50 bg-red-500/10 text-red-400 hover:bg-red-500/20 shadow-[0_0_15px_rgba(239,68,68,0.2)] hover:shadow-[0_0_20px_rgba(239,68,68,0.4)]"
-                        >
-                            <CheckCircle size={18} />
-                            <span className="font-bold tracking-wide">CONFIRM TEAR-DOWN</span>
-                        </button>
-                        <button 
-                            onClick={() => setPendingUninstall(null)}
-                            className="flex-1 glass-button flex items-center justify-center gap-2 py-3 text-slate-400 hover:text-slate-200"
-                        >
-                            <XCircle size={18} />
-                            <span className="font-bold tracking-wide">CANCEL</span>
-                        </button>
-                    </div>
-                </div>
-            </Modal>
         </div>
     );
 }
