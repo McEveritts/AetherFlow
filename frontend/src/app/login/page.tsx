@@ -208,7 +208,7 @@ export default function LoginPage() {
                                 className="glass-button-primary w-full py-3.5 flex items-center justify-center gap-2 font-semibold tracking-wide disabled:opacity-50"
                             >
                                 <LogIn size={18} className={isLoading ? "animate-pulse" : ""} />
-                                {isLoading ? 'Authenticating...' : (isSetup ? 'Initialize Identity' : 'Unlock Bare-Metal')}
+                                {isLoading ? 'Authenticating...' : (isSetup ? 'Initialize Identity' : 'Unlock the Aether')}
                             </button>
                         </form>
                     )}
