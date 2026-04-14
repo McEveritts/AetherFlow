@@ -1,4 +1,4 @@
-import { Settings, Sparkles, ChevronRight, DownloadCloud, AlertCircle, Eye, EyeOff, Key, Monitor, Globe, Clock, LayoutDashboard, Radio, HardDriveDownload, Shield, KeyRound } from 'lucide-react';
+import { Settings, Sparkles, ChevronRight, DownloadCloud, AlertCircle, Eye, EyeOff, Key, Monitor, Globe, Clock, LayoutDashboard, Radio, HardDriveDownload, Shield, KeyRound, RefreshCw } from 'lucide-react';
 import { useState, FormEvent } from 'react';
 import useSWR from 'swr';
 import dynamic from 'next/dynamic';
@@ -67,7 +67,7 @@ export default function SettingsTab() {
         }
     };
 
-    const { data: updateData, error: updateError } = useSWR(
+    const { data: updateData, error: updateError, isValidating: isCheckingUpdate, mutate: mutateUpdateData } = useSWR(
         '/api/v1/auth/system/update/check',
         { refreshInterval: 60000 }
     );
@@ -159,6 +159,12 @@ export default function SettingsTab() {
             setUpdateMessage('API dispatch failure: Daemon update trigger.');
             setIsUpdating(false);
         }
+    };
+
+    const handleCheckForUpdates = async () => {
+        if (!mutateUpdateData) return;
+        addToast('Checking for updates...', 'success');
+        await mutateUpdateData();
     };
 
     return (
@@ -621,16 +627,37 @@ export default function SettingsTab() {
                         {activeTab === 'system' && (
                             <div className="space-y-8 animate-fade-in">
                                 
-                                {/* CATEGORY: Core System */}
+                                {/* CATEGORY: Update Engine Controls */}
                                 <div>
-                                    <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3 px-2">Core System</h4>
-                                    <div className="bg-slate-950/50 border border-white/10 rounded-2xl divide-y divide-white/10 overflow-hidden">
-                                        <div className="p-5 flex flex-col md:flex-row md:items-center justify-between gap-4 hover:bg-white/[0.02] transition-colors">
+                                    <div className="flex items-center justify-between px-2 mb-3">
+                                        <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider">Update Engine Controls</h4>
+                                        <div className="flex items-center gap-3">
+                                            {updateData && updateData.updateAvailable && (
+                                                <span className="bg-blue-500/20 text-blue-400 text-[10px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wider animate-pulse">
+                                                    {t('updateAvailable')}
+                                                </span>
+                                            )}
+                                            <button
+                                                type="button"
+                                                onClick={handleCheckForUpdates}
+                                                disabled={isCheckingUpdate}
+                                                className="bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-400 border border-indigo-500/20 rounded-lg px-3 py-1.5 text-xs font-semibold flex items-center gap-1 transition-colors disabled:opacity-50"
+                                            >
+                                                <RefreshCw size={14} className={isCheckingUpdate ? "animate-spin" : ""} />
+                                                {isCheckingUpdate ? 'Checking...' : 'Check for Updates'}
+                                            </button>
+                                        </div>
+                                    </div>
+                                    
+                                    <div className="bg-slate-950/50 border border-white/10 rounded-2xl overflow-hidden divide-y divide-white/10">
+                                        
+                                        {/* Update Channel Sub-section */}
+                                        <div className="p-5 flex flex-col md:flex-row md:items-center justify-between gap-4 hover:bg-white/[0.02] transition-colors bg-slate-900/20">
                                             <div>
                                                 <label className="text-sm font-semibold text-slate-200 flex items-center gap-2">
-                                                    <Radio size={16} className="text-blue-400" /> Update Channel
+                                                    <Radio size={16} className="text-indigo-400" /> Update Channel
                                                 </label>
-                                                <p className="text-xs text-slate-500 mt-1">Determines which branch of AetherFlow the updater pulls from. Nightly builds may break functionality.</p>
+                                                <p className="text-xs text-slate-500 mt-1">Select the release branch. Save configuration to apply changes.</p>
                                             </div>
                                             <div className="shrink-0 w-full md:w-80 relative">
                                                 <select
@@ -645,78 +672,68 @@ export default function SettingsTab() {
                                                 <ChevronRight size={16} className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-500 rotate-90 pointer-events-none" />
                                             </div>
                                         </div>
-                                    </div>
-                                </div>
 
-                                {/* CATEGORY: Update Engine Controls */}
-                                <div>
-                                    <div className="flex items-center justify-between px-2 mb-3">
-                                        <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider">Update Engine Controls</h4>
-                                        {updateData && updateData.updateAvailable && (
-                                            <span className="bg-blue-500/20 text-blue-400 text-[10px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wider animate-pulse">
-                                                {t('updateAvailable')}
-                                            </span>
-                                        )}
-                                    </div>
-                                    <div className="bg-slate-950/50 border border-white/10 rounded-2xl overflow-hidden p-5">
-                                        <div className="space-y-4 text-sm text-slate-400">
-                                            {updateError ? (
-                                                <div className="flex items-center gap-2 text-red-400 bg-red-500/10 p-4 rounded-xl">
-                                                    <AlertCircle size={16} /> Could not fetch update status.
-                                                </div>
-                                            ) : !updateData ? (
-                                                <div className="flex items-center gap-2 text-slate-500">
-                                                    <div className="w-4 h-4 border-2 border-slate-500/30 border-t-slate-500 rounded-full animate-spin"></div>
-                                                    {t('checkingUpdates')}
-                                                </div>
-                                            ) : (
-                                                <>
-                                                    <div className="flex flex-col gap-2 p-4 bg-white/5 rounded-xl border border-white/5">
-                                                        <div className="flex justify-between">
-                                                            <span>Current Version:</span>
-                                                            <span className="font-mono text-slate-300">{updateData.currentVersion}</span>
-                                                        </div>
-                                                        <div className="flex justify-between">
-                                                            <span>Latest Version:</span>
-                                                            <span className="font-mono text-slate-300">{updateData.latestVersion}</span>
-                                                        </div>
-                                                        {updateData.message && (
-                                                            <div className={`mt-2 text-xs ${updateData.latestVersion?.includes('Unknown') ? 'text-amber-400' : 'text-slate-500'}`}>
-                                                                {updateData.message}
-                                                            </div>
-                                                        )}
-                                                        {updateData.url && !updateData.latestVersion?.includes('Unknown') && (
-                                                            <div className="mt-2">
-                                                                <a href={updateData.url} target="_blank" rel="noopener noreferrer" className="text-xs text-indigo-400 hover:text-indigo-300 underline transition-colors">
-                                                                    View release details →
-                                                                </a>
-                                                            </div>
-                                                        )}
+                                        {/* Update Info Payload */}
+                                        <div className="p-5">
+                                            <div className="space-y-4 text-sm text-slate-400">
+                                                {updateError ? (
+                                                    <div className="flex items-center gap-2 text-red-400 bg-red-500/10 p-4 rounded-xl">
+                                                        <AlertCircle size={16} /> Could not fetch update status.
                                                     </div>
-
-                                                    {updateData.updateAvailable ? (
-                                                        <div className="pt-4 border-t border-white/10">
-                                                            <button
-                                                                type="button"
-                                                                onClick={handleRunUpdate}
-                                                                disabled={isUpdating}
-                                                                className="w-full px-4 py-3 bg-blue-600 hover:bg-blue-500 disabled:bg-blue-600/50 disabled:cursor-not-allowed text-white font-bold rounded-xl transition-colors shadow-lg shadow-blue-500/20 text-center"
-                                                            >
-                                                                {isUpdating ? 'Updating System...' : `Update to ${updateData.latestVersion}`}
-                                                            </button>
-                                                            {updateMessage && (
-                                                                <div className={`mt-3 text-xs text-center ${updateMessage.includes('error') || updateMessage.includes('Failed') ? 'text-red-400' : 'text-emerald-400'}`}>
-                                                                    {updateMessage}
+                                                ) : !updateData ? (
+                                                    <div className="flex items-center gap-2 text-slate-500 p-4 border border-white/5 rounded-xl bg-white/[0.01]">
+                                                        <div className="w-4 h-4 border-2 border-slate-500/30 border-t-slate-500 rounded-full animate-spin"></div>
+                                                        {t('checkingUpdates')}
+                                                    </div>
+                                                ) : (
+                                                    <>
+                                                        <div className="flex flex-col gap-2 p-4 bg-white/5 rounded-xl border border-white/5">
+                                                            <div className="flex justify-between">
+                                                                <span className="font-semibold text-slate-300">Current Version:</span>
+                                                                <span className="font-mono text-slate-300">{updateData.currentVersion}</span>
+                                                            </div>
+                                                            <div className="flex justify-between">
+                                                                <span className="font-semibold text-slate-300">Latest Version:</span>
+                                                                <span className="font-mono text-slate-300">{updateData.latestVersion}</span>
+                                                            </div>
+                                                            {updateData.message && (
+                                                                <div className={`mt-2 text-xs ${updateData.latestVersion?.includes('Unknown') ? 'text-amber-400' : 'text-slate-500'} bg-black/20 p-3 rounded-lg overflow-y-auto max-h-60 break-words whitespace-pre-wrap`}>
+                                                                    {updateData.message}
+                                                                </div>
+                                                            )}
+                                                            {updateData.url && !updateData.latestVersion?.includes('Unknown') && (
+                                                                <div className="mt-2">
+                                                                    <a href={updateData.url} target="_blank" rel="noopener noreferrer" className="text-xs text-indigo-400 hover:text-indigo-300 underline transition-colors">
+                                                                        View release details →
+                                                                    </a>
                                                                 </div>
                                                             )}
                                                         </div>
-                                                    ) : (
-                                                        <div className="text-center p-4">
-                                                            <p className="text-slate-500">Your system is up to date.</p>
-                                                        </div>
-                                                    )}
-                                                </>
-                                            )}
+
+                                                        {updateData.updateAvailable ? (
+                                                            <div className="pt-4">
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={handleRunUpdate}
+                                                                    disabled={isUpdating}
+                                                                    className="w-full px-4 py-3 bg-blue-600 hover:bg-blue-500 disabled:bg-blue-600/50 disabled:cursor-not-allowed text-white font-bold rounded-xl transition-colors shadow-lg shadow-blue-500/20 text-center"
+                                                                >
+                                                                    {isUpdating ? 'Updating System...' : `Update to ${updateData.latestVersion}`}
+                                                                </button>
+                                                                {updateMessage && (
+                                                                    <div className={`mt-3 text-xs text-center ${updateMessage.includes('error') || updateMessage.includes('Failed') ? 'text-red-400' : 'text-emerald-400'}`}>
+                                                                        {updateMessage}
+                                                                    </div>
+                                                                )}
+                                                            </div>
+                                                        ) : (
+                                                            <div className="text-center p-4">
+                                                                <p className="text-slate-500">Your system is up to date.</p>
+                                                            </div>
+                                                        )}
+                                                    </>
+                                                )}
+                                            </div>
                                         </div>
                                     </div>
                                 </div>
