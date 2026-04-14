@@ -157,10 +157,10 @@ export default function LoginPage() {
                             )}
                         </div>
                         <h1 className="text-2xl font-bold text-slate-100 tracking-tight">
-                            {isSetup ? 'Initialize Nexus' : (step === 'credentials' ? 'Access Nexus' : 'Verify Identity')}
+                            {isSetup ? 'Initialize Nexus' : (step === 'credentials' ? 'AetherFlow' : 'Verify Identity')}
                         </h1>
                         <p className="text-slate-400 text-sm mt-2 font-medium">
-                            {isSetup ? 'Create primary administrative context' : (step === 'credentials' ? 'AetherFlow Unified Dashboard' : 'Multi-factor authentication required')}
+                            {isSetup ? 'Create primary administrative context' : (step === 'credentials' ? 'Welcome to the Aether' : 'Multi-factor authentication required')}
                         </p>
                     </div>
 
@@ -177,7 +177,7 @@ export default function LoginPage() {
                                 <div className="relative">
                                     <input
                                         type="text"
-                                        placeholder={isSetup ? 'Choose administrative operator ID' : 'Operator ID'}
+                                        placeholder={isSetup ? 'Choose administrative operator ID' : 'Username'}
                                         value={username}
                                         onChange={(e) => setUsername(e.target.value)}
                                         required
@@ -189,7 +189,7 @@ export default function LoginPage() {
                                 <div className="relative">
                                     <input
                                         type="password"
-                                        placeholder={isSetup ? 'Establish cryptographic key (min 6)' : 'Cryptographic Key'}
+                                        placeholder={isSetup ? 'Establish cryptographic key (min 6)' : 'Password'}
                                         value={password}
                                         onChange={(e) => setPassword(e.target.value)}
                                         required
@@ -251,7 +251,7 @@ export default function LoginPage() {
 
                     {step === 'credentials' && (
                         <div className="mt-8 pt-6 border-t border-white/5 relative">
-                            <div className="absolute -top-3 left-1/2 -translate-x-1/2 px-4 bg-slate-950/50 backdrop-blur-md text-[10px] font-semibold text-slate-500 tracking-widest uppercase rounded-full">
+                            <div className="absolute -top-3 left-1/2 -translate-x-1/2 px-4 bg-slate-950/50 backdrop-blur-md text-[10px] font-semibold text-slate-500 tracking-widest uppercase rounded-full whitespace-nowrap">
                                 External Providers
                             </div>
                             <button
