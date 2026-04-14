@@ -579,9 +579,9 @@ export default function SettingsTab() {
                                                         <option value="gpt-4-turbo">GPT-4 Turbo</option>
                                                     </optgroup>
                                                     <optgroup label="Anthropic">
-                                                        <option value="claude-3-5-sonnet">Claude 3.5 Sonnet</option>
-                                                        <option value="claude-3-5-haiku">Claude 3.5 Haiku</option>
-                                                        <option value="claude-3-opus">Claude 3 Opus</option>
+                                                        <option value="claude-4-6-sonnet">Claude 4.6 Sonnet</option>
+                                                        <option value="claude-4-6-haiku">Claude 4.6 Haiku</option>
+                                                        <option value="claude-4-5-opus">Claude 4.5 Opus</option>
                                                     </optgroup>
                                                     <optgroup label="Local Hosted">
                                                         <option value="lm-studio">LM Studio (Local)</option>
