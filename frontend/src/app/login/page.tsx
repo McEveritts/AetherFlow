@@ -148,14 +148,16 @@ export default function LoginPage() {
                     <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-indigo-500/80 to-transparent"></div>
 
                     <div className="text-center mb-10">
-                        <div className="mx-auto h-16 w-16 mb-6 rounded-2xl bg-gradient-to-br from-indigo-500 via-blue-600 to-indigo-800 flex items-center justify-center shadow-[0_0_30px_rgba(99,102,241,0.3)] relative overflow-hidden">
-                            <div className="absolute inset-0 bg-[url('data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI4IiBoZWlnaHQ9IjgiPgo8cmVjdCB3aWR0aD0iOCIgaGVpZ2h0PSI4IiBmaWxsPSIjZmZmIiBmaWxsLW9wYWNpdHk9IjAuMSIvPgo8L3N2Zz4=')] opacity-30 mix-blend-overlay"></div>
-                            {step === 'credentials' ? (
-                                <span className="font-extrabold text-white text-3xl tracking-tighter mix-blend-screen drop-shadow-md">A</span>
-                            ) : (
+                        {step === 'credentials' ? (
+                            <div className="mx-auto h-20 w-20 mb-6 rounded-[1.25rem] shadow-[0_0_30px_rgba(99,102,241,0.3)] relative overflow-hidden ring-1 ring-white/10">
+                                <img src="/img/af-logo.png" alt="AetherFlow Logo" className="w-full h-full object-cover" />
+                            </div>
+                        ) : (
+                            <div className="mx-auto h-16 w-16 mb-6 rounded-2xl bg-gradient-to-br from-indigo-500 via-blue-600 to-indigo-800 flex items-center justify-center shadow-[0_0_30px_rgba(99,102,241,0.3)] relative overflow-hidden">
+                                <div className="absolute inset-0 bg-[url('data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI4IiBoZWlnaHQ9IjgiPgo8cmVjdCB3aWR0aD0iOCIgaGVpZ2h0PSI4IiBmaWxsPSIjZmZmIiBmaWxsLW9wYWNpdHk9IjAuMSIvPgo8L3N2Zz4=')] opacity-30 mix-blend-overlay"></div>
                                 <Fingerprint className="text-white w-8 h-8 opacity-90 drop-shadow-md" />
-                            )}
-                        </div>
+                            </div>
+                        )}
                         <h1 className="text-2xl font-bold text-slate-100 tracking-tight">
                             {isSetup ? 'Initialize Nexus' : (step === 'credentials' ? 'AetherFlow' : 'Verify Identity')}
                         </h1>
