@@ -112,7 +112,8 @@ export default function SettingsTab() {
             ambientColor2: ambientColor2,
             timezone: timezone,
             updateChannel: updateChannel,
-            defaultDashboard: defaultDashboard
+            defaultDashboard: defaultDashboard,
+            setupCompleted: true
         };
 
         // Optimistic update
@@ -131,7 +132,8 @@ export default function SettingsTab() {
                 mutateSettings(); // revalidate from server
             } else {
                 mutateSettings(prevData, false); // rollback
-                addToast('Configuration sync rejected', 'error');
+                const errData = await res.json().catch(() => ({ message: `HTTP ${res.status}` }));
+                addToast(errData.message || errData.error || `Configuration sync rejected (${res.status})`, 'error');
             }
         } catch (_err) {
             mutateSettings(prevData, false); // rollback
