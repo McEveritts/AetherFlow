@@ -44,10 +44,8 @@ export default function SecurityTab() {
     };
 
     return (
-        <div className="space-y-6 animate-fade-in relative z-10 w-full min-h-screen">
+        <div className="animate-fade-in relative z-10 w-full">
             <div className="absolute inset-0 bg-red-500/5 rounded-full blur-[120px] pointer-events-none -translate-y-1/2 -translate-x-1/2"></div>
-
-            <div className="glass-panel rounded-3xl p-10 relative overflow-hidden">
                 <h2 className="text-2xl font-bold text-slate-100 flex items-center gap-3 mb-8 pb-4 border-b border-white/5 relative z-10">
                     <Shield size={24} className="text-indigo-400" />
                     Security & Access Control
@@ -149,7 +147,6 @@ export default function SecurityTab() {
                         </button>
                     </div>
                 </div>
-            </div>
         </div>
     );
 }

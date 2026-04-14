@@ -29,7 +29,7 @@ fi
 log "Downloading latest Gitea..."
 ARCH=$(dpkg --print-architecture)
 
-GITEA_VERSION=$(curl -sL https://api.github.com/repos/go-gitea/gitea/releases/latest | grep '"tag_name"' | sed -E 's/.*"v([^"]+)".*/\1/')
+GITEA_VERSION=$(curl -sL https://api.github.com/repos/go-gitea/gitea/releases/latest | grep -oP '"tag_name": "v\K[^"]+')
 if [[ -z "$GITEA_VERSION" ]]; then
     GITEA_VERSION="1.22.0"
 fi

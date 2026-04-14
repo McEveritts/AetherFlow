@@ -1,37 +1,109 @@
 #!/bin/bash
 #
 # [AetherFlow :: Install FlareSolverr]
-# Proxy server to bypass Cloudflare and DDoS-GUARD
+# Proxy server to bypass Cloudflare and DDoS-GUARD — Native deployment
 #
 # Author : McEveritts
 # URL    : https://AetherFlow.io
 # License: GPL-3.0
 #
 set -e
+set -o pipefail
 
 LOGFILE="/opt/AetherFlow/logs/installer.log"
 mkdir -p /opt/AetherFlow/logs /install
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [flaresolverr] $1" | tee -a "$LOGFILE"; }
 
-# ── Install Docker if not present ────────────────────────────────────────────
-if ! command -v docker &>/dev/null; then
-    log "Docker not found — installing Docker Engine..."
-    fetch_and_run "https://get.docker.com" "SKIP" >>"$LOGFILE" 2>&1
-    systemctl enable docker >>"$LOGFILE" 2>&1
-    systemctl start docker
+if [[ -f /install/.flaresolverr.lock ]]; then
+    log "FlareSolverr is already installed. Skipping."
+    exit 0
 fi
 
-# ── Deploy FlareSolverr container ────────────────────────────────────────────
-log "Pulling and starting FlareSolverr container..."
-docker rm -f flaresolverr 2>/dev/null || true
-docker run -d \
-    --name flaresolverr \
-    --restart=always \
-    -p 8191:8191 \
-    -e LOG_LEVEL=info \
-    -e TZ=America/New_York \
-    ghcr.io/flaresolverr/flaresolverr:latest >>"$LOGFILE" 2>&1
+# ── Dependencies ─────────────────────────────────────────────────────────────
+log "Installing dependencies..."
+apt-get update >>"$LOGFILE" 2>&1
+apt-get install -y curl xvfb chromium chromium-driver >>"$LOGFILE" 2>&1
+
+# ── Architecture detection ───────────────────────────────────────────────────
+ARCH=$(dpkg --print-architecture)
+case "$ARCH" in
+    amd64) FS_ARCH="linux-x64"  ;;
+    arm64) FS_ARCH="linux-arm64" ;;
+    *)     FS_ARCH="linux-x64"  ;;
+esac
+log "Detected architecture: ${ARCH} → ${FS_ARCH}"
+
+# ── Download FlareSolverr ────────────────────────────────────────────────────
+log "Downloading FlareSolverr..."
+
+FS_URL=$(curl -sL https://api.github.com/repos/FlareSolverr/FlareSolverr/releases/latest \
+    | grep -oP "\"browser_download_url\": \"\K(https://[^\"]+${FS_ARCH}\.tar\.gz)(?=\")" \
+    | head -1) || true
+
+if [[ -z "$FS_URL" ]]; then
+    log "GitHub API did not return matching asset, attempting tag-based fallback..."
+    FS_VERSION=$(curl -sL https://api.github.com/repos/FlareSolverr/FlareSolverr/releases/latest \
+        | grep -oP '"tag_name": "v?\K[^"]+') || true
+    if [[ -z "$FS_VERSION" ]]; then
+        log "FATAL: Could not determine FlareSolverr version."
+        exit 1
+    fi
+    FS_URL="https://github.com/FlareSolverr/FlareSolverr/releases/download/v${FS_VERSION}/flaresolverr_${FS_ARCH}.tar.gz"
+fi
+
+log "Download URL: ${FS_URL}"
+mkdir -p /tmp/AetherFlow
+cd /tmp/AetherFlow
+curl -sL "$FS_URL" -o flaresolverr.tar.gz >>"$LOGFILE" 2>&1
+
+log "Extracting FlareSolverr..."
+rm -rf /opt/flaresolverr
+mkdir -p /opt/flaresolverr
+tar -xzf flaresolverr.tar.gz -C /opt/flaresolverr --strip-components=1 >>"$LOGFILE" 2>&1
+rm -f flaresolverr.tar.gz
+
+# ── Create flaresolverr user ─────────────────────────────────────────────────
+if ! id -u flaresolverr &>/dev/null; then
+    useradd -r -s /usr/sbin/nologin -d /opt/flaresolverr flaresolverr
+fi
+chown -R flaresolverr:flaresolverr /opt/flaresolverr
+
+# ── Systemd service ──────────────────────────────────────────────────────────
+log "Creating systemd service..."
+cat > /etc/systemd/system/flaresolverr.service <<'EOF'
+[Unit]
+Description=FlareSolverr Proxy (AetherFlow Managed)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=flaresolverr
+Group=flaresolverr
+WorkingDirectory=/opt/flaresolverr
+Environment=LOG_LEVEL=info
+Environment=TZ=America/New_York
+ExecStart=/opt/flaresolverr/flaresolverr
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=20
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+ReadWritePaths=/opt/flaresolverr
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable flaresolverr.service >>"$LOGFILE" 2>&1
+systemctl start flaresolverr.service
 
 # ── Finalize ─────────────────────────────────────────────────────────────────
 touch /install/.flaresolverr.lock

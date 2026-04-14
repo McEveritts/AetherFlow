@@ -1,67 +1,84 @@
 #!/bin/bash
 #
-# [Quick Box :: Install Tautulli ]
+# [AetherFlow :: Install Tautulli]
+# Plex monitoring and tracking tool
 #
-# GITHUB REPOS
-# GitHub _ packages  :   https://github.com/AetherFlow/AetherFlow_packages
-# LOCAL REPOS
-# Local _ packages   :   /etc/AetherFlow/packages
-# Author             :   AetherFlow.IO | liara (edited AetherFlow staff Dtech)
-# URL                :   https://AetherFlow.io
+# Author : McEveritts
+# URL    : https://AetherFlow.io
+# License: GPL-3.0
 #
-# AetherFlow Copyright (C) 2017 AetherFlow.io
-# Licensed under GNU General Public License v3.0 GPL-3 (in short)
-#
-#   You may copy, distribute and modify the software as long as you track
-#   changes/dates in source files. Any modifications to our software
-#   including (via compiler) GPL-licensed code must also be made available
-#   under the GPL along with build & install instructions.
-#
-source /opt/AetherFlow/packages/common.sh
-OUTTO=$LOGFILE
-local_setup=/opt/AetherFlow/setup/
-MASTER=$AETHERFLOW_USER
+set -e
 
+LOGFILE="/opt/AetherFlow/logs/installer.log"
+mkdir -p /opt/AetherFlow/logs /install
 
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [tautulli] $1" | tee -a "$LOGFILE"; }
+
+# ── Dependencies ─────────────────────────────────────────────────────────────
+log "Installing dependencies..."
+apt-get update >>"$LOGFILE" 2>&1
+apt-get install -y python3 python3-setuptools git wget >>"$LOGFILE" 2>&1
+
+# ── Create tautulli user ─────────────────────────────────────────────────────
+if ! id -u tautulli &>/dev/null; then
+    useradd -r -s /usr/sbin/nologin -d /opt/Tautulli tautulli
+fi
+
+# ── Download Tautulli ────────────────────────────────────────────────────────
+log "Downloading Tautulli from latest Github repo..."
+rm -rf /opt/Tautulli
 cd /opt
-echo "Cloning Tautulli repository" >>"${OUTTO}" 2>&1;
-git clone https://github.com/Tautulli/Tautulli.git > /dev/null 2>&1
+git clone https://github.com/Tautulli/Tautulli.git >>"$LOGFILE" 2>&1
 
-echo "Adding user and setting up Tautulli" >>"${OUTTO}" 2>&1;
-adduser --system --no-create-home tautulli
+chown -R tautulli:tautulli /opt/Tautulli
 
-echo "Adjusting permissions" >>"${OUTTO}" 2>&1;
-chown tautulli:nogroup -R /opt/Tautulli
+# ── Systemd service ──────────────────────────────────────────────────────────
+log "Creating systemd service..."
+cat > /etc/systemd/system/tautulli.service <<'EOF'
+[Unit]
+Description=Tautulli - Plex Monitor
+After=network.target
 
+[Service]
+Environment=LANG=en_US.UTF-8
+Environment=LC_ALL=en_US.UTF-8
+ExecStart=/usr/bin/python3 /opt/Tautulli/Tautulli.py
+User=tautulli
+Group=tautulli
+Restart=on-failure
+RestartSec=5
+Type=simple
+TimeoutStopSec=20
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+ReadWritePaths=/opt/Tautulli
 
-cat > /etc/apache2/sites-enabled/Tautulli.conf <<EOF
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable tautulli.service >>"$LOGFILE" 2>&1
+systemctl start tautulli.service
+
+# ── Apache reverse proxy ─────────────────────────────────────────────────────
+log "Configuring Apache reverse proxy..."
+cat > /etc/apache2/sites-enabled/tautulli.conf <<'EOF'
 <Location /tautulli>
-ProxyPass http://localhost:8181/tautulli
-ProxyPassReverse http://localhost:8181/tautulli
-#AuthType Digest
-#AuthName "rutorrent"
-#AuthUserFile '/etc/htpasswd'
-#Require user ${MASTER}
+    ProxyPass http://localhost:8181/tautulli
+    ProxyPassReverse http://localhost:8181/tautulli
 </Location>
 EOF
-chown www-data: /etc/apache2/sites-enabled/Tautulli.conf
-service apache2 reload
+chown www-data:www-data /etc/apache2/sites-enabled/tautulli.conf
+a2enmod proxy proxy_http >>/dev/null 2>&1
+service apache2 reload >>"$LOGFILE" 2>&1
 
-echo "Enabling Tautulli Systemd configuration"
-cp ${local_setup}templates/sysd/Tautulli.template /etc/systemd/system/Tautulli.service
-systemctl enable Tautulli > /dev/null 2>&1
-systemctl start Tautulli
-sleep 10
-systemctl stop Tautulli
-sleep 10
-sed -i "s/http_root.*/http_root = \"tautulli\"/g" /opt/Tautulli/config.ini
-sed -i "s/http_host.*/http_host = localhost/g" /opt/Tautulli/config.ini
-systemctl start Tautulli
-touch /install/.Tautulli.lock
-
-echo "Tautulli Install Complete!" >>"${OUTTO}" 2>&1;
-sleep 5
-echo >>"${OUTTO}" 2>&1;
-echo >>"${OUTTO}" 2>&1;
-echo "Close this dialog box to refresh your browser" >>"${OUTTO}" 2>&1;
-
+# ── Finalize ─────────────────────────────────────────────────────────────────
+touch /install/.tautulli.lock
+log "Tautulli installation complete! Access at http://your-server:8181"

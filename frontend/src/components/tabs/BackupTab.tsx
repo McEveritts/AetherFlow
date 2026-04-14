@@ -138,11 +138,9 @@ export default function BackupTab() {
     };
 
     return (
-        <div className="space-y-6 animate-fade-in relative z-10 w-full min-h-[calc(100vh-10rem)] flex flex-col">
-
-            <div className="bg-white/[0.02] border border-white/[0.05] rounded-3xl p-10 backdrop-blur-xl relative overflow-hidden flex-1">
-                {/* Background glow */}
-                <div className="absolute top-0 right-0 w-[400px] h-[400px] bg-emerald-500/10 rounded-full blur-[100px] pointer-events-none -translate-y-1/2 translate-x-1/2"></div>
+        <div className="animate-fade-in relative z-10 w-full">
+            {/* Background glow */}
+            <div className="absolute top-0 right-0 w-[400px] h-[400px] bg-emerald-500/10 rounded-full blur-[100px] pointer-events-none -translate-y-1/2 translate-x-1/2"></div>
 
                 <div className="flex items-center justify-between mb-8 pb-4 border-b border-white/5 relative z-10">
                     <h2 className="text-2xl font-bold text-slate-100 flex items-center gap-3">
@@ -311,7 +309,6 @@ export default function BackupTab() {
                         </div>
                     </div>
                 </div>
-            </div>
         </div>
     );
 }

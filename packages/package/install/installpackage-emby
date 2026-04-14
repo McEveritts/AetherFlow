@@ -1,82 +1,65 @@
 #!/bin/bash
 #
-# [Quick Box :: Install Emby package]
+# [AetherFlow :: Install Emby]
+# Open Media Library Server
 #
-# GITHUB REPOS
-# GitHub _ packages  :   https://github.com/AetherFlow/AetherFlow_packages
-# LOCAL REPOS
-# Local _ packages   :   /etc/AetherFlow/packages
-# Author             :   McEveritts
-# URL                :   https://AetherFlow.io
+# Author : McEveritts
+# URL    : https://AetherFlow.io
+# License: GPL-3.0
 #
-# AetherFlow Copyright (C) 2017 AetherFlow.io
-# Licensed under GNU General Public License v3.0 GPL-3 (in short)
-#
-#   You may copy, distribute and modify the software as long as you track
-#   changes/dates in source files. Any modifications to our software
-#   including (via compiler) GPL-licensed code must also be made available
-#   under the GPL along with build & install instructions.
+set -e
 
-DISTRO=$(lsb_release -is)
-CODENAME=$(lsb_release -cs)
-source /opt/AetherFlow/packages/common.sh
-OUTTO=$LOGFILE
-username=$AETHERFLOW_USER
-local_setup=/opt/AetherFlow/setup/
+LOGFILE="/opt/AetherFlow/logs/installer.log"
+mkdir -p /opt/AetherFlow/logs /install
 
-echo "Setting up emby apache configuration ... " >>"${OUTTO}" 2>&1
-cp ${local_setup}templates/emby.conf.template /etc/apache2/sites-enabled/emby.conf
-chown www-data /etc/apache2/sites-enabled/emby.conf
-a2enmod proxy >/dev/null 2>&1
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [emby] $1" | tee -a "$LOGFILE"; }
 
-echo "Installing emby keys and sources ... " >>"${OUTTO}" 2>&1
-if [[ $CODENAME == stretch ]]; then
-  echo 'deb http://download.opensuse.org/repositories/home:/emby/Debian_9.0/ /' >/etc/apt/sources.list.d/emby-server.list
-  wget --quiet http://download.opensuse.org/repositories/home:emby/Debian_9.0/Release.key -O - | apt-key add - >/dev/null 2>&1
-elif [[ $CODENAME == jessie ]]; then
-  echo 'deb http://download.opensuse.org/repositories/home:/emby/Debian_8.0/ /' >/etc/apt/sources.list.d/emby-server.list
-  wget --quiet http://download.opensuse.org/repositories/home:emby/Debian_8.0/Release.key -O - | apt-key add - >/dev/null 2>&1
-elif [[ $CODENAME == yakkety ]]; then
-  sudo sh -c "echo 'deb http://download.opensuse.org/repositories/home:/emby/xUbuntu_16.10/ /' > /etc/apt/sources.list.d/emby-server.list"
-  wget --quiet http://download.opensuse.org/repositories/home:emby/xUbuntu_16.10/Release.key -O - | apt-key add - >/dev/null 2>&1
-elif [[ $CODENAME == xenial ]]; then
-  sudo sh -c "echo 'deb http://download.opensuse.org/repositories/home:/emby/xUbuntu_16.04/ /' > /etc/apt/sources.list.d/emby-server.list"
-  wget --quiet http://download.opensuse.org/repositories/home:emby/xUbuntu_16.04/Release.key -O - | apt-key add - >/dev/null 2>&1
-elif [[ $CODENAME == wily ]]; then
-  sudo sh -c "echo 'deb http://download.opensuse.org/repositories/home:/emby/xUbuntu_15.10/ /' > /etc/apt/sources.list.d/emby-server.list"
-  wget --quiet http://download.opensuse.org/repositories/home:emby/xUbuntu_15.10/Release.key -O - | apt-key add - >/dev/null 2>&1
+# ── Dependencies ─────────────────────────────────────────────────────────────
+log "Installing dependencies..."
+apt-get update >>"$LOGFILE" 2>&1
+apt-get install -y curl wget >>"$LOGFILE" 2>&1
+
+# ── Download Emby Server ─────────────────────────────────────────────────────
+log "Downloading latest Emby Server release..."
+ARCH=$(dpkg --print-architecture)
+
+EMBY_URL=$(curl -sL https://api.github.com/repos/MediaBrowser/Emby.Releases/releases/latest | grep -oP '"browser_download_url": "\K(https://[^"]+emby-server-deb_[^"]+'${ARCH}'\.deb)(?=")' | head -1)
+
+if [[ -z "$EMBY_URL" ]]; then
+    log "Could not parse API download URL, attempting fallback to known latest..."
+    EMBY_VERSION=$(curl -sL https://api.github.com/repos/MediaBrowser/Emby.Releases/releases/latest | grep -oP '"tag_name": "\K[^"]+')
+    EMBY_URL="https://github.com/MediaBrowser/Emby.Releases/releases/download/${EMBY_VERSION}/emby-server-deb_${EMBY_VERSION}_amd64.deb"
 fi
 
-echo "Installing emby server ... " >>"${OUTTO}" 2>&1
-emby_version=$(curl -Ls https://github.com/MediaBrowser/Emby.Releases/releases/latest | grep "emby-server-deb" | cut -d "/" -f 6 | head -1)
 mkdir -p /tmp/AetherFlow
 cd /tmp/AetherFlow
-wget -q https://github.com/MediaBrowser/Emby.Releases/releases/download/${emby_version}/emby-server-deb_${emby_version}_amd64.deb >/dev/null 2>&1
-dpkg -i emby-server-deb_${emby_version}_amd64.deb >/dev/null 2>&1
+curl -sL "$EMBY_URL" -o emby-server.deb >>"$LOGFILE" 2>&1
 
-sleep 3
+# ── Install Package ──────────────────────────────────────────────────────────
+log "Installing Emby dpkg..."
+dpkg -i emby-server.deb >>"$LOGFILE" 2>&1 || apt-get install -y -f >>"$LOGFILE" 2>&1
+rm -f emby-server.deb
 
-rm -rf emby-server-deb_*
-#apt-get -y update >/dev/null 2>&1
-#apt-get install -y --allow-unauthenticated -f emby-server >/dev/null 2>&1
-echo
-sleep 5
-
-if [[ -f /etc/emby-server.conf ]]; then
-  echo "EMBY_USER="${username}"" >>/etc/emby-server.conf
-  echo "EMBY_GROUP="${username}"" >>/etc/emby-server.conf
+# ── Create emby system configuration ─────────────────────────────────────────
+if ! id -u emby &>/dev/null; then
+    useradd -r -s /usr/sbin/nologin -d /var/lib/emby emby || true
 fi
 
-systemctl restart emby-server >/dev/null 2>&1
+# ── Apache reverse proxy ─────────────────────────────────────────────────────
+log "Configuring Apache reverse proxy..."
+cat > /etc/apache2/sites-enabled/emby.conf <<'EOF'
+<Location /emby>
+    ProxyPass http://localhost:8096/emby
+    ProxyPassReverse http://localhost:8096/emby
+</Location>
+EOF
+chown www-data:www-data /etc/apache2/sites-enabled/emby.conf
+a2enmod proxy proxy_http >>/dev/null 2>&1
+service apache2 reload >>"$LOGFILE" 2>&1
+
+# ── Finalize ─────────────────────────────────────────────────────────────────
+systemctl enable emby-server >>"$LOGFILE" 2>&1
+systemctl restart emby-server >>"$LOGFILE" 2>&1
+
 touch /install/.emby.lock
-echo
-
-echo "Emby Install Complete!" >>"${OUTTO}" 2>&1
-sleep 5
-echo >>"${OUTTO}" 2>&1
-echo >>"${OUTTO}" 2>&1
-echo "Close this dialog box to refresh your browser" >>"${OUTTO}" 2>&1
-service apache2 reload >/dev/null 2>&1
-
-exit
-
+log "Emby installation complete! Access at http://your-server:8096"

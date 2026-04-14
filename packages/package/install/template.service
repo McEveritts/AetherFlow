@@ -1,0 +1,219 @@
+# ╔══════════════════════════════════════════════════════════════════════════════╗
+# ║  AetherFlow :: Master Systemd Service Template                              ║
+# ║  Reference implementation for hardened, isolated daemon contexts            ║
+# ║                                                                              ║
+# ║  This template is NOT deployed directly. It documents the security          ║
+# ║  directives that every installpackage-* script must embed into the          ║
+# ║  systemd unit file it generates via heredoc.                                ║
+# ║                                                                              ║
+# ║  Phase 8: Systemd Template Refactoring                                      ║
+# ║  Phase 9: Privilege Escalation Hardening                                    ║
+# ╚══════════════════════════════════════════════════════════════════════════════╝
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# [Unit] — When and how the service starts
+# ═══════════════════════════════════════════════════════════════════════════════
+[Unit]
+Description=AppName Daemon (AetherFlow Managed)
+
+# Use `network-online.target` instead of `network.target`.
+# `network.target` only means "network interfaces are configured" — DNS may
+# not work yet. `network-online.target` waits until at least one interface
+# has a routable address, which is critical for apps that phone home on
+# startup (e.g., Sonarr checking for updates, Jackett fetching indexer lists).
+After=network-online.target
+Wants=network-online.target
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# [Service] — How the process is managed
+# ═══════════════════════════════════════════════════════════════════════════════
+[Service]
+
+# ─── IDENTITY ────────────────────────────────────────────────────────────────
+# Phase 7: Daemon User Mapping
+#
+# BEFORE (QuickBox era):
+#   User=${username}          ← Shared global SSH user
+#   Group=${username}         ← Same shared group
+#   WorkingDirectory=/opt/${username}/AppName
+#
+# AFTER (AetherFlow native):
+#   Each service gets its own system user created with:
+#     useradd -r -s /usr/sbin/nologin -d /opt/AppName appname
+#
+#   This creates a user that:
+#     - Has a UID below 1000 (won't appear in GUI login screens)
+#     - Cannot be used for SSH or interactive login
+#     - Owns only its own application directory
+User=appname
+Group=appname
+
+# ─── EXECUTION ───────────────────────────────────────────────────────────────
+# `Type=simple` means systemd considers the service "started" the moment
+# ExecStart launches. This is correct for long-running daemons that don't
+# fork (which is the case for all *arr apps, Jackett, Transmission in
+# foreground mode, etc.).
+#
+# NEVER use `Type=forking` for apps that run in the foreground — it causes
+# systemd to wait for a fork that never happens, then declare the service failed.
+# The old SABnzbd script used `Type=forking` with `screen -d -m` which is
+# an anti-pattern that hides the process from systemd's supervision tree.
+Type=simple
+
+# Working directory must be the install path so relative path references
+# in the application work correctly.
+WorkingDirectory=/opt/AppName
+
+# The binary path and arguments.
+# For *arr apps (Sonarr, Radarr, Lidarr, Readarr, Prowlarr):
+#   /opt/AppName/AppName -nobrowser -data=/var/lib/appname/
+#
+# The `-data=` flag tells the app to store its SQLite database, config.xml,
+# and log files in /var/lib/appname/ instead of the default ~/.config/AppName/.
+# This is crucial because:
+#   1. It separates binaries (immutable) from data (mutable)
+#   2. It enables `ProtectHome=true` (see below)
+#   3. It makes backup scripts trivial: `tar czf backup.tar.gz /var/lib/appname/`
+ExecStart=/opt/AppName/AppName -nobrowser -data=/var/lib/appname/
+
+# ─── RESTART POLICY ──────────────────────────────────────────────────────────
+# `on-failure` restarts only on non-zero exit codes (not on clean shutdown).
+# `RestartSec=10` prevents restart loops from hammering the system.
+# `TimeoutStopSec=20` gives the app 20 seconds to gracefully flush its
+# SQLite database before systemd sends SIGKILL.
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=20
+
+# `KillMode=process` only kills the main process, not child processes.
+# This is important for apps like Transmission that spawn download threads —
+# orphaned threads will be cleaned by the kernel, not by a premature SIGKILL
+# from systemd hitting the control group.
+KillMode=process
+
+# ─── SECURITY HARDENING (Phase 9) ────────────────────────────────────────────
+#
+# These directives form a defense-in-depth sandbox around the service.
+# Each one addresses a specific attack vector.
+
+# ┌────────────────────────────────────────────────────────────────────────────┐
+# │ NoNewPrivileges=yes                                                        │
+# │                                                                            │
+# │ THE MOST IMPORTANT DIRECTIVE.                                              │
+# │                                                                            │
+# │ Once set, the process (and all its children) can NEVER gain new            │
+# │ privileges. This means:                                                    │
+# │   - setuid binaries won't escalate (e.g., a malicious /usr/bin/su attempt) │
+# │   - Filesystem capabilities are ignored                                    │
+# │   - Even if the app has a remote code execution vulnerability, the         │
+# │     attacker is permanently confined to the service user's permissions     │
+# │                                                                            │
+# │ Safe for ALL AetherFlow apps — none of them need privilege escalation.     │
+# └────────────────────────────────────────────────────────────────────────────┘
+NoNewPrivileges=yes
+
+# ┌────────────────────────────────────────────────────────────────────────────┐
+# │ ProtectSystem=full                                                         │
+# │                                                                            │
+# │ Makes /usr, /boot, and /lib READ-ONLY for this service.                   │
+# │ The application can only write to:                                         │
+# │   - /opt/AppName/ (its install directory)                                  │
+# │   - /var/lib/appname/ (its data directory, via ReadWritePaths)             │
+# │   - /tmp (its private tmp, via PrivateTmp)                                │
+# │                                                                            │
+# │ Alternatives:                                                              │
+# │   `strict` = everything is read-only except explicit ReadWritePaths        │
+# │   `full`   = /usr, /boot, /lib are read-only; /etc is writable            │
+# │   (We use `full` because some apps write to /etc on first run)             │
+# └────────────────────────────────────────────────────────────────────────────┘
+ProtectSystem=full
+
+# ┌────────────────────────────────────────────────────────────────────────────┐
+# │ ProtectHome=true                                                           │
+# │                                                                            │
+# │ Makes /home, /root, and /run/user COMPLETELY INACCESSIBLE.                │
+# │                                                                            │
+# │ WHY THIS MATTERS:                                                          │
+# │ Old QuickBox scripts stored configs in /home/$USER/.config/AppName/.       │
+# │ We migrated all data to /var/lib/appname/ specifically so we could         │
+# │ enable this directive. Without it, a compromised Jackett process could     │
+# │ read SSH keys from /home/user/.ssh/ or API tokens from other apps'         │
+# │ config directories.                                                        │
+# │                                                                            │
+# │ EXCEPTION: If media files live under /home/ (e.g., /home/user/Media),     │
+# │ use `ProtectHome=read-only` instead, or bind-mount the media path.         │
+# └────────────────────────────────────────────────────────────────────────────┘
+ProtectHome=true
+
+# ┌────────────────────────────────────────────────────────────────────────────┐
+# │ PrivateTmp=yes                                                             │
+# │                                                                            │
+# │ Creates isolated /tmp and /var/tmp namespaces for this service.            │
+# │                                                                            │
+# │ Without this, all services share /tmp. Attack scenario:                    │
+# │   1. Attacker uploads a malicious .torrent to Transmission                 │
+# │   2. Transmission writes a temp file to /tmp/exploit.so                    │
+# │   3. Jackett (also running in /tmp) loads it via LD_PRELOAD                │
+# │                                                                            │
+# │ With PrivateTmp, each service has its own /tmp. Transmission's /tmp        │
+# │ is invisible to Jackett and vice versa.                                    │
+# └────────────────────────────────────────────────────────────────────────────┘
+PrivateTmp=yes
+
+# ┌────────────────────────────────────────────────────────────────────────────┐
+# │ PrivateDevices=yes                                                         │
+# │                                                                            │
+# │ Prevents access to physical devices (/dev/sda, /dev/usb, etc.).           │
+# │ Only pseudo-devices (/dev/null, /dev/zero, /dev/urandom) are exposed.     │
+# │                                                                            │
+# │ Network daemons never need raw device access. This prevents a             │
+# │ compromised process from dumping raw disk blocks or manipulating hardware. │
+# └────────────────────────────────────────────────────────────────────────────┘
+PrivateDevices=yes
+
+# ┌────────────────────────────────────────────────────────────────────────────┐
+# │ ProtectKernelTunables=yes                                                  │
+# │                                                                            │
+# │ Prevents writes to /proc/sys, /sys, and other kernel parameter paths.     │
+# │ Without this, a compromised process could:                                 │
+# │   - Disable ASLR: echo 0 > /proc/sys/kernel/randomize_va_space            │
+# │   - Enable IP forwarding: echo 1 > /proc/sys/net/ipv4/ip_forward          │
+# │   - Modify network stack parameters to intercept traffic                   │
+# └────────────────────────────────────────────────────────────────────────────┘
+ProtectKernelTunables=yes
+
+# ┌────────────────────────────────────────────────────────────────────────────┐
+# │ ProtectControlGroups=yes                                                   │
+# │                                                                            │
+# │ Makes the cgroup filesystem (/sys/fs/cgroup) read-only.                   │
+# │ Prevents the service from modifying its own resource limits or            │
+# │ escaping into a different cgroup namespace.                                │
+# └────────────────────────────────────────────────────────────────────────────┘
+ProtectControlGroups=yes
+
+# ┌────────────────────────────────────────────────────────────────────────────┐
+# │ RestrictSUIDSGID=yes                                                       │
+# │                                                                            │
+# │ Prevents the service from creating files with the SUID or SGID bits set.  │
+# │ Without this, a compromised process could create a setuid-root binary     │
+# │ in a world-writable directory, then exploit it for privilege escalation.   │
+# └────────────────────────────────────────────────────────────────────────────┘
+RestrictSUIDSGID=yes
+
+# ┌────────────────────────────────────────────────────────────────────────────┐
+# │ ReadWritePaths=                                                            │
+# │                                                                            │
+# │ Under ProtectSystem=full, most of the filesystem is read-only.            │
+# │ This directive explicitly whitelists the directories the service needs    │
+# │ to write to. Everything else remains locked.                               │
+# │                                                                            │
+# │ For media apps, add the download/media directories:                        │
+# │   ReadWritePaths=/var/lib/appname /home/transmission/Downloads             │
+# └────────────────────────────────────────────────────────────────────────────┘
+ReadWritePaths=/var/lib/appname
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# [Install] — How the service is enabled
+# ═══════════════════════════════════════════════════════════════════════════════
+[Install]
+WantedBy=multi-user.target

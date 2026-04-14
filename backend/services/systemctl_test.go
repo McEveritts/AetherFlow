@@ -12,7 +12,7 @@ func TestValidateServiceName(t *testing.T) {
 		wantErr bool
 	}{
 		{name: "apache2", wantErr: false},
-		{name: "docker.service", wantErr: false},
+		{name: "apache2.service", wantErr: false},
 		{name: "nginx-1", wantErr: false},
 		{name: "user@1000.service", wantErr: false},
 		{name: "bad name", wantErr: true},

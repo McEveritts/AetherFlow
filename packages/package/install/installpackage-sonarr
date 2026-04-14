@@ -1,156 +1,97 @@
 #!/bin/bash
 #
-# [AetherFlow :: Install Sonarr package]
+# [AetherFlow :: Install Sonarr]
+# TV collection manager for Usenet and BitTorrent
 #
-# GITHUB REPOS
-# GitHub _ packages  :   https://github.com/AetherFlow/AetherFlow_packages
-# LOCAL REPOS
-# Local _ packages   :   /opt/AetherFlow/packages
-# Author             :   McEveritts
-# URL                :   https://AetherFlow.io
+# Author : McEveritts
+# URL    : https://AetherFlow.io
+# License: GPL-3.0
 #
-# AetherFlow Copyright (C) 2016
-# Licensed under GNU General Public License v3.0 GPL-3 (in short)
-#
-#   You may copy, distribute and modify the software as long as you track
-#   changes/dates in source files. Any modifications to our software
-#   including (via compiler) GPL-licensed code must also be made available
-#   under the GPL along with build & install instructions.
-#
-#################################################################################
+set -e
 
-# Source shared variables FIRST so $LOGFILE and $AETHERFLOW_USER are available
-source /opt/AetherFlow/packages/common.sh
+LOGFILE="/opt/AetherFlow/logs/installer.log"
+mkdir -p /opt/AetherFlow/logs /install
 
-OUTTO=$LOGFILE
-local_setup=/opt/AetherFlow/setup/
-username=$AETHERFLOW_USER
-distribution=$(lsb_release -is)
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [sonarr] $1" | tee -a "$LOGFILE"; }
 
-#################################################################################
+# ── Dependencies ─────────────────────────────────────────────────────────────
+log "Installing dependencies..."
+apt-get update >>"$LOGFILE" 2>&1
+apt-get install -y curl sqlite3 libicu-dev >>"$LOGFILE" 2>&1
 
-function _installSonarrintro() {
-  echo "Sonarr will now be installed." >>"${OUTTO}" 2>&1
-  echo "This process may take up to 2 minutes." >>"${OUTTO}" 2>&1
-  echo "Please wait until install is completed." >>"${OUTTO}" 2>&1
-  echo "Sonarr will now be installed."
-  echo "This process may take up to 2 minutes."
-  echo "Please wait until install is completed."
-  echo
-}
+# ── Download Sonarr ──────────────────────────────────────────────────────────
+log "Downloading latest Sonarr..."
+ARCH=$(dpkg --print-architecture)
+case "$ARCH" in
+    amd64) SONARR_ARCH="x64" ;;
+    arm64) SONARR_ARCH="arm64" ;;
+    armhf) SONARR_ARCH="arm" ;;
+    *) SONARR_ARCH="x64" ;;
+esac
 
-function _addSonarrRepo() {
-  # Add the Sonarr v3/v4 repository (modern method)
-  echo "Adding Sonarr repository ..." >>"${OUTTO}" 2>&1
-  echo "Adding Sonarr repository ..."
+mkdir -p /tmp/AetherFlow
+cd /tmp/AetherFlow
+curl -sL "https://services.sonarr.tv/v1/download/main/latest?version=4&os=linux&arch=${SONARR_ARCH}" -o sonarr.tar.gz >>"$LOGFILE" 2>&1
 
-  # Install prerequisites
-  apt-get install -y curl gnupg ca-certificates >>"${OUTTO}" 2>&1
+log "Extracting Sonarr..."
+rm -rf /opt/Sonarr
+tar -xzf sonarr.tar.gz -C /opt >>"$LOGFILE" 2>&1
+rm -f sonarr.tar.gz
 
-  # Import Sonarr GPG key
-  if [[ ! -f /usr/share/keyrings/sonarr-keyring.gpg ]]; then
-    curl -sL "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x2009837cbffd68f45bc180471f4f90de2a9b4bf8" | \
-      gpg --dearmor -o /usr/share/keyrings/sonarr-keyring.gpg >>"${OUTTO}" 2>&1
-  fi
+# ── Create sonarr user ───────────────────────────────────────────────────────
+if ! id -u sonarr &>/dev/null; then
+    useradd -r -s /usr/sbin/nologin -d /opt/Sonarr sonarr
+fi
+chown -R sonarr:sonarr /opt/Sonarr
+mkdir -p /var/lib/sonarr
+chown -R sonarr:sonarr /var/lib/sonarr
 
-  # Add the Sonarr apt source
-  echo "deb [signed-by=/usr/share/keyrings/sonarr-keyring.gpg] https://apt.sonarr.tv/debian testing main" \
-    > /etc/apt/sources.list.d/sonarr.list
+# ── Systemd service ──────────────────────────────────────────────────────────
+log "Creating systemd service..."
+cat > /etc/systemd/system/sonarr.service <<'EOF'
+[Unit]
+Description=Sonarr TV Series Manager
+After=syslog.target network.target
 
-  apt-get update -y >>"${OUTTO}" 2>&1
-}
+[Service]
+User=sonarr
+Group=sonarr
+Type=simple
+ExecStart=/opt/Sonarr/Sonarr -nobrowser -data=/var/lib/sonarr/
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=20
+KillMode=process
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+ReadWritePaths=/var/lib/sonarr
 
-function _installSonarrPkg() {
-  echo "Installing Sonarr ..." >>"${OUTTO}" 2>&1
-  echo "Installing Sonarr ..."
+[Install]
+WantedBy=multi-user.target
+EOF
 
-  # Install Sonarr non-interactively
-  export DEBIAN_FRONTEND=noninteractive
-  apt-get install -y sonarr >>"${OUTTO}" 2>&1
+systemctl daemon-reload
+systemctl enable sonarr.service >>"$LOGFILE" 2>&1
+systemctl start sonarr.service
 
-  if [[ $? -ne 0 ]]; then
-    echo "ERROR: Sonarr apt install failed, check logs." >>"${OUTTO}" 2>&1
-    echo "ERROR: Sonarr apt install failed."
-    # Try alternative method: install mono + nzbdrone as fallback
-    echo "Trying fallback install via mono + NzbDrone ..." >>"${OUTTO}" 2>&1
-    apt-get install -y mono-devel mediainfo sqlite3 >>"${OUTTO}" 2>&1
-    
-    if [[ ! -d /opt/NzbDrone ]]; then
-      curl -sL "https://services.sonarr.tv/v1/download/main/latest?version=3&os=linux" -o /tmp/sonarr.tar.gz >>"${OUTTO}" 2>&1
-      tar -xzf /tmp/sonarr.tar.gz -C /opt/ >>"${OUTTO}" 2>&1
-      rm -f /tmp/sonarr.tar.gz
-    fi
-  fi
-
-  touch /install/.sonarr.lock
-}
-
-function _configureSonarr() {
-  echo "Setting permissions ..." >>"${OUTTO}" 2>&1
-  echo "Setting permissions ..."
-
-  # Set ownership based on what was installed
-  if [[ -d /opt/Sonarr ]]; then
-    chown -R "${username}":"${username}" /opt/Sonarr
-  elif [[ -d /opt/NzbDrone ]]; then
-    chown -R "${username}":"${username}" /opt/NzbDrone
-  fi
-}
-
-function _setupService() {
-  echo "Setting up Sonarr as a service ..." >>"${OUTTO}" 2>&1
-  echo "Setting up Sonarr as a service ..."
-
-  # Check if the new Sonarr package installed its own systemd service
-  if systemctl cat sonarr.service >/dev/null 2>&1; then
-    # Sonarr v3/v4 package creates its own service
-    systemctl enable sonarr >/dev/null 2>&1
-    systemctl start sonarr
-    echo "Using Sonarr's built-in systemd service." >>"${OUTTO}" 2>&1
-  else
-    # Fallback: use our template
-    if [[ -f ${local_setup}templates/sysd/sonarr.template ]]; then
-      cp "${local_setup}templates/sysd/sonarr.template" /etc/systemd/system/sonarr@.service
-      systemctl daemon-reload
-      systemctl enable "sonarr@${username}" >/dev/null 2>&1
-      systemctl start "sonarr@${username}"
-    else
-      echo "WARNING: No systemd template found at ${local_setup}templates/sysd/sonarr.template" >>"${OUTTO}" 2>&1
-    fi
-  fi
-
-  # Wait for Sonarr to generate its config
-  sleep 10
-}
-
-function _setupReverseProxy() {
-  echo "Setting up reverse proxy ..." >>"${OUTTO}" 2>&1
-  echo "Setting up reverse proxy ..."
-
-  cat > /etc/apache2/sites-enabled/sonarr.conf <<EOF
+# ── Apache reverse proxy ─────────────────────────────────────────────────────
+log "Configuring Apache reverse proxy..."
+cat > /etc/apache2/sites-enabled/sonarr.conf <<'EOF'
 <Location /sonarr>
-ProxyPass http://localhost:8989/sonarr
-ProxyPassReverse http://localhost:8989/sonarr
+    ProxyPass http://localhost:8989/sonarr
+    ProxyPassReverse http://localhost:8989/sonarr
 </Location>
 EOF
-  chown www-data: /etc/apache2/sites-enabled/sonarr.conf
-  service apache2 reload
-}
+chown www-data:www-data /etc/apache2/sites-enabled/sonarr.conf
+a2enmod proxy proxy_http >>/dev/null 2>&1
+service apache2 reload >>"$LOGFILE" 2>&1
 
-function _installSonarrComplete() {
-  echo "Sonarr Install Complete!" >>"${OUTTO}" 2>&1
-  echo "Sonarr Install Complete!"
-  echo >>"${OUTTO}" 2>&1
-  echo >>"${OUTTO}" 2>&1
-  echo "Close this dialog box to refresh your browser" >>"${OUTTO}" 2>&1
-}
-
-
-# ---- Main execution ----
-_installSonarrintro
-_addSonarrRepo
-_installSonarrPkg
-_configureSonarr
-_setupService
-_setupReverseProxy
-_installSonarrComplete
+# ── Finalize ─────────────────────────────────────────────────────────────────
+touch /install/.sonarr.lock
+log "Sonarr installation complete! Access at http://your-server:8989"

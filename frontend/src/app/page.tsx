@@ -12,13 +12,10 @@ const ServicesTab = dynamic(() => import('@/components/tabs/ServicesTab'), { ssr
 const MarketplaceTab = dynamic(() => import('@/components/tabs/MarketplaceTab'), { ssr: false });
 const AiChatTab = dynamic(() => import('@/components/tabs/AiChatTab'), { ssr: false });
 const SettingsTab = dynamic(() => import('@/components/tabs/SettingsTab'), { ssr: false });
-const SecurityTab = dynamic(() => import('@/components/tabs/SecurityTab'), { ssr: false });
 const FileshareTab = dynamic(() => import('@/components/tabs/FileshareTab'), { ssr: false });
-const BackupTab = dynamic(() => import('@/components/tabs/BackupTab'), { ssr: false });
 const ProfileTab = dynamic(() => import('@/components/tabs/ProfileTab'), { ssr: false });
 const UsersTab = dynamic(() => import('@/components/tabs/UsersTab'), { ssr: false });
 const AuditTab = dynamic(() => import('@/components/tabs/AuditTab'), { ssr: false });
-const OIDCClientsTab = dynamic(() => import('@/components/tabs/OIDCClientsTab'), { ssr: false });
 import { useMetrics } from '@/hooks/useMetrics';
 import { OverviewSkeleton } from '@/components/layout/SkeletonBox';
 import OnboardingWizard from '@/components/layout/OnboardingWizard';
@@ -89,20 +86,14 @@ export default function Dashboard() {
         return <AiChatTab />;
       case 'settings':
         return <SettingsTab />;
-      case 'security':
-        return <SecurityTab />;
       case 'users':
         return <UsersTab />;
       case 'fileshare':
         return <FileshareTab />;
-      case 'backups':
-        return <BackupTab />;
       case 'profile':
         return <ProfileTab />;
       case 'audit':
         return <AuditTab />;
-      case 'oidc-clients':
-        return <OIDCClientsTab />;
       default:
         return <div className="text-slate-400">Please select an option from the sidebar.</div>;
     }

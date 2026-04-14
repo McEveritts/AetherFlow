@@ -1,98 +1,109 @@
 #!/bin/bash
 #
-# [Quick Box :: Install sabnzbd]
+# [AetherFlow :: Install SABnzbd]
+# Free and easy binary newsreader
 #
-# QUICKLAB REPOS
-# AetherFlow _ packages  :   https://github.com/AetherFlow/AetherFlow_packages
-# LOCAL REPOS
-# Local _ packages   :   /etc/AetherFlow/packages
-# Author             :   AetherFlow.IO | kclawl
-# URL                :   https://AetherFlow.io
+# Author : McEveritts
+# URL    : https://AetherFlow.io
+# License: GPL-3.0
 #
-# AetherFlow Copyright (C) 2017 AetherFlow.io
-# Licensed under GNU General Public License v3.0 GPL-3 (in short)
-#
-#   You may copy, distribute and modify the software as long as you track
-#   changes/dates in source files. Any modifications to our software
-#   including (via compiler) GPL-licensed code must also be made available
-#   under the GPL along with build & install instructions.
+set -e
 
-_sab() {
-  add-apt-repository ppa:jcfp/sab-addons
-  apt update
-  apt -y install par2-tbb python-openssl python-sabyenc python-cheetah >/dev/null 2>&1
-  cd /home/${username}/
-  #wget -qO SABnzbd.tar.gz https://github.com/sabnzbd/sabnzbd/releases/download/1.1.1/SABnzbd-1.1.1-src.tar.gz
-  #tar xf SABnzbd.tar.gz >/dev/null 2>&1
-  #mv SABnzbd-* SABnzbd
-  git clone https://github.com/sabnzbd/sabnzbd.git /home/${username}/SABnzbd
-  chown ${username}.${username} -R SABnzbd
-  rm SABnzbd.tar.gz
-  pip install http://www.golug.it/pub/yenc/yenc-0.4.0.tar.gz
-  apt install p7zip-full -y
-  touch /install/.sabnzbd.lock
-}
+LOGFILE="/opt/AetherFlow/logs/installer.log"
+mkdir -p /opt/AetherFlow/logs /install
 
-_upstart() {
-cat >/etc/systemd/system/sabnzbd@.service<<EOF
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [sabnzbd] $1" | tee -a "$LOGFILE"; }
+
+# ── Dependencies ─────────────────────────────────────────────────────────────
+log "Installing dependencies..."
+apt-get update >>"$LOGFILE" 2>&1
+apt-get install -y python3 python3-pip python3-venv unrar p7zip-full >>"$LOGFILE" 2>&1
+
+# ── Create sabnzbd user ──────────────────────────────────────────────────────
+if ! id -u sabnzbd &>/dev/null; then
+    useradd -r -s /usr/sbin/nologin -d /opt/SABnzbd sabnzbd
+fi
+
+# ── Download SABnzbd ─────────────────────────────────────────────────────────
+log "Downloading latest SABnzbd release..."
+
+SABNZBD_URL=$(curl -sL https://api.github.com/repos/sabnzbd/sabnzbd/releases/latest | grep -oP '"browser_download_url": "\K(https://[^"]+src\.tar\.gz)(?=")' | head -1)
+
+if [[ -z "$SABNZBD_URL" ]]; then
+    log "Could not parse API download URL, attempting fallback to known latest..."
+    SABNZBD_VERSION=$(curl -sL https://api.github.com/repos/sabnzbd/sabnzbd/releases/latest | grep -oP '"tag_name": "\K[^"]+')
+    SABNZBD_URL="https://github.com/sabnzbd/sabnzbd/releases/download/${SABNZBD_VERSION}/SABnzbd-${SABNZBD_VERSION}-src.tar.gz"
+fi
+
+mkdir -p /tmp/AetherFlow
+cd /tmp/AetherFlow
+curl -sL "$SABNZBD_URL" -o sabnzbd.tar.gz >>"$LOGFILE" 2>&1
+
+log "Extracting SABnzbd..."
+rm -rf /opt/SABnzbd
+tar -xzf sabnzbd.tar.gz -C /opt >>"$LOGFILE" 2>&1
+rm -f sabnzbd.tar.gz
+
+# Find the extracted folder (e.g., SABnzbd-4.2.2) and move it to /opt/SABnzbd
+SAB_DIR=$(find /opt -maxdepth 1 -name "SABnzbd-*" -type d | head -1)
+if [[ -n "$SAB_DIR" ]]; then
+    mv "$SAB_DIR" /opt/SABnzbd
+fi
+
+# ── Python Requirements ──────────────────────────────────────────────────────
+log "Installing Python dependencies..."
+cd /opt/SABnzbd
+python3 -m pip install -r requirements.txt >>"$LOGFILE" 2>&1 || \
+python3 -m pip install --break-system-packages -r requirements.txt >>"$LOGFILE" 2>&1
+
+# ── Directories ──────────────────────────────────────────────────────────────
+mkdir -p /var/lib/sabnzbd
+chown -R sabnzbd:sabnzbd /opt/SABnzbd /var/lib/sabnzbd
+
+# ── Systemd service ──────────────────────────────────────────────────────────
+log "Creating systemd service..."
+cat > /etc/systemd/system/sabnzbd.service <<'EOF'
 [Unit]
-Description=sabnzbd
+Description=SABnzbd Binary Newsreader
 After=network.target
 
 [Service]
-Type=forking
-KillMode=process
-User=%I
-ExecStart=/usr/bin/screen -f -a -d -m -S sabnzbd python SABnzbd/SABnzbd.py --browser 0 --server 127.0.0.1:65080 --https 65443
-ExecStop=/bin/kill -HUP $MAINPID
-WorkingDirectory=/home/%I/
+Type=simple
+User=sabnzbd
+Group=sabnzbd
+ExecStart=/usr/bin/python3 /opt/SABnzbd/SABnzbd.py -f /var/lib/sabnzbd/sabnzbd.ini -s 0.0.0.0:8080
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+ReadWritePaths=/var/lib/sabnzbd /opt/SABnzbd
 
 [Install]
 WantedBy=multi-user.target
-
 EOF
 
-cat > /etc/apache2/sites-enabled/sabnzbd.conf <<EOF
+systemctl daemon-reload
+systemctl enable sabnzbd.service >>"$LOGFILE" 2>&1
+systemctl start sabnzbd.service
+
+# ── Apache reverse proxy ─────────────────────────────────────────────────────
+log "Configuring Apache reverse proxy..."
+cat > /etc/apache2/sites-enabled/sabnzbd.conf <<'EOF'
 <Location /sabnzbd>
-ProxyPass http://localhost:65080/sabnzbd
-ProxyPassReverse http://localhost:65080/sabnzbd
-#AuthType Digest
-#AuthName "rutorrent"
-#AuthUserFile '/etc/htpasswd'
-#Require user ${username}
+    ProxyPass http://localhost:8080/sabnzbd
+    ProxyPassReverse http://localhost:8080/sabnzbd
 </Location>
 EOF
-chown www-data: /etc/apache2/sites-enabled/sabnzbd.conf
-service apache2 reload
+chown www-data:www-data /etc/apache2/sites-enabled/sabnzbd.conf
+a2enmod proxy proxy_http >>/dev/null 2>&1
+service apache2 reload >>"$LOGFILE" 2>&1
 
-}
-
-_sabnzbdenable() {
-  systemctl daemon-reload >/dev/null 2>&1
-  systemctl enable sabnzbd@${username}.service >/dev/null 2>&1
-  systemctl start sabnzbd@${username}.service >/dev/null 2>&1
-}
-
-_sabnzbdcomplete() {
-  echo "SABnzbd Install Complete!" >>"${OUTTO}" 2>&1;
-  sleep 5
-  echo >>"${OUTTO}" 2>&1;
-  echo >>"${OUTTO}" 2>&1;
-  echo "Close this dialog box to refresh your browser" >>"${OUTTO}" 2>&1;
-}
-
-_sabnzbdexit() {
-  exit
-}
-
-source /opt/AetherFlow/packages/common.sh
-username=$AETHERFLOW_USER
-PUBLICIP=$(ip route get 8.8.8.8 | awk 'NR==1 {print $NF}')
-OUTTO=$LOGFILE
-
-echo "Installing sabnzbd ... " >>"${OUTTO}" 2>&1;_sab
-echo "Creating sabnzbd systemd template ... " >>"${OUTTO}" 2>&1;_upstart
-echo "Enabling sabnzbd services ... " >>"${OUTTO}" 2>&1;_sabnzbdenable
-_sabnzbdcomplete
-_sabnzbdexit
-
+# ── Finalize ─────────────────────────────────────────────────────────────────
+touch /install/.sabnzbd.lock
+log "SABnzbd installation complete! Access at http://your-server:8080"

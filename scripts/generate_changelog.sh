@@ -140,7 +140,7 @@ normalize_subject() {
       subject="Applied an additional hardening pass by moving fileshare uploads behind admin-only access, blocking dangerous extensions, and removing destructive update flows"
       ;;
     "implement P1-P15 improvement backlog")
-      subject="Implemented the P1-P15 reliability backlog, including rate limiting, safer backups, semver-aware updates, Docker status detection, and initial critical-path test coverage"
+      subject="Implemented the P1-P15 reliability backlog, including rate limiting, safer backups, semver-aware updates, service status detection, and initial critical-path test coverage"
       ;;
     "Parts 2 & 5 - Frontend state management + Legacy deprecation + Security hardening")
       subject="Completed the remaining frontend state-management, legacy deprecation, and security-hardening work for the Gold release candidate"

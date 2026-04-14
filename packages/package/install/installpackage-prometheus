@@ -30,7 +30,7 @@ case "$ARCH" in
     *) PROM_ARCH="linux-amd64" ;;
 esac
 
-PROM_VERSION=$(curl -sL https://api.github.com/repos/prometheus/prometheus/releases/latest | grep '"tag_name"' | sed -E 's/.*"v([^"]+)".*/\1/')
+PROM_VERSION=$(curl -sL https://api.github.com/repos/prometheus/prometheus/releases/latest | grep -oP '"tag_name": "v\K[^"]+')
 if [[ -z "$PROM_VERSION" ]]; then
     PROM_VERSION="2.51.2"
 fi
@@ -69,7 +69,7 @@ rm -rf "/tmp/prometheus-${PROM_VERSION}.${PROM_ARCH}"*
 
 # ── Also install node_exporter ────────────────────────────────────────────────
 log "Installing node_exporter for system metrics..."
-NODE_VERSION=$(curl -sL https://api.github.com/repos/prometheus/node_exporter/releases/latest | grep '"tag_name"' | sed -E 's/.*"v([^"]+)".*/\1/')
+NODE_VERSION=$(curl -sL https://api.github.com/repos/prometheus/node_exporter/releases/latest | grep -oP '"tag_name": "v\K[^"]+')
 if [[ -z "$NODE_VERSION" ]]; then
     NODE_VERSION="1.8.1"
 fi

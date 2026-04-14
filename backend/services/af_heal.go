@@ -252,8 +252,6 @@ func executeRecovery(displayName, processName, managedBy string, actionID int) {
 		cmd = exec.CommandContext(ctx, "systemctl", "restart", processName)
 	case "pm2":
 		cmd = exec.CommandContext(ctx, "pm2", "restart", processName)
-	case "docker":
-		cmd = exec.CommandContext(ctx, "docker", "restart", processName)
 	default:
 		healLog.Warn("recovery skipped: unknown manager",
 			"service", displayName,

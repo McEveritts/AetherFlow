@@ -12,11 +12,11 @@ interface ChatMessage {
 }
 
 const AI_MODELS = [
-    { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro', tier: 'latest' },
-    { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash', tier: 'latest' },
-    { id: 'gemini-2.0-flash', name: 'Gemini 2.0 Flash', tier: 'stable' },
-    { id: 'gemini-1.5-pro', name: 'Gemini 1.5 Pro', tier: 'stable' },
-    { id: 'gemini-1.5-flash', name: 'Gemini 1.5 Flash', tier: 'stable' },
+    { id: 'gemini-3.1-pro-preview', name: 'Gemini 3.1 Pro Preview', tier: 'preview' },
+    { id: 'gemini-3-flash-preview', name: 'Gemini 3.0 Flash Preview', tier: 'preview' },
+    { id: 'gemini-3.1-flash-lite-preview', name: 'Gemini 3.1 Flash Lite Preview', tier: 'preview' },
+    { id: 'gemini-3-pro-image-preview', name: 'Gemini 3.0 Pro Image Preview', tier: 'preview' },
+    { id: 'gemini-3.1-flash-image-preview', name: 'Gemini 3.1 Flash Image Preview', tier: 'preview' },
 ];
 
 const CONTEXT_MODES = [
@@ -32,12 +32,12 @@ export default function AiChatTab() {
     const [messages, setMessages] = useState<ChatMessage[]>([
         { 
             role: 'assistant', 
-            text: "Hello! I am FlowAI, your localized infrastructure management assistant. I'm connected to your system metrics, docker containers, and media pipelines.\n\nI can analyze issues and even draft maintenance workflows directly into your Approval Inbox. How can I help you today?" 
+            text: "Hello! I am FlowAI, your localized infrastructure management assistant. I'm connected to your system metrics, service health monitors, and media pipelines.\n\nI can analyze issues and even draft maintenance workflows directly into your Approval Inbox. How can I help you today?" 
         }
     ]);
     const [input, setInput] = useState('');
     const [isTyping, setIsTyping] = useState(false);
-    const [selectedModel, setSelectedModel] = useState('gemini-2.5-pro');
+    const [selectedModel, setSelectedModel] = useState('gemini-3.1-pro-preview');
     const [showModelPicker, setShowModelPicker] = useState(false);
     const [supportMode, setSupportMode] = useState(false);
     const [contextMode, setContextMode] = useState('full');

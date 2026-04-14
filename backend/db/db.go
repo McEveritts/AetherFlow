@@ -104,7 +104,7 @@ func InitDB() {
 	_, err = DB.Exec(`
 		CREATE TABLE IF NOT EXISTS settings (
 			id INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
-			ai_model TEXT DEFAULT 'gemini-2.5-pro',
+			ai_model TEXT DEFAULT 'gemini-3.1-pro-preview',
 			system_prompt TEXT DEFAULT 'You are FlowAI, a highly intelligent infrastructure assistant connected to a local Next.js + Go Nexus environment. Always prioritize safe and performant configurations.',
 			language TEXT DEFAULT 'en',
 			timezone TEXT DEFAULT 'UTC',

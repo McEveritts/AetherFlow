@@ -55,6 +55,15 @@ Group=qbittorrent
 ExecStart=/usr/bin/qbittorrent-nox --webui-port=8180
 Restart=on-failure
 RestartSec=5
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=read-only
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+ReadWritePaths=/home/qbittorrent
 
 [Install]
 WantedBy=multi-user.target

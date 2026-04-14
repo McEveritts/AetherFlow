@@ -1,162 +1,97 @@
 #!/bin/bash
 #
-# [Quick Box :: Install Lidarr package]
+# [AetherFlow :: Install Lidarr]
+# Music collection manager for Usenet and BitTorrent
 #
-# GITHUB REPOS
-# GitHub _ packages  :   https://github.com/McEveritts/MediaNexus
-# LOCAL REPOS
-# Local _ packages   :   /etc/AetherFlow/packages
-# Author             :   KaraokeStu
-# URL                :   https://AetherFlow.io
+# Author : McEveritts
+# URL    : https://AetherFlow.io
+# License: GPL-3.0
 #
-# AetherFlow Copyright (C) 2018 AetherFlow.io
-# Licensed under GNU General Public License v3.0 GPL-3 (in short)
-#
-#   You may copy, distribute and modify the software as long as you track
-#   changes/dates in source files. Any modifications to our software
-#   including (via compiler) GPL-licensed code must also be made available
-#   under the GPL along with build & install instructions.
-#################################################################################
-function _string() { perl -le 'print map {(a..z,A..Z,0..9)[rand 62] } 0..pop' 15 ; }
-#################################################################################
+set -e
 
-function _installLidarrIntro() {
-  echo "Lidarr will now be installed." >>"${OUTTO}" 2>&1;
-  echo "This process may take up to 2 minutes." >>"${OUTTO}" 2>&1;
-  echo "Please wait until install is completed." >>"${OUTTO}" 2>&1;
-  # output to box
-  echo "Lidarr will now be installed."
-  echo "This process may take up to 2 minutes."
-  echo "Please wait until install is completed."
-  echo
-  sleep 5
-}
+LOGFILE="/opt/AetherFlow/logs/installer.log"
+mkdir -p /opt/AetherFlow/logs /install
 
-function _installLidarrDependencies() {
-  # output to box
-  echo "Installing dependencies ... "
-if ls /etc/apt/sources.list.d/mono-* >/dev/null 2>&1; then
-    ls /etc/apt/sources.list.d/mono-* >/dev/null 2>&1;
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [lidarr] $1" | tee -a "$LOGFILE"; }
+
+# ── Dependencies ─────────────────────────────────────────────────────────────
+log "Installing dependencies..."
+apt-get update >>"$LOGFILE" 2>&1
+apt-get install -y curl sqlite3 libicu-dev chromaprint-tools >>"$LOGFILE" 2>&1
+
+# ── Download Lidarr ──────────────────────────────────────────────────────────
+log "Downloading latest Lidarr..."
+ARCH=$(dpkg --print-architecture)
+case "$ARCH" in
+    amd64) LIDARR_ARCH="x64" ;;
+    arm64) LIDARR_ARCH="arm64" ;;
+    armhf) LIDARR_ARCH="arm" ;;
+    *) LIDARR_ARCH="x64" ;;
+esac
+
+mkdir -p /tmp/AetherFlow
+cd /tmp/AetherFlow
+curl -sL "https://lidarr.servarr.com/v1/update/master/updatefile?os=linux&runtime=netcore&arch=${LIDARR_ARCH}" -o lidarr.tar.gz >>"$LOGFILE" 2>&1
+
+log "Extracting Lidarr..."
+rm -rf /opt/Lidarr
+tar -xzf lidarr.tar.gz -C /opt >>"$LOGFILE" 2>&1
+rm -f lidarr.tar.gz
+
+# ── Create lidarr user ───────────────────────────────────────────────────────
+if ! id -u lidarr &>/dev/null; then
+    useradd -r -s /usr/sbin/nologin -d /opt/Lidarr lidarr
 fi
-for list in /etc/apt/sources.list.d/mono-*; do
-    if [[ -f $list ]]; then
-        rm -rf /etc/apt/sources.list.d/mono-*
-        sudo apt-key adv --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys 3FA7E0328081BFF6A14DA29AA6A19B38D3D831EF
-        echo "deb http://download.mono-project.com/repo/ubuntu stable-xenial main" | sudo tee /etc/apt/sources.list.d/mono-official-stable.list
-        break
-    fi
-done
-	apt-get -y update && apt-get -y upgrade >/dev/null 2>&1
-	apt-get install -y libmono-cil-dev curl mediainfo >/dev/null 2>&1
-}
+chown -R lidarr:lidarr /opt/Lidarr
+mkdir -p /var/lib/lidarr
+chown -R lidarr:lidarr /var/lib/lidarr
 
-function _installLidarrCode() {
-  # output to box
-  echo "Installing Lidarr ... "
-  cd /opt
-  wget $( curl -s https://api.github.com/repos/lidarr/Lidarr/releases | grep linux.tar.gz | grep browser_download_url | head -1 | cut -d \" -f 4 ) > /dev/null 2>&1
-  tar -xvzf Lidarr.develop.*.linux.tar.gz >/dev/null 2>&1
-  rm -rf /opt/Lidarr.develop.*.linux.tar.gz
-  touch /install/.lidarr.lock
-}
-
-function _installLidarrConfigure() {
-  # output to box
-  echo "Configuring Lidarr ... "
-cat > /etc/systemd/system/lidarr.service <<EOF
+# ── Systemd service ──────────────────────────────────────────────────────────
+log "Creating systemd service..."
+cat > /etc/systemd/system/lidarr.service <<'EOF'
 [Unit]
-Description=Lidarr Daemon
+Description=Lidarr Music Manager
 After=syslog.target network.target
 
 [Service]
-User=${username}
-Group=${username}
+User=lidarr
+Group=lidarr
 Type=simple
-ExecStart=/usr/bin/mono /opt/Lidarr/Lidarr.exe -nobrowser
+ExecStart=/opt/Lidarr/Lidarr -nobrowser -data=/var/lib/lidarr/
+Restart=on-failure
+RestartSec=10
 TimeoutStopSec=20
 KillMode=process
-Restart=on-failure
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+ReadWritePaths=/var/lib/lidarr
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-  cat > /etc/apache2/sites-enabled/lidarr.conf <<EOF
+systemctl daemon-reload
+systemctl enable lidarr.service >>"$LOGFILE" 2>&1
+systemctl start lidarr.service
+
+# ── Apache reverse proxy ─────────────────────────────────────────────────────
+log "Configuring Apache reverse proxy..."
+cat > /etc/apache2/sites-enabled/lidarr.conf <<'EOF'
 <Location /lidarr>
-ProxyPass http://localhost:8686/lidarr
-ProxyPassReverse http://localhost:8686/lidarr
-#AuthType Digest
-#AuthName "rutorrent"
-#AuthUserFile '/etc/htpasswd'
-#Require user ${username}
+    ProxyPass http://localhost:8686/lidarr
+    ProxyPassReverse http://localhost:8686/lidarr
 </Location>
 EOF
+chown www-data:www-data /etc/apache2/sites-enabled/lidarr.conf
+a2enmod proxy proxy_http >>/dev/null 2>&1
+service apache2 reload >>"$LOGFILE" 2>&1
 
-  mkdir -p /home/${username}/.config
-  chown -R ${username}:${username} /home/${username}/.config
-  chmod 775 /home/${username}/.config
-  chown -R ${username}:${username} /opt/Lidarr/
-  chown www-data:www-data /etc/apache2/sites-enabled/lidarr.conf
-  systemctl daemon-reload
-  systemctl enable lidarr.service > /dev/null 2>&1
-  systemctl start lidarr.service
-  sleep 10
-
-  cp ${local_setup}configs/Lidarr/config.xml /home/${username}/.config/Lidarr/config.xml
-  chown ${username}:${username} /home/${username}/.config/Lidarr/config.xml
-
-  systemctl stop lidarr.service
-  sleep 10
-
-  if [[ -f /home/${username}/.config/Lidarr/config.xml ]]; then
-    #sed -i "s/<UrlBase>.*/<UrlBase>lidarr<\/UrlBase>/g" /home/${username}/.config/Lidarr/config.xml
-    #sed -i "s/<BindAddress>.*/<BindAddress>127.0.0.1<\/BindAddress>/g" /home/${username}/.config/Lidarr/config.xml
-    service apache2 reload
-  else
-    # output to dashboard
-    echo "ERROR INSTALLING - COULD NOT FIND config.xml in /home/${username}/.config/Lidarr/config.xml" >> "${OUTTO}" 2>&1
-    # output to box
-    echo "ERROR INSTALLING - COULD NOT FIND config.xml in /home/${username}/.config/Lidarr/config.xml"
-  fi
-}
-
-function _installLidarrStart() {
-  # output to box
-  echo "Starting Lidarr ... "
-  systemctl start lidarr.service
-}
-
-function _installLidarrFinish() {
-  # output to dashboard
-  echo "Lidarr Install Complete!" >>"${OUTTO}" 2>&1;
-  echo "You can access it at  : http://$ip/lidarr" >>"${OUTTO}" 2>&1;
-  echo >>"${OUTTO}" 2>&1;
-  echo >>"${OUTTO}" 2>&1;
-  echo "Close this dialog box to refresh your browser" >>"${OUTTO}" 2>&1;
-  # output to box
-  echo "Lidarr Install Complete!"
-  echo "You can access it at  : http://$ip/lidarr"
-  echo
-  echo "Close this dialog box to refresh your browser"
-}
-
-function _installLidarrExit() {
-	exit 0
-}
-
-source /opt/AetherFlow/packages/common.sh
-OUTTO=$LOGFILE
-local_setup=/opt/AetherFlow/setup/
-local_packages=/etc/AetherFlow/packages/
-username=$AETHERFLOW_USER
-distribution=$(lsb_release -is)
-ip=$(curl -s http://whatismyip.akamai.com)
-
-_installLidarrIntro
-echo "Installing dependencies ... " >>"${OUTTO}" 2>&1;_installLidarrDependencies
-echo "Installing Lidarr ... " >>"${OUTTO}" 2>&1;_installLidarrCode
-echo "Configuring Lidarr ... " >>"${OUTTO}" 2>&1;_installLidarrConfigure
-echo "Starting Lidarr ... " >>"${OUTTO}" 2>&1;_installLidarrStart
-_installLidarrFinish
-_installLidarrExit
-
+# ── Finalize ─────────────────────────────────────────────────────────────────
+touch /install/.lidarr.lock
+log "Lidarr installation complete! Access at http://your-server:8686"

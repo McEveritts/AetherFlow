@@ -1,160 +1,97 @@
 #!/bin/bash
 #
-# [Quick Box :: Install Radarr package]
+# [AetherFlow :: Install Radarr]
+# Movie collection manager for Usenet and BitTorrent
 #
-# GITHUB REPOS
-# GitHub _ packages  :   https://github.com/McEveritts/MediaNexus
-# LOCAL REPOS
-# Local _ packages   :   /etc/AetherFlow/packages
-# Author             :   PastaGringo | KarmaPoliceT2
-# URL                :   https://AetherFlow.io
+# Author : McEveritts
+# URL    : https://AetherFlow.io
+# License: GPL-3.0
 #
-# AetherFlow Copyright (C) 2017 AetherFlow.io
-# Licensed under GNU General Public License v3.0 GPL-3 (in short)
-#
-#   You may copy, distribute and modify the software as long as you track
-#   changes/dates in source files. Any modifications to our software
-#   including (via compiler) GPL-licensed code must also be made available
-#   under the GPL along with build & install instructions.
-#################################################################################
-function _string() { perl -le 'print map {(a..z,A..Z,0..9)[rand 62] } 0..pop' 15 ; }
-#################################################################################
+set -e
 
-function _installRadarrIntro() {
-  echo "Radarr will now be installed." >>"${OUTTO}" 2>&1;
-  echo "This process may take up to 2 minutes." >>"${OUTTO}" 2>&1;
-  echo "Please wait until install is completed." >>"${OUTTO}" 2>&1;
-  # output to box
-  echo "Radarr will now be installed."
-  echo "This process may take up to 2 minutes."
-  echo "Please wait until install is completed."
-  echo
-  sleep 5
-}
+LOGFILE="/opt/AetherFlow/logs/installer.log"
+mkdir -p /opt/AetherFlow/logs /install
 
-function _installRadarrDependencies() {
-  # output to box
-  echo "Installing dependencies ... "
-if [[ ! -f /etc/apt/sources.list.d/mono-official-stable.list ]]; then
-  if [[ $distribution == "Ubuntu" ]]; then
-    apt-key adv --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys 3FA7E0328081BFF6A14DA29AA6A19B38D3D831EF >/dev/null 2>&1
-  elif [[ $distribution == "Debian" ]]; then
-      #exit
-  fi
-  echo "deb https://download.mono-project.com/repo/ubuntu stable-xenial main" | sudo tee /etc/apt/sources.list.d/mono-official-stable.list >/dev/null 2>&1
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [radarr] $1" | tee -a "$LOGFILE"; }
+
+# ── Dependencies ─────────────────────────────────────────────────────────────
+log "Installing dependencies..."
+apt-get update >>"$LOGFILE" 2>&1
+apt-get install -y curl sqlite3 libicu-dev >>"$LOGFILE" 2>&1
+
+# ── Download Radarr ──────────────────────────────────────────────────────────
+log "Downloading latest Radarr..."
+ARCH=$(dpkg --print-architecture)
+case "$ARCH" in
+    amd64) RADARR_ARCH="x64" ;;
+    arm64) RADARR_ARCH="arm64" ;;
+    armhf) RADARR_ARCH="arm" ;;
+    *) RADARR_ARCH="x64" ;;
+esac
+
+mkdir -p /tmp/AetherFlow
+cd /tmp/AetherFlow
+curl -sL "https://radarr.servarr.com/v1/update/master/updatefile?os=linux&runtime=netcore&arch=${RADARR_ARCH}" -o radarr.tar.gz >>"$LOGFILE" 2>&1
+
+log "Extracting Radarr..."
+rm -rf /opt/Radarr
+tar -xzf radarr.tar.gz -C /opt >>"$LOGFILE" 2>&1
+rm -f radarr.tar.gz
+
+# ── Create radarr user ───────────────────────────────────────────────────────
+if ! id -u radarr &>/dev/null; then
+    useradd -r -s /usr/sbin/nologin -d /opt/Radarr radarr
 fi
+chown -R radarr:radarr /opt/Radarr
+mkdir -p /var/lib/radarr
+chown -R radarr:radarr /var/lib/radarr
 
-apt-get update -y >/dev/null 2>&1
-apt-get install -y mono-devel apt-transport-https >/dev/null 2>&1
-}
-
-function _installRadarrCode() {
-  # output to box
-  echo "Installing Radar ... "
-  cd /opt
-  wget $( curl -s https://api.github.com/repos/Radarr/Radarr/releases | grep linux.tar.gz | grep browser_download_url | head -1 | cut -d \" -f 4 ) > /dev/null 2>&1
-  tar -xvzf Radarr.*.linux.tar.gz >/dev/null 2>&1
-  rm -rf /opt/Radarr.*.linux.tar.gz
-  touch /install/.radarr.lock
-}
-
-function _installRadarrConfigure() {
-  # output to box
-  echo "Configuring Radar ... "
-cat > /etc/systemd/system/radarr.service <<EOF
+# ── Systemd service ──────────────────────────────────────────────────────────
+log "Creating systemd service..."
+cat > /etc/systemd/system/radarr.service <<'EOF'
 [Unit]
-Description=Radarr Daemon
+Description=Radarr Movie Manager
 After=syslog.target network.target
 
 [Service]
-User=${username}
-Group=${username}
+User=radarr
+Group=radarr
 Type=simple
-ExecStart=/usr/bin/mono /opt/Radarr/Radarr.exe -nobrowser
+ExecStart=/opt/Radarr/Radarr -nobrowser -data=/var/lib/radarr/
+Restart=on-failure
+RestartSec=10
 TimeoutStopSec=20
 KillMode=process
-Restart=on-failure
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+ReadWritePaths=/var/lib/radarr
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-  cat > /etc/apache2/sites-enabled/radarr.conf <<EOF
+systemctl daemon-reload
+systemctl enable radarr.service >>"$LOGFILE" 2>&1
+systemctl start radarr.service
+
+# ── Apache reverse proxy ─────────────────────────────────────────────────────
+log "Configuring Apache reverse proxy..."
+cat > /etc/apache2/sites-enabled/radarr.conf <<'EOF'
 <Location /radarr>
-ProxyPass http://localhost:7878/radarr
-ProxyPassReverse http://localhost:7878/radarr
-#AuthType Digest
-#AuthName "rutorrent"
-#AuthUserFile '/etc/htpasswd'
-#Require user ${username}
+    ProxyPass http://localhost:7878/radarr
+    ProxyPassReverse http://localhost:7878/radarr
 </Location>
 EOF
+chown www-data:www-data /etc/apache2/sites-enabled/radarr.conf
+a2enmod proxy proxy_http >>/dev/null 2>&1
+service apache2 reload >>"$LOGFILE" 2>&1
 
-  mkdir -p /home/${username}/.config
-  chown -R ${username}:${username} /home/${username}/.config
-  chmod 775 /home/${username}/.config
-  chown -R ${username}:${username} /opt/Radarr/
-  chown www-data:www-data /etc/apache2/sites-enabled/radarr.conf
-  systemctl daemon-reload
-  systemctl enable radarr.service > /dev/null 2>&1
-  systemctl start radarr.service
-  sleep 10
-
-  cp ${local_setup}configs/Radarr/config.xml /home/${username}/.config/Radarr/config.xml
-  chown ${username}:${username} /home/${username}/.config/Radarr/config.xml
-
-  systemctl stop radarr.service
-  sleep 10
-
-  if [[ -f /home/${username}/.config/Radarr/config.xml ]]; then
-    #sed -i "s/<UrlBase>.*/<UrlBase>radarr<\/UrlBase>/g" /home/${username}/.config/Radarr/config.xml
-    #sed -i "s/<BindAddress>.*/<BindAddress>127.0.0.1<\/BindAddress>/g" /home/${username}/.config/Radarr/config.xml
-    service apache2 reload
-  else
-    # output to dashboard
-    echo "ERROR INSTALLING - COULD NOT FIND config.xml in /home/${username}/.config/Radarr/config.xml" >> "${OUTTO}" 2>&1
-    # output to box
-    echo "ERROR INSTALLING - COULD NOT FIND config.xml in /home/${username}/.config/Radarr/config.xml"
-  fi
-}
-
-function _installRadarrStart() {
-  # output to box
-  echo "Starting Radar ... "
-  systemctl start radarr.service
-}
-
-function _installRadarrFinish() {
-  # output to dashboard
-  echo "Radarr Install Complete!" >>"${OUTTO}" 2>&1;
-  echo "You can access it at  : http://$ip/radarr" >>"${OUTTO}" 2>&1;
-  echo >>"${OUTTO}" 2>&1;
-  echo >>"${OUTTO}" 2>&1;
-  echo "Close this dialog box to refresh your browser" >>"${OUTTO}" 2>&1;
-  # output to box
-  echo "Radarr Install Complete!"
-  echo "You can access it at  : http://$ip/radarr"
-  echo
-  echo "Close this dialog box to refresh your browser"
-}
-
-function _installRadarrExit() {
-	exit 0
-}
-
-source /opt/AetherFlow/packages/common.sh
-OUTTO=$LOGFILE
-local_setup=/opt/AetherFlow/setup/
-local_packages=/etc/AetherFlow/packages/
-username=$AETHERFLOW_USER
-distribution=$(lsb_release -is)
-ip=$(curl -s http://whatismyip.akamai.com)
-
-_installRadarrIntro
-echo "Installing dependencies ... " >>"${OUTTO}" 2>&1;_installRadarrDependencies
-echo "Installing Radar ... " >>"${OUTTO}" 2>&1;_installRadarrCode
-echo "Configuring Radar ... " >>"${OUTTO}" 2>&1;_installRadarrConfigure
-echo "Starting Radar ... " >>"${OUTTO}" 2>&1;_installRadarrStart
-_installRadarrFinish
-_installRadarrExit
-
+# ── Finalize ─────────────────────────────────────────────────────────────────
+touch /install/.radarr.lock
+log "Radarr installation complete! Access at http://your-server:7878"

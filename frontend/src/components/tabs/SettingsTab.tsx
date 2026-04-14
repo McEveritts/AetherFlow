@@ -1,6 +1,11 @@
-import { Settings, Sparkles, ChevronRight, DownloadCloud, AlertCircle, Eye, EyeOff, Key, Monitor, Globe, Clock, LayoutDashboard, Radio } from 'lucide-react';
+import { Settings, Sparkles, ChevronRight, DownloadCloud, AlertCircle, Eye, EyeOff, Key, Monitor, Globe, Clock, LayoutDashboard, Radio, HardDriveDownload, Shield, KeyRound } from 'lucide-react';
 import { useState, FormEvent } from 'react';
 import useSWR from 'swr';
+import dynamic from 'next/dynamic';
+
+const BackupTab = dynamic(() => import('@/components/tabs/BackupTab'), { ssr: false });
+const SecurityTab = dynamic(() => import('@/components/tabs/SecurityTab'), { ssr: false });
+const OIDCClientsTab = dynamic(() => import('@/components/tabs/OIDCClientsTab'), { ssr: false });
 import { useToast } from '@/contexts/ToastContext';
 import { useSystemStore } from '@/store/useSystemStore';
 import { useTranslations } from 'next-intl';
@@ -13,10 +18,10 @@ export default function SettingsTab() {
     const { theme, setTheme, language, setLanguage, ambientColor1, setAmbientColor1, ambientColor2, setAmbientColor2 } = useSystemStore();
     
     // Tab State
-    const [activeTab, setActiveTab] = useState<'preferences' | 'ai' | 'system'>('preferences');
+    const [activeTab, setActiveTab] = useState<'preferences' | 'ai' | 'system' | 'backups' | 'security' | 'oidc-clients'>('preferences');
     
     // Config State
-    const [model, setModel] = useState('gemini-2.5-pro');
+    const [model, setModel] = useState('gemini-3.1-pro-preview');
     const [prompt, setPrompt] = useState("You are FlowAI, a highly intelligent infrastructure assistant connected to a local Next.js + Go Nexus environment. Always prioritize safe and performant configurations.");
     const [apiKey, setApiKey] = useState('');
     const [timezone, setTimezone] = useState('UTC');
@@ -175,8 +180,30 @@ export default function SettingsTab() {
                     >
                         <DownloadCloud size={16} /> {t('systemUpdates')}
                     </button>
+                    <button 
+                        type="button" 
+                        onClick={() => setActiveTab('backups')}
+                        className={`px-4 py-2 rounded-lg text-sm font-semibold transition-colors flex -mt-px border-b-2 items-center gap-2 whitespace-nowrap ${activeTab === 'backups' ? 'border-indigo-500 text-indigo-400 bg-indigo-500/10' : 'border-transparent text-slate-400 hover:bg-white/5 hover:text-slate-200'}`}
+                    >
+                        <HardDriveDownload size={16} /> Backups
+                    </button>
+                    <button 
+                        type="button" 
+                        onClick={() => setActiveTab('security')}
+                        className={`px-4 py-2 rounded-lg text-sm font-semibold transition-colors flex -mt-px border-b-2 items-center gap-2 whitespace-nowrap ${activeTab === 'security' ? 'border-indigo-500 text-indigo-400 bg-indigo-500/10' : 'border-transparent text-slate-400 hover:bg-white/5 hover:text-slate-200'}`}
+                    >
+                        <Shield size={16} /> Security
+                    </button>
+                    <button 
+                        type="button" 
+                        onClick={() => setActiveTab('oidc-clients')}
+                        className={`px-4 py-2 rounded-lg text-sm font-semibold transition-colors flex -mt-px border-b-2 items-center gap-2 whitespace-nowrap ${activeTab === 'oidc-clients' ? 'border-indigo-500 text-indigo-400 bg-indigo-500/10' : 'border-transparent text-slate-400 hover:bg-white/5 hover:text-slate-200'}`}
+                    >
+                        <KeyRound size={16} /> OIDC Clients
+                    </button>
                 </div>
 
+                {['preferences', 'ai', 'system'].includes(activeTab) ? (
                 <div className="max-w-2xl space-y-8 relative z-10 w-full">
                     <form onSubmit={handleSave} className="space-y-8">
                         
@@ -412,14 +439,12 @@ export default function SettingsTab() {
                                                     onChange={(e) => setModel(e.target.value)}
                                                     className="w-full bg-slate-900 border border-white/10 rounded-xl px-4 py-3 text-slate-200 text-sm focus:outline-none focus:border-indigo-500/50 transition-colors appearance-none cursor-pointer"
                                                 >
-                                                    <optgroup label="Latest">
-                                                        <option value="gemini-2.5-pro">Gemini 2.5 Pro</option>
-                                                        <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
-                                                    </optgroup>
-                                                    <optgroup label="Stable">
-                                                        <option value="gemini-2.0-flash">Gemini 2.0 Flash</option>
-                                                        <option value="gemini-1.5-pro">Gemini 1.5 Pro</option>
-                                                        <option value="gemini-1.5-flash">Gemini 1.5 Flash</option>
+                                                    <optgroup label="Preview">
+                                                        <option value="gemini-3.1-pro-preview">Gemini 3.1 Pro Preview</option>
+                                                        <option value="gemini-3-flash-preview">Gemini 3.0 Flash Preview</option>
+                                                        <option value="gemini-3.1-flash-lite-preview">Gemini 3.1 Flash Lite Preview</option>
+                                                        <option value="gemini-3-pro-image-preview">Gemini 3.0 Pro Image Preview</option>
+                                                        <option value="gemini-3.1-flash-image-preview">Gemini 3.1 Flash Image Preview</option>
                                                     </optgroup>
                                                 </select>
                                                 <ChevronRight size={16} className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-500 rotate-90 pointer-events-none" />
@@ -559,6 +584,13 @@ export default function SettingsTab() {
                         </div>
                     </form>
                 </div>
+                ) : (
+                <div className="relative z-10 w-full">
+                    {activeTab === 'backups' && <BackupTab />}
+                    {activeTab === 'security' && <SecurityTab />}
+                    {activeTab === 'oidc-clients' && <OIDCClientsTab />}
+                </div>
+                )}
             </div>
         </div>
     );

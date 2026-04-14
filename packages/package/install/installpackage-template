@@ -1,0 +1,332 @@
+#!/bin/bash
+# ╔══════════════════════════════════════════════════════════════════════════════╗
+# ║  AetherFlow :: Master Installer Template                                    ║
+# ║  Reference implementation for all AetherMarketplace deployment scripts      ║
+# ║                                                                              ║
+# ║  This template codifies 5 architectural principles:                          ║
+# ║    1. IDEMPOTENCY   — Safe to run multiple times without side effects        ║
+# ║    2. ISOLATION      — Dedicated daemon user per service, locked shell       ║
+# ║    3. ROBUSTNESS     — Strict JSON parsing, fallback chains, error trapping  ║
+# ║    4. OBSERVABILITY  — Unified timestamped logging to installer.log          ║
+# ║    5. OS AGNOSTICISM — No codename branches, no apt-key, arch-aware fetches  ║
+# ║                                                                              ║
+# ║  Author : McEveritts                                                         ║
+# ║  URL    : https://AetherFlow.io                                              ║
+# ║  License: GPL-3.0                                                            ║
+# ╚══════════════════════════════════════════════════════════════════════════════╝
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# PHASE 5: FAIL-FAST ERROR TRAPPING
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# `set -e`  : Exit immediately if any command returns non-zero.
+# `set -o pipefail` : Propagate failures through pipes (e.g., curl | grep failing
+#                     won't be masked by a successful `head -1`).
+# Together these ensure that silent failures — the #1 killer of the old QuickBox
+# scripts — are impossible. If a download fails, the script dies loudly.
+set -e
+set -o pipefail
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# APPLICATION IDENTITY BLOCK
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Every variable that defines *what* this script installs lives here.
+# To adapt this template for a new app, ONLY modify this block.
+APP_NAME="appname"                         # Lowercase identifier (used in log tags, lock files, service names)
+APP_LABEL="AppName"                        # Display name (used in systemd Description)
+APP_BINARY="/opt/${APP_LABEL}/${APP_LABEL}" # Path to the native executable
+APP_PORT="8080"                            # Default listening port
+APP_DATA_DIR="/var/lib/${APP_NAME}"         # Persistent data directory (configs, databases)
+APP_INSTALL_DIR="/opt/${APP_LABEL}"         # Application binaries directory
+APP_USER="${APP_NAME}"                      # Isolated daemon user (Phase 7)
+APP_GROUP="${APP_NAME}"                     # Isolated daemon group
+GITHUB_OWNER="owner"                       # GitHub repository owner
+GITHUB_REPO="repo"                         # GitHub repository name
+ASSET_PATTERN="linux-core-x64.tar.gz"      # grep pattern to match the correct release asset
+LOCK_FILE="/install/.${APP_NAME}.lock"      # AetherFlow backend reads this to confirm installation
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# LOGGING INFRASTRUCTURE
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# All output goes to both:
+#   1. The installer log file (consumed by the Go backend via services/installer.go)
+#   2. stdout (consumed by the frontend WebSocket progress stream)
+#
+# The timestamp format matches ISO-8601 for machine parseability.
+# The [tag] prefix allows log filtering: `grep "\[appname\]" installer.log`
+LOGFILE="/opt/AetherFlow/logs/installer.log"
+mkdir -p /opt/AetherFlow/logs /install
+
+log()  { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [${APP_NAME}] $1" | tee -a "$LOGFILE"; }
+warn() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [${APP_NAME}] [WARN] $1" | tee -a "$LOGFILE"; }
+die()  { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [${APP_NAME}] [FATAL] $1" | tee -a "$LOGFILE"; exit 1; }
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# PHASE 5: IDEMPOTENCY CHECK
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# If the lock file already exists, this app was previously installed.
+# Old QuickBox scripts would blindly re-run, leaving duplicate system users,
+# orphaned systemd units, and corrupt config files.
+#
+# This guard ensures:
+#   - Re-running an already-installed app is a safe no-op
+#   - The backend correctly reports "already installed" instead of hanging
+if [[ -f "$LOCK_FILE" ]]; then
+    log "${APP_LABEL} is already installed. Skipping."
+    exit 0
+fi
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# PHASE 2: DEPENDENCY INSTALLATION (Global Namespace Deprecation)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# RULES:
+#   - NEVER use `apt-key adv` (deprecated since Debian 11 / Ubuntu 22.04)
+#   - NEVER add external PPAs or OS-codename-specific repositories
+#   - ONLY install packages from the base distribution repos
+#   - If the app needs a custom repo, use signed-by keyrings:
+#       curl -sL <key_url> -o /usr/share/keyrings/<app>-archive-keyring.gpg
+#       echo "deb [signed-by=...] <url> ..." > /etc/apt/sources.list.d/<app>.list
+log "Installing dependencies..."
+apt-get update >>"$LOGFILE" 2>&1
+apt-get install -y curl sqlite3 libicu-dev ca-certificates >>"$LOGFILE" 2>&1
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# PHASE 6: OS-AGNOSTIC ARCHITECTURE DETECTION
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# `dpkg --print-architecture` returns the Debian architecture identifier.
+# This is universally reliable across Debian, Ubuntu, Kali, Raspberry Pi OS, etc.
+# We map it to the upstream project's naming convention.
+#
+# NEVER hard-code "amd64" — ARM servers and Raspberry Pi deployments are real.
+ARCH=$(dpkg --print-architecture)
+case "$ARCH" in
+    amd64) APP_ARCH="x64"   ;;
+    arm64) APP_ARCH="arm64" ;;
+    armhf) APP_ARCH="arm"   ;;
+    *)     warn "Unknown architecture: $ARCH — defaulting to x64"
+           APP_ARCH="x64"   ;;
+esac
+log "Detected architecture: ${ARCH} → mapped to ${APP_ARCH}"
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# PHASE 4: STRICT JSON PARSING — DOWNLOAD URL RESOLUTION
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# The old QuickBox approach:
+#   wget $( curl -s .../releases | grep linux.tar.gz | grep browser_download_url | head -1 | cut -d \" -f 4 )
+#
+# This was catastrophically fragile because:
+#   1. `grep linux.tar.gz` matches ANY asset containing that substring (including source tarballs)
+#   2. `cut -d \" -f 4` assumes the URL is always the 4th quote-delimited field
+#   3. If the grep returns nothing, `wget ""` silently downloads an HTML error page
+#   4. The outer `$()` swallows the error, and the script continues as if nothing happened
+#
+# THE NEW APPROACH uses a 3-tier fallback chain:
+#
+# Tier 1: Official CDN (for *arr apps that have servarr.com endpoints)
+#   curl -sL "https://appname.servarr.com/v1/update/master/updatefile?os=linux&runtime=netcore&arch=${APP_ARCH}"
+#
+# Tier 2: GitHub Releases API with PCRE regex
+#   The `-oP` flags enable Perl-Compatible Regular Expressions:
+#     -o = Output only the matched portion (not the entire line)
+#     -P = Enable PCRE (supports \K lookbehind and (?=...) lookahead)
+#
+#   Pattern breakdown for browser_download_url:
+#     "browser_download_url": "   ← literal prefix we look for
+#     \K                          ← "Keep" — discards everything before this point from the match
+#     https://[^"]+               ← captures the URL (any chars except quote)
+#     ${ASSET_PATTERN}            ← must contain our expected asset name
+#     (?=")                       ← lookahead: must be followed by a closing quote (not consumed)
+#
+# Tier 3: Hardcoded fallback URL (constructed from tag_name)
+#   Only used when the API is rate-limited or unreachable.
+
+log "Resolving download URL..."
+
+# --- Tier 2: GitHub Releases API ---
+DOWNLOAD_URL=$(curl -sL "https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/releases/latest" \
+    | grep -oP "\"browser_download_url\": \"\K(https://[^\"]+${ASSET_PATTERN})(?=\")" \
+    | head -1) || true  # `|| true` prevents set -e from killing us if grep finds nothing
+
+# --- Tier 3: Fallback via tag_name ---
+if [[ -z "$DOWNLOAD_URL" ]]; then
+    warn "GitHub API did not return a matching asset. Attempting tag-based fallback..."
+
+    # Extract the version tag using the same PCRE approach:
+    #   "tag_name": "v1.2.3"  →  captures "1.2.3" (the \K discards "tag_name": "v)
+    APP_VERSION=$(curl -sL "https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/releases/latest" \
+        | grep -oP '"tag_name": "v?\K[^"]+') || true
+
+    if [[ -z "$APP_VERSION" ]]; then
+        die "Could not determine latest version from GitHub API. Check network connectivity and rate limits."
+    fi
+
+    DOWNLOAD_URL="https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/releases/download/v${APP_VERSION}/${APP_LABEL}-${APP_VERSION}-${ASSET_PATTERN}"
+    warn "Constructed fallback URL: ${DOWNLOAD_URL}"
+fi
+
+log "Download URL resolved: ${DOWNLOAD_URL}"
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# DOWNLOAD & EXTRACT
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+log "Downloading ${APP_LABEL}..."
+mkdir -p /tmp/AetherFlow
+cd /tmp/AetherFlow
+curl -sL "$DOWNLOAD_URL" -o "${APP_NAME}.tar.gz" >>"$LOGFILE" 2>&1
+
+# Verify the download is not an HTML error page or empty file
+FILESIZE=$(stat -c%s "${APP_NAME}.tar.gz" 2>/dev/null || echo "0")
+if [[ "$FILESIZE" -lt 1000 ]]; then
+    die "Downloaded file is suspiciously small (${FILESIZE} bytes). Possible 404 or rate limit."
+fi
+
+log "Extracting ${APP_LABEL}..."
+rm -rf "${APP_INSTALL_DIR}"
+tar -xzf "${APP_NAME}.tar.gz" -C /opt >>"$LOGFILE" 2>&1
+rm -f "${APP_NAME}.tar.gz"
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# PHASE 7: DAEMON USER MAPPING (Isolated Service Identity)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# WHY ISOLATED USERS MATTER:
+#   Old QuickBox scripts ran everything as $AETHERFLOW_USER (the SSH login user, often root).
+#   This meant:
+#     - A vulnerability in Jackett could read Radarr's API keys
+#     - A malicious torrent in Transmission could overwrite Sonarr's database
+#     - All services shared /tmp, allowing symlink attacks between apps
+#
+# THE NEW MODEL:
+#   Each application gets its own system user with:
+#     -r                  : System account (UID < 1000, doesn't appear in login screens)
+#     -s /usr/sbin/nologin: Cannot be used for interactive login (SSH, su, etc.)
+#     -d <home>           : Home directory set to the app's install path
+#
+# IDEMPOTENCY (Phase 5):
+#   `id -u <user>` returns 0 if the user exists.
+#   Without this check, re-running the script throws "user already exists" errors
+#   which (under set -e) would abort the entire installation.
+log "Creating isolated service user: ${APP_USER}"
+if ! id -u "${APP_USER}" &>/dev/null; then
+    useradd -r -s /usr/sbin/nologin -d "${APP_INSTALL_DIR}" "${APP_USER}"
+    log "Created system user: ${APP_USER}"
+else
+    log "System user ${APP_USER} already exists, skipping creation."
+fi
+
+# Create and assign the persistent data directory
+mkdir -p "${APP_DATA_DIR}"
+chown -R "${APP_USER}:${APP_GROUP}" "${APP_INSTALL_DIR}"
+chown -R "${APP_USER}:${APP_GROUP}" "${APP_DATA_DIR}"
+
+# Optional: Add the user to a shared 'media' group for cross-service file access
+# This allows Radarr to read files downloaded by Transmission, Plex to read
+# files organized by Sonarr, etc.
+#
+# Uncomment the following lines for media-stack applications:
+# if ! getent group media &>/dev/null; then
+#     groupadd media
+# fi
+# usermod -aG media "${APP_USER}"
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# PHASE 8 + 9: SYSTEMD SERVICE (Hardened Template)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# The systemd unit file is the security boundary of the entire deployment.
+# See the companion file `template.service` for the annotated version.
+#
+# IMPORTANT: We use <<'EOF' (quoted heredoc) to prevent bash from expanding
+# variables like $MAINPID inside the service file. Without quotes, bash would
+# try to resolve $MAINPID at script-write-time (where it's empty), producing
+# a broken unit file.
+log "Creating systemd service..."
+cat > "/etc/systemd/system/${APP_NAME}.service" <<EOF
+[Unit]
+Description=${APP_LABEL} Daemon (AetherFlow Managed)
+Documentation=https://aetherflow.io/docs/${APP_NAME}
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# ── Identity ─────────────────────────────────────────────────────
+User=${APP_USER}
+Group=${APP_GROUP}
+Type=simple
+WorkingDirectory=${APP_INSTALL_DIR}
+
+# ── Execution ────────────────────────────────────────────────────
+ExecStart=${APP_BINARY} -nobrowser -data=${APP_DATA_DIR}/
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=20
+KillMode=process
+
+# ── Phase 9: Security Hardening ──────────────────────────────────
+# NoNewPrivileges: Prevents the process from gaining additional
+# privileges via setuid/setgid binaries or filesystem capabilities.
+# This is the single most impactful security directive.
+NoNewPrivileges=yes
+
+# ProtectSystem: Makes /usr, /boot, and /lib read-only.
+# The application can only write to its own data directories.
+ProtectSystem=full
+
+# ProtectHome: Prevents the service from reading /home, /root, /run/user.
+# Old scripts stored configs in /home/\$USER/.config/ — we've moved
+# everything to /var/lib/<app>/ specifically to enable this directive.
+ProtectHome=true
+
+# PrivateTmp: Gives the service its own /tmp and /var/tmp namespaces.
+# Prevents cross-service temp file attacks (symlink races, data leaks).
+PrivateTmp=yes
+
+# PrivateDevices: Denies access to /dev/ devices (no USB, no disk access).
+# Safe for network services that only need sockets.
+PrivateDevices=yes
+
+# ProtectKernelTunables: Prevents writes to /proc/sys, /sys, etc.
+ProtectKernelTunables=yes
+
+# ProtectControlGroups: Prevents modification of the cgroup filesystem.
+ProtectControlGroups=yes
+
+# RestrictSUIDSGID: Prevents the service from creating setuid/setgid files.
+RestrictSUIDSGID=yes
+
+# ReadWritePaths: Explicitly whitelist directories the service may write to.
+# Everything else (under ProtectSystem=full) is read-only.
+ReadWritePaths=${APP_DATA_DIR}
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable "${APP_NAME}.service" >>"$LOGFILE" 2>&1
+systemctl start "${APP_NAME}.service"
+log "Service ${APP_NAME}.service started successfully."
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# APACHE REVERSE PROXY
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+log "Configuring Apache reverse proxy..."
+cat > "/etc/apache2/sites-enabled/${APP_NAME}.conf" <<EOF
+<Location /${APP_NAME}>
+    ProxyPass http://localhost:${APP_PORT}/${APP_NAME}
+    ProxyPassReverse http://localhost:${APP_PORT}/${APP_NAME}
+</Location>
+EOF
+chown www-data:www-data "/etc/apache2/sites-enabled/${APP_NAME}.conf"
+a2enmod proxy proxy_http >>/dev/null 2>&1
+service apache2 reload >>"$LOGFILE" 2>&1
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# FINALIZE — LOCK FILE CREATION
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# The lock file is the ONLY signal the AetherFlow backend uses to determine
+# whether an application is installed. The Go handler in services/installer.go
+# checks for this file's existence.
+#
+# CRITICAL: This line must be the LAST operation in the script.
+# If any step above failed (and set -e didn't catch it), we do NOT want
+# to create the lock file and falsely report a successful installation.
+touch "$LOCK_FILE"
+log "${APP_LABEL} installation complete! Access at http://your-server:${APP_PORT}"

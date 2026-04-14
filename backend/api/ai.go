@@ -352,7 +352,7 @@ func extractProposedAction(aiReply string, userMessage string) *ProposedAction {
 func extractServiceTarget(message string) string {
 	lower := strings.ToLower(message)
 	knownServices := []string{
-		"nginx", "docker", "postgres", "postgresql", "redis",
+		"nginx", "postgres", "postgresql", "redis",
 		"qbittorrent", "sonarr", "radarr", "lidarr", "prowlarr",
 		"plex", "jellyfin", "emby", "transmission", "deluge",
 		"jackett", "wireguard", "tailscale", "caddy", "traefik",

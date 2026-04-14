@@ -57,7 +57,7 @@ func getGeminiBundle(ctx context.Context) (*GeminiClientBundle, error) {
 	var aiModel, systemPrompt string
 	err = db.DB.QueryRow("SELECT ai_model, system_prompt FROM settings WHERE id = 1").Scan(&aiModel, &systemPrompt)
 	if err != nil {
-		aiModel = "gemini-2.5-pro"
+		aiModel = "gemini-3.1-pro-preview"
 		systemPrompt = "You are FlowAI, a helpful server assistant."
 		slog.Warn("Using fallback AI settings. DB Error", "error", err)
 	}

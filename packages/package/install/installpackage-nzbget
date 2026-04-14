@@ -28,8 +28,9 @@ case "$ARCH" in
     *) NZBGET_ARCH="linux" ;;
 esac
 
-NZBGET_URL=$(curl -sL https://api.github.com/repos/nzbgetcom/nzbget/releases/latest | grep "browser_download_url.*${NZBGET_ARCH}-bin" | head -1 | cut -d '"' -f 4)
+NZBGET_URL=$(curl -sL https://api.github.com/repos/nzbgetcom/nzbget/releases/latest | grep -oP '"browser_download_url": "\K(https://[^"]+linux-bin\.run)(?=")' | head -1)
 if [[ -z "$NZBGET_URL" ]]; then
+    log "Could not determine latest NZBGet URL via API, attempting fallback..."
     NZBGET_URL="https://github.com/nzbgetcom/nzbget/releases/latest/download/nzbget-linux.run"
 fi
 

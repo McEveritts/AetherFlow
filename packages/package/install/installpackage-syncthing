@@ -1,54 +1,109 @@
 #!/bin/bash
 #
-# [Quick Box :: Install syncthing]
+# [AetherFlow :: Install Syncthing]
+# Continuous file synchronization
 #
-# GITHUB REPOS
-# GitHub _ packages  :   https://github.com/AetherFlow/AetherFlow_packages
-# LOCAL REPOS
-# Local _ packages   :   /etc/AetherFlow/packages
-# Author             :   AetherFlow.IO | liara
-# URL                :   https://AetherFlow.io
+# Author : McEveritts
+# URL    : https://AetherFlow.io
+# License: GPL-3.0
 #
-# AetherFlow Copyright (C) 2017 AetherFlow.io
-# Licensed under GNU General Public License v3.0 GPL-3 (in short)
-#
-#   You may copy, distribute and modify the software as long as you track
-#   changes/dates in source files. Any modifications to our software
-#   including (via compiler) GPL-licensed code must also be made available
-#   under the GPL along with build & install instructions.
+set -e
 
-local_setup=/opt/AetherFlow/setup/
-source /opt/AetherFlow/packages/common.sh
-OUTTO=$LOGFILE
-MASTER=$AETHERFLOW_USER
+LOGFILE="/opt/AetherFlow/logs/installer.log"
+mkdir -p /opt/AetherFlow/logs /install
 
-echo "Adding Syncthing Repository ... " >>"${OUTTO}" 2>&1;
-# Use modern signed-by keyring instead of deprecated apt-key
-curl -sL https://syncthing.net/release-key.gpg -o /usr/share/keyrings/syncthing-archive-keyring.gpg 2>/dev/null
-echo "deb [signed-by=/usr/share/keyrings/syncthing-archive-keyring.gpg] https://apt.syncthing.net/ syncthing stable" > /etc/apt/sources.list.d/syncthing.list
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [syncthing] $1" | tee -a "$LOGFILE"; }
 
-echo "Installing Syncthing ... " >>"${OUTTO}" 2>&1;
-sudo apt-get -q update > /dev/null 2>&1
-sudo apt-get -qy install syncthing > /dev/null 2>&1
+# ── Dependencies ─────────────────────────────────────────────────────────────
+log "Installing dependencies..."
+apt-get update >>"$LOGFILE" 2>&1
+apt-get install -y curl apt-transport-https gnupg2 >>"$LOGFILE" 2>&1
 
-echo "Configuring Syncthing & Starting ... " >>"${OUTTO}" 2>&1;
-cp ${local_setup}templates/sysd/syncthing.template /etc/systemd/system/syncthing@.service
-systemctl enable syncthing@${MASTER} > /dev/null 2>&1
-systemctl start syncthing@${MASTER} > /dev/null 2>&1
+# ── Create syncthing user ────────────────────────────────────────────────────
+if ! id -u syncthing &>/dev/null; then
+    useradd -r -s /usr/sbin/nologin -d /var/lib/syncthing syncthing
+fi
+mkdir -p /var/lib/syncthing /home/syncthing
+chown -R syncthing:syncthing /var/lib/syncthing /home/syncthing
 
-cat > /etc/apache2/sites-enabled/syncthing.conf <<EOF
+# ── Download Syncthing ───────────────────────────────────────────────────────
+log "Downloading latest Syncthing..."
+ARCH=$(dpkg --print-architecture)
+case "$ARCH" in
+    amd64) SYNC_ARCH="linux-amd64" ;;
+    arm64) SYNC_ARCH="linux-arm64" ;;
+    armhf) SYNC_ARCH="linux-arm" ;;
+    *) SYNC_ARCH="linux-amd64" ;;
+esac
+
+SYNC_URL=$(curl -sL https://api.github.com/repos/syncthing/syncthing/releases/latest | grep -oP '"browser_download_url": "\K(https://[^"]+'${SYNC_ARCH}'\.tar\.gz)(?=")' | head -1)
+
+if [[ -z "$SYNC_URL" ]]; then
+    log "Could not parse API download URL, attempting fallback to known latest..."
+    SYNC_VERSION=$(curl -sL https://api.github.com/repos/syncthing/syncthing/releases/latest | grep -oP '"tag_name": "\K[^"]+')
+    SYNC_URL="https://github.com/syncthing/syncthing/releases/download/${SYNC_VERSION}/syncthing-${SYNC_ARCH}-${SYNC_VERSION}.tar.gz"
+fi
+
+mkdir -p /tmp/AetherFlow
+cd /tmp/AetherFlow
+curl -sL "$SYNC_URL" -o syncthing.tar.gz >>"$LOGFILE" 2>&1
+
+log "Extracting Syncthing..."
+tar -xzf syncthing.tar.gz >>"$LOGFILE" 2>&1
+rm -f syncthing.tar.gz
+
+SYNC_DIR=$(find . -maxdepth 1 -name "syncthing-linux-*" -type d | head -1)
+if [[ -n "$SYNC_DIR" ]]; then
+    cp "$SYNC_DIR/syncthing" /usr/local/bin/
+    chmod +x /usr/local/bin/syncthing
+fi
+rm -rf "$SYNC_DIR"
+
+# ── Systemd service ──────────────────────────────────────────────────────────
+log "Creating systemd service..."
+cat > /etc/systemd/system/syncthing.service <<'EOF'
+[Unit]
+Description=Syncthing - Open Source Continuous File Synchronization
+After=network.target
+
+[Service]
+User=syncthing
+Group=syncthing
+ExecStart=/usr/local/bin/syncthing -no-browser -no-restart -logflags=0
+Restart=on-failure
+RestartSec=10
+SuccessExitStatus=3 4
+RestartForceExitStatus=3 4
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=read-only
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+ReadWritePaths=/var/lib/syncthing
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable syncthing.service >>"$LOGFILE" 2>&1
+systemctl start syncthing.service
+
+# ── Apache reverse proxy ─────────────────────────────────────────────────────
+log "Configuring Apache reverse proxy..."
+cat > /etc/apache2/sites-enabled/syncthing.conf <<'EOF'
 <Location /syncthing>
-ProxyPass http://localhost:8384
-ProxyPassReverse http://localhost:8384
-Require user ${MASTER}
+    ProxyPass http://localhost:8384
+    ProxyPassReverse http://localhost:8384
 </Location>
 EOF
-chown www-data: /etc/apache2/sites-enabled/syncthing.conf
-service apache2 reload
+chown www-data:www-data /etc/apache2/sites-enabled/syncthing.conf
+a2enmod proxy proxy_http >>/dev/null 2>&1
+service apache2 reload >>"$LOGFILE" 2>&1
 
+# ── Finalize ─────────────────────────────────────────────────────────────────
 touch /install/.syncthing.lock
-echo "Syncthing installation complete!" >>"${OUTTO}" 2>&1;
-echo >>"${OUTTO}" 2>&1;
-echo >>"${OUTTO}" 2>&1;
-echo "Close this dialog box to refresh your browser" >>"${OUTTO}" 2>&1;
-
+log "Syncthing installation complete! Access at http://your-server:8384"

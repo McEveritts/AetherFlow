@@ -1,45 +1,93 @@
 #!/bin/bash
 #
 # [AetherFlow :: Install Portainer]
-# Lightweight container management UI for Docker
+# Lightweight container management UI — Native binary deployment
 #
 # Author : McEveritts
 # URL    : https://AetherFlow.io
 # License: GPL-3.0
 #
 set -e
+set -o pipefail
 
 LOGFILE="/opt/AetherFlow/logs/installer.log"
 mkdir -p /opt/AetherFlow/logs /install
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [portainer] $1" | tee -a "$LOGFILE"; }
 
-# ── Install Docker if not present ────────────────────────────────────────────
-if ! command -v docker &>/dev/null; then
-    log "Docker not found — installing Docker Engine..."
-    fetch_and_run "https://get.docker.com" "SKIP" >>"$LOGFILE" 2>&1
-    systemctl enable docker >>"$LOGFILE" 2>&1
-    systemctl start docker
-    log "Docker installed successfully."
-else
-    log "Docker already installed."
+if [[ -f /install/.portainer.lock ]]; then
+    log "Portainer is already installed. Skipping."
+    exit 0
 fi
 
-# ── Create Portainer data volume ─────────────────────────────────────────────
-log "Creating Portainer data volume..."
-docker volume create portainer_data >>"$LOGFILE" 2>&1 || true
+# ── Dependencies ─────────────────────────────────────────────────────────────
+log "Installing dependencies..."
+apt-get update >>"$LOGFILE" 2>&1
+apt-get install -y curl ca-certificates >>"$LOGFILE" 2>&1
 
-# ── Deploy Portainer container ───────────────────────────────────────────────
-log "Pulling and starting Portainer CE container..."
-docker rm -f portainer 2>/dev/null || true
-docker run -d \
-    --name portainer \
-    --restart=always \
-    -p 9443:9443 \
-    -p 9000:9000 \
-    -v /var/run/docker.sock:/var/run/docker.sock \
-    -v portainer_data:/data \
-    portainer/portainer-ce:latest >>"$LOGFILE" 2>&1
+# ── Architecture detection ───────────────────────────────────────────────────
+ARCH=$(dpkg --print-architecture)
+case "$ARCH" in
+    amd64) PORTAINER_ARCH="amd64" ;;
+    arm64) PORTAINER_ARCH="arm64" ;;
+    armhf) PORTAINER_ARCH="arm"   ;;
+    *)     PORTAINER_ARCH="amd64" ;;
+esac
+log "Detected architecture: ${ARCH} → ${PORTAINER_ARCH}"
+
+# ── Download Portainer CE binary ─────────────────────────────────────────────
+log "Downloading Portainer CE..."
+PORTAINER_URL="https://github.com/portainer/portainer/releases/latest/download/portainer-${PORTAINER_ARCH}.tar.gz"
+
+mkdir -p /tmp/AetherFlow
+cd /tmp/AetherFlow
+curl -sL "$PORTAINER_URL" -o portainer.tar.gz >>"$LOGFILE" 2>&1
+
+log "Extracting Portainer..."
+rm -rf /opt/portainer
+tar -xzf portainer.tar.gz -C /opt >>"$LOGFILE" 2>&1
+rm -f portainer.tar.gz
+
+# ── Create portainer user ────────────────────────────────────────────────────
+if ! id -u portainer &>/dev/null; then
+    useradd -r -s /usr/sbin/nologin -d /opt/portainer portainer
+fi
+mkdir -p /var/lib/portainer
+chown -R portainer:portainer /opt/portainer /var/lib/portainer
+
+# ── Systemd service ──────────────────────────────────────────────────────────
+log "Creating systemd service..."
+cat > /etc/systemd/system/portainer.service <<'EOF'
+[Unit]
+Description=Portainer CE (AetherFlow Managed)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=portainer
+Group=portainer
+ExecStart=/opt/portainer/portainer --data /var/lib/portainer --bind :9000 --bind-https :9443
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=20
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+ReadWritePaths=/var/lib/portainer
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable portainer.service >>"$LOGFILE" 2>&1
+systemctl start portainer.service
 
 # ── Apache reverse proxy ─────────────────────────────────────────────────────
 log "Configuring Apache reverse proxy..."

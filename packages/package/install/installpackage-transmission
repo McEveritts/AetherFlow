@@ -1,220 +1,113 @@
 #!/bin/bash
 #
-# [Quick Box :: Install Transmission-Web package]
+# [AetherFlow :: Install Transmission]
+# Fast, easy, and free BitTorrent client
 #
-# QUICKLAB REPOS
-# AetherFlow _ packages  :   https://github.com/McEveritts/MediaNexus/tree/master/packages
-# LOCAL REPOS
-# Local _ packages   :   /etc/AetherFlow/packages
-# Author             :   AetherFlow.IO
-# URL                :   https://AetherFlow.io
+# Author : McEveritts
+# URL    : https://AetherFlow.io
+# License: GPL-3.0
 #
-# AetherFlow Copyright (C) 2018 AetherFlow.io
-# Licensed under GNU General Public License v3.0 GPL-3 (in short)
-#
-#   You may copy, distribute and modify the software as long as you track
-#   changes/dates in source files. Any modifications to our software
-#   including (via compiler) GPL-licensed code must also be made available
-#   under the GPL along with build & install instructions.
-#
-#   AetherFlow.IO does not grant the end-user the right to distribute this
-#   code in a means to supply commercial monetization. If you would like
-#   to include AetherFlow in your commercial project, write to echo@AetherFlow.io
-#   with a summary of your project as well as its intended use for moentization.
-#
+set -e
 
-function _insTr() {
-  sudo add-apt-repository -y ppa:transmissionbt/ppa >>"${OUTTO}" 2>&1
-  apt-get -q -y update >>"${OUTTO}" 2>&1
-  apt-get -q -y install transmission-daemon >>"${OUTTO}" 2>&1
-  systemctl stop transmission-daemon >>"${OUTTO}" 2>&1
-  systemctl disable transmission-daemon >>"${OUTTO}" 2>&1
-  mkdir -p /home/${username}/.config/transmission/blocklists >/dev/null 2>&1
-	mkdir -p /home/${username}/.config/transmission/resume >/dev/null 2>&1
-	mkdir -p /home/${username}/.config/transmission/torrents >/dev/null 2>&1
-	mkdir -p /home/${username}/torrents/transmission >/dev/null 2>&1
-  cp ${local_setup}templates/transmission.json.template /home/${username}/.config/transmission/settings.json
-  sed -i "s/\/var\/lib\/transmission-daemon\/downloads/\/home\/${username}\/torrents\/transmission/g" /home/${username}/.config/transmission/settings.json
-  sed -i "s/\/var\/lib\/transmission-daemon\/Downloads/\/home\/${username}\/torrents\/transmission\/incomplete/g" /home/${username}/.config/transmission/settings.json
-  sed -i "s/\/var\/lib\/transmission-daemon\/trwatch/\/home\/${username}\/trwatch/g" /home/${username}/.config/transmission/settings.json
-  sed -i "s/\"{.*/\"${passwd}\", /g" /home/${username}/.config/transmission/settings.json
-  sed -i "s/\"transmission\",/\"${username}\",/g" /home/${username}/.config/transmission/settings.json
-  mkdir -p /home/${username}/torrents/transmission
-  mkdir -p /home/${username}/trwatch
-  chmod -R 755 /home/${username}/.config
-  chown -R ${username}.${username} /home/${username}/.config/
-  chmod -R 755 /home/${username}/torrents/transmission
-  chown -R ${username}.${username} /home/${username}/torrents/transmission
-  chmod -R 755 /home/${username}/trwatch
-  chown -R ${username}.${username} /home/${username}/trwatch
+LOGFILE="/opt/AetherFlow/logs/installer.log"
+mkdir -p /opt/AetherFlow/logs /install
+
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [transmission] $1" | tee -a "$LOGFILE"; }
+
+# ── Dependencies ─────────────────────────────────────────────────────────────
+log "Installing Transmission Daemon..."
+apt-get update >>"$LOGFILE" 2>&1
+apt-get install -y transmission-daemon transmission-cli >>"$LOGFILE" 2>&1
+
+# Stop the default installed daemon
+systemctl stop transmission-daemon >>"$LOGFILE" 2>&1 || true
+systemctl disable transmission-daemon >>"$LOGFILE" 2>&1 || true
+
+# ── Create transmission user ─────────────────────────────────────────────────
+if ! id -u transmission &>/dev/null; then
+    useradd -r -s /usr/sbin/nologin -d /var/lib/transmission-daemon transmission
+fi
+
+# ── Directories ──────────────────────────────────────────────────────────────
+log "Setting up directories..."
+mkdir -p /var/lib/transmission-daemon/.config/transmission-daemon
+mkdir -p /home/transmission/Downloads
+chown -R transmission:transmission /var/lib/transmission-daemon
+chown -R transmission:transmission /home/transmission
+
+# ── Configuration ────────────────────────────────────────────────────────────
+cat > /var/lib/transmission-daemon/.config/transmission-daemon/settings.json <<EOF
+{
+    "rpc-port": 9091,
+    "rpc-enabled": true,
+    "rpc-whitelist-enabled": false,
+    "rpc-authentication-required": false,
+    "download-dir": "/home/transmission/Downloads"
 }
+EOF
+chown transmission:transmission /var/lib/transmission-daemon/.config/transmission-daemon/settings.json
 
-function _insTrWeb() {
-  #!/bin/sh
-  ROOT_FOLDER="$1"
-  WEB_FOLDER=""
-  ORG_INDEX_FILE="index.original.html"
-  INDEX_FILE="index.html"
-  TMP_FOLDER="/tmp/tr-web-control"
-  PACK_NAME="src.tar.gz"
-	WEB_HOST="https://github.com/ronggang/twc-release/raw/master/"
-	DOWNLOAD_URL="$WEB_HOST$PACK_NAME"
-	INSTALL_TYPE=-1
+# ── Transmission Web Control (Optional/Modern UI) ────────────────────────────
+log "Installing Transmission Web Control..."
+TWC_URL=$(curl -sL https://api.github.com/repos/ronggang/transmission-web-control/releases/latest | grep -oP '"tarball_url": "\K[^"]+')
+if [[ -z "$TWC_URL" ]]; then
+    log "Failed to find Web Control URL, using default UI."
+else
+    mkdir -p /tmp/AetherFlow/twc
+    cd /tmp/AetherFlow/twc
+    curl -sL "$TWC_URL" -o twc.tar.gz >>"$LOGFILE" 2>&1
+    tar -xzf twc.tar.gz
+    TWC_DIR=$(find . -maxdepth 1 -type d -name "ronggang-transmission-web-control*" | head -1)
+    if [[ -d "$TWC_DIR/src" ]]; then
+        mkdir -p /usr/share/transmission/web
+        cp -r /usr/share/transmission/web/index.html /usr/share/transmission/web/index.original.html 2>/dev/null || true
+        cp -r ${TWC_DIR}/src/* /usr/share/transmission/web/
+    fi
+    rm -rf /tmp/AetherFlow/twc
+fi
 
+# ── Systemd service ──────────────────────────────────────────────────────────
+log "Creating systemd service..."
+cat > /etc/systemd/system/transmission.service <<'EOF'
+[Unit]
+Description=Transmission BitTorrent Daemon
+After=network.target
 
-	main() {
-	  if [ ! -d "$TMP_FOLDER" ]; then
-		mkdir -p "$TMP_FOLDER"
-	  fi
+[Service]
+User=transmission
+Type=notify
+ExecStart=/usr/bin/transmission-daemon -f --log-error
+ExecReload=/bin/kill -s HUP $MAINPID
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=read-only
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+ReadWritePaths=/home/transmission/Downloads /var/lib/transmission-daemon
 
-	  if [ -d "$ROOT_FOLDER" ]; then
-		echo "use arg: $ROOT_FOLDER" >>"${OUTTO}" 2>&1
-		INSTALL_TYPE=3
-		WEB_FOLDER="$ROOT_FOLDER/web"
-	  else
-		findWebFolder
-	  fi
-	  install
-	  clear
-	}
+[Install]
+WantedBy=multi-user.target
+EOF
 
-	findWebFolder() {
-	  echo "Searching Transmission Web Folder..."  >>"${OUTTO}" 2>&1
-	  ROOT_FOLDER="/usr/local/transmission/share/transmission"
-	  if [ -f /etc/fedora-release ] || [ -f "/etc/debian_version" ]; then
-		ROOT_FOLDER="/usr/share/transmission"
-	  fi
-		
-	  if [ $TRANSMISSION_WEB_HOME ]; then
-		echo "use TRANSMISSION_WEB_HOME: $TRANSMISSION_WEB_HOME" >>"${OUTTO}" 2>&1
-		if [ ! -d "$TRANSMISSION_WEB_HOME" ]; then
-			 mkdir -p "$TRANSMISSION_WEB_HOME"
-		  fi
-		INSTALL_TYPE=2
-	  else
-		echo "Looking for folder: $ROOT_FOLDER/web" >>"${OUTTO}" 2>&1
-		if [ -d "$ROOT_FOLDER/web" ]; then
-		  WEB_FOLDER="$ROOT_FOLDER/web"
-		  INSTALL_TYPE=1
-		  echo "Folder found. Using it." >>"${OUTTO}" 2>&1
-		else
-		  echo "Folder not found. Will search the entire /. This will take a while..." >>"${OUTTO}" 2>&1
-		  ROOT_FOLDER=`find / -name 'web' -type d 2>/dev/null| grep 'transmission/web' | sed 's/\/web$//g'`
+systemctl daemon-reload
+systemctl enable transmission.service >>"$LOGFILE" 2>&1
+systemctl start transmission.service
 
-		  if [ -d "$ROOT_FOLDER/web" ]; then
-			WEB_FOLDER="$ROOT_FOLDER/web"
-			INSTALL_TYPE=1
-		  fi
-		fi
-	  fi
-	}
-
-	install() {
-	  if [ $INSTALL_TYPE = 1 -o $INSTALL_TYPE = 3 ]; then
-		download
-		echo "Installing..." >>"${OUTTO}" 2>&1
-		mkdir web
-		tar -xzf "$PACK_NAME" -C "web" >>"${OUTTO}" 2>&1
-		if [ ! -f "$WEB_FOLDER/$ORG_INDEX_FILE" ]; then
-		  mv "$WEB_FOLDER/$INDEX_FILE" "$WEB_FOLDER/$ORG_INDEX_FILE"
-		fi
-		cp -r web "$ROOT_FOLDER"
-
-		find "$ROOT_FOLDER" -type d -exec chmod o+rx {} \;
-		find "$ROOT_FOLDER" -type f -exec chmod o+r {} \;
-
-		installed
-	  elif [ $INSTALL_TYPE = 2 ]; then
-		download
-		echo "Installing..." >>"${OUTTO}" 2>&1
-		tar -xzf "$PACK_NAME" -C "$TRANSMISSION_WEB_HOME"
-
-		find "$TRANSMISSION_WEB_HOME" -type d -exec chmod o+rx {} \;
-		find "$TRANSMISSION_WEB_HOME" -type f -exec chmod o+r {} \;
-
-		installed
-	  else
-			#echo "##############################################"
-			#echo "#"
-			echo "# ERROR : Transmisson WEB UI Folder is missing." >>"${OUTTO}" 2>&1
-			#echo "#"
-			#echo "##############################################"
-	  fi
-	}
-
-	download() {
-	  cd "$TMP_FOLDER"
-	  echo "Downloading Transmission Web Control..." >>"${OUTTO}" 2>&1
-	  wget -q "$DOWNLOAD_URL" --no-check-certificate
-	}
-
-	installed() {
-	  echo "Transmission Web Control Installation completed!" >>"${OUTTO}" 2>&1
-	}
-
-	clear() {
-	  rm "$PACK_NAME"
-	  rm -rf "$TMP_FOLDER"
-	}
-
-	main
-
-  rm -rf "$tmpFolder"
-  ln -s /home/${username}/torrents/transmission/ /srv/rutorrent/home/${username}.transmission.downloads
-}
-
-function _insTrApache() {
-  cat > /etc/apache2/sites-enabled/transmission.conf <<EOF
-<Location /$APPNAME>
-ProxyPass http://localhost:$APPDPORT/$APPNAME
-ProxyPassReverse http://localhost:$APPDPORT/$APPNAME
+# ── Apache reverse proxy ─────────────────────────────────────────────────────
+log "Configuring Apache reverse proxy..."
+cat > /etc/apache2/sites-enabled/transmission.conf <<'EOF'
+<Location /transmission>
+    ProxyPass http://localhost:9091/transmission
+    ProxyPassReverse http://localhost:9091/transmission
 </Location>
 EOF
+chown www-data:www-data /etc/apache2/sites-enabled/transmission.conf
+a2enmod proxy proxy_http >>/dev/null 2>&1
+service apache2 reload >>"$LOGFILE" 2>&1
 
-	touch /install/.transmission.lock
-  chown www-data: /etc/apache2/sites-enabled/transmission.conf
-  cat > /usr/share/transmission/web/.htaccess <<EOF
-allow from all
-EOF
-  cp ${local_setup}templates/sysd/transmission.template  /etc/systemd/system/transmission@.service >/dev/null 2>&1
-  systemctl enable transmission@${username} >/dev/null 2>&1
-  systemctl start transmission@${username} >/dev/null 2>&1
-  service apache2 reload
-}
-
-function _insTrComplete() {
-  echo "Transmisson Install Complete!" >>"${OUTTO}" 2>&1;
-  sleep 5
-  echo >>"${OUTTO}" 2>&1;
-  echo >>"${OUTTO}" 2>&1;
-  echo "Close this dialog box to refresh your browser" >>"${OUTTO}" 2>&1;
-}
-function _insTrExit() {
-  exit
-}
-
-
-source /opt/AetherFlow/packages/common.sh
-username=$AETHERFLOW_USER
-passwd=$(cat /root/${username}.info | cut -d ":" -f 3 | cut -d "@" -f 1)
-OUTTO=$LOGFILE
-local_setup=/opt/AetherFlow/setup/
-local_dashboard=/etc/AetherFlow/dashboard/
-
-APPNAME='transmission'
-APPDPORT='9091'
-
-echo "Configuring Transmisson ... " >> ${OUTTO} 2>&1
-echo -en "\rConfiguring Transmisson ... ";_insTr
-echo "Installing Transmisson Web Control ... " >> ${OUTTO} 2>&1
-echo -en "\rInstalling Transmisson Web Control ... ";_insTrWeb
-echo "Setting up Transmission Reverse Proxy and Reloading Apache2 ... " >> ${OUTTO} 2>&1
-echo -en "\rSetting up Transmission Reverse Proxy and Reloading Apache2 ... ";_insTrApache
-sleep 5
-echo >>"${OUTTO}" 2>&1;
-echo >>"${OUTTO}" 2>&1;
-_insTrComplete
-_insTrExit
-
-echo ""
-
+# ── Finalize ─────────────────────────────────────────────────────────────────
+touch /install/.transmission.lock
+log "Transmission installation complete! Access at http://your-server:9091"

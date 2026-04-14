@@ -122,7 +122,7 @@
         "description": "Proxy server to bypass Cloudflare and DDoS-GUARD protection.",
         "lock_file": "/install/.flaresolverr.lock",
         "category": "Media",
-        "service_type": "docker",
+        "service_type": "systemd",
         "service_name": "flaresolverr"
     },
     {
@@ -257,7 +257,7 @@
         "description": "Lightweight Bitwarden-compatible password manager server.",
         "lock_file": "/install/.vaultwarden.lock",
         "category": "Security",
-        "service_type": "docker",
+        "service_type": "systemd",
         "service_name": "vaultwarden"
     },
     {
@@ -308,10 +308,10 @@
     {
         "name": "portainer",
         "label": "Portainer",
-        "description": "Lightweight container management UI for Docker environments.",
+        "description": "Lightweight container management UI for your infrastructure.",
         "lock_file": "/install/.portainer.lock",
         "category": "DevOps",
-        "service_type": "docker",
+        "service_type": "systemd",
         "service_name": "portainer"
     },
     {

@@ -28,11 +28,8 @@ export const NAVIGATION = [
 ];
 
 export const BOTTOM_NAVIGATION = [
-    { id: 'backups' as TabId, label: 'Backups', icon: <HardDriveDownload size={18} /> },
-    { id: 'security' as TabId, label: 'Security', icon: <Shield size={18} /> },
     { id: 'users' as TabId, label: 'Users', icon: <Users size={18} /> },
     { id: 'audit' as TabId, label: 'Audit Trail', icon: <ClipboardList size={18} /> },
-    { id: 'oidc-clients' as TabId, label: 'OIDC Clients', icon: <KeyRound size={18} /> },
     { id: 'profile' as TabId, label: 'Profile', icon: <UserCircle size={18} /> },
     { id: 'settings' as TabId, label: 'Settings', icon: <Settings size={18} /> },
     { id: 'logout' as TabId, label: 'Log Out', icon: <LogOut size={18} /> },

@@ -2,9 +2,6 @@ package services
 
 import (
 	"log/slog"
-	"os/exec"
-	"strings"
-	"time"
 
 	"github.com/gin-gonic/gin"
 )
@@ -73,13 +70,7 @@ func GetActiveServices() map[string]interface{} {
 		var status, uptime, version string
 		managedBy := "systemd"
 
-		if pkg.ServiceType == "docker" {
-			// For Docker services, check docker container status
-			status, uptime, version = GetDockerServiceInfo(serviceName)
-			managedBy = "docker"
-		} else {
-			status, uptime, version = GetServiceInfo(serviceName)
-		}
+		status, uptime, version = GetServiceInfo(serviceName)
 
 		if version == "-" {
 			version = "latest"
@@ -95,62 +86,4 @@ func GetActiveServices() map[string]interface{} {
 	}
 
 	return servicesList
-}
-
-// GetDockerServiceInfo checks Docker container status via docker inspect
-func GetDockerServiceInfo(containerName string) (status, uptime, version string) {
-	status = "stopped"
-	uptime = "-"
-	version = "-"
-
-	// Check if Docker daemon is running first
-	dockerStatus, _, _ := GetServiceInfo("docker")
-	if dockerStatus != "running" {
-		return
-	}
-
-	// Query container status
-	statusCmd := exec.Command("docker", "inspect", "--format", "{{.State.Status}}", containerName)
-	statusOut, err := statusCmd.Output()
-	if err != nil {
-		return // Container doesn't exist or can't be inspected
-	}
-
-	containerStatus := strings.TrimSpace(string(statusOut))
-	switch containerStatus {
-	case "running":
-		status = "running"
-	case "exited", "dead":
-		status = "stopped"
-	case "restarting":
-		status = "error"
-	default:
-		status = containerStatus
-	}
-
-	// Get uptime from container start time
-	if status == "running" {
-		startCmd := exec.Command("docker", "inspect", "--format", "{{.State.StartedAt}}", containerName)
-		startOut, err := startCmd.Output()
-		if err == nil {
-			startStr := strings.TrimSpace(string(startOut))
-			if t, err := time.Parse(time.RFC3339Nano, startStr); err == nil {
-				uptime = FormatDuration(time.Since(t))
-			}
-		}
-	}
-
-	// Get image version
-	imageCmd := exec.Command("docker", "inspect", "--format", "{{.Config.Image}}", containerName)
-	imageOut, err := imageCmd.Output()
-	if err == nil {
-		image := strings.TrimSpace(string(imageOut))
-		if parts := strings.SplitN(image, ":", 2); len(parts) == 2 {
-			version = parts[1]
-		} else {
-			version = "latest"
-		}
-	}
-
-	return
 }
