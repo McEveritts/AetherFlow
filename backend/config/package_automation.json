@@ -45,8 +45,8 @@
     "update_package": "jellyfin"
   },
   "lidarr": {
-    "sandbox_profile": "mono",
-    "sandbox_rw_paths": ["/opt/Lidarr", "/home/{{SERVICE_USER}}/.config/Lidarr"],
+    "sandbox_profile": "dotnet",
+    "sandbox_rw_paths": ["/opt/Lidarr", "/var/lib/lidarr"],
     "sandbox_service_units": ["lidarr.service"]
   },
   "navidrome": {
@@ -106,8 +106,8 @@
     "sandbox_service_units": ["qbittorrent.service"]
   },
   "radarr": {
-    "sandbox_profile": "mono",
-    "sandbox_rw_paths": ["/opt/Radarr", "/home/{{SERVICE_USER}}/.config/Radarr"],
+    "sandbox_profile": "dotnet",
+    "sandbox_rw_paths": ["/opt/Radarr", "/var/lib/radarr"],
     "sandbox_service_units": ["radarr.service"]
   },
   "readarr": {

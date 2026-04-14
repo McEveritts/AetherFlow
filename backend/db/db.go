@@ -112,6 +112,11 @@ func InitDB() {
 			default_dashboard TEXT DEFAULT 'overview',
 			setup_completed BOOLEAN DEFAULT 0,
 			gemini_api_key TEXT DEFAULT '',
+			openai_api_key TEXT DEFAULT '',
+			lm_studio_endpoint TEXT DEFAULT '',
+			ollama_endpoint TEXT DEFAULT '',
+			anthropic_api_key TEXT DEFAULT '',
+			anthropic_endpoint TEXT DEFAULT '',
 			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 		)
 	`)
@@ -507,6 +512,17 @@ func InitDB() {
 		"CREATE INDEX IF NOT EXISTS idx_audit_log_user ON admin_audit_log(user_id);",
 		"CREATE INDEX IF NOT EXISTS idx_audit_log_action ON admin_audit_log(action);",
 		"CREATE INDEX IF NOT EXISTS idx_audit_log_created ON admin_audit_log(created_at);")
+
+	// ─── Migration v12: Phase 29 — Additional AI Providers ─────────────
+	migrate(12, "Add OpenAI and Local AI provider config",
+		"ALTER TABLE settings ADD COLUMN openai_api_key TEXT DEFAULT '';",
+		"ALTER TABLE settings ADD COLUMN lm_studio_endpoint TEXT DEFAULT '';",
+		"ALTER TABLE settings ADD COLUMN ollama_endpoint TEXT DEFAULT '';")
+
+	// ─── Migration v13: Add Anthropic Support ─────────────
+	migrate(13, "Add Anthropic API provider config",
+		"ALTER TABLE settings ADD COLUMN anthropic_api_key TEXT DEFAULT '';",
+		"ALTER TABLE settings ADD COLUMN anthropic_endpoint TEXT DEFAULT '';")
 
 	// ─── Ensure singleton settings row ─────────────────────────────────
 	DB.Exec(`INSERT OR IGNORE INTO settings (id) VALUES (1)`)

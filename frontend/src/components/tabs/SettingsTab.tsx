@@ -24,12 +24,19 @@ export default function SettingsTab() {
     const [model, setModel] = useState('gemini-3.1-pro-preview');
     const [prompt, setPrompt] = useState("You are FlowAI, a highly intelligent infrastructure assistant connected to a local Next.js + Go Nexus environment. Always prioritize safe and performant configurations.");
     const [apiKey, setApiKey] = useState('');
+    const [openaiApiKey, setOpenaiApiKey] = useState('');
+    const [anthropicApiKey, setAnthropicApiKey] = useState('');
+    const [lmStudioEndpoint, setLmStudioEndpoint] = useState('');
+    const [ollamaEndpoint, setOllamaEndpoint] = useState('');
+    const [anthropicEndpoint, setAnthropicEndpoint] = useState('');
     const [timezone, setTimezone] = useState('UTC');
     const [updateChannel, setUpdateChannel] = useState('stable');
     const [defaultDashboard, setDefaultDashboard] = useState('overview');
 
     // UI state
     const [showApiKey, setShowApiKey] = useState(false);
+    const [showOpenaiApiKey, setShowOpenaiApiKey] = useState(false);
+    const [showAnthropicApiKey, setShowAnthropicApiKey] = useState(false);
     const [isSaving, setIsSaving] = useState(false);
     const [isUpdating, setIsUpdating] = useState(false);
     const [updateMessage, setUpdateMessage] = useState('');
@@ -72,6 +79,11 @@ export default function SettingsTab() {
                 if (data.aiModel) setModel(data.aiModel);
                 if (data.systemPrompt) setPrompt(data.systemPrompt);
                 if (data.geminiApiKey) setApiKey(data.geminiApiKey);
+                if (data.openaiApiKey) setOpenaiApiKey(data.openaiApiKey);
+                if (data.anthropicApiKey) setAnthropicApiKey(data.anthropicApiKey);
+                if (data.lmStudioEndpoint) setLmStudioEndpoint(data.lmStudioEndpoint);
+                if (data.ollamaEndpoint) setOllamaEndpoint(data.ollamaEndpoint);
+                if (data.anthropicEndpoint) setAnthropicEndpoint(data.anthropicEndpoint);
                 if (data.timezone) setTimezone(data.timezone);
                 if (data.updateChannel) setUpdateChannel(data.updateChannel);
                 if (data.defaultDashboard) setDefaultDashboard(data.defaultDashboard);
@@ -89,6 +101,11 @@ export default function SettingsTab() {
             aiModel: model,
             systemPrompt: prompt,
             geminiApiKey: apiKey,
+            openaiApiKey: openaiApiKey,
+            anthropicApiKey: anthropicApiKey,
+            lmStudioEndpoint: lmStudioEndpoint,
+            ollamaEndpoint: ollamaEndpoint,
+            anthropicEndpoint: anthropicEndpoint,
             language: language,
             theme: theme,
             ambientColor1: ambientColor1,
@@ -417,6 +434,118 @@ export default function SettingsTab() {
                                                 </button>
                                             </div>
                                         </div>
+                                        {/* OpenAI API Key */}
+                                        <div className="p-5 flex flex-col md:flex-row justify-between gap-4 hover:bg-white/[0.02] transition-colors border-t border-white/10">
+                                            <div>
+                                                <label className="text-sm font-semibold text-slate-200 flex items-center gap-2">
+                                                    <Key size={16} className="text-emerald-400" /> OpenAI API Key
+                                                </label>
+                                                <p className="text-xs text-slate-500 mt-1 max-w-sm">Connect to the OpenAI ecosystem for access to GPT models. Your key is stored securely.</p>
+                                            </div>
+                                            <div className="shrink-0 w-full md:w-80 space-y-3">
+                                                <div className="relative">
+                                                    <input
+                                                        type={showOpenaiApiKey ? 'text' : 'password'}
+                                                        value={openaiApiKey}
+                                                        onChange={(e) => setOpenaiApiKey(e.target.value)}
+                                                        placeholder="sk-proj-..."
+                                                        className="w-full bg-slate-900 border border-white/10 rounded-xl px-4 py-3 pr-12 text-slate-200 text-sm focus:outline-none focus:border-indigo-500/50 transition-colors font-mono"
+                                                    />
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => setShowOpenaiApiKey(!showOpenaiApiKey)}
+                                                        className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300 transition-colors"
+                                                    >
+                                                        {showOpenaiApiKey ? <EyeOff size={16} /> : <Eye size={16} />}
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        </div>
+                                        {/* Anthropic API Key */}
+                                        <div className="p-5 flex flex-col md:flex-row justify-between gap-4 hover:bg-white/[0.02] transition-colors border-t border-white/10">
+                                            <div>
+                                                <label className="text-sm font-semibold text-slate-200 flex items-center gap-2">
+                                                    <Key size={16} className="text-orange-400" /> Anthropic API Key
+                                                </label>
+                                                <p className="text-xs text-slate-500 mt-1 max-w-sm">Connect to the Anthropic ecosystem for Claude model access. Your key is stored securely.</p>
+                                            </div>
+                                            <div className="shrink-0 w-full md:w-80 space-y-3">
+                                                <div className="relative">
+                                                    <input
+                                                        type={showAnthropicApiKey ? 'text' : 'password'}
+                                                        value={anthropicApiKey}
+                                                        onChange={(e) => setAnthropicApiKey(e.target.value)}
+                                                        placeholder="sk-ant-..."
+                                                        className="w-full bg-slate-900 border border-white/10 rounded-xl px-4 py-3 pr-12 text-slate-200 text-sm focus:outline-none focus:border-indigo-500/50 transition-colors font-mono"
+                                                    />
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => setShowAnthropicApiKey(!showAnthropicApiKey)}
+                                                        className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300 transition-colors"
+                                                    >
+                                                        {showAnthropicApiKey ? <EyeOff size={16} /> : <Eye size={16} />}
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                {/* CATEGORY: Local Engines */}
+                                <div>
+                                    <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3 px-2">Local AI Engines</h4>
+                                    <div className="bg-slate-950/50 border border-white/10 rounded-2xl divide-y divide-white/10 overflow-hidden">
+                                        <div className="p-5 flex flex-col md:flex-row justify-between gap-4 hover:bg-white/[0.02] transition-colors">
+                                            <div>
+                                                <label className="text-sm font-semibold text-slate-200 flex items-center gap-2">
+                                                    <Radio size={16} className="text-purple-400" /> LM-Studio Endpoint
+                                                </label>
+                                                <p className="text-xs text-slate-500 mt-1 max-w-sm">URL to your LM-Studio local server (e.g., http://localhost:1234)</p>
+                                            </div>
+                                            <div className="shrink-0 w-full md:w-80 space-y-3">
+                                                <input
+                                                    type="text"
+                                                    value={lmStudioEndpoint}
+                                                    onChange={(e) => setLmStudioEndpoint(e.target.value)}
+                                                    placeholder="http://localhost:1234"
+                                                    className="w-full bg-slate-900 border border-white/10 rounded-xl px-4 py-3 text-slate-200 text-sm focus:outline-none focus:border-indigo-500/50 transition-colors font-mono"
+                                                />
+                                            </div>
+                                        </div>
+                                        <div className="p-5 flex flex-col md:flex-row justify-between gap-4 hover:bg-white/[0.02] transition-colors">
+                                            <div>
+                                                <label className="text-sm font-semibold text-slate-200 flex items-center gap-2">
+                                                    <Radio size={16} className="text-pink-400" /> Ollama Endpoint
+                                                </label>
+                                                <p className="text-xs text-slate-500 mt-1 max-w-sm">URL to your Ollama service (e.g., http://localhost:11434)</p>
+                                            </div>
+                                            <div className="shrink-0 w-full md:w-80 space-y-3">
+                                                <input
+                                                    type="text"
+                                                    value={ollamaEndpoint}
+                                                    onChange={(e) => setOllamaEndpoint(e.target.value)}
+                                                    placeholder="http://localhost:11434"
+                                                    className="w-full bg-slate-900 border border-white/10 rounded-xl px-4 py-3 text-slate-200 text-sm focus:outline-none focus:border-indigo-500/50 transition-colors font-mono"
+                                                />
+                                            </div>
+                                        </div>
+                                        <div className="p-5 flex flex-col md:flex-row justify-between gap-4 hover:bg-white/[0.02] transition-colors">
+                                            <div>
+                                                <label className="text-sm font-semibold text-slate-200 flex items-center gap-2">
+                                                    <Radio size={16} className="text-orange-400" /> Anthropic Custom Endpoint
+                                                </label>
+                                                <p className="text-xs text-slate-500 mt-1 max-w-sm">Override the default Anthropic API URL if using a proxy or local simulator.</p>
+                                            </div>
+                                            <div className="shrink-0 w-full md:w-80 space-y-3">
+                                                <input
+                                                    type="text"
+                                                    value={anthropicEndpoint}
+                                                    onChange={(e) => setAnthropicEndpoint(e.target.value)}
+                                                    placeholder="https://api.anthropic.com/v1/"
+                                                    className="w-full bg-slate-900 border border-white/10 rounded-xl px-4 py-3 text-slate-200 text-sm focus:outline-none focus:border-indigo-500/50 transition-colors font-mono"
+                                                />
+                                            </div>
+                                        </div>
                                     </div>
                                 </div>
 
@@ -439,12 +568,24 @@ export default function SettingsTab() {
                                                     onChange={(e) => setModel(e.target.value)}
                                                     className="w-full bg-slate-900 border border-white/10 rounded-xl px-4 py-3 text-slate-200 text-sm focus:outline-none focus:border-indigo-500/50 transition-colors appearance-none cursor-pointer"
                                                 >
-                                                    <optgroup label="Preview">
+                                                    <optgroup label="Google Primary">
                                                         <option value="gemini-3.1-pro-preview">Gemini 3.1 Pro Preview</option>
                                                         <option value="gemini-3-flash-preview">Gemini 3.0 Flash Preview</option>
                                                         <option value="gemini-3.1-flash-lite-preview">Gemini 3.1 Flash Lite Preview</option>
-                                                        <option value="gemini-3-pro-image-preview">Gemini 3.0 Pro Image Preview</option>
-                                                        <option value="gemini-3.1-flash-image-preview">Gemini 3.1 Flash Image Preview</option>
+                                                    </optgroup>
+                                                    <optgroup label="OpenAI Base">
+                                                        <option value="gpt-4o">GPT-4o</option>
+                                                        <option value="gpt-4o-mini">GPT-4o Mini</option>
+                                                        <option value="gpt-4-turbo">GPT-4 Turbo</option>
+                                                    </optgroup>
+                                                    <optgroup label="Anthropic">
+                                                        <option value="claude-3-5-sonnet">Claude 3.5 Sonnet</option>
+                                                        <option value="claude-3-5-haiku">Claude 3.5 Haiku</option>
+                                                        <option value="claude-3-opus">Claude 3 Opus</option>
+                                                    </optgroup>
+                                                    <optgroup label="Local Hosted">
+                                                        <option value="lm-studio">LM Studio (Local)</option>
+                                                        <option value="ollama">Ollama (Local)</option>
                                                     </optgroup>
                                                 </select>
                                                 <ChevronRight size={16} className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-500 rotate-90 pointer-events-none" />

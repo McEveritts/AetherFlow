@@ -40,7 +40,7 @@ export default function MarketplaceTab() {
             const res = await apiFetch(`/api/v1/admin/packages/${app.id}/install`, { method: 'POST' });
             if (!res.ok) {
                 const data = await res.json().catch(() => ({}));
-                throw new Error(data.error || 'Installation request failed');
+                throw new Error(data.message || data.error || 'Installation request failed');
             }
             addToast(`Provisioning sequence initiated for ${app.id}`, 'info');
             mutate();
@@ -57,7 +57,7 @@ export default function MarketplaceTab() {
             const res = await apiFetch(`/api/v1/admin/packages/${app.id}/uninstall`, { method: 'POST' });
             if (!res.ok) {
                 const data = await res.json().catch(() => ({}));
-                throw new Error(data.error || 'Uninstallation request failed');
+                throw new Error(data.message || data.error || 'Uninstallation request failed');
             }
             addToast(`Tear-down sequence initiated for ${app.id}`, 'info');
             mutate();
