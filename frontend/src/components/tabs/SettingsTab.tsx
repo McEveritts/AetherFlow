@@ -540,7 +540,16 @@ export default function SettingsTab() {
                                                             <span className="font-mono text-slate-300">{updateData.latestVersion}</span>
                                                         </div>
                                                         {updateData.message && (
-                                                            <div className="text-amber-400 mt-2 text-xs">{updateData.message}</div>
+                                                            <div className={`mt-2 text-xs ${updateData.latestVersion?.includes('Unknown') ? 'text-amber-400' : 'text-slate-500'}`}>
+                                                                {updateData.message}
+                                                            </div>
+                                                        )}
+                                                        {updateData.url && !updateData.latestVersion?.includes('Unknown') && (
+                                                            <div className="mt-2">
+                                                                <a href={updateData.url} target="_blank" rel="noopener noreferrer" className="text-xs text-indigo-400 hover:text-indigo-300 underline transition-colors">
+                                                                    View release details →
+                                                                </a>
+                                                            </div>
                                                         )}
                                                     </div>
 

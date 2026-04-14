@@ -25,8 +25,24 @@ type GitHubRelease struct {
 	HtmlUrl string `json:"html_url"`
 }
 
+// GitHubTag represents a tag from the GitHub Tags API (fallback)
+type GitHubTag struct {
+	Name string `json:"name"`
+}
+
+// GitHubCommit represents the structure of the GitHub Commits API response
+type GitHubCommit struct {
+	Sha     string `json:"sha"`
+	HtmlUrl string `json:"html_url"`
+	Commit  struct {
+		Message string `json:"message"`
+	} `json:"commit"`
+}
+
 var versionFilePath string
 var updateScriptPath string
+
+const githubRepo = "McEveritts/AetherFlow"
 
 func init() {
 	// Resolve script paths relative to the executable directory to prevent
@@ -56,15 +72,112 @@ func getLocalVersion() string {
 	return strings.TrimSpace(string(versionBytes))
 }
 
+// fetchLatestStableRelease attempts to get the latest version via the Releases API,
+// then falls back to the Tags API if no GitHub Release objects exist.
+func fetchLatestStableRelease() (tagName, body, htmlUrl string, err error) {
+	// Tier 1: Try the GitHub Releases API (/releases/latest)
+	resp, reqErr := httpClient.Get("https://api.github.com/repos/" + githubRepo + "/releases/latest")
+	if reqErr != nil {
+		slog.Warn("[updater] releases API request failed", "error", reqErr)
+		// Fall through to Tier 2
+	} else {
+		defer resp.Body.Close()
+		if resp.StatusCode == 200 {
+			var release GitHubRelease
+			bodyBytes, _ := io.ReadAll(resp.Body)
+			if jsonErr := json.Unmarshal(bodyBytes, &release); jsonErr == nil && release.TagName != "" {
+				slog.Info("[updater] resolved latest version via Releases API", "version", release.TagName)
+				return release.TagName, release.Body, release.HtmlUrl, nil
+			}
+		} else {
+			slog.Info("[updater] releases API returned non-200, falling back to Tags API",
+				"status", resp.StatusCode)
+			resp.Body.Close()
+		}
+	}
 
+	// Tier 2: Fall back to the Tags API (/tags)
+	// This works even when no GitHub Release objects exist (only git tags pushed).
+	tagsResp, tagsErr := httpClient.Get("https://api.github.com/repos/" + githubRepo + "/tags?per_page=10")
+	if tagsErr != nil {
+		slog.Error("[updater] tags API request failed", "error", tagsErr)
+		return "", "", "", tagsErr
+	}
+	defer tagsResp.Body.Close()
 
-// GitHubCommit represents the structure of the GitHub Commits API response
-type GitHubCommit struct {
-	Sha    string `json:"sha"`
-	HtmlUrl string `json:"html_url"`
-	Commit struct {
-		Message string `json:"message"`
-	} `json:"commit"`
+	if tagsResp.StatusCode != 200 {
+		slog.Error("[updater] tags API returned non-200", "status", tagsResp.StatusCode)
+		return "", "", "", nil
+	}
+
+	var tags []GitHubTag
+	tagsBody, _ := io.ReadAll(tagsResp.Body)
+	if jsonErr := json.Unmarshal(tagsBody, &tags); jsonErr != nil {
+		slog.Error("[updater] failed to parse tags response", "error", jsonErr)
+		return "", "", "", jsonErr
+	}
+
+	// Find the first tag that looks like a semver release (starts with 'v')
+	// and is NOT a pre-release (no '-' suffix like v3.0.1-PreAlpha.01)
+	for _, tag := range tags {
+		if strings.HasPrefix(tag.Name, "v") && !strings.Contains(tag.Name, "-") {
+			url := "https://github.com/" + githubRepo + "/releases/tag/" + tag.Name
+			slog.Info("[updater] resolved latest version via Tags API fallback", "version", tag.Name)
+			return tag.Name, "", url, nil
+		}
+	}
+
+	// Tier 2b: If all tags are pre-releases, just use the first tag
+	if len(tags) > 0 {
+		url := "https://github.com/" + githubRepo + "/releases/tag/" + tags[0].Name
+		slog.Info("[updater] resolved latest version via first available tag", "version", tags[0].Name)
+		return tags[0].Name, "", url, nil
+	}
+
+	slog.Warn("[updater] no tags found in repository")
+	return "", "", "", nil
+}
+
+// fetchLatestBetaRelease returns the latest release (including pre-releases) via
+// the Releases API, with fallback to Tags API.
+func fetchLatestBetaRelease() (tagName, body, htmlUrl string, err error) {
+	resp, reqErr := httpClient.Get("https://api.github.com/repos/" + githubRepo + "/releases?per_page=5")
+	if reqErr != nil {
+		slog.Warn("[updater] releases API request failed for beta", "error", reqErr)
+	} else {
+		defer resp.Body.Close()
+		if resp.StatusCode == 200 {
+			var releases []GitHubRelease
+			bodyBytes, _ := io.ReadAll(resp.Body)
+			if jsonErr := json.Unmarshal(bodyBytes, &releases); jsonErr == nil && len(releases) > 0 {
+				slog.Info("[updater] resolved beta version via Releases API", "version", releases[0].TagName)
+				return releases[0].TagName, releases[0].Body, releases[0].HtmlUrl, nil
+			}
+		} else {
+			slog.Info("[updater] beta releases API returned non-200, falling back to Tags API",
+				"status", resp.StatusCode)
+			resp.Body.Close()
+		}
+	}
+
+	// Fallback: use the first tag (including pre-releases)
+	tagsResp, tagsErr := httpClient.Get("https://api.github.com/repos/" + githubRepo + "/tags?per_page=5")
+	if tagsErr != nil {
+		return "", "", "", tagsErr
+	}
+	defer tagsResp.Body.Close()
+
+	if tagsResp.StatusCode == 200 {
+		var tags []GitHubTag
+		tagsBody, _ := io.ReadAll(tagsResp.Body)
+		if jsonErr := json.Unmarshal(tagsBody, &tags); jsonErr == nil && len(tags) > 0 {
+			url := "https://github.com/" + githubRepo + "/releases/tag/" + tags[0].Name
+			slog.Info("[updater] resolved beta version via Tags API fallback", "version", tags[0].Name)
+			return tags[0].Name, "", url, nil
+		}
+	}
+
+	return "", "", "", nil
 }
 
 // CheckUpdate queries the GitHub API to see if a newer release exists based on the Update Channel
@@ -82,69 +195,57 @@ func CheckUpdate(c *gin.Context) {
 	var message string
 	var htmlUrl string
 
-	if channel == "nightly" {
-		resp, err := httpClient.Get("https://api.github.com/repos/McEveritts/AetherFlow/commits/master")
-		if err != nil {
-			InternalError(c, "Failed to reach GitHub API for nightly")
-			return
-		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode == 200 {
-			var commit GitHubCommit
-			bodyBytes, _ := io.ReadAll(resp.Body)
-			if err := json.Unmarshal(bodyBytes, &commit); err == nil {
-				shortSha := commit.Sha
-				if len(shortSha) > 7 {
-					shortSha = shortSha[:7]
+	switch channel {
+	case "nightly":
+		resp, reqErr := httpClient.Get("https://api.github.com/repos/" + githubRepo + "/commits/master")
+		if reqErr != nil {
+			slog.Error("[updater] nightly commits API request failed", "error", reqErr)
+		} else {
+			defer resp.Body.Close()
+			if resp.StatusCode == 200 {
+				var commit GitHubCommit
+				bodyBytes, _ := io.ReadAll(resp.Body)
+				if jsonErr := json.Unmarshal(bodyBytes, &commit); jsonErr == nil {
+					shortSha := commit.Sha
+					if len(shortSha) > 7 {
+						shortSha = shortSha[:7]
+					}
+					latestVersion = "nightly-" + shortSha
+					message = commit.Commit.Message
+					htmlUrl = commit.HtmlUrl
+					updateAvailable = (currentVersion != latestVersion)
 				}
-				latestVersion = "nightly-" + shortSha
-				message = commit.Commit.Message
-				htmlUrl = commit.HtmlUrl
-				// For nightly, if currentVersion isn't the commit sha, it's an update
-				updateAvailable = (currentVersion != latestVersion)
+			} else {
+				slog.Warn("[updater] nightly commits API returned non-200", "status", resp.StatusCode)
 			}
 		}
-	} else if channel == "beta" {
-		resp, err := httpClient.Get("https://api.github.com/repos/McEveritts/AetherFlow/releases")
-		if err != nil {
-			InternalError(c, "Failed to reach GitHub API for releases")
-			return
-		}
-		defer resp.Body.Close()
 
-		if resp.StatusCode == 200 {
-			var releases []GitHubRelease
-			bodyBytes, _ := io.ReadAll(resp.Body)
-			if err := json.Unmarshal(bodyBytes, &releases); err == nil && len(releases) > 0 {
-				latestVersion = releases[0].TagName
-				message = releases[0].Body
-				htmlUrl = releases[0].HtmlUrl
-				updateAvailable = isNewerVersion(currentVersion, latestVersion)
-			}
+	case "beta":
+		tag, releaseBody, url, fetchErr := fetchLatestBetaRelease()
+		if fetchErr != nil {
+			slog.Error("[updater] beta version resolution failed", "error", fetchErr)
+		} else if tag != "" {
+			latestVersion = tag
+			message = releaseBody
+			htmlUrl = url
+			updateAvailable = isNewerVersion(currentVersion, latestVersion)
 		}
-	} else {
-		// Stable
-		resp, err := httpClient.Get("https://api.github.com/repos/McEveritts/AetherFlow/releases/latest")
-		if err != nil {
-			InternalError(c, "Failed to reach GitHub API for stable release")
-			return
-		}
-		defer resp.Body.Close()
 
-		if resp.StatusCode == 200 {
-			var release GitHubRelease
-			bodyBytes, _ := io.ReadAll(resp.Body)
-			if err := json.Unmarshal(bodyBytes, &release); err == nil {
-				latestVersion = release.TagName
-				message = release.Body
-				htmlUrl = release.HtmlUrl
-				updateAvailable = isNewerVersion(currentVersion, latestVersion)
-			}
+	default: // "stable"
+		tag, releaseBody, url, fetchErr := fetchLatestStableRelease()
+		if fetchErr != nil {
+			slog.Error("[updater] stable version resolution failed", "error", fetchErr)
+		} else if tag != "" {
+			latestVersion = tag
+			message = releaseBody
+			htmlUrl = url
+			updateAvailable = isNewerVersion(currentVersion, latestVersion)
 		}
 	}
 
 	if latestVersion == "" {
+		slog.Warn("[updater] could not resolve latest version",
+			"channel", channel, "currentVersion", currentVersion)
 		c.JSON(http.StatusOK, gin.H{
 			"updateAvailable": false,
 			"currentVersion":  currentVersion,
