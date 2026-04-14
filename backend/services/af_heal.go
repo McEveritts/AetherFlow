@@ -251,12 +251,21 @@ func executeRecovery(displayName, processName, managedBy string, actionID int) {
 	case "systemd":
 		cmd = exec.CommandContext(ctx, "systemctl", "restart", processName)
 	case "pm2":
-		cmd = exec.CommandContext(ctx, "pm2", "restart", processName)
+		// Attempt PM2 if available, otherwise fall back to systemd
+		pm2Path := findPM2Binary()
+		if pm2Path != "" {
+			cmd = exec.CommandContext(ctx, pm2Path, "restart", processName)
+		} else {
+			healLog.Warn("pm2 binary not found, falling back to systemd",
+				"service", displayName)
+			cmd = exec.CommandContext(ctx, "systemctl", "restart", processName)
+		}
 	default:
-		healLog.Warn("recovery skipped: unknown manager",
+		// Default fallback: try systemd for any unrecognized manager
+		healLog.Warn("unknown manager, falling back to systemd",
 			"service", displayName,
 			"manager", managedBy)
-		return
+		cmd = exec.CommandContext(ctx, "systemctl", "restart", processName)
 	}
 
 	output, err := cmd.CombinedOutput()

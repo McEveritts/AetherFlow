@@ -162,7 +162,11 @@ func (c *GRPCClient) executeCommand(cmd *pb.RemoteCommand) {
 		serviceName := cmd.Params["service"]
 		managedBy := cmd.Params["managed_by"]
 		if managedBy == "pm2" {
-			services.ControlPM2Service(serviceName, "restart")
+			// Attempt PM2, fall back to systemd if binary not found
+			if err := services.ControlPM2Service(serviceName, "restart"); err != nil {
+				slog.Warn("PM2 restart failed, falling back to systemd", "service", serviceName, "error", err)
+				services.ControlService(serviceName, "restart")
+			}
 		} else {
 			services.ControlService(serviceName, "restart")
 		}

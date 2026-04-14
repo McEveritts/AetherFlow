@@ -1,6 +1,7 @@
 package api
 
 import (
+	"log/slog"
 	"net/http"
 	"os"
 	"strings"
@@ -315,6 +316,12 @@ func controlService(c *gin.Context) {
 	var err error
 	if req.ManagedBy == "pm2" {
 		err = services.ControlPM2Service(target, req.Action)
+		if err != nil {
+			// PM2 not available — fall back to systemd
+			slog.Warn("PM2 control failed, falling back to systemd",
+				"service", target, "action", req.Action, "error", err)
+			err = services.ControlService(target, req.Action)
+		}
 	} else {
 		err = services.ControlService(target, req.Action)
 	}
