@@ -150,7 +150,7 @@ export default function LoginPage() {
                     <div className="text-center mb-10">
                         {step === 'credentials' ? (
                             <div className="mx-auto h-20 w-20 mb-6 rounded-[1.25rem] shadow-[0_0_30px_rgba(99,102,241,0.3)] relative overflow-hidden ring-1 ring-white/10">
-                                <img src="/img/af-logo.png" alt="AetherFlow Logo" className="w-full h-full object-cover" />
+                                <img src="/img/af-logo.png" alt="AetherFlow Logo" className="w-full h-full object-cover scale-[1.15]" />
                             </div>
                         ) : (
                             <div className="mx-auto h-16 w-16 mb-6 rounded-2xl bg-gradient-to-br from-indigo-500 via-blue-600 to-indigo-800 flex items-center justify-center shadow-[0_0_30px_rgba(99,102,241,0.3)] relative overflow-hidden">

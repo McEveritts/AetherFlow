@@ -61,9 +61,8 @@ export default function Sidebar() {
                     <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-indigo-500/50 to-transparent"></div>
 
                     <div className="flex items-center gap-4 w-full relative z-10 mt-1">
-                        <div className="h-9 w-9 min-w-[2.25rem] rounded-xl bg-gradient-to-br from-indigo-500 via-blue-600 to-indigo-800 flex items-center justify-center shadow-[0_0_20px_rgba(99,102,241,0.3)] relative overflow-hidden">
-                            <div className="absolute inset-0 bg-[url('data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI4IiBoZWlnaHQ9IjgiPgo8cmVjdCB3aWR0aD0iOCIgaGVpZ2h0PSI4IiBmaWxsPSIjZmZmIiBmaWxsLW9wYWNpdHk9IjAuMSIvPgo8L3N2Zz4=')] opacity-30 mix-blend-overlay"></div>
-                            <span className="font-extrabold text-white text-lg tracking-tighter mix-blend-screen drop-shadow-md">A</span>
+                        <div className="h-9 w-9 min-w-[2.25rem] rounded-xl shadow-[0_0_20px_rgba(99,102,241,0.3)] relative overflow-hidden ring-1 ring-white/10">
+                            <img src="/img/af-logo.png" alt="AetherFlow Logo" className="w-full h-full object-cover scale-[1.15]" />
                         </div>
                         <h1 className={`text-xl font-bold tracking-tight bg-gradient-to-r from-slate-100 to-slate-400 bg-clip-text text-transparent transition-opacity duration-300 truncate whitespace-nowrap ${isSidebarHovered ? 'opacity-100' : 'opacity-0 w-0'}`}>
                             AetherFlow
