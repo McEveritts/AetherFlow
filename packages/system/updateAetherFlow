@@ -312,8 +312,8 @@ function _buildmodernstack() {
         /usr/local/go/bin/go mod tidy >>"${OUTTO}" 2>&1
         /usr/local/go/bin/go build -o aetherflow-api main.go >>"${OUTTO}" 2>&1
         
-        # Restart Go API via PM2
-        pm2 restart aetherflow-api || pm2 start ./aetherflow-api --name "aetherflow-api" >>"${OUTTO}" 2>&1
+        # Restart Go API via systemd
+        systemctl restart aetherflow-api >>"${OUTTO}" 2>&1
     fi
 
     # Build Next.js Frontend
@@ -322,11 +322,9 @@ function _buildmodernstack() {
         npm install >>"${OUTTO}" 2>&1
         npm run build >>"${OUTTO}" 2>&1
         
-        # Restart Next.js via PM2
-        pm2 restart aetherflow-frontend || pm2 start npm --name "aetherflow-frontend" -- start >>"${OUTTO}" 2>&1
+        # Restart Next.js via systemd
+        systemctl restart aetherflow-frontend >>"${OUTTO}" 2>&1
     fi
-
-    pm2 save >>"${OUTTO}" 2>&1
 }
 
 function _fin() {

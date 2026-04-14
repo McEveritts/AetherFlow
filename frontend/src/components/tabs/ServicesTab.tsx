@@ -115,14 +115,17 @@ export default function ServicesTab() {
 
     const allEntries = Object.entries(services || {});
 
+    // Core platform process names
+    const corePlatformProcesses = ['aetherflow-api', 'aetherflow-frontend', 'apache2', 'nginx'];
+
     // Separate core platform services from installed apps
     const coreServices = allEntries.filter(([, d]) => {
         const info = d as ServiceInfo;
-        return info.managed_by === 'pm2' || ['apache2', 'nginx'].includes(info.process || '');
+        return corePlatformProcesses.includes(info.process || '');
     });
     const appServices = allEntries.filter(([, d]) => {
         const info = d as ServiceInfo;
-        return info.managed_by !== 'pm2' && !['apache2', 'nginx'].includes(info.process || '');
+        return !corePlatformProcesses.includes(info.process || '');
     });
 
     const runningCount = allEntries.filter(([, d]) => (d as ServiceInfo).status === 'running').length;
@@ -141,7 +144,7 @@ export default function ServicesTab() {
                 <div className="flex justify-between items-start mb-6">
                     <div className="flex items-center gap-4">
                         <div className="h-12 w-12 rounded-2xl bg-slate-900 border border-white/10 flex items-center justify-center shadow-inner group-hover:scale-105 transition-transform">
-                            {data.managed_by === 'pm2' ? (
+                            {corePlatformProcesses.includes(data.process || '') ? (
                                 <Cpu size={24} className={isRunning ? 'text-emerald-400' : (isError ? 'text-red-400' : 'text-slate-500')} />
                             ) : (
                                 <Box size={24} className={isRunning ? 'text-emerald-400' : (isError ? 'text-red-400' : 'text-slate-500')} />
