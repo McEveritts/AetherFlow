@@ -25,6 +25,27 @@ var (
 	activeJobs sync.Map
 )
 
+// ResolvePackageScriptPath finds the bash script location. Returns empty string if missing.
+func ResolvePackageScriptPath(action, scriptName string) string {
+	candidates := []string{
+		filepath.Join("/opt", "AetherFlow", "packages", "package", action, scriptName),
+	}
+	if exeDir != "" {
+		candidates = append(candidates, filepath.Join(exeDir, "..", "packages", "package", action, scriptName))
+	}
+	candidates = append(candidates,
+		filepath.Join("packages", "package", action, scriptName),
+		filepath.Join("..", "packages", "package", action, scriptName),
+	)
+
+	for _, c := range candidates {
+		if _, err := os.Stat(c); err == nil {
+			return c
+		}
+	}
+	return ""
+}
+
 // RunPackageAction executes the specified bash script for installing or removing a package.
 // It streams output line-by-line so we can track progress in real time.
 func RunPackageAction(action, pkgId, scriptName, lockFile string) {
@@ -45,32 +66,20 @@ func RunPackageAction(action, pkgId, scriptName, lockFile string) {
 	slog.Info("starting package action", "action", action, "package", pkgId)
 
 	defer func() {
-		activeJobs.Delete(pkgId)
-		slog.Info("package action finalized", "action", action, "package", pkgId)
+		// Use a delayed deletion to allow frontend SWR polling to catch failure states
+		go func() {
+			time.Sleep(30 * time.Second)
+			activeJobs.Delete(pkgId)
+			slog.Info("package action finalized", "action", action, "package", pkgId)
+		}()
 	}()
 
-	// Resolve script path — try multiple locations so this works from any CWD
-	candidates := []string{
-		filepath.Join("/opt", "AetherFlow", "packages", "package", action, scriptName),
-	}
-	if exeDir != "" {
-		// Executable lives in backend/, so packages/ is ../packages/ relative to it
-		candidates = append(candidates, filepath.Join(exeDir, "..", "packages", "package", action, scriptName))
-	}
-	candidates = append(candidates,
-		filepath.Join("packages", "package", action, scriptName),       // CWD is project root
-		filepath.Join("..", "packages", "package", action, scriptName), // CWD is backend/
-	)
-
-	scriptPath := ""
-	for _, c := range candidates {
-		if _, err := os.Stat(c); err == nil {
-			scriptPath = c
-			break
-		}
-	}
+	scriptPath := ResolvePackageScriptPath(action, scriptName)
 	if scriptPath == "" {
 		slog.Error("install script not found", "action", action, "package", pkgId)
+		job.Status = "failed"
+		job.LastLine = "Error: Script not found"
+		job.Progress = 100
 		return
 	}
 
@@ -84,16 +93,27 @@ func RunPackageAction(action, pkgId, scriptName, lockFile string) {
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		slog.Error("failed to create stdout pipe", "action", action, "script", scriptName, "error", err)
-		// Fallback to CombinedOutput
-		output, runErr := exec.Command("bash", scriptPath).CombinedOutput()
-		if runErr != nil {
-			slog.Error("fallback execution error", "action", action, "error", runErr, "output", string(output))
-		}
+		// Fallback to async combined output so we don't stall the pipe
+		go func() {
+			output, runErr := exec.Command("bash", scriptPath).CombinedOutput()
+			job.LogLines = len(strings.Split(string(output), "\n"))
+			job.Progress = 100
+			if runErr != nil {
+				job.Status = "failed"
+				job.LastLine = "Error: " + runErr.Error()
+				slog.Error("fallback execution error", "action", action, "error", runErr)
+			} else {
+				job.LastLine = "Complete!"
+			}
+		}()
 		return
 	}
 	cmd.Stderr = cmd.Stdout // merge stderr into stdout pipe
 
 	if err := cmd.Start(); err != nil {
+		job.Status = "failed"
+		job.LastLine = "Error: " + err.Error()
+		job.Progress = 100
 		slog.Error("failed to start script", "action", action, "script", scriptName, "error", err)
 		return
 	}
@@ -125,6 +145,7 @@ func RunPackageAction(action, pkgId, scriptName, lockFile string) {
 
 	if err := cmd.Wait(); err != nil {
 		slog.Error("script exited with error", "action", action, "script", scriptName, "error", err)
+		job.Status = "failed"
 		job.LastLine = "Error: " + err.Error()
 		job.Progress = 100
 		return

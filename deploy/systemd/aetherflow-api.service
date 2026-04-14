@@ -1,0 +1,59 @@
+[Unit]
+Description=AetherFlow Go API Gateway
+Documentation=https://github.com/McEveritts/AetherFlow
+
+# ── Boot Race Prevention ─────────────────────────────────────────────────────
+# Wait for true network connectivity (not just daemon start).
+After=network-online.target time-sync.target
+Wants=network-online.target
+
+# Block startup until the release directory mount is confirmed.
+RequiresMountsFor=/opt/AetherFlow
+
+[Service]
+Type=simple
+User=aetherflow
+Group=aetherflow
+WorkingDirectory=/opt/AetherFlow/current/backend
+
+# ── Execution ────────────────────────────────────────────────────────────────
+# The symlink /opt/AetherFlow/current always points to the active release.
+ExecStart=/opt/AetherFlow/current/backend/aetherflow-api
+
+# Environment injection via .env file (non-secret tunables).
+EnvironmentFile=-/opt/AetherFlow/current/.env
+
+# ── Signal Traps & Graceful Shutdown ─────────────────────────────────────────
+# Reap ALL processes in the cgroup, not just the main PID.
+KillMode=control-group
+KillSignal=SIGTERM
+
+# Grace period before SIGKILL. Must align with Go's shutdown context (30s).
+# Set slightly higher to let the application complete its drain first.
+TimeoutStopSec=35s
+
+# ── Restart Policy ───────────────────────────────────────────────────────────
+Restart=on-failure
+RestartSec=5s
+
+# ── Security Hardening (Zero-Trust Namespace Isolation) ──────────────────────
+# Mount host filesystem as immutable read-only.
+ProtectSystem=strict
+
+# Deny access to user home directories (SSH keys, bash_history).
+ProtectHome=yes
+
+# Isolate /tmp per-service to prevent cross-process payload sharing.
+PrivateTmp=yes
+
+# Strip SUID/SGID — prevent privilege escalation.
+NoNewPrivileges=yes
+
+# Restrict writable paths to only what the API needs.
+ReadWritePaths=/var/lib/openclaw /var/log/aetherflow
+
+# ── Resource Limits ──────────────────────────────────────────────────────────
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

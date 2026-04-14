@@ -35,12 +35,12 @@ func init() {
 	if err != nil {
 		slog.Warn("Could not resolve executable path, using relative paths", "error", err)
 		versionFilePath = "../.version"
-		updateScriptPath = "../scripts/update.sh"
+		updateScriptPath = "../scripts/deployment_engine.sh"
 		return
 	}
 	execDir := filepath.Dir(execPath)
 	versionFilePath = filepath.Clean(filepath.Join(execDir, "..", ".version"))
-	updateScriptPath = filepath.Clean(filepath.Join(execDir, "..", "scripts", "update.sh"))
+	updateScriptPath = filepath.Clean(filepath.Join(execDir, "..", "scripts", "deployment_engine.sh"))
 }
 
 // httpClient is a timeout-bound HTTP client for outbound requests.
@@ -56,58 +56,117 @@ func getLocalVersion() string {
 	return strings.TrimSpace(string(versionBytes))
 }
 
-// CheckUpdate queries the GitHub API to see if a newer release exists
+
+
+// GitHubCommit represents the structure of the GitHub Commits API response
+type GitHubCommit struct {
+	Sha    string `json:"sha"`
+	HtmlUrl string `json:"html_url"`
+	Commit struct {
+		Message string `json:"message"`
+	} `json:"commit"`
+}
+
+// CheckUpdate queries the GitHub API to see if a newer release exists based on the Update Channel
 func CheckUpdate(c *gin.Context) {
 	currentVersion := getLocalVersion()
 
-	// Use McEveritts/AetherFlow with a timeout-bound client
-	resp, err := httpClient.Get("https://api.github.com/repos/McEveritts/AetherFlow/releases/latest")
-	if err != nil {
-		InternalError(c, "Failed to reach GitHub API")
-		return
+	var channel string
+	err := db.DB.QueryRow("SELECT update_channel FROM settings WHERE id = 1").Scan(&channel)
+	if err != nil || channel == "" {
+		channel = "stable"
 	}
-	defer resp.Body.Close()
 
-	if resp.StatusCode != 200 {
+	var updateAvailable bool
+	var latestVersion string
+	var message string
+	var htmlUrl string
+
+	if channel == "nightly" {
+		resp, err := httpClient.Get("https://api.github.com/repos/McEveritts/AetherFlow/commits/master")
+		if err != nil {
+			InternalError(c, "Failed to reach GitHub API for nightly")
+			return
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode == 200 {
+			var commit GitHubCommit
+			bodyBytes, _ := io.ReadAll(resp.Body)
+			if err := json.Unmarshal(bodyBytes, &commit); err == nil {
+				shortSha := commit.Sha
+				if len(shortSha) > 7 {
+					shortSha = shortSha[:7]
+				}
+				latestVersion = "nightly-" + shortSha
+				message = commit.Commit.Message
+				htmlUrl = commit.HtmlUrl
+				// For nightly, if currentVersion isn't the commit sha, it's an update
+				updateAvailable = (currentVersion != latestVersion)
+			}
+		}
+	} else if channel == "beta" {
+		resp, err := httpClient.Get("https://api.github.com/repos/McEveritts/AetherFlow/releases")
+		if err != nil {
+			InternalError(c, "Failed to reach GitHub API for releases")
+			return
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode == 200 {
+			var releases []GitHubRelease
+			bodyBytes, _ := io.ReadAll(resp.Body)
+			if err := json.Unmarshal(bodyBytes, &releases); err == nil && len(releases) > 0 {
+				latestVersion = releases[0].TagName
+				message = releases[0].Body
+				htmlUrl = releases[0].HtmlUrl
+				updateAvailable = isNewerVersion(currentVersion, latestVersion)
+			}
+		}
+	} else {
+		// Stable
+		resp, err := httpClient.Get("https://api.github.com/repos/McEveritts/AetherFlow/releases/latest")
+		if err != nil {
+			InternalError(c, "Failed to reach GitHub API for stable release")
+			return
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode == 200 {
+			var release GitHubRelease
+			bodyBytes, _ := io.ReadAll(resp.Body)
+			if err := json.Unmarshal(bodyBytes, &release); err == nil {
+				latestVersion = release.TagName
+				message = release.Body
+				htmlUrl = release.HtmlUrl
+				updateAvailable = isNewerVersion(currentVersion, latestVersion)
+			}
+		}
+	}
+
+	if latestVersion == "" {
 		c.JSON(http.StatusOK, gin.H{
 			"updateAvailable": false,
 			"currentVersion":  currentVersion,
-			"latestVersion":   "Unknown (Rate Limited)",
-			"message":         "API rate limit exceeded.",
+			"latestVersion":   "Unknown (API Error or Rate Limited)",
+			"message":         "Could not fetch latest updates.",
 		})
 		return
 	}
 
-	bodyBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		InternalError(c, "Failed to read GitHub response")
-		return
-	}
-
-	var release GitHubRelease
-	if err := json.Unmarshal(bodyBytes, &release); err != nil {
-		InternalError(c, "Failed to parse GitHub response")
-		return
-	}
-
-	// Proper semver comparison: only flag update if remote > local
-	updateAvailable := isNewerVersion(currentVersion, release.TagName)
-
 	c.JSON(http.StatusOK, gin.H{
 		"updateAvailable": updateAvailable,
 		"currentVersion":  currentVersion,
-		"latestVersion":   release.TagName,
-		"message":         release.Body,
-		"url":             release.HtmlUrl,
+		"latestVersion":   latestVersion,
+		"message":         message,
+		"url":             htmlUrl,
 	})
 }
 
 // isNewerVersion returns true if remote is strictly newer than local.
-// Handles versions like "v3.1.0", "3.1.0", "v3.2.0-beta".
 func isNewerVersion(local, remote string) bool {
 	parseVersion := func(v string) (int, int, int) {
 		v = strings.TrimPrefix(v, "v")
-		// Strip any pre-release suffix (e.g., "-beta", "-rc1")
 		if idx := strings.IndexByte(v, '-'); idx != -1 {
 			v = v[:idx]
 		}
@@ -137,44 +196,47 @@ func isNewerVersion(local, remote string) bool {
 	return rPat > lPat
 }
 
-// RunUpdate initiates the background bash script that pulls code and restarts PM2
+// RunUpdate initiates the background bash script to perform atomic blue/green deployment
 func RunUpdate(c *gin.Context) {
-	// Execute the update script asynchronously so the HTTP request can complete seamlessly
-	go func() {
-		slog.Info("Initiating over-the-air update sequence...")
+	var channel string
+	err := db.DB.QueryRow("SELECT update_channel FROM settings WHERE id = 1").Scan(&channel)
+	if err != nil || channel == "" {
+		channel = "stable"
+	}
 
-		// Bound the update script to 5 minutes to prevent infinite goroutine leaks
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	// Calculate target (for logging and script mapping)
+	go func(ch string) {
+		slog.Info("Initiating atomic Blue/Green update sequence...", "channel", ch)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 		defer cancel()
 
-		cmd := exec.CommandContext(ctx, "/bin/bash", updateScriptPath)
-		// Redirect output so it doesn't wait on pipes
+		cmd := exec.CommandContext(ctx, "/bin/bash", updateScriptPath, ch)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 
 		if err := cmd.Start(); err != nil {
-			slog.Error("failed to start update script", "error", err)
+			slog.Error("failed to start deployment engine", "error", err)
 			return
 		}
 
-		// Wait in goroutine — context cancellation will kill the process if it exceeds 5 min
 		err := cmd.Wait()
 		if ctx.Err() == context.DeadlineExceeded {
-			slog.Error("update script killed after timeout", "timeout", "5m")
+			slog.Error("deployment script killed after timeout", "timeout", "10m")
 		} else if err != nil {
-			slog.Info("Update script finished with error", "error", err)
+			slog.Info("Deployment script finished with error", "error", err)
 		} else {
-			slog.Info("Update script finished successfully.")
+			slog.Info("Deployment script finished successfully.")
 		}
-	}()
+	}(channel)
 
 	userID, _ := c.Get("user_id")
 	username, _ := c.Get("username")
 	uid, _ := userID.(int)
 	uname, _ := username.(string)
-	db.RecordAudit(uid, uname, "system_update", "system", "ota", "", c.ClientIP(), c.Request.UserAgent())
+	db.RecordAudit(uid, uname, "system_deployment", "engine", "blue_green", "Channel: "+channel, c.ClientIP(), c.Request.UserAgent())
 
 	c.JSON(http.StatusOK, gin.H{
-		"message": "Update sequence initiated. The dashboard will restart momentarily.",
+		"message": "Atomic deployment initiated. The system will cleanly transition once builds are complete.",
 	})
 }

@@ -53,7 +53,7 @@ export default function Sidebar() {
             )}
 
             <aside
-                className={`fixed inset-y-0 left-0 z-50 flex flex-col glass-panel border-r border-white/[0.05] transition-all duration-300 ease-[cubic-bezier(0.4,0,0.2,1)] shadow-[4px_0_24px_rgba(0,0,0,0.2)]
+                className={`sticky top-4 h-[calc(100vh-2rem)] overflow-y-auto z-50 flex flex-col glass-panel border-r border-white/[0.05] transition-all duration-300 ease-[cubic-bezier(0.4,0,0.2,1)] shadow-[4px_0_24px_rgba(0,0,0,0.2)]
                 ${isMobileMenuOpen ? 'translate-x-0 w-64' : '-translate-x-full'} 
                 md:translate-x-0 ${isSidebarHovered ? 'md:w-64' : 'md:w-20'}`}
                 onMouseEnter={() => setIsSidebarHovered(true)}

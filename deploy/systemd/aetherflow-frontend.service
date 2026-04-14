@@ -1,0 +1,51 @@
+[Unit]
+Description=AetherFlow Next.js Frontend
+Documentation=https://github.com/McEveritts/AetherFlow
+
+# ── Boot Race Prevention ─────────────────────────────────────────────────────
+# Frontend depends on the API being available first.
+After=network-online.target aetherflow-api.service
+Wants=network-online.target
+Requires=aetherflow-api.service
+
+# Block startup until the release directory mount is confirmed.
+RequiresMountsFor=/opt/AetherFlow
+
+[Service]
+Type=simple
+User=aetherflow
+Group=aetherflow
+WorkingDirectory=/opt/AetherFlow/current/frontend
+
+# ── Execution ────────────────────────────────────────────────────────────────
+# Start the Next.js production server from the symlinked release.
+ExecStart=/usr/bin/npm start
+
+# Environment injection.
+EnvironmentFile=-/opt/AetherFlow/current/.env
+Environment=NODE_ENV=production
+Environment=PORT=3000
+
+# ── Signal Traps & Graceful Shutdown ─────────────────────────────────────────
+KillMode=control-group
+KillSignal=SIGTERM
+TimeoutStopSec=20s
+
+# ── Restart Policy ───────────────────────────────────────────────────────────
+Restart=on-failure
+RestartSec=5s
+
+# ── Security Hardening (Zero-Trust Namespace Isolation) ──────────────────────
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+
+# Frontend only needs read access to its own directory and /tmp for builds.
+ReadWritePaths=/var/log/aetherflow
+
+# ── Resource Limits ──────────────────────────────────────────────────────────
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

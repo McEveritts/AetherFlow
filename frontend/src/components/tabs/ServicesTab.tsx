@@ -99,7 +99,7 @@ export default function ServicesTab() {
             });
             if (!res.ok) {
                 const d = await res.json().catch(() => ({}));
-                throw new Error(d.error || 'Daemon control operation rejected.');
+                throw new Error(d.message || d.error || 'Daemon control operation rejected.');
             }
             addToast(`Successfully executed '${action}' on ${name}.`, 'success');
             // Revalidate to get actual server state

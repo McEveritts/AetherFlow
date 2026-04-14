@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sync"
 )
@@ -160,40 +159,24 @@ func GetPackages() ([]models.Package, error) {
 			}
 
 			// 2. For systemd services, check if the unit actually exists on the system
-			if pkgs[idx].ServiceType == "systemd" && pkgs[idx].ServiceName != "" {
-				// Check if the systemd unit file exists (not just its status)
-				unitExists := false
-				checkCmd := exec.Command("systemctl", "cat", pkgs[idx].ServiceName)
-				if err := checkCmd.Run(); err == nil {
-					unitExists = true
-				}
-
-				mu.Lock()
-				if unitExists {
+			lockPath := pkgs[idx].LockFile
+			if lockPath != "" {
+				if _, err := os.Stat(lockPath); err == nil {
+					mu.Lock()
 					pkgs[idx].Status = "installed"
-				} else {
-					pkgs[idx].Status = "uninstalled"
-				}
-				mu.Unlock()
-			} else {
-				// Legacy lock file check
-				lockPath := pkgs[idx].LockFile
-				if lockPath != "" {
-					if _, err := os.Stat(lockPath); err == nil {
-						mu.Lock()
-						pkgs[idx].Status = "installed"
-						mu.Unlock()
-					} else {
-						mu.Lock()
-						pkgs[idx].Status = "uninstalled"
-						mu.Unlock()
-					}
+					mu.Unlock()
 				} else {
 					mu.Lock()
 					pkgs[idx].Status = "uninstalled"
 					mu.Unlock()
 				}
+				return
 			}
+
+			// Fallback if packages.json is missing lock_file definition for an app
+			mu.Lock()
+			pkgs[idx].Status = "uninstalled"
+			mu.Unlock()
 		}(i)
 	}
 	wg.Wait()

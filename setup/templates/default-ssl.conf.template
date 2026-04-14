@@ -1,10 +1,3 @@
-SSLPassPhraseDialog builtin
-SSLSessionCache shmcb:/var/cache/mod_ssl/scache(512000)
-SSLSessionCacheTimeout 300
-SSLRandomSeed startup file:/dev/urandom 256
-SSLRandomSeed connect builtin
-SSLCryptoDevice builtin
-
 <VirtualHost *:80>
         ServerName _
         RewriteEngine On
@@ -26,8 +19,6 @@ SSLCryptoDevice builtin
         SSLCipherSuite HIGH:!aNULL:!MD5:!3DES
         SSLCompression off
         SSLSessionTickets off
-        SSLUseStapling On
-        SSLStaplingCache shmcb:/var/cache/mod_ssl/stapling_cache(128000)
 
         SSLCertificateFile /etc/ssl/certs/ssl-cert-snakeoil.pem
         SSLCertificateKeyFile /etc/ssl/private/ssl-cert-snakeoil.key

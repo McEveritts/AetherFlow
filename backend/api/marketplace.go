@@ -99,8 +99,14 @@ func InstallPackage(c *gin.Context) {
 		return
 	}
 
+	scriptName := "installpackage-" + pkg.Name
+	if services.ResolvePackageScriptPath("install", scriptName) == "" {
+		InternalError(c, "Provisioning script is missing or unreadable on the server")
+		return
+	}
+
 	// Trigger async install
-	go services.RunPackageAction("install", pkg.Name, "installpackage-"+pkg.Name, pkg.LockFile)
+	go services.RunPackageAction("install", pkg.Name, scriptName, pkg.LockFile)
 
 	c.JSON(http.StatusOK, gin.H{
 		"message": "Installation started successfully",
@@ -128,9 +134,14 @@ func UninstallPackage(c *gin.Context) {
 		return
 	}
 
+	scriptName := "removepackage-" + pkg.Name
+	if services.ResolvePackageScriptPath("remove", scriptName) == "" {
+		InternalError(c, "Tear-down script is missing or unreadable on the server")
+		return
+	}
+
 	// Trigger async uninstall
-	// Note: According to packages.json, the remove script convention is typically removepackage-pkgname
-	go services.RunPackageAction("remove", pkg.Name, "removepackage-"+pkg.Name, pkg.LockFile)
+	go services.RunPackageAction("remove", pkg.Name, scriptName, pkg.LockFile)
 
 	c.JSON(http.StatusOK, gin.H{
 		"message": "Uninstallation started successfully",

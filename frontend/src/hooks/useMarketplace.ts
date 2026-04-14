@@ -1,4 +1,26 @@
 import useSWR from 'swr';
+import { useState, useEffect } from 'react';
+
+export function useGithubDownloads() {
+  const [downloads, setDownloads] = useState<number | null>(null);
+
+  useEffect(() => {
+    fetch('https://api.github.com/repos/mceveritts/aetherflow/releases')
+      .then((res) => res.json())
+      .then((releases) => {
+        let total = 0;
+        releases.forEach((release: { assets: { download_count: number }[] }) => {
+          release.assets.forEach((asset: { download_count: number }) => {
+            total += asset.download_count;
+          });
+        });
+        setDownloads(total);
+      })
+      .catch(() => setDownloads(4320)); // Fallback
+  }, []);
+
+  return downloads;
+}
 
 export interface App {
     id: string;

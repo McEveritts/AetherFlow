@@ -1,0 +1,7 @@
+printf '%s\n' 7338 | sudo -S -p '' bash -lc '
+set -e
+sed -i "/SSLUseStapling/d;/SSLStaplingCache/d" /etc/apache2/sites-enabled/default-ssl.conf
+apachectl configtest
+systemctl restart apache2
+systemctl is-active apache2
+'
