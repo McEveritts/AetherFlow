@@ -173,3 +173,27 @@ func resolveActorID(c *gin.Context) int {
 	}
 	return 0
 }
+
+// GetPendingAction returns a single action by its ID, including its execution log.
+// GET /api/admin/actions/:id
+func GetPendingAction(c *gin.Context) {
+	actionID := c.Param("id")
+
+	var a PendingAction
+	err := db.DB.QueryRow(
+		`SELECT id, classification, source, action, reason, status, created_at, resolved_at, resolved_by, execution_log
+		 FROM pending_actions WHERE id = ?`, actionID,
+	).Scan(&a.ID, &a.Classification, &a.Source, &a.Action, &a.Reason,
+		&a.Status, &a.CreatedAt, &a.ResolvedAt, &a.ResolvedBy, &a.ExecutionLog)
+
+	if err == sql.ErrNoRows {
+		RespondError(c, http.StatusNotFound, ErrCodeNotFound, "Action not found")
+		return
+	} else if err != nil {
+		slog.Error("[action-gates] Failed to query action", "error", err, "id", actionID)
+		RespondError(c, http.StatusInternalServerError, ErrCodeInternal, "Failed to query action")
+		return
+	}
+
+	c.JSON(http.StatusOK, a)
+}

@@ -3,6 +3,11 @@
 import { useState, useCallback } from 'react';
 import useSWR from 'swr';
 import { Search, Filter, ChevronLeft, ChevronRight, Clock, User, Activity, FileText } from 'lucide-react';
+import { useToast } from '@/contexts/ToastContext';
+import { apiFetch } from '@/lib/fetcher';
+import { ActionDetailModal } from '@/components/tabs/ActionDetailModal';
+import ServiceLogsModal from '@/components/tabs/ServiceLogsModal';
+import type { PendingAction } from '@/types/api';
 
 interface AuditEntry {
     id: number;
@@ -61,10 +66,15 @@ function formatTimestamp(ts: string): string {
 const PAGE_SIZE = 25;
 
 export default function AuditTab() {
+    const { addToast } = useToast();
     const [page, setPage] = useState(0);
     const [actionFilter, setActionFilter] = useState('');
     const [usernameFilter, setUsernameFilter] = useState('');
     const [searchInput, setSearchInput] = useState('');
+
+    const [selectedAction, setSelectedAction] = useState<PendingAction | null>(null);
+    const [selectedService, setSelectedService] = useState<string | null>(null);
+    const [isFetchingDetail, setIsFetchingDetail] = useState(false);
 
     const buildKey = useCallback(() => {
         const params = new URLSearchParams();
@@ -87,6 +97,30 @@ export default function AuditTab() {
     const handleSearch = () => {
         setUsernameFilter(searchInput.trim());
         setPage(0);
+    };
+
+    const handleRowClick = async (entry: AuditEntry) => {
+        if (entry.target_type === 'pending_action') {
+            const id = parseInt(entry.target_id, 10);
+            if (isNaN(id)) return;
+            
+            setIsFetchingDetail(true);
+            try {
+                const res = await apiFetch(`/api/v1/admin/actions/${id}`);
+                if (res.ok) {
+                    const data = await res.json();
+                    setSelectedAction(data);
+                } else {
+                    addToast('Failed to load action details', 'error');
+                }
+            } catch (err) {
+                addToast('Network error loading action', 'error');
+            } finally {
+                setIsFetchingDetail(false);
+            }
+        } else if (entry.target_type === 'service') {
+            setSelectedService(entry.target_id);
+        }
     };
 
     const availableActions = Object.keys(ACTION_BADGE_MAP);
@@ -204,7 +238,11 @@ export default function AuditTab() {
                             </thead>
                             <tbody className="divide-y divide-white/[0.04]">
                                 {entries.map((entry) => (
-                                    <tr key={entry.id} className="hover:bg-white/[0.02] transition-colors">
+                                    <tr 
+                                        key={entry.id} 
+                                        className={`transition-colors ${entry.target_type === 'pending_action' || entry.target_type === 'service' ? 'hover:bg-white/[0.06] cursor-pointer' : 'hover:bg-white/[0.02]'}`}
+                                        onClick={() => handleRowClick(entry)}
+                                    >
                                         <td className="px-4 py-3 text-slate-400 whitespace-nowrap font-mono text-xs">
                                             {formatTimestamp(entry.created_at)}
                                         </td>
@@ -260,6 +298,45 @@ export default function AuditTab() {
                     </div>
                 )}
             </div>
+
+            {/* Context Modals */}
+            <ActionDetailModal
+                action={selectedAction}
+                isOpen={!!selectedAction}
+                onClose={() => setSelectedAction(null)}
+                onApprove={async (id) => {
+                    if (selectedAction?.source === 'FlowAI') {
+                        const match = selectedAction.action.match(/^(Restart|Stop|Start)\s+(.+)$/i);
+                        if (match) {
+                            try {
+                                await apiFetch(`/api/v1/admin/services/${encodeURIComponent(match[2])}/control`, {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ action: match[1].toLowerCase(), process: match[2] })
+                                });
+                            } catch (e) {}
+                        }
+                    }
+                    apiFetch(`/api/v1/admin/actions/${id}/approve`, { method: 'POST' }).then(() => {
+                        addToast('Action authorized', 'success');
+                        setSelectedAction(null);
+                    }).catch(() => addToast('Failed to authorize action', 'error'));
+                }}
+                onReject={(id) => {
+                    apiFetch(`/api/v1/admin/actions/${id}/reject`, { method: 'POST' }).then(() => {
+                        addToast('Action rejected', 'success');
+                        setSelectedAction(null);
+                    }).catch(() => addToast('Failed to reject action', 'error'));
+                }}
+                isProcessing={isFetchingDetail}
+            />
+
+            {selectedService && (
+                <ServiceLogsModal
+                    serviceName={selectedService}
+                    onClose={() => setSelectedService(null)}
+                />
+            )}
         </div>
     );
 }

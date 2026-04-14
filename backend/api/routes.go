@@ -267,6 +267,7 @@ func registerV1Routes(apiGroup *gin.RouterGroup) {
 
 		// Phase 9: Action Approval Gates
 		adminGroup.GET("/actions/pending", ListPendingActions)
+		adminGroup.GET("/actions/:id", GetPendingAction)
 		adminGroup.POST("/actions/:id/approve", ApproveAction)
 		adminGroup.POST("/actions/:id/reject", RejectAction)
 
