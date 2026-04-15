@@ -166,6 +166,11 @@ func RunPackageAction(action, pkgId, scriptName, lockFile string) {
 
 	job.Progress = 100
 	job.LastLine = "Complete!"
+	if action == "install" {
+		job.Status = "installed"
+	} else {
+		job.Status = "uninstalled"
+	}
 	slog.Info("script completed successfully", "action", action, "script", scriptName, "lines", lineCount)
 }
 
