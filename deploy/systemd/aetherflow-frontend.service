@@ -19,7 +19,7 @@ WorkingDirectory=/opt/AetherFlow/frontend
 
 # ── Execution ────────────────────────────────────────────────────────────────
 # Start the Next.js production server.
-ExecStart=/usr/bin/npm start
+ExecStart=/usr/local/bin/npm start
 
 # Environment injection.
 EnvironmentFile=-/opt/AetherFlow/frontend/.env

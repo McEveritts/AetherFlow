@@ -185,7 +185,7 @@ export default function OverviewTab({ metrics, hardware, history }: OverviewTabP
             )}
 
             {/* Core Widgets Grid */}
-            <div className={`grid gap-6 ${dashboardDensity === 'immersive' ? 'grid-cols-1 xl:grid-cols-2' : 'grid-cols-1 md:grid-cols-2 lg:grid-cols-3'}`}>
+            <div className={`grid gap-6 items-start ${dashboardDensity === 'immersive' ? 'grid-cols-1 xl:grid-cols-2' : 'grid-cols-1 md:grid-cols-2 lg:grid-cols-3'}`}>
                 
                 {/* 1. Primary Metrics */}
                 <div className="space-y-6">
@@ -211,7 +211,7 @@ export default function OverviewTab({ metrics, hardware, history }: OverviewTabP
 
                 {/* 3. System Visualization & Processes */}
                 <div className={`space-y-6 ${dashboardDensity === 'immersive' ? 'xl:col-span-2' : ''}`}>
-                    <div className={`grid gap-6 ${dashboardDensity === 'immersive' ? 'grid-cols-1 lg:grid-cols-3' : 'grid-cols-1'}`}>
+                    <div className={`grid gap-6 items-start ${dashboardDensity === 'immersive' ? 'grid-cols-1 lg:grid-cols-3' : 'grid-cols-1'}`}>
                         <div className={dashboardDensity === 'immersive' ? 'lg:col-span-2' : ''}>
                             <MemoAppTopologyMap metrics={tMetrics} density={dashboardDensity} />
                         </div>
