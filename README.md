@@ -46,14 +46,16 @@ We did not adopt complexity for the sake of it. AetherFlow is built on a rigid p
 
 ## 🖼️ Platform Previews
 
-**Intelligent Dashboard**
-![AetherFlow Dashboard](./docs/screenshot_dashboard.png)
-
-**AetherMarketplace**
-![AetherMarketplace](./docs/screenshot_marketplace.png)
-
-**FlowAI Assistant**
-![FlowAI Assistant](./docs/screenshot_flowai.png)
+| | |
+|:---:|:---:|
+| ![AetherFlow Dashboard](./docs/screenshot_dashboard.png)<br>**Intelligent Dashboard** | ![AetherMarketplace](./docs/screenshot_marketplace.png)<br>**AetherMarketplace** |
+| ![FlowAI Assistant](./docs/screenshot_flowai.png)<br>**FlowAI Assistant** | ![Action Inbox](./docs/screenshot_4.png)<br>**Action Approval Inbox** |
+| ![Services](./docs/screenshot_5.png)<br>**Services Monitor** | ![File Share](./docs/screenshot_6.png)<br>**Storage Array** |
+| ![Users](./docs/screenshot_7.png)<br>**User Management** | ![Audit Trail](./docs/screenshot_8.png)<br>**Audit Logs** |
+| ![Settings Interface](./docs/screenshot_9.png)<br>**UI Configuration** | ![FlowAI Engine](./docs/screenshot_10.png)<br>**FlowAI Engine Settings** |
+| ![System Updates](./docs/screenshot_11.png)<br>**System Updates** | ![Backups](https://via.placeholder.com/800x450/09090b/ffffff.png?text=Automated+Backups)<br>**Automated Backups** |
+| ![Docker](https://via.placeholder.com/800x450/09090b/ffffff.png?text=Docker+Engine)<br>**Docker Engine** | ![Network](https://via.placeholder.com/800x450/09090b/ffffff.png?text=Networking)<br>**Networking** |
+| ![Topology Map](https://via.placeholder.com/800x450/09090b/ffffff.png?text=Topology+Map)<br>**Topology Map** | ![Metrics](https://via.placeholder.com/800x450/09090b/ffffff.png?text=Performance+Metrics)<br>**Performance Metrics** |
 
 ---
 
