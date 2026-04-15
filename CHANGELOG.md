@@ -1,3 +1,14 @@
+## CHANGELOG v3.1.8 - Live Frequency Intelligence
+_Generated April 15, 2026._
+
+---
+
+### New Features
+* **Real-time CPU Polling**: Upgraded the CPU frequency tracking to use kernel-level frequency scaling files on Linux for true "Live" updates.
+* **Smart Fallbacks**: Implemented intelligent OS-detection to provide the most reactive frequency measurements available on Windows and other platforms without manual configuration.
+
+---
+
 ## CHANGELOG v3.1.7 - UX Language Refinement
 _Generated April 15, 2026._
 

@@ -102,6 +102,11 @@ func registerV1Routes(apiGroup *gin.RouterGroup) {
 
 		authGroup.GET("/user/quota", GetOwnQuota)
 
+		// 2FA TOTP Management
+		authGroup.GET("/user/2fa/setup", Setup2FA)
+		authGroup.POST("/user/2fa/verify", Verify2FA)
+		authGroup.POST("/user/2fa/disable", Disable2FA)
+
 		authGroup.GET("/settings", GetSettings)
 		authGroup.GET("/fileshare", GetFilesList)
 		authGroup.GET("/fileshare/download/:filename", HandleDownloadFile)

@@ -4,6 +4,9 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strconv"
+	"strings"
+	"os"
 	"time"
 
 	"aetherflow/models"
@@ -73,11 +76,8 @@ func GetSystemMetricsCore() models.SystemMetrics {
 		perCoreCPU = corePercents
 	}
 
-	// 1c. CPU Frequency
-	cpuInfos, err := cpu.Info()
-	if err == nil && len(cpuInfos) > 0 {
-		cpuFreqMhz = cpuInfos[0].Mhz
-	}
+	// 1c. CPU Frequency (Live Detection)
+	cpuFreqMhz = getLiveCpuFreq()
 
 	// 2. Memory
 	vMem, err := mem.VirtualMemory()
@@ -379,6 +379,27 @@ func GetSystemMetricsCore() models.SystemMetrics {
 		Services:    servicesMap,
 		GPUs:        gpuMetrics,
 	}
+}
+
+// getLiveCpuFreq attempts to get the real-time CPU clock speed.
+// It prioritizes Linux sysfs for frequency scaling but falls back to gopsutil.
+func getLiveCpuFreq() float64 {
+	// 1. Linux sysfs - Current Frequency (Very live)
+	data, err := os.ReadFile("/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq")
+	if err == nil {
+		freqKHz, err := strconv.ParseFloat(strings.TrimSpace(string(data)), 64)
+		if err == nil {
+			return freqKHz / 1000.0 // KHz to MHz
+		}
+	}
+
+	// 2. Fallback to gopsutil (Default OS report)
+	cpuInfos, err := cpu.Info()
+	if err == nil && len(cpuInfos) > 0 {
+		return cpuInfos[0].Mhz
+	}
+
+	return 0
 }
 
 func formatBytes(bytes float64) string {

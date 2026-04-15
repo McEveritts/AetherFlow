@@ -1,6 +1,10 @@
-import { Shield, Lock, KeyRound, MonitorSmartphone, Laptop, XCircle } from 'lucide-react';
+import { Shield, Lock, KeyRound, MonitorSmartphone, Laptop, XCircle, ShieldCheck, ShieldOff, Copy, Check, Loader2 } from 'lucide-react';
 import { useToast } from '@/contexts/ToastContext';
+import { useAuth } from '@/contexts/AuthContext';
+import { apiFetch } from '@/lib/fetcher';
+import { QRCodeSVG } from 'qrcode.react';
 import useSWR from 'swr';
+import { useState, useCallback } from 'react';
 
 interface SessionInfo {
     jti: string;
@@ -11,14 +15,33 @@ interface SessionInfo {
     is_current: boolean;
 }
 
+interface SetupResponse {
+    otpauth_uri: string;
+    secret: string;
+}
+
 export default function SecurityTab() {
     const { addToast } = useToast();
+    const { user } = useAuth();
     const { data: sessionData, mutate } = useSWR<{ sessions: SessionInfo[] }>('/api/v1/auth/sessions', {
         refreshInterval: 10000,
     });
 
     const sessions = sessionData?.sessions || [];
 
+    // ── 2FA State ──
+    const [setupData, setSetupData] = useState<SetupResponse | null>(null);
+    const [isSettingUp, setIsSettingUp] = useState(false);
+    const [verifyCode, setVerifyCode] = useState('');
+    const [isVerifying, setIsVerifying] = useState(false);
+    const [disableCode, setDisableCode] = useState('');
+    const [isDisabling, setIsDisabling] = useState(false);
+    const [showDisableConfirm, setShowDisableConfirm] = useState(false);
+    const [secretCopied, setSecretCopied] = useState(false);
+
+    const is2FAEnabled = user?.totp_enabled ?? false;
+
+    // ── Session Actions ──
     const revokeSession = async (jti: string) => {
         try {
             const res = await fetch(`/api/v1/auth/sessions/${encodeURIComponent(jti)}`, { method: 'DELETE' });
@@ -42,6 +65,91 @@ export default function SecurityTab() {
             addToast('Error revoking some sessions.', 'error');
         }
     };
+
+    // ── 2FA Actions ──
+    const initSetup = useCallback(async () => {
+        setIsSettingUp(true);
+        try {
+            const res = await apiFetch('/api/v1/auth/user/2fa/setup');
+            if (!res.ok) {
+                const data = await res.json();
+                addToast(data.message || data.error || 'Failed to initiate 2FA setup.', 'error');
+                return;
+            }
+            const data: SetupResponse = await res.json();
+            setSetupData(data);
+            setVerifyCode('');
+        } catch {
+            addToast('Failed to connect to 2FA service.', 'error');
+        } finally {
+            setIsSettingUp(false);
+        }
+    }, [addToast]);
+
+    const confirmSetup = useCallback(async () => {
+        if (verifyCode.length < 6) {
+            addToast('Please enter a 6-digit code from your authenticator app.', 'error');
+            return;
+        }
+        setIsVerifying(true);
+        try {
+            const res = await apiFetch('/api/v1/auth/user/2fa/verify', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ code: verifyCode }),
+            });
+            if (!res.ok) {
+                const data = await res.json();
+                addToast(data.message || data.error || 'Verification failed.', 'error');
+                return;
+            }
+            addToast('Two-factor authentication enabled successfully!', 'success');
+            setSetupData(null);
+            setVerifyCode('');
+            // Force session refresh to pick up new totp_enabled status
+            window.location.reload();
+        } catch {
+            addToast('Failed to verify code.', 'error');
+        } finally {
+            setIsVerifying(false);
+        }
+    }, [verifyCode, addToast]);
+
+    const disable2FA = useCallback(async () => {
+        if (disableCode.length < 6) {
+            addToast('Enter your current 6-digit code to disable 2FA.', 'error');
+            return;
+        }
+        setIsDisabling(true);
+        try {
+            const res = await apiFetch('/api/v1/auth/user/2fa/disable', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ code: disableCode }),
+            });
+            if (!res.ok) {
+                const data = await res.json();
+                addToast(data.message || data.error || 'Failed to disable 2FA.', 'error');
+                return;
+            }
+            addToast('Two-factor authentication disabled.', 'info');
+            setShowDisableConfirm(false);
+            setDisableCode('');
+            window.location.reload();
+        } catch {
+            addToast('Failed to disable 2FA.', 'error');
+        } finally {
+            setIsDisabling(false);
+        }
+    }, [disableCode, addToast]);
+
+    const copySecret = useCallback(() => {
+        if (setupData?.secret) {
+            navigator.clipboard.writeText(setupData.secret);
+            setSecretCopied(true);
+            setTimeout(() => setSecretCopied(false), 2000);
+        }
+    }, [setupData]);
 
     return (
         <div className="animate-fade-in relative z-10 w-full">
@@ -110,26 +218,147 @@ export default function SecurityTab() {
                         </div>
                     </div>
 
-                    {/* Standard Auth Controls */}
+                    {/* Two-Factor Authentication Panel */}
                     <div className="bg-slate-900/60 border border-white/5 rounded-2xl p-6">
                         <div className="flex items-center gap-3 mb-4">
                             <Lock className="text-slate-400" size={20} />
-                            <h3 className="text-lg font-bold text-slate-200">Authentication Context</h3>
+                            <h3 className="text-lg font-bold text-slate-200">Two-Factor Authentication</h3>
                         </div>
-                        <p className="text-sm text-slate-400 mb-6">Manage session lifecycles, secondary factors, and encryption contexts.</p>
 
-                        <div className="space-y-4">
-                            <button 
-                                onClick={() => addToast('Encryption key rotation initiated.', 'info')}
-                                className="glass-button w-full text-left px-4 py-3 border border-white/5 cursor-pointer">
-                                Rotate Cryptographic Key
-                            </button>
-                            <button 
-                                onClick={() => addToast('Multi-factor enforcement updated.', 'success')}
-                                className="glass-button w-full text-left px-4 py-3 border border-white/5 flex items-center justify-between cursor-pointer">
-                                Enforce Strict Validation <span className="text-[10px] bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 px-2 py-0.5 rounded uppercase tracking-wider font-bold">Active</span>
-                            </button>
-                        </div>
+                        {is2FAEnabled ? (
+                            /* ── 2FA is ENABLED ── */
+                            <div className="space-y-4">
+                                <div className="flex items-center gap-3 p-4 bg-emerald-500/10 border border-emerald-500/20 rounded-xl">
+                                    <ShieldCheck size={24} className="text-emerald-400 shrink-0" />
+                                    <div>
+                                        <p className="text-sm font-bold text-emerald-300">Two-Factor Authentication is Active</p>
+                                        <p className="text-xs text-slate-400 mt-1">Your account is protected with TOTP-based verification.</p>
+                                    </div>
+                                </div>
+
+                                {showDisableConfirm ? (
+                                    <div className="space-y-4 p-4 bg-red-500/5 border border-red-500/20 rounded-xl">
+                                        <p className="text-sm text-red-300 font-semibold">Enter your current authenticator code to confirm:</p>
+                                        <input
+                                            type="text"
+                                            inputMode="numeric"
+                                            maxLength={6}
+                                            value={disableCode}
+                                            onChange={e => setDisableCode(e.target.value.replace(/\D/g, ''))}
+                                            placeholder="000000"
+                                            className="w-full bg-slate-900 border border-white/10 rounded-xl px-4 py-3 text-slate-200 text-center text-2xl tracking-[0.5em] font-mono focus:outline-none focus:border-red-500/50 transition-colors"
+                                            autoFocus
+                                        />
+                                        <div className="flex gap-3">
+                                            <button
+                                                onClick={disable2FA}
+                                                disabled={isDisabling || disableCode.length < 6}
+                                                className="flex-1 px-4 py-2.5 bg-red-600 hover:bg-red-500 disabled:bg-red-600/30 disabled:text-slate-500 rounded-xl text-sm font-bold text-white transition-all flex items-center justify-center gap-2"
+                                            >
+                                                {isDisabling && <Loader2 size={16} className="animate-spin" />}
+                                                {isDisabling ? 'Disabling...' : 'Confirm Disable'}
+                                            </button>
+                                            <button
+                                                onClick={() => { setShowDisableConfirm(false); setDisableCode(''); }}
+                                                className="px-4 py-2.5 bg-white/5 border border-white/10 hover:bg-white/10 rounded-xl text-sm font-bold text-slate-300 transition-colors"
+                                            >
+                                                Cancel
+                                            </button>
+                                        </div>
+                                    </div>
+                                ) : (
+                                    <button
+                                        onClick={() => setShowDisableConfirm(true)}
+                                        className="glass-button w-full text-left px-4 py-3 border border-red-500/20 text-red-300 hover:bg-red-500/10 hover:border-red-500/30 flex items-center gap-2 cursor-pointer transition-colors"
+                                    >
+                                        <ShieldOff size={16} /> Disable Two-Factor Authentication
+                                    </button>
+                                )}
+                            </div>
+                        ) : setupData ? (
+                            /* ── 2FA SETUP IN PROGRESS ── */
+                            <div className="space-y-5">
+                                <p className="text-sm text-slate-400">
+                                    Scan the QR code below with your authenticator app (e.g. Google Authenticator, Authy, 1Password).
+                                </p>
+
+                                {/* QR Code */}
+                                <div className="flex justify-center">
+                                    <div className="bg-white p-4 rounded-2xl shadow-lg">
+                                        <QRCodeSVG
+                                            value={setupData.otpauth_uri}
+                                            size={200}
+                                            level="M"
+                                            includeMargin={false}
+                                        />
+                                    </div>
+                                </div>
+
+                                {/* Manual Entry Secret */}
+                                <div className="space-y-2">
+                                    <p className="text-xs text-slate-500 uppercase tracking-wider font-bold">Manual Entry Key</p>
+                                    <div className="flex items-center gap-2">
+                                        <code className="flex-1 bg-slate-950 border border-white/10 rounded-xl px-4 py-3 text-indigo-300 text-sm font-mono tracking-wider break-all select-all">
+                                            {setupData.secret}
+                                        </code>
+                                        <button
+                                            onClick={copySecret}
+                                            className="shrink-0 p-3 bg-white/5 border border-white/10 hover:bg-white/10 rounded-xl text-slate-400 hover:text-white transition-colors"
+                                            title="Copy secret"
+                                        >
+                                            {secretCopied ? <Check size={16} className="text-emerald-400" /> : <Copy size={16} />}
+                                        </button>
+                                    </div>
+                                </div>
+
+                                {/* Verification Input */}
+                                <div className="space-y-3 pt-2 border-t border-white/5">
+                                    <p className="text-sm text-slate-300 font-semibold">Enter the 6-digit code to verify:</p>
+                                    <input
+                                        type="text"
+                                        inputMode="numeric"
+                                        maxLength={6}
+                                        value={verifyCode}
+                                        onChange={e => setVerifyCode(e.target.value.replace(/\D/g, ''))}
+                                        placeholder="000000"
+                                        className="w-full bg-slate-900 border border-white/10 rounded-xl px-4 py-3 text-slate-200 text-center text-2xl tracking-[0.5em] font-mono focus:outline-none focus:border-indigo-500/50 transition-colors"
+                                        onKeyDown={e => { if (e.key === 'Enter') confirmSetup(); }}
+                                    />
+                                    <div className="flex gap-3">
+                                        <button
+                                            onClick={confirmSetup}
+                                            disabled={isVerifying || verifyCode.length < 6}
+                                            className="flex-1 px-4 py-2.5 bg-indigo-600 hover:bg-indigo-500 disabled:bg-indigo-600/30 disabled:text-slate-500 rounded-xl text-sm font-bold text-white transition-all flex items-center justify-center gap-2"
+                                        >
+                                            {isVerifying && <Loader2 size={16} className="animate-spin" />}
+                                            {isVerifying ? 'Verifying...' : 'Enable 2FA'}
+                                        </button>
+                                        <button
+                                            onClick={() => { setSetupData(null); setVerifyCode(''); }}
+                                            className="px-4 py-2.5 bg-white/5 border border-white/10 hover:bg-white/10 rounded-xl text-sm font-bold text-slate-300 transition-colors"
+                                        >
+                                            Cancel
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        ) : (
+                            /* ── 2FA NOT ENROLLED ── */
+                            <div className="space-y-4">
+                                <p className="text-sm text-slate-400 mb-6">Add an extra layer of security to your account with time-based one-time passwords (TOTP).</p>
+                                <button
+                                    onClick={initSetup}
+                                    disabled={isSettingUp}
+                                    className="glass-button-primary w-full px-4 py-3 text-center flex items-center justify-center gap-2"
+                                >
+                                    {isSettingUp ? (
+                                        <><Loader2 size={16} className="animate-spin" /> Generating Key...</>
+                                    ) : (
+                                        <><ShieldCheck size={16} /> Enable Two-Factor Authentication</>
+                                    )}
+                                </button>
+                            </div>
+                        )}
                     </div>
 
                     {/* Infrastructure API */}

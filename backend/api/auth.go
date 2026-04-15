@@ -497,10 +497,13 @@ func GetSession(c *gin.Context) {
 	userId := int(userIdFloat)
 	var user models.User
 	var googleId sql.NullString
-	err = db.DB.QueryRow("SELECT id, username, email, avatar_url, role, google_id FROM users WHERE id = ?", userId).
-		Scan(&user.ID, &user.Username, &user.Email, &user.AvatarURL, &user.Role, &googleId)
+	var totpEnabled sql.NullBool
+	err = db.DB.QueryRow(
+		"SELECT id, username, email, avatar_url, role, google_id, COALESCE(totp_enabled, 0) FROM users WHERE id = ?", userId,
+	).Scan(&user.ID, &user.Username, &user.Email, &user.AvatarURL, &user.Role, &googleId, &totpEnabled)
 
 	user.IsOAuth = googleId.Valid && googleId.String != ""
+	user.TOTPEnabled = totpEnabled.Valid && totpEnabled.Bool
 
 	if err != nil {
 		Unauthorized(c, "User not found")

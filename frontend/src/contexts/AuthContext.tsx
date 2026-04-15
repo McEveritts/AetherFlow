@@ -13,6 +13,7 @@ export interface User {
     avatar_url: string;
     role: string;
     is_oauth: boolean;
+    totp_enabled: boolean;
 }
 
 interface AuthContextType {
