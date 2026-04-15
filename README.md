@@ -2,51 +2,51 @@
 
 > Orchestrating the Next Era of Bare-Metal Infrastructure.
 
-AetherFlow is a modern, enterprise-grade bare-metal seedbox orchestration platform. Forked and heavily diverged from QuickBox CE, AetherFlow has been completely rebuilt from the ground up to provide unparalleled performance, security, and AI-driven automation for managing media-server applications.
+AetherFlow is a modern, enterprise-grade bare-metal orchestration platform. Rebuilt from the ground up to replace legacy bloat with mathematical precision, AetherFlow delivers unparalleled performance, security, and AI-driven automation for managing media-server applications.
 
-Gone is the legacy PHP dashboard. Welcome to the future: a high-performance orchestration core and dashboard. Built entirely in pure Go and strictly-typed TypeScript, it rejects legacy bloat in favor of mathematical precision and AI-native operational workflows.
+Powered by a high-performance **Go (Gin)** control plane, a **strictly-typed React (Next.js)** frontend, and native **systemd** orchestration—AetherFlow is built for the edge.
 
-## 🏗️ The Architecture: An Executable Built for the Edge
+---
 
-Uncompromising technology choices designed for stability. No Rust rewrites. No legacy PHP.
+## 📚 Documentation Portal
 
-*   **The Control Plane (Go)**: A robust, highly concurrent Go API. Designed for lightweight execution, connection stability, and pure backend operational control.
-*   **The Visualization Layer (TypeScript)**: A premium Next.js Single Page Application utilizing standard-setting frontend tooling: `Zustand` for state tracking, `SWR` for real-time hydration, and `Framer Motion` for spatial transitions. Unified by our shared vertically integrated `@aetherflow/ui` foundation.
+Welcome to the AetherFlow v3.1.x documentation suite. Whether you are deploying your first node or building against the Marketplace API, everything you need is here.
+
+### Start Here
+- **[About AetherFlow](./docs/about.md)** — The history, from QuickBox to v3, and our core platform philosophy.
+- **[System Architecture](./docs/architecture.md)** — High-level design, Go/Next.js stack, and systemd mechanics.
+- **[Quickstart Guide](./docs/quickstart.md)** — The shortest path to deploying a fresh Ubuntu 24.04 node.
+
+### Operations & Security
+- **[Configuration Reference](./docs/configuration.md)** — Complete `SQLite`/`Redis` and `.env` parameter guide.
+- **[Security & Hardening](./docs/security.md)** — Deep dive into TOTP 2FA, AES-256-GCM encryption, and sudoers policies.
+- **[Upgrading & Rollbacks](./docs/upgrading.md)** — How to migrate from PM2 to systemd or roll back bad updates.
+
+### Platform Features
+- **[FlowAI Assistant](./docs/flowai.md)** — The AI operations layer, Support vs. Assistant modes, and the Action Approval Gate.
+- **[AetherMarketplace](./docs/marketplace.md)** — Overview of the 50+ managed applications, installation loops, and data retention.
+- **[Marketplace Developer Guide](./docs/marketplace-developer-guide.md)** — Technical requirements for creating idempotent `common.sh` installer scripts.
+
+### Reference & Troubleshooting
+- **[API Documentation](./docs/api.md)** — Complete REST endpoint structures, WebSocket sub-protocols, and CSRF rules.
+- **[Testing AetherFlow](./docs/testing.md)** — How to run Playwright E2E suites, backend Go tests, and manual python diagnostics.
+- **[Troubleshooting & FAQ](./docs/troubleshooting.md)** — Resolving "System Offline" errors, connection drops, and marketplace script failures.
+
+---
 
 ## ✨ Core Directives
 
 We did not adopt complexity for the sake of it. AetherFlow is built on a rigid philosophy: infrastructure software should be fast, typed, and verifiable.
 
-1.  **Bare-Metal First**: We manage bare-metal infrastructure without imposing heavy virtualization runtimes or orchestrator bloat. Direct, efficient execution.
-2.  **Strict Typing**: From our compiled Go interfaces to our Next.js frontend state, strict typing is enforced everywhere. No silent runtime anomalies.
-3.  **AI-Native, Human-Gated**: AI is not a side feature; it acts as the core diagnostic engine. Models *propose* mitigations; humans approve them.
-
-## 🧠 Intelligence Bounded by Authorization
-
-AetherFlow integrates AI directly into the operational feedback loop, shifting it from a chatbot to an active infrastructure agent.
-
-*   **Deep Diagnostics**: AI assesses logs and telemetry to identify failure patterns.
-*   **The Approval Inbox**: AI cannot arbitrarily mutate state. Every automated remediation is piped to a global Approval Inbox for explicit, cryptographically verifiable operator authorization.
-
-## 🚀 Status & Momentum: Maturing for Production
-
-AetherFlow is actively hardening its core operational surfaces.
-
-*   **Repo Truth Mandate**: If it is not running in the compiler and passing CI, it does not exist.
-*   **Unified Tooling**: Focusing on reliable integration between the backend control plane and the strictly-typed UI.
-*   **Current Focus**: Finalizing the human-in-the-loop workflows for AI infrastructure management.
+1.  **Bare-Metal First**: Direct, efficient execution using native host tools. No heavy virtualization overlays.
+2.  **Systemd-Native Orchestration**: Every service and marketplace application maps cleanly to the host's native `systemd` process manager.
+3.  **Human-Gated AI**: FlowAI exists to observe and diagnose. Before the AI can mutate state, it is piped to the global **Approval Inbox** for explicit operator authorization.
 
 ---
 
-## 🛠️ Getting Started
+## 🛠️ Quick Installation
 
-### Prerequisites
-*   OS: Ubuntu 20.04/22.04 LTS, Debian 11/12, or Kali Linux (rolling)
-*   Kali Linux is supported as a Debian derivative — the installer auto-detects it and follows the Debian codepath.
-*   *A clean, fresh OS installation is highly recommended.*
-
-### Installation
-Run the newly parallelized bootstrap installer to automatically configure the environment, compile the Go backend, and serve the Next.js UI:
+For a fresh install on Ubuntu 20.04/22.04 LTS, Debian 11/12, or Kali Linux:
 
 ```bash
 apt-get update && apt-get -y upgrade
@@ -56,20 +56,7 @@ cd /opt/AetherFlow/setup
 sudo bash AetherFlow-Setup
 ```
 
-Follow the interactive prompts to set your primary Admin credentials, configure your domain, and start the Onboarding Wizard in your browser.
-
-## 📚 Documentation & Development
-
-AetherFlow is built to be extensible. Whether you are writing a custom plugin or integrating an external billing platform, check out our core documentation:
-
-*   [API Documentation (v1)](/docs/API.md) - Full OpenAPI/Swagger specs for the Go backend.
-*   [Codebase Brain](/docs/CODEBASE_BRAIN.md) - Architectural overview and security context.
-*   [Universal Plugin SDK](/plugins/README.md) - Boilerplate templates for Next.js/Go plugin development.
-
-### Testing
-We maintain a strict CI/CD pipeline.
-*   **Backend**: `cd backend && go test ./... -count=1`
-*   **Frontend**: `cd frontend && npm run test:e2e` (Includes Playwright visual regression testing).
+Follow the interactive prompts to bootstrap your domain and configure your primary admin credentials. 
 
 ## 📄 License
 
