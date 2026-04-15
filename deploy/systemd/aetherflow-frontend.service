@@ -15,14 +15,14 @@ RequiresMountsFor=/opt/AetherFlow
 Type=simple
 User=aetherflow
 Group=aetherflow
-WorkingDirectory=/opt/AetherFlow/current/frontend
+WorkingDirectory=/opt/AetherFlow/frontend
 
 # ── Execution ────────────────────────────────────────────────────────────────
-# Start the Next.js production server from the symlinked release.
+# Start the Next.js production server.
 ExecStart=/usr/bin/npm start
 
 # Environment injection.
-EnvironmentFile=-/opt/AetherFlow/current/.env
+EnvironmentFile=-/opt/AetherFlow/frontend/.env
 Environment=NODE_ENV=production
 Environment=PORT=3000
 

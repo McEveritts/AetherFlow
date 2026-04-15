@@ -44,8 +44,9 @@ RestrictRealtime=yes
 SystemCallArchitectures=native
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 UMask=0027
-# Fix #5: ReadWritePaths for the backend data directory
-ReadWritePaths=/opt/AetherFlow/backend/data
+# Fix #5: ReadWritePaths for the backend data directory and logs
+ReadWritePaths=/var/log/aetherflow /opt/AetherFlow/backend/data
+ReadWritePaths=-/var/lib/openclaw
 
 [Install]
 WantedBy=multi-user.target

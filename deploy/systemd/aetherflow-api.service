@@ -14,14 +14,14 @@ RequiresMountsFor=/opt/AetherFlow
 Type=simple
 User=aetherflow
 Group=aetherflow
-WorkingDirectory=/opt/AetherFlow/current/backend
+WorkingDirectory=/opt/AetherFlow/backend
 
 # ── Execution ────────────────────────────────────────────────────────────────
-# The symlink /opt/AetherFlow/current always points to the active release.
-ExecStart=/opt/AetherFlow/current/backend/aetherflow-api
+# Start the Go API Gateway.
+ExecStart=/opt/AetherFlow/backend/aetherflow-api
 
 # Environment injection via .env file (non-secret tunables).
-EnvironmentFile=-/opt/AetherFlow/current/.env
+EnvironmentFile=-/opt/AetherFlow/backend/.env
 
 # ── Signal Traps & Graceful Shutdown ─────────────────────────────────────────
 # Reap ALL processes in the cgroup, not just the main PID.
@@ -42,7 +42,8 @@ RestartSec=5s
 PrivateTmp=yes
 
 # Restrict writable paths to only what the API needs.
-ReadWritePaths=/var/lib/openclaw /var/log/aetherflow
+ReadWritePaths=/var/log/aetherflow /opt/AetherFlow/backend/data
+ReadWritePaths=-/var/lib/openclaw
 
 # ── Resource Limits ──────────────────────────────────────────────────────────
 LimitNOFILE=65535
