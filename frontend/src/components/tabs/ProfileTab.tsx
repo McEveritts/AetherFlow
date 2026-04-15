@@ -144,13 +144,26 @@ export default function ProfileTab() {
                         <div className="p-6 flex flex-col md:flex-row md:items-center justify-between gap-4 bg-slate-900/30">
                             <div>
                                 <h5 className="text-sm font-semibold text-slate-200 flex items-center gap-2">
-                                    Two-Factor Authentication <span className="px-2 py-0.5 rounded text-[10px] uppercase font-bold bg-amber-500/20 text-amber-400 border border-amber-500/20">Coming Soon</span>
+                                    Two-Factor Authentication
+                                    {user.totp_enabled ? (
+                                        <span className="px-2 py-0.5 rounded text-[10px] uppercase font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/20">Active</span>
+                                    ) : (
+                                        <span className="px-2 py-0.5 rounded text-[10px] uppercase font-bold bg-slate-700/50 text-slate-400 border border-white/10">Inactive</span>
+                                    )}
                                 </h5>
-                                <p className="text-xs text-slate-500 mt-1">Add an extra layer of security to your account.</p>
+                                <p className="text-xs text-slate-500 mt-1">
+                                    {user.totp_enabled
+                                        ? 'Your account is protected with TOTP-based verification.'
+                                        : 'Add an extra layer of security via the Security tab.'}
+                                </p>
                             </div>
-                            <button type="button" disabled className="px-6 py-2.5 bg-transparent border border-white/5 text-slate-500 text-sm font-bold rounded-xl transition-colors whitespace-nowrap cursor-not-allowed">
-                                Enable 2FA
-                            </button>
+                            <span className={`px-6 py-2.5 text-sm font-bold rounded-xl transition-colors whitespace-nowrap ${
+                                user.totp_enabled
+                                    ? 'bg-emerald-500/10 border border-emerald-500/20 text-emerald-400'
+                                    : 'bg-white/5 border border-white/10 text-slate-400'
+                            }`}>
+                                {user.totp_enabled ? 'Enrolled' : 'Not Enrolled'}
+                            </span>
                         </div>
 
                     </div>

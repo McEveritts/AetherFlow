@@ -155,3 +155,67 @@ func Delete2FAPending(userID int) {
 		RedisClient.Del(ctx, key)
 	}
 }
+
+// ── MFA Login Challenge Cache ─────────────────────────────────────────────
+// These bridge the gap between password verification and TOTP verification
+// during login. The mfa_token is an opaque challenge proving password was valid.
+
+var mfaChallengeCache sync.Map // fallback: token → {userID int, expiresAt int64}
+
+type mfaChallengeEntry struct {
+	UserID    int
+	ExpiresAt int64
+}
+
+// StoreMFAChallenge stores a challenge token mapping to a user ID.
+func StoreMFAChallenge(token string, userID int, ttl time.Duration) error {
+	key := "mfa_challenge:" + token
+	entry := mfaChallengeEntry{UserID: userID, ExpiresAt: time.Now().Add(ttl).Unix()}
+	mfaChallengeCache.Store(key, entry)
+
+	if RedisClient != nil {
+		ctx := context.Background()
+		return RedisClient.Set(ctx, key, fmt.Sprintf("%d", userID), ttl).Err()
+	}
+	return nil
+}
+
+// GetMFAChallenge retrieves the user ID for a challenge token.
+func GetMFAChallenge(token string) (int, error) {
+	key := "mfa_challenge:" + token
+
+	// Try local cache first
+	if raw, ok := mfaChallengeCache.Load(key); ok {
+		entry, ok := raw.(mfaChallengeEntry)
+		if ok && time.Now().Unix() <= entry.ExpiresAt {
+			return entry.UserID, nil
+		}
+		mfaChallengeCache.Delete(key) // expired
+	}
+
+	// Try Redis
+	if RedisClient != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancel()
+		val, err := RedisClient.Get(ctx, key).Result()
+		if err == nil {
+			var uid int
+			if _, err := fmt.Sscanf(val, "%d", &uid); err == nil {
+				return uid, nil
+			}
+		}
+	}
+
+	return 0, fmt.Errorf("MFA challenge expired or not found")
+}
+
+// DeleteMFAChallenge removes a challenge token after successful verification.
+func DeleteMFAChallenge(token string) {
+	key := "mfa_challenge:" + token
+	mfaChallengeCache.Delete(key)
+
+	if RedisClient != nil {
+		ctx := context.Background()
+		RedisClient.Del(ctx, key)
+	}
+}

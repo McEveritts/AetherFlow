@@ -529,6 +529,17 @@ func InitDB() {
 		"ALTER TABLE users ADD COLUMN totp_secret TEXT DEFAULT '';",
 		"ALTER TABLE users ADD COLUMN totp_enabled BOOLEAN DEFAULT 0;")
 
+	// ─── Migration v15: Recovery Codes for 2FA ─────────────────────────
+	migrate(15, "Add recovery_codes table for 2FA backup codes",
+		`CREATE TABLE IF NOT EXISTS recovery_codes (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			user_id INTEGER NOT NULL,
+			code_hash TEXT NOT NULL,
+			used BOOLEAN DEFAULT 0,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+		);`)
+
 	// ─── Ensure singleton settings row ─────────────────────────────────
 	DB.Exec(`INSERT OR IGNORE INTO settings (id) VALUES (1)`)
 

@@ -8,6 +8,7 @@ import ProcessWidget from '@/components/widgets/ProcessWidget';
 import StorageWidget from '@/components/widgets/StorageWidget';
 import AppTopologyMap from '@/components/widgets/AppTopologyMap';
 import GpuWidget from '@/components/widgets/GpuWidget';
+import DataUsageHistoryWidget from '@/components/widgets/DataUsageHistoryWidget';
 import React, { useState, useEffect, useRef } from 'react';
 import { useConnectionStore, ConnectionMode } from '@/store/useConnectionStore';
 
@@ -40,7 +41,7 @@ function formatTotalBytes(bytes: number): string {
 }
 
 export default function OverviewTab({ metrics, hardware, history }: OverviewTabProps) {
-    const { preferredMode, setPreferredMode, pollInterval, setPollInterval, connectionState, dashboardDensity, setDashboardDensity } = useConnectionStore();
+    const { preferredMode, setPreferredMode, pollInterval, setPollInterval, connectionState, dashboardDensity, setDashboardDensity, showGpuWidget, showDataUsageWidget } = useConnectionStore();
     
     // Adaptive render cycle: Faster if we have high-frequency data
     const renderInterval = preferredMode === 'websocket' ? 500 : Math.min(pollInterval, 1000);
@@ -127,6 +128,7 @@ export default function OverviewTab({ metrics, hardware, history }: OverviewTabP
                     </select>
                 </div>
             </div>
+            </div>
 
             {/* Hero Stats Row */}
             <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
@@ -203,6 +205,11 @@ export default function OverviewTab({ metrics, hardware, history }: OverviewTabP
                 <div className="space-y-6">
                     <MemoNetworkWidget metrics={tMetrics} history={tHistory} />
                     <MemoDiskIOWidget metrics={tMetrics} history={tHistory} />
+                    
+                    {/* Data Usage History Widget - User Enabled */}
+                    {showDataUsageWidget && (
+                        <DataUsageHistoryWidget />
+                    )}
                 </div>
 
                 {/* 3. System Visualization & Processes */}

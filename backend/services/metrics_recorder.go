@@ -86,16 +86,16 @@ func recordMetricsSnapshot() {
 	}
 }
 
-// pruneOldMetrics removes entries older than 30 days.
+// pruneOldMetrics removes entries older than 90 days.
 func pruneOldMetrics() {
-	cutoff := time.Now().AddDate(0, 0, -30).Format(time.RFC3339)
+	cutoff := time.Now().AddDate(0, 0, -90).Format(time.RFC3339)
 	result, err := db.DB.Exec("DELETE FROM metrics_history WHERE timestamp < ?", cutoff)
 	if err != nil {
 		metricsLog.Error("failed to prune old entries", "error", err)
 		return
 	}
 	if rows, _ := result.RowsAffected(); rows > 0 {
-		metricsLog.Info("pruned old entries", "count", rows, "retention", "30d")
+		metricsLog.Info("pruned old entries", "count", rows, "retention", "90d")
 	}
 }
 

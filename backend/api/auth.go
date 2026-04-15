@@ -143,10 +143,11 @@ func LocalLogin(c *gin.Context) {
 	var user models.User
 	var passwordHash string
 	var googleId sql.NullString
+	var totpEnabled bool
 	err := db.DB.QueryRow(
-		"SELECT id, username, email, avatar_url, role, COALESCE(password_hash, ''), google_id FROM users WHERE username = ?",
+		"SELECT id, username, email, avatar_url, role, COALESCE(password_hash, ''), google_id, COALESCE(totp_enabled, 0) FROM users WHERE username = ?",
 		req.Username,
-	).Scan(&user.ID, &user.Username, &user.Email, &user.AvatarURL, &user.Role, &passwordHash, &googleId)
+	).Scan(&user.ID, &user.Username, &user.Email, &user.AvatarURL, &user.Role, &passwordHash, &googleId, &totpEnabled)
 
 	user.IsOAuth = googleId.Valid && googleId.String != ""
 
@@ -165,6 +166,31 @@ func LocalLogin(c *gin.Context) {
 		return
 	}
 
+	// ── 2FA Gate ──
+	// If the user has TOTP enabled, do NOT issue a session yet.
+	// Instead, return a challenge token that must be verified with a TOTP code.
+	if totpEnabled {
+		mfaToken := make([]byte, 32)
+		if _, err := io.ReadFull(rand.Reader, mfaToken); err != nil {
+			InternalError(c, "Failed to generate MFA challenge")
+			return
+		}
+		token := hex.EncodeToString(mfaToken)
+
+		if err := db.StoreMFAChallenge(token, user.ID, 5*time.Minute); err != nil {
+			InternalError(c, "Failed to store MFA challenge")
+			return
+		}
+
+		slog.Info("MFA challenge issued", "user_id", user.ID, "username", user.Username)
+		c.JSON(http.StatusOK, gin.H{
+			"requires_mfa": true,
+			"mfa_token":    token,
+		})
+		return
+	}
+
+	// ── Standard login (no 2FA) ──
 	// Log login
 	clientIP := c.ClientIP()
 	userAgent := c.Request.UserAgent()

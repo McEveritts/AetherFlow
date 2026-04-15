@@ -17,6 +17,10 @@ export default function LoginPage() {
     const [error, setError] = useState('');
     const [isSetup, setIsSetup] = useState(false);
     
+    const [mfaToken, setMfaToken] = useState('');
+    const [isRecoveryMode, setIsRecoveryMode] = useState(false);
+    const [recoveryCode, setRecoveryCode] = useState('');
+    
     const mfaRefs = [
         useRef<HTMLInputElement>(null),
         useRef<HTMLInputElement>(null),
@@ -51,8 +55,8 @@ export default function LoginPage() {
             const data = await res.json();
 
             if (res.ok) {
-                // If API supports MFA in the future, it might return requires_mfa
                 if (data.requires_mfa) {
+                    setMfaToken(data.mfa_token);
                     setStep('mfa_challenge');
                 } else if (data.requires_mfa_setup) {
                     setStep('mfa_setup');
@@ -60,8 +64,6 @@ export default function LoginPage() {
                     loginLocal();
                 }
             } else {
-                // Phase 26: Error-state language system
-                // Replace generic errors with operator-facing language
                 setError(
                     data.error?.includes('credentials') ? 'Authentication denied: Invalid credentials provided.' :
                     data.error?.includes('locked') ? 'Identity locked: Maximum attempts exceeded. Try again in 15m.' :
@@ -77,21 +79,31 @@ export default function LoginPage() {
 
     const handleMfaSubmit = async (e: FormEvent) => {
         e.preventDefault();
-        const code = mfaCode.join('');
-        if (code.length !== 6) return;
+        const code = isRecoveryMode ? recoveryCode : mfaCode.join('');
+        if (!isRecoveryMode && code.length !== 6) return;
+        if (isRecoveryMode && !code.trim()) return;
 
         setIsLoading(true);
         setError('');
 
-        // Mocking the MFA verification step for the UX flow
         try {
-            // Future implementation: POST /api/v1/public/auth/mfa/verify
-            setTimeout(() => {
+            const res = await apiFetch('/api/v1/public/auth/mfa/verify', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ mfa_token: mfaToken, code: code.trim() })
+            });
+
+            const data = await res.json();
+
+            if (res.ok) {
                 loginLocal();
-            }, 800);
+            } else {
+                setError(data.message || 'Verification failed. Check your code and try again.');
+            }
         } catch (_err) {
              setError('Cryptographic verification failed. Check clock sync or token validity.');
-             setIsLoading(false);
+        } finally {
+            setIsLoading(false);
         }
     };
 
@@ -215,38 +227,71 @@ export default function LoginPage() {
 
                     {step === 'mfa_challenge' && (
                         <form onSubmit={handleMfaSubmit} className="space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-500">
-                            <div className="flex justify-between gap-2 px-1">
-                                {mfaCode.map((val, i) => (
-                                    <input
-                                        key={i}
-                                        ref={mfaRefs[i]}
-                                        type="text"
-                                        maxLength={1}
-                                        value={val}
-                                        onChange={(e) => handleMfaChange(i, e.target.value)}
-                                        onKeyDown={(e) => handleMfaKeyDown(i, e)}
-                                        onPaste={handlePaste}
-                                        className="glass-input w-12 h-14 text-center text-xl font-bold font-mono !px-0 focus:ring-2 focus:ring-indigo-500"
-                                    />
-                                ))}
-                            </div>
+                            {isRecoveryMode ? (
+                                <div className="space-y-4">
+                                    <div className="relative">
+                                        <input
+                                            type="text"
+                                            placeholder="XXXX-XXXX"
+                                            value={recoveryCode}
+                                            onChange={(e) => setRecoveryCode(e.target.value.toUpperCase())}
+                                            required
+                                            autoFocus
+                                            className="glass-input w-full px-4 py-3 pl-11 !text-sm font-bold tracking-widest font-mono"
+                                        />
+                                        <KeyRound size={18} className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" />
+                                    </div>
+                                    <p className="text-xs text-slate-500 text-center px-4">
+                                        Enter one of your 8-character recovery codes to unlock your account.
+                                    </p>
+                                </div>
+                            ) : (
+                                <div className="flex justify-between gap-2 px-1">
+                                    {mfaCode.map((val, i) => (
+                                        <input
+                                            key={i}
+                                            ref={mfaRefs[i]}
+                                            type="text"
+                                            maxLength={1}
+                                            value={val}
+                                            onChange={(e) => handleMfaChange(i, e.target.value)}
+                                            onKeyDown={(e) => handleMfaKeyDown(i, e)}
+                                            onPaste={handlePaste}
+                                            className="glass-input w-12 h-14 text-center text-xl font-bold font-mono !px-0 focus:ring-2 focus:ring-indigo-500"
+                                        />
+                                    ))}
+                                </div>
+                            )}
 
                             <div className="space-y-4">
                                 <button
                                     type="submit"
-                                    disabled={isLoading || mfaCode.join('').length !== 6}
+                                    disabled={isLoading || (!isRecoveryMode && mfaCode.join('').length !== 6) || (isRecoveryMode && !recoveryCode.trim())}
                                     className="glass-button-primary w-full py-3.5 flex items-center justify-center gap-2 font-semibold tracking-wide disabled:opacity-50"
                                 >
                                     {isLoading ? 'Verifying Context...' : 'Authorize Action'}
                                     {!isLoading && <ArrowRight size={18} />}
                                 </button>
-                                <button
-                                    type="button"
-                                    onClick={() => setStep('credentials')}
-                                    className="w-full text-center text-slate-500 hover:text-slate-300 text-sm font-medium transition-colors"
-                                >
-                                    Cancel and return
-                                </button>
+                                
+                                <div className="flex flex-col gap-3">
+                                    <button
+                                        type="button"
+                                        onClick={() => setIsRecoveryMode(!isRecoveryMode)}
+                                        className="w-full text-center text-indigo-400 hover:text-indigo-300 text-sm font-medium transition-colors"
+                                    >
+                                        {isRecoveryMode ? 'Use authentication app' : 'Lost your device? Use recovery code'}
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={() => {
+                                            setStep('credentials');
+                                            setIsRecoveryMode(false);
+                                        }}
+                                        className="w-full text-center text-slate-500 hover:text-slate-300 text-sm font-medium transition-colors"
+                                    >
+                                        Cancel and return
+                                    </button>
+                                </div>
                             </div>
                         </form>
                     )}

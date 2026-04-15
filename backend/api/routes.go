@@ -62,6 +62,7 @@ func registerV1Routes(apiGroup *gin.RouterGroup) {
 	publicGroup.GET("/auth/google/login", GoogleLogin)
 	publicGroup.GET("/auth/google/callback", GoogleCallback)
 	publicGroup.POST("/auth/login", authLimiter, LocalLogin)
+	publicGroup.POST("/auth/mfa/verify", authLimiter, MFALoginVerify)
 	publicGroup.POST("/auth/setup", authLimiter, SetupAdmin)
 	publicGroup.GET("/auth/setup/check", CheckSetupNeeded)
 
@@ -106,6 +107,7 @@ func registerV1Routes(apiGroup *gin.RouterGroup) {
 		authGroup.GET("/user/2fa/setup", Setup2FA)
 		authGroup.POST("/user/2fa/verify", Verify2FA)
 		authGroup.POST("/user/2fa/disable", Disable2FA)
+		authGroup.POST("/user/2fa/recovery/regenerate", Regenerate2FARecoveryCodes)
 
 		authGroup.GET("/settings", GetSettings)
 		authGroup.GET("/fileshare", GetFilesList)

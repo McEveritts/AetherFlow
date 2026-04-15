@@ -9,7 +9,8 @@ export default function DashboardSettingsTab() {
         preferredMode, setPreferredMode, 
         pollInterval, setPollInterval, 
         dashboardDensity, setDashboardDensity,
-        showGpuWidget, setShowGpuWidget
+        showGpuWidget, setShowGpuWidget,
+        showDataUsageWidget, setShowDataUsageWidget
     } = useConnectionStore();
 
     return (
@@ -58,6 +59,25 @@ export default function DashboardSettingsTab() {
                                 className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none ${showGpuWidget ? 'bg-indigo-600' : 'bg-slate-700'}`}
                             >
                                 <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${showGpuWidget ? 'translate-x-6' : 'translate-x-1'}`} />
+                            </button>
+                        </div>
+                    </div>
+
+                    {/* Data Usage History Visibility */}
+                    <div className="p-5 flex flex-col md:flex-row md:items-center justify-between gap-4 hover:bg-white/[0.02] transition-colors">
+                        <div>
+                            <label className="text-sm font-semibold text-slate-200 flex items-center gap-2">
+                                <Layers size={16} className="text-emerald-400" /> 90-Day Data Usage History
+                            </label>
+                            <p className="text-xs text-slate-500 mt-1">Show a persistent chart of bandwidth usage trends natively on the dashboard.</p>
+                        </div>
+                        <div className="flex items-center gap-3">
+                            <span className="text-xs text-slate-500">{showDataUsageWidget ? 'Enabled' : 'Disabled'}</span>
+                            <button
+                                onClick={() => setShowDataUsageWidget(!showDataUsageWidget)}
+                                className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none ${showDataUsageWidget ? 'bg-indigo-600' : 'bg-slate-700'}`}
+                            >
+                                <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${showDataUsageWidget ? 'translate-x-6' : 'translate-x-1'}`} />
                             </button>
                         </div>
                     </div>

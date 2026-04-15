@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"strconv"
 
 	"aetherflow/services"
 
@@ -32,7 +33,15 @@ func HandleAnalyzePredictions(c *gin.Context) {
 
 // HandleGetMetricsHistory returns raw metrics history data.
 func HandleGetMetricsHistory(c *gin.Context) {
-	snapshots, err := services.GetMetricsHistory(30)
+	daysStr := c.Query("days")
+	days := 90 // Default to 90 for long term data visualization
+	if daysStr != "" {
+		if parsed, err := strconv.Atoi(daysStr); err == nil && parsed > 0 {
+			days = parsed
+		}
+	}
+
+	snapshots, err := services.GetMetricsHistory(days)
 	if err != nil {
 		InternalError(c, "Failed to query metrics history: " + err.Error())
 		return

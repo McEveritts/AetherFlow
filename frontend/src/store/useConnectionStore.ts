@@ -13,6 +13,7 @@ interface ConnectionStoreState {
     pollInterval: number; // in milliseconds
     dashboardDensity: 'compact' | 'immersive';
     showGpuWidget: boolean;
+    showDataUsageWidget: boolean;
 
     // Actions
     setConnectionState: (state: ConnectionState) => void;
@@ -22,6 +23,7 @@ interface ConnectionStoreState {
     setPollInterval: (interval: number) => void;
     setDashboardDensity: (density: 'compact' | 'immersive') => void;
     setShowGpuWidget: (show: boolean) => void;
+    setShowDataUsageWidget: (show: boolean) => void;
     reset: () => void;
 }
 
@@ -33,6 +35,7 @@ export const useConnectionStore = create<ConnectionStoreState>()((set) => ({
     pollInterval: 5000,
     dashboardDensity: 'compact',
     showGpuWidget: true,
+    showDataUsageWidget: true,
 
     setConnectionState: (connectionState) => set({ connectionState }),
     setReconnectAttempt: (reconnectAttempt) => set({ reconnectAttempt }),
@@ -41,6 +44,7 @@ export const useConnectionStore = create<ConnectionStoreState>()((set) => ({
     setPollInterval: (pollInterval) => set({ pollInterval }),
     setDashboardDensity: (dashboardDensity) => set({ dashboardDensity }),
     setShowGpuWidget: (showGpuWidget) => set({ showGpuWidget }),
+    setShowDataUsageWidget: (showDataUsageWidget) => set({ showDataUsageWidget }),
     reset: () => set({ 
         connectionState: 'DISCONNECTED', 
         reconnectAttempt: 0, 
@@ -48,6 +52,7 @@ export const useConnectionStore = create<ConnectionStoreState>()((set) => ({
         preferredMode: 'websocket',
         pollInterval: 5000,
         dashboardDensity: 'compact',
-        showGpuWidget: true
+        showGpuWidget: true,
+        showDataUsageWidget: true
     }),
 }));
