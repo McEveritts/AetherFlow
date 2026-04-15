@@ -6,6 +6,7 @@ interface CpuWidgetProps {
     metrics: SystemMetrics;
     hardware: HardwareReport | null;
     history: MetricsHistory;
+    density?: 'compact' | 'immersive';
 }
 
 function getCoreColor(pct: number): string {
@@ -17,32 +18,34 @@ function getCoreColor(pct: number): string {
     return 'bg-slate-700';
 }
 
-export default function CpuWidget({ metrics, hardware, history }: CpuWidgetProps) {
+export default function CpuWidget({ metrics, hardware, history, density = 'compact' }: CpuWidgetProps) {
     const cores = metrics.per_core_cpu || [];
+    const isImmersive = density === 'immersive';
 
     return (
-        <div className="glass-card p-5 relative overflow-hidden group hover:bg-white/[0.04] transition-colors">
+        <div className={`glass-card relative overflow-hidden group transition-all duration-300 hover:bg-white/[0.04] ${isImmersive ? 'p-6 space-y-4' : 'p-5'}`}>
             {/* Header */}
             <div className="flex items-center justify-between mb-3">
-                <h2 className="text-sm font-semibold text-slate-200 flex items-center gap-2">
-                    <Cpu size={16} className="text-blue-400" /> CPU Usage
+                <h2 className={`${isImmersive ? 'text-lg' : 'text-sm'} font-semibold text-slate-200 flex items-center gap-2`}>
+                    <Cpu size={isImmersive ? 18 : 16} className="text-blue-400" /> CPU Usage
                 </h2>
                 <div className="flex items-center gap-2">
-                    <span className="text-2xl font-bold tracking-tighter text-white">{metrics.cpu_usage.toFixed(1)}%</span>
+                    <span className={`${isImmersive ? 'text-3xl' : 'text-2xl'} font-bold tracking-tighter text-white`}>{metrics.cpu_usage.toFixed(1)}%</span>
                 </div>
             </div>
 
             {/* Sparkline Chart */}
-            <div className="rounded-xl overflow-hidden bg-slate-900/50 border border-white/[0.03] mb-4">
+            <div className={`rounded-xl overflow-hidden bg-slate-900/50 border border-white/[0.03] transition-all duration-300 ${isImmersive ? 'mb-6 shadow-2xl' : 'mb-4'}`}>
                 <Sparkline
                     data={history.cpu.length > 1 ? history.cpu : [0, 0]}
                     color="#6366f1"
                     gradientFrom="#6366f1"
-                    height={90}
+                    height={isImmersive ? 140 : 90}
                     showArea={true}
                     currentValue={`${metrics.cpu_usage.toFixed(1)}%`}
                 />
             </div>
+
 
             {/* Per-Core Heatmap */}
             <div>

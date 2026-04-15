@@ -1,4 +1,4 @@
-import { Clock, Activity, Zap, Wifi, ArrowDown, ArrowUp, Server, Radio, ZapOff, Settings2, Gauge } from 'lucide-react';
+import { Clock, Activity, Zap, Wifi, ArrowDown, ArrowUp, Server, Radio, ZapOff, Settings2, Maximize2, Minimize2 } from 'lucide-react';
 import { SystemMetrics, HardwareReport, MetricsHistory } from '@/types/dashboard';
 import CpuWidget from '@/components/widgets/CpuWidget';
 import MemoryWidget from '@/components/widgets/MemoryWidget';
@@ -77,10 +77,10 @@ export default function OverviewTab({ metrics, hardware, history }: OverviewTabP
                     {/* Perspective / Immersion Toggle */}
                     <button 
                         onClick={() => setDashboardDensity(dashboardDensity === 'compact' ? 'immersive' : 'compact')}
-                        className={`p-2 rounded-xl border border-white/10 transition-all ${dashboardDensity === 'immersive' ? 'bg-indigo-500/20 text-indigo-400 shadow-[0_0_15px_rgba(99,102,241,0.2)]' : 'bg-white/5 text-slate-400 hover:text-white'}`}
-                        title="Toggle Immersion Mode"
+                        className={`p-2 rounded-xl border border-white/10 transition-all ${dashboardDensity === 'immersive' ? 'bg-indigo-500/20 text-indigo-400 shadow-[0_0_15px_rgba(99,102,241,0.2)]' : 'bg-white/5 text-slate-400 hover:text-white dark:hover:bg-white/5'}`}
+                        title={dashboardDensity === 'immersive' ? 'Exit Immersive Mode' : 'Enter Immersive Mode'}
                     >
-                        <Gauge size={18} className={dashboardDensity === 'immersive' ? 'animate-pulse' : ''} />
+                        {dashboardDensity === 'immersive' ? <Minimize2 size={18} /> : <Maximize2 size={18} />}
                     </button>
 
                     {/* Dashboard Settings Navigation */}
@@ -190,8 +190,8 @@ export default function OverviewTab({ metrics, hardware, history }: OverviewTabP
                 
                 {/* 1. Primary Metrics */}
                 <div className="space-y-6">
-                    <MemoCpuWidget metrics={tMetrics} hardware={hardware} history={tHistory} />
-                    <MemoMemoryWidget metrics={tMetrics} hardware={hardware} history={tHistory} />
+                    <MemoCpuWidget metrics={tMetrics} hardware={hardware} history={tHistory} density={dashboardDensity} />
+                    <MemoMemoryWidget metrics={tMetrics} hardware={hardware} history={tHistory} density={dashboardDensity} />
                     
                     {/* GPU Widget - Auto Detectable & User Enabled */}
                     {(showGpuWidget && tMetrics.gpus && tMetrics.gpus.length > 0) && (
@@ -201,8 +201,8 @@ export default function OverviewTab({ metrics, hardware, history }: OverviewTabP
 
                 {/* 2. Secondary Metrics */}
                 <div className="space-y-6">
-                    <MemoNetworkWidget metrics={tMetrics} hardware={hardware} history={tHistory} />
-                    <MemoDiskIOWidget metrics={tMetrics} history={tHistory} />
+                    <MemoNetworkWidget metrics={tMetrics} hardware={hardware} history={tHistory} density={dashboardDensity} />
+                    <MemoDiskIOWidget metrics={tMetrics} history={tHistory} density={dashboardDensity} />
                     
                     {/* Data Usage History Widget - User Enabled */}
                     {showDataUsageWidget && (
@@ -217,13 +217,14 @@ export default function OverviewTab({ metrics, hardware, history }: OverviewTabP
                             <MemoAppTopologyMap metrics={tMetrics} />
                         </div>
                         <div className="space-y-6">
-                            <MemoStorageWidget metrics={tMetrics} hardware={hardware} />
-                            <MemoProcessWidget processes={tMetrics.processes || []} />
+                            <MemoStorageWidget metrics={tMetrics} hardware={hardware} density={dashboardDensity} />
+                            <MemoProcessWidget processes={tMetrics.processes || []} density={dashboardDensity} />
                         </div>
                     </div>
                 </div>
             </div>
         </div>
+
     );
 }
 

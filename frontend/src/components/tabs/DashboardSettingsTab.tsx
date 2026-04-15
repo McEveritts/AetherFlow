@@ -1,7 +1,7 @@
 'use client';
 
 import React from 'react';
-import { LayoutDashboard, Radio, Clock, Monitor, ChevronRight, Gauge, Layers } from 'lucide-react';
+import { LayoutDashboard, Radio, Clock, Monitor, ChevronRight, Maximize2, Layers } from 'lucide-react';
 import { useConnectionStore } from '@/store/useConnectionStore';
 
 export default function DashboardSettingsTab() {
@@ -140,7 +140,7 @@ export default function DashboardSettingsTab() {
             </div>
 
             <div className="bg-blue-500/5 border border-blue-500/10 rounded-2xl p-5 flex items-start gap-4">
-                <Gauge size={20} className="text-blue-400 shrink-0 mt-0.5" />
+                <Maximize2 size={20} className="text-blue-400 shrink-0 mt-0.5" />
                 <div>
                     <h5 className="text-sm font-bold text-blue-200">AetherNexus Engine Tuning</h5>
                     <p className="text-xs text-slate-400 mt-1 leading-relaxed">

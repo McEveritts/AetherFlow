@@ -6,6 +6,7 @@ interface NetworkWidgetProps {
     metrics: SystemMetrics;
     hardware: HardwareReport | null;
     history: MetricsHistory;
+    density?: 'compact' | 'immersive';
 }
 
 function formatTotalBytes(bytes: number): string {
@@ -20,9 +21,12 @@ function formatTotalBytes(bytes: number): string {
     return `${value.toFixed(unitIndex > 1 ? 1 : 0)} ${units[unitIndex]}`;
 }
 
-export default function NetworkWidget({ metrics, hardware, history }: NetworkWidgetProps) {
+export default function NetworkWidget({ metrics, hardware, history, density = 'compact' }: NetworkWidgetProps) {
+    const isImmersive = density === 'immersive';
+
     return (
-        <div className="bg-white/[0.02] border border-white/[0.05] rounded-2xl p-5 relative overflow-hidden group hover:bg-white/[0.04] transition-colors backdrop-blur-xl">
+        <div className={`bg-white/[0.02] border border-white/[0.05] rounded-2xl relative overflow-hidden group transition-all duration-300 hover:bg-white/[0.04] backdrop-blur-xl ${isImmersive ? 'p-6 space-y-4' : 'p-5'}`}>
+
             {/* Header */}
             <div className="flex items-center justify-between mb-3">
                 <h2 className="text-sm font-semibold text-slate-200 flex items-center gap-2">
@@ -37,7 +41,7 @@ export default function NetworkWidget({ metrics, hardware, history }: NetworkWid
             </div>
 
             {/* Dual-line Sparkline */}
-            <div className="rounded-xl overflow-hidden bg-slate-900/50 border border-white/[0.03] mb-4">
+            <div className={`rounded-xl overflow-hidden bg-slate-900/50 border border-white/[0.03] transition-all duration-300 ${isImmersive ? 'mb-6 shadow-2xl' : 'mb-4'}`}>
                 <Sparkline
                     data={history.netDown.length > 1 ? history.netDown : [0, 0]}
                     data2={history.netUp.length > 1 ? history.netUp : [0, 0]}
@@ -45,7 +49,7 @@ export default function NetworkWidget({ metrics, hardware, history }: NetworkWid
                     color2="#6366f1"
                     gradientFrom="#10b981"
                     gradientFrom2="#6366f1"
-                    height={90}
+                    height={isImmersive ? 140 : 90}
                     showArea={true}
                     label="Download"
                     label2="Upload"
@@ -53,6 +57,7 @@ export default function NetworkWidget({ metrics, hardware, history }: NetworkWid
                     currentValue2={metrics.network.up as string}
                 />
             </div>
+
 
             {/* Cumulative totals */}
             <div className="grid grid-cols-2 gap-3">

@@ -8,11 +8,14 @@ import { useSystemStore } from '@/store/useSystemStore';
 
 interface ProcessWidgetProps {
     processes: ProcessInfo[];
+    density?: 'compact' | 'immersive';
 }
 
-export default function ProcessWidget({ processes }: ProcessWidgetProps) {
+export default function ProcessWidget({ processes, density = 'compact' }: ProcessWidgetProps) {
+    const isImmersive = density === 'immersive';
     const { data: services } = useSWR<Record<string, { status: string; uptime: string; version: string; process?: string }>>('/api/v1/auth/services');
     const setActiveTab = useSystemStore((state) => state.setActiveTab);
+
 
     const columns = useMemo<ColumnDef<ProcessInfo>[]>(() => [
         {
@@ -93,11 +96,11 @@ export default function ProcessWidget({ processes }: ProcessWidgetProps) {
     ], [services, setActiveTab]);
 
     return (
-        <div className="bg-white/[0.02] border border-white/[0.05] rounded-2xl p-5 relative overflow-hidden backdrop-blur-xl flex flex-col h-full">
+        <div className={`bg-white/[0.02] border border-white/[0.05] rounded-2xl relative overflow-hidden backdrop-blur-xl flex flex-col h-full transition-all duration-300 ${isImmersive ? 'p-6' : 'p-5'}`}>
             {/* Header */}
-            <div className="flex items-center justify-between mb-4 shrink-0">
-                <h2 className="text-sm font-semibold text-slate-200 flex items-center gap-2">
-                    <Activity size={16} className="text-cyan-400" /> Top Processes
+            <div className={`flex items-center justify-between shrink-0 ${isImmersive ? 'mb-6' : 'mb-4'}`}>
+                <h2 className={`${isImmersive ? 'text-lg' : 'text-sm'} font-semibold text-slate-200 flex items-center gap-2`}>
+                    <Activity size={isImmersive ? 18 : 16} className="text-cyan-400" /> Top Processes
                 </h2>
                 <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider">By CPU</span>
             </div>
@@ -108,9 +111,10 @@ export default function ProcessWidget({ processes }: ProcessWidgetProps) {
                     columns={columns}
                     data={processes || []}
                     className="h-full !max-h-full border-none shadow-none rounded-xl"
-                    rowHeight={48}
+                    rowHeight={isImmersive ? 56 : 48}
                 />
             </div>
         </div>
+
     );
 }

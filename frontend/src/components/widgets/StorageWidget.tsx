@@ -4,10 +4,12 @@ import { SystemMetrics, HardwareReport } from '@/types/dashboard';
 interface StorageWidgetProps {
     metrics: SystemMetrics;
     hardware: HardwareReport | null;
+    density?: 'compact' | 'immersive';
 }
 
-export default function StorageWidget({ metrics, hardware }: StorageWidgetProps) {
+export default function StorageWidget({ metrics, hardware, density = 'compact' }: StorageWidgetProps) {
     const disks = metrics.disks || [];
+    const isImmersive = density === 'immersive';
     // Calculate total across all partitions
     const totalAllGB = disks.reduce((sum, d) => sum + d.total_gb, 0);
     const usedAllGB = disks.reduce((sum, d) => sum + d.used_gb, 0);
@@ -15,30 +17,32 @@ export default function StorageWidget({ metrics, hardware }: StorageWidgetProps)
     const overallPct = totalAllGB > 0 ? (usedAllGB / totalAllGB) * 100 : 0;
 
     return (
-        <div className="bg-white/[0.02] border border-white/[0.05] rounded-2xl p-5 relative overflow-hidden backdrop-blur-xl">
-            <div className="flex items-center justify-between mb-4">
-                <h2 className="text-sm font-semibold text-slate-200 flex items-center gap-2">
-                    <HardDrive size={16} className="text-amber-400" /> Storage
+        <div className={`bg-white/[0.02] border border-white/[0.05] rounded-2xl relative overflow-hidden backdrop-blur-xl transition-all duration-300 ${isImmersive ? 'p-6 space-y-4 shadow-xl' : 'p-5'}`}>
+            <div className={`flex items-center justify-between ${isImmersive ? 'mb-6' : 'mb-4'}`}>
+                <h2 className={`${isImmersive ? 'text-lg' : 'text-sm'} font-semibold text-slate-200 flex items-center gap-2`}>
+                    <HardDrive size={isImmersive ? 18 : 16} className="text-amber-400" /> Storage
                 </h2>
                 <div className="flex items-baseline gap-1">
-                    <span className="text-2xl font-bold tracking-tighter text-amber-400">{overallPct.toFixed(1)}%</span>
+                    <span className={`${isImmersive ? 'text-3xl' : 'text-2xl'} font-bold tracking-tighter text-amber-400`}>{overallPct.toFixed(1)}%</span>
                 </div>
             </div>
 
+
             {/* Overall summary */}
-            <div className="mb-4">
-                <div className="flex justify-between text-[10px] text-slate-400 font-semibold uppercase tracking-wider mb-1.5">
+            <div className={isImmersive ? 'mb-8' : 'mb-4'}>
+                <div className="flex justify-between text-[10px] text-slate-400 font-semibold uppercase tracking-wider mb-2">
                     <span>{usedAllGB.toFixed(1)} GB used</span>
                     <span>{freeAllGB.toFixed(1)} GB free</span>
                 </div>
-                <div className="h-3 w-full bg-slate-800/80 rounded-full overflow-hidden flex">
+                <div className={`${isImmersive ? 'h-4' : 'h-3'} w-full bg-slate-800/80 rounded-full overflow-hidden flex transition-all duration-300`}>
                     <div
-                        className="h-full bg-gradient-to-r from-amber-600 to-amber-400 transition-all duration-300 rounded-full"
+                        className="h-full bg-gradient-to-r from-amber-600 to-amber-400 transition-all duration-300 rounded-full shadow-[0_0_10px_rgba(245,158,11,0.3)]"
                         style={{ width: `${overallPct}%` }}
                     />
                 </div>
-                <div className="text-[10px] text-slate-500 mt-1">{totalAllGB.toFixed(0)} GB total across {disks.length} partition{disks.length !== 1 ? 's' : ''}</div>
+                <div className="text-[10px] text-slate-500 mt-2 font-medium">{totalAllGB.toFixed(0)} GB total across {disks.length} partition{disks.length !== 1 ? 's' : ''}</div>
             </div>
+
 
             {/* Individual partitions */}
             {disks.length > 0 && (
