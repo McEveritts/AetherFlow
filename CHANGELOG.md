@@ -1,3 +1,15 @@
+## CHANGELOG v3.1.6 - Visual Stabilization Fix
+_Generated April 15, 2026 from user reported bug fix._
+
+---
+
+### Bug Fixes
+* **Topology Map Stabilization**: Resolved a critical visual "glitch" where nodes would jitter or jump on every data refresh.
+* **Persistent Simulation**: Refactored the D3 force-directed graph to use persistent node coordinates and a stable simulation state across heartbeats.
+* **Smooth Transitions**: Added CSS transitions for node status updates (colors) to provide a more fluid, organic experience.
+
+---
+
 ## CHANGELOG v3.1.5 - Immersive Dashboard & GPU Intelligence
 _Generated April 15, 2026 from recent implementation turn._
 
