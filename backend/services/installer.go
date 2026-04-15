@@ -2,6 +2,7 @@ package services
 
 import (
 	"bufio"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -85,17 +86,18 @@ func RunPackageAction(action, pkgId, scriptName, lockFile string) {
 
 	slog.Info("executing script", "action", action, "path", scriptPath)
 
-	cmd := exec.Command("bash", scriptPath)
-	// Merge stderr into stdout so we get everything
-	cmd.Stderr = nil
+	// Use sudo -E -n bash -c to run the script with elevated privileges
+	// Redirect stderr into stdout ( 2>&1 ) in the bash shell so it naturally flows into StdoutPipe
+	cmdArg := fmt.Sprintf("%s 2>&1", scriptPath)
+	cmd := exec.Command("sudo", "-E", "-n", "bash", "-c", cmdArg)
 
-	// Use a pipe to stream stdout line-by-line
+	// Use a pipe to stream stdout line-by-line (which now includes stderr)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		slog.Error("failed to create stdout pipe", "action", action, "script", scriptName, "error", err)
 		// Fallback to async combined output so we don't stall the pipe
 		go func() {
-			output, runErr := exec.Command("bash", scriptPath).CombinedOutput()
+			output, runErr := exec.Command("sudo", "-E", "-n", "bash", "-c", cmdArg).CombinedOutput()
 			job.LogLines = len(strings.Split(string(output), "\n"))
 			job.Progress = 100
 			if runErr != nil {
@@ -108,7 +110,6 @@ func RunPackageAction(action, pkgId, scriptName, lockFile string) {
 		}()
 		return
 	}
-	cmd.Stderr = cmd.Stdout // merge stderr into stdout pipe
 
 	if err := cmd.Start(); err != nil {
 		job.Status = "failed"

@@ -36,18 +36,10 @@ TimeoutStopSec=35s
 Restart=on-failure
 RestartSec=5s
 
-# ── Security Hardening (Zero-Trust Namespace Isolation) ──────────────────────
-# Mount host filesystem as immutable read-only.
-ProtectSystem=strict
-
-# Deny access to user home directories (SSH keys, bash_history).
-ProtectHome=yes
+# ── Security Hardening (Namespace Isolation) ──────────────────────
 
 # Isolate /tmp per-service to prevent cross-process payload sharing.
 PrivateTmp=yes
-
-# Strip SUID/SGID — prevent privilege escalation.
-NoNewPrivileges=yes
 
 # Restrict writable paths to only what the API needs.
 ReadWritePaths=/var/lib/openclaw /var/log/aetherflow

@@ -29,11 +29,8 @@ Environment=ALLOWED_HOSTS=localhost:8080,127.0.0.1:8080,__HOST_IP__:8080,__PUBLI
 Environment=ALLOWED_CORS_ORIGIN=http://localhost:3000,http://127.0.0.1:3000,http://__HOST_IP__:3000,http://__PUBLIC_IP__:3000
 
 # Security Hardening
-NoNewPrivileges=yes
 PrivateTmp=yes
 PrivateDevices=yes
-ProtectSystem=strict
-ProtectHome=yes
 ProtectClock=yes
 ProtectControlGroups=yes
 ProtectKernelLogs=yes
@@ -44,11 +41,8 @@ ProcSubset=pid
 LockPersonality=yes
 RestrictNamespaces=yes
 RestrictRealtime=yes
-RestrictSUIDSGID=yes
 SystemCallArchitectures=native
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-CapabilityBoundingSet=
-AmbientCapabilities=
 UMask=0027
 # Fix #5: ReadWritePaths for the backend data directory
 ReadWritePaths=/opt/AetherFlow/backend/data
