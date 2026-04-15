@@ -26,13 +26,13 @@ function _removePlex() {
   systemctl daemon-reload >/dev/null 2>&1
   rm -rf /var/lib/plexmediaserver
   rm -rf /usr/lib/plexmediaserver
-  rm /etc/init/plexmediaserver.conf
-  rm /etc/default/plexmediaserver
-  rm /etc/apache2/conf-available/fqdn.conf
-  rm /etc/apache2/conf-enabled/fqdn.conf
-  rm /etc/apache2/sites-enabled/plex.conf
-  rm /srv/rutorrent/home/.plex
-  rm /install/.plex.lock
+  rm -f /etc/init/plexmediaserver.conf
+  rm -f /etc/default/plexmediaserver
+  rm -f /etc/apache2/conf-available/fqdn.conf
+  rm -f /etc/apache2/conf-enabled/fqdn.conf
+  rm -f /etc/apache2/sites-enabled/plex.conf
+  rm -f /srv/rutorrent/home/.plex
+  rm -f /install/.plex.lock
   sudo userdel plex >/dev/null 2>&1
   pkill -f plex
 }

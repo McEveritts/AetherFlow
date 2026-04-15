@@ -80,10 +80,13 @@ export default function MarketplaceTab() {
                     notifiedRef.current.add(app.id);
                     addToast(`${app.name} has been successfully installed.`, 'success');
                     setTimeout(() => notifiedRef.current.delete(app.id), 5000);
-                }
-                if (action === 'uninstalling' && app.status === 'uninstalled') {
+                } else if (action === 'uninstalling' && app.status === 'uninstalled') {
                     notifiedRef.current.add(app.id);
                     addToast(`${app.name} has been successfully removed.`, 'success');
+                    setTimeout(() => notifiedRef.current.delete(app.id), 5000);
+                } else if (app.status === 'failed') {
+                    notifiedRef.current.add(app.id);
+                    addToast(`Operation failed for ${app.name}. Check system logs.`, 'error');
                     setTimeout(() => notifiedRef.current.delete(app.id), 5000);
                 }
             }

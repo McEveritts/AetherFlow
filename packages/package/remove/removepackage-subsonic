@@ -20,7 +20,7 @@
 
 source /opt/AetherFlow/packages/common.sh
 dpkg -r subsonic
-rm /etc/systemd/system/subsonic.service
+rm -f /etc/systemd/system/subsonic.service
 rm -rf /srv/subsonic
 rm -rf /var/subsonic
 rm -rf /usr/share/subsonic

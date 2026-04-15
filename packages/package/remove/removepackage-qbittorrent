@@ -9,13 +9,16 @@ LOGFILE="/opt/AetherFlow/logs/installer.log"
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [remove-qbittorrent] $1" | tee -a "$LOGFILE"; }
 
 log "Stopping qbittorrent..."
-systemctl stop qbittorrent; systemctl disable qbittorrent
+systemctl stop qbittorrent 2>/dev/null || true
+systemctl disable qbittorrent 2>/dev/null || true
 
 log "Removing qbittorrent files and configuration..."
-apt-get remove -y qbittorrent-nox >/dev/null 2>&1; rm -rf /etc/systemd/system/qbittorrent.service /etc/apache2/sites-enabled/qbittorrent.conf; userdel qbittorrent 2>/dev/null
+apt-get remove -y qbittorrent-nox >/dev/null 2>&1 || true
+rm -rf /etc/systemd/system/qbittorrent.service /etc/apache2/sites-enabled/qbittorrent.conf
+userdel qbittorrent 2>/dev/null || true
 
-systemctl daemon-reload 2>/dev/null
-service apache2 reload 2>/dev/null
+systemctl daemon-reload 2>/dev/null || true
+service apache2 reload 2>/dev/null || true
 rm -f /install/.qbittorrent.lock
 
 log "qbittorrent has been completely removed."

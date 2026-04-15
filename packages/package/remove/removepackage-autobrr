@@ -9,13 +9,15 @@ LOGFILE="/opt/AetherFlow/logs/installer.log"
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [remove-autobrr] $1" | tee -a "$LOGFILE"; }
 
 log "Stopping autobrr..."
-systemctl stop autobrr; systemctl disable autobrr
+systemctl stop autobrr 2>/dev/null || true
+systemctl disable autobrr 2>/dev/null || true
 
 log "Removing autobrr files and configuration..."
-rm -rf /opt/autobrr /home/autobrr /etc/systemd/system/autobrr.service /etc/apache2/sites-enabled/autobrr.conf; userdel autobrr 2>/dev/null
+rm -rf /opt/autobrr /home/autobrr /etc/systemd/system/autobrr.service /etc/apache2/sites-enabled/autobrr.conf
+userdel autobrr 2>/dev/null || true
 
-systemctl daemon-reload 2>/dev/null
-service apache2 reload 2>/dev/null
+systemctl daemon-reload 2>/dev/null || true
+service apache2 reload 2>/dev/null || true
 rm -f /install/.autobrr.lock
 
 log "autobrr has been completely removed."

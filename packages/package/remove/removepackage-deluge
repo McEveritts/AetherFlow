@@ -9,13 +9,16 @@ LOGFILE="/opt/AetherFlow/logs/installer.log"
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [remove-deluge] $1" | tee -a "$LOGFILE"; }
 
 log "Stopping deluge..."
-systemctl stop deluged deluge-web; systemctl disable deluged deluge-web
+systemctl stop deluged deluge-web 2>/dev/null || true
+systemctl disable deluged deluge-web 2>/dev/null || true
 
 log "Removing deluge files and configuration..."
-apt-get remove -y deluged deluge-web deluge-console >/dev/null 2>&1; rm -rf /etc/systemd/system/deluged.service /etc/systemd/system/deluge-web.service /etc/apache2/sites-enabled/deluge.conf; userdel deluge 2>/dev/null
+apt-get remove -y deluged deluge-web deluge-console >/dev/null 2>&1 || true
+rm -rf /etc/systemd/system/deluged.service /etc/systemd/system/deluge-web.service /etc/apache2/sites-enabled/deluge.conf
+userdel deluge 2>/dev/null || true
 
-systemctl daemon-reload 2>/dev/null
-service apache2 reload 2>/dev/null
+systemctl daemon-reload 2>/dev/null || true
+service apache2 reload 2>/dev/null || true
 rm -f /install/.deluge.lock
 
 log "deluge has been completely removed."

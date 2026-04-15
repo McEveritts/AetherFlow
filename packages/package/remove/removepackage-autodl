@@ -2,42 +2,25 @@
 #
 # [Quick Box :: Remove AutoDL-IRSSI package]
 #
-# GITHUB REPOS
-# GitHub _ packages  :   https://github.com/AetherFlow/AetherFlow_packages
-# LOCAL REPOS
-# Local _ packages   :   /etc/AetherFlow/packages
-# Author             :   McEveritts
-# URL                :   https://AetherFlow.io
-#
-# AetherFlow Copyright (C) 2017 AetherFlow.io
-# Licensed under GNU General Public License v3.0 GPL-3 (in short)
-#
-#   You may copy, distribute and modify the software as long as you track
-#   changes/dates in source files. Any modifications to our software
-#   including (via compiler) GPL-licensed code must also be made available
-#   under the GPL along with build & install instructions.
-#
-
 source /opt/AetherFlow/packages/common.sh
+
 function _removepackage-autodl() {
   username=$(whoami);
   users=($(cat /etc/htpasswd | cut -d ":" -f 1))
-  # LEGACY: rutorrent path no longer used
-# rutorrent="/srv/rutorrent/";
   PLUGIN="autodl-irssi"
     for i in $PLUGIN; do
       rm -rf "${rutorrent}/plugins/$i"
     done
-      systemctl stop irssi@*
-      systemctl disable irssi@*
-      rm /etc/systemd/system/irssi@.service
-    for u in "${users[@]}"; do
-      rm -rf /home/${u}/.autodl
-      rm -rf /home/${u}/.irssi
-    done
-    rm /install/.autodlirssi.lock
+    systemctl stop irssi@* 2>/dev/null || true
+    systemctl disable irssi@* 2>/dev/null || true
+    rm -f /etc/systemd/system/irssi@.service
+    systemctl daemon-reload 2>/dev/null || true
 
+    for u in "${users[@]}"; do
+      rm -rf "/home/${u}/.autodl"
+      rm -rf "/home/${u}/.irssi"
+    done
+    rm -f /install/.autodlirssi.lock
 }
 
 _removepackage-autodl
-

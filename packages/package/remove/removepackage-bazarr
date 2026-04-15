@@ -9,13 +9,15 @@ LOGFILE="/opt/AetherFlow/logs/installer.log"
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [remove-bazarr] $1" | tee -a "$LOGFILE"; }
 
 log "Stopping bazarr..."
-systemctl stop bazarr; systemctl disable bazarr
+systemctl stop bazarr 2>/dev/null || true
+systemctl disable bazarr 2>/dev/null || true
 
 log "Removing bazarr files and configuration..."
-rm -rf /opt/bazarr /etc/systemd/system/bazarr.service /etc/apache2/sites-enabled/bazarr.conf; userdel bazarr 2>/dev/null
+rm -rf /opt/bazarr /etc/systemd/system/bazarr.service /etc/apache2/sites-enabled/bazarr.conf
+userdel bazarr 2>/dev/null || true
 
-systemctl daemon-reload 2>/dev/null
-service apache2 reload 2>/dev/null
+systemctl daemon-reload 2>/dev/null || true
+service apache2 reload 2>/dev/null || true
 rm -f /install/.bazarr.lock
 
 log "bazarr has been completely removed."

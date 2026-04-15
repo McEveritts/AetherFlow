@@ -12,36 +12,31 @@
 # AetherFlow Copyright (C) 2017 AetherFlow.io
 # Licensed under GNU General Public License v3.0 GPL-3 (in short)
 #
-#   You may copy, distribute and modify the software as long as you track
-#   changes/dates in source files. Any modifications to our software
-#   including (via compiler) GPL-licensed code must also be made available
-#   under the GPL along with build & install instructions.
-#
-#   AetherFlow.IO does not grant the end-user the right to distribute this
-#   code in a means to supply commercial monetization. If you would like
-#   to include AetherFlow in your commercial project, write to echo@AetherFlow.io
-#   with a summary of your project as well as its intended use for moentization.
-#
-
 source /opt/AetherFlow/packages/common.sh
+username="${AETHERFLOW_USER:-$(whoami)}"
+
 function _removepackage-tr() {
 	# Disable and Stop Transmission services
-	systemctl disable transmission@${username} > /dev/null 2>&1
-	systemctl stop transmission@${username} > /dev/null 2>&1
+	systemctl disable "transmission@${username}" 2>/dev/null || true
+	systemctl stop "transmission@${username}" 2>/dev/null || true
+
 	# Remove Transmission user and settings directories
-	rm -rf /home/${username}/torrents/transmission/
-	rm -rf /home/${username}/trwatch/
+	rm -rf "/home/${username}/torrents/transmission/"
+	rm -rf "/home/${username}/trwatch/"
 	rm -rf /usr/share/transmission
-	rm -rf /srv/rutorrent/home/${username}.transmission.downloads
-	rm -rf /home/${username}/.config/transmission/
+	rm -rf "/srv/rutorrent/home/${username}.transmission.downloads"
+	rm -rf "/home/${username}/.config/transmission/"
 	rm -rf /etc/apache2/sites-enabled/transmission.conf
+
 	# Remove any package dependencies and settings
-	apt-get -y remove transmission*
-	apt-get -y purge transmission*
+	apt-get -y remove transmission* || true
+	apt-get -y purge transmission* || true
+
 	# Remove lock file
-	rm /install/.transmission.lock
+	rm -f /install/.transmission.lock
+
 	# Reload apache2
-	service apache2 reload
+	service apache2 reload 2>/dev/null || true
 }
 
 # LEGACY REMOVED: master.txt
@@ -49,4 +44,3 @@ MASTER="$AETHERFLOW_USER"
 OUTTO=$LOGFILE
 
 _removepackage-tr
-

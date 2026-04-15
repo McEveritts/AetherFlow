@@ -24,5 +24,5 @@ MASTER="$AETHERFLOW_USER"
 
 sed -i 's/usrjquota=aquota.user,jqfmt=vfsv1,//g' /etc/fstab
 apt-get remove -y -q quota >/dev/null 2>&1
-rm /install/.quota.lock
+rm -f /install/.quota.lock
 

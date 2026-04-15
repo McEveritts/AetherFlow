@@ -1,10 +1,10 @@
 #!/bin/bash
 source /opt/AetherFlow/packages/common.sh
-systemctl stop Tautulli
-systemctl disable Tautulli
+systemctl stop Tautulli 2>/dev/null || true
+systemctl disable Tautulli 2>/dev/null || true
 rm -rf /opt/Tautulli
-rm /install/.Tautulli.lock
+rm -f /install/.Tautulli.lock
 rm -f /etc/apache2/sites-enabled/Tautulli.conf
-service apache2 reload
-rm /etc/systemd/system/Tautulli.service
-
+service apache2 reload 2>/dev/null || true
+rm -f /etc/systemd/system/Tautulli.service
+systemctl daemon-reload 2>/dev/null || true

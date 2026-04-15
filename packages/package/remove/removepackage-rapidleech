@@ -24,8 +24,8 @@ OUTTO=$LOGFILE
 
 function _removeRapidleech() {
   sudo rm -r  /home/"${MASTER}"/rapidleech
-  sudo rm /etc/apache2/sites-enabled/${MASTER}.rapidleech.conf
-  sudo rm /install/.rapidleech.lock
+  sudo rm -f /etc/apache2/sites-enabled/${MASTER}.rapidleech.conf
+  sudo rm -f /install/.rapidleech.lock
   service apache2 reload
 }
 

@@ -26,21 +26,21 @@ function _removeSickRage() {
   if [[ -f /etc/init.d/sickrage ]]; then
     sudo service sickrage stop
     sudo update-rc.d -f sickrage remove
-    sudo rm /etc/default/sickrage > /dev/null 2>&1
-    sudo rm /etc/init.d/sickrage > /dev/null 2>&1
+    sudo rm -f /etc/default/sickrage > /dev/null 2>&1
+    sudo rm -f /etc/init.d/sickrage > /dev/null 2>&1
   fi
-    systemctl disable sickrage@${MASTER}
-    systemctl stop sickrage@${MASTER}
+    systemctl disable "sickrage@${MASTER}" 2>/dev/null || true
+    systemctl stop "sickrage@${MASTER}" 2>/dev/null || true
 
 
-  sudo rm -r /var/run/sickrage > /dev/null 2>&1
-  sudo rm /etc/apache2/sites-enabled/sickrage.conf > /dev/null 2>&1
-  sudo rm /etc/systemd/sickrage@.service > /dev/null 2>&1
-  sudo rm /install/.sickrage.lock
+  sudo rm -rf /var/run/sickrage > /dev/null 2>&1
+  sudo rm -f /etc/apache2/sites-enabled/sickrage.conf > /dev/null 2>&1
+  sudo rm -f /etc/systemd/sickrage@.service > /dev/null 2>&1
+  sudo rm -f /install/.sickrage.lock
   service apache2 reload
 
   cd /home/"$MASTER"
-  sudo rm -r .sickrage
+  sudo rm -rf .sickrage
 
   echo -n "Verifying SickRage removal from /home/$MASTER directory"
   echo ""
@@ -52,4 +52,3 @@ function _removeSickRage() {
 }
 
 _removeSickRage
-

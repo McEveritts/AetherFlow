@@ -15,9 +15,9 @@ function _removeSonarr() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] [sonarr] Starting Sonarr removal..."
 
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] [sonarr] Stopping Sonarr service..."
-    systemctl stop sonarr@"${username}" || true
-    systemctl stop sonarr || true
-    systemctl disable sonarr@"${username}" 2>/dev/null || true
+    systemctl stop "sonarr@${username}" 2>/dev/null || true
+    systemctl stop sonarr 2>/dev/null || true
+    systemctl disable "sonarr@${username}" 2>/dev/null || true
     systemctl disable sonarr 2>/dev/null || true
 
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] [sonarr] Removing Sonarr packages..."
@@ -26,29 +26,29 @@ function _removeSonarr() {
     apt-get -y autoremove >/dev/null 2>&1 || true
 
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] [sonarr] Cleaning up configuration..."
-    rm -f /etc/apt/sources.list.d/sonarr.list || true
-    rm -f /etc/apache2/sites-enabled/sonarr.conf || true
-    rm -rf /opt/Sonarr || true
-    rm -rf /var/lib/sonarr || true
+    rm -f /etc/apt/sources.list.d/sonarr.list
+    rm -f /etc/apache2/sites-enabled/sonarr.conf
+    rm -rf /opt/Sonarr
+    rm -rf /var/lib/sonarr
 
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] [sonarr] Removing init scripts..."
     if [[ -f /etc/init.d/sonarr ]]; then
         update-rc.d -f sonarr remove >/dev/null 2>&1 || true
-        rm -f /etc/default/sonarr || true
-        rm -f /etc/init.d/sonarr || true
+        rm -f /etc/default/sonarr
+        rm -f /etc/init.d/sonarr
     fi
 
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] [sonarr] Removing systemd unit..."
-    rm -f /etc/systemd/system/sonarr.service || true
-    rm -f /etc/systemd/system/sonarr@.service || true
-    systemctl daemon-reload || true
+    rm -f /etc/systemd/system/sonarr.service
+    rm -f /etc/systemd/system/sonarr@.service
+    systemctl daemon-reload 2>/dev/null || true
 
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] [sonarr] Reloading web server..."
     service apache2 reload 2>/dev/null || true
-
+    
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] [sonarr] Removing lockfile..."
-    rm -f /install/.sonarr.lock || true
-
+    rm -f /install/.sonarr.lock
+    
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] [sonarr] Sonarr removal complete!"
 }
 

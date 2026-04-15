@@ -2,39 +2,24 @@
 #
 # [Quick Box :: Uninstaller for Medusa package]
 #
-# GITHUB REPOS
-# GitHub _ packages  :   https://github.com/AetherFlow/AetherFlow_packages
-# LOCAL REPOS
-# Local _ packages   :   /etc/AetherFlow/packages
-# Author             :   AetherFlow.IO
-# URL                :   https://AetherFlow.io
-#
-# AetherFlow Copyright (C) 2017 AetherFlow.io
-# Licensed under GNU General Public License v3.0 GPL-3 (in short)
-#
-#   You may copy, distribute and modify the software as long as you track
-#   changes/dates in source files. Any modifications to our software
-#   including (via compiler) GPL-licensed code must also be made available
-#   under the GPL along with build & install instructions.
-#
 source /opt/AetherFlow/packages/common.sh
 # LEGACY REMOVED: master.txt
 MASTER="$AETHERFLOW_USER"
 OUTTO=$LOGFILE
 
 function _removeMedusa() {
+  systemctl disable "medusa@${MASTER}" 2>/dev/null || true
+  systemctl stop "medusa@${MASTER}" 2>/dev/null || true
+  
+  sudo rm -rf /var/run/medusa > /dev/null 2>&1
+  sudo rm -f /etc/apache2/sites-enabled/medusa.conf > /dev/null 2>&1
+  sudo rm -f /etc/systemd/medusa@.service > /dev/null 2>&1
+  sudo rm -f /install/.medusa.lock
+  service apache2 reload 2>/dev/null || true
+  systemctl daemon-reload 2>/dev/null || true
 
-  systemctl disable medusa@${MASTER}
-  systemctl stop medusa@${MASTER}
-
-  sudo rm -r /var/run/medusa > /dev/null 2>&1
-  sudo rm /etc/apache2/sites-enabled/medusa.conf > /dev/null 2>&1
-  sudo rm /etc/systemd/medusa@.service > /dev/null 2>&1
-  sudo rm /install/.medusa.lock
-  service apache2 reload
-
-  cd /home/"${MASTER}"
-  sudo rm -r .medusa
+  cd "/home/${MASTER}"
+  sudo rm -rf .medusa
 
   echo -n "Verifying Medusa removal from /home/${MASTER} directory"
   echo ""
@@ -42,8 +27,6 @@ function _removeMedusa() {
   echo ""
   echo ""
   echo "Medusa Uninstall Complete. You may reinstall at any time by running [installpackage-medusa]."
-
 }
 
 _removeMedusa
-

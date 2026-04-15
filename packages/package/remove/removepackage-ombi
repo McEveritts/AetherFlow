@@ -9,13 +9,15 @@ LOGFILE="/opt/AetherFlow/logs/installer.log"
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [remove-ombi] $1" | tee -a "$LOGFILE"; }
 
 log "Stopping ombi..."
-systemctl stop ombi; systemctl disable ombi
+systemctl stop ombi 2>/dev/null || true
+systemctl disable ombi 2>/dev/null || true
 
 log "Removing ombi files and configuration..."
-rm -rf /opt/Ombi /etc/systemd/system/ombi.service /etc/apache2/sites-enabled/ombi.conf; userdel ombi 2>/dev/null
+rm -rf /opt/Ombi /etc/systemd/system/ombi.service /etc/apache2/sites-enabled/ombi.conf
+userdel ombi 2>/dev/null || true
 
-systemctl daemon-reload 2>/dev/null
-service apache2 reload 2>/dev/null
+systemctl daemon-reload 2>/dev/null || true
+service apache2 reload 2>/dev/null || true
 rm -f /install/.ombi.lock
 
 log "ombi has been completely removed."
