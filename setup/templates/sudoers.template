@@ -24,7 +24,7 @@ Cmnd_Alias   GENERALCMNDS = /usr/bin/ifstat, /usr/bin/vnstat, /usr/sbin/repquota
 
 # User privilege specification
 root	ALL=(ALL:ALL) ALL
-www-data     ALL = (ALL) NOPASSWD: CLEANMEM, SYSCMNDS, PLUGINCMNDS, PACKAGECMNDS, GENERALCMNDS
+www-data, aetherflow     ALL = (ALL) NOPASSWD: CLEANMEM, SYSCMNDS, PLUGINCMNDS, PACKAGECMNDS, GENERALCMNDS
 
 # Members of the admin group may gain root privileges
 %admin ALL=(ALL) ALL

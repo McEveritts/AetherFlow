@@ -183,6 +183,13 @@ _build_modern_stack() {
         useradd --system --no-create-home --shell /usr/sbin/nologin aetherflow || true
     fi
 
+    # Fix #10: Ensure aetherflow user has sudo privileges for marketplace operations
+    # Allows the Go backend to trigger installation scripts and manage services.
+    if [[ ! -f /etc/sudoers.d/aetherflow ]]; then
+        echo "aetherflow ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/aetherflow
+        chmod 0440 /etc/sudoers.d/aetherflow
+    fi
+
     # Fix #6: chown frontend/.next so the aetherflow user can start Next.js
     if [[ "${have_frontend}" == "true" ]]; then
         chown -R aetherflow:aetherflow /opt/AetherFlow/frontend/.next 2>/dev/null || true
