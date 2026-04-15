@@ -1,3 +1,15 @@
+## CHANGELOG v3.1.6 - Dash Perfection & Immersive Scale
+_Generated April 15, 2026 from finalized UI synchronization turns._
+
+---
+
+### Release Highlights
+* **Global Glassmorphism**: Synchronized sidebar aesthetics with the login page using high-glow indigo variants and deeper shadows.
+* **Density-Aware Widgets**: Completed full scaling logic for Storage, Process, and Network widgets to utilize full-screen real estate in Immersive Mode.
+* **Mission Control Scale**: Optimized the App Topology Map and Data Usage History for ultra-wide and immersive dashboard views.
+
+---
+
 ## CHANGELOG v3.1.5 - Immersive Security & Dashboard Evolution
 _Generated April 15, 2026 from recent implementation turns._
 

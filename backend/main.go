@@ -46,7 +46,7 @@ import (
 	"github.com/joho/godotenv"
 )
 
-var version = "dev"
+var version = "3.1.6"
 
 // discoverOrigins auto-detects local and public IPs and builds CORS origin list
 func discoverOrigins() []string {
