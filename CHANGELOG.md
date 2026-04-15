@@ -1,43 +1,20 @@
-## CHANGELOG v3.1.8 - Live Frequency Intelligence
-_Generated April 15, 2026._
-
----
-
-### New Features
-* **Real-time CPU Polling**: Upgraded the CPU frequency tracking to use kernel-level frequency scaling files on Linux for true "Live" updates.
-* **Smart Fallbacks**: Implemented intelligent OS-detection to provide the most reactive frequency measurements available on Windows and other platforms without manual configuration.
-
----
-
-## CHANGELOG v3.1.7 - UX Language Refinement
-_Generated April 15, 2026._
-
----
-
-### UI/UX Improvements
-* **Network Label Clarity**: Renamed "RX" and "TX" to "Downloaded" and "Uploaded" respectively across the dashboard for better human readability.
-* **Consistency Fix**: Synchronized labels in both the `Overview` StatPills and the `NetworkWidget`.
-
----
-
-## CHANGELOG v3.1.6 - Visual Stabilization Fix
-_Generated April 15, 2026 from user reported bug fix._
-
----
-
-### Bug Fixes
-* **Topology Map Stabilization**: Resolved a critical visual "glitch" where nodes would jitter or jump on every data refresh.
-* **Persistent Simulation**: Refactored the D3 force-directed graph to use persistent node coordinates and a stable simulation state across heartbeats.
-* **Smooth Transitions**: Added CSS transitions for node status updates (colors) to provide a more fluid, organic experience.
-
----
-
-## CHANGELOG v3.1.5 - Immersive Dashboard & GPU Intelligence
-_Generated April 15, 2026 from recent implementation turn._
+## CHANGELOG v3.1.5 - Immersive Dashboard & System Refinements
+_Generated April 15, 2026 from recent implementation turns._
 
 ---
 
 ### Release Highlights
+* **Dashboard Evolution**: Upgraded the standard layout into an immersive, hardware-aware mission control center.
+* **Component Stability**: Resolved major rendering jitters in the App Topology Map.
+* **Hardware Intelligence**: Shifted from generic static metric reporting to real-time, detected component stats (e.g., live CPU freq).
+
+### New Features & Improvements
+* **Real-time CPU Polling**: Upgraded the CPU frequency tracking to use kernel-level frequency scaling files on Linux for true "Live" updates.
+* **Smart Fallbacks**: Implemented intelligent OS-detection to provide the most reactive frequency measurements available on Windows and other platforms without manual configuration.
+* **Network Label Clarity**: Renamed "RX" and "TX" to "Downloaded" and "Uploaded" respectively across the dashboard for better human readability.
+* **Consistency Fix**: Synchronized labels in both the `Overview` StatPills and the `NetworkWidget`.
+* **Topology Map Stabilization**: Resolved a critical visual "glitch" where nodes would jitter or jump on every data refresh by refactoring the D3 force-directed graph to use persistent node coordinates.
+* **Smooth Transitions**: Added CSS transitions for node status updates (colors) to provide a more fluid, organic experience.
 * **Immersive Mode**: Introduced a new high-fidelity dashboard density mode that expands visualizations and enhances visual flair for administrative monitoring.
 * **GPU Intelligence**: Implemented intelligent, detectable GPU metric monitoring that gracefully handles both headless server and direct-display environments.
 * **Dash Settings Integration**: Added a dedicated Dashboard settings tab for managing layout density, connectivity modes, and hardware visibility toggles.
