@@ -379,16 +379,15 @@ export default function SettingsTab() {
                                         <div className="p-5 flex flex-col md:flex-row md:items-center justify-between gap-4 hover:bg-white/[0.02] transition-colors">
                                             <div>
                                                 <label className="text-sm font-semibold text-slate-200 flex items-center gap-2">
-                                                    <Clock size={16} className="text-blue-400" /> Polling Heartbeat
+                                                    <Clock size={16} className="text-blue-400" /> Refresh Heartbeat
                                                 </label>
-                                                <p className="text-xs text-slate-500 mt-1">Set the data refresh frequency when in polling mode.</p>
+                                                <p className="text-xs text-slate-500 mt-1">Set the data refresh frequency for the dashboard.</p>
                                             </div>
                                             <div className="shrink-0 w-full md:w-80 relative">
                                                 <select
                                                     value={pollInterval}
                                                     onChange={(e) => setPollInterval(Number(e.target.value))}
-                                                    disabled={preferredMode === 'websocket'}
-                                                    className="w-full bg-slate-900 border border-white/10 rounded-xl px-4 py-3 text-slate-200 text-sm focus:outline-none focus:border-indigo-500/50 transition-colors appearance-none cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed"
+                                                    className="w-full bg-slate-900 border border-white/10 rounded-xl px-4 py-3 text-slate-200 text-sm focus:outline-none focus:border-indigo-500/50 transition-colors appearance-none cursor-pointer"
                                                 >
                                                     <option value={1000}>1 Second (Hyper)</option>
                                                     <option value={2000}>2 Seconds (Fast)</option>

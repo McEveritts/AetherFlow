@@ -117,13 +117,12 @@ export default function DashboardSettingsTab() {
                             <label className="text-sm font-semibold text-slate-200 flex items-center gap-2">
                                 <Clock size={16} className="text-amber-400" /> Refresh Heartbeat
                             </label>
-                            <p className="text-xs text-slate-500 mt-1">Update frequency when WebSockets are unavailable or disabled.</p>
+                            <p className="text-xs text-slate-500 mt-1">Update frequency for dashboard visual updates.</p>
                         </div>
                         <div className="shrink-0 w-full md:w-80 relative">
                             <select
                                 value={pollInterval}
                                 onChange={(e) => setPollInterval(Number(e.target.value))}
-                                disabled={preferredMode === 'websocket'}
                                 className="w-full bg-slate-900 border border-white/10 rounded-xl px-4 py-3 text-slate-200 text-sm focus:outline-none focus:border-indigo-500/50 transition-colors appearance-none cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed"
                             >
                                 <option value={1000}>1 Second (Hyper)</option>

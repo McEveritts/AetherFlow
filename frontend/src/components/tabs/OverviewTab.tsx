@@ -116,8 +116,7 @@ export default function OverviewTab({ metrics, hardware, history }: OverviewTabP
                     <select 
                         value={pollInterval}
                         onChange={(e) => setPollInterval(Number(e.target.value))}
-                        disabled={preferredMode === 'websocket'}
-                        className="bg-transparent text-slate-300 text-xs font-bold outline-none cursor-pointer hover:text-white disabled:opacity-30 disabled:cursor-not-allowed"
+                        className="bg-transparent text-slate-300 text-xs font-bold outline-none cursor-pointer hover:text-white"
                     >
                         <option value={1000} className="bg-[#12141a]">1s</option>
                         <option value={2000} className="bg-[#12141a]">2s</option>

@@ -89,6 +89,7 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
     const hasConnectedOnceRef = useRef(false);       // suppress "restored" toast on first connect
     const isMountedRef = useRef(true);
     const isManualCloseRef = useRef(false);          // distinguish user-initiated close from error
+    const lastWsPushRef = useRef<number>(0);
 
     // ── Heartbeat ──────────────────────────────────────────────
     const clearHeartbeat = useCallback(() => {
@@ -225,13 +226,22 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
 
         ws.onmessage = (event) => {
             if (!isMountedRef.current) return;
-            setLastMessageAt(Date.now());
+            const now = Date.now();
+            setLastMessageAt(now);
             resetHeartbeatTimeout();
 
             try {
                 const rawMessage = JSON.parse(event.data);
                 const message = webSocketMessageSchema.parse(rawMessage);
                 if (message.type === 'METRICS_UPDATE') {
+                    // Honor the user's pollInterval setting to provide adjustable dashboard updates
+                    // even when receiving 1-second WebSocket blasts from the backend.
+                    const currentInterval = useConnectionStore.getState().pollInterval;
+                    if (now - lastWsPushRef.current < currentInterval - 100) {
+                        return; // drop update to enforce user's selected update frequency
+                    }
+                    lastWsPushRef.current = now;
+
                     const parsedData = metricsUpdateDataSchema.safeParse(message.data);
                     if (parsedData.success) {
                         setData({

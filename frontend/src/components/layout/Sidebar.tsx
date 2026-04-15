@@ -60,8 +60,8 @@ export default function Sidebar() {
                     <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-indigo-500/80 to-transparent"></div>
 
                     <div className="flex items-center gap-4 w-full relative z-10 mt-1">
-                        <div className="h-9 w-9 min-w-[2.25rem] rounded-xl shadow-[0_0_25px_rgba(99,102,241,0.4)] relative overflow-hidden ring-1 ring-white/20">
-                            <img src="/img/af-logo.png" alt="AetherFlow Logo" className="w-full h-full object-cover scale-[1.35]" />
+                        <div className="h-9 w-9 min-w-[2.25rem] rounded-2xl shadow-[0_0_30px_rgba(99,102,241,0.5)] relative overflow-hidden bg-indigo-500/10">
+                            <img src="/img/af-logo.png" alt="AetherFlow Logo" className="w-full h-full object-cover scale-[1.3]" />
                         </div>
                         <h1 className={`text-xl font-bold tracking-tight bg-gradient-to-r from-slate-100 to-slate-400 bg-clip-text text-transparent transition-opacity duration-300 truncate whitespace-nowrap ${isSidebarHovered ? 'opacity-100' : 'opacity-0 w-0'}`}>
                             AetherFlow
@@ -78,8 +78,8 @@ export default function Sidebar() {
                                 key={item.id}
                                 onClick={() => setActiveTab(item.id)}
                                 className={`w-full flex items-center relative gap-4 px-3.5 py-3 rounded-xl transition-all duration-300 group overflow-hidden ${isActive
-                                    ? 'bg-indigo-500/15 text-indigo-50 shadow-[0_0_20px_rgba(99,102,241,0.15)] border border-indigo-500/30'
-                                    : 'text-slate-400 hover:bg-white/5 hover:text-slate-200 border border-transparent'
+                                    ? 'bg-gradient-to-r from-indigo-500/20 to-purple-500/20 text-white shadow-[0_0_15px_rgba(99,102,241,0.2)]'
+                                    : 'text-slate-400 hover:bg-white/5 hover:text-slate-200'
                                     }`}
                             >
                                 {/* Active Indicator Line */}
@@ -118,7 +118,7 @@ export default function Sidebar() {
                                     setActiveTab(item.id);
                                 }
                             }}
-                            className={`w-full flex items-center gap-4 px-3 py-2.5 rounded-xl text-slate-400 hover:text-slate-200 hover:bg-white/5 transition-all duration-300 group overflow-hidden ${activeTab === item.id ? 'bg-indigo-500/15 text-indigo-50 shadow-[0_0_15px_rgba(99,102,241,0.1)] border border-indigo-500/20' : 'border border-transparent'}`}
+                            className={`w-full flex items-center gap-4 px-3 py-2.5 rounded-xl text-slate-400 hover:text-slate-200 hover:bg-white/5 transition-all duration-300 group overflow-hidden ${activeTab === item.id ? 'bg-gradient-to-r from-indigo-500/20 to-purple-500/20 text-white shadow-[0_0_15px_rgba(99,102,241,0.2)]' : ''}`}
                         >
                             <div className="min-w-[1.125rem] flex items-center justify-center group-hover:scale-110 transition-transform">
                                 {item.icon}
