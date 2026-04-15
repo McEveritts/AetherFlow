@@ -9,13 +9,15 @@ LOGFILE="/opt/AetherFlow/logs/installer.log"
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [remove-prometheus] $1" | tee -a "$LOGFILE"; }
 
 log "Stopping prometheus..."
-systemctl stop prometheus node_exporter; systemctl disable prometheus node_exporter
+systemctl stop prometheus node_exporter 2>/dev/null || true
+systemctl disable prometheus node_exporter 2>/dev/null || true
 
 log "Removing prometheus files and configuration..."
-rm -rf /opt/prometheus /etc/prometheus /var/lib/prometheus /etc/systemd/system/prometheus.service /etc/systemd/system/node_exporter.service /etc/apache2/sites-enabled/prometheus.conf; userdel prometheus 2>/dev/null
+rm -rf /opt/prometheus /etc/prometheus /var/lib/prometheus /etc/systemd/system/prometheus.service /etc/systemd/system/node_exporter.service /etc/apache2/sites-enabled/prometheus.conf
+userdel prometheus 2>/dev/null || true
 
-systemctl daemon-reload 2>/dev/null
-service apache2 reload 2>/dev/null
+systemctl daemon-reload 2>/dev/null || true
+service apache2 reload 2>/dev/null || true
 rm -f /install/.prometheus.lock
 
 log "prometheus has been completely removed."

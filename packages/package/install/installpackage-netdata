@@ -7,12 +7,16 @@
 # URL    : https://AetherFlow.io
 # License: GPL-3.0
 #
-set -e
+source /opt/AetherFlow/packages/common.sh
+set -euo pipefail
 
-LOGFILE="/opt/AetherFlow/logs/installer.log"
-mkdir -p /opt/AetherFlow/logs /install
+# Override common.sh LOGFILE for this specific package
+export LOGFILE="/opt/AetherFlow/logs/installer.log"
+mkdir -p "$(dirname "$LOGFILE")"
 
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [netdata] $1" | tee -a "$LOGFILE"; }
+# We use print_info to ensure output is visible to the backend installer
+log() { print_info "[$APP_ID] $1"; }
+APP_ID="netdata"
 
 # ── Install Netdata using official kickstart ─────────────────────────────────
 log "Running Netdata kickstart installer..."

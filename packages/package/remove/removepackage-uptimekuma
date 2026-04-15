@@ -9,13 +9,15 @@ LOGFILE="/opt/AetherFlow/logs/installer.log"
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [remove-uptimekuma] $1" | tee -a "$LOGFILE"; }
 
 log "Stopping uptimekuma..."
-systemctl stop uptime-kuma; systemctl disable uptime-kuma
+systemctl stop uptime-kuma 2>/dev/null || true
+systemctl disable uptime-kuma 2>/dev/null || true
 
 log "Removing uptimekuma files and configuration..."
-rm -rf /opt/uptime-kuma /etc/systemd/system/uptime-kuma.service /etc/apache2/sites-enabled/uptimekuma.conf; userdel uptimekuma 2>/dev/null
+rm -rf /opt/uptime-kuma /etc/systemd/system/uptime-kuma.service /etc/apache2/sites-enabled/uptimekuma.conf
+userdel uptimekuma 2>/dev/null || true
 
-systemctl daemon-reload 2>/dev/null
-service apache2 reload 2>/dev/null
+systemctl daemon-reload 2>/dev/null || true
+service apache2 reload 2>/dev/null || true
 rm -f /install/.uptimekuma.lock
 
 log "uptimekuma has been completely removed."

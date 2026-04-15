@@ -9,13 +9,15 @@ LOGFILE="/opt/AetherFlow/logs/installer.log"
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [remove-prowlarr] $1" | tee -a "$LOGFILE"; }
 
 log "Stopping prowlarr..."
-systemctl stop prowlarr; systemctl disable prowlarr
+systemctl stop prowlarr 2>/dev/null || true
+systemctl disable prowlarr 2>/dev/null || true
 
 log "Removing prowlarr files and configuration..."
-rm -rf /opt/Prowlarr /var/lib/prowlarr /etc/systemd/system/prowlarr.service /etc/apache2/sites-enabled/prowlarr.conf; userdel prowlarr 2>/dev/null
+rm -rf /opt/Prowlarr /var/lib/prowlarr /etc/systemd/system/prowlarr.service /etc/apache2/sites-enabled/prowlarr.conf
+userdel prowlarr 2>/dev/null || true
 
-systemctl daemon-reload 2>/dev/null
-service apache2 reload 2>/dev/null
+systemctl daemon-reload 2>/dev/null || true
+service apache2 reload 2>/dev/null || true
 rm -f /install/.prowlarr.lock
 
 log "prowlarr has been completely removed."

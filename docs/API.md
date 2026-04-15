@@ -1,208 +1,91 @@
-# AetherFlow REST & WebSocket API Reference
+# API Reference
 
-Backend:
-- Go 1.25 + Gin
-- Auth: `aetherflow_session` HttpOnly JWT cookie
-- Canonical base path: `/api/v1`
-- Legacy base path: `/api`
-- Version header: `X-API-Version: v1`
-- Vendor media type: `Accept: application/vnd.aetherflow.v1+json`
-- Machine-readable schema: `/api/v1/openapi.yaml`
+The AetherFlow API is a high-performance Go backend built on the Gin framework. It provides both RESTful endpoints for state mutation and WebSocket connections for real-time telemetry.
 
-## Versioning
+> [!NOTE]
+> This API is designed primarily for the AetherFlow dashboard, but it can be consumed programmatically by administrators with valid session tokens.
 
-- `/api/v1` is the stable reseller-facing surface for v3.1.0.
-- `/api` still routes to the same handlers for backwards compatibility.
-- Legacy `/api` responses now include:
-  - `X-API-Version: v1`
-  - `Deprecation: true`
-  - `Link: </api/v1/...>; rel="successor-version"`
+---
 
-## Auth
+## Authentication
 
-- `POST /api/v1/auth/setup`
-  - Create the initial admin account when no users exist.
-- `POST /api/v1/auth/login`
-  - Local username/password authentication.
-- `GET /api/v1/auth/session`
-  - Resolve the current authenticated user.
-- `POST /api/v1/auth/logout`
-  - Clear the current session.
-- `GET /api/v1/auth/setup/check`
-  - Return `{ "setupRequired": boolean }`.
-- `GET /api/v1/auth/google/login`
-  - Start Google OAuth.
-- `GET /api/v1/auth/google/callback`
-  - Finish Google OAuth.
-- `PUT /api/v1/auth/profile`
-  - Update the current user profile.
+All API endpoints (except the login route) require an active session. AetherFlow uses HTTP-only cookies and CSRF protection to secure API interactions.
 
-## System
+### The Session Cookie
+Authentication is driven by the `aetherflow_session` cookie, which contains an encrypted JWT. This cookie is automatically managed by the browser but must be explicitly passed if using external clients like `curl` or Postman.
 
-- `GET /api/v1/system/metrics`
-  - Point-in-time metrics snapshot.
-- `GET /api/v1/system/hardware`
-  - Hardware inventory.
-- `GET /api/v1/system/update/check`
-  - Check for a newer AetherFlow release.
-- `POST /api/v1/system/update/run`
-  - Run the updater. Admin only.
-- `GET /api/v1/openapi.yaml`
-  - Embedded OpenAPI schema for the current API version.
+### CSRF Protection
+For any non-GET request (POST, PUT, DELETE), you must include a valid CSRF token in the request headers.
 
-## WebSocket
+| Header | Description |
+| :--- | :--- |
+| `X-CSRF-Token` | The token retrieved during the initial authentication handshake. |
 
-- `GET /api/v1/ws`
-  - Real-time metrics and service updates.
-- `GET /api/v1/ws/logs`
-  - Real-time log streaming.
-- Message types:
-  - `METRICS_UPDATE`
-  - `MARKETPLACE_UPDATE`
-  - `NOTIFICATION`
+---
 
-## Observability & Auditing
+## API Namespaces
 
-- `GET /metrics`
-  - Exposes process, system, and database metrics in Prometheus text exposition format.
-- `GET /api/admin/audit-log`
-  - Read paginated admin action trails (requires limit, offset, action, username filters).
+The API is structured into four primary namespaces. All routes are prefixed with `/api/v1`.
 
-## Services
+### 1. Auth (`/auth`)
+Handles session initialization, verification, and 2FA challenges.
 
-- `GET /api/v1/services`
-  - List active services and runtime metadata.
-- `POST /api/v1/services/:name/control`
-  - Start, stop, or restart a service. Admin only.
+| Method | Endpoint | Description |
+| :--- | :--- | :--- |
+| `POST` | `/auth/login` | Authenticates user credentials and issues the session cookie. |
+| `POST` | `/auth/verify-2fa` | Validates a TOTP code if local 2FA is active. |
+| `GET` | `/auth/me` | Returns the current user profile and session validity. |
+| `POST` | `/auth/logout` | Invalidates the JWT and clears the `aetherflow_session` cookie. |
 
-## Marketplace
+### 2. System (`/system`)
+Provides host-level diagnostics, service control, and configuration management.
 
-- `GET /api/v1/marketplace`
-  - List marketplace packages and live update badges.
-- `POST /api/v1/packages/:id/install`
-  - Start package installation. Admin only.
-- `POST /api/v1/packages/:id/uninstall`
-  - Start package removal. Admin only.
-- `GET /api/v1/packages/:id/progress`
-  - Read current install or uninstall progress.
+| Method | Endpoint | Description |
+| :--- | :--- | :--- |
+| `GET` | `/system/status` | Returns top-level health metrics (uptime, CPU, memory). |
+| `GET` | `/system/logs` | Fetches the recent `journald` daemon logs for AetherFlow. |
+| `POST` | `/system/services/:action` | Executes systemd actions (start, stop, restart) on a defined unit. |
 
-## Files & Backup
+### 3. Marketplace (`/marketplace`)
+Controls the lifecycle of managed external applications.
 
-- `GET /api/v1/fileshare`
-  - List uploaded files.
-- `POST /api/v1/fileshare/upload`
-  - Upload a file. Admin only. Quota middleware now rejects uploads that exceed configured filesystem headroom.
-- `POST /api/v1/backup/run`
-  - Create a backup. Admin only.
-- `GET /api/v1/backup/list`
-  - List backups. Admin only.
-- `GET /api/v1/backup/download/:filename`
-  - Download a backup. Admin only.
-- `POST /api/v1/backup/upload/:filename`
-  - Upload backup chunks. Admin only.
+| Method | Endpoint | Description |
+| :--- | :--- | :--- |
+| `GET` | `/marketplace/catalog` | Lists all available apps and their local installation status. |
+| `POST` | `/marketplace/install/:app` | Triggers the asynchronous installation workflow for an app. |
+| `DELETE` | `/marketplace/remove/:app` | Initiates the safe uninstallation playbook for an app. |
 
-## Users, Quotas & Billing
+### 4. AI (`/ai`)
+Interfaces with the FlowAI sub-system for diagnostic execution and intent parsing.
 
-- `GET /api/v1/users`
-  - List users. Admin only.
-- `PUT /api/v1/users/:id/role`
-  - Update user role. Admin only.
-- `DELETE /api/v1/users/:id`
-  - Delete a user. Admin only.
-- `GET /api/v1/user/quota/:id`
-  - Resolve the current quota record for a user.
-- `GET /api/v1/quotas`
-  - List quota records for all users. Admin only.
-- `PUT /api/v1/quotas/:id`
-  - Set or update a quota. Admin only.
-- `POST /api/v1/quotas/:id/refresh`
-  - Refresh quota usage from `showspace`. Admin only.
-- `POST /api/v1/billing/webhooks/whmcs`
-  - Secure WHMCS webhook listener.
-- `POST /api/v1/billing/webhooks/blesta`
-  - Secure Blesta webhook listener.
-- `GET /api/v1/billing/webhooks`
-  - Audit recent webhook deliveries. Admin only.
+| Method | Endpoint | Description |
+| :--- | :--- | :--- |
+| `POST` | `/ai/chat` | Submits a query; optionally injects current system metrics if `support_mode=true`. |
+| `GET` | `/ai/approvals` | Retrieves pending system mutations proposed by the AI in Assistant mode. |
+| `POST` | `/ai/approvals/:id/decide`| Accepts or rejects an AI-proposed system mutation. |
 
-Billing listener security:
-- Preferred:
-  - `Authorization: Bearer <secret>`
-- Supported HMAC headers:
-  - `X-AetherFlow-Signature`
-  - `X-WHMCS-Signature`
-  - `X-BLESTA-Signature`
-- Supported token headers:
-  - `X-AetherFlow-Token`
-  - `X-WHMCS-Token`
-  - `X-BLESTA-Token`
+---
 
-Environment variables:
-- `WHMCS_WEBHOOK_SECRET`
-- `BLESTA_WEBHOOK_SECRET`
-- `BILLING_WEBHOOK_SECRET`
-- `BILLING_QUOTA_PLAN_MAP`
+## Real-Time Telemetry (WebSockets)
 
-## Notifications
+AetherFlow heavily utilizes WebSockets for sub-second telemetry feeds and streaming logs.
 
-- `GET /api/v1/notifications`
-- `PUT /api/v1/notifications/:id/read`
-- `POST /api/v1/notifications/dismiss-all`
-- `GET /api/v1/notifications/rules`
-- `POST /api/v1/notifications/rules`
-- `PUT /api/v1/notifications/rules/:id`
-- `DELETE /api/v1/notifications/rules/:id`
-- `GET /api/v1/notifications/channels`
-- `POST /api/v1/notifications/channels`
-- `POST /api/v1/notifications/channels/:id/test`
-- `DELETE /api/v1/notifications/channels/:id`
+**Endpoint:** `ws://<host>:<port>/api/v1/ws`
 
-## OIDC
+### Sub-Protocols
+When establishing a connection, the client must specify their intent by sending a subscription payload:
 
-- `GET /api/v1/oidc/jwks`
-- `GET /api/v1/oidc/authorize`
-- `POST /api/v1/oidc/token`
-- `GET /api/v1/oidc/userinfo`
-- `POST /api/v1/oidc/revoke`
-- `GET /.well-known/openid-configuration`
-  - Discovery now points clients at `/api/v1/oidc/*`.
+```json
+{
+  "type": "subscribe",
+  "channel": "metrics.system"
+}
+```
 
-## Action Approval Gates
+### Available Channels
+- `metrics.system`: Streams live CPU, RAM, and Disk IO data every 1000ms.
+- `logs.daemon`: Pushes new lines from `/var/log/aetherflow/error.log` and `journald`.
+- `marketplace.progress`: Emits structured task updates during package installations.
 
-- `GET /api/v1/actions/pending`
-  - List AI-proposed operations that require an admin's cryptographic resolution. Filterable by `status`.
-- `POST /api/v1/actions/:id/approve`
-  - Explicitly authorize an AI payload for execution. The supervising service then executes.
-- `POST /api/v1/actions/:id/reject`
-  - Dismiss an AI payload.
-
-## AI
-
-- `POST /api/v1/ai/chat`
-- `POST /api/v1/ai/support`
-- `POST /api/v1/ai/metadata/scan`
-- `GET /api/v1/ai/metadata/status`
-- `GET /api/v1/ai/metadata/results`
-- `POST /api/v1/ai/bandwidth/analyze`
-- `POST /api/v1/ai/bandwidth/apply`
-- `GET /api/v1/ai/predictions`
-- `POST /api/v1/ai/predictions/analyze`
-- `GET /api/v1/ai/predictions/history`
-- `GET /api/v1/ai/backup/optimal-window`
-- `POST /api/v1/ai/backup/schedule`
-
-## Cluster & Network
-
-- Cluster:
-  - `GET /api/v1/cluster/nodes`
-  - `POST /api/v1/cluster/enroll`
-  - `DELETE /api/v1/cluster/nodes/:id`
-  - `GET /api/v1/cluster/nodes/:id/metrics`
-- Network:
-  - `GET /api/v1/network/status`
-  - `GET /api/v1/network/wireguard/peers`
-  - `POST /api/v1/network/wireguard/peers`
-  - `DELETE /api/v1/network/wireguard/peers/:key`
-  - `POST /api/v1/network/wireguard/keygen`
-  - `GET /api/v1/network/tailscale/status`
-  - `GET /api/v1/network/tailscale/peers`
-  - `POST /api/v1/network/tailscale/routes`
+> [!WARNING]
+> WebSocket connections are stateful and will be forcibly closed by the server if the `aetherflow_session` cookie expires. Clients must implement reconnect and re-authentication logic.

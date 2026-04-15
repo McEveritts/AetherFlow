@@ -26,7 +26,7 @@ function _removeBTSync() {
   sudo service resilio-sync stop
   sudo apt-get -y remove --purge resilio-sync* >>"${OUTTO}" 2>&1
   rm -rf /home/${MASTER}/sync_folder
-  rm /install/.btsync.lock
+  rm -f /install/.btsync.lock
   sudo service apache2 reload
 }
 

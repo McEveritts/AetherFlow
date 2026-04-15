@@ -9,7 +9,7 @@ LOGFILE="/opt/AetherFlow/logs/installer.log"
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [remove-vaultwarden] $1" | tee -a "$LOGFILE"; }
 
 log "Stopping vaultwarden..."
-docker stop vaultwarden; docker rm vaultwarden
+docker stop vaultwarden; docker rm -f vaultwarden
 
 log "Removing vaultwarden files and configuration..."
 rm -rf /opt/vaultwarden /etc/apache2/sites-enabled/vaultwarden.conf

@@ -23,6 +23,7 @@ _Generated April 15, 2026 from recent implementation turns._
 
 ### Security & Identity
 * **Two-Factor Authentication**: Native support for TOTP (Google Authenticator/Authy) in the Go backend (`totp.go`) and Next.js frontend.
+* **Update Channel Separation**: Decoupled Stable and Beta update channels. The Stable channel is now strictly restricted to official `mceveritt` authored releases and ignores pre-releases to secure deployment integrity, whereas the Beta channel uses Git Tags.
 * **Recovery Logic**: Integrated a secure recovery code system with hashed storage for account restoration.
 * **Hardened Login**: Updated the `LocalLogin` workflow to require multi-stage verification when 2FA is enabled.
 * **Security Dashboard**: Added a consolidated Security tab for managing authentication factors and sessions.

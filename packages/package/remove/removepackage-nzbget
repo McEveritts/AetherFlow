@@ -9,13 +9,15 @@ LOGFILE="/opt/AetherFlow/logs/installer.log"
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [remove-nzbget] $1" | tee -a "$LOGFILE"; }
 
 log "Stopping nzbget..."
-systemctl stop nzbget; systemctl disable nzbget
+systemctl stop nzbget 2>/dev/null || true
+systemctl disable nzbget 2>/dev/null || true
 
 log "Removing nzbget files and configuration..."
-rm -rf /opt/nzbget /etc/systemd/system/nzbget.service /etc/apache2/sites-enabled/nzbget.conf; userdel nzbget 2>/dev/null
+rm -rf /opt/nzbget /etc/systemd/system/nzbget.service /etc/apache2/sites-enabled/nzbget.conf
+userdel nzbget 2>/dev/null || true
 
-systemctl daemon-reload 2>/dev/null
-service apache2 reload 2>/dev/null
+systemctl daemon-reload 2>/dev/null || true
+service apache2 reload 2>/dev/null || true
 rm -f /install/.nzbget.lock
 
 log "nzbget has been completely removed."

@@ -3,65 +3,61 @@
 source /opt/AetherFlow/packages/common.sh
 # LEGACY REMOVED: master.txt
 MASTER="$AETHERFLOW_USER"
+username="$MASTER"
 
-rm -rf /opt/${username}/Jackett
-rm -rf /home/${username}/Jackett
-rm -rf /home/${username}/.config/Jackett
-rm /install/.jackett.lock
-systemctl stop jackett@${username}
-systemctl disable jackett@${username}
-rm /etc/systemd/system/jackett@.service
+systemctl stop "jackett@${username}" 2>/dev/null || true
+systemctl disable "jackett@${username}" 2>/dev/null || true
+rm -f /etc/systemd/system/jackett@.service
+systemctl daemon-reload 2>/dev/null || true
+
+rm -rf "/opt/${username}/Jackett"
+rm -rf "/home/${username}/Jackett"
+rm -rf "/home/${username}/.config/Jackett"
+rm -f /install/.jackett.lock
 rm -f /etc/apache2/sites-enabled/jackett.conf
+
 if [[ -f /install/.radarr.lock ]]; then
-    if ls mono-* >/dev/null 2>&1; then
+    if ls /etc/apt/sources.list.d/mono-* >/dev/null 2>&1; then
         echo "mono sources list was found"
-        ls mono-*
     fi
     for list in /etc/apt/sources.list.d/mono-*; do
         if [[ -f $list ]]; then
             echo "removing and replacing with stable mono"
-            rm -rf /etc/apt/sources.list.d/mono-*
+            rm -f "/etc/apt/sources.list.d/mono-*"
             sudo apt-key adv --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys 3FA7E0328081BFF6A14DA29AA6A19B38D3D831EF
             echo "deb http://download.mono-project.com/repo/ubuntu stable-xenial main" | sudo tee /etc/apt/sources.list.d/mono-official-stable.list
             break
         fi
     done
-fi
-if [[ -f /install/.lidarr.lock ]]; then
-    if ls mono-* >/dev/null 2>&1; then
-        echo "mono sources list was found"
-        ls mono-*
-    fi
-    for list in /etc/apt/sources.list.d/mono-*; do
-        if [[ -f $list ]]; then
-            echo "removing and replacing with stable mono"
-            rm -rf /etc/apt/sources.list.d/mono-*
-            sudo apt-key adv --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys 3FA7E0328081BFF6A14DA29AA6A19B38D3D831EF
-            echo "deb http://download.mono-project.com/repo/ubuntu stable-xenial main" | sudo tee /etc/apt/sources.list.d/mono-official-stable.list
-            break
-        fi
-    done
-fi
-if [[ -f /install/.sonarr.lock ]]; then
-    if ls mono-* >/dev/null 2>&1; then
-        echo "mono sources list was found"
-        ls mono-*
-    fi
-    for list in /etc/apt/sources.list.d/mono-*; do
-        if [[ -f $list ]]; then
-            echo "removing and replacing with stable mono"
-            rm -rf /etc/apt/sources.list.d/mono-*
-            sudo apt-key adv --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys 3FA7E0328081BFF6A14DA29AA6A19B38D3D831EF
-            echo "deb http://download.mono-project.com/repo/ubuntu stable-xenial main" | sudo tee /etc/apt/sources.list.d/mono-official-stable.list
-            break
-        fi
-    done
-fi
-apt-get -y autoremove && apt-get -y autoclean
-service apache2 reload
-if [[ -f /etc/init.d/jackett ]]; then
-    rm /etc/init.d/jackett
-    update-rc.d -f jackett remove
-    service jackett stop
 fi
 
+if [[ -f /install/.lidarr.lock ]]; then
+    for list in /etc/apt/sources.list.d/mono-*; do
+        if [[ -f $list ]]; then
+            rm -f "/etc/apt/sources.list.d/mono-*"
+            sudo apt-key adv --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys 3FA7E0328081BFF6A14DA29AA6A19B38D3D831EF
+            echo "deb http://download.mono-project.com/repo/ubuntu stable-xenial main" | sudo tee /etc/apt/sources.list.d/mono-official-stable.list
+            break
+        fi
+    done
+fi
+
+if [[ -f /install/.sonarr.lock ]]; then
+    for list in /etc/apt/sources.list.d/mono-*; do
+        if [[ -f $list ]]; then
+            rm -f "/etc/apt/sources.list.d/mono-*"
+            sudo apt-key adv --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys 3FA7E0328081BFF6A14DA29AA6A19B38D3D831EF
+            echo "deb http://download.mono-project.com/repo/ubuntu stable-xenial main" | sudo tee /etc/apt/sources.list.d/mono-official-stable.list
+            break
+        fi
+    done
+fi
+
+apt-get -y autoremove && apt-get -y autoclean
+service apache2 reload 2>/dev/null || true
+
+if [[ -f /etc/init.d/jackett ]]; then
+    service jackett stop 2>/dev/null || true
+    rm -f /etc/init.d/jackett
+    update-rc.d -f jackett remove 2>/dev/null || true
+fi

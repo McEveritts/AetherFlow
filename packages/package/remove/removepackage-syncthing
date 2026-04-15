@@ -2,10 +2,10 @@
 source /opt/AetherFlow/packages/common.sh
 # LEGACY REMOVED: master.txt
 MASTER="$AETHERFLOW_USER"
-systemctl stop syncthing@${MASTER}
-apt-get -q -y purge syncthing
-rm /etc/systemd/system/syncthing@.service
-rm -f  /etc/apache2/sites-enabled/syncthing.conf
-service apache2 reload
-rm /install/.syncthing.lock
-
+systemctl stop "syncthing@${MASTER}" 2>/dev/null || true
+apt-get -q -y purge syncthing || true
+rm -f /etc/systemd/system/syncthing@.service
+systemctl daemon-reload 2>/dev/null || true
+rm -f /etc/apache2/sites-enabled/syncthing.conf
+service apache2 reload 2>/dev/null || true
+rm -f /install/.syncthing.lock
