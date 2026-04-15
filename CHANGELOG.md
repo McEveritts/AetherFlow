@@ -1,3 +1,25 @@
+## CHANGELOG v3.1.5 - Immersive Dashboard & GPU Intelligence
+_Generated April 15, 2026 from recent implementation turn._
+
+---
+
+### Release Highlights
+* **Immersive Mode**: Introduced a new high-fidelity dashboard density mode that expands visualizations and enhances visual flair for administrative monitoring.
+* **GPU Intelligence**: Implemented intelligent, detectable GPU metric monitoring that gracefully handles both headless server and direct-display environments.
+* **Dash Settings Integration**: Added a dedicated Dashboard settings tab for managing layout density, connectivity modes, and hardware visibility toggles.
+
+### Features & Improvements
+* **UI/UX**:
+  * Integrated a quick-access settings cog wheel directly in the dashboard header.
+  * Adaptive grid layout that re-renders based on user density preferences (Compact vs. Immersive).
+  * Smooth transitions and micro-animations for dashboard state changes.
+* **Control Plane**:
+  * Enhanced `ghw`-based hardware detection for specialized compute devices (GPUs).
+  * Optimized WebSocket render cycles for high-frequency telemetrics.
+  * Unified "Live" polling logic with automatic WebSocket failover.
+
+---
+
 ## CHANGELOG v3.1.0 - Gold Release Candidate
 _Generated March 15, 2026 from commits since `v3.0.1`._
 
