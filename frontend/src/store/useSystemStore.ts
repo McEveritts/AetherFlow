@@ -11,6 +11,7 @@ interface SystemState {
 
     // UI state (not persisted)
     activeTab: TabId;
+    activeSettingsTab: 'preferences' | 'ai' | 'system' | 'dashboard' | 'backups' | 'security' | 'profile' | 'oidc-clients';
     isSidebarHovered: boolean;
     isMobileMenuOpen: boolean;
 
@@ -20,6 +21,7 @@ interface SystemState {
     setAmbientColor1: (color: string) => void;
     setAmbientColor2: (color: string) => void;
     setActiveTab: (tab: TabId) => void;
+    setActiveSettingsTab: (tab: 'preferences' | 'ai' | 'system' | 'dashboard' | 'backups' | 'security' | 'profile' | 'oidc-clients') => void;
     setIsSidebarHovered: (hovered: boolean) => void;
     setIsMobileMenuOpen: (open: boolean) => void;
 }
@@ -32,6 +34,7 @@ export const useSystemStore = create<SystemState>()(
             ambientColor1: '#2563eb', // default blue
             ambientColor2: '#4f46e5', // default indigo
             activeTab: 'overview',
+            activeSettingsTab: 'preferences',
             isSidebarHovered: false,
             isMobileMenuOpen: false,
 
@@ -40,6 +43,7 @@ export const useSystemStore = create<SystemState>()(
             setAmbientColor1: (ambientColor1) => set({ ambientColor1 }),
             setAmbientColor2: (ambientColor2) => set({ ambientColor2 }),
             setActiveTab: (activeTab) => set({ activeTab, isMobileMenuOpen: false }),
+            setActiveSettingsTab: (activeSettingsTab) => set({ activeSettingsTab }),
             setIsSidebarHovered: (isSidebarHovered) => set({ isSidebarHovered }),
             setIsMobileMenuOpen: (isMobileMenuOpen) => set({ isMobileMenuOpen }),
 

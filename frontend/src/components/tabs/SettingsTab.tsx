@@ -18,11 +18,10 @@ import { useConnectionStore } from '@/store/useConnectionStore';
 export default function SettingsTab() {
     const t = useTranslations('Settings');
     const { addToast } = useToast();
-    const { theme, setTheme, language, setLanguage, ambientColor1, setAmbientColor1, ambientColor2, setAmbientColor2 } = useSystemStore();
+    const { theme, setTheme, language, setLanguage, ambientColor1, setAmbientColor1, ambientColor2, setAmbientColor2, activeSettingsTab: activeTab, setActiveSettingsTab: setActiveTab } = useSystemStore();
     const { preferredMode, setPreferredMode, pollInterval, setPollInterval } = useConnectionStore();
     
-    // Tab State
-    const [activeTab, setActiveTab] = useState<'preferences' | 'ai' | 'system' | 'dashboard' | 'backups' | 'security' | 'profile' | 'oidc-clients'>('preferences');
+    // Tab State is now managed by useSystemStore
     
     // Config State
     const [model, setModel] = useState('gemini-3.1-pro-preview');

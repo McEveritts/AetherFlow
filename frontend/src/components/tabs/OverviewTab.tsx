@@ -9,8 +9,9 @@ import StorageWidget from '@/components/widgets/StorageWidget';
 import AppTopologyMap from '@/components/widgets/AppTopologyMap';
 import GpuWidget from '@/components/widgets/GpuWidget';
 import DataUsageHistoryWidget from '@/components/widgets/DataUsageHistoryWidget';
-import React, { useState, useEffect, useRef } from 'react';
+import React from 'react';
 import { useConnectionStore, ConnectionMode } from '@/store/useConnectionStore';
+import { useSystemStore } from '@/store/useSystemStore';
 
 // Memoize dashboard widgets to block parent render cascades
 const MemoCpuWidget = React.memo(CpuWidget);
@@ -42,28 +43,13 @@ function formatTotalBytes(bytes: number): string {
 
 export default function OverviewTab({ metrics, hardware, history }: OverviewTabProps) {
     const { preferredMode, setPreferredMode, pollInterval, setPollInterval, connectionState, dashboardDensity, setDashboardDensity, showGpuWidget, showDataUsageWidget } = useConnectionStore();
+    const { setActiveTab, setActiveSettingsTab } = useSystemStore();
     
-    // Adaptive render cycle: Faster if we have high-frequency data
-    const renderInterval = preferredMode === 'websocket' ? 500 : Math.min(pollInterval, 1000);
-
-    const metricsRef = useRef(metrics);
-    const historyRef = useRef(history);
-    
-    useEffect(() => {
-        metricsRef.current = metrics;
-        historyRef.current = history;
-    }, [metrics, history]);
-
-    const [tMetrics, setTMetrics] = useState(metrics);
-    const [tHistory, setTHistory] = useState(history);
-
-    useEffect(() => {
-        const timer = setInterval(() => {
-            setTMetrics(metricsRef.current);
-            setTHistory(historyRef.current);
-        }, renderInterval);
-        return () => clearInterval(timer);
-    }, [renderInterval]);
+    // Direct prop pass-through — the upstream Zustand store already throttles
+    // at 250ms via pushMetrics. React.memo on child widgets prevents unnecessary
+    // re-renders, so no additional render gating is needed.
+    const tMetrics = metrics;
+    const tHistory = history;
 
     return (
         <div className="space-y-6 animate-fade-in pb-10">
@@ -87,14 +73,26 @@ export default function OverviewTab({ metrics, hardware, history }: OverviewTabP
                     </div>
                 </div>
 
-                <div className="flex items-center gap-4">
-                    {/* Settings Cog Wheel */}
+                <div className="flex items-center gap-2">
+                    {/* Perspective / Immersion Toggle */}
                     <button 
                         onClick={() => setDashboardDensity(dashboardDensity === 'compact' ? 'immersive' : 'compact')}
                         className={`p-2 rounded-xl border border-white/10 transition-all ${dashboardDensity === 'immersive' ? 'bg-indigo-500/20 text-indigo-400 shadow-[0_0_15px_rgba(99,102,241,0.2)]' : 'bg-white/5 text-slate-400 hover:text-white'}`}
                         title="Toggle Immersion Mode"
                     >
-                        <Settings2 size={18} className={dashboardDensity === 'immersive' ? 'rotate-90 transition-transform duration-500' : ''} />
+                        <Gauge size={18} className={dashboardDensity === 'immersive' ? 'animate-pulse' : ''} />
+                    </button>
+
+                    {/* Dashboard Settings Navigation */}
+                    <button 
+                        onClick={() => {
+                            setActiveTab('settings');
+                            setActiveSettingsTab('dashboard');
+                        }}
+                        className="p-2 rounded-xl border border-white/10 transition-all bg-white/5 text-slate-400 hover:text-white hover:bg-white/10"
+                        title="Manage Dashboard Settings"
+                    >
+                        <Settings2 size={18} />
                     </button>
 
                     <div className="flex items-center gap-3 bg-black/20 p-1.5 rounded-xl border border-white/5">
