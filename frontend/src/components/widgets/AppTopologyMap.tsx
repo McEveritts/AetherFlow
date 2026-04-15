@@ -7,6 +7,7 @@ import { SystemMetrics } from '@/types/dashboard';
 
 interface AppTopologyMapProps {
     metrics: SystemMetrics;
+    density?: 'compact' | 'immersive';
 }
 
 interface D3Node extends d3.SimulationNodeDatum {
@@ -21,7 +22,9 @@ interface D3Link extends d3.SimulationLinkDatum<D3Node> {
     value: number;
 }
 
-export default function AppTopologyMap({ metrics }: AppTopologyMapProps) {
+export default function AppTopologyMap({ metrics, density = 'compact' }: AppTopologyMapProps) {
+    const isImmersive = density === 'immersive';
+
     const svgRef = useRef<SVGSVGElement>(null);
     const simulationRef = useRef<d3.Simulation<D3Node, D3Link> | null>(null);
     const nodesRef = useRef<D3Node[]>([]);
@@ -31,13 +34,14 @@ export default function AppTopologyMap({ metrics }: AppTopologyMapProps) {
         if (!svgRef.current) return;
 
         const width = svgRef.current.parentElement?.clientWidth || 800;
-        const height = 400;
+        const height = isImmersive ? 600 : 400;
 
         // 1. Setup SVG only once
         const svg = d3.select(svgRef.current)
             .attr('width', '100%')
             .attr('height', height)
             .attr('viewBox', [0, 0, width, height]);
+
 
         if (svg.select('g.container').empty()) {
             const container = svg.append("g").attr("class", "container");
@@ -57,10 +61,10 @@ export default function AppTopologyMap({ metrics }: AppTopologyMapProps) {
         // 2. Initialize simulation only once
         if (!simulationRef.current) {
             simulationRef.current = d3.forceSimulation<D3Node, D3Link>()
-                .force("link", d3.forceLink<D3Node, D3Link>().id((d: any) => d.id).distance(120))
-                .force("charge", d3.forceManyBody().strength(-400))
+                .force("link", d3.forceLink<D3Node, D3Link>().id((d: any) => d.id).distance(isImmersive ? 150 : 120))
+                .force("charge", d3.forceManyBody().strength(isImmersive ? -600 : -400))
                 .force("center", d3.forceCenter(width / 2, height / 2))
-                .force("collide", d3.forceCollide().radius(40));
+                .force("collide", d3.forceCollide().radius(isImmersive ? 50 : 40));
 
             // Tooltip setup (once)
             if (d3.select("body").select(".d3-tooltip").empty()) {
@@ -219,10 +223,11 @@ export default function AppTopologyMap({ metrics }: AppTopologyMapProps) {
     }, [metrics]);
 
     return (
-        <div className="bg-white/[0.02] border border-white/[0.05] rounded-2xl p-5 relative overflow-hidden backdrop-blur-xl h-full">
-            <div className="flex items-center justify-between mb-4 relative z-10">
-                <h2 className="text-sm font-semibold text-slate-200 flex items-center gap-2">
-                    <Network size={16} className="text-purple-400" /> App Topology Map
+    return (
+        <div className={`bg-white/[0.02] border border-white/[0.05] rounded-2xl relative overflow-hidden backdrop-blur-xl h-full transition-all duration-300 ${isImmersive ? 'p-6' : 'p-5'}`}>
+            <div className={`flex items-center justify-between relative z-10 ${isImmersive ? 'mb-6' : 'mb-4'}`}>
+                <h2 className={`${isImmersive ? 'text-lg' : 'text-sm'} font-semibold text-slate-200 flex items-center gap-2`}>
+                    <Network size={isImmersive ? 18 : 16} className="text-purple-400" /> App Topology Map
                 </h2>
                 <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider">Live Nodes</span>
             </div>

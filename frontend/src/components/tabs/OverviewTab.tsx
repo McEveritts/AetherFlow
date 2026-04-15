@@ -206,7 +206,7 @@ export default function OverviewTab({ metrics, hardware, history }: OverviewTabP
                     
                     {/* Data Usage History Widget - User Enabled */}
                     {showDataUsageWidget && (
-                        <DataUsageHistoryWidget />
+                        <DataUsageHistoryWidget density={dashboardDensity} />
                     )}
                 </div>
 
@@ -214,7 +214,7 @@ export default function OverviewTab({ metrics, hardware, history }: OverviewTabP
                 <div className={`space-y-6 ${dashboardDensity === 'immersive' ? 'xl:col-span-2' : ''}`}>
                     <div className={`grid gap-6 ${dashboardDensity === 'immersive' ? 'grid-cols-1 lg:grid-cols-3' : 'grid-cols-1'}`}>
                         <div className={dashboardDensity === 'immersive' ? 'lg:col-span-2' : ''}>
-                            <MemoAppTopologyMap metrics={tMetrics} />
+                            <MemoAppTopologyMap metrics={tMetrics} density={dashboardDensity} />
                         </div>
                         <div className="space-y-6">
                             <MemoStorageWidget metrics={tMetrics} hardware={hardware} density={dashboardDensity} />

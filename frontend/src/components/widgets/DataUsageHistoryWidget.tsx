@@ -27,7 +27,12 @@ function formatBytes(bytes: number, decimals = 1): string {
     return `${parseFloat((bytes / Math.pow(k, i)).toFixed(dm))} ${sizes[i]}`;
 }
 
-export default function DataUsageHistoryWidget() {
+interface DataUsageHistoryWidgetProps {
+    density?: 'compact' | 'immersive';
+}
+
+export default function DataUsageHistoryWidget({ density = 'compact' }: DataUsageHistoryWidgetProps) {
+    const isImmersive = density === 'immersive';
     const [days, setDays] = useState<number>(30); // Default to 30 as user requested
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
@@ -97,11 +102,11 @@ export default function DataUsageHistoryWidget() {
     }, [data]);
 
     return (
-        <div className="bg-white/[0.02] border border-white/[0.05] rounded-2xl p-5 relative overflow-hidden group hover:bg-white/[0.04] transition-colors backdrop-blur-xl flex flex-col h-full">
+        <div className={`bg-white/[0.02] border border-white/[0.05] rounded-2xl relative overflow-hidden group transition-all duration-300 hover:bg-white/[0.04] backdrop-blur-xl flex flex-col h-full ${isImmersive ? 'p-6 py-7' : 'p-5'}`}>
             {/* Header & Controls */}
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-6">
-                <h2 className="text-sm font-semibold text-slate-200 flex items-center gap-2">
-                    <Activity size={16} className="text-indigo-400" /> Historical Data Usage
+            <div className={`flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${isImmersive ? 'mb-8' : 'mb-6'}`}>
+                <h2 className={`${isImmersive ? 'text-lg' : 'text-sm'} font-semibold text-slate-200 flex items-center gap-2`}>
+                    <Activity size={isImmersive ? 18 : 16} className="text-indigo-400" /> Historical Data Usage
                 </h2>
                 <div className="flex bg-slate-900/50 p-1 rounded-lg border border-white/[0.05] self-start sm:self-auto">
                     {[7, 30, 90].map((d) => (
@@ -131,9 +136,9 @@ export default function DataUsageHistoryWidget() {
 
             {/* Loading / Data State */}
             {!error && (
-                <div className="flex-1 flex flex-col min-h-[220px]">
+                <div className={`flex-1 flex flex-col ${isImmersive ? 'min-h-[350px]' : 'min-h-[220px]'}`}>
                     {/* The Chart */}
-                    <div className="flex-1 min-h-[160px] relative -mx-2">
+                    <div className={`flex-1 relative -mx-2 ${isImmersive ? 'min-h-[280px]' : 'min-h-[160px]'}`}>
                         {loading && data.length === 0 ? (
                              <div className="absolute inset-0 flex items-center justify-center">
                                  <div className="w-5 h-5 border-2 border-indigo-500/30 border-t-indigo-500 rounded-full animate-spin" />
