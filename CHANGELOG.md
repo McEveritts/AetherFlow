@@ -1,33 +1,36 @@
-## CHANGELOG v3.1.5 - Immersive Dashboard & System Refinements
+## CHANGELOG v3.1.5 - Immersive Security & Dashboard Evolution
 _Generated April 15, 2026 from recent implementation turns._
 
 ---
 
 ### Release Highlights
-* **Dashboard Evolution**: Upgraded the standard layout into an immersive, hardware-aware mission control center.
-* **Component Stability**: Resolved major rendering jitters in the App Topology Map.
+* **Enterprise Security**: Implemented full TOTP 2FA support with recovery codes for all local accounts.
+* **Dashboard Evolution**: Upgraded the standard layout into an immersive, hardware-aware mission control center with "Hyperspeed" WebSocket performance.
+* **UI Consolidation**: Migrated the Profile page into the Settings suite and aligned sidebar styling for brand consistency.
 * **Hardware Intelligence**: Shifted from generic static metric reporting to real-time, detected component stats (e.g., live CPU freq).
 
-### New Features & Improvements
-* **Real-time CPU Polling**: Upgraded the CPU frequency tracking to use kernel-level frequency scaling files on Linux for true "Live" updates.
-* **Smart Fallbacks**: Implemented intelligent OS-detection to provide the most reactive frequency measurements available on Windows and other platforms without manual configuration.
-* **Network Label Clarity**: Renamed "RX" and "TX" to "Downloaded" and "Uploaded" respectively across the dashboard for better human readability.
-* **Consistency Fix**: Synchronized labels in both the `Overview` StatPills and the `NetworkWidget`.
-* **Topology Map Stabilization**: Resolved a critical visual "glitch" where nodes would jitter or jump on every data refresh by refactoring the D3 force-directed graph to use persistent node coordinates.
-* **Smooth Transitions**: Added CSS transitions for node status updates (colors) to provide a more fluid, organic experience.
-* **Immersive Mode**: Introduced a new high-fidelity dashboard density mode that expands visualizations and enhances visual flair for administrative monitoring.
-* **GPU Intelligence**: Implemented intelligent, detectable GPU metric monitoring that gracefully handles both headless server and direct-display environments.
-* **Dash Settings Integration**: Added a dedicated Dashboard settings tab for managing layout density, connectivity modes, and hardware visibility toggles.
+### Security & Identity
+* **Two-Factor Authentication**: Native support for TOTP (Google Authenticator/Authy) in the Go backend (`totp.go`) and Next.js frontend.
+* **Recovery Logic**: Integrated a secure recovery code system with hashed storage for account restoration.
+* **Hardened Login**: Updated the `LocalLogin` workflow to require multi-stage verification when 2FA is enabled.
+* **Security Dashboard**: Added a consolidated Security tab for managing authentication factors and sessions.
 
-### Features & Improvements
-* **UI/UX**:
-  * Integrated a quick-access settings cog wheel directly in the dashboard header.
-  * Adaptive grid layout that re-renders based on user density preferences (Compact vs. Immersive).
-  * Smooth transitions and micro-animations for dashboard state changes.
-* **Control Plane**:
-  * Enhanced `ghw`-based hardware detection for specialized compute devices (GPUs).
-  * Optimized WebSocket render cycles for high-frequency telemetrics.
-  * Unified "Live" polling logic with automatic WebSocket failover.
+### New Features & Improvements
+* **WebSocket "Hyperspeed"**: Optimized the metrics broadcast/render pipeline to eliminate stuttering in high-frequency monitoring mode.
+* **Real-time CPU Polling**: Upgraded CPU frequency tracking to use kernel-level frequency scaling files (`sysfs`) for true "Live" updates.
+* **Profile Migration**: Removed the redundant Profile sidebar link and integrated profile management as a sub-tab within Settings.
+* **Network Label Clarity**: Renamed "RX" and "TX" to "Downloaded" and "Uploaded" respectively across the dashboard for better human readability.
+* **Topology Map Stabilization**: Resolved node jitter in the App Topology Map by refactoring the D3 force-directed graph with persistent coordinate logic.
+* **Immersive Mode**: Introduced a new high-fidelity dashboard density mode that utilizes full screen real-estate.
+* **GPU Intelligence**: Implemented detectable GPU metric monitoring for both headless and desktop server environments.
+* **Sidebar Alignment**: Synchronized sidebar visual styling with the login page for unified glassmorphism aesthetics.
+
+### UI/UX & Control Plane
+* **Quick-Access Settings**: Integrated a settings cog wheel directly in the dashboard header.
+* **Adaptive Grid**: Refactored the dashboard grid to re-render based on user density preferences (Compact vs. Immersive).
+* **Hardware Detection**: Enhanced `ghw`-based hardware discovery for specialized compute devices.
+* **Data History**: Introduced the Data Usage History widget for long-term traffic trend analysis.
+
 
 ---
 

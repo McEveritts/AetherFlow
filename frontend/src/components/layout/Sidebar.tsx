@@ -49,7 +49,7 @@ export default function Sidebar() {
             )}
 
             <aside
-                className={`sticky top-4 h-[calc(100vh-2rem)] overflow-y-auto z-50 flex flex-col glass-panel border-r border-white/[0.05] transition-all duration-300 ease-[cubic-bezier(0.4,0,0.2,1)] shadow-[4px_0_24px_rgba(0,0,0,0.2)]
+                className={`sticky top-4 h-[calc(100vh-2rem)] overflow-y-auto z-50 flex flex-col glass-panel transition-all duration-300 ease-[cubic-bezier(0.4,0,0.2,1)]
                 ${isMobileMenuOpen ? 'translate-x-0 w-64' : '-translate-x-full'} 
                 md:translate-x-0 ${isSidebarHovered ? 'md:w-64' : 'md:w-20'}`}
                 onMouseEnter={() => setIsSidebarHovered(true)}
@@ -57,11 +57,11 @@ export default function Sidebar() {
             >
                 <div className="flex h-20 items-center px-6 border-b border-white/5 relative overflow-hidden shrink-0">
                     {/* Header Glow */}
-                    <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-indigo-500/50 to-transparent"></div>
+                    <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-indigo-500/80 to-transparent"></div>
 
                     <div className="flex items-center gap-4 w-full relative z-10 mt-1">
-                        <div className="h-9 w-9 min-w-[2.25rem] rounded-xl shadow-[0_0_20px_rgba(99,102,241,0.3)] relative overflow-hidden ring-1 ring-white/10">
-                            <img src="/img/af-logo.png" alt="AetherFlow Logo" className="w-full h-full object-cover scale-[1.15]" />
+                        <div className="h-9 w-9 min-w-[2.25rem] rounded-xl shadow-[0_0_25px_rgba(99,102,241,0.4)] relative overflow-hidden ring-1 ring-white/20">
+                            <img src="/img/af-logo.png" alt="AetherFlow Logo" className="w-full h-full object-cover scale-[1.35]" />
                         </div>
                         <h1 className={`text-xl font-bold tracking-tight bg-gradient-to-r from-slate-100 to-slate-400 bg-clip-text text-transparent transition-opacity duration-300 truncate whitespace-nowrap ${isSidebarHovered ? 'opacity-100' : 'opacity-0 w-0'}`}>
                             AetherFlow
@@ -78,12 +78,12 @@ export default function Sidebar() {
                                 key={item.id}
                                 onClick={() => setActiveTab(item.id)}
                                 className={`w-full flex items-center relative gap-4 px-3.5 py-3 rounded-xl transition-all duration-300 group overflow-hidden ${isActive
-                                    ? 'bg-indigo-500/10 text-indigo-100 shadow-sm border border-indigo-500/20'
+                                    ? 'bg-indigo-500/15 text-indigo-50 shadow-[0_0_20px_rgba(99,102,241,0.15)] border border-indigo-500/30'
                                     : 'text-slate-400 hover:bg-white/5 hover:text-slate-200 border border-transparent'
                                     }`}
                             >
                                 {/* Active Indicator Line */}
-                                <div className={`absolute left-0 top-1/2 -translate-y-1/2 w-1 h-1/2 bg-indigo-500 rounded-r-full transition-all duration-300 ${isActive ? 'scale-y-100 opacity-100' : 'scale-y-0 opacity-0'}`}></div>
+                                <div className={`absolute left-0 top-1/2 -translate-y-1/2 w-1 h-3/5 bg-indigo-500 rounded-r-full transition-all duration-300 shadow-[0_0_8px_#6366f1] ${isActive ? 'scale-y-100 opacity-100' : 'scale-y-0 opacity-0'}`}></div>
 
                                 <div className={`min-w-[1.25rem] flex items-center justify-center transition-colors ${isActive ? 'text-indigo-400 drop-shadow-[0_0_8px_rgba(129,140,248,0.5)]' : 'group-hover:text-slate-300'}`}>
                                     {item.icon}
@@ -118,7 +118,7 @@ export default function Sidebar() {
                                     setActiveTab(item.id);
                                 }
                             }}
-                            className={`w-full flex items-center gap-4 px-3 py-2.5 rounded-lg text-slate-400 hover:text-slate-200 hover:bg-white/5 transition-all duration-300 group overflow-hidden ${activeTab === item.id ? 'bg-white/10 text-white' : ''}`}
+                            className={`w-full flex items-center gap-4 px-3 py-2.5 rounded-xl text-slate-400 hover:text-slate-200 hover:bg-white/5 transition-all duration-300 group overflow-hidden ${activeTab === item.id ? 'bg-indigo-500/15 text-indigo-50 shadow-[0_0_15px_rgba(99,102,241,0.1)] border border-indigo-500/20' : 'border border-transparent'}`}
                         >
                             <div className="min-w-[1.125rem] flex items-center justify-center group-hover:scale-110 transition-transform">
                                 {item.icon}

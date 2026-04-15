@@ -68,7 +68,7 @@ const useHistoryStore = create<{
     lastPushAt: 0,
     pushMetrics: (metrics: SystemMetrics) => {
         const now = Date.now();
-        if (now - get().lastPushAt < 500) return; // Throttle: max once per 500ms
+        if (now - get().lastPushAt < 250) return; // Throttle: max once per 250ms
 
         const push = (arr: number[], val: number): number[] => {
             // Optimised push to avoid memory reallocation

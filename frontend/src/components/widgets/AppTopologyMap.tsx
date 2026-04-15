@@ -57,7 +57,7 @@ export default function AppTopologyMap({ metrics }: AppTopologyMapProps) {
         // 2. Initialize simulation only once
         if (!simulationRef.current) {
             simulationRef.current = d3.forceSimulation<D3Node, D3Link>()
-                .force("link", d3.forceLink<D3Node, D3Link>().id(d => d.id).distance(120))
+                .force("link", d3.forceLink<D3Node, D3Link>().id((d: any) => d.id).distance(120))
                 .force("charge", d3.forceManyBody().strength(-400))
                 .force("center", d3.forceCenter(width / 2, height / 2))
                 .force("collide", d3.forceCollide().radius(40));
@@ -119,14 +119,14 @@ export default function AppTopologyMap({ metrics }: AppTopologyMapProps) {
                 .join("line")
                 .attr("stroke", "#ffffff20")
                 .attr("stroke-opacity", 0.6)
-                .attr("stroke-width", d => Math.sqrt(d.value));
+                .attr("stroke-width", (d: any) => Math.sqrt(d.value));
 
             const node = container.select("g.nodes")
                 .selectAll<SVGCircleElement, D3Node>("circle")
-                .data(mergedNodes, d => d.id)
+                .data(mergedNodes, (d: any) => d.id)
                 .join(
                     enter => enter.append("circle")
-                        .attr("r", d => d.group === 1 ? 14 : 8)
+                        .attr("r", (d: any) => d.group === 1 ? 14 : 8)
                         .attr("stroke", "#1e293b")
                         .attr("stroke-width", 1.5)
                         .call(d3.drag<SVGCircleElement, D3Node>()
@@ -136,7 +136,7 @@ export default function AppTopologyMap({ metrics }: AppTopologyMapProps) {
                     update => update,
                     exit => exit.remove()
                 )
-                .attr("fill", d => {
+                .attr("fill", (d: any) => {
                     if (d.status === 'error') return '#ef4444';
                     if (d.status === 'stopped') return '#64748b';
                     if (d.group === 1) return '#6366f1';
@@ -160,9 +160,9 @@ export default function AppTopologyMap({ metrics }: AppTopologyMapProps) {
 
             const label = container.select("g.labels")
                 .selectAll("text")
-                .data(mergedNodes, d => d.id)
+                .data(mergedNodes, (d: any) => d.id)
                 .join("text")
-                .text(d => d.id)
+                .text((d: any) => d.id)
                 .attr('font-size', '10px')
                 .attr('font-weight', 'bold')
                 .attr('fill', '#94a3b8')
@@ -182,18 +182,18 @@ export default function AppTopologyMap({ metrics }: AppTopologyMapProps) {
 
             simulation.on("tick", () => {
                 link
-                    .attr("x1", d => (d.source as any).x)
-                    .attr("y1", d => (d.source as any).y)
-                    .attr("x2", d => (d.target as any).x)
-                    .attr("y2", d => (d.target as any).y);
+                    .attr("x1", (d: any) => (d.source as any).x)
+                    .attr("y1", (d: any) => (d.source as any).y)
+                    .attr("x2", (d: any) => (d.target as any).x)
+                    .attr("y2", (d: any) => (d.target as any).y);
 
                 node
-                    .attr("cx", d => d.x!)
-                    .attr("cy", d => d.y!);
+                    .attr("cx", (d: any) => d.x!)
+                    .attr("cy", (d: any) => d.y!);
 
                 label
-                    .attr("x", d => d.x!)
-                    .attr("y", d => d.y!);
+                    .attr("x", (d: any) => d.x!)
+                    .attr("y", (d: any) => d.y!);
             });
         };
 

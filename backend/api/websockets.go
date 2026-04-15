@@ -289,7 +289,7 @@ var (
 )
 
 func maintainSystemState() {
-	metricsTicker := time.NewTicker(3 * time.Second)
+	metricsTicker := time.NewTicker(1 * time.Second)
 	serviceTicker := time.NewTicker(15 * time.Second)
 
 	// Keep services updated on its own cadence
@@ -328,7 +328,7 @@ func maintainSystemState() {
 }
 
 func broadcastMetricsLoop() {
-	broadcastTicker := time.NewTicker(3 * time.Second)
+	broadcastTicker := time.NewTicker(1 * time.Second)
 	defer broadcastTicker.Stop()
 
 	// Initial kick off for state maintenance

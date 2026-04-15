@@ -190,8 +190,8 @@ export default function OverviewTab({ metrics, hardware, history }: OverviewTabP
                 
                 {/* 1. Primary Metrics */}
                 <div className="space-y-6">
-                    <MemoCpuWidget metrics={tMetrics} history={tHistory} />
-                    <MemoMemoryWidget metrics={tMetrics} history={tHistory} />
+                    <MemoCpuWidget metrics={tMetrics} hardware={hardware} history={tHistory} />
+                    <MemoMemoryWidget metrics={tMetrics} hardware={hardware} history={tHistory} />
                     
                     {/* GPU Widget - Auto Detectable & User Enabled */}
                     {(showGpuWidget && tMetrics.gpus && tMetrics.gpus.length > 0) && (
@@ -201,7 +201,7 @@ export default function OverviewTab({ metrics, hardware, history }: OverviewTabP
 
                 {/* 2. Secondary Metrics */}
                 <div className="space-y-6">
-                    <MemoNetworkWidget metrics={tMetrics} history={tHistory} />
+                    <MemoNetworkWidget metrics={tMetrics} hardware={hardware} history={tHistory} />
                     <MemoDiskIOWidget metrics={tMetrics} history={tHistory} />
                     
                     {/* Data Usage History Widget - User Enabled */}
@@ -214,11 +214,11 @@ export default function OverviewTab({ metrics, hardware, history }: OverviewTabP
                 <div className={`space-y-6 ${dashboardDensity === 'immersive' ? 'xl:col-span-2' : ''}`}>
                     <div className={`grid gap-6 ${dashboardDensity === 'immersive' ? 'grid-cols-1 lg:grid-cols-3' : 'grid-cols-1'}`}>
                         <div className={dashboardDensity === 'immersive' ? 'lg:col-span-2' : ''}>
-                            <MemoAppTopologyMap metrics={tMetrics} hardware={hardware} />
+                            <MemoAppTopologyMap metrics={tMetrics} />
                         </div>
                         <div className="space-y-6">
-                            <MemoStorageWidget metrics={tMetrics} />
-                            <MemoProcessWidget metrics={tMetrics} />
+                            <MemoStorageWidget metrics={tMetrics} hardware={hardware} />
+                            <MemoProcessWidget processes={tMetrics.processes || []} />
                         </div>
                     </div>
                 </div>
