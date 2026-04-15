@@ -55,6 +55,7 @@ interface ServiceInfo {
     uptime: string;
     managed_by?: string;
     process?: string;
+    id?: string;
 }
 
 export default function ServicesTab() {
@@ -138,14 +139,27 @@ export default function ServicesTab() {
         const controlDisabled = isBusy || !canControlServices;
 
         return (
-            <div key={name} className="bg-white/[0.02] border border-white/[0.05] rounded-2xl p-6 hover:bg-white/[0.04] transition-all hover:border-white/10 group cursor-default relative overflow-hidden">
-                <div className={`absolute top-0 left-0 w-1 h-full ${isRunning ? 'bg-emerald-500/50' : (isError ? 'bg-red-500/50' : 'bg-slate-500/50')} transition-colors`}></div>
+            <div key={name} className="relative bg-slate-950/80 border border-white/10 rounded-2xl p-6 backdrop-blur-xl transition-all hover:border-indigo-500/50 group cursor-default overflow-hidden">
+                <div className={`absolute top-0 left-0 w-1 h-full ${isRunning ? 'bg-emerald-500/50' : (isError ? 'bg-red-500/50' : 'bg-slate-500/50')} transition-colors z-20`}></div>
 
-                <div className="flex justify-between items-start mb-6">
+                <div className="flex justify-between items-start mb-6 relative z-10">
                     <div className="flex items-center gap-4">
-                        <div className="h-12 w-12 rounded-2xl bg-slate-900 border border-white/10 flex items-center justify-center shadow-inner group-hover:scale-105 transition-transform">
+                        <div className="h-12 w-12 bg-white/5 rounded-xl border border-white/10 flex items-center justify-center shadow-inner overflow-hidden group-hover:scale-105 transition-transform">
                             {corePlatformProcesses.includes(data.process || '') ? (
                                 <Cpu size={24} className={isRunning ? 'text-emerald-400' : (isError ? 'text-red-400' : 'text-slate-500')} />
+                            ) : data.id ? (
+                                <div className="relative w-8 h-8 flex items-center justify-center">
+                                    <img 
+                                        src={`/img/${data.id}.png`} 
+                                        alt={name}
+                                        className="w-full h-full object-contain"
+                                        onError={(e) => {
+                                            e.currentTarget.style.display = 'none';
+                                            e.currentTarget.parentElement?.querySelector('.fallback')?.classList.remove('hidden');
+                                        }}
+                                    />
+                                    <Box size={24} className={`fallback hidden ${isRunning ? 'text-emerald-400' : (isError ? 'text-red-400' : 'text-slate-500')} absolute`} />
+                                </div>
                             ) : (
                                 <Box size={24} className={isRunning ? 'text-emerald-400' : (isError ? 'text-red-400' : 'text-slate-500')} />
                             )}
@@ -253,7 +267,8 @@ export default function ServicesTab() {
     }
 
     return (
-        <div className="space-y-8 animate-fade-in">
+        <div className="space-y-8 animate-fade-in relative z-10 w-full min-h-screen">
+            <div className="absolute inset-0 bg-blue-500/5 rounded-full blur-[120px] pointer-events-none -translate-y-1/2 -translate-x-1/2"></div>
             {/* Header */}
             <div className="flex justify-between items-end">
                 <div>

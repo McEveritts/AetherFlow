@@ -27,6 +27,7 @@ func GetActiveServices() map[string]interface{} {
 			"version":    version,
 			"managed_by": "systemd",
 			"process":    systemdName,
+			"id":         systemdName,
 		}
 	}
 
@@ -63,6 +64,7 @@ func GetActiveServices() map[string]interface{} {
 			"version":    version,
 			"managed_by": managedBy,
 			"process":    serviceName,
+			"id":         pkg.Name,
 		}
 	}
 
