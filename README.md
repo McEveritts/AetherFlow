@@ -44,6 +44,19 @@ We did not adopt complexity for the sake of it. AetherFlow is built on a rigid p
 
 ---
 
+## 🖼️ Platform Previews
+
+**Intelligent Dashboard**
+![AetherFlow Dashboard](./docs/screenshot_dashboard.png)
+
+**AetherMarketplace**
+![AetherMarketplace](./docs/screenshot_marketplace.png)
+
+**FlowAI Assistant**
+![FlowAI Assistant](./docs/screenshot_flowai.png)
+
+---
+
 ## 🛠️ Quick Installation
 
 For a fresh install on Ubuntu 20.04/22.04 LTS, Debian 11/12, or Kali Linux:
