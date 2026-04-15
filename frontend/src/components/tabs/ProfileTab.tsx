@@ -54,72 +54,119 @@ export default function ProfileTab() {
     }
 
     return (
-        <div className="space-y-6 animate-fade-in relative z-10 w-full min-h-[calc(100vh-10rem)]">
-            <div className="bg-white/[0.02] border border-white/[0.05] rounded-3xl p-10 backdrop-blur-xl relative overflow-hidden">
-                <div className="absolute top-0 right-0 w-[400px] h-[400px] bg-purple-500/10 rounded-full blur-[100px] pointer-events-none -translate-y-1/2 translate-x-1/2"></div>
+        <div className="space-y-8 animate-fade-in relative z-10 w-full mb-8">
+            <h3 className="text-xl font-bold text-slate-100 flex items-center gap-3 border-b border-white/5 pb-4">
+                <UserCircle size={24} className="text-indigo-400" />
+                Local Profile
+            </h3>
 
-                <h2 className="text-2xl font-bold text-slate-100 flex items-center gap-3 mb-8 pb-4 border-b border-white/5 relative z-10">
-                    <UserCircle size={24} className="text-purple-400" />
-                    User Profile
-                </h2>
-
-                <div className="max-w-2xl relative z-10">
-                    <div className="flex items-start gap-8 mb-10 pb-10 border-b border-white/5">
-                        <Image
-                            src={user.avatar_url || 'https://via.placeholder.com/150'}
-                            alt="Profile Avatar"
-                            width={96}
-                            height={96}
-                            className="rounded-2xl shadow-lg border border-white/10"
-                        />
-                        <div>
-                            <h3 className="text-2xl font-bold text-slate-200">{user.username}</h3>
-                            <div className="flex items-center gap-2 mt-2">
-                                <span className="bg-purple-500/10 text-purple-400 text-xs font-bold px-3 py-1 rounded-full uppercase tracking-widest border border-purple-500/20">
-                                    {user.role}
-                                </span>
-                                <span className={`text-sm ${user.is_oauth ? 'text-slate-500' : 'text-slate-500'}`}>
-                                    {user.is_oauth ? 'OAuth Connected' : 'Local Account'}
-                                </span>
+            <div className="max-w-2xl relative z-10 space-y-10">
+                {/* Avatar & Basics */}
+                <div className="flex flex-col md:flex-row items-center md:items-start gap-8 pb-10 border-b border-white/5">
+                    <div className="flex flex-col items-center gap-4">
+                        <div className="relative group">
+                            <Image
+                                src={user.avatar_url || 'https://via.placeholder.com/150'}
+                                alt="Profile Avatar"
+                                width={112}
+                                height={112}
+                                className="rounded-2xl shadow-lg border border-white/10"
+                            />
+                            <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 transition-opacity rounded-2xl flex items-center justify-center backdrop-blur-sm cursor-pointer">
+                                <span className="text-xs font-bold text-white uppercase tracking-wider">Change</span>
                             </div>
                         </div>
+                        <button type="button" className="text-xs text-slate-400 hover:text-indigo-400 transition-colors">
+                            Remove Avatar
+                        </button>
                     </div>
+                    
+                    <div className="text-center md:text-left flex-1">
+                        <h3 className="text-3xl font-bold text-slate-100 tracking-tight">{user.username}</h3>
+                        <div className="flex flex-wrap items-center justify-center md:justify-start gap-2 mt-3">
+                            <span className="bg-indigo-500/10 text-indigo-400 text-xs font-bold px-3 py-1 rounded-full uppercase tracking-widest border border-indigo-500/20">
+                                {user.role}
+                            </span>
+                            <span className={`text-xs font-bold px-3 py-1 rounded-full border ${user.is_oauth ? 'bg-amber-500/10 text-amber-500/80 border-amber-500/20' : 'bg-slate-800 text-slate-400 border-white/5'}`}>
+                                {user.is_oauth ? 'OAuth Connected' : 'Local Account'}
+                            </span>
+                        </div>
+                        {user.is_oauth && (
+                            <div className="mt-4 flex gap-3 text-sm text-amber-500/80 bg-amber-500/5 p-4 rounded-xl border border-amber-500/10 text-left">
+                                <AlertCircle size={20} className="shrink-0" />
+                                <p>You are logged in via Google OAuth. To delete this account, revoke access from your Google Account settings.</p>
+                            </div>
+                        )}
+                    </div>
+                </div>
 
-                    <form onSubmit={handleUpdate} className="space-y-8">
-                        <div>
-                            <label className="block text-sm font-semibold text-slate-300 mb-2 flex items-center gap-2">
-                                <Mail size={16} className="text-slate-400" /> Notification Email
-                            </label>
+                {/* Email Management */}
+                <form onSubmit={handleUpdate} className="space-y-6">
+                    <h4 className="text-sm font-bold text-slate-400 uppercase tracking-wider">Email Preferences</h4>
+                    <div className="bg-slate-950/50 border border-white/10 rounded-2xl p-6">
+                        <label className="block text-sm font-semibold text-slate-300 mb-3 flex items-center gap-2">
+                            <Mail size={16} className="text-slate-400" /> Notification Email
+                        </label>
+                        <div className="flex flex-col md:flex-row gap-4">
                             <input
                                 type="email"
                                 value={email}
                                 onChange={(e) => setEmail(e.target.value)}
-                                className="w-full bg-slate-900 border border-white/10 rounded-xl px-4 py-3.5 text-slate-200 text-sm focus:outline-none focus:border-purple-500/50 transition-colors"
+                                className="flex-1 bg-slate-900 border border-white/10 rounded-xl px-4 py-3 text-slate-200 text-sm focus:outline-none focus:border-indigo-500/50 transition-colors"
                             />
-                            <p className="text-xs text-slate-500 mt-2">Where AetherFlow sends critical system alerts.</p>
-                        </div>
-
-                        <div className="pt-4 flex items-center gap-4">
                             <button
                                 type="submit"
                                 disabled={isSaving || email === user.email}
-                                className="px-8 py-3 bg-purple-600 hover:bg-purple-500 disabled:bg-purple-600/50 rounded-xl text-sm font-bold text-white transition-all shadow-lg shadow-purple-500/20 flex items-center gap-2"
+                                className="px-6 py-3 bg-indigo-600 hover:bg-indigo-500 disabled:bg-indigo-600/30 disabled:text-slate-500 rounded-xl text-sm font-bold text-white transition-all whitespace-nowrap"
                             >
-                                <Save size={18} />
-                                {isSaving ? 'Saving...' : 'Update Details'}
+                                {isSaving ? 'Saving...' : 'Update Email'}
                             </button>
                         </div>
-                    </form>
+                        <p className="text-xs text-slate-500 mt-3">Where AetherFlow sends critical system alerts and authentication events.</p>
+                    </div>
+                </form>
 
-                    {/* Account Storage Quota */}
-                    <div className="mt-12 bg-white/[0.02] border border-white/[0.05] rounded-2xl p-8 backdrop-blur-md">
+                {/* Security Section (Mockup) */}
+                <div className="space-y-6">
+                    <h4 className="text-sm font-bold text-slate-400 uppercase tracking-wider">Authentication & Security</h4>
+                    <div className="bg-slate-950/50 border border-white/10 rounded-2xl divide-y divide-white/10 overflow-hidden">
+                        
+                        <div className="p-6 flex flex-col md:flex-row md:items-center justify-between gap-4">
+                            <div>
+                                <h5 className="text-sm font-semibold text-slate-200">Account Password</h5>
+                                <p className="text-xs text-slate-500 mt-1">Change the password used to access your local account.</p>
+                            </div>
+                            <button type="button" className="px-6 py-2.5 bg-white/5 border border-white/10 hover:bg-white/10 text-slate-300 text-sm font-bold rounded-xl transition-colors whitespace-nowrap">
+                                Change Password
+                            </button>
+                        </div>
+                        
+                        <div className="p-6 flex flex-col md:flex-row md:items-center justify-between gap-4 bg-slate-900/30">
+                            <div>
+                                <h5 className="text-sm font-semibold text-slate-200 flex items-center gap-2">
+                                    Two-Factor Authentication <span className="px-2 py-0.5 rounded text-[10px] uppercase font-bold bg-amber-500/20 text-amber-400 border border-amber-500/20">Coming Soon</span>
+                                </h5>
+                                <p className="text-xs text-slate-500 mt-1">Add an extra layer of security to your account.</p>
+                            </div>
+                            <button type="button" disabled className="px-6 py-2.5 bg-transparent border border-white/5 text-slate-500 text-sm font-bold rounded-xl transition-colors whitespace-nowrap cursor-not-allowed">
+                                Enable 2FA
+                            </button>
+                        </div>
+
+                    </div>
+                </div>
+
+                {/* Account Storage Quota */}
+                <div className="space-y-6">
+                    <h4 className="text-sm font-bold text-slate-400 uppercase tracking-wider">Quotas & Limits</h4>
+                    <div className="bg-slate-950/50 border border-white/10 rounded-2xl p-6">
                         <div className="flex items-center gap-3 mb-6">
-                            <div className="p-3 bg-indigo-500/20 text-indigo-400 rounded-xl">
-                                <HardDrive size={24} />
+                            <div className="p-2.5 bg-emerald-500/20 text-emerald-400 rounded-xl">
+                                <HardDrive size={20} />
                             </div>
                             <div>
-                                <h3 className="text-xl font-bold text-slate-200">Account Storage Quotas</h3>
-                                <p className="text-sm text-slate-400">Your total disk boundaries within the Nexus filesystem.</p>
+                                <h3 className="font-bold text-slate-200">Account Storage</h3>
+                                <p className="text-xs text-slate-400 mt-0.5">Your total disk boundaries within the Nexus filesystem.</p>
                             </div>
                         </div>
 
@@ -129,24 +176,30 @@ export default function ProfileTab() {
                                 <SkeletonBox className="h-10 w-full" />
                             </div>
                         ) : quota ? (
-                            <div className="space-y-4">
+                            <div className="space-y-3">
                                 <div className="flex items-end justify-between text-sm">
-                                    <span className="font-semibold text-slate-300">Space Used</span>
+                                    <span className="font-semibold text-slate-400">Space Used</span>
                                     <div className="text-right">
-                                        <span className="text-xl font-bold text-white">{quota.usedGB.toFixed(1)} GB</span>
-                                        <span className="text-slate-500"> / {quota.totalGB} GB</span>
+                                        <span className="text-lg font-bold text-white">{(quota.usedGB || 0).toFixed(1)} GB</span>
+                                        {quota.totalGB > 0 ? (
+                                            <span className="text-slate-500 text-xs ml-1">/ {quota.totalGB} GB</span>
+                                        ) : (
+                                            <span className="text-slate-500 text-[10px] ml-1 uppercase">(No Limit Set)</span>
+                                        )}
                                     </div>
                                 </div>
-                                <div className="h-4 w-full bg-slate-900 border border-white/10 rounded-full overflow-hidden">
+                                <div className="h-3 w-full bg-slate-900 border border-white/5 rounded-full overflow-hidden shrink-0">
                                     <div
-                                        className={`h-full transition-all duration-1000 flex items-center justify-end px-2 text-[10px] font-bold ${quota.percentage > 90 ? 'bg-red-500 shadow-[0_0_10px_rgba(239,68,68,0.5)]' :
+                                        className={`h-full transition-all duration-1000 ${quota.percentage > 90 ? 'bg-red-500 shadow-[0_0_10px_rgba(239,68,68,0.5)]' :
                                             quota.percentage > 75 ? 'bg-amber-500 shadow-[0_0_10px_rgba(245,158,11,0.5)]' :
-                                                'bg-indigo-500 shadow-[0_0_10px_rgba(99,102,241,0.5)]'
+                                                'bg-emerald-500 shadow-[0_0_10px_rgba(16,185,129,0.5)]'
                                             }`}
-                                        style={{ width: `${Math.min(quota.percentage, 100)}%` }}
+                                        style={{ width: `${Math.min(quota.percentage || 0, 100)}%` }}
                                     ></div>
                                 </div>
-                                <p className="text-xs text-slate-500 text-right mt-2">{quota.percentage.toFixed(1)}% utilized</p>
+                                {quota.totalGB > 0 && (
+                                    <p className="text-[11px] text-slate-500 text-right mt-1">{(quota.percentage || 0).toFixed(1)}% utilized</p>
+                                )}
                             </div>
                         ) : (
                             <div className="p-4 border border-red-500/20 bg-red-500/10 text-red-400 rounded-xl text-sm">
@@ -154,19 +207,8 @@ export default function ProfileTab() {
                             </div>
                         )}
                     </div>
-
-                    {user.is_oauth && (
-                        <div className="mt-12 bg-red-500/5 border border-red-500/20 rounded-2xl p-6">
-                            <div className="flex gap-4">
-                                <AlertCircle className="text-red-400 shrink-0" size={24} />
-                                <div>
-                                    <h3 className="text-lg font-bold text-slate-200 mb-2">Danger Zone</h3>
-                                    <p className="text-sm text-slate-400 mb-4">You are currently logged in via Google OAuth. To delete this account, revoke access from your Google Account settings, which will lock you out of this dashboard.</p>
-                                </div>
-                            </div>
-                        </div>
-                    )}
                 </div>
+
             </div>
         </div>
     );

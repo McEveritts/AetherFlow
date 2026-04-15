@@ -7,6 +7,15 @@ type ProcessInfo struct {
 	Mem  float64 `json:"mem"`
 }
 
+type GpuMetric struct {
+	Index       int     `json:"index"`
+	Name        string  `json:"name"`
+	UsagePct    float64 `json:"usage_pct"`
+	MemoryTotal float64 `json:"memory_total"`
+	MemoryUsed  float64 `json:"memory_used"`
+	Temp        float64 `json:"temp"`
+}
+
 type DiskPartition struct {
 	MountPoint string  `json:"mount_point"`
 	Device     string  `json:"device"`
@@ -32,5 +41,6 @@ type SystemMetrics struct {
 	Uptime        string                 `json:"uptime"`
 	LoadAverage   []float64              `json:"load_average"`
 	Processes     []ProcessInfo          `json:"processes"`
+	GPUs          []GpuMetric            `json:"gpus,omitempty"`
 }
 

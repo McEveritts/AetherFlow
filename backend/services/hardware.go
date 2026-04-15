@@ -324,6 +324,24 @@ func GetSystemMetricsCore() models.SystemMetrics {
 	swapTotal = sanitizeFloat64(swapTotal)
 	swapUsed = sanitizeFloat64(swapUsed)
 
+	// 8. GPUs
+	var gpuMetrics []models.GpuMetric
+	gpuInfo, err := ghw.GPU()
+	if err == nil && gpuInfo != nil {
+		for i, card := range gpuInfo.GraphicsCards {
+			name := "GPU"
+			if card.DeviceInfo != nil && card.DeviceInfo.Product != nil {
+				name = card.DeviceInfo.Product.Name
+			}
+			gpuMetrics = append(gpuMetrics, models.GpuMetric{
+				Index: i,
+				Name:  name,
+				// Usage and specific memory used would require NVML or similar
+				// For now, we provide the detectable presence and metadata
+			})
+		}
+	}
+
 	return models.SystemMetrics{
 		CPUUsage:   cpuUsage,
 		PerCoreCPU: perCoreCPU,
@@ -359,6 +377,7 @@ func GetSystemMetricsCore() models.SystemMetrics {
 		LoadAverage: loadAvg,
 		Processes:   cachedProcesses,
 		Services:    servicesMap,
+		GPUs:        gpuMetrics,
 	}
 }
 

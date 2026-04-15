@@ -1,24 +1,28 @@
-import { Settings, Sparkles, ChevronRight, DownloadCloud, AlertCircle, Eye, EyeOff, Key, Monitor, Globe, Clock, LayoutDashboard, Radio, HardDriveDownload, Shield, KeyRound, RefreshCw } from 'lucide-react';
+import { Settings, Sparkles, ChevronRight, DownloadCloud, AlertCircle, Eye, EyeOff, Key, Monitor, Globe, Clock, LayoutDashboard, Radio, HardDriveDownload, Shield, KeyRound, RefreshCw, UserCircle } from 'lucide-react';
 import { useState, FormEvent } from 'react';
 import useSWR from 'swr';
 import dynamic from 'next/dynamic';
 
 const BackupTab = dynamic(() => import('@/components/tabs/BackupTab'), { ssr: false });
 const SecurityTab = dynamic(() => import('@/components/tabs/SecurityTab'), { ssr: false });
+const ProfileTab = dynamic(() => import('@/components/tabs/ProfileTab'), { ssr: false });
+const DashboardSettingsTab = dynamic(() => import('@/components/tabs/DashboardSettingsTab'), { ssr: false });
 const OIDCClientsTab = dynamic(() => import('@/components/tabs/OIDCClientsTab'), { ssr: false });
 import { useToast } from '@/contexts/ToastContext';
 import { useSystemStore } from '@/store/useSystemStore';
 import { useTranslations } from 'next-intl';
 import { SettingsSkeleton } from '@/components/layout/SkeletonBox';
 import { apiFetch } from '@/lib/fetcher';
+import { useConnectionStore } from '@/store/useConnectionStore';
 
 export default function SettingsTab() {
     const t = useTranslations('Settings');
     const { addToast } = useToast();
     const { theme, setTheme, language, setLanguage, ambientColor1, setAmbientColor1, ambientColor2, setAmbientColor2 } = useSystemStore();
+    const { preferredMode, setPreferredMode, pollInterval, setPollInterval } = useConnectionStore();
     
     // Tab State
-    const [activeTab, setActiveTab] = useState<'preferences' | 'ai' | 'system' | 'backups' | 'security' | 'oidc-clients'>('preferences');
+    const [activeTab, setActiveTab] = useState<'preferences' | 'ai' | 'system' | 'dashboard' | 'backups' | 'security' | 'profile' | 'oidc-clients'>('preferences');
     
     // Config State
     const [model, setModel] = useState('gemini-3.1-pro-preview');
@@ -221,6 +225,20 @@ export default function SettingsTab() {
                     </button>
                     <button 
                         type="button" 
+                        onClick={() => setActiveTab('dashboard')}
+                        className={`px-4 py-2 rounded-lg text-sm font-semibold transition-colors flex -mt-px border-b-2 items-center gap-2 whitespace-nowrap ${activeTab === 'dashboard' ? 'border-indigo-500 text-indigo-400 bg-indigo-500/10' : 'border-transparent text-slate-400 hover:bg-white/5 hover:text-slate-200'}`}
+                    >
+                        <LayoutDashboard size={16} /> Dashboard
+                    </button>
+                    <button 
+                        type="button" 
+                        onClick={() => setActiveTab('profile')}
+                        className={`px-4 py-2 rounded-lg text-sm font-semibold transition-colors flex -mt-px border-b-2 items-center gap-2 whitespace-nowrap ${activeTab === 'profile' ? 'border-indigo-500 text-indigo-400 bg-indigo-500/10' : 'border-transparent text-slate-400 hover:bg-white/5 hover:text-slate-200'}`}
+                    >
+                        <UserCircle size={16} /> Profile
+                    </button>
+                    <button 
+                        type="button" 
                         onClick={() => setActiveTab('oidc-clients')}
                         className={`px-4 py-2 rounded-lg text-sm font-semibold transition-colors flex -mt-px border-b-2 items-center gap-2 whitespace-nowrap ${activeTab === 'oidc-clients' ? 'border-indigo-500 text-indigo-400 bg-indigo-500/10' : 'border-transparent text-slate-400 hover:bg-white/5 hover:text-slate-200'}`}
                     >
@@ -332,60 +350,54 @@ export default function SettingsTab() {
                                     </div>
                                 </div>
 
-                                {/* CATEGORY: Appearance */}
+                                {/* CATEGORY: Connectivity & Telemetry */}
                                 <div>
-                                    <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3 px-2">Appearance</h4>
+                                    <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3 px-2">Connectivity & Telemetry</h4>
                                     <div className="bg-slate-950/50 border border-white/10 rounded-2xl divide-y divide-white/10 overflow-hidden">
                                         
-                                        {/* Theme */}
+                                        {/* Preferred Mode */}
                                         <div className="p-5 flex flex-col md:flex-row md:items-center justify-between gap-4 hover:bg-white/[0.02] transition-colors">
                                             <div>
                                                 <label className="text-sm font-semibold text-slate-200 flex items-center gap-2">
-                                                    <Monitor size={16} className="text-purple-400" /> {t('displayTheme')}
+                                                    <Radio size={16} className="text-indigo-400" /> Preferred Connectivity
                                                 </label>
-                                                <p className="text-xs text-slate-500 mt-1">Adjust the visual theme of the UI.</p>
+                                                <p className="text-xs text-slate-500 mt-1">Choose between high-speed WebSockets or stable REST Polling.</p>
                                             </div>
                                             <div className="shrink-0 w-full md:w-80 relative">
                                                 <select
-                                                    value={theme}
-                                                    onChange={(e) => setTheme(e.target.value as 'light' | 'dark' | 'system')}
+                                                    value={preferredMode}
+                                                    onChange={(e) => setPreferredMode(e.target.value as 'websocket' | 'poll')}
                                                     className="w-full bg-slate-900 border border-white/10 rounded-xl px-4 py-3 text-slate-200 text-sm focus:outline-none focus:border-indigo-500/50 transition-colors appearance-none cursor-pointer"
                                                 >
-                                                    <option value="system">{t('themeSystem')}</option>
-                                                    <option value="dark">{t('themeDark')}</option>
-                                                    <option value="light">{t('themeLight')}</option>
+                                                    <option value="websocket">Auto-Connect (WebSockets)</option>
+                                                    <option value="poll">Nexus Link (REST Polling)</option>
                                                 </select>
                                                 <ChevronRight size={16} className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-500 rotate-90 pointer-events-none" />
                                             </div>
                                         </div>
 
-                                        {/* Ambient Blends */}
-                                        <div className="p-5 flex flex-col md:flex-row justify-between gap-6 hover:bg-white/[0.02] transition-colors">
+                                        {/* Polling Interval */}
+                                        <div className="p-5 flex flex-col md:flex-row md:items-center justify-between gap-4 hover:bg-white/[0.02] transition-colors">
                                             <div>
                                                 <label className="text-sm font-semibold text-slate-200 flex items-center gap-2">
-                                                    <Sparkles size={16} className="text-pink-400" /> Ambient Light Blends
+                                                    <Clock size={16} className="text-blue-400" /> Polling Heartbeat
                                                 </label>
-                                                <p className="text-xs text-slate-500 mt-1">Customize the background lighting gradients globally.</p>
+                                                <p className="text-xs text-slate-500 mt-1">Set the data refresh frequency when in polling mode.</p>
                                             </div>
-                                            <div className="shrink-0 w-full md:w-80 flex gap-3">
-                                                <div className="flex-1 flex items-center gap-2 bg-slate-900 border border-white/10 rounded-xl px-3 py-2">
-                                                    <input 
-                                                        type="color" 
-                                                        value={ambientColor1} 
-                                                        onChange={(e) => setAmbientColor1(e.target.value)}
-                                                        className="w-6 h-6 rounded cursor-pointer bg-transparent border-none p-0"
-                                                    />
-                                                    <span className="text-xs text-slate-300 font-mono">{ambientColor1}</span>
-                                                </div>
-                                                <div className="flex-1 flex items-center gap-2 bg-slate-900 border border-white/10 rounded-xl px-3 py-2">
-                                                    <input 
-                                                        type="color" 
-                                                        value={ambientColor2} 
-                                                        onChange={(e) => setAmbientColor2(e.target.value)}
-                                                        className="w-6 h-6 rounded cursor-pointer bg-transparent border-none p-0"
-                                                    />
-                                                    <span className="text-xs text-slate-300 font-mono">{ambientColor2}</span>
-                                                </div>
+                                            <div className="shrink-0 w-full md:w-80 relative">
+                                                <select
+                                                    value={pollInterval}
+                                                    onChange={(e) => setPollInterval(Number(e.target.value))}
+                                                    disabled={preferredMode === 'websocket'}
+                                                    className="w-full bg-slate-900 border border-white/10 rounded-xl px-4 py-3 text-slate-200 text-sm focus:outline-none focus:border-indigo-500/50 transition-colors appearance-none cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed"
+                                                >
+                                                    <option value={1000}>1 Second (Hyper)</option>
+                                                    <option value={2000}>2 Seconds (Fast)</option>
+                                                    <option value={5000}>5 Seconds (Normal)</option>
+                                                    <option value={10000}>10 Seconds (Stable)</option>
+                                                    <option value={30000}>30 Seconds (Eco)</option>
+                                                </select>
+                                                <ChevronRight size={16} className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-500 rotate-90 pointer-events-none" />
                                             </div>
                                         </div>
 
@@ -755,8 +767,10 @@ export default function SettingsTab() {
                 </div>
                 ) : (
                 <div className="relative z-10 w-full">
+                    {activeTab === 'dashboard' && <DashboardSettingsTab />}
                     {activeTab === 'backups' && <BackupTab />}
                     {activeTab === 'security' && <SecurityTab />}
+                    {activeTab === 'profile' && <ProfileTab />}
                     {activeTab === 'oidc-clients' && <OIDCClientsTab />}
                 </div>
                 )}

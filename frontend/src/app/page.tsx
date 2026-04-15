@@ -13,7 +13,6 @@ const MarketplaceTab = dynamic(() => import('@/components/tabs/MarketplaceTab'),
 const AiChatTab = dynamic(() => import('@/components/tabs/AiChatTab'), { ssr: false });
 const SettingsTab = dynamic(() => import('@/components/tabs/SettingsTab'), { ssr: false });
 const FileshareTab = dynamic(() => import('@/components/tabs/FileshareTab'), { ssr: false });
-const ProfileTab = dynamic(() => import('@/components/tabs/ProfileTab'), { ssr: false });
 const UsersTab = dynamic(() => import('@/components/tabs/UsersTab'), { ssr: false });
 const AuditTab = dynamic(() => import('@/components/tabs/AuditTab'), { ssr: false });
 import { useMetrics } from '@/hooks/useMetrics';
@@ -90,8 +89,6 @@ export default function Dashboard() {
         return <UsersTab />;
       case 'fileshare':
         return <FileshareTab />;
-      case 'profile':
-        return <ProfileTab />;
       case 'audit':
         return <AuditTab />;
       default:

@@ -7,6 +7,15 @@ export interface ProcessInfo {
     mem: number;
 }
 
+export interface GpuMetric {
+    index: number;
+    name: string;
+    usage_pct: number;
+    memory_total: number;
+    memory_used: number;
+    temp: number;
+}
+
 export interface DiskPartition {
     mount_point: string;
     device: string;
@@ -55,6 +64,7 @@ export interface SystemMetrics {
     uptime: string;
     load_average: [number, number, number];
     processes: ProcessInfo[];
+    gpus?: GpuMetric[];
 }
 
 export interface MetricsHistory {

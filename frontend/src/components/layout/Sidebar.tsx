@@ -30,7 +30,6 @@ export const NAVIGATION = [
 export const BOTTOM_NAVIGATION = [
     { id: 'users' as TabId, label: 'Users', icon: <Users size={18} /> },
     { id: 'audit' as TabId, label: 'Audit Trail', icon: <ClipboardList size={18} /> },
-    { id: 'profile' as TabId, label: 'Profile', icon: <UserCircle size={18} /> },
     { id: 'settings' as TabId, label: 'Settings', icon: <Settings size={18} /> },
     { id: 'logout' as TabId, label: 'Log Out', icon: <LogOut size={18} /> },
 ];

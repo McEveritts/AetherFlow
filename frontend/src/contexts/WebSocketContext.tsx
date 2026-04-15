@@ -69,6 +69,8 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
     const {
         connectionState,
         reconnectAttempt,
+        preferredMode,
+        pollInterval,
         setConnectionState,
         setReconnectAttempt,
         setLastMessageAt,
@@ -124,41 +126,44 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
 
     const startPolling = useCallback((silent = false) => {
         stopPolling();
+        
+        // Only set to FALLBACK if we are actually in a failed state.
+        // If preferredMode is 'poll', we might want a different label like 'CONNECTED (POLL)' or just stay in FALLBACK.
+        // For now, if user chose 'poll', we treat it as a valid connection state but use the 'FALLBACK' badge style.
         setConnectionState('FALLBACK');
-        if (!silent) {
+        
+        if (!silent && preferredMode !== 'poll') {
             addToast('Live connection unavailable — switched to polling mode', 'info');
+        } else if (!silent && preferredMode === 'poll') {
+            addToast('Nexus link active: Polling mode', 'info');
         }
 
         const poll = async () => {
             try {
                 const res = await apiFetch('/api/v1/auth/system/metrics');
                 if (!res.ok) return;
-                // Guard against empty body — backend may return 200 OK with
-                // no content when json.Marshal fails on +Inf/NaN values.
                 const text = await res.text();
-                if (!text || text.trim() === '') {
-                    console.warn('[WS] Metrics poll returned empty body — skipping');
-                    return;
-                }
+                if (!text || text.trim() === '') return;
+                
                 let metrics;
                 try {
                     metrics = JSON.parse(text);
                 } catch {
-                    console.warn('[WS] Metrics poll returned malformed JSON — skipping');
                     return;
                 }
+                
                 if (isMountedRef.current && metrics) {
                     setData({ system: metrics, services: null });
                     setLastMessageAt(Date.now());
                 }
             } catch {
-                // Silently swallow — poll will retry on next interval
+                // Silently swallow
             }
         };
 
         poll(); // immediate first poll
-        pollTimerRef.current = setInterval(poll, FALLBACK_POLL_INTERVAL_MS);
-    }, [stopPolling, setConnectionState, setLastMessageAt, addToast]);
+        pollTimerRef.current = setInterval(poll, pollInterval);
+    }, [stopPolling, setConnectionState, setLastMessageAt, addToast, pollInterval, preferredMode]);
 
     // ── Core Connect Logic ─────────────────────────────────────
     const connect = useCallback(async () => {
@@ -304,14 +309,19 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
     useEffect(() => {
         isMountedRef.current = true;
 
-        // Don't attempt WS connection if not authenticated or on login page
         if (!isAuthenticated || pathname === '/login') {
             return () => {
                 isMountedRef.current = false;
             };
         }
 
-        if (isWebSocketDisabled()) {
+        if (isWebSocketDisabled() || preferredMode === 'poll') {
+            // If we have an active WS connection, close it
+            if (wsRef.current) {
+                isManualCloseRef.current = true;
+                wsRef.current.close();
+                isManualCloseRef.current = false;
+            }
             startPolling(true);
             return () => {
                 isMountedRef.current = false;
@@ -331,7 +341,7 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
             wsRef.current?.close();
         };
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [isAuthenticated, pathname]);
+    }, [isAuthenticated, pathname, preferredMode, pollInterval]);
 
     return (
         <WebSocketContext.Provider value={{ data, connectionState, reconnectAttempt, manualReconnect }}>

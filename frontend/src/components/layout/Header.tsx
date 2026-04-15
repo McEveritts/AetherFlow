@@ -10,7 +10,7 @@ import Image from 'next/image';
 
 export default function Header() {
     const { activeTab, isMobileMenuOpen, setIsMobileMenuOpen } = useSystemStore();
-    const { connectionState, reconnectAttempt } = useConnectionStore();
+    const { connectionState, reconnectAttempt, preferredMode } = useConnectionStore();
     const { tasks } = useTaskStore();
     const { user, logout } = useAuth();
     const { toasts, toggleDrawer } = useToast();
@@ -67,9 +67,21 @@ export default function Header() {
             label: 'Connecting...', 
             containerClass: 'shadow-[0_0_15px_rgba(99,102,241,0.4)] border-indigo-500/50 bg-indigo-500/5' 
         },
-        FALLBACK: { icon: <Radio size={16} className="text-amber-400" />, label: 'Degraded (Polling)' },
+        FALLBACK: { 
+            icon: <Radio size={16} className="text-amber-400" />, 
+            label: preferredMode === 'poll' ? 'Nexus Poll' : 'Degraded (Polling)',
+            containerClass: preferredMode === 'poll' ? 'border-amber-500/20 bg-amber-500/5' : ''
+        },
         DISCONNECTED: { icon: <WifiOff size={16} className="text-slate-500" />, label: 'Stale (Offline)', containerClass: 'opacity-50 grayscale' },
     };
+
+    // Override CONNECTED logic if in Poll mode
+    if (connectionState === 'CONNECTED' || (connectionState === 'FALLBACK' && preferredMode === 'poll')) {
+        statusConfig.CONNECTED = { 
+            icon: preferredMode === 'websocket' ? <Wifi size={16} className="text-emerald-400" /> : <Radio size={16} className="text-amber-400 animate-pulse" />, 
+            label: preferredMode === 'websocket' ? 'Hyperspeed' : 'Nexus Poll' 
+        };
+    }
 
     const status = statusConfig[connectionState] || statusConfig.DISCONNECTED;
 
