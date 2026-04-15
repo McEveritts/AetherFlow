@@ -1,89 +1,55 @@
 #!/bin/bash
 #
-# [Quick Box :: Remove Sonarr-NzbDrone package]
+# [AetherFlow :: Remove Sonarr package]
 #
-# GITHUB REPOS
-# GitHub _ packages  :   https://github.com/AetherFlow/AetherFlow_packages
-# LOCAL REPOS
-# Local _ packages   :   /etc/AetherFlow/packages
 # Author             :   McEveritts
 # URL                :   https://AetherFlow.io
 #
 # AetherFlow Copyright (C) 2016
-# Licensed under GNU General Public License v3.0 GPL-3 (in short)
-#
-#   You may copy, distribute and modify the software as long as you track
-#   changes/dates in source files. Any modifications to our software
-#   including (via compiler) GPL-licensed code must also be made available
-#   under the GPL along with build & install instructions.
+# Licensed under GNU General Public License v3.0 GPL-3
 #
 source /opt/AetherFlow/packages/common.sh
-# LEGACY REMOVED: master.txt
-MASTER="$AETHERFLOW_USER"
-local_setup=/opt/AetherFlow/setup/
+username="${AETHERFLOW_USER:-$(whoami)}"
 
 function _removeSonarr() {
-  systemctl stop sonarr@{username}
-  systemctl disable sonarr@{username}
-  sudo apt-get remove -y nzbdrone >/dev/null 2>&1
-  sudo apt-get -y autoremove >/dev/null 2>&1
-  rm -f /etc/apt/sources.list.d/sonarr.list
-  rm -f /etc/apache2/sites-enabled/sonarr.conf
-if [[ -f /install/.jackett.lock ]]; then
-if ls mono-* >/dev/null 2>&1; then
-    echo "mono sources list was found"
-    ls mono-*
-fi
-for list in /etc/apt/sources.list.d/mono-*; do
-    if [[ -f $list ]]; then
-        echo "removing and replacing with stable mono"
-        rm -rf /etc/apt/sources.list.d/mono-*
-        sudo apt-key adv --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys 3FA7E0328081BFF6A14DA29AA6A19B38D3D831EF
-        echo "deb http://download.mono-project.com/repo/ubuntu stable-xenial main" | sudo tee /etc/apt/sources.list.d/mono-official-stable.list
-        break
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [sonarr] Starting Sonarr removal..."
+
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [sonarr] Stopping Sonarr service..."
+    systemctl stop sonarr@"${username}" || true
+    systemctl stop sonarr || true
+    systemctl disable sonarr@"${username}" 2>/dev/null || true
+    systemctl disable sonarr 2>/dev/null || true
+
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [sonarr] Removing Sonarr packages..."
+    apt-get remove -y nzbdrone >/dev/null 2>&1 || true
+    apt-get remove -y sonarr >/dev/null 2>&1 || true
+    apt-get -y autoremove >/dev/null 2>&1 || true
+
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [sonarr] Cleaning up configuration..."
+    rm -f /etc/apt/sources.list.d/sonarr.list || true
+    rm -f /etc/apache2/sites-enabled/sonarr.conf || true
+    rm -rf /opt/Sonarr || true
+    rm -rf /var/lib/sonarr || true
+
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [sonarr] Removing init scripts..."
+    if [[ -f /etc/init.d/sonarr ]]; then
+        update-rc.d -f sonarr remove >/dev/null 2>&1 || true
+        rm -f /etc/default/sonarr || true
+        rm -f /etc/init.d/sonarr || true
     fi
-done
-fi
-if [[ -f /install/.lidarr.lock ]]; then
-if ls mono-* >/dev/null 2>&1; then
-    echo "mono sources list was found"
-    ls mono-*
-fi
-for list in /etc/apt/sources.list.d/mono-*; do
-    if [[ -f $list ]]; then
-        echo "removing and replacing with stable mono"
-        rm -rf /etc/apt/sources.list.d/mono-*
-        sudo apt-key adv --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys 3FA7E0328081BFF6A14DA29AA6A19B38D3D831EF
-        echo "deb http://download.mono-project.com/repo/ubuntu stable-xenial main" | sudo tee /etc/apt/sources.list.d/mono-official-stable.list
-        break
-    fi
-done
-fi
-if [[ -f /install/.radarr.lock ]]; then
-if ls mono-* >/dev/null 2>&1; then
-    echo "mono sources list was found"
-    ls mono-*
-fi
-for list in /etc/apt/sources.list.d/mono-*; do
-    if [[ -f $list ]]; then
-        echo "removing and replacing with stable mono"
-        rm -rf /etc/apt/sources.list.d/mono-*
-        sudo apt-key adv --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys 3FA7E0328081BFF6A14DA29AA6A19B38D3D831EF
-        echo "deb http://download.mono-project.com/repo/ubuntu stable-xenial main" | sudo tee /etc/apt/sources.list.d/mono-official-stable.list
-        break
-    fi
-done
-fi
-  apt-get -y autoremove && apt-get -y autoclean
-  if [[ -f /etc/init.d/sonarr ]]; then
-    sudo update-rc.d -f sonarr remove >/dev/null 2>&1
-    sudo rm /etc/default/sonarr
-    sudo rm /etc/init.d/sonarr
-  fi
-    sudo rm /install/.sonarr.lock
-    apt-get -y autoremove && apt-get -y autoclean
-    service apache2 reload
+
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [sonarr] Removing systemd unit..."
+    rm -f /etc/systemd/system/sonarr.service || true
+    rm -f /etc/systemd/system/sonarr@.service || true
+    systemctl daemon-reload || true
+
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [sonarr] Reloading web server..."
+    service apache2 reload 2>/dev/null || true
+
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [sonarr] Removing lockfile..."
+    rm -f /install/.sonarr.lock || true
+
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [sonarr] Sonarr removal complete!"
 }
 
 _removeSonarr
-

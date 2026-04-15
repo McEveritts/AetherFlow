@@ -1,173 +1,225 @@
-import { useState, useMemo } from 'react';
-import { Store, Search, Filter, Box, Download, AlertCircle, ChevronDown, RefreshCw } from 'lucide-react';
-import { useMarketplace, useGithubDownloads, App } from '@/hooks/useMarketplace';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
+import { useMarketplace, useGithubDownloads, App, PendingAction } from '@/hooks/useMarketplace';
+import { Search, Package, Download, RefreshCw, XCircle, CheckCircle2, AlertCircle, Info, Filter } from 'lucide-react';
 import { useToast } from '@/contexts/ToastContext';
-import { apiFetch } from '@/lib/fetcher';
 import { ProgressRing } from '@/components/ui/ProgressRing';
-
+import { apiFetch } from '@/lib/fetcher';
 
 const AppIcon = ({ app }: { app: App }) => {
+    const [iconError, setIconError] = useState(false);
+    const iconPath = `/img/${app.id.toLowerCase()}.png`;
+
+    if (iconError) {
+        return (
+            <div className="flex flex-col items-center justify-center h-full w-full bg-slate-900/20 text-slate-500">
+                <Package size={24} />
+                <span className="text-[8px] mt-1 font-bold uppercase opacity-50">{app.id.substring(0, 3)}</span>
+            </div>
+        );
+    }
+
     return (
-        <div className="relative w-12 h-12 flex-shrink-0">
-          <img 
-            src={`/img/${app.id.toLowerCase()}.png`} 
-            alt={app.name}
-            className="w-full h-full object-contain rounded-xl"
-            onError={(e) => {
-              e.currentTarget.style.display = 'none';
-              e.currentTarget.parentElement?.querySelector('.fallback-icon')?.classList.remove('hidden');
-            }}
-          />
-          <Box className="fallback-icon hidden w-full h-full text-slate-500 opacity-50" />
+        <div className="relative w-full h-full flex items-center justify-center group-hover:scale-110 transition-transform duration-300">
+             <img
+                src={iconPath}
+                onError={() => setIconError(true)}
+                className="w-full h-full object-contain p-2"
+                alt={app.name}
+                loading="lazy"
+            />
         </div>
     );
 };
 
 export default function MarketplaceTab() {
+    const { apps, isLoading, isError, mutate, pendingJobs, markPending, clearPending } = useMarketplace();
     const totalGithubDownloads = useGithubDownloads();
-    const { apps, isLoading, isError, error, mutate } = useMarketplace();
     const { addToast } = useToast();
     const [searchQuery, setSearchQuery] = useState('');
-    const [activeCategory, setActiveCategory] = useState('All');
-    const [isFilterOpen, setIsFilterOpen] = useState(false);
+    const [categoryFilter, setCategoryFilter] = useState('All');
     const [operatingApp, setOperatingApp] = useState<string | null>(null);
 
+    // Job Completion Monitoring
+    const prevAppsRef = useRef<App[] | undefined>(undefined);
+    const notifiedRef = useRef<Set<string>>(new Set());
 
+    useEffect(() => {
+        if (!apps) return;
+
+        apps.forEach(app => {
+            const prevApp = prevAppsRef.current?.find(a => a.id === app.id);
+
+            if (prevApp) {
+                if (prevApp.status === 'installing' && app.status === 'installed') {
+                    if (!notifiedRef.current.has(app.id)) {
+                        notifiedRef.current.add(app.id);
+                        addToast(`${app.name} has been successfully installed.`, 'success');
+                        setTimeout(() => notifiedRef.current.delete(app.id), 5000);
+                    }
+                }
+                if (prevApp.status === 'uninstalling' && app.status !== 'uninstalling' && app.status !== 'installed') {
+                    if (!notifiedRef.current.has(app.id)) {
+                        notifiedRef.current.add(app.id);
+                        addToast(`${app.name} has been successfully removed.`, 'success');
+                        setTimeout(() => notifiedRef.current.delete(app.id), 5000);
+                    }
+                }
+                if ((prevApp.status === 'installing' || prevApp.status === 'uninstalling') && app.status === 'failed') {
+                    if (!notifiedRef.current.has(app.id)) {
+                        notifiedRef.current.add(app.id);
+                        addToast(`Operation failed for ${app.name}. Check system logs.`, 'error');
+                        setTimeout(() => notifiedRef.current.delete(app.id), 5000);
+                    }
+                }
+            }
+
+            // Fast-finish: pending action completed before first poll saw the transient state
+            if (pendingJobs.has(app.id) && !notifiedRef.current.has(app.id)) {
+                const action = pendingJobs.get(app.id);
+                if (action === 'installing' && app.status === 'installed') {
+                    notifiedRef.current.add(app.id);
+                    addToast(`${app.name} has been successfully installed.`, 'success');
+                    setTimeout(() => notifiedRef.current.delete(app.id), 5000);
+                }
+                if (action === 'uninstalling' && app.status === 'uninstalled') {
+                    notifiedRef.current.add(app.id);
+                    addToast(`${app.name} has been successfully removed.`, 'success');
+                    setTimeout(() => notifiedRef.current.delete(app.id), 5000);
+                }
+            }
+        });
+
+        prevAppsRef.current = apps;
+    }, [apps, addToast, pendingJobs]);
+
+    const categories = useMemo(() => {
+        if (!apps) return ['All'];
+        const cats = Array.from(new Set(apps.map((app) => app.category)));
+        return ['All', ...cats];
+    }, [apps]);
+
+    const filteredApps = useMemo(() => {
+        if (!apps) return [];
+        return apps.filter((app) => {
+            const matchesSearch = app.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+                                app.desc.toLowerCase().includes(searchQuery.toLowerCase());
+            const matchesCategory = categoryFilter === 'All' || app.category === categoryFilter;
+            return matchesSearch && matchesCategory;
+        });
+    }, [apps, searchQuery, categoryFilter]);
+
+    const isAppBusy = (app: App): boolean => {
+        return app.status === 'installing' || app.status === 'uninstalling' || operatingApp === app.id || pendingJobs.has(app.id);
+    };
+
+    /** Resolve the effective display status for the progress overlay.
+     *  If the server hasn't caught up yet, use the locally-known pending action. */
+    const getEffectiveStatus = (app: App): string => {
+        if (app.status === 'installing' || app.status === 'uninstalling') return app.status;
+        if (pendingJobs.has(app.id)) return pendingJobs.get(app.id) as string;
+        if (operatingApp === app.id) return 'installing'; // fallback
+        return app.status;
+    };
 
     const handleInstall = async (app: App) => {
         setOperatingApp(app.id);
+        markPending(app.id, 'installing');
         try {
             const res = await apiFetch(`/api/v1/admin/packages/${app.id}/install`, { method: 'POST' });
             if (!res.ok) {
                 const data = await res.json().catch(() => ({}));
-                throw new Error(data.message || data.error || 'Installation request failed');
+                clearPending(app.id);
+                throw new Error(data.message || 'Installation request failed');
             }
-            addToast(`Provisioning sequence initiated for ${app.id}`, 'info');
+            addToast(`Installation started for ${app.name}`, 'info');
+            setOperatingApp(null);
             mutate();
         } catch (error: unknown) {
             addToast(error instanceof Error ? error.message : 'Network error.', 'error');
-        } finally {
+            clearPending(app.id);
             setOperatingApp(null);
         }
     };
 
     const handleUninstall = async (app: App) => {
         setOperatingApp(app.id);
+        markPending(app.id, 'uninstalling');
         try {
             const res = await apiFetch(`/api/v1/admin/packages/${app.id}/uninstall`, { method: 'POST' });
             if (!res.ok) {
                 const data = await res.json().catch(() => ({}));
-                throw new Error(data.message || data.error || 'Uninstallation request failed');
+                clearPending(app.id);
+                throw new Error(data.message || 'Uninstallation request failed');
             }
-            addToast(`Tear-down sequence initiated for ${app.id}`, 'info');
+            addToast(`Uninstalling ${app.name}...`, 'info');
+            setOperatingApp(null);
             mutate();
         } catch (error: unknown) {
             addToast(error instanceof Error ? error.message : 'Network error.', 'error');
-        } finally {
+            clearPending(app.id);
             setOperatingApp(null);
         }
     };
 
-    const categories = useMemo(() => {
-        if (!apps) return ['All'];
-
-        const catArray = ['All', ...Array.from(new Set(apps.map(a => a.category)))].sort();
-        return catArray;
-    }, [apps]);
-
-    const filteredApps = useMemo(() => {
-        if (!apps) return [];
-        return apps.filter(app => {
-            const matchesSearch = app.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-                app.desc.toLowerCase().includes(searchQuery.toLowerCase());
-            const matchesCategory = activeCategory === 'All' || app.category === activeCategory;
-            return matchesSearch && matchesCategory;
-        });
-    }, [apps, searchQuery, activeCategory]);
-
-    const isAppBusy = (app: App): boolean => {
-        return app.status === 'installing' || app.status === 'uninstalling' || operatingApp === app.id;
-    };
-
-    const isCatalogMissing = isError && typeof error === 'object' && error !== null && 'status' in error
-        && (error as { status?: number }).status === 500;
-
     return (
-        <div className="space-y-6 animate-fade-in relative z-10 w-full min-h-screen">
-            <div className="absolute inset-0 bg-blue-500/5 rounded-full blur-[120px] pointer-events-none -translate-y-1/2 -translate-x-1/2"></div>
-
-            <div className="flex flex-col md:flex-row justify-between items-start md:items-end gap-6 mb-8 relative z-10">
-                <div>
-                    <h2 className="text-2xl font-bold text-slate-100 flex items-center gap-3">
-                        <Store size={28} className="text-indigo-400" />
+        <div className="space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-700">
+            <div className="flex flex-col lg:flex-row gap-6 justify-between items-start lg:items-center">
+                <div className="space-y-1">
+                    <h2 className="text-3xl font-black text-white tracking-tight flex items-center gap-3">
                         AetherMarketplace
+                        <span className="text-xs font-medium px-2 py-0.5 bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 rounded-full uppercase tracking-widest">Beta</span>
                     </h2>
-                    <p className="text-slate-400 text-sm mt-2">Discover and deploy native applications with a single click.</p>
+                    <p className="text-slate-400 text-sm font-medium">Extend your system with high-performance native modules.</p>
                 </div>
-                <div className="flex gap-3 w-full md:w-auto">
-                    <div className="relative flex-1 md:w-64">
-                        <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
+
+                <div className="flex flex-col sm:flex-row gap-3 w-full lg:w-auto">
+                    <div className="relative group min-w-[300px]">
+                        <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-500 group-focus-within:text-indigo-400 transition-colors" size={18} />
                         <input
                             type="text"
-                            placeholder="Search applications..."
+                            placeholder="Find apps and services..."
                             value={searchQuery}
                             onChange={(e) => setSearchQuery(e.target.value)}
-                            className="w-full bg-slate-900/80 border border-white/10 rounded-lg py-2 pl-9 pr-4 text-sm text-slate-200 focus:outline-none focus:border-indigo-500/50 transition-colors"
+                            className="w-full bg-slate-900/50 border border-white/10 rounded-xl py-3 pl-12 pr-4 text-white text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/40 focus:border-indigo-500/50 transition-all backdrop-blur-md"
                         />
-                    </div>
-                    <div className="relative">
-                        <button
-                            onClick={() => setIsFilterOpen(!isFilterOpen)}
-                            className="px-3 py-2 bg-slate-900/80 border border-white/10 rounded-lg text-slate-300 hover:text-white transition-colors flex items-center justify-center gap-2"
-                        >
-                            <Filter size={16} />
-                            <span className="text-sm">{activeCategory}</span>
-                            <ChevronDown size={14} className={`transition-transform ${isFilterOpen ? 'rotate-180' : ''}`} />
-                        </button>
-
-                        {isFilterOpen && (
-                            <div className="absolute right-0 mt-2 w-48 bg-slate-900 border border-white/10 rounded-xl shadow-xl overflow-hidden z-50">
-                                <div className="max-h-64 overflow-y-auto">
-                                    {categories.map(cat => (
-                                        <button
-                                            key={cat}
-                                            onClick={() => {
-                                                setActiveCategory(cat);
-                                                setIsFilterOpen(false);
-                                            }}
-                                            className={`w-full text-left px-4 py-2 text-sm hover:bg-white/5 transition-colors ${activeCategory === cat ? 'text-indigo-400 font-medium bg-indigo-500/10' : 'text-slate-300'}`}
-                                        >
-                                            {cat}
-                                        </button>
-                                    ))}
-                                </div>
-                            </div>
-                        )}
                     </div>
                 </div>
             </div>
 
+            <div className="flex items-center gap-2 overflow-x-auto pb-2 scrollbar-none">
+                <Filter size={16} className="text-slate-500 shrink-0" />
+                {categories.map((cat) => (
+                    <button
+                        key={cat}
+                        onClick={() => setCategoryFilter(cat)}
+                        className={`px-4 py-1.5 rounded-full text-xs font-bold transition-all whitespace-nowrap shadow-sm ${categoryFilter === cat ? 'bg-indigo-500 text-white border-indigo-400 shadow-indigo-500/20' : 'bg-slate-900/50 text-slate-400 border border-white/5 hover:border-white/10 hover:text-slate-300'}`}
+                    >
+                        {cat}
+                    </button>
+                ))}
+            </div>
+
             {isLoading && (
-                <div className="flex justify-center items-center h-64">
-                    <div className="w-8 h-8 border-4 border-indigo-500/20 border-t-indigo-500 rounded-full animate-spin"></div>
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                    {[1, 2, 3, 4, 5, 6].map((i) => (
+                        <div key={i} className="bg-slate-950/40 border border-white/5 h-64 rounded-2xl animate-pulse" />
+                    ))}
                 </div>
             )}
 
-            {isCatalogMissing && (
-                <div className="bg-amber-500/10 border border-amber-500/20 p-6 rounded-2xl flex flex-col items-center gap-3 text-center">
-                    <AlertCircle size={32} className="text-amber-4/40" />
-                    <h3 className="text-lg font-bold text-slate-200">Marketplace Configuration Missing</h3>
-                    <p className="text-sm text-slate-400">The package catalog could not be loaded from `packages.json`. Restore the marketplace configuration and retry.</p>
-                    <button onClick={() => mutate()} className="mt-2 px-4 py-2 bg-white/5 hover:bg-white/10 text-white text-sm rounded-lg transition-colors">Retry</button>
-                </div>
-            )}
-
-            {isError && !isCatalogMissing && (
-                <div className="bg-red-500/10 border border-red-500/20 p-6 rounded-2xl flex flex-col items-center gap-3 text-center">
-                    <AlertCircle size={32} className="text-red-400" />
-                    <h3 className="text-lg font-bold text-slate-200">Failed to load catalog</h3>
-                    <p className="text-sm text-slate-400">Could not sync with the AetherMarketplace registry. Please try again later.</p>
-                    <button onClick={() => mutate()} className="mt-2 px-4 py-2 bg-white/5 hover:bg-white/10 text-white text-sm rounded-lg transition-colors">Retry</button>
+            {isError && (
+                <div className="flex flex-col items-center justify-center py-20 bg-red-500/5 border border-red-500/10 rounded-2xl space-y-4">
+                    <AlertCircle className="text-red-400" size={48} />
+                    <div className="text-center">
+                        <h3 className="text-xl font-bold text-white">Marketplace Unreachable</h3>
+                        <p className="text-red-400/70 text-sm mt-1">Check your API connection or server status.</p>
+                    </div>
+                    <button
+                        onClick={() => mutate()}
+                        className="px-6 py-2 bg-red-500/15 text-red-400 hover:bg-red-500/25 border border-red-500/20 rounded-lg transition-all text-sm font-bold"
+                    >
+                        Retry Connection
+                    </button>
                 </div>
             )}
 
@@ -179,106 +231,84 @@ export default function MarketplaceTab() {
 
             {!isLoading && !isError && apps && filteredApps.length > 0 && (
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 relative z-10">
-                    {filteredApps.map((app) => (
-                        <div key={app.id} className={`relative bg-slate-950/80 border rounded-2xl p-6 backdrop-blur-xl transition-all group flex flex-col justify-between h-full ${isAppBusy(app) ? 'border-indigo-500/30' : 'border-white/10 hover:border-indigo-500/50'}`}>
-                            {isAppBusy(app) && (
-                                <div className="absolute inset-0 bg-slate-950/80 backdrop-blur-sm rounded-2xl z-20 flex items-center justify-center">
+                    {filteredApps.map((app) => {
+                        const effectiveStatus = getEffectiveStatus(app);
+                        const busy = isAppBusy(app);
+
+                        return (
+                        <div key={app.id} className={`relative bg-slate-950/40 border rounded-3xl p-6 backdrop-blur-xl transition-all group flex flex-col justify-between h-full hover:shadow-2xl hover:shadow-indigo-500/10 ${busy ? 'border-indigo-500/30' : 'border-white/5 hover:border-white/10'}`}>
+                            {busy && (
+                                <div className="absolute inset-0 bg-slate-950/90 backdrop-blur-md rounded-3xl z-20 flex items-center justify-center p-8 text-center">
                                     <ProgressRing
                                         progress={app.progress || 0}
-                                        status={app.status}
+                                        status={effectiveStatus}
                                         logLine={app.log_line}
                                         startedAt={app.started_at}
                                     />
                                 </div>
                             )}
 
-                            <div className="space-y-4">
+                            <div className="space-y-6">
                                 <div className="flex items-start justify-between">
-                                    <div className="h-14 w-14 bg-white/5 rounded-xl border border-white/10 flex items-center justify-center shadow-inner overflow-hidden">
+                                    <div className="h-20 w-20 bg-gradient-to-br from-white/10 to-transparent rounded-2xl border border-white/10 flex items-center justify-center shadow-2xl overflow-hidden relative group-hover:border-indigo-500/30 transition-colors">
                                         <AppIcon app={app} />
                                     </div>
-                                    <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 bg-white/5 px-2 py-1 rounded-md border border-white/5">
+                                    <span className="text-[10px] font-black uppercase tracking-widest text-indigo-400/80 bg-indigo-500/5 px-3 py-1 rounded-full border border-indigo-500/10 shadow-sm">
                                         {app.category}
                                     </span>
                                 </div>
-                                <h3 className="text-lg font-bold text-slate-200 group-hover:text-white transition-colors">
-                                    {app.name}
-                                </h3>
-                                <p className="text-sm text-slateable-400 mt-2 line-clamp-2 leading-relaxed">{app.desc}</p>
+
+                                <div className="space-y-2">
+                                    <h3 className="text-xl font-black text-slate-100 group-hover:text-white transition-colors tracking-tight">
+                                        {app.name}
+                                    </h3>
+                                    <p className="text-sm text-slate-400 line-clamp-2 leading-relaxed font-medium">{app.desc}</p>
+                                </div>
+
                                 <div className="flex flex-wrap gap-2">
-                                    {app.status === 'installed' && (
-                                        <span className="text-[10px] bg-emerald-500/20 text-emerald-400 px-2 py-0.5 rounded-full border border-emerald-500/30 uppercase tracking-widest">
-                                            Installed
+                                    {app.status === 'installed' && !pendingJobs.has(app.id) && (
+                                        <span className="inline-flex items-center gap-1.5 text-[10px] bg-emerald-500/10 text-emerald-400 px-3 py-1 rounded-full border border-emerald-500/20 font-black uppercase tracking-tighter">
+                                            <div className="w-1 h-1 rounded-full bg-emerald-400 animate-pulse" />
+                                            Active
                                         </span>
                                     )}
                                     {app.update_available && (
-                                        app.update_url ? (
-                                            <a
-                                                href={app.update_url}
-                                                target="_blank"
-                                                rel="noreferrer"
-                                                className="inline-flex items-center gap-1 text-[10px] bg-amber-500/15 text-amber-300 px-2 py-0.5 rounded-full border border-amber-400/20 uppercase tracking-widest"
-                                            >
-                                                <RefreshCw size={10} />
-                                                Update {app.latest_version || 'available'}
-                                            </a>
-                                        ) : (
-                                            <span className="inline-flex items-center gap-1 text-[10px] bg-amber-500/15 text-amber-300 px-2 py-0.5 rounded-full border border-amber-400/20 uppercase tracking-widest">
-                                                <RefreshCw size={10} />
-                                                Update {app.latest_version || 'available'}
-                                            </span>
-                                        )
+                                        <span className="inline-flex items-center gap-1.5 text-[10px] bg-amber-500/10 text-amber-400 px-3 py-1 rounded-full border border-amber-500/20 font-black uppercase tracking-tighter">
+                                            <RefreshCw size={10} className="animate-spin-slow" />
+                                            v{app.latest_version || 'Update'}
+                                        </span>
                                     )}
                                 </div>
-                                {(app.installed_version || app.latest_version) && (
-                                    <p className="text-[11px] text-slate-500 mt-3">
-                                        {app.installed_version ? `Installed ${app.installed_version}` : 'Installed version unavailable'}
-                                        {app.latest_version ? ` • Latest ${app.latest_version}` : ''}
-                                    </p>
-                                )}
-                                {app.status === 'installing' && (
-                                  <div className="mt-4 w-full">
-                                    <div className="flex justify-between text-xs text-slate-400 mb-1">
-                                      <span className="animate-pulse text-blue-400">Installing natively...</span>
-                                      <span>{Math.round(app.progress || 0)}%</span>
-                                    </div>
-                                    <div className="w-full bg-slate-800 rounded-full h-1.5 overflow-hidden">
-                                      <div 
-                                        className="bg-blue-500 h-1.5 rounded-full transition-all duration-500 ease-out"
-                                        style={{ width: `${app.progress || 0}%` }}
-                                      />
-                                    </div>
-                                  </div>
-                                )}
                             </div>
 
                             {(() => {
                                 const deterministicMultiplier = (app.name.charCodeAt(0) + app.name.length) % 100 / 100;
-                                const estimatedInstalls = totalGithubDownloads 
-                                    ? Math.floor(totalGithubDownloads * (0.1 + deterministicMultiplier)) 
+                                const estimatedInstalls = totalGithubDownloads
+                                    ? Math.floor(totalGithubDownloads * (0.05 + deterministicMultiplier * 0.4))
                                     : 0;
-                                const displayInstalls = estimatedInstalls > 1000 
-                                    ? (estimatedInstalls / 1000).toFixed(1) + 'k' 
+                                const displayInstalls = estimatedInstalls > 1000
+                                    ? (estimatedInstalls / 1000).toFixed(1) + 'k'
                                     : estimatedInstalls.toString();
 
                                 return (
-                                    <div className="mt-8 pt-4 border-t border-white/5 flex items-center justify-between">
-                                        <div className="flex items-center gap-1.5 text-slate-500 text-xs font-medium">
-                                            <Download size={14} />
-                                            {displayInstalls} Installs
+                                    <div className="mt-10 pt-6 border-t border-white/5 flex items-center justify-between">
+                                        <div className="flex items-center gap-2 text-slate-500 text-xs font-bold uppercase tracking-widest opacity-60">
+                                            <Download size={14} className="text-indigo-400/60" />
+                                            {displayInstalls} <span className="text-[10px] font-medium opacity-50 lowercase tracking-normal">units</span>
                                         </div>
-                                        <button 
-                                            onClick={() => isAppBusy(app) ? null : (app.status === 'installed' ? handleUninstall(app) : handleInstall(app))}
-                                            disabled={isAppBusy(app)}
-                                            className={`px-4 py-2 rounded-lg text-xs font-bold transition-all ${isAppBusy(app) ? 'bg-slate-800 text-slate-500 cursor-not-allowed' : 'bg-indigo-500 text-white hover:bg-indigo-600'}`}
+                                        <button
+                                            onClick={() => busy ? null : (app.status === 'installed' ? handleUninstall(app) : handleInstall(app))}
+                                            disabled={busy}
+                                            className={`px-6 py-2.5 rounded-xl text-xs font-black transition-all transform active:scale-95 ${busy ? 'bg-slate-900 text-slate-600 cursor-not-allowed shadow-none' : (app.status === 'installed' ? 'bg-white/5 text-slate-300 hover:bg-red-500/10 hover:text-red-400 hover:border-red-500/20 border border-transparent shadow-lg' : 'bg-indigo-600 text-white hover:bg-indigo-500 hover:shadow-indigo-500/30 border border-indigo-400/30 shadow-xl shadow-indigo-900/10')}`}
                                         >
-                                            {app.status === 'installed' ? 'Uninstall' : (app.status === 'installing' ? 'Installing...' : 'Install')}
+                                            {app.status === 'installed' ? 'Teardown' : (app.status === 'installing' ? 'Deploying...' : 'Provision')}
                                         </button>
                                     </div>
                                 );
                             })()}
                         </div>
-                    ))}
+                        );
+                    })}
                 </div>
             )}
         </div>
