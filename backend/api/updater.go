@@ -23,6 +23,9 @@ type GitHubRelease struct {
 	TagName string `json:"tag_name"`
 	Body    string `json:"body"`
 	HtmlUrl string `json:"html_url"`
+	Author  struct {
+		Login string `json:"login"`
+	} `json:"author"`
 }
 
 // GitHubTag represents a tag from the GitHub Tags API (fallback)
@@ -72,95 +75,42 @@ func getLocalVersion() string {
 	return strings.TrimSpace(string(versionBytes))
 }
 
-// fetchLatestStableRelease attempts to get the latest version via the Releases API,
-// then falls back to the Tags API if no GitHub Release objects exist.
+// fetchLatestStableRelease gets the latest version via the Releases API,
+// ensuring that the release was authored by "mceveritt" and is not a pre-release.
 func fetchLatestStableRelease() (tagName, body, htmlUrl string, err error) {
-	// Tier 1: Try the GitHub Releases API (/releases/latest)
-	resp, reqErr := httpClient.Get("https://api.github.com/repos/" + githubRepo + "/releases/latest")
+	resp, reqErr := httpClient.Get("https://api.github.com/repos/" + githubRepo + "/releases")
 	if reqErr != nil {
 		slog.Warn("[updater] releases API request failed", "error", reqErr)
-		// Fall through to Tier 2
-	} else {
-		defer resp.Body.Close()
-		if resp.StatusCode == 200 {
-			var release GitHubRelease
-			bodyBytes, _ := io.ReadAll(resp.Body)
-			if jsonErr := json.Unmarshal(bodyBytes, &release); jsonErr == nil && release.TagName != "" {
-				slog.Info("[updater] resolved latest version via Releases API", "version", release.TagName)
-				return release.TagName, release.Body, release.HtmlUrl, nil
-			}
-		} else {
-			slog.Info("[updater] releases API returned non-200, falling back to Tags API",
-				"status", resp.StatusCode)
-			resp.Body.Close()
-		}
+		return "", "", "", reqErr
 	}
+	defer resp.Body.Close()
 
-	// Tier 2: Fall back to the Tags API (/tags)
-	// This works even when no GitHub Release objects exist (only git tags pushed).
-	tagsResp, tagsErr := httpClient.Get("https://api.github.com/repos/" + githubRepo + "/tags?per_page=10")
-	if tagsErr != nil {
-		slog.Error("[updater] tags API request failed", "error", tagsErr)
-		return "", "", "", tagsErr
-	}
-	defer tagsResp.Body.Close()
-
-	if tagsResp.StatusCode != 200 {
-		slog.Error("[updater] tags API returned non-200", "status", tagsResp.StatusCode)
+	if resp.StatusCode != 200 {
+		slog.Info("[updater] releases API returned non-200", "status", resp.StatusCode)
 		return "", "", "", nil
 	}
 
-	var tags []GitHubTag
-	tagsBody, _ := io.ReadAll(tagsResp.Body)
-	if jsonErr := json.Unmarshal(tagsBody, &tags); jsonErr != nil {
-		slog.Error("[updater] failed to parse tags response", "error", jsonErr)
+	var releases []GitHubRelease
+	bodyBytes, _ := io.ReadAll(resp.Body)
+	if jsonErr := json.Unmarshal(bodyBytes, &releases); jsonErr != nil {
+		slog.Error("[updater] failed to parse releases response", "error", jsonErr)
 		return "", "", "", jsonErr
 	}
 
-	// Find the first tag that looks like a semver release (starts with 'v')
-	// and is NOT a pre-release (no '-' suffix like v3.0.1-PreAlpha.01)
-	for _, tag := range tags {
-		if strings.HasPrefix(tag.Name, "v") && !strings.Contains(tag.Name, "-") {
-			url := "https://github.com/" + githubRepo + "/releases/tag/" + tag.Name
-			slog.Info("[updater] resolved latest version via Tags API fallback", "version", tag.Name)
-			return tag.Name, "", url, nil
+	// Find the first release matching criteria
+	for _, release := range releases {
+		if strings.EqualFold(release.Author.Login, "mceveritt") && !strings.Contains(release.TagName, "-") {
+			slog.Info("[updater] resolved latest version via Releases API", "version", release.TagName)
+			return release.TagName, release.Body, release.HtmlUrl, nil
 		}
 	}
 
-	// Tier 2b: If all tags are pre-releases, just use the first tag
-	if len(tags) > 0 {
-		url := "https://github.com/" + githubRepo + "/releases/tag/" + tags[0].Name
-		slog.Info("[updater] resolved latest version via first available tag", "version", tags[0].Name)
-		return tags[0].Name, "", url, nil
-	}
-
-	slog.Warn("[updater] no tags found in repository")
+	slog.Warn("[updater] no stable releases authored by mceveritt found")
 	return "", "", "", nil
 }
 
-// fetchLatestBetaRelease returns the latest release (including pre-releases) via
-// the Releases API, with fallback to Tags API.
+// fetchLatestBetaRelease returns the latest tag via the Tags API.
 func fetchLatestBetaRelease() (tagName, body, htmlUrl string, err error) {
-	resp, reqErr := httpClient.Get("https://api.github.com/repos/" + githubRepo + "/releases?per_page=5")
-	if reqErr != nil {
-		slog.Warn("[updater] releases API request failed for beta", "error", reqErr)
-	} else {
-		defer resp.Body.Close()
-		if resp.StatusCode == 200 {
-			var releases []GitHubRelease
-			bodyBytes, _ := io.ReadAll(resp.Body)
-			if jsonErr := json.Unmarshal(bodyBytes, &releases); jsonErr == nil && len(releases) > 0 {
-				slog.Info("[updater] resolved beta version via Releases API", "version", releases[0].TagName)
-				return releases[0].TagName, releases[0].Body, releases[0].HtmlUrl, nil
-			}
-		} else {
-			slog.Info("[updater] beta releases API returned non-200, falling back to Tags API",
-				"status", resp.StatusCode)
-			resp.Body.Close()
-		}
-	}
-
-	// Fallback: use the first tag (including pre-releases)
 	tagsResp, tagsErr := httpClient.Get("https://api.github.com/repos/" + githubRepo + "/tags?per_page=5")
 	if tagsErr != nil {
 		return "", "", "", tagsErr
@@ -172,7 +122,7 @@ func fetchLatestBetaRelease() (tagName, body, htmlUrl string, err error) {
 		tagsBody, _ := io.ReadAll(tagsResp.Body)
 		if jsonErr := json.Unmarshal(tagsBody, &tags); jsonErr == nil && len(tags) > 0 {
 			url := "https://github.com/" + githubRepo + "/releases/tag/" + tags[0].Name
-			slog.Info("[updater] resolved beta version via Tags API fallback", "version", tags[0].Name)
+			slog.Info("[updater] resolved beta version via Tags API", "version", tags[0].Name)
 			return tags[0].Name, "", url, nil
 		}
 	}

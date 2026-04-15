@@ -30,13 +30,26 @@ cd ${TARGET_DIR}
 
 echo "[2/7] Binding target branch/tag for channel: ${CHANNEL}..."
 if [ "$CHANNEL" == "stable" ]; then
-    # Fetch latest stable release tag safely
-    LATEST_TAG=$(curl -s https://api.github.com/repos/McEveritts/AetherFlow/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+    # Fetch latest stable release tag safely, restricted to mceveritt author only and excluding prereleases
+    LATEST_TAG=$(python3 -c '
+import urllib.request, json
+try:
+    req = urllib.request.Request("https://api.github.com/repos/McEveritts/AetherFlow/releases")
+    req.add_header("User-Agent", "AetherFlow-Deployment")
+    data = json.loads(urllib.request.urlopen(req).read().decode("utf-8"))
+    for r in data:
+        if r.get("author", {}).get("login", "").lower() == "mceveritt" and not r.get("prerelease"):
+            print(r.get("tag_name", ""))
+            break
+except Exception as e:
+    pass
+' | tr -d '\r\n')
+    
     if [ -n "$LATEST_TAG" ]; then
         git checkout ${LATEST_TAG}
         echo ${LATEST_TAG} > ${TARGET_DIR}/.version
     else
-        echo "ERROR: Could not resolve latest stable tag."
+        echo "ERROR: Could not resolve latest stable tag authored by mceveritt."
         rm -rf ${TARGET_DIR}
         exit 1
     fi
