@@ -29,15 +29,12 @@ case "$ARCH" in
     *) PROWLARR_ARCH="x64" ;;
 esac
 
-PROWLARR_URL=$(curl -sL "https://prowlarr.servarr.com/v1/update/master/updatefile?os=linux&runtime=netcore&arch=${PROWLARR_ARCH}" | grep -oP 'https://[^"]+\.tar\.gz' | head -1)
-if [[ -z "$PROWLARR_URL" ]]; then
-    PROWLARR_URL="https://github.com/Prowlarr/Prowlarr/releases/latest/download/Prowlarr.master.0.0.0.0.linux-core-${PROWLARR_ARCH}.tar.gz"
-fi
+PROWLARR_URL="https://prowlarr.servarr.com/v1/update/master/updatefile?os=linux&runtime=netcore&arch=${PROWLARR_ARCH}"
 
 mkdir -p /tmp/AetherFlow
 cd /tmp/AetherFlow
-curl -sL "$PROWLARR_URL" -o prowlarr.tar.gz >>"$LOGFILE" 2>&1 || \
-wget -q "https://prowlarr.servarr.com/v1/update/master/updatefile?os=linux&runtime=netcore&arch=${PROWLARR_ARCH}" -O prowlarr.tar.gz >>"$LOGFILE" 2>&1
+curl -sL -f "$PROWLARR_URL" -o prowlarr.tar.gz >>"$LOGFILE" 2>&1 || \
+wget -q "$PROWLARR_URL" -O prowlarr.tar.gz >>"$LOGFILE" 2>&1
 
 log "Extracting Prowlarr..."
 rm -rf /opt/Prowlarr
