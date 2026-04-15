@@ -1,3 +1,14 @@
+## CHANGELOG v3.1.7 - UX Language Refinement
+_Generated April 15, 2026._
+
+---
+
+### UI/UX Improvements
+* **Network Label Clarity**: Renamed "RX" and "TX" to "Downloaded" and "Uploaded" respectively across the dashboard for better human readability.
+* **Consistency Fix**: Synchronized labels in both the `Overview` StatPills and the `NetworkWidget`.
+
+---
+
 ## CHANGELOG v3.1.6 - Visual Stabilization Fix
 _Generated April 15, 2026 from user reported bug fix._
 

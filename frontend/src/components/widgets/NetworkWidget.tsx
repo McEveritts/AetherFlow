@@ -57,11 +57,11 @@ export default function NetworkWidget({ metrics, hardware, history }: NetworkWid
             {/* Cumulative totals */}
             <div className="grid grid-cols-2 gap-3">
                 <div className="bg-slate-900/50 rounded-xl p-3 border border-white/[0.03]">
-                    <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider block">Total RX</span>
+                    <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider block">Total Downloaded</span>
                     <span className="text-sm font-bold text-emerald-400">{formatTotalBytes(metrics.total_net_bytes?.rx || 0)}</span>
                 </div>
                 <div className="bg-slate-900/50 rounded-xl p-3 border border-white/[0.03]">
-                    <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider block">Total TX</span>
+                    <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider block">Total Uploaded</span>
                     <span className="text-sm font-bold text-indigo-400">{formatTotalBytes(metrics.total_net_bytes?.tx || 0)}</span>
                 </div>
             </div>

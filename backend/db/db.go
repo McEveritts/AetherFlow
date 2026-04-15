@@ -524,6 +524,11 @@ func InitDB() {
 		"ALTER TABLE settings ADD COLUMN anthropic_api_key TEXT DEFAULT '';",
 		"ALTER TABLE settings ADD COLUMN anthropic_endpoint TEXT DEFAULT '';")
 
+	// ─── Migration v14: TOTP Two-Factor Authentication ─────────────────
+	migrate(14, "Add TOTP 2FA columns to users",
+		"ALTER TABLE users ADD COLUMN totp_secret TEXT DEFAULT '';",
+		"ALTER TABLE users ADD COLUMN totp_enabled BOOLEAN DEFAULT 0;")
+
 	// ─── Ensure singleton settings row ─────────────────────────────────
 	DB.Exec(`INSERT OR IGNORE INTO settings (id) VALUES (1)`)
 

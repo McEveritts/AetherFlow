@@ -94,3 +94,63 @@ func IsTokenRevoked(jti string) bool {
 	}
 	return false
 }
+
+// ── 2FA Pending Secret Cache ──────────────────────────────────────────────
+
+var pending2FACache sync.Map // fallback: userID → {secret string, expiresAt int64}
+
+type pending2FAEntry struct {
+	Secret    string
+	ExpiresAt int64
+}
+
+// Store2FAPending stores a pending TOTP secret with a TTL.
+// Uses Redis ("2fa_pending:<userID>") with an in-memory fallback.
+func Store2FAPending(userID int, secret string, ttl time.Duration) error {
+	key := fmt.Sprintf("2fa_pending:%d", userID)
+	entry := pending2FAEntry{Secret: secret, ExpiresAt: time.Now().Add(ttl).Unix()}
+	pending2FACache.Store(key, entry)
+
+	if RedisClient != nil {
+		ctx := context.Background()
+		return RedisClient.Set(ctx, key, secret, ttl).Err()
+	}
+	return nil
+}
+
+// Get2FAPending retrieves a pending TOTP secret.
+func Get2FAPending(userID int) (string, error) {
+	key := fmt.Sprintf("2fa_pending:%d", userID)
+
+	// Try local cache first
+	if raw, ok := pending2FACache.Load(key); ok {
+		entry, ok := raw.(pending2FAEntry)
+		if ok && time.Now().Unix() <= entry.ExpiresAt {
+			return entry.Secret, nil
+		}
+		pending2FACache.Delete(key) // expired
+	}
+
+	// Try Redis
+	if RedisClient != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancel()
+		val, err := RedisClient.Get(ctx, key).Result()
+		if err == nil {
+			return val, nil
+		}
+	}
+
+	return "", fmt.Errorf("no pending 2FA secret found")
+}
+
+// Delete2FAPending removes a pending TOTP secret after successful verification.
+func Delete2FAPending(userID int) {
+	key := fmt.Sprintf("2fa_pending:%d", userID)
+	pending2FACache.Delete(key)
+
+	if RedisClient != nil {
+		ctx := context.Background()
+		RedisClient.Del(ctx, key)
+	}
+}

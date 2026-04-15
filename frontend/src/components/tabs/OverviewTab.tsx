@@ -162,14 +162,14 @@ export default function OverviewTab({ metrics, hardware, history }: OverviewTabP
                     icon={<ArrowDown size={15} />}
                     iconColor="text-emerald-400"
                     iconBg="bg-emerald-500/10"
-                    label="Total RX"
+                    label="Downloaded"
                     value={formatTotalBytes(metrics.total_net_bytes?.rx || 0)}
                 />
                 <StatPill
                     icon={<ArrowUp size={15} />}
                     iconColor="text-indigo-400"
                     iconBg="bg-indigo-500/10"
-                    label="Total TX"
+                    label="Uploaded"
                     value={formatTotalBytes(metrics.total_net_bytes?.tx || 0)}
                 />
             </div>
