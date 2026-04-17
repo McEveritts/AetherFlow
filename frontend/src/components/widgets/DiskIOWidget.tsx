@@ -3,7 +3,7 @@ import { SystemMetrics, MetricsHistory } from '@/types/dashboard';
 import Sparkline from '@/components/charts/Sparkline';
 
 interface DiskIOWidgetProps {
-    metrics: SystemMetrics;
+    diskIoData: SystemMetrics['disk_io'];
     history: MetricsHistory;
     density?: 'compact' | 'immersive';
 }
@@ -15,10 +15,10 @@ function formatBytesPerSec(bytes: number): string {
     return `${(bytes / 1073741824).toFixed(2)} GB/s`;
 }
 
-export default function DiskIOWidget({ metrics, history, density = 'compact' }: DiskIOWidgetProps) {
+export default function DiskIOWidget({ diskIoData, history, density = 'compact' }: DiskIOWidgetProps) {
     const isImmersive = density === 'immersive';
-    const read = metrics.disk_io?.read_bytes_sec || 0;
-    const write = metrics.disk_io?.write_bytes_sec || 0;
+    const read = diskIoData?.read_bytes_sec || 0;
+    const write = diskIoData?.write_bytes_sec || 0;
 
     return (
         <div className={`bg-white/[0.02] border border-white/[0.05] rounded-2xl relative overflow-hidden group transition-all duration-300 hover:bg-white/[0.04] backdrop-blur-xl ${isImmersive ? 'p-6 space-y-4' : 'p-5'}`}>

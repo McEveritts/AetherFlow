@@ -6,7 +6,7 @@ import { Network } from 'lucide-react';
 import { SystemMetrics } from '@/types/dashboard';
 
 interface AppTopologyMapProps {
-    metrics: SystemMetrics;
+    topologyData: SystemMetrics['services'];
     density?: 'compact' | 'immersive';
 }
 
@@ -22,7 +22,7 @@ interface D3Link extends d3.SimulationLinkDatum<D3Node> {
     value: number;
 }
 
-export default function AppTopologyMap({ metrics, density = 'compact' }: AppTopologyMapProps) {
+export default function AppTopologyMap({ topologyData, density = 'compact' }: AppTopologyMapProps) {
     const isImmersive = density === 'immersive';
 
     const svgRef = useRef<SVGSVGElement>(null);
@@ -81,8 +81,8 @@ export default function AppTopologyMap({ metrics, density = 'compact' }: AppTopo
             const newNodes: D3Node[] = [{ id: 'AetherFlow Core', group: 1, status: 'running' }];
             const newLinks: D3Link[] = [];
 
-            if (metrics.services) {
-                Object.entries(metrics.services).forEach(([name, info]) => {
+            if (topologyData) {
+                Object.entries(topologyData).forEach(([name, info]) => {
                     newNodes.push({ id: name, group: 2, status: info.status });
                     newLinks.push({ source: 'AetherFlow Core', target: name, value: 1 });
                 });

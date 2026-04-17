@@ -15,6 +15,12 @@ AetherFlow uses encrypted JSON Web Tokens (`aetherflow_session`) for stateless a
 - **HTTP-Only Cookies**: Tokens are stored in `HttpOnly` and `Secure` cookies to prevent XSS-based theft.
 - **CSRF Protection**: All state-changing requests (POST/PUT/DELETE) require a valid CSRF token matched against the session state.
 
+### 3. Perimeter Gateway (True SSO)
+AetherFlow acts as a lightweight Identity Provider (IdP) for all hosted applications across the platform.
+- **Forward\_Auth intercept**: Caddy intercepts all traffic meant for internal applications (e.g., Radarr, Jellyseerr) and first routes it to AetherFlow's `/api/v1/auth/verify` endpoint.
+- **Identity Proxy Header Injection**: Upon confirming a valid session, AetherFlow passes an authenticated `X-Aetherflow-User` context header downstream to the underlying application.
+- **Double-login Prevention**: Thanks to AetherFlow's native "Config Mutators," target applications are pre-configured locally to trust Proxied Authentication. An authenticated AetherFlow user drops directly into their media application interfaces seamlessly.
+
 ---
 
 ## Data Security

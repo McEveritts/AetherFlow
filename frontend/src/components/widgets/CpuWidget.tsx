@@ -3,7 +3,7 @@ import { SystemMetrics, HardwareReport, MetricsHistory } from '@/types/dashboard
 import Sparkline from '@/components/charts/Sparkline';
 
 interface CpuWidgetProps {
-    metrics: SystemMetrics;
+    cpuData: { usage: number; freq: number; cores: number[] };
     hardware: HardwareReport | null;
     history: MetricsHistory;
     density?: 'compact' | 'immersive';
@@ -18,8 +18,8 @@ function getCoreColor(pct: number): string {
     return 'bg-slate-700';
 }
 
-export default function CpuWidget({ metrics, hardware, history, density = 'compact' }: CpuWidgetProps) {
-    const cores = metrics.per_core_cpu || [];
+export default function CpuWidget({ cpuData, hardware, history, density = 'compact' }: CpuWidgetProps) {
+    const cores = cpuData.cores || [];
     const isImmersive = density === 'immersive';
 
     return (
@@ -30,7 +30,7 @@ export default function CpuWidget({ metrics, hardware, history, density = 'compa
                     <Cpu size={isImmersive ? 18 : 16} className="text-blue-400" /> CPU Usage
                 </h2>
                 <div className="flex items-center gap-2">
-                    <span className={`${isImmersive ? 'text-3xl' : 'text-2xl'} font-bold tracking-tighter text-white`}>{metrics.cpu_usage.toFixed(1)}%</span>
+                    <span className={`${isImmersive ? 'text-3xl' : 'text-2xl'} font-bold tracking-tighter text-white`}>{cpuData.usage.toFixed(1)}%</span>
                 </div>
             </div>
 
@@ -42,7 +42,7 @@ export default function CpuWidget({ metrics, hardware, history, density = 'compa
                     gradientFrom="#6366f1"
                     height={isImmersive ? 140 : 90}
                     showArea={true}
-                    currentValue={`${metrics.cpu_usage.toFixed(1)}%`}
+                    currentValue={`${cpuData.usage.toFixed(1)}%`}
                 />
             </div>
 
@@ -71,10 +71,10 @@ export default function CpuWidget({ metrics, hardware, history, density = 'compa
                         <span>{cores.length} cores</span>
                         <span>•</span>
                         <span>{hardware?.cpu?.threads || cores.length} threads</span>
-                        {metrics.cpu_freq_mhz > 0 && (
+                        {cpuData.freq > 0 && (
                             <>
                                 <span>•</span>
-                                <span>{(metrics.cpu_freq_mhz / 1000).toFixed(2)} GHz</span>
+                                <span>{(cpuData.freq / 1000).toFixed(2)} GHz</span>
                             </>
                         )}
                     </div>

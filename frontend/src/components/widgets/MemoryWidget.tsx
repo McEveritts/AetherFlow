@@ -3,16 +3,16 @@ import { SystemMetrics, HardwareReport, MetricsHistory } from '@/types/dashboard
 import Sparkline from '@/components/charts/Sparkline';
 
 interface MemoryWidgetProps {
-    metrics: SystemMetrics;
+    memoryData: { memory: SystemMetrics['memory']; swap: SystemMetrics['swap'] };
     hardware: HardwareReport | null;
     history: MetricsHistory;
     density?: 'compact' | 'immersive';
 }
 
-export default function MemoryWidget({ metrics, hardware, history, density = 'compact' }: MemoryWidgetProps) {
-    const memPct = metrics.memory.total > 0 ? (metrics.memory.used / metrics.memory.total) * 100 : 0;
-    const swapPct = metrics.swap?.total > 0 ? (metrics.swap.used / metrics.swap.total) * 100 : 0;
-    const hasSwap = metrics.swap?.total > 0;
+export default function MemoryWidget({ memoryData, hardware, history, density = 'compact' }: MemoryWidgetProps) {
+    const memPct = memoryData.memory.total > 0 ? (memoryData.memory.used / memoryData.memory.total) * 100 : 0;
+    const swapPct = memoryData.swap?.total > 0 ? (memoryData.swap.used / memoryData.swap.total) * 100 : 0;
+    const hasSwap = memoryData.swap?.total > 0;
     const isImmersive = density === 'immersive';
 
     return (
@@ -23,8 +23,8 @@ export default function MemoryWidget({ metrics, hardware, history, density = 'co
                     <MemoryStick size={isImmersive ? 18 : 16} className="text-purple-400" /> Memory
                 </h2>
                 <div className="flex items-baseline gap-1">
-                    <span className={`${isImmersive ? 'text-3xl' : 'text-2xl'} font-bold tracking-tighter text-white`}>{metrics.memory.used.toFixed(1)}</span>
-                    <span className={`${isImmersive ? 'text-base' : 'text-sm'} text-slate-400 font-medium`}>/ {metrics.memory.total.toFixed(0)} GB</span>
+                    <span className={`${isImmersive ? 'text-3xl' : 'text-2xl'} font-bold tracking-tighter text-white`}>{memoryData.memory.used.toFixed(1)}</span>
+                    <span className={`${isImmersive ? 'text-base' : 'text-sm'} text-slate-400 font-medium`}>/ {memoryData.memory.total.toFixed(0)} GB</span>
                 </div>
             </div>
 
@@ -46,7 +46,7 @@ export default function MemoryWidget({ metrics, hardware, history, density = 'co
                 <div>
                     <div className="flex justify-between text-[10px] text-slate-400 font-semibold uppercase tracking-wider mb-1.5">
                         <span>RAM Used ({memPct.toFixed(0)}%)</span>
-                        <span>{(metrics.memory.total - metrics.memory.used).toFixed(1)} GB free</span>
+                        <span>{(memoryData.memory.total - memoryData.memory.used).toFixed(1)} GB free</span>
                     </div>
                     <div className="h-2.5 w-full bg-slate-800/80 rounded-full overflow-hidden flex">
                         <div
@@ -61,7 +61,7 @@ export default function MemoryWidget({ metrics, hardware, history, density = 'co
                     <div>
                         <div className="flex justify-between text-[10px] text-slate-400 font-semibold uppercase tracking-wider mb-1.5">
                             <span>Swap ({swapPct.toFixed(0)}%)</span>
-                            <span>{metrics.swap.used.toFixed(2)} / {metrics.swap.total.toFixed(1)} GB</span>
+                            <span>{memoryData.swap.used.toFixed(2)} / {memoryData.swap.total.toFixed(1)} GB</span>
                         </div>
                         <div className="h-2 w-full bg-slate-800/80 rounded-full overflow-hidden flex">
                             <div

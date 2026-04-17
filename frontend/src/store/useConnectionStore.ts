@@ -7,6 +7,7 @@ interface ConnectionStoreState {
     connectionState: ConnectionState;
     reconnectAttempt: number;
     lastMessageAt: number | null;
+    lastTransportSwitchReason: string | null;
     
     // Polling preferences
     preferredMode: ConnectionMode;
@@ -19,6 +20,7 @@ interface ConnectionStoreState {
     setConnectionState: (state: ConnectionState) => void;
     setReconnectAttempt: (attempt: number) => void;
     setLastMessageAt: (timestamp: number) => void;
+    setLastTransportSwitchReason: (reason: string | null) => void;
     setPreferredMode: (mode: ConnectionMode) => void;
     setPollInterval: (interval: number) => void;
     setDashboardDensity: (density: 'compact' | 'immersive') => void;
@@ -31,6 +33,7 @@ export const useConnectionStore = create<ConnectionStoreState>()((set) => ({
     connectionState: 'CONNECTING',
     reconnectAttempt: 0,
     lastMessageAt: null,
+    lastTransportSwitchReason: null,
     preferredMode: 'websocket',
     pollInterval: 5000,
     dashboardDensity: 'compact',
@@ -40,6 +43,7 @@ export const useConnectionStore = create<ConnectionStoreState>()((set) => ({
     setConnectionState: (connectionState) => set({ connectionState }),
     setReconnectAttempt: (reconnectAttempt) => set({ reconnectAttempt }),
     setLastMessageAt: (lastMessageAt) => set({ lastMessageAt }),
+    setLastTransportSwitchReason: (lastTransportSwitchReason) => set({ lastTransportSwitchReason }),
     setPreferredMode: (preferredMode) => set({ preferredMode }),
     setPollInterval: (pollInterval) => set({ pollInterval }),
     setDashboardDensity: (dashboardDensity) => set({ dashboardDensity }),
@@ -49,6 +53,7 @@ export const useConnectionStore = create<ConnectionStoreState>()((set) => ({
         connectionState: 'DISCONNECTED', 
         reconnectAttempt: 0, 
         lastMessageAt: null,
+        lastTransportSwitchReason: null,
         preferredMode: 'websocket',
         pollInterval: 5000,
         dashboardDensity: 'compact',

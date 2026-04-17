@@ -2,13 +2,13 @@ import { HardDrive } from 'lucide-react';
 import { SystemMetrics, HardwareReport } from '@/types/dashboard';
 
 interface StorageWidgetProps {
-    metrics: SystemMetrics;
+    storageData: DiskPartition[];
     hardware: HardwareReport | null;
     density?: 'compact' | 'immersive';
 }
 
-export default function StorageWidget({ metrics, hardware, density = 'compact' }: StorageWidgetProps) {
-    const disks = metrics.disks || [];
+export default function StorageWidget({ storageData, hardware, density = 'compact' }: StorageWidgetProps) {
+    const disks = storageData || [];
     const isImmersive = density === 'immersive';
     // Calculate total across all partitions
     const totalAllGB = disks.reduce((sum, d) => sum + d.total_gb, 0);

@@ -8,12 +8,14 @@ AetherFlow is engineered as a high-concurrency, unified control plane for modern
 graph TD
     User((User)) --> Web[Next.js 16 Frontend]
     Web --> API[Go Backend Service]
-    API --> Auth[Auth Layer / TOTP]
+    API --> Auth[Auth Layer / Security Gate]
+    API --> Caddy[Caddy Internal Switchboard]
     API --> WS[Hyperspeed WebSocket Layer]
     API --> DB[(SQLite DB)]
     API --> Redis[(Redis Session Store)]
     API --> AI[FlowAI Logic]
-    API --> Sys[Systemd / Scripts]
+    API --> Orchestrator[Atomic Orchestrator]
+    Orchestrator --> Sys[Systemd / Symlink Swaps]
     Sys --> Apps[Marketplace Applications]
 ```
 
@@ -33,11 +35,12 @@ The backend is a compiled binary responsible for all high-privilege operations.
 - **Routing**: Strict namespacing (`/api/v1/admin`, `/api/v1/public`) to ensure security.
 - **Inter-Process Communication**: Directly manages systemd service units and executes marketplace scripts.
 
-### 3. Orchestration: Systemd
-AetherFlow has deprecated PM2 in favor of native Linux `systemd` units.
-- **Predictability**: Aligning with the host OS ensures that if the server reboots, AetherFlow and all managed apps recover reliably.
-- **Isolation**: Each marketplace application runs as its own systemd service (e.g., `af-plex.service`).
-- **Control**: The backend uses `dbus` or direct `systemctl` calls to manage service lifecycles.
+### 3. Orchestration: Systemd & Atomic Blue/Green Engine
+AetherFlow natively integrates with `systemd` to manage processes, but application lifecycle is handled via an advanced **Atomic Deployment Engine**:
+- **Zero-Downtime Swaps**: Applications are upgraded using isolated Blue/Green extraction environments. The live application is swapped via an atomic `os.Symlink` and `os.Rename` operation.
+- **Centralized AppData**: All SQLite `.db` or `.json` configurations are kept in a static directory rather than the application directory, preventing split-brain database fragmentation during updates.
+- **Polymorphic Mutators**: AetherFlow understands configuration schemas across apps (INI, JSON, SQLite) using "Config Mutators," allowing it to dynamically inject routes without breaking existing app functionality.
+- **Internal Switchboard**: The Go service manipulates Caddy's routing layer via REST API to switch traffic between the Blue/Green environments seamlessly.
 
 ### 4. Data Layer: SQLite & Redis
 AetherFlow balances simplicity with high-speed invalidation:

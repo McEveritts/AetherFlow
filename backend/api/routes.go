@@ -62,6 +62,7 @@ func registerV1Routes(apiGroup *gin.RouterGroup) {
 	publicGroup.GET("/auth/google/login", GoogleLogin)
 	publicGroup.GET("/auth/google/callback", GoogleCallback)
 	publicGroup.POST("/auth/login", authLimiter, LocalLogin)
+	publicGroup.GET("/auth/verify", VerifyProxyAuth)
 	publicGroup.POST("/auth/mfa/verify", authLimiter, MFALoginVerify)
 	publicGroup.POST("/auth/setup", authLimiter, SetupAdmin)
 	publicGroup.GET("/auth/setup/check", CheckSetupNeeded)
@@ -127,6 +128,8 @@ func registerV1Routes(apiGroup *gin.RouterGroup) {
 		authGroup.POST("/notifications/dismiss-all", DismissAllNotifications)
 
 		authGroup.GET("/ws/logs", HandleLogWebSocket)
+		authGroup.GET("/deploy/stream", HandleDeployStream)
+		authGroup.POST("/deploy/:appName", HandleDeployProcess)
 	}
 
 	// ── Admin routes (require valid JWT session + admin role) ──

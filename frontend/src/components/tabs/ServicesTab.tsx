@@ -10,6 +10,7 @@ import { apiFetch } from '@/lib/fetcher';
 import RequireClaim from '@/components/auth/RequireClaim';
 import ServiceLogsModal from '@/components/tabs/ServiceLogsModal';
 import { Terminal } from 'lucide-react';
+import { useSystemStore } from '@/store/useSystemStore';
 
 // Maps service process names to their web UI ports/paths
 const SERVICE_WEB_PORTS: Record<string, number | string> = {
@@ -64,6 +65,7 @@ export default function ServicesTab() {
     const [loadingService, setLoadingService] = useState<string | null>(null);
     const [logsModalService, setLogsModalService] = useState<string | null>(null);
     const canControlServices = user?.role === 'admin';
+    const { setActiveTab } = useSystemStore();
 
     const { data: services, mutate, isLoading } = useSWR<Record<string, ServiceInfo>>(
         '/api/v1/auth/services',
@@ -131,6 +133,28 @@ export default function ServicesTab() {
 
     const runningCount = allEntries.filter(([, d]) => (d as ServiceInfo).status === 'running').length;
 
+    const handleOpenWebUI = (name: string, data: ServiceInfo) => {
+        const process = data.process || name;
+        const portOrPath = SERVICE_WEB_PORTS[process];
+        if (portOrPath != null) {
+            const host = window.location.hostname;
+            const url = typeof portOrPath === 'string'
+                ? portOrPath.startsWith('/') ? `${window.location.protocol}//${host}${portOrPath}` : portOrPath
+                : `${window.location.protocol}//${host}:${portOrPath}`;
+            window.open(url, '_blank');
+        } else {
+            addToast('No web UI configured for this service.', 'info');
+        }
+    };
+
+    const handleOpenSettings = (name: string, data: ServiceInfo) => {
+        if (corePlatformProcesses.includes(data.process || '')) {
+            setActiveTab('settings');
+        } else {
+            handleOpenWebUI(name, data);
+        }
+    };
+
     const renderServiceCard = (name: string, rawData: unknown) => {
         const data = rawData as ServiceInfo;
         const isRunning = data.status === 'running';
@@ -180,7 +204,12 @@ export default function ServicesTab() {
                             </div>
                         </div>
                     </div>
-                    <button className="p-2 text-slate-500 hover:text-slate-300 hover:bg-white/5 rounded-lg transition-colors">
+                    <button 
+                        onClick={() => handleOpenSettings(name, data)}
+                        disabled={isBusy}
+                        className="p-2 text-slate-500 hover:text-slate-300 hover:bg-white/5 rounded-lg transition-colors disabled:opacity-50"
+                        title="Settings"
+                    >
                         <Settings size={18} />
                     </button>
                 </div>
@@ -200,19 +229,7 @@ export default function ServicesTab() {
                     {isRunning ? (
                         <>
                             <button
-                                onClick={() => {
-                                    const process = data.process || name;
-                                    const portOrPath = SERVICE_WEB_PORTS[process];
-                                    if (portOrPath != null) {
-                                        const host = window.location.hostname;
-                                        const url = typeof portOrPath === 'string'
-                                            ? portOrPath.startsWith('/') ? `${window.location.protocol}//${host}${portOrPath}` : portOrPath
-                                            : `${window.location.protocol}//${host}:${portOrPath}`;
-                                        window.open(url, '_blank');
-                                    } else {
-                                        addToast('No web UI configured for this service.', 'info');
-                                    }
-                                }}
+                                onClick={() => handleOpenWebUI(name, data)}
                                 className="flex-1 py-2 bg-slate-800/80 hover:bg-slate-700 text-slate-300 text-xs font-semibold rounded-lg transition-colors flex items-center justify-center gap-2 disabled:opacity-50"
                                 disabled={isBusy}
                             >

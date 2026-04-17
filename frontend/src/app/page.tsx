@@ -1,6 +1,7 @@
 'use client';
 
 import { useSystemStore } from '@/store/useSystemStore';
+import { useShallow } from 'zustand/react/shallow';
 import Sidebar from '@/components/layout/Sidebar';
 import Header from '@/components/layout/Header';
 import GlobalBanners from '@/components/layout/GlobalBanners';
@@ -22,7 +23,12 @@ import { ErrorBoundary } from '@/components/ui/ErrorBoundary';
 import useSWR from 'swr';
 
 export default function Dashboard() {
-  const { activeTab, isSidebarHovered } = useSystemStore();
+  const { activeTab, isSidebarHovered } = useSystemStore(
+    useShallow((state) => ({
+      activeTab: state.activeTab,
+      isSidebarHovered: state.isSidebarHovered
+    }))
+  );
   const { metrics, hardware, history, isLoading, isError, connectionState } = useMetrics();
 
   const { data: settingsData, mutate: mutateSettings } = useSWR('/api/v1/auth/settings');

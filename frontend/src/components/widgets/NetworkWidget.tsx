@@ -3,7 +3,7 @@ import { SystemMetrics, HardwareReport, MetricsHistory } from '@/types/dashboard
 import Sparkline from '@/components/charts/Sparkline';
 
 interface NetworkWidgetProps {
-    metrics: SystemMetrics;
+    networkData: { network: SystemMetrics['network']; total: SystemMetrics['total_net_bytes'] };
     hardware: HardwareReport | null;
     history: MetricsHistory;
     density?: 'compact' | 'immersive';
@@ -21,7 +21,7 @@ function formatTotalBytes(bytes: number): string {
     return `${value.toFixed(unitIndex > 1 ? 1 : 0)} ${units[unitIndex]}`;
 }
 
-export default function NetworkWidget({ metrics, hardware, history, density = 'compact' }: NetworkWidgetProps) {
+export default function NetworkWidget({ networkData, hardware, history, density = 'compact' }: NetworkWidgetProps) {
     const isImmersive = density === 'immersive';
 
     return (
@@ -37,7 +37,7 @@ export default function NetworkWidget({ metrics, hardware, history, density = 'c
                         <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500" />
                     </span>
                 </h2>
-                <span className="text-[10px] text-slate-500 font-medium">{metrics.network.active_connections} connections</span>
+                <span className="text-[10px] text-slate-500 font-medium">{networkData.network.active_connections} connections</span>
             </div>
 
             {/* Dual-line Sparkline */}
@@ -53,8 +53,8 @@ export default function NetworkWidget({ metrics, hardware, history, density = 'c
                     showArea={true}
                     label="Download"
                     label2="Upload"
-                    currentValue={metrics.network.down as string}
-                    currentValue2={metrics.network.up as string}
+                    currentValue={networkData.network.down as string}
+                    currentValue2={networkData.network.up as string}
                 />
             </div>
 
@@ -63,11 +63,11 @@ export default function NetworkWidget({ metrics, hardware, history, density = 'c
             <div className="grid grid-cols-2 gap-3">
                 <div className="bg-slate-900/50 rounded-xl p-3 border border-white/[0.03]">
                     <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider block">Total Downloaded</span>
-                    <span className="text-sm font-bold text-emerald-400">{formatTotalBytes(metrics.total_net_bytes?.rx || 0)}</span>
+                    <span className="text-sm font-bold text-emerald-400">{formatTotalBytes(networkData.total?.rx || 0)}</span>
                 </div>
                 <div className="bg-slate-900/50 rounded-xl p-3 border border-white/[0.03]">
                     <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider block">Total Uploaded</span>
-                    <span className="text-sm font-bold text-indigo-400">{formatTotalBytes(metrics.total_net_bytes?.tx || 0)}</span>
+                    <span className="text-sm font-bold text-indigo-400">{formatTotalBytes(networkData.total?.tx || 0)}</span>
                 </div>
             </div>
         </div>

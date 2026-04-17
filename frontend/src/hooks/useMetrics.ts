@@ -6,6 +6,7 @@ import { create } from 'zustand';
 
 export type TimeWindow = '1m' | '5m' | '1h';
 
+// FALLBACK: Using fixed 1800-sample cap until Retention Policy (Sample Count vs. Wall-Clock) is ratified.
 const MAX_HISTORY_SIZE = 1800; // 1800 data points = 1 hour at 2s intervals
 const WINDOW_SIZES: Record<TimeWindow, number> = {
     '1m': 30,    // 1 min

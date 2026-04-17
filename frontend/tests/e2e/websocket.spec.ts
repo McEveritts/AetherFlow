@@ -31,7 +31,7 @@ test('validates WebSocket connection drops and automatic reconnection UI durabil
   await expect(page.getByText('API Connected')).toBeVisible({ timeout: 10000 });
 
   // Simulate network disruption
-  mockSocket.close();
+  mockSocket?.close();
 
   // Wait for fallback/reconnect mode to trigger
   await expect(page.getByText('Connection lost — reconnecting...')).toBeVisible();

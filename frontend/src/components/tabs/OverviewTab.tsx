@@ -1,5 +1,5 @@
 import { Clock, Activity, Zap, Wifi, ArrowDown, ArrowUp, Server, Radio, ZapOff, Settings2, Maximize2, Minimize2 } from 'lucide-react';
-import { SystemMetrics, HardwareReport, MetricsHistory } from '@/types/dashboard';
+import { SystemMetrics, HardwareReport, MetricsHistory, ProcessInfo, DiskPartition, GpuMetric } from '@/types/dashboard';
 import CpuWidget from '@/components/widgets/CpuWidget';
 import MemoryWidget from '@/components/widgets/MemoryWidget';
 import NetworkWidget from '@/components/widgets/NetworkWidget';
@@ -12,16 +12,42 @@ import DataUsageHistoryWidget from '@/components/widgets/DataUsageHistoryWidget'
 import React from 'react';
 import { useConnectionStore, ConnectionMode } from '@/store/useConnectionStore';
 import { useSystemStore } from '@/store/useSystemStore';
+import { useShallow } from 'zustand/react/shallow';
 
-// Memoize dashboard widgets to block parent render cascades
-const MemoCpuWidget = React.memo(CpuWidget);
-const MemoMemoryWidget = React.memo(MemoryWidget);
-const MemoNetworkWidget = React.memo(NetworkWidget);
-const MemoDiskIOWidget = React.memo(DiskIOWidget);
-const MemoProcessWidget = React.memo(ProcessWidget);
-const MemoStorageWidget = React.memo(StorageWidget);
-const MemoAppTopologyMap = React.memo(AppTopologyMap);
-const MemoGpuWidget = React.memo(GpuWidget);
+// Memoize dashboard widgets with custom, primitive-level comparators to block render cascades
+const MemoCpuWidget = React.memo(CpuWidget, (prev, next) => 
+    prev.cpuData.usage === next.cpuData.usage && 
+    prev.cpuData.freq === next.cpuData.freq &&
+    (prev.cpuData.cores || []).join(',') === (next.cpuData.cores || []).join(',')
+);
+const MemoMemoryWidget = React.memo(MemoryWidget, (prev, next) => 
+    prev.memoryData.memory.used === next.memoryData.memory.used && 
+    prev.memoryData.swap.used === next.memoryData.swap.used
+);
+const MemoNetworkWidget = React.memo(NetworkWidget, (prev, next) => 
+    `${prev.networkData.network.active_connections}-${prev.networkData.network.down}-${prev.networkData.network.up}-${prev.networkData.total?.rx}-${prev.networkData.total?.tx}` ===
+    `${next.networkData.network.active_connections}-${next.networkData.network.down}-${next.networkData.network.up}-${next.networkData.total?.rx}-${next.networkData.total?.tx}`
+);
+const MemoDiskIOWidget = React.memo(DiskIOWidget, (prev, next) => 
+    prev.diskIoData?.read_bytes_sec === next.diskIoData?.read_bytes_sec && 
+    prev.diskIoData?.write_bytes_sec === next.diskIoData?.write_bytes_sec
+);
+const MemoProcessWidget = React.memo(ProcessWidget, (prev, next) => {
+    const getProcHash = (p: ProcessInfo[]) => (p || []).slice(0, 5).map(proc => `${proc.pid}-${proc.cpu}`).join(':');
+    return getProcHash(prev.processes) === getProcHash(next.processes);
+});
+const MemoStorageWidget = React.memo(StorageWidget, (prev, next) => {
+    const getDiskHash = (d: DiskPartition[]) => (d || []).map(disk => `${disk.mount_point}-${disk.used_pct}`).join(':');
+    return getDiskHash(prev.storageData) === getDiskHash(next.storageData);
+});
+const MemoAppTopologyMap = React.memo(AppTopologyMap, (prev, next) => {
+    const getStatusHash = (t: SystemMetrics['services']) => Object.values(t || {}).map(node => node.status).join(':');
+    return getStatusHash(prev.topologyData) === getStatusHash(next.topologyData);
+});
+const MemoGpuWidget = React.memo(GpuWidget, (prev, next) => {
+    const getGpuHash = (g: GpuMetric[]) => (g || []).map(gpu => `${gpu.index}-${gpu.usage_pct}-${gpu.temp}`).join(':');
+    return getGpuHash(prev.gpus) === getGpuHash(next.gpus);
+});
 
 interface OverviewTabProps {
     metrics: SystemMetrics;
@@ -42,8 +68,25 @@ function formatTotalBytes(bytes: number): string {
 }
 
 export default function OverviewTab({ metrics, hardware, history }: OverviewTabProps) {
-    const { preferredMode, setPreferredMode, pollInterval, setPollInterval, connectionState, dashboardDensity, setDashboardDensity, showGpuWidget, showDataUsageWidget } = useConnectionStore();
-    const { setActiveTab, setActiveSettingsTab } = useSystemStore();
+    const { preferredMode, setPreferredMode, pollInterval, setPollInterval, connectionState, dashboardDensity, setDashboardDensity, showGpuWidget, showDataUsageWidget } = useConnectionStore(
+        useShallow((state) => ({
+            preferredMode: state.preferredMode,
+            setPreferredMode: state.setPreferredMode,
+            pollInterval: state.pollInterval,
+            setPollInterval: state.setPollInterval,
+            connectionState: state.connectionState,
+            dashboardDensity: state.dashboardDensity,
+            setDashboardDensity: state.setDashboardDensity,
+            showGpuWidget: state.showGpuWidget,
+            showDataUsageWidget: state.showDataUsageWidget
+        }))
+    );
+    const { setActiveTab, setActiveSettingsTab } = useSystemStore(
+        useShallow((state) => ({
+            setActiveTab: state.setActiveTab,
+            setActiveSettingsTab: state.setActiveSettingsTab
+        }))
+    );
     
     // Direct prop pass-through — the upstream Zustand store already throttles
     // at 250ms via pushMetrics. React.memo on child widgets prevents unnecessary
@@ -189,8 +232,8 @@ export default function OverviewTab({ metrics, hardware, history }: OverviewTabP
                 
                 {/* 1. Primary Metrics */}
                 <div className="space-y-6">
-                    <MemoCpuWidget metrics={tMetrics} hardware={hardware} history={tHistory} density={dashboardDensity} />
-                    <MemoMemoryWidget metrics={tMetrics} hardware={hardware} history={tHistory} density={dashboardDensity} />
+                    <MemoCpuWidget cpuData={{ usage: tMetrics.cpu_usage, freq: tMetrics.cpu_freq_mhz, cores: tMetrics.per_core_cpu }} hardware={hardware} history={tHistory} density={dashboardDensity} />
+                    <MemoMemoryWidget memoryData={{ memory: tMetrics.memory, swap: tMetrics.swap }} hardware={hardware} history={tHistory} density={dashboardDensity} />
                     
                     {/* GPU Widget - Auto Detectable & User Enabled */}
                     {(showGpuWidget && tMetrics.gpus && tMetrics.gpus.length > 0) && (
@@ -200,8 +243,8 @@ export default function OverviewTab({ metrics, hardware, history }: OverviewTabP
 
                 {/* 2. Secondary Metrics */}
                 <div className="space-y-6">
-                    <MemoNetworkWidget metrics={tMetrics} hardware={hardware} history={tHistory} density={dashboardDensity} />
-                    <MemoDiskIOWidget metrics={tMetrics} history={tHistory} density={dashboardDensity} />
+                    <MemoNetworkWidget networkData={{ network: tMetrics.network, total: tMetrics.total_net_bytes }} hardware={hardware} history={tHistory} density={dashboardDensity} />
+                    <MemoDiskIOWidget diskIoData={tMetrics.disk_io} history={tHistory} density={dashboardDensity} />
                     
                     {/* Data Usage History Widget - User Enabled */}
                     {showDataUsageWidget && (
@@ -213,10 +256,10 @@ export default function OverviewTab({ metrics, hardware, history }: OverviewTabP
                 <div className={`space-y-6 ${dashboardDensity === 'immersive' ? 'xl:col-span-2' : ''}`}>
                     <div className={`grid gap-6 items-start ${dashboardDensity === 'immersive' ? 'grid-cols-1 lg:grid-cols-3' : 'grid-cols-1'}`}>
                         <div className={dashboardDensity === 'immersive' ? 'lg:col-span-2' : ''}>
-                            <MemoAppTopologyMap metrics={tMetrics} density={dashboardDensity} />
+                            <MemoAppTopologyMap topologyData={tMetrics.services} density={dashboardDensity} />
                         </div>
                         <div className="space-y-6">
-                            <MemoStorageWidget metrics={tMetrics} hardware={hardware} density={dashboardDensity} />
+                            <MemoStorageWidget storageData={tMetrics.disks} hardware={hardware} density={dashboardDensity} />
                             <MemoProcessWidget processes={tMetrics.processes || []} density={dashboardDensity} />
                         </div>
                     </div>

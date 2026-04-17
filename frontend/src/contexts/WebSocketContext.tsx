@@ -13,6 +13,7 @@ import { webSocketMessageSchema, metricsUpdateDataSchema } from '@/lib/schemas';
 declare global {
     interface Window {
         __AF_DISABLE_WS__?: boolean;
+        __AF_EXTENDED_TIMEOUT__?: boolean;
     }
 }
 
@@ -90,6 +91,13 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
     const isMountedRef = useRef(true);
     const isManualCloseRef = useRef(false);          // distinguish user-initiated close from error
     const lastWsPushRef = useRef<number>(0);
+    
+    // FALLBACK: Assume default priority (WS -> Polling) until ratified
+    const transportOwnerRef = useRef<'websocket' | 'poll'>('websocket');
+    // FALLBACK: Use MAX aggregation semantics for dropped frames until policy is ratified
+    const suppressedMetricsBufferRef = useRef<SystemMetrics | null>(null);
+    // FALLBACK: Treat control-plane events as standard throttled metrics until unconditional bypass is ratified.
+    const suppressedControlEventsRef = useRef<{type: string, data: any}[]>([]);
 
     // ── Heartbeat ──────────────────────────────────────────────
     const clearHeartbeat = useCallback(() => {
@@ -100,11 +108,15 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
     const resetHeartbeatTimeout = useCallback(() => {
         // Called whenever we receive ANY message from the server
         if (heartbeatTimeoutRef.current) clearTimeout(heartbeatTimeoutRef.current);
+        
+        // FALLBACK: Implement feature-flagged 60s timeout until liveness guarantee is confirmed
+        const timeoutMs = (typeof window !== 'undefined' && window.__AF_EXTENDED_TIMEOUT__) ? 60_000 : HEARTBEAT_TIMEOUT_MS;
+        
         heartbeatTimeoutRef.current = setTimeout(() => {
             // No message received within deadline — connection is zombie
             console.warn('[WS] Heartbeat timeout — closing zombie connection');
             wsRef.current?.close();
-        }, HEARTBEAT_TIMEOUT_MS);
+        }, timeoutMs);
     }, []);
 
     const startHeartbeat = useCallback(() => {
@@ -126,6 +138,11 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
     }, []);
 
     const startPolling = useCallback((silent = false) => {
+        // FALLBACK: Assume default priority (WS -> Polling) until ratified
+        if (transportOwnerRef.current === 'websocket' && useConnectionStore.getState().preferredMode === 'websocket') {
+            return; // Prevent polling loop from taking over active WS transport owner unless forced
+        }
+
         stopPolling();
         
         // Only set to FALLBACK if we are actually in a failed state.
@@ -189,6 +206,8 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
             attemptRef.current += 1;
             setReconnectAttempt(attemptRef.current);
             if (attemptRef.current >= MAX_RECONNECT_BEFORE_FALLBACK) {
+                transportOwnerRef.current = 'poll';
+                useConnectionStore.getState().setLastTransportSwitchReason('MAX_RECONNECT_EXCEEDED');
                 startPolling();
                 if (hasConnectedOnceRef.current) {
                     addToast('WebSocket authentication failed \u2014 switched to polling mode', 'error');
@@ -233,36 +252,75 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
             try {
                 const rawMessage = JSON.parse(event.data);
                 const message = webSocketMessageSchema.parse(rawMessage);
-                if (message.type === 'METRICS_UPDATE') {
-                    // Honor the user's pollInterval setting to provide adjustable dashboard updates
-                    // even when receiving 1-second WebSocket blasts from the backend.
-                    const currentInterval = useConnectionStore.getState().pollInterval;
-                    if (now - lastWsPushRef.current < currentInterval - 100) {
-                        return; // drop update to enforce user's selected update frequency
+                const currentInterval = useConnectionStore.getState().pollInterval;
+                
+                // Throttle logic
+                if (now - lastWsPushRef.current < currentInterval - 100) {
+                    if (message.type === 'METRICS_UPDATE') {
+                        const parsedData = metricsUpdateDataSchema.safeParse(message.data);
+                        if (parsedData.success) {
+                            const sysData = parsedData.data.system as unknown as SystemMetrics;
+                            // FALLBACK: Use MAX aggregation semantics for dropped frames until policy is ratified
+                            if (!suppressedMetricsBufferRef.current) {
+                                suppressedMetricsBufferRef.current = sysData;
+                            } else {
+                                const prev = suppressedMetricsBufferRef.current;
+                                suppressedMetricsBufferRef.current = {
+                                    ...sysData,
+                                    cpu_usage: Math.max(prev.cpu_usage, sysData.cpu_usage),
+                                } as unknown as SystemMetrics;
+                            }
+                        }
+                    } else if (['MARKETPLACE_UPDATE', 'SYSTEM_HEAL', 'ACTION_QUEUED'].includes(message.type)) {
+                        // FALLBACK: Treat control-plane events as standard throttled metrics until unconditional bypass is ratified.
+                        suppressedControlEventsRef.current.push({ type: message.type, data: message.data });
                     }
-                    lastWsPushRef.current = now;
+                    return; // drop update to enforce user's selected update frequency
+                }
 
+                lastWsPushRef.current = now;
+
+                if (message.type === 'METRICS_UPDATE') {
                     const parsedData = metricsUpdateDataSchema.safeParse(message.data);
                     if (parsedData.success) {
+                        const sysData = parsedData.data.system as unknown as SystemMetrics;
+                        
+                        // Merge with buffered MAX metrics if any exist
+                        const finalMetrics = suppressedMetricsBufferRef.current ? {
+                            ...sysData,
+                            cpu_usage: Math.max(suppressedMetricsBufferRef.current.cpu_usage, sysData.cpu_usage)
+                        } as unknown as SystemMetrics : sysData;
+                        
+                        suppressedMetricsBufferRef.current = null;
+
                         setData({
-                            system: parsedData.data.system as SystemMetrics | null,
+                            system: finalMetrics as unknown as SystemMetrics | null,
                             services: parsedData.data.services as Record<string, unknown> | null,
                         });
                     } else {
                         console.warn('[WS] Malformed metrics payload dropped', parsedData.error.format());
                     }
-                } else if (message.type === 'MARKETPLACE_UPDATE') {
-                    globalMutate('/api/v1/public/marketplace');
-                } else if (message.type === 'SYSTEM_HEAL') {
-                    const healData = message.data as { service?: string, reason?: string, action?: string };
-                    addToast(`Self-Healing: ${healData.action || 'Restarted'} ${healData.service || 'service'} (${healData.reason || 'unresponsive'})`, 'info');
-                } else if (message.type === 'ACTION_QUEUED') {
-                    // Phase 14: Real-time action gate notifications
-                    const actionData = message.data as { action_id?: number, classification?: string, source?: string, action?: string };
-                    // Revalidate the action gates SWR cache so InboxTab updates instantly
-                    globalMutate('/api/v1/admin/actions/pending?status=pending');
-                    addToast(`New action queued: ${actionData.action || 'Unknown'} (#${actionData.action_id || '?'})`, 'info');
+                } 
+                // Process current message and any queued control messages
+                const eventsToProcess = [...suppressedControlEventsRef.current];
+                if (['MARKETPLACE_UPDATE', 'SYSTEM_HEAL', 'ACTION_QUEUED'].includes(message.type)) {
+                    eventsToProcess.push({ type: message.type, data: message.data });
                 }
+                suppressedControlEventsRef.current = [];
+
+                eventsToProcess.forEach(ev => {
+                    if (ev.type === 'MARKETPLACE_UPDATE') {
+                        globalMutate('/api/v1/public/marketplace');
+                    } else if (ev.type === 'SYSTEM_HEAL') {
+                        const healData = ev.data as { service?: string, reason?: string, action?: string };
+                        addToast(`Self-Healing: ${healData.action || 'Restarted'} ${healData.service || 'service'} (${healData.reason || 'unresponsive'})`, 'info');
+                    } else if (ev.type === 'ACTION_QUEUED') {
+                        const actionData = ev.data as { action_id?: number, classification?: string, source?: string, action?: string };
+                        globalMutate('/api/v1/admin/actions/pending?status=pending');
+                        addToast(`New action queued: ${actionData.action || 'Unknown'} (#${actionData.action_id || '?'})`, 'info');
+                    }
+                });
+
                 // PONG and other message types are silently consumed
             } catch (err) {
                 console.error('[WS] Failed to parse message', err);
@@ -326,6 +384,8 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
         }
 
         if (isWebSocketDisabled() || preferredMode === 'poll') {
+            transportOwnerRef.current = 'poll';
+            useConnectionStore.getState().setLastTransportSwitchReason('USER_PREFERENCE_OR_DISABLED');
             // If we have an active WS connection, close it
             if (wsRef.current) {
                 isManualCloseRef.current = true;
