@@ -16,7 +16,7 @@ def run():
         # The blue/green deployer then builds it.
         commands = [
             f'echo "{PASSWORD}" | sudo -S -i bash -c "cd /opt/AetherFlow && git stash && git pull origin master"',
-            f'echo "{PASSWORD}" | sudo -S -i bash -c "cd /opt/AetherFlow/backend && rm -f aetherflow-api && go build -o aetherflow-api ."',
+            f'echo "{PASSWORD}" | sudo -S -i bash -c "cd /opt/AetherFlow/backend && rm -f aetherflow-api && /usr/local/go/bin/go build -o aetherflow-api ."',
             f'echo "{PASSWORD}" | sudo -S -i bash -c "cd /opt/AetherFlow/frontend && npm run build"',
             f'echo "{PASSWORD}" | sudo -S -i bash -c "systemctl restart aetherflow-api aetherflow-web"'
         ]

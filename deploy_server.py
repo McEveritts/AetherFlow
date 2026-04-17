@@ -56,7 +56,7 @@ def run():
         execute("cd /opt/AetherFlow && git pull origin master")
         
         # Let's build and restart
-        execute("cd /opt/AetherFlow/backend && go build -o bin/aetherflow-api .")
+        execute("cd /opt/AetherFlow/backend && /usr/local/go/bin/go build -o bin/aetherflow-api .")
         execute("cd /opt/AetherFlow/frontend && npm install && npm run build")
         execute("systemctl restart aetherflow-api aetherflow-web")
         
