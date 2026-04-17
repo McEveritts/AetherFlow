@@ -12,6 +12,7 @@ const InboxTab = dynamic(() => import('@/components/tabs/InboxTab'), { ssr: fals
 const ServicesTab = dynamic(() => import('@/components/tabs/ServicesTab'), { ssr: false });
 const MarketplaceTab = dynamic(() => import('@/components/tabs/MarketplaceTab'), { ssr: false });
 const AiChatTab = dynamic(() => import('@/components/tabs/AiChatTab'), { ssr: false });
+const MediaFlowTab = dynamic(() => import('@/components/tabs/MediaFlowTab'), { ssr: false });
 const SettingsTab = dynamic(() => import('@/components/tabs/SettingsTab'), { ssr: false });
 const FileshareTab = dynamic(() => import('@/components/tabs/FileshareTab'), { ssr: false });
 const UsersTab = dynamic(() => import('@/components/tabs/UsersTab'), { ssr: false });
@@ -89,6 +90,8 @@ export default function Dashboard() {
         return <MarketplaceTab />;
       case 'ai':
         return <AiChatTab />;
+      case 'mediaflow':
+        return <MediaFlowTab />;
       case 'settings':
         return <SettingsTab />;
       case 'users':

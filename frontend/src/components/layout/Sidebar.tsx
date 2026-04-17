@@ -15,7 +15,8 @@ import {
     Users,
     Mail,
     ClipboardList,
-    KeyRound
+    KeyRound,
+    Film
 } from 'lucide-react';
 
 export const NAVIGATION = [
@@ -24,6 +25,7 @@ export const NAVIGATION = [
     { id: 'services' as TabId, label: 'Services', icon: <Server size={20} /> },
     { id: 'marketplace' as TabId, label: 'Marketplace', icon: <Store size={20} /> },
     { id: 'fileshare' as TabId, label: 'File Share', icon: <FolderUp size={20} /> },
+    { id: 'mediaflow' as TabId, label: 'MediaFlow', icon: <Film size={20} className="text-zinc-400 group-hover:text-zinc-200 transition-colors" /> },
     { id: 'ai' as TabId, label: 'FlowAI', icon: <Sparkles size={20} className="text-indigo-400 group-hover:text-indigo-300 transition-colors" /> },
 ];
 

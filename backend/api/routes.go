@@ -284,6 +284,11 @@ func registerV1Routes(apiGroup *gin.RouterGroup) {
 
 		// Phase 28: Admin Audit Trail
 		adminGroup.GET("/audit-log", GetAuditLog)
+
+		// Phase 8: MediaFlow Transcode Engine
+		adminGroup.GET("/mediaflow/queue", GetMediaFlowQueue)
+		adminGroup.POST("/mediaflow/scan", TriggerScan)
+		adminGroup.POST("/mediaflow/approve/:id", ApproveItem)
 	}
 }
 

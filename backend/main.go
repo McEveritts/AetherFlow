@@ -158,6 +158,9 @@ func main() {
 		// Initialize the Metrics Recorder (Phase 19 — Predictive Resource Scaling)
 	services.InitMetricsRecorder()
 
+	// Phase 8: Initialize MediaFlow Job Poller
+	services.MediaFlowQueuePoller()
+
 	// Initialize the Smart Backup Scheduler (Phase 20)
 	services.InitSmartBackupScheduler(api.GetDecryptedGeminiKey, func() error {
 		_, err := api.PerformSystemBackup()

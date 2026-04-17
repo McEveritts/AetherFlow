@@ -540,6 +540,22 @@ func InitDB() {
 			FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 		);`)
 
+	// ─── Migration v16: MediaFlow Hardware Transcode Engine ────────────
+	migrate(16, "Add mediaflow queue for hwaccel transcoding",
+		`CREATE TABLE IF NOT EXISTS mediaflow_queue (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			file_path TEXT UNIQUE NOT NULL,
+			status TEXT DEFAULT 'PENDING_APPROVAL',
+			original_codec TEXT DEFAULT '',
+			original_size INTEGER DEFAULT 0,
+			new_codec TEXT DEFAULT '',
+			new_size INTEGER DEFAULT 0,
+			error_log TEXT DEFAULT '',
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		);`,
+		"CREATE INDEX IF NOT EXISTS idx_mediaflow_status ON mediaflow_queue(status);")
+
 	// ─── Ensure singleton settings row ─────────────────────────────────
 	DB.Exec(`INSERT OR IGNORE INTO settings (id) VALUES (1)`)
 
