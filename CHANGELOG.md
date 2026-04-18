@@ -1,12 +1,28 @@
-## CHANGELOG v3.1.6 - Dash Perfection & Immersive Scale
-_Generated April 15, 2026 from finalized UI synchronization turns._
+## CHANGELOG v3.1.6 - MediaFlow Engine & AetherMarketplace Stabilization
+_Generated April 18, 2026 encompassing all commits from v3.1.5 to v3.1.6._
 
 ---
 
 ### Release Highlights
-* **Global Glassmorphism**: Synchronized sidebar aesthetics with the login page using high-glow indigo variants and deeper shadows.
-* **Density-Aware Widgets**: Completed full scaling logic for Storage, Process, and Network widgets to utilize full-screen real estate in Immersive Mode.
-* **Mission Control Scale**: Optimized the App Topology Map and Data Usage History for ultra-wide and immersive dashboard views.
+* **MediaFlow Hardware-Agnostic Engine**: Implemented dynamic AMD (VAAPI) and Intel (QSV) GPU detection with zero-container transcoding mapping directly to optimal `.mkv` targets.
+* **Non-Destructive Retention**: Upgraded MediaFlow to utilize a safe `.mediaflow_trash` lifecycle hook, abolishing legacy destructive file deletions.
+* **Atomic Deploy Engine & SSO**: Introduced Native SSO, Atomic Deploy Engine functionality, and optimizations to Next.js UI.
+* **Update Channels**: Separated stable releases from beta tags natively within the updater.
+* **Marketplace Hardening**: Resolves numerous marketplace and script installation errors, adding proper permission escalations and error bubbling.
+
+### AetherMarketplace & Services
+* **Error Bubbling & Execution**: Stripped sandbox blockers, automatically set execute (`+x`) permissions, and surfaced `stderr` so failed installations become visible.
+* **Sudo Automation**: Automated sudo permissions for the `aetherflow` service user.
+* **Prowlarr & Core App Fixes**: Resolved Prowlarr installation extraction error by pointing directly to the update API.
+* **UI State Sync**: Jobs now immediately reflect as "installed" or "uninstalled" on the frontend upon script completion.
+* **Visual Polish**: Restored missing icons, fixed progress overlay, corrected status labels, and aligned the Services tab aesthetics with the main AetherMarketplace.
+* **Systemd Refinements**: Hardened systemd path logic, enforce strict mounts, and deployed fixes to python remote deployment (`deploy_server.py`) scripts.
+
+### Dashboard & Immersive UI
+* **Global Glassmorphism**: Synchronized sidebar aesthetics and resolved visual glitches matching the high-glow indigo variants of the login flow.
+* **Density-Aware Widgets**: Completed full scaling logic for Storage, Process, and Network widgets to utilize full-screen real estate in Immersive Mode without overlaps.
+* **Mission Control Scale**: Optimized the App Topology Map and Data Usage History for ultra-wide and immersive dashboard views, fixing duplicate node renders.
+* **Deployment Previews**: Expanded platform preview documentation to a 2x8 grid with 11 distinct aesthetic screenshots.
 
 ---
 
