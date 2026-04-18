@@ -59,6 +59,57 @@ cat /etc/sudoers.d/aetherflow
 # aetherflow ALL=(ALL) NOPASSWD: ALL
 ```
 
+### 4. Backend Crash: `AES_MASTER_KEY must be exactly 32 bytes`
+**Symptom**: The `aetherflow-api.service` enters a crash loop immediately on startup. `journalctl` shows the fatal message:
+```
+FATAL: AES_MASTER_KEY must be exactly 32 bytes (AES-256). Got 64 raw bytes.
+```
+**Cause**: The `AES_MASTER_KEY` in your `.env` file is a raw hexadecimal string (64 characters = 64 bytes of ASCII), not a valid key format. The backend's `config.Load` expects either a raw 32-character string **or** a Base64-encoded string that decodes to exactly 32 bytes.
+**Resolution**:
+Generate a correctly formatted key and replace it in your `.env`:
+```bash
+# Generate a valid 32-byte Base64-encoded key
+openssl rand -base64 32
+```
+Then replace the value in `/opt/AetherFlow/backend/.env`:
+```
+AES_MASTER_KEY=<your new base64 key>
+```
+
+> [!CAUTION]
+> Rotating your `AES_MASTER_KEY` will make all previously encrypted secrets (API keys, OIDC secrets) unreadable. You must re-enter them via the Settings UI after rotation.
+
+### 5. Frontend Crash: `EADDRINUSE: address already in use :::3000`
+**Symptom**: The `aetherflow-frontend.service` enters a rapid restart loop. `journalctl` shows:
+```
+Error: listen EADDRINUSE: address already in use :::3000
+```
+**Cause**: A zombie process (typically a leftover PM2-managed `next-server` instance from a pre-systemd deployment) is still holding port 3000. The new systemd unit cannot bind.
+**Resolution**:
+1. Identify the process holding the port:
+   ```bash
+   sudo ss -tulpn | grep ':3000'
+   ```
+2. Stop both AetherFlow systemd services to prevent restart races:
+   ```bash
+   sudo systemctl stop aetherflow-api aetherflow-frontend
+   ```
+3. Kill the zombie process by PID:
+   ```bash
+   sudo kill -9 <PID>
+   ```
+4. Optionally, purge the legacy PM2 daemon entirely:
+   ```bash
+   pm2 kill 2>/dev/null; pm2 unstartup 2>/dev/null
+   ```
+5. Restart the services:
+   ```bash
+   sudo systemctl start aetherflow-api aetherflow-frontend
+   ```
+
+> [!TIP]
+> Next.js processes spawned via `npm start` ignore `SIGTERM`. If a graceful `kill <PID>` does not release the port, `kill -9` (SIGKILL) is required.
+
 ---
 
 ## Frequently Asked Questions

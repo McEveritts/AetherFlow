@@ -31,6 +31,7 @@ Welcome to the AetherFlow v3.1.x documentation suite. Whether you are deploying 
 - **[API Documentation](./docs/api.md)** — Complete REST endpoint structures, WebSocket sub-protocols, and CSRF rules.
 - **[Testing AetherFlow](./docs/testing.md)** — How to run Playwright E2E suites, backend Go tests, and manual python diagnostics.
 - **[Troubleshooting & FAQ](./docs/troubleshooting.md)** — Resolving "System Offline" errors, connection drops, and marketplace script failures.
+- **[Incident Reports](./docs/incidents/mcstream_deployment_outage_v3.1.6.md)** — Historical post-mortems, including the McStream deployment outage.
 
 ---
 

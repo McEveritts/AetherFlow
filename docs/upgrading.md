@@ -22,6 +22,14 @@ The v3.1.x release represents a turning point in platform stability and performa
 ### 1. The systemd Migration
 In v3.1.2+, AetherFlow has officially migrated from **PM2** to **systemd** for service management. This change is handled automatically by the updater, but requires a one-time reboot of the dashboard services.
 
+> [!WARNING]
+> **PM2 Zombie Processes**: The automated migration does not guarantee that pre-existing PM2 daemons are fully terminated. If leftover `next-server` or `node` processes continue to hold port 3000, the new systemd units will crash with `EADDRINUSE`. After upgrading, verify no orphaned processes remain:
+> ```bash
+> sudo ss -tulpn | grep ':3000'
+> pm2 kill 2>/dev/null   # Safe to run even if pm2 is not installed
+> ```
+> See [Troubleshooting §5](./troubleshooting.md) for the full resolution procedure.
+
 **Post-Update verification:**
 ```bash
 # Verify the new systemd units are active
