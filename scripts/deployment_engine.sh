@@ -93,8 +93,12 @@ echo "[5/7] Migrating Persistent Configuration States..."
 if [ -L ${ACTIVE_ROOT} ] || [ -d ${ACTIVE_ROOT} ]; then
     OLD_ROOT=$(readlink -f ${ACTIVE_ROOT})
     echo "Cloning persistent database and static assets from ${OLD_ROOT}..."
-    if [ -f "${OLD_ROOT}/backend/aetherflow.db" ]; then
-        cp -pf "${OLD_ROOT}/backend/aetherflow.db" "${TARGET_DIR}/backend/aetherflow.db"
+    if [ -d "${OLD_ROOT}/backend/data" ]; then
+        cp -Rpf "${OLD_ROOT}/backend/data" "${TARGET_DIR}/backend/"
+    fi
+    # Migrate backend .env
+    if [ -f "${OLD_ROOT}/backend/.env" ]; then
+        cp -pf "${OLD_ROOT}/backend/.env" "${TARGET_DIR}/backend/.env"
     fi
     # If using .env.local in frontend, migrate it
     if [ -f "${OLD_ROOT}/frontend/.env.local" ]; then
@@ -109,8 +113,9 @@ rm -rf ${ACTIVE_ROOT} # Removes old dir or old symlink
 ln -sfn ${TARGET_DIR} ${ACTIVE_ROOT}
 
 echo "[7/7] Gracefully Reloading Daemons..."
-pm2 reload aetherflow-api || pm2 start ${ACTIVE_ROOT}/backend/aetherflow-api --name "aetherflow-api"
-pm2 reload aetherflow-frontend || pm2 start npm --name "aetherflow-frontend" -- start
+export PATH=$PATH:/usr/local/node-v22.12.0-linux-x64/bin
+pm2 reload aetherflow-api || pm2 start ${ACTIVE_ROOT}/backend/aetherflow-api --name "aetherflow-api" --cwd ${ACTIVE_ROOT}/backend
+pm2 reload aetherflow-frontend || pm2 start ${ACTIVE_ROOT}/frontend/node_modules/next/dist/bin/next --name "aetherflow-frontend" --cwd ${ACTIVE_ROOT}/frontend -- start
 pm2 save
 
 mkdir -p /srv/aetherflow
