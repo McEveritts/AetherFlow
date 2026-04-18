@@ -110,6 +110,33 @@ Error: listen EADDRINUSE: address already in use :::3000
 > [!TIP]
 > Next.js processes spawned via `npm start` ignore `SIGTERM`. If a graceful `kill <PID>` does not release the port, `kill -9` (SIGKILL) is required.
 
+### 6. Backend Panic: `readonly database` on First Write
+**Symptom**: Both services start successfully and the frontend loads. However, the first write operation (e.g., submitting initialization credentials, saving settings) causes the Go backend to panic with `attempt to write a readonly database`.
+**Cause**: The `aetherflow-api.service` unit uses `ProtectSystem=strict`, which mounts the entire filesystem as read-only inside the service namespace. If the `ReadWritePaths` directive does not include the application's data directory, SQLite cannot write — even when POSIX file ownership is correct. This is deceptive because the boot sequence only reads the database; the crash is deferred until the first authenticated write.
+**Resolution**:
+1. Edit the systemd unit file:
+   ```bash
+   sudo systemctl edit --full aetherflow-api.service
+   ```
+2. Ensure `ReadWritePaths` includes the application directory and any release directories used by atomic symlink deployments:
+   ```ini
+   [Service]
+   ProtectSystem=strict
+   ReadWritePaths=/opt/AetherFlow /opt/AetherFlow_releases
+   ```
+3. Reload and restart:
+   ```bash
+   sudo systemctl daemon-reload
+   sudo systemctl restart aetherflow-api
+   ```
+4. Verify `RW` access by checking the journal for successful database operations:
+   ```bash
+   sudo journalctl -u aetherflow-api -n 20 --no-pager | grep -i "sqlite\|database\|migration"
+   ```
+
+> [!IMPORTANT]
+> If you use atomic symlink deployments (`/opt/AetherFlow` → `/opt/AetherFlow_releases/<version>`), both the symlink path **and** the real release directory must be listed in `ReadWritePaths`. The systemd sandbox resolves symlinks before applying filesystem restrictions.
+
 ---
 
 ## Frequently Asked Questions

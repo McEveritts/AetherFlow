@@ -8,7 +8,7 @@ Following a recent deployment engine refactoring and an update atomic symlink sw
 
 ## Root Cause Analysis & Identification
 
-By securely connecting to the McStream node via non-interactive SSH (using `paramiko` from the native Windows environment), we were able to parse the system `journalctl` error logs and the `systemctl status` diagnostics. Two independent blockers were identified.
+By securely connecting to the McStream node via non-interactive SSH (using `paramiko` from the native Windows environment), we were able to parse the system `journalctl` error logs and the `systemctl status` diagnostics. Three independent blockers were identified.
 
 ### 1. Backend Crash: Encryption Key Misconfiguration
 **How it was identified:** 
@@ -25,6 +25,13 @@ Simultaneously, the `aetherflow-frontend.service` crashed and was placed into a 
 
 **The Root Cause:**
 Prior to our architectural refactoring, PM2 managed AetherFlow applications directly. When transferring execution rights to systemd (`aetherflow-frontend.service`), the pre-existing PM2 daemon processes (or orphaned `next-server` instances) were not gracefully expunged and continued gripping port `3000`. The new systemd unit could not bind, triggering an immediate crash. Since Next.js natively ignores SIGTERM signals dispatched via `npm start`, automated shutdowns timed out without flushing the port.
+
+### 3. Backend Panic: SQLite `readonly database` Under systemd Sandbox
+**How it was identified:**
+After resolving blockers 1 and 2, both services booted successfully. However, when the user attempted to submit initialization credentials through the frontend setup wizard, the Go backend suffered a catastrophic `readonly database` panic on the first SQLite write operation.
+
+**The Root Cause:**
+The new hardened `aetherflow-api.service` unit file enforces `ProtectSystem=strict`, which mounts the entire Linux filesystem as read-only inside the service's namespace. While file ownership had been correctly set (`chown -R aetherflow:aetherflow`), the systemd sandbox blocked all write access to the SQLite database at `/opt/AetherFlow/backend/data/aetherflow.sqlite` because the `ReadWritePaths` directive did not include the application's release directory. This defect was invisible during startup because the boot sequence only performs read operations against the database; the panic only surfaced on the first authenticated write (credential initialization).
 
 ## Remediations Executed
 
@@ -48,8 +55,17 @@ Rather than relying on `pm2 kill`, which could not be reliably located in standa
 2. Halted the systemd orchestrators intentionally: `systemctl stop aetherflow-api aetherflow-frontend` to avoid restart races.
 3. Dispatched absolute SIGKILL (`kill -9`) traps targeting the trapped PIDs directly resolving the `EADDRINUSE` port collision.
 
-### 3. Re-enabling the Pipeline
-Once the ports were fully deregistered and the encryption key verified, the systemd services were started. Both immediately synced and stabilized.
+### 3. Patching the systemd Sandbox
+The `aetherflow-api.service` unit file was patched to whitelist the application's data directories in the `ReadWritePaths` directive:
+1. Re-anchored ownership: `chown -R aetherflow:aetherflow /opt/AetherFlow_releases`.
+2. Spliced both the symlink and release directories into the unit file:
+   ```ini
+   ReadWritePaths=/opt/AetherFlow /opt/AetherFlow_releases
+   ```
+3. Reloaded the daemon (`systemctl daemon-reload`) and hard-restarted the API.
+
+### 4. Re-enabling the Pipeline
+Once the ports were fully deregistered, the encryption key verified, and the sandbox permissions corrected, the systemd services were started. Both immediately synced and stabilized. The background telemetry orchestrator and OIDC credential pruner confirmed successful `RW` access to the database.
 
 ## Validations Performed
 

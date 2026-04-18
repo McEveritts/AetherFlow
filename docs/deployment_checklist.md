@@ -67,7 +67,20 @@ cd backend
 GIN_MODE=release go build -o dist/aetherflow-api .
 ```
 
-### 5. Zero-Downtime Strategy
+### 5. Verify systemd Sandbox Permissions
+
+If your `aetherflow-api.service` uses `ProtectSystem=strict` (recommended for production), verify that `ReadWritePaths` includes all directories the backend needs to write to:
+```bash
+systemctl cat aetherflow-api.service | grep -E "ProtectSystem|ReadWritePaths"
+# Expected:
+# ProtectSystem=strict
+# ReadWritePaths=/opt/AetherFlow /opt/AetherFlow_releases
+```
+
+> [!WARNING]
+> Missing `ReadWritePaths` entries will **not** cause a startup failure. The service will boot normally but panic on the first SQLite write operation (e.g., credential initialization). See [Troubleshooting §6](./troubleshooting.md) for details.
+
+### 6. Zero-Downtime Strategy
 
 1. Deploy with all env vars set (especially `AES_MASTER_KEY`)
 2. The system will:
