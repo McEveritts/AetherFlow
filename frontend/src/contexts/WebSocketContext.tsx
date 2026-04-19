@@ -189,7 +189,8 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
         if (wsRef.current) {
             isManualCloseRef.current = true;
             wsRef.current.close();
-            isManualCloseRef.current = false;
+            wsRef.current = null;
+            // NOTE: isManualCloseRef stays true until ws.onopen of the NEW connection resets it
         }
 
         const stateLabel = attemptRef.current === 0 ? 'CONNECTING' : 'RECONNECTING';
@@ -225,6 +226,9 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
 
         ws.onopen = () => {
             if (!isMountedRef.current) return;
+
+            // New connection is live — clear the manual-close flag
+            isManualCloseRef.current = false;
 
             // If we were polling, stop
             stopPolling();
@@ -386,12 +390,21 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
         if (isWebSocketDisabled() || preferredMode === 'poll') {
             transportOwnerRef.current = 'poll';
             useConnectionStore.getState().setLastTransportSwitchReason('USER_PREFERENCE_OR_DISABLED');
-            // If we have an active WS connection, close it
+            // If we have an active WS connection, close it cleanly
             if (wsRef.current) {
                 isManualCloseRef.current = true;
                 wsRef.current.close();
-                isManualCloseRef.current = false;
+                wsRef.current = null;
+                // Flag stays true — no new WS will be opened in this branch
             }
+            // Cancel any pending WS reconnect timers
+            if (reconnectTimerRef.current) {
+                clearTimeout(reconnectTimerRef.current);
+                reconnectTimerRef.current = undefined;
+            }
+            clearHeartbeat();
+            attemptRef.current = 0;
+            setReconnectAttempt(0);
             startPolling(true);
             return () => {
                 isMountedRef.current = false;

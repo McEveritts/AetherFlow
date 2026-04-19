@@ -202,7 +202,7 @@ export default function MediaFlowTab() {
                                         <td className="p-4">
                                             <span className="bg-white/10 text-zinc-300 text-xs px-2 py-1 rounded font-mono border border-white/5">{item.originalCodec}</span>
                                             {item.newCodec && (
-                                                <span className="ml-2 bg-indigo-500/20 text-indigo-300 text-xs px-2 py-1 rounded font-mono border border-indigo-500/20">-> {item.newCodec}</span>
+                                                <span className="ml-2 bg-indigo-500/20 text-indigo-300 text-xs px-2 py-1 rounded font-mono border border-indigo-500/20">{'->'} {item.newCodec}</span>
                                             )}
                                         </td>
                                         <td className="p-4">

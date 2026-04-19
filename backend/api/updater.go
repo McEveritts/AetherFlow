@@ -76,7 +76,7 @@ func getLocalVersion() string {
 }
 
 // fetchLatestStableRelease gets the latest version via the Releases API,
-// ensuring that the release was authored by "mceveritt" and is not a pre-release.
+// ensuring that the release was authored by "McEveritts" and is not a pre-release.
 func fetchLatestStableRelease() (tagName, body, htmlUrl string, err error) {
 	resp, reqErr := httpClient.Get("https://api.github.com/repos/" + githubRepo + "/releases")
 	if reqErr != nil {
@@ -99,13 +99,13 @@ func fetchLatestStableRelease() (tagName, body, htmlUrl string, err error) {
 
 	// Find the first release matching criteria
 	for _, release := range releases {
-		if strings.EqualFold(release.Author.Login, "mceveritt") && !strings.Contains(release.TagName, "-") {
+		if strings.EqualFold(release.Author.Login, "McEveritts") && !strings.Contains(release.TagName, "-") {
 			slog.Info("[updater] resolved latest version via Releases API", "version", release.TagName)
 			return release.TagName, release.Body, release.HtmlUrl, nil
 		}
 	}
 
-	slog.Warn("[updater] no stable releases authored by mceveritt found")
+	slog.Warn("[updater] no stable releases authored by McEveritts found")
 	return "", "", "", nil
 }
 
