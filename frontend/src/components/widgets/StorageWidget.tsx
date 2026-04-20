@@ -1,5 +1,5 @@
 import { HardDrive } from 'lucide-react';
-import { SystemMetrics, HardwareReport } from '@/types/dashboard';
+import { SystemMetrics, HardwareReport, DiskPartition } from '@/types/dashboard';
 
 interface StorageWidgetProps {
     storageData: DiskPartition[];

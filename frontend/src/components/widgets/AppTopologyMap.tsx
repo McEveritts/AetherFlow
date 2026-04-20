@@ -220,7 +220,7 @@ export default function AppTopologyMap({ topologyData, density = 'compact' }: Ap
             event.subject.fy = null;
         }
 
-    }, [metrics]);
+    }, [topologyData, isImmersive]);
 
     return (
         <div className={`bg-white/[0.02] border border-white/[0.05] rounded-2xl relative overflow-hidden backdrop-blur-xl h-full transition-all duration-300 ${isImmersive ? 'p-6' : 'p-5'}`}>
