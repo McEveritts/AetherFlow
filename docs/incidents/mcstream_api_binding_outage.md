@@ -1,48 +1,74 @@
-# AetherFlow Backend Binding Outage Resolution
+# AetherFlow Backend Connectivity Outage Resolution
 
-This document outlines the diagnosis and resolution of a networking visibility issue that prevented the AetherFlow backend from being accessible on the McStream production server.
+This document outlines the diagnosis and resolution of two cascading networking/authentication defects that prevented the AetherFlow backend from being accessible on the McStream production server.
 
 ## Incident Overview
 
-Following a successful atomic deployment of AetherFlow, the Go API Gateway (backend) appeared to be completely offline when accessed via the McStream server's external IP address (`192.168.1.153:8080`). The `aetherflow-api.service` was actively running and processing requests (verified via `systemctl status` and `journalctl`), but the client-side dashboard could not establish a connection to it.
+Following a successful atomic deployment of AetherFlow, the Go API Gateway (backend) appeared to be completely offline when accessed via the McStream server's external IP address (`192.168.1.153`). The `aetherflow-api.service` was actively running and processing requests (verified via `systemctl status` and `journalctl`), but the client-side dashboard could not establish a connection — displaying "Connection to identity provider lost. Is the backend service active?"
 
 ## Root Cause Analysis & Identification
 
-By securely connecting to the McStream node and testing the port locally (`curl 127.0.0.1:8080`), it was determined that the API was functioning properly. However, external requests to `192.168.1.153:8080` were returning connection refused or timeouts.
+Two independent defects were identified:
 
-**The Root Cause:**
+### 1. HTTP Server Bind Address (Blocker #1)
 The `main.go` source code for the backend had a hardcoded `http.Server` address configuration that bound the application exclusively to localhost:
 
 ```go
-// Old configuration
 srv := &http.Server{
-	Addr:    "127.0.0.1:" + port,
-	Handler: r,
+    Addr: "127.0.0.1:" + port,
 }
 ```
 
-This caused the backend to be physically restricted to loopback traffic. Because of this, the server's networking layer and proxy components were unable to route external traffic to the API, creating the illusion of an offline backend.
+This physically restricted the backend to loopback traffic only. External connections to port 8080 were refused at the OS level.
+
+### 2. HostValidationMiddleware Rejection (Blocker #2)
+After fixing the bind address, the backend was reachable on the network but still rejected browser requests with `400 Bad Request`. The `HostValidationMiddleware` in `api/auth.go` contained a hardcoded whitelist of allowed `Host` header values:
+
+```go
+allowedHosts := map[string]bool{
+    "api.aetherflow.com": true,
+    "localhost:8080":     true,
+    "127.0.0.1:8080":    true,
+}
+```
+
+AetherFlow's frontend uses a Next.js rewrite proxy — the browser sends requests to port `3000`, and the Next.js server forwards them to the backend on port `8080`. Critically, Next.js preserves the **original browser Host header** (e.g. `192.168.1.153:3000`) when proxying. Since the LAN IP was not in the hardcoded whitelist, the middleware silently rejected every proxied request.
 
 ## Remediations Executed
 
-### 1. Source Code Patch
-The `backend/main.go` file was patched to bind the HTTP server to `0.0.0.0`, ensuring that the API Gateway listens on all network interfaces instead of just the loopback interface.
+### 1. Bind Address Fix (`backend/main.go`)
+Patched the HTTP server to bind to `0.0.0.0` (all interfaces):
 
 ```go
-// New configuration
 srv := &http.Server{
-	Addr:    "0.0.0.0:" + port,
-	Handler: r,
+    Addr: "0.0.0.0:" + port,
 }
 ```
-The startup logging statement was also updated to reflect the `0.0.0.0` address.
 
-### 2. Deployment
-The fix was committed to the `master` branch and a `nightly` atomic deployment was triggered on the McStream server using the `/opt/AetherFlow/scripts/deployment_engine.sh nightly` pipeline. This fetched the new source, compiled the Go backend, and executed the daemon reload.
+### 2. HostValidationMiddleware Auto-Discovery (`backend/api/auth.go`)
+Replaced the hardcoded host whitelist with dynamic auto-discovery using `net.Interfaces()`. When `ALLOWED_HOSTS` is not explicitly set in the environment, the middleware now:
+- Includes default entries: `localhost`, `127.0.0.1` (with ports `3000` and `8080`)
+- Auto-discovers all non-loopback IPs from the server's network interfaces
+- Registers each discovered IP bare, and with `:8080` and `:3000` suffixes
+- Logs the total number of allowed hosts at startup for observability
+
+When `ALLOWED_HOSTS` **is** explicitly set, it overrides defaults entirely (production hardening).
+
+This approach is **network-agnostic** — it works on any server regardless of IP address or network topology, since it discovers the machine's own IPs at runtime.
+
+### 3. Deployment
+Both fixes were committed and pushed to the `master` branch. A `nightly` atomic deployment was triggered on McStream via `deployment_engine.sh nightly`, which compiled the patched backend and restarted the systemd services.
 
 ## Validations Performed
 
-Post-deployment, the API Gateway was successfully verified by issuing an external `curl` network request:
+Post-deployment end-to-end verification:
 
-- **External Network Check**: `curl -v http://192.168.1.153:8080/api/v1/public/auth/setup/check`
-- **Result**: Successfully connected and received HTTP headers from the API Gateway (including AetherFlow's custom `Content-Security-Policy` and `X-Api-Version` headers), confirming that the backend is now exposed and correctly accepting external connections.
+| Test | Method | Result |
+|---|---|---|
+| Backend via Next.js proxy | `curl http://192.168.1.153:3000/api/v1/public/auth/setup/check` | `200 OK` — `{"setupRequired":true}` |
+| Setup check (localhost) | `curl http://127.0.0.1:8080/api/v1/public/auth/setup/check` | `200 OK` — `{"setupRequired":true}` |
+| Host header rejection proof | `curl -H 'Host: 192.168.1.153:3000' http://127.0.0.1:8080/...` | Previously `400`, now `200` |
+
+## Key Takeaway
+
+The `HostValidationMiddleware` is a critical security control (CWE-601: Open Redirect prevention), but its hardcoded whitelist was incompatible with AetherFlow's proxy architecture. The auto-discovery pattern mirrors the existing `discoverOrigins()` function used for CORS in `main.go`, maintaining consistency across the codebase.
