@@ -11,6 +11,7 @@ import (
 	"log"
 	"log/slog"
 	"net/http"
+	"net"
 	"net/url"
 	"os"
 	"strings"
@@ -680,21 +681,59 @@ func UpdateProfile(c *gin.Context) {
 func HostValidationMiddleware() gin.HandlerFunc {
 	allowedHosts := map[string]bool{
 		"api.aetherflow.com": true,
+		"localhost":          true,
 		"localhost:8080":     true,
-		"127.0.0.1:8080":     true,
+		"localhost:3000":     true,
+		"127.0.0.1":         true,
+		"127.0.0.1:8080":    true,
+		"127.0.0.1:3000":    true,
 	}
-	// For dev continuity, allow if ALLOWED_HOSTS is empty in env by fallback
+
 	envHosts := os.Getenv("ALLOWED_HOSTS")
 	if envHosts != "" {
+		// Explicit whitelist overrides defaults entirely
 		allowedHosts = make(map[string]bool)
 		for _, h := range strings.Split(envHosts, ",") {
 			allowedHosts[strings.TrimSpace(h)] = true
 		}
+	} else {
+		// Auto-discover local network IPs so the Next.js proxy
+		// can forward requests with the original browser Host header.
+		ifaces, err := net.Interfaces()
+		if err == nil {
+			for _, iface := range ifaces {
+				addrs, err := iface.Addrs()
+				if err != nil {
+					continue
+				}
+				for _, addr := range addrs {
+					var ip net.IP
+					switch v := addr.(type) {
+					case *net.IPNet:
+						ip = v.IP
+					case *net.IPAddr:
+						ip = v.IP
+					}
+					if ip == nil || ip.IsLoopback() {
+						continue
+					}
+					ipStr := ip.String()
+					allowedHosts[ipStr] = true
+					allowedHosts[ipStr+":8080"] = true
+					allowedHosts[ipStr+":3000"] = true
+				}
+			}
+		}
+		slog.Info("host validation auto-discovered", "allowed_count", len(allowedHosts))
 	}
 
 	return func(c *gin.Context) {
 		if len(allowedHosts) > 0 {
 			if !allowedHosts[c.Request.Host] {
+				slog.Warn("host validation rejected request",
+					"host", c.Request.Host,
+					"ip", c.ClientIP(),
+				)
 				c.AbortWithStatus(http.StatusBadRequest)
 				return
 			}
