@@ -32,8 +32,28 @@ run_check() {
 }
 
 run_check \
-    "Known token and API key formats" \
-    '(ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{16,}|sk-ant-[A-Za-z0-9_-]{16,}|AIza[0-9A-Za-z_-]{20,}|AKIA[0-9A-Z]{16})' \
+    "GitHub token formats" \
+    '(ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{20,})' \
+    '^(backend/.*_test\.go:|frontend/tests/:|\.github/workflows/(ci|security)\.yml:)'
+
+run_check \
+    "OpenAI token formats" \
+    'sk-[A-Za-z0-9_-]{16,}' \
+    '^(backend/.*_test\.go:|frontend/tests/:|\.github/workflows/(ci|security)\.yml:)'
+
+run_check \
+    "Anthropic token formats" \
+    'sk-ant-[A-Za-z0-9_-]{16,}' \
+    '^(backend/.*_test\.go:|frontend/tests/:|\.github/workflows/(ci|security)\.yml:)'
+
+run_check \
+    "Google API key formats" \
+    'AIza[0-9A-Za-z_-]{20,}' \
+    '^(backend/.*_test\.go:|frontend/tests/:|\.github/workflows/(ci|security)\.yml:)'
+
+run_check \
+    "AWS access key formats" \
+    'AKIA[0-9A-Z]{16}' \
     '^(backend/.*_test\.go:|frontend/tests/:|\.github/workflows/(ci|security)\.yml:)'
 
 run_check \
