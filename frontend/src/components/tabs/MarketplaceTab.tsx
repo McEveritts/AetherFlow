@@ -4,10 +4,22 @@ import { Search, Package, Download, RefreshCw, XCircle, CheckCircle2, AlertCircl
 import { useToast } from '@/contexts/ToastContext';
 import { ProgressRing } from '@/components/ui/ProgressRing';
 import { apiFetch } from '@/lib/fetcher';
+import { getSVGLCatalog, matchSVGLLogo } from '@/lib/svgl';
 
 const AppIcon = ({ app }: { app: App }) => {
     const [iconError, setIconError] = useState(false);
-    const iconPath = `/img/${app.id.toLowerCase()}.png`;
+    const [svglUrl, setSvglUrl] = useState<string | null>(null);
+    const primaryIconPath = svglUrl || `/img/${app.id.toLowerCase()}.png`;
+
+    useEffect(() => {
+        getSVGLCatalog().then(catalog => {
+            const match = matchSVGLLogo(catalog, app.id, app.name);
+            if (match) {
+                setSvglUrl(match);
+                setIconError(false); // Reset error in case previous local fetch failed
+            }
+        });
+    }, [app.id, app.name]);
 
     if (iconError) {
         return (
@@ -21,9 +33,17 @@ const AppIcon = ({ app }: { app: App }) => {
     return (
         <div className="relative w-full h-full flex items-center justify-center group-hover:scale-110 transition-transform duration-300">
              <img
-                src={iconPath}
-                onError={() => setIconError(true)}
-                className="w-full h-full object-contain p-2"
+                src={primaryIconPath}
+                onError={() => {
+                    // If SVGL failed, drop down to the local file by clearing the svglUrl
+                    if (svglUrl) {
+                        setSvglUrl(null);
+                    } else {
+                        // Both failed, show the fallback icon
+                        setIconError(true);
+                    }
+                }}
+                className={`w-full h-full object-contain p-2 ${svglUrl ? 'drop-shadow-lg' : ''}`}
                 alt={app.name}
                 loading="lazy"
             />
