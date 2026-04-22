@@ -122,7 +122,8 @@ normalize_subject() {
   local subject
   subject="$(sanitize_text "$1")"
 
-  if [[ "${subject}" =~ ^[[:alpha:]][[:alnum:]_-]*(\([^)]+\))?:[[:space:]]*(.*)$ ]]; then
+  local re="^[[:alpha:]][[:alnum:]_-]*(\([^)]+\))?:[[:space:]]*(.*)$"
+  if [[ "${subject}" =~ $re ]]; then
     subject="${BASH_REMATCH[2]}"
   fi
 
