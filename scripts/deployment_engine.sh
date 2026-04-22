@@ -30,26 +30,14 @@ cd ${TARGET_DIR}
 
 echo "[2/7] Binding target branch/tag for channel: ${CHANNEL}..."
 if [ "$CHANNEL" == "stable" ]; then
-    # Fetch latest stable release tag safely, restricted to mceveritt author only and excluding prereleases
-    LATEST_TAG=$(python3 -c '
-import urllib.request, json
-try:
-    req = urllib.request.Request("https://api.github.com/repos/McEveritts/AetherFlow/releases")
-    req.add_header("User-Agent", "AetherFlow-Deployment")
-    data = json.loads(urllib.request.urlopen(req).read().decode("utf-8"))
-    for r in data:
-        if r.get("author", {}).get("login", "").lower() == "mceveritt" and not r.get("prerelease"):
-            print(r.get("tag_name", ""))
-            break
-except Exception as e:
-    pass
-' | tr -d '\r\n')
+    # Fetch latest stable tag from git directly, filtering out prereleases
+    LATEST_TAG=$(git tag -l | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1)
     
     if [ -n "$LATEST_TAG" ]; then
         git checkout ${LATEST_TAG}
         echo ${LATEST_TAG} > ${TARGET_DIR}/.version
     else
-        echo "ERROR: Could not resolve latest stable tag authored by mceveritt."
+        echo "ERROR: Could not resolve latest stable tag."
         rm -rf ${TARGET_DIR}
         exit 1
     fi
@@ -100,6 +88,10 @@ if [ -L ${ACTIVE_ROOT} ] || [ -d ${ACTIVE_ROOT} ]; then
     if [ -f "${OLD_ROOT}/backend/.env" ]; then
         cp -pf "${OLD_ROOT}/backend/.env" "${TARGET_DIR}/backend/.env"
     fi
+    # Migrate sqlite database
+    if [ -f "${OLD_ROOT}/backend/aetherflow.sqlite" ]; then
+        cp -pf "${OLD_ROOT}/backend/aetherflow.sqlite" "${TARGET_DIR}/backend/aetherflow.sqlite"
+    fi
     # If using .env.local in frontend, migrate it
     if [ -f "${OLD_ROOT}/frontend/.env.local" ]; then
         cp -pf "${OLD_ROOT}/frontend/.env.local" "${TARGET_DIR}/frontend/.env.local"
@@ -113,10 +105,8 @@ rm -rf ${ACTIVE_ROOT} # Removes old dir or old symlink
 ln -sfn ${TARGET_DIR} ${ACTIVE_ROOT}
 
 echo "[7/7] Gracefully Reloading Daemons..."
-export PATH=$PATH:/usr/local/node-v22.12.0-linux-x64/bin
-pm2 reload aetherflow-api || pm2 start ${ACTIVE_ROOT}/backend/aetherflow-api --name "aetherflow-api" --cwd ${ACTIVE_ROOT}/backend
-pm2 reload aetherflow-frontend || pm2 start ${ACTIVE_ROOT}/frontend/node_modules/next/dist/bin/next --name "aetherflow-frontend" --cwd ${ACTIVE_ROOT}/frontend -- start
-pm2 save
+systemctl daemon-reload
+systemctl restart aetherflow-api aetherflow-frontend || true
 
 mkdir -p /srv/aetherflow
 sed -i '/SCGIMount/d' /etc/apache2/sites-enabled/*.conf 2>/dev/null || true
