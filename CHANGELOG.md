@@ -10,6 +10,7 @@ _Generated April 22, 2026 encompassing all commits from v3.1.6 to v3.1.7._
 * **Storage Insights**: Introduced a dynamic partition-filtering dropdown to the Storage widget, allowing targeted drive inspection instead of only aggregate views.
 * **Immersive UI Polish**: Refactored the Ghost Spacer Sidebar to align icon dimensions, optimized the `GpuWidget` layout to prevent text clipping, and integrated SVGL for fetching dynamic AetherMarketplace logos.
 * **Frontend Build Integrity**: Resolved pre-existing TypeScript/build errors in `StorageWidget`, `AppTopologyMap`, and `MediaFlowTab`. Removed the orphaned `LoginOverlay` component.
+  * *Hotfix:* Patched a strict type validation mismatch (`e.target.value as AIProviderID`) in `AiChatTab` that blocked Next.js production builds during deployment.
 
 ---
 
