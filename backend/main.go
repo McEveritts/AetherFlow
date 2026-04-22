@@ -51,10 +51,14 @@ var version = "3.1.6"
 // discoverOrigins auto-detects local and public IPs and builds CORS origin list
 func discoverOrigins() []string {
 	origins := map[string]bool{
-		"http://localhost":  true,
-		"https://localhost": true,
-		"http://127.0.0.1":  true,
-		"https://127.0.0.1": true,
+		"http://localhost":      true,
+		"https://localhost":     true,
+		"http://localhost:3000": true,
+		"http://localhost:8080": true,
+		"http://127.0.0.1":      true,
+		"https://127.0.0.1":     true,
+		"http://127.0.0.1:3000": true,
+		"http://127.0.0.1:8080": true,
 	}
 
 	// Detect local IPs from network interfaces
@@ -77,8 +81,11 @@ func discoverOrigins() []string {
 					continue
 				}
 				ipStr := ip.String()
+				// Add base IP and common dev/proxy ports
 				origins[fmt.Sprintf("http://%s", ipStr)] = true
 				origins[fmt.Sprintf("https://%s", ipStr)] = true
+				origins[fmt.Sprintf("http://%s:3000", ipStr)] = true
+				origins[fmt.Sprintf("http://%s:8080", ipStr)] = true
 			}
 		}
 	}
@@ -94,11 +101,21 @@ func discoverOrigins() []string {
 			if publicIP != "" {
 				origins[fmt.Sprintf("http://%s", publicIP)] = true
 				origins[fmt.Sprintf("https://%s", publicIP)] = true
+				origins[fmt.Sprintf("http://%s:3000", publicIP)] = true
+				origins[fmt.Sprintf("http://%s:8080", publicIP)] = true
 				slog.Info("detected public IP", "ip", publicIP)
 			}
 		}
 	} else {
 		slog.Warn("could not detect public IP", "error", err)
+	}
+
+	// Also add the machine's hostname if it resolves
+	hostname, err := os.Hostname()
+	if err == nil && hostname != "" {
+		origins[fmt.Sprintf("http://%s", hostname)] = true
+		origins[fmt.Sprintf("http://%s:3000", hostname)] = true
+		origins[fmt.Sprintf("http://%s:8080", hostname)] = true
 	}
 
 	// Convert map to slice
@@ -256,7 +273,7 @@ func main() {
 	// CORS Configuration
 	corsConfig := cors.Config{
 		AllowMethods:     []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
-		AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "Authorization", "X-API-Version", "X-AetherFlow-Signature", "X-WHMCS-Signature", "X-BLESTA-Signature"},
+		AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "Authorization", "X-API-Version", "X-CSRF-Token", "X-Requested-With", "X-AetherFlow-Signature", "X-WHMCS-Signature", "X-BLESTA-Signature"},
 		ExposeHeaders:    []string{"Content-Length", "X-API-Version", "Deprecation", "Link"},
 		AllowCredentials: true,
 	}
