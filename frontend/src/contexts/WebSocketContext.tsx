@@ -256,32 +256,7 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
             try {
                 const rawMessage = JSON.parse(event.data);
                 const message = webSocketMessageSchema.parse(rawMessage);
-                const currentInterval = useConnectionStore.getState().pollInterval;
                 
-                // Throttle logic
-                if (now - lastWsPushRef.current < currentInterval - 100) {
-                    if (message.type === 'METRICS_UPDATE') {
-                        const parsedData = metricsUpdateDataSchema.safeParse(message.data);
-                        if (parsedData.success) {
-                            const sysData = parsedData.data.system as unknown as SystemMetrics;
-                            // FALLBACK: Use MAX aggregation semantics for dropped frames until policy is ratified
-                            if (!suppressedMetricsBufferRef.current) {
-                                suppressedMetricsBufferRef.current = sysData;
-                            } else {
-                                const prev = suppressedMetricsBufferRef.current;
-                                suppressedMetricsBufferRef.current = {
-                                    ...sysData,
-                                    cpu_usage: Math.max(prev.cpu_usage, sysData.cpu_usage),
-                                } as unknown as SystemMetrics;
-                            }
-                        }
-                    } else if (['MARKETPLACE_UPDATE', 'SYSTEM_HEAL', 'ACTION_QUEUED'].includes(message.type)) {
-                        // FALLBACK: Treat control-plane events as standard throttled metrics until unconditional bypass is ratified.
-                        suppressedControlEventsRef.current.push({ type: message.type, data: message.data });
-                    }
-                    return; // drop update to enforce user's selected update frequency
-                }
-
                 lastWsPushRef.current = now;
 
                 if (message.type === 'METRICS_UPDATE') {
@@ -289,16 +264,8 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
                     if (parsedData.success) {
                         const sysData = parsedData.data.system as unknown as SystemMetrics;
                         
-                        // Merge with buffered MAX metrics if any exist
-                        const finalMetrics = suppressedMetricsBufferRef.current ? {
-                            ...sysData,
-                            cpu_usage: Math.max(suppressedMetricsBufferRef.current.cpu_usage, sysData.cpu_usage)
-                        } as unknown as SystemMetrics : sysData;
-                        
-                        suppressedMetricsBufferRef.current = null;
-
                         setData({
-                            system: finalMetrics as unknown as SystemMetrics | null,
+                            system: sysData,
                             services: parsedData.data.services as Record<string, unknown> | null,
                         });
                     } else {

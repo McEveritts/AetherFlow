@@ -52,7 +52,7 @@ export default function DataUsageHistoryWidget({ density = 'compact' }: DataUsag
                 const dailyGroups = new Map<string, { minRx: number; maxRx: number; minTx: number; maxTx: number }>();
 
                 rawData.forEach(record => {
-                    const date = record.timestamp.split('T')[0];
+                    const date = record.timestamp.split(/[ T]/)[0];
                     if (!dailyGroups.has(date)) {
                         dailyGroups.set(date, { 
                             minRx: record.net_rx_bytes, maxRx: record.net_rx_bytes,

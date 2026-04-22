@@ -40,11 +40,11 @@ export default function GpuWidget({ gpus, density }: GpuWidgetProps) {
                 {gpus.map((gpu, idx) => (
                     <div key={idx} className="bg-white/[0.03] border border-white/5 rounded-xl p-4">
                         <div className="flex items-start justify-between mb-3">
-                            <div className="space-y-1">
-                                <p className="text-xs font-bold text-slate-200 truncate max-w-[180px]">{gpu.name}</p>
+                            <div className="space-y-1 flex-1 min-w-0 mr-4">
+                                <p className="text-xs font-bold text-slate-200 truncate">{gpu.name}</p>
                                 <p className="text-[10px] text-slate-500 font-medium">Index: {gpu.index}</p>
                             </div>
-                            <div className="text-right">
+                            <div className="text-right shrink-0">
                                 <p className="text-xs font-black text-blue-400">#{gpu.index}</p>
                             </div>
                         </div>

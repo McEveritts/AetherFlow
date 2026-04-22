@@ -223,6 +223,7 @@ export default function OverviewTab({ metrics, hardware, history }: OverviewTabP
                     <span className="text-[11px] text-slate-500 font-medium">
                         {[hardware.system_vendor, hardware.system_product].filter(Boolean).join(' · ')}
                         {hardware.cpu?.model && ` · ${hardware.cpu.model}`}
+                        {hardware.gpus && hardware.gpus.length > 0 && ` · ${hardware.gpus.map(g => g.product).join(' + ')}`}
                     </span>
                 </div>
             )}
