@@ -1,7 +1,6 @@
 package api
 
 import (
-	"context"
 	"fmt"
 	"log/slog"
 	"os"
@@ -9,70 +8,97 @@ import (
 
 	"aetherflow/db"
 	"aetherflow/services"
-
-	"github.com/google/generative-ai-go/genai"
-	"google.golang.org/api/option"
 )
 
-// GeminiClientBundle holds an initialized Gemini client and model settings.
-type GeminiClientBundle struct {
-	Client       *genai.Client
-	APIKey       string
-	DefaultModel string
-	SystemPrompt string
+// ProviderSettings holds all provider configuration from the settings table.
+type ProviderSettings struct {
+	GeminiAPIKey      string
+	OpenAIAPIKey      string
+	AnthropicAPIKey   string
+	AnthropicEndpoint string
+	LMStudioEndpoint  string
+	OllamaEndpoint    string
+	DefaultModel      string
+	SystemPrompt      string
 }
 
-// GetDecryptedGeminiKey resolves the Gemini API key through a single path:
-// 1. Read from SQLite settings
-// 2. Decrypt (if encryption is enabled)
-// 3. Fall back to GEMINI_API_KEY env var
-// All consumers of the Gemini API key MUST use this function.
-func GetDecryptedGeminiKey() (string, error) {
-	var apiKey string
-	db.DB.QueryRow("SELECT COALESCE(gemini_api_key, '') FROM settings WHERE id = 1").Scan(&apiKey)
-	// Decrypt the API key if it was stored encrypted
-	if apiKey != "" {
-		if decrypted, err := DecryptKey(apiKey); err == nil {
-			apiKey = decrypted
-		}
-	}
-	if apiKey == "" {
-		apiKey = os.Getenv("GEMINI_API_KEY")
-	}
-	if apiKey == "" {
-		return "", fmt.Errorf("Gemini API key not configured. Set it in Settings → FlowAI Engine.")
-	}
-	return apiKey, nil
-}
-
-// getGeminiBundle resolves the API key, default model, and system prompt,
-// then creates a ready-to-use Gemini client. Caller must defer bundle.Client.Close().
-func getGeminiBundle(ctx context.Context) (*GeminiClientBundle, error) {
-	apiKey, err := GetDecryptedGeminiKey()
+// ResolveProviderSettings reads all AI provider settings from the database.
+func ResolveProviderSettings() (*ProviderSettings, error) {
+	ps := &ProviderSettings{}
+	err := db.DB.QueryRow(`
+		SELECT
+			COALESCE(gemini_api_key, ''),
+			COALESCE(openai_api_key, ''),
+			COALESCE(anthropic_api_key, ''),
+			COALESCE(anthropic_endpoint, ''),
+			COALESCE(lm_studio_endpoint, ''),
+			COALESCE(ollama_endpoint, ''),
+			COALESCE(ai_model, ''),
+			COALESCE(system_prompt, '')
+		FROM settings WHERE id = 1
+	`).Scan(
+		&ps.GeminiAPIKey, &ps.OpenAIAPIKey, &ps.AnthropicAPIKey,
+		&ps.AnthropicEndpoint, &ps.LMStudioEndpoint, &ps.OllamaEndpoint,
+		&ps.DefaultModel, &ps.SystemPrompt,
+	)
 	if err != nil {
-		return nil, err
-	}
-
-	// Resolve default model and system prompt
-	var aiModel, systemPrompt string
-	err = db.DB.QueryRow("SELECT ai_model, system_prompt FROM settings WHERE id = 1").Scan(&aiModel, &systemPrompt)
-	if err != nil {
-		aiModel = "gemini-3.1-pro-preview"
-		systemPrompt = "You are FlowAI, a helpful server assistant."
+		ps.DefaultModel = "gemini-2.0-flash"
+		ps.SystemPrompt = "You are FlowAI, a helpful server assistant."
 		slog.Warn("Using fallback AI settings. DB Error", "error", err)
 	}
 
-	client, err := genai.NewClient(ctx, option.WithAPIKey(apiKey))
-	if err != nil {
-		return nil, fmt.Errorf("failed to initialize Gemini client: %v", err)
+	// Decrypt API keys
+	if ps.GeminiAPIKey != "" {
+		if decrypted, decErr := DecryptKey(ps.GeminiAPIKey); decErr == nil {
+			ps.GeminiAPIKey = decrypted
+		}
+	}
+	if ps.OpenAIAPIKey != "" {
+		if decrypted, decErr := DecryptKey(ps.OpenAIAPIKey); decErr == nil {
+			ps.OpenAIAPIKey = decrypted
+		}
+	}
+	if ps.AnthropicAPIKey != "" {
+		if decrypted, decErr := DecryptKey(ps.AnthropicAPIKey); decErr == nil {
+			ps.AnthropicAPIKey = decrypted
+		}
 	}
 
-	return &GeminiClientBundle{
-		Client:       client,
-		APIKey:       apiKey,
-		DefaultModel: aiModel,
-		SystemPrompt: systemPrompt,
-	}, nil
+	// Fall back to env vars
+	if ps.GeminiAPIKey == "" {
+		ps.GeminiAPIKey = os.Getenv("GEMINI_API_KEY")
+	}
+	if ps.OpenAIAPIKey == "" {
+		ps.OpenAIAPIKey = os.Getenv("OPENAI_API_KEY")
+	}
+	if ps.AnthropicAPIKey == "" {
+		ps.AnthropicAPIKey = os.Getenv("ANTHROPIC_API_KEY")
+	}
+	if ps.DefaultModel == "" {
+		ps.DefaultModel = "gemini-2.0-flash"
+	}
+
+	return ps, nil
+}
+
+// ResolveProvider determines which provider to use based on the model ID.
+func ResolveProvider(provider string, modelID string) string {
+	if provider != "" {
+		return provider
+	}
+	// Auto-detect from model ID prefix
+	switch {
+	case strings.HasPrefix(modelID, "gemini"):
+		return "gemini"
+	case strings.HasPrefix(modelID, "gpt"):
+		return "openai"
+	case strings.HasPrefix(modelID, "claude"):
+		return "anthropic"
+	case modelID == "lm-studio" || modelID == "ollama" || modelID == "anthropic-local":
+		return "localai"
+	default:
+		return "gemini"
+	}
 }
 
 // getRecentLogContext queries the log aggregator for recent error/warning entries

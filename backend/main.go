@@ -162,7 +162,13 @@ func main() {
 	services.MediaFlowQueuePoller()
 
 	// Initialize the Smart Backup Scheduler (Phase 20)
-	services.InitSmartBackupScheduler(api.GetDecryptedGeminiKey, func() error {
+	services.InitSmartBackupScheduler(func() (string, error) {
+		ps, err := api.ResolveProviderSettings()
+		if err != nil || ps.GeminiAPIKey == "" {
+			return "", fmt.Errorf("Gemini API key not configured")
+		}
+		return ps.GeminiAPIKey, nil
+	}, func() error {
 		_, err := api.PerformSystemBackup()
 		return err
 	})

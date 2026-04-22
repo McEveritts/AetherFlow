@@ -60,7 +60,7 @@ Configuration for the integrated management assistant.
 | `OPENAI_API_KEY` | (Optional) For GPT-4 based support. |
 
 > [!TIP]
-> **FlowAI Support Mode** performs best when provided with a high-bandwidth model like Gemini 1.5 Pro or Claude 3.5 Sonnet.
+> **FlowAI Support Mode** performs best when provided with a high-bandwidth model like Gemini 2.0 Flash or Claude 3.5 Sonnet.
 
 ---
 

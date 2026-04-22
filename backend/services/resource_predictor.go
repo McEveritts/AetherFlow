@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
-
-	"github.com/google/generative-ai-go/genai"
 )
 
 // PredictionReport is the AI-generated resource prediction analysis.
@@ -109,18 +107,12 @@ Provide your analysis as JSON ONLY (no markdown, no explanation):
 Be specific about cgroup limits, upgrade recommendations, and timeframes.`, sb.String())
 
 	ctx := context.Background()
-	client, err := GetAIClient(ctx)
+	replyText, err := GenerateWithGemini(ctx, prompt)
 	if err != nil {
-		return nil, fmt.Errorf("Gemini client error: %v", err)
+		return nil, fmt.Errorf("prediction analysis failed: %v", err)
 	}
 
-	model := GetAIModel(client, "")
-	resp, err := model.GenerateContent(ctx, genai.Text(prompt))
-	if err != nil {
-		return nil, fmt.Errorf("generation error: %v", err)
-	}
-
-	replyText := CleanJSONResponse(ExtractTextFromResponse(resp))
+	replyText = CleanJSONResponse(replyText)
 
 	var report PredictionReport
 	if err := json.Unmarshal([]byte(replyText), &report); err != nil {

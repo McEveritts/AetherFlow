@@ -7,10 +7,9 @@ import (
 	"strings"
 
 	"aetherflow/db"
+	"aetherflow/providers"
 
 	"github.com/gin-gonic/gin"
-	"github.com/google/generative-ai-go/genai"
-	"google.golang.org/api/option"
 )
 
 type ChatMessage struct {
@@ -18,20 +17,47 @@ type ChatMessage struct {
 	Text string `json:"text"`
 }
 
-// allowedAIModels is the set of valid Gemini model identifiers.
+// allowedAIModels is the set of valid model identifiers across all providers.
 var allowedAIModels = map[string]bool{
-	"gemini-2.0-flash":      true,
-	"gemini-2.0-flash-lite": true,
+	// Gemini (current frontier)
+	"gemini-3.1-pro-preview":          true,
+	"gemini-3-flash-preview":          true,
+	"gemini-3.1-flash-lite-preview":   true,
+	"gemini-3-pro-image-preview":      true,
+	"gemini-3.1-flash-image-preview":  true,
+	// Gemini (stable)
 	"gemini-2.5-pro":        true,
 	"gemini-2.5-flash":      true,
+	"gemini-2.0-flash":      true,
+	"gemini-2.0-flash-lite": true,
 	"gemini-1.5-pro":        true,
 	"gemini-1.5-flash":      true,
+	// OpenAI
+	"gpt-4o":       true,
+	"gpt-4o-mini":  true,
+	"gpt-4-turbo":  true,
+	"gpt-5.4":      true,
+	"gpt-5.4-mini": true,
+	// Anthropic
+	"claude-opus":         true,
+	"claude-opus-4.5":     true,
+	"claude-opus-4.6":     true,
+	"claude-sonnet-4.5":   true,
+	"claude-sonnet-4.6":   true,
+	"claude-4-6-sonnet":   true,
+	"claude-4-6-haiku":    true,
+	"claude-4-5-opus":     true,
+	// Local AI (OpenAI-compatible endpoints)
+	"lm-studio":       true,
+	"ollama":           true,
+	"anthropic-local":  true,
 }
 
 type ChatRequest struct {
-	Message string        `json:"message" binding:"required"`
-	History []ChatMessage `json:"history"`
-	Model   string        `json:"model"`
+	Message  string        `json:"message" binding:"required"`
+	History  []ChatMessage `json:"history"`
+	Model    string        `json:"model"`
+	Provider string        `json:"provider"` // "gemini", "openai", "anthropic", "localai"
 }
 
 // SupportChatRequest extends ChatRequest with context mode for support-aware chat.
@@ -63,66 +89,60 @@ var allowedContextModes = map[string]bool{
 	"full":    true,
 }
 
-// runChatSession is a shared helper that executes a Gemini chat session with the given
-// system prompt, model override, history, and message. Used by both handleAiChat and handleAiSupport.
-func runChatSession(c *gin.Context, systemPrompt string, modelOverride string, history []ChatMessage, message string) {
+// runChatSession is the shared helper that routes a chat request to the correct
+// AI provider based on the model prefix or explicit provider field.
+func runChatSession(c *gin.Context, systemPrompt string, modelOverride string, providerHint string, history []ChatMessage, message string) {
 	ctx := context.Background()
-	bundle, err := getGeminiBundle(ctx)
+
+	// 1. Resolve all provider settings (decrypted keys, endpoints)
+	ps, err := ResolveProviderSettings()
 	if err != nil {
 		InternalError(c, err.Error())
 		return
 	}
-	defer bundle.Client.Close()
 
-	aiModel := bundle.DefaultModel
-	if modelOverride != "" {
-		if !allowedAIModels[modelOverride] {
-			BadRequest(c, "Invalid AI model. Check settings for available models.")
-			return
-		}
-		aiModel = modelOverride
+	// 2. Determine model and provider
+	aiModel := modelOverride
+	if aiModel == "" {
+		aiModel = ps.DefaultModel
+	}
+	if !allowedAIModels[aiModel] {
+		BadRequest(c, "Invalid AI model. Check settings for available models.")
+		return
 	}
 
-	// Use provided system prompt, or fall back to bundle default
+	providerType := ResolveProvider(providerHint, aiModel)
+
+	// 3. Build provider config with decrypted credentials
+	cfg := buildProviderConfig(ps, providerType, aiModel)
+
+	// Use system prompt from settings if none provided
 	prompt := systemPrompt
 	if prompt == "" {
-		prompt = bundle.SystemPrompt
+		prompt = ps.SystemPrompt
 	}
 
-	model := bundle.Client.GenerativeModel(aiModel)
-	model.SystemInstruction = genai.NewUserContent(genai.Text(prompt))
+	// 4. Create provider and execute chat
+	provider, err := providers.NewProvider(providerType, cfg)
+	if err != nil {
+		InternalError(c, fmt.Sprintf("AI provider initialization failed: %v", err))
+		return
+	}
+	defer provider.Close()
 
-	session := model.StartChat()
-
-	// Pre-load history
-	for _, hm := range history {
-		if hm.Role == "user" {
-			session.History = append(session.History, &genai.Content{
-				Parts: []genai.Part{genai.Text(hm.Text)},
-				Role:  "user",
-			})
-		} else if hm.Role == "assistant" {
-			session.History = append(session.History, &genai.Content{
-				Parts: []genai.Part{genai.Text(hm.Text)},
-				Role:  "model",
-			})
-		}
+	// Convert history to provider format
+	providerHistory := make([]providers.Message, len(history))
+	for i, hm := range history {
+		providerHistory[i] = providers.Message{Role: hm.Role, Text: hm.Text}
 	}
 
-	resp, err := session.SendMessage(ctx, genai.Text(message))
+	resp, err := provider.Chat(ctx, prompt, providerHistory, message)
 	if err != nil {
 		InternalError(c, fmt.Sprintf("Generation error: %v", err))
 		return
 	}
 
-	var replyText string
-	if resp != nil && len(resp.Candidates) > 0 && resp.Candidates[0].Content != nil {
-		for _, part := range resp.Candidates[0].Content.Parts {
-			if text, ok := part.(genai.Text); ok {
-				replyText += string(text)
-			}
-		}
-	}
+	replyText := resp.Text
 	if replyText == "" {
 		replyText = "I received an empty response. Please try again."
 	}
@@ -164,6 +184,37 @@ func runChatSession(c *gin.Context, systemPrompt string, modelOverride string, h
 	c.JSON(http.StatusOK, ChatResponse{Reply: replyText})
 }
 
+// buildProviderConfig constructs a ProviderConfig from resolved settings.
+func buildProviderConfig(ps *ProviderSettings, providerType string, model string) providers.ProviderConfig {
+	switch providerType {
+	case "openai":
+		return providers.ProviderConfig{APIKey: ps.OpenAIAPIKey, Model: model}
+	case "anthropic":
+		return providers.ProviderConfig{APIKey: ps.AnthropicAPIKey, Endpoint: ps.AnthropicEndpoint, Model: model}
+	case "localai":
+		endpoint := ps.LMStudioEndpoint
+		switch model {
+		case "ollama":
+			endpoint = ps.OllamaEndpoint
+			if endpoint == "" {
+				endpoint = "http://localhost:11434"
+			}
+		case "anthropic-local":
+			endpoint = ps.AnthropicEndpoint
+			if endpoint == "" {
+				endpoint = "http://localhost:8080"
+			}
+		default: // lm-studio
+			if endpoint == "" {
+				endpoint = "http://localhost:1234"
+			}
+		}
+		return providers.ProviderConfig{Endpoint: endpoint, Model: model}
+	default: // gemini
+		return providers.ProviderConfig{APIKey: ps.GeminiAPIKey, Model: model}
+	}
+}
+
 func handleAiChat(c *gin.Context) {
 	var req ChatRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -171,7 +222,7 @@ func handleAiChat(c *gin.Context) {
 		return
 	}
 
-	runChatSession(c, "", req.Model, req.History, req.Message)
+	runChatSession(c, "", req.Model, req.Provider, req.History, req.Message)
 }
 
 // handleAiSupport handles the AI support chatbot endpoint.
@@ -200,17 +251,15 @@ func handleAiSupport(c *gin.Context) {
 		return
 	}
 
-	// Build context-enriched system prompt
-	ctx := context.Background()
-	bundle, err := getGeminiBundle(ctx)
+	// Build context-enriched system prompt using provider settings
+	ps, err := ResolveProviderSettings()
 	if err != nil {
 		InternalError(c, err.Error())
 		return
 	}
-	bundle.Client.Close() // We only needed settings; runChatSession creates its own client
 
 	var contextBlock strings.Builder
-	contextBlock.WriteString(bundle.SystemPrompt)
+	contextBlock.WriteString(ps.SystemPrompt)
 	contextBlock.WriteString("\n\nYou are in SUPPORT MODE. The user is troubleshooting a server issue. ")
 	contextBlock.WriteString("Use the following live system data to help diagnose problems:\n\n")
 
@@ -228,57 +277,78 @@ func handleAiSupport(c *gin.Context) {
 	contextBlock.WriteString("\nAnalyze the above data in context of the user's question. ")
 	contextBlock.WriteString("Provide specific, actionable troubleshooting steps. Reference specific log entries or metrics when relevant.")
 
-	runChatSession(c, contextBlock.String(), req.Model, req.History, req.Message)
+	runChatSession(c, contextBlock.String(), req.Model, req.Provider, req.History, req.Message)
 }
 
 func TestAiConnection(c *gin.Context) {
 	var req struct {
-		ApiKey string `json:"gemini_api_key"`
+		GeminiKey    string `json:"gemini_api_key"`
+		OpenAIKey    string `json:"openai_api_key"`
+		AnthropicKey string `json:"anthropic_api_key"`
+		Provider     string `json:"provider"`
+		Endpoint     string `json:"endpoint"`
 	}
 
 	c.ShouldBindJSON(&req)
 
-	// If key is masked or empty, read the real key from the database
-	keyToTest := req.ApiKey
-	if keyToTest == "" || strings.HasPrefix(keyToTest, "****") {
-		var savedKey string
-		err := db.DB.QueryRow("SELECT COALESCE(gemini_api_key, '') FROM settings WHERE id = 1").Scan(&savedKey)
-		if err != nil || savedKey == "" {
-			BadRequest(c, "No API key saved. Please enter and save a key first.")
-			return
-		}
-		// Decrypt if stored encrypted
-		if decrypted, decErr := DecryptKey(savedKey); decErr == nil {
-			savedKey = decrypted
-		}
-		keyToTest = savedKey
+	// Determine which provider to test
+	providerType := req.Provider
+	if providerType == "" {
+		providerType = "gemini"
 	}
+
+	// Resolve stored credentials as baseline
+	ps, err := ResolveProviderSettings()
+	if err != nil {
+		InternalError(c, err.Error())
+		return
+	}
+
+	// Override keys if fresh (unsaved) ones were provided for testing
+	if req.GeminiKey != "" && !strings.HasPrefix(req.GeminiKey, "****") {
+		ps.GeminiAPIKey = req.GeminiKey
+	}
+	if req.OpenAIKey != "" && !strings.HasPrefix(req.OpenAIKey, "****") {
+		ps.OpenAIAPIKey = req.OpenAIKey
+	}
+	if req.AnthropicKey != "" && !strings.HasPrefix(req.AnthropicKey, "****") {
+		ps.AnthropicAPIKey = req.AnthropicKey
+	}
+	if req.Endpoint != "" {
+		// Override the relevant endpoint for localai testing
+		ps.LMStudioEndpoint = req.Endpoint
+		ps.OllamaEndpoint = req.Endpoint
+	}
+
+	// Select an appropriate test model per provider
+	testModel := "gemini-2.0-flash"
+	switch providerType {
+	case "openai":
+		testModel = "gpt-4o"
+	case "anthropic":
+		testModel = "claude-sonnet-4.5"
+	case "localai":
+		testModel = "local-test"
+	}
+
+	cfg := buildProviderConfig(ps, providerType, testModel)
 
 	ctx := context.Background()
-	client, err := genai.NewClient(ctx, option.WithAPIKey(keyToTest))
+	provider, err := providers.NewProvider(providerType, cfg)
 	if err != nil {
-		InternalError(c, fmt.Sprintf("Initialization error: %v", err))
+		BadRequest(c, fmt.Sprintf("Provider initialization failed: %v", err))
 		return
 	}
-	defer client.Close()
+	defer provider.Close()
 
-	model := client.GenerativeModel("gemini-2.0-flash")
-	resp, err := model.GenerateContent(ctx, genai.Text("Reply with the exact word: SUCCESS"))
-	if err != nil {
-		Unauthorized(c, "API Key is invalid or quota exceeded")
+	if err := provider.TestConnection(ctx); err != nil {
+		Unauthorized(c, fmt.Sprintf("Connection test failed: %v", err))
 		return
 	}
 
-	if resp != nil && len(resp.Candidates) > 0 && resp.Candidates[0].Content != nil {
-		for _, part := range resp.Candidates[0].Content.Parts {
-			if _, ok := part.(genai.Text); ok {
-				c.JSON(http.StatusOK, gin.H{"message": "Connection successful"})
-				return
-			}
-		}
-	}
-
-	c.JSON(http.StatusOK, gin.H{"message": "Connection successful but unrecognized response"})
+	c.JSON(http.StatusOK, gin.H{
+		"message": fmt.Sprintf("%s connection successful", providerType),
+	})
 }
 
 // ── Phase 18: AI → Action Gate Bridge ───────────────────────────────────

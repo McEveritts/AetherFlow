@@ -1,4 +1,6 @@
 import { Settings, Sparkles, ChevronRight, DownloadCloud, AlertCircle, Eye, EyeOff, Key, Monitor, Globe, Clock, LayoutDashboard, Radio, HardDriveDownload, Shield, KeyRound, RefreshCw, UserCircle } from 'lucide-react';
+import { AI_MODELS, resolveProviderForModel } from '@/lib/ai-models';
+import type { AIProviderID } from '@/lib/ai-models';
 import { useState, FormEvent } from 'react';
 import useSWR from 'swr';
 import dynamic from 'next/dynamic';
@@ -45,23 +47,26 @@ export default function SettingsTab() {
     const [updateMessage, setUpdateMessage] = useState('');
     const [isTesting, setIsTesting] = useState(false);
 
-    const handleTestConnection = async () => {
-        if (!apiKey) {
-            addToast('Constraint failure: Missing API token.', 'error');
-            return;
-        }
+    const handleTestConnection = async (providerOverride?: string, extraPayload?: Record<string, string>) => {
+        const testProvider = providerOverride || resolveProviderForModel(model);
         setIsTesting(true);
         try {
             const res = await apiFetch('/api/v1/admin/settings/test-ai', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ gemini_api_key: apiKey }),
+                body: JSON.stringify({
+                    gemini_api_key: apiKey,
+                    openai_api_key: openaiApiKey,
+                    anthropic_api_key: anthropicApiKey,
+                    provider: testProvider,
+                    ...extraPayload,
+                }),
             });
             const data = await res.json();
             if (res.ok) {
-                addToast(data.message || 'Connection successful!', 'success');
+                addToast(data.message || `${testProvider} connection successful!`, 'success');
             } else {
-                addToast(data.error || 'Remote connection refused.', 'error');
+                addToast(data.error || data.message || 'Remote connection refused.', 'error');
             }
         } catch (_err) {
             addToast('API dispatch failure: Remote connection test.', 'error');
@@ -440,14 +445,14 @@ export default function SettingsTab() {
                                                 </div>
                                                 <button
                                                     type="button"
-                                                    onClick={handleTestConnection}
+                                                    onClick={() => handleTestConnection('gemini')}
                                                     disabled={isTesting || !apiKey}
                                                     className="w-full py-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 border border-white/10 rounded-lg text-xs font-semibold text-slate-300 transition-colors flex items-center justify-center gap-2"
                                                 >
                                                     {isTesting ? (
                                                         <><div className="w-3 h-3 border-2 border-slate-400/30 border-t-slate-400 rounded-full animate-spin"></div> {t('testing')}</>
                                                     ) : (
-                                                        <><Sparkles size={14} className="text-amber-400" /> {t('testApi')}</>
+                                                        <><Sparkles size={14} className="text-amber-400" /> Test Gemini</>
                                                     )}
                                                 </button>
                                             </div>
@@ -477,6 +482,18 @@ export default function SettingsTab() {
                                                         {showOpenaiApiKey ? <EyeOff size={16} /> : <Eye size={16} />}
                                                     </button>
                                                 </div>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => handleTestConnection('openai')}
+                                                    disabled={isTesting || !openaiApiKey}
+                                                    className="w-full py-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 border border-white/10 rounded-lg text-xs font-semibold text-slate-300 transition-colors flex items-center justify-center gap-2"
+                                                >
+                                                    {isTesting ? (
+                                                        <><div className="w-3 h-3 border-2 border-slate-400/30 border-t-slate-400 rounded-full animate-spin"></div> {t('testing')}</>
+                                                    ) : (
+                                                        <><Sparkles size={14} className="text-emerald-400" /> Test OpenAI</>
+                                                    )}
+                                                </button>
                                             </div>
                                         </div>
                                         {/* Anthropic API Key */}
@@ -504,6 +521,18 @@ export default function SettingsTab() {
                                                         {showAnthropicApiKey ? <EyeOff size={16} /> : <Eye size={16} />}
                                                     </button>
                                                 </div>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => handleTestConnection('anthropic')}
+                                                    disabled={isTesting || !anthropicApiKey}
+                                                    className="w-full py-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 border border-white/10 rounded-lg text-xs font-semibold text-slate-300 transition-colors flex items-center justify-center gap-2"
+                                                >
+                                                    {isTesting ? (
+                                                        <><div className="w-3 h-3 border-2 border-slate-400/30 border-t-slate-400 rounded-full animate-spin"></div> {t('testing')}</>
+                                                    ) : (
+                                                        <><Sparkles size={14} className="text-orange-400" /> Test Anthropic</>
+                                                    )}
+                                                </button>
                                             </div>
                                         </div>
                                     </div>
@@ -547,6 +576,41 @@ export default function SettingsTab() {
                                                 />
                                             </div>
                                         </div>
+                                        {/* Test Local AI Button */}
+                                        <div className="p-5 flex flex-col md:flex-row justify-between gap-4 hover:bg-white/[0.02] transition-colors">
+                                            <div>
+                                                <label className="text-sm font-semibold text-slate-200 flex items-center gap-2">
+                                                    <Sparkles size={16} className="text-cyan-400" /> Test Local Connection
+                                                </label>
+                                                <p className="text-xs text-slate-500 mt-1 max-w-sm">Validate connectivity to your LM Studio or Ollama endpoint.</p>
+                                            </div>
+                                            <div className="shrink-0 w-full md:w-80 space-y-2">
+                                                <button
+                                                    type="button"
+                                                    onClick={() => handleTestConnection('localai', { endpoint: lmStudioEndpoint || 'http://localhost:1234' })}
+                                                    disabled={isTesting}
+                                                    className="w-full py-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 border border-white/10 rounded-lg text-xs font-semibold text-slate-300 transition-colors flex items-center justify-center gap-2"
+                                                >
+                                                    {isTesting ? (
+                                                        <><div className="w-3 h-3 border-2 border-slate-400/30 border-t-slate-400 rounded-full animate-spin"></div> {t('testing')}</>
+                                                    ) : (
+                                                        <><Radio size={14} className="text-purple-400" /> Test LM Studio</>
+                                                    )}
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => handleTestConnection('localai', { endpoint: ollamaEndpoint || 'http://localhost:11434' })}
+                                                    disabled={isTesting}
+                                                    className="w-full py-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 border border-white/10 rounded-lg text-xs font-semibold text-slate-300 transition-colors flex items-center justify-center gap-2"
+                                                >
+                                                    {isTesting ? (
+                                                        <><div className="w-3 h-3 border-2 border-slate-400/30 border-t-slate-400 rounded-full animate-spin"></div> {t('testing')}</>
+                                                    ) : (
+                                                        <><Radio size={14} className="text-pink-400" /> Test Ollama</>
+                                                    )}
+                                                </button>
+                                            </div>
+                                        </div>
                                         <div className="p-5 flex flex-col md:flex-row justify-between gap-4 hover:bg-white/[0.02] transition-colors">
                                             <div>
                                                 <label className="text-sm font-semibold text-slate-200 flex items-center gap-2">
@@ -586,25 +650,13 @@ export default function SettingsTab() {
                                                     onChange={(e) => setModel(e.target.value)}
                                                     className="w-full bg-slate-900 border border-white/10 rounded-xl px-4 py-3 text-slate-200 text-sm focus:outline-none focus:border-indigo-500/50 transition-colors appearance-none cursor-pointer"
                                                 >
-                                                    <optgroup label="Google Primary">
-                                                        <option value="gemini-3.1-pro-preview">Gemini 3.1 Pro Preview</option>
-                                                        <option value="gemini-3-flash-preview">Gemini 3.0 Flash Preview</option>
-                                                        <option value="gemini-3.1-flash-lite-preview">Gemini 3.1 Flash Lite Preview</option>
-                                                    </optgroup>
-                                                    <optgroup label="OpenAI Base">
-                                                        <option value="gpt-4o">GPT-4o</option>
-                                                        <option value="gpt-4o-mini">GPT-4o Mini</option>
-                                                        <option value="gpt-4-turbo">GPT-4 Turbo</option>
-                                                    </optgroup>
-                                                    <optgroup label="Anthropic">
-                                                        <option value="claude-4-6-sonnet">Claude 4.6 Sonnet</option>
-                                                        <option value="claude-4-6-haiku">Claude 4.6 Haiku</option>
-                                                        <option value="claude-4-5-opus">Claude 4.5 Opus</option>
-                                                    </optgroup>
-                                                    <optgroup label="Local Hosted">
-                                                        <option value="lm-studio">LM Studio (Local)</option>
-                                                        <option value="ollama">Ollama (Local)</option>
-                                                    </optgroup>
+                                                        {Object.entries(AI_MODELS).map(([providerId, models]) => (
+                                                        <optgroup key={providerId} label={providerId.charAt(0).toUpperCase() + providerId.slice(1)}>
+                                                            {models.map((m) => (
+                                                                <option key={m.id} value={m.id}>{m.name}</option>
+                                                            ))}
+                                                        </optgroup>
+                                                    ))}
                                                 </select>
                                                 <ChevronRight size={16} className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-500 rotate-90 pointer-events-none" />
                                             </div>

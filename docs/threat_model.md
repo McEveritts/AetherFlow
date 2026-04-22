@@ -83,7 +83,7 @@ Redis outage → BlacklistCheck returns nil error
 AES_MASTER_KEY not set → API keys stored in plaintext in SQLite
   → Database backup download (admin-only) → Attacker obtains .sqlite file
   → OR: Local File Inclusion (LFI) → Direct database read
-  → Full Gemini API key compromise → Unauthorized AI usage / billing
+  → Full AI Provider API key compromise → Unauthorized AI usage / billing
 ```
 **Mitigation**: Fail-fast in production mode. `log.Fatal()` when `GIN_MODE=release` and key is missing.
 

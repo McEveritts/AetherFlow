@@ -4,47 +4,14 @@ import { useSystemStore } from '@/store/useSystemStore';
 import { apiFetch } from '@/lib/fetcher';
 import { useMetrics } from '@/hooks/useMetrics';
 import { useToast } from '@/contexts/ToastContext';
+import { AI_PROVIDERS, AI_MODELS, resolveProviderForModel } from '@/lib/ai-models';
+import type { AIProviderID } from '@/lib/ai-models';
 
 interface ChatMessage {
     role: 'user' | 'assistant';
     text: string;
     payload?: Record<string, unknown>;
 }
-
-const PROVIDERS = [
-    { id: 'gemini', name: 'Gemini' },
-    { id: 'anthropic', name: 'Anthropic' },
-    { id: 'openai', name: 'OpenAI' },
-    { id: 'localai', name: 'LocalAI' },
-];
-
-const AI_MODELS: Record<string, { id: string, name: string, tier: string }[]> = {
-    'gemini': [
-        { id: 'gemini-3.1-pro-preview', name: 'Gemini 3.1 Pro Preview', tier: 'preview' },
-        { id: 'gemini-3-flash-preview', name: 'Gemini 3.0 Flash Preview', tier: 'preview' },
-        { id: 'gemini-3.1-flash-lite-preview', name: 'Gemini 3.1 Flash Lite Preview', tier: 'preview' },
-        { id: 'gemini-3-pro-image-preview', name: 'Gemini 3.0 Pro Image Preview', tier: 'preview' },
-        { id: 'gemini-3.1-flash-image-preview', name: 'Gemini 3.1 Flash Image Preview', tier: 'preview' },
-    ],
-    'anthropic': [
-        { id: 'claude-opus', name: 'Claude Opus', tier: 'latest' },
-        { id: 'claude-opus-4.5', name: 'Claude Opus 4.5', tier: 'latest' },
-        { id: 'claude-opus-4.6', name: 'Claude Opus 4.6', tier: 'latest' },
-        { id: 'claude-sonnet-4.5', name: 'Claude Sonnet 4.5', tier: 'latest' },
-        { id: 'claude-sonnet-4.6', name: 'Claude Sonnet 4.6', tier: 'latest' },
-    ],
-    'openai': [
-        { id: 'gpt-4o', name: 'GPT 4o', tier: 'latest' },
-        { id: 'gpt-4o-mini', name: 'GPT 4o-mini', tier: 'latest' },
-        { id: 'gpt-5.4', name: 'GPT 5.4', tier: 'latest' },
-        { id: 'gpt-5.4-mini', name: 'GPT 5.4-Mini', tier: 'latest' },
-    ],
-    'localai': [
-        { id: 'lm-studio', name: 'LM-Studio Endpoint', tier: 'local' },
-        { id: 'ollama', name: 'Ollama Endpoint', tier: 'local' },
-        { id: 'anthropic-local', name: 'Anthropic Endpoint', tier: 'local' },
-    ]
-};
 
 const CONTEXT_MODES = [
     { id: 'full', name: 'Full Context', icon: Layers, description: 'Logs + System Metrics' },
@@ -64,7 +31,7 @@ export default function AiChatTab() {
     ]);
     const [input, setInput] = useState('');
     const [isTyping, setIsTyping] = useState(false);
-    const [selectedProvider, setSelectedProvider] = useState('gemini');
+    const [selectedProvider, setSelectedProvider] = useState<AIProviderID>('gemini');
     const [selectedModel, setSelectedModel] = useState('gemini-3.1-pro-preview');
     const [showModelPicker, setShowModelPicker] = useState(false);
     const [supportMode, setSupportMode] = useState(false);
@@ -114,6 +81,7 @@ export default function AiChatTab() {
                 message: text,
                 history: messages,
                 model: selectedModel,
+                provider: selectedProvider,
             };
             if (supportMode) {
                 body.context_mode = contextMode;
@@ -259,7 +227,7 @@ export default function AiChatTab() {
                                         }}
                                         onClick={(e) => e.stopPropagation()}
                                     >
-                                        {PROVIDERS.map((p) => (
+                                        {AI_PROVIDERS.map((p) => (
                                             <option key={p.id} value={p.id}>{p.name}</option>
                                         ))}
                                     </select>
