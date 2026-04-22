@@ -1,0 +1,36 @@
+name: Privacy Hygiene
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 6 * * 1'
+  push:
+    branches:
+      - main
+      - master
+      - development
+    paths:
+      - '.github/workflows/privacy-hygiene.yml'
+      - 'scripts/check_privacy_hygiene.sh'
+  pull_request:
+    branches:
+      - main
+      - master
+      - development
+    paths:
+      - '.github/workflows/privacy-hygiene.yml'
+      - 'scripts/check_privacy_hygiene.sh'
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    name: Scan for hardcoded personal info
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run privacy hygiene scan
+        run: bash ./scripts/check_privacy_hygiene.sh
