@@ -76,8 +76,13 @@ AetherFlow includes `test_api.py` as a manual diagnostic script for remote and l
 
 **Usage**:
 ```bash
+AETHERFLOW_TEST_HOST=server.example.com \
+AETHERFLOW_TEST_USER=operator \
+AETHERFLOW_TEST_PASSWORD='your-password' \
 python3 test_api.py
 ```
+
+If the remote `sudo` password differs from the SSH password, also set `AETHERFLOW_TEST_SUDO_PASSWORD`.
 
 > [!WARNING]
 > `test_api.py` is a diagnostic tool, not a replacement for automated tests. Use it to quickly isolate whether an issue lies in the React state management or the core Go backend.

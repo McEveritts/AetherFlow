@@ -1,6 +1,6 @@
 # AetherFlow Deployment Incident Resolution
 
-This document outlines the diagnosis and resolution of a multi-faceted deployment outage on the McStream production server (192.168.1.153) that prevented the AetherFlow platform from starting.
+This document outlines the diagnosis and resolution of a multi-faceted deployment outage on a private production server that prevented the AetherFlow platform from starting.
 
 ## Incident Overview
 
@@ -8,7 +8,7 @@ Following a recent deployment engine refactoring and an update atomic symlink sw
 
 ## Root Cause Analysis & Identification
 
-By securely connecting to the McStream node via non-interactive SSH (using `paramiko` from the native Windows environment), we were able to parse the system `journalctl` error logs and the `systemctl status` diagnostics. Three independent blockers were identified.
+By securely connecting to the affected node via non-interactive SSH (using `paramiko` from the native Windows environment), we were able to parse the system `journalctl` error logs and the `systemctl status` diagnostics. Three independent blockers were identified.
 
 ### 1. Backend Crash: Encryption Key Misconfiguration
 **How it was identified:** 
@@ -35,7 +35,7 @@ The new hardened `aetherflow-api.service` unit file enforces `ProtectSystem=stri
 
 ## Remediations Executed
 
-We formulated and executed aggressive server-side Python remediation scripts directly on the McStream server.
+We formulated and executed aggressive server-side Python remediation scripts directly on the affected server.
 
 ### 1. Generating a Valid AES Token
 Instead of relying on unstable `sed` operations which might intersect with special base64 characters, we programmatically ran a Python injection snippet on the remote host. We forged a new, cryptographically secure 32-byte Base64 key and surgically injected it into `/opt/AetherFlow/backend/.env`.
@@ -69,7 +69,7 @@ Once the ports were fully deregistered, the encryption key verified, and the san
 
 ## Validations Performed
 
-Final end-to-end health-monitoring queries established from McStream verified optimal performance.
+Final end-to-end health-monitoring queries verified optimal performance.
 - **Frontend Check:** `curl -s -I http://127.0.0.1:3000` registered `HTTP/1.1 200 OK`.
 - **API Check:** `curl -s http://127.0.0.1:8080/health` registered:
   ```json

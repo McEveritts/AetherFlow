@@ -1,5 +1,6 @@
-import urllib.request
 import os
+from pathlib import Path
+import urllib.request
 
 icons = [
     'jellyfin', 'readarr', 'prowlarr', 'bazarr', 'overseerr', 'ombi',
@@ -11,6 +12,9 @@ icons = [
 
 base_url = "https://raw.githubusercontent.com/walkxcode/dashboard-icons/main/png/{}.png"
 
+PROJECT_ROOT = Path(__file__).resolve().parent
+OUTPUT_DIR = PROJECT_ROOT / "frontend" / "public" / "img"
+
 for icon in icons:
     url = base_url.format(icon)
     # the application ID in packages.json
@@ -18,7 +22,7 @@ for icon in icons:
     if icon == 'uptime-kuma': save_name = 'uptimekuma'
     elif icon == 'home-assistant': save_name = 'homeassistant'
     
-    out_path = f"c:/Users/armyw/OneDrive/Documents/Antigravity/Projects/AetherFlow/frontend/public/img/{save_name}.png"
+    out_path = OUTPUT_DIR / f"{save_name}.png"
     if not os.path.exists(out_path):
         try:
             print(f"Downloading {save_name}...")

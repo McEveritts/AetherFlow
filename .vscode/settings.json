@@ -8,7 +8,7 @@
     ],
     "python.testing.pytestEnabled": false,
     "python.testing.unittestEnabled": true,
-    "local.model.provider.serverUrl": "http://192.168.1.153:1234/v1",
+    "local.model.provider.serverUrl": "http://127.0.0.1:1234/v1",
     "local.model.provider.defaultModel": "gemma-4-21b-a4b-it-reap",
     "local.model.provider.defaultMaxTokens": 154000,
     "local.model.provider.defaultMaxOutputTokens": 8192,
@@ -16,7 +16,7 @@
     "local.model.provider.agentTemperature": 0.2,
     "editor.stickyScroll.defaultModel": "foldingProviderModel",
     "local.model.provider.requestTimeout": 300000,
-    "omega.lmStudioUrl": "http://192.168.1.153:1234",
+    "omega.lmStudioUrl": "http://127.0.0.1:1234",
     "omega.maxTokens": 8192,
     "omega.temperature": 0.2,
     "omega.defaultModel": "gemma-4-21b-a4b-it-reap"

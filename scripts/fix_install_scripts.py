@@ -1,8 +1,13 @@
 import os
 import re
 import glob
+from pathlib import Path
 
-INSTALL_DIR = r"c:\Users\armyw\OneDrive\Documents\Antigravity\Projects\AetherFlow\packages\package\install"
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+INSTALL_DIR = os.getenv(
+    "AETHERFLOW_INSTALL_DIR",
+    str(PROJECT_ROOT / "packages" / "package" / "install"),
+)
 
 def process_file(filepath):
     with open(filepath, 'r', encoding='utf-8') as f:
