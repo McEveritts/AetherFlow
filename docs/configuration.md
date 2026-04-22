@@ -51,16 +51,18 @@ Required for the primary login flow. Create credentials at the [Google Cloud Con
 
 ## AI & FlowAI
 
-Configuration for the integrated management assistant.
+Configuration for the integrated multi-provider management assistant. Settings here act as defaults but can be overridden dynamically within the UI or via local endpoints.
 
 | Variable | Description |
 | :--- | :--- |
 | `GEMINI_API_KEY` | Your Google AI Studio API key. |
 | `ANTHROPIC_API_KEY` | (Optional) For Claude-based support. |
 | `OPENAI_API_KEY` | (Optional) For GPT-4 based support. |
+| `LM_STUDIO_ENDPOINT` | (Optional) Override for local LM Studio API. Defaults to `http://localhost:1234`. |
+| `OLLAMA_ENDPOINT` | (Optional) Override for local Ollama API. Defaults to `http://localhost:11434`. |
 
 > [!TIP]
-> **FlowAI Support Mode** performs best when provided with a high-bandwidth model like Gemini 2.0 Flash or Claude 3.5 Sonnet.
+> **FlowAI Support Mode** performs best when provided with a high-bandwidth model like Gemini 2.0 Flash or Claude 3.5 Sonnet. Advanced users can use **LocalAI** via LM Studio or Ollama for full data privacy.
 
 ---
 
