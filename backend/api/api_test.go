@@ -53,13 +53,41 @@ func TestAllowedAIModels(t *testing.T) {
 		model string
 		want  bool
 	}{
+		// Gemini preview models
+		{"gemini-3.1-pro-preview", true},
+		{"gemini-3-flash-preview", true},
+		{"gemini-3.1-flash-lite-preview", true},
+		{"gemini-3-pro-image-preview", true},
+		{"gemini-3.1-flash-image-preview", true},
+		// Gemini stable models
 		{"gemini-2.5-pro", true},
+		{"gemini-2.5-flash", true},
 		{"gemini-2.0-flash", true},
 		{"gemini-2.0-flash-lite", true},
-		{"gemini-2.5-flash", true},
 		{"gemini-1.5-pro", true},
 		{"gemini-1.5-flash", true},
+		// OpenAI models
+		{"gpt-4o", true},
+		{"gpt-4o-mini", true},
+		{"gpt-4-turbo", true},
+		{"gpt-5.4", true},
+		{"gpt-5.4-mini", true},
+		// Anthropic models
+		{"claude-opus", true},
+		{"claude-opus-4.5", true},
+		{"claude-opus-4.6", true},
+		{"claude-sonnet-4.5", true},
+		{"claude-sonnet-4.6", true},
+		{"claude-4-6-sonnet", true},
+		{"claude-4-6-haiku", true},
+		{"claude-4-5-opus", true},
+		// Local AI
+		{"lm-studio", true},
+		{"ollama", true},
+		{"anthropic-local", true},
+		// Invalid / attack payloads
 		{"gpt-4", false},
+		{"gemini-pro", false},
 		{"'; DROP TABLE users;--", false},
 		{"", false},
 	}
@@ -69,6 +97,93 @@ func TestAllowedAIModels(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("allowedAIModels[%q] = %v, want %v", tt.model, got, tt.want)
 		}
+	}
+}
+
+// --- AI Provider Routing ---
+
+func TestResolveProvider(t *testing.T) {
+	tests := []struct {
+		hint  string
+		model string
+		want  string
+	}{
+		// Explicit hint takes precedence
+		{"openai", "gemini-2.0-flash", "openai"},
+		{"anthropic", "gpt-4o", "anthropic"},
+		// Auto-detect from model prefix
+		{"", "gemini-2.5-pro", "gemini"},
+		{"", "gemini-3.1-pro-preview", "gemini"},
+		{"", "gpt-4o", "openai"},
+		{"", "gpt-5.4-mini", "openai"},
+		{"", "claude-opus-4.6", "anthropic"},
+		{"", "claude-4-6-haiku", "anthropic"},
+		// Local AI detection
+		{"", "lm-studio", "localai"},
+		{"", "ollama", "localai"},
+		{"", "anthropic-local", "localai"},
+		// Unknown model defaults to gemini
+		{"", "unknown-model", "gemini"},
+	}
+
+	for _, tt := range tests {
+		got := ResolveProvider(tt.hint, tt.model)
+		if got != tt.want {
+			t.Errorf("ResolveProvider(%q, %q) = %q, want %q", tt.hint, tt.model, got, tt.want)
+		}
+	}
+}
+
+func TestBuildProviderConfig(t *testing.T) {
+	ps := &ProviderSettings{
+		GeminiAPIKey:    "gemini-test-key",
+		OpenAIAPIKey:    "openai-test-key",
+		AnthropicAPIKey: "anthropic-test-key",
+		LMStudioEndpoint: "http://localhost:1234",
+		OllamaEndpoint:   "http://localhost:11434",
+		AnthropicEndpoint: "https://custom-anthropic.example.com",
+	}
+
+	// Gemini config
+	cfg := buildProviderConfig(ps, "gemini", "gemini-2.0-flash")
+	if cfg.APIKey != "gemini-test-key" {
+		t.Errorf("Gemini config APIKey = %q, want %q", cfg.APIKey, "gemini-test-key")
+	}
+	if cfg.Model != "gemini-2.0-flash" {
+		t.Errorf("Gemini config Model = %q, want %q", cfg.Model, "gemini-2.0-flash")
+	}
+
+	// OpenAI config
+	cfg = buildProviderConfig(ps, "openai", "gpt-4o")
+	if cfg.APIKey != "openai-test-key" {
+		t.Errorf("OpenAI config APIKey = %q, want %q", cfg.APIKey, "openai-test-key")
+	}
+
+	// Anthropic config with custom endpoint
+	cfg = buildProviderConfig(ps, "anthropic", "claude-opus")
+	if cfg.APIKey != "anthropic-test-key" {
+		t.Errorf("Anthropic config APIKey = %q, want %q", cfg.APIKey, "anthropic-test-key")
+	}
+	if cfg.Endpoint != "https://custom-anthropic.example.com" {
+		t.Errorf("Anthropic config Endpoint = %q, want custom endpoint", cfg.Endpoint)
+	}
+
+	// LocalAI with LM Studio
+	cfg = buildProviderConfig(ps, "localai", "lm-studio")
+	if cfg.Endpoint != "http://localhost:1234" {
+		t.Errorf("LocalAI config Endpoint = %q, want LM Studio endpoint", cfg.Endpoint)
+	}
+
+	// LocalAI with Ollama
+	cfg = buildProviderConfig(ps, "localai", "ollama")
+	if cfg.Endpoint != "http://localhost:11434" {
+		t.Errorf("Ollama config Endpoint = %q, want Ollama endpoint", cfg.Endpoint)
+	}
+
+	// LocalAI with anthropic-local (should use Anthropic endpoint, not LM Studio)
+	cfg = buildProviderConfig(ps, "localai", "anthropic-local")
+	if cfg.Endpoint != "https://custom-anthropic.example.com" {
+		t.Errorf("Anthropic-local config Endpoint = %q, want Anthropic endpoint", cfg.Endpoint)
 	}
 }
 

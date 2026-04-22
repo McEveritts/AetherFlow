@@ -5,21 +5,19 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-
-	"github.com/google/generative-ai-go/genai"
 )
 
 // BandwidthRecommendation holds the AI's bandwidth optimization suggestion.
 type BandwidthRecommendation struct {
-	RecommendedUploadKBps   int     `json:"recommended_upload_kbps"`
-	RecommendedDownloadKBps int     `json:"recommended_download_kbps"`
-	Reasoning               string  `json:"reasoning"`
-	Confidence              float64 `json:"confidence"`
-	SwarmHealth             string  `json:"swarm_health"` // "healthy", "congested", "underutilized"
+	RecommendedUploadKBps   int      `json:"recommended_upload_kbps"`
+	RecommendedDownloadKBps int      `json:"recommended_download_kbps"`
+	Reasoning               string   `json:"reasoning"`
+	Confidence              float64  `json:"confidence"`
+	SwarmHealth             string   `json:"swarm_health"` // "healthy", "congested", "underutilized"
 	Suggestions             []string `json:"suggestions"`
 }
 
-// AnalyzeBandwidth gathers system metrics and asks Gemini for bandwidth optimization advice.
+// AnalyzeBandwidth gathers system metrics and asks the AI for bandwidth optimization advice.
 func AnalyzeBandwidth(apiKey string) (*BandwidthRecommendation, error) {
 	metrics := GetSystemMetricsCore()
 
@@ -59,19 +57,12 @@ Respond ONLY with valid JSON (no markdown, no explanation):
 {"recommended_upload_kbps": 0, "recommended_download_kbps": 0, "reasoning": "...", "confidence": 0.0, "swarm_health": "healthy|congested|underutilized", "suggestions": ["..."]}`, sb.String())
 
 	ctx := context.Background()
-	client, err := GetAIClient(ctx)
+	replyText, err := GenerateWithGemini(ctx, prompt)
 	if err != nil {
-		return nil, fmt.Errorf("Gemini client error: %v", err)
-	}
-	// Do NOT defer client.Close() — shared singleton
-
-	model := GetAIModel(client, "")
-	resp, err := model.GenerateContent(ctx, genai.Text(prompt))
-	if err != nil {
-		return nil, fmt.Errorf("generation error: %v", err)
+		return nil, fmt.Errorf("bandwidth analysis failed: %v", err)
 	}
 
-	replyText := CleanJSONResponse(ExtractTextFromResponse(resp))
+	replyText = CleanJSONResponse(replyText)
 
 	var rec BandwidthRecommendation
 	if err := json.Unmarshal([]byte(replyText), &rec); err != nil {

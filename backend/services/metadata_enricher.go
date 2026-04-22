@@ -12,8 +12,6 @@ import (
 	"time"
 
 	"aetherflow/db"
-
-	"github.com/google/generative-ai-go/genai"
 )
 
 // validMediaExtensions is the set of file extensions to include in media scans.
@@ -206,10 +204,6 @@ func (me *MetadataEnricher) runEnrichment(scanPath string, apiKey string) {
 
 func (me *MetadataEnricher) enrichBatch(files []MediaFile, apiKey string) ([]EnrichedMedia, error) {
 	ctx := context.Background()
-	client, err := GetAIClient(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create Gemini client: %v", err)
-	}
 
 	// Build file list for the prompt
 	var fileList strings.Builder
@@ -228,14 +222,13 @@ Respond with a JSON array ONLY (no markdown, no explanation). Each element must 
 
 If you cannot determine a field, use "unknown". For subtitle files (.srt, .ass, .vtt, etc.), identify the language from the filename.`, fileList.String())
 
-	model := GetAIModel(client, "")
-	resp, err := model.GenerateContent(ctx, genai.Text(prompt))
+	replyText, err := GenerateWithGemini(ctx, prompt)
 	if err != nil {
-		return nil, fmt.Errorf("Gemini generation error: %v", err)
+		return nil, fmt.Errorf("metadata enrichment error: %v", err)
 	}
 
 	// Parse JSON response
-	replyText := CleanJSONResponse(ExtractTextFromResponse(resp))
+	replyText = CleanJSONResponse(replyText)
 
 	var parsed []struct {
 		Filename  string   `json:"filename"`

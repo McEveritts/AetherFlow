@@ -9,79 +9,82 @@ import (
 	"sync"
 
 	"aetherflow/db"
-
-	"github.com/google/generative-ai-go/genai"
-	"google.golang.org/api/option"
+	"aetherflow/providers"
 )
 
-// ── Phase 7: Shared Gemini Client Factory ──────────────────────────────
+// ── Unified AI Provider Factory ─────────────────────────────────────────
 //
-// All AI services MUST use this factory instead of creating ad-hoc clients.
-// Benefits:
-//   - Single source for API key resolution
-//   - Consistent model selection from settings
-//   - Connection pooling (one client per API key, reused across calls)
-//   - Centralized error handling and logging
-
-// aiClientSingleton caches a reusable Gemini client. The genai.Client is
-// safe for concurrent use and should not be recreated on every request.
-var (
-	aiClientMu        sync.Mutex
-	aiClientSingleton *genai.Client
-	aiClientAPIKey    string // tracks which key the singleton was created with
-)
+// This is the SINGLE source of truth for creating AI providers in the
+// services layer. Both API handlers (via api/ai.go) and background
+// services use this factory.
 
 // DefaultAIModel is the fallback model when settings are unavailable.
 const DefaultAIModel = "gemini-2.0-flash"
 
-// GetAIClient returns a shared, long-lived Gemini client.
-// The client is reused across calls; callers MUST NOT call .Close() on it.
-// If the API key changes (e.g., user updates settings), the client is recreated.
-func GetAIClient(ctx context.Context) (*genai.Client, error) {
+var (
+	providerMu        sync.Mutex
+	cachedGemini      providers.AIProvider
+	cachedGeminiKey   string // tracks which key the singleton was created with
+)
+
+// GetGeminiProvider returns a shared, long-lived Gemini provider.
+// The provider is cached and reused; callers MUST NOT call Close() on it.
+// If the API key changes, the provider is recreated.
+func GetGeminiProvider(ctx context.Context) (providers.AIProvider, error) {
 	apiKey, err := ResolveGeminiKey()
 	if err != nil {
 		return nil, err
 	}
 
-	aiClientMu.Lock()
-	defer aiClientMu.Unlock()
+	providerMu.Lock()
+	defer providerMu.Unlock()
 
-	// Reuse existing client if API key hasn't changed
-	if aiClientSingleton != nil && aiClientAPIKey == apiKey {
-		return aiClientSingleton, nil
+	// Reuse if key hasn't changed
+	if cachedGemini != nil && cachedGeminiKey == apiKey {
+		return cachedGemini, nil
 	}
 
-	// Close stale client if key changed
-	if aiClientSingleton != nil {
-		aiClientSingleton.Close()
-		aiClientSingleton = nil
-		slog.Info("AI client: API key changed, recreating client")
+	// Close stale provider
+	if cachedGemini != nil {
+		cachedGemini.Close()
+		cachedGemini = nil
+		slog.Info("AI provider: API key changed, recreating Gemini provider")
 	}
 
-	client, err := genai.NewClient(ctx, option.WithAPIKey(apiKey))
+	model := ResolveAIModelName()
+	p, err := providers.NewProvider("gemini", providers.ProviderConfig{
+		APIKey: apiKey,
+		Model:  model,
+	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to create Gemini client: %w", err)
+		return nil, fmt.Errorf("failed to create Gemini provider: %w", err)
 	}
 
-	aiClientSingleton = client
-	aiClientAPIKey = apiKey
-	slog.Info("AI client: initialized shared Gemini client")
-	return client, nil
+	cachedGemini = p
+	cachedGeminiKey = apiKey
+	slog.Info("AI provider: initialized shared Gemini provider", "model", model)
+	return p, nil
 }
 
-// GetAIModel returns a GenerativeModel using the specified model name.
-// If modelName is empty, uses the model configured in settings (or DefaultAIModel).
-func GetAIModel(client *genai.Client, modelName string) *genai.GenerativeModel {
-	if modelName == "" {
-		modelName = ResolveAIModelName()
+// GenerateWithGemini is a convenience function for background services
+// that need single-shot AI generation. Uses the shared Gemini provider.
+func GenerateWithGemini(ctx context.Context, prompt string) (string, error) {
+	p, err := GetGeminiProvider(ctx)
+	if err != nil {
+		return "", err
 	}
-	return client.GenerativeModel(modelName)
+	// Do NOT defer p.Close() — this is the shared singleton
+
+	resp, err := p.Generate(ctx, prompt)
+	if err != nil {
+		return "", err
+	}
+	return resp.Text, nil
 }
 
 // ResolveGeminiKey resolves the Gemini API key through:
 // 1. SQLite settings (decrypted if encrypted)
 // 2. GEMINI_API_KEY environment variable
-// This is the services-layer equivalent of api.GetDecryptedGeminiKey().
 func ResolveGeminiKey() (string, error) {
 	var apiKey string
 	db.DB.QueryRow("SELECT COALESCE(gemini_api_key, '') FROM settings WHERE id = 1").Scan(&apiKey)
@@ -109,22 +112,6 @@ func ResolveAIModelName() string {
 		return DefaultAIModel
 	}
 	return model
-}
-
-// ExtractTextFromResponse extracts the text content from a Gemini response.
-// This standardizes the response parsing that was duplicated across all 6 callsites.
-func ExtractTextFromResponse(resp *genai.GenerateContentResponse) string {
-	if resp == nil || len(resp.Candidates) == 0 || resp.Candidates[0].Content == nil {
-		return ""
-	}
-
-	var sb strings.Builder
-	for _, part := range resp.Candidates[0].Content.Parts {
-		if text, ok := part.(genai.Text); ok {
-			sb.WriteString(string(text))
-		}
-	}
-	return sb.String()
 }
 
 // CleanJSONResponse strips markdown code fences from AI JSON responses.

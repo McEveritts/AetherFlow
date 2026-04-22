@@ -10,8 +10,6 @@ import (
 	"time"
 
 	"aetherflow/db"
-
-	"github.com/google/generative-ai-go/genai"
 )
 
 // BackupWindow represents the AI-determined optimal backup time.
@@ -402,18 +400,12 @@ Respond ONLY with valid JSON (no markdown, no explanation):
 Choose the hour with the lowest combined CPU, Disk I/O, and load average.`, sb.String())
 
 	ctx := context.Background()
-	client, err := GetAIClient(ctx)
+	replyText, err := GenerateWithGemini(ctx, prompt)
 	if err != nil {
-		return nil, fmt.Errorf("Gemini client error: %v", err)
+		return nil, fmt.Errorf("backup window analysis failed: %v", err)
 	}
 
-	model := GetAIModel(client, "")
-	resp, err := model.GenerateContent(ctx, genai.Text(prompt))
-	if err != nil {
-		return nil, fmt.Errorf("generation error: %v", err)
-	}
-
-	replyText := CleanJSONResponse(ExtractTextFromResponse(resp))
+	replyText = CleanJSONResponse(replyText)
 
 	var window BackupWindow
 	if err := json.Unmarshal([]byte(replyText), &window); err != nil {

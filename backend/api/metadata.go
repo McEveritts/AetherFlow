@@ -42,13 +42,13 @@ func HandleMetadataScan(c *gin.Context) {
 	}
 
 	// Get API key (always decrypted)
-	apiKey, err := GetDecryptedGeminiKey()
-	if err != nil {
-		InternalError(c, err.Error())
+	ps, err := ResolveProviderSettings()
+	if err != nil || ps.GeminiAPIKey == "" {
+		InternalError(c, "Gemini API key not configured. Set it in Settings → FlowAI Engine.")
 		return
 	}
 
-	services.Enricher.StartEnrichment(cleanPath, apiKey)
+	services.Enricher.StartEnrichment(cleanPath, ps.GeminiAPIKey)
 
 	c.JSON(http.StatusOK, gin.H{
 		"message": "Metadata enrichment scan started",

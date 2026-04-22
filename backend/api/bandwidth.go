@@ -14,13 +14,13 @@ import (
 
 // HandleBandwidthAnalyze triggers AI bandwidth analysis.
 func HandleBandwidthAnalyze(c *gin.Context) {
-	apiKey, err := GetDecryptedGeminiKey()
-	if err != nil {
-		InternalError(c, err.Error())
+	ps, err := ResolveProviderSettings()
+	if err != nil || ps.GeminiAPIKey == "" {
+		InternalError(c, "Gemini API key not configured. Set it in Settings → FlowAI Engine.")
 		return
 	}
 
-	rec, err := services.AnalyzeBandwidth(apiKey)
+	rec, err := services.AnalyzeBandwidth(ps.GeminiAPIKey)
 	if err != nil {
 		InternalError(c, "Bandwidth analysis failed: " + err.Error())
 		return

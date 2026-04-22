@@ -57,8 +57,8 @@ The `DecryptKey()` function has a built-in backwards-compatibility fallback:
 
 To force-encrypt existing plaintext keys after setting `AES_MASTER_KEY`:
 1. Open the AetherFlow Dashboard → Settings
-2. Clear and re-enter the Gemini API key
-3. Click Save — the key will be stored encrypted
+2. Clear and re-enter your AI Provider API keys (Gemini, OpenAI, Anthropic)
+3. Click Save — the keys will be stored encrypted
 
 ### 4. Build and Deploy
 
@@ -148,7 +148,7 @@ redis-cli -a $REDIS_PASSWORD GET "blacklist:$JTI_FROM_STEP_2"
 ### Encryption
 
 ```bash
-# Verify API key is stored encrypted in SQLite
+# Verify API keys are stored encrypted in SQLite
 sqlite3 /path/to/aetherflow.sqlite \
   "SELECT gemini_api_key FROM settings WHERE id = 1;"
 # Expected: Base64-encoded ciphertext (NOT plaintext API key)

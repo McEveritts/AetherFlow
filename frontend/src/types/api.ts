@@ -122,17 +122,20 @@ export interface AuditLogResponse {
 
 export interface AIChatRequest {
     message: string;
-    context_mode?: 'minimal' | 'full' | 'logs';
+    model?: string;
+    provider?: 'gemini' | 'openai' | 'anthropic' | 'localai';
+    history?: { role: string; text: string }[];
+    context_mode?: 'logs' | 'metrics' | 'full';
     system_metrics?: unknown;
     system_logs?: unknown[];
 }
 
 export interface AIProposedAction {
     type: 'system_action';
-    id: string;
+    action_id: number;
     title: string;
     description: string;
-    danger_level: 'info' | 'warning' | 'critical';
+    danger_level: 'info' | 'warn' | 'critical';
     impact: string;
 }
 
