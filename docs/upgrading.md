@@ -50,7 +50,7 @@ If you are performing a manual upgrade:
 2. **Fetch Source**:
    ```bash
    git fetch --all
-   git checkout tags/v3.1.6
+   git checkout tags/v3.1.7
    ```
 3. **Rebuild Backend**:
    ```bash

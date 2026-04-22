@@ -1,3 +1,18 @@
+## CHANGELOG v3.1.7 - FlowAI Architecture & Dashboard Optimization
+_Generated April 22, 2026 encompassing all commits from v3.1.6 to v3.1.7._
+
+---
+
+### Release Highlights
+* **FlowAI Multi-Provider Architecture**: Finalized provider-agnostic routing, per-provider connection testing, and expanded the settings UI to support dynamic model and credential handling for Anthropic, Gemini, and OpenAI.
+* **Hybrid File System Browser**: Integrated a secure, controlled "hybrid" file system browser into the AetherMarketplace UI with server-side path-traversal protection.
+* **Dashboard Telemetry Refinements**: Upgraded the `WebSocketContext` to bypass polling intervals for genuine real-time `METRICS_UPDATE` broadcasting. Fixed SQLite date parsing to accurately bucket historical Data Usage metrics.
+* **Storage Insights**: Introduced a dynamic partition-filtering dropdown to the Storage widget, allowing targeted drive inspection instead of only aggregate views.
+* **Immersive UI Polish**: Refactored the Ghost Spacer Sidebar to align icon dimensions, optimized the `GpuWidget` layout to prevent text clipping, and integrated SVGL for fetching dynamic AetherMarketplace logos.
+* **Frontend Build Integrity**: Resolved pre-existing TypeScript/build errors in `StorageWidget`, `AppTopologyMap`, and `MediaFlowTab`. Removed the orphaned `LoginOverlay` component.
+
+---
+
 ## CHANGELOG v3.1.6 - MediaFlow Engine & AetherMarketplace Stabilization
 _Generated April 18, 2026 encompassing all commits from v3.1.5 to v3.1.6._
 

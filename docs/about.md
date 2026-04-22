@@ -7,7 +7,7 @@ It began as the next evolution of **QuickBox**, then grew into something broader
 Rather than treating the server as a loose collection of scripts and panels, AetherFlow treats it as a managed platform: one place to operate services, observe the system, automate tasks, and safely delegate actions through an AI-assisted interface.
 
 > [!NOTE]
-> AetherFlow v3.1.6 reflects a major architectural modernization. The platform is moving away from legacy PHP patterns and toward a high-concurrency stack built around Go, Next.js, and systemd-native orchestration.
+> AetherFlow v3.1.7 reflects a major architectural modernization. The platform is moving away from legacy PHP patterns and toward a high-concurrency stack built around Go, Next.js, and systemd-native orchestration.
 
 ---
 
