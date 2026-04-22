@@ -52,7 +52,8 @@ run_check \
 
 run_check \
     "Personal workstation path residue" \
-    '([A-Za-z]:[/\\]+Users[/\\]+[^/\\]+[/\\]+|/Users/[^/]+/|OneDrive[/\\])'
+    '([A-Za-z]:[/\\]+Users[/\\]+[^/\\]+[/\\]+|/Users/[^/]+/|OneDrive[/\\])' \
+    '^scripts/check_privacy_hygiene\.sh:'
 
 if [[ "${failures}" -ne 0 ]]; then
     echo "Privacy hygiene scan failed."

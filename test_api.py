@@ -27,11 +27,12 @@ def require(value, flag_name):
 
 
 def exec_sudo_command(client, sudo_password, command):
-    quoted_password = shlex.quote(sudo_password)
-    quoted_command = shlex.quote(command)
     stdin, stdout, stderr = client.exec_command(
-        f"printf '%s\\n' {quoted_password} | sudo -S -p '' sh -lc {quoted_command}"
+        f"sudo -S -p '' sh -lc {shlex.quote(command)}",
+        get_pty=True,
     )
+    stdin.write(f"{sudo_password}\n")
+    stdin.flush()
     output = stdout.read().decode("ascii", errors="ignore")
     error = stderr.read().decode("ascii", errors="ignore")
     if error:
