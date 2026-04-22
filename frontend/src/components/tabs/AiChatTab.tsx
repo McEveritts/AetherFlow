@@ -221,7 +221,7 @@ export default function AiChatTab() {
                                         className="bg-slate-800 text-xs text-slate-300 rounded border border-white/10 px-2 py-1 outline-none"
                                         value={selectedProvider}
                                         onChange={(e) => {
-                                            const newProvider = e.target.value;
+                                            const newProvider = e.target.value as AIProviderID;
                                             setSelectedProvider(newProvider);
                                             setSelectedModel(AI_MODELS[newProvider]?.[0]?.id || '');
                                         }}
