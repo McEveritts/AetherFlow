@@ -149,3 +149,16 @@ A: AetherFlow stores account data in SQLite. If you are locked out locally, use 
 
 **Q: Why is my root disk filling up quickly?**  
 A: Check two areas: Docker (if you use Portainer/Marketplace containers) via `docker system df`, and `journald` size via `journalctl --disk-usage`. AetherFlow logs rotate automatically, but application data (like Plex metadata) can grow unbounded if unmonitored.
+
+### 7. Frontend Build Failure: Type Mismatch in State Setter
+**Symptom**: The Next.js frontend fails to build during deployment or locally with `next build`. `npm run build` exits with code 1 and logs show a TypeScript error like `Type 'string' is not assignable to type 'SomeSpecificType'`.
+**Cause**: An event handler (like `onChange` on a `<select>`) extracts a value (`e.target.value`) as a generic `string` and attempts to pass it directly to a state setter that expects a strictly typed string literal union (e.g., `AIProviderID`).
+**Resolution**:
+Explicitly cast the generic string to the expected type literal union before passing it to the setter:
+```tsx
+// Incorrect
+const newProvider = e.target.value; 
+
+// Correct
+const newProvider = e.target.value as AIProviderID;
+```
