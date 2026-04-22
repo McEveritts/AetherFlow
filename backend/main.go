@@ -283,7 +283,7 @@ func main() {
 		port = "8080"
 	}
 
-	slog.Info("AetherFlow backend starting", "addr", "127.0.0.1:"+port, "version", version)
+	slog.Info("AetherFlow backend starting", "addr", "0.0.0.0:"+port, "version", version)
 
 	// Start Phase 14: Automated Auto-Heal Recovery process
 	services.StartHealWorker(10 * time.Second)
@@ -299,7 +299,7 @@ func main() {
 	// ── Phase 24: Graceful Shutdown ─────────────────────────────────────
 	// Use http.Server directly for proper lifecycle control
 	srv := &http.Server{
-		Addr:    "127.0.0.1:" + port,
+		Addr:    "0.0.0.0:" + port,
 		Handler: r,
 	}
 
