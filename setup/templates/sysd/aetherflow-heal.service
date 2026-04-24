@@ -5,7 +5,8 @@ After=network.target
 [Service]
 Type=oneshot
 User=root
-ExecStart=/usr/local/bin/AetherFlow/system/af-heal
+ExecStart=/opt/AetherFlow/packages/system/af-heal
+StateDirectory=aetherflow
 NoNewPrivileges=yes
 PrivateTmp=yes
 PrivateDevices=yes
