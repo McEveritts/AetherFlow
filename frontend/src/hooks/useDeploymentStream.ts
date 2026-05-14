@@ -10,6 +10,7 @@ export function useDeploymentStream(appName: string, initiateDeployment: boolean
         return;
     }
 
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setIsDeploying(true);
     setError(null);
     setLogs([]);
