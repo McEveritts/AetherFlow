@@ -10,8 +10,8 @@ import (
 	"io"
 	"log"
 	"log/slog"
-	"net/http"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"strings"
@@ -272,7 +272,7 @@ func GoogleCallback(c *gin.Context) {
 
 	errParam := c.Query("error")
 	if errParam != "" {
-		c.Redirect(http.StatusTemporaryRedirect, baseURL+"/login?error="+errParam)
+		c.Redirect(http.StatusTemporaryRedirect, baseURL+"/login?error="+url.QueryEscape(errParam))
 		return
 	}
 
@@ -684,9 +684,9 @@ func HostValidationMiddleware() gin.HandlerFunc {
 		"localhost":          true,
 		"localhost:8080":     true,
 		"localhost:3000":     true,
-		"127.0.0.1":         true,
-		"127.0.0.1:8080":    true,
-		"127.0.0.1:3000":    true,
+		"127.0.0.1":          true,
+		"127.0.0.1:8080":     true,
+		"127.0.0.1:3000":     true,
 	}
 
 	envHosts := os.Getenv("ALLOWED_HOSTS")
