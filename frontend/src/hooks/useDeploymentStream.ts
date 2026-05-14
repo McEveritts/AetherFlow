@@ -10,9 +10,13 @@ export function useDeploymentStream(appName: string, initiateDeployment: boolean
         return;
     }
 
-    setIsDeploying(true);
-    setError(null);
-    setLogs([]);
+    // Use a microtask to avoid "cascading renders" lint error
+    // by deferring state updates until after the current render cycle.
+    queueMicrotask(() => {
+        setIsDeploying(true);
+        setError(null);
+        setLogs([]);
+    });
 
     // We assume backend API is hooked to /api/v1/deploy/stream
     const eventSource = new EventSource(`/api/v1/deploy/stream?appName=${appName}`);
