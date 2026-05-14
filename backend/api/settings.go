@@ -11,18 +11,18 @@ import (
 )
 
 type SettingsPayload struct {
-	AiModel          string `json:"aiModel"`
-	SystemPrompt     string `json:"systemPrompt"`
-	Language         string `json:"language"`
-	Timezone         string `json:"timezone"`
-	UpdateChannel    string `json:"updateChannel"`
-	DefaultDashboard string `json:"defaultDashboard"`
-	SetupCompleted   bool   `json:"setupCompleted"`
-	GeminiApiKey     string `json:"geminiApiKey"`
-	OpenaiApiKey     string `json:"openaiApiKey"`
-	LmStudioEndpoint string `json:"lmStudioEndpoint"`
-	OllamaEndpoint   string `json:"ollamaEndpoint"`
-	AnthropicApiKey  string `json:"anthropicApiKey"`
+	AiModel           string `json:"aiModel"`
+	SystemPrompt      string `json:"systemPrompt"`
+	Language          string `json:"language"`
+	Timezone          string `json:"timezone"`
+	UpdateChannel     string `json:"updateChannel"`
+	DefaultDashboard  string `json:"defaultDashboard"`
+	SetupCompleted    bool   `json:"setupCompleted"`
+	GeminiApiKey      string `json:"geminiApiKey"`
+	OpenaiApiKey      string `json:"openaiApiKey"`
+	LmStudioEndpoint  string `json:"lmStudioEndpoint"`
+	OllamaEndpoint    string `json:"ollamaEndpoint"`
+	AnthropicApiKey   string `json:"anthropicApiKey"`
 	AnthropicEndpoint string `json:"anthropicEndpoint"`
 }
 
@@ -33,8 +33,8 @@ func GetSettings(c *gin.Context) {
 		       COALESCE(gemini_api_key, ''), COALESCE(openai_api_key, ''), COALESCE(lm_studio_endpoint, ''), COALESCE(ollama_endpoint, ''),
 		       COALESCE(anthropic_api_key, ''), COALESCE(anthropic_endpoint, '')
 		FROM settings WHERE id = 1
-	`).Scan(&s.AiModel, &s.SystemPrompt, &s.Language, &s.Timezone, &s.UpdateChannel, &s.DefaultDashboard, &s.SetupCompleted, 
-		    &s.GeminiApiKey, &s.OpenaiApiKey, &s.LmStudioEndpoint, &s.OllamaEndpoint, &s.AnthropicApiKey, &s.AnthropicEndpoint)
+	`).Scan(&s.AiModel, &s.SystemPrompt, &s.Language, &s.Timezone, &s.UpdateChannel, &s.DefaultDashboard, &s.SetupCompleted,
+		&s.GeminiApiKey, &s.OpenaiApiKey, &s.LmStudioEndpoint, &s.OllamaEndpoint, &s.AnthropicApiKey, &s.AnthropicEndpoint)
 
 	if err != nil {
 		slog.Error("fetching settings", "error", err)
@@ -79,63 +79,59 @@ func updateSettings(c *gin.Context) {
 		return
 	}
 
-	// Handle API key encryption individually 
+	// Handle API key encryption individually
 	var err error
-	
-	geminiKeyStr := ""
-	if strings.HasPrefix(req.GeminiApiKey, "****") || req.GeminiApiKey == "" {
-		// Don't overwrite existing
-		geminiKeyStr = "gemini_api_key" // sql identifier workaround
-	} else {
-		if encrypted, err := EncryptKey(req.GeminiApiKey); err == nil {
-			geminiKeyStr = "'" + strings.ReplaceAll(encrypted, "'", "''") + "'"
-		} else {
-			geminiKeyStr = "'" + strings.ReplaceAll(req.GeminiApiKey, "'", "''") + "'"
-		}
-	}
 
-	openaiKeyStr := ""
-	if strings.HasPrefix(req.OpenaiApiKey, "****") || req.OpenaiApiKey == "" {
-		openaiKeyStr = "openai_api_key"
-	} else {
-		if encrypted, err := EncryptKey(req.OpenaiApiKey); err == nil {
-			openaiKeyStr = "'" + strings.ReplaceAll(encrypted, "'", "''") + "'"
-		} else {
-			openaiKeyStr = "'" + strings.ReplaceAll(req.OpenaiApiKey, "'", "''") + "'"
-		}
-	}
-
-	anthropicKeyStr := ""
-	if strings.HasPrefix(req.AnthropicApiKey, "****") || req.AnthropicApiKey == "" {
-		anthropicKeyStr = "anthropic_api_key"
-	} else {
-		if encrypted, err := EncryptKey(req.AnthropicApiKey); err == nil {
-			anthropicKeyStr = "'" + strings.ReplaceAll(encrypted, "'", "''") + "'"
-		} else {
-			anthropicKeyStr = "'" + strings.ReplaceAll(req.AnthropicApiKey, "'", "''") + "'"
-		}
-	}
-
-	// Because of our conditional logic to ignore masked strings, building query dynamically is safer
-	_, err = db.DB.Exec(`
-		UPDATE settings SET 
-			ai_model = ?, 
+	query := `
+		UPDATE settings SET
+			ai_model = ?,
 			system_prompt = ?,
 			language = ?,
 			timezone = ?,
 			update_channel = ?,
 			default_dashboard = ?,
-			setup_completed = ?,
-			gemini_api_key = `+geminiKeyStr+`,
-			openai_api_key = `+openaiKeyStr+`,
-			anthropic_api_key = `+anthropicKeyStr+`,
+			setup_completed = ?`
+
+	var args []interface{}
+	args = append(args, req.AiModel, req.SystemPrompt, req.Language, req.Timezone, req.UpdateChannel, req.DefaultDashboard, req.SetupCompleted)
+
+	if !(strings.HasPrefix(req.GeminiApiKey, "****") || req.GeminiApiKey == "") {
+		key := req.GeminiApiKey
+		if encrypted, err := EncryptKey(key); err == nil {
+			key = encrypted
+		}
+		query += ", gemini_api_key = ?"
+		args = append(args, key)
+	}
+
+	if !(strings.HasPrefix(req.OpenaiApiKey, "****") || req.OpenaiApiKey == "") {
+		key := req.OpenaiApiKey
+		if encrypted, err := EncryptKey(key); err == nil {
+			key = encrypted
+		}
+		query += ", openai_api_key = ?"
+		args = append(args, key)
+	}
+
+	if !(strings.HasPrefix(req.AnthropicApiKey, "****") || req.AnthropicApiKey == "") {
+		key := req.AnthropicApiKey
+		if encrypted, err := EncryptKey(key); err == nil {
+			key = encrypted
+		}
+		query += ", anthropic_api_key = ?"
+		args = append(args, key)
+	}
+
+	query += `,
 			lm_studio_endpoint = ?,
 			ollama_endpoint = ?,
 			anthropic_endpoint = ?,
 			updated_at = CURRENT_TIMESTAMP
 		WHERE id = 1
-	`, req.AiModel, req.SystemPrompt, req.Language, req.Timezone, req.UpdateChannel, req.DefaultDashboard, req.SetupCompleted, req.LmStudioEndpoint, req.OllamaEndpoint, req.AnthropicEndpoint)
+	`
+	args = append(args, req.LmStudioEndpoint, req.OllamaEndpoint, req.AnthropicEndpoint)
 
+	_, err = db.DB.Exec(query, args...)
 
 	if err != nil {
 		slog.Error("updating settings", "error", err)
