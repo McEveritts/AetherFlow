@@ -4,7 +4,6 @@
 
 import os
 import re
-import time
 from collections import defaultdict
 
 AUTH_LOG = '/var/log/auth.log'
