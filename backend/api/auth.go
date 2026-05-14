@@ -272,7 +272,7 @@ func GoogleCallback(c *gin.Context) {
 
 	errParam := c.Query("error")
 	if errParam != "" {
-		c.Redirect(http.StatusTemporaryRedirect, baseURL+"/login?error="+errParam)
+		c.Redirect(http.StatusTemporaryRedirect, baseURL+"/login?error="+url.QueryEscape(errParam))
 		return
 	}
 
