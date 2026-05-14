@@ -142,12 +142,12 @@ func getSystemMetricsContext() string {
 	sb.WriteString(fmt.Sprintf("CPU Frequency: %.0f MHz\n", metrics.CPUFreqMhz))
 
 	if total, ok := metrics.Memory["total"]; ok {
-		used, _ := metrics.Memory["used"]
+		used := metrics.Memory["used"]
 		sb.WriteString(fmt.Sprintf("Memory: %.2f / %.2f GB (%.1f%%)\n", used, total, (used/total)*100))
 	}
 
 	if swapTotal, ok := metrics.Swap["total"]; ok && swapTotal > 0 {
-		swapUsed, _ := metrics.Swap["used"]
+		swapUsed := metrics.Swap["used"]
 		sb.WriteString(fmt.Sprintf("Swap: %.2f / %.2f GB\n", swapUsed, swapTotal))
 	}
 
@@ -157,13 +157,13 @@ func getSystemMetricsContext() string {
 	}
 
 	if readBPS, ok := metrics.DiskIO["read_bytes_sec"]; ok {
-		writeBPS, _ := metrics.DiskIO["write_bytes_sec"]
+		writeBPS := metrics.DiskIO["write_bytes_sec"]
 		sb.WriteString(fmt.Sprintf("Disk I/O: Read %.0f B/s, Write %.0f B/s\n", readBPS, writeBPS))
 	}
 
 	if down, ok := metrics.Network["down"]; ok {
-		up, _ := metrics.Network["up"]
-		conns, _ := metrics.Network["active_connections"]
+		up := metrics.Network["up"]
+		conns := metrics.Network["active_connections"]
 		sb.WriteString(fmt.Sprintf("Network: Down %v, Up %v, Active Connections: %v\n", down, up, conns))
 	}
 
