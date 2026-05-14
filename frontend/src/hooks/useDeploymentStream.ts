@@ -10,9 +10,11 @@ export function useDeploymentStream(appName: string, initiateDeployment: boolean
         return;
     }
 
-    setIsDeploying(true);
-    setError(null);
-    setLogs([]);
+    setTimeout(() => {
+      setIsDeploying(true);
+      setError(null);
+      setLogs([]);
+    }, 0);
 
     // We assume backend API is hooked to /api/v1/deploy/stream
     const eventSource = new EventSource(`/api/v1/deploy/stream?appName=${appName}`);
