@@ -65,9 +65,7 @@ func (d *DNSManager) AppendOrUpdateDomains(domains []string) error {
 			// Extract existing domain if formatted properly (e.g. "127.0.0.1 radarr.aether.local")
 			parts := strings.Fields(trimmedLine)
 			if len(parts) >= 2 && parts[0] == routeTarget {
-				for _, p := range parts[1:] {
-					existingDomains = append(existingDomains, p)
-				}
+				existingDomains = append(existingDomains, parts[1:]...)
 			}
 		} else {
 			newVars = append(newVars, line)

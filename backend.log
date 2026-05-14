@@ -1,0 +1,556 @@
+2026/05/14 12:20:11 INFO [config] executable dir resolved to dir=/tmp/go-build711603203/b001/exe
+2026/05/14 12:20:12 INFO OIDC key generated path=/tmp/go-build711603203/b001/exe/data/oidc_rsa.pem kid=2b1cb5a4d7778da4
+time=2026-05-14T12:20:12.025Z level=INFO msg="configuration loaded"
+time=2026-05-14T12:20:12.025Z level=INFO msg="config summary" port=8443 db=aetherflow.db redis=localhost:6379 cluster="" csrf_disabled=false
+time=2026-05-14T12:20:12.025Z level=WARN msg="configuration warning" issue="JWT_SECRET is empty — sessions will use an insecure default key"
+time=2026-05-14T12:20:12.025Z level=WARN msg="configuration warning" issue="AES_MASTER_KEY is empty — API keys stored in plaintext"
+time=2026-05-14T12:20:12.025Z level=WARN msg="configuration warning" issue="No billing webhook secret configured (BILLING_WEBHOOK_SECRET)"
+time=2026-05-14T12:20:12.025Z level=WARN msg="configuration warning" issue="ALLOWED_HOSTS is empty — host validation disabled"
+time=2026-05-14T12:20:12.025Z level=INFO msg="database path anchored" path=/tmp/go-build711603203/b001/exe/data/aetherflow.sqlite
+time=2026-05-14T12:20:12.037Z level=INFO msg="migration already applied (duplicate column)" version=1
+time=2026-05-14T12:20:12.037Z level=INFO msg="migration applied" version=1 description="Add setup_completed to settings"
+time=2026-05-14T12:20:12.037Z level=INFO msg="migration already applied (duplicate column)" version=2
+time=2026-05-14T12:20:12.038Z level=INFO msg="migration applied" version=2 description="Add gemini_api_key to settings"
+time=2026-05-14T12:20:12.038Z level=INFO msg="migration already applied (duplicate column)" version=3
+time=2026-05-14T12:20:12.038Z level=INFO msg="migration applied" version=3 description="Add password_hash to users"
+time=2026-05-14T12:20:12.039Z level=INFO msg="migration applied" version=4 description="Add backup scheduling columns to settings"
+time=2026-05-14T12:20:12.041Z level=INFO msg="migration applied" version=5 description="v3.1.0 Gold — performance indexes"
+time=2026-05-14T12:20:12.042Z level=INFO msg="migration applied" version=6 description="Persist smart backup next run time"
+time=2026-05-14T12:20:12.042Z level=INFO msg="migration applied" version=7 description="Add OIDC consent persistence"
+time=2026-05-14T12:20:12.043Z level=INFO msg="migration applied" version=8 description="Add active sessions table for session tracking"
+time=2026-05-14T12:20:12.043Z level=INFO msg="migration applied" version=9 description="Add pending_actions table for approval gates"
+time=2026-05-14T12:20:12.044Z level=INFO msg="migration applied" version=10 description="Add notification_delivery_log for delivery tracking"
+time=2026-05-14T12:20:12.045Z level=INFO msg="migration applied" version=11 description="Add admin audit trail for accountability"
+time=2026-05-14T12:20:12.045Z level=INFO msg="migration already applied (duplicate column)" version=12
+time=2026-05-14T12:20:12.045Z level=INFO msg="migration already applied (duplicate column)" version=12
+time=2026-05-14T12:20:12.045Z level=INFO msg="migration already applied (duplicate column)" version=12
+time=2026-05-14T12:20:12.045Z level=INFO msg="migration applied" version=12 description="Add OpenAI and Local AI provider config"
+time=2026-05-14T12:20:12.045Z level=INFO msg="migration already applied (duplicate column)" version=13
+time=2026-05-14T12:20:12.045Z level=INFO msg="migration already applied (duplicate column)" version=13
+time=2026-05-14T12:20:12.045Z level=INFO msg="migration applied" version=13 description="Add Anthropic API provider config"
+time=2026-05-14T12:20:12.047Z level=INFO msg="migration applied" version=14 description="Add TOTP 2FA columns to users"
+time=2026-05-14T12:20:12.047Z level=INFO msg="migration applied" version=15 description="Add recovery_codes table for 2FA backup codes"
+time=2026-05-14T12:20:12.048Z level=INFO msg="migration applied" version=16 description="Add mediaflow queue for hwaccel transcoding"
+time=2026-05-14T12:20:12.048Z level=INFO msg="database connected" path=/tmp/go-build711603203/b001/exe/data/aetherflow.sqlite
+redis: 2026/05/14 12:20:12 pool.go:617: redis: connection pool: failed to dial after 5 attempts: dial tcp [::1]:6379: connect: connection refused
+redis: 2026/05/14 12:20:12 pool.go:617: redis: connection pool: failed to dial after 5 attempts: dial tcp [::1]:6379: connect: connection refused
+redis: 2026/05/14 12:20:12 pool.go:617: redis: connection pool: failed to dial after 5 attempts: dial tcp [::1]:6379: connect: connection refused
+redis: 2026/05/14 12:20:12 pool.go:617: redis: connection pool: failed to dial after 5 attempts: dial tcp [::1]:6379: connect: connection refused
+redis: 2026/05/14 12:20:12 pool.go:617: redis: connection pool: failed to dial after 5 attempts: dial tcp [::1]:6379: connect: connection refused
+redis: 2026/05/14 12:20:12 pool.go:617: redis: connection pool: failed to dial after 5 attempts: dial tcp [::1]:6379: connect: connection refused
+redis: 2026/05/14 12:20:12 pool.go:617: redis: connection pool: failed to dial after 5 attempts: dial tcp [::1]:6379: connect: connection refused
+redis: 2026/05/14 12:20:12 pool.go:617: redis: connection pool: failed to dial after 5 attempts: dial tcp [::1]:6379: connect: connection refused
+redis: 2026/05/14 12:20:12 pool.go:617: redis: connection pool: failed to dial after 5 attempts: dial tcp [::1]:6379: connect: connection refused
+redis: 2026/05/14 12:20:12 pool.go:617: redis: connection pool: failed to dial after 5 attempts: dial tcp [::1]:6379: connect: connection refused
+redis: 2026/05/14 12:20:12 pool.go:617: redis: connection pool: failed to dial after 5 attempts: dial tcp [::1]:6379: connect: connection refused
+redis: 2026/05/14 12:20:13 pool.go:617: redis: connection pool: failed to dial after 5 attempts: dial tcp [::1]:6379: connect: connection refused
+redis: 2026/05/14 12:20:13 pool.go:617: redis: connection pool: failed to dial after 5 attempts: dial tcp [::1]:6379: connect: connection refused
+redis: 2026/05/14 12:20:13 pool.go:617: redis: connection pool: failed to dial after 5 attempts: dial tcp [::1]:6379: connect: connection refused
+redis: 2026/05/14 12:20:13 pool.go:617: redis: connection pool: failed to dial after 5 attempts: dial tcp [::1]:6379: connect: connection refused
+redis: 2026/05/14 12:20:13 pool.go:617: redis: connection pool: failed to dial after 5 attempts: dial tcp [::1]:6379: connect: connection refused
+redis: 2026/05/14 12:20:13 pool.go:617: redis: connection pool: failed to dial after 5 attempts: dial tcp [::1]:6379: connect: connection refused
+redis: 2026/05/14 12:20:13 pool.go:617: redis: connection pool: failed to dial after 5 attempts: dial tcp [::1]:6379: connect: connection refused
+redis: 2026/05/14 12:20:13 pool.go:617: redis: connection pool: failed to dial after 5 attempts: dial tcp [::1]:6379: connect: connection refused
+redis: 2026/05/14 12:20:13 pool.go:617: redis: connection pool: failed to dial after 5 attempts: dial tcp [::1]:6379: connect: connection refused
+redis: 2026/05/14 12:20:13 pool.go:617: redis: connection pool: failed to dial after 5 attempts: dial tcp [::1]:6379: connect: connection refused
+redis: 2026/05/14 12:20:13 pool.go:617: redis: connection pool: failed to dial after 5 attempts: dial tcp [::1]:6379: connect: connection refused
+redis: 2026/05/14 12:20:13 pool.go:617: redis: connection pool: failed to dial after 5 attempts: dial tcp [::1]:6379: connect: connection refused
+redis: 2026/05/14 12:20:13 pool.go:617: redis: connection pool: failed to dial after 5 attempts: dial tcp [::1]:6379: connect: connection refused
+redis: 2026/05/14 12:20:13 pool.go:617: redis: connection pool: failed to dial after 5 attempts: dial tcp [::1]:6379: connect: connection refused
+redis: 2026/05/14 12:20:13 pool.go:617: redis: connection pool: failed to dial after 5 attempts: dial tcp [::1]:6379: connect: connection refused
+redis: 2026/05/14 12:20:13 pool.go:617: redis: connection pool: failed to dial after 5 attempts: dial tcp [::1]:6379: connect: connection refused
+redis: 2026/05/14 12:20:13 pool.go:617: redis: connection pool: failed to dial after 5 attempts: dial tcp [::1]:6379: connect: connection refused
+redis: 2026/05/14 12:20:13 pool.go:617: redis: connection pool: failed to dial after 5 attempts: dial tcp [::1]:6379: connect: connection refused
+redis: 2026/05/14 12:20:13 pool.go:617: redis: connection pool: failed to dial after 5 attempts: dial tcp [::1]:6379: connect: connection refused
+redis: 2026/05/14 12:20:13 pool.go:617: redis: connection pool: failed to dial after 5 attempts: dial tcp [::1]:6379: connect: connection refused
+redis: 2026/05/14 12:20:13 pool.go:617: redis: connection pool: failed to dial after 5 attempts: dial tcp [::1]:6379: connect: connection refused
+redis: 2026/05/14 12:20:13 pool.go:617: redis: connection pool: failed to dial after 5 attempts: dial tcp [::1]:6379: connect: connection refused
+time=2026-05-14T12:20:14.049Z level=WARN msg="Redis unavailable, falling back to in-memory JWT blacklist" error="context deadline exceeded"
+time=2026-05-14T12:20:14.049Z level=INFO msg="database prune loop started" interval=15m
+time=2026-05-14T12:20:14.049Z level=INFO msg="WARNING: AES_MASTER_KEY not set. API key encryption is disabled (dev/test mode only)."
+time=2026-05-14T12:20:14.049Z level=INFO msg="cluster nodes loaded" count=0
+time=2026-05-14T12:20:14.049Z level=INFO msg="Cluster manager initialized"
+time=2026-05-14T12:20:14.049Z level=INFO msg="Log aggregator initialized"
+time=2026-05-14T12:20:14.049Z level=INFO msg="loaded active rules" domain=notifications component=engine count=0
+time=2026-05-14T12:20:14.049Z level=INFO msg="notification engine initialized" domain=notifications component=engine
+time=2026-05-14T12:20:14.049Z level=INFO msg="metrics recorder initialized" domain=telemetry component=metrics-recorder interval=15m
+time=2026-05-14T12:20:14.049Z level=INFO msg="MediaFlow Engine Queue Poller started"
+time=2026-05-14T12:20:14.049Z level=INFO msg="smart backup scheduler initialized" mode=manual
+time=2026-05-14T12:20:14.050Z level=WARN msg="no billing webhook secret configured" hint="set WHMCS_WEBHOOK_SECRET, BLESTA_WEBHOOK_SECRET, or BILLING_WEBHOOK_SECRET"
+time=2026-05-14T12:20:14.050Z level=INFO msg="platform detected" type=bare-metal sandbox=active
+time=2026-05-14T12:20:14.050Z level=INFO msg="cluster mode active" role=standalone
+[GIN-debug] [WARNING] Creating an Engine instance with the Logger and Recovery middleware already attached.
+
+[GIN-debug] [WARNING] Running in "debug" mode. Switch to "release" mode in production.
+ - using env:	export GIN_MODE=release
+ - using code:	gin.SetMode(gin.ReleaseMode)
+
+time=2026-05-14T12:20:14.050Z level=INFO msg="[config] loaded config from" path=config/packages.json
+time=2026-05-14T12:20:14.051Z level=INFO msg="[config] loaded config from" path=config/package_automation.json
+time=2026-05-14T12:20:14.052Z level=INFO msg="Log aggregator: streaming from journalctl"
+redis: 2026/05/14 12:20:14 pool.go:617: redis: connection pool: failed to dial after 5 attempts: dial tcp [::1]:6379: connect: connection refused
+redis: 2026/05/14 12:20:14 pool.go:617: redis: connection pool: failed to dial after 5 attempts: dial tcp [::1]:6379: connect: connection refused
+redis: 2026/05/14 12:20:14 pool.go:617: redis: connection pool: failed to dial after 5 attempts: dial tcp [::1]:6379: connect: connection refused
+redis: 2026/05/14 12:20:14 pool.go:617: redis: connection pool: failed to dial after 5 attempts: dial tcp [::1]:6379: connect: connection refused
+redis: 2026/05/14 12:20:14 pool.go:617: redis: connection pool: failed to dial after 5 attempts: dial tcp [::1]:6379: connect: connection refused
+redis: 2026/05/14 12:20:14 pool.go:617: redis: connection pool: failed to dial after 5 attempts: dial tcp [::1]:6379: connect: connection refused
+redis: 2026/05/14 12:20:14 pool.go:617: redis: connection pool: failed to dial after 5 attempts: dial tcp [::1]:6379: connect: connection refused
+redis: 2026/05/14 12:20:14 pool.go:617: redis: connection pool: failed to dial after 5 attempts: dial tcp [::1]:6379: connect: connection refused
+redis: 2026/05/14 12:20:14 pool.go:617: redis: connection pool: failed to dial after 5 attempts: dial tcp [::1]:6379: connect: connection refused
+redis: 2026/05/14 12:20:14 pool.go:617: redis: connection pool: failed to dial after 5 attempts: dial tcp [::1]:6379: connect: connection refused
+redis: 2026/05/14 12:20:14 pool.go:617: redis: connection pool: failed to dial after 5 attempts: dial tcp [::1]:6379: connect: connection refused
+time=2026-05-14T12:20:14.175Z level=INFO msg="detected public IP" ip=34.46.237.233
+time=2026-05-14T12:20:14.175Z level=INFO msg="CORS origins configured" count=27
+time=2026-05-14T12:20:14.175Z level=INFO msg="host validation auto-discovered" allowed_count=16
+[GIN-debug] GET    /api/public/openapi.yaml  --> aetherflow/api.GetOpenAPISpec (9 handlers)
+[GIN-debug] GET    /api/public/swagger/*any  --> github.com/swaggo/gin-swagger.CustomWrapHandler.func1 (9 handlers)
+[GIN-debug] GET    /api/public/csrf-token    --> aetherflow/api.issueCSRFToken (9 handlers)
+[GIN-debug] GET    /api/public/auth/google/login --> aetherflow/api.GoogleLogin (9 handlers)
+[GIN-debug] GET    /api/public/auth/google/callback --> aetherflow/api.GoogleCallback (9 handlers)
+[GIN-debug] POST   /api/public/auth/login    --> aetherflow/api.LocalLogin (10 handlers)
+[GIN-debug] GET    /api/public/auth/verify   --> aetherflow/api.VerifyProxyAuth (9 handlers)
+[GIN-debug] POST   /api/public/auth/mfa/verify --> aetherflow/api.MFALoginVerify (10 handlers)
+[GIN-debug] POST   /api/public/auth/setup    --> aetherflow/api.SetupAdmin (10 handlers)
+[GIN-debug] GET    /api/public/auth/setup/check --> aetherflow/api.CheckSetupNeeded (9 handlers)
+[GIN-debug] POST   /api/public/billing/webhooks/:provider --> aetherflow/api.HandleBillingWebhook (10 handlers)
+[GIN-debug] GET    /api/public/marketplace   --> aetherflow/api.GetMarketplaceApps (9 handlers)
+[GIN-debug] GET    /api/public/oidc/jwks     --> aetherflow/api.OIDCJwks (9 handlers)
+[GIN-debug] GET    /api/public/oidc/authorize --> aetherflow/api.OIDCAuthorize (10 handlers)
+[GIN-debug] POST   /api/public/oidc/token    --> aetherflow/api.OIDCToken (10 handlers)
+[GIN-debug] GET    /api/public/oidc/userinfo --> aetherflow/api.OIDCUserInfo (10 handlers)
+[GIN-debug] POST   /api/public/oidc/revoke   --> aetherflow/api.OIDCRevoke (10 handlers)
+[GIN-debug] POST   /api/public/oidc/introspect --> aetherflow/api.OIDCIntrospect (10 handlers)
+[GIN-debug] POST   /api/public/oidc/device/authorize --> aetherflow/api.OIDCDeviceAuthorize (10 handlers)
+[GIN-debug] GET    /api/auth/ws              --> aetherflow/api.HandleWebSocket (11 handlers)
+[GIN-debug] GET    /api/auth/ws/ticket       --> aetherflow/api.IssueWSTicket (11 handlers)
+[GIN-debug] POST   /api/auth/oidc/consent    --> aetherflow/api.OIDCConsent (11 handlers)
+[GIN-debug] POST   /api/auth/oidc/device/verify --> aetherflow/api.OIDCDeviceVerify (11 handlers)
+[GIN-debug] POST   /api/auth/oidc/device/consent --> aetherflow/api.OIDCDeviceConsent (11 handlers)
+[GIN-debug] POST   /api/auth/ai/chat         --> aetherflow/api.handleAiChat (12 handlers)
+[GIN-debug] POST   /api/auth/ai/support      --> aetherflow/api.handleAiSupport (12 handlers)
+[GIN-debug] GET    /api/auth/session         --> aetherflow/api.GetSession (11 handlers)
+[GIN-debug] GET    /api/auth/sessions        --> aetherflow/api.ListActiveSessions (11 handlers)
+[GIN-debug] DELETE /api/auth/sessions/:jti   --> aetherflow/api.RevokeSession (11 handlers)
+[GIN-debug] POST   /api/auth/logout          --> aetherflow/api.Logout (11 handlers)
+[GIN-debug] PUT    /api/auth/profile         --> aetherflow/api.UpdateProfile (11 handlers)
+[GIN-debug] GET    /api/auth/user/quota      --> aetherflow/api.GetOwnQuota (11 handlers)
+[GIN-debug] GET    /api/auth/user/2fa/setup  --> aetherflow/api.Setup2FA (11 handlers)
+[GIN-debug] POST   /api/auth/user/2fa/verify --> aetherflow/api.Verify2FA (11 handlers)
+[GIN-debug] POST   /api/auth/user/2fa/disable --> aetherflow/api.Disable2FA (11 handlers)
+[GIN-debug] POST   /api/auth/user/2fa/recovery/regenerate --> aetherflow/api.Regenerate2FARecoveryCodes (11 handlers)
+[GIN-debug] GET    /api/auth/settings        --> aetherflow/api.GetSettings (11 handlers)
+[GIN-debug] GET    /api/auth/fileshare       --> aetherflow/api.GetFilesList (11 handlers)
+[GIN-debug] GET    /api/auth/fileshare/download/:filename --> aetherflow/api.HandleDownloadFile (11 handlers)
+[GIN-debug] GET    /api/auth/services        --> aetherflow/api.getServices (11 handlers)
+[GIN-debug] GET    /api/auth/packages/:id/progress --> aetherflow/api.PackageProgress (11 handlers)
+[GIN-debug] GET    /api/auth/system/update/check --> aetherflow/api.CheckUpdate (11 handlers)
+[GIN-debug] GET    /api/auth/system/metrics  --> aetherflow/api.getSystemMetrics (11 handlers)
+[GIN-debug] GET    /api/auth/system/hardware --> aetherflow/api.GetHardwareInfo (11 handlers)
+[GIN-debug] GET    /api/auth/notifications   --> aetherflow/api.GetNotifications (11 handlers)
+[GIN-debug] PUT    /api/auth/notifications/:id/read --> aetherflow/api.MarkNotificationRead (11 handlers)
+[GIN-debug] POST   /api/auth/notifications/dismiss-all --> aetherflow/api.DismissAllNotifications (11 handlers)
+[GIN-debug] GET    /api/auth/ws/logs         --> aetherflow/api.HandleLogWebSocket (11 handlers)
+[GIN-debug] GET    /api/auth/deploy/stream   --> aetherflow/api.HandleDeployStream (11 handlers)
+[GIN-debug] POST   /api/auth/deploy/:appName --> aetherflow/api.HandleDeployProcess (11 handlers)
+[GIN-debug] POST   /api/admin/backup/run     --> aetherflow/api.RunBackup (11 handlers)
+[GIN-debug] GET    /api/admin/backup/list    --> aetherflow/api.GetBackupsList (11 handlers)
+[GIN-debug] GET    /api/admin/backup/download/:filename --> aetherflow/api.DownloadBackup (11 handlers)
+[GIN-debug] POST   /api/admin/backup/upload/:filename --> aetherflow/api.UploadBackupChunk (11 handlers)
+[GIN-debug] GET    /api/admin/settings       --> aetherflow/api.GetSettings (11 handlers)
+[GIN-debug] PUT    /api/admin/settings       --> aetherflow/api.updateSettings (11 handlers)
+[GIN-debug] POST   /api/admin/settings/test-ai --> aetherflow/api.TestAiConnection (11 handlers)
+[GIN-debug] GET    /api/admin/users          --> aetherflow/api.GetUsers (11 handlers)
+[GIN-debug] PUT    /api/admin/users/:id/role --> aetherflow/api.UpdateUserRole (11 handlers)
+[GIN-debug] DELETE /api/admin/users/:id      --> aetherflow/api.DeleteUser (11 handlers)
+[GIN-debug] GET    /api/admin/quotas         --> aetherflow/api.ListUserQuotas (11 handlers)
+[GIN-debug] PUT    /api/admin/quotas/:id     --> aetherflow/api.UpdateUserQuota (11 handlers)
+[GIN-debug] POST   /api/admin/quotas/:id/refresh --> aetherflow/api.RefreshUserQuota (11 handlers)
+[GIN-debug] GET    /api/admin/billing/webhooks --> aetherflow/api.ListBillingWebhookEvents (11 handlers)
+[GIN-debug] GET    /api/admin/services       --> aetherflow/api.getServices (11 handlers)
+[GIN-debug] POST   /api/admin/services/:name/control --> aetherflow/api.controlService (11 handlers)
+[GIN-debug] POST   /api/admin/packages/:id/install --> aetherflow/api.InstallPackage (11 handlers)
+[GIN-debug] POST   /api/admin/packages/:id/uninstall --> aetherflow/api.UninstallPackage (11 handlers)
+[GIN-debug] GET    /api/admin/system/update/check --> aetherflow/api.CheckUpdate (11 handlers)
+[GIN-debug] POST   /api/admin/system/update/run --> aetherflow/api.RunUpdate (11 handlers)
+[GIN-debug] POST   /api/admin/fileshare/upload --> aetherflow/api.UploadFile (12 handlers)
+[GIN-debug] GET    /api/admin/fileshare/download/:filename --> aetherflow/api.HandleDownloadFile (11 handlers)
+[GIN-debug] GET    /api/admin/cluster/nodes  --> aetherflow/api.GetClusterNodes (11 handlers)
+[GIN-debug] POST   /api/admin/cluster/enroll --> aetherflow/api.EnrollWorker (11 handlers)
+[GIN-debug] DELETE /api/admin/cluster/nodes/:id --> aetherflow/api.RemoveWorker (11 handlers)
+[GIN-debug] GET    /api/admin/cluster/nodes/:id/metrics --> aetherflow/api.GetWorkerMetrics (11 handlers)
+[GIN-debug] GET    /api/admin/oidc/clients   --> aetherflow/api.GetOIDCClients (11 handlers)
+[GIN-debug] POST   /api/admin/oidc/clients   --> aetherflow/api.CreateOIDCClient (11 handlers)
+[GIN-debug] DELETE /api/admin/oidc/clients/:id --> aetherflow/api.DeleteOIDCClient (11 handlers)
+[GIN-debug] POST   /api/admin/ai/metadata/scan --> aetherflow/api.HandleMetadataScan (11 handlers)
+[GIN-debug] GET    /api/admin/ai/metadata/status --> aetherflow/api.HandleMetadataStatus (11 handlers)
+[GIN-debug] GET    /api/admin/ai/metadata/results --> aetherflow/api.HandleMetadataResults (11 handlers)
+[GIN-debug] POST   /api/admin/ai/bandwidth/analyze --> aetherflow/api.HandleBandwidthAnalyze (11 handlers)
+[GIN-debug] POST   /api/admin/ai/bandwidth/apply --> aetherflow/api.HandleBandwidthApply (11 handlers)
+[GIN-debug] GET    /api/admin/ai/predictions --> aetherflow/api.HandleGetPredictions (11 handlers)
+[GIN-debug] POST   /api/admin/ai/predictions/analyze --> aetherflow/api.HandleAnalyzePredictions (11 handlers)
+[GIN-debug] GET    /api/admin/ai/predictions/history --> aetherflow/api.HandleGetMetricsHistory (11 handlers)
+[GIN-debug] GET    /api/admin/ai/backup/optimal-window --> aetherflow/api.HandleGetOptimalWindow (11 handlers)
+[GIN-debug] POST   /api/admin/ai/backup/schedule --> aetherflow/api.HandleSetBackupSchedule (11 handlers)
+[GIN-debug] GET    /api/admin/logs           --> aetherflow/api.GetLogs (11 handlers)
+[GIN-debug] GET    /api/admin/logs/sources   --> aetherflow/api.GetLogSources (11 handlers)
+[GIN-debug] POST   /api/admin/logs/bookmarks --> aetherflow/api.BookmarkLog (11 handlers)
+[GIN-debug] GET    /api/admin/logs/bookmarks --> aetherflow/api.GetBookmarks (11 handlers)
+[GIN-debug] GET    /api/admin/notifications/rules --> aetherflow/api.GetNotificationRules (11 handlers)
+[GIN-debug] POST   /api/admin/notifications/rules --> aetherflow/api.CreateNotificationRule (11 handlers)
+[GIN-debug] PUT    /api/admin/notifications/rules/:id --> aetherflow/api.UpdateNotificationRule (11 handlers)
+[GIN-debug] DELETE /api/admin/notifications/rules/:id --> aetherflow/api.DeleteNotificationRule (11 handlers)
+[GIN-debug] GET    /api/admin/notifications/channels --> aetherflow/api.GetNotificationChannels (11 handlers)
+[GIN-debug] POST   /api/admin/notifications/channels --> aetherflow/api.CreateNotificationChannel (11 handlers)
+[GIN-debug] POST   /api/admin/notifications/channels/:id/test --> aetherflow/api.TestNotificationChannel (11 handlers)
+[GIN-debug] DELETE /api/admin/notifications/channels/:id --> aetherflow/api.DeleteNotificationChannel (11 handlers)
+[GIN-debug] GET    /api/admin/network/status --> aetherflow/api.GetNetworkStatus (11 handlers)
+[GIN-debug] GET    /api/admin/network/wireguard/peers --> aetherflow/api.GetWireGuardPeers (11 handlers)
+[GIN-debug] POST   /api/admin/network/wireguard/peers --> aetherflow/api.AddWireGuardPeer (11 handlers)
+[GIN-debug] DELETE /api/admin/network/wireguard/peers/:key --> aetherflow/api.RemoveWireGuardPeer (11 handlers)
+[GIN-debug] POST   /api/admin/network/wireguard/keygen --> aetherflow/api.GenerateWireGuardKeys (11 handlers)
+[GIN-debug] GET    /api/admin/network/tailscale/status --> aetherflow/api.GetTailscaleStatus (11 handlers)
+[GIN-debug] GET    /api/admin/network/tailscale/peers --> aetherflow/api.GetTailscalePeers (11 handlers)
+[GIN-debug] POST   /api/admin/network/tailscale/routes --> aetherflow/api.AdvertiseTailscaleRoutes (11 handlers)
+[GIN-debug] GET    /api/admin/system/metrics --> aetherflow/api.getSystemMetrics (11 handlers)
+[GIN-debug] GET    /api/admin/actions/pending --> aetherflow/api.ListPendingActions (11 handlers)
+[GIN-debug] GET    /api/admin/actions/:id    --> aetherflow/api.GetPendingAction (11 handlers)
+[GIN-debug] POST   /api/admin/actions/:id/approve --> aetherflow/api.ApproveAction (11 handlers)
+[GIN-debug] POST   /api/admin/actions/:id/reject --> aetherflow/api.RejectAction (11 handlers)
+[GIN-debug] GET    /api/admin/audit-log      --> aetherflow/api.GetAuditLog (11 handlers)
+[GIN-debug] GET    /api/admin/mediaflow/queue --> aetherflow/api.GetMediaFlowQueue (11 handlers)
+[GIN-debug] POST   /api/admin/mediaflow/scan --> aetherflow/api.TriggerScan (11 handlers)
+[GIN-debug] POST   /api/admin/mediaflow/approve/:id --> aetherflow/api.ApproveItem (11 handlers)
+time=2026-05-14T12:20:14.176Z level=INFO msg="host validation auto-discovered" allowed_count=16
+[GIN-debug] GET    /api/v1/public/openapi.yaml --> aetherflow/api.GetOpenAPISpec (9 handlers)
+[GIN-debug] GET    /api/v1/public/swagger/*any --> github.com/swaggo/gin-swagger.CustomWrapHandler.func1 (9 handlers)
+[GIN-debug] GET    /api/v1/public/csrf-token --> aetherflow/api.issueCSRFToken (9 handlers)
+[GIN-debug] GET    /api/v1/public/auth/google/login --> aetherflow/api.GoogleLogin (9 handlers)
+[GIN-debug] GET    /api/v1/public/auth/google/callback --> aetherflow/api.GoogleCallback (9 handlers)
+[GIN-debug] POST   /api/v1/public/auth/login --> aetherflow/api.LocalLogin (10 handlers)
+[GIN-debug] GET    /api/v1/public/auth/verify --> aetherflow/api.VerifyProxyAuth (9 handlers)
+[GIN-debug] POST   /api/v1/public/auth/mfa/verify --> aetherflow/api.MFALoginVerify (10 handlers)
+[GIN-debug] POST   /api/v1/public/auth/setup --> aetherflow/api.SetupAdmin (10 handlers)
+[GIN-debug] GET    /api/v1/public/auth/setup/check --> aetherflow/api.CheckSetupNeeded (9 handlers)
+[GIN-debug] POST   /api/v1/public/billing/webhooks/:provider --> aetherflow/api.HandleBillingWebhook (10 handlers)
+[GIN-debug] GET    /api/v1/public/marketplace --> aetherflow/api.GetMarketplaceApps (9 handlers)
+[GIN-debug] GET    /api/v1/public/oidc/jwks  --> aetherflow/api.OIDCJwks (9 handlers)
+[GIN-debug] GET    /api/v1/public/oidc/authorize --> aetherflow/api.OIDCAuthorize (10 handlers)
+[GIN-debug] POST   /api/v1/public/oidc/token --> aetherflow/api.OIDCToken (10 handlers)
+[GIN-debug] GET    /api/v1/public/oidc/userinfo --> aetherflow/api.OIDCUserInfo (10 handlers)
+[GIN-debug] POST   /api/v1/public/oidc/revoke --> aetherflow/api.OIDCRevoke (10 handlers)
+[GIN-debug] POST   /api/v1/public/oidc/introspect --> aetherflow/api.OIDCIntrospect (10 handlers)
+[GIN-debug] POST   /api/v1/public/oidc/device/authorize --> aetherflow/api.OIDCDeviceAuthorize (10 handlers)
+[GIN-debug] GET    /api/v1/auth/ws           --> aetherflow/api.HandleWebSocket (11 handlers)
+[GIN-debug] GET    /api/v1/auth/ws/ticket    --> aetherflow/api.IssueWSTicket (11 handlers)
+[GIN-debug] POST   /api/v1/auth/oidc/consent --> aetherflow/api.OIDCConsent (11 handlers)
+[GIN-debug] POST   /api/v1/auth/oidc/device/verify --> aetherflow/api.OIDCDeviceVerify (11 handlers)
+[GIN-debug] POST   /api/v1/auth/oidc/device/consent --> aetherflow/api.OIDCDeviceConsent (11 handlers)
+[GIN-debug] POST   /api/v1/auth/ai/chat      --> aetherflow/api.handleAiChat (12 handlers)
+[GIN-debug] POST   /api/v1/auth/ai/support   --> aetherflow/api.handleAiSupport (12 handlers)
+[GIN-debug] GET    /api/v1/auth/session      --> aetherflow/api.GetSession (11 handlers)
+[GIN-debug] GET    /api/v1/auth/sessions     --> aetherflow/api.ListActiveSessions (11 handlers)
+[GIN-debug] DELETE /api/v1/auth/sessions/:jti --> aetherflow/api.RevokeSession (11 handlers)
+[GIN-debug] POST   /api/v1/auth/logout       --> aetherflow/api.Logout (11 handlers)
+[GIN-debug] PUT    /api/v1/auth/profile      --> aetherflow/api.UpdateProfile (11 handlers)
+[GIN-debug] GET    /api/v1/auth/user/quota   --> aetherflow/api.GetOwnQuota (11 handlers)
+[GIN-debug] GET    /api/v1/auth/user/2fa/setup --> aetherflow/api.Setup2FA (11 handlers)
+[GIN-debug] POST   /api/v1/auth/user/2fa/verify --> aetherflow/api.Verify2FA (11 handlers)
+[GIN-debug] POST   /api/v1/auth/user/2fa/disable --> aetherflow/api.Disable2FA (11 handlers)
+[GIN-debug] POST   /api/v1/auth/user/2fa/recovery/regenerate --> aetherflow/api.Regenerate2FARecoveryCodes (11 handlers)
+[GIN-debug] GET    /api/v1/auth/settings     --> aetherflow/api.GetSettings (11 handlers)
+[GIN-debug] GET    /api/v1/auth/fileshare    --> aetherflow/api.GetFilesList (11 handlers)
+[GIN-debug] GET    /api/v1/auth/fileshare/download/:filename --> aetherflow/api.HandleDownloadFile (11 handlers)
+[GIN-debug] GET    /api/v1/auth/services     --> aetherflow/api.getServices (11 handlers)
+[GIN-debug] GET    /api/v1/auth/packages/:id/progress --> aetherflow/api.PackageProgress (11 handlers)
+[GIN-debug] GET    /api/v1/auth/system/update/check --> aetherflow/api.CheckUpdate (11 handlers)
+[GIN-debug] GET    /api/v1/auth/system/metrics --> aetherflow/api.getSystemMetrics (11 handlers)
+[GIN-debug] GET    /api/v1/auth/system/hardware --> aetherflow/api.GetHardwareInfo (11 handlers)
+[GIN-debug] GET    /api/v1/auth/notifications --> aetherflow/api.GetNotifications (11 handlers)
+[GIN-debug] PUT    /api/v1/auth/notifications/:id/read --> aetherflow/api.MarkNotificationRead (11 handlers)
+[GIN-debug] POST   /api/v1/auth/notifications/dismiss-all --> aetherflow/api.DismissAllNotifications (11 handlers)
+[GIN-debug] GET    /api/v1/auth/ws/logs      --> aetherflow/api.HandleLogWebSocket (11 handlers)
+[GIN-debug] GET    /api/v1/auth/deploy/stream --> aetherflow/api.HandleDeployStream (11 handlers)
+[GIN-debug] POST   /api/v1/auth/deploy/:appName --> aetherflow/api.HandleDeployProcess (11 handlers)
+[GIN-debug] POST   /api/v1/admin/backup/run  --> aetherflow/api.RunBackup (11 handlers)
+[GIN-debug] GET    /api/v1/admin/backup/list --> aetherflow/api.GetBackupsList (11 handlers)
+[GIN-debug] GET    /api/v1/admin/backup/download/:filename --> aetherflow/api.DownloadBackup (11 handlers)
+[GIN-debug] POST   /api/v1/admin/backup/upload/:filename --> aetherflow/api.UploadBackupChunk (11 handlers)
+[GIN-debug] GET    /api/v1/admin/settings    --> aetherflow/api.GetSettings (11 handlers)
+[GIN-debug] PUT    /api/v1/admin/settings    --> aetherflow/api.updateSettings (11 handlers)
+[GIN-debug] POST   /api/v1/admin/settings/test-ai --> aetherflow/api.TestAiConnection (11 handlers)
+[GIN-debug] GET    /api/v1/admin/users       --> aetherflow/api.GetUsers (11 handlers)
+[GIN-debug] PUT    /api/v1/admin/users/:id/role --> aetherflow/api.UpdateUserRole (11 handlers)
+[GIN-debug] DELETE /api/v1/admin/users/:id   --> aetherflow/api.DeleteUser (11 handlers)
+[GIN-debug] GET    /api/v1/admin/quotas      --> aetherflow/api.ListUserQuotas (11 handlers)
+[GIN-debug] PUT    /api/v1/admin/quotas/:id  --> aetherflow/api.UpdateUserQuota (11 handlers)
+[GIN-debug] POST   /api/v1/admin/quotas/:id/refresh --> aetherflow/api.RefreshUserQuota (11 handlers)
+[GIN-debug] GET    /api/v1/admin/billing/webhooks --> aetherflow/api.ListBillingWebhookEvents (11 handlers)
+[GIN-debug] GET    /api/v1/admin/services    --> aetherflow/api.getServices (11 handlers)
+[GIN-debug] POST   /api/v1/admin/services/:name/control --> aetherflow/api.controlService (11 handlers)
+[GIN-debug] POST   /api/v1/admin/packages/:id/install --> aetherflow/api.InstallPackage (11 handlers)
+[GIN-debug] POST   /api/v1/admin/packages/:id/uninstall --> aetherflow/api.UninstallPackage (11 handlers)
+[GIN-debug] GET    /api/v1/admin/system/update/check --> aetherflow/api.CheckUpdate (11 handlers)
+[GIN-debug] POST   /api/v1/admin/system/update/run --> aetherflow/api.RunUpdate (11 handlers)
+[GIN-debug] POST   /api/v1/admin/fileshare/upload --> aetherflow/api.UploadFile (12 handlers)
+[GIN-debug] GET    /api/v1/admin/fileshare/download/:filename --> aetherflow/api.HandleDownloadFile (11 handlers)
+[GIN-debug] GET    /api/v1/admin/cluster/nodes --> aetherflow/api.GetClusterNodes (11 handlers)
+[GIN-debug] POST   /api/v1/admin/cluster/enroll --> aetherflow/api.EnrollWorker (11 handlers)
+[GIN-debug] DELETE /api/v1/admin/cluster/nodes/:id --> aetherflow/api.RemoveWorker (11 handlers)
+[GIN-debug] GET    /api/v1/admin/cluster/nodes/:id/metrics --> aetherflow/api.GetWorkerMetrics (11 handlers)
+[GIN-debug] GET    /api/v1/admin/oidc/clients --> aetherflow/api.GetOIDCClients (11 handlers)
+[GIN-debug] POST   /api/v1/admin/oidc/clients --> aetherflow/api.CreateOIDCClient (11 handlers)
+[GIN-debug] DELETE /api/v1/admin/oidc/clients/:id --> aetherflow/api.DeleteOIDCClient (11 handlers)
+[GIN-debug] POST   /api/v1/admin/ai/metadata/scan --> aetherflow/api.HandleMetadataScan (11 handlers)
+[GIN-debug] GET    /api/v1/admin/ai/metadata/status --> aetherflow/api.HandleMetadataStatus (11 handlers)
+[GIN-debug] GET    /api/v1/admin/ai/metadata/results --> aetherflow/api.HandleMetadataResults (11 handlers)
+[GIN-debug] POST   /api/v1/admin/ai/bandwidth/analyze --> aetherflow/api.HandleBandwidthAnalyze (11 handlers)
+[GIN-debug] POST   /api/v1/admin/ai/bandwidth/apply --> aetherflow/api.HandleBandwidthApply (11 handlers)
+[GIN-debug] GET    /api/v1/admin/ai/predictions --> aetherflow/api.HandleGetPredictions (11 handlers)
+[GIN-debug] POST   /api/v1/admin/ai/predictions/analyze --> aetherflow/api.HandleAnalyzePredictions (11 handlers)
+[GIN-debug] GET    /api/v1/admin/ai/predictions/history --> aetherflow/api.HandleGetMetricsHistory (11 handlers)
+[GIN-debug] GET    /api/v1/admin/ai/backup/optimal-window --> aetherflow/api.HandleGetOptimalWindow (11 handlers)
+[GIN-debug] POST   /api/v1/admin/ai/backup/schedule --> aetherflow/api.HandleSetBackupSchedule (11 handlers)
+[GIN-debug] GET    /api/v1/admin/logs        --> aetherflow/api.GetLogs (11 handlers)
+[GIN-debug] GET    /api/v1/admin/logs/sources --> aetherflow/api.GetLogSources (11 handlers)
+[GIN-debug] POST   /api/v1/admin/logs/bookmarks --> aetherflow/api.BookmarkLog (11 handlers)
+[GIN-debug] GET    /api/v1/admin/logs/bookmarks --> aetherflow/api.GetBookmarks (11 handlers)
+[GIN-debug] GET    /api/v1/admin/notifications/rules --> aetherflow/api.GetNotificationRules (11 handlers)
+[GIN-debug] POST   /api/v1/admin/notifications/rules --> aetherflow/api.CreateNotificationRule (11 handlers)
+[GIN-debug] PUT    /api/v1/admin/notifications/rules/:id --> aetherflow/api.UpdateNotificationRule (11 handlers)
+[GIN-debug] DELETE /api/v1/admin/notifications/rules/:id --> aetherflow/api.DeleteNotificationRule (11 handlers)
+[GIN-debug] GET    /api/v1/admin/notifications/channels --> aetherflow/api.GetNotificationChannels (11 handlers)
+[GIN-debug] POST   /api/v1/admin/notifications/channels --> aetherflow/api.CreateNotificationChannel (11 handlers)
+[GIN-debug] POST   /api/v1/admin/notifications/channels/:id/test --> aetherflow/api.TestNotificationChannel (11 handlers)
+[GIN-debug] DELETE /api/v1/admin/notifications/channels/:id --> aetherflow/api.DeleteNotificationChannel (11 handlers)
+[GIN-debug] GET    /api/v1/admin/network/status --> aetherflow/api.GetNetworkStatus (11 handlers)
+[GIN-debug] GET    /api/v1/admin/network/wireguard/peers --> aetherflow/api.GetWireGuardPeers (11 handlers)
+[GIN-debug] POST   /api/v1/admin/network/wireguard/peers --> aetherflow/api.AddWireGuardPeer (11 handlers)
+[GIN-debug] DELETE /api/v1/admin/network/wireguard/peers/:key --> aetherflow/api.RemoveWireGuardPeer (11 handlers)
+[GIN-debug] POST   /api/v1/admin/network/wireguard/keygen --> aetherflow/api.GenerateWireGuardKeys (11 handlers)
+[GIN-debug] GET    /api/v1/admin/network/tailscale/status --> aetherflow/api.GetTailscaleStatus (11 handlers)
+[GIN-debug] GET    /api/v1/admin/network/tailscale/peers --> aetherflow/api.GetTailscalePeers (11 handlers)
+[GIN-debug] POST   /api/v1/admin/network/tailscale/routes --> aetherflow/api.AdvertiseTailscaleRoutes (11 handlers)
+[GIN-debug] GET    /api/v1/admin/system/metrics --> aetherflow/api.getSystemMetrics (11 handlers)
+[GIN-debug] GET    /api/v1/admin/actions/pending --> aetherflow/api.ListPendingActions (11 handlers)
+[GIN-debug] GET    /api/v1/admin/actions/:id --> aetherflow/api.GetPendingAction (11 handlers)
+[GIN-debug] POST   /api/v1/admin/actions/:id/approve --> aetherflow/api.ApproveAction (11 handlers)
+[GIN-debug] POST   /api/v1/admin/actions/:id/reject --> aetherflow/api.RejectAction (11 handlers)
+[GIN-debug] GET    /api/v1/admin/audit-log   --> aetherflow/api.GetAuditLog (11 handlers)
+[GIN-debug] GET    /api/v1/admin/mediaflow/queue --> aetherflow/api.GetMediaFlowQueue (11 handlers)
+[GIN-debug] POST   /api/v1/admin/mediaflow/scan --> aetherflow/api.TriggerScan (11 handlers)
+[GIN-debug] POST   /api/v1/admin/mediaflow/approve/:id --> aetherflow/api.ApproveItem (11 handlers)
+[GIN-debug] GET    /.well-known/openid-configuration --> aetherflow/api.OIDCDiscovery (7 handlers)
+[GIN-debug] GET    /health                   --> aetherflow/api.HealthCheck (7 handlers)
+[GIN-debug] GET    /health/live              --> aetherflow/api.HealthLive (7 handlers)
+[GIN-debug] GET    /health/ready             --> aetherflow/api.HealthReady (7 handlers)
+[GIN-debug] GET    /metrics                  --> aetherflow/api.HandleMetrics (7 handlers)
+time=2026-05-14T12:20:14.177Z level=INFO msg="AetherFlow backend starting" addr=0.0.0.0:8080 version=3.1.6
+time=2026-05-14T12:20:14.178Z level=INFO msg="pprof profiler listening" addr=127.0.0.1:6060
+time=2026-05-14T12:20:14.178Z level=INFO msg="recovery orchestrator initialized" domain=control component=af-heal mode="GATED (approval required)" budget=10 timeout=30s
+time=2026-05-14T12:20:24.222Z level=INFO msg="[config] loaded config from" path=config/packages.json
+time=2026-05-14T12:20:24.222Z level=INFO msg="[config] loaded config from" path=config/package_automation.json
+time=2026-05-14T12:20:34.218Z level=INFO msg="[config] loaded config from" path=config/packages.json
+time=2026-05-14T12:20:34.218Z level=INFO msg="[config] loaded config from" path=config/package_automation.json
+time=2026-05-14T12:20:44.222Z level=INFO msg="[config] loaded config from" path=config/packages.json
+time=2026-05-14T12:20:44.223Z level=INFO msg="[config] loaded config from" path=config/package_automation.json
+[GIN] 2026/05/14 - 12:20:51 | 401 | 254.764µs |       127.0.0.1 | GET      "/api/v1/auth/session"
+[GIN] 2026/05/14 - 12:20:51 | 401 | 75.714µs |       127.0.0.1 | GET      "/api/v1/auth/session"
+[GIN] 2026/05/14 - 12:20:51 | 401 | 60.555µs |       127.0.0.1 | GET      "/api/v1/auth/session"
+[GIN] 2026/05/14 - 12:20:51 | 401 | 63.948µs |       127.0.0.1 | GET      "/api/v1/auth/session"
+[GIN] 2026/05/14 - 12:20:51 | 200 | 255.072µs |       127.0.0.1 | GET      "/api/v1/public/auth/setup/check"
+[GIN] 2026/05/14 - 12:20:51 | 200 | 924.719µs |       127.0.0.1 | GET      "/api/v1/public/auth/setup/check"
+[GIN] 2026/05/14 - 12:20:51 | 200 | 296.315µs |       127.0.0.1 | GET      "/api/v1/public/auth/setup/check"
+[GIN] 2026/05/14 - 12:20:51 | 200 | 455.845µs |       127.0.0.1 | GET      "/api/v1/public/auth/setup/check"
+[GIN] 2026/05/14 - 12:20:52 | 401 | 62.458µs |       127.0.0.1 | GET      "/api/v1/auth/session"
+[GIN] 2026/05/14 - 12:20:52 | 401 | 145.446µs |       127.0.0.1 | GET      "/api/v1/auth/session"
+[GIN] 2026/05/14 - 12:20:52 | 200 | 261.424µs |       127.0.0.1 | GET      "/api/v1/public/auth/setup/check"
+[GIN] 2026/05/14 - 12:20:52 | 200 | 220.169µs |       127.0.0.1 | GET      "/api/v1/public/auth/setup/check"
+time=2026-05-14T12:20:54.224Z level=INFO msg="[config] loaded config from" path=config/packages.json
+time=2026-05-14T12:20:54.224Z level=INFO msg="[config] loaded config from" path=config/package_automation.json
+[GIN] 2026/05/14 - 12:20:57 | 200 | 253.124µs |       127.0.0.1 | GET      "/api/v1/public/auth/setup/check"
+[GIN] 2026/05/14 - 12:20:57 | 200 | 314.633µs |       127.0.0.1 | GET      "/api/v1/public/auth/setup/check"
+[GIN] 2026/05/14 - 12:20:59 | 200 | 207.426µs |       127.0.0.1 | GET      "/api/v1/public/auth/setup/check"
+[GIN] 2026/05/14 - 12:20:59 | 200 | 202.186µs |       127.0.0.1 | GET      "/api/v1/public/auth/setup/check"
+time=2026-05-14T12:21:04.281Z level=INFO msg="[config] loaded config from" path=config/packages.json
+time=2026-05-14T12:21:04.281Z level=INFO msg="[config] loaded config from" path=config/package_automation.json
+[GIN] 2026/05/14 - 12:21:04 | 401 | 456.153µs |       127.0.0.1 | GET      "/api/v1/auth/system/hardware"
+[GIN] 2026/05/14 - 12:21:04 | 401 | 116.325µs |       127.0.0.1 | GET      "/api/v1/auth/settings"
+[GIN] 2026/05/14 - 12:21:04 | 401 | 129.713µs |       127.0.0.1 | GET      "/api/v1/auth/system/metrics"
+[GIN] 2026/05/14 - 12:21:04 | 401 | 63.486µs |       127.0.0.1 | GET      "/api/v1/auth/system/metrics"
+[GIN] 2026/05/14 - 12:21:04 | 404 | 222.29µs |       127.0.0.1 | POST     "/api/v1/auth/refresh"
+[GIN] 2026/05/14 - 12:21:07 | 401 | 44.718µs |       127.0.0.1 | GET      "/api/v1/auth/settings"
+[GIN] 2026/05/14 - 12:21:07 | 401 | 823.558µs |       127.0.0.1 | GET      "/api/v1/auth/system/hardware"
+[GIN] 2026/05/14 - 12:21:07 | 401 | 60.508µs |       127.0.0.1 | GET      "/api/v1/auth/system/metrics"
+[GIN] 2026/05/14 - 12:21:07 | 401 | 111.037µs |       127.0.0.1 | GET      "/api/v1/auth/system/metrics"
+[GIN] 2026/05/14 - 12:21:07 | 404 | 261.976µs |       127.0.0.1 | POST     "/api/v1/auth/refresh"
+[GIN] 2026/05/14 - 12:21:09 | 401 | 60.665µs |       127.0.0.1 | GET      "/api/v1/auth/system/metrics"
+[GIN] 2026/05/14 - 12:21:09 | 404 | 44.069µs |       127.0.0.1 | POST     "/api/v1/auth/refresh"
+[GIN] 2026/05/14 - 12:21:10 | 401 | 78.382µs |       127.0.0.1 | GET      "/api/v1/auth/system/hardware"
+[GIN] 2026/05/14 - 12:21:10 | 401 |   63.9µs |       127.0.0.1 | GET      "/api/v1/auth/settings"
+[GIN] 2026/05/14 - 12:21:10 | 404 | 46.447µs |       127.0.0.1 | POST     "/api/v1/auth/refresh"
+[GIN] 2026/05/14 - 12:21:12 | 401 | 64.159µs |       127.0.0.1 | GET      "/api/v1/auth/system/metrics"
+[GIN] 2026/05/14 - 12:21:12 | 404 | 47.137µs |       127.0.0.1 | POST     "/api/v1/auth/refresh"
+[GIN] 2026/05/14 - 12:21:13 | 200 | 232.568µs |       127.0.0.1 | GET      "/api/v1/public/auth/setup/check"
+[GIN] 2026/05/14 - 12:21:13 | 200 | 183.139µs |       127.0.0.1 | GET      "/api/v1/public/auth/setup/check"
+time=2026-05-14T12:21:14.227Z level=INFO msg="[config] loaded config from" path=config/packages.json
+time=2026-05-14T12:21:14.227Z level=INFO msg="[config] loaded config from" path=config/package_automation.json
+[GIN] 2026/05/14 - 12:21:14 | 401 |  71.75µs |       127.0.0.1 | GET      "/api/v1/auth/system/hardware"
+[GIN] 2026/05/14 - 12:21:14 | 401 | 36.778µs |       127.0.0.1 | GET      "/api/v1/auth/settings"
+[GIN] 2026/05/14 - 12:21:15 | 404 | 148.258µs |       127.0.0.1 | POST     "/api/v1/auth/refresh"
+[GIN] 2026/05/14 - 12:21:20 | 401 | 63.114µs |       127.0.0.1 | GET      "/api/v1/auth/system/hardware"
+[GIN] 2026/05/14 - 12:21:20 | 404 | 46.288µs |       127.0.0.1 | POST     "/api/v1/auth/refresh"
+time=2026-05-14T12:21:24.222Z level=INFO msg="[config] loaded config from" path=config/packages.json
+time=2026-05-14T12:21:24.223Z level=INFO msg="[config] loaded config from" path=config/package_automation.json
+time=2026-05-14T12:21:34.226Z level=INFO msg="[config] loaded config from" path=config/packages.json
+time=2026-05-14T12:21:34.226Z level=INFO msg="[config] loaded config from" path=config/package_automation.json
+time=2026-05-14T12:21:44.228Z level=INFO msg="[config] loaded config from" path=config/packages.json
+time=2026-05-14T12:21:44.229Z level=INFO msg="[config] loaded config from" path=config/package_automation.json
+time=2026-05-14T12:21:54.222Z level=INFO msg="[config] loaded config from" path=config/packages.json
+time=2026-05-14T12:21:54.222Z level=INFO msg="[config] loaded config from" path=config/package_automation.json
+time=2026-05-14T12:22:04.253Z level=INFO msg="[config] loaded config from" path=config/packages.json
+time=2026-05-14T12:22:04.253Z level=INFO msg="[config] loaded config from" path=config/package_automation.json
+time=2026-05-14T12:22:14.218Z level=INFO msg="[config] loaded config from" path=config/packages.json
+time=2026-05-14T12:22:14.219Z level=INFO msg="[config] loaded config from" path=config/package_automation.json
+time=2026-05-14T12:22:24.219Z level=INFO msg="[config] loaded config from" path=config/packages.json
+time=2026-05-14T12:22:24.219Z level=INFO msg="[config] loaded config from" path=config/package_automation.json
+time=2026-05-14T12:22:34.226Z level=INFO msg="[config] loaded config from" path=config/packages.json
+time=2026-05-14T12:22:34.227Z level=INFO msg="[config] loaded config from" path=config/package_automation.json
+time=2026-05-14T12:22:44.221Z level=INFO msg="[config] loaded config from" path=config/packages.json
+time=2026-05-14T12:22:44.221Z level=INFO msg="[config] loaded config from" path=config/package_automation.json
+time=2026-05-14T12:22:54.228Z level=INFO msg="[config] loaded config from" path=config/packages.json
+time=2026-05-14T12:22:54.228Z level=INFO msg="[config] loaded config from" path=config/package_automation.json
+time=2026-05-14T12:23:04.223Z level=INFO msg="[config] loaded config from" path=config/packages.json
+time=2026-05-14T12:23:04.223Z level=INFO msg="[config] loaded config from" path=config/package_automation.json
+time=2026-05-14T12:23:14.224Z level=INFO msg="[config] loaded config from" path=config/packages.json
+time=2026-05-14T12:23:14.224Z level=INFO msg="[config] loaded config from" path=config/package_automation.json
+time=2026-05-14T12:23:24.222Z level=INFO msg="[config] loaded config from" path=config/packages.json
+time=2026-05-14T12:23:24.222Z level=INFO msg="[config] loaded config from" path=config/package_automation.json
+time=2026-05-14T12:23:34.221Z level=INFO msg="[config] loaded config from" path=config/packages.json
+time=2026-05-14T12:23:34.222Z level=INFO msg="[config] loaded config from" path=config/package_automation.json
+time=2026-05-14T12:23:44.220Z level=INFO msg="[config] loaded config from" path=config/packages.json
+time=2026-05-14T12:23:44.220Z level=INFO msg="[config] loaded config from" path=config/package_automation.json
+time=2026-05-14T12:23:54.223Z level=INFO msg="[config] loaded config from" path=config/packages.json
+time=2026-05-14T12:23:54.224Z level=INFO msg="[config] loaded config from" path=config/package_automation.json
+time=2026-05-14T12:24:04.222Z level=INFO msg="[config] loaded config from" path=config/packages.json
+time=2026-05-14T12:24:04.223Z level=INFO msg="[config] loaded config from" path=config/package_automation.json
+time=2026-05-14T12:24:14.224Z level=INFO msg="[config] loaded config from" path=config/packages.json
+time=2026-05-14T12:24:14.224Z level=INFO msg="[config] loaded config from" path=config/package_automation.json
+time=2026-05-14T12:24:24.225Z level=INFO msg="[config] loaded config from" path=config/packages.json
+time=2026-05-14T12:24:24.226Z level=INFO msg="[config] loaded config from" path=config/package_automation.json
+time=2026-05-14T12:24:34.224Z level=INFO msg="[config] loaded config from" path=config/packages.json
+time=2026-05-14T12:24:34.224Z level=INFO msg="[config] loaded config from" path=config/package_automation.json
+time=2026-05-14T12:24:44.219Z level=INFO msg="[config] loaded config from" path=config/packages.json
+time=2026-05-14T12:24:44.219Z level=INFO msg="[config] loaded config from" path=config/package_automation.json
+time=2026-05-14T12:24:54.220Z level=INFO msg="[config] loaded config from" path=config/packages.json
+time=2026-05-14T12:24:54.220Z level=INFO msg="[config] loaded config from" path=config/package_automation.json
+time=2026-05-14T12:25:04.223Z level=INFO msg="[config] loaded config from" path=config/packages.json
+time=2026-05-14T12:25:04.224Z level=INFO msg="[config] loaded config from" path=config/package_automation.json
+time=2026-05-14T12:25:14.224Z level=INFO msg="[config] loaded config from" path=config/packages.json
+time=2026-05-14T12:25:14.224Z level=INFO msg="[config] loaded config from" path=config/package_automation.json
+time=2026-05-14T12:25:24.294Z level=INFO msg="[config] loaded config from" path=config/packages.json
+time=2026-05-14T12:25:24.295Z level=INFO msg="[config] loaded config from" path=config/package_automation.json
+[GIN] 2026/05/14 - 12:25:25 | 401 | 76.324µs |       127.0.0.1 | GET      "/api/v1/auth/session"
+[GIN] 2026/05/14 - 12:25:25 | 401 | 111.55µs |       127.0.0.1 | GET      "/api/v1/auth/session"
+[GIN] 2026/05/14 - 12:25:25 | 401 | 62.554µs |       127.0.0.1 | GET      "/api/v1/auth/session"
+[GIN] 2026/05/14 - 12:25:25 | 401 | 77.763µs |       127.0.0.1 | GET      "/api/v1/auth/session"
+[GIN] 2026/05/14 - 12:25:25 | 200 | 230.881µs |       127.0.0.1 | GET      "/api/v1/public/auth/setup/check"
+[GIN] 2026/05/14 - 12:25:25 | 200 | 651.173µs |       127.0.0.1 | GET      "/api/v1/public/auth/setup/check"
+[GIN] 2026/05/14 - 12:25:25 | 200 | 293.013µs |       127.0.0.1 | GET      "/api/v1/public/auth/setup/check"
+[GIN] 2026/05/14 - 12:25:25 | 200 | 207.679µs |       127.0.0.1 | GET      "/api/v1/public/auth/setup/check"
+[GIN] 2026/05/14 - 12:25:26 | 401 | 65.222µs |       127.0.0.1 | GET      "/api/v1/auth/session"
+[GIN] 2026/05/14 - 12:25:26 | 401 | 56.145µs |       127.0.0.1 | GET      "/api/v1/auth/session"
+[GIN] 2026/05/14 - 12:25:26 | 200 | 308.114µs |       127.0.0.1 | GET      "/api/v1/public/auth/setup/check"
+[GIN] 2026/05/14 - 12:25:26 | 200 | 212.197µs |       127.0.0.1 | GET      "/api/v1/public/auth/setup/check"
+[GIN] 2026/05/14 - 12:25:32 | 200 | 217.494µs |       127.0.0.1 | GET      "/api/v1/public/auth/setup/check"
+[GIN] 2026/05/14 - 12:25:32 | 200 | 627.842µs |       127.0.0.1 | GET      "/api/v1/public/auth/setup/check"
+time=2026-05-14T12:25:34.220Z level=INFO msg="[config] loaded config from" path=config/packages.json
+time=2026-05-14T12:25:34.220Z level=INFO msg="[config] loaded config from" path=config/package_automation.json
+[GIN] 2026/05/14 - 12:25:34 | 200 | 241.202µs |       127.0.0.1 | GET      "/api/v1/public/auth/setup/check"
+[GIN] 2026/05/14 - 12:25:34 | 200 | 217.576µs |       127.0.0.1 | GET      "/api/v1/public/auth/setup/check"
+[GIN] 2026/05/14 - 12:25:38 | 401 | 73.581µs |       127.0.0.1 | GET      "/api/v1/auth/system/hardware"
+[GIN] 2026/05/14 - 12:25:38 | 401 | 65.206µs |       127.0.0.1 | GET      "/api/v1/auth/settings"
+[GIN] 2026/05/14 - 12:25:38 | 401 | 78.991µs |       127.0.0.1 | GET      "/api/v1/auth/system/metrics"
+[GIN] 2026/05/14 - 12:25:38 | 401 | 59.046µs |       127.0.0.1 | GET      "/api/v1/auth/system/metrics"
+[GIN] 2026/05/14 - 12:25:38 | 404 | 200.788µs |       127.0.0.1 | POST     "/api/v1/auth/refresh"
+[GIN] 2026/05/14 - 12:25:39 | 404 | 71.694µs |       127.0.0.1 | POST     "/api/v1/auth/refresh"
+[GIN] 2026/05/14 - 12:25:41 | 401 | 61.301µs |       127.0.0.1 | GET      "/api/v1/auth/system/hardware"
+[GIN] 2026/05/14 - 12:25:41 | 401 |  56.76µs |       127.0.0.1 | GET      "/api/v1/auth/settings"
+[GIN] 2026/05/14 - 12:25:41 | 401 | 93.909µs |       127.0.0.1 | GET      "/api/v1/auth/system/metrics"
+[GIN] 2026/05/14 - 12:25:41 | 401 | 51.455µs |       127.0.0.1 | GET      "/api/v1/auth/system/metrics"
+[GIN] 2026/05/14 - 12:25:41 | 404 | 36.129µs |       127.0.0.1 | POST     "/api/v1/auth/refresh"
+[GIN] 2026/05/14 - 12:25:41 | 404 | 50.121µs |       127.0.0.1 | POST     "/api/v1/auth/refresh"
+[GIN] 2026/05/14 - 12:25:43 | 401 | 60.021µs |       127.0.0.1 | GET      "/api/v1/auth/system/metrics"
+[GIN] 2026/05/14 - 12:25:43 | 404 | 43.703µs |       127.0.0.1 | POST     "/api/v1/auth/refresh"
+[GIN] 2026/05/14 - 12:25:44 | 401 | 63.746µs |       127.0.0.1 | GET      "/api/v1/auth/settings"
+[GIN] 2026/05/14 - 12:25:44 | 404 | 48.928µs |       127.0.0.1 | POST     "/api/v1/auth/refresh"
+time=2026-05-14T12:25:44.222Z level=INFO msg="[config] loaded config from" path=config/packages.json
+time=2026-05-14T12:25:44.222Z level=INFO msg="[config] loaded config from" path=config/package_automation.json
+[GIN] 2026/05/14 - 12:25:46 | 401 |  66.15µs |       127.0.0.1 | GET      "/api/v1/auth/system/metrics"
+[GIN] 2026/05/14 - 12:25:46 | 404 | 67.442µs |       127.0.0.1 | POST     "/api/v1/auth/refresh"
+[GIN] 2026/05/14 - 12:25:46 | 200 | 228.172µs |       127.0.0.1 | GET      "/api/v1/public/auth/setup/check"
+[GIN] 2026/05/14 - 12:25:46 | 200 | 333.605µs |       127.0.0.1 | GET      "/api/v1/public/auth/setup/check"
+[GIN] 2026/05/14 - 12:25:49 | 401 | 63.067µs |       127.0.0.1 | GET      "/api/v1/auth/system/hardware"
+[GIN] 2026/05/14 - 12:25:49 | 401 |  55.15µs |       127.0.0.1 | GET      "/api/v1/auth/settings"
+[GIN] 2026/05/14 - 12:25:49 | 404 | 80.307µs |       127.0.0.1 | POST     "/api/v1/auth/refresh"
+time=2026-05-14T12:25:54.222Z level=INFO msg="[config] loaded config from" path=config/packages.json
+time=2026-05-14T12:25:54.222Z level=INFO msg="[config] loaded config from" path=config/package_automation.json
+[GIN] 2026/05/14 - 12:25:54 | 401 |  70.43µs |       127.0.0.1 | GET      "/api/v1/auth/settings"
+[GIN] 2026/05/14 - 12:25:54 | 404 | 45.611µs |       127.0.0.1 | POST     "/api/v1/auth/refresh"
+time=2026-05-14T12:26:04.223Z level=INFO msg="[config] loaded config from" path=config/packages.json
+time=2026-05-14T12:26:04.224Z level=INFO msg="[config] loaded config from" path=config/package_automation.json
+time=2026-05-14T12:26:14.219Z level=INFO msg="[config] loaded config from" path=config/packages.json
+time=2026-05-14T12:26:14.220Z level=INFO msg="[config] loaded config from" path=config/package_automation.json
+time=2026-05-14T12:26:24.222Z level=INFO msg="[config] loaded config from" path=config/packages.json
+time=2026-05-14T12:26:24.222Z level=INFO msg="[config] loaded config from" path=config/package_automation.json
+time=2026-05-14T12:26:34.220Z level=INFO msg="[config] loaded config from" path=config/packages.json
+time=2026-05-14T12:26:34.220Z level=INFO msg="[config] loaded config from" path=config/package_automation.json
+time=2026-05-14T12:26:44.224Z level=INFO msg="[config] loaded config from" path=config/packages.json
+time=2026-05-14T12:26:44.225Z level=INFO msg="[config] loaded config from" path=config/package_automation.json
+time=2026-05-14T12:26:54.225Z level=INFO msg="[config] loaded config from" path=config/packages.json
+time=2026-05-14T12:26:54.226Z level=INFO msg="[config] loaded config from" path=config/package_automation.json
+time=2026-05-14T12:27:04.222Z level=INFO msg="[config] loaded config from" path=config/packages.json
+time=2026-05-14T12:27:04.223Z level=INFO msg="[config] loaded config from" path=config/package_automation.json
+time=2026-05-14T12:27:14.232Z level=INFO msg="[config] loaded config from" path=config/packages.json
+time=2026-05-14T12:27:14.233Z level=INFO msg="[config] loaded config from" path=config/package_automation.json
+time=2026-05-14T12:27:24.223Z level=INFO msg="[config] loaded config from" path=config/packages.json
+time=2026-05-14T12:27:24.223Z level=INFO msg="[config] loaded config from" path=config/package_automation.json
+time=2026-05-14T12:27:34.226Z level=INFO msg="[config] loaded config from" path=config/packages.json
+time=2026-05-14T12:27:34.226Z level=INFO msg="[config] loaded config from" path=config/package_automation.json
+time=2026-05-14T12:27:44.225Z level=INFO msg="[config] loaded config from" path=config/packages.json
+time=2026-05-14T12:27:44.225Z level=INFO msg="[config] loaded config from" path=config/package_automation.json
+time=2026-05-14T12:27:54.227Z level=INFO msg="[config] loaded config from" path=config/packages.json
+time=2026-05-14T12:27:54.227Z level=INFO msg="[config] loaded config from" path=config/package_automation.json
+time=2026-05-14T12:28:04.225Z level=INFO msg="[config] loaded config from" path=config/packages.json
+time=2026-05-14T12:28:04.225Z level=INFO msg="[config] loaded config from" path=config/package_automation.json
+time=2026-05-14T12:28:14.223Z level=INFO msg="[config] loaded config from" path=config/packages.json
+time=2026-05-14T12:28:14.223Z level=INFO msg="[config] loaded config from" path=config/package_automation.json
+time=2026-05-14T12:28:24.224Z level=INFO msg="[config] loaded config from" path=config/packages.json
+time=2026-05-14T12:28:24.224Z level=INFO msg="[config] loaded config from" path=config/package_automation.json
+time=2026-05-14T12:28:34.222Z level=INFO msg="[config] loaded config from" path=config/packages.json
+time=2026-05-14T12:28:34.222Z level=INFO msg="[config] loaded config from" path=config/package_automation.json
+time=2026-05-14T12:28:44.223Z level=INFO msg="[config] loaded config from" path=config/packages.json
+time=2026-05-14T12:28:44.223Z level=INFO msg="[config] loaded config from" path=config/package_automation.json
+time=2026-05-14T12:28:54.258Z level=INFO msg="[config] loaded config from" path=config/packages.json
+time=2026-05-14T12:28:54.258Z level=INFO msg="[config] loaded config from" path=config/package_automation.json
+time=2026-05-14T12:29:04.222Z level=INFO msg="[config] loaded config from" path=config/packages.json
+time=2026-05-14T12:29:04.223Z level=INFO msg="[config] loaded config from" path=config/package_automation.json
+time=2026-05-14T12:29:14.229Z level=INFO msg="[config] loaded config from" path=config/packages.json
+time=2026-05-14T12:29:14.230Z level=INFO msg="[config] loaded config from" path=config/package_automation.json
+time=2026-05-14T12:29:24.225Z level=INFO msg="[config] loaded config from" path=config/packages.json
+time=2026-05-14T12:29:24.225Z level=INFO msg="[config] loaded config from" path=config/package_automation.json
+time=2026-05-14T12:29:34.222Z level=INFO msg="[config] loaded config from" path=config/packages.json
+time=2026-05-14T12:29:34.222Z level=INFO msg="[config] loaded config from" path=config/package_automation.json
+time=2026-05-14T12:29:37.144Z level=INFO msg="shutdown signal received" signal=terminated
+time=2026-05-14T12:29:37.144Z level=INFO msg="HTTP server stopped"
+time=2026-05-14T12:29:37.144Z level=INFO msg="stopping all background subsystems" domain=control component=lifecycle
+time=2026-05-14T12:29:37.144Z level=INFO msg="[updates] Shutdown signal received, stopping update watcher"
+time=2026-05-14T12:29:37.144Z level=INFO msg="shutdown signal received, stopping heal worker" domain=control component=af-heal
+time=2026-05-14T12:29:37.144Z level=INFO msg="shutdown signal received, stopping" domain=notifications component=engine
+time=2026-05-14T12:29:37.144Z level=INFO msg="smart backup executor: shutdown signal received"
+time=2026-05-14T12:29:37.144Z level=INFO msg="shutdown signal received, stopping" domain=telemetry component=metrics-recorder
+time=2026-05-14T12:29:37.144Z level=INFO msg="smart backup scheduler: shutdown signal received"
+time=2026-05-14T12:29:37.145Z level=INFO msg="Log aggregator: journalctl exited" error="signal: terminated"
+time=2026-05-14T12:29:37.145Z level=INFO msg="Log aggregator: journalctl stream ended, restarting in 5s..."
+time=2026-05-14T12:29:37.645Z level=INFO msg="background subsystems stopped"
+time=2026-05-14T12:29:37.653Z level=INFO msg="database connection closed"
+time=2026-05-14T12:29:37.653Z level=INFO msg="AetherFlow backend shutdown complete"

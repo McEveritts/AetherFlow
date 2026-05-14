@@ -100,7 +100,7 @@ func ResolveGeminiKey() (string, error) {
 		apiKey = os.Getenv("GEMINI_API_KEY")
 	}
 	if apiKey == "" {
-		return "", fmt.Errorf("Gemini API key not configured. Set it in Settings → FlowAI Engine")
+		return "", fmt.Errorf("gemini API key not configured. Set it in Settings → FlowAI Engine")
 	}
 	return apiKey, nil
 }

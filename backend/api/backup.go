@@ -159,7 +159,7 @@ type BackupFile struct {
 func PerformSystemBackup() (BackupFile, error) {
 	backupDir := getBackupDir()
 	if err := os.MkdirAll(backupDir, 0755); err != nil {
-		return BackupFile{}, errors.New("Failed to create backup directory")
+		return BackupFile{}, errors.New("failed to create backup directory")
 	}
 
 	timestamp := time.Now().Format("2006-01-02_15-04-05")
@@ -167,7 +167,7 @@ func PerformSystemBackup() (BackupFile, error) {
 
 	// Strict whitelist validation for backup filename (CWE-89 defense-in-depth)
 	if !isValidBackupFilename(filename) {
-		return BackupFile{}, errors.New("Invalid backup filename")
+		return BackupFile{}, errors.New("invalid backup filename")
 	}
 
 	backupFile, err := safeBackupPath(backupDir, filename)
@@ -180,12 +180,12 @@ func PerformSystemBackup() (BackupFile, error) {
 	_, err = db.DB.Exec(fmt.Sprintf(`VACUUM INTO '%s'`, safePath))
 	if err != nil {
 		slog.Info("Backup VACUUM INTO failed", "error", err)
-		return BackupFile{}, errors.New("Backup failed: " + err.Error())
+		return BackupFile{}, errors.New("backup failed: " + err.Error())
 	}
 
 	info, err := os.Stat(backupFile)
 	if err != nil {
-		return BackupFile{}, errors.New("Backup created but file metadata is unavailable")
+		return BackupFile{}, errors.New("backup created but file metadata is unavailable")
 	}
 
 	checksum, err := computeFileSHA256(backupFile)

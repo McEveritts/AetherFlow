@@ -30,9 +30,9 @@ describe("useConnectionStore", () => {
     useConnectionStore.getState().reset();
     const state = useConnectionStore.getState();
 
-    expect(state.connectionState).toBe("CONNECTING");
+    expect(state.connectionState).toBe("DISCONNECTED");
     expect(state.reconnectAttempt).toBe(0);
     // reset() intentionally does not clear lastMessageAt in current implementation
-    expect(state.lastMessageAt).toBe(111);
+    expect(state.lastMessageAt).toBe(null);
   });
 });

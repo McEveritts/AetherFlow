@@ -43,11 +43,11 @@ func sanitizeFloat64(v float64) float64 {
 }
 
 // sanitizeFloat64Map sanitizes every value in a map[string]float64.
-func sanitizeFloat64Map(m map[string]float64) {
+/* func sanitizeFloat64Map(m map[string]float64) {
 	for k, v := range m {
 		m[k] = sanitizeFloat64(v)
 	}
-}
+} */
 
 func GetSystemMetricsCore() models.SystemMetrics {
 

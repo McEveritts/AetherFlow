@@ -182,7 +182,7 @@ func main() {
 	services.InitSmartBackupScheduler(func() (string, error) {
 		ps, err := api.ResolveProviderSettings()
 		if err != nil || ps.GeminiAPIKey == "" {
-			return "", fmt.Errorf("Gemini API key not configured")
+			return "", fmt.Errorf("gemini API key not configured")
 		}
 		return ps.GeminiAPIKey, nil
 	}, func() error {

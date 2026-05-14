@@ -49,7 +49,7 @@ type openaiError struct {
 // NewOpenAIProvider creates a provider for the OpenAI API.
 func NewOpenAIProvider(cfg ProviderConfig) (*OpenAIProvider, error) {
 	if cfg.APIKey == "" {
-		return nil, fmt.Errorf("OpenAI API key not configured. Set it in Settings → FlowAI Engine")
+		return nil, fmt.Errorf("openai API key not configured. Set it in Settings → FlowAI Engine")
 	}
 
 	endpoint := openaiDefaultEndpoint
@@ -70,7 +70,7 @@ func NewOpenAIProvider(cfg ProviderConfig) (*OpenAIProvider, error) {
 func NewLocalAIProvider(cfg ProviderConfig) (*OpenAIProvider, error) {
 	endpoint := cfg.Endpoint
 	if endpoint == "" {
-		return nil, fmt.Errorf("Local AI endpoint not configured. Set it in Settings → FlowAI Engine → Local AI Engines")
+		return nil, fmt.Errorf("local AI endpoint not configured. Set it in Settings → FlowAI Engine → Local AI Engines")
 	}
 
 	return &OpenAIProvider{
@@ -133,7 +133,7 @@ func (o *OpenAIProvider) doRequest(ctx context.Context, messages []openaiMessage
 
 	resp, err := o.client.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("OpenAI API request failed: %w", err)
+		return nil, fmt.Errorf("openai API request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -146,9 +146,9 @@ func (o *OpenAIProvider) doRequest(ctx context.Context, messages []openaiMessage
 	if resp.StatusCode != http.StatusOK {
 		var errResp openaiResponse
 		if json.Unmarshal(respBytes, &errResp) == nil && errResp.Error != nil {
-			return nil, fmt.Errorf("OpenAI API error (%d): %s", resp.StatusCode, errResp.Error.Message)
+			return nil, fmt.Errorf("openai API error (%d): %s", resp.StatusCode, errResp.Error.Message)
 		}
-		return nil, fmt.Errorf("OpenAI API error: %d %s", resp.StatusCode, string(respBytes))
+		return nil, fmt.Errorf("openai API error: %d %s", resp.StatusCode, string(respBytes))
 	}
 
 	var chatResp openaiResponse
@@ -157,7 +157,7 @@ func (o *OpenAIProvider) doRequest(ctx context.Context, messages []openaiMessage
 	}
 
 	if len(chatResp.Choices) == 0 {
-		return nil, fmt.Errorf("OpenAI returned no choices")
+		return nil, fmt.Errorf("openai returned no choices")
 	}
 
 	return &Response{Text: chatResp.Choices[0].Message.Content}, nil
