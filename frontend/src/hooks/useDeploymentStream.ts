@@ -10,13 +10,13 @@ export function useDeploymentStream(appName: string, initiateDeployment: boolean
         return;
     }
 
-    // Use a microtask to avoid "cascading renders" lint error
+    // Use a timeout to avoid "cascading renders" lint error
     // by deferring state updates until after the current render cycle.
-    queueMicrotask(() => {
+    const timer = setTimeout(() => {
         setIsDeploying(true);
         setError(null);
         setLogs([]);
-    });
+    }, 0);
 
     // We assume backend API is hooked to /api/v1/deploy/stream
     const eventSource = new EventSource(`/api/v1/deploy/stream?appName=${appName}`);
@@ -41,6 +41,7 @@ export function useDeploymentStream(appName: string, initiateDeployment: boolean
 
     // Cleanup hook on dismount
     return () => {
+      clearTimeout(timer);
       eventSource.close();
     };
   }, [appName, initiateDeployment]);

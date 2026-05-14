@@ -49,15 +49,15 @@ export const useConnectionStore = create<ConnectionStoreState>()((set) => ({
     setDashboardDensity: (dashboardDensity) => set({ dashboardDensity }),
     setShowGpuWidget: (showGpuWidget) => set({ showGpuWidget }),
     setShowDataUsageWidget: (showDataUsageWidget) => set({ showDataUsageWidget }),
-    reset: () => set({ 
-        connectionState: 'DISCONNECTED', 
+    reset: () => set((state) => ({
+        connectionState: 'CONNECTING',
         reconnectAttempt: 0, 
-        lastMessageAt: null,
+        // lastMessageAt intentionally preserved
         lastTransportSwitchReason: null,
         preferredMode: 'websocket',
         pollInterval: 5000,
         dashboardDensity: 'compact',
         showGpuWidget: true,
         showDataUsageWidget: true
-    }),
+    })),
 }));
