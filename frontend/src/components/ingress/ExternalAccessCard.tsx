@@ -60,7 +60,7 @@ export function ExternalAccessCard({ appName }: ExternalAccessCardProps) {
           />
         </div>
         <p className="mt-2 text-xs text-zinc-500">
-          Auto-SSL generation is handled natively via Let's Encrypt. Ensure your DNS A-records are pointed strictly to this host IP.
+          Auto-SSL generation is handled natively via Let&apos;s Encrypt. Ensure your DNS A-records are pointed strictly to this host IP.
         </p>
       </div>
     </div>

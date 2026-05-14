@@ -6,7 +6,10 @@ export function useDeploymentStream(appName: string, initiateDeployment: boolean
   const [error, setError] = useState<Error | null>(null);
 
   useEffect(() => {
-    if (!initiateDeployment) return;
+    if (!initiateDeployment) {
+        setIsDeploying(false);
+        return;
+    }
 
     setIsDeploying(true);
     setError(null);
