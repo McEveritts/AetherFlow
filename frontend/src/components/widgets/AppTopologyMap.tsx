@@ -61,7 +61,7 @@ export default function AppTopologyMap({ topologyData, density = 'compact' }: Ap
         // 2. Initialize simulation only once
         if (!simulationRef.current) {
             simulationRef.current = d3.forceSimulation<D3Node, D3Link>()
-                .force("link", d3.forceLink<D3Node, D3Link>().id((d: any) => d.id).distance(isImmersive ? 150 : 120))
+                .force("link", d3.forceLink<D3Node, D3Link>().id((d) => (d as D3Node).id).distance(isImmersive ? 150 : 120))
                 .force("charge", d3.forceManyBody().strength(isImmersive ? -600 : -400))
                 .force("center", d3.forceCenter(width / 2, height / 2))
                 .force("collide", d3.forceCollide().radius(isImmersive ? 50 : 40));
@@ -118,19 +118,19 @@ export default function AppTopologyMap({ topologyData, density = 'compact' }: Ap
             const tooltip = d3.select("body").select(".d3-tooltip");
 
             const link = container.select("g.links")
-                .selectAll("line")
+                .selectAll<SVGLineElement, D3Link>("line")
                 .data(linksRef.current)
                 .join("line")
                 .attr("stroke", "#ffffff20")
                 .attr("stroke-opacity", 0.6)
-                .attr("stroke-width", (d: any) => Math.sqrt(d.value));
+                .attr("stroke-width", (d) => Math.sqrt(d.value));
 
             const node = container.select("g.nodes")
                 .selectAll<SVGCircleElement, D3Node>("circle")
-                .data(mergedNodes, (d: any) => d.id)
+                .data(mergedNodes, (d) => d.id)
                 .join(
                     enter => enter.append("circle")
-                        .attr("r", (d: any) => d.group === 1 ? 14 : 8)
+                        .attr("r", (d) => d.group === 1 ? 14 : 8)
                         .attr("stroke", "#1e293b")
                         .attr("stroke-width", 1.5)
                         .call(d3.drag<SVGCircleElement, D3Node>()
@@ -140,7 +140,7 @@ export default function AppTopologyMap({ topologyData, density = 'compact' }: Ap
                     update => update,
                     exit => exit.remove()
                 )
-                .attr("fill", (d: any) => {
+                .attr("fill", (d) => {
                     if (d.status === 'error') return '#ef4444';
                     if (d.status === 'stopped') return '#64748b';
                     if (d.group === 1) return '#6366f1';
@@ -163,10 +163,10 @@ export default function AppTopologyMap({ topologyData, density = 'compact' }: Ap
             });
 
             const label = container.select("g.labels")
-                .selectAll("text")
-                .data(mergedNodes, (d: any) => d.id)
+                .selectAll<SVGTextElement, D3Node>("text")
+                .data(mergedNodes, (d) => d.id)
                 .join("text")
-                .text((d: any) => d.id)
+                .text((d) => d.id)
                 .attr('font-size', '10px')
                 .attr('font-weight', 'bold')
                 .attr('fill', '#94a3b8')
@@ -186,35 +186,35 @@ export default function AppTopologyMap({ topologyData, density = 'compact' }: Ap
 
             simulation.on("tick", () => {
                 link
-                    .attr("x1", (d: any) => (d.source as any).x)
-                    .attr("y1", (d: any) => (d.source as any).y)
-                    .attr("x2", (d: any) => (d.target as any).x)
-                    .attr("y2", (d: any) => (d.target as any).y);
+                    .attr("x1", (d) => (d.source as unknown as D3Node).x!)
+                    .attr("y1", (d) => (d.source as unknown as D3Node).y!)
+                    .attr("x2", (d) => (d.target as unknown as D3Node).x!)
+                    .attr("y2", (d) => (d.target as unknown as D3Node).y!);
 
                 node
-                    .attr("cx", (d: any) => d.x!)
-                    .attr("cy", (d: any) => d.y!);
+                    .attr("cx", (d) => d.x!)
+                    .attr("cy", (d) => d.y!);
 
                 label
-                    .attr("x", (d: any) => d.x!)
-                    .attr("y", (d: any) => d.y!);
+                    .attr("x", (d) => d.x!)
+                    .attr("y", (d) => d.y!);
             });
         };
 
         updateGraph();
 
-        function dragstarted(event: any) {
+        function dragstarted(event: d3.D3DragEvent<SVGCircleElement, D3Node, D3Node>) {
             if (!event.active) simulation.alphaTarget(0.3).restart();
             event.subject.fx = event.subject.x;
             event.subject.fy = event.subject.y;
         }
 
-        function dragged(event: any) {
+        function dragged(event: d3.D3DragEvent<SVGCircleElement, D3Node, D3Node>) {
             event.subject.fx = event.x;
             event.subject.fy = event.y;
         }
 
-        function dragended(event: any) {
+        function dragended(event: d3.D3DragEvent<SVGCircleElement, D3Node, D3Node>) {
             if (!event.active) simulation.alphaTarget(0);
             event.subject.fx = null;
             event.subject.fy = null;

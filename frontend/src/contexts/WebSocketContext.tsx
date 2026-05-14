@@ -97,7 +97,7 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
     // FALLBACK: Use MAX aggregation semantics for dropped frames until policy is ratified
     const suppressedMetricsBufferRef = useRef<SystemMetrics | null>(null);
     // FALLBACK: Treat control-plane events as standard throttled metrics until unconditional bypass is ratified.
-    const suppressedControlEventsRef = useRef<{type: string, data: any}[]>([]);
+    const suppressedControlEventsRef = useRef<{type: string, data: unknown}[]>([]);
 
     // ── Heartbeat ──────────────────────────────────────────────
     const clearHeartbeat = useCallback(() => {

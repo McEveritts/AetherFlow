@@ -367,7 +367,7 @@ export default function SecurityTab() {
                                         </div>
                                     ) : (
                                         <p className="text-xs text-slate-500 leading-relaxed">
-                                            If you've used your recovery codes or believe they've been compromised, you can generate a new set. This will invalidate all previous codes.
+                                            If you&apos;ve used your recovery codes or believe they&apos;ve been compromised, you can generate a new set. This will invalidate all previous codes.
                                         </p>
                                     )}
                                 </div>
