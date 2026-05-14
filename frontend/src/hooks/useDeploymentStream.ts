@@ -7,7 +7,6 @@ export function useDeploymentStream(appName: string, initiateDeployment: boolean
 
   useEffect(() => {
     if (!initiateDeployment) {
-        setIsDeploying(false);
         return;
     }
 

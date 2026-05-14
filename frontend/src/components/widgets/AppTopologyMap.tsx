@@ -203,18 +203,18 @@ export default function AppTopologyMap({ topologyData, density = 'compact' }: Ap
 
         updateGraph();
 
-        function dragstarted(event: any) {
+        function dragstarted(event: d3.D3DragEvent<SVGCircleElement, D3Node, D3Node>) {
             if (!event.active) simulation.alphaTarget(0.3).restart();
             event.subject.fx = event.subject.x;
             event.subject.fy = event.subject.y;
         }
 
-        function dragged(event: any) {
+        function dragged(event: d3.D3DragEvent<SVGCircleElement, D3Node, D3Node>) {
             event.subject.fx = event.x;
             event.subject.fy = event.y;
         }
 
-        function dragended(event: any) {
+        function dragended(event: d3.D3DragEvent<SVGCircleElement, D3Node, D3Node>) {
             if (!event.active) simulation.alphaTarget(0);
             event.subject.fx = null;
             event.subject.fy = null;
