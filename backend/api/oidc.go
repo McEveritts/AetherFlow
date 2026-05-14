@@ -951,7 +951,7 @@ func recordActiveSession(userID int, jti string, c *gin.Context) {
 }
 
 // lookupOIDCClient retrieves client info from the database.
-func lookupOIDCClient(clientID string) (name string, redirectURIs string, err error) {
+/* func lookupOIDCClient(clientID string) (name string, redirectURIs string, err error) {
 	err = db.DB.QueryRow(
 		"SELECT name, redirect_uris FROM oidc_clients WHERE id = ?",
 		clientID,
@@ -960,7 +960,7 @@ func lookupOIDCClient(clientID string) (name string, redirectURIs string, err er
 		return "", "", fmt.Errorf("client not found")
 	}
 	return
-}
+} */
 
 // ---- Device Code Flow ----
 

@@ -66,7 +66,7 @@ type anthropicError struct {
 // NewAnthropicProvider creates a provider for the Anthropic Messages API.
 func NewAnthropicProvider(cfg ProviderConfig) (*AnthropicProvider, error) {
 	if cfg.APIKey == "" {
-		return nil, fmt.Errorf("Anthropic API key not configured. Set it in Settings → FlowAI Engine")
+		return nil, fmt.Errorf("anthropic API key not configured. Set it in Settings → FlowAI Engine")
 	}
 
 	endpoint := anthropicDefaultEndpoint
@@ -141,7 +141,7 @@ func (a *AnthropicProvider) doRequest(ctx context.Context, systemPrompt string, 
 
 	resp, err := a.client.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("Anthropic API request failed: %w", err)
+		return nil, fmt.Errorf("anthropic API request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -154,9 +154,9 @@ func (a *AnthropicProvider) doRequest(ctx context.Context, systemPrompt string, 
 	if resp.StatusCode != http.StatusOK {
 		var errResp anthropicResponse
 		if json.Unmarshal(respBytes, &errResp) == nil && errResp.Error != nil {
-			return nil, fmt.Errorf("Anthropic API error (%d): %s", resp.StatusCode, errResp.Error.Message)
+			return nil, fmt.Errorf("anthropic API error (%d): %s", resp.StatusCode, errResp.Error.Message)
 		}
-		return nil, fmt.Errorf("Anthropic API error: %d %s", resp.StatusCode, string(respBytes))
+		return nil, fmt.Errorf("anthropic API error: %d %s", resp.StatusCode, string(respBytes))
 	}
 
 	var anthropicResp anthropicResponse
@@ -172,7 +172,7 @@ func (a *AnthropicProvider) doRequest(ctx context.Context, systemPrompt string, 
 	}
 
 	if text == "" {
-		return nil, fmt.Errorf("Anthropic returned empty response")
+		return nil, fmt.Errorf("anthropic returned empty response")
 	}
 
 	return &Response{Text: text}, nil

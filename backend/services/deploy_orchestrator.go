@@ -159,7 +159,7 @@ func (o *Orchestrator) startService(serviceName string) error {
 }
 
 // OS File copy minimal implementation
-func (o *Orchestrator) copyFile(src, dst string) error {
+/* func (o *Orchestrator) copyFile(src, dst string) error {
 	in, err := os.Open(src)
 	if err != nil { return err }
 	defer in.Close()
@@ -168,4 +168,4 @@ func (o *Orchestrator) copyFile(src, dst string) error {
 	defer out.Close()
 	_, err = in.WriteTo(out)
 	return err
-}
+} */

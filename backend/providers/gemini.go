@@ -19,7 +19,7 @@ type GeminiProvider struct {
 // The caller is responsible for calling Close() when done.
 func NewGeminiProvider(cfg ProviderConfig) (*GeminiProvider, error) {
 	if cfg.APIKey == "" {
-		return nil, fmt.Errorf("Gemini API key not configured. Set it in Settings → FlowAI Engine")
+		return nil, fmt.Errorf("gemini API key not configured. Set it in Settings → FlowAI Engine")
 	}
 
 	model := cfg.Model
@@ -59,7 +59,7 @@ func (g *GeminiProvider) Chat(ctx context.Context, systemPrompt string, history 
 
 	resp, err := session.SendMessage(ctx, genai.Text(message))
 	if err != nil {
-		return nil, fmt.Errorf("Gemini generation error: %w", err)
+		return nil, fmt.Errorf("gemini generation error: %w", err)
 	}
 
 	text := extractGeminiText(resp)
@@ -75,12 +75,12 @@ func (g *GeminiProvider) Generate(ctx context.Context, prompt string) (*Response
 	model := g.client.GenerativeModel(g.model)
 	resp, err := model.GenerateContent(ctx, genai.Text(prompt))
 	if err != nil {
-		return nil, fmt.Errorf("Gemini generation error: %w", err)
+		return nil, fmt.Errorf("gemini generation error: %w", err)
 	}
 
 	text := extractGeminiText(resp)
 	if text == "" {
-		return nil, fmt.Errorf("Gemini returned empty response")
+		return nil, fmt.Errorf("gemini returned empty response")
 	}
 
 	return &Response{Text: text}, nil
@@ -91,11 +91,11 @@ func (g *GeminiProvider) TestConnection(ctx context.Context) error {
 	model := g.client.GenerativeModel("gemini-2.0-flash")
 	resp, err := model.GenerateContent(ctx, genai.Text("Reply with the exact word: SUCCESS"))
 	if err != nil {
-		return fmt.Errorf("Gemini connection test failed: %w", err)
+		return fmt.Errorf("gemini connection test failed: %w", err)
 	}
 	text := extractGeminiText(resp)
 	if text == "" {
-		return fmt.Errorf("Gemini returned empty test response")
+		return fmt.Errorf("gemini returned empty test response")
 	}
 	return nil
 }

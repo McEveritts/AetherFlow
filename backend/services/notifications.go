@@ -288,7 +288,7 @@ func (ne *NotificationEngine) evaluateRules() {
 		case "memory_usage":
 			threshold, _ := strconv.ParseFloat(rule.ConditionValue, 64)
 			if total, ok := metrics.Memory["total"]; ok && total > 0 {
-				used, _ := metrics.Memory["used"]
+				used := metrics.Memory["used"]
 				pct := (used / total) * 100
 				if pct >= threshold {
 					triggered = true

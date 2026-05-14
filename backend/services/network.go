@@ -301,7 +301,7 @@ func parseTailscalePeer(data map[string]interface{}) *TailscalePeer {
 // GetTailscalePeers returns the list of Tailscale peers.
 func GetTailscalePeers() ([]TailscalePeer, error) {
 	if runtime.GOOS != "linux" {
-		return nil, fmt.Errorf("Tailscale management requires Linux")
+		return nil, fmt.Errorf("tailscale management requires Linux")
 	}
 
 	status, err := getTailscaleStatus()
@@ -315,7 +315,7 @@ func GetTailscalePeers() ([]TailscalePeer, error) {
 // AdvertiseTailscaleRoutes configures subnet routes on the Tailscale node.
 func AdvertiseTailscaleRoutes(routes []string) error {
 	if runtime.GOOS != "linux" {
-		return fmt.Errorf("Tailscale management requires Linux")
+		return fmt.Errorf("tailscale management requires Linux")
 	}
 
 	if len(routes) == 0 {
