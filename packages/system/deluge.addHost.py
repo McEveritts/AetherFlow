@@ -7,7 +7,6 @@
 #
 
 import hashlib
-import sys
 import time
 
 print(hashlib.sha1(str(time.time()).encode('utf-8')).hexdigest())
