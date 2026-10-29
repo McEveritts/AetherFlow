@@ -14,6 +14,7 @@
 
 <VirtualHost *:443>
         ServerName _
+        Protocols h2 http/1.1
         SSLEngine on
         SSLProtocol -all +TLSv1.2 +TLSv1.3
         SSLHonorCipherOrder off
@@ -45,7 +46,7 @@
 
         ProxyRequests Off
         ProxyPreserveHost On
-        ProxyTimeout 300
+        ProxyTimeout 60
         RequestHeader set X-Forwarded-Proto "https"
         RequestHeader set X-Forwarded-Port "443"
 
@@ -56,12 +57,12 @@
 
         ProxyPass /.well-known/acme-challenge/ !
 
-        ProxyPass /api/ http://127.0.0.1:8080/api/ retry=0 timeout=300
+        ProxyPass /api/ http://127.0.0.1:8080/api/ retry=0 timeout=60 keepalive=On
         ProxyPassReverse /api/ http://127.0.0.1:8080/api/
 
-        ProxyPass /_next/ http://127.0.0.1:8080/_next/ retry=0 timeout=300
+        ProxyPass /_next/ http://127.0.0.1:8080/_next/ retry=0 timeout=60 keepalive=On
         ProxyPassReverse /_next/ http://127.0.0.1:8080/_next/
 
-        ProxyPass / http://127.0.0.1:8080/ retry=0 timeout=300
+        ProxyPass / http://127.0.0.1:8080/ retry=0 timeout=60 keepalive=On
         ProxyPassReverse / http://127.0.0.1:8080/
 </VirtualHost>

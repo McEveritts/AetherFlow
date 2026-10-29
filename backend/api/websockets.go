@@ -230,9 +230,9 @@ func IssueWSTicket(c *gin.Context) {
 	}
 	wsTicketsMu.Unlock()
 
-	// 30 seconds expiry for ticket
+	// 90 seconds expiry for ticket
 	go func(t string) {
-		time.Sleep(30 * time.Second)
+		time.Sleep(90 * time.Second)
 		wsTicketsMu.Lock()
 		delete(wsTickets, t)
 		wsTicketsMu.Unlock()

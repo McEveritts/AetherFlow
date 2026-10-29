@@ -25,7 +25,17 @@ var (
 	providerMu        sync.Mutex
 	cachedGemini      providers.AIProvider
 	cachedGeminiKey   string // tracks which key the singleton was created with
+	geminiKeyResolver func() (string, error)
 )
+
+// SetGeminiKeyResolver registers an external key resolver (e.g. from the api package
+// where AES-256-GCM decryption is initialized) so background services never pass
+// raw encrypted ciphertext to the Gemini SDK.
+func SetGeminiKeyResolver(fn func() (string, error)) {
+	providerMu.Lock()
+	geminiKeyResolver = fn
+	providerMu.Unlock()
+}
 
 // GetGeminiProvider returns a shared, long-lived Gemini provider.
 // The provider is cached and reused; callers MUST NOT call Close() on it.
@@ -34,6 +44,18 @@ func GetGeminiProvider(ctx context.Context) (providers.AIProvider, error) {
 	apiKey, err := ResolveGeminiKey()
 	if err != nil {
 		return nil, err
+	}
+	return GetGeminiProviderWithKey(ctx, apiKey)
+}
+
+// GetGeminiProviderWithKey returns a shared Gemini provider using an explicitly supplied decrypted API key.
+func GetGeminiProviderWithKey(ctx context.Context, apiKey string) (providers.AIProvider, error) {
+	if strings.TrimSpace(apiKey) == "" {
+		var err error
+		apiKey, err = ResolveGeminiKey()
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	providerMu.Lock()
@@ -82,10 +104,33 @@ func GenerateWithGemini(ctx context.Context, prompt string) (string, error) {
 	return resp.Text, nil
 }
 
+// GenerateWithGeminiKey performs single-shot AI generation using a pre-resolved API key.
+func GenerateWithGeminiKey(ctx context.Context, apiKey string, prompt string) (string, error) {
+	p, err := GetGeminiProviderWithKey(ctx, apiKey)
+	if err != nil {
+		return "", err
+	}
+	resp, err := p.Generate(ctx, prompt)
+	if err != nil {
+		return "", err
+	}
+	return resp.Text, nil
+}
+
 // ResolveGeminiKey resolves the Gemini API key through:
+// 0. Registered decrypted key resolver from api package
 // 1. SQLite settings (decrypted if encrypted)
 // 2. GEMINI_API_KEY environment variable
 func ResolveGeminiKey() (string, error) {
+	providerMu.Lock()
+	resolver := geminiKeyResolver
+	providerMu.Unlock()
+	if resolver != nil {
+		if k, err := resolver(); err == nil && strings.TrimSpace(k) != "" {
+			return strings.TrimSpace(k), nil
+		}
+	}
+
 	var apiKey string
 	db.DB.QueryRow("SELECT COALESCE(gemini_api_key, '') FROM settings WHERE id = 1").Scan(&apiKey)
 

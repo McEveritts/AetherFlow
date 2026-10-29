@@ -32,6 +32,35 @@ var jwtSecret []byte
 var jwtSecretOnce sync.Once
 var errUnauthorizedSession = errors.New("unauthorized session")
 
+// rotatedTokenGrace tracks recently rotated JTIs for a 15-second overlap window
+// so concurrent in-flight requests or multi-tab refresh races do not trigger
+// false 401 logouts while db.IsTokenRevoked(jti) still reflects revocation.
+const rotatedTokenGraceWindow = 15 * time.Second
+
+type rotatedTokenGraceEntry struct {
+	userID    int
+	newToken  string
+	expiresAt time.Time
+}
+
+var rotatedTokenGrace sync.Map
+
+func isWithinRotationGrace(jti string) (rotatedTokenGraceEntry, bool) {
+	if jti == "" {
+		return rotatedTokenGraceEntry{}, false
+	}
+	raw, ok := rotatedTokenGrace.Load(jti)
+	if !ok {
+		return rotatedTokenGraceEntry{}, false
+	}
+	entry, ok := raw.(rotatedTokenGraceEntry)
+	if !ok || time.Now().After(entry.expiresAt) {
+		rotatedTokenGrace.Delete(jti)
+		return rotatedTokenGraceEntry{}, false
+	}
+	return entry, true
+}
+
 func getJWTSecret() []byte {
 	jwtSecretOnce.Do(func() {
 		jwtSecret = []byte(os.Getenv("JWT_SECRET"))
@@ -561,6 +590,7 @@ func Logout(c *gin.Context) {
 	// Attempt to revoke the token intelligently (Phase 10 integration)
 	if _, claims, err := resolveSessionToken(c); err == nil {
 		if jti, ok := claims["jti"].(string); ok {
+			rotatedTokenGrace.Delete(jti)
 			if exp, ok := claims["exp"].(float64); ok {
 				remaining := time.Until(time.Unix(int64(exp), 0))
 				if remaining > 0 {
@@ -625,14 +655,6 @@ func RefreshSession(c *gin.Context) {
 		}
 	}
 
-	if jti, ok := claims["jti"].(string); ok && jti != "" {
-		if db.IsTokenRevoked(jti) {
-			Unauthorized(c, "Session has been revoked")
-			return
-		}
-		db.RevokeToken(jti, 15*time.Minute)
-	}
-
 	if cfp, ok := claims["cfp"].(string); ok && cfp != "" {
 		if !matchesClientFingerprint(cfp, c) {
 			slog.Warn("refresh rejected: client fingerprint mismatch", "ip", c.ClientIP())
@@ -655,10 +677,42 @@ func RefreshSession(c *gin.Context) {
 		return
 	}
 
+	jti, _ := claims["jti"].(string)
+	if jti != "" {
+		if db.IsTokenRevoked(jti) {
+			if graceEntry, ok := isWithinRotationGrace(jti); ok && graceEntry.userID == user.ID && graceEntry.newToken != "" {
+				c.SetSameSite(http.SameSiteLaxMode)
+				c.SetCookie("aetherflow_session", graceEntry.newToken, sessionCookieMaxAge, "/", "", secureCookie(), true)
+				c.JSON(http.StatusOK, gin.H{
+					"status":     "success",
+					"token":      graceEntry.newToken,
+					"expires_at": time.Now().Add(15 * time.Minute).Unix(),
+					"user": gin.H{
+						"id":       user.ID,
+						"username": user.Username,
+						"role":     user.Role,
+					},
+				})
+				return
+			}
+			Unauthorized(c, "Session has been revoked")
+			return
+		}
+		db.RevokeToken(jti, 15*time.Minute)
+	}
+
 	newToken, err := GenerateJWT(user.ID, c)
 	if err != nil {
 		InternalError(c, "Failed to create new session")
 		return
+	}
+
+	if jti != "" {
+		rotatedTokenGrace.Store(jti, rotatedTokenGraceEntry{
+			userID:    user.ID,
+			newToken:  newToken,
+			expiresAt: time.Now().Add(rotatedTokenGraceWindow),
+		})
 	}
 
 	c.SetSameSite(http.SameSiteLaxMode)
@@ -702,8 +756,10 @@ func AuthMiddleware() gin.HandlerFunc {
 		// Phase 11 & 12: Robust JWT Blacklist (Redis O(1) + LRU Fallback)
 		jti, hasJti := claims["jti"].(string)
 		if hasJti && db.IsTokenRevoked(jti) {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, APIError{Code: ErrCodeSessionExpired, Message: "Session revoked"})
-			return
+			if graceEntry, ok := isWithinRotationGrace(jti); !ok || graceEntry.userID != userId {
+				c.AbortWithStatusJSON(http.StatusUnauthorized, APIError{Code: ErrCodeSessionExpired, Message: "Session revoked"})
+				return
+			}
 		}
 
 		// Verify the user still exists in the database
@@ -972,6 +1028,7 @@ func RevokeSession(c *gin.Context) {
 	}
 
 	// Revoke the token via the blacklist
+	rotatedTokenGrace.Delete(fullJTI)
 	if expTime, err := time.Parse(time.RFC3339, expiresAt); err == nil {
 		remaining := time.Until(expTime)
 		if remaining > 0 {

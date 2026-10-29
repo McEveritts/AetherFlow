@@ -11,15 +11,14 @@ import (
 
 // HandleGetPredictions returns the latest prediction report (or runs one on demand).
 func HandleGetPredictions(c *gin.Context) {
-	ps, err := ResolveProviderSettings()
-	if err != nil || ps.GeminiAPIKey == "" {
-		InternalError(c, "Gemini API key not configured. Set it in Settings → FlowAI Engine.")
-		return
+	var apiKey string
+	if ps, err := ResolveProviderSettings(); err == nil && ps != nil {
+		apiKey = ps.GeminiAPIKey
 	}
 
-	report, err := services.AnalyzeResourceTrends(ps.GeminiAPIKey)
+	report, err := services.AnalyzeResourceTrends(apiKey)
 	if err != nil {
-		InternalError(c, "Prediction analysis failed: " + err.Error())
+		InternalError(c, "Prediction analysis failed: "+err.Error())
 		return
 	}
 

@@ -8,7 +8,16 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 )
+
+type cachedConfigEntry struct {
+	data    []byte
+	modTime time.Time
+	size    int64
+}
+
+var configFileCache sync.Map
 
 // exeDir caches the directory containing the running executable so config
 // files that live next to the binary are always discoverable regardless of
@@ -51,8 +60,27 @@ func readFirstConfigFile(paths []string) ([]byte, error) {
 	)
 
 	for _, p := range paths {
+		info, statErr := os.Stat(p)
+		if statErr != nil || info.IsDir() {
+			err = statErr
+			continue
+		}
+		if cachedRaw, ok := configFileCache.Load(p); ok {
+			if cached, ok := cachedRaw.(cachedConfigEntry); ok && cached.modTime.Equal(info.ModTime()) && cached.size == info.Size() {
+				out := make([]byte, len(cached.data))
+				copy(out, cached.data)
+				return out, nil
+			}
+		}
 		data, err = os.ReadFile(p)
 		if err == nil {
+			stored := make([]byte, len(data))
+			copy(stored, data)
+			configFileCache.Store(p, cachedConfigEntry{
+				data:    stored,
+				modTime: info.ModTime(),
+				size:    info.Size(),
+			})
 			slog.Info("[config] loaded config from", "path", p)
 			return data, nil
 		}
@@ -120,8 +148,8 @@ func mergePackageUpdateState(pkgs []models.Package) {
 	}
 }
 
-// GetPackages reads the packages.json and determines installation status.
-func GetPackages() ([]models.Package, error) {
+// GetPackageCatalog loads package metadata and automation configuration without probing filesystem lock files.
+func GetPackageCatalog() ([]models.Package, error) {
 	data, err := readFirstConfigFile(resolveConfigPaths("AETHERFLOW_PACKAGES_CONFIG", "packages.json"))
 	if err != nil {
 		wrapped := fmt.Errorf("load packages.json: %w", err)
@@ -137,6 +165,15 @@ func GetPackages() ([]models.Package, error) {
 	}
 
 	mergePackageAutomation(pkgs, loadPackageAutomation())
+	return pkgs, nil
+}
+
+// GetPackages reads the packages.json and determines installation status.
+func GetPackages() ([]models.Package, error) {
+	pkgs, err := GetPackageCatalog()
+	if err != nil {
+		return nil, err
+	}
 
 	// Iterate and check status concurrently to eliminate CPU/IO wait blocking
 	var wg sync.WaitGroup

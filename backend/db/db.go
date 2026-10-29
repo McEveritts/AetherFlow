@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"aetherflow/models"
@@ -680,6 +681,8 @@ func InitDB() {
 		_, _ = DB.Exec(`UPDATE settings SET base_domain = ? WHERE id = 1 AND COALESCE(base_domain, '') = ''`, envDomain)
 	}
 
+	InvalidateIngressCache()
+
 	slog.Info("database connected", "path", dbPath)
 }
 
@@ -774,11 +777,43 @@ func StartPruneLoop() {
 
 // ─── Phase 30: App Ingress Configurations (Migration 17) ───────────────
 
+const ingressCacheTTL = 5 * time.Second
+
+var (
+	ingressCacheMu         sync.RWMutex
+	ingressCacheDB         *sql.DB
+	cachedIngressConfigs   []models.AppIngressConfig
+	cachedIngressConfigsAt time.Time
+	cachedBaseDomain       string
+	cachedBaseDomainAt     time.Time
+)
+
+// InvalidateIngressCache clears the in-memory cache for app ingress configs and base domain.
+func InvalidateIngressCache() {
+	ingressCacheMu.Lock()
+	ingressCacheDB = DB
+	cachedIngressConfigs = nil
+	cachedIngressConfigsAt = time.Time{}
+	cachedBaseDomain = ""
+	cachedBaseDomainAt = time.Time{}
+	ingressCacheMu.Unlock()
+}
+
 // GetAllAppIngressConfigs returns all stored app ingress configurations.
 func GetAllAppIngressConfigs() ([]models.AppIngressConfig, error) {
 	if DB == nil {
 		return []models.AppIngressConfig{}, nil
 	}
+
+	ingressCacheMu.RLock()
+	if ingressCacheDB == DB && cachedIngressConfigs != nil && time.Since(cachedIngressConfigsAt) < ingressCacheTTL {
+		out := make([]models.AppIngressConfig, len(cachedIngressConfigs))
+		copy(out, cachedIngressConfigs)
+		ingressCacheMu.RUnlock()
+		return out, nil
+	}
+	ingressCacheMu.RUnlock()
+
 	rows, err := DB.Query(`
 		SELECT app_name, public_domain, external_access_enabled, listen_port, tls_enabled, created_at, updated_at
 		FROM app_ingress_configs
@@ -811,6 +846,14 @@ func GetAllAppIngressConfigs() ([]models.AppIngressConfig, error) {
 	if configs == nil {
 		configs = []models.AppIngressConfig{}
 	}
+
+	ingressCacheMu.Lock()
+	ingressCacheDB = DB
+	cachedIngressConfigs = make([]models.AppIngressConfig, len(configs))
+	copy(cachedIngressConfigs, configs)
+	cachedIngressConfigsAt = time.Now()
+	ingressCacheMu.Unlock()
+
 	return configs, nil
 }
 
@@ -819,6 +862,17 @@ func GetAppIngressConfig(appName string) (*models.AppIngressConfig, error) {
 	if DB == nil {
 		return nil, nil
 	}
+
+	if all, err := GetAllAppIngressConfigs(); err == nil {
+		for _, c := range all {
+			if c.AppName == appName {
+				cp := c
+				return &cp, nil
+			}
+		}
+		return nil, nil
+	}
+
 	var c models.AppIngressConfig
 	var createdAt, updatedAt string
 	err := DB.QueryRow(`
@@ -860,6 +914,7 @@ func SetAppIngressConfig(cfg models.AppIngressConfig) error {
 			tls_enabled = excluded.tls_enabled,
 			updated_at = CURRENT_TIMESTAMP
 	`, cfg.AppName, cfg.PublicDomain, cfg.ExternalAccessEnabled, cfg.ListenPort, cfg.TLSEnabled)
+	InvalidateIngressCache()
 	return err
 }
 
@@ -869,6 +924,7 @@ func DeleteAppIngressConfig(appName string) error {
 		return nil
 	}
 	_, err := DB.Exec(`DELETE FROM app_ingress_configs WHERE app_name = ?`, appName)
+	InvalidateIngressCache()
 	return err
 }
 
@@ -897,11 +953,28 @@ func GetBaseDomain() string {
 	if DB == nil {
 		return ""
 	}
+
+	ingressCacheMu.RLock()
+	if ingressCacheDB == DB && !cachedBaseDomainAt.IsZero() && time.Since(cachedBaseDomainAt) < ingressCacheTTL {
+		dom := cachedBaseDomain
+		ingressCacheMu.RUnlock()
+		return dom
+	}
+	ingressCacheMu.RUnlock()
+
 	var baseDomain string
 	if err := DB.QueryRow(`SELECT COALESCE(base_domain, '') FROM settings WHERE id = 1`).Scan(&baseDomain); err != nil {
 		return ""
 	}
-	return NormalizeBaseDomain(baseDomain)
+	normalized := NormalizeBaseDomain(baseDomain)
+
+	ingressCacheMu.Lock()
+	ingressCacheDB = DB
+	cachedBaseDomain = normalized
+	cachedBaseDomainAt = time.Now()
+	ingressCacheMu.Unlock()
+
+	return normalized
 }
 
 // SetBaseDomain updates the persisted server base domain in settings.
@@ -911,6 +984,7 @@ func SetBaseDomain(domain string) error {
 	}
 	normalized := NormalizeBaseDomain(domain)
 	_, err := DB.Exec(`UPDATE settings SET base_domain = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1`, normalized)
+	InvalidateIngressCache()
 	return err
 }
 

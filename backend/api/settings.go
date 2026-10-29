@@ -164,6 +164,8 @@ func updateSettings(c *gin.Context) {
 		return
 	}
 
+	db.InvalidateIngressCache()
+
 	if req.BaseDomain != "" {
 		services.SyncInstalledAppsBaseDomain(prevBaseDomain, req.BaseDomain)
 	}

@@ -254,14 +254,19 @@ function _apacheconf() {
 	#a2dismod mpm_prefork >>"${OUTTO}" 2>&1
 	#a2enmod mpm_worker >>"${OUTTO}" 2>&1
 
-	# ensure fastcgi module is activated
+	# ensure fastcgi & event MPM + HTTP/2 modules are activated for high-concurrency proxy multiplexing
 	a2enmod actions >>"${OUTTO}" 2>&1 || true
 	a2enmod headers >>"${OUTTO}" 2>&1 || true
+	a2enmod http2 >>"${OUTTO}" 2>&1 || true
+	a2enmod reqtimeout >>"${OUTTO}" 2>&1 || true
 	a2enmod fastcgi >>"${OUTTO}" 2>&1 || true
 	a2enmod proxy_fcgi setenvif >>"${OUTTO}" 2>&1 || true
 	if [[ -n "${_php_ver}" ]]; then
+		a2dismod "php${_php_ver}" >>"${OUTTO}" 2>&1 || true
 		a2enconf php"${_php_ver}"-fpm >>"${OUTTO}" 2>&1 || echo "[WARN] php${_php_ver}-fpm Apache config not available."
 	fi
+	a2dismod mpm_prefork >>"${OUTTO}" 2>&1 || true
+	a2enmod mpm_event >>"${OUTTO}" 2>&1 || true
 
 	#sed -i 's/memory_limit = 128M/memory_limit = 768M/g' /etc/php/${PHP_VER}/apache2/php.ini
 }

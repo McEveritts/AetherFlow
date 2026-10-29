@@ -172,13 +172,15 @@ func main() {
 	services.InitStreamingMonitor()
 
 	// Initialize the Smart Backup Scheduler (Phase 20)
-	services.InitSmartBackupScheduler(func() (string, error) {
+	resolveGeminiKey := func() (string, error) {
 		ps, err := api.ResolveProviderSettings()
 		if err != nil || ps.GeminiAPIKey == "" {
 			return "", fmt.Errorf("gemini API key not configured")
 		}
 		return ps.GeminiAPIKey, nil
-	}, func() error {
+	}
+	services.SetGeminiKeyResolver(resolveGeminiKey)
+	services.InitSmartBackupScheduler(resolveGeminiKey, func() error {
 		_, err := api.PerformSystemBackup()
 		return err
 	})

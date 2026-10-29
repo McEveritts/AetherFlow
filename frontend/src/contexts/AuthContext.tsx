@@ -1,6 +1,6 @@
 'use client';
 
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useContext, useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { apiFetch } from '@/lib/fetcher';
 import { mutate as globalMutate } from 'swr';
@@ -41,12 +41,18 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     const [isLoading, setIsLoading] = useState(true);
     const [user, setUser] = useState<User | null>(null);
     const router = useRouter();
+    const sessionCheckGenRef = useRef(0);
+    const lastAuthenticatedAtRef = useRef(0);
 
     const checkSession = async () => {
+        const gen = ++sessionCheckGenRef.current;
         try {
             const res = await apiFetch('/api/v1/auth/session');
+            if (gen !== sessionCheckGenRef.current) return;
             if (res.ok) {
                 const userData = await res.json();
+                if (gen !== sessionCheckGenRef.current) return;
+                lastAuthenticatedAtRef.current = Date.now();
                 setUser(userData);
                 setIsAuthenticated(true);
             } else {
@@ -54,10 +60,13 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
                 setUser(null);
             }
         } catch (err) {
+            if (gen !== sessionCheckGenRef.current) return;
             console.error("Auth check failed:", err);
             setIsAuthenticated(false);
         } finally {
-            setIsLoading(false);
+            if (gen === sessionCheckGenRef.current) {
+                setIsLoading(false);
+            }
         }
     };
 
@@ -77,6 +86,11 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
 
         // Same-tab hard 401 listener when silent token refresh also fails
         const handleSessionExpired = () => {
+            // Guard against delayed pre-login requests resolving right after login succeeded
+            if (Date.now() - lastAuthenticatedAtRef.current < 10_000) {
+                void checkSession();
+                return;
+            }
             setIsAuthenticated(false);
             setUser(null);
             useConnectionStore.getState().reset();
@@ -126,6 +140,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     };
 
     const loginLocal = () => {
+        lastAuthenticatedAtRef.current = Date.now();
         // Re-check session after local login set the cookie, then redirect
         checkSession().then(() => {
             window.localStorage.setItem('af_login_sync', String(Date.now()));
@@ -134,6 +149,8 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     };
 
     const logout = async () => {
+        sessionCheckGenRef.current++;
+        lastAuthenticatedAtRef.current = 0;
         try {
             await apiFetch('/api/v1/auth/logout', { method: 'POST' });
         } catch (err) {

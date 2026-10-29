@@ -136,7 +136,7 @@ func ResolveServiceUnits(target string) []string {
 		return nil
 	}
 
-	pkgs, err := GetPackages()
+	pkgs, err := GetPackageCatalog()
 	if err == nil {
 		for _, pkg := range pkgs {
 			svcName := strings.TrimSuffix(strings.TrimSpace(pkg.ServiceName), ".service")

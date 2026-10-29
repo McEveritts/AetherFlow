@@ -9,43 +9,73 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 )
 
+type serviceInfoCacheEntry struct {
+	status    string
+	uptime    string
+	version   string
+	fetchedAt time.Time
+}
+
+var serviceInfoCache sync.Map
+
+const serviceInfoCacheTTL = 2500 * time.Millisecond
+
 // GetServiceInfo queries systemctl for the status, uptime, and version of a given service.
 func GetServiceInfo(serviceName string) (status, uptime, version string) {
+	if raw, ok := serviceInfoCache.Load(serviceName); ok {
+		if entry, ok := raw.(serviceInfoCacheEntry); ok && time.Since(entry.fetchedAt) < serviceInfoCacheTTL {
+			return entry.status, entry.uptime, entry.version
+		}
+	}
+
 	status = "stopped"
 	uptime = "-"
 	version = "-"
 
-	cmdActive := exec.Command("systemctl", "is-active", serviceName)
-	outActive, err := cmdActive.Output()
-	if err == nil {
-		activeStr := strings.TrimSpace(string(outActive))
-		if activeStr == "active" {
-			status = "running"
+	cmdShow := exec.Command("systemctl", "show", "-p", "ActiveState,ActiveEnterTimestamp", "--", serviceName)
+	if outShow, err := cmdShow.Output(); err == nil {
+		var activeState, enterTs string
+		for _, line := range strings.Split(string(outShow), "\n") {
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(line, "ActiveState=") {
+				activeState = strings.TrimPrefix(line, "ActiveState=")
+			} else if strings.HasPrefix(line, "ActiveEnterTimestamp=") {
+				enterTs = strings.TrimPrefix(line, "ActiveEnterTimestamp=")
+			}
 		}
-	} else {
-		cmdFailed := exec.Command("systemctl", "is-failed", serviceName)
-		outFailed, errFailed := cmdFailed.Output()
-		if errFailed == nil && strings.TrimSpace(string(outFailed)) == "failed" {
+		switch activeState {
+		case "active":
+			status = "running"
+			if enterTs != "" {
+				uptime = FormatUptime(enterTs)
+			}
+		case "failed":
 			status = "error"
 		}
-	}
-
-	if status == "running" {
-		cmdUptime := exec.Command("systemctl", "show", "-p", "ActiveEnterTimestamp", serviceName)
-		outUptime, errUptime := cmdUptime.Output()
-		if errUptime == nil {
-			uptimeStr := strings.TrimSpace(string(outUptime))
-			if strings.HasPrefix(uptimeStr, "ActiveEnterTimestamp=") {
-				uptimeVal := strings.TrimPrefix(uptimeStr, "ActiveEnterTimestamp=")
-				if uptimeVal != "" {
-					uptime = FormatUptime(uptimeVal)
-				}
+	} else {
+		cmdActive := exec.Command("systemctl", "is-active", serviceName)
+		outActive, err := cmdActive.Output()
+		if err == nil && strings.TrimSpace(string(outActive)) == "active" {
+			status = "running"
+		} else {
+			cmdFailed := exec.Command("systemctl", "is-failed", serviceName)
+			outFailed, errFailed := cmdFailed.Output()
+			if errFailed == nil && strings.TrimSpace(string(outFailed)) == "failed" {
+				status = "error"
 			}
 		}
 	}
+
+	serviceInfoCache.Store(serviceName, serviceInfoCacheEntry{
+		status:    status,
+		uptime:    uptime,
+		version:   version,
+		fetchedAt: time.Now(),
+	})
 
 	return status, uptime, version
 }
@@ -184,6 +214,7 @@ func ControlService(serviceName, action string) error {
 	if err := validateServiceName(serviceName); err != nil {
 		return err
 	}
+	serviceInfoCache.Delete(serviceName)
 	slog.Info("systemctl executing", "action", action, "service", serviceName)
 
 	// Prefer the root-owned UNIX socket runner when active (allows NoNewPrivileges=yes on aetherflow-api).
@@ -192,6 +223,7 @@ func ControlService(serviceName, action string) error {
 			slog.Error("systemctl runner action failed", "action", action, "service", serviceName, "error", err)
 			return err
 		}
+		serviceInfoCache.Delete(serviceName)
 		slog.Info("systemctl action succeeded via runner", "action", action, "service", serviceName)
 		return nil
 	}
@@ -205,6 +237,7 @@ func ControlService(serviceName, action string) error {
 		slog.Error("systemctl action failed", "action", action, "service", serviceName, "error", err, "output", string(output))
 		return err
 	}
+	serviceInfoCache.Delete(serviceName)
 	slog.Info("systemctl action succeeded", "action", action, "service", serviceName)
 	return nil
 }
