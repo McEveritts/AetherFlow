@@ -86,6 +86,9 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
     const heartbeatTimerRef = useRef<ReturnType<typeof setInterval> | undefined>(undefined);
     const heartbeatTimeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
     const pollTimerRef = useRef<ReturnType<typeof setInterval> | undefined>(undefined);
+    const pollInFlightRef = useRef(false);
+    const transportGenRef = useRef(0);
+    const prevPollIntervalRef = useRef(pollInterval);
     const attemptRef = useRef(0);                    // mirrors Zustand but non-reactive
     const hasConnectedOnceRef = useRef(false);       // suppress "restored" toast on first connect
     const isMountedRef = useRef(true);
@@ -135,29 +138,38 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
             clearInterval(pollTimerRef.current);
             pollTimerRef.current = undefined;
         }
+        pollInFlightRef.current = false;
     }, []);
 
     const startPolling = useCallback((silent = false) => {
-        // FALLBACK: Assume default priority (WS -> Polling) until ratified
-        if (transportOwnerRef.current === 'websocket' && useConnectionStore.getState().preferredMode === 'websocket') {
-            return; // Prevent polling loop from taking over active WS transport owner unless forced
+        const storeState = useConnectionStore.getState();
+        const currentPreferredMode = storeState.preferredMode;
+
+        // Only block fallback polling if an active WebSocket is currently OPEN and preferred
+        if (
+            wsRef.current?.readyState === WebSocket.OPEN &&
+            transportOwnerRef.current === 'websocket' &&
+            currentPreferredMode === 'websocket' &&
+            !isWebSocketDisabled()
+        ) {
+            return;
         }
 
         stopPolling();
-        
-        // Only set to FALLBACK if we are actually in a failed state.
-        // If preferredMode is 'poll', we might want a different label like 'CONNECTED (POLL)' or just stay in FALLBACK.
-        // For now, if user chose 'poll', we treat it as a valid connection state but use the 'FALLBACK' badge style.
+        transportOwnerRef.current = 'poll';
         setConnectionState('FALLBACK');
         
-        if (!silent && preferredMode !== 'poll') {
+        if (!silent && currentPreferredMode !== 'poll') {
             addToast('Live connection unavailable — switched to polling mode', 'info');
-        } else if (!silent && preferredMode === 'poll') {
+        } else if (!silent && currentPreferredMode === 'poll') {
             addToast('Nexus link active: Polling mode', 'info');
         }
 
         let pollTick = 0;
         const poll = async () => {
+            if (!isMountedRef.current || transportOwnerRef.current !== 'poll') return;
+            if (pollInFlightRef.current) return;
+            pollInFlightRef.current = true;
             const currentTick = pollTick++;
             try {
                 const shouldFetchServices = currentTick % 5 === 0;
@@ -165,7 +177,7 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
                     apiFetch('/api/v1/auth/system/metrics'),
                     shouldFetchServices ? apiFetch('/api/v1/auth/services').catch(() => null) : Promise.resolve(null),
                 ]);
-                if (!metricsRes.ok) return;
+                if (!metricsRes.ok || !isMountedRef.current || transportOwnerRef.current !== 'poll') return;
                 const text = await metricsRes.text();
                 if (!text || text.trim() === '') return;
                 
@@ -185,7 +197,7 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
                     }
                 }
                 
-                if (isMountedRef.current && metrics) {
+                if (isMountedRef.current && metrics && transportOwnerRef.current === 'poll') {
                     setData((prev) => {
                         const nextServices = polledServices ?? prev.services;
                         const mergedSystem: SystemMetrics = nextServices
@@ -199,16 +211,28 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
                     setLastMessageAt(Date.now());
                 }
             } catch {
-                // Silently swallow
+                // Silently swallow transient poll errors
+            } finally {
+                pollInFlightRef.current = false;
             }
         };
 
+        // Cap default 5000ms store interval to 2000ms for smooth real-time sparklines unless user explicitly set 1000ms
+        const rawInterval = storeState.pollInterval || 2000;
+        const effectiveInterval = rawInterval === 5000 ? 2000 : Math.max(1000, rawInterval);
+
         poll(); // immediate first poll
-        pollTimerRef.current = setInterval(poll, pollInterval);
-    }, [stopPolling, setConnectionState, setLastMessageAt, addToast, pollInterval, preferredMode]);
+        pollTimerRef.current = setInterval(poll, effectiveInterval);
+    }, [stopPolling, setConnectionState, setLastMessageAt, addToast]);
 
     // ── Core Connect Logic ─────────────────────────────────────
     const connect = useCallback(async () => {
+        if (!isMountedRef.current || isWebSocketDisabled() || useConnectionStore.getState().preferredMode === 'poll') {
+            return;
+        }
+
+        const connectGen = ++transportGenRef.current;
+
         // Clean up any existing connection
         if (wsRef.current) {
             const prevWs = wsRef.current;
@@ -224,9 +248,12 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
         try {
             const res = await apiFetch('/api/v1/auth/ws/ticket');
             if (!res.ok) throw new Error('Failed to fetch ticket');
-            const data = await res.json();
-            wsUrl = buildWsUrl(data.ticket);
+            const ticketData = await res.json();
+            wsUrl = buildWsUrl(ticketData.ticket);
         } catch (err) {
+            if (!isMountedRef.current || connectGen !== transportGenRef.current || useConnectionStore.getState().preferredMode === 'poll') {
+                return;
+            }
             console.error('[WS] Failed to obtain connection ticket', err);
             attemptRef.current += 1;
             setReconnectAttempt(attemptRef.current);
@@ -246,10 +273,18 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
             return;
         }
 
+        // Abort if transport mode changed while awaiting the WS ticket
+        if (!isMountedRef.current || connectGen !== transportGenRef.current || useConnectionStore.getState().preferredMode === 'poll' || isWebSocketDisabled()) {
+            return;
+        }
+
         const ws = new WebSocket(wsUrl);
 
         ws.onopen = () => {
-            if (!isMountedRef.current) return;
+            if (!isMountedRef.current || connectGen !== transportGenRef.current) {
+                ws.close();
+                return;
+            }
 
             // New connection is live — clear the manual-close flag and claim transport ownership
             isManualCloseRef.current = false;
@@ -273,7 +308,7 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
         };
 
         ws.onmessage = (event) => {
-            if (!isMountedRef.current) return;
+            if (!isMountedRef.current || connectGen !== transportGenRef.current) return;
             const now = Date.now();
             setLastMessageAt(now);
             resetHeartbeatTimeout();
@@ -331,10 +366,14 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
         };
 
         ws.onclose = () => {
-            if (!isMountedRef.current || isManualCloseRef.current || wsRef.current !== ws) return;
+            if (!isMountedRef.current || isManualCloseRef.current || wsRef.current !== ws || connectGen !== transportGenRef.current) return;
             wsRef.current = null;
 
             clearHeartbeat();
+            if (useConnectionStore.getState().preferredMode === 'poll' || isWebSocketDisabled()) {
+                return;
+            }
+
             attemptRef.current += 1;
             setReconnectAttempt(attemptRef.current);
 
@@ -373,24 +412,46 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
     const manualReconnect = useCallback(() => {
         if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
         stopPolling();
-        transportOwnerRef.current = 'websocket';
         attemptRef.current = 0;
         setReconnectAttempt(0);
-        resetConnection();
-        connect();
-    }, [connect, stopPolling, setReconnectAttempt, resetConnection]);
+        if (useConnectionStore.getState().preferredMode === 'poll' || isWebSocketDisabled()) {
+            transportOwnerRef.current = 'poll';
+            startPolling(false);
+        } else {
+            transportOwnerRef.current = 'websocket';
+            resetConnection();
+            connect();
+        }
+    }, [connect, startPolling, stopPolling, setReconnectAttempt, resetConnection]);
 
-    // ── Lifecycle ──────────────────────────────────────────────
+    // ── Mount / Unmount tracking ───────────────────────────────
     useEffect(() => {
         isMountedRef.current = true;
+        return () => {
+            isMountedRef.current = false;
+        };
+    }, []);
 
+    // ── Primary Transport Lifecycle ────────────────────────────
+    useEffect(() => {
         if (!isAuthenticated || pathname === '/login') {
-            return () => {
-                isMountedRef.current = false;
-            };
+            transportGenRef.current += 1;
+            if (reconnectTimerRef.current) {
+                clearTimeout(reconnectTimerRef.current);
+                reconnectTimerRef.current = undefined;
+            }
+            clearHeartbeat();
+            stopPolling();
+            if (wsRef.current) {
+                isManualCloseRef.current = true;
+                wsRef.current.close();
+                wsRef.current = null;
+            }
+            return;
         }
 
         if (isWebSocketDisabled() || preferredMode === 'poll') {
+            transportGenRef.current += 1;
             transportOwnerRef.current = 'poll';
             useConnectionStore.getState().setLastTransportSwitchReason('USER_PREFERENCE_OR_DISABLED');
             // If we have an active WS connection, close it cleanly
@@ -398,7 +459,6 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
                 isManualCloseRef.current = true;
                 wsRef.current.close();
                 wsRef.current = null;
-                // Flag stays true — no new WS will be opened in this branch
             }
             // Cancel any pending WS reconnect timers
             if (reconnectTimerRef.current) {
@@ -410,7 +470,6 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
             setReconnectAttempt(0);
             startPolling(true);
             return () => {
-                isMountedRef.current = false;
                 clearHeartbeat();
                 stopPolling();
             };
@@ -421,18 +480,25 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
         connect();
 
         return () => {
-            isMountedRef.current = false;
+            transportGenRef.current += 1;
             isManualCloseRef.current = true;
-            if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+            if (reconnectTimerRef.current) {
+                clearTimeout(reconnectTimerRef.current);
+                reconnectTimerRef.current = undefined;
+            }
             clearHeartbeat();
             stopPolling();
-            wsRef.current?.close();
+            if (wsRef.current) {
+                wsRef.current.close();
+                wsRef.current = null;
+            }
         };
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [isAuthenticated, pathname, preferredMode]);
+    }, [isAuthenticated, pathname, preferredMode, connect, startPolling, stopPolling, clearHeartbeat, setReconnectAttempt]);
 
-    // Restart polling timer when pollInterval changes while actively polling
+    // Restart polling timer ONLY when pollInterval itself changes while actively polling
     useEffect(() => {
+        if (prevPollIntervalRef.current === pollInterval) return;
+        prevPollIntervalRef.current = pollInterval;
         if (!isAuthenticated || pathname === '/login') return;
         if (isWebSocketDisabled() || preferredMode === 'poll' || transportOwnerRef.current === 'poll') {
             startPolling(true);

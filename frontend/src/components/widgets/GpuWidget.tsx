@@ -37,50 +37,83 @@ export default function GpuWidget({ gpus, density }: GpuWidgetProps) {
             </div>
 
             <div className={`grid gap-4 ${isImmersive && gpus.length > 1 ? 'grid-cols-2' : 'grid-cols-1'}`}>
-                {gpus.map((gpu, idx) => (
-                    <div key={idx} className="bg-white/[0.03] border border-white/5 rounded-xl p-4">
-                        <div className="flex items-start justify-between mb-3">
-                            <div className="space-y-1 flex-1 min-w-0 mr-4">
-                                <p className="text-xs font-bold text-slate-200 truncate">{gpu.name}</p>
-                                <p className="text-[10px] text-slate-500 font-medium">Index: {gpu.index}</p>
-                            </div>
-                            <div className="text-right shrink-0">
-                                <p className="text-xs font-black text-blue-400">#{gpu.index}</p>
-                            </div>
-                        </div>
+                {gpus.map((gpu, idx) => {
+                    const usagePct = Number(gpu.usage_pct || 0);
+                    const hasDedicatedVram = Number(gpu.memory_total || 0) > 0;
+                    const vramPct = hasDedicatedVram
+                        ? Math.min(100, Math.max(0, (Number(gpu.memory_used || 0) / Number(gpu.memory_total)) * 100))
+                        : 0;
+                    const tempC = Number(gpu.temp || 0);
 
-                        {/* Real-time stats placeholders */}
-                        <div className="space-y-3">
-                            <div>
-                                <div className="flex justify-between text-[10px] font-bold mb-1 uppercase tracking-tight">
-                                    <span className="text-slate-400">Core Load</span>
-                                    <span className="text-blue-400">{gpu.usage_pct || 0}%</span>
+                    return (
+                        <div key={idx} className="bg-white/[0.03] border border-white/5 rounded-xl p-4">
+                            <div className="flex items-start justify-between mb-3">
+                                <div className="space-y-1 flex-1 min-w-0 mr-4">
+                                    <p className="text-xs font-bold text-slate-200 truncate">{gpu.name}</p>
+                                    <div className="flex items-center gap-2 flex-wrap">
+                                        <p className="text-[10px] text-slate-500 font-medium">Index: {gpu.index}</p>
+                                        {!hasDedicatedVram && (
+                                            <span className="text-[9px] font-semibold text-indigo-300/80 bg-indigo-500/10 border border-indigo-500/20 px-1.5 py-0.5 rounded">
+                                                Shared System Memory · Integrated GPU
+                                            </span>
+                                        )}
+                                    </div>
                                 </div>
-                                <div className="h-1.5 w-full bg-white/5 rounded-full overflow-hidden">
-                                    <div 
-                                        className="h-full bg-gradient-to-r from-blue-500 to-indigo-500 transition-all duration-300" 
-                                        style={{ width: `${gpu.usage_pct || 0}%` }}
-                                    />
+                                <div className="text-right shrink-0 flex items-center gap-2">
+                                    {tempC > 0 && (
+                                        <span className={`text-[10px] font-mono font-bold px-1.5 py-0.5 rounded border ${
+                                            tempC >= 80
+                                                ? 'text-red-400 bg-red-500/10 border-red-500/20'
+                                                : tempC >= 65
+                                                    ? 'text-amber-400 bg-amber-500/10 border-amber-500/20'
+                                                    : 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20'
+                                        }`}>
+                                            {tempC.toFixed(0)}°C
+                                        </span>
+                                    )}
+                                    <p className="text-xs font-black text-blue-400">#{gpu.index}</p>
                                 </div>
                             </div>
 
-                            {isImmersive && (
+                            {/* Real-time telemetry */}
+                            <div className="space-y-3">
                                 <div>
                                     <div className="flex justify-between text-[10px] font-bold mb-1 uppercase tracking-tight">
-                                        <span className="text-slate-400">VRAM Usage</span>
-                                        <span className="text-purple-400">Detecting...</span>
+                                        <span className="text-slate-400">Core Load</span>
+                                        <span className="text-blue-400">{usagePct.toFixed(1)}%</span>
                                     </div>
                                     <div className="h-1.5 w-full bg-white/5 rounded-full overflow-hidden">
                                         <div 
-                                            className="h-full bg-gradient-to-r from-purple-500 to-pink-500 opacity-30 shadow-[0_0_10px_rgba(168,85,247,0.5)]" 
-                                            style={{ width: '15%' }}
+                                            className="h-full bg-gradient-to-r from-blue-500 to-indigo-500 transition-all duration-300" 
+                                            style={{ width: `${usagePct > 0 ? Math.max(3, Math.min(100, usagePct)) : 0}%` }}
                                         />
                                     </div>
                                 </div>
-                            )}
+
+                                {(hasDedicatedVram || isImmersive) && (
+                                    <div>
+                                        <div className="flex justify-between text-[10px] font-bold mb-1 uppercase tracking-tight">
+                                            <span className="text-slate-400">{hasDedicatedVram ? 'VRAM Usage' : 'Memory Allocation'}</span>
+                                            <span className="text-purple-400">
+                                                {hasDedicatedVram
+                                                    ? `${Math.round(gpu.memory_used || 0)} / ${Math.round(gpu.memory_total)} MB (${vramPct.toFixed(0)}%)`
+                                                    : 'Dynamic Shared RAM'}
+                                            </span>
+                                        </div>
+                                        {hasDedicatedVram && (
+                                            <div className="h-1.5 w-full bg-white/5 rounded-full overflow-hidden">
+                                                <div 
+                                                    className="h-full bg-gradient-to-r from-purple-500 to-pink-500 transition-all duration-300 shadow-[0_0_10px_rgba(168,85,247,0.5)]" 
+                                                    style={{ width: `${Math.max(2, vramPct)}%` }}
+                                                />
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
+                            </div>
                         </div>
-                    </div>
-                ))}
+                    );
+                })}
             </div>
             
             {isImmersive && (

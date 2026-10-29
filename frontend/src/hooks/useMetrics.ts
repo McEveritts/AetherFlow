@@ -69,7 +69,7 @@ const useHistoryStore = create<{
     lastPushAt: 0,
     pushMetrics: (metrics: SystemMetrics) => {
         const now = Date.now();
-        if (now - get().lastPushAt < 250) return; // Throttle: max once per 250ms
+        if (now - get().lastPushAt < 100) return; // Throttle: max once per 100ms
 
         const push = (arr: number[], val: number): number[] => {
             if (arr.length === 0) return [val, val];
@@ -159,7 +159,7 @@ export function useMetrics() {
         history: effectiveHistory, // Component consumers get the windowed slice
         timeWindow,
         setTimeWindow,
-        isLoading: (connectionState === 'CONNECTING' || connectionState === 'CONNECTED') && !metrics,
+        isLoading: (connectionState === 'CONNECTING' || connectionState === 'CONNECTED' || connectionState === 'FALLBACK') && !metrics,
         isError: connectionState === 'DISCONNECTED' && !metrics,
         connectionState,
     };

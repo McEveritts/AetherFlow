@@ -1,7 +1,9 @@
 'use client';
 
 import { useRef } from 'react';
+import useSWR from 'swr';
 import { TabId } from '@/types/dashboard';
+import type { PendingActionsResponse } from '@/types/api';
 import { useAuth } from '@/contexts/AuthContext';
 import { useSystemStore } from '@/store/useSystemStore';
 import { useConnectionStore } from '@/store/useConnectionStore';
@@ -64,6 +66,10 @@ export default function Sidebar() {
         hapticFeedback,
     } = useSystemStore();
     const { connectionState, preferredMode } = useConnectionStore();
+    const { data: pendingActionsData } = useSWR<PendingActionsResponse>(
+        user?.role === 'admin' ? '/api/v1/admin/actions/pending?status=pending' : null
+    );
+    const pendingCount = pendingActionsData?.count ?? pendingActionsData?.actions?.length ?? 0;
     const touchStartXRef = useRef<number | null>(null);
 
     // Map connection state to Obsidian beacon class
@@ -161,7 +167,7 @@ export default function Sidebar() {
                     onClick={() => setIsMobileMenuOpen(false)}
                 >
                     <aside 
-                        className="fixed inset-y-0 left-0 w-72 max-w-[85vw] glass-panel p-5 flex flex-col z-50 border-r border-indigo-500/30 shadow-[0_24px_60px_rgba(0,0,0,0.9)] overflow-y-auto no-scrollbar obs-gpu-120hz-rail"
+                        className="fixed inset-y-0 left-0 w-72 max-w-[85vw] glass-panel obs-sidebar-surface bg-[#080915]/96 backdrop-blur-2xl p-5 flex flex-col z-50 border-r border-indigo-500/30 shadow-[0_24px_60px_rgba(0,0,0,0.9)] overflow-y-auto no-scrollbar obs-gpu-120hz-rail"
                         onClick={(e) => e.stopPropagation()}
                         onTouchStart={handleDrawerTouchStart}
                         onTouchEnd={handleDrawerTouchEnd}
@@ -249,22 +255,30 @@ export default function Sidebar() {
 
             {/* ========================================================================= */}
             {/* 3. TABLET & DESKTOP GLASS RAIL (md:block)                                */}
-            {/* Ghost Spacer holds w-20 in document flow so the page never shifts        */}
+            {/* Ghost Spacer holds rail width in document flow so the page never shifts  */}
             {/* ========================================================================= */}
-            <div className="hidden md:block md:sticky md:top-4 z-50 shrink-0 md:w-20 md:h-[calc(100vh-2rem)]">
+            <div className="hidden md:block shrink-0 md:w-[5.5rem] relative z-50">
                 <aside
-                    className={`fixed inset-y-0 left-0 md:absolute md:top-0 md:bottom-0 md:h-full flex flex-col obs-gpu-120hz-rail ${
-                        isSidebarHovered ? 'md:w-64 md:shadow-[0_20px_50px_rgba(0,0,0,0.8)]' : 'md:w-20 md:shadow-none'
+                    className={`fixed inset-y-0 left-0 md:top-3 md:bottom-3 md:left-3 z-50 flex flex-col overflow-visible obs-gpu-120hz-rail ${
+                        isSidebarHovered ? 'md:w-64' : 'md:w-20'
                     }`}
                     onMouseEnter={() => setIsSidebarHovered(true)}
                     onMouseLeave={() => setIsSidebarHovered(false)}
                 >
-                    <div className="absolute inset-0 glass-panel rounded-none md:rounded-2xl overflow-hidden flex flex-col">
+                    <div className="w-full h-full glass-panel obs-sidebar-surface bg-[#080915]/96 backdrop-blur-2xl rounded-none md:rounded-2xl overflow-hidden flex flex-col border border-indigo-500/25 shadow-[0_24px_64px_rgba(0,0,0,0.88)]">
                         {/* Header Area with Chromatic Top Accent */}
-                        <div className="flex h-20 items-center px-5 border-b border-white/5 relative shrink-0">
+                        <div
+                            className={`flex h-20 items-center border-b border-white/[0.06] relative shrink-0 transition-all duration-200 ${
+                                isSidebarHovered ? 'px-5 justify-start' : 'md:justify-center md:px-0 px-5'
+                            }`}
+                        >
                             <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-cyan-400/40 via-indigo-500/80 to-fuchsia-400/40" />
 
-                            <div className="flex items-center gap-4 w-full relative z-10 mt-1">
+                            <div
+                                className={`flex items-center w-full relative z-10 ${
+                                    isSidebarHovered ? 'gap-3.5 justify-start' : 'md:justify-center md:gap-0 gap-3.5'
+                                }`}
+                            >
                                 <button
                                     type="button"
                                     onClick={() => {
@@ -277,19 +291,23 @@ export default function Sidebar() {
                                 >
                                     <img src="/img/af-logo.png" alt="AetherFlow Logo" className="w-[130%] h-[130%] object-cover" />
                                 </button>
-                                <h1 className={`text-xl font-bold tracking-tight bg-gradient-to-r from-slate-100 to-slate-400 bg-clip-text text-transparent transition-opacity duration-200 whitespace-nowrap ${
-                                    isSidebarHovered ? 'opacity-100' : 'opacity-0 w-0 overflow-hidden'
-                                }`}>
+                                <h1
+                                    className={`text-xl font-bold tracking-tight bg-gradient-to-r from-slate-100 to-slate-400 bg-clip-text text-transparent transition-all duration-200 whitespace-nowrap ${
+                                        isSidebarHovered ? 'opacity-100 w-auto translate-x-0' : 'opacity-0 w-0 overflow-hidden md:hidden pointer-events-none'
+                                    }`}
+                                >
                                     AetherFlow
                                 </h1>
                             </div>
                         </div>
 
                         {/* Navigation List */}
-                        <nav className="flex-1 px-3 py-4 space-y-1 overflow-y-auto no-scrollbar relative z-10">
-                            <div className={`px-4 pb-1.5 text-[10px] font-bold text-slate-500 uppercase tracking-widest transition-opacity duration-200 whitespace-nowrap ${
-                                isSidebarHovered ? 'opacity-100' : 'opacity-0'
-                            }`}>
+                        <nav className="flex-1 px-3 py-4 space-y-1.5 overflow-y-auto no-scrollbar relative z-10">
+                            <div
+                                className={`pb-1.5 text-[10px] font-bold text-slate-500 uppercase tracking-widest transition-opacity duration-200 whitespace-nowrap overflow-hidden ${
+                                    isSidebarHovered ? 'px-3 opacity-100' : 'px-0 text-center opacity-0 select-none pointer-events-none'
+                                }`}
+                            >
                                 Nexus
                             </div>
                             {NAVIGATION.map((item) => {
@@ -301,30 +319,55 @@ export default function Sidebar() {
                                             triggerHaptic(8, hapticFeedback);
                                             setActiveTab(item.id);
                                         }}
-                                        className={`w-full flex items-center relative gap-3 px-2 py-1.5 rounded-xl obs-gpu-120hz-interactive group overflow-hidden obs-inline-action ${
+                                        title={!isSidebarHovered ? item.label : undefined}
+                                        className={`w-full flex items-center relative py-1.5 rounded-xl obs-gpu-120hz-interactive group overflow-hidden obs-inline-action ${
+                                            isSidebarHovered ? 'px-2 gap-3 justify-start' : 'md:justify-center md:px-0 md:gap-0 px-2 gap-3'
+                                        } ${
                                             isActive
-                                                ? 'bg-gradient-to-r from-indigo-500/20 to-purple-500/20 text-white shadow-[0_0_15px_rgba(99,102,241,0.2)]'
+                                                ? 'bg-gradient-to-r from-indigo-500/25 to-purple-500/20 text-white shadow-[0_0_15px_rgba(99,102,241,0.2)]'
                                                 : 'text-slate-400 hover:bg-white/5 hover:text-slate-200'
                                         }`}
                                     >
-                                        <div className={`absolute left-0 top-1/2 -translate-y-1/2 w-1 h-3/5 bg-indigo-500 rounded-r-full transition-all duration-200 shadow-[0_0_8px_#6366f1] ${
-                                            isActive ? 'scale-y-100 opacity-100' : 'scale-y-0 opacity-0'
-                                        }`} />
+                                        <div
+                                            className={`absolute left-0 top-1/2 -translate-y-1/2 w-1 h-6 bg-indigo-400 rounded-r-full transition-all duration-200 shadow-[0_0_8px_#6366f1] ${
+                                                isActive ? 'scale-y-100 opacity-100' : 'scale-y-0 opacity-0'
+                                            }`}
+                                        />
 
-                                        <div className={`w-10 h-9 shrink-0 flex items-center justify-center transition-colors ${
-                                            isActive ? 'text-indigo-400 drop-shadow-[0_0_8px_rgba(129,140,248,0.5)]' : 'group-hover:text-slate-300'
-                                        }`}>
+                                        <div
+                                            className={`w-10 h-10 rounded-xl shrink-0 flex items-center justify-center transition-colors ${
+                                                isActive ? 'text-indigo-400 drop-shadow-[0_0_8px_rgba(129,140,248,0.5)]' : 'group-hover:text-slate-300'
+                                            }`}
+                                        >
                                             {item.icon}
                                         </div>
 
-                                        <span className={`font-semibold transition-all duration-200 whitespace-nowrap text-sm tracking-wide ${
-                                            isSidebarHovered ? 'opacity-100 translate-x-0' : 'opacity-0 md:-translate-x-4 pointer-events-none'
-                                        }`}>
+                                        <span
+                                            className={`font-semibold transition-all duration-200 whitespace-nowrap text-sm tracking-wide ${
+                                                isSidebarHovered
+                                                    ? 'opacity-100 translate-x-0 w-auto'
+                                                    : 'opacity-0 md:w-0 md:overflow-hidden md:-translate-x-4 pointer-events-none'
+                                            }`}
+                                        >
                                             {item.label}
                                         </span>
 
+                                        {item.id === 'inbox' && pendingCount > 0 && (
+                                            isSidebarHovered ? (
+                                                <span className="ml-auto bg-indigo-500/20 text-indigo-300 border border-indigo-500/40 text-[11px] font-bold px-2 py-0.5 rounded-full shrink-0">
+                                                    {pendingCount}
+                                                </span>
+                                            ) : (
+                                                <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-indigo-400 shadow-[0_0_8px_#818CF8]" />
+                                            )
+                                        )}
+
                                         {isActive && item.id === 'ai' && (
-                                            <div className="absolute right-4 w-1.5 h-1.5 rounded-full bg-indigo-400 shadow-[0_0_8px_#818CF8] animate-pulse" />
+                                            <div
+                                                className={`rounded-full bg-indigo-400 shadow-[0_0_8px_#818CF8] animate-pulse ${
+                                                    isSidebarHovered ? 'ml-auto mr-1.5 w-1.5 h-1.5' : 'absolute top-1.5 right-1.5 w-1.5 h-1.5'
+                                                }`}
+                                            />
                                         )}
                                     </button>
                                 );
@@ -332,41 +375,62 @@ export default function Sidebar() {
                         </nav>
 
                         {/* Bottom Admin Navigation */}
-                        <div className="p-3 border-t border-white/5 bg-slate-950/50 backdrop-blur-md relative z-10 shrink-0 space-y-0.5">
+                        <div className="p-3 border-t border-white/[0.06] bg-slate-950/60 relative z-10 shrink-0 space-y-1">
                             {BOTTOM_NAVIGATION.filter(item => {
                                 if (['settings', 'security', 'users', 'audit', 'oidc-clients', 'network', 'cluster'].includes(item.id)) {
                                     return user?.role === 'admin';
                                 }
                                 return true;
-                            }).map((item) => (
-                                <button
-                                    key={item.id}
-                                    onClick={() => {
-                                        triggerHaptic(8, hapticFeedback);
-                                        if (item.id === 'logout') logout();
-                                        else setActiveTab(item.id);
-                                    }}
-                                    className={`w-full flex items-center gap-3 px-2 py-1 rounded-xl text-slate-400 hover:text-slate-200 hover:bg-white/5 obs-gpu-120hz-interactive group overflow-hidden obs-inline-action ${
-                                        activeTab === item.id ? 'bg-gradient-to-r from-indigo-500/20 to-purple-500/20 text-white shadow-[0_0_15px_rgba(99,102,241,0.2)]' : ''
-                                    }`}
-                                >
-                                    <div className="w-10 h-8 shrink-0 flex items-center justify-center group-hover:scale-110 transition-transform">
-                                        {item.icon}
-                                    </div>
-                                    <span className={`text-sm font-semibold tracking-wide transition-all duration-200 whitespace-nowrap ${
-                                        isSidebarHovered ? 'opacity-100 translate-x-0' : 'opacity-0 -translate-x-4 pointer-events-none'
-                                    }`}>
-                                        {item.label}
-                                    </span>
-                                </button>
-                            ))}
+                            }).map((item) => {
+                                const isActive = activeTab === item.id;
+                                return (
+                                    <button
+                                        key={item.id}
+                                        onClick={() => {
+                                            triggerHaptic(8, hapticFeedback);
+                                            if (item.id === 'logout') logout();
+                                            else setActiveTab(item.id);
+                                        }}
+                                        title={!isSidebarHovered ? item.label : undefined}
+                                        className={`w-full flex items-center relative py-1 rounded-xl obs-gpu-120hz-interactive group overflow-hidden obs-inline-action ${
+                                            isSidebarHovered ? 'px-2 gap-3 justify-start' : 'md:justify-center md:px-0 md:gap-0 px-2 gap-3'
+                                        } ${
+                                            isActive
+                                                ? 'bg-gradient-to-r from-indigo-500/25 to-purple-500/20 text-white shadow-[0_0_15px_rgba(99,102,241,0.2)]'
+                                                : 'text-slate-400 hover:text-slate-200 hover:bg-white/5'
+                                        }`}
+                                    >
+                                        <div
+                                            className={`absolute left-0 top-1/2 -translate-y-1/2 w-1 h-5 bg-indigo-400 rounded-r-full transition-all duration-200 shadow-[0_0_8px_#6366f1] ${
+                                                isActive ? 'scale-y-100 opacity-100' : 'scale-y-0 opacity-0'
+                                            }`}
+                                        />
+                                        <div
+                                            className={`w-10 h-8 shrink-0 flex items-center justify-center group-hover:scale-110 transition-transform ${
+                                                isActive ? 'text-indigo-400 drop-shadow-[0_0_8px_rgba(129,140,248,0.5)]' : ''
+                                            }`}
+                                        >
+                                            {item.icon}
+                                        </div>
+                                        <span
+                                            className={`text-sm font-semibold tracking-wide transition-all duration-200 whitespace-nowrap ${
+                                                isSidebarHovered
+                                                    ? 'opacity-100 translate-x-0 w-auto'
+                                                    : 'opacity-0 md:w-0 md:overflow-hidden md:-translate-x-4 pointer-events-none'
+                                            }`}
+                                        >
+                                            {item.label}
+                                        </span>
+                                    </button>
+                                );
+                            })}
                         </div>
                     </div>
 
-                    {/* Floating Collapse Button on right edge (vertically centered, never overlaps nav items) */}
+                    {/* Floating Collapse Button on right edge (vertically centered, never clipped or overlapping nav items) */}
                     <button
                         type="button"
-                        className={`hidden md:flex absolute -right-3.5 top-1/2 -translate-y-1/2 w-7 h-7 obs-inline-action rounded-full bg-slate-800 border border-slate-700 text-slate-400 hover:text-white items-center justify-center shadow-lg transition-all duration-200 z-[60] ${
+                        className={`hidden md:flex absolute -right-3.5 top-1/2 -translate-y-1/2 w-7 h-7 obs-inline-action rounded-full bg-[#0d1026] border border-indigo-500/40 text-slate-300 hover:text-white hover:border-indigo-400 items-center justify-center shadow-[0_4px_16px_rgba(0,0,0,0.9),0_0_12px_rgba(99,102,241,0.25)] transition-all duration-200 z-[60] ${
                             isSidebarHovered ? 'opacity-100 scale-100' : 'opacity-0 scale-50 pointer-events-none'
                         }`}
                         onClick={(e) => {

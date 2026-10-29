@@ -20,6 +20,7 @@ import { useShallow } from 'zustand/react/shallow';
 const MemoCpuWidget = React.memo(CpuWidget, (prev, next) => 
     prev.cpuData.usage === next.cpuData.usage && 
     prev.cpuData.freq === next.cpuData.freq &&
+    prev.cpuData.cores === next.cpuData.cores &&
     (prev.cpuData.cores || []).join(',') === (next.cpuData.cores || []).join(',') &&
     prev.history === next.history &&
     prev.density === next.density &&
@@ -58,7 +59,7 @@ const MemoAppTopologyMap = React.memo(AppTopologyMap, (prev, next) => {
     return getStatusHash(prev.topologyData) === getStatusHash(next.topologyData) && prev.density === next.density;
 });
 const MemoGpuWidget = React.memo(GpuWidget, (prev, next) => {
-    const getGpuHash = (g: GpuMetric[]) => (g || []).map(gpu => `${gpu.index}-${gpu.usage_pct}-${gpu.temp}`).join(':');
+    const getGpuHash = (g: GpuMetric[]) => (g || []).map(gpu => `${gpu.index}-${gpu.usage_pct}-${gpu.temp}-${gpu.memory_used}-${gpu.memory_total}`).join(':');
     return getGpuHash(prev.gpus) === getGpuHash(next.gpus) && prev.density === next.density;
 });
 
@@ -178,7 +179,12 @@ export default function OverviewTab({ metrics, hardware, history }: OverviewTabP
                             WebSocket
                         </button>
                         <button
-                            onClick={() => setPreferredMode('poll')}
+                            onClick={() => {
+                                if (pollInterval === 5000) {
+                                    setPollInterval(2000);
+                                }
+                                setPreferredMode('poll');
+                            }}
                             className={`obs-touch-target-standard obs-gpu-120hz-interactive px-3.5 py-2 rounded-lg text-xs font-bold transition-all flex items-center gap-2 ${preferredMode === 'poll' ? 'bg-purple-500 text-white shadow-lg' : 'text-slate-400 hover:text-slate-200 hover:bg-white/5'}`}
                         >
                             <Radio size={14} />

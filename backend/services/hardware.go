@@ -1,9 +1,12 @@
 package services
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -30,6 +33,8 @@ var (
 
 	lastValidCPUUsage   float64
 	lastValidPerCoreCPU []float64
+	lastCPUSampleTime   time.Time
+	cachedCpuMhz        float64
 
 	lastNetBytesRecv   uint64
 	lastNetBytesSent   uint64
@@ -43,16 +48,24 @@ var (
 	lastProcessScan      time.Time
 	processCacheInterval = 5 * time.Second
 
-	// GPU hardware metadata cache
-	cachedGPUs []models.GpuMetric
-	gpuScanned bool
+	// GPU hardware metadata & live telemetry state
+	cachedGPUs       []models.GpuMetric
+	gpuScanned       bool
+	nvidiaSmiChecked bool
+	nvidiaSmiPath    string
+	lastGpuRC6Ms     = make(map[string]uint64)
+	lastGpuRC6Time   = make(map[string]time.Time)
 )
 
 func init() {
 	// Prime CPU, disk, and network baseline counters at startup so the first
 	// dashboard sample measures a real delta instead of returning zero.
-	_, _ = cpu.Percent(0, false)
 	_, _ = cpu.Percent(0, true)
+	lastCPUSampleTime = time.Now()
+
+	if cpuInfos, err := cpu.Info(); err == nil && len(cpuInfos) > 0 {
+		cachedCpuMhz = cpuInfos[0].Mhz
+	}
 
 	if diskIO, err := disk.IOCounters(); err == nil {
 		for _, d := range diskIO {
@@ -110,42 +123,59 @@ func GetSystemMetricsCore() models.SystemMetrics {
 	var readBytesPerSec, writeBytesPerSec float64
 	var totalRx, totalTx uint64
 
-	// 1. CPU (aggregate)
-	cpuPercents, err := cpu.Percent(0, false)
-	if err == nil && len(cpuPercents) > 0 {
-		cpuUsage = cpuPercents[0]
-		if cpuUsage > 0 {
-			lastValidCPUUsage = cpuUsage
-		} else if lastValidCPUUsage > 0 {
-			cpuUsage = lastValidCPUUsage
-		}
-	} else if lastValidCPUUsage > 0 {
-		cpuUsage = lastValidCPUUsage
-	}
-
-	// 1b. Per-core CPU
+	// 1. Per-core & Aggregate CPU (single source of truth via cpu.Percent(0, true))
+	cpuSampleElapsed := time.Since(lastCPUSampleTime)
 	corePercents, err := cpu.Percent(0, true)
+	lastCPUSampleTime = time.Now()
 	if err == nil && len(corePercents) > 0 {
 		allZero := true
-		for _, pct := range corePercents {
-			if pct > 0 {
+		for i, pct := range corePercents {
+			clamped := math.Min(100, math.Max(0, sanitizeFloat64(pct)))
+			corePercents[i] = math.Round(clamped*10) / 10
+			if corePercents[i] > 0 {
 				allZero = false
-				break
 			}
 		}
 		if !allZero || len(lastValidPerCoreCPU) == 0 {
 			perCoreCPU = corePercents
-			if !allZero {
-				lastValidPerCoreCPU = append([]float64(nil), corePercents...)
-			}
+			lastValidPerCoreCPU = append([]float64(nil), corePercents...)
+		} else if cpuSampleElapsed < 350*time.Millisecond {
+			// Sub-jiffy sample window: keep last valid per-core reading
+			perCoreCPU = append([]float64(nil), lastValidPerCoreCPU...)
 		} else {
+			// Full sample window with 0 delta ticks: gently decay instead of freezing forever
+			decayed := make([]float64, len(lastValidPerCoreCPU))
+			for i, prev := range lastValidPerCoreCPU {
+				next := math.Round(prev*0.5*10) / 10
+				if next < 0.2 {
+					next = 0
+				}
+				decayed[i] = next
+			}
+			perCoreCPU = decayed
+			lastValidPerCoreCPU = append([]float64(nil), decayed...)
+		}
+
+		var sum float64
+		for _, pct := range perCoreCPU {
+			sum += pct
+		}
+		cpuUsage = math.Round((sum/float64(len(perCoreCPU)))*10) / 10
+		lastValidCPUUsage = cpuUsage
+	} else {
+		// Fallback to aggregate CPU query if per-core is unavailable
+		if cpuPercents, aggErr := cpu.Percent(0, false); aggErr == nil && len(cpuPercents) > 0 {
+			cpuUsage = math.Round(math.Min(100, math.Max(0, sanitizeFloat64(cpuPercents[0])))*10) / 10
+			lastValidCPUUsage = cpuUsage
+		} else if lastValidCPUUsage > 0 {
+			cpuUsage = lastValidCPUUsage
+		}
+		if len(lastValidPerCoreCPU) > 0 {
 			perCoreCPU = append([]float64(nil), lastValidPerCoreCPU...)
 		}
-	} else if len(lastValidPerCoreCPU) > 0 {
-		perCoreCPU = append([]float64(nil), lastValidPerCoreCPU...)
 	}
 
-	// 1c. CPU Frequency (Live Detection)
+	// 1c. CPU Frequency (Live Detection across online cores)
 	cpuFreqMhz = getLiveCpuFreq()
 
 	// 2. Memory
@@ -417,7 +447,7 @@ func GetSystemMetricsCore() models.SystemMetrics {
 	swapTotal = sanitizeFloat64(swapTotal)
 	swapUsed = sanitizeFloat64(swapUsed)
 
-	// 8. GPUs (cached after initial hardware scan)
+	// 8. GPUs (hardware scan cached once, live utilization/temp/memory updated each tick)
 	if !gpuScanned {
 		var gpuMetrics []models.GpuMetric
 		gpuInfo, err := ghw.GPU()
@@ -435,6 +465,9 @@ func GetSystemMetricsCore() models.SystemMetrics {
 		}
 		cachedGPUs = gpuMetrics
 		gpuScanned = true
+	}
+	if len(cachedGPUs) > 0 {
+		cachedGPUs = updateGPUMetrics(cachedGPUs)
 	}
 
 	lastMetricsSample = models.SystemMetrics{
@@ -479,25 +512,230 @@ func GetSystemMetricsCore() models.SystemMetrics {
 	return lastMetricsSample
 }
 
-// getLiveCpuFreq attempts to get the real-time CPU clock speed.
-// It prioritizes Linux sysfs for frequency scaling but falls back to gopsutil.
+// getLiveCpuFreq reads the real-time CPU clock speed across online cores.
+// It prioritizes Linux cpufreq sysfs (scaling_cur_freq / cpuinfo_cur_freq),
+// then /proc/cpuinfo "cpu MHz", and finally falls back to gopsutil / cachedCpuMhz.
 func getLiveCpuFreq() float64 {
-	// 1. Linux sysfs - Current Frequency (Very live)
-	data, err := os.ReadFile("/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq")
-	if err == nil {
-		freqKHz, err := strconv.ParseFloat(strings.TrimSpace(string(data)), 64)
-		if err == nil {
-			return freqKHz / 1000.0 // KHz to MHz
+	// 1. Linux sysfs - Average scaling_cur_freq across online cores
+	for _, pattern := range []string{
+		"/sys/devices/system/cpu/cpu[0-9]*/cpufreq/scaling_cur_freq",
+		"/sys/devices/system/cpu/cpu[0-9]*/cpufreq/cpuinfo_cur_freq",
+	} {
+		matches, err := filepath.Glob(pattern)
+		if err == nil && len(matches) > 0 {
+			var sumMhz float64
+			var count int
+			for _, p := range matches {
+				data, rErr := os.ReadFile(p)
+				if rErr != nil {
+					continue
+				}
+				freqKHz, pErr := strconv.ParseFloat(strings.TrimSpace(string(data)), 64)
+				if pErr == nil && freqKHz > 0 {
+					sumMhz += freqKHz / 1000.0
+					count++
+				}
+			}
+			if count > 0 {
+				return math.Round((sumMhz/float64(count))*10) / 10
+			}
 		}
 	}
 
-	// 2. Fallback to gopsutil (Default OS report)
-	cpuInfos, err := cpu.Info()
-	if err == nil && len(cpuInfos) > 0 {
-		return cpuInfos[0].Mhz
+	// 2. Linux /proc/cpuinfo live "cpu MHz" lines averaged across cores
+	if procData, err := os.ReadFile("/proc/cpuinfo"); err == nil {
+		var sumMhz float64
+		var count int
+		for _, line := range strings.Split(string(procData), "\n") {
+			if strings.HasPrefix(line, "cpu MHz") {
+				parts := strings.SplitN(line, ":", 2)
+				if len(parts) == 2 {
+					if mhz, pErr := strconv.ParseFloat(strings.TrimSpace(parts[1]), 64); pErr == nil && mhz > 0 {
+						sumMhz += mhz
+						count++
+					}
+				}
+			}
+		}
+		if count > 0 {
+			return math.Round((sumMhz/float64(count))*10) / 10
+		}
 	}
 
-	return 0
+	// 3. Fallback to gopsutil or cached startup MHz
+	if cpuInfos, err := cpu.Info(); err == nil && len(cpuInfos) > 0 && cpuInfos[0].Mhz > 0 {
+		cachedCpuMhz = cpuInfos[0].Mhz
+		return cachedCpuMhz
+	}
+
+	return cachedCpuMhz
+}
+
+// readSysfsFloat reads a single numeric value from a sysfs file.
+func readSysfsFloat(path string) (float64, bool) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0, false
+	}
+	v, err := strconv.ParseFloat(strings.TrimSpace(string(data)), 64)
+	if err != nil {
+		return 0, false
+	}
+	return v, true
+}
+
+// updateGPUMetrics refreshes live utilization, temperature, and VRAM telemetry for detected GPUs.
+func updateGPUMetrics(gpus []models.GpuMetric) []models.GpuMetric {
+	updated := make([]models.GpuMetric, len(gpus))
+	copy(updated, gpus)
+
+	// 1. Check NVIDIA GPUs via nvidia-smi if available
+	if !nvidiaSmiChecked {
+		if p, err := exec.LookPath("nvidia-smi"); err == nil {
+			nvidiaSmiPath = p
+		}
+		nvidiaSmiChecked = true
+	}
+	nvidiaUpdated := make(map[int]bool)
+	if nvidiaSmiPath != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
+		out, err := exec.CommandContext(
+			ctx,
+			nvidiaSmiPath,
+			"--query-gpu=index,utilization.gpu,temperature.gpu,memory.used,memory.total",
+			"--format=csv,noheader,nounits",
+		).Output()
+		cancel()
+		if err == nil && len(out) > 0 {
+			for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+				fields := strings.Split(line, ",")
+				if len(fields) < 5 {
+					continue
+				}
+				idx, idxErr := strconv.Atoi(strings.TrimSpace(fields[0]))
+				if idxErr != nil || idx < 0 || idx >= len(updated) {
+					continue
+				}
+				util, _ := strconv.ParseFloat(strings.TrimSpace(fields[1]), 64)
+				temp, _ := strconv.ParseFloat(strings.TrimSpace(fields[2]), 64)
+				memUsed, _ := strconv.ParseFloat(strings.TrimSpace(fields[3]), 64)
+				memTotal, _ := strconv.ParseFloat(strings.TrimSpace(fields[4]), 64)
+
+				updated[idx].UsagePct = math.Round(math.Min(100, math.Max(0, sanitizeFloat64(util)))*10) / 10
+				updated[idx].Temp = math.Round(sanitizeFloat64(temp)*10) / 10
+				updated[idx].MemoryUsed = math.Round(sanitizeFloat64(memUsed)*10) / 10
+				updated[idx].MemoryTotal = math.Round(sanitizeFloat64(memTotal)*10) / 10
+				nvidiaUpdated[idx] = true
+			}
+		}
+	}
+
+	// 2. Check Linux DRM sysfs (/sys/class/drm/card*) for Intel (i915/xe) and AMD (amdgpu) GPUs
+	cards, _ := filepath.Glob("/sys/class/drm/card[0-9]*")
+	sort.Strings(cards)
+
+	for i := range updated {
+		if nvidiaUpdated[i] {
+			continue
+		}
+		if i >= len(cards) {
+			break
+		}
+		cardDir := cards[i]
+		var usagePct float64
+		var gotUsage bool
+
+		// 2a. Direct gpu_busy_percent (AMD amdgpu / newer Intel DRM)
+		if busy, ok := readSysfsFloat(filepath.Join(cardDir, "device/gpu_busy_percent")); ok {
+			usagePct = math.Min(100, math.Max(0, busy))
+			gotUsage = true
+		}
+
+		// 2b. Intel i915 / xe RC6 idle residency counter delta (e.g. HD Graphics 630)
+		if !gotUsage {
+			for _, rc6Rel := range []string{"gt/gt0/rc6_residency_ms", "power/rc6_residency_ms"} {
+				rc6Path := filepath.Join(cardDir, rc6Rel)
+				if rc6Val, ok := readSysfsFloat(rc6Path); ok && rc6Val >= 0 {
+					now := time.Now()
+					curRC6 := uint64(rc6Val)
+					if prevTime, hasPrev := lastGpuRC6Time[rc6Path]; hasPrev {
+						dtMs := float64(now.Sub(prevTime).Milliseconds())
+						prevRC6 := lastGpuRC6Ms[rc6Path]
+						if dtMs >= 50 && curRC6 >= prevRC6 {
+							dRC6 := float64(curRC6 - prevRC6)
+							busyPct := 100.0 * (1.0 - (dRC6 / dtMs))
+							usagePct = math.Min(100, math.Max(0, busyPct))
+							gotUsage = true
+						}
+					}
+					lastGpuRC6Ms[rc6Path] = curRC6
+					lastGpuRC6Time[rc6Path] = now
+					break
+				}
+			}
+		}
+
+		// 2c. Intel i915 / xe frequency scaling fallback (cur_freq vs min/max freq)
+		if !gotUsage || usagePct == 0 {
+			var curFreq, minFreq, maxFreq float64
+			for _, p := range []string{"gt_cur_freq_mhz", "gt/gt0/rps_cur_freq_mhz"} {
+				if v, ok := readSysfsFloat(filepath.Join(cardDir, p)); ok && v > 0 {
+					curFreq = v
+					break
+				}
+			}
+			for _, p := range []string{"gt_min_freq_mhz", "gt/gt0/rps_min_freq_mhz", "gt_RPn_freq_mhz"} {
+				if v, ok := readSysfsFloat(filepath.Join(cardDir, p)); ok && v > 0 {
+					minFreq = v
+					break
+				}
+			}
+			for _, p := range []string{"gt_max_freq_mhz", "gt/gt0/rps_max_freq_mhz", "gt_RP0_freq_mhz"} {
+				if v, ok := readSysfsFloat(filepath.Join(cardDir, p)); ok && v > 0 {
+					maxFreq = v
+					break
+				}
+			}
+			if maxFreq > minFreq && curFreq > minFreq {
+				freqPct := ((curFreq - minFreq) / (maxFreq - minFreq)) * 100.0
+				if freqPct > usagePct {
+					usagePct = math.Min(100, math.Max(0, freqPct))
+				}
+			}
+		}
+
+		updated[i].UsagePct = math.Round(sanitizeFloat64(usagePct)*10) / 10
+
+		// 2d. Dedicated VRAM via DRM mem_info_vram_* (bytes -> MB)
+		if vramTotalBytes, ok := readSysfsFloat(filepath.Join(cardDir, "device/mem_info_vram_total")); ok && vramTotalBytes > 0 {
+			updated[i].MemoryTotal = math.Round((vramTotalBytes/(1024*1024))*10) / 10
+			if vramUsedBytes, okUsed := readSysfsFloat(filepath.Join(cardDir, "device/mem_info_vram_used")); okUsed && vramUsedBytes >= 0 {
+				updated[i].MemoryUsed = math.Round((vramUsedBytes/(1024*1024))*10) / 10
+			}
+		}
+
+		// 2e. GPU / SoC Package Temperature (millidegrees C -> C)
+		var tempC float64
+		if hwmonMatches, _ := filepath.Glob(filepath.Join(cardDir, "device/hwmon/hwmon*/temp1_input")); len(hwmonMatches) > 0 {
+			if milliC, ok := readSysfsFloat(hwmonMatches[0]); ok && milliC > 1000 {
+				tempC = milliC / 1000.0
+			}
+		}
+		if tempC == 0 {
+			// Integrated GPUs share the CPU package thermal zone
+			if tzMatches, _ := filepath.Glob("/sys/class/thermal/thermal_zone*/temp"); len(tzMatches) > 0 {
+				for _, tzPath := range tzMatches {
+					if milliC, ok := readSysfsFloat(tzPath); ok && milliC >= 15000 && milliC <= 115000 {
+						tempC = milliC / 1000.0
+						break
+					}
+				}
+			}
+		}
+		updated[i].Temp = math.Round(sanitizeFloat64(tempC)*10) / 10
+	}
+
+	return updated
 }
 
 func formatBytes(bytes float64) string {

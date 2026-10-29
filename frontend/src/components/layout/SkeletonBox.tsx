@@ -88,42 +88,35 @@ export function UsersSkeleton() {
 
 export function SettingsSkeleton() {
     return (
-        <div className="space-y-6 animate-fade-in relative z-10 w-full">
-            <div className="bg-white/[0.02] border border-white/[0.05] rounded-3xl p-10 backdrop-blur-xl">
-                <div className="mb-8 pb-4 border-b border-white/5">
-                    <SkeletonBox className="h-8 w-64 rounded-md bg-white/10" animated={false} />
-                </div>
-                <div className="max-w-2xl space-y-8">
-                    <div className="bg-slate-950/50 border border-white/10 rounded-2xl p-6 space-y-6">
-                        <SkeletonBox className="h-6 w-48 rounded-md bg-white/5" animated={false} />
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                            <SkeletonBox className="h-20 w-full rounded-xl" />
-                            <SkeletonBox className="h-20 w-full rounded-xl" />
-                        </div>
-                    </div>
-                    
-                    <div className="bg-slate-950/50 border border-white/10 rounded-2xl p-6 space-y-6">
-                        <SkeletonBox className="h-6 w-40 rounded-md bg-white/5" animated={false} />
-                        <SkeletonBox className="h-20 w-full rounded-xl" />
-                        <SkeletonBox className="h-20 w-full rounded-xl" />
-                        <SkeletonBox className="h-24 w-full rounded-xl" />
-                    </div>
-                    
-                    <SkeletonBox className="h-12 w-48 rounded-xl bg-indigo-500/20" animated={false} />
+        <div className="space-y-8 animate-fade-in relative pb-12 w-full">
+            <div className="space-y-2">
+                <SkeletonBox className="h-8 w-64 rounded-md bg-white/10" animated={false} />
+                <SkeletonBox className="h-4 w-96 rounded-md bg-white/5" animated={false} />
+            </div>
 
-                    {/* System Updates Skeleton */}
-                    <div className="bg-slate-950/50 border border-white/10 rounded-2xl p-6 space-y-6">
-                        <div className="flex justify-between items-center">
-                            <SkeletonBox className="h-6 w-40 rounded-md bg-white/5" animated={false} />
-                            <SkeletonBox className="h-6 w-24 rounded-full bg-white/5" animated={false} />
-                        </div>
-                        <div className="p-4 bg-white/5 rounded-xl border border-white/5 space-y-4">
-                            <SkeletonBox className="h-5 w-full rounded-md bg-white/5" animated={false} />
-                            <SkeletonBox className="h-5 w-3/4 rounded-md bg-white/5" animated={false} />
-                        </div>
-                    </div>
+            <div className="flex flex-wrap gap-2 pb-4 border-b border-white/[0.06]">
+                {[...Array(9)].map((_, i) => (
+                    <SkeletonBox key={i} className="h-9 w-28 rounded-xl bg-white/5" animated={false} />
+                ))}
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 w-full">
+                <div className="glass-panel border border-white/[0.06] rounded-2xl p-6 space-y-5">
+                    <SkeletonBox className="h-6 w-48 rounded-md bg-white/5" animated={false} />
+                    <SkeletonBox className="h-24 w-full rounded-xl" />
+                    <SkeletonBox className="h-24 w-full rounded-xl" />
+                    <SkeletonBox className="h-24 w-full rounded-xl" />
+                </div>
+
+                <div className="glass-panel border border-white/[0.06] rounded-2xl p-6 space-y-5">
+                    <SkeletonBox className="h-6 w-48 rounded-md bg-white/5" animated={false} />
+                    <SkeletonBox className="h-24 w-full rounded-xl" />
+                    <SkeletonBox className="h-24 w-full rounded-xl" />
+                    <SkeletonBox className="h-24 w-full rounded-xl" />
                 </div>
             </div>
+
+            <SkeletonBox className="h-16 w-full rounded-2xl bg-white/[0.02]" animated={false} />
         </div>
     );
 }

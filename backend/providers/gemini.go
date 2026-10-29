@@ -36,9 +36,34 @@ func NewGeminiProvider(cfg ProviderConfig) (*GeminiProvider, error) {
 	return &GeminiProvider{client: client, model: model}, nil
 }
 
-// Chat implements AIProvider.Chat for Gemini using the chat session API.
-func (g *GeminiProvider) Chat(ctx context.Context, systemPrompt string, history []Message, message string) (*Response, error) {
-	model := g.client.GenerativeModel(g.model)
+// resolveGeminiFallbackModel maps preview/alias model IDs to universally available
+// upstream Gemini models when a consumer API key receives a 404 / model-not-found error,
+// while preserving g.model in provider metadata.
+func resolveGeminiFallbackModel(modelName string) (string, bool) {
+	switch strings.TrimSpace(modelName) {
+	case "gemini-4-argon":
+		return "gemini-2.5-pro", true
+	case "gemini-3.8-flash":
+		return "gemini-2.5-flash", true
+	default:
+		return "", false
+	}
+}
+
+// isGeminiModelNotFoundError detects upstream 404 / model-not-found errors from the Gemini API.
+func isGeminiModelNotFoundError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "404") ||
+		strings.Contains(msg, "not found") ||
+		strings.Contains(msg, "not_found") ||
+		strings.Contains(msg, "not supported for generatecontent")
+}
+
+func (g *GeminiProvider) sendChatWithModel(ctx context.Context, modelName string, systemPrompt string, history []Message, message string) (*genai.GenerateContentResponse, error) {
+	model := g.client.GenerativeModel(modelName)
 	if systemPrompt != "" {
 		model.SystemInstruction = genai.NewUserContent(genai.Text(systemPrompt))
 	}
@@ -57,7 +82,17 @@ func (g *GeminiProvider) Chat(ctx context.Context, systemPrompt string, history 
 		})
 	}
 
-	resp, err := session.SendMessage(ctx, genai.Text(message))
+	return session.SendMessage(ctx, genai.Text(message))
+}
+
+// Chat implements AIProvider.Chat for Gemini using the chat session API.
+func (g *GeminiProvider) Chat(ctx context.Context, systemPrompt string, history []Message, message string) (*Response, error) {
+	resp, err := g.sendChatWithModel(ctx, g.model, systemPrompt, history, message)
+	if err != nil && isGeminiModelNotFoundError(err) {
+		if fallbackModel, ok := resolveGeminiFallbackModel(g.model); ok {
+			resp, err = g.sendChatWithModel(ctx, fallbackModel, systemPrompt, history, message)
+		}
+	}
 	if err != nil {
 		return nil, fmt.Errorf("gemini generation error: %w", err)
 	}
@@ -74,6 +109,12 @@ func (g *GeminiProvider) Chat(ctx context.Context, systemPrompt string, history 
 func (g *GeminiProvider) Generate(ctx context.Context, prompt string) (*Response, error) {
 	model := g.client.GenerativeModel(g.model)
 	resp, err := model.GenerateContent(ctx, genai.Text(prompt))
+	if err != nil && isGeminiModelNotFoundError(err) {
+		if fallbackModel, ok := resolveGeminiFallbackModel(g.model); ok {
+			fallback := g.client.GenerativeModel(fallbackModel)
+			resp, err = fallback.GenerateContent(ctx, genai.Text(prompt))
+		}
+	}
 	if err != nil {
 		return nil, fmt.Errorf("gemini generation error: %w", err)
 	}
@@ -88,8 +129,15 @@ func (g *GeminiProvider) Generate(ctx context.Context, prompt string) (*Response
 
 // TestConnection implements AIProvider.TestConnection for Gemini.
 func (g *GeminiProvider) TestConnection(ctx context.Context) error {
-	model := g.client.GenerativeModel("gemini-3.8-flash")
+	testModel := "gemini-3.8-flash"
+	model := g.client.GenerativeModel(testModel)
 	resp, err := model.GenerateContent(ctx, genai.Text("Reply with the exact word: SUCCESS"))
+	if err != nil && isGeminiModelNotFoundError(err) {
+		if fallbackModel, ok := resolveGeminiFallbackModel(testModel); ok {
+			fallback := g.client.GenerativeModel(fallbackModel)
+			resp, err = fallback.GenerateContent(ctx, genai.Text("Reply with the exact word: SUCCESS"))
+		}
+	}
 	if err != nil {
 		return fmt.Errorf("gemini connection test failed: %w", err)
 	}

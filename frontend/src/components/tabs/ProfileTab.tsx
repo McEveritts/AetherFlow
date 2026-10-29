@@ -171,167 +171,176 @@ export default function ProfileTab() {
     }
 
     return (
-        <div className="space-y-8 animate-fade-in relative z-10 w-full mb-8">
-            <h3 className="text-xl font-bold text-slate-100 flex items-center gap-3 border-b border-white/5 pb-4">
+        <div className="space-y-6 animate-fade-in relative z-10 w-full mb-8">
+            <h3 className="text-xl font-bold text-slate-100 flex items-center gap-3 border-b border-white/[0.06] pb-4">
                 <UserCircle size={24} className="text-indigo-400" />
                 Local Profile
             </h3>
 
-            <div className="max-w-2xl relative z-10 space-y-10">
-                {/* Avatar & Basics */}
-                <div className="flex flex-col md:flex-row items-center md:items-start gap-8 pb-10 border-b border-white/5">
-                    <div className="flex flex-col items-center gap-4">
-                        <input
-                            type="file"
-                            ref={avatarInputRef}
-                            accept="image/*"
-                            onChange={handleAvatarChange}
-                            className="hidden"
-                        />
-                        <div 
-                            className="relative group cursor-pointer"
-                            onClick={() => avatarInputRef.current?.click()}
-                        >
-                            <Image
-                                src={user.avatar_url || 'https://via.placeholder.com/150'}
-                                alt="Profile Avatar"
-                                width={112}
-                                height={112}
-                                className="rounded-2xl shadow-lg border border-white/10 object-cover"
-                            />
-                            <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 transition-opacity rounded-2xl flex items-center justify-center backdrop-blur-sm">
-                                <span className="text-xs font-bold text-white uppercase tracking-wider">
-                                    {isAvatarUpdating ? 'Saving...' : 'Change'}
-                                </span>
-                            </div>
-                        </div>
-                        <button 
-                            type="button" 
-                            onClick={handleRemoveAvatar}
-                            disabled={isAvatarUpdating || !user.avatar_url}
-                            className="text-xs text-slate-400 hover:text-red-400 disabled:opacity-40 transition-colors"
-                        >
-                            Remove Avatar
-                        </button>
-                    </div>
-                    
-                    <div className="text-center md:text-left flex-1">
-                        <h3 className="text-3xl font-bold text-slate-100 tracking-tight">{user.username}</h3>
-                        <div className="flex flex-wrap items-center justify-center md:justify-start gap-2 mt-3">
-                            <span className="bg-indigo-500/10 text-indigo-400 text-xs font-bold px-3 py-1 rounded-full uppercase tracking-widest border border-indigo-500/20">
-                                {user.role}
-                            </span>
-                            <span className={`text-xs font-bold px-3 py-1 rounded-full border ${user.is_oauth ? 'bg-amber-500/10 text-amber-500/80 border-amber-500/20' : 'bg-slate-800 text-slate-400 border-white/5'}`}>
-                                {user.is_oauth ? 'OAuth Connected' : 'Local Account'}
-                            </span>
-                        </div>
-                        {user.is_oauth && (
-                            <div className="mt-4 flex gap-3 text-sm text-amber-500/80 bg-amber-500/5 p-4 rounded-xl border border-amber-500/10 text-left">
-                                <AlertCircle size={20} className="shrink-0" />
-                                <p>You are logged in via Google OAuth. To delete this account, revoke access from your Google Account settings.</p>
-                            </div>
-                        )}
-                    </div>
-                </div>
-
-                {/* Email Management */}
-                <form onSubmit={handleUpdate} className="space-y-6">
-                    <h4 className="text-sm font-bold text-slate-400 uppercase tracking-wider">Email Preferences</h4>
-                    <div className="glass-card rounded-2xl p-6">
-                        <label className="block text-sm font-semibold text-slate-300 mb-3 flex items-center gap-2">
-                            <Mail size={16} className="text-slate-400" /> Notification Email
-                        </label>
-                        <div className="flex flex-col md:flex-row gap-4">
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 w-full relative z-10">
+                {/* LEFT COLUMN: Account Overview & Email Preferences */}
+                <div className="glass-panel rounded-2xl p-6 border border-white/[0.06] flex flex-col justify-between space-y-8">
+                    {/* Avatar & Basics */}
+                    <div className="flex flex-col sm:flex-row items-center sm:items-start gap-6 pb-6 border-b border-white/[0.06]">
+                        <div className="flex flex-col items-center gap-3 shrink-0">
                             <input
-                                type="email"
-                                value={email}
-                                onChange={(e) => setEmail(e.target.value)}
-                                className="flex-1 bg-slate-900 border border-white/10 rounded-xl px-4 py-3 text-slate-200 text-sm focus:outline-none focus:border-indigo-500/50 transition-colors"
+                                type="file"
+                                ref={avatarInputRef}
+                                accept="image/*"
+                                onChange={handleAvatarChange}
+                                className="hidden"
                             />
-                            <button
-                                type="submit"
-                                disabled={isSaving || email === user.email}
-                                className="px-6 py-3 bg-indigo-600 hover:bg-indigo-500 disabled:bg-indigo-600/30 disabled:text-slate-500 rounded-xl text-sm font-bold text-white transition-all whitespace-nowrap"
+                            <div 
+                                className="relative group cursor-pointer"
+                                onClick={() => avatarInputRef.current?.click()}
                             >
-                                {isSaving ? 'Saving...' : 'Update Email'}
-                            </button>
-                        </div>
-                        <p className="text-xs text-slate-500 mt-3">Where AetherFlow sends critical system alerts and authentication events.</p>
-                    </div>
-                </form>
-
-                {/* Security Section */}
-                <div className="space-y-6">
-                    <h4 className="text-sm font-bold text-slate-400 uppercase tracking-wider">Authentication & Security</h4>
-                    <div className="glass-card rounded-2xl divide-y divide-white/10 overflow-hidden">
-                        
-                        <div className="p-6 flex flex-col md:flex-row md:items-center justify-between gap-4">
-                            <div>
-                                <h5 className="text-sm font-semibold text-slate-200">Account Password</h5>
-                                <p className="text-xs text-slate-500 mt-1">Change the password used to access your local account.</p>
+                                <Image
+                                    src={user.avatar_url || 'https://via.placeholder.com/150'}
+                                    alt="Profile Avatar"
+                                    width={96}
+                                    height={96}
+                                    className="rounded-2xl shadow-lg border border-white/10 object-cover"
+                                />
+                                <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 transition-opacity rounded-2xl flex items-center justify-center backdrop-blur-sm">
+                                    <span className="text-xs font-bold text-white uppercase tracking-wider">
+                                        {isAvatarUpdating ? 'Saving...' : 'Change'}
+                                    </span>
+                                </div>
                             </div>
                             <button 
                                 type="button" 
-                                onClick={() => setShowPasswordModal(true)}
-                                className="px-6 py-2.5 bg-white/5 border border-white/10 hover:bg-white/10 text-slate-300 text-sm font-bold rounded-xl transition-colors whitespace-nowrap"
+                                onClick={handleRemoveAvatar}
+                                disabled={isAvatarUpdating || !user.avatar_url}
+                                className="text-xs text-slate-400 hover:text-red-400 disabled:opacity-40 transition-colors"
                             >
-                                Change Password
+                                Remove Avatar
                             </button>
                         </div>
                         
-                        <div className="p-6 flex flex-col md:flex-row md:items-center justify-between gap-4 bg-slate-900/30">
-                            <div>
-                                <h5 className="text-sm font-semibold text-slate-200 flex items-center gap-2">
-                                    Two-Factor Authentication
-                                    {user.totp_enabled ? (
-                                        <span className="px-2 py-0.5 rounded text-[10px] uppercase font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/20">Active</span>
-                                    ) : (
-                                        <span className="px-2 py-0.5 rounded text-[10px] uppercase font-bold bg-slate-700/50 text-slate-400 border border-white/10">Inactive</span>
-                                    )}
-                                </h5>
-                                <p className="text-xs text-slate-500 mt-1">
-                                    {user.totp_enabled
-                                        ? 'Your account is protected with TOTP-based verification.'
-                                        : 'Add an extra layer of security via the Security tab.'}
-                                </p>
+                        <div className="text-center sm:text-left flex-1">
+                            <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 block">Account Identity</span>
+                            <h3 className="text-2xl font-bold text-slate-100 tracking-tight mt-0.5">{user.username}</h3>
+                            <div className="flex flex-wrap items-center justify-center sm:justify-start gap-2 mt-3">
+                                <span className="bg-indigo-500/10 text-indigo-400 text-xs font-bold px-3 py-1 rounded-full uppercase tracking-widest border border-indigo-500/20">
+                                    {user.role}
+                                </span>
+                                <span className={`text-xs font-bold px-3 py-1 rounded-full border ${user.is_oauth ? 'bg-amber-500/10 text-amber-500/80 border-amber-500/20' : 'bg-slate-800 text-slate-400 border-white/5'}`}>
+                                    {user.is_oauth ? 'OAuth Connected' : 'Local Account'}
+                                </span>
                             </div>
-                            <span className={`px-6 py-2.5 text-sm font-bold rounded-xl transition-colors whitespace-nowrap ${
-                                user.totp_enabled
-                                    ? 'bg-emerald-500/10 border border-emerald-500/20 text-emerald-400'
-                                    : 'bg-white/5 border border-white/10 text-slate-400'
-                            }`}>
-                                {user.totp_enabled ? 'Enrolled' : 'Not Enrolled'}
-                            </span>
+                            {user.is_oauth && (
+                                <div className="mt-4 flex gap-3 text-xs text-amber-400/90 bg-amber-500/5 p-3.5 rounded-xl border border-amber-500/15 text-left">
+                                    <AlertCircle size={18} className="shrink-0 mt-0.5" />
+                                    <p>You are logged in via Google OAuth. To delete this account, revoke access from your Google Account settings.</p>
+                                </div>
+                            )}
                         </div>
-
                     </div>
+
+                    {/* Email Management */}
+                    <form onSubmit={handleUpdate} className="space-y-4">
+                        <div className="flex items-center justify-between">
+                            <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider">Email Preferences</h4>
+                            <span className="text-[10px] font-mono uppercase text-slate-500">System Alerts</span>
+                        </div>
+                        <div className="p-4 rounded-xl bg-slate-950/50 border border-white/[0.06] space-y-3">
+                            <label className="text-sm font-semibold text-slate-300 flex items-center gap-2">
+                                <Mail size={15} className="text-indigo-400" /> Notification Email
+                            </label>
+                            <div className="flex flex-col sm:flex-row gap-3">
+                                <input
+                                    type="email"
+                                    value={email}
+                                    onChange={(e) => setEmail(e.target.value)}
+                                    className="flex-1 bg-slate-900 border border-white/10 rounded-xl px-4 py-2.5 text-slate-200 text-sm focus:outline-none focus:border-indigo-500/50 transition-colors"
+                                />
+                                <button
+                                    type="submit"
+                                    disabled={isSaving || email === user.email}
+                                    className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-500 disabled:bg-indigo-600/30 disabled:text-slate-500 rounded-xl text-xs font-bold text-white transition-all whitespace-nowrap"
+                                >
+                                    {isSaving ? 'Saving...' : 'Update Email'}
+                                </button>
+                            </div>
+                            <p className="text-xs text-slate-500">Where AetherFlow sends critical system alerts and authentication events.</p>
+                        </div>
+                    </form>
                 </div>
 
-                {/* Account Storage Quota */}
+                {/* RIGHT COLUMN: Authentication & Security + Storage Quota */}
                 <div className="space-y-6">
-                    <h4 className="text-sm font-bold text-slate-400 uppercase tracking-wider">Quotas & Limits</h4>
-                    <div className="bg-slate-950/50 border border-white/10 rounded-2xl p-6">
-                        <div className="flex items-center gap-3 mb-6">
-                            <div className="p-2.5 bg-emerald-500/20 text-emerald-400 rounded-xl">
-                                <HardDrive size={20} />
+                    {/* Security Section */}
+                    <div className="glass-panel rounded-2xl p-6 border border-white/[0.06] space-y-4">
+                        <div className="flex items-center justify-between border-b border-white/[0.06] pb-3">
+                            <h4 className="text-sm font-bold text-slate-100 flex items-center gap-2">
+                                <KeyRound size={16} className="text-indigo-400" /> Authentication & Security
+                            </h4>
+                        </div>
+                        <div className="rounded-xl bg-slate-950/50 border border-white/[0.06] divide-y divide-white/[0.06] overflow-hidden">
+                            <div className="p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                                <div>
+                                    <h5 className="text-sm font-semibold text-slate-200">Account Password</h5>
+                                    <p className="text-xs text-slate-500 mt-0.5">Change the password used to access your local account.</p>
+                                </div>
+                                <button 
+                                    type="button" 
+                                    onClick={() => setShowPasswordModal(true)}
+                                    className="px-4 py-2 bg-white/5 border border-white/10 hover:bg-white/10 text-slate-200 text-xs font-bold rounded-xl transition-colors whitespace-nowrap"
+                                >
+                                    Change Password
+                                </button>
+                            </div>
+                            
+                            <div className="p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                                <div>
+                                    <h5 className="text-sm font-semibold text-slate-200 flex items-center gap-2">
+                                        Two-Factor Authentication
+                                        {user.totp_enabled ? (
+                                            <span className="px-2 py-0.5 rounded text-[10px] uppercase font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/20">Active</span>
+                                        ) : (
+                                            <span className="px-2 py-0.5 rounded text-[10px] uppercase font-bold bg-slate-700/50 text-slate-400 border border-white/10">Inactive</span>
+                                        )}
+                                    </h5>
+                                    <p className="text-xs text-slate-500 mt-0.5">
+                                        {user.totp_enabled
+                                            ? 'Your account is protected with TOTP-based verification.'
+                                            : 'Add an extra layer of security via the Security tab.'}
+                                    </p>
+                                </div>
+                                <span className={`px-4 py-2 text-xs font-bold rounded-xl transition-colors whitespace-nowrap ${
+                                    user.totp_enabled
+                                        ? 'bg-emerald-500/10 border border-emerald-500/20 text-emerald-400'
+                                        : 'bg-white/5 border border-white/10 text-slate-400'
+                                }`}>
+                                    {user.totp_enabled ? 'Enrolled' : 'Not Enrolled'}
+                                </span>
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Account Storage Quota */}
+                    <div className="glass-panel rounded-2xl p-6 border border-white/[0.06] space-y-4">
+                        <div className="flex items-center gap-3">
+                            <div className="p-2.5 bg-emerald-500/15 border border-emerald-500/20 text-emerald-400 rounded-xl">
+                                <HardDrive size={18} />
                             </div>
                             <div>
-                                <h3 className="font-bold text-slate-200">Account Storage</h3>
-                                <p className="text-xs text-slate-400 mt-0.5">Your total disk boundaries within the Nexus filesystem.</p>
+                                <h3 className="text-sm font-bold text-slate-100">Account Storage Quota</h3>
+                                <p className="text-xs text-slate-400 mt-0.5">Your disk boundaries within the Nexus filesystem.</p>
                             </div>
                         </div>
 
                         {isQuotaLoading ? (
-                            <div className="space-y-4">
+                            <div className="space-y-3">
                                 <SkeletonBox className="h-4 w-full" />
-                                <SkeletonBox className="h-10 w-full" />
+                                <SkeletonBox className="h-8 w-full" />
                             </div>
                         ) : quota ? (
-                            <div className="space-y-3">
+                            <div className="p-4 rounded-xl bg-slate-950/50 border border-white/[0.06] space-y-3">
                                 <div className="flex items-end justify-between text-sm">
-                                    <span className="font-semibold text-slate-400">Space Used</span>
+                                    <span className="text-xs font-semibold text-slate-400">Space Used</span>
                                     <div className="text-right">
-                                        <span className="text-lg font-bold text-white">{(quota.usedGB || 0).toFixed(1)} GB</span>
+                                        <span className="text-base font-bold text-white">{(quota.usedGB || 0).toFixed(1)} GB</span>
                                         {quota.totalGB > 0 ? (
                                             <span className="text-slate-500 text-xs ml-1">/ {quota.totalGB} GB</span>
                                         ) : (
@@ -353,13 +362,12 @@ export default function ProfileTab() {
                                 )}
                             </div>
                         ) : (
-                            <div className="p-4 border border-red-500/20 bg-red-500/10 text-red-400 rounded-xl text-sm">
+                            <div className="p-4 border border-red-500/20 bg-red-500/10 text-red-400 rounded-xl text-xs">
                                 Quota telemetry unavailable.
                             </div>
                         )}
                     </div>
                 </div>
-
             </div>
 
             {/* Change Password Modal */}

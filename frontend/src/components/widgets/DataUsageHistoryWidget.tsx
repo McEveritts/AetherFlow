@@ -51,7 +51,7 @@ export default function DataUsageHistoryWidget({ density = 'compact' }: DataUsag
                 // Group by Day (YYYY-MM-DD)
                 const dailyGroups = new Map<string, { minRx: number; maxRx: number; minTx: number; maxTx: number }>();
 
-                rawData.forEach(record => {
+                (Array.isArray(rawData) ? rawData : []).forEach(record => {
                     const date = record.timestamp.split(/[ T]/)[0];
                     if (!dailyGroups.has(date)) {
                         dailyGroups.set(date, { 
@@ -67,11 +67,47 @@ export default function DataUsageHistoryWidget({ density = 'compact' }: DataUsag
                     }
                 });
 
-                const chartData: DailyUsage[] = Array.from(dailyGroups.entries()).map(([date, group]) => ({
-                    date,
-                    downloadedBytes: group.maxRx - group.minRx,
-                    uploadedBytes: group.maxTx - group.minTx,
-                })).sort((a, b) => a.date.localeCompare(b.date)); // Sort chronologically
+                const chartData: DailyUsage[] = Array.from(dailyGroups.entries()).map(([date, group]) => {
+                    const dlDelta = group.maxRx - group.minRx;
+                    const ulDelta = group.maxTx - group.minTx;
+                    return {
+                        date,
+                        downloadedBytes: dlDelta === 0 && dailyGroups.size === 1 ? group.maxRx : dlDelta,
+                        uploadedBytes: ulDelta === 0 && dailyGroups.size === 1 ? group.maxTx : ulDelta,
+                    };
+                }).sort((a, b) => a.date.localeCompare(b.date)); // Sort chronologically
+
+                // Recharts AreaChart requires at least 2 points along the X-axis to draw an area polygon.
+                // When only 1 day of history exists, prepend a prior-day baseline point (0 B).
+                if (chartData.length === 1) {
+                    const firstDate = new Date(`${chartData[0].date}T00:00:00`);
+                    if (!isNaN(firstDate.getTime())) {
+                        firstDate.setDate(firstDate.getDate() - 1);
+                        const yyyy = firstDate.getFullYear();
+                        const mm = String(firstDate.getMonth() + 1).padStart(2, '0');
+                        const dd = String(firstDate.getDate()).padStart(2, '0');
+                        chartData.unshift({
+                            date: `${yyyy}-${mm}-${dd}`,
+                            downloadedBytes: 0,
+                            uploadedBytes: 0,
+                        });
+                    } else {
+                        chartData.unshift({
+                            date: 'Prior',
+                            downloadedBytes: 0,
+                            uploadedBytes: 0,
+                        });
+                    }
+                } else if (chartData.length === 0) {
+                    const today = new Date();
+                    const yesterday = new Date(today);
+                    yesterday.setDate(today.getDate() - 1);
+                    const fmt = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+                    chartData.push(
+                        { date: fmt(yesterday), downloadedBytes: 0, uploadedBytes: 0 },
+                        { date: fmt(today), downloadedBytes: 0, uploadedBytes: 0 }
+                    );
+                }
 
                 setData(chartData);
             } catch (err: unknown) {
@@ -132,10 +168,10 @@ export default function DataUsageHistoryWidget({ density = 'compact' }: DataUsag
 
             {/* Loading / Data State */}
             {!error && (
-                <div className={`flex-1 flex flex-col ${isImmersive ? 'min-h-[350px]' : 'min-h-[220px]'}`}>
+                <div className={`flex-1 flex flex-col ${isImmersive ? 'min-h-[350px]' : 'min-h-[240px]'}`}>
                     {/* The Chart */}
                     <div
-                        className={`flex-1 relative -mx-2 select-none ${isImmersive ? 'min-h-[280px]' : 'min-h-[160px]'}`}
+                        className={`relative -mx-2 select-none w-full ${isImmersive ? 'h-[280px] min-h-[280px]' : 'h-[180px] min-h-[180px]'}`}
                         style={{ touchAction: 'pan-y' }}
                     >
                         {loading && data.length === 0 ? (
@@ -143,16 +179,16 @@ export default function DataUsageHistoryWidget({ density = 'compact' }: DataUsag
                                  <div className="w-5 h-5 border-2 border-indigo-500/30 border-t-indigo-500 rounded-full animate-spin" />
                              </div>
                         ) : (
-                            <ResponsiveContainer width="100%" height="100%">
-                                <AreaChart data={data} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
+                            <ResponsiveContainer width="100%" height={isImmersive ? 280 : 180}>
+                                <AreaChart data={data} margin={{ top: 10, right: 12, left: 0, bottom: 0 }}>
                                     <defs>
                                         <linearGradient id="colorDl" x1="0" y1="0" x2="0" y2="1">
-                                            <stop offset="5%" stopColor="#818cf8" stopOpacity={0.3} />
-                                            <stop offset="95%" stopColor="#818cf8" stopOpacity={0} />
+                                            <stop offset="5%" stopColor="#818cf8" stopOpacity={0.35} />
+                                            <stop offset="95%" stopColor="#818cf8" stopOpacity={0.02} />
                                         </linearGradient>
                                         <linearGradient id="colorUl" x1="0" y1="0" x2="0" y2="1">
-                                            <stop offset="5%" stopColor="#2dd4bf" stopOpacity={0.3} />
-                                            <stop offset="95%" stopColor="#2dd4bf" stopOpacity={0} />
+                                            <stop offset="5%" stopColor="#2dd4bf" stopOpacity={0.35} />
+                                            <stop offset="95%" stopColor="#2dd4bf" stopOpacity={0.02} />
                                         </linearGradient>
                                     </defs>
                                     <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" vertical={false} />
@@ -161,8 +197,8 @@ export default function DataUsageHistoryWidget({ density = 'compact' }: DataUsag
                                         stroke="rgba(255,255,255,0.2)" 
                                         tick={{ fill: 'rgba(255,255,255,0.4)', fontSize: 10 }}
                                         tickFormatter={(val) => {
-                                            const parts = val.split('-');
-                                            return `${parts[1]}/${parts[2]}`;
+                                            const parts = String(val).split('-');
+                                            return parts.length === 3 ? `${parts[1]}/${parts[2]}` : String(val);
                                         }}
                                         minTickGap={20}
                                     />
@@ -179,8 +215,8 @@ export default function DataUsageHistoryWidget({ density = 'compact' }: DataUsag
                                         formatter={(value) => [formatBytes(Number(value || 0)), '']}
                                         animationDuration={120}
                                     />
-                                    <Area type="monotone" name="Downloaded" dataKey="downloadedBytes" stroke="#818cf8" strokeWidth={2} fillOpacity={1} fill="url(#colorDl)" animationDuration={180} />
-                                    <Area type="monotone" name="Uploaded" dataKey="uploadedBytes" stroke="#2dd4bf" strokeWidth={2} fillOpacity={1} fill="url(#colorUl)" animationDuration={180} />
+                                    <Area type="monotone" name="Downloaded" dataKey="downloadedBytes" stroke="#818cf8" strokeWidth={2} fillOpacity={1} fill="url(#colorDl)" dot={{ r: 3, fill: '#818cf8', fillOpacity: 0.9 }} activeDot={{ r: 5 }} animationDuration={180} />
+                                    <Area type="monotone" name="Uploaded" dataKey="uploadedBytes" stroke="#2dd4bf" strokeWidth={2} fillOpacity={1} fill="url(#colorUl)" dot={{ r: 3, fill: '#2dd4bf', fillOpacity: 0.9 }} activeDot={{ r: 5 }} animationDuration={180} />
                                 </AreaChart>
                             </ResponsiveContainer>
                         )}
