@@ -1,4 +1,4 @@
-import { Clock, Activity, Zap, Wifi, ArrowDown, ArrowUp, Server, Radio, Settings2, Maximize2, Minimize2, Sparkles } from 'lucide-react';
+import { Clock, Activity, Zap, Wifi, ArrowDown, ArrowUp, Server, Settings2, Maximize2, Minimize2, Sparkles } from 'lucide-react';
 import { SystemMetrics, HardwareReport, MetricsHistory, ProcessInfo, DiskPartition, GpuMetric } from '@/types/dashboard';
 import CpuWidget from '@/components/widgets/CpuWidget';
 import MemoryWidget from '@/components/widgets/MemoryWidget';
@@ -82,12 +82,8 @@ function formatTotalBytes(bytes: number): string {
 }
 
 export default function OverviewTab({ metrics, hardware, history }: OverviewTabProps) {
-    const { preferredMode, setPreferredMode, pollInterval, setPollInterval, connectionState, dashboardDensity, setDashboardDensity, showGpuWidget, showDataUsageWidget } = useConnectionStore(
+    const { connectionState, dashboardDensity, setDashboardDensity, showGpuWidget, showDataUsageWidget } = useConnectionStore(
         useShallow((state) => ({
-            preferredMode: state.preferredMode,
-            setPreferredMode: state.setPreferredMode,
-            pollInterval: state.pollInterval,
-            setPollInterval: state.setPollInterval,
             connectionState: state.connectionState,
             dashboardDensity: state.dashboardDensity,
             setDashboardDensity: state.setDashboardDensity,
@@ -117,16 +113,12 @@ export default function OverviewTab({ metrics, hardware, history }: OverviewTabP
                         <div className={`p-3 rounded-xl ${
                             connectionState === 'CONNECTED'
                                 ? 'bg-emerald-500/20 text-emerald-400'
-                                : preferredMode === 'poll' && connectionState === 'FALLBACK'
-                                    ? 'bg-purple-500/20 text-purple-400'
-                                    : 'bg-amber-500/20 text-amber-400'
+                                : 'bg-amber-500/20 text-amber-400'
                         } border border-white/10`}>
-                            {preferredMode === 'websocket' && connectionState === 'CONNECTED'
-                                ? <Zap size={20} className="animate-pulse" />
-                                : <Radio size={20} className="animate-pulse" />}
+                            <Zap size={20} className="animate-pulse" />
                         </div>
                         <div className={`absolute -bottom-1 -right-1 w-3 h-3 rounded-full border-2 border-[#0B0E14] ${
-                            connectionState === 'CONNECTED' || (preferredMode === 'poll' && connectionState === 'FALLBACK')
+                            connectionState === 'CONNECTED'
                                 ? 'bg-emerald-500'
                                 : 'bg-amber-500'
                         }`} />
@@ -135,15 +127,13 @@ export default function OverviewTab({ metrics, hardware, history }: OverviewTabP
                         <h2 className="text-xl font-black text-white tracking-tight flex items-center gap-2">
                             AetherNexus
                             <span className="text-[10px] bg-white/10 px-2 py-0.5 rounded-full font-bold uppercase tracking-widest text-slate-400 border border-white/5">
-                                {preferredMode === 'websocket' && connectionState === 'CONNECTED' ? 'Live WS' : 'REST Poll'}
+                                Live WS
                             </span>
                         </h2>
                         <p className="text-xs text-slate-400 font-medium">
-                            {preferredMode === 'websocket' && connectionState === 'CONNECTED'
+                            {connectionState === 'CONNECTED'
                                 ? 'Hyper-Link connection active (WS · 1.0s Live Stream)'
-                                : preferredMode === 'websocket' && connectionState === 'FALLBACK'
-                                    ? `WebSocket fallback — Polling Nexus active (${(pollInterval / 1000).toFixed(1)}s)`
-                                    : `Polling Nexus active (${(pollInterval / 1000).toFixed(1)}s interval)`}
+                                : 'Reconnecting to Hyper-Link WebSocket stream...'}
                         </p>
                     </div>
                 </div>
@@ -171,40 +161,10 @@ export default function OverviewTab({ metrics, hardware, history }: OverviewTabP
                     </button>
 
                     <div className="flex items-center gap-2 bg-black/20 p-1.5 rounded-xl border border-white/5">
-                        <button
-                            onClick={() => setPreferredMode('websocket')}
-                            className={`obs-touch-target-standard obs-gpu-120hz-interactive px-3.5 py-2 rounded-lg text-xs font-bold transition-all flex items-center gap-2 ${preferredMode === 'websocket' ? 'bg-indigo-500 text-white shadow-lg' : 'text-slate-400 hover:text-slate-200 hover:bg-white/5'}`}
-                        >
+                        <div className="obs-touch-target-standard px-3.5 py-2 rounded-lg text-xs font-bold flex items-center gap-2 bg-indigo-500 text-white shadow-lg">
                             <Zap size={14} />
                             WebSocket
-                        </button>
-                        <button
-                            onClick={() => {
-                                if (pollInterval === 5000) {
-                                    setPollInterval(2000);
-                                }
-                                setPreferredMode('poll');
-                            }}
-                            className={`obs-touch-target-standard obs-gpu-120hz-interactive px-3.5 py-2 rounded-lg text-xs font-bold transition-all flex items-center gap-2 ${preferredMode === 'poll' ? 'bg-purple-500 text-white shadow-lg' : 'text-slate-400 hover:text-slate-200 hover:bg-white/5'}`}
-                        >
-                            <Radio size={14} />
-                            Poll
-                        </button>
-                        
-                        <div className="h-4 w-px bg-white/10 mx-1" />
-                        
-                        <select 
-                            value={pollInterval}
-                            onChange={(e) => setPollInterval(Number(e.target.value))}
-                            disabled={preferredMode === 'websocket' && connectionState === 'CONNECTED'}
-                            title={preferredMode === 'websocket' && connectionState === 'CONNECTED' ? 'WebSocket streams in real time (1s). Switch to Poll mode to customize interval.' : 'Select REST polling interval'}
-                            className="obs-touch-target-standard bg-transparent text-slate-300 text-xs font-bold outline-none cursor-pointer hover:text-white px-2 py-1 disabled:opacity-40 disabled:cursor-not-allowed"
-                        >
-                            <option value={1000} className="bg-[#12141a]">1s</option>
-                            <option value={2000} className="bg-[#12141a]">2s</option>
-                            <option value={5000} className="bg-[#12141a]">5s</option>
-                            <option value={10000} className="bg-[#12141a]">10s</option>
-                        </select>
+                        </div>
                     </div>
                 </div>
             </div>

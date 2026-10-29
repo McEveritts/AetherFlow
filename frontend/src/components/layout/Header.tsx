@@ -19,7 +19,7 @@ export default function Header() {
         setIsCommandPaletteOpen,
         hapticFeedback,
     } = useSystemStore();
-    const { connectionState, reconnectAttempt, preferredMode } = useConnectionStore();
+    const { connectionState, reconnectAttempt } = useConnectionStore();
     const { tasks } = useTaskStore();
     const { user, logout } = useAuth();
     const { toasts, toggleDrawer } = useToast();
@@ -53,7 +53,7 @@ export default function Header() {
     const statusConfig: Record<string, { beaconClass: string, label: string, containerClass?: string }> = {
         CONNECTED: { 
             beaconClass: 'obs-beacon-live', 
-            label: preferredMode === 'websocket' ? 'Hyperspeed (Live)' : 'Nexus Poll',
+            label: 'Hyperspeed (Live)',
             containerClass: 'border-emerald-500/30 bg-emerald-500/5'
         },
         RECONNECTING: { 
@@ -91,11 +91,9 @@ export default function Header() {
             containerClass: 'shadow-[0_0_15px_rgba(99,102,241,0.4)] border-indigo-500/50 bg-indigo-500/5' 
         },
         FALLBACK: { 
-            beaconClass: preferredMode === 'poll' ? 'obs-beacon-live' : 'obs-beacon-reconnecting', 
-            label: preferredMode === 'poll' ? 'Nexus Poll' : 'Degraded (Polling)',
-            containerClass: preferredMode === 'poll'
-                ? 'border-purple-500/30 bg-purple-500/5 text-purple-200'
-                : 'border-amber-500/20 bg-amber-500/5 text-amber-200'
+            beaconClass: 'obs-beacon-live', 
+            label: 'Hyperspeed (Live)',
+            containerClass: 'border-emerald-500/30 bg-emerald-500/5'
         },
         DISCONNECTED: { 
             beaconClass: 'obs-beacon-danger', 

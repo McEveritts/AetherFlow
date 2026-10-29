@@ -231,7 +231,7 @@ export default function ServicesTab() {
                             ) : data.id ? (
                                 <div className="relative w-8 h-8 flex items-center justify-center">
                                     <img 
-                                        src={`/img/${data.id}.png`} 
+                                        src={`/img/${data.id.toLowerCase()}.png`} 
                                         alt={name}
                                         className="w-full h-full object-contain"
                                         onError={(e) => {

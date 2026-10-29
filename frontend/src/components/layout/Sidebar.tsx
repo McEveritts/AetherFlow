@@ -67,7 +67,7 @@ export default function Sidebar() {
         setIsMobileMenuOpen,
         hapticFeedback,
     } = useSystemStore();
-    const { connectionState, preferredMode } = useConnectionStore();
+    const { connectionState } = useConnectionStore();
     const { data: pendingActionsData } = useSWR<PendingActionsResponse>(
         user?.role === 'admin' ? '/api/v1/admin/actions/pending?status=pending' : null
     );
@@ -76,7 +76,7 @@ export default function Sidebar() {
 
     // Map connection state to Obsidian beacon class
     const getBeaconClass = () => {
-        if (connectionState === 'CONNECTED' || (connectionState === 'FALLBACK' && preferredMode === 'poll')) {
+        if (connectionState === 'CONNECTED') {
             return 'obs-beacon-live';
         }
         if (connectionState === 'RECONNECTING' || connectionState === 'CONNECTING' || connectionState === 'FALLBACK') {

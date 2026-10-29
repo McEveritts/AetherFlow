@@ -2,10 +2,7 @@
 
 import React from 'react';
 import { 
-    Radio, 
-    Clock, 
     Monitor, 
-    ChevronRight, 
     Maximize2, 
     Layers, 
     Sparkles, 
@@ -22,8 +19,6 @@ import { triggerHaptic } from '@/lib/design';
 
 export default function DashboardSettingsTab() {
     const { 
-        preferredMode, setPreferredMode, 
-        pollInterval, setPollInterval, 
         dashboardDensity, setDashboardDensity,
         showGpuWidget, setShowGpuWidget,
         showDataUsageWidget, setShowDataUsageWidget
@@ -371,59 +366,6 @@ export default function DashboardSettingsTab() {
                                     showDataUsageWidget ? 'translate-x-6' : 'translate-x-1'
                                 }`} />
                             </button>
-                        </div>
-                    </div>
-
-                </div>
-            </div>
-
-            {/* CATEGORY: Connectivity */}
-            <div>
-                <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3 px-2">Telemetrics Engine</h4>
-                <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl divide-y divide-white/[0.04] overflow-hidden">
-                    
-                    {/* Mode */}
-                    <div className="p-5 flex flex-col md:flex-row md:items-center justify-between gap-4 hover:bg-white/[0.02] transition-colors">
-                        <div>
-                            <label className="text-sm font-semibold text-slate-200 flex items-center gap-2">
-                                <Radio size={16} className="text-emerald-400" /> Connection Mode
-                            </label>
-                            <p className="text-xs text-slate-400 mt-1">Primary protocol used for dashboard data updates.</p>
-                        </div>
-                        <div className="shrink-0 w-full md:w-80 relative">
-                            <select
-                                value={preferredMode}
-                                onChange={(e) => setPreferredMode(e.target.value as 'websocket' | 'poll')}
-                                className="w-full glass-input px-4 py-3 text-slate-200 text-sm focus:outline-none focus:border-indigo-500/50 transition-colors appearance-none cursor-pointer"
-                            >
-                                <option value="websocket" className="bg-slate-900 text-white">Auto-Connect (WebSockets)</option>
-                                <option value="poll" className="bg-slate-900 text-white">Nexus Link (REST Polling)</option>
-                            </select>
-                            <ChevronRight size={16} className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-500 rotate-90 pointer-events-none" />
-                        </div>
-                    </div>
-
-                    {/* Poll Interval */}
-                    <div className="p-5 flex flex-col md:flex-row md:items-center justify-between gap-4 hover:bg-white/[0.02] transition-colors">
-                        <div>
-                            <label className="text-sm font-semibold text-slate-200 flex items-center gap-2">
-                                <Clock size={16} className="text-amber-400" /> Refresh Heartbeat
-                            </label>
-                            <p className="text-xs text-slate-400 mt-1">Update frequency for dashboard visual updates.</p>
-                        </div>
-                        <div className="shrink-0 w-full md:w-80 relative">
-                            <select
-                                value={pollInterval}
-                                onChange={(e) => setPollInterval(Number(e.target.value))}
-                                className="w-full glass-input px-4 py-3 text-slate-200 text-sm focus:outline-none focus:border-indigo-500/50 transition-colors appearance-none cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed"
-                            >
-                                <option value={1000} className="bg-slate-900 text-white">1 Second (Hyper)</option>
-                                <option value={2000} className="bg-slate-900 text-white">2 Seconds (Fast)</option>
-                                <option value={5000} className="bg-slate-900 text-white">5 Seconds (Normal)</option>
-                                <option value={10000} className="bg-slate-900 text-white">10 Seconds (Stable)</option>
-                                <option value={30000} className="bg-slate-900 text-white">30 Seconds (Eco)</option>
-                            </select>
-                            <ChevronRight size={16} className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-500 rotate-90 pointer-events-none" />
                         </div>
                     </div>
 

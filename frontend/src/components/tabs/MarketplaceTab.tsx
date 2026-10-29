@@ -9,21 +9,36 @@ import { ExternalAccessCard } from '@/components/ingress/ExternalAccessCard';
 import { DeploymentStatus } from '@/components/deploy/DeploymentStatus';
 
 const AppIcon = ({ app }: { app: App }) => {
-    const [iconError, setIconError] = useState(false);
+    const [localFailed, setLocalFailed] = useState(false);
     const [svglUrl, setSvglUrl] = useState<string | null>(null);
-    const primaryIconPath = svglUrl || `/img/${app.id.toLowerCase()}.png`;
+    const [iconError, setIconError] = useState(false);
+    const localIconPath = `/img/${app.id.toLowerCase()}.png`;
+    const primaryIconPath = localFailed ? svglUrl : localIconPath;
 
     useEffect(() => {
+        setLocalFailed(false);
+        setSvglUrl(null);
+        setIconError(false);
+    }, [app.id]);
+
+    useEffect(() => {
+        if (!localFailed) return;
+        let cancelled = false;
         getSVGLCatalog().then(catalog => {
+            if (cancelled) return;
             const match = matchSVGLLogo(catalog, app.id, app.name);
             if (match) {
                 setSvglUrl(match);
-                setIconError(false);
+            } else {
+                setIconError(true);
             }
         });
-    }, [app.id, app.name]);
+        return () => {
+            cancelled = true;
+        };
+    }, [localFailed, app.id, app.name]);
 
-    if (iconError) {
+    if (iconError || (localFailed && !svglUrl)) {
         return (
             <div className="flex flex-col items-center justify-center h-full w-full bg-slate-900/20 text-slate-500">
                 <Package size={24} />
@@ -35,15 +50,15 @@ const AppIcon = ({ app }: { app: App }) => {
     return (
         <div className="relative w-full h-full flex items-center justify-center group-hover:scale-110 transition-transform duration-300">
              <img
-                src={primaryIconPath}
+                src={primaryIconPath || localIconPath}
                 onError={() => {
-                    if (svglUrl) {
-                        setSvglUrl(null);
+                    if (!localFailed) {
+                        setLocalFailed(true);
                     } else {
                         setIconError(true);
                     }
                 }}
-                className={`w-full h-full object-contain p-2 ${svglUrl ? 'drop-shadow-lg' : ''}`}
+                className="w-full h-full object-contain p-2 drop-shadow-lg"
                 alt={app.name}
                 loading="lazy"
             />

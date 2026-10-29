@@ -16,7 +16,6 @@ import { useSystemStore } from '@/store/useSystemStore';
 import { useTranslations } from 'next-intl';
 import { SettingsSkeleton } from '@/components/layout/SkeletonBox';
 import { apiFetch } from '@/lib/fetcher';
-import { useConnectionStore } from '@/store/useConnectionStore';
 
 const PROVIDER_CARDS: {
     id: AIProviderID;
@@ -73,7 +72,6 @@ export default function SettingsTab() {
         activeSettingsTab: activeTab,
         setActiveSettingsTab: setActiveTab,
     } = useSystemStore();
-    const { preferredMode, setPreferredMode, pollInterval, setPollInterval } = useConnectionStore();
     
     // Config State
     const [model, setModel] = useState('gemini-4-argon');
@@ -516,51 +514,15 @@ export default function SettingsTab() {
                                                 />
                                             </div>
 
-                                            {/* Preferred Mode */}
+                                            {/* Transport Protocol */}
                                             <div className="p-4 rounded-xl bg-slate-950/50 border border-white/[0.06] space-y-2.5">
                                                 <div className="flex items-center justify-between">
                                                     <label className="text-sm font-semibold text-slate-200 flex items-center gap-2">
-                                                        <Radio size={15} className="text-indigo-400" /> Preferred Connectivity
+                                                        <Radio size={15} className="text-indigo-400" /> Telemetry Transport
                                                     </label>
-                                                    <span className="text-xs font-mono uppercase tracking-wider text-emerald-400">{preferredMode}</span>
+                                                    <span className="text-xs font-mono uppercase tracking-wider text-emerald-400">WebSocket</span>
                                                 </div>
-                                                <p className="text-xs text-slate-500">Choose between full-duplex WebSockets or stateless REST Polling.</p>
-                                                <div className="relative">
-                                                    <select
-                                                        value={preferredMode}
-                                                        onChange={(e) => setPreferredMode(e.target.value as 'websocket' | 'poll')}
-                                                        className="obs-touch-target-standard w-full bg-slate-900 border border-white/10 rounded-xl px-4 py-3 text-slate-200 text-sm focus:outline-none focus:border-indigo-500/50 transition-colors appearance-none cursor-pointer"
-                                                    >
-                                                        <option value="websocket">Auto-Connect (WebSockets)</option>
-                                                        <option value="poll">Nexus Link (REST Polling)</option>
-                                                    </select>
-                                                    <ChevronRight size={16} className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-500 rotate-90 pointer-events-none" />
-                                                </div>
-                                            </div>
-
-                                            {/* Polling Interval */}
-                                            <div className="p-4 rounded-xl bg-slate-950/50 border border-white/[0.06] space-y-2.5">
-                                                <div className="flex items-center justify-between">
-                                                    <label className="text-sm font-semibold text-slate-200 flex items-center gap-2">
-                                                        <Clock size={15} className="text-blue-400" /> Refresh Heartbeat
-                                                    </label>
-                                                    <span className="text-xs font-mono uppercase tracking-wider text-slate-400">{pollInterval / 1000}s</span>
-                                                </div>
-                                                <p className="text-xs text-slate-500">Set the telemetry synchronization frequency for the dashboard.</p>
-                                                <div className="relative">
-                                                    <select
-                                                        value={pollInterval}
-                                                        onChange={(e) => setPollInterval(Number(e.target.value))}
-                                                        className="obs-touch-target-standard w-full bg-slate-900 border border-white/10 rounded-xl px-4 py-3 text-slate-200 text-sm focus:outline-none focus:border-indigo-500/50 transition-colors appearance-none cursor-pointer"
-                                                    >
-                                                        <option value={1000}>1 Second (Hyper)</option>
-                                                        <option value={2000}>2 Seconds (Fast)</option>
-                                                        <option value={5000}>5 Seconds (Normal)</option>
-                                                        <option value={10000}>10 Seconds (Stable)</option>
-                                                        <option value={30000}>30 Seconds (Eco)</option>
-                                                    </select>
-                                                    <ChevronRight size={16} className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-500 rotate-90 pointer-events-none" />
-                                                </div>
+                                                <p className="text-xs text-slate-500">Full-duplex WebSocket streaming with real-time 1.0s telemetry updates.</p>
                                             </div>
                                         </div>
                                     </div>

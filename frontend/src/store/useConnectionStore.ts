@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 
-export type ConnectionMode = 'websocket' | 'poll';
+export type ConnectionMode = 'websocket';
 export type ConnectionState = 'CONNECTING' | 'CONNECTED' | 'RECONNECTING' | 'FALLBACK' | 'DEGRADED' | 'DISCONNECTED';
 
 interface ConnectionStoreState {
@@ -9,9 +9,8 @@ interface ConnectionStoreState {
     lastMessageAt: number | null;
     lastTransportSwitchReason: string | null;
     
-    // Polling preferences
+    // Dashboard preferences
     preferredMode: ConnectionMode;
-    pollInterval: number; // in milliseconds
     dashboardDensity: 'compact' | 'immersive';
     showGpuWidget: boolean;
     showDataUsageWidget: boolean;
@@ -22,7 +21,6 @@ interface ConnectionStoreState {
     setLastMessageAt: (timestamp: number) => void;
     setLastTransportSwitchReason: (reason: string | null) => void;
     setPreferredMode: (mode: ConnectionMode) => void;
-    setPollInterval: (interval: number) => void;
     setDashboardDensity: (density: 'compact' | 'immersive') => void;
     setShowGpuWidget: (show: boolean) => void;
     setShowDataUsageWidget: (show: boolean) => void;
@@ -35,7 +33,6 @@ export const useConnectionStore = create<ConnectionStoreState>()((set) => ({
     lastMessageAt: null,
     lastTransportSwitchReason: null,
     preferredMode: 'websocket',
-    pollInterval: 5000,
     dashboardDensity: 'compact',
     showGpuWidget: true,
     showDataUsageWidget: true,
@@ -44,8 +41,7 @@ export const useConnectionStore = create<ConnectionStoreState>()((set) => ({
     setReconnectAttempt: (reconnectAttempt) => set({ reconnectAttempt }),
     setLastMessageAt: (lastMessageAt) => set({ lastMessageAt }),
     setLastTransportSwitchReason: (lastTransportSwitchReason) => set({ lastTransportSwitchReason }),
-    setPreferredMode: (preferredMode) => set({ preferredMode }),
-    setPollInterval: (pollInterval) => set({ pollInterval }),
+    setPreferredMode: () => set({ preferredMode: 'websocket' }),
     setDashboardDensity: (dashboardDensity) => set({ dashboardDensity }),
     setShowGpuWidget: (showGpuWidget) => set({ showGpuWidget }),
     setShowDataUsageWidget: (showDataUsageWidget) => set({ showDataUsageWidget }),
@@ -55,7 +51,6 @@ export const useConnectionStore = create<ConnectionStoreState>()((set) => ({
         lastMessageAt: null,
         lastTransportSwitchReason: null,
         preferredMode: 'websocket',
-        pollInterval: 5000,
         dashboardDensity: 'compact',
         showGpuWidget: true,
         showDataUsageWidget: true
