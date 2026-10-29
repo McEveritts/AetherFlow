@@ -1,85 +1,38 @@
 # Security Guide
 
-AetherFlow v3.1.x implement a deep-security posture designed to protect your infrastructure from unauthorized access while maintaining operational fluidity.
+AetherFlow v3.1.7+ implements defense-in-depth across authentication, data at rest, systemd namespace sandboxing, and CI/CD supply-chain verification.
 
-## Authentication Layer
+## Authentication & Perimeter SSO
 
-### 1. TOTP Two-Factor Authentication
-Mandatory 2FA is the standard for all AetherFlow administrator accounts.
-- **Enrollment**: On first login, the platform forces a TOTP registration flow using a QR code.
-- **Verification**: All subsequent login attempts require a valid 6-digit code from a registered authenticator app (e.g., Google Authenticator, Bitwarden).
-- **Session Duration**: Sessions are capped and can be remotely invalidated via the dashboard or Redis.
-
-### 2. JWT Session Security
-AetherFlow uses encrypted JSON Web Tokens (`aetherflow_session`) for stateless authentication.
-- **HTTP-Only Cookies**: Tokens are stored in `HttpOnly` and `Secure` cookies to prevent XSS-based theft.
-- **CSRF Protection**: All state-changing requests (POST/PUT/DELETE) require a valid CSRF token matched against the session state.
-
-### 3. Perimeter Gateway (True SSO)
-AetherFlow acts as a lightweight Identity Provider (IdP) for all hosted applications across the platform.
-- **Forward\_Auth intercept**: Caddy intercepts all traffic meant for internal applications (e.g., Radarr, Jellyseerr) and first routes it to AetherFlow's `/api/v1/auth/verify` endpoint.
-- **Identity Proxy Header Injection**: Upon confirming a valid session, AetherFlow passes an authenticated `X-Aetherflow-User` context header downstream to the underlying application.
-- **Double-login Prevention**: Thanks to AetherFlow's native "Config Mutators," target applications are pre-configured locally to trust Proxied Authentication. An authenticated AetherFlow user drops directly into their media application interfaces seamlessly.
+1. **Mandatory TOTP 2FA**: Enforced for administrator accounts (`totp.go`) with hashed recovery codes.
+2. **Hardened JWT Sessions**: `HttpOnly`, `Secure` cookies paired with Redis JTI revocation and CSRF validation on all state-mutating endpoints.
+3. **Perimeter Gateway (True SSO)**: Caddy `forward_auth` validates requests against `/api/v1/public/auth/verify` and injects `X-Aetherflow-User` identity headers into downstream applications.
 
 ---
 
-## Data Security
+## Data & Secret Isolation (FHS Layout)
 
-### 1. AES-256 Encryption at Rest
-All sensitive provider API keys, OIDC secrets, and SSH credentials stored in the SQLite database are encrypted at rest.
-- **Algorithm**: AES-256-GCM.
-- **Key Storage**: The master encryption key is never stored in the database; it must be provided via the `AES_MASTER_KEY` environment variable.
-
-> [!CAUTION]
-> **Key Fragility**: If you lose your `AES_MASTER_KEY`, you will lose access to all encrypted secrets in the database. There is no recovery path for an encrypted database without the original key.
-
-### 2. Secret Rotation
-To rotate your master key:
-1. Export current secrets in an unencrypted state (requires admin privilege).
-2. Update the `AES_MASTER_KEY` in `.env`.
-3. Re-import or re-run the encryption sync utility.
+- **Database Location**: `/var/lib/aetherflow/aetherflow.sqlite` (managed via `StateDirectory=aetherflow`, mode `0700`).
+- **Secrets File**: `/etc/aetherflow/aetherflow.env` (mode `0600`), never copied into or stored inside code release directories.
+- **AES-256-GCM at Rest**: All AI provider keys, OIDC secrets, and webhook credentials are encrypted in SQLite using `AES_MASTER_KEY`.
 
 ---
 
-## Infrastructure Hardening
+## Privilege Separation & Systemd Sandboxing
 
-### 1. Least-Privilege Sudoers
-AetherFlow requires certain root privileges to manage systemd units and install marketplace applications. To ensure security, we use a targeted sudoers policy rather than running the whole process as root.
+Rather than granting the web API unrestricted `sudo` or disabling `ProtectSystem=strict`, AetherFlow splits execution into two systemd units:
 
-**Recommended Configuration (`/etc/sudoers.d/aetherflow`):**
-```bash
-# Allow the aetherflow user to manage specific services without a password
-aetherflow ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart af-*
-aetherflow ALL=(ALL) NOPASSWD: /usr/bin/systemctl status af-*
-aetherflow ALL=(ALL) NOPASSWD: /opt/AetherFlow/packages/common.sh
-```
-
-### 2. Service Isolation
-By migrating to **systemd**, AetherFlow leverages standard Linux security features:
-- **PrivateTmp**: Most managed app units are configured with isolated `/tmp` directories.
-- **User Namespacing**: Each marketplace application can be configured to run as a non-privileged system user.
+1. **`aetherflow-api.service` (Unprivileged Web Control Plane)**:
+   - Runs as `User=aetherflow` with `ProtectSystem=strict`, `ProtectHome=yes`, `PrivateTmp=yes`, `NoNewPrivileges=yes`, `ProtectControlGroups=yes`, `ProtectKernelTunables=yes`, and `RestrictSUIDSGID=yes`.
+2. **`aetherflow-runner.service` (Root UNIX Socket Helper)**:
+   - Listens exclusively on `/run/aetherflow/runner.sock` (`0660 root:aetherflow`).
+   - Enforces strict regex and enum allowlists for `systemctl` actions, Marketplace installer scripts (serialized behind a global mutex with `DPkg::Lock::Timeout=120`), and atomic `release-manager.sh` updates.
 
 ---
 
-## Network Security
+## CI/CD Security Gates
 
-### 1. CORS & Host Validation
-To prevent cross-site request forgery and host-header injection (CWE-601), AetherFlow enforces strict origin validation.
-- **Allowed Hosts**: Only requests with `Host` headers matching your `ALLOWED_HOSTS` configuration are accepted.
-- **CORS**: APIs are restricted to your frontend origin by default.
-
-### 2. Reverse Proxy Recommendation
-AetherFlow should always be deployed behind a modern reverse proxy (Nginx, Caddy, or Traefik) for:
-- **TLS Termination**: Ensuring all traffic is encrypted via HTTPS.
-- **Rate Limiting**: Protecting the API from brute-force attempts.
-- **Access Logs**: Standardizing audit trails at the edge.
-
-> [!TIP]
-> Use **Tailscale Funnel** or a similar overlay network if you need to access your AetherFlow dashboard without exposing ports directly to the public internet.
-
----
-
-## Security Audit Logs
-All critical administrative actions (app installation, user creation, 2FA reset) are logged in the `System Logs` tab.
-- **Location**: Inspect via the UI or `journalctl -u aetherflow-api`.
-- **Retention**: Configurable in the database settings table.
+Every push and release runs through `.github/workflows/security.yml` and `.github/workflows/release.yml`:
+- **Secret Scanning**: `gitleaks` scans the repository to block accidental credential or key commits.
+- **Go SAST & Vulnerability Checks**: `govulncheck`, `gosec`, `staticcheck`, `go vet`, and `go test -race`.
+- **Signed/Checksummed Pull Releases**: Production nodes verify `SHA256SUMS` before extracting `aetherflow-linux-amd64.tar.gz` and perform an online SQLite `.backup` + `PRAGMA integrity_check` auto-rollback if `/health/ready` fails.

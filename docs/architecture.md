@@ -1,21 +1,20 @@
 # Architecture
 
-AetherFlow is engineered as a high-concurrency, unified control plane for modern Linux systems. It separates the presentation layer from system orchestration, using **Go** for performance and **systemd** for reliable service management.
+AetherFlow is engineered as a high-concurrency, single-binary control plane for modern Linux systems. It embeds the compiled Next.js static UI directly into the Go binary (`go:embed`), isolates privileged host operations behind a root-owned UNIX domain socket (`aetherflow-runner.service`), and orchestrates bare-metal workloads via **systemd** and **Caddy**.
 
 ## System Overview
 
 ```mermaid
 graph TD
-    User((User)) --> Web[Next.js 16 Frontend]
-    Web --> API[Go Backend Service]
-    API --> Auth[Auth Layer / Security Gate]
-    API --> Caddy[Caddy Internal Switchboard]
+    User((User)) --> Caddy[Caddy Internal Switchboard]
+    Caddy --> API["Single-Binary Go Control Plane + Embedded Next.js UI (aetherflow-api.service)"]
+    API --> Auth[Auth Layer / TOTP + OIDC Gate]
     API --> WS[Hyperspeed WebSocket Layer]
-    API --> DB[(SQLite DB)]
+    API --> DB[("/var/lib/aetherflow/aetherflow.sqlite")]
     API --> Redis[(Redis Session Store)]
-    API --> AI[FlowAI Logic]
-    API --> Orchestrator[Atomic Orchestrator]
-    Orchestrator --> Sys[Systemd / Symlink Swaps]
+    API --> AI[FlowAI Multi-Provider Engine]
+    API --> Runner["Privileged UNIX Socket Helper (aetherflow-runner.service)"]
+    Runner --> Sys[Systemd Units / Serialized APT & Marketplace]
     Sys --> Apps[Marketplace Applications]
 ```
 
@@ -23,57 +22,16 @@ graph TD
 
 ## Component Breakdown
 
-### 1. Frontend: Next.js 16 (React)
-The frontend is a density-aware, immersive dashboard built for speed and responsiveness.
-- **State Management**: Uses React hooks and context for near-instant UI updates.
-- **Communication**: Hooks into the backend via REST for configuration and **WebSockets (Hyperspeed)** for real-time telemetry.
-- **Styling**: Leverages Tailwind 4 for a sleek, modern, glassmorphic aesthetic.
+### 1. Single-Binary Control Plane & Embedded UI (`backend/web/embed.go`)
+- **Zero Production Node.js Runtime**: Next.js 16 compiles to a static export (`NEXT_STATIC_EXPORT=1`) during CI and is embedded directly into the Go binary via `go:embed`.
+- **Same-Origin Delivery**: `aetherflow-api` serves both `/api/v1/*` and the SPA frontend with immutable cache headers (`/_next/static/*`), eliminating cross-origin port `3000` zombie locks (`EADDRINUSE`) and public-IP CORS lookups.
 
-### 2. Backend: Go 1.25 (Gin)
-The backend is a compiled binary responsible for all high-privilege operations.
-- **Performance**: High-concurrency handling of metrics and service state.
-- **Routing**: Strict namespacing (`/api/v1/admin`, `/api/v1/public`) to ensure security.
-- **Inter-Process Communication**: Directly manages systemd service units and executes marketplace scripts.
+### 2. Privilege Separation (`backend/services/privileged_runner.go`)
+- **`aetherflow-api.service`**: Runs as unprivileged `User=aetherflow` with full systemd namespace isolation (`ProtectSystem=strict`, `ProtectHome=yes`, `PrivateTmp=yes`, `NoNewPrivileges=yes`, `RestrictSUIDSGID=yes`).
+- **`aetherflow-runner.service`**: Runs `/opt/AetherFlow/current/aetherflow-api runner` in a separate root cgroup listening on `/run/aetherflow/runner.sock` (`0660 root:aetherflow`). It validates and executes allowlisted `systemctl` verbs, serialized Marketplace package scripts (with a global `sync.Mutex` and `DPkg::Lock::Timeout=120`), and atomic self-updates.
 
-### 3. Orchestration: Systemd & Atomic Blue/Green Engine
-AetherFlow natively integrates with `systemd` to manage processes, but application lifecycle is handled via an advanced **Atomic Deployment Engine**:
-- **Zero-Downtime Swaps**: Applications are upgraded using isolated Blue/Green extraction environments. The live application is swapped via an atomic `os.Symlink` and `os.Rename` operation.
-- **Centralized AppData**: All SQLite `.db` or `.json` configurations are kept in a static directory rather than the application directory, preventing split-brain database fragmentation during updates.
-- **Polymorphic Mutators**: AetherFlow understands configuration schemas across apps (INI, JSON, SQLite) using "Config Mutators," allowing it to dynamically inject routes without breaking existing app functionality.
-- **Internal Switchboard**: The Go service manipulates Caddy's routing layer via REST API to switch traffic between the Blue/Green environments seamlessly.
-
-### 4. Data Layer: SQLite & Redis
-AetherFlow balances simplicity with high-speed invalidation:
-- **SQLite**: Stores all persistent state (user accounts, app configurations, marketplace history, security keys).
-- **Redis**: Used exclusively for real-time session invalidation (JWT blacklisting) and cross-process coordination in cluster mode.
-
----
-
-## FlowAI Architecture
-
-FlowAI is integrated at both the API and UI layers to provide context-aware system assistance.
-
-### Context Injection Pipeline
-1. **Trigger**: User asks a question in the Support tab.
-2. **Analysis**: The backend gathers recent system logs (`journalctl`) and hardware metrics.
-3. **Synthesis**: This raw data is injected into the LLM prompt context as a "System Status Digest".
-4. **Action Proposal**: If the AI suggests a fix (e.g., "Restarting the network service might help"), it triggers the **Action Gate**.
-
-### The Action Gate Approval Workflow
-To prevent destructive autonomous actions, proposals are routed through an internal queue:
-- **Proposal**: AI generates a JSON payload for a system action.
-- **Intercept**: The Backend scans the payload for protected keywords.
-- **Queue**: The action is placed in the **Approval Inbox**.
-- **Execution**: Only runs if a human administrator clicks "Approve" in the UI.
-
----
-
-## Performance: "Hyperspeed" WebSockets
-
-Real-time telemetry is the heartbeat of AetherFlow.
-- **Frequency**: Metrics are sampled at sub-second intervals.
-- **Efficiency**: Rather than polling, the UI maintains a persistent WebSocket connection.
-- **Hardware Awareness**: The backend reads directly from `/proc` and `/sys` to provide overhead-free CPU frequency and per-core temperature tracking.
-
-> [!TIP]
-> Architecture decisions are biased toward **Operational Honesty**. The goal is for the dashboard to always reflect the absolute truth of the underlying hardware and service state.
+### 3. Strict FHS State & Pull-Based Release Pipeline (`deploy/release-manager.sh`)
+- **Immutable Releases**: `/opt/AetherFlow/releases/<epoch>` symlinked atomically to `/opt/AetherFlow/current`.
+- **Mutable State**: `/var/lib/aetherflow/aetherflow.sqlite` (`StateDirectory=aetherflow`, `0700`).
+- **Environment Secrets**: `/etc/aetherflow/aetherflow.env` (`0600`).
+- **Pull-Based CD**: GitHub Actions (`.github/workflows/release.yml`) runs Gitleaks, SAST, unit/E2E tests, builds the pure-Go static binary (`CGO_ENABLED=0`), attests build provenance, and publishes `aetherflow-linux-amd64.tar.gz` + `SHA256SUMS` to GitHub Releases (`stable`, `beta`, `nightly`). Production nodes pull and verify the SHA-256 digest without compiling code on production.

@@ -1,111 +1,122 @@
-# AetherFlow Ecosystem Gap Analysis & Strategic Application Roadmap
+# AetherFlow Ecosystem Gap Analysis & Strategic Bare-Metal Roadmap (v3.2)
 
 ## Executive Summary
 
-AetherFlow currently possesses a robust and highly capable core infrastructure, featuring a custom Next.js/Tailwind UI orchestrated by a Go 1.25 service layer. Its strength lies in its deep integration of media acquisition (the Arr stack), download management, and foundational networking services.
+AetherFlow v3.2 marks a decisive architectural evolution: transitioning from a mixed package-and-container footprint into a **100% Bare-Metal Sovereign Homelab Operating System**. 
 
-The biggest competitive market gaps are the lack of modern personal cloud functionality (photo/video management), unified external access control, and advanced document workflow capabilities. While AetherFlow is a powerful infrastructure manager, it currently lacks the breadth to be classified as a comprehensive "Modern Sovereign Homelab OS."
+In previous iterations, AetherFlow relied on container management tools (such as Portainer) to bridge gaps in personal cloud services and automation. Under the **Strict Zero-Docker Mandate**, AetherFlow v3.2 has completely purged Docker, Docker Compose, and all container runtimes from the core platform, configuration registries, installer scripts, and systemd sandboxing rules. In their place stands an expanded **55-package bare-metal application catalog** (36 retained base packages + 19 newly authored bare-metal services), running natively on Debian 13 (Trixie) under granular `systemd` process supervision, atomic privilege boundaries via `aetherflow-runner.service`, automated UnionFS sandboxing (`af-systemd-sandbox`), and zero-touch configuration pipelines.
 
-The strategic shift required is moving from being an exceptional *Media Acquisition & Infrastructure Manager* to becoming a complete, integrated *Personal Cloud and Workflow Orchestrator*. This requires prioritizing foundational platform unlocks over mere ecosystem expansion.
+This document details the v3.2 ecosystem snapshot, the architecture of the 19 added bare-metal packages, the automated multi-unit and Zero-Touch Arr wiring mechanisms, the complete ruTorrent plugin modernization, and the long-term sovereign roadmap.
 
-## 1. Current AetherFlow Ecosystem Snapshot
+---
 
-### Internal Architecture
-AetherFlow operates as a sovereign software platform defined by its custom architecture:
-*   **Frontend:** Built on Next.js 16 RC, utilizing Tailwind CSS and Zustand for state management, providing the primary user interface and orchestration dashboard.
-*   **Backend:** A Go-based service layer (Go 1.25) responsible for all core logic, API handling, atomic deployments, and managing the lifecycle of managed applications.
-*   **Deployment Model:** Designed around modularity via internal packages (`/packages`) and external application definitions (`/plugins`).
+## 1. Current AetherFlow Ecosystem Snapshot (v3.2)
 
-### Existing Managed Application Categories
-The platform currently manages a vast array of services across several critical domains:
-*   **Media & Streaming:** Plex, Jellyfin, Emby, Navidrome.
-*   **Automation & Management (Arr Stack):** Sonarr, Radarr, Lidarr, Readarr, Prowlarr, Bazarr, Overseerr/Ombi.
-*   **Downloaders:** qBittorrent, SABnzbd, Flood, Autobrr.
-*   **Cloud & Storage:** Nextcloud, Syncthing, File Browser.
-*   **Network & Security:** WireGuard, Pi-hole, Fail2ban, Vaultwarden.
-*   **Monitoring & Home Automation:** Grafana/Prometheus, Netdata, Uptime Kuma, Home Assistant.
+### 1.1 Internal Architecture
 
-## 2. Competitive Gaps and Strategic Implications
+AetherFlow operates as a sovereign software platform defined by its decoupled, high-performance architecture:
+*   **Frontend:** Built on Next.js 16 with the Obsidian V2 visual design system, rendering GPU-composited 120Hz cosmic aurora atmospheres, chromatic refraction glass panels, and a responsive tri-mode layout (desktop rail, tablet icon rail, mobile bottom dock).
+*   **Backend Control Plane:** A Go 1.25 service layer (`aetherflow-api`) executing as an unprivileged system user (`aetherflow`) under `NoNewPrivileges=yes` and `ProtectSystem=strict`.
+*   **Privileged Boundary (`aetherflow-runner`):** A dedicated, zero-sudo UNIX socket daemon (`/run/aetherflow/runner.sock`) that executes privileged operations (package script execution, systemd daemon reloads, Caddy/DNS configuration, and quota adjustments) without granting unrestricted root or `sudo` access to the API server.
+*   **Reverse Proxy & Ingress:** Embedded Caddy manager orchestrating dynamic reverse proxy routes, automated TLS certificates, and LAN/WAN split ingress for all catalog services without containerized proxies.
 
-The primary missing capability areas prevent AetherFlow from competing directly with integrated homelab platforms like CasaOS or Umbrel:
+### 1.2 Strict Zero-Docker Mandate
 
-1.  **Unified Ingress & Access Control:** The lack of a native, user-friendly reverse proxy solution means external access is complex and non-standardized, hindering the "one-click home server" experience that competitors provide.
-2.  **Personal Cloud Depth:** While Nextcloud exists, there is no modern, high-performance photo/video management system (e.g., Immich). This gap prevents AetherFlow from capturing the massive market segment focused on self-hosted personal data backup.
-3.  **Advanced Workflow & Document Handling:** The absence of dedicated OCR document capture and low-code automation tools means users must rely on external scripting or complex manual processes, limiting the platform's utility as a true workflow orchestrator.
-4.  **Unified Identity Management (SSO):** As more services are exposed, the lack of centralized authentication forces users to manage multiple logins, creating friction in the user experience.
+AetherFlow strictly rejects container runtimes:
+*   **Portainer Purged:** The legacy `portainer` package (port `9443`) and its installer/uninstaller scripts have been permanently removed from `packages.json`, `package_automation.json`, `app_catalog.go`, and frontend service mappings.
+*   **Zero Container Overheads:** No Docker daemon, `containerd`, Podman, or Compose files are installed or utilized. Services execute directly against Linux kernel primitives, dramatically reducing memory footprint, CPU overhead, and network bridging latency.
+*   **Pure Native systemd:** Every service runs natively as a systemd unit or native web service (e.g., Apache2/PHP for ruTorrent), managed via standard systemd lifecycle states (`active`, `activating`, `deactivating`, `failed`).
 
-## 3. Prioritized Application Roadmap
+### 1.3 55-Package Bare-Metal Catalog Breakdown
 
-### Tier 1: Must-Have
-*These applications address foundational architectural needs and close the most critical competitive gaps.*
+The catalog consists of exactly 55 bare-metal packages categorized across 7 core homelab domains:
+1.  **Media & Streaming (14):** Plex, Jellyfin, Emby, Navidrome, Jellyseerr, Overseerr, Audiobookshelf, Kavita, Calibre-Web, Unpackerr, Autoscan, Recyclarr, Tautulli, Ombi.
+2.  **Automation & Management (Arr Stack) (6):** Sonarr, Radarr, Lidarr, Readarr, Prowlarr, Bazarr.
+3.  **Downloaders (6):** qBittorrent, SABnzbd, Deluge, Transmission, rTorrent, ruTorrent.
+4.  **Cloud & Storage (7):** Nextcloud, Syncthing, File Browser, Rclone, MergerFS, Cloudplow, Paperless-ngx.
+5.  **Network, DNS & IRC (10):** WireGuard, Tailscale, Pi-hole, AdGuard Home, Librespeed, The Lounge, ZNC, Fail2ban, Quassel, Shellinabox.
+6.  **Monitoring & Diagnostics (7):** Grafana, Prometheus, Netdata, Uptime Kuma, Scrutiny, LFD, CSF.
+7.  **Productivity & Workflow (5):** n8n, Vaultwarden, Gitea, Organizr, Jackett.
 
-| Application | Category | Priority Rationale | Integration Notes |
-| :--- | :--- | :--- | :--- |
-| **Immich** | Personal Cloud | Fills a major market gap by providing modern, self-hosted photo/video backup and browsing. This elevates AetherFlow into the personal cloud space. | Likely integrates with Syncthing for robust data redundancy and storage management. |
-| **PhotoPrism** | Personal Cloud | Offers an alternative path to Immich, focusing on high performance and metadata indexing for large media libraries. | Best treated as an alternative photo-management track to Immich, with integration focused on file storage and metadata indexing workflows. |
-| **Reverse Proxy (NPM / Caddy)** | Network & Security | Essential for enabling secure, standardized external access via subdomains and auto-SSL, matching the ease of use found in competing platforms. | Likely integrates with AetherFlow's orchestration layer to manage certificate lifecycle automatically. |
-| **Tailscale** | Network & Security | Provides a zero-config mesh VPN solution that allows users to securely access their server without complex router port forwarding setups. | Can be configured to work alongside the existing Go service layer for network policy enforcement. |
-| **Headscale** | Network & Security | Provides a self-hosted coordination layer for Tailscale-compatible networking, preserving sovereignty for users who want mesh VPN access without relying on a third-party control plane. | Should integrate with the orchestration layer to manage node registration and policies. |
-| **Jellyseerr** | Media Management | Offers a clean, widely adopted media request interface that supports Jellyfin and Emby, providing better compatibility than Overseerr/Ombi alone. | Likely integrates with Jellyfin/Emby APIs; complements the Arr stack workflow. |
+---
 
-### Tier 2: Highly Recommended
-*These applications significantly expand core functionality into productivity, automation, and content normalization.*
+## 2. The 19 Added Bare-Metal Packages
 
-| Application | Category | Priority Rationale | Integration Notes |
-| :--- | :--- | :--- | :--- |
-| **Paperless-ngx** | Document Management | The definitive solution for self-hosted document capture. It uses OCR to digitize and tag household records, a staple feature in modern homelabs. | Likely requires robust storage integration (MinIO/Nextcloud) and database connectivity. |
-| **n8n** | Automation & Workflow | Provides low-code workflow automation capabilities that integrate deeply with the Arr stack, allowing users to build complex processes without custom scripting. | Should leverage AetherFlow's internal API hooks for event triggering and data flow management. |
-| **Tdarr / FileFlows** | Media Processing | Crucial for media normalization and storage optimization by automatically transcoding large files (e.g., H264 to HEVC), directly supporting Plex/Jellyfin efficiency. | Likely requires high CPU resources; should be managed as a background service via the Go orchestrator. |
-| **Unpackerr** | Utilities / Arr Stack | A high-leverage, low-surface area utility that provides significant quality-of-life improvements for users heavily invested in media acquisition workflows. | Should integrate directly with downloaders (qBittorrent/SABnzbd) and the Arr stack APIs. |
-| **Databases as a Service** | Infrastructure Enabler | Provides managed PostgreSQL, MariaDB, or Redis instances. This is highly valuable for advanced custom applications that require persistent state beyond simple file storage. | Should be deployed and managed atomically by the AetherFlow orchestration layer to ensure consistency. |
+Milestone 2 through Milestone 5 introduced 19 high-impact bare-metal packages, bringing the catalog from 36 base packages to 55 packages. Each package features clean-room native installer and uninstaller scripts, update tracking automation, and unified blueprint definitions:
 
-### Tier 3: Strong Additions
-*Apps that fill specific niches, enhance user experience, and round out the "Swiss Army Knife" appeal.*
+| # | Package | Category | Default Port | Service / Companion Units | Native Implementation Architecture |
+|---|---|---|---|---|---|
+| 1 | **jellyseerr** | Media | 5055 | `jellyseerr.service` | Standalone Node.js native service; requests proxy for Jellyfin/Emby/Arr stack. |
+| 2 | **adguardhome** | Network | 3080 | `adguardhome.service` | Upstream official Go binary with native DNS, DoH, DoT, and DNS-over-QUIC filtering. |
+| 3 | **rtorrent** | Downloaders | 0 (SCGI) | `rtorrent.service` | Native C++ BitTorrent daemon with dual SCGI socket (`/run/rtorrent/rpc.sock`) and loopback port (`127.0.0.1:15000`). |
+| 4 | **rutorrent** | Downloaders | 8087 | `apache2.service` | Web UI deployed at `/var/www/rutorrent` (with `/srv/rutorrent` symlink) communicating via SCGI bridge to rTorrent. |
+| 5 | **rclone** | Cloud | 5572 | `rclone.service`, `rclone-vfs.service` | Upstream Go binary running `rclone rcd --rc-web-gui` plus companion `rclone-vfs` mount unit for `/mnt/remote`. |
+| 6 | **mergerfs** | Cloud | 0 | `mergerfs.service` | High-performance FUSE union filesystem pooling `/mnt/local` and `/mnt/remote` into `/mnt/unionfs`. |
+| 7 | **cloudplow** | Cloud | 0 | `cloudplow.service` | Automated cloud uploader running in isolated Python virtualenv (`/opt/cloudplow/.venv`) with blueprint dependencies on `rclone` and `mergerfs`. |
+| 8 | **unpackerr** | Media | 0 | `unpackerr.service` | Upstream Go binary extracting downloaded media archives with Zero-Touch Arr discovery. |
+| 9 | **autoscan** | Media | 3030 | `autoscan.service` | Upstream Go binary triggering atomic library scans across Plex/Jellyfin/Emby with Zero-Touch Arr discovery. |
+| 10 | **recyclarr** | Media | 0 | `recyclarr.service`, `recyclarr.timer` | Native C# binary synchronizing TRaSH guides into Sonarr/Radarr via companion systemd timer and oneshot unit. |
+| 11 | **audiobookshelf** | Media | 13378 | `audiobookshelf.service` | Upstream official bare-metal package for self-hosted audiobooks and podcasts with sqlite storage. |
+| 12 | **kavita** | Media | 5002 | `kavita.service` | Native .NET binary server providing dedicated web reader for comics, manga, and ebooks. |
+| 13 | **calibreweb** | Media | 8083 | `calibreweb.service` | Python application providing an intuitive web interface for browsing and reading Calibre e-book libraries. |
+| 14 | **librespeed** | Network | 8988 | `librespeed.service` | Lightweight standalone Go binary (`speedtest-go`) providing local network speed benchmarking. |
+| 15 | **thelounge** | Network | 9000 | `thelounge.service` | Modern self-hosted web IRC client running natively under Node.js with push notifications and rich embeds. |
+| 16 | **znc** | Network | 6501 | `znc.service` | Upstream native IRC network bouncer supporting multi-network connections and SSL. |
+| 17 | **scrutiny** | Monitoring | 8098 | `scrutiny.service`, `scrutiny-collector.timer` | Hard drive SMART health dashboard with companion periodic SMART collector timer. |
+| 18 | **paperless-ngx** | Cloud | 8010 | `paperless-webserver.service`, `paperless-worker.service`, `paperless-scheduler.service` | Native bare-metal deployment utilizing `redis-server`, `tesseract-ocr`, Gunicorn webserver, Celery workers, and Beat scheduler. |
+| 19 | **n8n** | Automation | 5678 | `n8n.service` | Native Node.js enterprise low-code workflow automation platform. |
 
-| Application | Category | Priority Rationale | Integration Notes |
-| :--- | :--- | :--- | :--- |
-| **AdGuard Home** | Network & Security | A strong alternative to Pi-hole with a cleaner UI and native support for DoH/DoT, appealing to users seeking modern DNS management. | Likely operates at the network level; requires careful configuration alongside existing Pi-hole instances. |
-| **Audiobookshelf** | Media Management | Complements Readarr and Navidrome by providing a dedicated, high-quality server for audiobooks and podcasts. | Should integrate with file storage (Syncthing/Nextcloud) to access media libraries efficiently. |
-| **Scrypted** | Home Automation Bridge | A great smart-home bridge app that enhances the functionality of Home Assistant, especially regarding camera feeds and HomeKit bridging capabilities. | Likely requires tight integration with Home Assistant events for seamless automation triggers. |
-| **Stirling-PDF** | Document Utilities | A hugely popular, fully local web app for manipulating PDFs (merge, split, compress, watermark), adding high utility to the document management suite. | Should be deployed as a standalone service accessible via the Reverse Proxy. |
-| **Mealie / Tandoor Recipes** | Household Utility | These are incredibly popular household tools that increase platform stickiness and broaden appeal beyond technical users by providing everyday utility. | Low resource usage; integrates well with the existing Next.js frontend structure for display. |
-| **Mylar3** | Reading & Comics | Functions as a dedicated comic-book acquisition manager, complementing Readarr's book management capabilities. | Likely integrates with Readarr's metadata sources to automate content discovery and fetching. |
-| **Kavita** | Reading & Comics | Provides a high-quality web reader for comics and manga, offering a superior viewing experience compared to general file browsers. | Should integrate with the same acquisition pipelines as Mylar3. |
+---
 
-### Tier 4: Nice to Have
-*Specialized tools that cater to specific user interests and advanced monitoring.*
+## 3. Core Architectural Modernizations
 
-| Application | Category | Priority Rationale | Integration Notes |
-| :--- | :--- | :--- | :--- |
-| **Seafile** | Cloud & Storage | Offers a lightning-fast, C-based alternative to Nextcloud for file syncing. It is valuable because it provides Dropbox-style speed without the full feature bloat of productivity suites. | Can run parallel to Nextcloud but should be marketed as a high-performance sync solution. |
-| **Firefly III / Actual Budget** | Finance & Accounting | Strong self-hosted finance apps with broad appeal, adding a highly useful utility that appeals to the household user base. | Requires dedicated database resources; can be deployed as an independent service. |
-| **IT-Tools** | Developer Utilities | A beautiful, static dashboard of developer tools (hash generators, JSON formatters, JWT decoders) that caters specifically to technical users and developers. | Low resource usage; ideal for inclusion within the Next.js frontend structure. |
-| **MinIO** | Storage / DevOps | Provides S3-compatible object storage. Highly valuable for power users, backups, and development workflows requiring cloud-native APIs. | Can serve as a high-performance backend storage layer for other applications like Tdarr. |
-| **Speedtest Tracker** | Monitoring & Network | Continuously runs speed tests on a schedule and graphs the results, providing essential diagnostic data for network performance and ISP throttling issues. | Should integrate with Grafana/Prometheus to provide historical network health metrics. |
-| **RomM / EmulatorJS** | Entertainment | Allows users to manage and play retro gaming collections directly in the web browser, appealing to a specific entertainment niche. | Requires dedicated storage for ROMs; minimal infrastructure overhead. |
+### 3.1 Zero-Touch Arr API Key Auto-Discovery
 
-### Tier 5: Future / Heavy / Complex
-*These applications are valuable but often require significant system resources or represent functional overlap with AetherFlow's core strengths.*
+AetherFlow v3.2 eliminates manual copy-pasting of API keys when configuring companion tools. The installer scripts for `unpackerr`, `autoscan`, and `recyclarr` execute automated local inspection:
+*   When installed, each script scans `/var/lib/{sonarr,radarr,lidarr,readarr}/config.xml`.
+*   The script parses `<ApiKey>` nodes directly via regex and streams verified tokens into target configuration files:
+    *   `/etc/unpackerr/unpackerr.conf`: Configures active Sonarr/Radarr/Lidarr/Readarr integration sections.
+    *   `/etc/autoscan/config.yml`: Auto-registers active Arr webhook triggers.
+    *   `/var/lib/recyclarr/recyclarr.yml`: Populates base URLs and API keys for TRaSH quality profiles.
+*   If an Arr application is not yet installed, safe placeholders are generated, allowing zero-friction operation once the application is added.
 
-| Application | Category | Priority Rationale | Integration Notes |
-| :--- | :--- | :--- | :--- |
-| **Homepage / Homarr** | Dashboards | While useful for a distinct landing page, this is low priority. The custom Next.js/Tailwind UI already serves as the primary, integrated dashboard and orchestrator. | Only pursue if a separate, highly stylized public-facing portal is required that differs significantly from the admin UI. |
-| **Wiki.js / Outline** | Documentation | Good for internal notes and documentation storage, but does not provide a unique competitive advantage over the existing platform's ability to host custom docs via Next.js. | Low priority unless AetherFlow expands into enterprise knowledge management features. |
-| **Mailcow / Docker Mailserver** | Communication | Highly requested by power users, but notoriously difficult to support due to complex DNS requirements (DKIM/DMARC) and spam blacklisting risks. | Should be treated as an advanced, high-maintenance offering requiring expert operational knowledge. |
+### 3.2 ruTorrent Plugin Architecture & Script Repair
 
-## 4. Fastest High-Impact Gap Closers
+Legacy ruTorrent plugin installers suffered from script fragility, artificial delay loops, and unhandled errors under strict shell settings. In v3.2:
+*   **Unbound Variable Elimination:** All 52 `installplugin-*` and `removeplugin-*` scripts explicitly bind `rutorrent="${rutorrent:-/var/www/rutorrent/}"`, preventing fatal `rutorrent: unbound variable` aborts under `common.sh`'s `set -euo pipefail`.
+*   **Zero Artificial Delays:** Stripped all legacy `sleep 5` loops (and typos like `sleep5`), saving 15 seconds per plugin installation and 10 seconds per plugin removal.
+*   **Directory Safety & 3-Tier Fallback:**
+    *   Guaranteed directory creation (`mkdir -p "${rutorrent}plugins"`).
+    *   3-Tier asset acquisition: checks local plugin vault `/etc/AetherFlow/rtplugins/` first; checks existing destination; and cleanly falls back to upstream Git cloning if local archives are absent.
+*   **Retired Script Purge:** Completely removed deprecated `autodl-irssi` plugin scripts (`installplugin-autodl-irssi`, `removeplugin-autodl-irssi`, `removeplugin-autodl`) and `packages/system/upgradeIRSSI`.
 
-The following additions offer the highest leverage for quickly closing competitor gaps and enhancing user value:
+### 3.3 Storage Sandboxing & Systemd Isolation (`af-systemd-sandbox` & UnionFS)
 
-*   **Immich:** Immediately transforms AetherFlow into a comprehensive personal cloud platform, addressing the largest market demand.
-*   **Reverse Proxy (Caddy/NPM):** Solves the critical ingress problem, enabling secure external access to all managed services with minimal configuration friction.
-*   **Paperless-ngx:** Introduces professional document workflow and OCR capabilities, moving AetherFlow into the realm of household record management.
-*   **Jellyseerr:** Provides a clean, standardized media request layer that is highly sought after by users of Jellyfin/Emby.
-*   **AdGuard Home:** Offers a modern, competitive DNS filtering solution to complement Pi-hole and broaden network utility.
-*   **n8n:** Unlocks powerful, low-code automation capabilities, transforming AetherFlow from an orchestrator into a true workflow engine.
+To provide security without the virtualization penalty of containers, AetherFlow implements strict kernel sandboxing via systemd drop-in configurations:
+*   **UnionFS (`/mnt/unionfs`):** All media, downloader, and cloud applications declare optional bind mounts `-/mnt/unionfs` in `sandbox_rw_paths`. The leading `-` ensures services start without error if union mounts are unmounted or absent.
+*   **Hardware and FUSE Exemptions:** Privileged units requiring direct hardware access or FUSE kernel capabilities are exempted from restrictive sandbox drop-ins:
+    *   `mergerfs.service` (requires `CAP_SYS_ADMIN` and `/dev/fuse`)
+    *   `rclone-vfs.service` (requires `/dev/fuse` and mount permissions)
+    *   `scrutiny-collector.service` (requires raw disk ioctl access for `smartctl`)
+*   **Multi-Unit Service Resolution:** In `backend/services/service_manager.go`, `ResolveServiceUnits()` and `MatchesUnitFilter()` resolve companion services dynamically. Operations on `paperless-ngx` manage `paperless-webserver`, `paperless-worker`, and `paperless-scheduler` in unison; `scrutiny` manages both the web dashboard and `scrutiny-collector`; `recyclarr` manages both unit and timer; and `rclone` manages both `rclone.service` and `rclone-vfs.service`.
 
-## 5. Final Strategic Recommendation
+---
 
-AetherFlow must prioritize **foundational platform unlocks** over mere ecosystem expansion. The immediate focus should be on Reverse Proxy and Immich first, with PhotoPrism retained as an alternative path for users who prefer its indexing and library model. These two additions fundamentally change AetherFlow's market positioning from a "media server" to a "personal cloud."
+## 4. Strategic Road Ahead & Sovereign Bare-Metal Horizon
 
-We recommend delaying third-party dashboard solutions (Homarr/Homepage) because our custom Next.js UI already provides a superior, integrated orchestration experience. Instead, we should focus on making the *underlying services* more powerful and accessible by integrating Tier 2 enablers like **Databases as a Service** and workflow engines like **n8n**. This strategy ensures AetherFlow differentiates itself not by having the most apps, but by offering the deepest, most reliable, and most automated orchestration layer in the market.
+### 4.1 Resolution of Container-Centric Gaps
+
+Previous roadmaps recommended Docker-heavy applications such as `Immich` and `Mailcow`. Under AetherFlow's strict Zero-Docker mandate, these have been strategically resolved:
+1.  **Document Management:** Fully solved via bare-metal **Paperless-ngx** (native OCR, Redis caching, Gunicorn/Celery orchestration).
+2.  **Workflow Automation:** Fully solved via native **n8n** (Node.js engine, webhook routing, Arr stack event integration).
+3.  **Unified Ingress & SSL:** Fully solved via embedded **CaddyManager** (declarative REST API routing, auto Let's Encrypt / ZeroSSL, LAN split-horizon).
+4.  **Network Mesh & VPN:** Fully solved via native **WireGuard** and **Tailscale** kernel integration.
+5.  **Personal Photo Management:** Rather than introducing fragile Docker workarounds for Immich, AetherFlow prioritizes native bare-metal options (such as PhotoPrism or future native Go/Rust implementations) that execute directly against local filesystem trees with zero container overhead.
+
+### 4.2 Quality Assurance & Verification Invariants
+
+AetherFlow v3.2 maintains a zero-regression invariant verified by automated pipelines:
+*   **Catalog Blueprint Integrity:** 100% of the 55 packages have corresponding non-nil blueprints, matching `default_port` mappings, and valid `shouldTrackPackage` update metadata.
+*   **Script Parity:** Exactly 55 `installpackage-*` and 55 `removepackage-*` scripts exist, all passing `bash -n` syntax validation with zero Docker references.
+*   **Zero Port Collisions:** Every port-bearing application possesses a unique listen port with zero collisions against core system ports (`80`, `443`, `8080`).
+*   **Surgical Audit:** Zero `P0_CRITICAL` and zero `P1_HIGH` defects across the working tree via McSurgeon static pre-scan and multi-lens verification.

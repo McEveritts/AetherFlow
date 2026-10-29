@@ -1,0 +1,3495 @@
+{
+  "version": "3.1.7",
+  "mode": "contract",
+  "timestamp": "2026-10-29T05:11:48Z",
+  "total": 387,
+  "passed": 387,
+  "failed": 0,
+  "skipped": 0,
+  "duration_ms": 488.91,
+  "results": [
+    {
+      "test_id": "T1_F01_01",
+      "feature_id": "F01",
+      "tier": 1,
+      "description": "Directory listing returns entries array and path metadata for allowed path",
+      "status": "PASS",
+      "duration_ms": 0.77,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F01_02",
+      "feature_id": "F01",
+      "tier": 1,
+      "description": "Parent path is accurately computed for nested subdirectories",
+      "status": "PASS",
+      "duration_ms": 0.19,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F01_03",
+      "feature_id": "F01",
+      "tier": 1,
+      "description": "Each directory entry contains name, path, is_dir, size, and mod_time",
+      "status": "PASS",
+      "duration_ms": 0.12,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F01_04",
+      "feature_id": "F01",
+      "tier": 1,
+      "description": "Symlinks pointing inside allowed roots are resolved and accessible",
+      "status": "PASS",
+      "duration_ms": 0.11,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F01_05",
+      "feature_id": "F01",
+      "tier": 1,
+      "description": "Compatibility alias /api/fs routes to the Go filesystem browser",
+      "status": "PASS",
+      "duration_ms": 0.11,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F02_01",
+      "feature_id": "F02",
+      "tier": 1,
+      "description": "Valid session cookie returns new JWT token with HTTP 200",
+      "status": "PASS",
+      "duration_ms": 0.21,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F02_02",
+      "feature_id": "F02",
+      "tier": 1,
+      "description": "Refresh response includes updated future expires_at timestamp",
+      "status": "PASS",
+      "duration_ms": 0.51,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F02_03",
+      "feature_id": "F02",
+      "tier": 1,
+      "description": "Refresh response includes user object with id, username, and role",
+      "status": "PASS",
+      "duration_ms": 0.21,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F02_04",
+      "feature_id": "F02",
+      "tier": 1,
+      "description": "Rotated token successfully authenticates subsequent requests",
+      "status": "PASS",
+      "duration_ms": 0.17,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F02_05",
+      "feature_id": "F02",
+      "tier": 1,
+      "description": "Refresh endpoint allows X-Requested-With header without CSRF token block",
+      "status": "PASS",
+      "duration_ms": 0.26,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F03_01",
+      "feature_id": "F03",
+      "tier": 1,
+      "description": "PUT /api/v1/auth/profile/password is registered in router",
+      "status": "PASS",
+      "duration_ms": 0.07,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F03_02",
+      "feature_id": "F03",
+      "tier": 1,
+      "description": "Current password is verified using bcrypt before applying changes",
+      "status": "PASS",
+      "duration_ms": 0.14,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F03_03",
+      "feature_id": "F03",
+      "tier": 1,
+      "description": "New password length is enforced (minimum 8 characters)",
+      "status": "PASS",
+      "duration_ms": 0.13,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F03_04",
+      "feature_id": "F03",
+      "tier": 1,
+      "description": "New password is encrypted with bcrypt before saving to users table",
+      "status": "PASS",
+      "duration_ms": 0.1,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F03_05",
+      "feature_id": "F03",
+      "tier": 1,
+      "description": "Password mutation emits an audit log event",
+      "status": "PASS",
+      "duration_ms": 0.15,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F04_01",
+      "feature_id": "F04",
+      "tier": 1,
+      "description": "PUT /api/v1/auth/profile/avatar is registered in routes.go",
+      "status": "PASS",
+      "duration_ms": 0.07,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F04_02",
+      "feature_id": "F04",
+      "tier": 1,
+      "description": "DELETE /api/v1/auth/profile/avatar is registered in routes.go",
+      "status": "PASS",
+      "duration_ms": 0.17,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F04_03",
+      "feature_id": "F04",
+      "tier": 1,
+      "description": "Avatar mutation accepts and stores valid image data URIs",
+      "status": "PASS",
+      "duration_ms": 0.12,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F04_04",
+      "feature_id": "F04",
+      "tier": 1,
+      "description": "DELETE avatar handler resets user avatar column to empty string",
+      "status": "PASS",
+      "duration_ms": 0.12,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F04_05",
+      "feature_id": "F04",
+      "tier": 1,
+      "description": "GET /api/v1/auth/profile returns the updated avatar",
+      "status": "PASS",
+      "duration_ms": 0.1,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F05_01",
+      "feature_id": "F05",
+      "tier": 1,
+      "description": "GET /api/v1/admin/ingress/configs returns list of app ingress records",
+      "status": "PASS",
+      "duration_ms": 0.11,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F05_02",
+      "feature_id": "F05",
+      "tier": 1,
+      "description": "PUT /api/v1/admin/ingress/apps/:appName upserts domain and port routing",
+      "status": "PASS",
+      "duration_ms": 0.07,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F05_03",
+      "feature_id": "F05",
+      "tier": 1,
+      "description": "Ingress handler persists configurations to app_ingress_configs table",
+      "status": "PASS",
+      "duration_ms": 0.08,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F05_04",
+      "feature_id": "F05",
+      "tier": 1,
+      "description": "Ingress update invokes CaddyManager to reload reverse proxy routes",
+      "status": "PASS",
+      "duration_ms": 0.07,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F05_05",
+      "feature_id": "F05",
+      "tier": 1,
+      "description": "Compatibility aliases /api/ingress/* are registered for frontend store",
+      "status": "PASS",
+      "duration_ms": 0.07,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F06_01",
+      "feature_id": "F06",
+      "tier": 1,
+      "description": "GET /api/v1/auth/system/topology is registered in router",
+      "status": "PASS",
+      "duration_ms": 0.06,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F06_02",
+      "feature_id": "F06",
+      "tier": 1,
+      "description": "Topology response structure includes nodes and links arrays",
+      "status": "PASS",
+      "duration_ms": 0.16,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F06_03",
+      "feature_id": "F06",
+      "tier": 1,
+      "description": "Zero hardcoded fake infrastructure nodes returned in topology",
+      "status": "PASS",
+      "duration_ms": 0.19,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F06_04",
+      "feature_id": "F06",
+      "tier": 1,
+      "description": "Topology models actual runtime services: SQLite WAL, Runner Daemon, Caddy",
+      "status": "PASS",
+      "duration_ms": 0.14,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F06_05",
+      "feature_id": "F06",
+      "tier": 1,
+      "description": "All topology link sources and targets reference valid node IDs",
+      "status": "PASS",
+      "duration_ms": 0.09,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F07_01",
+      "feature_id": "F07",
+      "tier": 1,
+      "description": "Runner socket implements POST /v1/sandbox for systemd sandboxing",
+      "status": "PASS",
+      "duration_ms": 0.09,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F07_02",
+      "feature_id": "F07",
+      "tier": 1,
+      "description": "Runner socket implements POST /v1/hosts for atomic /etc/hosts updates",
+      "status": "PASS",
+      "duration_ms": 0.08,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F07_03",
+      "feature_id": "F07",
+      "tier": 1,
+      "description": "Runner socket implements POST /v1/network for WireGuard and Tailscale",
+      "status": "PASS",
+      "duration_ms": 0.07,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F07_04",
+      "feature_id": "F07",
+      "tier": 1,
+      "description": "Runner socket implements POST /v1/quota for setdisk disk quota management",
+      "status": "PASS",
+      "duration_ms": 0.07,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F07_05",
+      "feature_id": "F07",
+      "tier": 1,
+      "description": "Runner socket path defaults to /run/aetherflow/runner.sock with mode 0660",
+      "status": "PASS",
+      "duration_ms": 0.07,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F08_01",
+      "feature_id": "F08",
+      "tier": 1,
+      "description": "af_heal.go restarts services via runner socket without direct systemctl",
+      "status": "PASS",
+      "duration_ms": 0.09,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F08_02",
+      "feature_id": "F08",
+      "tier": 1,
+      "description": "arr_injector.go removes direct sudo systemctl calls",
+      "status": "PASS",
+      "duration_ms": 0.2,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F08_03",
+      "feature_id": "F08",
+      "tier": 1,
+      "description": "deploy_orchestrator.go routes service lifecycle through runner",
+      "status": "PASS",
+      "duration_ms": 0.1,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F08_04",
+      "feature_id": "F08",
+      "tier": 1,
+      "description": "systemd_sandbox.go dispatches sandboxing mutations to /v1/sandbox",
+      "status": "PASS",
+      "duration_ms": 0.08,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F08_05",
+      "feature_id": "F08",
+      "tier": 1,
+      "description": "local_dns_manager.go and quota_manager.go route mutations via runner",
+      "status": "PASS",
+      "duration_ms": 0.31,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F09_01",
+      "feature_id": "F09",
+      "tier": 1,
+      "description": "Migration 17 is defined in backend/db/db.go",
+      "status": "PASS",
+      "duration_ms": 0.1,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F09_02",
+      "feature_id": "F09",
+      "tier": 1,
+      "description": "Migration 17 creates app_ingress_configs table with correct columns",
+      "status": "PASS",
+      "duration_ms": 0.1,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F09_03",
+      "feature_id": "F09",
+      "tier": 1,
+      "description": "app_name column is PRIMARY KEY in app_ingress_configs",
+      "status": "PASS",
+      "duration_ms": 0.07,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F09_04",
+      "feature_id": "F09",
+      "tier": 1,
+      "description": "Go struct AppIngressConfig exists in models or api package",
+      "status": "PASS",
+      "duration_ms": 0.11,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F09_05",
+      "feature_id": "F09",
+      "tier": 1,
+      "description": "CREATE TABLE IF NOT EXISTS ensures idempotent migration runs",
+      "status": "PASS",
+      "duration_ms": 0.15,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F10_01",
+      "feature_id": "F10",
+      "tier": 1,
+      "description": "backend/main.go initializes cluster manager cleanly before serving",
+      "status": "PASS",
+      "duration_ms": 0.1,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F10_02",
+      "feature_id": "F10",
+      "tier": 1,
+      "description": "Cluster handlers respond without nil pointer panic",
+      "status": "PASS",
+      "duration_ms": 0.09,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F10_03",
+      "feature_id": "F10",
+      "tier": 1,
+      "description": "GET /api/v1/admin/cluster/nodes returns node list",
+      "status": "PASS",
+      "duration_ms": 0.07,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F10_04",
+      "feature_id": "F10",
+      "tier": 1,
+      "description": "POST /api/v1/admin/cluster/enroll generates worker join token",
+      "status": "PASS",
+      "duration_ms": 0.07,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F10_05",
+      "feature_id": "F10",
+      "tier": 1,
+      "description": "GET /api/v1/admin/cluster/nodes/:id/metrics returns node telemetry",
+      "status": "PASS",
+      "duration_ms": 0.06,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F11_01",
+      "feature_id": "F11",
+      "tier": 1,
+      "description": "frontend/src/app/api/fs/route.ts is deleted from repository",
+      "status": "PASS",
+      "duration_ms": 0.03,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F11_02",
+      "feature_id": "F11",
+      "tier": 1,
+      "description": "next.config.ts enables output: export when NEXT_STATIC_EXPORT=1",
+      "status": "PASS",
+      "duration_ms": 0.08,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F11_03",
+      "feature_id": "F11",
+      "tier": 1,
+      "description": "No incompatible server routes exist in frontend/src/app/api",
+      "status": "PASS",
+      "duration_ms": 0.02,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F11_04",
+      "feature_id": "F11",
+      "tier": 1,
+      "description": "PathSelector.tsx targets authenticated Go backend filesystem endpoint",
+      "status": "PASS",
+      "duration_ms": 0.08,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F11_05",
+      "feature_id": "F11",
+      "tier": 1,
+      "description": "Zero Node.js fs/promises imports across frontend/src/",
+      "status": "PASS",
+      "duration_ms": 209.08,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F12_01",
+      "feature_id": "F12",
+      "tier": 1,
+      "description": "Unit tests exist for Go directory browser handler",
+      "status": "PASS",
+      "duration_ms": 0.07,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F12_02",
+      "feature_id": "F12",
+      "tier": 1,
+      "description": "Unit tests exist for auth session refresh and password mutation",
+      "status": "PASS",
+      "duration_ms": 0.13,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F12_03",
+      "feature_id": "F12",
+      "tier": 1,
+      "description": "Unit tests exist for ingress CRUD and SQLite persistence",
+      "status": "PASS",
+      "duration_ms": 0.05,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F12_04",
+      "feature_id": "F12",
+      "tier": 1,
+      "description": "Unit tests exist for new privileged runner socket endpoints",
+      "status": "PASS",
+      "duration_ms": 0.17,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F12_05",
+      "feature_id": "F12",
+      "tier": 1,
+      "description": "Unit tests exist for cluster manager and node telemetry",
+      "status": "PASS",
+      "duration_ms": 0.08,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F13_01",
+      "feature_id": "F13",
+      "tier": 1,
+      "description": "globals.css defines --obs-bg-base as #000000",
+      "status": "PASS",
+      "duration_ms": 0.27,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F13_02",
+      "feature_id": "F13",
+      "tier": 1,
+      "description": "body::before renders 3-orb radial aurora and base vertical gradient",
+      "status": "PASS",
+      "duration_ms": 0.11,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F13_03",
+      "feature_id": "F13",
+      "tier": 1,
+      "description": "body::after renders SVG fractal micro-grain and spatial edge vignette",
+      "status": "PASS",
+      "duration_ms": 0.09,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F13_04",
+      "feature_id": "F13",
+      "tier": 1,
+      "description": "Atmosphere pseudo-elements use GPU containment and strict layer caching",
+      "status": "PASS",
+      "duration_ms": 0.22,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F13_05",
+      "feature_id": "F13",
+      "tier": 1,
+      "description": "body background is transparent to expose underlying atmospheric layers",
+      "status": "PASS",
+      "duration_ms": 0.1,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F14_01",
+      "feature_id": "F14",
+      "tier": 1,
+      "description": "--obs-specular-top directional highlight token is defined",
+      "status": "PASS",
+      "duration_ms": 0.08,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F14_02",
+      "feature_id": "F14",
+      "tier": 1,
+      "description": "--obs-chromatic-edge-gradient prism rim token is defined",
+      "status": "PASS",
+      "duration_ms": 0.07,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F14_03",
+      "feature_id": "F14",
+      "tier": 1,
+      "description": "--obs-ease-spring-120 high refresh curve is defined",
+      "status": "PASS",
+      "duration_ms": 0.07,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F14_04",
+      "feature_id": "F14",
+      "tier": 1,
+      "description": ".glass-card class implements specular borders and chromatic refraction",
+      "status": "PASS",
+      "duration_ms": 0.07,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F14_05",
+      "feature_id": "F14",
+      "tier": 1,
+      "description": ".glass-button-primary uses indigo-to-fuchsia gradient",
+      "status": "PASS",
+      "duration_ms": 0.08,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F15_01",
+      "feature_id": "F15",
+      "tier": 1,
+      "description": "Mobile bottom dock component is rendered with md:hidden",
+      "status": "PASS",
+      "duration_ms": 0.1,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F15_02",
+      "feature_id": "F15",
+      "tier": 1,
+      "description": "Desktop sidebar expands from icon rail to full navigation panel",
+      "status": "PASS",
+      "duration_ms": 0.07,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F15_03",
+      "feature_id": "F15",
+      "tier": 1,
+      "description": "Mobile navigation items enforce min 44px touch targets",
+      "status": "PASS",
+      "duration_ms": 0.14,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F15_04",
+      "feature_id": "F15",
+      "tier": 1,
+      "description": "obs-beacon-* utility classes style live/reconnecting/danger beacons",
+      "status": "PASS",
+      "duration_ms": 0.2,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F15_05",
+      "feature_id": "F15",
+      "tier": 1,
+      "description": "Mobile dock applies safe-area-inset-bottom padding",
+      "status": "PASS",
+      "duration_ms": 0.18,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F16_01",
+      "feature_id": "F16",
+      "tier": 1,
+      "description": "Zero blanket 'overflow-x: hidden' on html or body tags in globals.css",
+      "status": "PASS",
+      "duration_ms": 0.47,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F16_02",
+      "feature_id": "F16",
+      "tier": 1,
+      "description": "Main content area uses min-w-0 to prevent flex item blowout",
+      "status": "PASS",
+      "duration_ms": 0.1,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F16_03",
+      "feature_id": "F16",
+      "tier": 1,
+      "description": "AuditTab scopes wide tables with overflow-x-auto",
+      "status": "PASS",
+      "duration_ms": 0.09,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F16_04",
+      "feature_id": "F16",
+      "tier": 1,
+      "description": "DataGrid primitive encapsulates wide tabular layouts",
+      "status": "PASS",
+      "duration_ms": 0.19,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F16_05",
+      "feature_id": "F16",
+      "tier": 1,
+      "description": "page.tsx root container does not truncate sticky headers with overflow-hidden",
+      "status": "PASS",
+      "duration_ms": 0.09,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F17_01",
+      "feature_id": "F17",
+      "tier": 1,
+      "description": "DashboardSettingsTab exposes aurora intensity slider",
+      "status": "PASS",
+      "duration_ms": 0.22,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F17_02",
+      "feature_id": "F17",
+      "tier": 1,
+      "description": "DashboardSettingsTab provides static 120Hz cached vs animated toggle",
+      "status": "PASS",
+      "duration_ms": 0.15,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F17_03",
+      "feature_id": "F17",
+      "tier": 1,
+      "description": "DashboardSettingsTab provides micro-grain enable/disable toggle",
+      "status": "PASS",
+      "duration_ms": 0.14,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F17_04",
+      "feature_id": "F17",
+      "tier": 1,
+      "description": "DashboardSettingsTab provides density / card lift control",
+      "status": "PASS",
+      "duration_ms": 0.14,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F17_05",
+      "feature_id": "F17",
+      "tier": 1,
+      "description": "Atmosphere preferences persist in localStorage or settings store",
+      "status": "PASS",
+      "duration_ms": 0.07,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F18_01",
+      "feature_id": "F18",
+      "tier": 1,
+      "description": "Card.tsx applies Obsidian V2 glass tokens and specular borders",
+      "status": "PASS",
+      "duration_ms": 0.12,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F18_02",
+      "feature_id": "F18",
+      "tier": 1,
+      "description": "Button.tsx variants use Obsidian V2 chromatic gradients",
+      "status": "PASS",
+      "duration_ms": 0.12,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F18_03",
+      "feature_id": "F18",
+      "tier": 1,
+      "description": "Input.tsx renders recessed dark well with specular focus ring",
+      "status": "PASS",
+      "duration_ms": 0.07,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F18_04",
+      "feature_id": "F18",
+      "tier": 1,
+      "description": "Modal.tsx renders .glass-panel with backdrop blur",
+      "status": "PASS",
+      "duration_ms": 0.07,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F18_05",
+      "feature_id": "F18",
+      "tier": 1,
+      "description": "login/page.tsx rendered with Obsidian V2 atmosphere and zero redundant blur divs",
+      "status": "PASS",
+      "duration_ms": 0.11,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F19_01",
+      "feature_id": "F19",
+      "tier": 1,
+      "description": "BandwidthCard is imported and rendered in OverviewTab.tsx",
+      "status": "PASS",
+      "duration_ms": 0.22,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F19_02",
+      "feature_id": "F19",
+      "tier": 1,
+      "description": "PredictionsCard is imported and rendered in OverviewTab.tsx",
+      "status": "PASS",
+      "duration_ms": 0.15,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F19_03",
+      "feature_id": "F19",
+      "tier": 1,
+      "description": "PredictionsCard fetches metrics from /api/v1/admin/ai/predictions/history",
+      "status": "PASS",
+      "duration_ms": 0.17,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F19_04",
+      "feature_id": "F19",
+      "tier": 1,
+      "description": "PredictionsCard contains zero synthetic Math.sin() trend data generation",
+      "status": "PASS",
+      "duration_ms": 0.2,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F19_05",
+      "feature_id": "F19",
+      "tier": 1,
+      "description": "PredictionsCard loads existing prediction report on mount via useEffect",
+      "status": "PASS",
+      "duration_ms": 0.09,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F20_01",
+      "feature_id": "F20",
+      "tier": 1,
+      "description": "MetadataTab is imported and reachable inside MediaFlowTab.tsx",
+      "status": "PASS",
+      "duration_ms": 0.09,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F20_02",
+      "feature_id": "F20",
+      "tier": 1,
+      "description": "PathSelector component is integrated for directory inputs",
+      "status": "PASS",
+      "duration_ms": 0.16,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F20_03",
+      "feature_id": "F20",
+      "tier": 1,
+      "description": "PathSelector queries /api/fs or /api/v1/auth/fs",
+      "status": "PASS",
+      "duration_ms": 0.08,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F20_04",
+      "feature_id": "F20",
+      "tier": 1,
+      "description": "MediaFlowTab uses apiFetch helper with cookie/CSRF authentication",
+      "status": "PASS",
+      "duration_ms": 0.07,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F20_05",
+      "feature_id": "F20",
+      "tier": 1,
+      "description": "MediaFlowTab eliminates stale localStorage.getItem('token') usages",
+      "status": "PASS",
+      "duration_ms": 0.07,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F21_01",
+      "feature_id": "F21",
+      "tier": 1,
+      "description": "ExternalAccessCard is imported and rendered in services/marketplace UI",
+      "status": "PASS",
+      "duration_ms": 0.14,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F21_02",
+      "feature_id": "F21",
+      "tier": 1,
+      "description": "DeploymentStatus is imported and rendered in deploy modal/tab",
+      "status": "PASS",
+      "duration_ms": 0.14,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F21_03",
+      "feature_id": "F21",
+      "tier": 1,
+      "description": "useIngressStore is wired to fetch and update ingress configs",
+      "status": "PASS",
+      "duration_ms": 0.15,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F21_04",
+      "feature_id": "F21",
+      "tier": 1,
+      "description": "useDeploymentStream connects to authenticated path /api/v1/auth/deploy/stream",
+      "status": "PASS",
+      "duration_ms": 0.08,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F21_05",
+      "feature_id": "F21",
+      "tier": 1,
+      "description": "backend/api/deploy_api.go returns streamTarget with /api/v1/auth/deploy/stream",
+      "status": "PASS",
+      "duration_ms": 0.08,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F22_01",
+      "feature_id": "F22",
+      "tier": 1,
+      "description": "ProfileTab.tsx wires Change Password button to modal form",
+      "status": "PASS",
+      "duration_ms": 0.09,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F22_02",
+      "feature_id": "F22",
+      "tier": 1,
+      "description": "Password change form dispatches PUT /api/v1/auth/profile/password",
+      "status": "PASS",
+      "duration_ms": 0.09,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F22_03",
+      "feature_id": "F22",
+      "tier": 1,
+      "description": "ProfileTab.tsx wires avatar change control to PUT /api/v1/auth/profile/avatar",
+      "status": "PASS",
+      "duration_ms": 0.07,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F22_04",
+      "feature_id": "F22",
+      "tier": 1,
+      "description": "ProfileTab.tsx wires Remove Avatar button to DELETE /api/v1/auth/profile/avatar",
+      "status": "PASS",
+      "duration_ms": 0.11,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F22_05",
+      "feature_id": "F22",
+      "tier": 1,
+      "description": "ProfileTab.tsx eliminates legacy 'Security Section (Mockup)' markers",
+      "status": "PASS",
+      "duration_ms": 0.15,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F23_01",
+      "feature_id": "F23",
+      "tier": 1,
+      "description": "AppTopologyMap.tsx queries /api/v1/auth/system/topology",
+      "status": "PASS",
+      "duration_ms": 0.08,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F23_02",
+      "feature_id": "F23",
+      "tier": 1,
+      "description": "AppTopologyMap eliminates hardcoded dummy nodes array",
+      "status": "PASS",
+      "duration_ms": 0.1,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F23_03",
+      "feature_id": "F23",
+      "tier": 1,
+      "description": "AppTopologyMap renders live running/stopped/degraded statuses",
+      "status": "PASS",
+      "duration_ms": 0.15,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F23_04",
+      "feature_id": "F23",
+      "tier": 1,
+      "description": "AppTopologyMap calculates node coordinates without canvas collisions",
+      "status": "PASS",
+      "duration_ms": 0.08,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F23_05",
+      "feature_id": "F23",
+      "tier": 1,
+      "description": "AppTopologyMap renders links connecting dependent services",
+      "status": "PASS",
+      "duration_ms": 0.07,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F24_01",
+      "feature_id": "F24",
+      "tier": 1,
+      "description": "NetworkTab.tsx exists in frontend/src/components/tabs/",
+      "status": "PASS",
+      "duration_ms": 0.03,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F24_02",
+      "feature_id": "F24",
+      "tier": 1,
+      "description": "NetworkTab is registered in Sidebar navigation",
+      "status": "PASS",
+      "duration_ms": 0.13,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F24_03",
+      "feature_id": "F24",
+      "tier": 1,
+      "description": "NetworkTab displays WireGuard peers and key generation controls",
+      "status": "PASS",
+      "duration_ms": 0.22,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F24_04",
+      "feature_id": "F24",
+      "tier": 1,
+      "description": "NetworkTab displays Tailscale status and route advertisement",
+      "status": "PASS",
+      "duration_ms": 0.17,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F24_05",
+      "feature_id": "F24",
+      "tier": 1,
+      "description": "NetworkTab queries /api/v1/admin/network/status",
+      "status": "PASS",
+      "duration_ms": 0.11,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F25_01",
+      "feature_id": "F25",
+      "tier": 1,
+      "description": "NotificationsSettingsTab.tsx exists in frontend/src/components/tabs/",
+      "status": "PASS",
+      "duration_ms": 0.03,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F25_02",
+      "feature_id": "F25",
+      "tier": 1,
+      "description": "Notifications tab is registered in navigation",
+      "status": "PASS",
+      "duration_ms": 0.26,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F25_03",
+      "feature_id": "F25",
+      "tier": 1,
+      "description": "Notifications tab lists alert rules with enabled toggles",
+      "status": "PASS",
+      "duration_ms": 0.36,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F25_04",
+      "feature_id": "F25",
+      "tier": 1,
+      "description": "Notifications tab supports channel management (discord, slack, email, webhook)",
+      "status": "PASS",
+      "duration_ms": 0.37,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F25_05",
+      "feature_id": "F25",
+      "tier": 1,
+      "description": "Notifications tab provides 'Test Channel' trigger button",
+      "status": "PASS",
+      "duration_ms": 0.36,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F26_01",
+      "feature_id": "F26",
+      "tier": 1,
+      "description": "QuotasBillingTab.tsx exists in frontend/src/components/tabs/",
+      "status": "PASS",
+      "duration_ms": 0.05,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F26_02",
+      "feature_id": "F26",
+      "tier": 1,
+      "description": "Quotas & Billing tab is registered in navigation",
+      "status": "PASS",
+      "duration_ms": 0.21,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F26_03",
+      "feature_id": "F26",
+      "tier": 1,
+      "description": "Quotas tab lists user storage usage and quota thresholds",
+      "status": "PASS",
+      "duration_ms": 0.29,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F26_04",
+      "feature_id": "F26",
+      "tier": 1,
+      "description": "Quotas tab lists billing webhook audit events",
+      "status": "PASS",
+      "duration_ms": 0.17,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F26_05",
+      "feature_id": "F26",
+      "tier": 1,
+      "description": "Quotas tab provides manual disk usage refresh button",
+      "status": "PASS",
+      "duration_ms": 0.25,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F27_01",
+      "feature_id": "F27",
+      "tier": 1,
+      "description": "ClusterTab.tsx exists in frontend/src/components/tabs/",
+      "status": "PASS",
+      "duration_ms": 0.03,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F27_02",
+      "feature_id": "F27",
+      "tier": 1,
+      "description": "Cluster tab is registered in navigation",
+      "status": "PASS",
+      "duration_ms": 0.15,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F27_03",
+      "feature_id": "F27",
+      "tier": 1,
+      "description": "ClusterTab lists worker nodes with status, CPU, and memory",
+      "status": "PASS",
+      "duration_ms": 0.1,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F27_04",
+      "feature_id": "F27",
+      "tier": 1,
+      "description": "ClusterTab provides Enroll Worker modal with join token",
+      "status": "PASS",
+      "duration_ms": 0.16,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F27_05",
+      "feature_id": "F27",
+      "tier": 1,
+      "description": "ClusterTab wires node removal to DELETE /api/v1/admin/cluster/nodes/:id",
+      "status": "PASS",
+      "duration_ms": 0.16,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F28_01",
+      "feature_id": "F28",
+      "tier": 1,
+      "description": "setup/templates/apt.sources/debian.template uses TLS https://",
+      "status": "PASS",
+      "duration_ms": 0.08,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F28_02",
+      "feature_id": "F28",
+      "tier": 1,
+      "description": "debian.template includes non-free-firmware component",
+      "status": "PASS",
+      "duration_ms": 0.1,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F28_03",
+      "feature_id": "F28",
+      "tier": 1,
+      "description": "debian.template uses official HTTPS security repository",
+      "status": "PASS",
+      "duration_ms": 0.14,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F28_04",
+      "feature_id": "F28",
+      "tier": 1,
+      "description": "debian.template eliminates insecure unauthenticated deb-multimedia repo",
+      "status": "PASS",
+      "duration_ms": 0.07,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F28_05",
+      "feature_id": "F28",
+      "tier": 1,
+      "description": "debian.template configures release backports with HTTPS",
+      "status": "PASS",
+      "duration_ms": 0.06,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F29_01",
+      "feature_id": "F29",
+      "tier": 1,
+      "description": "00-core.sh supports Debian 13 codename 'trixie'",
+      "status": "PASS",
+      "duration_ms": 0.09,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F29_02",
+      "feature_id": "F29",
+      "tier": 1,
+      "description": "00-core.sh handles rolling release with empty VERSION_ID without fatal exit",
+      "status": "PASS",
+      "duration_ms": 0.07,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F29_03",
+      "feature_id": "F29",
+      "tier": 1,
+      "description": "00-core.sh detects native PHP 8.4 on Debian 13",
+      "status": "PASS",
+      "duration_ms": 0.1,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F29_04",
+      "feature_id": "F29",
+      "tier": 1,
+      "description": "_version_ge helper handles empty strings without syntax error",
+      "status": "PASS",
+      "duration_ms": 0.07,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F29_05",
+      "feature_id": "F29",
+      "tier": 1,
+      "description": "00-core.sh confirms Debian 11, 12, and 13 as supported distributions",
+      "status": "PASS",
+      "duration_ms": 0.06,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F30_01",
+      "feature_id": "F30",
+      "tier": 1,
+      "description": "setup/modules/02-packages.sh removes unconditional software-properties-common on Debian",
+      "status": "PASS",
+      "duration_ms": 0.11,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F30_02",
+      "feature_id": "F30",
+      "tier": 1,
+      "description": "pcregrep replaced with pcre2-utils in package installation list",
+      "status": "PASS",
+      "duration_ms": 0.07,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F30_03",
+      "feature_id": "F30",
+      "tier": 1,
+      "description": "libncurses5-dev replaced with libncurses-dev in package list",
+      "status": "PASS",
+      "duration_ms": 0.07,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F30_04",
+      "feature_id": "F30",
+      "tier": 1,
+      "description": "Dead packages (mcrypt, libmcrypt-dev, php-xmlrpc) removed from 02-packages.sh",
+      "status": "PASS",
+      "duration_ms": 0.19,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F30_05",
+      "feature_id": "F30",
+      "tier": 1,
+      "description": "sury php.list uses ${CODENAME} instead of raw $(lsb_release -sc)",
+      "status": "PASS",
+      "duration_ms": 0.18,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F31_01",
+      "feature_id": "F31",
+      "tier": 1,
+      "description": "installpackage-btsync uses /usr/share/keyrings/ instead of apt-key",
+      "status": "PASS",
+      "duration_ms": 0.07,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F31_02",
+      "feature_id": "F31",
+      "tier": 1,
+      "description": "installpackage-x2go uses modern keyring instead of apt-key adv",
+      "status": "PASS",
+      "duration_ms": 0.03,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F31_03",
+      "feature_id": "F31",
+      "tier": 1,
+      "description": "installpackage-znc uses modern keyring instead of apt-key add",
+      "status": "PASS",
+      "duration_ms": 6.01,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F31_04",
+      "feature_id": "F31",
+      "tier": 1,
+      "description": "removepackage scripts for jackett/lidarr/radarr remove dead Mono apt-key calls",
+      "status": "PASS",
+      "duration_ms": 0.32,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F31_05",
+      "feature_id": "F31",
+      "tier": 1,
+      "description": "updateAetherFlow removes dead Jessie apt-key call",
+      "status": "PASS",
+      "duration_ms": 0.1,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F32_01",
+      "feature_id": "F32",
+      "tier": 1,
+      "description": "modern_stack.sh builds Next.js static export before compiling Go backend",
+      "status": "PASS",
+      "duration_ms": 0.11,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F32_02",
+      "feature_id": "F32",
+      "tier": 1,
+      "description": "modern_stack.sh copies frontend build artifacts into backend/web/dist/",
+      "status": "PASS",
+      "duration_ms": 0.07,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F32_03",
+      "feature_id": "F32",
+      "tier": 1,
+      "description": "Go backend compiles to single executable 'aetherflow-api'",
+      "status": "PASS",
+      "duration_ms": 0.07,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F32_04",
+      "feature_id": "F32",
+      "tier": 1,
+      "description": "backend/web/embed.go embeds dist/ directory with go:embed",
+      "status": "PASS",
+      "duration_ms": 0.07,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F32_05",
+      "feature_id": "F32",
+      "tier": 1,
+      "description": "setup/modules/05-finalize.sh displays onboarding URL on port 8080",
+      "status": "PASS",
+      "duration_ms": 0.09,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F33_01",
+      "feature_id": "F33",
+      "tier": 1,
+      "description": "aetherflow-runner.template exists in setup/templates/sysd/",
+      "status": "PASS",
+      "duration_ms": 0.03,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F33_02",
+      "feature_id": "F33",
+      "tier": 1,
+      "description": "aetherflow-api.template declares ProtectSystem=strict",
+      "status": "PASS",
+      "duration_ms": 0.08,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F33_03",
+      "feature_id": "F33",
+      "tier": 1,
+      "description": "aetherflow-api.template declares NoNewPrivileges=yes",
+      "status": "PASS",
+      "duration_ms": 0.17,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F33_04",
+      "feature_id": "F33",
+      "tier": 1,
+      "description": "aetherflow-api runs under unprivileged User=aetherflow",
+      "status": "PASS",
+      "duration_ms": 0.08,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F33_05",
+      "feature_id": "F33",
+      "tier": 1,
+      "description": "setup scripts do not install obsolete aetherflow-frontend.service",
+      "status": "PASS",
+      "duration_ms": 0.15,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F34_01",
+      "feature_id": "F34",
+      "tier": 1,
+      "description": "modern_stack.sh does not create /etc/sudoers.d/aetherflow NOPASSWD: ALL",
+      "status": "PASS",
+      "duration_ms": 0.07,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F34_02",
+      "feature_id": "F34",
+      "tier": 1,
+      "description": "modern_stack.sh eliminates global PM2 installation and root startup",
+      "status": "PASS",
+      "duration_ms": 0.06,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F34_03",
+      "feature_id": "F34",
+      "tier": 1,
+      "description": "Installer purges legacy /etc/sudoers.d/aetherflow if detected",
+      "status": "PASS",
+      "duration_ms": 0.07,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F34_04",
+      "feature_id": "F34",
+      "tier": 1,
+      "description": "API server relies solely on runner socket without setuid or sudo",
+      "status": "PASS",
+      "duration_ms": 0.12,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F34_05",
+      "feature_id": "F34",
+      "tier": 1,
+      "description": "Services are managed exclusively via systemd service units",
+      "status": "PASS",
+      "duration_ms": 0.13,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F35_01",
+      "feature_id": "F35",
+      "tier": 1,
+      "description": "100% of shell scripts in setup/, deploy/, packages/ use LF line endings",
+      "status": "PASS",
+      "duration_ms": 173.1,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F35_02",
+      "feature_id": "F35",
+      "tier": 1,
+      "description": "Shell scripts have valid bash shebangs (#!/usr/bin/env bash or #!/bin/bash)",
+      "status": "PASS",
+      "duration_ms": 9.03,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F35_03",
+      "feature_id": "F35",
+      "tier": 1,
+      "description": "Core setup scripts pass bash syntax inspection",
+      "status": "PASS",
+      "duration_ms": 0.38,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F35_04",
+      "feature_id": "F35",
+      "tier": 1,
+      "description": "New setup scripts declare 'set -e' or 'set -euo pipefail'",
+      "status": "PASS",
+      "duration_ms": 0.07,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F35_05",
+      "feature_id": "F35",
+      "tier": 1,
+      "description": "Shell scripts contain zero UTF-8 BOM headers",
+      "status": "PASS",
+      "duration_ms": 8.73,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F36_01",
+      "feature_id": "F36",
+      "tier": 1,
+      "description": "Test suite implements coverage for all 37 features in PROJECT.md",
+      "status": "PASS",
+      "duration_ms": 0.0,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F36_02",
+      "feature_id": "F36",
+      "tier": 1,
+      "description": "Test suite implements Tier 1, Tier 2, Tier 3, and Tier 4",
+      "status": "PASS",
+      "duration_ms": 0.09,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F36_03",
+      "feature_id": "F36",
+      "tier": 1,
+      "description": "Test runner supports CLI options (--tier, --feature, --mode)",
+      "status": "PASS",
+      "duration_ms": 0.1,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F36_04",
+      "feature_id": "F36",
+      "tier": 1,
+      "description": "Test runner exits with 0 on success and non-zero on test failures",
+      "status": "PASS",
+      "duration_ms": 0.09,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F36_05",
+      "feature_id": "F36",
+      "tier": 1,
+      "description": "Test runner supports JSON export and markdown summary tables",
+      "status": "PASS",
+      "duration_ms": 0.19,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F37_01",
+      "feature_id": "F37",
+      "tier": 1,
+      "description": "TEST_INFRA.md exists at project root",
+      "status": "PASS",
+      "duration_ms": 0.05,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F37_02",
+      "feature_id": "F37",
+      "tier": 1,
+      "description": "TEST_READY.md exists at project root summarizing baseline results",
+      "status": "PASS",
+      "duration_ms": 0.09,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F37_03",
+      "feature_id": "F37",
+      "tier": 1,
+      "description": "Test harness supports both contract static mode and live HTTP mode",
+      "status": "PASS",
+      "duration_ms": 0.16,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F37_04",
+      "feature_id": "F37",
+      "tier": 1,
+      "description": "Tests enforce real assertions against specifications rather than dummy passes",
+      "status": "PASS",
+      "duration_ms": 0.0,
+      "error": ""
+    },
+    {
+      "test_id": "T1_F37_05",
+      "feature_id": "F37",
+      "tier": 1,
+      "description": "Tests execute cleanly in M0 baseline phase to establish gap analysis",
+      "status": "PASS",
+      "duration_ms": 0.0,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B01_01",
+      "feature_id": "F01",
+      "tier": 2,
+      "description": "Path traversal attempt ('../../etc/passwd') is strictly blocked with 400/403",
+      "status": "PASS",
+      "duration_ms": 0.09,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B01_02",
+      "feature_id": "F01",
+      "tier": 2,
+      "description": "Null byte injection in path query parameter is rejected",
+      "status": "PASS",
+      "duration_ms": 0.0,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B01_03",
+      "feature_id": "F01",
+      "tier": 2,
+      "description": "Paths outside allowlisted roots (/root, /boot) return HTTP 403 Forbidden",
+      "status": "PASS",
+      "duration_ms": 0.07,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B01_04",
+      "feature_id": "F01",
+      "tier": 2,
+      "description": "Empty path query parameter returns HTTP 400 Bad Request",
+      "status": "PASS",
+      "duration_ms": 0.06,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B01_05",
+      "feature_id": "F01",
+      "tier": 2,
+      "description": "Valid path format pointing to non-existent directory returns HTTP 404",
+      "status": "PASS",
+      "duration_ms": 0.06,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B02_01",
+      "feature_id": "F02",
+      "tier": 2,
+      "description": "Expired refresh token returns HTTP 401 Unauthorized",
+      "status": "PASS",
+      "duration_ms": 0.14,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B02_02",
+      "feature_id": "F02",
+      "tier": 2,
+      "description": "Refresh request with zero auth cookies or headers returns HTTP 401",
+      "status": "PASS",
+      "duration_ms": 0.0,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B02_03",
+      "feature_id": "F02",
+      "tier": 2,
+      "description": "Refresh on explicitly revoked session JTI returns HTTP 401",
+      "status": "PASS",
+      "duration_ms": 0.17,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B02_04",
+      "feature_id": "F02",
+      "tier": 2,
+      "description": "Tampered JWT cryptographic signature returns HTTP 401",
+      "status": "PASS",
+      "duration_ms": 0.15,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B02_05",
+      "feature_id": "F02",
+      "tier": 2,
+      "description": "Garbage cookie string in aetherflow_session returns HTTP 401 without 500 panic",
+      "status": "PASS",
+      "duration_ms": 0.0,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B03_01",
+      "feature_id": "F03",
+      "tier": 2,
+      "description": "Incorrect current password returns HTTP 400 or 401",
+      "status": "PASS",
+      "duration_ms": 0.22,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B03_02",
+      "feature_id": "F03",
+      "tier": 2,
+      "description": "New password shorter than 8 characters returns HTTP 400",
+      "status": "PASS",
+      "duration_ms": 0.12,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B03_03",
+      "feature_id": "F03",
+      "tier": 2,
+      "description": "Payload omitting new_password returns HTTP 400",
+      "status": "PASS",
+      "duration_ms": 0.11,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B03_04",
+      "feature_id": "F03",
+      "tier": 2,
+      "description": "Identical current and new password handled cleanly without corruption",
+      "status": "PASS",
+      "duration_ms": 0.0,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B03_05",
+      "feature_id": "F03",
+      "tier": 2,
+      "description": "SQL injection string in password field is safely parameterized",
+      "status": "PASS",
+      "duration_ms": 0.1,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B04_01",
+      "feature_id": "F04",
+      "tier": 2,
+      "description": "Avatar URL with javascript: or file: scheme returns HTTP 400",
+      "status": "PASS",
+      "duration_ms": 0.1,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B04_02",
+      "feature_id": "F04",
+      "tier": 2,
+      "description": "Base64 avatar payload exceeding 2MB is rejected with HTTP 400 or 413",
+      "status": "PASS",
+      "duration_ms": 0.1,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B04_03",
+      "feature_id": "F04",
+      "tier": 2,
+      "description": "Empty JSON payload to PUT /profile/avatar returns HTTP 400",
+      "status": "PASS",
+      "duration_ms": 0.1,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B04_04",
+      "feature_id": "F04",
+      "tier": 2,
+      "description": "Avatar mutation without authentication token returns HTTP 401",
+      "status": "PASS",
+      "duration_ms": 0.09,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B04_05",
+      "feature_id": "F04",
+      "tier": 2,
+      "description": "DELETE /profile/avatar when already empty succeeds with HTTP 200",
+      "status": "PASS",
+      "duration_ms": 0.13,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B05_01",
+      "feature_id": "F05",
+      "tier": 2,
+      "description": "Ingress public domain with spaces or invalid chars returns HTTP 400",
+      "status": "PASS",
+      "duration_ms": 0.08,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B05_02",
+      "feature_id": "F05",
+      "tier": 2,
+      "description": "Ingress listen port < 1 or > 65535 returns HTTP 400",
+      "status": "PASS",
+      "duration_ms": 0.07,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B05_03",
+      "feature_id": "F05",
+      "tier": 2,
+      "description": "Non-admin user attempting ingress mutation returns HTTP 403 Forbidden",
+      "status": "PASS",
+      "duration_ms": 0.09,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B05_04",
+      "feature_id": "F05",
+      "tier": 2,
+      "description": "Ingress update with missing publicDomain returns HTTP 400",
+      "status": "PASS",
+      "duration_ms": 0.06,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B05_05",
+      "feature_id": "F05",
+      "tier": 2,
+      "description": "Empty appName path parameter returns HTTP 400 or 404",
+      "status": "PASS",
+      "duration_ms": 0.06,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B06_01",
+      "feature_id": "F06",
+      "tier": 2,
+      "description": "GET /api/v1/auth/system/topology without token returns HTTP 401",
+      "status": "PASS",
+      "duration_ms": 0.06,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B06_02",
+      "feature_id": "F06",
+      "tier": 2,
+      "description": "POST /api/v1/auth/system/topology returns HTTP 405 Method Not Allowed",
+      "status": "PASS",
+      "duration_ms": 0.09,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B06_03",
+      "feature_id": "F06",
+      "tier": 2,
+      "description": "Topology nodes details do not expose database passwords or tokens",
+      "status": "PASS",
+      "duration_ms": 0.12,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B06_04",
+      "feature_id": "F06",
+      "tier": 2,
+      "description": "Node status values are strictly constrained to valid states",
+      "status": "PASS",
+      "duration_ms": 0.14,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B06_05",
+      "feature_id": "F06",
+      "tier": 2,
+      "description": "Link array contains zero dangling references to non-existent node IDs",
+      "status": "PASS",
+      "duration_ms": 0.0,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B07_01",
+      "feature_id": "F07",
+      "tier": 2,
+      "description": "Payload exceeding 4096 bytes to runner socket returns HTTP 413",
+      "status": "PASS",
+      "duration_ms": 0.09,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B07_02",
+      "feature_id": "F07",
+      "tier": 2,
+      "description": "Shell metacharacters ('; rm -rf', '|', '&') in package name are rejected",
+      "status": "PASS",
+      "duration_ms": 0.12,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B07_03",
+      "feature_id": "F07",
+      "tier": 2,
+      "description": "Newline or injection characters in domain/IP for /v1/hosts return HTTP 400",
+      "status": "PASS",
+      "duration_ms": 0.17,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B07_04",
+      "feature_id": "F07",
+      "tier": 2,
+      "description": "Unrecognized action verb in /v1/systemctl returns HTTP 400",
+      "status": "PASS",
+      "duration_ms": 0.08,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B07_05",
+      "feature_id": "F07",
+      "tier": 2,
+      "description": "Unknown path on runner socket returns HTTP 404 Not Found",
+      "status": "PASS",
+      "duration_ms": 0.08,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B08_01",
+      "feature_id": "F08",
+      "tier": 2,
+      "description": "Caller services handle missing runner socket gracefully without panic",
+      "status": "PASS",
+      "duration_ms": 0.06,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B08_02",
+      "feature_id": "F08",
+      "tier": 2,
+      "description": "Socket requests enforce finite context timeout (prevent hangs)",
+      "status": "PASS",
+      "duration_ms": 0.06,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B08_03",
+      "feature_id": "F08",
+      "tier": 2,
+      "description": "network.go handles absence of wg binary gracefully",
+      "status": "PASS",
+      "duration_ms": 0.09,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B08_04",
+      "feature_id": "F08",
+      "tier": 2,
+      "description": "quota_manager.go handles non-existent Linux users cleanly",
+      "status": "PASS",
+      "duration_ms": 0.14,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B08_05",
+      "feature_id": "F08",
+      "tier": 2,
+      "description": "systemd_sandbox.go handles non-existent package definition",
+      "status": "PASS",
+      "duration_ms": 0.17,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B09_01",
+      "feature_id": "F09",
+      "tier": 2,
+      "description": "Inserting duplicate app_name into app_ingress_configs violates PRIMARY KEY",
+      "status": "PASS",
+      "duration_ms": 0.25,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B09_02",
+      "feature_id": "F09",
+      "tier": 2,
+      "description": "Re-running migration 17 does not fail or alter existing data",
+      "status": "PASS",
+      "duration_ms": 0.12,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B09_03",
+      "feature_id": "F09",
+      "tier": 2,
+      "description": "Migration 17 records version 17 in schema_versions table",
+      "status": "PASS",
+      "duration_ms": 0.08,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B09_04",
+      "feature_id": "F09",
+      "tier": 2,
+      "description": "Migration preserves SQLite WAL journal mode and busy timeout",
+      "status": "PASS",
+      "duration_ms": 0.07,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B09_05",
+      "feature_id": "F09",
+      "tier": 2,
+      "description": "SQLite connection pool strictly capped at MaxOpenConns(1)",
+      "status": "PASS",
+      "duration_ms": 0.07,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B10_01",
+      "feature_id": "F10",
+      "tier": 2,
+      "description": "Calling cluster initialization multiple times is safe and idempotent",
+      "status": "PASS",
+      "duration_ms": 0.11,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B10_02",
+      "feature_id": "F10",
+      "tier": 2,
+      "description": "Cluster endpoints return 503 rather than crashing if manager is nil",
+      "status": "PASS",
+      "duration_ms": 0.08,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B10_03",
+      "feature_id": "F10",
+      "tier": 2,
+      "description": "Joining cluster with invalid or expired enrollment token returns HTTP 401",
+      "status": "PASS",
+      "duration_ms": 0.07,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B10_04",
+      "feature_id": "F10",
+      "tier": 2,
+      "description": "Attempting to remove master node returns HTTP 400 Bad Request",
+      "status": "PASS",
+      "duration_ms": 0.06,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B10_05",
+      "feature_id": "F10",
+      "tier": 2,
+      "description": "Querying metrics for newly enrolled node without history returns empty array",
+      "status": "PASS",
+      "duration_ms": 0.06,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B11_01",
+      "feature_id": "F11",
+      "tier": 2,
+      "description": "Direct access to deleted Next.js server route returns 404",
+      "status": "PASS",
+      "duration_ms": 0.03,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B11_02",
+      "feature_id": "F11",
+      "tier": 2,
+      "description": "Next.js static export fails if any non-static server route exists",
+      "status": "PASS",
+      "duration_ms": 0.07,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B11_03",
+      "feature_id": "F11",
+      "tier": 2,
+      "description": "PathSelector displays inline error when filesystem API is unreachable",
+      "status": "PASS",
+      "duration_ms": 0.14,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B11_04",
+      "feature_id": "F11",
+      "tier": 2,
+      "description": "Client bundles contain zero webpack fallbacks or polyfills for node fs",
+      "status": "PASS",
+      "duration_ms": 4.66,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B11_05",
+      "feature_id": "F11",
+      "tier": 2,
+      "description": "Build pipeline expects index.html in output directory",
+      "status": "PASS",
+      "duration_ms": 0.12,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B12_01",
+      "feature_id": "F12",
+      "tier": 2,
+      "description": "Go test suites use t.TempDir() or defer os.RemoveAll() for test files",
+      "status": "PASS",
+      "duration_ms": 0.09,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B12_02",
+      "feature_id": "F12",
+      "tier": 2,
+      "description": "Unit test suites avoid global state mutation without synchronization",
+      "status": "PASS",
+      "duration_ms": 0.0,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B12_03",
+      "feature_id": "F12",
+      "tier": 2,
+      "description": "Runner test suite exercises malformed JSON request bodies",
+      "status": "PASS",
+      "duration_ms": 0.07,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B12_04",
+      "feature_id": "F12",
+      "tier": 2,
+      "description": "DB unit tests use isolated in-memory or temp SQLite databases",
+      "status": "PASS",
+      "duration_ms": 0.1,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B12_05",
+      "feature_id": "F12",
+      "tier": 2,
+      "description": "Backend Go packages contain no syntax errors",
+      "status": "PASS",
+      "duration_ms": 0.08,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B13_01",
+      "feature_id": "F13",
+      "tier": 2,
+      "description": "Text color against --obs-bg-base (#000000) satisfies WCAG AA (>= 4.5:1)",
+      "status": "PASS",
+      "duration_ms": 0.14,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B13_02",
+      "feature_id": "F13",
+      "tier": 2,
+      "description": "Atmosphere pseudo-elements (::before, ::after) declare pointer-events: none",
+      "status": "PASS",
+      "duration_ms": 0.19,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B13_03",
+      "feature_id": "F13",
+      "tier": 2,
+      "description": "body::before is z-index: -2 and body::after is z-index: -1",
+      "status": "PASS",
+      "duration_ms": 0.09,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B13_04",
+      "feature_id": "F13",
+      "tier": 2,
+      "description": "Page roots eliminate opaque bg-slate-950 that blocks atmosphere",
+      "status": "PASS",
+      "duration_ms": 0.08,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B13_05",
+      "feature_id": "F13",
+      "tier": 2,
+      "description": "Print media query disables heavy background radial gradients",
+      "status": "PASS",
+      "duration_ms": 0.0,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B14_01",
+      "feature_id": "F14",
+      "tier": 2,
+      "description": "prefers-reduced-motion media query disables 120Hz high-refresh animations",
+      "status": "PASS",
+      "duration_ms": 0.09,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B14_02",
+      "feature_id": "F14",
+      "tier": 2,
+      "description": "--obs-card-lift uses transform (translateY) to avoid reflow layout shifts",
+      "status": "PASS",
+      "duration_ms": 0.07,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B14_03",
+      "feature_id": "F14",
+      "tier": 2,
+      "description": "Specular top border is constrained to 1px thickness",
+      "status": "PASS",
+      "duration_ms": 0.07,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B14_04",
+      "feature_id": "F14",
+      "tier": 2,
+      "description": "Interactive glass buttons retain accessible focus-visible outline",
+      "status": "PASS",
+      "duration_ms": 0.08,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B14_05",
+      "feature_id": "F14",
+      "tier": 2,
+      "description": "Glass input wells use inset box shadows to appear physically recessed",
+      "status": "PASS",
+      "duration_ms": 0.08,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B15_01",
+      "feature_id": "F15",
+      "tier": 2,
+      "description": "Touch target utility strictly enforces min-height and min-width of 44px",
+      "status": "PASS",
+      "duration_ms": 0.07,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B15_02",
+      "feature_id": "F15",
+      "tier": 2,
+      "description": "Tapping backdrop outside mobile navigation drawer triggers close",
+      "status": "PASS",
+      "duration_ms": 0.09,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B15_03",
+      "feature_id": "F15",
+      "tier": 2,
+      "description": "Tri-mode layout uses CSS media queries to avoid SSR hydration mismatches",
+      "status": "PASS",
+      "duration_ms": 0.13,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B15_04",
+      "feature_id": "F15",
+      "tier": 2,
+      "description": "Active route or tab displays distinct visual highlight across all 3 modes",
+      "status": "PASS",
+      "duration_ms": 0.12,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B15_05",
+      "feature_id": "F15",
+      "tier": 2,
+      "description": "Mobile layout applies bottom padding to prevent dock from obscuring content",
+      "status": "PASS",
+      "duration_ms": 0.08,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B16_01",
+      "feature_id": "F16",
+      "tier": 2,
+      "description": "Long hashes or URLs use break-all or truncate to prevent horizontal blowouts",
+      "status": "PASS",
+      "duration_ms": 0.11,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B16_02",
+      "feature_id": "F16",
+      "tier": 2,
+      "description": "Deep flex child containers declare min-w-0",
+      "status": "PASS",
+      "duration_ms": 0.08,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B16_03",
+      "feature_id": "F16",
+      "tier": 2,
+      "description": "DataGrid and tables preserve sticky header alignment",
+      "status": "PASS",
+      "duration_ms": 0.1,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B16_04",
+      "feature_id": "F16",
+      "tier": 2,
+      "description": "Body width is constrained to 100% without horizontal canvas shaking",
+      "status": "PASS",
+      "duration_ms": 0.11,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B16_05",
+      "feature_id": "F16",
+      "tier": 2,
+      "description": "Horizontal scroll containers use smooth touch scrolling",
+      "status": "PASS",
+      "duration_ms": 0.0,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B17_01",
+      "feature_id": "F17",
+      "tier": 2,
+      "description": "Setting aurora opacity to 0% retains readable black base canvas",
+      "status": "PASS",
+      "duration_ms": 0.0,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B17_02",
+      "feature_id": "F17",
+      "tier": 2,
+      "description": "Setting aurora opacity to 100% does not wash out foreground text",
+      "status": "PASS",
+      "duration_ms": 0.0,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B17_03",
+      "feature_id": "F17",
+      "tier": 2,
+      "description": "Corrupted localStorage JSON falls back gracefully to default theme settings",
+      "status": "PASS",
+      "duration_ms": 0.08,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B17_04",
+      "feature_id": "F17",
+      "tier": 2,
+      "description": "Rapidly toggling grain or animation does not leak event listeners or timers",
+      "status": "PASS",
+      "duration_ms": 0.0,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B17_05",
+      "feature_id": "F17",
+      "tier": 2,
+      "description": "Reset button restores original Obsidian V2 default values",
+      "status": "PASS",
+      "duration_ms": 0.0,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B18_01",
+      "feature_id": "F18",
+      "tier": 2,
+      "description": "Disabled button has reduced opacity, not-allowed cursor, and no hover lift",
+      "status": "PASS",
+      "duration_ms": 0.09,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B18_02",
+      "feature_id": "F18",
+      "tier": 2,
+      "description": "Modal traps tab focus and closes upon pressing Escape key",
+      "status": "PASS",
+      "duration_ms": 0.07,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B18_03",
+      "feature_id": "F18",
+      "tier": 2,
+      "description": "Input field with error renders red specular border with high-contrast message",
+      "status": "PASS",
+      "duration_ms": 0.07,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B18_04",
+      "feature_id": "F18",
+      "tier": 2,
+      "description": "OAuth consent page renders inside glass container with touch targets",
+      "status": "PASS",
+      "duration_ms": 0.21,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B18_05",
+      "feature_id": "F18",
+      "tier": 2,
+      "description": "DataGrid with zero rows renders friendly empty state rather than blank box",
+      "status": "PASS",
+      "duration_ms": 0.11,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B19_01",
+      "feature_id": "F19",
+      "tier": 2,
+      "description": "PredictionsCard handles empty metrics array without NaN or division by zero",
+      "status": "PASS",
+      "duration_ms": 0.09,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B19_02",
+      "feature_id": "F19",
+      "tier": 2,
+      "description": "Memory calculation guards against mem_total_gb == 0",
+      "status": "PASS",
+      "duration_ms": 0.08,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B19_03",
+      "feature_id": "F19",
+      "tier": 2,
+      "description": "PredictionsCard displays retry button when API request fails",
+      "status": "PASS",
+      "duration_ms": 0.07,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B19_04",
+      "feature_id": "F19",
+      "tier": 2,
+      "description": "BandwidthCard disables apply button and shows spinner during request",
+      "status": "PASS",
+      "duration_ms": 0.08,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B19_05",
+      "feature_id": "F19",
+      "tier": 2,
+      "description": "Sparkline scaling clamps extreme 100% CPU or 10Gbps spikes cleanly",
+      "status": "PASS",
+      "duration_ms": 0.0,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B20_01",
+      "feature_id": "F20",
+      "tier": 2,
+      "description": "PathSelector UI prevents navigating above root directory ('..')",
+      "status": "PASS",
+      "duration_ms": 0.07,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B20_02",
+      "feature_id": "F20",
+      "tier": 2,
+      "description": "PathSelector handles permission denied error on restricted directories",
+      "status": "PASS",
+      "duration_ms": 0.06,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B20_03",
+      "feature_id": "F20",
+      "tier": 2,
+      "description": "MediaFlow transcode stream handles SSE disconnect and reconnect",
+      "status": "PASS",
+      "duration_ms": 0.08,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B20_04",
+      "feature_id": "F20",
+      "tier": 2,
+      "description": "Metadata scan form rejects empty target directory input",
+      "status": "PASS",
+      "duration_ms": 0.1,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B20_05",
+      "feature_id": "F20",
+      "tier": 2,
+      "description": "PathSelector renders virtualized or bounded list for directories with >1000 items",
+      "status": "PASS",
+      "duration_ms": 0.13,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B21_01",
+      "feature_id": "F21",
+      "tier": 2,
+      "description": "ExternalAccessCard validates public domain syntax before sending PUT",
+      "status": "PASS",
+      "duration_ms": 0.14,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B21_02",
+      "feature_id": "F21",
+      "tier": 2,
+      "description": "useDeploymentStream closes EventSource when component unmounts",
+      "status": "PASS",
+      "duration_ms": 0.08,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B21_03",
+      "feature_id": "F21",
+      "tier": 2,
+      "description": "DeploymentStatus renders failure state and logs when deployment fails",
+      "status": "PASS",
+      "duration_ms": 0.08,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B21_04",
+      "feature_id": "F21",
+      "tier": 2,
+      "description": "useDeploymentStream partitions state by appName",
+      "status": "PASS",
+      "duration_ms": 0.07,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B21_05",
+      "feature_id": "F21",
+      "tier": 2,
+      "description": "useIngressStore includes credentials or apiFetch for auth",
+      "status": "PASS",
+      "duration_ms": 0.07,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B22_01",
+      "feature_id": "F22",
+      "tier": 2,
+      "description": "Password change form blocks submission if new password and confirmation mismatch",
+      "status": "PASS",
+      "duration_ms": 0.09,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B22_02",
+      "feature_id": "F22",
+      "tier": 2,
+      "description": "Avatar file selector warns and blocks files exceeding 2MB before upload",
+      "status": "PASS",
+      "duration_ms": 0.08,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B22_03",
+      "feature_id": "F22",
+      "tier": 2,
+      "description": "ProfileTab displays error toast if current password verification fails",
+      "status": "PASS",
+      "duration_ms": 0.08,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B22_04",
+      "feature_id": "F22",
+      "tier": 2,
+      "description": "Removing avatar updates UI immediately to default placeholder icon",
+      "status": "PASS",
+      "duration_ms": 0.07,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B22_05",
+      "feature_id": "F22",
+      "tier": 2,
+      "description": "Usernames containing HTML tags (<script>) are rendered safely as text",
+      "status": "PASS",
+      "duration_ms": 0.0,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B23_01",
+      "feature_id": "F23",
+      "tier": 2,
+      "description": "AppTopologyMap displays clean error state when backend topology API fails",
+      "status": "PASS",
+      "duration_ms": 0.08,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B23_02",
+      "feature_id": "F23",
+      "tier": 2,
+      "description": "Topology renders core infrastructure nodes even when no extra services run",
+      "status": "PASS",
+      "duration_ms": 0.06,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B23_03",
+      "feature_id": "F23",
+      "tier": 2,
+      "description": "Graph forces ensure nodes do not overlap on canvas",
+      "status": "PASS",
+      "duration_ms": 0.16,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B23_04",
+      "feature_id": "F23",
+      "tier": 2,
+      "description": "Window resize event re-centers graph canvas",
+      "status": "PASS",
+      "duration_ms": 0.09,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B23_05",
+      "feature_id": "F23",
+      "tier": 2,
+      "description": "Bidirectional links between services do not create infinite layout loops",
+      "status": "PASS",
+      "duration_ms": 0.0,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B24_01",
+      "feature_id": "F24",
+      "tier": 2,
+      "description": "WireGuard peer creation rejects malformed base64 public key",
+      "status": "PASS",
+      "duration_ms": 0.24,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B24_02",
+      "feature_id": "F24",
+      "tier": 2,
+      "description": "Tailscale route advertisement rejects invalid CIDR notation",
+      "status": "PASS",
+      "duration_ms": 0.17,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B24_03",
+      "feature_id": "F24",
+      "tier": 2,
+      "description": "Deleting WireGuard peer prompts confirmation modal before removing",
+      "status": "PASS",
+      "duration_ms": 0.16,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B24_04",
+      "feature_id": "F24",
+      "tier": 2,
+      "description": "Displays 'Tailscale Daemon Offline' warning when service is stopped",
+      "status": "PASS",
+      "duration_ms": 0.15,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B24_05",
+      "feature_id": "F24",
+      "tier": 2,
+      "description": "Non-admin user cannot access Network & VPN management tab",
+      "status": "PASS",
+      "duration_ms": 0.17,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B25_01",
+      "feature_id": "F25",
+      "tier": 2,
+      "description": "Creating webhook channel with empty destination URL is rejected in UI and API",
+      "status": "PASS",
+      "duration_ms": 0.3,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B25_02",
+      "feature_id": "F25",
+      "tier": 2,
+      "description": "Test alert dispatches with timeout and handles unreachable remote endpoints",
+      "status": "PASS",
+      "duration_ms": 0.27,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B25_03",
+      "feature_id": "F25",
+      "tier": 2,
+      "description": "Deleting active notification rule prompts operator for confirmation",
+      "status": "PASS",
+      "duration_ms": 0.2,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B25_04",
+      "feature_id": "F25",
+      "tier": 2,
+      "description": "Webhook secrets and bot tokens are masked in channel list",
+      "status": "PASS",
+      "duration_ms": 0.23,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B25_05",
+      "feature_id": "F25",
+      "tier": 2,
+      "description": "Creating rule with duplicate name handles collision gracefully",
+      "status": "PASS",
+      "duration_ms": 0.0,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B26_01",
+      "feature_id": "F26",
+      "tier": 2,
+      "description": "Setting negative or invalid quota string (e.g. '-50GB', 'abc') is rejected",
+      "status": "PASS",
+      "duration_ms": 0.25,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B26_02",
+      "feature_id": "F26",
+      "tier": 2,
+      "description": "Assigning quota exceeding physical disk volume triggers operator warning",
+      "status": "PASS",
+      "duration_ms": 0.17,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B26_03",
+      "feature_id": "F26",
+      "tier": 2,
+      "description": "Billing webhook events allow expanding raw JSON payload",
+      "status": "PASS",
+      "duration_ms": 0.15,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B26_04",
+      "feature_id": "F26",
+      "tier": 2,
+      "description": "Manual refresh disk quota button throttles repeated clicks",
+      "status": "PASS",
+      "duration_ms": 0.08,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B26_05",
+      "feature_id": "F26",
+      "tier": 2,
+      "description": "Quotas management APIs strictly reject non-admin sessions",
+      "status": "PASS",
+      "duration_ms": 0.07,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B27_01",
+      "feature_id": "F27",
+      "tier": 2,
+      "description": "UI disables delete button for master / coordinator cluster node",
+      "status": "PASS",
+      "duration_ms": 0.17,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B27_02",
+      "feature_id": "F27",
+      "tier": 2,
+      "description": "Enroll worker modal indicates token expiry window (e.g. 1 hour)",
+      "status": "PASS",
+      "duration_ms": 0.19,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B27_03",
+      "feature_id": "F27",
+      "tier": 2,
+      "description": "Nodes with missed heartbeats (>30s) display yellow/red warning beacon",
+      "status": "PASS",
+      "duration_ms": 0.34,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B27_04",
+      "feature_id": "F27",
+      "tier": 2,
+      "description": "If cluster manager is not enabled, UI displays setup guide rather than raw error",
+      "status": "PASS",
+      "duration_ms": 0.2,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B27_05",
+      "feature_id": "F27",
+      "tier": 2,
+      "description": "Clicking 'Copy Join Command' shows 'Copied!' toast confirmation",
+      "status": "PASS",
+      "duration_ms": 0.17,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B28_01",
+      "feature_id": "F28",
+      "tier": 2,
+      "description": "Zero plain HTTP repository URLs remain in debian.template",
+      "status": "PASS",
+      "duration_ms": 0.08,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B28_02",
+      "feature_id": "F28",
+      "tier": 2,
+      "description": "Debian 13 templates strictly include non-free-firmware alongside non-free",
+      "status": "PASS",
+      "duration_ms": 0.07,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B28_03",
+      "feature_id": "F28",
+      "tier": 2,
+      "description": "Unsigned third-party repositories (deb-multimedia) are not included",
+      "status": "PASS",
+      "duration_ms": 0.07,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B28_04",
+      "feature_id": "F28",
+      "tier": 2,
+      "description": "RELEASE placeholder in debian.template expands without malformed URLs",
+      "status": "PASS",
+      "duration_ms": 0.17,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B28_05",
+      "feature_id": "F28",
+      "tier": 2,
+      "description": "Security mirror uses valid RELEASE-security / debian-security format",
+      "status": "PASS",
+      "duration_ms": 0.07,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B29_01",
+      "feature_id": "F29",
+      "tier": 2,
+      "description": "00-core.sh handles missing or unreadable /etc/os-release without uncaught crash",
+      "status": "PASS",
+      "duration_ms": 0.07,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B29_02",
+      "feature_id": "F29",
+      "tier": 2,
+      "description": "Rolling Trixie snapshot with empty VERSION_ID does not exit with unsupported error",
+      "status": "PASS",
+      "duration_ms": 0.09,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B29_03",
+      "feature_id": "F29",
+      "tier": 2,
+      "description": "Debian releases older than version 11 (e.g. Buster 10) are rejected",
+      "status": "PASS",
+      "duration_ms": 0.06,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B29_04",
+      "feature_id": "F29",
+      "tier": 2,
+      "description": "_version_ge function handles empty string operands without syntax errors",
+      "status": "PASS",
+      "duration_ms": 0.06,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B29_05",
+      "feature_id": "F29",
+      "tier": 2,
+      "description": "PHP_VER defaults safely if distro codename is unrecognized",
+      "status": "PASS",
+      "duration_ms": 0.06,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B30_01",
+      "feature_id": "F30",
+      "tier": 2,
+      "description": "Zero duplicate package names in 02-packages.sh apt install command",
+      "status": "PASS",
+      "duration_ms": 0.21,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B30_02",
+      "feature_id": "F30",
+      "tier": 2,
+      "description": "apt-get calls use non-interactive options (-y, DEBIAN_FRONTEND=noninteractive)",
+      "status": "PASS",
+      "duration_ms": 0.07,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B30_03",
+      "feature_id": "F30",
+      "tier": 2,
+      "description": "mcrypt and libmcrypt-dev are completely purged from install lists",
+      "status": "PASS",
+      "duration_ms": 0.07,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B30_04",
+      "feature_id": "F30",
+      "tier": 2,
+      "description": "Avoids hardcoded libxslt1.1 or libfcgi0ldbl affected by Debian 13 t64 transition",
+      "status": "PASS",
+      "duration_ms": 0.07,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B30_05",
+      "feature_id": "F30",
+      "tier": 2,
+      "description": "Failure of optional utility (e.g. speedtest-cli) does not abort setup",
+      "status": "PASS",
+      "duration_ms": 0.0,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B31_01",
+      "feature_id": "F31",
+      "tier": 2,
+      "description": "/usr/share/keyrings/ directory permissions are 0755 root:root",
+      "status": "PASS",
+      "duration_ms": 0.0,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B31_02",
+      "feature_id": "F31",
+      "tier": 2,
+      "description": "Imported .gpg keyrings have world-readable permissions 0644",
+      "status": "PASS",
+      "duration_ms": 0.0,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B31_03",
+      "feature_id": "F31",
+      "tier": 2,
+      "description": "ASCII-armored keys use 'gpg --dearmor' when writing to /usr/share/keyrings/",
+      "status": "PASS",
+      "duration_ms": 0.18,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B31_04",
+      "feature_id": "F31",
+      "tier": 2,
+      "description": "Dead Mono Xenial repository blocks removed from package uninstallation scripts",
+      "status": "PASS",
+      "duration_ms": 0.21,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B31_05",
+      "feature_id": "F31",
+      "tier": 2,
+      "description": "Zero occurrences of deprecated 'apt-key' across all 7 target scripts",
+      "status": "PASS",
+      "duration_ms": 0.36,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B32_01",
+      "feature_id": "F32",
+      "tier": 2,
+      "description": "Failure during static export halts pipeline before Go compile",
+      "status": "PASS",
+      "duration_ms": 0.07,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B32_02",
+      "feature_id": "F32",
+      "tier": 2,
+      "description": "Single binary serves index.html on deep non-asset paths (SPA fallback)",
+      "status": "PASS",
+      "duration_ms": 0.06,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B32_03",
+      "feature_id": "F32",
+      "tier": 2,
+      "description": "Embedded static assets served with valid Content-Type headers",
+      "status": "PASS",
+      "duration_ms": 0.06,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B32_04",
+      "feature_id": "F32",
+      "tier": 2,
+      "description": "Compiled binary aetherflow-api permissions set to executable (0755)",
+      "status": "PASS",
+      "duration_ms": 0.07,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B32_05",
+      "feature_id": "F32",
+      "tier": 2,
+      "description": "Compiled single binary size is reasonable (<150MB with embedded assets)",
+      "status": "PASS",
+      "duration_ms": 0.0,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B33_01",
+      "feature_id": "F33",
+      "tier": 2,
+      "description": "aetherflow-runner unit specifies RuntimeDirectoryMode=0750",
+      "status": "PASS",
+      "duration_ms": 0.18,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B33_02",
+      "feature_id": "F33",
+      "tier": 2,
+      "description": "aetherflow-api unit specifies StateDirectory=aetherflow for sandboxed database writes",
+      "status": "PASS",
+      "duration_ms": 0.13,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B33_03",
+      "feature_id": "F33",
+      "tier": 2,
+      "description": "aetherflow-api unit loads configuration from EnvironmentFile=/etc/aetherflow/aetherflow.env",
+      "status": "PASS",
+      "duration_ms": 0.08,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B33_04",
+      "feature_id": "F33",
+      "tier": 2,
+      "description": "aetherflow-api declares After=aetherflow-runner.service and Wants=aetherflow-runner.service",
+      "status": "PASS",
+      "duration_ms": 0.06,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B33_05",
+      "feature_id": "F33",
+      "tier": 2,
+      "description": "Systemd units specify Restart=on-failure and RestartSec backoff",
+      "status": "PASS",
+      "duration_ms": 0.06,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B34_01",
+      "feature_id": "F34",
+      "tier": 2,
+      "description": "Unprivileged aetherflow user is denied sudo privileges",
+      "status": "PASS",
+      "duration_ms": 0.07,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B34_02",
+      "feature_id": "F34",
+      "tier": 2,
+      "description": "setup scripts do not run 'npm install -g pm2'",
+      "status": "PASS",
+      "duration_ms": 0.07,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B34_03",
+      "feature_id": "F34",
+      "tier": 2,
+      "description": "Idempotent re-run of modern_stack.sh never re-creates sudoers file",
+      "status": "PASS",
+      "duration_ms": 0.07,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B34_04",
+      "feature_id": "F34",
+      "tier": 2,
+      "description": "Setup scripts do not set SUID/SGID bits on compiled binaries",
+      "status": "PASS",
+      "duration_ms": 0.07,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B34_05",
+      "feature_id": "F34",
+      "tier": 2,
+      "description": "Services run strictly within systemd cgroups",
+      "status": "PASS",
+      "duration_ms": 0.0,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B35_01",
+      "feature_id": "F35",
+      "tier": 2,
+      "description": "setup/ directory contains zero files with CRLF carriage returns",
+      "status": "PASS",
+      "duration_ms": 7.92,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B35_02",
+      "feature_id": "F35",
+      "tier": 2,
+      "description": "packages/ directory contains zero files with CRLF carriage returns",
+      "status": "PASS",
+      "duration_ms": 14.93,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B35_03",
+      "feature_id": "F35",
+      "tier": 2,
+      "description": "Shell scripts quote variables containing filesystem paths",
+      "status": "PASS",
+      "duration_ms": 0.08,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B35_04",
+      "feature_id": "F35",
+      "tier": 2,
+      "description": "All shell scripts have readable permissions",
+      "status": "PASS",
+      "duration_ms": 7.07,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B35_05",
+      "feature_id": "F35",
+      "tier": 2,
+      "description": "Core installer scripts have 100% valid bash syntax",
+      "status": "PASS",
+      "duration_ms": 0.0,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B36_01",
+      "feature_id": "F36",
+      "tier": 2,
+      "description": "Test harness requests enforce socket timeout without indefinite hang",
+      "status": "PASS",
+      "duration_ms": 0.1,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B36_02",
+      "feature_id": "F36",
+      "tier": 2,
+      "description": "Failed assertions include test ID, feature ID, and expected vs actual",
+      "status": "PASS",
+      "duration_ms": 0.07,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B36_03",
+      "feature_id": "F36",
+      "tier": 2,
+      "description": "Filtering by feature or tier runs strictly matching test subsets",
+      "status": "PASS",
+      "duration_ms": 0.16,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B36_04",
+      "feature_id": "F36",
+      "tier": 2,
+      "description": "Each test case initializes independent state and does not depend on order",
+      "status": "PASS",
+      "duration_ms": 0.0,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B36_05",
+      "feature_id": "F36",
+      "tier": 2,
+      "description": "Test runner produces valid JSON report conforming to standard schema",
+      "status": "PASS",
+      "duration_ms": 0.11,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B37_01",
+      "feature_id": "F37",
+      "tier": 2,
+      "description": "Backend handles extreme payload fuzzing (10MB, non-UTF8, control chars)",
+      "status": "PASS",
+      "duration_ms": 0.0,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B37_02",
+      "feature_id": "F37",
+      "tier": 2,
+      "description": "Concurrent write operations do not trigger database table locks in WAL mode",
+      "status": "PASS",
+      "duration_ms": 0.07,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B37_03",
+      "feature_id": "F37",
+      "tier": 2,
+      "description": "Mutating endpoints (POST, PUT, DELETE) reject requests with forged CSRF tokens",
+      "status": "PASS",
+      "duration_ms": 0.11,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B37_04",
+      "feature_id": "F37",
+      "tier": 2,
+      "description": "Public login and password endpoints enforce rate limits or payload constraints",
+      "status": "PASS",
+      "duration_ms": 0.07,
+      "error": ""
+    },
+    {
+      "test_id": "T2_B37_05",
+      "feature_id": "F37",
+      "tier": 2,
+      "description": "API server handles SIGINT/SIGTERM with graceful connection drainage",
+      "status": "PASS",
+      "duration_ms": 0.08,
+      "error": ""
+    },
+    {
+      "test_id": "T3_COMBO_01",
+      "feature_id": "F05+F07+F06+F09",
+      "tier": 3,
+      "description": "Ingress CRUD persists to Migration 17, syncs DNS via runner, and reflects in topology",
+      "status": "PASS",
+      "duration_ms": 0.66,
+      "error": ""
+    },
+    {
+      "test_id": "T3_COMBO_02",
+      "feature_id": "F02+F03+F22",
+      "tier": 3,
+      "description": "Password mutation, session rotation, and ProfileTab form interaction",
+      "status": "PASS",
+      "duration_ms": 0.26,
+      "error": ""
+    },
+    {
+      "test_id": "T3_COMBO_03",
+      "feature_id": "F01+F20",
+      "tier": 3,
+      "description": "PathSelector integration with Go FS handler and MediaFlow cookie auth",
+      "status": "PASS",
+      "duration_ms": 0.22,
+      "error": ""
+    },
+    {
+      "test_id": "T3_COMBO_04",
+      "feature_id": "F26+F07+F08",
+      "tier": 3,
+      "description": "Quotas UI, runner /v1/quota dispatch, and billing webhook events",
+      "status": "PASS",
+      "duration_ms": 0.52,
+      "error": ""
+    },
+    {
+      "test_id": "T3_COMBO_05",
+      "feature_id": "F24+F07+F08",
+      "tier": 3,
+      "description": "Network panel UI, runner /v1/network, and WireGuard/Tailscale callers",
+      "status": "PASS",
+      "duration_ms": 0.29,
+      "error": ""
+    },
+    {
+      "test_id": "T3_COMBO_06",
+      "feature_id": "F10+F27",
+      "tier": 3,
+      "description": "Cluster manager startup cleanliness, ClusterTab UI, and worker telemetry",
+      "status": "PASS",
+      "duration_ms": 0.27,
+      "error": ""
+    },
+    {
+      "test_id": "T3_COMBO_07",
+      "feature_id": "F32+F11+F13+F14",
+      "tier": 3,
+      "description": "Single binary build, static export embed, and Obsidian V2 CSS foundation",
+      "status": "PASS",
+      "duration_ms": 0.33,
+      "error": ""
+    },
+    {
+      "test_id": "T3_COMBO_08",
+      "feature_id": "F33+F34+F07+F08",
+      "tier": 3,
+      "description": "Systemd least privilege units, sudoers purge, runner socket, and sandbox caller",
+      "status": "PASS",
+      "duration_ms": 0.21,
+      "error": ""
+    },
+    {
+      "test_id": "T3_COMBO_09",
+      "feature_id": "F28+F29+F30+F31",
+      "tier": 3,
+      "description": "Debian 13 APT TLS template, core OS detection, modernized packages, and keyrings",
+      "status": "PASS",
+      "duration_ms": 0.19,
+      "error": ""
+    },
+    {
+      "test_id": "T3_COMBO_10",
+      "feature_id": "F19+Overview",
+      "tier": 3,
+      "description": "OverviewTab mounting of BandwidthCard and PredictionsCard with real history",
+      "status": "PASS",
+      "duration_ms": 0.16,
+      "error": ""
+    },
+    {
+      "test_id": "T3_COMBO_11",
+      "feature_id": "F21+Deploy",
+      "tier": 3,
+      "description": "ExternalAccessCard, DeploymentStatus, useDeploymentStream SSE, and Caddy integration",
+      "status": "PASS",
+      "duration_ms": 0.15,
+      "error": ""
+    },
+    {
+      "test_id": "T3_COMBO_12",
+      "feature_id": "F15+F16+F18",
+      "tier": 3,
+      "description": "Tri-mode mobile dock, scroller containment invariant, and Obsidian UI primitives",
+      "status": "PASS",
+      "duration_ms": 0.27,
+      "error": ""
+    },
+    {
+      "test_id": "T4_SCENARIO_01",
+      "feature_id": "OperatorLifecycle",
+      "tier": 4,
+      "description": "Complete Operator Bootstrap, Privilege Drop, Password Change & Topology Verification",
+      "status": "PASS",
+      "duration_ms": 0.44,
+      "error": ""
+    },
+    {
+      "test_id": "T4_SCENARIO_02",
+      "feature_id": "AppProvisioning",
+      "tier": 4,
+      "description": "Application Provisioning, Caddy Ingress, /etc/hosts Sync & SSE Streaming",
+      "status": "PASS",
+      "duration_ms": 0.5,
+      "error": ""
+    },
+    {
+      "test_id": "T4_SCENARIO_03",
+      "feature_id": "QuotaBilling",
+      "tier": 4,
+      "description": "Multi-Tenant Storage Quota Assignment, Runner setdisk & Billing Audit Log",
+      "status": "PASS",
+      "duration_ms": 0.38,
+      "error": ""
+    },
+    {
+      "test_id": "T4_SCENARIO_04",
+      "feature_id": "MeshVPN",
+      "tier": 4,
+      "description": "Zero-Trust WireGuard Keygen, Peer Enrollment & Tailscale Route Advertisement",
+      "status": "PASS",
+      "duration_ms": 0.28,
+      "error": ""
+    },
+    {
+      "test_id": "T4_SCENARIO_05",
+      "feature_id": "SelfHealing",
+      "tier": 4,
+      "description": "Predictive Telemetry Analysis, Anomaly Notification & Runner Socket Self-Healing",
+      "status": "PASS",
+      "duration_ms": 0.26,
+      "error": ""
+    }
+  ]
+}

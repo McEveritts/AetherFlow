@@ -4,20 +4,29 @@ on:
   workflow_dispatch:
   push:
     branches: [main, master, development]
-    paths:
-      - 'backend/**'
-      - '.github/workflows/security.yml'
   pull_request:
     branches: [main, master, development]
-    paths:
-      - 'backend/**'
-      - '.github/workflows/security.yml'
 
 permissions:
   contents: read
 
 jobs:
+  secret-scan:
+    name: Secret & Credential Scan (Gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Install and run gitleaks on working tree
+        run: |
+          GITLEAKS_VERSION="8.24.2"
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" | tar -xz -C /usr/local/bin gitleaks
+          gitleaks dir . --verbose --redact
+
   security-checks:
+    name: Backend SAST & Vulnerability Scan
     runs-on: ubuntu-latest
     defaults:
       run:
