@@ -582,13 +582,15 @@ spinner() {
 	local delay=0.1
 	local -a spinstr=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
 	local i=0
-	while kill -0 "${pid}" 2>/dev/null; do
-		printf " [${bold}${magenta}%s${normal}]  " "${spinstr[i]}"
-		i=$(((i + 1) % 10))
-		sleep "${delay}"
-		printf "\b\b\b\b\b\b"
-	done
-	printf "    \b\b\b\b"
+	if [[ -t 1 ]]; then
+		while kill -0 "${pid}" 2>/dev/null; do
+			printf " [${bold}${magenta}%s${normal}]  " "${spinstr[i]}"
+			i=$(((i + 1) % 10))
+			sleep "${delay}"
+			printf "\b\b\b\b\b\b"
+		done
+		printf "    \b\b\b\b"
+	fi
 	wait "${pid}"
 	local rc=$?
 	if [[ ${rc} -eq 0 ]]; then
