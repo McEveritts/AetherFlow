@@ -1,6 +1,6 @@
 # Security Guide
 
-AetherFlow v3.2.01+ implements defense-in-depth across authentication, data at rest, systemd namespace sandboxing, and CI/CD supply-chain verification.
+AetherFlow v3.2.1+ implements defense-in-depth across authentication, data at rest, systemd namespace sandboxing, and CI/CD supply-chain verification.
 
 ## Authentication & Perimeter SSO
 

@@ -7,7 +7,7 @@ It began as the next evolution of **QuickBox**, then grew into something broader
 Rather than treating the server as a loose collection of scripts and panels, AetherFlow treats it as a managed platform: one place to operate services, observe the system, automate tasks, and safely delegate actions through an AI-assisted interface.
 
 > [!NOTE]
-> AetherFlow v3.2.01 reflects a major architectural modernization. The platform is moving away from legacy PHP patterns and toward a high-concurrency stack built around Go, Next.js, and systemd-native orchestration.
+> AetherFlow v3.2.1 reflects a major architectural modernization. The platform is moving away from legacy PHP patterns and toward a high-concurrency stack built around Go, Next.js, and systemd-native orchestration.
 
 ---
 
@@ -43,7 +43,7 @@ A localized infrastructure management assistant integrated directly into the con
 - **Action Approval Gate**: A security layer that queues destructive AI proposals (restarts, deletions, config changes) for administrator approval.
 
 ### 3. AetherMarketplace
-A managed ecosystem of 37+ installable applications (e.g., Plex, qBittorrent, Autobrr).
+A managed ecosystem of 69 installable applications (e.g., Plex, Jellyfin, qBittorrent, Qui, Autobrr).
 - **One-Click Deploy**: Reliable, idempotent installation scripts.
 - **Real-Time Progress**: Visual circular progress tracking for active deployments.
 - **Service Orchestration**: Automatically creates systemd units for every installed application.

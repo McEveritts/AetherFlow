@@ -226,13 +226,13 @@ func CheckUpdate(c *gin.Context) {
 
 // isNewerVersion returns true if remote is strictly newer than local.
 func isNewerVersion(local, remote string) bool {
-	parseVersion := func(v string) (int, int, int) {
+	parseVersion := func(v string) (int, int, int, int) {
 		v = strings.TrimPrefix(v, "v")
 		if idx := strings.IndexByte(v, '-'); idx != -1 {
 			v = v[:idx]
 		}
 		parts := strings.Split(v, ".")
-		major, minor, patch := 0, 0, 0
+		major, minor, patch, subpatch := 0, 0, 0, 0
 		if len(parts) >= 1 {
 			major, _ = strconv.Atoi(parts[0])
 		}
@@ -240,13 +240,18 @@ func isNewerVersion(local, remote string) bool {
 			minor, _ = strconv.Atoi(parts[1])
 		}
 		if len(parts) >= 3 {
-			patch, _ = strconv.Atoi(parts[2])
+			if len(parts[2]) > 1 && strings.HasPrefix(parts[2], "0") {
+				patch = 0
+				subpatch, _ = strconv.Atoi(parts[2])
+			} else {
+				patch, _ = strconv.Atoi(parts[2])
+			}
 		}
-		return major, minor, patch
+		return major, minor, patch, subpatch
 	}
 
-	lMaj, lMin, lPat := parseVersion(local)
-	rMaj, rMin, rPat := parseVersion(remote)
+	lMaj, lMin, lPat, lSub := parseVersion(local)
+	rMaj, rMin, rPat, rSub := parseVersion(remote)
 
 	if rMaj != lMaj {
 		return rMaj > lMaj
@@ -254,7 +259,10 @@ func isNewerVersion(local, remote string) bool {
 	if rMin != lMin {
 		return rMin > lMin
 	}
-	return rPat > lPat
+	if rPat != lPat {
+		return rPat > lPat
+	}
+	return rSub > lSub
 }
 
 // RunUpdate initiates the background bash script to perform atomic blue/green deployment

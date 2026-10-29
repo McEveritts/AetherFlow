@@ -255,6 +255,8 @@ func TestIsNewerVersion(t *testing.T) {
 		{"v3.1.0-beta", "v3.1.0", false}, // same semver (beta stripped)
 		{"3.0.0", "v3.1.0", true},        // missing v prefix
 		{"v3.2.0-dev", "v3.1.0", false},  // local is higher
+		{"v3.2.01", "v3.2.1", true},      // 3.2.1 is newer than decimal sub-patch 3.2.01
+		{"v3.2.1", "v3.2.01", false},     // 3.2.01 is older than 3.2.1
 	}
 
 	for _, tt := range tests {

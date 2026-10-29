@@ -1,3 +1,27 @@
+## CHANGELOG v3.2.1 - 69-App Bare-Metal Catalog, Jellyfin Streaming Telemetry, FlowAI Open Canvas & 57-Point Surgical Audit
+_Direct comparison against `v3.2.01` (`v3.2.01...v3.2.1`), consolidating catalog expansion, streaming intelligence, ingress hardening, and McSurgeon audit resolutions._
+
+---
+
+### Release Highlights (since `v3.2.01`)
+* **69-Application Bare-Metal Catalog (+14 New Native Packages)**: Expanded AetherMarketplace from 55 to **69 bare-metal applications** with idempotent install/remove lifecycles, systemd service units, automation templates, and brand iconography: **Qui**, **Threadfin**, **Dispatcharr**, **Listenarr**, **SeedCross**, **pyLoad**, **Flood**, **Calibre-Web**, **FileBot**, **Unmanic**, **Quassel**, **X2Go**, **Notifiarr**, and **Organizr**.
+* **Jellyfin Streaming Dashboard & Bandwidth Telemetry**: Introduced `StreamingMonitor` (`backend/services/streaming_monitor.go`), REST endpoints (`/api/v1/streaming/*`), SQLite playback history persistence, and the dedicated **Streaming** dashboard tab (`StreamingTab.tsx`) featuring live Direct Play vs. Transcode session cards, play statistics, library analytics, and real-time bandwidth telemetry.
+* **LibreSpeed Obsidian V2 Theme & Backend Telemetry Patches**: Bundled the custom Obsidian V2 glassmorphic speedtest frontend (`index-modern.html`, `styling/obsidian.css`, `speedtest_worker.js`, custom SVG assets) and Go backend patches (`stats.go`, `telemetry.go`) directly into the `installpackage-librespeed` provisioning pipeline.
+* **FlowAI Open-Canvas Overhaul & Docked Sidebar**: Redesigned `AiChatTab.tsx` into a full-viewport open canvas, stabilized primary navigation into a docked left `<aside>` sidebar, unified default Gemini routing on `gemini-4-argon` with automatic model fallback chains, and resolved FileShare & MediaFlow path handling.
+* **Master Credential Synchronization & Bootstrap Modularization**: Synchronized operator credentials across the Web UI Onboarding Wizard, password updates, `/root/.master.info`, and automated blueprint/package provisioning (including PBKDF2 WebUI credentials for `qbittorrent-nox`). Decoupled mandatory torrent client installation from `AetherFlow-Setup` so base nodes bootstrap cleanly.
+* **57-Point McSurgeon Surgical Audit Resolution**: Resolved 57 security, concurrency, ingress, DNS, hardware telemetry, and UI findings across backend and frontend components.
+
+### Ingress, Auth & Systemd Hardening
+* **Apache2 Subdomain Gateway & Certbot SAN Sync**: Prioritized Apache2 VirtualHost subdomain routing alongside Caddy, automated Certbot SAN certificate synchronization via `af-certbot-sync`, and hardened ingress route validation (`ingress_handlers.go`, `blueprint_lifecycle.go`, `deploy_orchestrator.go`).
+* **Systemd `AF_NETLINK` Sandboxing**: Added `AF_NETLINK` to `RestrictAddressFamilies` in `aetherflow-api.service` so `net.Interfaces()` LAN origin discovery operates cleanly inside strict systemd sandboxing.
+* **Session Hijacking & Silent JWT Refresh Fixes**: Prevented false-positive session hijacking invalidations during browser socket rotation and stabilized background silent JWT refresh.
+
+### Telemetry & UI Polish
+* **Live GPU & CPU Telemetry**: Enhanced live GPU discovery and utilization polling (`nvidia-smi` and DRM `sysfs`) alongside real-time CPU frequency and thermal sensors in `hardware.go` and `GpuWidget.tsx`.
+* **Dashboard & Settings Refinements**: Polished `SettingsTab.tsx`, `ProfileTab.tsx`, and `DataUsageHistoryWidget.tsx` state synchronization, accessibility semantics, and responsive layout density.
+
+---
+
 ## CHANGELOG v3.2.01 - Single-Binary Control Plane, Auto-Subdomain Ingress & Real-Time Telemetry
 _Direct comparison against `v3.1.5` (`v3.1.5...v3.2.01`), consolidating all architectural, security, packaging, and UI advancements._
 
