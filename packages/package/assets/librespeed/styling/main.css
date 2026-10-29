@@ -1,0 +1,135 @@
+/* Obsidian V2 Speedtest Stage Layout */
+
+main.st-main {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1.8rem;
+  padding: 0.6rem 1rem 1.2rem 1rem;
+  width: 100%;
+  max-width: 114rem;
+  margin: 0 auto;
+  flex: 1;
+}
+
+/* ============================================================================
+   1. TOP TELEMETRY SCOREBOARD RIBBON (Ping, Jitter, Download + Wave, Upload + Wave)
+   ============================================================================ */
+.st-metrics-ribbon {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1.65fr 1.65fr;
+  gap: 1.4rem;
+  width: 100%;
+
+  @media screen and (max-width: 960px) {
+    grid-template-columns: 1fr 1fr;
+  }
+  @media screen and (max-width: 520px) {
+    gap: 1.0rem;
+  }
+}
+
+.st-metric-card {
+  padding: 1.4rem 1.8rem;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  min-height: 9.6rem;
+  text-align: left;
+  transition: transform var(--obs-duration-card) var(--obs-ease-spring-120),
+              border-color var(--obs-duration-card) var(--obs-ease-out-120),
+              box-shadow var(--obs-duration-card) var(--obs-ease-out-120),
+              background var(--obs-duration-card) var(--obs-ease-out-120);
+
+  &.is-active-phase {
+    border-color: rgba(217, 70, 239, 0.78);
+    border-top-color: rgba(255, 255, 255, 0.60);
+    background: var(--obs-card-bg-hover);
+    box-shadow: 0 16px 40px rgba(0, 0, 0, 0.75),
+                0 0 28px rgba(99, 102, 241, 0.36),
+                0 0 16px rgba(217, 70, 239, 0.28);
+    transform: translate3d(0, -2px, 0);
+  }
+}
+
+.st-metric-top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1.0rem;
+  width: 100%;
+}
+
+.st-metric-header {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+
+  & > .label {
+    font-size: 1.25rem;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--obs-slate-300);
+  }
+
+  & > .st-metric-unit {
+    font-family: var(--obs-font-mono);
+    font-size: 1.15rem;
+    font-weight: 600;
+    color: var(--obs-slate-500);
+  }
+}
+
+.st-metric-icon {
+  width: 1.8rem;
+  height: 1.8rem;
+  flex-shrink: 0;
+
+  &.emerald {
+    color: var(--obs-emerald-400);
+    filter: drop-shadow(0 0 8px rgba(52, 211, 153, 0.45));
+  }
+  &.indigo {
+    color: var(--obs-indigo-400);
+    filter: drop-shadow(0 0 8px rgba(129, 140, 248, 0.45));
+  }
+  &.fuchsia {
+    color: var(--obs-fuchsia-400);
+    filter: drop-shadow(0 0 8px rgba(217, 70, 239, 0.45));
+  }
+  &.cyan {
+    color: var(--obs-sky-400);
+    filter: drop-shadow(0 0 8px rgba(56, 189, 248, 0.45));
+  }
+}
+
+.st-metric-body {
+  margin-top: 0.4rem;
+
+  & > .value {
+    font-family: var(--obs-font-mono);
+    font-variant-numeric: tabular-nums;
+    font-size: 3.2rem;
+    font-weight: 800;
+    letter-spacing: -0.08rem;
+    color: var(--obs-white);
+    line-height: 1.1;
+  }
+}
+
+.st-metric-wide .st-metric-body {
+  margin-top: 0;
+  & > .value {
+    font-size: 2.9rem;
+  }
+}
+
+canvas.st-sparkline {
+  width: 100%;
+  height: 3.4rem;
+  margin-top: 0.6rem;
+  display: block;
+  border-radius: 0.6rem;
+}

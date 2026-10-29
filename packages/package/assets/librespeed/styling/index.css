@@ -1,0 +1,84 @@
+/**
+ * LibreSpeed Obsidian V2 Stylesheet Entrypoint
+ * Grounded in AetherFlow v3.2 & Jellyfin 12.2 Obsidian V2
+ */
+
+@import url("obsidian.css");
+@import url("colors.css");
+@import url("fonts.css");
+@import url("main.css");
+@import url("server-selector.css");
+@import url("button.css");
+@import url("results.css");
+@import url("dialog.css");
+
+/* Setting up the basic structure (Zero blanket overflow-x hidden) */
+
+* {
+  box-sizing: border-box;
+  padding: 0;
+  margin: 0;
+}
+
+html,
+body {
+  min-height: 100vh;
+  width: 100%;
+  max-width: 100%;
+}
+
+html {
+  background-color: var(--obs-bg-base) !important;
+  background-image: none !important;
+  font-size: 10px;
+
+  @media screen and (max-width: 800px) {
+    font-size: 8px;
+  }
+}
+
+body {
+  font-family: var(--obs-font-sans);
+  background-color: transparent !important;
+  color: var(--primary-text-color);
+  display: flex;
+  flex-direction: column;
+  padding: 0 2rem;
+}
+
+/* Footer link & metadata */
+
+footer {
+  margin: auto auto 0 auto;
+  padding: 3.6rem 2rem;
+  text-align: center;
+
+  & > p.source {
+    display: inline-flex;
+    align-items: center;
+    gap: 1.2rem;
+    padding: 0.8rem 1.8rem;
+    border-radius: var(--obs-radius-full);
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(129, 140, 248, 0.24);
+    font-size: 1.3rem;
+    color: var(--obs-slate-400);
+  }
+
+  & > p.source a {
+    font-size: 1.3rem;
+    font-weight: 600;
+    letter-spacing: -0.02rem;
+    color: var(--obs-indigo-300);
+    text-decoration: none;
+    transition: color var(--obs-duration-fast) var(--obs-ease-out-120);
+
+    &:hover {
+      color: var(--obs-fuchsia-400);
+    }
+  }
+
+  @media screen and (max-width: 800px) {
+    padding: 2.8rem 1.6rem;
+  }
+}

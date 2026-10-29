@@ -1,0 +1,252 @@
+/* ============================================================================
+   2. SPEEDTEST.NET PULSING "GO" RING BUTTON & ACTION CONTROLS
+   ============================================================================ */
+
+.st-stage {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  min-height: 41rem;
+}
+
+.st-go-wrapper {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26rem;
+  height: 26rem;
+  transition: opacity 0.35s var(--obs-ease-out-120),
+              transform 0.4s var(--obs-ease-spring-120);
+}
+
+main.st-main:not([data-stage="idle"]) .st-go-wrapper {
+  opacity: 0;
+  pointer-events: none;
+  transform: scale(0.72);
+  position: absolute;
+}
+
+/* Concentric Sonar Ripple Rings */
+.st-go-sonar {
+  position: absolute;
+  inset: 2rem;
+  border-radius: 50%;
+  border: 1.5px solid rgba(129, 140, 248, 0.45);
+  box-shadow: 0 0 24px rgba(99, 102, 241, 0.25),
+              inset 0 0 18px rgba(217, 70, 239, 0.18);
+  pointer-events: none;
+  animation: st-sonar-pulse 3.2s cubic-bezier(0.16, 1, 0.3, 1) infinite;
+}
+
+.st-go-sonar-2 {
+  border-color: rgba(217, 70, 239, 0.40);
+  animation-delay: 1.06s;
+}
+
+.st-go-sonar-3 {
+  border-color: rgba(56, 189, 248, 0.40);
+  animation-delay: 2.12s;
+}
+
+@keyframes st-sonar-pulse {
+  0% {
+    transform: scale(0.88);
+    opacity: 0.85;
+  }
+  75% {
+    opacity: 0.22;
+  }
+  100% {
+    transform: scale(1.58);
+    opacity: 0;
+  }
+}
+
+/* Main Circular "GO" Button */
+button.st-go-button {
+  position: relative;
+  width: 20.4rem;
+  height: 20.4rem;
+  min-width: 0;
+  padding: 0;
+  margin: 0;
+  border-radius: 50%;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.80),
+              0 0 44px rgba(99, 102, 241, 0.42),
+              0 0 24px rgba(217, 70, 239, 0.28);
+  transition: transform 0.28s var(--obs-ease-spring-120),
+              box-shadow 0.28s var(--obs-ease-out-120);
+
+  /* Spinning Chromatic Conic Rim */
+  & > .st-go-prism {
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+    padding: 3.5px;
+    background: conic-gradient(
+      from 0deg,
+      #38bdf8 0deg,
+      #6366f1 110deg,
+      #d946ef 220deg,
+      #a855f7 290deg,
+      #38bdf8 360deg
+    );
+    -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+    -webkit-mask-composite: xor;
+    mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+    mask-composite: exclude;
+    animation: st-prism-spin 5s linear infinite;
+  }
+
+  /* Deep Obsidian Glass Inner Core */
+  & > .st-go-core {
+    position: relative;
+    z-index: 2;
+    width: calc(100% - 10px);
+    height: calc(100% - 10px);
+    border-radius: 50%;
+    background: radial-gradient(
+      circle at 50% 32%,
+      rgba(99, 102, 241, 0.24) 0%,
+      rgba(15, 18, 38, 0.92) 58%,
+      rgba(5, 6, 16, 0.98) 100%
+    );
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    box-shadow: inset 0 2px 12px rgba(255, 255, 255, 0.18),
+                inset 0 -8px 24px rgba(0, 0, 0, 0.8);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.4rem;
+  }
+
+  & .st-go-text {
+    font-family: var(--obs-font-sans);
+    font-size: 5.8rem;
+    font-weight: 900;
+    letter-spacing: 0.04em;
+    line-height: 1;
+    background: linear-gradient(135deg, #ffffff 0%, #e0f2fe 45%, #f5d0fe 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    filter: drop-shadow(0 0 18px rgba(129, 140, 248, 0.45));
+    transition: transform 0.25s var(--obs-ease-spring-120);
+  }
+
+  & .st-go-sub {
+    font-family: var(--obs-font-mono);
+    font-size: 1.1rem;
+    font-weight: 700;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--obs-sky-400);
+  }
+
+  &:hover:not(.disabled) {
+    transform: scale(1.06);
+    box-shadow: 0 24px 70px rgba(0, 0, 0, 0.88),
+                0 0 60px rgba(217, 70, 239, 0.55),
+                0 0 32px rgba(56, 189, 248, 0.45);
+
+    & .st-go-text {
+      transform: scale(1.05);
+    }
+  }
+
+  &:active:not(.disabled) {
+    transform: scale(0.96);
+  }
+
+  &.disabled {
+    opacity: 0.65;
+    cursor: default;
+  }
+}
+
+@keyframes st-prism-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Action Buttons inside Gauge Pod & Modals */
+button.st-action-btn,
+dialog button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.8rem;
+  height: 4.4rem;
+  min-width: 16.4rem;
+  padding: 0 2.4rem;
+  border-radius: var(--obs-radius-full);
+  font-family: var(--obs-font-sans);
+  font-size: 1.35rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--obs-white);
+  cursor: pointer;
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  border-top: 1px solid rgba(255, 255, 255, 0.48);
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.92) 0%, rgba(217, 70, 239, 0.92) 100%);
+  box-shadow: var(--obs-shadow-button-primary);
+  transition: transform var(--obs-duration-fast) var(--obs-ease-out-120),
+              box-shadow var(--obs-duration-fast) ease,
+              background var(--obs-duration-fast) ease,
+              border-color var(--obs-duration-fast) ease;
+
+  &:hover {
+    transform: scale(1.03);
+    box-shadow: var(--obs-shadow-button-hover);
+  }
+
+  &:active {
+    transform: scale(0.97);
+  }
+
+  &.st-abort-btn {
+    background: rgba(244, 63, 94, 0.16);
+    border-color: rgba(244, 63, 94, 0.48);
+    color: #fda4af;
+    box-shadow: 0 4px 20px rgba(244, 63, 94, 0.20);
+
+    &:hover {
+      background: rgba(244, 63, 94, 0.28);
+      color: #ffffff;
+      box-shadow: 0 6px 24px rgba(244, 63, 94, 0.38);
+    }
+  }
+
+  &.inverted {
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid var(--obs-chromatic-border-indigo);
+    border-top: 1px solid var(--obs-specular-top);
+    border-left: 1px solid var(--obs-chromatic-border-cyan);
+    border-right: 1px solid var(--obs-chromatic-border-fuchsia);
+    box-shadow: var(--obs-shadow-card), var(--obs-chromatic-inset-card);
+
+    &:hover {
+      background: rgba(255, 255, 255, 0.12);
+      border-color: var(--obs-glass-border-hover);
+    }
+  }
+
+  &.hidden {
+    display: none !important;
+  }
+}

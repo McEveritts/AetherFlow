@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+  <meta name="description"
+    content="LibreSpeed Network Telemetry — Obsidian V2 Speedtest Edition hosted on AetherFlow." />
+  <link rel="shortcut icon" href="images/favicon.svg" />
+  <script type="text/javascript" src="speedtest.js"></script>
+  <script type="text/javascript">
+    var SPEEDTEST_SERVERS = "server-list.json";
+  </script>
+  <script type="text/javascript" src="javascript/index.js"></script>
+  <link rel="stylesheet" type="text/css" href="styling/index.css" />
+  <title>LibreSpeed · Obsidian V2 Network Telemetry</title>
+</head>
+
+<body>
+  <header class="obs-header">
+    <a class="obs-brand" href="./">
+      <img src="images/logo.svg" alt="LibreSpeed" />
+      <span class="obs-badge">
+        <span class="obs-beacon-live"></span>
+        Obsidian V2
+      </span>
+    </a>
+    <nav class="obs-nav-pills" aria-label="Telemetry View Switcher">
+      <a class="obs-tab-pill obs-tab-pill-active" href="./">Speedtest Stage</a>
+      <a class="obs-tab-pill" href="stats">Telemetry Vault</a>
+      <a class="obs-tab-pill" href="#" id="choose-privacy">Privacy</a>
+    </nav>
+  </header>
+
+  <main class="st-main" data-stage="idle" data-phase="idle">
+    <!-- TOP TELEMETRY RIBBON (Speedtest.net Live Scoreboard + Sparklines) -->
+    <section class="st-metrics-ribbon" aria-label="Live Telemetry Metrics">
+      <!-- Ping Metric Card -->
+      <div class="st-metric-card glass-card ping" id="card-ping">
+        <div class="st-metric-header">
+          <svg class="st-metric-icon emerald" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
+          </svg>
+          <span class="label">Ping</span>
+          <span class="st-metric-unit">ms</span>
+        </div>
+        <div class="st-metric-body">
+          <span class="value" id="ping">--</span>
+        </div>
+      </div>
+
+      <!-- Jitter Metric Card -->
+      <div class="st-metric-card glass-card jitter" id="card-jitter">
+        <div class="st-metric-header">
+          <svg class="st-metric-icon indigo" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M2 12h4l3-9 4 18 3-9h6"></path>
+          </svg>
+          <span class="label">Jitter</span>
+          <span class="st-metric-unit">ms</span>
+        </div>
+        <div class="st-metric-body">
+          <span class="value" id="jitter">--</span>
+        </div>
+      </div>
+
+      <!-- Download Metric Card + Live Sparkline -->
+      <div class="st-metric-card st-metric-wide glass-card" id="card-download">
+        <div class="st-metric-top">
+          <div class="st-metric-header">
+            <svg class="st-metric-icon fuchsia" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+              <circle cx="12" cy="12" r="10"></circle>
+              <polyline points="8 12 12 16 16 12"></polyline>
+              <line x1="12" y1="8" x2="12" y2="16"></line>
+            </svg>
+            <span class="label">Download</span>
+            <span class="st-metric-unit">Mbps</span>
+          </div>
+          <div class="st-metric-body">
+            <span class="value" id="download-speed">--</span>
+          </div>
+        </div>
+        <canvas id="dl-sparkline" class="st-sparkline" width="220" height="36"></canvas>
+      </div>
+
+      <!-- Upload Metric Card + Live Sparkline -->
+      <div class="st-metric-card st-metric-wide glass-card" id="card-upload">
+        <div class="st-metric-top">
+          <div class="st-metric-header">
+            <svg class="st-metric-icon cyan" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+              <circle cx="12" cy="12" r="10"></circle>
+              <polyline points="16 12 12 8 8 12"></polyline>
+              <line x1="12" y1="16" x2="12" y2="8"></line>
+            </svg>
+            <span class="label">Upload</span>
+            <span class="st-metric-unit">Mbps</span>
+          </div>
+          <div class="st-metric-body">
+            <span class="value" id="upload-speed">--</span>
+          </div>
+        </div>
+        <canvas id="ul-sparkline" class="st-sparkline" width="220" height="36"></canvas>
+      </div>
+    </section>
+
+    <!-- CENTER STAGE: MORPHING "GO" RING BUTTON <-> MASTER 270° SPEEDOMETER -->
+    <section class="st-stage">
+      <!-- State 1: Iconic Speedtest.net Pulsing "GO" Ring Button -->
+      <div class="st-go-wrapper" id="go-wrapper">
+        <div class="st-go-sonar st-go-sonar-1"></div>
+        <div class="st-go-sonar st-go-sonar-2"></div>
+        <div class="st-go-sonar st-go-sonar-3"></div>
+        <button class="st-go-button disabled" id="start-button" aria-label="Start Speedtest">
+          <span class="st-go-prism"></span>
+          <span class="st-go-core">
+            <span class="st-go-text" id="start-button-label">GO</span>
+            <span class="st-go-sub" id="start-button-sub">Initializing...</span>
+          </span>
+        </button>
+      </div>
+
+      <!-- State 2 & 3: Central Master 270° Speedometer Gauge Pod -->
+      <div class="st-gauge-pod glass-card" id="master-gauge-pod">
+        <div class="st-phase-header">
+          <span class="st-phase-badge" id="st-phase-badge">
+            <span class="st-phase-dot"></span>
+            <span id="st-phase-text">READY</span>
+          </span>
+        </div>
+
+        <div class="st-speedometer-wrap">
+          <svg class="st-speedometer-svg" viewBox="0 0 440 340" aria-hidden="true">
+            <defs>
+              <!-- Download Gradient: Indigo -> Fuchsia -> Pink -->
+              <linearGradient id="obs-grad-download" x1="0%" y1="100%" x2="100%" y2="0%">
+                <stop offset="0%" stop-color="#4f46e5" />
+                <stop offset="50%" stop-color="#a855f7" />
+                <stop offset="100%" stop-color="#ec4899" />
+              </linearGradient>
+              <!-- Upload Gradient: Indigo -> Sky Cyan -> Emerald -->
+              <linearGradient id="obs-grad-upload" x1="0%" y1="100%" x2="100%" y2="0%">
+                <stop offset="0%" stop-color="#4f46e5" />
+                <stop offset="50%" stop-color="#0ea5e9" />
+                <stop offset="100%" stop-color="#38bdf8" />
+              </linearGradient>
+              <!-- Ping Gradient: Emerald -> Cyan -->
+              <linearGradient id="obs-grad-ping" x1="0%" y1="100%" x2="100%" y2="0%">
+                <stop offset="0%" stop-color="#10b981" />
+                <stop offset="100%" stop-color="#38bdf8" />
+              </linearGradient>
+              <!-- Needle Gradient -->
+              <linearGradient id="obs-grad-needle" x1="0%" y1="0%" x2="0%" y2="100%">
+                <stop offset="0%" stop-color="#ffffff" />
+                <stop offset="45%" stop-color="#e0f2fe" />
+                <stop offset="100%" stop-color="rgba(99, 102, 241, 0)" />
+              </linearGradient>
+              <!-- Luminescent Drop Shadow Filter -->
+              <filter id="obs-arc-glow" x="-20%" y="-20%" width="140%" height="140%">
+                <feGaussianBlur stdDeviation="6" result="blur" />
+                <feComposite in="SourceGraphic" in2="blur" operator="over" />
+              </filter>
+            </defs>
+
+            <!-- Outer Phase Progress Ring (R = 166) -->
+            <path
+              class="st-arc-progress-bg"
+              d="M 102.62 307.38 A 166 166 0 1 1 337.38 307.38"
+              pathLength="1000"
+            />
+            <path
+              id="st-arc-progress"
+              class="st-arc-progress-fill"
+              d="M 102.62 307.38 A 166 166 0 1 1 337.38 307.38"
+              pathLength="1000"
+              stroke-dasharray="1000"
+              stroke-dashoffset="1000"
+            />
+
+            <!-- Main Speedometer Track Arc (R = 144, center = 220, 190) -->
+            <path
+              class="st-arc-track"
+              d="M 118.18 291.82 A 144 144 0 1 1 321.82 291.82"
+              pathLength="1000"
+            />
+
+            <!-- Main Speedometer Active Glowing Arc (R = 144) -->
+            <path
+              id="st-arc-active"
+              class="st-arc-active"
+              d="M 118.18 291.82 A 144 144 0 1 1 321.82 291.82"
+              pathLength="1000"
+              stroke-dasharray="1000"
+              stroke-dashoffset="1000"
+              filter="url(#obs-arc-glow)"
+            />
+
+            <!-- Scale Ticks & Labels Group (populated by JS at exact polar coordinates) -->
+            <g id="st-gauge-ticks"></g>
+
+            <!-- Rotating Tapered Needle Group (pivots around 220, 190; radial tip spans R=144 arc 36..56) -->
+            <g id="st-needle-group" transform="rotate(-135 220 190)">
+              <polygon points="220,56 216,190 224,190" fill="url(#obs-grad-needle)" />
+              <line x1="220" y1="35" x2="220" y2="57" stroke="#ffffff" stroke-width="3.2" stroke-linecap="round" filter="url(#obs-arc-glow)" />
+            </g>
+
+            <!-- Center Hub Cap -->
+            <circle cx="220" cy="190" r="13" fill="rgba(10, 14, 28, 0.95)" stroke="rgba(129, 140, 248, 0.45)" stroke-width="2" />
+            <circle cx="220" cy="190" r="4.5" fill="#818cf8" />
+          </svg>
+
+          <!-- Center Digital Readout & Live Waveform inside Gauge Bowl -->
+          <div class="st-gauge-readout">
+            <canvas id="st-gauge-wave" width="220" height="44"></canvas>
+            <div class="st-master-number" id="st-master-value">0.00</div>
+            <div class="st-master-unit" id="st-master-unit">Mbps</div>
+          </div>
+        </div>
+
+        <!-- Action Controls Bar inside/below Master Gauge Pod -->
+        <div class="st-gauge-actions">
+          <button type="button" class="st-action-btn st-abort-btn" id="abort-button">
+            Abort Test
+          </button>
+          <button type="button" class="st-action-btn st-again-btn hidden" id="restart-button">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+              <polyline points="23 4 23 10 17 10"></polyline>
+              <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
+            </svg>
+            Test Again
+          </button>
+          <button type="button" class="st-action-btn st-share-btn inverted hidden" id="share-results">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+              <circle cx="18" cy="5" r="3"></circle>
+              <circle cx="6" cy="12" r="3"></circle>
+              <circle cx="18" cy="19" r="3"></circle>
+              <line x1="8.59" y1="13.51" x2="15.42" y2="17.49"></line>
+              <line x1="15.41" y1="6.51" x2="8.59" y2="10.49"></line>
+            </svg>
+            Share Result
+          </button>
+        </div>
+
+        <!-- Compatibility hidden hooks -->
+        <div class="gauge download" id="download-gauge" style="display:none"><div class="progress"></div><div class="speed"></div></div>
+        <div class="gauge upload" id="upload-gauge" style="display:none"><div class="progress"></div><div class="speed"></div></div>
+      </div>
+    </section>
+
+    <!-- BOTTOM CONNECTION TOPOLOGY BAR (Speedtest.net Client <-> Fiber Stream <-> Server Node) -->
+    <section class="st-topology-bar" aria-label="Connection Topology">
+      <!-- Left: Client Endpoint Node -->
+      <div class="st-node-card glass-card" id="client-node-card">
+        <div class="st-node-icon cyan">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="10"></circle>
+            <line x1="2" y1="12" x2="22" y2="12"></line>
+            <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path>
+          </svg>
+        </div>
+        <div class="st-node-meta">
+          <span class="st-node-label">Client Endpoint</span>
+          <strong class="st-node-title" id="client-ip-text">Ready · Local Network</strong>
+          <span class="st-node-sub" id="privacy-warning">Anonymous Telemetry Ready</span>
+        </div>
+      </div>
+
+      <!-- Center: Animated Bidirectional Packet Stream Bridge -->
+      <div class="st-fiber-bridge" id="fiber-bridge" data-stream="idle">
+        <div class="st-fiber-line">
+          <span class="st-packet st-packet-1"></span>
+          <span class="st-packet st-packet-2"></span>
+          <span class="st-packet st-packet-3"></span>
+        </div>
+        <span class="st-fiber-label" id="fiber-status-label">10GbE Direct Link</span>
+      </div>
+
+      <!-- Right: Target Telemetry Server Selector Node -->
+      <div class="st-node-card glass-card server-selector" id="server-selector-card">
+        <div class="chosen">
+          <div class="st-node-icon indigo">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="2" y="2" width="20" height="8" rx="2" ry="2"></rect>
+              <rect x="2" y="14" width="20" height="8" rx="2" ry="2"></rect>
+              <line x1="6" y1="6" x2="6.01" y2="6"></line>
+              <line x1="6" y1="18" x2="6.01" y2="18"></line>
+            </svg>
+          </div>
+          <div class="st-node-meta">
+            <span class="st-node-label">Telemetry Server</span>
+            <h2 class="st-node-title" id="selected-server">Initializing node...</h2>
+            <p class="st-node-sub sponsor" id="sponsor">&nbsp;</p>
+          </div>
+          <div class="chevron">
+            <img src="images/chevron.svg" alt="select..." />
+          </div>
+        </div>
+        <ul class="servers"></ul>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <p class="source">
+      <span>Powered by AetherFlow Obsidian V2</span>
+      &middot;
+      <a href="https://github.com/librespeed/speedtest-go" target="_blank" rel="noopener noreferrer">LibreSpeed Engine</a>
+    </p>
+  </footer>
+
+  <dialog id="share">
+    <div class="close-dialog">
+      <img src="images/close-button.svg" alt="Close" />
+    </div>
+    <img id="results" src="" alt="Test results in graphical form" />
+    <button id="copy-link">Copy link</button>
+  </dialog>
+
+  <dialog id="privacy">
+    <div class="close-dialog">
+      <img src="images/close-button.svg" alt="Close" />
+    </div>
+    <section>
+      <h1>Privacy Policy</h1>
+      <p>
+        This HTML5 speed test server is configured with telemetry enabled.
+      </p>
+
+      <h2>What data we collect</h2>
+      <p>
+        At the end of the test, the following data is collected and stored:
+      </p>
+
+      <ul>
+        <li>Test ID (ULID)</li>
+        <li>Time of testing</li>
+        <li>Test results (download and upload speed, ping and jitter)</li>
+        <li>IP address and ISP information</li>
+        <li>Approximate location (inferred from IP address, not GPS)</li>
+        <li>User agent and browser locale</li>
+        <li>Test log (contains no personal information)</li>
+      </ul>
+
+      <h2>How we use the data</h2>
+      <p>Data collected through this service is used to:</p>
+
+      <ul>
+        <li>
+          Allow sharing of test results (sharable image for forums, diagnostics, etc.)
+        </li>
+        <li>
+          To monitor and improve network throughput offered by this node
+        </li>
+      </ul>
+
+      <p>No personal information is disclosed to third parties.</p>
+
+      <h2>Your consent</h2>
+      <p>
+        By starting the test, you consent to the terms of this privacy policy.
+      </p>
+    </section>
+    <button id="close-privacy">Close</button>
+  </dialog>
+</body>
+
+</html>

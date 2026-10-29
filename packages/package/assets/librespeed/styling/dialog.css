@@ -1,0 +1,154 @@
+/* Obsidian V2 Glass Dialogs & Modals */
+
+dialog {
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  width: min(72rem, 92vw);
+  max-height: 82vh;
+  margin: auto;
+  padding: 3.6rem 3.2rem;
+
+  background: var(--obs-panel-bg);
+  backdrop-filter: blur(28px) var(--obs-glass-saturation);
+  -webkit-backdrop-filter: blur(28px) var(--obs-glass-saturation);
+  border: 1px solid var(--obs-chromatic-border-indigo);
+  border-top: 1px solid var(--obs-specular-top);
+  border-left: 1px solid var(--obs-chromatic-border-cyan);
+  border-right: 1px solid var(--obs-chromatic-border-fuchsia);
+  border-radius: var(--obs-radius-2xl);
+  box-shadow: var(--obs-shadow-panel), var(--obs-chromatic-inset);
+  color: var(--obs-slate-200);
+
+  &::backdrop {
+    background: rgba(0, 0, 0, 0.76);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+  }
+
+  @media screen and (max-width: 800px) {
+    width: 94vw;
+    max-height: 88vh;
+    padding: 2.8rem 2.0rem;
+  }
+
+  animation: fade-out 0.2s var(--obs-ease-out-120);
+  &[open] {
+    display: flex;
+    animation: fade-in 0.25s var(--obs-ease-spring-120);
+  }
+
+  & > .close-dialog {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 4.0rem;
+    height: 4.0rem;
+    position: absolute;
+    top: 2.0rem;
+    right: 2.0rem;
+    border-radius: var(--obs-radius-full);
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    cursor: pointer;
+    transition: background-color var(--obs-duration-fast) ease,
+                transform var(--obs-duration-fast) ease;
+
+    &:hover {
+      background: rgba(255, 255, 255, 0.14);
+      transform: scale(1.06);
+    }
+  }
+
+  & > img#results {
+    max-width: 100%;
+    height: auto;
+    border-radius: var(--obs-radius-xl);
+    border: 1px solid var(--obs-chromatic-border-indigo);
+    box-shadow: var(--obs-shadow-card);
+    margin: 1.6rem 0;
+  }
+
+  & > section {
+    max-width: 64rem;
+    overflow-y: auto;
+    margin: 1.6rem 0;
+    padding: 0 1.2rem 0 0;
+    text-align: left;
+
+    & h1,
+    & h2 {
+      margin: 2.0rem 0 1.0rem 0;
+      font-size: 2.8rem;
+      font-weight: 700;
+      letter-spacing: -0.06rem;
+      color: var(--primary-text-color);
+    }
+    & h2 {
+      margin: 1.8rem 0 0.8rem 0;
+      font-size: 2.0rem;
+      color: var(--obs-indigo-300);
+    }
+
+    & p,
+    & li {
+      margin: 0.8rem 0;
+      font-size: 1.5rem;
+      line-height: 2.4rem;
+      font-weight: 400;
+      color: var(--obs-slate-300);
+    }
+
+    & ul {
+      list-style-position: inside;
+      margin: 0.8rem 1.2rem;
+
+      & li {
+        margin: 0.4rem 0;
+      }
+    }
+
+    & a {
+      font-size: 1.5rem;
+      font-weight: 600;
+      color: var(--obs-sky-400);
+      text-underline-offset: 0.3rem;
+
+      &:hover {
+        color: var(--obs-fuchsia-400);
+      }
+    }
+  }
+}
+
+@keyframes fade-in {
+  0% {
+    opacity: 0;
+    transform: scale(0.92);
+    display: none;
+  }
+  0.1% {
+    display: flex;
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+    display: flex;
+  }
+}
+
+@keyframes fade-out {
+  0% {
+    opacity: 1;
+    transform: scale(1);
+    display: flex;
+  }
+  99.9% {
+    display: flex;
+  }
+  100% {
+    opacity: 0;
+    transform: scale(0.92);
+    display: none;
+  }
+}

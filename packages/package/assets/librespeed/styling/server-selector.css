@@ -1,0 +1,252 @@
+/* ============================================================================
+   4. BOTTOM CONNECTION TOPOLOGY BAR (Client Endpoint <-> Fiber Bridge <-> Server)
+   ============================================================================ */
+
+.st-topology-bar {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  gap: 1.4rem;
+  width: 100%;
+
+  @media screen and (max-width: 860px) {
+    grid-template-columns: 1fr;
+    gap: 1.0rem;
+  }
+}
+
+.st-node-card {
+  padding: 1.4rem 1.8rem;
+  display: flex;
+  align-items: center;
+  gap: 1.4rem;
+  text-align: left;
+  min-width: 0;
+}
+
+.st-node-icon {
+  width: 4.4rem;
+  height: 4.4rem;
+  border-radius: var(--obs-radius-xl);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+
+  &.cyan {
+    background: rgba(56, 189, 248, 0.12);
+    border: 1px solid rgba(56, 189, 248, 0.36);
+    color: var(--obs-sky-400);
+    box-shadow: 0 0 18px rgba(56, 189, 248, 0.18);
+  }
+
+  &.indigo {
+    background: rgba(99, 102, 241, 0.14);
+    border: 1px solid rgba(129, 140, 248, 0.40);
+    color: var(--obs-indigo-300);
+    box-shadow: 0 0 18px rgba(99, 102, 241, 0.22);
+  }
+}
+
+.st-node-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  min-width: 0;
+  flex: 1;
+}
+
+.st-node-label {
+  font-family: var(--obs-font-mono);
+  font-size: 1.05rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--obs-sky-400);
+}
+
+.st-node-title {
+  font-size: 1.55rem;
+  font-weight: 700;
+  letter-spacing: -0.02rem;
+  color: var(--obs-white);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin: 0;
+}
+
+.st-node-sub {
+  font-size: 1.2rem;
+  color: var(--obs-slate-400);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin: 0;
+
+  & a {
+    color: var(--obs-indigo-300);
+    text-decoration: none;
+    font-weight: 600;
+  }
+}
+
+/* Animated Bidirectional Fiber-Optic Stream Bridge */
+.st-fiber-bridge {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.6rem;
+  min-width: 14rem;
+  padding: 0 0.6rem;
+
+  @media screen and (max-width: 860px) {
+    display: none;
+  }
+}
+
+.st-fiber-line {
+  position: relative;
+  width: 100%;
+  height: 3px;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.18);
+  overflow: hidden;
+}
+
+.st-packet {
+  position: absolute;
+  top: 0;
+  width: 36px;
+  height: 100%;
+  border-radius: 999px;
+  opacity: 0;
+}
+
+.st-fiber-bridge[data-stream="download"] .st-packet {
+  opacity: 1;
+  background: linear-gradient(90deg, transparent, #d946ef, #ffffff);
+  box-shadow: 0 0 12px #d946ef;
+  animation: st-packet-dl 1.0s linear infinite;
+}
+
+.st-fiber-bridge[data-stream="upload"] .st-packet {
+  opacity: 1;
+  background: linear-gradient(90deg, #ffffff, #38bdf8, transparent);
+  box-shadow: 0 0 12px #38bdf8;
+  animation: st-packet-ul 1.0s linear infinite;
+}
+
+.st-fiber-bridge[data-stream="ping"] .st-packet {
+  opacity: 1;
+  background: linear-gradient(90deg, transparent, #34d399, transparent);
+  box-shadow: 0 0 12px #34d399;
+  animation: st-packet-ul 0.7s ease-in-out infinite alternate;
+}
+
+.st-packet-2 {
+  animation-delay: 0.33s !important;
+}
+.st-packet-3 {
+  animation-delay: 0.66s !important;
+}
+
+@keyframes st-packet-dl {
+  0% {
+    left: 100%;
+  }
+  100% {
+    left: -40px;
+  }
+}
+
+@keyframes st-packet-ul {
+  0% {
+    left: -40px;
+  }
+  100% {
+    left: 100%;
+  }
+}
+
+.st-fiber-label {
+  font-family: var(--obs-font-mono);
+  font-size: 1.05rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--obs-slate-400);
+}
+
+/* Server Selector Card Behaviour */
+.server-selector {
+  position: relative;
+
+  & > .chosen {
+    display: flex;
+    align-items: center;
+    gap: 1.4rem;
+    width: 100%;
+    min-width: 0;
+    cursor: pointer;
+
+    & > .chevron {
+      width: 28px;
+      height: 28px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+  }
+
+  &.single-server > .chosen {
+    cursor: default;
+    & > .chevron {
+      display: none;
+    }
+  }
+
+  &.disabled {
+    pointer-events: none;
+    opacity: 0.82;
+  }
+
+  & > ul.servers {
+    position: absolute;
+    bottom: calc(100% + 0.8rem);
+    left: 0;
+    right: 0;
+    max-height: 45vh;
+    overflow-y: auto;
+    z-index: 30;
+    background: var(--obs-panel-bg);
+    backdrop-filter: blur(24px) var(--obs-glass-saturation);
+    -webkit-backdrop-filter: blur(24px) var(--obs-glass-saturation);
+    border: 1px solid var(--obs-chromatic-border-indigo);
+    border-radius: var(--obs-radius-2xl);
+    box-shadow: var(--obs-shadow-panel);
+    list-style: none;
+    transform: scaleY(0);
+    transform-origin: bottom;
+    transition: transform var(--obs-duration-fast) var(--obs-ease-out-120);
+
+    &.active {
+      transform: scaleY(1);
+    }
+
+    & > li a {
+      display: block;
+      padding: 1.0rem 1.8rem;
+      font-size: 1.45rem;
+      font-weight: 600;
+      color: var(--obs-slate-200);
+      text-decoration: none;
+
+      &:hover {
+        background: rgba(99, 102, 241, 0.22);
+        color: var(--obs-white);
+      }
+    }
+  }
+}

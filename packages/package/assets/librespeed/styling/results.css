@@ -1,0 +1,219 @@
+/* ============================================================================
+   3. CENTRAL MASTER 270° SPEEDOMETER GAUGE POD (Speedtest.net + Obsidian V2)
+   ============================================================================ */
+
+.st-gauge-pod {
+  width: min(50rem, 96vw);
+  padding: 2.0rem 2.8rem 2.2rem 2.8rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  transition: opacity 0.38s var(--obs-ease-out-120),
+              transform 0.42s var(--obs-ease-spring-120);
+}
+
+main.st-main[data-stage="idle"] .st-gauge-pod {
+  opacity: 0;
+  pointer-events: none;
+  transform: scale(0.86);
+  position: absolute;
+}
+
+.st-phase-header {
+  margin-bottom: 0.4rem;
+}
+
+.st-phase-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.8rem;
+  padding: 0.5rem 1.4rem;
+  border-radius: var(--obs-radius-full);
+  background: rgba(15, 23, 42, 0.72);
+  border: 1px solid rgba(129, 140, 248, 0.38);
+  font-family: var(--obs-font-mono);
+  font-size: 1.15rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--obs-indigo-300);
+}
+
+.st-phase-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--obs-sky-400);
+  box-shadow: 0 0 10px var(--obs-sky-400);
+  animation: obs-pulse-live 1.4s infinite ease-in-out;
+}
+
+main.st-main[data-phase="ping"] .st-phase-badge {
+  border-color: rgba(52, 211, 153, 0.50);
+  color: var(--obs-emerald-400);
+  & .st-phase-dot {
+    background: var(--obs-emerald-400);
+    box-shadow: 0 0 12px var(--obs-emerald-400);
+  }
+}
+
+main.st-main[data-phase="download"] .st-phase-badge {
+  border-color: rgba(217, 70, 239, 0.55);
+  color: var(--obs-fuchsia-400);
+  & .st-phase-dot {
+    background: var(--obs-fuchsia-500);
+    box-shadow: 0 0 12px var(--obs-fuchsia-500);
+  }
+}
+
+main.st-main[data-phase="upload"] .st-phase-badge {
+  border-color: rgba(56, 189, 248, 0.55);
+  color: var(--obs-sky-400);
+  & .st-phase-dot {
+    background: var(--obs-sky-400);
+    box-shadow: 0 0 12px var(--obs-sky-400);
+  }
+}
+
+main.st-main[data-phase="finished"] .st-phase-badge {
+  border-color: rgba(52, 211, 153, 0.55);
+  color: var(--obs-emerald-400);
+  & .st-phase-dot {
+    background: var(--obs-emerald-400);
+    box-shadow: 0 0 12px var(--obs-emerald-400);
+    animation: none;
+  }
+}
+
+/* SVG Master Speedometer Dial */
+.st-speedometer-wrap {
+  position: relative;
+  width: 100%;
+  max-width: 42rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.st-speedometer-svg {
+  width: 100%;
+  height: auto;
+  display: block;
+  overflow: visible;
+}
+
+.st-arc-progress-bg {
+  fill: none;
+  stroke: rgba(148, 163, 184, 0.10);
+  stroke-width: 4;
+  stroke-linecap: butt;
+}
+
+.st-arc-progress-fill {
+  fill: none;
+  stroke: var(--obs-indigo-400);
+  stroke-width: 4;
+  stroke-linecap: butt;
+  transition: stroke-dashoffset 0.08s linear;
+}
+
+.st-arc-track {
+  fill: none;
+  stroke: rgba(30, 41, 59, 0.78);
+  stroke-width: 20;
+  stroke-linecap: butt;
+}
+
+.st-arc-active {
+  fill: none;
+  stroke: url(#obs-grad-download);
+  stroke-width: 20;
+  stroke-linecap: butt;
+}
+
+main.st-main[data-phase="upload"] .st-arc-active {
+  stroke: url(#obs-grad-upload);
+}
+
+main.st-main[data-phase="ping"] .st-arc-active {
+  opacity: 0;
+}
+
+/* Scale Ticks & Labels inside SVG */
+.st-tick-line {
+  stroke: rgba(148, 163, 184, 0.28);
+  stroke-width: 2;
+  stroke-linecap: round;
+  transition: stroke 0.18s ease;
+}
+
+.st-tick-line.is-minor {
+  stroke: rgba(148, 163, 184, 0.15);
+  stroke-width: 1.5;
+}
+
+.st-tick-line.is-lit {
+  stroke: #ffffff;
+}
+
+.st-tick-label {
+  fill: rgba(148, 163, 184, 0.58);
+  font-family: var(--obs-font-mono);
+  font-size: 11.5px;
+  font-weight: 700;
+  text-anchor: middle;
+  dominant-baseline: middle;
+  transition: fill 0.18s ease;
+}
+
+.st-tick-label.is-lit {
+  fill: #ffffff;
+}
+
+/* Digital Speed Readout + Waveform inside Gauge Bowl */
+.st-gauge-readout {
+  position: absolute;
+  bottom: 0.2rem;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  pointer-events: none;
+}
+
+#st-gauge-wave {
+  width: 11.4rem;
+  height: 2.5rem;
+  margin-bottom: 0.3rem;
+}
+
+.st-master-number {
+  font-family: var(--obs-font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 4.3rem;
+  font-weight: 800;
+  letter-spacing: -0.15rem;
+  line-height: 1;
+  color: var(--obs-white);
+  text-shadow: 0 0 28px rgba(129, 140, 248, 0.45);
+}
+
+.st-master-unit {
+  margin-top: 0.3rem;
+  font-size: 1.3rem;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--obs-slate-400);
+}
+
+.st-gauge-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 1.2rem;
+  margin-top: 1.2rem;
+}

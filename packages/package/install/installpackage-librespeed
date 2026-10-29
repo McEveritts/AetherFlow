@@ -60,6 +60,35 @@ else
 fi
 printf '%s\n' "${LS_VERSION#v}" > /opt/librespeed/.af-version
 
+report_progress 72 "Applying Obsidian V2 theme assets to LibreSpeed..."
+mkdir -p /opt/librespeed/assets
+TMP_SRC_DIR=$(mktemp -d /tmp/librespeed-src-XXXXXX)
+if curl -fsSL "https://github.com/librespeed/speedtest-go/archive/refs/tags/v${LS_VERSION}.tar.gz" | tar -xz -C "$TMP_SRC_DIR" --strip-components=1 >> "$LOGFILE" 2>&1; then
+    if [[ -d "${TMP_SRC_DIR}/web/assets" ]]; then
+        cp -rf "${TMP_SRC_DIR}/web/assets/." /opt/librespeed/assets/
+    fi
+fi
+
+OBSIDIAN_ASSET_DIR="${SELF_DIR}/../assets/librespeed"
+if [[ ! -d "$OBSIDIAN_ASSET_DIR" && -d "/opt/AetherFlow/packages/package/assets/librespeed" ]]; then
+    OBSIDIAN_ASSET_DIR="/opt/AetherFlow/packages/package/assets/librespeed"
+fi
+if [[ -d "$OBSIDIAN_ASSET_DIR" ]]; then
+    cp -rf "${OBSIDIAN_ASSET_DIR}/." /opt/librespeed/assets/
+    rm -rf /opt/librespeed/assets/backend-patches
+    if [[ -d "${TMP_SRC_DIR}/web/assets" && -x /usr/local/go/bin/go ]]; then
+        cp -rf /opt/librespeed/assets/. "${TMP_SRC_DIR}/web/assets/"
+        if [[ -f "${OBSIDIAN_ASSET_DIR}/backend-patches/stats.go" ]]; then
+            cp -f "${OBSIDIAN_ASSET_DIR}/backend-patches/stats.go" "${TMP_SRC_DIR}/results/stats.go"
+        fi
+        if [[ -f "${OBSIDIAN_ASSET_DIR}/backend-patches/telemetry.go" ]]; then
+            cp -f "${OBSIDIAN_ASSET_DIR}/backend-patches/telemetry.go" "${TMP_SRC_DIR}/results/telemetry.go"
+        fi
+        (cd "$TMP_SRC_DIR" && /usr/local/go/bin/go build -ldflags "-w -s" -trimpath -o /opt/librespeed/speedtest-backend main.go) >> "$LOGFILE" 2>&1 || true
+    fi
+fi
+rm -rf "$TMP_SRC_DIR"
+
 LS_STATS_PASS="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "${MASTER_PASS}")"
 cat <<EOF > /opt/librespeed/settings.toml
 # LibreSpeed speedtest-go configuration
@@ -70,7 +99,7 @@ proxyprotocol_port=0
 server_lat=0
 server_lng=0
 ipinfo_api_key=""
-assets_path=""
+assets_path="/opt/librespeed/assets"
 statistics_password=${LS_STATS_PASS}
 redact_ip_addresses=false
 database_type="bolt"

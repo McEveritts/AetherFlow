@@ -1,0 +1,45 @@
+/**
+ * ============================================================================
+ * OBSIDIAN V2 COLOR BRIDGE FOR LIBRESPEED
+ * Maps LibreSpeed semantic variables onto Obsidian V2 (--obs-*) tokens
+ * ============================================================================
+ */
+:root {
+  --theme-green: var(--obs-sky-400, #38bdf8);
+  --theme-pink: var(--obs-fuchsia-500, #d946ef);
+  --theme-indigo: var(--obs-indigo-500, #6366f1);
+  --theme-emerald: var(--obs-emerald-400, #34d399);
+
+  --background-backup-color: var(--obs-bg-base, #000000);
+  --background-overlay-color: transparent;
+
+  --primary-text-color: var(--obs-white, #ffffff);
+  --tagline-text-color: var(--obs-indigo-300, #a5b4fc);
+  --secondary-text-color: var(--obs-slate-400, #94a3b8);
+  --primary-text-disabled-color: var(--obs-slate-500, #64748b);
+  --secondary-text-disabled-color: var(--obs-slate-700, #334155);
+  --sprint-text-color: var(--obs-slate-200, #e2e8f0);
+
+  --button-text-color: var(--obs-white, #ffffff);
+  --button-gradient-1-color-1: var(--obs-indigo-500, #6366f1);
+  --button-gradient-1-color-2: var(--obs-sky-400, #38bdf8);
+  --button-gradient-1-color-3: var(--obs-fuchsia-500, #d946ef);
+  --button-shadow-color: rgba(99, 102, 241, 0.42);
+  --button-disabled-background-color: rgba(30, 41, 59, 0.65);
+
+  --server-selector-border-color: var(--obs-chromatic-border-indigo, rgba(129, 140, 248, 0.48));
+  --server-selector-hover-border-color: var(--obs-glass-border-hover, rgba(168, 85, 247, 0.68));
+  --server-selector-background-color: rgba(12, 16, 32, 0.72);
+  --server-selector-hover-background-color: rgba(99, 102, 241, 0.18);
+
+  --gauge-background-color: rgba(148, 163, 184, 0.16);
+  --gauge-progress-color: rgba(99, 102, 241, 0.42);
+  --gauge-pointer-green: #e0f2fe;
+  --gauge-pointer-pink: #fae8ff;
+
+  --ping-and-jitter-primary-text-color: var(--obs-white, #ffffff);
+  --ping-and-jitter-secondary-text-color: var(--obs-slate-400, #94a3b8);
+
+  --popup-background-color: rgba(12, 14, 30, 0.90);
+  --popup-shadow-color: #000000;
+}
