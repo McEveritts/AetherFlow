@@ -145,6 +145,10 @@ func registerV1Routes(apiGroup *gin.RouterGroup) {
 		authGroup.POST("/deploy/:appName", HandleDeployProcess)
 		authGroup.GET("/blueprints", GetBlueprints)
 		authGroup.GET("/blueprints/:appName", GetAppBlueprint)
+
+		// Streaming Dashboard (Jellyfin first; Plex & Emby upcoming)
+		authGroup.GET("/streaming/dashboard", GetStreamingDashboard)
+		authGroup.GET("/streaming/artwork/:itemId", GetStreamingArtwork)
 	}
 
 	// ── Admin routes (require valid JWT session + admin role) ──
@@ -314,6 +318,13 @@ func registerV1Routes(apiGroup *gin.RouterGroup) {
 		adminGroup.PUT("/ingress/apps/:appName", UpdateAppIngressConfig)
 		// Requires admin context (Phase 8)
 		adminGroup.POST("/blueprints/:appName/sync", SyncAppBlueprint)
+
+		// Streaming Dashboard Administration (Jellyfin first; Plex & Emby upcoming)
+		adminGroup.PUT("/streaming/servers/:provider", UpdateStreamingServer)
+		adminGroup.POST("/streaming/servers/test", TestStreamingServer)
+		adminGroup.POST("/streaming/servers/:provider/sync", SyncStreamingServerHistory)
+		adminGroup.POST("/streaming/sessions/:sessionId/command", ControlStreamingSession)
+		adminGroup.POST("/streaming/demo", HandleStreamingDemo)
 	}
 
 	// Compatibility aliases for frontend and legacy routing (api/ingress)

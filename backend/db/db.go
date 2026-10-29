@@ -598,6 +598,78 @@ func InitDB() {
 	migrate(18, "Add base_domain to settings for automatic app subdomain provisioning",
 		"ALTER TABLE settings ADD COLUMN base_domain TEXT DEFAULT '';")
 
+	// ─── Migration v19: Streaming Dashboard (Jellyfin / Plex / Emby Telemetry & History) ─
+	migrate(19, "Add streaming_servers, streaming_history, and streaming_bandwidth_samples tables",
+		`CREATE TABLE IF NOT EXISTS streaming_servers (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			provider TEXT NOT NULL UNIQUE,
+			name TEXT NOT NULL DEFAULT 'Jellyfin',
+			url TEXT NOT NULL DEFAULT 'http://127.0.0.1:8096',
+			api_key TEXT NOT NULL DEFAULT '',
+			enabled BOOLEAN DEFAULT 1,
+			server_id TEXT DEFAULT '',
+			server_version TEXT DEFAULT '',
+			last_connected_at DATETIME,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		);`,
+		`CREATE TABLE IF NOT EXISTS streaming_history (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			session_key TEXT UNIQUE NOT NULL,
+			provider TEXT NOT NULL DEFAULT 'jellyfin',
+			server_name TEXT NOT NULL DEFAULT 'Jellyfin',
+			user_id TEXT NOT NULL DEFAULT '',
+			user_name TEXT NOT NULL DEFAULT '',
+			client_name TEXT NOT NULL DEFAULT '',
+			device_name TEXT NOT NULL DEFAULT '',
+			device_id TEXT NOT NULL DEFAULT '',
+			ip_address TEXT NOT NULL DEFAULT '',
+			item_id TEXT NOT NULL DEFAULT '',
+			item_name TEXT NOT NULL DEFAULT '',
+			item_type TEXT NOT NULL DEFAULT 'Movie',
+			series_name TEXT NOT NULL DEFAULT '',
+			series_id TEXT NOT NULL DEFAULT '',
+			season_number INTEGER DEFAULT 0,
+			episode_number INTEGER DEFAULT 0,
+			production_year INTEGER DEFAULT 0,
+			play_method TEXT NOT NULL DEFAULT 'DirectPlay',
+			container TEXT NOT NULL DEFAULT '',
+			video_codec TEXT NOT NULL DEFAULT '',
+			video_resolution TEXT NOT NULL DEFAULT '',
+			audio_codec TEXT NOT NULL DEFAULT '',
+			audio_channels INTEGER DEFAULT 0,
+			subtitle_codec TEXT NOT NULL DEFAULT '',
+			hw_accel TEXT NOT NULL DEFAULT '',
+			transcode_reasons TEXT NOT NULL DEFAULT '',
+			bitrate_bps INTEGER DEFAULT 0,
+			duration_secs INTEGER DEFAULT 0,
+			watched_secs INTEGER DEFAULT 0,
+			data_used_bytes INTEGER DEFAULT 0,
+			completion_pct REAL DEFAULT 0,
+			started_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			last_seen_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			ended_at DATETIME,
+			is_active BOOLEAN DEFAULT 0
+		);`,
+		"CREATE INDEX IF NOT EXISTS idx_streaming_history_provider ON streaming_history(provider);",
+		"CREATE INDEX IF NOT EXISTS idx_streaming_history_started ON streaming_history(started_at);",
+		"CREATE INDEX IF NOT EXISTS idx_streaming_history_last_seen ON streaming_history(last_seen_at DESC, id DESC);",
+		"CREATE INDEX IF NOT EXISTS idx_streaming_history_user ON streaming_history(user_name);",
+		"CREATE INDEX IF NOT EXISTS idx_streaming_history_item ON streaming_history(item_id);",
+		"CREATE INDEX IF NOT EXISTS idx_streaming_history_active ON streaming_history(provider, is_active);",
+		`CREATE TABLE IF NOT EXISTS streaming_bandwidth_samples (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+			provider TEXT NOT NULL DEFAULT 'jellyfin',
+			active_streams INTEGER DEFAULT 0,
+			direct_play_count INTEGER DEFAULT 0,
+			direct_stream_count INTEGER DEFAULT 0,
+			transcode_count INTEGER DEFAULT 0,
+			total_bitrate_bps INTEGER DEFAULT 0,
+			bytes_delta INTEGER DEFAULT 0
+		);`,
+		"CREATE INDEX IF NOT EXISTS idx_streaming_bw_timestamp ON streaming_bandwidth_samples(timestamp);")
+
 	// ─── Ensure singleton settings row ─────────────────────────────────
 	DB.Exec(`INSERT OR IGNORE INTO settings (id) VALUES (1)`)
 	DB.Exec(`UPDATE settings SET ai_model = 'gemini-4-argon' WHERE id = 1 AND ai_model IN ('gemini-3.8-flash', 'gemini-2.0-flash', 'gemini-2.0-flash-lite', 'gemini-1.5-pro', 'gemini-1.5-flash', 'gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-3.1-pro-preview', 'gemini-3-flash-preview', 'gemini-3.1-flash-lite-preview', 'gemini-3-pro-image-preview', 'gemini-3.1-flash-image-preview')`)
@@ -665,6 +737,8 @@ func PruneExpiredData() {
 		{"login_history", "DELETE FROM login_history WHERE created_at < datetime('now', '-90 days')"},
 		// Keep 30 days of billing webhook events
 		{"billing_webhook_events", "DELETE FROM billing_webhook_events WHERE processed_at < datetime('now', '-30 days')"},
+		// Keep 90 days of streaming bandwidth telemetry samples
+		{"streaming_bandwidth_samples", "DELETE FROM streaming_bandwidth_samples WHERE timestamp < datetime('now', '-90 days')"},
 	}
 
 	for _, target := range pruneTargets {

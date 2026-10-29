@@ -168,6 +168,9 @@ func main() {
 	// Phase 8: Initialize MediaFlow Job Poller
 	services.MediaFlowQueuePoller()
 
+	// Initialize Streaming Dashboard Telemetry Monitor (Jellyfin active streams & bandwidth)
+	services.InitStreamingMonitor()
+
 	// Initialize the Smart Backup Scheduler (Phase 20)
 	services.InitSmartBackupScheduler(func() (string, error) {
 		ps, err := api.ResolveProviderSettings()

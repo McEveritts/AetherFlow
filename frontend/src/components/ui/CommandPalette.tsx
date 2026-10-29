@@ -18,7 +18,8 @@ import {
   Bot,
   X,
   Radio,
-  Boxes
+  Boxes,
+  Tv
 } from 'lucide-react';
 import { useSystemStore } from '@/store/useSystemStore';
 import { TabId } from '@/types/dashboard';
@@ -43,6 +44,7 @@ const actions: PaletteAction[] = [
   { id: 'nav-services', title: 'Go to Services', icon: Server, type: 'navigate', tab: 'services' },
   { id: 'nav-marketplace', title: 'Go to Marketplace', icon: Store, type: 'navigate', tab: 'marketplace' },
   { id: 'nav-fileshare', title: 'Go to File Share', icon: FolderOpen, type: 'navigate', tab: 'fileshare' },
+  { id: 'nav-streaming', title: 'Go to Streaming Dashboard', icon: Tv, type: 'navigate', tab: 'streaming' },
   { id: 'nav-network', title: 'Go to Network & VPN', icon: Radio, type: 'navigate', tab: 'network' },
   { id: 'nav-cluster', title: 'Go to Cluster Mesh', icon: Boxes, type: 'navigate', tab: 'cluster' },
   { id: 'nav-security', title: 'Go to Security', icon: Shield, type: 'navigate', tab: 'security' },

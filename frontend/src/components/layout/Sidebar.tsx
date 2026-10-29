@@ -20,6 +20,7 @@ import {
     Mail,
     ClipboardList,
     Film,
+    Tv,
     ChevronLeft,
     Menu,
     X,
@@ -33,6 +34,7 @@ export const NAVIGATION = [
     { id: 'services' as TabId, label: 'Services', icon: <Server size={19} /> },
     { id: 'marketplace' as TabId, label: 'Marketplace', icon: <Store size={19} /> },
     { id: 'fileshare' as TabId, label: 'File Share', icon: <FolderUp size={19} /> },
+    { id: 'streaming' as TabId, label: 'Streaming', icon: <Tv size={19} /> },
     { id: 'mediaflow' as TabId, label: 'MediaFlow', icon: <Film size={19} /> },
     { id: 'ai' as TabId, label: 'FlowAI', icon: <Sparkles size={19} /> },
 ];
