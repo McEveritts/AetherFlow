@@ -79,10 +79,16 @@ expand_rw_path() {
     expanded="${expanded//\{\{SERVICE_HOME\}\}/${service_home}}"
     # Always prefix with '-' if optional or if directory does not currently exist on disk
     # so systemd never fails with 226/NAMESPACE on optional/missing directories.
+    local result=""
     if [[ -n "${optional_prefix}" || ! -e "${expanded}" ]]; then
-        printf -- '-%s\n' "${expanded}"
+        result="-${expanded}"
     else
-        printf '%s\n' "${expanded}"
+        result="${expanded}"
+    fi
+    if [[ "${result}" == *[[:space:]]* ]]; then
+        printf '"%s"\n' "${result}"
+    else
+        printf '%s\n' "${result}"
     fi
 }
 

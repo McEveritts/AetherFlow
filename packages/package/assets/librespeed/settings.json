@@ -2,6 +2,9 @@
   "telemetry_level": "basic",
   "time_dl_max": 18,
   "time_ul_max": 18,
+  "xhr_dlMultistream": 12,
+  "xhr_ulMultistream": 8,
+  "xhr_multistreamDelay": 100,
   "getIp_ispInfo": true,
   "getIp_ispInfo_distance": "km"
 }

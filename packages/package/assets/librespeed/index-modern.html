@@ -215,6 +215,44 @@
           </div>
         </div>
 
+        <!-- Benchmark Complete Telemetry Summary Card (Displayed when data-phase="finished") -->
+        <div class="st-complete-summary" id="st-complete-summary" aria-live="polite">
+          <div class="st-complete-card" id="st-complete-card">
+            <div class="st-complete-grid">
+              <div class="st-complete-cell">
+                <div class="st-complete-label st-label-sm">Ping</div>
+                <div class="st-complete-val-row">
+                  <span class="st-complete-val ping" id="st-res-ping">--</span>
+                  <span class="st-complete-unit-inline">ms</span>
+                </div>
+              </div>
+              <div class="st-complete-cell">
+                <div class="st-complete-label st-label-sm">Jitter</div>
+                <div class="st-complete-val-row">
+                  <span class="st-complete-val jitter" id="st-res-jitter">--</span>
+                  <span class="st-complete-unit-inline">ms</span>
+                </div>
+              </div>
+              <div class="st-complete-cell st-cell-throughput">
+                <div class="st-complete-label st-label-lg">Download</div>
+                <div class="st-complete-val download" id="st-res-dl">--</div>
+                <div class="st-complete-unit-block">Mbit/s</div>
+              </div>
+              <div class="st-complete-cell st-cell-throughput">
+                <div class="st-complete-label st-label-lg">Upload</div>
+                <div class="st-complete-val upload" id="st-res-ul">--</div>
+                <div class="st-complete-unit-block">Mbit/s</div>
+              </div>
+            </div>
+            <div class="st-complete-isp" id="st-res-isp">ISP: --</div>
+            <div class="st-complete-footer">
+              <span class="st-complete-ts" id="st-res-ts">--</span>
+              <span class="st-complete-wm">LibreSpeed &middot; Obsidian V2</span>
+            </div>
+            <img id="st-complete-img" class="st-complete-img" src="" alt="Benchmark Complete Telemetry Result Card" />
+          </div>
+        </div>
+
         <!-- Action Controls Bar inside/below Master Gauge Pod -->
         <div class="st-gauge-actions">
           <button type="button" class="st-action-btn st-abort-btn" id="abort-button">

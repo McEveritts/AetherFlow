@@ -213,21 +213,46 @@ func GetSystemMetricsCore() models.SystemMetrics {
 		swapUsed = float64(swapMem.Used) / (1024 * 1024 * 1024)
 	}
 
-	// 3. Disk Partitions (all real mounts)
+	// 3. Disk Partitions (real block mounts + dedicated RAM disks under /home or /mnt)
 	var diskPartitions []models.DiskPartition
 	parts, err := disk.Partitions(false) // false = only real devices, no virtual
+	if allParts, errAll := disk.Partitions(true); errAll == nil {
+		for _, ap := range allParts {
+			if ap.Fstype == "tmpfs" && (strings.HasPrefix(ap.Mountpoint, "/home/") || strings.HasPrefix(ap.Mountpoint, "/mnt/")) {
+				parts = append(parts, ap)
+			}
+		}
+	}
 	if err == nil {
-		seen := make(map[string]bool)
+		// Sort by mountpoint length so canonical root mounts (e.g. "/") precede systemd bind mounts
+		sort.Slice(parts, func(i, j int) bool {
+			if len(parts[i].Mountpoint) != len(parts[j].Mountpoint) {
+				return len(parts[i].Mountpoint) < len(parts[j].Mountpoint)
+			}
+			return parts[i].Mountpoint < parts[j].Mountpoint
+		})
+		seenMount := make(map[string]bool)
+		seenDevice := make(map[string]bool)
 		for _, p := range parts {
-			// Skip snap/squashfs/tmpfs/devtmpfs mounts
-			if p.Fstype == "squashfs" || p.Fstype == "tmpfs" || p.Fstype == "devtmpfs" || p.Fstype == "overlay" {
+			isRamDisk := p.Fstype == "tmpfs" && (strings.HasPrefix(p.Mountpoint, "/home/") || strings.HasPrefix(p.Mountpoint, "/mnt/"))
+			// Skip snap/squashfs/tmpfs/devtmpfs mounts (except dedicated RAM disks)
+			if !isRamDisk && (p.Fstype == "squashfs" || p.Fstype == "tmpfs" || p.Fstype == "devtmpfs" || p.Fstype == "overlay") {
 				continue
 			}
-			// Deduplicate by mount point
-			if seen[p.Mountpoint] {
+			// Skip boot partitions and systemd sandbox / internal FHS bind-mounts
+			if p.Mountpoint == "/boot" || strings.HasPrefix(p.Mountpoint, "/boot/") ||
+				strings.HasPrefix(p.Mountpoint, "/var/") || strings.HasPrefix(p.Mountpoint, "/opt/") ||
+				strings.HasPrefix(p.Mountpoint, "/run/") || strings.HasPrefix(p.Mountpoint, "/tmp") {
 				continue
 			}
-			seen[p.Mountpoint] = true
+			// Deduplicate by mount point and underlying block device (eliminates bind-mount duplicates)
+			if seenMount[p.Mountpoint] || (!isRamDisk && p.Device != "" && seenDevice[p.Device]) {
+				continue
+			}
+			seenMount[p.Mountpoint] = true
+			if !isRamDisk && p.Device != "" {
+				seenDevice[p.Device] = true
+			}
 
 			usage, err := disk.Usage(p.Mountpoint)
 			if err != nil || usage.Total == 0 {

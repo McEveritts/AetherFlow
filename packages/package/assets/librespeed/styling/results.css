@@ -217,3 +217,174 @@ main.st-main[data-phase="ping"] .st-arc-active {
   gap: 1.2rem;
   margin-top: 1.2rem;
 }
+
+/* ============================================================================
+   4. BENCHMARK COMPLETE TELEMETRY RESULT CARD (Obsidian V2)
+   ============================================================================ */
+
+main.st-main[data-stage="finished"] .st-speedometer-wrap,
+main.st-main[data-phase="finished"] .st-speedometer-wrap {
+  display: none;
+}
+
+.st-complete-summary {
+  display: none;
+  width: 100%;
+  justify-content: center;
+  align-items: center;
+  margin: 0.8rem 0 0.6rem 0;
+  animation: st-complete-reveal 0.34s var(--obs-ease-spring-120);
+}
+
+main.st-main[data-stage="finished"] .st-complete-summary,
+main.st-main[data-phase="finished"] .st-complete-summary {
+  display: flex;
+}
+
+@keyframes st-complete-reveal {
+  0% {
+    opacity: 0;
+    transform: translateY(8px) scale(0.96);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.st-complete-card {
+  position: relative;
+  width: min(50rem, 100%);
+  aspect-ratio: 500 / 286;
+  background: #080a18;
+  border-radius: var(--obs-radius-xl);
+  border: 1px solid var(--obs-chromatic-border-indigo);
+  box-shadow: var(--obs-shadow-card);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 2.0rem 0 0 0;
+  user-select: text;
+}
+
+.st-complete-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  row-gap: 1.6rem;
+  width: 100%;
+  flex: 1;
+  align-content: center;
+  padding: 0 1.6rem;
+}
+
+.st-complete-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+}
+
+.st-complete-label {
+  color: #cbd5e1;
+  font-family: var(--obs-font-sans);
+  font-weight: 500;
+  letter-spacing: 0.01em;
+}
+
+.st-complete-label.st-label-sm {
+  font-size: 2.2rem;
+  margin-bottom: 0.4rem;
+}
+
+.st-complete-label.st-label-lg {
+  font-size: 2.6rem;
+  margin-bottom: 0.4rem;
+}
+
+.st-complete-val-row {
+  display: inline-flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 0.5rem;
+}
+
+.st-complete-val {
+  font-family: var(--obs-font-sans);
+  font-weight: 300;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.08;
+}
+
+.st-complete-val.ping {
+  font-size: 3.1rem;
+  color: #34d399;
+}
+
+.st-complete-val.jitter {
+  font-size: 3.1rem;
+  color: #818cf8;
+}
+
+.st-complete-val.download {
+  font-size: 3.6rem;
+  color: #d946ef;
+}
+
+.st-complete-val.upload {
+  font-size: 3.6rem;
+  color: #38bdf8;
+}
+
+.st-complete-unit-inline {
+  font-size: 1.9rem;
+  font-weight: 500;
+  color: #94a3b8;
+}
+
+.st-complete-unit-block {
+  margin-top: 0.3rem;
+  font-size: 1.9rem;
+  font-weight: 500;
+  color: #94a3b8;
+}
+
+.st-complete-isp {
+  padding: 0 1.2rem 0.6rem 1.2rem;
+  font-size: 1.55rem;
+  font-weight: 600;
+  color: #e2e8f0;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.st-complete-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.45rem 1.0rem 0.5rem 1.2rem;
+  border-top: 1px solid rgba(99, 102, 241, 0.55);
+  font-size: 1.2rem;
+  font-weight: 400;
+  color: #818cf8;
+}
+
+.st-complete-img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: fill;
+  display: block;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.18s ease;
+}
+
+.st-complete-img.is-loaded {
+  opacity: 1;
+  pointer-events: auto;
+}

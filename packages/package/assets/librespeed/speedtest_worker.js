@@ -51,9 +51,9 @@ let settings = {
 	url_getIp: "backend/getIP.php", // path to getIP.php relative to this js file, or a similar thing that outputs the client's ip
 	getIp_ispInfo: true, //if set to true, the server will include ISP info with the IP address
 	getIp_ispInfo_distance: "km", //km or mi=estimate distance from server in km/mi; set to false to disable distance estimation. getIp_ispInfo must be enabled in order for this to work
-	xhr_dlMultistream: 6, // number of download streams to use (can be different if enable_quirks is active)
-	xhr_ulMultistream: 3, // number of upload streams to use (can be different if enable_quirks is active)
-	xhr_multistreamDelay: 300, //how much concurrent requests should be delayed
+	xhr_dlMultistream: 12, // number of download streams to use (tuned for high-RTT trans-Atlantic BDP)
+	xhr_ulMultistream: 8, // number of upload streams to use (tuned for high-RTT trans-Atlantic BDP)
+	xhr_multistreamDelay: 100, //how much concurrent requests should be delayed
 	xhr_ignoreErrors: 1, // 0=fail on errors, 1=attempt to restart a stream if it fails, 2=ignore all errors
 	xhr_dlUseBlob: false, // if set to true, it reduces ram usage but uses the hard drive (useful with large garbagePhp_chunkSize and/or high xhr_dlMultistream)
 	xhr_ul_blob_megabytes: 20, //size in megabytes of the upload blobs sent in the upload test (forced to 4 on chrome mobile)
@@ -134,14 +134,14 @@ this.addEventListener("message", function(e) {
 				}
 				if (/Edge.(\d+\.\d+)/i.test(ua)) {
 					if (typeof s.xhr_dlMultistream === "undefined") {
-						// edge more precise with 3 download streams
-						settings.xhr_dlMultistream = 3;
+						// high-BDP trans-Atlantic multistream default
+						settings.xhr_dlMultistream = 12;
 					}
 				}
 				if (/Chrome.(\d+)/i.test(ua) && !!self.fetch) {
 					if (typeof s.xhr_dlMultistream === "undefined") {
-						// chrome more precise with 5 streams
-						settings.xhr_dlMultistream = 5;
+						// high-BDP trans-Atlantic multistream default
+						settings.xhr_dlMultistream = 12;
 					}
 				}
 			}

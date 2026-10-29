@@ -53,6 +53,9 @@ patch_*.py
 *.sqlite-shm
 *.db
 *.bak
+backend/data/
+**/.master.creds
+/config/
 
 # Agent teamwork & IDE state
 .agents/

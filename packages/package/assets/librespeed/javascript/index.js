@@ -323,6 +323,36 @@ function createSpeedtest() {
   };
 }
 
+function formatCardIsp(clientIp) {
+  if (!clientIp) return "--";
+  if (clientIp.includes("-")) {
+    const idx = clientIp.indexOf("-");
+    let str = clientIp.substring(idx + 1);
+    if (str.includes("(")) {
+      str = str.split("(")[0];
+    }
+    return str;
+  }
+  return clientIp;
+}
+
+function formatCardTimestamp(dateObj) {
+  const pad = (n) => String(n).padStart(2, "0");
+  return (
+    dateObj.getFullYear() +
+    "-" +
+    pad(dateObj.getMonth() + 1) +
+    "-" +
+    pad(dateObj.getDate()) +
+    " " +
+    pad(dateObj.getHours()) +
+    ":" +
+    pad(dateObj.getMinutes()) +
+    ":" +
+    pad(dateObj.getSeconds())
+  );
+}
+
 function beginBenchmark() {
   if (testState.state !== READY && testState.state !== FINISHED) return;
   testState.dlHistory = [];
@@ -336,6 +366,11 @@ function beginBenchmark() {
   testState.targetFraction = 0;
   testState.currentProgress = 0;
   testState.targetProgress = 0;
+  const completeImg = document.querySelector("#st-complete-img");
+  if (completeImg) {
+    completeImg.classList.remove("is-loaded");
+    completeImg.removeAttribute("src");
+  }
   initSparklines();
   testState.speedtest.start();
   testState.state = RUNNING;
@@ -574,6 +609,21 @@ function startRenderingLoop() {
   const fiberBridge = document.querySelector("#fiber-bridge");
   const fiberStatusLabel = document.querySelector("#fiber-status-label");
 
+  const resPing = document.querySelector("#st-res-ping");
+  const resJitter = document.querySelector("#st-res-jitter");
+  const resDl = document.querySelector("#st-res-dl");
+  const resUl = document.querySelector("#st-res-ul");
+  const resIsp = document.querySelector("#st-res-isp");
+  const resTs = document.querySelector("#st-res-ts");
+  const completeImg = document.querySelector("#st-complete-img");
+  if (completeImg) {
+    completeImg.addEventListener("load", () => {
+      if (completeImg.getAttribute("src")) {
+        completeImg.classList.add("is-loaded");
+      }
+    });
+  }
+
   function renderUI() {
     // 1. Stage state (idle vs running vs finished)
     const stageStr =
@@ -730,10 +780,26 @@ function startRenderingLoop() {
     }
 
     if (testState.testDataDirty && d) {
-      if (d.pingStatus) pingText.textContent = numberToText(d.pingStatus);
-      if (d.jitterStatus) jitterText.textContent = numberToText(d.jitterStatus);
-      if (d.dlStatus) downloadText.textContent = numberToText(d.dlStatus);
-      if (d.ulStatus) uploadText.textContent = numberToText(d.ulStatus);
+      if (d.pingStatus) {
+        pingText.textContent = numberToText(d.pingStatus);
+        if (resPing) resPing.textContent = String(d.pingStatus).split(".")[0];
+      }
+      if (d.jitterStatus) {
+        jitterText.textContent = numberToText(d.jitterStatus);
+        if (resJitter) resJitter.textContent = d.jitterStatus;
+      }
+      if (d.dlStatus) {
+        downloadText.textContent = numberToText(d.dlStatus);
+        if (resDl) resDl.textContent = d.dlStatus;
+      }
+      if (d.ulStatus) {
+        uploadText.textContent = numberToText(d.ulStatus);
+        if (resUl) resUl.textContent = d.ulStatus;
+      }
+
+      if (resTs && testState.state === FINISHED) {
+        resTs.textContent = formatCardTimestamp(new Date());
+      }
 
       // Update sparklines
       drawWaveform(
@@ -773,16 +839,23 @@ function startRenderingLoop() {
         const parts = d.clientIp.split(" - ");
         clientIpText.textContent = parts[0] || d.clientIp;
         privacyWarning.textContent = parts[1] || "Direct Telemetry Session";
+        if (resIsp) {
+          resIsp.textContent = "ISP: " + formatCardIsp(d.clientIp);
+        }
       }
 
       if (d.testId) {
-        resultsImage.src =
+        const resultUrl =
           window.location.href.substring(
             0,
             window.location.href.lastIndexOf("/")
           ) +
           "/results/?id=" +
           d.testId;
+        resultsImage.src = resultUrl;
+        if (completeImg && completeImg.getAttribute("src") !== resultUrl) {
+          completeImg.src = resultUrl;
+        }
       }
 
       testState.testDataDirty = false;
