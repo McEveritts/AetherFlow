@@ -26,9 +26,31 @@ func TestCatalogBlueprintsAndAutomationCoverage(t *testing.T) {
 		t.Fatal("loadPackageAutomation() returned empty map")
 	}
 
+	imgDir := filepath.Join("..", "..", "frontend", "public", "img")
+	imgEntries, err := os.ReadDir(imgDir)
+	if err != nil {
+		t.Fatalf("os.ReadDir(%q) failed: %v", imgDir, err)
+	}
+	exactImgNames := make(map[string]bool, len(imgEntries))
+	for _, entry := range imgEntries {
+		if !entry.IsDir() {
+			exactImgNames[entry.Name()] = true
+		}
+	}
+
 	for _, pkg := range pkgs {
 		if _, ok := automation[pkg.Name]; !ok {
 			t.Errorf("package %q is missing from package_automation.json", pkg.Name)
+		}
+
+		expectedIcon := strings.ToLower(pkg.Name) + ".png"
+		if !exactImgNames[expectedIcon] {
+			t.Errorf("marketplace icon %q missing (or case-mismatched) in frontend/public/img", expectedIcon)
+		} else {
+			iconData, readErr := os.ReadFile(filepath.Join(imgDir, expectedIcon))
+			if readErr != nil || len(iconData) < 64 || string(iconData[:8]) != "\x89PNG\r\n\x1a\n" {
+				t.Errorf("marketplace icon %q is invalid or corrupted PNG (len=%d, err=%v)", expectedIcon, len(iconData), readErr)
+			}
 		}
 
 		bp := GetBlueprint(pkg.Name)
