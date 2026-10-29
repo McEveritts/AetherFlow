@@ -80,7 +80,7 @@ func (sm *SQLiteMutator) InjectRoutes(routes map[string]string) error {
 		if host, ok := settings["Host"].(string); ok {
 			if target, present := routes[host]; present {
 				settings["Host"] = target
-				settings["Port"] = 80 // Route through internal Caddy switchboard
+				settings["Port"] = 8080 // Route through AetherFlow internal subdomain gateway
 				modified = true
 			}
 		}

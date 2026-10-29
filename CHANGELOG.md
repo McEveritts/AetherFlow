@@ -12,7 +12,7 @@ _Direct comparison against `v3.2.01` (`v3.2.01...v3.2.1`), consolidating catalog
 * **57-Point McSurgeon Surgical Audit Resolution**: Resolved 57 security, concurrency, ingress, DNS, hardware telemetry, and UI findings across backend and frontend components.
 
 ### Ingress, Auth & Systemd Hardening
-* **Apache2 Subdomain Gateway & Certbot SAN Sync**: Prioritized Apache2 VirtualHost subdomain routing alongside Caddy, automated Certbot SAN certificate synchronization via `af-certbot-sync`, and hardened ingress route validation (`ingress_handlers.go`, `blueprint_lifecycle.go`, `deploy_orchestrator.go`).
+* **Apache2 Subdomain Gateway & Certbot SAN Sync (Caddy Removal)**: Consolidated ingress routing exclusively onto Apache2 VirtualHosts and the built-in Go `AppSubdomainProxyMiddleware`, removed the legacy Caddy compatibility layer (`caddy_manager.go`), automated Certbot SAN certificate synchronization via `af-certbot-sync`, and hardened `.aether.local` and SSO identity header routing (`ingress_handlers.go`, `blueprint_lifecycle.go`, `deploy_orchestrator.go`).
 * **Systemd `AF_NETLINK` Sandboxing**: Added `AF_NETLINK` to `RestrictAddressFamilies` in `aetherflow-api.service` so `net.Interfaces()` LAN origin discovery operates cleanly inside strict systemd sandboxing.
 * **Session Hijacking & Silent JWT Refresh Fixes**: Prevented false-positive session hijacking invalidations during browser socket rotation and stabilized background silent JWT refresh.
 

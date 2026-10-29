@@ -10,7 +10,7 @@ import (
 )
 
 // Global Orchestrator instance mimicking a fully spun-up environment engine singleton for brevity.
-var globalOrchestrator = services.NewOrchestrator("http://unix%2Fvar%2Frun%2Fcaddy.sock")
+var globalOrchestrator = services.NewOrchestrator()
 
 // HandleDeployProcess is an asynchronous trigger that fires the master Atomic Swap Sequence.
 // Responses are returned immediately with 202 Accepted.
@@ -40,7 +40,7 @@ func HandleDeployProcess(c *gin.Context) {
 		internalDomain = fmt.Sprintf("%s.aether.local", appBlueprint.AppName)
 	}
 
-	// In real environment, parameters like TargetCaddyPort and BinaryStaging are dynamically fetched locally.
+	// In real environment, parameters like TargetPort and BinaryStaging are dynamically fetched locally.
 	// We'll scaffold safe parameters here before sending down to the logic engine.
 	deployConfig := services.DeployConfig{
 		AppName:         appBlueprint.AppName,
@@ -49,7 +49,7 @@ func HandleDeployProcess(c *gin.Context) {
 		BinaryStaging:   fmt.Sprintf("/opt/%s/latest-update", appBlueprint.AppName),
 		CentralDBPath:   appBlueprint.AppDataPath,
 		TargetInternal:  internalDomain,
-		TargetCaddyPort: targetPort,
+		TargetPort:      targetPort,
 		HealthCheckPath: appBlueprint.HealthCheckPath,
 		StatusChan:      statusChan,
 	}

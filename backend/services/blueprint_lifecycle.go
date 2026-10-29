@@ -26,7 +26,7 @@ type BlueprintSetupResult struct {
 	ExternalAccessEnabled bool   `json:"external_access_enabled"`
 	ConfigPath            string `json:"config_path,omitempty"`
 	ConfigApplied         bool   `json:"config_applied"`
-	CaddySynced           bool   `json:"caddy_synced"`
+	IngressSynced         bool   `json:"ingress_synced"`
 	HostsSynced           bool   `json:"hosts_synced"`
 	NetworkDNSSynced      bool   `json:"network_dns_synced"`
 }
@@ -89,7 +89,6 @@ func ResolveDynamicAppPort(appName string, checkHostListeners bool) (int, bool, 
 	reserved := map[int]string{
 		80:   "http",
 		443:  "https",
-		2019: "caddy-admin",
 		8080: "aetherflow-api",
 	}
 
@@ -501,7 +500,7 @@ func FormatAppPublicDomain(appName, baseDomain string) string {
 }
 
 // SyncInstalledAppsBaseDomain automatically provisions or updates "<app>.<newBaseDomain>"
-// across SQLite app_ingress_configs, Caddy reverse proxy routes, and local DNS providers
+// across SQLite app_ingress_configs, Apache2 Certbot SANs, and local DNS providers
 // for all installed applications (and existing auto-provisioned ingress records) when the
 // server's base domain is configured or changed.
 func SyncInstalledAppsBaseDomain(oldBaseDomain, newBaseDomain string) {
@@ -527,7 +526,6 @@ func SyncInstalledAppsBaseDomain(oldBaseDomain, newBaseDomain string) {
 		}
 	}
 
-	caddyMgr := NewCaddyManager("")
 	for appName := range targetApps {
 		bp := GetBlueprint(appName)
 		if bp == nil || bp.DefaultPort <= 0 {
@@ -570,13 +568,6 @@ func SyncInstalledAppsBaseDomain(oldBaseDomain, newBaseDomain string) {
 
 		_, _, _ = ApplyBlueprintAppConfig(bp, activePort)
 
-		_ = caddyMgr.UpdateAppRoutes(RoutingState{
-			AppName:               bp.AppName,
-			ActivePort:            activePort,
-			InternalDomain:        bp.InternalDomain,
-			PublicDomain:          pubDomain,
-			ExternalAccessEnabled: extEnabled,
-		})
 		if bp.InternalDomain != "" {
 			_ = NewDNSManager().AppendOrUpdateDomains([]string{bp.InternalDomain})
 		}
@@ -600,11 +591,11 @@ func TriggerApacheCertSync() {
 // ApplyBlueprintPostInstall executes the complete post-installation setup for an application:
 // 1. Resolves a conflict-free port (or uses preAllocatedPort).
 // 2. Writes/mutates the app's native configuration file.
-// 3. Persists AppIngressConfig in SQLite (auto-setting <app>.<baseDomain> if a base domain is configured).
-// 4. Wires Caddy reverse proxy routes (<app>.aether.local and public domain if configured).
-// 5. Registers <app>.aether.local in /etc/hosts.
-// 6. Synchronizes networking DNS apps (Pi-hole / dnsmasq) with all active domains.
-// 7. Restarts the service if its port or config was dynamically modified.
+// 3. Persists AppIngressConfig in SQLite (auto-setting <app>.<baseDomain> if a base domain is configured)
+//    and triggers Apache2 Certbot SAN synchronization.
+// 4. Registers <app>.aether.local in /etc/hosts.
+// 5. Synchronizes networking DNS apps (Pi-hole / dnsmasq) with all active domains.
+// 6. Restarts the service if its port or config was dynamically modified.
 func ApplyBlueprintPostInstall(appName string, preAllocatedPort int) (*BlueprintSetupResult, error) {
 	bp := GetBlueprint(appName)
 	if bp == nil {
@@ -665,6 +656,8 @@ func ApplyBlueprintPostInstall(appName string, preAllocatedPort int) (*Blueprint
 	if activePort > 0 || bp.IsNetworkApp {
 		if err := db.SetAppIngressConfig(ingressCfg); err != nil {
 			slog.Warn("failed to persist blueprint ingress config", "app", bp.AppName, "error", err)
+		} else if activePort > 0 {
+			res.IngressSynced = true
 		}
 	}
 	res.PublicDomain = ingressCfg.PublicDomain
@@ -673,24 +666,7 @@ func ApplyBlueprintPostInstall(appName string, preAllocatedPort int) (*Blueprint
 		TriggerApacheCertSync()
 	}
 
-	// 3. Register route in Caddy Reverse Proxy if the app exposes an HTTP port
-	if activePort > 0 {
-		caddyMgr := NewCaddyManager("")
-		routeState := RoutingState{
-			AppName:               bp.AppName,
-			ActivePort:            activePort,
-			InternalDomain:        bp.InternalDomain,
-			PublicDomain:          ingressCfg.PublicDomain,
-			ExternalAccessEnabled: ingressCfg.ExternalAccessEnabled,
-		}
-		if err := caddyMgr.UpdateAppRoutes(routeState); err != nil {
-			slog.Warn("blueprint Caddy route registration notice", "app", bp.AppName, "warning", err)
-		} else {
-			res.CaddySynced = true
-		}
-	}
-
-	// 4. Register internal domain (<app>.aether.local) in /etc/hosts
+	// 3. Register internal domain (<app>.aether.local) in /etc/hosts
 	if bp.InternalDomain != "" {
 		dnsMgr := NewDNSManager()
 		if err := dnsMgr.AppendOrUpdateDomains([]string{bp.InternalDomain}); err != nil {
@@ -700,12 +676,12 @@ func ApplyBlueprintPostInstall(appName string, preAllocatedPort int) (*Blueprint
 		}
 	}
 
-	// 5. Synchronize networking DNS apps (Pi-hole / dnsmasq)
+	// 4. Synchronize networking DNS apps (Pi-hole / dnsmasq)
 	if netSynced, err := SyncNetworkDNSProviders(); err == nil && netSynced {
 		res.NetworkDNSSynced = true
 	}
 
-	// 6. If the port was dynamically reassigned or config was updated, restart service units so changes take effect
+	// 5. If the port was dynamically reassigned or config was updated, restart service units so changes take effect
 	if (reassigned || cfgApplied) && bp.ServiceName != "" {
 		for _, unit := range ResolveServiceUnits(bp.AppName) {
 			_ = ControlService(unit, "restart")
@@ -728,24 +704,18 @@ func TeardownBlueprintUninstall(appName string) error {
 		}
 	}
 
-	// 1. Remove routes from Caddy
-	caddyMgr := NewCaddyManager("")
-	if err := caddyMgr.RemoveAppRoutes(canonicalName); err != nil {
-		slog.Warn("blueprint Caddy route removal notice", "app", canonicalName, "warning", err)
-	}
-
-	// 2. Remove internal domain from /etc/hosts
+	// 1. Remove internal domain from /etc/hosts
 	dnsMgr := NewDNSManager()
 	if err := dnsMgr.RemoveDomains([]string{internalDomain}); err != nil {
 		slog.Warn("blueprint /etc/hosts removal notice", "app", canonicalName, "warning", err)
 	}
 
-	// 3. Delete persisted ingress record from SQLite
+	// 2. Delete persisted ingress record from SQLite
 	if err := db.DeleteAppIngressConfig(canonicalName); err != nil {
 		slog.Warn("failed to delete ingress config on uninstall", "app", canonicalName, "error", err)
 	}
 
-	// 4. Re-sync networking DNS providers (Pi-hole / dnsmasq) so removed domain is purged
+	// 3. Re-sync networking DNS providers (Pi-hole / dnsmasq) so removed domain is purged
 	_, _ = SyncNetworkDNSProviders()
 
 	return nil

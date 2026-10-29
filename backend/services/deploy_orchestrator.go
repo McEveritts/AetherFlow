@@ -18,21 +18,19 @@ type DeployConfig struct {
 	BinaryStaging   string // e.g., "/opt/radarr/v3.0.1"
 	CentralDBPath   string // e.g., "/var/lib/radarr/radarr.db"
 	TargetInternal  string // e.g., "qbittorrent.aether.local"
-	TargetCaddyPort int    // Dynamic green port
+	TargetPort      int    // Dynamic green port
 	HealthCheckPath string // Blueprint health check endpoint
 	StatusChan      chan string // SSE Livestreaming
 }
 
 // Orchestrator handles the high-level deploy logic
 type Orchestrator struct {
-	CaddyMgr *CaddyManager
-	DNSMgr   *DNSManager
+	DNSMgr *DNSManager
 }
 
-func NewOrchestrator(caddyEndpoint string) *Orchestrator {
+func NewOrchestrator() *Orchestrator {
 	return &Orchestrator{
-		CaddyMgr: NewCaddyManager(caddyEndpoint),
-		DNSMgr:   NewDNSManager(),
+		DNSMgr: NewDNSManager(),
 	}
 }
 
@@ -105,24 +103,19 @@ func (o *Orchestrator) ExecuteAtomicDeploy(cfg DeployConfig) error {
 		} else if baseDomain := ResolveBaseDomain(); baseDomain != "" {
 			pubDomain = FormatAppPublicDomain(cfg.AppName, baseDomain)
 		}
-		_ = db.SetAppIngressConfig(models.AppIngressConfig{
+		if err := db.SetAppIngressConfig(models.AppIngressConfig{
 			AppName:               cfg.AppName,
 			PublicDomain:          pubDomain,
-			ListenPort:            cfg.TargetCaddyPort,
+			ListenPort:            cfg.TargetPort,
 			ExternalAccessEnabled: extEnabled,
 			TLSEnabled:            tlsEnabled,
-		})
+		}); err != nil {
+			o.executeRollback(cfg, oldTarget, prevIngress)
+			return fmt.Errorf("failed routing update: %w", err)
+		}
 	}
-	routeState := RoutingState{
-		AppName:               cfg.AppName,
-		ActivePort:            cfg.TargetCaddyPort,
-		InternalDomain:        fmt.Sprintf("%s.aether.local", cfg.AppName),
-		PublicDomain:          pubDomain,
-		ExternalAccessEnabled: extEnabled,
-	}
-	if err := o.CaddyMgr.UpdateAppRoutes(routeState); err != nil {
-		o.executeRollback(cfg, oldTarget, prevIngress)
-		return fmt.Errorf("failed routing update: %w", err)
+	if extEnabled && pubDomain != "" {
+		TriggerApacheCertSync()
 	}
 
 	o.logToStream(cfg.StatusChan, "[STEP 6] Spinning up Green environment...")
@@ -137,7 +130,7 @@ func (o *Orchestrator) ExecuteAtomicDeploy(cfg DeployConfig) error {
 	if healthPath == "" {
 		healthPath = "/api/v3/system/status"
 	}
-	healthURL := fmt.Sprintf("http://127.0.0.1:%d%s", cfg.TargetCaddyPort, healthPath)
+	healthURL := fmt.Sprintf("http://127.0.0.1:%d%s", cfg.TargetPort, healthPath)
 	resp, err := http.Get(healthURL)
 	if err != nil || resp.StatusCode >= 400 {
 		o.executeRollback(cfg, oldTarget, prevIngress)
@@ -178,29 +171,6 @@ func (o *Orchestrator) executeRollback(cfg DeployConfig, oldTarget string, prevI
 		tmpLink := cfg.ActiveSymlink + ".tmp"
 		os.Symlink(oldTarget, tmpLink)
 		os.Rename(tmpLink, cfg.ActiveSymlink)
-	}
-
-	// Caddy routing: restore previous Blue proxy port & domains
-	if o.CaddyMgr != nil {
-		rollbackPort := 0
-		rollbackPub := ""
-		rollbackExt := true
-		if prevIngress != nil && prevIngress.ListenPort > 0 {
-			rollbackPort = prevIngress.ListenPort
-			rollbackPub = prevIngress.PublicDomain
-			rollbackExt = prevIngress.ExternalAccessEnabled
-		} else if bp := GetBlueprint(cfg.AppName); bp != nil && bp.DefaultPort > 0 {
-			rollbackPort = bp.DefaultPort
-		}
-		if rollbackPort > 0 {
-			_ = o.CaddyMgr.UpdateAppRoutes(RoutingState{
-				AppName:               cfg.AppName,
-				ActivePort:            rollbackPort,
-				InternalDomain:        fmt.Sprintf("%s.aether.local", cfg.AppName),
-				PublicDomain:          rollbackPub,
-				ExternalAccessEnabled: rollbackExt,
-			})
-		}
 	}
 
 	o.startService(cfg.AppName)

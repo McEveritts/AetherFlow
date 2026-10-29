@@ -502,10 +502,10 @@ export default function SettingsTab() {
                                                     <label className="text-sm font-semibold text-slate-200 flex items-center gap-2">
                                                         <Globe size={15} className="text-indigo-400" /> Server Base Domain
                                                     </label>
-                                                    <span className="text-xs font-mono uppercase tracking-wider text-indigo-400">Apache2 / Caddy Auto-Route</span>
+                                                    <span className="text-xs font-mono uppercase tracking-wider text-indigo-400">Apache2 Auto-Route</span>
                                                 </div>
                                                 <p className="text-xs text-slate-500">
-                                                    Automatically assigns <span className="font-mono text-indigo-300">jellyfin.{baseDomain.trim().replace(/^\*\./, '') || 'domain.com'}</span> via Apache2 / Caddy reverse proxy when installing apps.
+                                                    Automatically assigns <span className="font-mono text-indigo-300">jellyfin.{baseDomain.trim().replace(/^\*\./, '') || 'domain.com'}</span> via Apache2 reverse proxy when installing apps.
                                                 </p>
                                                 <input
                                                     type="text"

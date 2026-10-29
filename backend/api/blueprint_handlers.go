@@ -117,7 +117,7 @@ func GetAppBlueprint(c *gin.Context) {
 }
 
 // SyncAppBlueprint triggers on-demand blueprint application (dynamic port check,
-// config mutation, Caddy route upsert, /etc/hosts registration, and Pi-hole/DNS sync).
+// config mutation, Apache2 Subdomain Gateway & Certbot SAN sync, /etc/hosts registration, and Pi-hole/DNS sync).
 func SyncAppBlueprint(c *gin.Context) {
 	appName := strings.TrimSpace(c.Param("appName"))
 	if appName == "" {

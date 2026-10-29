@@ -122,7 +122,7 @@ func GetSystemTopology(c *gin.Context) {
 		})
 	}
 
-	// 5. Apache2 / Reverse Proxy Gateway (prefers Apache2 over Caddy)
+	// 5. Apache2 Reverse Proxy & Subdomain Gateway
 	proxyNodeID := "Apache2 Reverse Proxy"
 	proxyStatus := "stopped"
 	proxyDetails := "Port 443 / 80"
@@ -133,20 +133,6 @@ func GetSystemTopology(c *gin.Context) {
 		proxyNodeID = "Nginx Reverse Proxy"
 		proxyStatus = "running"
 		proxyDetails = "Nginx active (443 / 80)"
-	} else if cst, _, _ := services.GetServiceInfo("caddy"); cst == "running" {
-		proxyNodeID = "Caddy Reverse Proxy"
-		proxyStatus = "running"
-		proxyDetails = "Caddy active (443 / 80)"
-	} else {
-		client := &http.Client{Timeout: 200 * time.Millisecond}
-		if resp, err := client.Get("http://127.0.0.1:2019/config/"); err == nil {
-			resp.Body.Close()
-			if resp.StatusCode < 500 {
-				proxyNodeID = "Caddy Reverse Proxy"
-				proxyStatus = "running"
-				proxyDetails = "Caddy Admin API active (443 / 80)"
-			}
-		}
 	}
 	nodes = append(nodes, TopologyNode{
 		ID:      proxyNodeID,

@@ -1,13 +1,11 @@
 package services
 
 import (
-	"encoding/json"
-	"net/http"
-	"net/http/httptest"
+	"aetherflow/db"
+	"aetherflow/models"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 )
 
@@ -115,7 +113,7 @@ func TestCatalogBlueprintsAndAutomationCoverage(t *testing.T) {
 		}
 	}
 
-	// Verify every web app has a unique non-conflicting DefaultPort and never collides with AetherFlow (8080) or Caddy (80/443)
+	// Verify every web app has a unique non-conflicting DefaultPort and never collides with AetherFlow (8080) or Apache2 (80/443)
 	seenPorts := make(map[int]string)
 	for _, pkg := range pkgs {
 		if pkg.DefaultPort == 0 {
@@ -190,85 +188,45 @@ func TestParseProgressLine(t *testing.T) {
 	}
 }
 
-func TestCaddyManagerUpsertAndDeleteRoutes(t *testing.T) {
-	var mu sync.Mutex
-	var calls []string
-	var postedBodies []map[string]interface{}
+func TestSubdomainGatewayHostResolution(t *testing.T) {
+	setupBlueprintTestDB(t)
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		defer mu.Unlock()
-		calls = append(calls, r.Method+" "+r.URL.Path)
-
-		if r.Method == http.MethodPatch {
-			// Simulate route @id not existing yet on first upsert
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		if r.Method == http.MethodPost {
-			var payload map[string]interface{}
-			_ = json.NewDecoder(r.Body).Decode(&payload)
-			postedBodies = append(postedBodies, payload)
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-		if r.Method == http.MethodDelete {
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer server.Close()
-
-	cm := NewCaddyManager(server.URL)
-
-	// 1. Enable external access -> should fallback from PATCH 404 to POST for both internal and public routes
-	err := cm.UpdateAppRoutes(RoutingState{
+	// 1. Enable external access -> both internal and public domains should resolve to configured port
+	err := db.SetAppIngressConfig(models.AppIngressConfig{
 		AppName:               "sonarr",
-		ActivePort:            8989,
-		InternalDomain:        "sonarr.aether.local",
+		ListenPort:            8989,
 		PublicDomain:          "sonarr.example.com",
 		ExternalAccessEnabled: true,
+		TLSEnabled:            true,
 	})
 	if err != nil {
-		t.Fatalf("UpdateAppRoutes failed: %v", err)
+		t.Fatalf("SetAppIngressConfig failed: %v", err)
 	}
 
-	mu.Lock()
-	if len(postedBodies) != 2 {
-		t.Fatalf("expected 2 POST route creations, got %d (calls: %v)", len(postedBodies), calls)
+	if port, app, matched := ResolveAppTargetForHost("sonarr.aether.local"); !matched || app != "sonarr" || port != 8989 {
+		t.Errorf("ResolveAppTargetForHost(sonarr.aether.local) = (%d, %q, %v), want (8989, sonarr, true)", port, app, matched)
 	}
-	if postedBodies[0]["@id"] != "sonarr_internal" {
-		t.Errorf("first POST @id = %v, want sonarr_internal", postedBodies[0]["@id"])
+	if port, app, matched := ResolveAppTargetForHost("sonarr.example.com"); !matched || app != "sonarr" || port != 8989 {
+		t.Errorf("ResolveAppTargetForHost(sonarr.example.com) = (%d, %q, %v), want (8989, sonarr, true)", port, app, matched)
 	}
-	if postedBodies[1]["@id"] != "sonarr_public" {
-		t.Errorf("second POST @id = %v, want sonarr_public", postedBodies[1]["@id"])
-	}
-	mu.Unlock()
 
-	// 2. Disable external access -> should DELETE public route
-	err = cm.UpdateAppRoutes(RoutingState{
+	// 2. Disable external access -> public domain must stop resolving while internal domain remains active
+	err = db.SetAppIngressConfig(models.AppIngressConfig{
 		AppName:               "sonarr",
-		ActivePort:            8989,
-		InternalDomain:        "sonarr.aether.local",
+		ListenPort:            8989,
 		PublicDomain:          "sonarr.example.com",
 		ExternalAccessEnabled: false,
+		TLSEnabled:            true,
 	})
 	if err != nil {
-		t.Fatalf("UpdateAppRoutes (disable public) failed: %v", err)
+		t.Fatalf("SetAppIngressConfig (disable public) failed: %v", err)
 	}
 
-	mu.Lock()
-	foundDelete := false
-	for _, c := range calls {
-		if strings.HasPrefix(c, "DELETE ") && strings.Contains(c, "sonarr_public") {
-			foundDelete = true
-			break
-		}
+	if _, _, matched := ResolveAppTargetForHost("sonarr.example.com"); matched {
+		t.Errorf("expected ResolveAppTargetForHost(sonarr.example.com) to be false when ExternalAccessEnabled=false")
 	}
-	mu.Unlock()
-	if !foundDelete {
-		t.Errorf("expected DELETE call for sonarr_public route, got calls: %v", calls)
+	if port, app, matched := ResolveAppTargetForHost("sonarr.aether.local"); !matched || app != "sonarr" || port != 8989 {
+		t.Errorf("expected sonarr.aether.local to remain active on port 8989, got (%d, %q, %v)", port, app, matched)
 	}
 }
 

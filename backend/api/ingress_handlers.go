@@ -35,7 +35,7 @@ func GetIngressConfigs(c *gin.Context) {
 
 // UpdateAppIngressConfig updates or creates an ingress route for a specific application.
 // Persists configuration records into the SQLite app_ingress_configs table.
-// Synchronizes dynamically with CaddyManager and DNSManager.
+// Synchronizes dynamically with the built-in Subdomain Gateway, Apache2 Certbot SANs, and DNSManager.
 func UpdateAppIngressConfig(c *gin.Context) {
 	appName := strings.TrimSpace(c.Param("appName"))
 	if appName == "" {
@@ -102,21 +102,8 @@ func UpdateAppIngressConfig(c *gin.Context) {
 		return
 	}
 
-	// Hot-sync with Caddy proxy if available
-	caddyMgr := services.NewCaddyManager("")
-	internalDomain := fmt.Sprintf("%s.aether.local", appName)
-	routingState := services.RoutingState{
-		AppName:               appName,
-		ActivePort:            listenPort,
-		PublicDomain:          cfg.PublicDomain,
-		InternalDomain:        internalDomain,
-		ExternalAccessEnabled: cfg.ExternalAccessEnabled,
-	}
-	if err := caddyMgr.UpdateAppRoutes(routingState); err != nil {
-		slog.Warn("caddy route hot-reload notice", "app", appName, "warning", err)
-	}
-
 	// Hot-sync with local DNS manager
+	internalDomain := fmt.Sprintf("%s.aether.local", appName)
 	dnsMgr := services.NewDNSManager()
 	if err := dnsMgr.AppendOrUpdateDomains([]string{internalDomain}); err != nil {
 		slog.Warn("local dns hot-reload notice", "app", appName, "warning", err)
@@ -146,8 +133,8 @@ func UpdateAppIngressConfig(c *gin.Context) {
 // AppSubdomainProxyMiddleware intercepts incoming HTTP and WebSocket requests whose Host
 // header matches an installed application's public subdomain (e.g., qbittorrent.mcflow.stream)
 // or internal domain (<app>.aether.local) and reverse-proxies them directly to 127.0.0.1:<port>.
-// This allows Apache/Nginx-fronted deployments (where Caddy is not running on :80/:443) to
-// transparently route all application subdomains through the single AetherFlow gateway port.
+// This allows Apache2-fronted deployments to transparently route all application subdomains
+// through the single AetherFlow gateway port.
 func AppSubdomainProxyMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if c.GetBool("af_subdomain_checked") {
@@ -208,9 +195,19 @@ func AppSubdomainProxyMiddleware() gin.HandlerFunc {
 		proxy.FlushInterval = -1
 		origDirector := proxy.Director
 		incomingHost := c.Request.Host
+		authenticatedUser := ""
+		if _, claims, err := resolveSessionToken(c); err == nil && db.DB != nil {
+			if userIDFloat, ok := claims["user_id"].(float64); ok {
+				_ = db.DB.QueryRow("SELECT username FROM users WHERE id = ?", int(userIDFloat)).Scan(&authenticatedUser)
+			}
+		}
 		proxy.Director = func(req *http.Request) {
 			origDirector(req)
 			req.Host = incomingHost
+			req.Header.Del("X-Aetherflow-User")
+			if authenticatedUser != "" {
+				req.Header.Set("X-Aetherflow-User", authenticatedUser)
+			}
 			if req.Header.Get("X-Forwarded-Host") == "" {
 				req.Header.Set("X-Forwarded-Host", incomingHost)
 			}

@@ -308,10 +308,9 @@ log "Service ${APP_NAME}.service started successfully."
 # APACHE REVERSE PROXY
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 log "Configuring Apache reverse proxy..."
-: # Apache2 heredoc replaced by Caddy switchboard
-: # routing handled by Caddy switchboard
-: # routing handled by Caddy switchboard
-: # routing handled by Caddy switchboard
+: # Apache2 + AetherFlow Subdomain Gateway handles routing dynamically
+: # via SQLite app_ingress_configs and af-certbot-sync
+: # (no static per-app Apache2 heredoc required)
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # FINALIZE — LOCK FILE CREATION

@@ -133,16 +133,16 @@ class TestComboAiTelemetryPredictions(TestCase):
         has_history = bool(card and "/api/v1/admin/ai/predictions/history" in card)
         self.assert_true(has_cards and has_history, "Combo 10: OverviewTab AI cards mounting with real history must be satisfied")
 
-class TestComboDeploySseCaddy(TestCase):
+class TestComboDeploySseGateway(TestCase):
     def __init__(self):
-        super().__init__("T3_COMBO_11", "F21+Deploy", 3, "ExternalAccessCard, DeploymentStatus, useDeploymentStream SSE, and Caddy integration")
+        super().__init__("T3_COMBO_11", "F21+Deploy", 3, "ExternalAccessCard, DeploymentStatus, useDeploymentStream SSE, and Apache2 Subdomain Gateway integration")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
         hook = inspector.read_file("frontend/src/hooks/useDeploymentStream.ts")
         deploy_api = inspector.read_file("backend/api/deploy_api.go")
         has_hook = bool(hook and "/api/v1/auth/deploy/stream" in hook)
         has_api = bool(deploy_api and "/api/v1/auth/deploy/stream" in deploy_api)
-        self.assert_true(has_hook and has_api, "Combo 11: Deployment SSE stream and Caddy deploy orchestration must be satisfied")
+        self.assert_true(has_hook and has_api, "Combo 11: Deployment SSE stream and Apache2 Subdomain Gateway deploy orchestration must be satisfied")
 
 class TestComboResponsiveDockScrollerContainment(TestCase):
     def __init__(self):
@@ -167,6 +167,6 @@ def get_tier3_tests():
         TestComboPrivilegeBoundarySandbox(),
         TestComboDebian13AptPackaging(),
         TestComboAiTelemetryPredictions(),
-        TestComboDeploySseCaddy(),
+        TestComboDeploySseGateway(),
         TestComboResponsiveDockScrollerContainment()
     ]

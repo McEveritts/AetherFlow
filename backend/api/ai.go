@@ -427,7 +427,7 @@ func extractServiceTarget(message string) string {
 		"nginx", "postgres", "postgresql", "redis",
 		"qbittorrent", "qui", "autobrr", "sonarr", "radarr", "lidarr", "prowlarr",
 		"plex", "jellyfin", "emby", "threadfin", "dispatcharr", "transmission", "deluge",
-		"jackett", "wireguard", "tailscale", "caddy", "traefik",
+		"jackett", "wireguard", "tailscale", "traefik",
 		"duplicati", "filebot", "listenarr", "notifiarr", "novnc",
 		"pyload", "quassel", "requestrr", "seedcross", "unmanic", "x2go",
 	}

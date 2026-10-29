@@ -7,9 +7,9 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// VerifyProxyAuth handles Caddy's forward_auth directive.
+// VerifyProxyAuth handles reverse-proxy forward-auth verification (Apache2 / Subdomain Gateway).
 // If valid session cookie is present, returns 200 OK and injects X-Aetherflow-User.
-// Otherwise, returns 401 Unauthorized forcing Caddy to redirect to login.
+// Otherwise, returns 401 Unauthorized to redirect unauthenticated requests to login.
 func VerifyProxyAuth(c *gin.Context) {
 	// Re-use internal secure session parsing logic
 	_, claims, err := resolveSessionToken(c)
@@ -38,8 +38,7 @@ func VerifyProxyAuth(c *gin.Context) {
 		return
 	}
 
-	// Session is valid. Inject identity headers into the Response.
-	// Caddy's `copy_response_headers` logic will pull these and push to upstream apps.
+	// Session is valid. Inject identity headers into the Response for downstream proxy consumers.
 	c.Header("X-Aetherflow-User", username)
 	c.Header("Remote-User", username) // Included for older app compatibility
 

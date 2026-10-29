@@ -2,7 +2,7 @@
 Tier 4: Real-World Application Scenarios (Operator E2E Workflows)
 5 Multi-Step Production Scenarios:
 1. Operator Bootstrap & Privilege Drop Lifecycle
-2. Application Ingress Provisioning & Caddy/DNS Routing Sync
+2. Application Ingress Provisioning & Apache2 Subdomain/DNS Routing Sync
 3. Multi-Tenant Storage Quota Enforcement & Webhook Billing Flow
 4. Zero-Trust Mesh VPN & Route Advertisement Flow
 5. AI Anomaly Detection, Alerting & Runner Self-Healing Flow
@@ -45,7 +45,7 @@ class TestScenarioOperatorBootstrap(TestCase):
 
 class TestScenarioAppIngressProvisioning(TestCase):
     def __init__(self):
-        super().__init__("T4_SCENARIO_02", "AppProvisioning", 4, "Application Provisioning, Caddy Ingress, /etc/hosts Sync & SSE Streaming")
+        super().__init__("T4_SCENARIO_02", "AppProvisioning", 4, "Application Provisioning, Apache2 Subdomain Ingress, /etc/hosts Sync & SSE Streaming")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
         if mode == "live" and client.is_server_reachable():
@@ -53,10 +53,10 @@ class TestScenarioAppIngressProvisioning(TestCase):
             self.assert_status_code(code, 200)
         else:
             has_ingress = bool(inspector.read_file("backend/api/routes.go") and "/ingress" in inspector.read_file("backend/api/routes.go"))
-            has_caddy = inspector.file_exists("backend/services/caddy_manager.go")
+            has_gateway = bool(inspector.read_file("backend/api/ingress_handlers.go") and "AppSubdomainProxyMiddleware" in inspector.read_file("backend/api/ingress_handlers.go"))
             has_stream = bool(inspector.read_file("backend/api/routes.go") and "/deploy/stream" in inspector.read_file("backend/api/routes.go"))
             has_card = inspector.file_exists("frontend/src/components/ingress/ExternalAccessCard.tsx")
-            self.assert_true(has_ingress and has_caddy and has_stream and has_card, "Scenario 02: Ingress provisioning pipeline must be satisfied")
+            self.assert_true(has_ingress and has_gateway and has_stream and has_card, "Scenario 02: Ingress provisioning pipeline must be satisfied")
 
 class TestScenarioMultitenantQuotaBilling(TestCase):
     def __init__(self):

@@ -6,7 +6,7 @@ AetherFlow v3.2.1+ implements defense-in-depth across authentication, data at re
 
 1. **Mandatory TOTP 2FA**: Enforced for administrator accounts (`totp.go`) with hashed recovery codes.
 2. **Hardened JWT Sessions**: `HttpOnly`, `Secure` cookies paired with Redis JTI revocation and CSRF validation on all state-mutating endpoints.
-3. **Perimeter Gateway (True SSO)**: Caddy `forward_auth` validates requests against `/api/v1/public/auth/verify` and injects `X-Aetherflow-User` identity headers into downstream applications.
+3. **Perimeter Gateway (True SSO)**: `AppSubdomainProxyMiddleware` and `/api/v1/public/auth/verify` validate session tokens and inject verified `X-Aetherflow-User` identity headers into downstream applications while stripping untrusted client-supplied identity headers.
 
 ---
 

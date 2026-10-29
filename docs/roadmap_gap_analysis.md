@@ -17,8 +17,8 @@ This document details the v3.2 ecosystem snapshot, the architecture of the 19 ad
 AetherFlow operates as a sovereign software platform defined by its decoupled, high-performance architecture:
 *   **Frontend:** Built on Next.js 16 with the Obsidian V2 visual design system, rendering GPU-composited 120Hz cosmic aurora atmospheres, chromatic refraction glass panels, and a responsive tri-mode layout (desktop rail, tablet icon rail, mobile bottom dock).
 *   **Backend Control Plane:** A Go 1.25 service layer (`aetherflow-api`) executing as an unprivileged system user (`aetherflow`) under `NoNewPrivileges=yes` and `ProtectSystem=strict`.
-*   **Privileged Boundary (`aetherflow-runner`):** A dedicated, zero-sudo UNIX socket daemon (`/run/aetherflow/runner.sock`) that executes privileged operations (package script execution, systemd daemon reloads, Caddy/DNS configuration, and quota adjustments) without granting unrestricted root or `sudo` access to the API server.
-*   **Reverse Proxy & Ingress:** Embedded Caddy manager orchestrating dynamic reverse proxy routes, automated TLS certificates, and LAN/WAN split ingress for all catalog services without containerized proxies.
+*   **Privileged Boundary (`aetherflow-runner`):** A dedicated, zero-sudo UNIX socket daemon (`/run/aetherflow/runner.sock`) that executes privileged operations (package script execution, systemd daemon reloads, Apache2 Certbot SAN / DNS configuration, and quota adjustments) without granting unrestricted root or `sudo` access to the API server.
+*   **Reverse Proxy & Ingress:** Apache2 + embedded AetherFlow Subdomain Gateway orchestrating dynamic reverse proxy routes, automated Let's Encrypt SAN TLS certificates (`af-certbot-sync`), and LAN/WAN split ingress for all catalog services without containerized proxies.
 
 ### 1.2 Strict Zero-Docker Mandate
 
@@ -109,7 +109,7 @@ To provide security without the virtualization penalty of containers, AetherFlow
 Previous roadmaps recommended Docker-heavy applications such as `Immich` and `Mailcow`. Under AetherFlow's strict Zero-Docker mandate, these have been strategically resolved:
 1.  **Document Management:** Fully solved via bare-metal **Paperless-ngx** (native OCR, Redis caching, Gunicorn/Celery orchestration).
 2.  **Workflow Automation:** Fully solved via native **n8n** (Node.js engine, webhook routing, Arr stack event integration).
-3.  **Unified Ingress & SSL:** Fully solved via embedded **CaddyManager** (declarative REST API routing, auto Let's Encrypt / ZeroSSL, LAN split-horizon).
+3.  **Unified Ingress & SSL:** Fully solved via **Apache2 + AetherFlow Subdomain Gateway** (dynamic SQLite host routing, automated Let's Encrypt SAN expansion via `af-certbot-sync`, LAN split-horizon).
 4.  **Network Mesh & VPN:** Fully solved via native **WireGuard** and **Tailscale** kernel integration.
 5.  **Personal Photo Management:** Rather than introducing fragile Docker workarounds for Immich, AetherFlow prioritizes native bare-metal options (such as PhotoPrism or future native Go/Rust implementations) that execute directly against local filesystem trees with zero container overhead.
 

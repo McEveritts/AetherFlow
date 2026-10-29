@@ -1,6 +1,10 @@
 <VirtualHost *:80>
         ServerName _
+        ProxyRequests Off
+        ProxyPreserveHost On
         RewriteEngine On
+        RewriteCond %{HTTP_HOST} \.aether\.local(:[0-9]+)?$ [NC]
+        RewriteRule ^/?(.*)$ http://127.0.0.1:8080/$1 [P,L]
         RewriteCond %{REQUEST_URI} !^/\.well-known/acme-challenge/
         RewriteRule ^/?(.*)$ https://%{HTTP_HOST}/$1 [R=301,L]
 

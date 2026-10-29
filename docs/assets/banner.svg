@@ -71,7 +71,7 @@
       Sovereign Bare-Metal Infrastructure, Media Automation &amp; AI Control Plane
     </text>
     <text x="2" y="66" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, Roboto, Helvetica, Arial, sans-serif" font-size="14.5" font-weight="400" fill="#94a3b8">
-      Compiled Go 1.26 + Embedded Next.js SPA • Root Privileged Socket Daemon • Automated Caddy TLS Ingress
+      Compiled Go 1.26 + Embedded Next.js SPA • Root Privileged Socket Daemon • Automated Apache2 TLS Ingress
     </text>
   </g>
 

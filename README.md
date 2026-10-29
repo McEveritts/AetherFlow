@@ -21,11 +21,11 @@
 
 ![AetherFlow Overview Dashboard](./docs/assets/dashboard.png)
 
-### Why AetherFlow v3.2?
+### Why AetherFlow v3.2.1?
 
 - **Single-Binary Control Plane (`aetherflow-api`)** — The entire **Next.js (Obsidian V2)** static frontend is embedded directly inside the compiled **Go (Gin)** binary (`CGO_ENABLED=0`), eliminating separate Node.js runtime daemons and port-proxy sprawl.
 - **Zero-Sudo Privileged Socket Boundary (`aetherflow-runner`)** — The API server runs as an unprivileged `aetherflow` user under `ProtectSystem=strict` and `NoNewPrivileges=yes`. Root-level package installations, `systemctl` transitions, quota updates, and atomic rollbacks are isolated behind `/run/aetherflow/runner.sock` with strict allowlists.
-- **Whatbox-Style Automatic Subdomain Ingress** — Configure a server `baseDomain` once, and installing any web-capable Marketplace application automatically provisions `<app>.<baseDomain>` (e.g., `jellyfin.example.com`, `sonarr.example.com`) with automated TLS via **Caddy**.
+- **Whatbox-Style Automatic Subdomain Ingress** — Configure a server `baseDomain` once, and installing any web-capable Marketplace application automatically provisions `<app>.<baseDomain>` (e.g., `jellyfin.example.com`, `sonarr.example.com`) through **Apache2** and the built-in **AetherFlow Subdomain Gateway**, with automated Let's Encrypt SAN expansion via **`af-certbot-sync`** and `.aether.local` LAN split-horizon routing.
 - **Frame-0 Real-Time Telemetry (`Hyperspeed`)** — Immediate frame-0 WebSocket state hydration, non-blocking kernel `cpu.Times` delta sampling, per-PID CPU tracking, SMART drive health, and GPU hardware discovery (AMD VAAPI / Intel QSV).
 - **100% Bare-Metal, Zero Docker Overhead** — Every application runs natively under `systemd` cgroups and optional `af-systemd-sandbox` UnionFS profiles—zero Docker daemons, zero container bridging latency.
 
@@ -52,7 +52,7 @@
 
 ```mermaid
 flowchart LR
-    Operator["Operator Browser<br/>(Obsidian V2 SPA)"] -->|HTTPS / WSS| Ingress["Caddy / Apache Ingress<br/>Auto-Subdomain TLS"]
+    Operator["Operator Browser<br/>(Obsidian V2 SPA)"] -->|HTTPS / WSS| Ingress["Apache2 Ingress<br/>Auto-Subdomain TLS"]
     Ingress -->|127.0.0.1:8080| API["aetherflow-api<br/>(Single-Binary Go + Embedded SPA)<br/>User=aetherflow • ProtectSystem=strict"]
 
     subgraph State["Persistence & Cache"]
@@ -68,12 +68,12 @@ flowchart LR
     subgraph BareMetal["Bare-Metal Host (Debian 12/13 • Ubuntu 22.04/24.04)"]
         Systemd["systemd Service Manager"]
         Catalog["69 Native Applications<br/>(Plex, Arr Stack, qBittorrent, Qui, Threadfin, Dispatcharr, WireGuard...)"]
-        CaddyRoutes["Dynamic Caddyfile<br/>&lt;app&gt;.&lt;baseDomain&gt;"]
+        CertSync["Certbot SAN Auto-Sync<br/>&lt;app&gt;.&lt;baseDomain&gt;"]
     end
 
     Runner --> Systemd
     Runner --> Catalog
-    Runner --> CaddyRoutes
+    Runner --> CertSync
 ```
 
 ---

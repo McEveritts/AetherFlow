@@ -209,8 +209,8 @@ func TestAdversarial_PortUniquenessAndCollisions(t *testing.T) {
 
 	seenPorts := make(map[int]string)
 	reservedPorts := map[int]string{
-		80:   "HTTP / Caddy",
-		443:  "HTTPS / Caddy",
+		80:   "HTTP / Apache2",
+		443:  "HTTPS / Apache2",
 		8080: "AetherFlow API",
 	}
 

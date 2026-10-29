@@ -48,7 +48,7 @@ The test suite is organized into four complementary verification tiers covering 
 ----------------------------------------------------------------------------------------
  Tier 3: Cross-Feature Combinations (Pairwise Interoperability)
    └─ 12 multi-feature integration suites (>25 tests)
-   └─ Ingress + Caddy + Hosts, Auth Refresh + Password, PathSelector + FS + MediaFlow.
+   └─ Ingress + Apache2 Gateway + Hosts, Auth Refresh + Password, PathSelector + FS + MediaFlow.
 ----------------------------------------------------------------------------------------
  Tier 4: Real-World Application Scenarios (Operator E2E Workflows)
    └─ 5 complete end-to-end lifecycles (>15 tests)
@@ -90,14 +90,14 @@ The test suite is organized into four complementary verification tiers covering 
   8. `test_combo_privilege_boundary_sandbox`: Systemd Privilege Units (F33) + Sudoers Purge (F34) + Caller Migration (F08) + Runner Sandboxing (F07).
   9. `test_combo_debian13_apt_packaging`: APT Template (F28) + Core OS Detection (F29) + Package Modernization (F30) + Keyring Migration (F31).
   10. `test_combo_ai_telemetry_predictions`: Predictions History (F19) + AI Bandwidth Tuning (F19) + Overview Dashboard Mounting (F19).
-  11. `test_combo_deploy_sse_caddy`: External Access (F21) + Deployment SSE Stream (F21) + Caddy Dynamic Routing (F05).
+  11. `test_combo_deploy_sse_gateway`: External Access (F21) + Deployment SSE Stream (F21) + Apache2 Subdomain Gateway Routing (F05).
   12. `test_combo_responsive_ui_containment`: Tri-Mode Dock (F15) + Scroller Containment (F16) + Touch Targets (F15) + Primitives (F18).
 
 ### Tier 4: Real-World Application Scenarios (Operator Lifecycles)
 - **Objective**: Exercise complex, multi-step real-world administrator workflows from start to finish.
 - **Scenarios**:
   1. `test_scenario_operator_bootstrap`: Clean system install on Debian 13 -> single binary daemon startup -> privileged runner socket binding -> unprivileged user drops capabilities -> admin login -> password update -> profile avatar -> topology verification.
-  2. `test_scenario_app_ingress_provisioning`: Radarr application deployment -> dynamic Caddy upstream proxying -> external domain assignment -> `/etc/hosts` sync via privileged runner -> deployment SSE status streaming -> topology visualization.
+  2. `test_scenario_app_ingress_provisioning`: Radarr application deployment -> dynamic Apache2 Subdomain Gateway upstream proxying -> external domain assignment -> `/etc/hosts` sync via privileged runner -> deployment SSE status streaming -> topology visualization.
   3. `test_scenario_multitenant_quota_enforcement`: User provisioning -> storage quota assignment via runner `setdisk` -> billing webhook notification -> quota recalculation -> boundary limit enforcement.
   4. `test_scenario_mesh_vpn_orchestration`: Operator navigates to Network & VPN panel -> generates WireGuard keypair -> enrolls peer -> advertises Tailscale subnet route via privileged runner -> live interface verification.
   5. `test_scenario_ai_anomaly_healing`: Hardware metrics collection -> AI predictions report computation (real metrics history, no sine waves) -> anomaly alert rule trigger -> notification dispatch -> automated self-healing action dispatched through runner socket.
@@ -213,8 +213,8 @@ python tests/run_e2e.py --report-out TEST_READY.md
 | **F02** | `POST /api/v1/auth/refresh` | 200 OK with `{"status": "success", "token": str, "expires_at": int, "user": {...}}`. Exempt from CSRF or accepts `X-Requested-With: XMLHttpRequest`. Expired/invalid -> 401. |
 | **F03** | `PUT /api/v1/auth/profile/password` | Bcrypt verification of `current_password`, min 8 chars for `new_password`. Success -> 200 OK. Wrong current password -> 400/401. Short password -> 400. |
 | **F04** | `PUT/DELETE /api/v1/auth/profile/avatar` | PUT: Accepts image URL or base64 data URI (max 2MB) -> 200 OK. DELETE: Clears avatar -> 200 OK. Invalid scheme / oversized -> 400/413. |
-| **F05** | `GET /api/v1/admin/ingress/configs` & `PUT .../apps/:appName` | GET returns `{"configs": [...]}`. PUT upserts into SQLite `app_ingress_configs` and triggers `CaddyManager.UpdateAppRoutes()`. Port 1-65535, valid domain format. |
-| **F06** | `GET /api/v1/auth/system/topology` | 200 OK with live `nodes` and `links`. Nodes represent real daemons (API, Runner, SQLite WAL, Redis, Caddy). Zero hardcoded dummy nodes (`Proxy Port 8080`, `Nginx Router`). |
+| **F05** | `GET /api/v1/admin/ingress/configs` & `PUT .../apps/:appName` | GET returns `{"configs": [...]}`. PUT upserts into SQLite `app_ingress_configs` and triggers Apache2 Certbot SAN sync (`TriggerApacheCertSync`) and Subdomain Gateway routing. Port 1-65535, valid domain format. |
+| **F06** | `GET /api/v1/auth/system/topology` | 200 OK with live `nodes` and `links`. Nodes represent real daemons (API, Runner, SQLite WAL, Redis, Apache2). Zero hardcoded dummy nodes (`Proxy Port 8080`, `Nginx Router`). |
 | **F07** | `/run/aetherflow/runner.sock` (`/v1/sandbox`, `/v1/hosts`, `/v1/network`, `/v1/quota`) | HTTP/1.1 over UNIX domain socket, mode 0660 root:aetherflow. Max body 4096 bytes. Safe ID validation. Strict allowlist execution. |
 | **F08** | Caller Refactoring (`af_heal`, `arr_injector`, etc.) | Zero direct `sudo` or mutating `systemctl` calls in 7 target services. All route via `privileged_runner.go`. |
 | **F09** | SQLite Migration 17 (`app_ingress_configs`) | Schema: `app_ingress_configs(app_name TEXT PRIMARY KEY, public_domain TEXT, external_access_enabled INTEGER, listen_port INTEGER, tls_enabled INTEGER, updated_at DATETIME)`. Idempotent. |

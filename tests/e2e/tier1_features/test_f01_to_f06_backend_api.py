@@ -251,13 +251,13 @@ class TestF05IngressSqlitePersistence(TestCase):
         ingress_code = inspector.read_file("backend/api/ingress_handlers.go")
         self.assert_true(bool(ingress_code and "app_ingress_configs" in ingress_code), "F05: ingress_handlers.go must perform SQL queries against app_ingress_configs")
 
-class TestF05IngressCaddySyncTrigger(TestCase):
+class TestF05IngressGatewaySyncTrigger(TestCase):
     def __init__(self):
-        super().__init__("T1_F05_04", "F05", 1, "Ingress update invokes CaddyManager to reload reverse proxy routes")
+        super().__init__("T1_F05_04", "F05", 1, "Ingress update synchronizes Apache2 Certbot SANs and Subdomain Gateway routes")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
         ingress_code = inspector.read_file("backend/api/ingress_handlers.go")
-        self.assert_true(bool(ingress_code and ("caddy" in ingress_code.lower() or "UpdateAppRoutes" in ingress_code)), "F05: Ingress update must notify CaddyManager")
+        self.assert_true(bool(ingress_code and ("TriggerApacheCertSync" in ingress_code or "AppSubdomainProxyMiddleware" in ingress_code)), "F05: Ingress update must synchronize Apache2 Certbot SANs and Subdomain Gateway")
 
 class TestF05IngressStoreCompatibilityAliases(TestCase):
     def __init__(self):
@@ -302,7 +302,7 @@ class TestF06TopologyZeroDummyNodes(TestCase):
 
 class TestF06TopologyRealInfrastructureNodes(TestCase):
     def __init__(self):
-        super().__init__("T1_F06_04", "F06", 1, "Topology models actual runtime services: SQLite WAL, Runner Daemon, Caddy")
+        super().__init__("T1_F06_04", "F06", 1, "Topology models actual runtime services: SQLite WAL, Runner Daemon, Apache2")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
         handler = inspector.read_file("backend/api/topology_handlers.go") or inspector.read_file("backend/api/system_handlers.go")
@@ -322,6 +322,6 @@ def get_tests():
         TestF02SessionRefreshValidCredentials(), TestF02SessionRefreshExpiryUpdated(), TestF02SessionRefreshUserPayload(), TestF02SubsequentAuthWithRotatedToken(), TestF02CsrfExemptionForXmlHttpRequest(),
         TestF03PasswordMutationRouteRegistered(), TestF03PasswordBcryptVerification(), TestF03PasswordMinLengthEnforcement(), TestF03PasswordHashStorage(), TestF03PasswordAuditLogRecording(),
         TestF04AvatarPutRouteRegistered(), TestF04AvatarDeleteRouteRegistered(), TestF04AvatarDataUriHandling(), TestF04AvatarRemovalClearsField(), TestF04AvatarReflectedInProfile(),
-        TestF05IngressListConfigsRoute(), TestF05IngressUpdateAppRoute(), TestF05IngressSqlitePersistence(), TestF05IngressCaddySyncTrigger(), TestF05IngressStoreCompatibilityAliases(),
+        TestF05IngressListConfigsRoute(), TestF05IngressUpdateAppRoute(), TestF05IngressSqlitePersistence(), TestF05IngressGatewaySyncTrigger(), TestF05IngressStoreCompatibilityAliases(),
         TestF06TopologyRouteRegistered(), TestF06TopologyNodesAndLinksSchema(), TestF06TopologyZeroDummyNodes(), TestF06TopologyRealInfrastructureNodes(), TestF06TopologyLinkReferentialIntegrity()
     ]

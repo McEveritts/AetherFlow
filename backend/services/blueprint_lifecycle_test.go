@@ -2,15 +2,10 @@ package services
 
 import (
 	"aetherflow/db"
-	"encoding/json"
 	"net"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
-	"sync"
 	"testing"
 )
 
@@ -86,34 +81,6 @@ func TestPilotAppsBlueprintLifecycleAndNetworkingDNS(t *testing.T) {
 	t.Setenv("AETHERFLOW_PIHOLE_DIR", piholeDir)
 	t.Setenv("AETHERFLOW_DNSMASQ_DIR", dnsmasqDir)
 	t.Setenv("AETHERFLOW_LAN_IP", "192.168.1.50")
-
-	// Mock Caddy Admin API server
-	var mu sync.Mutex
-	caddyRoutes := make(map[string]string)
-	deletedRoutes := make(map[string]bool)
-	caddySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		defer mu.Unlock()
-		switch r.Method {
-		case http.MethodPatch:
-			w.WriteHeader(http.StatusNotFound)
-		case http.MethodPost:
-			var payload map[string]interface{}
-			_ = json.NewDecoder(r.Body).Decode(&payload)
-			if id, ok := payload["@id"].(string); ok {
-				raw, _ := json.Marshal(payload)
-				caddyRoutes[id] = string(raw)
-			}
-			w.WriteHeader(http.StatusOK)
-		case http.MethodDelete:
-			deletedRoutes[r.URL.Path] = true
-			w.WriteHeader(http.StatusOK)
-		default:
-			w.WriteHeader(http.StatusOK)
-		}
-	}))
-	defer caddySrv.Close()
-	t.Setenv("AETHERFLOW_CADDY_ENDPOINT", caddySrv.URL)
 
 	// Simulate port 8096 (Jellyfin default) being occupied on this host so Jellyfin dynamically shifts to 18096
 	t.Setenv("AETHERFLOW_OCCUPIED_PORTS", "8096")
@@ -201,13 +168,13 @@ func TestPilotAppsBlueprintLifecycleAndNetworkingDNS(t *testing.T) {
 		if !strings.Contains(string(hostsData), domain) {
 			t.Errorf("/etc/hosts missing entry for %s:\n%s", domain, string(hostsData))
 		}
-		mu.Lock()
-		routeJSON, ok := caddyRoutes[app+"_internal"]
-		mu.Unlock()
-		if !ok {
-			t.Errorf("Caddy missing route %s_internal", app)
-		} else if !strings.Contains(routeJSON, strconv.Itoa(results[app].AllocatedPort)) {
-			t.Errorf("Caddy route for %s missing allocated port %d: %s", app, results[app].AllocatedPort, routeJSON)
+		if !results[app].IngressSynced {
+			t.Errorf("expected IngressSynced=true for %s", app)
+		}
+		resolvedPort, resolvedApp, matched := ResolveAppTargetForHost(domain)
+		if !matched || resolvedApp != app || resolvedPort != results[app].AllocatedPort {
+			t.Errorf("ResolveAppTargetForHost(%s) = (%d, %q, %v), want (%d, %q, true)",
+				domain, resolvedPort, resolvedApp, matched, results[app].AllocatedPort, app)
 		}
 	}
 
@@ -216,7 +183,7 @@ func TestPilotAppsBlueprintLifecycleAndNetworkingDNS(t *testing.T) {
 		t.Fatalf("TeardownBlueprintUninstall(sonarr) failed: %v", err)
 	}
 
-	// Verify Sonarr removed from SQLite app_ingress_configs, /etc/hosts, Pi-hole custom.list, and Caddy
+	// Verify Sonarr removed from SQLite app_ingress_configs, /etc/hosts, and Pi-hole custom.list
 	if ing, _ := db.GetAppIngressConfig("sonarr"); ing != nil {
 		t.Errorf("expected sonarr ingress config to be deleted on uninstall, got %+v", ing)
 	}
@@ -250,29 +217,6 @@ func TestAutoSubdomainProvisioningFromSettingsBaseDomain(t *testing.T) {
 	t.Setenv("AETHERFLOW_DNSMASQ_DIR", dnsmasqDir)
 	t.Setenv("AETHERFLOW_LAN_IP", "192.168.1.50")
 
-	var mu sync.Mutex
-	caddyRoutes := make(map[string]string)
-	caddySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		defer mu.Unlock()
-		switch r.Method {
-		case http.MethodPatch:
-			w.WriteHeader(http.StatusNotFound)
-		case http.MethodPost:
-			var payload map[string]interface{}
-			_ = json.NewDecoder(r.Body).Decode(&payload)
-			if id, ok := payload["@id"].(string); ok {
-				raw, _ := json.Marshal(payload)
-				caddyRoutes[id] = string(raw)
-			}
-			w.WriteHeader(http.StatusOK)
-		default:
-			w.WriteHeader(http.StatusOK)
-		}
-	}))
-	defer caddySrv.Close()
-	t.Setenv("AETHERFLOW_CADDY_ENDPOINT", caddySrv.URL)
-
 	// 1. Configure base_domain in SQLite settings (e.g. "*.domain.com" -> normalized "domain.com")
 	if err := db.SetBaseDomain("*.domain.com"); err != nil {
 		t.Fatalf("SetBaseDomain failed: %v", err)
@@ -301,11 +245,8 @@ func TestAutoSubdomainProvisioningFromSettingsBaseDomain(t *testing.T) {
 		t.Errorf("unexpected persisted ingress config for jellyfin: %+v", ing)
 	}
 
-	mu.Lock()
-	pubRoute, hasPub := caddyRoutes["jellyfin_public"]
-	mu.Unlock()
-	if !hasPub || !strings.Contains(pubRoute, "jellyfin.domain.com") {
-		t.Errorf("expected Caddy public route for jellyfin.domain.com, got: %s", pubRoute)
+	if port, app, matched := ResolveAppTargetForHost("jellyfin.domain.com"); !matched || app != "jellyfin" || port != 8096 {
+		t.Errorf("expected Subdomain Gateway route for jellyfin.domain.com on port 8096, got port=%d app=%q matched=%v", port, app, matched)
 	}
 
 	// 3. Change base domain to "newbox.io" and verify SyncInstalledAppsBaseDomain updates Jellyfin automatically

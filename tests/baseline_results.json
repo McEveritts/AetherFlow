@@ -1,12 +1,12 @@
 {
   "version": "3.1.7",
   "mode": "contract",
-  "timestamp": "2026-10-29T05:11:48Z",
+  "timestamp": "2026-10-29T16:35:57Z",
   "total": 387,
   "passed": 387,
   "failed": 0,
   "skipped": 0,
-  "duration_ms": 488.91,
+  "duration_ms": 149.45,
   "results": [
     {
       "test_id": "T1_F01_01",
@@ -14,7 +14,7 @@
       "tier": 1,
       "description": "Directory listing returns entries array and path metadata for allowed path",
       "status": "PASS",
-      "duration_ms": 0.77,
+      "duration_ms": 0.75,
       "error": ""
     },
     {
@@ -23,7 +23,7 @@
       "tier": 1,
       "description": "Parent path is accurately computed for nested subdirectories",
       "status": "PASS",
-      "duration_ms": 0.19,
+      "duration_ms": 0.17,
       "error": ""
     },
     {
@@ -32,7 +32,7 @@
       "tier": 1,
       "description": "Each directory entry contains name, path, is_dir, size, and mod_time",
       "status": "PASS",
-      "duration_ms": 0.12,
+      "duration_ms": 0.11,
       "error": ""
     },
     {
@@ -41,7 +41,7 @@
       "tier": 1,
       "description": "Symlinks pointing inside allowed roots are resolved and accessible",
       "status": "PASS",
-      "duration_ms": 0.11,
+      "duration_ms": 0.1,
       "error": ""
     },
     {
@@ -50,7 +50,7 @@
       "tier": 1,
       "description": "Compatibility alias /api/fs routes to the Go filesystem browser",
       "status": "PASS",
-      "duration_ms": 0.11,
+      "duration_ms": 0.1,
       "error": ""
     },
     {
@@ -59,7 +59,7 @@
       "tier": 1,
       "description": "Valid session cookie returns new JWT token with HTTP 200",
       "status": "PASS",
-      "duration_ms": 0.21,
+      "duration_ms": 0.19,
       "error": ""
     },
     {
@@ -68,7 +68,7 @@
       "tier": 1,
       "description": "Refresh response includes updated future expires_at timestamp",
       "status": "PASS",
-      "duration_ms": 0.51,
+      "duration_ms": 0.59,
       "error": ""
     },
     {
@@ -86,7 +86,7 @@
       "tier": 1,
       "description": "Rotated token successfully authenticates subsequent requests",
       "status": "PASS",
-      "duration_ms": 0.17,
+      "duration_ms": 0.13,
       "error": ""
     },
     {
@@ -95,7 +95,7 @@
       "tier": 1,
       "description": "Refresh endpoint allows X-Requested-With header without CSRF token block",
       "status": "PASS",
-      "duration_ms": 0.26,
+      "duration_ms": 0.28,
       "error": ""
     },
     {
@@ -104,7 +104,7 @@
       "tier": 1,
       "description": "PUT /api/v1/auth/profile/password is registered in router",
       "status": "PASS",
-      "duration_ms": 0.07,
+      "duration_ms": 0.09,
       "error": ""
     },
     {
@@ -113,7 +113,7 @@
       "tier": 1,
       "description": "Current password is verified using bcrypt before applying changes",
       "status": "PASS",
-      "duration_ms": 0.14,
+      "duration_ms": 0.1,
       "error": ""
     },
     {
@@ -122,7 +122,7 @@
       "tier": 1,
       "description": "New password length is enforced (minimum 8 characters)",
       "status": "PASS",
-      "duration_ms": 0.13,
+      "duration_ms": 0.1,
       "error": ""
     },
     {
@@ -131,7 +131,7 @@
       "tier": 1,
       "description": "New password is encrypted with bcrypt before saving to users table",
       "status": "PASS",
-      "duration_ms": 0.1,
+      "duration_ms": 0.17,
       "error": ""
     },
     {
@@ -140,7 +140,7 @@
       "tier": 1,
       "description": "Password mutation emits an audit log event",
       "status": "PASS",
-      "duration_ms": 0.15,
+      "duration_ms": 0.16,
       "error": ""
     },
     {
@@ -149,7 +149,7 @@
       "tier": 1,
       "description": "PUT /api/v1/auth/profile/avatar is registered in routes.go",
       "status": "PASS",
-      "duration_ms": 0.07,
+      "duration_ms": 0.12,
       "error": ""
     },
     {
@@ -158,7 +158,7 @@
       "tier": 1,
       "description": "DELETE /api/v1/auth/profile/avatar is registered in routes.go",
       "status": "PASS",
-      "duration_ms": 0.17,
+      "duration_ms": 0.15,
       "error": ""
     },
     {
@@ -167,7 +167,7 @@
       "tier": 1,
       "description": "Avatar mutation accepts and stores valid image data URIs",
       "status": "PASS",
-      "duration_ms": 0.12,
+      "duration_ms": 0.11,
       "error": ""
     },
     {
@@ -176,7 +176,7 @@
       "tier": 1,
       "description": "DELETE avatar handler resets user avatar column to empty string",
       "status": "PASS",
-      "duration_ms": 0.12,
+      "duration_ms": 0.1,
       "error": ""
     },
     {
@@ -185,7 +185,7 @@
       "tier": 1,
       "description": "GET /api/v1/auth/profile returns the updated avatar",
       "status": "PASS",
-      "duration_ms": 0.1,
+      "duration_ms": 0.09,
       "error": ""
     },
     {
@@ -194,7 +194,7 @@
       "tier": 1,
       "description": "GET /api/v1/admin/ingress/configs returns list of app ingress records",
       "status": "PASS",
-      "duration_ms": 0.11,
+      "duration_ms": 0.12,
       "error": ""
     },
     {
@@ -203,7 +203,7 @@
       "tier": 1,
       "description": "PUT /api/v1/admin/ingress/apps/:appName upserts domain and port routing",
       "status": "PASS",
-      "duration_ms": 0.07,
+      "duration_ms": 0.11,
       "error": ""
     },
     {
@@ -212,16 +212,16 @@
       "tier": 1,
       "description": "Ingress handler persists configurations to app_ingress_configs table",
       "status": "PASS",
-      "duration_ms": 0.08,
+      "duration_ms": 0.11,
       "error": ""
     },
     {
       "test_id": "T1_F05_04",
       "feature_id": "F05",
       "tier": 1,
-      "description": "Ingress update invokes CaddyManager to reload reverse proxy routes",
+      "description": "Ingress update synchronizes Apache2 Certbot SANs and Subdomain Gateway routes",
       "status": "PASS",
-      "duration_ms": 0.07,
+      "duration_ms": 0.19,
       "error": ""
     },
     {
@@ -230,7 +230,7 @@
       "tier": 1,
       "description": "Compatibility aliases /api/ingress/* are registered for frontend store",
       "status": "PASS",
-      "duration_ms": 0.07,
+      "duration_ms": 0.21,
       "error": ""
     },
     {
@@ -239,7 +239,7 @@
       "tier": 1,
       "description": "GET /api/v1/auth/system/topology is registered in router",
       "status": "PASS",
-      "duration_ms": 0.06,
+      "duration_ms": 0.16,
       "error": ""
     },
     {
@@ -248,7 +248,7 @@
       "tier": 1,
       "description": "Topology response structure includes nodes and links arrays",
       "status": "PASS",
-      "duration_ms": 0.16,
+      "duration_ms": 0.11,
       "error": ""
     },
     {
@@ -257,16 +257,16 @@
       "tier": 1,
       "description": "Zero hardcoded fake infrastructure nodes returned in topology",
       "status": "PASS",
-      "duration_ms": 0.19,
+      "duration_ms": 0.12,
       "error": ""
     },
     {
       "test_id": "T1_F06_04",
       "feature_id": "F06",
       "tier": 1,
-      "description": "Topology models actual runtime services: SQLite WAL, Runner Daemon, Caddy",
+      "description": "Topology models actual runtime services: SQLite WAL, Runner Daemon, Apache2",
       "status": "PASS",
-      "duration_ms": 0.14,
+      "duration_ms": 0.15,
       "error": ""
     },
     {
@@ -293,7 +293,7 @@
       "tier": 1,
       "description": "Runner socket implements POST /v1/hosts for atomic /etc/hosts updates",
       "status": "PASS",
-      "duration_ms": 0.08,
+      "duration_ms": 0.23,
       "error": ""
     },
     {
@@ -302,7 +302,7 @@
       "tier": 1,
       "description": "Runner socket implements POST /v1/network for WireGuard and Tailscale",
       "status": "PASS",
-      "duration_ms": 0.07,
+      "duration_ms": 0.1,
       "error": ""
     },
     {
@@ -329,7 +329,7 @@
       "tier": 1,
       "description": "af_heal.go restarts services via runner socket without direct systemctl",
       "status": "PASS",
-      "duration_ms": 0.09,
+      "duration_ms": 0.1,
       "error": ""
     },
     {
@@ -338,7 +338,7 @@
       "tier": 1,
       "description": "arr_injector.go removes direct sudo systemctl calls",
       "status": "PASS",
-      "duration_ms": 0.2,
+      "duration_ms": 0.08,
       "error": ""
     },
     {
@@ -347,7 +347,7 @@
       "tier": 1,
       "description": "deploy_orchestrator.go routes service lifecycle through runner",
       "status": "PASS",
-      "duration_ms": 0.1,
+      "duration_ms": 0.08,
       "error": ""
     },
     {
@@ -365,7 +365,7 @@
       "tier": 1,
       "description": "local_dns_manager.go and quota_manager.go route mutations via runner",
       "status": "PASS",
-      "duration_ms": 0.31,
+      "duration_ms": 0.52,
       "error": ""
     },
     {
@@ -374,7 +374,7 @@
       "tier": 1,
       "description": "Migration 17 is defined in backend/db/db.go",
       "status": "PASS",
-      "duration_ms": 0.1,
+      "duration_ms": 0.19,
       "error": ""
     },
     {
@@ -383,7 +383,7 @@
       "tier": 1,
       "description": "Migration 17 creates app_ingress_configs table with correct columns",
       "status": "PASS",
-      "duration_ms": 0.1,
+      "duration_ms": 0.12,
       "error": ""
     },
     {
@@ -392,7 +392,7 @@
       "tier": 1,
       "description": "app_name column is PRIMARY KEY in app_ingress_configs",
       "status": "PASS",
-      "duration_ms": 0.07,
+      "duration_ms": 0.09,
       "error": ""
     },
     {
@@ -401,7 +401,7 @@
       "tier": 1,
       "description": "Go struct AppIngressConfig exists in models or api package",
       "status": "PASS",
-      "duration_ms": 0.11,
+      "duration_ms": 0.08,
       "error": ""
     },
     {
@@ -410,7 +410,7 @@
       "tier": 1,
       "description": "CREATE TABLE IF NOT EXISTS ensures idempotent migration runs",
       "status": "PASS",
-      "duration_ms": 0.15,
+      "duration_ms": 0.09,
       "error": ""
     },
     {
@@ -428,7 +428,7 @@
       "tier": 1,
       "description": "Cluster handlers respond without nil pointer panic",
       "status": "PASS",
-      "duration_ms": 0.09,
+      "duration_ms": 0.16,
       "error": ""
     },
     {
@@ -437,7 +437,7 @@
       "tier": 1,
       "description": "GET /api/v1/admin/cluster/nodes returns node list",
       "status": "PASS",
-      "duration_ms": 0.07,
+      "duration_ms": 0.14,
       "error": ""
     },
     {
@@ -446,7 +446,7 @@
       "tier": 1,
       "description": "POST /api/v1/admin/cluster/enroll generates worker join token",
       "status": "PASS",
-      "duration_ms": 0.07,
+      "duration_ms": 0.09,
       "error": ""
     },
     {
@@ -455,7 +455,7 @@
       "tier": 1,
       "description": "GET /api/v1/admin/cluster/nodes/:id/metrics returns node telemetry",
       "status": "PASS",
-      "duration_ms": 0.06,
+      "duration_ms": 0.08,
       "error": ""
     },
     {
@@ -464,7 +464,7 @@
       "tier": 1,
       "description": "frontend/src/app/api/fs/route.ts is deleted from repository",
       "status": "PASS",
-      "duration_ms": 0.03,
+      "duration_ms": 0.04,
       "error": ""
     },
     {
@@ -491,7 +491,7 @@
       "tier": 1,
       "description": "PathSelector.tsx targets authenticated Go backend filesystem endpoint",
       "status": "PASS",
-      "duration_ms": 0.08,
+      "duration_ms": 0.11,
       "error": ""
     },
     {
@@ -500,7 +500,7 @@
       "tier": 1,
       "description": "Zero Node.js fs/promises imports across frontend/src/",
       "status": "PASS",
-      "duration_ms": 209.08,
+      "duration_ms": 10.87,
       "error": ""
     },
     {
@@ -509,7 +509,7 @@
       "tier": 1,
       "description": "Unit tests exist for Go directory browser handler",
       "status": "PASS",
-      "duration_ms": 0.07,
+      "duration_ms": 0.04,
       "error": ""
     },
     {
@@ -518,7 +518,7 @@
       "tier": 1,
       "description": "Unit tests exist for auth session refresh and password mutation",
       "status": "PASS",
-      "duration_ms": 0.13,
+      "duration_ms": 0.05,
       "error": ""
     },
     {
@@ -536,7 +536,7 @@
       "tier": 1,
       "description": "Unit tests exist for new privileged runner socket endpoints",
       "status": "PASS",
-      "duration_ms": 0.17,
+      "duration_ms": 0.1,
       "error": ""
     },
     {
@@ -545,7 +545,7 @@
       "tier": 1,
       "description": "Unit tests exist for cluster manager and node telemetry",
       "status": "PASS",
-      "duration_ms": 0.08,
+      "duration_ms": 0.03,
       "error": ""
     },
     {
@@ -554,7 +554,7 @@
       "tier": 1,
       "description": "globals.css defines --obs-bg-base as #000000",
       "status": "PASS",
-      "duration_ms": 0.27,
+      "duration_ms": 0.11,
       "error": ""
     },
     {
@@ -563,7 +563,7 @@
       "tier": 1,
       "description": "body::before renders 3-orb radial aurora and base vertical gradient",
       "status": "PASS",
-      "duration_ms": 0.11,
+      "duration_ms": 0.08,
       "error": ""
     },
     {
@@ -572,7 +572,7 @@
       "tier": 1,
       "description": "body::after renders SVG fractal micro-grain and spatial edge vignette",
       "status": "PASS",
-      "duration_ms": 0.09,
+      "duration_ms": 0.08,
       "error": ""
     },
     {
@@ -581,7 +581,7 @@
       "tier": 1,
       "description": "Atmosphere pseudo-elements use GPU containment and strict layer caching",
       "status": "PASS",
-      "duration_ms": 0.22,
+      "duration_ms": 0.1,
       "error": ""
     },
     {
@@ -590,7 +590,7 @@
       "tier": 1,
       "description": "body background is transparent to expose underlying atmospheric layers",
       "status": "PASS",
-      "duration_ms": 0.1,
+      "duration_ms": 0.16,
       "error": ""
     },
     {
@@ -635,7 +635,7 @@
       "tier": 1,
       "description": ".glass-button-primary uses indigo-to-fuchsia gradient",
       "status": "PASS",
-      "duration_ms": 0.08,
+      "duration_ms": 0.07,
       "error": ""
     },
     {
@@ -653,7 +653,7 @@
       "tier": 1,
       "description": "Desktop sidebar expands from icon rail to full navigation panel",
       "status": "PASS",
-      "duration_ms": 0.07,
+      "duration_ms": 0.09,
       "error": ""
     },
     {
@@ -662,7 +662,7 @@
       "tier": 1,
       "description": "Mobile navigation items enforce min 44px touch targets",
       "status": "PASS",
-      "duration_ms": 0.14,
+      "duration_ms": 0.23,
       "error": ""
     },
     {
@@ -671,7 +671,7 @@
       "tier": 1,
       "description": "obs-beacon-* utility classes style live/reconnecting/danger beacons",
       "status": "PASS",
-      "duration_ms": 0.2,
+      "duration_ms": 0.25,
       "error": ""
     },
     {
@@ -680,7 +680,7 @@
       "tier": 1,
       "description": "Mobile dock applies safe-area-inset-bottom padding",
       "status": "PASS",
-      "duration_ms": 0.18,
+      "duration_ms": 0.24,
       "error": ""
     },
     {
@@ -689,7 +689,7 @@
       "tier": 1,
       "description": "Zero blanket 'overflow-x: hidden' on html or body tags in globals.css",
       "status": "PASS",
-      "duration_ms": 0.47,
+      "duration_ms": 0.54,
       "error": ""
     },
     {
@@ -698,7 +698,7 @@
       "tier": 1,
       "description": "Main content area uses min-w-0 to prevent flex item blowout",
       "status": "PASS",
-      "duration_ms": 0.1,
+      "duration_ms": 0.23,
       "error": ""
     },
     {
@@ -707,7 +707,7 @@
       "tier": 1,
       "description": "AuditTab scopes wide tables with overflow-x-auto",
       "status": "PASS",
-      "duration_ms": 0.09,
+      "duration_ms": 0.11,
       "error": ""
     },
     {
@@ -716,7 +716,7 @@
       "tier": 1,
       "description": "DataGrid primitive encapsulates wide tabular layouts",
       "status": "PASS",
-      "duration_ms": 0.19,
+      "duration_ms": 0.09,
       "error": ""
     },
     {
@@ -725,7 +725,7 @@
       "tier": 1,
       "description": "page.tsx root container does not truncate sticky headers with overflow-hidden",
       "status": "PASS",
-      "duration_ms": 0.09,
+      "duration_ms": 0.18,
       "error": ""
     },
     {
@@ -734,7 +734,7 @@
       "tier": 1,
       "description": "DashboardSettingsTab exposes aurora intensity slider",
       "status": "PASS",
-      "duration_ms": 0.22,
+      "duration_ms": 0.2,
       "error": ""
     },
     {
@@ -743,7 +743,7 @@
       "tier": 1,
       "description": "DashboardSettingsTab provides static 120Hz cached vs animated toggle",
       "status": "PASS",
-      "duration_ms": 0.15,
+      "duration_ms": 0.17,
       "error": ""
     },
     {
@@ -752,7 +752,7 @@
       "tier": 1,
       "description": "DashboardSettingsTab provides micro-grain enable/disable toggle",
       "status": "PASS",
-      "duration_ms": 0.14,
+      "duration_ms": 0.24,
       "error": ""
     },
     {
@@ -761,7 +761,7 @@
       "tier": 1,
       "description": "DashboardSettingsTab provides density / card lift control",
       "status": "PASS",
-      "duration_ms": 0.14,
+      "duration_ms": 0.19,
       "error": ""
     },
     {
@@ -770,7 +770,7 @@
       "tier": 1,
       "description": "Atmosphere preferences persist in localStorage or settings store",
       "status": "PASS",
-      "duration_ms": 0.07,
+      "duration_ms": 0.08,
       "error": ""
     },
     {
@@ -779,7 +779,7 @@
       "tier": 1,
       "description": "Card.tsx applies Obsidian V2 glass tokens and specular borders",
       "status": "PASS",
-      "duration_ms": 0.12,
+      "duration_ms": 0.07,
       "error": ""
     },
     {
@@ -788,7 +788,7 @@
       "tier": 1,
       "description": "Button.tsx variants use Obsidian V2 chromatic gradients",
       "status": "PASS",
-      "duration_ms": 0.12,
+      "duration_ms": 0.07,
       "error": ""
     },
     {
@@ -806,7 +806,7 @@
       "tier": 1,
       "description": "Modal.tsx renders .glass-panel with backdrop blur",
       "status": "PASS",
-      "duration_ms": 0.07,
+      "duration_ms": 0.06,
       "error": ""
     },
     {
@@ -815,7 +815,7 @@
       "tier": 1,
       "description": "login/page.tsx rendered with Obsidian V2 atmosphere and zero redundant blur divs",
       "status": "PASS",
-      "duration_ms": 0.11,
+      "duration_ms": 0.07,
       "error": ""
     },
     {
@@ -824,7 +824,7 @@
       "tier": 1,
       "description": "BandwidthCard is imported and rendered in OverviewTab.tsx",
       "status": "PASS",
-      "duration_ms": 0.22,
+      "duration_ms": 0.07,
       "error": ""
     },
     {
@@ -833,7 +833,7 @@
       "tier": 1,
       "description": "PredictionsCard is imported and rendered in OverviewTab.tsx",
       "status": "PASS",
-      "duration_ms": 0.15,
+      "duration_ms": 0.07,
       "error": ""
     },
     {
@@ -842,7 +842,7 @@
       "tier": 1,
       "description": "PredictionsCard fetches metrics from /api/v1/admin/ai/predictions/history",
       "status": "PASS",
-      "duration_ms": 0.17,
+      "duration_ms": 0.12,
       "error": ""
     },
     {
@@ -851,7 +851,7 @@
       "tier": 1,
       "description": "PredictionsCard contains zero synthetic Math.sin() trend data generation",
       "status": "PASS",
-      "duration_ms": 0.2,
+      "duration_ms": 0.16,
       "error": ""
     },
     {
@@ -860,7 +860,7 @@
       "tier": 1,
       "description": "PredictionsCard loads existing prediction report on mount via useEffect",
       "status": "PASS",
-      "duration_ms": 0.09,
+      "duration_ms": 0.08,
       "error": ""
     },
     {
@@ -869,7 +869,7 @@
       "tier": 1,
       "description": "MetadataTab is imported and reachable inside MediaFlowTab.tsx",
       "status": "PASS",
-      "duration_ms": 0.09,
+      "duration_ms": 0.08,
       "error": ""
     },
     {
@@ -878,7 +878,7 @@
       "tier": 1,
       "description": "PathSelector component is integrated for directory inputs",
       "status": "PASS",
-      "duration_ms": 0.16,
+      "duration_ms": 0.14,
       "error": ""
     },
     {
@@ -887,7 +887,7 @@
       "tier": 1,
       "description": "PathSelector queries /api/fs or /api/v1/auth/fs",
       "status": "PASS",
-      "duration_ms": 0.08,
+      "duration_ms": 0.09,
       "error": ""
     },
     {
@@ -896,7 +896,7 @@
       "tier": 1,
       "description": "MediaFlowTab uses apiFetch helper with cookie/CSRF authentication",
       "status": "PASS",
-      "duration_ms": 0.07,
+      "duration_ms": 0.08,
       "error": ""
     },
     {
@@ -905,7 +905,7 @@
       "tier": 1,
       "description": "MediaFlowTab eliminates stale localStorage.getItem('token') usages",
       "status": "PASS",
-      "duration_ms": 0.07,
+      "duration_ms": 0.09,
       "error": ""
     },
     {
@@ -914,7 +914,7 @@
       "tier": 1,
       "description": "ExternalAccessCard is imported and rendered in services/marketplace UI",
       "status": "PASS",
-      "duration_ms": 0.14,
+      "duration_ms": 0.44,
       "error": ""
     },
     {
@@ -923,7 +923,7 @@
       "tier": 1,
       "description": "DeploymentStatus is imported and rendered in deploy modal/tab",
       "status": "PASS",
-      "duration_ms": 0.14,
+      "duration_ms": 0.25,
       "error": ""
     },
     {
@@ -932,7 +932,7 @@
       "tier": 1,
       "description": "useIngressStore is wired to fetch and update ingress configs",
       "status": "PASS",
-      "duration_ms": 0.15,
+      "duration_ms": 0.07,
       "error": ""
     },
     {
@@ -941,7 +941,7 @@
       "tier": 1,
       "description": "useDeploymentStream connects to authenticated path /api/v1/auth/deploy/stream",
       "status": "PASS",
-      "duration_ms": 0.08,
+      "duration_ms": 0.07,
       "error": ""
     },
     {
@@ -968,7 +968,7 @@
       "tier": 1,
       "description": "Password change form dispatches PUT /api/v1/auth/profile/password",
       "status": "PASS",
-      "duration_ms": 0.09,
+      "duration_ms": 0.07,
       "error": ""
     },
     {
@@ -977,7 +977,7 @@
       "tier": 1,
       "description": "ProfileTab.tsx wires avatar change control to PUT /api/v1/auth/profile/avatar",
       "status": "PASS",
-      "duration_ms": 0.07,
+      "duration_ms": 0.06,
       "error": ""
     },
     {
@@ -986,7 +986,7 @@
       "tier": 1,
       "description": "ProfileTab.tsx wires Remove Avatar button to DELETE /api/v1/auth/profile/avatar",
       "status": "PASS",
-      "duration_ms": 0.11,
+      "duration_ms": 0.07,
       "error": ""
     },
     {
@@ -995,7 +995,7 @@
       "tier": 1,
       "description": "ProfileTab.tsx eliminates legacy 'Security Section (Mockup)' markers",
       "status": "PASS",
-      "duration_ms": 0.15,
+      "duration_ms": 0.14,
       "error": ""
     },
     {
@@ -1004,7 +1004,7 @@
       "tier": 1,
       "description": "AppTopologyMap.tsx queries /api/v1/auth/system/topology",
       "status": "PASS",
-      "duration_ms": 0.08,
+      "duration_ms": 0.12,
       "error": ""
     },
     {
@@ -1013,7 +1013,7 @@
       "tier": 1,
       "description": "AppTopologyMap eliminates hardcoded dummy nodes array",
       "status": "PASS",
-      "duration_ms": 0.1,
+      "duration_ms": 0.09,
       "error": ""
     },
     {
@@ -1022,7 +1022,7 @@
       "tier": 1,
       "description": "AppTopologyMap renders live running/stopped/degraded statuses",
       "status": "PASS",
-      "duration_ms": 0.15,
+      "duration_ms": 0.07,
       "error": ""
     },
     {
@@ -1040,7 +1040,7 @@
       "tier": 1,
       "description": "AppTopologyMap renders links connecting dependent services",
       "status": "PASS",
-      "duration_ms": 0.07,
+      "duration_ms": 0.16,
       "error": ""
     },
     {
@@ -1049,7 +1049,7 @@
       "tier": 1,
       "description": "NetworkTab.tsx exists in frontend/src/components/tabs/",
       "status": "PASS",
-      "duration_ms": 0.03,
+      "duration_ms": 0.07,
       "error": ""
     },
     {
@@ -1058,7 +1058,7 @@
       "tier": 1,
       "description": "NetworkTab is registered in Sidebar navigation",
       "status": "PASS",
-      "duration_ms": 0.13,
+      "duration_ms": 0.48,
       "error": ""
     },
     {
@@ -1067,7 +1067,7 @@
       "tier": 1,
       "description": "NetworkTab displays WireGuard peers and key generation controls",
       "status": "PASS",
-      "duration_ms": 0.22,
+      "duration_ms": 0.3,
       "error": ""
     },
     {
@@ -1076,7 +1076,7 @@
       "tier": 1,
       "description": "NetworkTab displays Tailscale status and route advertisement",
       "status": "PASS",
-      "duration_ms": 0.17,
+      "duration_ms": 0.19,
       "error": ""
     },
     {
@@ -1085,7 +1085,7 @@
       "tier": 1,
       "description": "NetworkTab queries /api/v1/admin/network/status",
       "status": "PASS",
-      "duration_ms": 0.11,
+      "duration_ms": 0.08,
       "error": ""
     },
     {
@@ -1103,7 +1103,7 @@
       "tier": 1,
       "description": "Notifications tab is registered in navigation",
       "status": "PASS",
-      "duration_ms": 0.26,
+      "duration_ms": 0.22,
       "error": ""
     },
     {
@@ -1112,7 +1112,7 @@
       "tier": 1,
       "description": "Notifications tab lists alert rules with enabled toggles",
       "status": "PASS",
-      "duration_ms": 0.36,
+      "duration_ms": 0.26,
       "error": ""
     },
     {
@@ -1121,7 +1121,7 @@
       "tier": 1,
       "description": "Notifications tab supports channel management (discord, slack, email, webhook)",
       "status": "PASS",
-      "duration_ms": 0.37,
+      "duration_ms": 0.23,
       "error": ""
     },
     {
@@ -1130,7 +1130,7 @@
       "tier": 1,
       "description": "Notifications tab provides 'Test Channel' trigger button",
       "status": "PASS",
-      "duration_ms": 0.36,
+      "duration_ms": 0.19,
       "error": ""
     },
     {
@@ -1148,7 +1148,7 @@
       "tier": 1,
       "description": "Quotas & Billing tab is registered in navigation",
       "status": "PASS",
-      "duration_ms": 0.21,
+      "duration_ms": 0.64,
       "error": ""
     },
     {
@@ -1157,7 +1157,7 @@
       "tier": 1,
       "description": "Quotas tab lists user storage usage and quota thresholds",
       "status": "PASS",
-      "duration_ms": 0.29,
+      "duration_ms": 0.28,
       "error": ""
     },
     {
@@ -1166,7 +1166,7 @@
       "tier": 1,
       "description": "Quotas tab lists billing webhook audit events",
       "status": "PASS",
-      "duration_ms": 0.17,
+      "duration_ms": 0.24,
       "error": ""
     },
     {
@@ -1175,7 +1175,7 @@
       "tier": 1,
       "description": "Quotas tab provides manual disk usage refresh button",
       "status": "PASS",
-      "duration_ms": 0.25,
+      "duration_ms": 0.17,
       "error": ""
     },
     {
@@ -1193,7 +1193,7 @@
       "tier": 1,
       "description": "Cluster tab is registered in navigation",
       "status": "PASS",
-      "duration_ms": 0.15,
+      "duration_ms": 0.32,
       "error": ""
     },
     {
@@ -1202,7 +1202,7 @@
       "tier": 1,
       "description": "ClusterTab lists worker nodes with status, CPU, and memory",
       "status": "PASS",
-      "duration_ms": 0.1,
+      "duration_ms": 0.16,
       "error": ""
     },
     {
@@ -1211,7 +1211,7 @@
       "tier": 1,
       "description": "ClusterTab provides Enroll Worker modal with join token",
       "status": "PASS",
-      "duration_ms": 0.16,
+      "duration_ms": 0.11,
       "error": ""
     },
     {
@@ -1229,7 +1229,7 @@
       "tier": 1,
       "description": "setup/templates/apt.sources/debian.template uses TLS https://",
       "status": "PASS",
-      "duration_ms": 0.08,
+      "duration_ms": 0.1,
       "error": ""
     },
     {
@@ -1238,7 +1238,7 @@
       "tier": 1,
       "description": "debian.template includes non-free-firmware component",
       "status": "PASS",
-      "duration_ms": 0.1,
+      "duration_ms": 0.08,
       "error": ""
     },
     {
@@ -1247,7 +1247,7 @@
       "tier": 1,
       "description": "debian.template uses official HTTPS security repository",
       "status": "PASS",
-      "duration_ms": 0.14,
+      "duration_ms": 0.06,
       "error": ""
     },
     {
@@ -1256,7 +1256,7 @@
       "tier": 1,
       "description": "debian.template eliminates insecure unauthenticated deb-multimedia repo",
       "status": "PASS",
-      "duration_ms": 0.07,
+      "duration_ms": 0.06,
       "error": ""
     },
     {
@@ -1265,7 +1265,7 @@
       "tier": 1,
       "description": "debian.template configures release backports with HTTPS",
       "status": "PASS",
-      "duration_ms": 0.06,
+      "duration_ms": 0.09,
       "error": ""
     },
     {
@@ -1274,7 +1274,7 @@
       "tier": 1,
       "description": "00-core.sh supports Debian 13 codename 'trixie'",
       "status": "PASS",
-      "duration_ms": 0.09,
+      "duration_ms": 0.16,
       "error": ""
     },
     {
@@ -1283,7 +1283,7 @@
       "tier": 1,
       "description": "00-core.sh handles rolling release with empty VERSION_ID without fatal exit",
       "status": "PASS",
-      "duration_ms": 0.07,
+      "duration_ms": 0.09,
       "error": ""
     },
     {
@@ -1292,7 +1292,7 @@
       "tier": 1,
       "description": "00-core.sh detects native PHP 8.4 on Debian 13",
       "status": "PASS",
-      "duration_ms": 0.1,
+      "duration_ms": 0.07,
       "error": ""
     },
     {
@@ -1301,7 +1301,7 @@
       "tier": 1,
       "description": "_version_ge helper handles empty strings without syntax error",
       "status": "PASS",
-      "duration_ms": 0.07,
+      "duration_ms": 0.09,
       "error": ""
     },
     {
@@ -1310,7 +1310,7 @@
       "tier": 1,
       "description": "00-core.sh confirms Debian 11, 12, and 13 as supported distributions",
       "status": "PASS",
-      "duration_ms": 0.06,
+      "duration_ms": 0.07,
       "error": ""
     },
     {
@@ -1319,7 +1319,7 @@
       "tier": 1,
       "description": "setup/modules/02-packages.sh removes unconditional software-properties-common on Debian",
       "status": "PASS",
-      "duration_ms": 0.11,
+      "duration_ms": 0.14,
       "error": ""
     },
     {
@@ -1328,7 +1328,7 @@
       "tier": 1,
       "description": "pcregrep replaced with pcre2-utils in package installation list",
       "status": "PASS",
-      "duration_ms": 0.07,
+      "duration_ms": 0.21,
       "error": ""
     },
     {
@@ -1337,7 +1337,7 @@
       "tier": 1,
       "description": "libncurses5-dev replaced with libncurses-dev in package list",
       "status": "PASS",
-      "duration_ms": 0.07,
+      "duration_ms": 0.17,
       "error": ""
     },
     {
@@ -1346,7 +1346,7 @@
       "tier": 1,
       "description": "Dead packages (mcrypt, libmcrypt-dev, php-xmlrpc) removed from 02-packages.sh",
       "status": "PASS",
-      "duration_ms": 0.19,
+      "duration_ms": 0.21,
       "error": ""
     },
     {
@@ -1355,7 +1355,7 @@
       "tier": 1,
       "description": "sury php.list uses ${CODENAME} instead of raw $(lsb_release -sc)",
       "status": "PASS",
-      "duration_ms": 0.18,
+      "duration_ms": 0.14,
       "error": ""
     },
     {
@@ -1364,7 +1364,7 @@
       "tier": 1,
       "description": "installpackage-btsync uses /usr/share/keyrings/ instead of apt-key",
       "status": "PASS",
-      "duration_ms": 0.07,
+      "duration_ms": 0.05,
       "error": ""
     },
     {
@@ -1373,7 +1373,7 @@
       "tier": 1,
       "description": "installpackage-x2go uses modern keyring instead of apt-key adv",
       "status": "PASS",
-      "duration_ms": 0.03,
+      "duration_ms": 0.17,
       "error": ""
     },
     {
@@ -1382,7 +1382,7 @@
       "tier": 1,
       "description": "installpackage-znc uses modern keyring instead of apt-key add",
       "status": "PASS",
-      "duration_ms": 6.01,
+      "duration_ms": 0.16,
       "error": ""
     },
     {
@@ -1391,7 +1391,7 @@
       "tier": 1,
       "description": "removepackage scripts for jackett/lidarr/radarr remove dead Mono apt-key calls",
       "status": "PASS",
-      "duration_ms": 0.32,
+      "duration_ms": 0.47,
       "error": ""
     },
     {
@@ -1400,7 +1400,7 @@
       "tier": 1,
       "description": "updateAetherFlow removes dead Jessie apt-key call",
       "status": "PASS",
-      "duration_ms": 0.1,
+      "duration_ms": 0.11,
       "error": ""
     },
     {
@@ -1409,7 +1409,7 @@
       "tier": 1,
       "description": "modern_stack.sh builds Next.js static export before compiling Go backend",
       "status": "PASS",
-      "duration_ms": 0.11,
+      "duration_ms": 0.09,
       "error": ""
     },
     {
@@ -1418,7 +1418,7 @@
       "tier": 1,
       "description": "modern_stack.sh copies frontend build artifacts into backend/web/dist/",
       "status": "PASS",
-      "duration_ms": 0.07,
+      "duration_ms": 0.08,
       "error": ""
     },
     {
@@ -1427,7 +1427,7 @@
       "tier": 1,
       "description": "Go backend compiles to single executable 'aetherflow-api'",
       "status": "PASS",
-      "duration_ms": 0.07,
+      "duration_ms": 0.15,
       "error": ""
     },
     {
@@ -1436,7 +1436,7 @@
       "tier": 1,
       "description": "backend/web/embed.go embeds dist/ directory with go:embed",
       "status": "PASS",
-      "duration_ms": 0.07,
+      "duration_ms": 0.09,
       "error": ""
     },
     {
@@ -1445,7 +1445,7 @@
       "tier": 1,
       "description": "setup/modules/05-finalize.sh displays onboarding URL on port 8080",
       "status": "PASS",
-      "duration_ms": 0.09,
+      "duration_ms": 0.11,
       "error": ""
     },
     {
@@ -1463,7 +1463,7 @@
       "tier": 1,
       "description": "aetherflow-api.template declares ProtectSystem=strict",
       "status": "PASS",
-      "duration_ms": 0.08,
+      "duration_ms": 0.07,
       "error": ""
     },
     {
@@ -1472,7 +1472,7 @@
       "tier": 1,
       "description": "aetherflow-api.template declares NoNewPrivileges=yes",
       "status": "PASS",
-      "duration_ms": 0.17,
+      "duration_ms": 0.18,
       "error": ""
     },
     {
@@ -1481,7 +1481,7 @@
       "tier": 1,
       "description": "aetherflow-api runs under unprivileged User=aetherflow",
       "status": "PASS",
-      "duration_ms": 0.08,
+      "duration_ms": 0.09,
       "error": ""
     },
     {
@@ -1490,7 +1490,7 @@
       "tier": 1,
       "description": "setup scripts do not install obsolete aetherflow-frontend.service",
       "status": "PASS",
-      "duration_ms": 0.15,
+      "duration_ms": 0.16,
       "error": ""
     },
     {
@@ -1508,7 +1508,7 @@
       "tier": 1,
       "description": "modern_stack.sh eliminates global PM2 installation and root startup",
       "status": "PASS",
-      "duration_ms": 0.06,
+      "duration_ms": 0.08,
       "error": ""
     },
     {
@@ -1526,7 +1526,7 @@
       "tier": 1,
       "description": "API server relies solely on runner socket without setuid or sudo",
       "status": "PASS",
-      "duration_ms": 0.12,
+      "duration_ms": 0.07,
       "error": ""
     },
     {
@@ -1535,7 +1535,7 @@
       "tier": 1,
       "description": "Services are managed exclusively via systemd service units",
       "status": "PASS",
-      "duration_ms": 0.13,
+      "duration_ms": 0.07,
       "error": ""
     },
     {
@@ -1544,7 +1544,7 @@
       "tier": 1,
       "description": "100% of shell scripts in setup/, deploy/, packages/ use LF line endings",
       "status": "PASS",
-      "duration_ms": 173.1,
+      "duration_ms": 23.81,
       "error": ""
     },
     {
@@ -1553,7 +1553,7 @@
       "tier": 1,
       "description": "Shell scripts have valid bash shebangs (#!/usr/bin/env bash or #!/bin/bash)",
       "status": "PASS",
-      "duration_ms": 9.03,
+      "duration_ms": 9.3,
       "error": ""
     },
     {
@@ -1562,7 +1562,7 @@
       "tier": 1,
       "description": "Core setup scripts pass bash syntax inspection",
       "status": "PASS",
-      "duration_ms": 0.38,
+      "duration_ms": 0.42,
       "error": ""
     },
     {
@@ -1571,7 +1571,7 @@
       "tier": 1,
       "description": "New setup scripts declare 'set -e' or 'set -euo pipefail'",
       "status": "PASS",
-      "duration_ms": 0.07,
+      "duration_ms": 0.09,
       "error": ""
     },
     {
@@ -1580,7 +1580,7 @@
       "tier": 1,
       "description": "Shell scripts contain zero UTF-8 BOM headers",
       "status": "PASS",
-      "duration_ms": 8.73,
+      "duration_ms": 9.45,
       "error": ""
     },
     {
@@ -1598,7 +1598,7 @@
       "tier": 1,
       "description": "Test suite implements Tier 1, Tier 2, Tier 3, and Tier 4",
       "status": "PASS",
-      "duration_ms": 0.09,
+      "duration_ms": 0.1,
       "error": ""
     },
     {
@@ -1607,7 +1607,7 @@
       "tier": 1,
       "description": "Test runner supports CLI options (--tier, --feature, --mode)",
       "status": "PASS",
-      "duration_ms": 0.1,
+      "duration_ms": 0.15,
       "error": ""
     },
     {
@@ -1616,7 +1616,7 @@
       "tier": 1,
       "description": "Test runner exits with 0 on success and non-zero on test failures",
       "status": "PASS",
-      "duration_ms": 0.09,
+      "duration_ms": 0.21,
       "error": ""
     },
     {
@@ -1625,25 +1625,25 @@
       "tier": 1,
       "description": "Test runner supports JSON export and markdown summary tables",
       "status": "PASS",
-      "duration_ms": 0.19,
+      "duration_ms": 0.23,
       "error": ""
     },
     {
       "test_id": "T1_F37_01",
       "feature_id": "F37",
       "tier": 1,
-      "description": "TEST_INFRA.md exists at project root",
+      "description": "TEST_INFRA.md specification exists",
       "status": "PASS",
-      "duration_ms": 0.05,
+      "duration_ms": 0.06,
       "error": ""
     },
     {
       "test_id": "T1_F37_02",
       "feature_id": "F37",
       "tier": 1,
-      "description": "TEST_READY.md exists at project root summarizing baseline results",
+      "description": "TEST_READY.md baseline report exists",
       "status": "PASS",
-      "duration_ms": 0.09,
+      "duration_ms": 0.03,
       "error": ""
     },
     {
@@ -1652,7 +1652,7 @@
       "tier": 1,
       "description": "Test harness supports both contract static mode and live HTTP mode",
       "status": "PASS",
-      "duration_ms": 0.16,
+      "duration_ms": 0.11,
       "error": ""
     },
     {
@@ -1724,7 +1724,7 @@
       "tier": 2,
       "description": "Expired refresh token returns HTTP 401 Unauthorized",
       "status": "PASS",
-      "duration_ms": 0.14,
+      "duration_ms": 0.08,
       "error": ""
     },
     {
@@ -1742,7 +1742,7 @@
       "tier": 2,
       "description": "Refresh on explicitly revoked session JTI returns HTTP 401",
       "status": "PASS",
-      "duration_ms": 0.17,
+      "duration_ms": 0.11,
       "error": ""
     },
     {
@@ -1751,7 +1751,7 @@
       "tier": 2,
       "description": "Tampered JWT cryptographic signature returns HTTP 401",
       "status": "PASS",
-      "duration_ms": 0.15,
+      "duration_ms": 0.17,
       "error": ""
     },
     {
@@ -1769,7 +1769,7 @@
       "tier": 2,
       "description": "Incorrect current password returns HTTP 400 or 401",
       "status": "PASS",
-      "duration_ms": 0.22,
+      "duration_ms": 0.1,
       "error": ""
     },
     {
@@ -1778,7 +1778,7 @@
       "tier": 2,
       "description": "New password shorter than 8 characters returns HTTP 400",
       "status": "PASS",
-      "duration_ms": 0.12,
+      "duration_ms": 0.17,
       "error": ""
     },
     {
@@ -1787,7 +1787,7 @@
       "tier": 2,
       "description": "Payload omitting new_password returns HTTP 400",
       "status": "PASS",
-      "duration_ms": 0.11,
+      "duration_ms": 0.1,
       "error": ""
     },
     {
@@ -1805,7 +1805,7 @@
       "tier": 2,
       "description": "SQL injection string in password field is safely parameterized",
       "status": "PASS",
-      "duration_ms": 0.1,
+      "duration_ms": 0.08,
       "error": ""
     },
     {
@@ -1814,7 +1814,7 @@
       "tier": 2,
       "description": "Avatar URL with javascript: or file: scheme returns HTTP 400",
       "status": "PASS",
-      "duration_ms": 0.1,
+      "duration_ms": 0.08,
       "error": ""
     },
     {
@@ -1823,7 +1823,7 @@
       "tier": 2,
       "description": "Base64 avatar payload exceeding 2MB is rejected with HTTP 400 or 413",
       "status": "PASS",
-      "duration_ms": 0.1,
+      "duration_ms": 0.08,
       "error": ""
     },
     {
@@ -1832,7 +1832,7 @@
       "tier": 2,
       "description": "Empty JSON payload to PUT /profile/avatar returns HTTP 400",
       "status": "PASS",
-      "duration_ms": 0.1,
+      "duration_ms": 0.08,
       "error": ""
     },
     {
@@ -1841,7 +1841,7 @@
       "tier": 2,
       "description": "Avatar mutation without authentication token returns HTTP 401",
       "status": "PASS",
-      "duration_ms": 0.09,
+      "duration_ms": 0.15,
       "error": ""
     },
     {
@@ -1850,7 +1850,7 @@
       "tier": 2,
       "description": "DELETE /profile/avatar when already empty succeeds with HTTP 200",
       "status": "PASS",
-      "duration_ms": 0.13,
+      "duration_ms": 0.17,
       "error": ""
     },
     {
@@ -1859,7 +1859,7 @@
       "tier": 2,
       "description": "Ingress public domain with spaces or invalid chars returns HTTP 400",
       "status": "PASS",
-      "duration_ms": 0.08,
+      "duration_ms": 0.13,
       "error": ""
     },
     {
@@ -1868,7 +1868,7 @@
       "tier": 2,
       "description": "Ingress listen port < 1 or > 65535 returns HTTP 400",
       "status": "PASS",
-      "duration_ms": 0.07,
+      "duration_ms": 0.09,
       "error": ""
     },
     {
@@ -1877,7 +1877,7 @@
       "tier": 2,
       "description": "Non-admin user attempting ingress mutation returns HTTP 403 Forbidden",
       "status": "PASS",
-      "duration_ms": 0.09,
+      "duration_ms": 0.1,
       "error": ""
     },
     {
@@ -1886,7 +1886,7 @@
       "tier": 2,
       "description": "Ingress update with missing publicDomain returns HTTP 400",
       "status": "PASS",
-      "duration_ms": 0.06,
+      "duration_ms": 0.07,
       "error": ""
     },
     {
@@ -1904,7 +1904,7 @@
       "tier": 2,
       "description": "GET /api/v1/auth/system/topology without token returns HTTP 401",
       "status": "PASS",
-      "duration_ms": 0.06,
+      "duration_ms": 0.07,
       "error": ""
     },
     {
@@ -1913,7 +1913,7 @@
       "tier": 2,
       "description": "POST /api/v1/auth/system/topology returns HTTP 405 Method Not Allowed",
       "status": "PASS",
-      "duration_ms": 0.09,
+      "duration_ms": 0.07,
       "error": ""
     },
     {
@@ -1922,7 +1922,7 @@
       "tier": 2,
       "description": "Topology nodes details do not expose database passwords or tokens",
       "status": "PASS",
-      "duration_ms": 0.12,
+      "duration_ms": 0.07,
       "error": ""
     },
     {
@@ -1931,7 +1931,7 @@
       "tier": 2,
       "description": "Node status values are strictly constrained to valid states",
       "status": "PASS",
-      "duration_ms": 0.14,
+      "duration_ms": 0.06,
       "error": ""
     },
     {
@@ -1949,7 +1949,7 @@
       "tier": 2,
       "description": "Payload exceeding 4096 bytes to runner socket returns HTTP 413",
       "status": "PASS",
-      "duration_ms": 0.09,
+      "duration_ms": 0.14,
       "error": ""
     },
     {
@@ -1958,7 +1958,7 @@
       "tier": 2,
       "description": "Shell metacharacters ('; rm -rf', '|', '&') in package name are rejected",
       "status": "PASS",
-      "duration_ms": 0.12,
+      "duration_ms": 0.15,
       "error": ""
     },
     {
@@ -1967,7 +1967,7 @@
       "tier": 2,
       "description": "Newline or injection characters in domain/IP for /v1/hosts return HTTP 400",
       "status": "PASS",
-      "duration_ms": 0.17,
+      "duration_ms": 0.1,
       "error": ""
     },
     {
@@ -1976,7 +1976,7 @@
       "tier": 2,
       "description": "Unrecognized action verb in /v1/systemctl returns HTTP 400",
       "status": "PASS",
-      "duration_ms": 0.08,
+      "duration_ms": 0.07,
       "error": ""
     },
     {
@@ -1985,7 +1985,7 @@
       "tier": 2,
       "description": "Unknown path on runner socket returns HTTP 404 Not Found",
       "status": "PASS",
-      "duration_ms": 0.08,
+      "duration_ms": 0.07,
       "error": ""
     },
     {
@@ -2012,7 +2012,7 @@
       "tier": 2,
       "description": "network.go handles absence of wg binary gracefully",
       "status": "PASS",
-      "duration_ms": 0.09,
+      "duration_ms": 0.13,
       "error": ""
     },
     {
@@ -2021,7 +2021,7 @@
       "tier": 2,
       "description": "quota_manager.go handles non-existent Linux users cleanly",
       "status": "PASS",
-      "duration_ms": 0.14,
+      "duration_ms": 0.16,
       "error": ""
     },
     {
@@ -2030,7 +2030,7 @@
       "tier": 2,
       "description": "systemd_sandbox.go handles non-existent package definition",
       "status": "PASS",
-      "duration_ms": 0.17,
+      "duration_ms": 0.13,
       "error": ""
     },
     {
@@ -2039,7 +2039,7 @@
       "tier": 2,
       "description": "Inserting duplicate app_name into app_ingress_configs violates PRIMARY KEY",
       "status": "PASS",
-      "duration_ms": 0.25,
+      "duration_ms": 0.23,
       "error": ""
     },
     {
@@ -2048,7 +2048,7 @@
       "tier": 2,
       "description": "Re-running migration 17 does not fail or alter existing data",
       "status": "PASS",
-      "duration_ms": 0.12,
+      "duration_ms": 0.13,
       "error": ""
     },
     {
@@ -2057,7 +2057,7 @@
       "tier": 2,
       "description": "Migration 17 records version 17 in schema_versions table",
       "status": "PASS",
-      "duration_ms": 0.08,
+      "duration_ms": 0.09,
       "error": ""
     },
     {
@@ -2066,7 +2066,7 @@
       "tier": 2,
       "description": "Migration preserves SQLite WAL journal mode and busy timeout",
       "status": "PASS",
-      "duration_ms": 0.07,
+      "duration_ms": 0.08,
       "error": ""
     },
     {
@@ -2075,7 +2075,7 @@
       "tier": 2,
       "description": "SQLite connection pool strictly capped at MaxOpenConns(1)",
       "status": "PASS",
-      "duration_ms": 0.07,
+      "duration_ms": 0.08,
       "error": ""
     },
     {
@@ -2084,7 +2084,7 @@
       "tier": 2,
       "description": "Calling cluster initialization multiple times is safe and idempotent",
       "status": "PASS",
-      "duration_ms": 0.11,
+      "duration_ms": 0.1,
       "error": ""
     },
     {
@@ -2129,7 +2129,7 @@
       "tier": 2,
       "description": "Direct access to deleted Next.js server route returns 404",
       "status": "PASS",
-      "duration_ms": 0.03,
+      "duration_ms": 0.06,
       "error": ""
     },
     {
@@ -2138,7 +2138,7 @@
       "tier": 2,
       "description": "Next.js static export fails if any non-static server route exists",
       "status": "PASS",
-      "duration_ms": 0.07,
+      "duration_ms": 0.2,
       "error": ""
     },
     {
@@ -2156,7 +2156,7 @@
       "tier": 2,
       "description": "Client bundles contain zero webpack fallbacks or polyfills for node fs",
       "status": "PASS",
-      "duration_ms": 4.66,
+      "duration_ms": 0.16,
       "error": ""
     },
     {
@@ -2165,7 +2165,7 @@
       "tier": 2,
       "description": "Build pipeline expects index.html in output directory",
       "status": "PASS",
-      "duration_ms": 0.12,
+      "duration_ms": 0.13,
       "error": ""
     },
     {
@@ -2174,7 +2174,7 @@
       "tier": 2,
       "description": "Go test suites use t.TempDir() or defer os.RemoveAll() for test files",
       "status": "PASS",
-      "duration_ms": 0.09,
+      "duration_ms": 0.08,
       "error": ""
     },
     {
@@ -2201,7 +2201,7 @@
       "tier": 2,
       "description": "DB unit tests use isolated in-memory or temp SQLite databases",
       "status": "PASS",
-      "duration_ms": 0.1,
+      "duration_ms": 0.09,
       "error": ""
     },
     {
@@ -2210,7 +2210,7 @@
       "tier": 2,
       "description": "Backend Go packages contain no syntax errors",
       "status": "PASS",
-      "duration_ms": 0.08,
+      "duration_ms": 0.14,
       "error": ""
     },
     {
@@ -2219,7 +2219,7 @@
       "tier": 2,
       "description": "Text color against --obs-bg-base (#000000) satisfies WCAG AA (>= 4.5:1)",
       "status": "PASS",
-      "duration_ms": 0.14,
+      "duration_ms": 0.12,
       "error": ""
     },
     {
@@ -2228,7 +2228,7 @@
       "tier": 2,
       "description": "Atmosphere pseudo-elements (::before, ::after) declare pointer-events: none",
       "status": "PASS",
-      "duration_ms": 0.19,
+      "duration_ms": 0.07,
       "error": ""
     },
     {
@@ -2237,7 +2237,7 @@
       "tier": 2,
       "description": "body::before is z-index: -2 and body::after is z-index: -1",
       "status": "PASS",
-      "duration_ms": 0.09,
+      "duration_ms": 0.07,
       "error": ""
     },
     {
@@ -2246,7 +2246,7 @@
       "tier": 2,
       "description": "Page roots eliminate opaque bg-slate-950 that blocks atmosphere",
       "status": "PASS",
-      "duration_ms": 0.08,
+      "duration_ms": 0.09,
       "error": ""
     },
     {
@@ -2264,7 +2264,7 @@
       "tier": 2,
       "description": "prefers-reduced-motion media query disables 120Hz high-refresh animations",
       "status": "PASS",
-      "duration_ms": 0.09,
+      "duration_ms": 0.08,
       "error": ""
     },
     {
@@ -2282,7 +2282,7 @@
       "tier": 2,
       "description": "Specular top border is constrained to 1px thickness",
       "status": "PASS",
-      "duration_ms": 0.07,
+      "duration_ms": 0.06,
       "error": ""
     },
     {
@@ -2291,7 +2291,7 @@
       "tier": 2,
       "description": "Interactive glass buttons retain accessible focus-visible outline",
       "status": "PASS",
-      "duration_ms": 0.08,
+      "duration_ms": 0.07,
       "error": ""
     },
     {
@@ -2300,7 +2300,7 @@
       "tier": 2,
       "description": "Glass input wells use inset box shadows to appear physically recessed",
       "status": "PASS",
-      "duration_ms": 0.08,
+      "duration_ms": 0.06,
       "error": ""
     },
     {
@@ -2318,7 +2318,7 @@
       "tier": 2,
       "description": "Tapping backdrop outside mobile navigation drawer triggers close",
       "status": "PASS",
-      "duration_ms": 0.09,
+      "duration_ms": 0.27,
       "error": ""
     },
     {
@@ -2327,7 +2327,7 @@
       "tier": 2,
       "description": "Tri-mode layout uses CSS media queries to avoid SSR hydration mismatches",
       "status": "PASS",
-      "duration_ms": 0.13,
+      "duration_ms": 0.17,
       "error": ""
     },
     {
@@ -2345,7 +2345,7 @@
       "tier": 2,
       "description": "Mobile layout applies bottom padding to prevent dock from obscuring content",
       "status": "PASS",
-      "duration_ms": 0.08,
+      "duration_ms": 0.16,
       "error": ""
     },
     {
@@ -2354,7 +2354,7 @@
       "tier": 2,
       "description": "Long hashes or URLs use break-all or truncate to prevent horizontal blowouts",
       "status": "PASS",
-      "duration_ms": 0.11,
+      "duration_ms": 0.2,
       "error": ""
     },
     {
@@ -2363,7 +2363,7 @@
       "tier": 2,
       "description": "Deep flex child containers declare min-w-0",
       "status": "PASS",
-      "duration_ms": 0.08,
+      "duration_ms": 0.18,
       "error": ""
     },
     {
@@ -2372,7 +2372,7 @@
       "tier": 2,
       "description": "DataGrid and tables preserve sticky header alignment",
       "status": "PASS",
-      "duration_ms": 0.1,
+      "duration_ms": 0.24,
       "error": ""
     },
     {
@@ -2381,7 +2381,7 @@
       "tier": 2,
       "description": "Body width is constrained to 100% without horizontal canvas shaking",
       "status": "PASS",
-      "duration_ms": 0.11,
+      "duration_ms": 0.13,
       "error": ""
     },
     {
@@ -2417,7 +2417,7 @@
       "tier": 2,
       "description": "Corrupted localStorage JSON falls back gracefully to default theme settings",
       "status": "PASS",
-      "duration_ms": 0.08,
+      "duration_ms": 0.13,
       "error": ""
     },
     {
@@ -2444,7 +2444,7 @@
       "tier": 2,
       "description": "Disabled button has reduced opacity, not-allowed cursor, and no hover lift",
       "status": "PASS",
-      "duration_ms": 0.09,
+      "duration_ms": 0.1,
       "error": ""
     },
     {
@@ -2453,7 +2453,7 @@
       "tier": 2,
       "description": "Modal traps tab focus and closes upon pressing Escape key",
       "status": "PASS",
-      "duration_ms": 0.07,
+      "duration_ms": 0.09,
       "error": ""
     },
     {
@@ -2462,7 +2462,7 @@
       "tier": 2,
       "description": "Input field with error renders red specular border with high-contrast message",
       "status": "PASS",
-      "duration_ms": 0.07,
+      "duration_ms": 0.09,
       "error": ""
     },
     {
@@ -2471,7 +2471,7 @@
       "tier": 2,
       "description": "OAuth consent page renders inside glass container with touch targets",
       "status": "PASS",
-      "duration_ms": 0.21,
+      "duration_ms": 0.11,
       "error": ""
     },
     {
@@ -2480,7 +2480,7 @@
       "tier": 2,
       "description": "DataGrid with zero rows renders friendly empty state rather than blank box",
       "status": "PASS",
-      "duration_ms": 0.11,
+      "duration_ms": 0.09,
       "error": ""
     },
     {
@@ -2489,7 +2489,7 @@
       "tier": 2,
       "description": "PredictionsCard handles empty metrics array without NaN or division by zero",
       "status": "PASS",
-      "duration_ms": 0.09,
+      "duration_ms": 0.18,
       "error": ""
     },
     {
@@ -2498,7 +2498,7 @@
       "tier": 2,
       "description": "Memory calculation guards against mem_total_gb == 0",
       "status": "PASS",
-      "duration_ms": 0.08,
+      "duration_ms": 0.09,
       "error": ""
     },
     {
@@ -2507,7 +2507,7 @@
       "tier": 2,
       "description": "PredictionsCard displays retry button when API request fails",
       "status": "PASS",
-      "duration_ms": 0.07,
+      "duration_ms": 0.09,
       "error": ""
     },
     {
@@ -2543,7 +2543,7 @@
       "tier": 2,
       "description": "PathSelector handles permission denied error on restricted directories",
       "status": "PASS",
-      "duration_ms": 0.06,
+      "duration_ms": 0.07,
       "error": ""
     },
     {
@@ -2552,7 +2552,7 @@
       "tier": 2,
       "description": "MediaFlow transcode stream handles SSE disconnect and reconnect",
       "status": "PASS",
-      "duration_ms": 0.08,
+      "duration_ms": 0.07,
       "error": ""
     },
     {
@@ -2561,7 +2561,7 @@
       "tier": 2,
       "description": "Metadata scan form rejects empty target directory input",
       "status": "PASS",
-      "duration_ms": 0.1,
+      "duration_ms": 0.08,
       "error": ""
     },
     {
@@ -2570,7 +2570,7 @@
       "tier": 2,
       "description": "PathSelector renders virtualized or bounded list for directories with >1000 items",
       "status": "PASS",
-      "duration_ms": 0.13,
+      "duration_ms": 0.07,
       "error": ""
     },
     {
@@ -2579,7 +2579,7 @@
       "tier": 2,
       "description": "ExternalAccessCard validates public domain syntax before sending PUT",
       "status": "PASS",
-      "duration_ms": 0.14,
+      "duration_ms": 0.07,
       "error": ""
     },
     {
@@ -2588,7 +2588,7 @@
       "tier": 2,
       "description": "useDeploymentStream closes EventSource when component unmounts",
       "status": "PASS",
-      "duration_ms": 0.08,
+      "duration_ms": 0.07,
       "error": ""
     },
     {
@@ -2597,7 +2597,7 @@
       "tier": 2,
       "description": "DeploymentStatus renders failure state and logs when deployment fails",
       "status": "PASS",
-      "duration_ms": 0.08,
+      "duration_ms": 0.07,
       "error": ""
     },
     {
@@ -2606,7 +2606,7 @@
       "tier": 2,
       "description": "useDeploymentStream partitions state by appName",
       "status": "PASS",
-      "duration_ms": 0.07,
+      "duration_ms": 0.19,
       "error": ""
     },
     {
@@ -2615,7 +2615,7 @@
       "tier": 2,
       "description": "useIngressStore includes credentials or apiFetch for auth",
       "status": "PASS",
-      "duration_ms": 0.07,
+      "duration_ms": 0.09,
       "error": ""
     },
     {
@@ -2624,7 +2624,7 @@
       "tier": 2,
       "description": "Password change form blocks submission if new password and confirmation mismatch",
       "status": "PASS",
-      "duration_ms": 0.09,
+      "duration_ms": 0.08,
       "error": ""
     },
     {
@@ -2633,7 +2633,7 @@
       "tier": 2,
       "description": "Avatar file selector warns and blocks files exceeding 2MB before upload",
       "status": "PASS",
-      "duration_ms": 0.08,
+      "duration_ms": 0.07,
       "error": ""
     },
     {
@@ -2642,7 +2642,7 @@
       "tier": 2,
       "description": "ProfileTab displays error toast if current password verification fails",
       "status": "PASS",
-      "duration_ms": 0.08,
+      "duration_ms": 0.07,
       "error": ""
     },
     {
@@ -2651,7 +2651,7 @@
       "tier": 2,
       "description": "Removing avatar updates UI immediately to default placeholder icon",
       "status": "PASS",
-      "duration_ms": 0.07,
+      "duration_ms": 0.16,
       "error": ""
     },
     {
@@ -2669,7 +2669,7 @@
       "tier": 2,
       "description": "AppTopologyMap displays clean error state when backend topology API fails",
       "status": "PASS",
-      "duration_ms": 0.08,
+      "duration_ms": 0.12,
       "error": ""
     },
     {
@@ -2678,7 +2678,7 @@
       "tier": 2,
       "description": "Topology renders core infrastructure nodes even when no extra services run",
       "status": "PASS",
-      "duration_ms": 0.06,
+      "duration_ms": 0.07,
       "error": ""
     },
     {
@@ -2687,7 +2687,7 @@
       "tier": 2,
       "description": "Graph forces ensure nodes do not overlap on canvas",
       "status": "PASS",
-      "duration_ms": 0.16,
+      "duration_ms": 0.07,
       "error": ""
     },
     {
@@ -2696,7 +2696,7 @@
       "tier": 2,
       "description": "Window resize event re-centers graph canvas",
       "status": "PASS",
-      "duration_ms": 0.09,
+      "duration_ms": 0.07,
       "error": ""
     },
     {
@@ -2714,7 +2714,7 @@
       "tier": 2,
       "description": "WireGuard peer creation rejects malformed base64 public key",
       "status": "PASS",
-      "duration_ms": 0.24,
+      "duration_ms": 0.31,
       "error": ""
     },
     {
@@ -2723,7 +2723,7 @@
       "tier": 2,
       "description": "Tailscale route advertisement rejects invalid CIDR notation",
       "status": "PASS",
-      "duration_ms": 0.17,
+      "duration_ms": 0.31,
       "error": ""
     },
     {
@@ -2732,7 +2732,7 @@
       "tier": 2,
       "description": "Deleting WireGuard peer prompts confirmation modal before removing",
       "status": "PASS",
-      "duration_ms": 0.16,
+      "duration_ms": 0.3,
       "error": ""
     },
     {
@@ -2741,7 +2741,7 @@
       "tier": 2,
       "description": "Displays 'Tailscale Daemon Offline' warning when service is stopped",
       "status": "PASS",
-      "duration_ms": 0.15,
+      "duration_ms": 0.25,
       "error": ""
     },
     {
@@ -2750,7 +2750,7 @@
       "tier": 2,
       "description": "Non-admin user cannot access Network & VPN management tab",
       "status": "PASS",
-      "duration_ms": 0.17,
+      "duration_ms": 0.15,
       "error": ""
     },
     {
@@ -2759,7 +2759,7 @@
       "tier": 2,
       "description": "Creating webhook channel with empty destination URL is rejected in UI and API",
       "status": "PASS",
-      "duration_ms": 0.3,
+      "duration_ms": 0.2,
       "error": ""
     },
     {
@@ -2768,7 +2768,7 @@
       "tier": 2,
       "description": "Test alert dispatches with timeout and handles unreachable remote endpoints",
       "status": "PASS",
-      "duration_ms": 0.27,
+      "duration_ms": 0.2,
       "error": ""
     },
     {
@@ -2777,7 +2777,7 @@
       "tier": 2,
       "description": "Deleting active notification rule prompts operator for confirmation",
       "status": "PASS",
-      "duration_ms": 0.2,
+      "duration_ms": 0.18,
       "error": ""
     },
     {
@@ -2786,7 +2786,7 @@
       "tier": 2,
       "description": "Webhook secrets and bot tokens are masked in channel list",
       "status": "PASS",
-      "duration_ms": 0.23,
+      "duration_ms": 0.21,
       "error": ""
     },
     {
@@ -2804,7 +2804,7 @@
       "tier": 2,
       "description": "Setting negative or invalid quota string (e.g. '-50GB', 'abc') is rejected",
       "status": "PASS",
-      "duration_ms": 0.25,
+      "duration_ms": 0.23,
       "error": ""
     },
     {
@@ -2822,7 +2822,7 @@
       "tier": 2,
       "description": "Billing webhook events allow expanding raw JSON payload",
       "status": "PASS",
-      "duration_ms": 0.15,
+      "duration_ms": 0.21,
       "error": ""
     },
     {
@@ -2831,7 +2831,7 @@
       "tier": 2,
       "description": "Manual refresh disk quota button throttles repeated clicks",
       "status": "PASS",
-      "duration_ms": 0.08,
+      "duration_ms": 0.12,
       "error": ""
     },
     {
@@ -2840,7 +2840,7 @@
       "tier": 2,
       "description": "Quotas management APIs strictly reject non-admin sessions",
       "status": "PASS",
-      "duration_ms": 0.07,
+      "duration_ms": 0.08,
       "error": ""
     },
     {
@@ -2849,7 +2849,7 @@
       "tier": 2,
       "description": "UI disables delete button for master / coordinator cluster node",
       "status": "PASS",
-      "duration_ms": 0.17,
+      "duration_ms": 0.08,
       "error": ""
     },
     {
@@ -2867,7 +2867,7 @@
       "tier": 2,
       "description": "Nodes with missed heartbeats (>30s) display yellow/red warning beacon",
       "status": "PASS",
-      "duration_ms": 0.34,
+      "duration_ms": 0.13,
       "error": ""
     },
     {
@@ -2876,7 +2876,7 @@
       "tier": 2,
       "description": "If cluster manager is not enabled, UI displays setup guide rather than raw error",
       "status": "PASS",
-      "duration_ms": 0.2,
+      "duration_ms": 0.08,
       "error": ""
     },
     {
@@ -2885,7 +2885,7 @@
       "tier": 2,
       "description": "Clicking 'Copy Join Command' shows 'Copied!' toast confirmation",
       "status": "PASS",
-      "duration_ms": 0.17,
+      "duration_ms": 0.08,
       "error": ""
     },
     {
@@ -2912,7 +2912,7 @@
       "tier": 2,
       "description": "Unsigned third-party repositories (deb-multimedia) are not included",
       "status": "PASS",
-      "duration_ms": 0.07,
+      "duration_ms": 0.06,
       "error": ""
     },
     {
@@ -2921,7 +2921,7 @@
       "tier": 2,
       "description": "RELEASE placeholder in debian.template expands without malformed URLs",
       "status": "PASS",
-      "duration_ms": 0.17,
+      "duration_ms": 0.07,
       "error": ""
     },
     {
@@ -2930,7 +2930,7 @@
       "tier": 2,
       "description": "Security mirror uses valid RELEASE-security / debian-security format",
       "status": "PASS",
-      "duration_ms": 0.07,
+      "duration_ms": 0.06,
       "error": ""
     },
     {
@@ -2948,7 +2948,7 @@
       "tier": 2,
       "description": "Rolling Trixie snapshot with empty VERSION_ID does not exit with unsupported error",
       "status": "PASS",
-      "duration_ms": 0.09,
+      "duration_ms": 0.07,
       "error": ""
     },
     {
@@ -2957,7 +2957,7 @@
       "tier": 2,
       "description": "Debian releases older than version 11 (e.g. Buster 10) are rejected",
       "status": "PASS",
-      "duration_ms": 0.06,
+      "duration_ms": 0.11,
       "error": ""
     },
     {
@@ -2966,7 +2966,7 @@
       "tier": 2,
       "description": "_version_ge function handles empty string operands without syntax errors",
       "status": "PASS",
-      "duration_ms": 0.06,
+      "duration_ms": 0.14,
       "error": ""
     },
     {
@@ -2975,7 +2975,7 @@
       "tier": 2,
       "description": "PHP_VER defaults safely if distro codename is unrecognized",
       "status": "PASS",
-      "duration_ms": 0.06,
+      "duration_ms": 0.23,
       "error": ""
     },
     {
@@ -2984,7 +2984,7 @@
       "tier": 2,
       "description": "Zero duplicate package names in 02-packages.sh apt install command",
       "status": "PASS",
-      "duration_ms": 0.21,
+      "duration_ms": 0.34,
       "error": ""
     },
     {
@@ -2993,7 +2993,7 @@
       "tier": 2,
       "description": "apt-get calls use non-interactive options (-y, DEBIAN_FRONTEND=noninteractive)",
       "status": "PASS",
-      "duration_ms": 0.07,
+      "duration_ms": 0.16,
       "error": ""
     },
     {
@@ -3002,7 +3002,7 @@
       "tier": 2,
       "description": "mcrypt and libmcrypt-dev are completely purged from install lists",
       "status": "PASS",
-      "duration_ms": 0.07,
+      "duration_ms": 0.16,
       "error": ""
     },
     {
@@ -3011,7 +3011,7 @@
       "tier": 2,
       "description": "Avoids hardcoded libxslt1.1 or libfcgi0ldbl affected by Debian 13 t64 transition",
       "status": "PASS",
-      "duration_ms": 0.07,
+      "duration_ms": 0.14,
       "error": ""
     },
     {
@@ -3047,7 +3047,7 @@
       "tier": 2,
       "description": "ASCII-armored keys use 'gpg --dearmor' when writing to /usr/share/keyrings/",
       "status": "PASS",
-      "duration_ms": 0.18,
+      "duration_ms": 0.08,
       "error": ""
     },
     {
@@ -3056,7 +3056,7 @@
       "tier": 2,
       "description": "Dead Mono Xenial repository blocks removed from package uninstallation scripts",
       "status": "PASS",
-      "duration_ms": 0.21,
+      "duration_ms": 0.2,
       "error": ""
     },
     {
@@ -3065,7 +3065,7 @@
       "tier": 2,
       "description": "Zero occurrences of deprecated 'apt-key' across all 7 target scripts",
       "status": "PASS",
-      "duration_ms": 0.36,
+      "duration_ms": 0.4,
       "error": ""
     },
     {
@@ -3083,7 +3083,7 @@
       "tier": 2,
       "description": "Single binary serves index.html on deep non-asset paths (SPA fallback)",
       "status": "PASS",
-      "duration_ms": 0.06,
+      "duration_ms": 0.07,
       "error": ""
     },
     {
@@ -3092,7 +3092,7 @@
       "tier": 2,
       "description": "Embedded static assets served with valid Content-Type headers",
       "status": "PASS",
-      "duration_ms": 0.06,
+      "duration_ms": 0.24,
       "error": ""
     },
     {
@@ -3101,7 +3101,7 @@
       "tier": 2,
       "description": "Compiled binary aetherflow-api permissions set to executable (0755)",
       "status": "PASS",
-      "duration_ms": 0.07,
+      "duration_ms": 0.13,
       "error": ""
     },
     {
@@ -3119,7 +3119,7 @@
       "tier": 2,
       "description": "aetherflow-runner unit specifies RuntimeDirectoryMode=0750",
       "status": "PASS",
-      "duration_ms": 0.18,
+      "duration_ms": 0.12,
       "error": ""
     },
     {
@@ -3128,7 +3128,7 @@
       "tier": 2,
       "description": "aetherflow-api unit specifies StateDirectory=aetherflow for sandboxed database writes",
       "status": "PASS",
-      "duration_ms": 0.13,
+      "duration_ms": 0.11,
       "error": ""
     },
     {
@@ -3137,7 +3137,7 @@
       "tier": 2,
       "description": "aetherflow-api unit loads configuration from EnvironmentFile=/etc/aetherflow/aetherflow.env",
       "status": "PASS",
-      "duration_ms": 0.08,
+      "duration_ms": 0.11,
       "error": ""
     },
     {
@@ -3146,7 +3146,7 @@
       "tier": 2,
       "description": "aetherflow-api declares After=aetherflow-runner.service and Wants=aetherflow-runner.service",
       "status": "PASS",
-      "duration_ms": 0.06,
+      "duration_ms": 0.11,
       "error": ""
     },
     {
@@ -3155,7 +3155,7 @@
       "tier": 2,
       "description": "Systemd units specify Restart=on-failure and RestartSec backoff",
       "status": "PASS",
-      "duration_ms": 0.06,
+      "duration_ms": 0.11,
       "error": ""
     },
     {
@@ -3164,7 +3164,7 @@
       "tier": 2,
       "description": "Unprivileged aetherflow user is denied sudo privileges",
       "status": "PASS",
-      "duration_ms": 0.07,
+      "duration_ms": 0.12,
       "error": ""
     },
     {
@@ -3173,7 +3173,7 @@
       "tier": 2,
       "description": "setup scripts do not run 'npm install -g pm2'",
       "status": "PASS",
-      "duration_ms": 0.07,
+      "duration_ms": 0.1,
       "error": ""
     },
     {
@@ -3182,7 +3182,7 @@
       "tier": 2,
       "description": "Idempotent re-run of modern_stack.sh never re-creates sudoers file",
       "status": "PASS",
-      "duration_ms": 0.07,
+      "duration_ms": 0.11,
       "error": ""
     },
     {
@@ -3191,7 +3191,7 @@
       "tier": 2,
       "description": "Setup scripts do not set SUID/SGID bits on compiled binaries",
       "status": "PASS",
-      "duration_ms": 0.07,
+      "duration_ms": 0.19,
       "error": ""
     },
     {
@@ -3209,7 +3209,7 @@
       "tier": 2,
       "description": "setup/ directory contains zero files with CRLF carriage returns",
       "status": "PASS",
-      "duration_ms": 7.92,
+      "duration_ms": 10.29,
       "error": ""
     },
     {
@@ -3218,7 +3218,7 @@
       "tier": 2,
       "description": "packages/ directory contains zero files with CRLF carriage returns",
       "status": "PASS",
-      "duration_ms": 14.93,
+      "duration_ms": 21.01,
       "error": ""
     },
     {
@@ -3227,7 +3227,7 @@
       "tier": 2,
       "description": "Shell scripts quote variables containing filesystem paths",
       "status": "PASS",
-      "duration_ms": 0.08,
+      "duration_ms": 0.09,
       "error": ""
     },
     {
@@ -3236,7 +3236,7 @@
       "tier": 2,
       "description": "All shell scripts have readable permissions",
       "status": "PASS",
-      "duration_ms": 7.07,
+      "duration_ms": 10.46,
       "error": ""
     },
     {
@@ -3254,7 +3254,7 @@
       "tier": 2,
       "description": "Test harness requests enforce socket timeout without indefinite hang",
       "status": "PASS",
-      "duration_ms": 0.1,
+      "duration_ms": 0.11,
       "error": ""
     },
     {
@@ -3263,7 +3263,7 @@
       "tier": 2,
       "description": "Failed assertions include test ID, feature ID, and expected vs actual",
       "status": "PASS",
-      "duration_ms": 0.07,
+      "duration_ms": 0.09,
       "error": ""
     },
     {
@@ -3272,7 +3272,7 @@
       "tier": 2,
       "description": "Filtering by feature or tier runs strictly matching test subsets",
       "status": "PASS",
-      "duration_ms": 0.16,
+      "duration_ms": 0.22,
       "error": ""
     },
     {
@@ -3290,7 +3290,7 @@
       "tier": 2,
       "description": "Test runner produces valid JSON report conforming to standard schema",
       "status": "PASS",
-      "duration_ms": 0.11,
+      "duration_ms": 0.21,
       "error": ""
     },
     {
@@ -3308,7 +3308,7 @@
       "tier": 2,
       "description": "Concurrent write operations do not trigger database table locks in WAL mode",
       "status": "PASS",
-      "duration_ms": 0.07,
+      "duration_ms": 0.23,
       "error": ""
     },
     {
@@ -3317,7 +3317,7 @@
       "tier": 2,
       "description": "Mutating endpoints (POST, PUT, DELETE) reject requests with forged CSRF tokens",
       "status": "PASS",
-      "duration_ms": 0.11,
+      "duration_ms": 0.14,
       "error": ""
     },
     {
@@ -3326,7 +3326,7 @@
       "tier": 2,
       "description": "Public login and password endpoints enforce rate limits or payload constraints",
       "status": "PASS",
-      "duration_ms": 0.07,
+      "duration_ms": 0.08,
       "error": ""
     },
     {
@@ -3344,7 +3344,7 @@
       "tier": 3,
       "description": "Ingress CRUD persists to Migration 17, syncs DNS via runner, and reflects in topology",
       "status": "PASS",
-      "duration_ms": 0.66,
+      "duration_ms": 0.53,
       "error": ""
     },
     {
@@ -3353,7 +3353,7 @@
       "tier": 3,
       "description": "Password mutation, session rotation, and ProfileTab form interaction",
       "status": "PASS",
-      "duration_ms": 0.26,
+      "duration_ms": 0.23,
       "error": ""
     },
     {
@@ -3362,7 +3362,7 @@
       "tier": 3,
       "description": "PathSelector integration with Go FS handler and MediaFlow cookie auth",
       "status": "PASS",
-      "duration_ms": 0.22,
+      "duration_ms": 0.23,
       "error": ""
     },
     {
@@ -3371,7 +3371,7 @@
       "tier": 3,
       "description": "Quotas UI, runner /v1/quota dispatch, and billing webhook events",
       "status": "PASS",
-      "duration_ms": 0.52,
+      "duration_ms": 0.71,
       "error": ""
     },
     {
@@ -3380,7 +3380,7 @@
       "tier": 3,
       "description": "Network panel UI, runner /v1/network, and WireGuard/Tailscale callers",
       "status": "PASS",
-      "duration_ms": 0.29,
+      "duration_ms": 0.42,
       "error": ""
     },
     {
@@ -3389,7 +3389,7 @@
       "tier": 3,
       "description": "Cluster manager startup cleanliness, ClusterTab UI, and worker telemetry",
       "status": "PASS",
-      "duration_ms": 0.27,
+      "duration_ms": 0.31,
       "error": ""
     },
     {
@@ -3398,7 +3398,7 @@
       "tier": 3,
       "description": "Single binary build, static export embed, and Obsidian V2 CSS foundation",
       "status": "PASS",
-      "duration_ms": 0.33,
+      "duration_ms": 0.21,
       "error": ""
     },
     {
@@ -3407,7 +3407,7 @@
       "tier": 3,
       "description": "Systemd least privilege units, sudoers purge, runner socket, and sandbox caller",
       "status": "PASS",
-      "duration_ms": 0.21,
+      "duration_ms": 0.37,
       "error": ""
     },
     {
@@ -3416,7 +3416,7 @@
       "tier": 3,
       "description": "Debian 13 APT TLS template, core OS detection, modernized packages, and keyrings",
       "status": "PASS",
-      "duration_ms": 0.19,
+      "duration_ms": 0.34,
       "error": ""
     },
     {
@@ -3425,16 +3425,16 @@
       "tier": 3,
       "description": "OverviewTab mounting of BandwidthCard and PredictionsCard with real history",
       "status": "PASS",
-      "duration_ms": 0.16,
+      "duration_ms": 0.26,
       "error": ""
     },
     {
       "test_id": "T3_COMBO_11",
       "feature_id": "F21+Deploy",
       "tier": 3,
-      "description": "ExternalAccessCard, DeploymentStatus, useDeploymentStream SSE, and Caddy integration",
+      "description": "ExternalAccessCard, DeploymentStatus, useDeploymentStream SSE, and Apache2 Subdomain Gateway integration",
       "status": "PASS",
-      "duration_ms": 0.15,
+      "duration_ms": 0.35,
       "error": ""
     },
     {
@@ -3443,7 +3443,7 @@
       "tier": 3,
       "description": "Tri-mode mobile dock, scroller containment invariant, and Obsidian UI primitives",
       "status": "PASS",
-      "duration_ms": 0.27,
+      "duration_ms": 0.23,
       "error": ""
     },
     {
@@ -3452,16 +3452,16 @@
       "tier": 4,
       "description": "Complete Operator Bootstrap, Privilege Drop, Password Change & Topology Verification",
       "status": "PASS",
-      "duration_ms": 0.44,
+      "duration_ms": 0.49,
       "error": ""
     },
     {
       "test_id": "T4_SCENARIO_02",
       "feature_id": "AppProvisioning",
       "tier": 4,
-      "description": "Application Provisioning, Caddy Ingress, /etc/hosts Sync & SSE Streaming",
+      "description": "Application Provisioning, Apache2 Subdomain Ingress, /etc/hosts Sync & SSE Streaming",
       "status": "PASS",
-      "duration_ms": 0.5,
+      "duration_ms": 0.62,
       "error": ""
     },
     {
@@ -3470,7 +3470,7 @@
       "tier": 4,
       "description": "Multi-Tenant Storage Quota Assignment, Runner setdisk & Billing Audit Log",
       "status": "PASS",
-      "duration_ms": 0.38,
+      "duration_ms": 0.37,
       "error": ""
     },
     {
@@ -3479,7 +3479,7 @@
       "tier": 4,
       "description": "Zero-Trust WireGuard Keygen, Peer Enrollment & Tailscale Route Advertisement",
       "status": "PASS",
-      "duration_ms": 0.28,
+      "duration_ms": 0.42,
       "error": ""
     },
     {
@@ -3488,7 +3488,7 @@
       "tier": 4,
       "description": "Predictive Telemetry Analysis, Anomaly Notification & Runner Socket Self-Healing",
       "status": "PASS",
-      "duration_ms": 0.26,
+      "duration_ms": 0.46,
       "error": ""
     }
   ]

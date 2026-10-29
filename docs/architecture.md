@@ -1,13 +1,13 @@
 # Architecture
 
-AetherFlow is engineered as a high-concurrency, single-binary control plane for modern Linux systems. It embeds the compiled Next.js static UI directly into the Go binary (`go:embed`), isolates privileged host operations behind a root-owned UNIX domain socket (`aetherflow-runner.service`), and orchestrates bare-metal workloads via **systemd** and **Caddy**.
+AetherFlow is engineered as a high-concurrency, single-binary control plane for modern Linux systems. It embeds the compiled Next.js static UI directly into the Go binary (`go:embed`), isolates privileged host operations behind a root-owned UNIX domain socket (`aetherflow-runner.service`), and orchestrates bare-metal workloads via **systemd** and **Apache2**.
 
 ## System Overview
 
 ```mermaid
 graph TD
-    User((User)) --> Caddy[Caddy Internal Switchboard]
-    Caddy --> API["Single-Binary Go Control Plane + Embedded Next.js UI (aetherflow-api.service)"]
+    User((User)) --> Apache[Apache2 + Subdomain Gateway]
+    Apache --> API["Single-Binary Go Control Plane + Embedded Next.js UI (aetherflow-api.service)"]
     API --> Auth[Auth Layer / TOTP + OIDC Gate]
     API --> WS[Hyperspeed WebSocket Layer]
     API --> DB[("/var/lib/aetherflow/aetherflow.sqlite")]
