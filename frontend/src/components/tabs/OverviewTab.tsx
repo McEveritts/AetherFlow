@@ -20,35 +20,46 @@ import { useShallow } from 'zustand/react/shallow';
 const MemoCpuWidget = React.memo(CpuWidget, (prev, next) => 
     prev.cpuData.usage === next.cpuData.usage && 
     prev.cpuData.freq === next.cpuData.freq &&
-    (prev.cpuData.cores || []).join(',') === (next.cpuData.cores || []).join(',')
+    (prev.cpuData.cores || []).join(',') === (next.cpuData.cores || []).join(',') &&
+    prev.history === next.history &&
+    prev.density === next.density &&
+    prev.hardware === next.hardware
 );
 const MemoMemoryWidget = React.memo(MemoryWidget, (prev, next) => 
     prev.memoryData.memory.used === next.memoryData.memory.used && 
-    prev.memoryData.swap.used === next.memoryData.swap.used
+    prev.memoryData.swap.used === next.memoryData.swap.used &&
+    prev.history === next.history &&
+    prev.density === next.density &&
+    prev.hardware === next.hardware
 );
 const MemoNetworkWidget = React.memo(NetworkWidget, (prev, next) => 
     `${prev.networkData.network.active_connections}-${prev.networkData.network.down}-${prev.networkData.network.up}-${prev.networkData.total?.rx}-${prev.networkData.total?.tx}` ===
-    `${next.networkData.network.active_connections}-${next.networkData.network.down}-${next.networkData.network.up}-${next.networkData.total?.rx}-${next.networkData.total?.tx}`
+    `${next.networkData.network.active_connections}-${next.networkData.network.down}-${next.networkData.network.up}-${next.networkData.total?.rx}-${next.networkData.total?.tx}` &&
+    prev.history === next.history &&
+    prev.density === next.density &&
+    prev.hardware === next.hardware
 );
 const MemoDiskIOWidget = React.memo(DiskIOWidget, (prev, next) => 
     prev.diskIoData?.read_bytes_sec === next.diskIoData?.read_bytes_sec && 
-    prev.diskIoData?.write_bytes_sec === next.diskIoData?.write_bytes_sec
+    prev.diskIoData?.write_bytes_sec === next.diskIoData?.write_bytes_sec &&
+    prev.history === next.history &&
+    prev.density === next.density
 );
 const MemoProcessWidget = React.memo(ProcessWidget, (prev, next) => {
     const getProcHash = (p: ProcessInfo[]) => (p || []).slice(0, 5).map(proc => `${proc.pid}-${proc.cpu}`).join(':');
-    return getProcHash(prev.processes) === getProcHash(next.processes);
+    return getProcHash(prev.processes) === getProcHash(next.processes) && prev.density === next.density;
 });
 const MemoStorageWidget = React.memo(StorageWidget, (prev, next) => {
     const getDiskHash = (d: DiskPartition[]) => (d || []).map(disk => `${disk.mount_point}-${disk.used_pct}`).join(':');
-    return getDiskHash(prev.storageData) === getDiskHash(next.storageData);
+    return getDiskHash(prev.storageData) === getDiskHash(next.storageData) && prev.density === next.density && prev.hardware === next.hardware;
 });
 const MemoAppTopologyMap = React.memo(AppTopologyMap, (prev, next) => {
     const getStatusHash = (t: SystemMetrics['services']) => Object.values(t || {}).map(node => node.status).join(':');
-    return getStatusHash(prev.topologyData) === getStatusHash(next.topologyData);
+    return getStatusHash(prev.topologyData) === getStatusHash(next.topologyData) && prev.density === next.density;
 });
 const MemoGpuWidget = React.memo(GpuWidget, (prev, next) => {
     const getGpuHash = (g: GpuMetric[]) => (g || []).map(gpu => `${gpu.index}-${gpu.usage_pct}-${gpu.temp}`).join(':');
-    return getGpuHash(prev.gpus) === getGpuHash(next.gpus);
+    return getGpuHash(prev.gpus) === getGpuHash(next.gpus) && prev.density === next.density;
 });
 
 interface OverviewTabProps {
@@ -102,18 +113,36 @@ export default function OverviewTab({ metrics, hardware, history }: OverviewTabP
             <div className="bg-gradient-to-r from-indigo-500/10 via-purple-500/10 to-blue-500/10 border border-white/[0.08] rounded-2xl p-4 flex flex-col md:flex-row items-start md:items-center justify-between gap-4 backdrop-blur-xl shadow-2xl">
                 <div className="flex items-center gap-4">
                     <div className="relative">
-                        <div className={`p-3 rounded-xl ${connectionState === 'CONNECTED' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-amber-500/20 text-amber-400'} border border-white/10`}>
-                            {preferredMode === 'websocket' ? <Zap size={20} className="animate-pulse" /> : <Radio size={20} className="animate-ping" />}
+                        <div className={`p-3 rounded-xl ${
+                            connectionState === 'CONNECTED'
+                                ? 'bg-emerald-500/20 text-emerald-400'
+                                : preferredMode === 'poll' && connectionState === 'FALLBACK'
+                                    ? 'bg-purple-500/20 text-purple-400'
+                                    : 'bg-amber-500/20 text-amber-400'
+                        } border border-white/10`}>
+                            {preferredMode === 'websocket' && connectionState === 'CONNECTED'
+                                ? <Zap size={20} className="animate-pulse" />
+                                : <Radio size={20} className="animate-pulse" />}
                         </div>
-                        <div className={`absolute -bottom-1 -right-1 w-3 h-3 rounded-full border-2 border-[#0B0E14] ${connectionState === 'CONNECTED' ? 'bg-emerald-500' : 'bg-amber-500'}`} />
+                        <div className={`absolute -bottom-1 -right-1 w-3 h-3 rounded-full border-2 border-[#0B0E14] ${
+                            connectionState === 'CONNECTED' || (preferredMode === 'poll' && connectionState === 'FALLBACK')
+                                ? 'bg-emerald-500'
+                                : 'bg-amber-500'
+                        }`} />
                     </div>
                     <div>
                         <h2 className="text-xl font-black text-white tracking-tight flex items-center gap-2">
                             AetherNexus
-                            <span className="text-[10px] bg-white/10 px-2 py-0.5 rounded-full font-bold uppercase tracking-widest text-slate-400 border border-white/5">Live</span>
+                            <span className="text-[10px] bg-white/10 px-2 py-0.5 rounded-full font-bold uppercase tracking-widest text-slate-400 border border-white/5">
+                                {preferredMode === 'websocket' && connectionState === 'CONNECTED' ? 'Live WS' : 'REST Poll'}
+                            </span>
                         </h2>
                         <p className="text-xs text-slate-400 font-medium">
-                            {preferredMode === 'websocket' ? 'Hyper-Link connection active (WS)' : `Polling Nexus active (${(pollInterval / 1000).toFixed(1)}s)`}
+                            {preferredMode === 'websocket' && connectionState === 'CONNECTED'
+                                ? 'Hyper-Link connection active (WS · 1.0s Live Stream)'
+                                : preferredMode === 'websocket' && connectionState === 'FALLBACK'
+                                    ? `WebSocket fallback — Polling Nexus active (${(pollInterval / 1000).toFixed(1)}s)`
+                                    : `Polling Nexus active (${(pollInterval / 1000).toFixed(1)}s interval)`}
                         </p>
                     </div>
                 </div>
@@ -161,7 +190,9 @@ export default function OverviewTab({ metrics, hardware, history }: OverviewTabP
                         <select 
                             value={pollInterval}
                             onChange={(e) => setPollInterval(Number(e.target.value))}
-                            className="obs-touch-target-standard bg-transparent text-slate-300 text-xs font-bold outline-none cursor-pointer hover:text-white px-2 py-1"
+                            disabled={preferredMode === 'websocket' && connectionState === 'CONNECTED'}
+                            title={preferredMode === 'websocket' && connectionState === 'CONNECTED' ? 'WebSocket streams in real time (1s). Switch to Poll mode to customize interval.' : 'Select REST polling interval'}
+                            className="obs-touch-target-standard bg-transparent text-slate-300 text-xs font-bold outline-none cursor-pointer hover:text-white px-2 py-1 disabled:opacity-40 disabled:cursor-not-allowed"
                         >
                             <option value={1000} className="bg-[#12141a]">1s</option>
                             <option value={2000} className="bg-[#12141a]">2s</option>

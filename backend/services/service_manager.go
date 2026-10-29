@@ -1,6 +1,8 @@
 package services
 
 import (
+	"aetherflow/db"
+	"aetherflow/models"
 	"log/slog"
 	"strings"
 
@@ -39,6 +41,14 @@ func GetActiveServices() map[string]interface{} {
 		return servicesList
 	}
 
+	ingressMap := make(map[string]models.AppIngressConfig)
+	if configs, err := db.GetAllAppIngressConfigs(); err == nil {
+		for _, cfg := range configs {
+			ingressMap[cfg.AppName] = cfg
+		}
+	}
+	baseDomain := ResolveBaseDomain()
+
 	for _, pkg := range pkgs {
 		if pkg.Status != "installed" && pkg.Status != "running" {
 			continue
@@ -63,16 +73,42 @@ func GetActiveServices() map[string]interface{} {
 			}
 		}
 
+		activePort := pkg.DefaultPort
+		internalDomain := ""
+		if bp := GetBlueprint(pkg.Name); bp != nil {
+			internalDomain = bp.InternalDomain
+		}
+		var publicDomain string
+		var externalAccess, tlsEnabled bool
+		if ing, ok := ingressMap[pkg.Name]; ok {
+			if ing.ListenPort > 0 {
+				activePort = ing.ListenPort
+			}
+			publicDomain = ing.PublicDomain
+			externalAccess = ing.ExternalAccessEnabled
+			tlsEnabled = ing.TLSEnabled
+		}
+		if publicDomain == "" && baseDomain != "" && activePort > 0 {
+			publicDomain = FormatAppPublicDomain(pkg.Name, baseDomain)
+			externalAccess = true
+			tlsEnabled = true
+		}
+
 		servicesList[pkg.Label] = gin.H{
-			"status":       status,
-			"uptime":       uptime,
-			"version":      version,
-			"managed_by":   managedBy,
-			"process":      serviceName,
-			"id":           pkg.Name,
-			"default_port": pkg.DefaultPort,
-			"web_path":     pkg.WebPath,
-			"units":        pkg.SandboxServiceIDs,
+			"status":                  status,
+			"uptime":                  uptime,
+			"version":                 version,
+			"managed_by":              managedBy,
+			"process":                 serviceName,
+			"id":                      pkg.Name,
+			"default_port":            pkg.DefaultPort,
+			"active_port":             activePort,
+			"internal_domain":         internalDomain,
+			"public_domain":           publicDomain,
+			"external_access_enabled": externalAccess,
+			"tls_enabled":             tlsEnabled,
+			"web_path":                pkg.WebPath,
+			"units":                   pkg.SandboxServiceIDs,
 		}
 	}
 

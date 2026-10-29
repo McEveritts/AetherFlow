@@ -39,7 +39,7 @@ export default function CpuWidget({ cpuData, hardware, history, density = 'compa
             {/* Sparkline Chart */}
             <div className={`rounded-xl overflow-hidden bg-slate-900/50 border border-white/[0.03] transition-all duration-300 ${isImmersive ? 'mb-6 shadow-2xl' : 'mb-4'}`}>
                 <Sparkline
-                    data={history.cpu.length > 1 ? history.cpu : [0, 0]}
+                    data={history.cpu.length > 0 ? history.cpu : [cpuData.usage, cpuData.usage]}
                     color="#6366f1"
                     gradientFrom="#6366f1"
                     height={isImmersive ? 140 : 90}

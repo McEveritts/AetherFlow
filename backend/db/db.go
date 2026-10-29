@@ -141,6 +141,7 @@ func InitDB() {
 			ollama_endpoint TEXT DEFAULT '',
 			anthropic_api_key TEXT DEFAULT '',
 			anthropic_endpoint TEXT DEFAULT '',
+			base_domain TEXT DEFAULT '',
 			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 		)
 	`)
@@ -593,9 +594,19 @@ func InitDB() {
 		);`,
 		"CREATE UNIQUE INDEX IF NOT EXISTS idx_ingress_configs_app_name ON app_ingress_configs(app_name);")
 
+	// ─── Migration v18: Base Domain in Settings for Auto-Subdomain Routing ─
+	migrate(18, "Add base_domain to settings for automatic app subdomain provisioning",
+		"ALTER TABLE settings ADD COLUMN base_domain TEXT DEFAULT '';")
+
 	// ─── Ensure singleton settings row ─────────────────────────────────
 	DB.Exec(`INSERT OR IGNORE INTO settings (id) VALUES (1)`)
 	DB.Exec(`UPDATE settings SET ai_model = 'gemini-3.8-flash' WHERE id = 1 AND ai_model IN ('gemini-2.0-flash', 'gemini-2.0-flash-lite', 'gemini-1.5-pro', 'gemini-1.5-flash', 'gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-3.1-pro-preview', 'gemini-3-flash-preview', 'gemini-3.1-flash-lite-preview', 'gemini-3-pro-image-preview', 'gemini-3.1-flash-image-preview')`)
+
+	if envDomain := NormalizeBaseDomain(os.Getenv("AETHERFLOW_BASE_DOMAIN")); envDomain != "" {
+		_, _ = DB.Exec(`UPDATE settings SET base_domain = ? WHERE id = 1 AND COALESCE(base_domain, '') = ''`, envDomain)
+	} else if envDomain := NormalizeBaseDomain(os.Getenv("AETHERFLOW_DOMAIN")); envDomain != "" {
+		_, _ = DB.Exec(`UPDATE settings SET base_domain = ? WHERE id = 1 AND COALESCE(base_domain, '') = ''`, envDomain)
+	}
 
 	slog.Info("database connected", "path", dbPath)
 }
@@ -786,4 +797,47 @@ func DeleteAppIngressConfig(appName string) error {
 	_, err := DB.Exec(`DELETE FROM app_ingress_configs WHERE app_name = ?`, appName)
 	return err
 }
+
+// NormalizeBaseDomain cleans a raw domain string (stripping scheme, port, paths, wildcard prefix, and leading/trailing dots).
+// Returns empty string for local-only placeholders (localhost, .local, .aether.local).
+func NormalizeBaseDomain(raw string) string {
+	d := strings.ToLower(strings.TrimSpace(raw))
+	d = strings.TrimPrefix(d, "https://")
+	d = strings.TrimPrefix(d, "http://")
+	if idx := strings.IndexByte(d, '/'); idx >= 0 {
+		d = d[:idx]
+	}
+	if idx := strings.IndexByte(d, ':'); idx >= 0 {
+		d = d[:idx]
+	}
+	d = strings.TrimPrefix(d, "*.")
+	d = strings.Trim(d, ".")
+	if d == "" || d == "localhost" || d == "aether.local" || strings.HasSuffix(d, ".local") || !strings.Contains(d, ".") {
+		return ""
+	}
+	return d
+}
+
+// GetBaseDomain returns the persisted server base domain from settings (or empty string if unset).
+func GetBaseDomain() string {
+	if DB == nil {
+		return ""
+	}
+	var baseDomain string
+	if err := DB.QueryRow(`SELECT COALESCE(base_domain, '') FROM settings WHERE id = 1`).Scan(&baseDomain); err != nil {
+		return ""
+	}
+	return NormalizeBaseDomain(baseDomain)
+}
+
+// SetBaseDomain updates the persisted server base domain in settings.
+func SetBaseDomain(domain string) error {
+	if DB == nil {
+		return nil
+	}
+	normalized := NormalizeBaseDomain(domain)
+	_, err := DB.Exec(`UPDATE settings SET base_domain = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1`, normalized)
+	return err
+}
+
 

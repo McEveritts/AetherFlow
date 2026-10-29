@@ -29,6 +29,12 @@ export interface App {
     hits: number;
     category: string;
     status: string;
+    default_port?: number;
+    active_port?: number;
+    internal_domain?: string;
+    public_domain?: string;
+    external_access_enabled?: boolean;
+    web_path?: string;
     progress: number;
     started_at?: string;
     log_line?: string;

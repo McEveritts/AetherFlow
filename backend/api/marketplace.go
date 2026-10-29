@@ -56,6 +56,7 @@ func GetMarketplaceApps(c *gin.Context) {
 		}
 	}
 
+	baseDomain := services.ResolveBaseDomain()
 	apps := []App{}
 	for _, p := range pkgs {
 		activePort := p.DefaultPort
@@ -71,6 +72,12 @@ func GetMarketplaceApps(c *gin.Context) {
 			}
 			publicDomain = ing.PublicDomain
 			externalAccess = ing.ExternalAccessEnabled
+		}
+		if publicDomain == "" && baseDomain != "" && activePort > 0 {
+			publicDomain = services.FormatAppPublicDomain(p.Name, baseDomain)
+			if p.Status == "installed" || p.Status == "running" {
+				externalAccess = true
+			}
 		}
 
 		app := App{

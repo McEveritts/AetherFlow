@@ -3,10 +3,11 @@ package services
 import (
 	"fmt"
 	"math"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
-	"os"
+	"sync"
 	"time"
 
 	"aetherflow/models"
@@ -22,17 +23,53 @@ import (
 )
 
 var (
-	lastNetBytesRecv uint64
-	lastNetBytesSent uint64
-	lastNetCheck     time.Time
+	metricsMu          sync.Mutex
+	lastMetricsSample  models.SystemMetrics
+	lastMetricsTime    time.Time
+	minMetricsInterval = 800 * time.Millisecond
+
+	lastValidCPUUsage   float64
+	lastValidPerCoreCPU []float64
+
+	lastNetBytesRecv   uint64
+	lastNetBytesSent   uint64
+	lastNetCheck       time.Time
 	lastDiskReadBytes  uint64
 	lastDiskWriteBytes uint64
 	lastDiskCheck      time.Time
 	// Process cache — refreshed every 5 seconds to avoid expensive /proc scan each tick
-	cachedProcesses     []models.ProcessInfo
-	lastProcessScan     time.Time
+	cachedProcesses      []models.ProcessInfo
+	prevProcCPUTimes     map[int32]float64
+	lastProcessScan      time.Time
 	processCacheInterval = 5 * time.Second
+
+	// GPU hardware metadata cache
+	cachedGPUs []models.GpuMetric
+	gpuScanned bool
 )
+
+func init() {
+	// Prime CPU, disk, and network baseline counters at startup so the first
+	// dashboard sample measures a real delta instead of returning zero.
+	_, _ = cpu.Percent(0, false)
+	_, _ = cpu.Percent(0, true)
+
+	if diskIO, err := disk.IOCounters(); err == nil {
+		for _, d := range diskIO {
+			lastDiskReadBytes += d.ReadBytes
+			lastDiskWriteBytes += d.WriteBytes
+		}
+		lastDiskCheck = time.Now()
+	}
+
+	if netIO, err := net.IOCounters(false); err == nil && len(netIO) > 0 {
+		lastNetBytesRecv = netIO[0].BytesRecv
+		lastNetBytesSent = netIO[0].BytesSent
+		lastNetCheck = time.Now()
+	}
+
+	prevProcCPUTimes = make(map[int32]float64)
+}
 
 // sanitizeFloat64 clamps +Inf and NaN to 0 so json.Marshal never panics.
 func sanitizeFloat64(v float64) float64 {
@@ -50,6 +87,15 @@ func sanitizeFloat64(v float64) float64 {
 } */
 
 func GetSystemMetricsCore() models.SystemMetrics {
+	metricsMu.Lock()
+	defer metricsMu.Unlock()
+
+	// Prevent concurrent or closely-spaced callers (WS broadcast loop, REST polling,
+	// Prometheus exporter, background evaluators) from starving each other's OS
+	// counter deltas and producing 0% CPU or 0 B/s network/disk readings.
+	if !lastMetricsTime.IsZero() && time.Since(lastMetricsTime) < minMetricsInterval {
+		return lastMetricsSample
+	}
 
 	var cpuUsage float64
 	var perCoreCPU []float64
@@ -68,12 +114,35 @@ func GetSystemMetricsCore() models.SystemMetrics {
 	cpuPercents, err := cpu.Percent(0, false)
 	if err == nil && len(cpuPercents) > 0 {
 		cpuUsage = cpuPercents[0]
+		if cpuUsage > 0 {
+			lastValidCPUUsage = cpuUsage
+		} else if lastValidCPUUsage > 0 {
+			cpuUsage = lastValidCPUUsage
+		}
+	} else if lastValidCPUUsage > 0 {
+		cpuUsage = lastValidCPUUsage
 	}
 
 	// 1b. Per-core CPU
 	corePercents, err := cpu.Percent(0, true)
-	if err == nil {
-		perCoreCPU = corePercents
+	if err == nil && len(corePercents) > 0 {
+		allZero := true
+		for _, pct := range corePercents {
+			if pct > 0 {
+				allZero = false
+				break
+			}
+		}
+		if !allZero || len(lastValidPerCoreCPU) == 0 {
+			perCoreCPU = corePercents
+			if !allZero {
+				lastValidPerCoreCPU = append([]float64(nil), corePercents...)
+			}
+		} else {
+			perCoreCPU = append([]float64(nil), lastValidPerCoreCPU...)
+		}
+	} else if len(lastValidPerCoreCPU) > 0 {
+		perCoreCPU = append([]float64(nil), lastValidPerCoreCPU...)
 	}
 
 	// 1c. CPU Frequency (Live Detection)
@@ -152,8 +221,12 @@ func GetSystemMetricsCore() models.SystemMetrics {
 			if duration < 0.01 {
 				duration = 0.01
 			}
-			readBytesPerSec = float64(totalRead-lastDiskReadBytes) / duration
-			writeBytesPerSec = float64(totalWrite-lastDiskWriteBytes) / duration
+			if totalRead >= lastDiskReadBytes {
+				readBytesPerSec = float64(totalRead-lastDiskReadBytes) / duration
+			}
+			if totalWrite >= lastDiskWriteBytes {
+				writeBytesPerSec = float64(totalWrite-lastDiskWriteBytes) / duration
+			}
 			// Guard against +Inf / NaN from edge cases
 			if math.IsInf(readBytesPerSec, 0) || math.IsNaN(readBytesPerSec) {
 				readBytesPerSec = 0
@@ -180,8 +253,13 @@ func GetSystemMetricsCore() models.SystemMetrics {
 			if duration < 0.01 {
 				duration = 0.01
 			}
-			recvDiff := netIO[0].BytesRecv - lastNetBytesRecv
-			sentDiff := netIO[0].BytesSent - lastNetBytesSent
+			var recvDiff, sentDiff uint64
+			if netIO[0].BytesRecv >= lastNetBytesRecv {
+				recvDiff = netIO[0].BytesRecv - lastNetBytesRecv
+			}
+			if netIO[0].BytesSent >= lastNetBytesSent {
+				sentDiff = netIO[0].BytesSent - lastNetBytesSent
+			}
 			downSpeedVal := float64(recvDiff) / duration
 			upSpeedVal := float64(sentDiff) / duration
 			if math.IsInf(downSpeedVal, 0) || math.IsNaN(downSpeedVal) {
@@ -246,6 +324,12 @@ func GetSystemMetricsCore() models.SystemMetrics {
 	// 7. Top Processes — cached, refreshed every 5 seconds
 	if time.Since(lastProcessScan) > processCacheInterval || cachedProcesses == nil {
 		var freshProcs []models.ProcessInfo
+		scanNow := time.Now()
+		scanDuration := scanNow.Sub(lastProcessScan).Seconds()
+		if scanDuration < 0.1 {
+			scanDuration = 0.1
+		}
+		nextProcCPUTimes := make(map[int32]float64)
 		procs, err := process.Processes()
 		if err == nil {
 			type procEntry struct {
@@ -260,9 +344,17 @@ func GetSystemMetricsCore() models.SystemMetrics {
 				if err != nil || name == "" {
 					continue
 				}
-				cpuPct, err := p.CPUPercent()
-				if err != nil {
-					cpuPct = 0
+				var cpuPct float64
+				if times, err := p.Times(); err == nil && times != nil {
+					totalProcTime := times.User + times.System
+					nextProcCPUTimes[p.Pid] = totalProcTime
+					if prevTime, ok := prevProcCPUTimes[p.Pid]; ok && !lastProcessScan.IsZero() && totalProcTime >= prevTime {
+						cpuPct = ((totalProcTime - prevTime) / scanDuration) * 100.0
+					} else if pct, err := p.CPUPercent(); err == nil {
+						cpuPct = pct
+					}
+				} else if pct, err := p.CPUPercent(); err == nil {
+					cpuPct = pct
 				}
 				memPct, err := p.MemoryPercent()
 				if err != nil {
@@ -287,7 +379,8 @@ func GetSystemMetricsCore() models.SystemMetrics {
 			}
 		}
 		cachedProcesses = freshProcs
-		lastProcessScan = time.Now()
+		prevProcCPUTimes = nextProcCPUTimes
+		lastProcessScan = scanNow
 	}
 
 	servicesMap := make(map[string]bool)
@@ -324,25 +417,27 @@ func GetSystemMetricsCore() models.SystemMetrics {
 	swapTotal = sanitizeFloat64(swapTotal)
 	swapUsed = sanitizeFloat64(swapUsed)
 
-	// 8. GPUs
-	var gpuMetrics []models.GpuMetric
-	gpuInfo, err := ghw.GPU()
-	if err == nil && gpuInfo != nil {
-		for i, card := range gpuInfo.GraphicsCards {
-			name := "GPU"
-			if card.DeviceInfo != nil && card.DeviceInfo.Product != nil {
-				name = card.DeviceInfo.Product.Name
+	// 8. GPUs (cached after initial hardware scan)
+	if !gpuScanned {
+		var gpuMetrics []models.GpuMetric
+		gpuInfo, err := ghw.GPU()
+		if err == nil && gpuInfo != nil {
+			for i, card := range gpuInfo.GraphicsCards {
+				name := "GPU"
+				if card.DeviceInfo != nil && card.DeviceInfo.Product != nil {
+					name = card.DeviceInfo.Product.Name
+				}
+				gpuMetrics = append(gpuMetrics, models.GpuMetric{
+					Index: i,
+					Name:  name,
+				})
 			}
-			gpuMetrics = append(gpuMetrics, models.GpuMetric{
-				Index: i,
-				Name:  name,
-				// Usage and specific memory used would require NVML or similar
-				// For now, we provide the detectable presence and metadata
-			})
 		}
+		cachedGPUs = gpuMetrics
+		gpuScanned = true
 	}
 
-	return models.SystemMetrics{
+	lastMetricsSample = models.SystemMetrics{
 		CPUUsage:   cpuUsage,
 		PerCoreCPU: perCoreCPU,
 		CPUFreqMhz: cpuFreqMhz,
@@ -377,8 +472,11 @@ func GetSystemMetricsCore() models.SystemMetrics {
 		LoadAverage: loadAvg,
 		Processes:   cachedProcesses,
 		Services:    servicesMap,
-		GPUs:        gpuMetrics,
+		GPUs:        cachedGPUs,
 	}
+	lastMetricsTime = time.Now()
+
+	return lastMetricsSample
 }
 
 // getLiveCpuFreq attempts to get the real-time CPU clock speed.

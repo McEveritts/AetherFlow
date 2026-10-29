@@ -91,9 +91,11 @@ export default function Header() {
             containerClass: 'shadow-[0_0_15px_rgba(99,102,241,0.4)] border-indigo-500/50 bg-indigo-500/5' 
         },
         FALLBACK: { 
-            beaconClass: 'obs-beacon-reconnecting', 
+            beaconClass: preferredMode === 'poll' ? 'obs-beacon-live' : 'obs-beacon-reconnecting', 
             label: preferredMode === 'poll' ? 'Nexus Poll' : 'Degraded (Polling)',
-            containerClass: 'border-amber-500/20 bg-amber-500/5 text-amber-200'
+            containerClass: preferredMode === 'poll'
+                ? 'border-purple-500/30 bg-purple-500/5 text-purple-200'
+                : 'border-amber-500/20 bg-amber-500/5 text-amber-200'
         },
         DISCONNECTED: { 
             beaconClass: 'obs-beacon-danger', 

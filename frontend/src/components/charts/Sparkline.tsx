@@ -47,11 +47,13 @@ export default function Sparkline({
     
     // Convert array of numbers to array of objects for Recharts
     const chartData = useMemo(() => {
-        if (!data || data.length === 0) return [{ name: 'P0', val1: 0, val2: 0 }];
-        return data.map((val, i) => ({
+        if (!data || data.length === 0) return [{ name: 'P0', val1: 0, val2: 0 }, { name: 'P1', val1: 0, val2: 0 }];
+        const normalized = data.length === 1 ? [data[0], data[0]] : data;
+        const normalized2 = data2 ? (data2.length === 1 ? [data2[0], data2[0]] : data2) : undefined;
+        return normalized.map((val, i) => ({
             name: `P${i}`,
             val1: val,
-            val2: data2 ? data2[i] : undefined,
+            val2: normalized2 ? normalized2[i] : undefined,
         }));
     }, [data, data2]);
 
@@ -121,8 +123,7 @@ export default function Sparkline({
                                 strokeWidth={strokeWidth}
                                 fillOpacity={1} 
                                 fill={showArea ? `url(#${id}-g2)` : "none"} 
-                                isAnimationActive={true}
-                                animationDuration={180}
+                                isAnimationActive={false}
                                 name={label2 || 'Metric 2'}
                             />
                         )}
@@ -133,8 +134,7 @@ export default function Sparkline({
                             strokeWidth={strokeWidth}
                             fillOpacity={1} 
                             fill={showArea ? `url(#${id}-g1)` : "none"} 
-                            isAnimationActive={true}
-                            animationDuration={180}
+                            isAnimationActive={false}
                             name={label || 'Metric 1'}
                         />
                     </AreaChart>

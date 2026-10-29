@@ -78,6 +78,11 @@ interface ServiceInfo {
     process?: string;
     id?: string;
     default_port?: number;
+    active_port?: number;
+    internal_domain?: string;
+    public_domain?: string;
+    external_access_enabled?: boolean;
+    tls_enabled?: boolean;
     web_path?: string;
     units?: string[];
 }
@@ -161,10 +166,16 @@ export default function ServicesTab() {
     const runningCount = allEntries.filter(([, d]) => (d as ServiceInfo).status === 'running').length;
 
     const handleOpenWebUI = (name: string, data: ServiceInfo) => {
+        const pathSuffix = data.web_path ? (data.web_path.startsWith('/') ? data.web_path : `/${data.web_path}`) : '';
+        if (data.external_access_enabled && data.public_domain) {
+            const proto = data.tls_enabled === false ? 'http:' : 'https:';
+            window.open(`${proto}//${data.public_domain}${pathSuffix}`, '_blank');
+            return;
+        }
         const host = window.location.hostname;
-        if (data.default_port && data.default_port > 0) {
-            const pathSuffix = data.web_path ? (data.web_path.startsWith('/') ? data.web_path : `/${data.web_path}`) : '';
-            window.open(`${window.location.protocol}//${host}:${data.default_port}${pathSuffix}`, '_blank');
+        const effectivePort = data.active_port || data.default_port;
+        if (effectivePort && effectivePort > 0) {
+            window.open(`${window.location.protocol}//${host}:${effectivePort}${pathSuffix}`, '_blank');
             return;
         }
         const process = data.process || name;
@@ -233,6 +244,11 @@ export default function ServicesTab() {
                                 {data.managed_by && (
                                     <span className="text-[10px] px-1.5 py-0.5 rounded bg-white/5 text-slate-500 border border-white/5 uppercase tracking-wider">
                                         {data.managed_by}
+                                    </span>
+                                )}
+                                {data.public_domain && (
+                                    <span className="text-[10px] px-2 py-0.5 rounded bg-indigo-500/10 text-indigo-300 border border-indigo-500/20 font-mono truncate max-w-[160px]" title={data.public_domain}>
+                                        {data.public_domain}
                                     </span>
                                 )}
                             </div>

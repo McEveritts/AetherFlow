@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useEffect, useState } from 'react';
+import useSWR from 'swr';
 import { Globe, Check } from 'lucide-react';
 import { useIngressStore } from '../../store/useIngressStore';
 
@@ -12,8 +13,14 @@ const DOMAIN_REGEX = /^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA
 
 export function ExternalAccessCard({ appName }: ExternalAccessCardProps) {
   const { configs, fetchConfigs, updateConfig } = useIngressStore();
+  const { data: settingsData } = useSWR<{ baseDomain?: string }>('/api/v1/auth/settings');
+  const cleanBaseDomain = (settingsData?.baseDomain || '').trim().replace(/^\*\./, '');
+  const suggestedDomain = cleanBaseDomain ? `${appName}.${cleanBaseDomain}` : `${appName}.mydomain.com`;
 
-  const config = configs[appName] || { publicDomain: '', externalAccessEnabled: false };
+  const config = configs[appName] || {
+    publicDomain: cleanBaseDomain ? `${appName}.${cleanBaseDomain}` : '',
+    externalAccessEnabled: Boolean(cleanBaseDomain),
+  };
   const [draftDomain, setDraftDomain] = useState<string>(config.publicDomain || '');
   const [validationError, setValidationError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState<boolean>(false);
@@ -23,8 +30,8 @@ export function ExternalAccessCard({ appName }: ExternalAccessCardProps) {
   }, [fetchConfigs]);
 
   useEffect(() => {
-    setDraftDomain(config.publicDomain || '');
-  }, [config.publicDomain, appName]);
+    setDraftDomain(config.publicDomain || (cleanBaseDomain ? `${appName}.${cleanBaseDomain}` : ''));
+  }, [config.publicDomain, appName, cleanBaseDomain]);
 
   const validateDomain = (domain: string, requireNonEmpty: boolean): boolean => {
     const trimmed = domain.trim();
@@ -122,7 +129,7 @@ export function ExternalAccessCard({ appName }: ExternalAccessCardProps) {
                   handleSaveDomain();
                 }
               }}
-              placeholder={`${appName}.mydomain.com`}
+              placeholder={suggestedDomain}
               className="block w-full pl-10 pr-3 py-2 bg-black/20 border border-white/10 rounded-md text-zinc-100 placeholder-zinc-600 focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-shadow"
             />
           </div>

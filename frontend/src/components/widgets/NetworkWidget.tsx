@@ -43,8 +43,8 @@ export default function NetworkWidget({ networkData, hardware, history, density 
             {/* Dual-line Sparkline */}
             <div className={`rounded-xl overflow-hidden bg-slate-900/50 border border-white/[0.03] transition-all duration-300 ${isImmersive ? 'mb-6 shadow-2xl' : 'mb-4'}`}>
                 <Sparkline
-                    data={history.netDown.length > 1 ? history.netDown : [0, 0]}
-                    data2={history.netUp.length > 1 ? history.netUp : [0, 0]}
+                    data={history.netDown.length > 0 ? history.netDown : [0, 0]}
+                    data2={history.netUp.length > 0 ? history.netUp : [0, 0]}
                     color="#10b981"
                     color2="#6366f1"
                     gradientFrom="#10b981"

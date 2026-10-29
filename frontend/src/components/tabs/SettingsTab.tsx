@@ -35,6 +35,7 @@ export default function SettingsTab() {
     const [timezone, setTimezone] = useState('UTC');
     const [updateChannel, setUpdateChannel] = useState('stable');
     const [defaultDashboard, setDefaultDashboard] = useState('overview');
+    const [baseDomain, setBaseDomain] = useState('');
 
     // UI state
     const [showApiKey, setShowApiKey] = useState(false);
@@ -95,6 +96,7 @@ export default function SettingsTab() {
                 if (data.timezone) setTimezone(data.timezone);
                 if (data.updateChannel) setUpdateChannel(data.updateChannel);
                 if (data.defaultDashboard) setDefaultDashboard(data.defaultDashboard);
+                if (typeof data.baseDomain === 'string') setBaseDomain(data.baseDomain);
             }
         }
     );
@@ -121,6 +123,7 @@ export default function SettingsTab() {
             timezone: timezone,
             updateChannel: updateChannel,
             defaultDashboard: defaultDashboard,
+            baseDomain: baseDomain.trim(),
             setupCompleted: true
         };
 
@@ -364,6 +367,27 @@ export default function SettingsTab() {
                                 <div>
                                     <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3 px-2">Connectivity & Telemetry</h4>
                                     <div className="bg-slate-950/50 border border-white/10 rounded-2xl divide-y divide-white/10 overflow-hidden">
+
+                                        {/* Server Base Domain (Whatbox-style Auto-Subdomain Routing) */}
+                                        <div className="p-5 flex flex-col md:flex-row md:items-center justify-between gap-4 hover:bg-white/[0.02] transition-colors">
+                                            <div>
+                                                <label className="text-sm font-semibold text-slate-200 flex items-center gap-2">
+                                                    <Globe size={16} className="text-indigo-400" /> Server Base Domain
+                                                </label>
+                                                <p className="text-xs text-slate-500 mt-1">
+                                                    Automatically assigns <span className="font-mono text-indigo-300">jellyfin.{baseDomain.trim().replace(/^\*\./, '') || 'domain.com'}</span> via Caddy reverse proxy when installing apps.
+                                                </p>
+                                            </div>
+                                            <div className="shrink-0 w-full md:w-80 relative">
+                                                <input
+                                                    type="text"
+                                                    value={baseDomain}
+                                                    onChange={(e) => setBaseDomain(e.target.value)}
+                                                    placeholder="domain.com"
+                                                    className="obs-touch-target-standard w-full bg-slate-900 border border-white/10 rounded-xl px-4 py-3 text-slate-200 text-sm font-mono focus:outline-none focus:border-indigo-500/50 transition-colors"
+                                                />
+                                            </div>
+                                        </div>
                                         
                                         {/* Preferred Mode */}
                                         <div className="p-5 flex flex-col md:flex-row md:items-center justify-between gap-4 hover:bg-white/[0.02] transition-colors">

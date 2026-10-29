@@ -72,6 +72,7 @@ const useHistoryStore = create<{
         if (now - get().lastPushAt < 250) return; // Throttle: max once per 250ms
 
         const push = (arr: number[], val: number): number[] => {
+            if (arr.length === 0) return [val, val];
             // Optimised push to avoid memory reallocation
             const newArr = [...arr, val];
             if (newArr.length > MAX_HISTORY_SIZE) newArr.shift();
@@ -79,9 +80,12 @@ const useHistoryStore = create<{
         };
 
         set((state) => {
+            const memPct = metrics.memory && metrics.memory.total > 0
+                ? (metrics.memory.used / metrics.memory.total) * 100
+                : 0;
             const newHistory: MetricsHistory = {
                 cpu: push(state.history.cpu, metrics.cpu_usage),
-                memory: push(state.history.memory, metrics.memory ? (metrics.memory.used / metrics.memory.total) * 100 : 0),
+                memory: push(state.history.memory, memPct),
                 netDown: push(state.history.netDown, parseSpeed(metrics.network?.down as string)),
                 netUp: push(state.history.netUp, parseSpeed(metrics.network?.up as string)),
                 diskRead: push(state.history.diskRead, metrics.disk_io?.read_bytes_sec || 0),
@@ -135,14 +139,27 @@ export function useMetrics() {
     // DISCONNECTED = completely dead → show error only if no cached data
     const isConnected = connectionState === 'CONNECTED' || connectionState === 'FALLBACK' || connectionState === 'DEGRADED';
 
+    const effectiveHistory: MetricsHistory = (visibleHistory.timestamps.length === 0 && metrics) ? {
+        cpu: [metrics.cpu_usage, metrics.cpu_usage],
+        memory: [
+            metrics.memory && metrics.memory.total > 0 ? (metrics.memory.used / metrics.memory.total) * 100 : 0,
+            metrics.memory && metrics.memory.total > 0 ? (metrics.memory.used / metrics.memory.total) * 100 : 0,
+        ],
+        netDown: [parseSpeed(metrics.network?.down as string), parseSpeed(metrics.network?.down as string)],
+        netUp: [parseSpeed(metrics.network?.up as string), parseSpeed(metrics.network?.up as string)],
+        diskRead: [metrics.disk_io?.read_bytes_sec || 0, metrics.disk_io?.read_bytes_sec || 0],
+        diskWrite: [metrics.disk_io?.write_bytes_sec || 0, metrics.disk_io?.write_bytes_sec || 0],
+        timestamps: [Date.now(), Date.now()],
+    } : visibleHistory;
+
     return {
         metrics,
         services: wsData?.services || null,
         hardware: hardware || null,
-        history: visibleHistory, // Component consumers get the windowed slice
+        history: effectiveHistory, // Component consumers get the windowed slice
         timeWindow,
         setTimeWindow,
-        isLoading: connectionState === 'CONNECTING' && !metrics,
+        isLoading: (connectionState === 'CONNECTING' || connectionState === 'CONNECTED') && !metrics,
         isError: connectionState === 'DISCONNECTED' && !metrics,
         connectionState,
     };

@@ -31,7 +31,7 @@ export default function MemoryWidget({ memoryData, hardware, history, density = 
             {/* Sparkline */}
             <div className={`rounded-xl overflow-hidden bg-slate-900/50 border border-white/[0.03] transition-all duration-300 ${isImmersive ? 'mb-6 shadow-2xl' : 'mb-4'}`}>
                 <Sparkline
-                    data={history.memory.length > 1 ? history.memory : [0, 0]}
+                    data={history.memory.length > 0 ? history.memory : [memPct, memPct]}
                     color="#a855f7"
                     gradientFrom="#a855f7"
                     height={isImmersive ? 140 : 90}

@@ -295,10 +295,16 @@ func SyncNetworkDNSProviders() (bool, error) {
 	}
 
 	// 2. Also include any installed packages from packages.json
+	baseDomain := ResolveBaseDomain()
 	if pkgs, err := GetPackages(); err == nil {
 		for _, pkg := range pkgs {
 			if (pkg.Status == "installed" || pkg.Status == "running") && pkg.Name != "" {
 				domainSet[fmt.Sprintf("%s.aether.local", strings.ToLower(pkg.Name))] = true
+				if baseDomain != "" && pkg.DefaultPort > 0 {
+					if pub := FormatAppPublicDomain(pkg.Name, baseDomain); pub != "" {
+						domainSet[pub] = true
+					}
+				}
 			}
 		}
 	}
@@ -383,10 +389,117 @@ func updatePiHoleCustomList(customListPath, lanIP string, domains []string) erro
 	return os.WriteFile(customListPath, []byte(strings.Join(finalLines, "\n")+"\n"), 0644)
 }
 
+// ResolveBaseDomain determines the active server base domain for Whatbox-style automatic
+// application subdomain provisioning (e.g., jellyfin.domain.com).
+// Priority order:
+//  1. Persisted settings.base_domain in SQLite
+//  2. AETHERFLOW_BASE_DOMAIN environment variable
+//  3. AETHERFLOW_DOMAIN environment variable
+func ResolveBaseDomain() string {
+	if dbDomain := db.GetBaseDomain(); dbDomain != "" {
+		return dbDomain
+	}
+	if envDomain := db.NormalizeBaseDomain(os.Getenv("AETHERFLOW_BASE_DOMAIN")); envDomain != "" {
+		return envDomain
+	}
+	if envDomain := db.NormalizeBaseDomain(os.Getenv("AETHERFLOW_DOMAIN")); envDomain != "" {
+		return envDomain
+	}
+	return ""
+}
+
+// FormatAppPublicDomain synthesizes "<app>.<baseDomain>" (e.g. "jellyfin.domain.com")
+// without double-prefixing if baseDomain already starts with "<app>.".
+func FormatAppPublicDomain(appName, baseDomain string) string {
+	cleanApp := strings.ToLower(strings.TrimSpace(appName))
+	cleanBase := db.NormalizeBaseDomain(baseDomain)
+	if cleanApp == "" || cleanBase == "" {
+		return ""
+	}
+	prefix := cleanApp + "."
+	if strings.HasPrefix(cleanBase, prefix) {
+		return cleanBase
+	}
+	return prefix + cleanBase
+}
+
+// SyncInstalledAppsBaseDomain automatically provisions or updates "<app>.<newBaseDomain>"
+// across SQLite app_ingress_configs, Caddy reverse proxy routes, and local DNS providers
+// for all installed applications (and existing auto-provisioned ingress records) when the
+// server's base domain is configured or changed.
+func SyncInstalledAppsBaseDomain(oldBaseDomain, newBaseDomain string) {
+	cleanOld := db.NormalizeBaseDomain(oldBaseDomain)
+	cleanNew := db.NormalizeBaseDomain(newBaseDomain)
+	if cleanNew == "" {
+		return
+	}
+
+	targetApps := make(map[string]bool)
+	if pkgs, err := GetPackages(); err == nil {
+		for _, pkg := range pkgs {
+			if (pkg.Status == "installed" || pkg.Status == "running") && pkg.DefaultPort > 0 {
+				targetApps[strings.ToLower(strings.TrimSpace(pkg.Name))] = true
+			}
+		}
+	}
+	if configs, err := db.GetAllAppIngressConfigs(); err == nil {
+		for _, cfg := range configs {
+			if cfg.AppName != "" {
+				targetApps[strings.ToLower(strings.TrimSpace(cfg.AppName))] = true
+			}
+		}
+	}
+
+	caddyMgr := NewCaddyManager("")
+	for appName := range targetApps {
+		bp := GetBlueprint(appName)
+		if bp == nil || bp.DefaultPort <= 0 {
+			continue
+		}
+
+		existing, _ := db.GetAppIngressConfig(bp.AppName)
+		activePort := bp.DefaultPort
+		if existing != nil && existing.ListenPort > 0 {
+			activePort = existing.ListenPort
+		}
+
+		shouldUpdateDomain := existing == nil ||
+			strings.TrimSpace(existing.PublicDomain) == "" ||
+			(cleanOld != "" && strings.EqualFold(strings.TrimSpace(existing.PublicDomain), FormatAppPublicDomain(bp.AppName, cleanOld)))
+
+		if !shouldUpdateDomain {
+			continue
+		}
+
+		pubDomain := FormatAppPublicDomain(bp.AppName, cleanNew)
+		cfg := models.AppIngressConfig{
+			AppName:               bp.AppName,
+			PublicDomain:          pubDomain,
+			ExternalAccessEnabled: true,
+			ListenPort:            activePort,
+			TLSEnabled:            true,
+		}
+		if err := db.SetAppIngressConfig(cfg); err != nil {
+			slog.Warn("failed to auto-provision base domain ingress config", "app", bp.AppName, "domain", pubDomain, "error", err)
+			continue
+		}
+
+		_ = caddyMgr.UpdateAppRoutes(RoutingState{
+			AppName:               bp.AppName,
+			ActivePort:            activePort,
+			InternalDomain:        bp.InternalDomain,
+			PublicDomain:          pubDomain,
+			ExternalAccessEnabled: true,
+		})
+	}
+
+	_, _ = SyncNetworkDNSProviders()
+}
+
 // ApplyBlueprintPostInstall executes the complete post-installation setup for an application:
 // 1. Resolves a conflict-free port (or uses preAllocatedPort).
 // 2. Writes/mutates the app's native configuration file.
-// 3. Persists AppIngressConfig in SQLite.
+// 3. Persists AppIngressConfig in SQLite (auto-setting <app>.<baseDomain> if a base domain is configured).
 // 4. Wires Caddy reverse proxy routes (<app>.aether.local and public domain if configured).
 // 5. Registers <app>.aether.local in /etc/hosts.
 // 6. Synchronizes networking DNS apps (Pi-hole / dnsmasq) with all active domains.
@@ -427,19 +540,25 @@ func ApplyBlueprintPostInstall(appName string, preAllocatedPort int) (*Blueprint
 	res.ConfigPath = cfgPath
 	res.ConfigApplied = cfgApplied
 
-	// 2. Persist ingress configuration in SQLite (preserving existing public domain if already set)
+	// 2. Persist ingress configuration in SQLite (preserving existing custom public domain,
+	// or automatically provisioning <app>.<baseDomain> when the server domain is known)
 	ingressCfg := models.AppIngressConfig{
 		AppName:    bp.AppName,
 		ListenPort: activePort,
 	}
-	if existing, err := db.GetAppIngressConfig(bp.AppName); err == nil && existing != nil {
+	existing, existingErr := db.GetAppIngressConfig(bp.AppName)
+	if existingErr == nil && existing != nil && strings.TrimSpace(existing.PublicDomain) != "" {
+		ingressCfg.PublicDomain = strings.TrimSpace(existing.PublicDomain)
+		ingressCfg.ExternalAccessEnabled = existing.ExternalAccessEnabled
+		ingressCfg.TLSEnabled = existing.TLSEnabled
+	} else if baseDomain := ResolveBaseDomain(); baseDomain != "" && activePort > 0 {
+		ingressCfg.PublicDomain = FormatAppPublicDomain(bp.AppName, baseDomain)
+		ingressCfg.ExternalAccessEnabled = true
+		ingressCfg.TLSEnabled = true
+	} else if existingErr == nil && existing != nil {
 		ingressCfg.PublicDomain = existing.PublicDomain
 		ingressCfg.ExternalAccessEnabled = existing.ExternalAccessEnabled
 		ingressCfg.TLSEnabled = existing.TLSEnabled
-	} else if baseDomain := strings.TrimSpace(os.Getenv("AETHERFLOW_BASE_DOMAIN")); baseDomain != "" && activePort > 0 {
-		ingressCfg.PublicDomain = fmt.Sprintf("%s.%s", bp.AppName, strings.TrimPrefix(baseDomain, "."))
-		ingressCfg.ExternalAccessEnabled = true
-		ingressCfg.TLSEnabled = true
 	}
 
 	if activePort > 0 || bp.IsNetworkApp {

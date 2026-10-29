@@ -32,6 +32,7 @@ func GetBlueprints(c *gin.Context) {
 		}
 	}
 
+	baseDomain := services.ResolveBaseDomain()
 	views := make([]BlueprintStatusView, 0, len(bps))
 	for _, bp := range bps {
 		activePort := bp.DefaultPort
@@ -47,6 +48,11 @@ func GetBlueprints(c *gin.Context) {
 			pubDomain = ing.PublicDomain
 			extAccess = ing.ExternalAccessEnabled
 			tlsEnabled = ing.TLSEnabled
+		}
+		if pubDomain == "" && baseDomain != "" && activePort > 0 {
+			pubDomain = services.FormatAppPublicDomain(bp.AppName, baseDomain)
+			extAccess = true
+			tlsEnabled = true
 		}
 
 		views = append(views, BlueprintStatusView{
@@ -91,6 +97,13 @@ func GetAppBlueprint(c *gin.Context) {
 		pubDomain = ing.PublicDomain
 		extAccess = ing.ExternalAccessEnabled
 		tlsEnabled = ing.TLSEnabled
+	}
+	if pubDomain == "" && activePort > 0 {
+		if baseDomain := services.ResolveBaseDomain(); baseDomain != "" {
+			pubDomain = services.FormatAppPublicDomain(bp.AppName, baseDomain)
+			extAccess = true
+			tlsEnabled = true
+		}
 	}
 
 	c.JSON(http.StatusOK, BlueprintStatusView{

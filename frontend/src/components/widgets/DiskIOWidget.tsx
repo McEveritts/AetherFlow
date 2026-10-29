@@ -33,8 +33,8 @@ export default function DiskIOWidget({ diskIoData, history, density = 'compact' 
             {/* Dual-line Sparkline */}
             <div className={`rounded-xl overflow-hidden bg-slate-900/50 border border-white/[0.03] transition-all duration-300 ${isImmersive ? 'mb-6 shadow-2xl' : 'mb-4'}`}>
                 <Sparkline
-                    data={history.diskRead.length > 1 ? history.diskRead : [0, 0]}
-                    data2={history.diskWrite.length > 1 ? history.diskWrite : [0, 0]}
+                    data={history.diskRead.length > 0 ? history.diskRead : [read, read]}
+                    data2={history.diskWrite.length > 0 ? history.diskWrite : [write, write]}
                     color="#f59e0b"
                     color2="#ef4444"
                     gradientFrom="#f59e0b"

@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useToast } from '@/contexts/ToastContext';
-import { ArrowRight, Check, Shield, Server, Box } from 'lucide-react';
+import { ArrowRight, Check, Shield, Server, Box, Globe } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { apiFetch } from '@/lib/fetcher';
 import { MotionPresets } from '@/lib/design';
@@ -14,6 +14,9 @@ export default function OnboardingWizard({ initialSettings, onComplete }: Onboar
     const { addToast } = useToast();
     const [step, setStep] = useState(1);
     const [isSaving, setIsSaving] = useState(false);
+    const [baseDomain, setBaseDomain] = useState<string>(
+        typeof initialSettings?.baseDomain === 'string' ? initialSettings.baseDomain : ''
+    );
 
     const handleNext = () => setStep(s => Math.min(s + 1, 2));
     const handlePrev = () => setStep(s => Math.max(s - 1, 1));
@@ -23,6 +26,7 @@ export default function OnboardingWizard({ initialSettings, onComplete }: Onboar
         try {
             const payload = {
                 ...initialSettings,
+                baseDomain: baseDomain.trim(),
                 setupCompleted: true
             };
 
@@ -112,6 +116,19 @@ export default function OnboardingWizard({ initialSettings, onComplete }: Onboar
                                             <p className="text-xs text-slate-500 mt-1">End-to-end encryption setup is validated.</p>
                                         </div>
                                     </div>
+                                </div>
+
+                                <div className="p-4 rounded-2xl bg-white/5 border border-white/10 space-y-2 mt-4">
+                                    <label className="text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center gap-2">
+                                        <Globe size={14} className="text-indigo-400" /> Server Base Domain (Optional)
+                                    </label>
+                                    <input
+                                        type="text"
+                                        value={baseDomain}
+                                        onChange={(e) => setBaseDomain(e.target.value)}
+                                        placeholder="domain.com (auto-creates jellyfin.domain.com on app install)"
+                                        className="w-full bg-slate-900/80 border border-white/10 rounded-xl px-4 py-2.5 text-slate-200 text-sm font-mono focus:outline-none focus:border-indigo-500/50 transition-colors"
+                                    />
                                 </div>
                             </motion.div>
                         )}

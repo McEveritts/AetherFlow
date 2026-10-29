@@ -156,22 +156,46 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
             addToast('Nexus link active: Polling mode', 'info');
         }
 
+        let pollTick = 0;
         const poll = async () => {
+            const currentTick = pollTick++;
             try {
-                const res = await apiFetch('/api/v1/auth/system/metrics');
-                if (!res.ok) return;
-                const text = await res.text();
+                const shouldFetchServices = currentTick % 5 === 0;
+                const [metricsRes, servicesRes] = await Promise.all([
+                    apiFetch('/api/v1/auth/system/metrics'),
+                    shouldFetchServices ? apiFetch('/api/v1/auth/services').catch(() => null) : Promise.resolve(null),
+                ]);
+                if (!metricsRes.ok) return;
+                const text = await metricsRes.text();
                 if (!text || text.trim() === '') return;
                 
-                let metrics;
+                let metrics: SystemMetrics;
                 try {
                     metrics = JSON.parse(text);
                 } catch {
                     return;
                 }
+
+                let polledServices: Record<string, unknown> | null = null;
+                if (servicesRes && servicesRes.ok) {
+                    try {
+                        polledServices = await servicesRes.json();
+                    } catch {
+                        polledServices = null;
+                    }
+                }
                 
                 if (isMountedRef.current && metrics) {
-                    setData({ system: metrics, services: null });
+                    setData((prev) => {
+                        const nextServices = polledServices ?? prev.services;
+                        const mergedSystem: SystemMetrics = nextServices
+                            ? { ...metrics, services: nextServices as SystemMetrics['services'] }
+                            : metrics;
+                        return {
+                            system: mergedSystem,
+                            services: nextServices,
+                        };
+                    });
                     setLastMessageAt(Date.now());
                 }
             } catch {
@@ -187,11 +211,11 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
     const connect = useCallback(async () => {
         // Clean up any existing connection
         if (wsRef.current) {
-            isManualCloseRef.current = true;
-            wsRef.current.close();
+            const prevWs = wsRef.current;
             wsRef.current = null;
-            // NOTE: isManualCloseRef stays true until ws.onopen of the NEW connection resets it
+            prevWs.close();
         }
+        isManualCloseRef.current = false;
 
         const stateLabel = attemptRef.current === 0 ? 'CONNECTING' : 'RECONNECTING';
         setConnectionState(stateLabel);
@@ -227,8 +251,9 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
         ws.onopen = () => {
             if (!isMountedRef.current) return;
 
-            // New connection is live — clear the manual-close flag
+            // New connection is live — clear the manual-close flag and claim transport ownership
             isManualCloseRef.current = false;
+            transportOwnerRef.current = 'websocket';
 
             // If we were polling, stop
             stopPolling();
@@ -263,10 +288,17 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
                     const parsedData = metricsUpdateDataSchema.safeParse(message.data);
                     if (parsedData.success) {
                         const sysData = parsedData.data.system as unknown as SystemMetrics;
-                        
-                        setData({
-                            system: sysData,
-                            services: parsedData.data.services as Record<string, unknown> | null,
+                        const incomingServices = (parsedData.data.services as Record<string, unknown> | null) ?? null;
+
+                        setData((prev) => {
+                            const nextServices = incomingServices ?? prev.services;
+                            const mergedSystem: SystemMetrics = sysData && nextServices
+                                ? { ...sysData, services: nextServices as SystemMetrics['services'] }
+                                : sysData;
+                            return {
+                                system: mergedSystem,
+                                services: nextServices,
+                            };
                         });
                     } else {
                         console.warn('[WS] Malformed metrics payload dropped', parsedData.error.format());
@@ -299,7 +331,8 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
         };
 
         ws.onclose = () => {
-            if (!isMountedRef.current || isManualCloseRef.current) return;
+            if (!isMountedRef.current || isManualCloseRef.current || wsRef.current !== ws) return;
+            wsRef.current = null;
 
             clearHeartbeat();
             attemptRef.current += 1;
@@ -311,6 +344,8 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
 
             if (attemptRef.current >= MAX_RECONNECT_BEFORE_FALLBACK) {
                 // Switch to REST polling
+                transportOwnerRef.current = 'poll';
+                useConnectionStore.getState().setLastTransportSwitchReason('MAX_RECONNECT_EXCEEDED');
                 startPolling();
                 // Still try WS reconnect in background at max backoff interval
                 reconnectTimerRef.current = setTimeout(connect, BACKOFF_MAX_MS);
@@ -338,6 +373,7 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
     const manualReconnect = useCallback(() => {
         if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
         stopPolling();
+        transportOwnerRef.current = 'websocket';
         attemptRef.current = 0;
         setReconnectAttempt(0);
         resetConnection();
@@ -380,6 +416,8 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
             };
         }
 
+        transportOwnerRef.current = 'websocket';
+        stopPolling();
         connect();
 
         return () => {
@@ -391,7 +429,15 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
             wsRef.current?.close();
         };
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [isAuthenticated, pathname, preferredMode, pollInterval]);
+    }, [isAuthenticated, pathname, preferredMode]);
+
+    // Restart polling timer when pollInterval changes while actively polling
+    useEffect(() => {
+        if (!isAuthenticated || pathname === '/login') return;
+        if (isWebSocketDisabled() || preferredMode === 'poll' || transportOwnerRef.current === 'poll') {
+            startPolling(true);
+        }
+    }, [pollInterval, isAuthenticated, pathname, preferredMode, startPolling]);
 
     return (
         <WebSocketContext.Provider value={{ data, connectionState, reconnectAttempt, manualReconnect }}>

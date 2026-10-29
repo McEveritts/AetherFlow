@@ -6,23 +6,25 @@ import (
 	"strings"
 
 	"aetherflow/db"
+	"aetherflow/services"
 
 	"github.com/gin-gonic/gin"
 )
 
 type SettingsPayload struct {
-	AiModel          string `json:"aiModel"`
-	SystemPrompt     string `json:"systemPrompt"`
-	Language         string `json:"language"`
-	Timezone         string `json:"timezone"`
-	UpdateChannel    string `json:"updateChannel"`
-	DefaultDashboard string `json:"defaultDashboard"`
-	SetupCompleted   bool   `json:"setupCompleted"`
-	GeminiApiKey     string `json:"geminiApiKey"`
-	OpenaiApiKey     string `json:"openaiApiKey"`
-	LmStudioEndpoint string `json:"lmStudioEndpoint"`
-	OllamaEndpoint   string `json:"ollamaEndpoint"`
-	AnthropicApiKey  string `json:"anthropicApiKey"`
+	AiModel           string `json:"aiModel"`
+	SystemPrompt      string `json:"systemPrompt"`
+	Language          string `json:"language"`
+	Timezone          string `json:"timezone"`
+	UpdateChannel     string `json:"updateChannel"`
+	DefaultDashboard  string `json:"defaultDashboard"`
+	SetupCompleted    bool   `json:"setupCompleted"`
+	BaseDomain        string `json:"baseDomain"`
+	GeminiApiKey      string `json:"geminiApiKey"`
+	OpenaiApiKey      string `json:"openaiApiKey"`
+	LmStudioEndpoint  string `json:"lmStudioEndpoint"`
+	OllamaEndpoint    string `json:"ollamaEndpoint"`
+	AnthropicApiKey   string `json:"anthropicApiKey"`
 	AnthropicEndpoint string `json:"anthropicEndpoint"`
 }
 
@@ -31,15 +33,21 @@ func GetSettings(c *gin.Context) {
 	err := db.DB.QueryRow(`
 		SELECT ai_model, system_prompt, language, timezone, update_channel, default_dashboard, setup_completed, 
 		       COALESCE(gemini_api_key, ''), COALESCE(openai_api_key, ''), COALESCE(lm_studio_endpoint, ''), COALESCE(ollama_endpoint, ''),
-		       COALESCE(anthropic_api_key, ''), COALESCE(anthropic_endpoint, '')
+		       COALESCE(anthropic_api_key, ''), COALESCE(anthropic_endpoint, ''), COALESCE(base_domain, '')
 		FROM settings WHERE id = 1
 	`).Scan(&s.AiModel, &s.SystemPrompt, &s.Language, &s.Timezone, &s.UpdateChannel, &s.DefaultDashboard, &s.SetupCompleted, 
-		    &s.GeminiApiKey, &s.OpenaiApiKey, &s.LmStudioEndpoint, &s.OllamaEndpoint, &s.AnthropicApiKey, &s.AnthropicEndpoint)
+		    &s.GeminiApiKey, &s.OpenaiApiKey, &s.LmStudioEndpoint, &s.OllamaEndpoint, &s.AnthropicApiKey, &s.AnthropicEndpoint, &s.BaseDomain)
 
 	if err != nil {
 		slog.Error("fetching settings", "error", err)
 		InternalError(c, "Failed to load settings")
 		return
+	}
+
+	if s.BaseDomain == "" {
+		s.BaseDomain = services.ResolveBaseDomain()
+	} else {
+		s.BaseDomain = db.NormalizeBaseDomain(s.BaseDomain)
 	}
 
 	// Decrypt the API keys before masking
@@ -77,6 +85,18 @@ func updateSettings(c *gin.Context) {
 	if err := c.ShouldBindJSON(&req); err != nil {
 		BadRequest(c, err.Error())
 		return
+	}
+
+	prevBaseDomain := db.GetBaseDomain()
+	if rawDomain := strings.TrimSpace(req.BaseDomain); rawDomain != "" {
+		normalized := db.NormalizeBaseDomain(rawDomain)
+		if normalized == "" || !domainRegex.MatchString(normalized) || len(normalized) > 253 {
+			RespondError(c, http.StatusBadRequest, "INVALID_DOMAIN", "Invalid base domain format (e.g., domain.com)")
+			return
+		}
+		req.BaseDomain = normalized
+	} else {
+		req.BaseDomain = ""
 	}
 
 	// Handle API key encryption individually 
@@ -126,6 +146,7 @@ func updateSettings(c *gin.Context) {
 			update_channel = ?,
 			default_dashboard = ?,
 			setup_completed = ?,
+			base_domain = ?,
 			gemini_api_key = `+geminiKeyStr+`,
 			openai_api_key = `+openaiKeyStr+`,
 			anthropic_api_key = `+anthropicKeyStr+`,
@@ -134,13 +155,17 @@ func updateSettings(c *gin.Context) {
 			anthropic_endpoint = ?,
 			updated_at = CURRENT_TIMESTAMP
 		WHERE id = 1
-	`, req.AiModel, req.SystemPrompt, req.Language, req.Timezone, req.UpdateChannel, req.DefaultDashboard, req.SetupCompleted, req.LmStudioEndpoint, req.OllamaEndpoint, req.AnthropicEndpoint)
+	`, req.AiModel, req.SystemPrompt, req.Language, req.Timezone, req.UpdateChannel, req.DefaultDashboard, req.SetupCompleted, req.BaseDomain, req.LmStudioEndpoint, req.OllamaEndpoint, req.AnthropicEndpoint)
 
 
 	if err != nil {
 		slog.Error("updating settings", "error", err)
 		InternalError(c, "Failed to save settings")
 		return
+	}
+
+	if req.BaseDomain != "" {
+		services.SyncInstalledAppsBaseDomain(prevBaseDomain, req.BaseDomain)
 	}
 
 	// Return settings without raw API keys

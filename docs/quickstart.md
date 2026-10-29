@@ -1,6 +1,6 @@
 # Quickstart Guide
 
-Get AetherFlow v3.1.7 running on your infrastructure in under 5 minutes.
+Get AetherFlow v3.2.01 running on your infrastructure in under 5 minutes.
 
 ## Prerequisites
 

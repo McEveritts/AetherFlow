@@ -241,6 +241,10 @@ func IssueWSTicket(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"ticket": ticket})
 }
 
+func isLoopbackIP(ip string) bool {
+	return ip == "127.0.0.1" || ip == "::1" || ip == "localhost"
+}
+
 // HandleWebSocket authenticates the request via WS ticket with IP-binding validation.
 func HandleWebSocket(c *gin.Context) {
 	ticket := c.Query("ticket")
@@ -262,8 +266,9 @@ func HandleWebSocket(c *gin.Context) {
 	}
 
 	// IP-binding: reject tickets used from a different IP than issuance
-	if entry.ClientIP != "" && entry.ClientIP != c.ClientIP() {
-		slog.Warn("WS ticket IP mismatch", "issued_to", entry.ClientIP, "used_from", c.ClientIP())
+	clientIP := c.ClientIP()
+	if entry.ClientIP != "" && entry.ClientIP != clientIP && !(isLoopbackIP(entry.ClientIP) && isLoopbackIP(clientIP)) {
+		slog.Warn("WS ticket IP mismatch", "issued_to", entry.ClientIP, "used_from", clientIP)
 		RespondError(c, http.StatusForbidden, "WS_IP_MISMATCH", "Ticket IP mismatch")
 		return
 	}
@@ -278,6 +283,42 @@ func HandleWebSocket(c *gin.Context) {
 	client := &Client{hub: WSHub, conn: conn, send: make(chan []byte, 256)}
 	client.hub.register <- client
 
+	// Immediately push an initial METRICS_UPDATE snapshot so the newly connected
+	// client renders live metrics on frame 0 without waiting for the next tick.
+	go func(cl *Client) {
+		systemStateMutex.RLock()
+		m := cachedMetrics
+		s := cachedServices
+		systemStateMutex.RUnlock()
+
+		if m == nil {
+			m = services.GetSystemMetricsCore()
+			systemStateMutex.Lock()
+			cachedMetrics = m
+			systemStateMutex.Unlock()
+		}
+		if s == nil {
+			s = services.GetActiveServices()
+			systemStateMutex.Lock()
+			cachedServices = s
+			systemStateMutex.Unlock()
+		}
+
+		payload := map[string]interface{}{
+			"type": "METRICS_UPDATE",
+			"data": map[string]interface{}{
+				"system":   m,
+				"services": s,
+			},
+		}
+		if message, err := json.Marshal(payload); err == nil {
+			select {
+			case cl.send <- message:
+			default:
+			}
+		}
+	}(client)
+
 	go client.writePump()
 	go client.readPump()
 }
@@ -289,6 +330,14 @@ var (
 )
 
 func maintainSystemState() {
+	// Seed initial state immediately so the first WebSocket client gets valid data
+	initialMetrics := services.GetSystemMetricsCore()
+	initialServices := services.GetActiveServices()
+	systemStateMutex.Lock()
+	cachedMetrics = initialMetrics
+	cachedServices = initialServices
+	systemStateMutex.Unlock()
+
 	metricsTicker := time.NewTicker(1 * time.Second)
 	serviceTicker := time.NewTicker(15 * time.Second)
 

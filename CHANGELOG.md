@@ -1,3 +1,29 @@
+## CHANGELOG v3.2.01 - Single-Binary Control Plane, Auto-Subdomain Ingress & Real-Time Telemetry
+_Direct comparison against `v3.1.5` (`v3.1.5...v3.2.01`), consolidating all architectural, security, packaging, and UI advancements._
+
+---
+
+### Release Highlights (since `v3.1.5`)
+* **Whatbox-Style Server Base Domain & Automatic Subdomain Provisioning**: Added `baseDomain` support across Settings, Onboarding Wizard, and environment seeding (`AETHERFLOW_BASE_DOMAIN`). Installing any web-capable Marketplace app automatically provisions `<app>.<baseDomain>` (e.g., `jellyfin.domain.com`) with external access and TLS enabled via the Caddy ingress layer, and updating `baseDomain` retroactively syncs existing installed apps.
+* **Frame-0 Real-Time Telemetry & Hardware Metric Smoothing**: WebSocket clients now receive an immediate `METRICS_UPDATE` snapshot on connection (`frame 0`) with pre-seeded system/service state, loopback IP-binding tolerance (`127.0.0.1` / `::1` / `localhost`), non-blocking `cpu.Times` delta calculation in `hardware.go`, cached GPU hardware discovery, and two-point sparkline initialization so charts render immediately without waiting or stuttering.
+* **Single-Binary Embedded SPA & Privileged Runner Daemon**: Compiled the Next.js static export (`backend/web/dist`) directly into the `aetherflow-api` Go binary (`CGO_ENABLED=0`) and split privileged root operations into a dedicated UNIX domain socket daemon (`aetherflow-runner.service` on `/run/aetherflow/runner.sock`) with strict regex/enum allowlists.
+* **Debian 13 (Trixie) & Ubuntu 24.04 Modernization**: Migrated APT repositories to DEB822 `.sources` format with `0644` `/etc/apt/keyrings` permissions for `sqv`, enforced `umask 0022`, preserved execute bits on hoisted workspace `node_modules/.bin` binaries during permission hardening, migrated `sysctl` BBR tuning to `/etc/sysctl.d/99-aetherflow-bbr.conf`, and hardened `vsftpd` TLS and `qbittorrent-nox` PBKDF2 WebUI provisioning.
+* **Obsidian V2 Design System & Operator Suite**: Delivered the Obsidian V2 glassmorphic interface with tri-mode navigation, Command Palette (`Cmd+K`), Smart App Switcher, External Access Card with live domain suggestions, Multi-Node Fleet Orchestration, Audit Log & Inbox approval gates, AI Forecasting, and 4-tier E2E verification (387 automated tests).
+* **FlowAI Multi-Provider Architecture & MediaFlow Engine**: Finalized provider-agnostic AI routing (Gemini, Anthropic, OpenAI, Ollama, LM Studio) with encrypted credential storage, plus hardware-agnostic MediaFlow transcoding (AMD VAAPI / Intel QSV) and non-destructive `.mediaflow_trash` retention.
+
+### Ingress, Networking & Reverse Proxy
+* **Automatic App Subdomain Lifecycle**: `BlueprintLifecycleManager` now resolves `baseDomain` from SQLite settings or environment variables and writes `<app>.<baseDomain>` into `app_ingress_configs` on installation, immediately syncing Caddy reverse-proxy routes.
+* **Retroactive Base Domain Sync**: Updating `baseDomain` via `PUT /api/v1/auth/settings` automatically provisions subdomains for all existing installed/running apps and triggers a live Caddy configuration reload.
+* **Apache SSL WebSocket Rewrite Fix**: Updated `setup/templates/default-ssl.conf.template` to proxy WebSocket upgrade requests across all `/api/(.*)` endpoints (`ws://127.0.0.1:8080/api/$1`), fixing `/api/v1/ws` upgrades behind Apache SSL.
+* **CORS & Host Validation Auto-Discovery**: Added automatic LAN interface IP and configured `saved_domain` (`http://` and `https://`) registration in `/etc/aetherflow/aetherflow.env` and `HostValidationMiddleware`.
+
+### Telemetry, WebSockets & Dashboard UI
+* **Instant WebSocket Snapshot & Transport Ownership**: `maintainSystemState()` pre-populates cached metrics and services prior to accepting connections, and `HandleWebSocket` pushes an immediate initial frame upon registration. Fixed `WebSocketContext` transport ownership so switching between WebSocket (`Hyperspeed`) and REST polling (`Nexus Poll`) cleanly tears down stale timers.
+* **Zero-Blocking CPU & Process Telemetry**: Replaced blocking 200ms `cpu.Percent` intervals with non-blocking `cpu.Times` delta math in `GetSystemMetricsCore()`, added monotonic counter guards for Disk I/O and Network throughput, tracked per-PID CPU time deltas across scan windows, and cached `ghw.GPU()` scans after initial boot discovery.
+* **Overview & Services Tab Enhancements**: Added full-card click-to-open navigation and public subdomain badges on active services, dynamic partition selection in the Storage widget, and smooth zero-animation Recharts sparklines for high-frequency metric updates.
+
+---
+
 ## CHANGELOG v3.1.7 - FlowAI Architecture & Dashboard Optimization
 _Generated April 22, 2026 encompassing all commits from v3.1.6 to v3.1.7._
 

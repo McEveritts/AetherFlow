@@ -74,7 +74,8 @@ export default function MarketplaceTab() {
                 if (prevApp.status === 'installing' && app.status === 'installed') {
                     if (!notifiedRef.current.has(app.id)) {
                         notifiedRef.current.add(app.id);
-                        addToast(`${app.name} has been successfully installed.`, 'success');
+                        const domainSuffix = app.public_domain ? ` (${app.public_domain})` : '';
+                        addToast(`${app.name} has been successfully installed${domainSuffix}.`, 'success');
                         setTimeout(() => notifiedRef.current.delete(app.id), 5000);
                     }
                 }
@@ -99,7 +100,8 @@ export default function MarketplaceTab() {
                 const action = pendingJobs.get(app.id);
                 if (action === 'installing' && app.status === 'installed') {
                     notifiedRef.current.add(app.id);
-                    addToast(`${app.name} has been successfully installed.`, 'success');
+                    const domainSuffix = app.public_domain ? ` (${app.public_domain})` : '';
+                    addToast(`${app.name} has been successfully installed${domainSuffix}.`, 'success');
                     setTimeout(() => notifiedRef.current.delete(app.id), 5000);
                 } else if (action === 'uninstalling' && app.status === 'uninstalled') {
                     notifiedRef.current.add(app.id);
@@ -293,6 +295,18 @@ export default function MarketplaceTab() {
                                             <div className="w-1 h-1 rounded-full bg-emerald-400 animate-pulse" />
                                             Active
                                         </span>
+                                    )}
+                                    {app.status === 'installed' && app.public_domain && (
+                                        <a
+                                            href={`https://${app.public_domain}${app.web_path ? (app.web_path.startsWith('/') ? app.web_path : `/${app.web_path}`) : ''}`}
+                                            target="_blank"
+                                            rel="noopener noreferrer"
+                                            className="inline-flex items-center gap-1.5 text-[10px] bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-300 px-3 py-1 rounded-full border border-indigo-500/20 font-mono transition-colors"
+                                            title={`Open https://${app.public_domain}`}
+                                        >
+                                            <Globe size={10} className="text-indigo-400" />
+                                            {app.public_domain}
+                                        </a>
                                     )}
                                     {app.update_available && (
                                         <span className="inline-flex items-center gap-1.5 text-[10px] bg-amber-500/10 text-amber-400 px-3 py-1 rounded-full border border-amber-500/20 font-black uppercase tracking-tighter">

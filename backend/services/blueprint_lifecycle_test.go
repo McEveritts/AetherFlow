@@ -232,3 +232,85 @@ func TestPilotAppsBlueprintLifecycleAndNetworkingDNS(t *testing.T) {
 		t.Errorf("expected sonarr.aether.local to be purged from Pi-hole custom.list on uninstall:\n%s", string(customListAfter))
 	}
 }
+
+func TestAutoSubdomainProvisioningFromSettingsBaseDomain(t *testing.T) {
+	setupBlueprintTestDB(t)
+
+	tmpRoot := t.TempDir()
+	hostsFile := filepath.Join(tmpRoot, "hosts")
+	piholeDir := filepath.Join(tmpRoot, "etc", "pihole")
+	dnsmasqDir := filepath.Join(tmpRoot, "etc", "dnsmasq.d")
+	_ = os.MkdirAll(piholeDir, 0755)
+	_ = os.MkdirAll(dnsmasqDir, 0755)
+
+	t.Setenv("AETHERFLOW_CONFIG_ROOT", tmpRoot)
+	t.Setenv("AETHERFLOW_HOSTS_FILE", hostsFile)
+	t.Setenv("AETHERFLOW_PIHOLE_DIR", piholeDir)
+	t.Setenv("AETHERFLOW_DNSMASQ_DIR", dnsmasqDir)
+	t.Setenv("AETHERFLOW_LAN_IP", "192.168.1.50")
+
+	var mu sync.Mutex
+	caddyRoutes := make(map[string]string)
+	caddySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch r.Method {
+		case http.MethodPatch:
+			w.WriteHeader(http.StatusNotFound)
+		case http.MethodPost:
+			var payload map[string]interface{}
+			_ = json.NewDecoder(r.Body).Decode(&payload)
+			if id, ok := payload["@id"].(string); ok {
+				raw, _ := json.Marshal(payload)
+				caddyRoutes[id] = string(raw)
+			}
+			w.WriteHeader(http.StatusOK)
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer caddySrv.Close()
+	t.Setenv("AETHERFLOW_CADDY_ENDPOINT", caddySrv.URL)
+
+	// 1. Configure base_domain in SQLite settings (e.g. "*.domain.com" -> normalized "domain.com")
+	if err := db.SetBaseDomain("*.domain.com"); err != nil {
+		t.Fatalf("SetBaseDomain failed: %v", err)
+	}
+	if got := ResolveBaseDomain(); got != "domain.com" {
+		t.Fatalf("ResolveBaseDomain() = %q, want 'domain.com'", got)
+	}
+
+	// 2. Install Jellyfin -> should automatically configure jellyfin.domain.com with TLS & external access
+	res, err := ApplyBlueprintPostInstall("jellyfin", 8096)
+	if err != nil {
+		t.Fatalf("ApplyBlueprintPostInstall(jellyfin) failed: %v", err)
+	}
+	if res.PublicDomain != "jellyfin.domain.com" || !res.ExternalAccessEnabled {
+		t.Fatalf("expected PublicDomain='jellyfin.domain.com' and ExternalAccessEnabled=true, got %+v", res)
+	}
+
+	ing, err := db.GetAppIngressConfig("jellyfin")
+	if err != nil || ing == nil {
+		t.Fatalf("GetAppIngressConfig(jellyfin) failed: %v", err)
+	}
+	if ing.PublicDomain != "jellyfin.domain.com" || !ing.ExternalAccessEnabled || !ing.TLSEnabled {
+		t.Errorf("unexpected persisted ingress config for jellyfin: %+v", ing)
+	}
+
+	mu.Lock()
+	pubRoute, hasPub := caddyRoutes["jellyfin_public"]
+	mu.Unlock()
+	if !hasPub || !strings.Contains(pubRoute, "jellyfin.domain.com") {
+		t.Errorf("expected Caddy public route for jellyfin.domain.com, got: %s", pubRoute)
+	}
+
+	// 3. Change base domain to "newbox.io" and verify SyncInstalledAppsBaseDomain updates Jellyfin automatically
+	_ = db.SetBaseDomain("newbox.io")
+	SyncInstalledAppsBaseDomain("domain.com", "newbox.io")
+
+	ingAfter, _ := db.GetAppIngressConfig("jellyfin")
+	if ingAfter == nil || ingAfter.PublicDomain != "jellyfin.newbox.io" {
+		t.Errorf("expected jellyfin domain to update to 'jellyfin.newbox.io', got %+v", ingAfter)
+	}
+}
+

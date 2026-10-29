@@ -89,4 +89,33 @@ func TestIngressConfigs_PersistenceAndSync(t *testing.T) {
 			t.Fatalf("expected to find 'plex' config in GET /ingress/configs response: %+v", res.Configs)
 		}
 	}
+
+	// 4. Updating baseDomain in PUT /settings automatically provisions subdomains for existing apps
+	{
+		r.GET("/settings", GetSettings)
+		r.PUT("/settings", updateSettings)
+
+		// Seed an installed app ingress config without a public domain yet
+		_ = db.SetAppIngressConfig(models.AppIngressConfig{
+			AppName:    "jellyfin",
+			ListenPort: 8096,
+		})
+
+		settingsPayload := `{"aiModel":"gemini-3.8-flash","language":"en","timezone":"UTC","updateChannel":"stable","defaultDashboard":"overview","setupCompleted":true,"baseDomain":"domain.com"}`
+		w := httptest.NewRecorder()
+		req, _ := http.NewRequest("PUT", "/settings", bytes.NewBufferString(settingsPayload))
+		req.Header.Set("Content-Type", "application/json")
+		r.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 from PUT /settings, got %d: %s", w.Code, w.Body.String())
+		}
+
+		jfCfg, err := db.GetAppIngressConfig("jellyfin")
+		if err != nil || jfCfg == nil {
+			t.Fatalf("expected jellyfin ingress config after baseDomain sync, got: %v", err)
+		}
+		if jfCfg.PublicDomain != "jellyfin.domain.com" || !jfCfg.ExternalAccessEnabled || !jfCfg.TLSEnabled {
+			t.Fatalf("expected jellyfin.domain.com to be auto-provisioned, got: %+v", jfCfg)
+		}
+	}
 }

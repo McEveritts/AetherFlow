@@ -213,15 +213,33 @@ _build_modern_stack() {
     chmod 0750 /etc/aetherflow
     chown root:aetherflow /etc/aetherflow 2>/dev/null || true
 
-    local cors_origins="http://localhost:8080,http://127.0.0.1:8080"
-    local allowed_hosts="localhost:8080,127.0.0.1:8080"
+    local saved_domain=""
+    if type _load_config &>/dev/null; then
+        saved_domain="$(_load_config hostname_value)"
+        if [[ -z "${saved_domain}" ]]; then
+            saved_domain="$(_load_config domain)"
+        fi
+    fi
+    if [[ -z "${saved_domain}" ]]; then
+        saved_domain="${AETHERFLOW_BASE_DOMAIN:-${AETHERFLOW_DOMAIN:-}}"
+    fi
+    if [[ "${saved_domain}" == "localhost" || "${saved_domain}" == *.local ]]; then
+        saved_domain=""
+    fi
+
+    local cors_origins="http://localhost:8080,http://127.0.0.1:8080,https://localhost,https://127.0.0.1"
+    local allowed_hosts="localhost,localhost:8080,127.0.0.1,127.0.0.1:8080"
     if [[ -n "${host_ip}" && "${host_ip}" != "127.0.0.1" ]]; then
-        cors_origins="${cors_origins},http://${host_ip}:8080"
-        allowed_hosts="${allowed_hosts},${host_ip}:8080"
+        cors_origins="${cors_origins},http://${host_ip}:8080,https://${host_ip},http://${host_ip}"
+        allowed_hosts="${allowed_hosts},${host_ip},${host_ip}:8080"
     fi
     if [[ -n "${public_ip}" ]]; then
-        cors_origins="${cors_origins},http://${public_ip}:8080"
-        allowed_hosts="${allowed_hosts},${public_ip}:8080"
+        cors_origins="${cors_origins},http://${public_ip}:8080,https://${public_ip},http://${public_ip}"
+        allowed_hosts="${allowed_hosts},${public_ip},${public_ip}:8080"
+    fi
+    if [[ -n "${saved_domain}" ]]; then
+        cors_origins="${cors_origins},http://${saved_domain}:8080,https://${saved_domain},http://${saved_domain}"
+        allowed_hosts="${allowed_hosts},${saved_domain},${saved_domain}:8080"
     fi
 
     cat > /etc/aetherflow/aetherflow.env <<EOF
@@ -231,6 +249,7 @@ PORT=8080
 BIND_ADDR=0.0.0.0
 ALLOWED_HOSTS=${allowed_hosts}
 ALLOWED_CORS_ORIGIN=${cors_origins}
+AETHERFLOW_BASE_DOMAIN=${saved_domain}
 DB_PATH=/opt/AetherFlow/backend/data/aetherflow.sqlite
 AETHERFLOW_DB_PATH=/opt/AetherFlow/backend/data/aetherflow.sqlite
 AETHERFLOW_RUNNER_SOCK=/run/aetherflow/runner.sock

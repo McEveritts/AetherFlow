@@ -48,7 +48,7 @@
         RewriteEngine On
         RewriteCond %{HTTP:Upgrade} =websocket [NC]
         RewriteCond %{HTTP:Connection} upgrade [NC]
-        RewriteRule ^/api/ws$ ws://127.0.0.1:8080/api/ws [P,L]
+        RewriteRule ^/api/(.*)$ ws://127.0.0.1:8080/api/$1 [P,L]
 
         ProxyPass /api/ http://127.0.0.1:8080/api/ retry=0 timeout=300
         ProxyPassReverse /api/ http://127.0.0.1:8080/api/

@@ -63,12 +63,14 @@ export default function Sidebar() {
         setIsMobileMenuOpen,
         hapticFeedback,
     } = useSystemStore();
-    const { connectionState } = useConnectionStore();
+    const { connectionState, preferredMode } = useConnectionStore();
     const touchStartXRef = useRef<number | null>(null);
 
     // Map connection state to Obsidian beacon class
     const getBeaconClass = () => {
-        if (connectionState === 'CONNECTED') return 'obs-beacon-live';
+        if (connectionState === 'CONNECTED' || (connectionState === 'FALLBACK' && preferredMode === 'poll')) {
+            return 'obs-beacon-live';
+        }
         if (connectionState === 'RECONNECTING' || connectionState === 'CONNECTING' || connectionState === 'FALLBACK') {
             return 'obs-beacon-reconnecting';
         }
