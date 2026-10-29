@@ -168,7 +168,7 @@ class AetherFlowApiClient:
                 with open("/install/.master.info", "r", encoding="utf-8", errors="replace") as f:
                     first = f.readline().strip()
                     if first:
-                        username = username or first
+                        username = username or first.split(":", 1)[0].strip()
             except Exception:
                 pass
         if (not username or not password) and os.path.exists("/root/information.info"):

@@ -92,8 +92,10 @@ class TestScenarioAiAnomalyHealing(TestCase):
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
         if mode == "live" and client.is_server_reachable():
-            code, pred, _ = client.request("GET", "/api/v1/admin/ai/predictions")
+            code, pred, _ = client.request("GET", "/api/v1/admin/ai/predictions/history")
             self.assert_status_code(code, 200)
+            ncode, _, _ = client.request("GET", "/api/v1/admin/notifications/rules")
+            self.assert_status_code(ncode, 200)
         else:
             has_predictions = bool(inspector.read_file("backend/api/routes.go") and "/predictions" in inspector.read_file("backend/api/routes.go"))
             has_heal = inspector.file_exists("backend/services/af_heal.go")
