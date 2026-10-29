@@ -31,6 +31,8 @@ class TestRunner:
         
         self.inspector = CodebaseInspector(PROJECT_ROOT)
         self.client = AetherFlowApiClient(base_url)
+        if self.mode == "live" and self.client.is_server_reachable():
+            self.client.ensure_live_authenticated()
         
         self.all_tests: List[TestCase] = []
         self.results: List[Dict[str, Any]] = []

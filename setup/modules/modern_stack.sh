@@ -173,6 +173,7 @@ _build_modern_stack() {
     if ! id -u aetherflow >/dev/null 2>&1; then
         useradd --system --no-create-home --shell /usr/sbin/nologin aetherflow || true
     fi
+    usermod -a -G systemd-journal,adm aetherflow 2>/dev/null || true
 
     # Enforce Least-Privilege Boundary: Remove legacy sudoers permissions
     rm -f /etc/sudoers.d/aether* 2>/dev/null || true

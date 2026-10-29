@@ -9,6 +9,7 @@ RequiresMountsFor=/opt/AetherFlow
 Type=simple
 User=aetherflow
 Group=aetherflow
+SupplementaryGroups=systemd-journal adm
 WorkingDirectory=/opt/AetherFlow/backend
 ExecStart=/opt/AetherFlow/backend/aetherflow-api
 Restart=on-failure
@@ -34,7 +35,7 @@ EnvironmentFile=-/etc/aetherflow/aetherflow.env
 
 # Zero-Trust Namespace Isolation
 ProtectSystem=strict
-ProtectHome=yes
+ProtectHome=read-only
 PrivateTmp=yes
 PrivateDevices=yes
 NoNewPrivileges=yes
@@ -54,7 +55,7 @@ RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 UMask=0027
 
 ReadWritePaths=/var/lib/aetherflow /var/log/aetherflow /run/aetherflow /opt/AetherFlow/backend/data
-ReadWritePaths=-/var/lib/openclaw
+ReadWritePaths=-/var/lib/openclaw -/home/hdd
 
 LimitNOFILE=65535
 

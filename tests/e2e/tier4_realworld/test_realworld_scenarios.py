@@ -21,7 +21,10 @@ class TestScenarioOperatorBootstrap(TestCase):
             self.assert_status_code(code, 200, "Health check failed")
             
             # Step 2: Login
-            code, login_resp, _ = client.request("POST", "/api/v1/public/auth/login", {"username": "admin", "password": "password"})
+            code, login_resp, _ = client.request("POST", "/api/v1/public/auth/login", {
+                "username": getattr(client, "auth_username", "admin"),
+                "password": getattr(client, "auth_password", "password"),
+            })
             self.assert_status_code(code, 200, "Login failed")
             token = login_resp.get("token")
             if token:

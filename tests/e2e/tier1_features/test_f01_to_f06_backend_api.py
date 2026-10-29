@@ -46,7 +46,7 @@ class TestF01EntryMetadataStructure(TestCase):
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
         if mode == "live" and client.is_server_reachable():
-            code, body, _ = client.request("GET", "/api/v1/auth/fs?path=/")
+            code, body, _ = client.request("GET", "/api/v1/auth/fs?path=/opt/AetherFlow")
             self.assert_status_code(code, 200)
             entries = body.get("entries", [])
             if entries:

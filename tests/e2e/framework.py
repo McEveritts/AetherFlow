@@ -156,6 +156,45 @@ class AetherFlowApiClient:
         self.opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(self.cookie_jar))
         self.jwt_token: Optional[str] = None
         self.csrf_token: Optional[str] = None
+        self.auth_username: str = "admin"
+        self.auth_password: str = "password"
+
+    def ensure_live_authenticated(self) -> bool:
+        """Resolves credentials from env or /root/information.info, bootstraps admin if needed, and logs in."""
+        username = os.environ.get("AETHERFLOW_E2E_USER") or os.environ.get("AETHERFLOW_USERNAME")
+        password = os.environ.get("AETHERFLOW_E2E_PASS") or os.environ.get("AETHERFLOW_PASSWORD")
+        if (not username or not password) and os.path.exists("/root/information.info"):
+            try:
+                with open("/root/information.info", "r", encoding="utf-8", errors="replace") as f:
+                    for line in f:
+                        if line.startswith("Admin Username:"):
+                            username = username or line.split(":", 1)[1].strip()
+                        elif line.startswith("Admin Password:"):
+                            password = password or line.split(":", 1)[1].strip()
+            except Exception:
+                pass
+        self.auth_username = username or "admin"
+        self.auth_password = password or "password"
+
+        # Seed initial admin if the database has no users yet (returns 409 if already seeded)
+        self.request("POST", "/api/v1/public/auth/setup", {
+            "username": self.auth_username,
+            "password": self.auth_password,
+        })
+
+        code, resp, _ = self.request("POST", "/api/v1/public/auth/login", {
+            "username": self.auth_username,
+            "password": self.auth_password,
+        })
+        if code == 200:
+            token = resp.get("token")
+            if token:
+                self.set_auth_token(token)
+            csrf = resp.get("csrf_token")
+            if csrf:
+                self.set_csrf_token(csrf)
+            return True
+        return False
 
     def set_auth_token(self, token: str):
         self.jwt_token = token

@@ -87,10 +87,32 @@ function _boot() {
 	systemctl enable --now aetherflow-heal.timer >/dev/null 2>&1 || true
 
 	# Enable and start the privileged runner daemon and control plane single binary
+	mkdir -p /mnt/storage/media 2>/dev/null || true
 	systemctl enable aetherflow-runner.service >/dev/null 2>&1 || true
 	systemctl restart aetherflow-runner.service >/dev/null 2>&1 || true
 	systemctl enable aetherflow-api.service >/dev/null 2>&1 || true
 	systemctl restart aetherflow-api.service >/dev/null 2>&1 || true
+
+	# Automatically seed the master administrator account in the Control Plane SQLite database
+	if [[ -n "${username:-}" && -n "${passwd:-}" ]]; then
+		local _api_try=0
+		while (( _api_try < 20 )); do
+			if curl -fsS --max-time 1 "http://127.0.0.1:8080/health/ready" >/dev/null 2>&1; then
+				break
+			fi
+			sleep 0.5
+			((_api_try++))
+		done
+		python3 -c '
+import json, sys, urllib.request
+payload = json.dumps({"username": sys.argv[1], "password": sys.argv[2]}).encode("utf-8")
+req = urllib.request.Request("http://127.0.0.1:8080/api/v1/public/auth/setup", data=payload, headers={"Content-Type": "application/json"}, method="POST")
+try:
+    urllib.request.urlopen(req, timeout=5)
+except Exception:
+    pass
+' "${username}" "${passwd}" >/dev/null 2>&1 || true
+	fi
 
 	mkdir -p /opt/AetherFlow/config
 	if [[ -n "${IFACE:-}" ]]; then
@@ -126,6 +148,7 @@ _ensure_aetherflow_user() {
 			aetherflow >>"${OUTTO}" 2>&1
 		echo "[$(date '+%Y-%m-%d %H:%M:%S')] Created system user: aetherflow" >> "${INSTALL_LOG}"
 	fi
+	usermod -a -G systemd-journal,adm aetherflow >>"${OUTTO}" 2>&1 || true
 }
 
 # Comprehensive permission hardening across /opt/AetherFlow

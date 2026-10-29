@@ -11,6 +11,7 @@ RequiresMountsFor=/opt/AetherFlow
 Type=simple
 User=aetherflow
 Group=aetherflow
+SupplementaryGroups=systemd-journal adm
 WorkingDirectory=/opt/AetherFlow/current
 
 # ── FHS Managed Directories ──────────────────────────────────────────────────
@@ -44,7 +45,7 @@ RestartSec=5s
 # Safe to enforce strictly because state lives in /var/lib/aetherflow and
 # root host operations are dispatched over /run/aetherflow/runner.sock.
 ProtectSystem=strict
-ProtectHome=yes
+ProtectHome=read-only
 PrivateTmp=yes
 NoNewPrivileges=yes
 ProtectControlGroups=yes
@@ -52,7 +53,7 @@ ProtectKernelTunables=yes
 RestrictSUIDSGID=yes
 
 ReadWritePaths=/var/lib/aetherflow /var/log/aetherflow /run/aetherflow
-ReadWritePaths=-/var/lib/openclaw
+ReadWritePaths=-/var/lib/openclaw -/home/hdd
 
 # ── Resource Limits ──────────────────────────────────────────────────────────
 LimitNOFILE=65535

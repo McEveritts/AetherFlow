@@ -15,7 +15,7 @@ function _ssdpblock() {
 }
 
 _fw_allowed_ports() {
-	echo "22/tcp 80/tcp 443/tcp 3000/tcp 8080/tcp"
+	echo "22/tcp 80/tcp 443/tcp 3000/tcp 5757/tcp 8080/tcp 10090:10100/tcp"
 }
 
 _setup_firewall() {
