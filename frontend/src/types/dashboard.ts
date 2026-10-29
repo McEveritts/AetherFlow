@@ -1,4 +1,4 @@
-export type TabId = 'overview' | 'inbox' | 'services' | 'marketplace' | 'fileshare' | 'ai' | 'mediaflow' | 'backups' | 'security' | 'profile' | 'settings' | 'users' | 'logout' | 'audit' | 'oidc-clients';
+export type TabId = 'overview' | 'inbox' | 'services' | 'marketplace' | 'fileshare' | 'ai' | 'mediaflow' | 'backups' | 'security' | 'profile' | 'settings' | 'users' | 'logout' | 'audit' | 'oidc-clients' | 'network' | 'cluster' | 'notifications' | 'quotas';
 
 export interface ProcessInfo {
     pid: number;

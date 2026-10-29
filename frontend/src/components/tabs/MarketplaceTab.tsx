@@ -1,10 +1,12 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
-import { useMarketplace, useGithubDownloads, App, PendingAction } from '@/hooks/useMarketplace';
-import { Search, Package, Download, RefreshCw, XCircle, CheckCircle2, AlertCircle, Info, Filter } from 'lucide-react';
+import { useMarketplace, useGithubDownloads, App } from '@/hooks/useMarketplace';
+import { Search, Package, Download, RefreshCw, XCircle, AlertCircle, Filter, Globe } from 'lucide-react';
 import { useToast } from '@/contexts/ToastContext';
 import { ProgressRing } from '@/components/ui/ProgressRing';
 import { apiFetch } from '@/lib/fetcher';
 import { getSVGLCatalog, matchSVGLLogo } from '@/lib/svgl';
+import { ExternalAccessCard } from '@/components/ingress/ExternalAccessCard';
+import { DeploymentStatus } from '@/components/deploy/DeploymentStatus';
 
 const AppIcon = ({ app }: { app: App }) => {
     const [iconError, setIconError] = useState(false);
@@ -16,7 +18,7 @@ const AppIcon = ({ app }: { app: App }) => {
             const match = matchSVGLLogo(catalog, app.id, app.name);
             if (match) {
                 setSvglUrl(match);
-                setIconError(false); // Reset error in case previous local fetch failed
+                setIconError(false);
             }
         });
     }, [app.id, app.name]);
@@ -35,11 +37,9 @@ const AppIcon = ({ app }: { app: App }) => {
              <img
                 src={primaryIconPath}
                 onError={() => {
-                    // If SVGL failed, drop down to the local file by clearing the svglUrl
                     if (svglUrl) {
                         setSvglUrl(null);
                     } else {
-                        // Both failed, show the fallback icon
                         setIconError(true);
                     }
                 }}
@@ -58,6 +58,7 @@ export default function MarketplaceTab() {
     const [searchQuery, setSearchQuery] = useState('');
     const [categoryFilter, setCategoryFilter] = useState('All');
     const [operatingApp, setOperatingApp] = useState<string | null>(null);
+    const [ingressModalApp, setIngressModalApp] = useState<string | null>(null);
 
     // Job Completion Monitoring
     const prevAppsRef = useRef<App[] | undefined>(undefined);
@@ -135,12 +136,10 @@ export default function MarketplaceTab() {
         return app.status === 'installing' || app.status === 'uninstalling' || operatingApp === app.id || pendingJobs.has(app.id);
     };
 
-    /** Resolve the effective display status for the progress overlay.
-     *  If the server hasn't caught up yet, use the locally-known pending action. */
     const getEffectiveStatus = (app: App): string => {
         if (app.status === 'installing' || app.status === 'uninstalling') return app.status;
         if (pendingJobs.has(app.id)) return pendingJobs.get(app.id) as string;
-        if (operatingApp === app.id) return 'installing'; // fallback
+        if (operatingApp === app.id) return 'installing';
         return app.status;
     };
 
@@ -196,7 +195,7 @@ export default function MarketplaceTab() {
                 </div>
 
                 <div className="flex flex-col sm:flex-row gap-3 w-full lg:w-auto">
-                    <div className="relative group min-w-[300px]">
+                    <div className="relative group min-w-0 sm:min-w-[300px] w-full">
                         <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-500 group-focus-within:text-indigo-400 transition-colors" size={18} />
                         <input
                             type="text"
@@ -209,13 +208,13 @@ export default function MarketplaceTab() {
                 </div>
             </div>
 
-            <div className="flex items-center gap-2 overflow-x-auto pb-2 scrollbar-none">
+            <div className="flex items-center gap-2 overflow-x-auto pb-2 scrollbar-none obs-touch-pills">
                 <Filter size={16} className="text-slate-500 shrink-0" />
                 {categories.map((cat) => (
                     <button
                         key={cat}
                         onClick={() => setCategoryFilter(cat)}
-                        className={`px-4 py-1.5 rounded-full text-xs font-bold transition-all whitespace-nowrap shadow-sm ${categoryFilter === cat ? 'bg-indigo-500 text-white border-indigo-400 shadow-indigo-500/20' : 'bg-slate-900/50 text-slate-400 border border-white/5 hover:border-white/10 hover:text-slate-300'}`}
+                        className={`obs-touch-target-standard obs-gpu-120hz-interactive px-4 py-2 rounded-full text-xs font-bold transition-all whitespace-nowrap shadow-sm flex items-center ${categoryFilter === cat ? 'bg-indigo-500 text-white border-indigo-400 shadow-indigo-500/20' : 'bg-slate-900/50 text-slate-400 border border-white/5 hover:border-white/10 hover:text-slate-300'}`}
                     >
                         {cat}
                     </button>
@@ -239,7 +238,7 @@ export default function MarketplaceTab() {
                     </div>
                     <button
                         onClick={() => mutate()}
-                        className="px-6 py-2 bg-red-500/15 text-red-400 hover:bg-red-500/25 border border-red-500/20 rounded-lg transition-all text-sm font-bold"
+                        className="obs-touch-target-standard obs-gpu-120hz-interactive px-6 py-2 bg-red-500/15 text-red-400 hover:bg-red-500/25 border border-red-500/20 rounded-lg transition-all text-sm font-bold"
                     >
                         Retry Connection
                     </button>
@@ -259,7 +258,7 @@ export default function MarketplaceTab() {
                         const busy = isAppBusy(app);
 
                         return (
-                        <div key={app.id} className={`relative bg-slate-950/40 border rounded-3xl p-6 backdrop-blur-xl transition-all group flex flex-col justify-between h-full hover:shadow-2xl hover:shadow-indigo-500/10 ${busy ? 'border-indigo-500/30' : 'border-white/5 hover:border-white/10'}`}>
+                        <div key={app.id} className={`glass-card relative bg-slate-950/40 border rounded-3xl p-6 transition-all group flex flex-col justify-between h-full hover:shadow-2xl hover:shadow-indigo-500/10 ${busy ? 'border-indigo-500/30' : 'border-white/5 hover:border-white/10'}`}>
                             {busy && (
                                 <div className="absolute inset-0 bg-slate-950/90 backdrop-blur-md rounded-3xl z-20 flex items-center justify-center p-8 text-center">
                                     <ProgressRing
@@ -319,19 +318,53 @@ export default function MarketplaceTab() {
                                             <Download size={14} className="text-indigo-400/60" />
                                             {displayInstalls} <span className="text-[10px] font-medium opacity-50 lowercase tracking-normal">units</span>
                                         </div>
-                                        <button
-                                            onClick={() => busy ? null : (app.status === 'installed' ? handleUninstall(app) : handleInstall(app))}
-                                            disabled={busy}
-                                            className={`px-6 py-2.5 rounded-xl text-xs font-black transition-all transform active:scale-95 ${busy ? 'bg-slate-900 text-slate-600 cursor-not-allowed shadow-none' : (app.status === 'installed' ? 'bg-white/5 text-slate-300 hover:bg-red-500/10 hover:text-red-400 hover:border-red-500/20 border border-transparent shadow-lg' : 'bg-indigo-600 text-white hover:bg-indigo-500 hover:shadow-indigo-500/30 border border-indigo-400/30 shadow-xl shadow-indigo-900/10')}`}
-                                        >
-                                            {app.status === 'installed' ? 'Teardown' : (app.status === 'installing' ? 'Deploying...' : 'Provision')}
-                                        </button>
+                                        <div className="flex items-center gap-2">
+                                            {app.status === 'installed' && (
+                                                <button
+                                                    onClick={() => setIngressModalApp(app.id)}
+                                                    className="obs-touch-target-standard obs-gpu-120hz-interactive p-2.5 text-slate-400 hover:text-indigo-400 rounded-xl hover:bg-white/5 transition-colors border border-white/5 flex items-center justify-center"
+                                                    title="Ingress & Deployment"
+                                                >
+                                                    <Globe size={14} />
+                                                </button>
+                                            )}
+                                            <button
+                                                onClick={() => busy ? null : (app.status === 'installed' ? handleUninstall(app) : handleInstall(app))}
+                                                disabled={busy}
+                                                className={`obs-touch-target-standard obs-gpu-120hz-interactive px-6 py-2.5 rounded-xl text-xs font-black transition-all ${busy ? 'bg-slate-900 text-slate-600 cursor-not-allowed shadow-none' : (app.status === 'installed' ? 'bg-white/5 text-slate-300 hover:bg-red-500/10 hover:text-red-400 hover:border-red-500/20 border border-transparent shadow-lg' : 'bg-indigo-600 text-white hover:bg-indigo-500 hover:shadow-indigo-500/30 border border-indigo-400/30 shadow-xl shadow-indigo-900/10')}`}
+                                            >
+                                                {app.status === 'installed' ? 'Teardown' : (app.status === 'installing' ? 'Deploying...' : 'Provision')}
+                                            </button>
+                                        </div>
                                     </div>
                                 );
                             })()}
                         </div>
                         );
                     })}
+                </div>
+            )}
+
+            {ingressModalApp && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-fade-in">
+                    <div className="glass-panel w-full max-w-xl max-h-[85vh] overflow-y-auto rounded-3xl p-6 border border-white/10 relative shadow-2xl">
+                        <div className="flex items-center justify-between pb-4 border-b border-white/10">
+                            <div className="flex items-center gap-2">
+                                <Globe className="text-indigo-400" size={20} />
+                                <h3 className="text-lg font-bold text-white capitalize">{ingressModalApp} Ingress & Deploy</h3>
+                            </div>
+                            <button
+                                onClick={() => setIngressModalApp(null)}
+                                className="obs-touch-target-standard p-2 text-slate-400 hover:text-white rounded-lg hover:bg-white/5 transition-colors flex items-center justify-center"
+                            >
+                                <XCircle size={18} />
+                            </button>
+                        </div>
+                        <div className="space-y-4">
+                            <ExternalAccessCard appName={ingressModalApp} />
+                            <DeploymentStatus appName={ingressModalApp} isTriggered={true} />
+                        </div>
+                    </div>
                 </div>
             )}
         </div>

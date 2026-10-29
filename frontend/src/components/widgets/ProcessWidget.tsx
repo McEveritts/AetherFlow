@@ -39,7 +39,7 @@ export default function ProcessWidget({ processes, density = 'compact' }: Proces
                     return (
                         <button 
                             onClick={() => setActiveTab('services')}
-                            className="font-medium text-emerald-400 hover:text-emerald-300 truncate block max-w-[180px] text-left hover:underline cursor-pointer transition-colors" 
+                            className="font-medium text-emerald-400 hover:text-emerald-300 truncate block max-w-[180px] text-left hover:underline cursor-pointer transition-colors py-1" 
                             title={`Go to Service: ${name}`}
                         >
                             {name}
@@ -96,7 +96,7 @@ export default function ProcessWidget({ processes, density = 'compact' }: Proces
     ], [services, setActiveTab]);
 
     return (
-        <div className={`bg-white/[0.02] border border-white/[0.05] rounded-2xl relative overflow-hidden backdrop-blur-xl flex flex-col h-full transition-all duration-300 ${isImmersive ? 'p-6' : 'p-5'}`}>
+        <div className={`glass-card relative overflow-hidden flex flex-col h-full transition-all duration-300 ${isImmersive ? 'p-6' : 'p-5'}`}>
             {/* Header */}
             <div className={`flex items-center justify-between shrink-0 ${isImmersive ? 'mb-6' : 'mb-4'}`}>
                 <h2 className={`${isImmersive ? 'text-lg' : 'text-sm'} font-semibold text-slate-200 flex items-center gap-2`}>

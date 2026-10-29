@@ -21,7 +21,7 @@ export default function DiskIOWidget({ diskIoData, history, density = 'compact' 
     const write = diskIoData?.write_bytes_sec || 0;
 
     return (
-        <div className={`bg-white/[0.02] border border-white/[0.05] rounded-2xl relative overflow-hidden group transition-all duration-300 hover:bg-white/[0.04] backdrop-blur-xl ${isImmersive ? 'p-6 space-y-4' : 'p-5'}`}>
+        <div className={`glass-card relative overflow-hidden group transition-all duration-300 hover:bg-white/[0.04] ${isImmersive ? 'p-6 space-y-4' : 'p-5'}`}>
             {/* Header */}
             <div className="flex items-center justify-between mb-3">
                 <h2 className={`${isImmersive ? 'text-lg' : 'text-sm'} font-semibold text-slate-200 flex items-center gap-2`}>

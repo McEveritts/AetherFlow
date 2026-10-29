@@ -4,6 +4,8 @@ import { useAuth } from '@/contexts/AuthContext';
 import { Sparkles, KeyRound, LogIn, ShieldCheck, ArrowRight, Fingerprint, Info } from 'lucide-react';
 import { FormEvent, useState, useEffect, useRef } from 'react';
 import { apiFetch } from '@/lib/fetcher';
+import { Button } from '@/components/ui/Button';
+import { Input } from '@/components/ui/Input';
 
 type AuthStep = 'credentials' | 'mfa_challenge' | 'mfa_setup';
 
@@ -147,17 +149,11 @@ export default function LoginPage() {
     };
 
     return (
-        <div className="min-h-screen bg-slate-950 flex items-center justify-center relative overflow-hidden selection:bg-indigo-500/30">
-            {/* Background ambient lighting */}
-            <div className="fixed top-0 left-1/2 -translate-x-1/2 w-full max-w-7xl h-full pointer-events-none z-0">
-                <div className="absolute top-1/4 left-1/4 w-[50%] h-[50%] bg-indigo-900/20 rounded-full blur-[120px] mix-blend-screen"></div>
-                <div className="absolute bottom-1/4 right-1/4 w-[40%] h-[40%] bg-blue-900/10 rounded-full blur-[100px] mix-blend-screen"></div>
-            </div>
-
-            <div className="w-full max-w-md p-8 relative z-10 transition-all duration-500">
-                <div className="glass-panel overflow-hidden rounded-3xl p-8 relative shadow-2xl">
-                    {/* Header Glow */}
-                    <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-indigo-500/80 to-transparent"></div>
+        <div className="min-h-screen bg-transparent flex items-center justify-center relative selection:bg-indigo-500/30 p-4">
+            <div className="w-full max-w-md p-4 sm:p-8 relative z-10 transition-all duration-500">
+                <div className="glass-panel overflow-hidden rounded-3xl p-6 sm:p-8 relative shadow-2xl border border-indigo-500/30">
+                    {/* Chromatic Top Edge Accent */}
+                    <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-cyan-400/50 via-indigo-500/80 to-fuchsia-400/50 rounded-t-3xl"></div>
 
                     <div className="text-center mb-10">
                         {step === 'credentials' ? (
@@ -189,39 +185,40 @@ export default function LoginPage() {
                         <form onSubmit={handleLogin} className="space-y-6">
                             <div className="space-y-4">
                                 <div className="relative">
-                                    <input
+                                    <Input
                                         type="text"
                                         placeholder={isSetup ? 'Choose administrative operator ID' : 'Username'}
                                         value={username}
                                         onChange={(e) => setUsername(e.target.value)}
                                         required
                                         autoFocus
-                                        className="glass-input w-full px-4 py-3 pl-11 !text-sm font-medium"
+                                        className="pl-11 !text-sm font-medium"
                                     />
-                                    <ShieldCheck size={18} className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" />
+                                    <ShieldCheck size={18} className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
                                 </div>
                                 <div className="relative">
-                                    <input
+                                    <Input
                                         type="password"
                                         placeholder={isSetup ? 'Establish cryptographic key (min 6)' : 'Password'}
                                         value={password}
                                         onChange={(e) => setPassword(e.target.value)}
                                         required
                                         minLength={isSetup ? 6 : 1}
-                                        className="glass-input w-full px-4 py-3 pl-11 !text-sm font-medium"
+                                        className="pl-11 !text-sm font-medium"
                                     />
-                                    <KeyRound size={18} className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" />
+                                    <KeyRound size={18} className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
                                 </div>
                             </div>
 
-                            <button
+                            <Button
                                 type="submit"
+                                variant="primary"
                                 disabled={isLoading}
-                                className="glass-button-primary w-full py-3.5 flex items-center justify-center gap-2 font-semibold tracking-wide disabled:opacity-50"
+                                className="w-full py-3.5 flex items-center justify-center gap-2 font-semibold tracking-wide disabled:opacity-50"
                             >
                                 <LogIn size={18} className={isLoading ? "animate-pulse" : ""} />
                                 {isLoading ? 'Authenticating...' : (isSetup ? 'Initialize Identity' : 'Unlock the Aether')}
-                            </button>
+                            </Button>
                         </form>
                     )}
 
@@ -230,16 +227,16 @@ export default function LoginPage() {
                             {isRecoveryMode ? (
                                 <div className="space-y-4">
                                     <div className="relative">
-                                        <input
+                                        <Input
                                             type="text"
                                             placeholder="XXXX-XXXX"
                                             value={recoveryCode}
                                             onChange={(e) => setRecoveryCode(e.target.value.toUpperCase())}
                                             required
                                             autoFocus
-                                            className="glass-input w-full px-4 py-3 pl-11 !text-sm font-bold tracking-widest font-mono"
+                                            className="pl-11 !text-sm font-bold tracking-widest font-mono"
                                         />
-                                        <KeyRound size={18} className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" />
+                                        <KeyRound size={18} className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
                                     </div>
                                     <p className="text-xs text-slate-500 text-center px-4">
                                         Enter one of your 8-character recovery codes to unlock your account.
@@ -264,25 +261,28 @@ export default function LoginPage() {
                             )}
 
                             <div className="space-y-4">
-                                <button
+                                <Button
                                     type="submit"
+                                    variant="primary"
                                     disabled={isLoading || (!isRecoveryMode && mfaCode.join('').length !== 6) || (isRecoveryMode && !recoveryCode.trim())}
-                                    className="glass-button-primary w-full py-3.5 flex items-center justify-center gap-2 font-semibold tracking-wide disabled:opacity-50"
+                                    className="w-full py-3.5 flex items-center justify-center gap-2 font-semibold tracking-wide disabled:opacity-50"
                                 >
                                     {isLoading ? 'Verifying Context...' : 'Authorize Action'}
                                     {!isLoading && <ArrowRight size={18} />}
-                                </button>
+                                </Button>
                                 
                                 <div className="flex flex-col gap-3">
-                                    <button
+                                    <Button
                                         type="button"
+                                        variant="ghost"
                                         onClick={() => setIsRecoveryMode(!isRecoveryMode)}
                                         className="w-full text-center text-indigo-400 hover:text-indigo-300 text-sm font-medium transition-colors"
                                     >
                                         {isRecoveryMode ? 'Use authentication app' : 'Lost your device? Use recovery code'}
-                                    </button>
-                                    <button
+                                    </Button>
+                                    <Button
                                         type="button"
+                                        variant="ghost"
                                         onClick={() => {
                                             setStep('credentials');
                                             setIsRecoveryMode(false);
@@ -290,7 +290,7 @@ export default function LoginPage() {
                                         className="w-full text-center text-slate-500 hover:text-slate-300 text-sm font-medium transition-colors"
                                     >
                                         Cancel and return
-                                    </button>
+                                    </Button>
                                 </div>
                             </div>
                         </form>
@@ -301,14 +301,15 @@ export default function LoginPage() {
                             <div className="absolute -top-3 left-1/2 -translate-x-1/2 px-4 bg-slate-950/50 backdrop-blur-md text-[10px] font-semibold text-slate-500 tracking-widest uppercase rounded-full whitespace-nowrap">
                                 External Providers
                             </div>
-                            <button
+                            <Button
                                 type="button"
+                                variant="default"
                                 onClick={() => login()}
-                                className="glass-button w-full py-3 mt-2 text-sm font-semibold flex items-center justify-center gap-2 text-slate-200"
+                                className="w-full py-3 mt-2 text-sm font-semibold flex items-center justify-center gap-2 text-slate-200"
                             >
                                 <Sparkles size={16} className="text-indigo-400" />
                                 Authenticate via OIDC Core
-                            </button>
+                            </Button>
                         </div>
                     )}
                 </div>

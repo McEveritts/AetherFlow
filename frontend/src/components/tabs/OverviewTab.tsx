@@ -1,4 +1,4 @@
-import { Clock, Activity, Zap, Wifi, ArrowDown, ArrowUp, Server, Radio, ZapOff, Settings2, Maximize2, Minimize2 } from 'lucide-react';
+import { Clock, Activity, Zap, Wifi, ArrowDown, ArrowUp, Server, Radio, Settings2, Maximize2, Minimize2, Sparkles } from 'lucide-react';
 import { SystemMetrics, HardwareReport, MetricsHistory, ProcessInfo, DiskPartition, GpuMetric } from '@/types/dashboard';
 import CpuWidget from '@/components/widgets/CpuWidget';
 import MemoryWidget from '@/components/widgets/MemoryWidget';
@@ -9,8 +9,10 @@ import StorageWidget from '@/components/widgets/StorageWidget';
 import AppTopologyMap from '@/components/widgets/AppTopologyMap';
 import GpuWidget from '@/components/widgets/GpuWidget';
 import DataUsageHistoryWidget from '@/components/widgets/DataUsageHistoryWidget';
+import BandwidthCard from '@/components/cards/BandwidthCard';
+import PredictionsCard from '@/components/cards/PredictionsCard';
 import React from 'react';
-import { useConnectionStore, ConnectionMode } from '@/store/useConnectionStore';
+import { useConnectionStore } from '@/store/useConnectionStore';
 import { useSystemStore } from '@/store/useSystemStore';
 import { useShallow } from 'zustand/react/shallow';
 
@@ -97,7 +99,7 @@ export default function OverviewTab({ metrics, hardware, history }: OverviewTabP
     return (
         <div className="space-y-6 animate-fade-in pb-10">
             {/* AetherNexus Live Status Control */}
-            <div className="bg-gradient-to-r from-indigo-500/10 via-purple-500/10 to-blue-500/10 border border-white/[0.08] rounded-2xl p-4 flex flex-col md:flex-row items-center justify-between gap-4 backdrop-blur-xl shadow-2xl">
+            <div className="bg-gradient-to-r from-indigo-500/10 via-purple-500/10 to-blue-500/10 border border-white/[0.08] rounded-2xl p-4 flex flex-col md:flex-row items-start md:items-center justify-between gap-4 backdrop-blur-xl shadow-2xl">
                 <div className="flex items-center gap-4">
                     <div className="relative">
                         <div className={`p-3 rounded-xl ${connectionState === 'CONNECTED' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-amber-500/20 text-amber-400'} border border-white/10`}>
@@ -116,11 +118,11 @@ export default function OverviewTab({ metrics, hardware, history }: OverviewTabP
                     </div>
                 </div>
 
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2 w-full md:w-auto justify-end">
                     {/* Perspective / Immersion Toggle */}
                     <button 
                         onClick={() => setDashboardDensity(dashboardDensity === 'compact' ? 'immersive' : 'compact')}
-                        className={`p-2 rounded-xl border border-white/10 transition-all ${dashboardDensity === 'immersive' ? 'bg-indigo-500/20 text-indigo-400 shadow-[0_0_15px_rgba(99,102,241,0.2)]' : 'bg-white/5 text-slate-400 hover:text-white dark:hover:bg-white/5'}`}
+                        className={`obs-touch-target-standard obs-gpu-120hz-interactive p-2.5 rounded-xl border border-white/10 transition-all flex items-center justify-center ${dashboardDensity === 'immersive' ? 'bg-indigo-500/20 text-indigo-400 shadow-[0_0_15px_rgba(99,102,241,0.2)]' : 'bg-white/5 text-slate-400 hover:text-white dark:hover:bg-white/5'}`}
                         title={dashboardDensity === 'immersive' ? 'Exit Immersive Mode' : 'Enter Immersive Mode'}
                     >
                         {dashboardDensity === 'immersive' ? <Minimize2 size={18} /> : <Maximize2 size={18} />}
@@ -132,42 +134,42 @@ export default function OverviewTab({ metrics, hardware, history }: OverviewTabP
                             setActiveTab('settings');
                             setActiveSettingsTab('dashboard');
                         }}
-                        className="p-2 rounded-xl border border-white/10 transition-all bg-white/5 text-slate-400 hover:text-white hover:bg-white/10"
+                        className="obs-touch-target-standard obs-gpu-120hz-interactive p-2.5 rounded-xl border border-white/10 transition-all bg-white/5 text-slate-400 hover:text-white hover:bg-white/10 flex items-center justify-center"
                         title="Manage Dashboard Settings"
                     >
                         <Settings2 size={18} />
                     </button>
 
-                    <div className="flex items-center gap-3 bg-black/20 p-1.5 rounded-xl border border-white/5">
-                    <button
-                        onClick={() => setPreferredMode('websocket')}
-                        className={`px-4 py-2 rounded-lg text-xs font-bold transition-all flex items-center gap-2 ${preferredMode === 'websocket' ? 'bg-indigo-500 text-white shadow-lg' : 'text-slate-400 hover:text-slate-200 hover:bg-white/5'}`}
-                    >
-                        <Zap size={14} />
-                        WebSocket
-                    </button>
-                    <button
-                        onClick={() => setPreferredMode('poll')}
-                        className={`px-4 py-2 rounded-lg text-xs font-bold transition-all flex items-center gap-2 ${preferredMode === 'poll' ? 'bg-purple-500 text-white shadow-lg' : 'text-slate-400 hover:text-slate-200 hover:bg-white/5'}`}
-                    >
-                        <Radio size={14} />
-                        Poll
-                    </button>
-                    
-                    <div className="h-4 w-px bg-white/10 mx-1" />
-                    
-                    <select 
-                        value={pollInterval}
-                        onChange={(e) => setPollInterval(Number(e.target.value))}
-                        className="bg-transparent text-slate-300 text-xs font-bold outline-none cursor-pointer hover:text-white"
-                    >
-                        <option value={1000} className="bg-[#12141a]">1s</option>
-                        <option value={2000} className="bg-[#12141a]">2s</option>
-                        <option value={5000} className="bg-[#12141a]">5s</option>
-                        <option value={10000} className="bg-[#12141a]">10s</option>
-                    </select>
+                    <div className="flex items-center gap-2 bg-black/20 p-1.5 rounded-xl border border-white/5">
+                        <button
+                            onClick={() => setPreferredMode('websocket')}
+                            className={`obs-touch-target-standard obs-gpu-120hz-interactive px-3.5 py-2 rounded-lg text-xs font-bold transition-all flex items-center gap-2 ${preferredMode === 'websocket' ? 'bg-indigo-500 text-white shadow-lg' : 'text-slate-400 hover:text-slate-200 hover:bg-white/5'}`}
+                        >
+                            <Zap size={14} />
+                            WebSocket
+                        </button>
+                        <button
+                            onClick={() => setPreferredMode('poll')}
+                            className={`obs-touch-target-standard obs-gpu-120hz-interactive px-3.5 py-2 rounded-lg text-xs font-bold transition-all flex items-center gap-2 ${preferredMode === 'poll' ? 'bg-purple-500 text-white shadow-lg' : 'text-slate-400 hover:text-slate-200 hover:bg-white/5'}`}
+                        >
+                            <Radio size={14} />
+                            Poll
+                        </button>
+                        
+                        <div className="h-4 w-px bg-white/10 mx-1" />
+                        
+                        <select 
+                            value={pollInterval}
+                            onChange={(e) => setPollInterval(Number(e.target.value))}
+                            className="obs-touch-target-standard bg-transparent text-slate-300 text-xs font-bold outline-none cursor-pointer hover:text-white px-2 py-1"
+                        >
+                            <option value={1000} className="bg-[#12141a]">1s</option>
+                            <option value={2000} className="bg-[#12141a]">2s</option>
+                            <option value={5000} className="bg-[#12141a]">5s</option>
+                            <option value={10000} className="bg-[#12141a]">10s</option>
+                        </select>
+                    </div>
                 </div>
-            </div>
             </div>
 
             {/* Hero Stats Row */}
@@ -266,6 +268,19 @@ export default function OverviewTab({ metrics, hardware, history }: OverviewTabP
                     </div>
                 </div>
             </div>
+
+            {/* 4. AI Telemetry & Capacity Section */}
+            <div className="pt-2 space-y-4">
+                <div className="flex items-center gap-2 px-1">
+                    <Sparkles size={16} className="text-fuchsia-400" />
+                    <h3 className="text-sm font-bold text-slate-200">AI Telemetry & Capacity Planning</h3>
+                    <span className="text-xs text-slate-500 font-medium">Predictive resource forecasting & peering optimization</span>
+                </div>
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                    <PredictionsCard />
+                    <BandwidthCard />
+                </div>
+            </div>
         </div>
 
     );
@@ -279,7 +294,7 @@ function StatPill({ icon, iconColor, iconBg, label, value }: {
     value: string;
 }) {
     return (
-        <div className="bg-white/[0.02] border border-white/[0.05] rounded-xl px-4 py-3 flex items-center gap-3 backdrop-blur-md group hover:bg-white/[0.04] transition-colors">
+        <div className="glass-card rounded-xl px-4 py-3 flex items-center gap-3 group hover:bg-white/[0.04] transition-colors">
             <div className={`p-2 ${iconBg} rounded-lg ${iconColor}`}>{icon}</div>
             <div className="min-w-0">
                 <p className="text-[10px] text-slate-500 uppercase font-bold tracking-wider">{label}</p>

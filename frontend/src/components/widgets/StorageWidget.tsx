@@ -25,7 +25,7 @@ export default function StorageWidget({ storageData, hardware, density = 'compac
     const overallPct = totalAllGB > 0 ? (usedAllGB / totalAllGB) * 100 : 0;
 
     return (
-        <div className={`bg-white/[0.02] border border-white/[0.05] rounded-2xl relative overflow-hidden backdrop-blur-xl transition-all duration-300 ${isImmersive ? 'p-6 space-y-4 shadow-xl' : 'p-5'}`}>
+        <div className={`glass-card relative overflow-hidden transition-all duration-300 ${isImmersive ? 'p-6 space-y-4 shadow-xl' : 'p-5'}`}>
             <div className={`flex items-center justify-between ${isImmersive ? 'mb-6' : 'mb-4'}`}>
                 <h2 className={`${isImmersive ? 'text-lg' : 'text-sm'} font-semibold text-slate-200 flex items-center gap-2`}>
                     <HardDrive size={isImmersive ? 18 : 16} className="text-amber-400" /> Storage
@@ -34,7 +34,7 @@ export default function StorageWidget({ storageData, hardware, density = 'compac
                     <select 
                         value={selectedDrive}
                         onChange={(e) => setSelectedDrive(e.target.value)}
-                        className="bg-slate-900/50 border border-white/[0.05] text-xs text-slate-300 rounded-md px-2 py-1 outline-none focus:border-amber-500/50 transition-colors"
+                        className="obs-touch-target-standard bg-slate-900/50 border border-white/[0.05] text-xs text-slate-300 rounded-md px-2.5 py-1.5 outline-none focus:border-amber-500/50 transition-colors cursor-pointer"
                     >
                         <option value="all">All Drives</option>
                         {disks.map((d, i) => (

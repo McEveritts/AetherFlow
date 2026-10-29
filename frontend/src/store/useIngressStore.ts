@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { apiFetch } from '@/lib/fetcher';
 
 export interface AppIngressConfig {
   publicDomain: string;          // User-defined external URL mapping
@@ -10,17 +11,29 @@ interface IngressState {
   isSaving: boolean;
   fetchConfigs: () => Promise<void>;
   updateConfig: (appName: string, config: AppIngressConfig) => Promise<void>;
+  updateAppIngress: (appName: string, config: AppIngressConfig) => Promise<void>;
 }
 
-export const useIngressStore = create<IngressState>((set) => ({
+export const useIngressStore = create<IngressState>((set, get) => ({
   configs: {},
   isSaving: false,
   fetchConfigs: async () => {
     try {
-      const response = await fetch('/api/ingress/configs');
+      const response = await apiFetch('/api/v1/admin/ingress/configs');
       if (!response.ok) throw new Error('Failed to fetch ingress configs');
       const data = await response.json();
-      set({ configs: data });
+      const configsMap: Record<string, AppIngressConfig> = {};
+      if (Array.isArray(data.configs)) {
+        for (const item of data.configs) {
+          configsMap[item.appName] = {
+            publicDomain: item.publicDomain || '',
+            externalAccessEnabled: Boolean(item.externalAccessEnabled),
+          };
+        }
+      } else if (data && typeof data === 'object') {
+        Object.assign(configsMap, data);
+      }
+      set({ configs: configsMap });
     } catch (error) {
       console.error("Error fetching ingress configs:", error);
     }
@@ -28,7 +41,7 @@ export const useIngressStore = create<IngressState>((set) => ({
   updateConfig: async (appName, config) => {
     set({ isSaving: true });
     try {
-      const response = await fetch(`/api/ingress/apps/${appName}`, {
+      const response = await apiFetch(`/api/v1/admin/ingress/apps/${encodeURIComponent(appName)}`, {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
@@ -45,5 +58,8 @@ export const useIngressStore = create<IngressState>((set) => ({
       console.error(`Error updating config for ${appName}:`, error);
       set({ isSaving: false });
     }
+  },
+  updateAppIngress: async (appName, config) => {
+    return get().updateConfig(appName, config);
   }
 }));

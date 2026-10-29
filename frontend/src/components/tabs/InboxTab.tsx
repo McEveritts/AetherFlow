@@ -39,8 +39,6 @@ export default function InboxTab() {
         try {
             const success = await approveAction(id);
             if (success) {
-                // If it's an AI-proposed action, the UI explicitly triggers the executor
-                // to bridge the human-in-the-loop boundary and run the real backend logic.
                 if (source === 'FlowAI') {
                     const match = actionTitle.match(/^(Restart|Stop|Start)\s+(.+)$/i);
                     if (match) {
@@ -114,7 +112,7 @@ export default function InboxTab() {
                         <p className="text-sm text-slate-400">Strict operator consent required.</p>
                         <button
                             onClick={() => refresh()}
-                            className="glass-button p-2 rounded-xl hover:border-indigo-500/30"
+                            className="obs-touch-target-standard obs-gpu-120hz-interactive glass-button p-2.5 rounded-xl hover:border-indigo-500/30 flex items-center justify-center"
                             title="Refresh"
                         >
                             <RefreshCw size={16} className={isValidating ? 'animate-spin text-indigo-400' : 'text-slate-400'} />
@@ -140,7 +138,7 @@ export default function InboxTab() {
                             <p className="text-sm mb-4">{error instanceof Error ? error.message : 'Failed to load pending actions'}</p>
                             <button
                                 onClick={() => refresh()}
-                                className="glass-button-primary px-4 py-2 rounded-xl text-sm"
+                                className="obs-touch-target-standard obs-gpu-120hz-interactive glass-button-primary px-4 py-2 rounded-xl text-sm"
                             >
                                 Retry
                             </button>
@@ -162,7 +160,7 @@ export default function InboxTab() {
                         return (
                             <div 
                                 key={action.id} 
-                                className="bg-slate-900/60 border border-white/10 rounded-2xl p-6 transition-all hover:border-indigo-500/30 cursor-pointer group"
+                                className="glass-card rounded-2xl p-6 transition-all hover:border-indigo-500/30 cursor-pointer group"
                                 onClick={() => setSelectedAction(action)}
                             >
                                 <div className="flex flex-col lg:flex-row justify-between items-start gap-6">
@@ -180,7 +178,7 @@ export default function InboxTab() {
                                             </span>
                                             <button 
                                                 onClick={(e) => { e.stopPropagation(); setSelectedAction(action); }}
-                                                className="ml-auto opacity-0 group-hover:opacity-100 transition-opacity text-slate-500 hover:text-indigo-400"
+                                                className="ml-auto obs-touch-target-standard obs-touch-action-reveal opacity-100 md:opacity-0 md:group-hover:opacity-100 p-2 rounded-lg transition-opacity text-slate-500 hover:text-indigo-400 flex items-center justify-center"
                                                 title="View Details"
                                             >
                                                 <Maximize2 size={14} />
@@ -215,7 +213,7 @@ export default function InboxTab() {
                                         <button 
                                             onClick={() => handleApprove(action.id, action.action, action.source)}
                                             disabled={isProcessing}
-                                            className="flex-1 glass-button-primary flex items-center justify-center gap-2 py-3 px-4 shadow-[0_0_15px_rgba(34,197,94,0.2)] hover:shadow-[0_0_20px_rgba(34,197,94,0.4)] border-emerald-500/50 bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20 disabled:opacity-50 disabled:cursor-not-allowed"
+                                            className="obs-touch-target-standard obs-gpu-120hz-interactive flex-1 glass-button-primary flex items-center justify-center gap-2 py-3 px-4 shadow-[0_0_15px_rgba(34,197,94,0.2)] hover:shadow-[0_0_20px_rgba(34,197,94,0.4)] border-emerald-500/50 bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20 disabled:opacity-50 disabled:cursor-not-allowed"
                                         >
                                             {isProcessing ? <Loader2 size={18} className="animate-spin" /> : <CheckCircle size={18} />}
                                             <span className="font-bold tracking-wide">AUTHORIZE</span>
@@ -223,7 +221,7 @@ export default function InboxTab() {
                                         <button 
                                             onClick={() => handleReject(action.id)}
                                             disabled={isProcessing}
-                                            className="flex-1 glass-button flex items-center justify-center gap-2 py-3 px-4 border-red-500/30 text-red-400 hover:bg-red-500/10 hover:border-red-500/50 disabled:opacity-50 disabled:cursor-not-allowed"
+                                            className="obs-touch-target-standard obs-gpu-120hz-interactive flex-1 glass-button flex items-center justify-center gap-2 py-3 px-4 border-red-500/30 text-red-400 hover:bg-red-500/10 hover:border-red-500/50 disabled:opacity-50 disabled:cursor-not-allowed"
                                         >
                                             {isProcessing ? <Loader2 size={18} className="animate-spin" /> : <XCircle size={18} />}
                                             <span className="font-bold tracking-wide">REJECT</span>

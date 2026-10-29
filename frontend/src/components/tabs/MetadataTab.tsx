@@ -1,6 +1,7 @@
 import { Sparkles, FolderSearch, Film, Music, Subtitles, Loader2, CheckCircle2, AlertCircle } from 'lucide-react';
 import { useState } from 'react';
 import { apiFetch } from '@/lib/fetcher';
+import PathSelector from '@/components/ui/PathSelector';
 
 interface EnrichedMedia {
     id: number;
@@ -35,13 +36,10 @@ export default function MetadataTab() {
         setResults([]);
 
         try {
-            // Using raw fetch for streaming support to process NDJSON chunks actively
-            const token = document.cookie.split('; ').find(row => row.startsWith('af_sid='))?.split('=')[1] || '';
-            const res = await fetch('/api/v1/admin/ai/metadata/scan', {
+            const res = await apiFetch('/api/v1/admin/ai/metadata/scan', {
                 method: 'POST',
                 headers: { 
                     'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${token}` 
                 },
                 body: JSON.stringify({ path: scanPath.trim() })
             });
@@ -112,7 +110,7 @@ export default function MetadataTab() {
         <div className="space-y-6 animate-fade-in relative z-10 w-full min-h-[calc(100vh-10rem)]">
 
             {/* Header Card — Scan Input */}
-            <div className="bg-white/[0.02] border border-white/[0.05] rounded-3xl p-8 backdrop-blur-xl relative overflow-hidden">
+            <div className="glass-card rounded-3xl p-8 relative overflow-hidden">
                 <div className="absolute top-0 left-0 w-[400px] h-[400px] bg-violet-500/10 rounded-full blur-[100px] pointer-events-none -translate-x-1/2 -translate-y-1/2"></div>
 
                 <div className="flex items-center gap-4 mb-6 relative z-10">
@@ -125,18 +123,17 @@ export default function MetadataTab() {
                     </div>
                 </div>
 
-                <div className="flex gap-3 relative z-10">
-                    <input
-                        type="text"
+                <div className="flex flex-col md:flex-row gap-3 relative z-10 items-stretch md:items-center">
+                    <PathSelector
                         value={scanPath}
-                        onChange={(e) => setScanPath(e.target.value)}
+                        onChange={setScanPath}
                         placeholder="/path/to/media/directory"
-                        className="flex-1 bg-white/[0.03] border border-white/10 rounded-xl px-5 py-3 text-slate-200 placeholder:text-slate-500 focus:outline-none focus:border-violet-500/50 transition-colors font-mono text-sm"
+                        className="flex-1"
                     />
                     <button
                         onClick={startScan}
                         disabled={!scanPath.trim() || status?.scanning}
-                        className="px-6 py-3 bg-violet-600 hover:bg-violet-500 disabled:bg-violet-600/50 disabled:cursor-not-allowed text-white font-bold rounded-xl transition-all flex items-center gap-2 shadow-lg shadow-violet-500/20"
+                        className="px-6 py-2.5 bg-violet-600 hover:bg-violet-500 disabled:bg-violet-600/50 disabled:cursor-not-allowed text-white text-xs font-bold rounded-xl transition-all flex items-center justify-center gap-2 shadow-lg shadow-violet-500/20 shrink-0"
                     >
                         {status?.scanning ? (
                             <><Loader2 size={18} className="animate-spin" /> Scanning...</>

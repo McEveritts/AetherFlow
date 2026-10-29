@@ -7,6 +7,8 @@ import { MotionPresets } from '@/lib/design';
 import { useState, useEffect, type ComponentType } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { apiFetch } from '@/lib/fetcher';
+import { Button } from '@/components/ui/Button';
+import { Input } from '@/components/ui/Input';
 
 export default function ConsentPage() {
     const { isAuthenticated, isLoading: authLoading } = useAuth();
@@ -74,7 +76,7 @@ export default function ConsentPage() {
 
     if (authLoading || !isAuthenticated) {
         return (
-            <div className="min-h-screen bg-slate-950 flex items-center justify-center">
+            <div className="min-h-screen bg-transparent flex items-center justify-center">
                 <Loader2 size={32} className="animate-spin text-indigo-500" />
             </div>
         );
@@ -82,8 +84,8 @@ export default function ConsentPage() {
 
     if (!clientId || !redirectUri) {
         return (
-            <div className="min-h-screen bg-slate-950 flex items-center justify-center p-6">
-                <div className="glass-panel border-red-500/20 p-8 rounded-3xl max-w-md w-full text-center">
+            <div className="min-h-screen bg-transparent flex items-center justify-center p-6">
+                <div className="glass-panel border border-red-500/30 p-8 rounded-3xl max-w-md w-full text-center shadow-2xl">
                     <ShieldAlert size={48} className="text-red-400 mx-auto mb-4" />
                     <h2 className="text-xl font-bold text-white mb-2">Invalid Authorization Request</h2>
                     <p className="text-sm text-slate-400">The OIDC payload is malformed or missing critical validation parameters.</p>
@@ -93,19 +95,15 @@ export default function ConsentPage() {
     }
 
     return (
-        <div className="min-h-screen bg-slate-950 flex items-center justify-center relative overflow-hidden selection:bg-indigo-500/30 p-6">
-            <div className="fixed top-0 left-1/2 -translate-x-1/2 w-full max-w-7xl h-full pointer-events-none z-0">
-                <div className="absolute top-1/4 left-1/4 w-[50%] h-[50%] bg-indigo-900/20 rounded-full blur-[120px] mix-blend-screen"></div>
-            </div>
-
+        <div className="min-h-screen bg-transparent flex items-center justify-center relative selection:bg-indigo-500/30 p-6">
             <motion.div 
                 className="w-full max-w-md relative z-10"
                 variants={MotionPresets.slideUp}
                 initial="hidden"
                 animate="visible"
             >
-                <div className="glass-panel overflow-hidden rounded-3xl shadow-[0_0_50px_rgba(0,0,0,0.5)]">
-                    <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-indigo-500/50 to-transparent"></div>
+                <div className="glass-panel overflow-hidden rounded-3xl shadow-[0_24px_60px_rgba(0,0,0,0.9)] border border-indigo-500/30">
+                    <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-cyan-400/50 via-indigo-500/80 to-fuchsia-400/50 rounded-t-3xl"></div>
                     
                     <div className="p-8 pb-6 text-center border-b border-white/5">
                         <div className="mx-auto h-16 w-16 mb-4 rounded-2xl bg-gradient-to-br from-indigo-500 to-blue-600 flex items-center justify-center shadow-lg shadow-indigo-500/20 relative">
@@ -120,6 +118,18 @@ export default function ConsentPage() {
                     </div>
 
                     <div className="p-8">
+                        <div className="mb-6 bg-slate-900/40 border border-white/5 rounded-xl p-4">
+                            <label className="text-xs font-bold uppercase tracking-widest text-slate-500 mb-2 block">
+                                Target Redirect URI
+                            </label>
+                            <Input
+                                type="text"
+                                readOnly
+                                value={redirectUri || ''}
+                                className="text-xs font-mono bg-black/40 text-slate-300 border-white/10 select-all cursor-default"
+                            />
+                        </div>
+
                         <div className="mb-6 bg-slate-900/40 border border-white/5 rounded-xl p-4">
                             <h3 className="text-[10px] font-bold uppercase tracking-widest text-slate-500 mb-3 text-center">
                                 Requested Scopes
@@ -167,23 +177,25 @@ export default function ConsentPage() {
                         )}
 
                         <div className="space-y-3">
-                            <button
+                            <Button
+                                variant="primary"
                                 onClick={() => handleConsent(true)}
                                 disabled={isSubmitting}
-                                className="glass-button-primary w-full py-3.5 flex items-center justify-center gap-2 font-bold tracking-wide disabled:opacity-50"
+                                className="w-full py-3.5 flex items-center justify-center gap-2 font-bold tracking-wide disabled:opacity-50"
                             >
                                 {isSubmitting ? <Loader2 size={16} className="animate-spin" /> : <Check size={18} />}
                                 Grant Authorization
-                            </button>
+                            </Button>
                             
-                            <button
+                            <Button
+                                variant="default"
                                 onClick={() => handleConsent(false)}
                                 disabled={isSubmitting}
-                                className="glass-button w-full py-3.5 flex items-center justify-center gap-2 font-bold text-slate-300 tracking-wide disabled:opacity-50"
+                                className="w-full py-3.5 flex items-center justify-center gap-2 font-bold text-slate-300 tracking-wide disabled:opacity-50"
                             >
                                 <X size={18} />
                                 Reject & Revoke
-                            </button>
+                            </Button>
                         </div>
                     </div>
                 </div>

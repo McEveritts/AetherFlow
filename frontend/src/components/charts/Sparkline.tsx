@@ -61,7 +61,10 @@ export default function Sparkline({
     const gTo2 = gradientTo2 || 'transparent';
 
     return (
-        <div className={`relative ${className}`} style={{ height: height + (label || label2 ? 24 : 0) }}>
+        <div
+            className={`relative select-none ${className}`}
+            style={{ height: height + (label || label2 ? 24 : 0), touchAction: 'pan-y' }}
+        >
             {(label || label2) && (
                 <div className="flex items-center gap-4 mb-2 px-2 z-10 relative pointer-events-none">
                     {label && (
@@ -80,7 +83,7 @@ export default function Sparkline({
                     )}
                 </div>
             )}
-            <div style={{ height: height }} className="w-full">
+            <div style={{ height: height, touchAction: 'pan-y' }} className="w-full">
                 <ResponsiveContainer width="100%" height="100%">
                     <AreaChart data={chartData} margin={{ top: 5, right: 0, left: 0, bottom: 0 }}>
                         <defs>
@@ -106,8 +109,8 @@ export default function Sparkline({
                             }}
                             itemStyle={{ color: '#f8fafc', fontSize: '12px', fontWeight: 'bold' }}
                             labelStyle={{ display: 'none' }}
-                            cursor={{ stroke: 'rgba(255,255,255,0.1)', strokeWidth: 1, strokeDasharray: '4 4' }}
-                            animationDuration={200}
+                            cursor={{ stroke: 'rgba(255,255,255,0.15)', strokeWidth: 1, strokeDasharray: '4 4' }}
+                            animationDuration={120}
                         />
 
                         {data2 && (
@@ -119,7 +122,7 @@ export default function Sparkline({
                                 fillOpacity={1} 
                                 fill={showArea ? `url(#${id}-g2)` : "none"} 
                                 isAnimationActive={true}
-                                animationDuration={500}
+                                animationDuration={180}
                                 name={label2 || 'Metric 2'}
                             />
                         )}
@@ -131,7 +134,7 @@ export default function Sparkline({
                             fillOpacity={1} 
                             fill={showArea ? `url(#${id}-g1)` : "none"} 
                             isAnimationActive={true}
-                            animationDuration={500}
+                            animationDuration={180}
                             name={label || 'Metric 1'}
                         />
                     </AreaChart>

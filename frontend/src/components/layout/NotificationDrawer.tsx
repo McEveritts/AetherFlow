@@ -5,6 +5,8 @@ import { X, CheckCircle, AlertCircle, Info, Bell, Trash2, Box } from 'lucide-rea
 import { useEffect, useRef, useState } from 'react';
 import { useMarketplace } from '@/hooks/useMarketplace';
 import { ProgressRing } from '@/components/ui/ProgressRing';
+import { triggerHaptic } from '@/lib/design';
+import { useSystemStore } from '@/store/useSystemStore';
 import useSWR from 'swr';
 
 interface ServerNotification {
@@ -18,9 +20,11 @@ interface ServerNotification {
 
 export default function NotificationDrawer() {
     const { toasts, isDrawerOpen, toggleDrawer, clearAll } = useToast();
+    const { hapticFeedback } = useSystemStore();
     const { apps } = useMarketplace();
     const [isVisible, setIsVisible] = useState(false);
     const hideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const touchStartXRef = useRef<number | null>(null);
 
     const { data: serverData, mutate } = useSWR<{ notifications: ServerNotification[], unread_count: number }>('/api/v1/auth/notifications', { refreshInterval: 5000 });
     const serverNotifications = serverData?.notifications || [];
@@ -33,10 +37,9 @@ export default function NotificationDrawer() {
             hideTimerRef.current = null;
         }
         if (isDrawerOpen) {
-            // Use microtask to avoid synchronous setState in effect body
             hideTimerRef.current = setTimeout(() => setIsVisible(true), 0);
         } else {
-            hideTimerRef.current = setTimeout(() => setIsVisible(false), 300);
+            hideTimerRef.current = setTimeout(() => setIsVisible(false), 220);
         }
         return () => {
             if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
@@ -44,10 +47,27 @@ export default function NotificationDrawer() {
     }, [isDrawerOpen]);
 
     const handleClearAll = async () => {
+        triggerHaptic(8, hapticFeedback);
         clearAll();
         if (serverNotifications.length > 0) {
             await fetch('/api/v1/auth/notifications/dismiss-all', { method: 'POST' });
             mutate();
+        }
+    };
+
+    const handleTouchStart = (e: React.TouchEvent) => {
+        touchStartXRef.current = e.touches[0]?.clientX ?? null;
+    };
+
+    const handleTouchEnd = (e: React.TouchEvent) => {
+        if (touchStartXRef.current === null) return;
+        const endX = e.changedTouches[0]?.clientX ?? touchStartXRef.current;
+        const deltaX = endX - touchStartXRef.current;
+        touchStartXRef.current = null;
+        // Swipe right (> 55px) to dismiss right-docked drawer
+        if (deltaX > 55) {
+            triggerHaptic(6, hapticFeedback);
+            toggleDrawer();
         }
     };
 
@@ -57,13 +77,16 @@ export default function NotificationDrawer() {
         <>
             {/* Backdrop */}
             <div 
-                className={`fixed inset-0 bg-slate-950/20 backdrop-blur-sm z-50 transition-opacity duration-300 ${isDrawerOpen ? 'opacity-100' : 'opacity-0'}`}
+                className={`fixed inset-0 bg-slate-950/35 backdrop-blur-sm z-50 transition-opacity duration-200 ${isDrawerOpen ? 'opacity-100' : 'opacity-0'}`}
                 onClick={toggleDrawer}
             />
 
-            {/* Drawer */}
-            <div className={`fixed top-0 bottom-0 right-0 w-80 md:w-96 bg-slate-950/95 border-l border-white/10 z-50 shadow-2xl backdrop-blur-3xl transform transition-transform duration-300 ease-out flex flex-col ${isDrawerOpen ? 'translate-x-0' : 'translate-x-full'}`}>
-                
+            {/* Drawer with 120Hz GPU acceleration & swipe-right-to-close */}
+            <div
+                onTouchStart={handleTouchStart}
+                onTouchEnd={handleTouchEnd}
+                className={`fixed top-0 bottom-0 right-0 w-80 md:w-96 max-w-[90vw] bg-slate-950/95 border-l border-white/10 z-50 shadow-2xl backdrop-blur-3xl obs-gpu-120hz-rail flex flex-col ${isDrawerOpen ? 'translate-x-0' : 'translate-x-full'}`}
+            >
                 {/* Header */}
                 <div className="flex items-center justify-between p-5 border-b border-white/5 bg-white/[0.02]">
                     <div className="flex items-center gap-2 text-slate-100 font-bold">
@@ -79,15 +102,20 @@ export default function NotificationDrawer() {
                         {(toasts.length + serverNotifications.length) > 0 && (
                             <button 
                                 onClick={handleClearAll}
-                                className="p-1.5 text-slate-400 hover:text-red-400 hover:bg-white/5 rounded-lg transition-colors"
+                                className="obs-touch-target-standard obs-gpu-120hz-interactive p-2 text-slate-400 hover:text-red-400 hover:bg-white/5 rounded-xl flex items-center justify-center"
                                 title="Clear All"
+                                aria-label="Clear All Notifications"
                             >
                                 <Trash2 size={16} />
                             </button>
                         )}
                         <button 
-                            onClick={toggleDrawer}
-                            className="p-1.5 text-slate-400 hover:text-white hover:bg-white/5 rounded-lg transition-colors"
+                            onClick={() => {
+                                triggerHaptic(6, hapticFeedback);
+                                toggleDrawer();
+                            }}
+                            className="obs-touch-target-standard obs-gpu-120hz-interactive p-2 text-slate-400 hover:text-white hover:bg-white/5 rounded-xl flex items-center justify-center"
+                            aria-label="Close Notifications Drawer"
                         >
                             <X size={20} />
                         </button>
@@ -95,7 +123,7 @@ export default function NotificationDrawer() {
                 </div>
 
                 {/* Content */}
-                <div className="flex-1 overflow-y-auto p-4 space-y-3 custom-scrollbar">
+                <div className="flex-1 overflow-y-auto p-4 space-y-3 custom-scrollbar obs-scroller">
                     {/* Active Marketplace Operations */}
                     {activeApps.length > 0 && (
                         <div className="mb-6 space-y-3">

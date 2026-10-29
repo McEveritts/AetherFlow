@@ -60,10 +60,6 @@ export default function DataUsageHistoryWidget({ density = 'compact' }: DataUsag
                         });
                     } else {
                         const group = dailyGroups.get(date)!;
-                        // Handle potential restarts (counters reset to 0) roughly. 
-                        // If a recording is lower than max, we might have restarted, 
-                        // but simple min/max usually captures the day's span well enough unless multi-restarts occur.
-                        // To be perfectly accurate across restarts we'd need sequential diffs, but min/max is standard for net IO.
                         group.minRx = Math.min(group.minRx, record.net_rx_bytes);
                         group.maxRx = Math.max(group.maxRx, record.net_rx_bytes);
                         group.minTx = Math.min(group.minTx, record.net_tx_bytes);
@@ -102,7 +98,7 @@ export default function DataUsageHistoryWidget({ density = 'compact' }: DataUsag
     }, [data]);
 
     return (
-        <div className={`bg-white/[0.02] border border-white/[0.05] rounded-2xl relative overflow-hidden group transition-all duration-300 hover:bg-white/[0.04] backdrop-blur-xl flex flex-col h-full ${isImmersive ? 'p-6 py-7' : 'p-5'}`}>
+        <div className={`glass-card relative overflow-hidden group transition-all duration-300 hover:bg-white/[0.04] flex flex-col h-full ${isImmersive ? 'p-6 py-7' : 'p-5'}`}>
             {/* Header & Controls */}
             <div className={`flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${isImmersive ? 'mb-8' : 'mb-6'}`}>
                 <h2 className={`${isImmersive ? 'text-lg' : 'text-sm'} font-semibold text-slate-200 flex items-center gap-2`}>
@@ -113,7 +109,7 @@ export default function DataUsageHistoryWidget({ density = 'compact' }: DataUsag
                         <button
                             key={d}
                             onClick={() => setDays(d)}
-                            className={`px-3 py-1 text-xs font-medium rounded-md transition-all ${
+                            className={`obs-touch-target-standard obs-gpu-120hz-interactive px-3 py-1.5 text-xs font-medium rounded-md transition-all ${
                                 days === d
                                     ? 'bg-indigo-500/20 text-indigo-300 shadow-sm'
                                     : 'text-slate-400 hover:text-slate-200 hover:bg-white/[0.02]'
@@ -138,7 +134,10 @@ export default function DataUsageHistoryWidget({ density = 'compact' }: DataUsag
             {!error && (
                 <div className={`flex-1 flex flex-col ${isImmersive ? 'min-h-[350px]' : 'min-h-[220px]'}`}>
                     {/* The Chart */}
-                    <div className={`flex-1 relative -mx-2 ${isImmersive ? 'min-h-[280px]' : 'min-h-[160px]'}`}>
+                    <div
+                        className={`flex-1 relative -mx-2 select-none ${isImmersive ? 'min-h-[280px]' : 'min-h-[160px]'}`}
+                        style={{ touchAction: 'pan-y' }}
+                    >
                         {loading && data.length === 0 ? (
                              <div className="absolute inset-0 flex items-center justify-center">
                                  <div className="w-5 h-5 border-2 border-indigo-500/30 border-t-indigo-500 rounded-full animate-spin" />
@@ -177,10 +176,11 @@ export default function DataUsageHistoryWidget({ density = 'compact' }: DataUsag
                                         contentStyle={{ backgroundColor: 'rgba(15, 23, 42, 0.9)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '12px', backdropFilter: 'blur(16px)' }}
                                         itemStyle={{ color: '#f8fafc', fontSize: '12px', fontWeight: 'bold' }}
                                         labelStyle={{ color: '#94a3b8', fontSize: '11px', marginBottom: '4px' }}
-                                    formatter={(value) => [formatBytes(Number(value || 0)), '']}
+                                        formatter={(value) => [formatBytes(Number(value || 0)), '']}
+                                        animationDuration={120}
                                     />
-                                    <Area type="monotone" name="Downloaded" dataKey="downloadedBytes" stroke="#818cf8" strokeWidth={2} fillOpacity={1} fill="url(#colorDl)" />
-                                    <Area type="monotone" name="Uploaded" dataKey="uploadedBytes" stroke="#2dd4bf" strokeWidth={2} fillOpacity={1} fill="url(#colorUl)" />
+                                    <Area type="monotone" name="Downloaded" dataKey="downloadedBytes" stroke="#818cf8" strokeWidth={2} fillOpacity={1} fill="url(#colorDl)" animationDuration={180} />
+                                    <Area type="monotone" name="Uploaded" dataKey="uploadedBytes" stroke="#2dd4bf" strokeWidth={2} fillOpacity={1} fill="url(#colorUl)" animationDuration={180} />
                                 </AreaChart>
                             </ResponsiveContainer>
                         )}

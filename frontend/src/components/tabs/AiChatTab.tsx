@@ -4,7 +4,7 @@ import { useSystemStore } from '@/store/useSystemStore';
 import { apiFetch } from '@/lib/fetcher';
 import { useMetrics } from '@/hooks/useMetrics';
 import { useToast } from '@/contexts/ToastContext';
-import { AI_PROVIDERS, AI_MODELS, resolveProviderForModel } from '@/lib/ai-models';
+import { AI_PROVIDERS, AI_MODELS } from '@/lib/ai-models';
 import type { AIProviderID } from '@/lib/ai-models';
 
 interface ChatMessage {
@@ -47,9 +47,9 @@ export default function AiChatTab() {
         }
     }, [messages, isTyping]);
 
-    // Close pickers when clicking outside
+    // Close pickers when clicking or tapping outside
     useEffect(() => {
-        const handleClickOutside = (e: MouseEvent) => {
+        const handleClickOutside = (e: PointerEvent) => {
             if (modelPickerRef.current && !modelPickerRef.current.contains(e.target as Node)) {
                 setShowModelPicker(false);
             }
@@ -57,8 +57,8 @@ export default function AiChatTab() {
                 setShowContextPicker(false);
             }
         };
-        document.addEventListener('mousedown', handleClickOutside);
-        return () => document.removeEventListener('mousedown', handleClickOutside);
+        document.addEventListener('pointerdown', handleClickOutside);
+        return () => document.removeEventListener('pointerdown', handleClickOutside);
     }, []);
 
     const activeModels = AI_MODELS[selectedProvider] || [];
@@ -85,7 +85,6 @@ export default function AiChatTab() {
             };
             if (supportMode) {
                 body.context_mode = contextMode;
-                // Dynamically inject local state boundaries into AI payload
                 if (contextMode === 'full' || contextMode === 'metrics') {
                     body.metrics_snapshot = metrics;
                 }
@@ -127,7 +126,7 @@ export default function AiChatTab() {
             <div className={`absolute top-0 left-0 w-[500px] h-[500px] rounded-full blur-[100px] pointer-events-none -translate-x-1/2 -translate-y-1/2 transition-colors duration-700 ${supportMode ? 'bg-amber-500/10' : 'bg-indigo-500/10'}`}></div>
             <div className={`absolute bottom-0 right-0 w-[600px] h-[600px] rounded-full blur-[120px] pointer-events-none translate-x-1/3 translate-y-1/3 transition-colors duration-700 ${supportMode ? 'bg-orange-500/5' : 'bg-blue-500/5'}`}></div>
 
-            <div className="flex items-center justify-between p-6 border-b border-white/[0.05] bg-slate-900/50 relative z-10 backdrop-blur-md">
+            <div className="flex flex-wrap items-center justify-between gap-3 p-4 md:p-6 border-b border-white/[0.05] bg-slate-900/50 relative z-10 backdrop-blur-md">
                 <div className="flex items-center gap-4">
                     <div className={`h-10 w-10 rounded-xl flex items-center justify-center border transition-colors duration-300 ${supportMode ? 'bg-amber-500/20 border-amber-500/30' : 'bg-indigo-500/20 border-indigo-500/30'}`}>
                         {supportMode ? <Wrench size={20} className="text-amber-400" /> : <Sparkles size={20} className="text-indigo-400" />}
@@ -147,11 +146,11 @@ export default function AiChatTab() {
                         </div>
                     </div>
                 </div>
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                     {/* Support Mode Toggle */}
                     <button
                         onClick={() => setSupportMode(!supportMode)}
-                        className={`flex items-center gap-2 px-3 py-2 rounded-xl text-sm font-medium transition-all border ${supportMode
+                        className={`obs-touch-target-standard obs-gpu-120hz-interactive flex items-center gap-2 px-3 py-2 rounded-xl text-sm font-medium transition-all border ${supportMode
                             ? 'bg-amber-500/20 border-amber-500/30 text-amber-300 shadow-lg shadow-amber-500/10'
                             : 'bg-white/[0.04] border-white/10 text-slate-400 hover:bg-white/[0.08] hover:text-slate-300'
                             }`}
@@ -165,7 +164,7 @@ export default function AiChatTab() {
                         <div className="relative" ref={contextPickerRef}>
                             <button
                                 onClick={() => setShowContextPicker(!showContextPicker)}
-                                className="flex items-center gap-2 px-3 py-2 bg-amber-500/10 border border-amber-500/20 rounded-xl text-sm text-amber-300 hover:bg-amber-500/20 transition-all"
+                                className="obs-touch-target-standard obs-gpu-120hz-interactive flex items-center gap-2 px-3 py-2 bg-amber-500/10 border border-amber-500/20 rounded-xl text-sm text-amber-300 hover:bg-amber-500/20 transition-all"
                             >
                                 <currentContext.icon size={14} />
                                 <span className="font-medium">{currentContext.name}</span>
@@ -182,7 +181,7 @@ export default function AiChatTab() {
                                             <button
                                                 key={mode.id}
                                                 onClick={() => { setContextMode(mode.id); setShowContextPicker(false); }}
-                                                className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg text-sm transition-all ${contextMode === mode.id
+                                                className={`obs-touch-target-standard w-full flex items-center justify-between px-3 py-2.5 rounded-lg text-sm transition-all ${contextMode === mode.id
                                                     ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
                                                     : 'text-slate-300 hover:bg-white/[0.06] border border-transparent'
                                                     }`}
@@ -206,7 +205,7 @@ export default function AiChatTab() {
                     <div className="relative" ref={modelPickerRef}>
                         <button
                             onClick={() => setShowModelPicker(!showModelPicker)}
-                            className="flex items-center gap-2 px-3 py-2 bg-white/[0.04] border border-white/10 rounded-xl text-sm text-slate-300 hover:bg-white/[0.08] hover:border-indigo-500/30 transition-all"
+                            className="obs-touch-target-standard obs-gpu-120hz-interactive flex items-center gap-2 px-3 py-2 bg-white/[0.04] border border-white/10 rounded-xl text-sm text-slate-300 hover:bg-white/[0.08] hover:border-indigo-500/30 transition-all"
                         >
                             <Sparkles size={14} className="text-indigo-400" />
                             <span className="font-medium">{currentModel.name}</span>
@@ -218,7 +217,7 @@ export default function AiChatTab() {
                                 <div className="p-2 border-b border-white/[0.05] flex items-center justify-between">
                                     <p className="text-[10px] uppercase tracking-wider text-slate-500 font-bold px-2 py-1">Select Model</p>
                                     <select
-                                        className="bg-slate-800 text-xs text-slate-300 rounded border border-white/10 px-2 py-1 outline-none"
+                                        className="obs-touch-target-standard bg-slate-800 text-xs text-slate-300 rounded border border-white/10 px-2 py-1 outline-none"
                                         value={selectedProvider}
                                         onChange={(e) => {
                                             const newProvider = e.target.value as AIProviderID;
@@ -237,7 +236,7 @@ export default function AiChatTab() {
                                         <button
                                             key={model.id}
                                             onClick={() => { setSelectedModel(model.id); setShowModelPicker(false); }}
-                                            className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg text-sm transition-all ${selectedModel === model.id
+                                            className={`obs-touch-target-standard w-full flex items-center justify-between px-3 py-2.5 rounded-lg text-sm transition-all ${selectedModel === model.id
                                                     ? 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/30'
                                                     : 'text-slate-300 hover:bg-white/[0.06] border border-transparent'
                                                 }`}
@@ -258,7 +257,7 @@ export default function AiChatTab() {
                             </div>
                         )}
                     </div>
-                    <button onClick={() => setActiveTab('settings')} className="p-2 text-slate-400 hover:text-white hover:bg-white/10 rounded-lg transition-colors">
+                    <button onClick={() => setActiveTab('settings')} className="obs-touch-target-standard obs-gpu-120hz-interactive p-2.5 text-slate-400 hover:text-white hover:bg-white/10 rounded-lg transition-colors flex items-center justify-center">
                         <Settings size={18} />
                     </button>
                 </div>
@@ -278,7 +277,7 @@ export default function AiChatTab() {
             )}
 
             {/* Chat Area */}
-            <div ref={scrollRef} className="flex-1 overflow-y-auto p-8 space-y-8 relative z-10 no-scrollbar scroll-smooth">
+            <div ref={scrollRef} className="flex-1 overflow-y-auto p-4 md:p-8 space-y-6 md:space-y-8 relative z-10 no-scrollbar scroll-smooth">
                 {messages.map((msg, index) => (
                     <div key={index} className={`flex gap-4 max-w-3xl ${msg.role === 'user' ? 'ml-auto justify-end' : ''}`}>
                         {msg.role === 'assistant' && (
@@ -295,7 +294,7 @@ export default function AiChatTab() {
 
                             {/* Render Contextual Payload if present */}
                             {msg.payload && msg.payload.type === 'system_action' && (
-                                <div className="mt-4 mt-4 bg-slate-950/80 border border-indigo-500/30 rounded-xl p-4 shadow-[0_0_15px_rgba(99,102,241,0.1)]">
+                                <div className="mt-4 bg-slate-950/80 border border-indigo-500/30 rounded-xl p-4 shadow-[0_0_15px_rgba(99,102,241,0.1)]">
                                     <div className="flex items-center gap-3 mb-2">
                                         <div className="bg-indigo-500/20 p-2 rounded-lg text-indigo-400">
                                             <Wrench size={16} />
@@ -319,7 +318,7 @@ export default function AiChatTab() {
                                                 addToast(`Action #${(msg.payload?.action_id as string) || '?'} is waiting in your Approval Inbox.`, 'success');
                                                 setActiveTab('inbox');
                                             }}
-                                            className="px-3 py-1.5 bg-indigo-500 hover:bg-indigo-400 text-white text-xs font-semibold rounded-lg transition-colors flex items-center gap-2 shadow-sm"
+                                            className="obs-touch-target-standard obs-gpu-120hz-interactive px-3 py-1.5 bg-indigo-500 hover:bg-indigo-400 text-white text-xs font-semibold rounded-lg transition-colors flex items-center gap-2 shadow-sm"
                                         >
                                             Review in Inbox <ChevronRight size={14} />
                                         </button>
@@ -351,25 +350,25 @@ export default function AiChatTab() {
             </div>
 
             {/* Input Area */}
-            <div className="p-6 bg-slate-950/80 backdrop-blur-xl border-t border-white/[0.05] relative z-10 w-full">
+            <div className="p-4 md:p-6 bg-slate-950/80 backdrop-blur-xl border-t border-white/[0.05] relative z-10 w-full">
                 <form onSubmit={handleSendMessage} className={`relative max-w-4xl mx-auto flex items-end overflow-hidden rounded-2xl bg-white/[0.02] border focus-within:bg-white/[0.04] transition-all shadow-inner ${supportMode ? 'border-amber-500/20 focus-within:border-amber-500/50' : 'border-white/10 focus-within:border-indigo-500/50'}`}>
                     <textarea
                         value={input}
                         onChange={(e) => setInput(e.target.value)}
                         onKeyDown={handleKeyDown}
                         placeholder={supportMode ? "Describe the issue you're troubleshooting..." : "Ask FlowAI about your system..."}
-                        className="w-full bg-transparent py-4 pl-6 pr-16 text-slate-200 placeholder:text-slate-500 focus:outline-none resize-none overflow-hidden min-h-[56px] max-h-32 text-sm"
+                        className="w-full bg-transparent py-4 pl-6 pr-24 text-slate-200 placeholder:text-slate-500 focus:outline-none resize-none overflow-hidden min-h-[56px] max-h-32 text-sm"
                         rows={1}
                         disabled={isTyping}
                     />
-                    <div className="absolute right-2 bottom-2 flex gap-2">
-                        <button type="button" className="p-2 text-slate-400 hover:text-white hover:bg-white/10 rounded-xl transition-colors">
+                    <div className="absolute right-2 bottom-1.5 flex gap-1.5">
+                        <button type="button" className="obs-touch-target-standard p-2 text-slate-400 hover:text-white hover:bg-white/10 rounded-xl transition-colors flex items-center justify-center">
                             <Lock size={18} />
                         </button>
                         <button
                             type="submit"
                             disabled={!input.trim() || isTyping}
-                            className={`p-2 rounded-xl text-white shadow-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${supportMode ? 'bg-amber-500 hover:bg-amber-400' : 'bg-indigo-500 hover:bg-indigo-400'}`}
+                            className={`obs-touch-target-standard obs-gpu-120hz-interactive p-2 rounded-xl text-white shadow-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center ${supportMode ? 'bg-amber-500 hover:bg-amber-400' : 'bg-indigo-500 hover:bg-indigo-400'}`}
                         >
                             <ChevronRight size={18} />
                         </button>

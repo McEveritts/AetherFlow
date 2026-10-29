@@ -1,7 +1,7 @@
 'use client';
 
 import React from 'react';
-import { Cpu, Zap, Activity, Monitor } from 'lucide-react';
+import { Monitor } from 'lucide-react';
 import { GpuMetric } from '@/types/dashboard';
 
 interface GpuWidgetProps {
@@ -15,7 +15,7 @@ export default function GpuWidget({ gpus, density }: GpuWidgetProps) {
     const isImmersive = density === 'immersive';
 
     return (
-        <div className={`bg-slate-900/40 border border-white/10 rounded-2xl overflow-hidden backdrop-blur-md transition-all duration-300 ${isImmersive ? 'p-6 space-y-4 shadow-blue-500/10 shadow-2xl' : 'p-4'}`}>
+        <div className={`glass-card relative overflow-hidden transition-all duration-300 ${isImmersive ? 'p-6 space-y-4 shadow-blue-500/10 shadow-2xl' : 'p-4'}`}>
             <div className="flex items-center justify-between mb-2">
                 <div className="flex items-center gap-3">
                     <div className="p-2 bg-blue-500/20 rounded-lg text-blue-400">
@@ -58,7 +58,7 @@ export default function GpuWidget({ gpus, density }: GpuWidgetProps) {
                                 </div>
                                 <div className="h-1.5 w-full bg-white/5 rounded-full overflow-hidden">
                                     <div 
-                                        className="h-full bg-gradient-to-r from-blue-500 to-indigo-500 transition-all duration-500" 
+                                        className="h-full bg-gradient-to-r from-blue-500 to-indigo-500 transition-all duration-300" 
                                         style={{ width: `${gpu.usage_pct || 0}%` }}
                                     />
                                 </div>

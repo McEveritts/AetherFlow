@@ -1,8 +1,8 @@
 import { useState, useRef } from 'react';
 import useSWR from 'swr';
 import { FolderUp, File as FileIcon, UploadCloud, Download, HardDrive, FolderOpen, X, ChevronRight } from 'lucide-react';
-import { apiFetch } from '@/lib/fetcher';
 import { useToast } from '@/contexts/ToastContext';
+import PathSelector from '@/components/ui/PathSelector';
 
 interface FetchedFile {
     name: string;
@@ -102,19 +102,19 @@ export default function FileshareTab() {
 
     return (
         <div className="space-y-6 animate-fade-in relative z-10 w-full min-h-screen">
-            <div className="bg-white/[0.02] border border-white/[0.05] rounded-3xl p-10 backdrop-blur-xl relative overflow-hidden flex flex-col h-[calc(100vh-10rem)]">
+            <div className="bg-white/[0.02] border border-white/[0.05] rounded-3xl p-6 md:p-10 backdrop-blur-xl relative overflow-hidden flex flex-col lg:h-[calc(100vh-10rem)]">
 
                 {/* Background glow */}
                 <div className="absolute top-0 right-0 w-[500px] h-[500px] bg-blue-500/10 rounded-full blur-[120px] pointer-events-none -translate-y-1/2 translate-x-1/3"></div>
 
-                <div className="flex items-center justify-between mb-8 pb-4 border-b border-white/5 relative z-10 shrink-0">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-8 pb-4 border-b border-white/5 relative z-10 shrink-0">
                     <div>
                         <h2 className="text-2xl font-bold text-slate-100 flex items-center gap-3">
                             <FolderUp size={24} className="text-blue-400" />
                             Secure File Drop
                         </h2>
                         {files && (
-                            <div className="mt-3 flex flex-col gap-1.5 w-[300px]">
+                            <div className="mt-3 flex flex-col gap-1.5 w-full sm:w-[300px]">
                                 <div className="flex justify-between text-xs font-semibold text-slate-400">
                                     <span>{formatBytes(files.reduce((acc, f) => acc + f.size, 0))} Used</span>
                                     <span>50 GB Total</span>
@@ -128,16 +128,16 @@ export default function FileshareTab() {
                             </div>
                         )}
                     </div>
-                    <div className="flex items-center gap-2 text-sm text-slate-400 bg-white/5 px-4 py-2 rounded-xl h-fit">
+                    <div className="flex items-center gap-2 text-sm text-slate-400 bg-white/5 px-4 py-2 rounded-xl h-fit self-start sm:self-auto">
                         <HardDrive size={16} />
                         Local Storage
                     </div>
                 </div>
 
-                <div className="flex gap-6 relative z-10 flex-1 min-h-0">
+                <div className="flex flex-col lg:flex-row gap-6 relative z-10 flex-1 min-h-0">
                     {/* Upload Zone */}
                     <div
-                        className={`w-1/3 flex flex-col items-center justify-center border-2 border-dashed rounded-3xl transition-all duration-300 p-8 text-center ${isDragging ? 'border-blue-500 bg-blue-500/10 scale-[1.02]' : 'border-white/10 hover:border-white/20 hover:bg-white/[0.02]'}`}
+                        className={`w-full lg:w-1/3 flex flex-col items-center justify-center border-2 border-dashed rounded-3xl transition-all duration-300 p-6 md:p-8 text-center ${isDragging ? 'border-blue-500 bg-blue-500/10 scale-[1.02]' : 'border-white/10 hover:border-white/20 hover:bg-white/[0.02]'}`}
                         onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
                         onDragLeave={() => setIsDragging(false)}
                         onDrop={(e) => {
@@ -171,7 +171,7 @@ export default function FileshareTab() {
                                         <span className="text-sm font-bold text-blue-400">Uploading chunks...</span>
                                         <div className="flex items-center gap-3">
                                             <span className="text-xs text-slate-400 font-mono">{uploadProgress}%</span>
-                                            <button onClick={cancelUpload} className="p-1 rounded bg-white/5 hover:bg-red-500/20 hover:text-red-400 text-slate-400 transition-colors">
+                                            <button onClick={cancelUpload} className="obs-touch-target-standard p-2 rounded bg-white/5 hover:bg-red-500/20 hover:text-red-400 text-slate-400 transition-colors flex items-center justify-center">
                                                 <X size={14} />
                                             </button>
                                         </div>
@@ -183,7 +183,7 @@ export default function FileshareTab() {
                             ) : (
                                 <button
                                     onClick={() => fileInputRef.current?.click()}
-                                    className="px-6 py-3 w-full bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-xl transition-all shadow-lg shadow-blue-500/20"
+                                    className="obs-touch-target-standard obs-gpu-120hz-interactive px-6 py-3 w-full bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-xl transition-all shadow-lg shadow-blue-500/20"
                                 >
                                     Browse Local Files
                                 </button>
@@ -192,20 +192,28 @@ export default function FileshareTab() {
                     </div>
 
                     {/* File List */}
-                    <div className="flex-1 bg-slate-950/50 border border-white/10 rounded-3xl p-6 flex flex-col overflow-hidden">
-                        <div className="flex items-center gap-2 text-sm font-bold text-slate-400 uppercase tracking-wider mb-6 shrink-0 bg-white/[0.02] p-2 rounded-lg border border-white/5">
-                            <button onClick={() => setCurrentPath('/')} className="hover:text-blue-400 cursor-pointer">Root</button>
-                            {currentPath !== '/' && currentPath.split('/').filter(Boolean).map((part, idx, arr) => (
-                                <div key={idx} className="flex items-center gap-2">
-                                    <ChevronRight size={14} className="text-slate-600" />
-                                    <button 
-                                        onClick={() => setCurrentPath('/' + arr.slice(0, idx+1).join('/'))}
-                                        className="hover:text-blue-400 cursor-pointer"
-                                    >
-                                        {part}
-                                    </button>
-                                </div>
-                            ))}
+                    <div className="flex-1 min-h-[360px] bg-slate-950/50 border border-white/10 rounded-3xl p-6 flex flex-col overflow-hidden">
+                        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 mb-6 shrink-0 bg-white/[0.02] p-2 rounded-xl border border-white/5">
+                            <div className="flex items-center gap-2 text-sm font-bold text-slate-400 uppercase tracking-wider overflow-x-auto max-w-full obs-touch-pills">
+                                <button onClick={() => setCurrentPath('/')} className="hover:text-blue-400 cursor-pointer py-1 px-1.5">Root</button>
+                                {currentPath !== '/' && currentPath.split('/').filter(Boolean).map((part, idx, arr) => (
+                                    <div key={idx} className="flex items-center gap-2">
+                                        <ChevronRight size={14} className="text-slate-600" />
+                                        <button 
+                                            onClick={() => setCurrentPath('/' + arr.slice(0, idx+1).join('/'))}
+                                            className="hover:text-blue-400 cursor-pointer py-1 px-1.5"
+                                        >
+                                            {part}
+                                        </button>
+                                    </div>
+                                ))}
+                            </div>
+                            <PathSelector 
+                                value={currentPath} 
+                                onChange={setCurrentPath} 
+                                placeholder="Jump to path..." 
+                                className="w-full sm:w-64 shrink-0" 
+                            />
                         </div>
 
                         <div className="flex-1 overflow-y-auto pr-2 space-y-3 no-scrollbar transform translate-z-0">
@@ -223,20 +231,20 @@ export default function FileshareTab() {
                             ) : (
                                 files.map((file, i) => (
                                     <div key={i} className="flex items-center justify-between p-4 bg-white/[0.02] hover:bg-white/[0.04] border border-white/5 rounded-2xl transition-colors group">
-                                        <div className="flex items-center gap-4 flex-1">
-                                            <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${file.isDir ? 'bg-amber-500/10 text-amber-400' : 'bg-blue-500/10 text-blue-400'}`}>
+                                        <div className="flex items-center gap-4 flex-1 min-w-0">
+                                            <div className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${file.isDir ? 'bg-amber-500/10 text-amber-400' : 'bg-blue-500/10 text-blue-400'}`}>
                                                 {file.isDir ? <FolderOpen size={20} /> : <FileIcon size={20} />}
                                             </div>
-                                            <div className="flex-1">
+                                            <div className="flex-1 min-w-0">
                                                 {file.isDir ? (
                                                     <button 
                                                         onClick={() => setCurrentPath(currentPath === '/' ? `/${file.name}` : `${currentPath}/${file.name}`)}
-                                                        className="text-sm font-bold text-slate-200 hover:text-blue-400 transition-colors text-left"
+                                                        className="text-sm font-bold text-slate-200 hover:text-blue-400 transition-colors text-left truncate block w-full py-0.5"
                                                     >
                                                         {file.name}
                                                     </button>
                                                 ) : (
-                                                    <p className="text-sm font-bold text-slate-200">{file.name}</p>
+                                                    <p className="text-sm font-bold text-slate-200 truncate">{file.name}</p>
                                                 )}
                                                 <div className="flex gap-3 text-xs text-slate-500 mt-1">
                                                     {!file.isDir && <span>{formatBytes(file.size)}</span>}
@@ -248,7 +256,7 @@ export default function FileshareTab() {
                                         {!file.isDir && (
                                             <button
                                                 onClick={() => handleDownload(file.name)}
-                                                className="p-2 text-slate-400 hover:text-white hover:bg-white/10 rounded-lg transition-colors opacity-0 group-hover:opacity-100 flex items-center justify-center"
+                                                className="obs-touch-target-standard obs-touch-action-reveal opacity-100 md:opacity-0 md:group-hover:opacity-100 p-2.5 text-slate-400 hover:text-white hover:bg-white/10 rounded-lg transition-all flex items-center justify-center shrink-0"
                                                 title="Download File"
                                             >
                                                 <Download size={18} />

@@ -15,11 +15,15 @@ import {
   Users,
   Store,
   FolderOpen,
-  Bot
+  Bot,
+  X,
+  Radio,
+  Boxes
 } from 'lucide-react';
 import { useSystemStore } from '@/store/useSystemStore';
 import { TabId } from '@/types/dashboard';
 import { useToast } from '@/contexts/ToastContext';
+import { triggerHaptic } from '@/lib/design';
 
 type ActionType = 'navigate' | 'task';
 
@@ -39,8 +43,10 @@ const actions: PaletteAction[] = [
   { id: 'nav-services', title: 'Go to Services', icon: Server, type: 'navigate', tab: 'services' },
   { id: 'nav-marketplace', title: 'Go to Marketplace', icon: Store, type: 'navigate', tab: 'marketplace' },
   { id: 'nav-fileshare', title: 'Go to File Share', icon: FolderOpen, type: 'navigate', tab: 'fileshare' },
+  { id: 'nav-network', title: 'Go to Network & VPN', icon: Radio, type: 'navigate', tab: 'network' },
+  { id: 'nav-cluster', title: 'Go to Cluster Mesh', icon: Boxes, type: 'navigate', tab: 'cluster' },
   { id: 'nav-security', title: 'Go to Security', icon: Shield, type: 'navigate', tab: 'security' },
-  { id: 'nav-users', title: 'Manage Users', icon: Users, type: 'navigate', tab: 'users' },
+  { id: 'nav-users', title: 'Manage Users & Quotas', icon: Users, type: 'navigate', tab: 'users' },
   { id: 'nav-settings', title: 'Go to Settings', icon: Settings, type: 'navigate', tab: 'settings' },
 
   // Background Tasks
@@ -68,11 +74,15 @@ function fuzzyMatch(pattern: string, str: string): boolean {
 }
 
 export function CommandPalette() {
-  const [isOpen, setIsOpen] = useState(false);
+  const {
+    setActiveTab,
+    isCommandPaletteOpen: isOpen,
+    setIsCommandPaletteOpen: setIsOpen,
+    hapticFeedback,
+  } = useSystemStore();
   const [query, setQuery] = useState('');
   const [selectedIndex, setSelectedIndex] = useState(0);
 
-  const { setActiveTab } = useSystemStore();
   const { addToast } = useToast();
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -82,17 +92,18 @@ export function CommandPalette() {
     : actions.filter((action) => fuzzyMatch(query, action.title));
 
   useEffect(() => {
+    if (isOpen) {
+      setQuery('');
+      setSelectedIndex(0);
+      setTimeout(() => inputRef.current?.focus(), 60);
+    }
+  }, [isOpen]);
+
+  useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
         e.preventDefault();
-        setIsOpen((prev) => {
-          if (!prev) {
-            setQuery('');
-            setSelectedIndex(0);
-            setTimeout(() => inputRef.current?.focus(), 100);
-          }
-          return !prev;
-        });
+        setIsOpen(!useSystemStore.getState().isCommandPaletteOpen);
       } else if (e.key === 'Escape') {
         setIsOpen(false);
       }
@@ -100,9 +111,7 @@ export function CommandPalette() {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, []);
-
-  // Removed effect that cascades sets
+  }, [setIsOpen]);
 
   const executeTask = (title: string, duration: number) => {
     addToast(`Started task: ${title}`, 'info');
@@ -112,6 +121,7 @@ export function CommandPalette() {
   };
 
   const executeAction = (action: PaletteAction) => {
+    triggerHaptic(8, hapticFeedback);
     if (action.type === 'navigate' && action.tab) {
       setActiveTab(action.tab);
     } else if (action.type === 'task' && action.taskTitle && action.taskDuration) {
@@ -143,19 +153,20 @@ export function CommandPalette() {
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
+            transition={{ duration: 0.16, ease: [0.22, 1, 0.36, 1] }}
             className="fixed inset-0 z-50 bg-slate-950/60 backdrop-blur-sm transition-opacity"
             onClick={() => setIsOpen(false)}
           />
 
           <motion.div
-            initial={{ opacity: 0, scale: 0.95, y: -20 }}
+            initial={{ opacity: 0, scale: 0.96, y: -16 }}
             animate={{ opacity: 1, scale: 1, y: 0 }}
-            exit={{ opacity: 0, scale: 0.95, y: -20 }}
-            transition={{ type: 'spring', damping: 25, stiffness: 300 }}
-            className="fixed inset-0 z-50 m-auto flex max-h-[80vh] w-full max-w-2xl flex-col overflow-hidden rounded-3xl border border-white/10 bg-slate-900/80 shadow-2xl backdrop-blur-2xl sm:inset-auto sm:top-[20vh]"
+            exit={{ opacity: 0, scale: 0.96, y: -16 }}
+            transition={{ type: 'spring', damping: 30, stiffness: 420, mass: 0.75 }}
+            className="fixed inset-x-4 top-[10vh] sm:inset-auto sm:left-1/2 sm:-translate-x-1/2 sm:top-[16vh] z-50 flex max-h-[80vh] w-auto sm:w-full max-w-2xl flex-col overflow-hidden rounded-3xl border border-white/10 bg-slate-900/90 shadow-2xl backdrop-blur-2xl"
           >
-            <div className="flex items-center border-b border-white/10 px-4 py-4">
-              <Search className="h-5 w-5 text-slate-400" />
+            <div className="flex items-center border-b border-white/10 px-4 py-3">
+              <Search className="h-5 w-5 text-slate-400 shrink-0" />
               <input
                 ref={inputRef}
                 type="text"
@@ -166,15 +177,22 @@ export function CommandPalette() {
                   setSelectedIndex(0);
                 }}
                 onKeyDown={handleKeyDown}
-                className="flex-1 bg-transparent px-4 text-slate-100 placeholder:text-slate-500 focus:outline-none"
+                className="flex-1 bg-transparent px-4 py-2 text-slate-100 placeholder:text-slate-500 focus:outline-none min-w-0"
               />
-              <div className="flex items-center gap-1 text-xs text-slate-500">
+              <div className="hidden sm:flex items-center gap-1 text-xs text-slate-500 mr-2">
                 <kbd className="rounded border border-white/10 bg-slate-800 px-1.5 py-0.5 font-sans">esc</kbd>
-                <span>to close</span>
               </div>
+              <button
+                type="button"
+                onClick={() => setIsOpen(false)}
+                aria-label="Close Command Palette"
+                className="obs-touch-target-standard obs-gpu-120hz-interactive p-2 rounded-xl text-slate-400 hover:text-white hover:bg-white/10 flex items-center justify-center shrink-0"
+              >
+                <X className="h-5 w-5" />
+              </button>
             </div>
 
-            <div className="flex-1 overflow-y-auto p-2 min-h-[300px]">
+            <div className="flex-1 overflow-y-auto p-2 min-h-[280px] obs-scroller">
               {filteredActions.length === 0 ? (
                 <div className="p-8 text-center text-slate-500">
                   <Command className="mx-auto mb-3 h-8 w-8 opacity-50" />
@@ -188,7 +206,7 @@ export function CommandPalette() {
                     return (
                       <button
                         key={action.id}
-                        className={`flex w-full items-center gap-3 rounded-xl px-4 py-3 text-left transition-colors ${
+                        className={`flex w-full items-center gap-3 rounded-xl px-4 py-3 text-left obs-touch-target-standard obs-gpu-120hz-interactive ${
                           isSelected ? 'bg-indigo-500/20 text-indigo-100' : 'text-slate-300 hover:bg-white/5'
                         }`}
                         onClick={() => executeAction(action)}

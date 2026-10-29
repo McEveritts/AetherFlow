@@ -114,7 +114,6 @@ export default function BackupTab() {
             });
             if (res.ok) {
                 setSchedule(prev => prev ? { ...prev, mode: newMode } : null);
-                // Re-fetch after a delay to get the computed window
                 setTimeout(fetchSchedule, 3000);
             }
         } catch {
@@ -142,12 +141,12 @@ export default function BackupTab() {
             {/* Background glow */}
             <div className="absolute top-0 right-0 w-[400px] h-[400px] bg-emerald-500/10 rounded-full blur-[100px] pointer-events-none -translate-y-1/2 translate-x-1/2"></div>
 
-                <div className="flex items-center justify-between mb-8 pb-4 border-b border-white/5 relative z-10">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-8 pb-4 border-b border-white/5 relative z-10">
                     <h2 className="text-2xl font-bold text-slate-100 flex items-center gap-3">
                         <HardDriveDownload size={24} className="text-emerald-400" />
                         System Backups & Snapshots
                     </h2>
-                    <div className="flex items-center gap-2 text-sm text-slate-400 bg-emerald-500/10 text-emerald-400 px-4 py-2 rounded-xl border border-emerald-500/20">
+                    <div className="flex items-center gap-2 text-sm text-slate-400 bg-emerald-500/10 text-emerald-400 px-4 py-2 rounded-xl border border-emerald-500/20 self-start sm:self-auto">
                         <ShieldCheck size={16} />
                         {schedule?.mode === 'smart' ? 'Smart backup automation active' : 'Manual backup mode'}
                     </div>
@@ -170,9 +169,9 @@ export default function BackupTab() {
                         <button
                             onClick={handleRunBackup}
                             disabled={backupState.status === 'running'}
-                            className={`w-full py-4 px-6 rounded-xl font-bold text-white shadow-xl transition-all flex items-center justify-center gap-3 ${backupState.status === 'running'
+                            className={`obs-touch-target-standard obs-gpu-120hz-interactive w-full py-4 px-6 rounded-xl font-bold text-white shadow-xl transition-all flex items-center justify-center gap-3 ${backupState.status === 'running'
                                 ? 'bg-emerald-600/50 cursor-not-allowed'
-                                : 'bg-emerald-600 hover:bg-emerald-500 shadow-emerald-500/20 hover:scale-[1.02]'
+                                : 'bg-emerald-600 hover:bg-emerald-500 shadow-emerald-500/20'
                                 }`}
                         >
                             {backupState.status === 'running' ? (
@@ -231,7 +230,7 @@ export default function BackupTab() {
                         <button
                             onClick={toggleSmartSchedule}
                             disabled={isTogglingSchedule}
-                            className={`w-full py-4 px-6 rounded-xl font-bold text-white shadow-xl transition-all flex items-center justify-center gap-3 ${schedule?.mode === 'smart'
+                            className={`obs-touch-target-standard obs-gpu-120hz-interactive w-full py-4 px-6 rounded-xl font-bold text-white shadow-xl transition-all flex items-center justify-center gap-3 ${schedule?.mode === 'smart'
                                 ? 'bg-purple-600 hover:bg-purple-500 shadow-purple-500/20'
                                 : 'bg-slate-700 hover:bg-slate-600 shadow-none'
                                 }`}
@@ -283,22 +282,22 @@ export default function BackupTab() {
                             ) : (
                                 backups.map((bk) => (
                                     <div key={bk.filename} className="bg-slate-800/50 hover:bg-slate-800 border border-white/5 hover:border-white/10 rounded-xl p-4 flex items-center justify-between transition-colors group">
-                                        <div className="flex items-center gap-4">
-                                            <div className="w-10 h-10 bg-slate-900 rounded-lg flex items-center justify-center text-slate-400 border border-white/5">
+                                        <div className="flex items-center gap-4 min-w-0">
+                                            <div className="w-10 h-10 bg-slate-900 rounded-lg flex items-center justify-center text-slate-400 border border-white/5 shrink-0">
                                                 <Database size={18} />
                                             </div>
-                                            <div>
-                                                <h4 className="text-slate-200 font-mono text-xs mb-1">{bk.filename}</h4>
+                                            <div className="min-w-0">
+                                                <h4 className="text-slate-200 font-mono text-xs mb-1 truncate">{bk.filename}</h4>
                                                 <div className="flex gap-3 text-xs text-slate-500">
                                                     <span>{formatBytes(bk.size)}</span>
                                                     <span>&bull;</span>
-                                                    <span>{new Date(bk.timestamp).toLocaleString()}</span>
+                                                    <span className="truncate">{new Date(bk.timestamp).toLocaleString()}</span>
                                                 </div>
                                             </div>
                                         </div>
                                         <button
                                             onClick={() => handleDownloadBackup(bk.filename)}
-                                            className="w-8 h-8 rounded-lg bg-emerald-500/10 text-emerald-400 flex items-center justify-center hover:bg-emerald-500 hover:text-white transition-colors opacity-0 group-hover:opacity-100 focus:opacity-100"
+                                            className="obs-touch-target-standard obs-touch-action-reveal opacity-100 md:opacity-0 md:group-hover:opacity-100 focus:opacity-100 w-10 h-10 rounded-lg bg-emerald-500/10 text-emerald-400 flex items-center justify-center hover:bg-emerald-500 hover:text-white transition-all shrink-0"
                                             title="Download SQLite Archive"
                                         >
                                             <Download size={16} />

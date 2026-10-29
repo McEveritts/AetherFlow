@@ -1,6 +1,6 @@
 'use client';
 
-import { RefreshCw, Box, Settings, Globe, RotateCcw, Square, Play, Server, Cpu } from 'lucide-react';
+import { RefreshCw, Box, Settings, Globe, RotateCcw, Square, Play, Server, Cpu, X, Network } from 'lucide-react';
 import { useState } from 'react';
 import useSWR from 'swr';
 import { useToast } from '@/contexts/ToastContext';
@@ -11,40 +11,60 @@ import RequireClaim from '@/components/auth/RequireClaim';
 import ServiceLogsModal from '@/components/tabs/ServiceLogsModal';
 import { Terminal } from 'lucide-react';
 import { useSystemStore } from '@/store/useSystemStore';
+import { ExternalAccessCard } from '@/components/ingress/ExternalAccessCard';
+import { DeploymentStatus } from '@/components/deploy/DeploymentStatus';
 
-// Maps service process names to their web UI ports/paths
+// Fallback map when default_port is not provided by backend
 const SERVICE_WEB_PORTS: Record<string, number | string> = {
     'plexmediaserver': 32400,
     'jellyfin': 8096,
-    'emby-server': 8096,
+    'emby-server': 8097,
     'sonarr': 8989,
     'radarr': 7878,
     'lidarr': 8686,
     'readarr': 8787,
     'prowlarr': 9696,
     'bazarr': 6767,
-    'overseerr': 5055,
+    'jellyseerr': 5055,
+    'overseerr': 5056,
     'ombi': 5000,
     'tautulli': 8181,
     'jackett': 9117,
+    'flaresolverr': 8191,
     'navidrome': 4533,
     'qbittorrent': 8180,
     'deluged': 8112,
     'transmission-daemon': 9091,
-    'sabnzbd': 8080,
+    'sabnzbd': 8085,
     'nzbget': 6789,
     'flood': 3001,
     'autobrr': 7474,
+    'nextcloud': 8088,
     'syncthing': 8384,
-    'filebrowser': 8085,
+    'filebrowser': 8095,
+    'pihole-FTL': 8089,
+    'vaultwarden': 8343,
     'grafana-server': 3000,
     'prometheus': 9090,
     'netdata': 19999,
-    'uptime-kuma': 3009,
+    'uptime-kuma': 3004,
     'home-assistant@homeassistant': 8123,
-    'portainer': 9443,
-    'gitea': 3000,
-    'pihole-FTL': '/admin',
+    'adguardhome': 3080,
+    'rutorrent': 8087,
+    'rclone': 5572,
+    'autoscan': 3030,
+    'audiobookshelf': 13378,
+    'kavita': 5002,
+    'calibreweb': 8083,
+    'librespeed': 8988,
+    'thelounge': 9000,
+    'znc': 6501,
+    'scrutiny': 8098,
+    'paperless-ngx': 8010,
+    'paperless-webserver': 8010,
+    'n8n': 5678,
+    'gitea': 3002,
+    'organizr': 8086,
     'apache2': 443,
     'aetherflow-frontend': '/',
     'aetherflow-api': '/api/v1/admin/services',
@@ -57,13 +77,18 @@ interface ServiceInfo {
     managed_by?: string;
     process?: string;
     id?: string;
+    default_port?: number;
+    web_path?: string;
+    units?: string[];
 }
+
 
 export default function ServicesTab() {
     const { addToast } = useToast();
     const { user } = useAuth();
     const [loadingService, setLoadingService] = useState<string | null>(null);
     const [logsModalService, setLogsModalService] = useState<string | null>(null);
+    const [ingressModalApp, setIngressModalApp] = useState<string | null>(null);
     const canControlServices = user?.role === 'admin';
     const { setActiveTab } = useSystemStore();
 
@@ -105,10 +130,8 @@ export default function ServicesTab() {
                 throw new Error(d.message || d.error || 'Daemon control operation rejected.');
             }
             addToast(`Successfully executed '${action}' on ${name}.`, 'success');
-            // Revalidate to get actual server state
             setTimeout(() => mutate(), 1500);
         } catch (err: unknown) {
-            // Rollback optimistic update on error
             mutate(prevData, false);
             addToast(err instanceof Error ? err.message : 'Undefined system exception encountered.', 'error');
         } finally {
@@ -118,26 +141,35 @@ export default function ServicesTab() {
 
     const allEntries = Object.entries(services || {});
 
-    // Core platform process names
     const corePlatformProcesses = ['aetherflow-api', 'aetherflow-frontend', 'apache2', 'nginx'];
+    const isCorePlatformService = (info: ServiceInfo) =>
+        corePlatformProcesses.includes(info.id || info.process || '');
 
-    // Separate core platform services from installed apps
-    const coreServices = allEntries.filter(([, d]) => {
-        const info = d as ServiceInfo;
-        return corePlatformProcesses.includes(info.process || '');
-    });
-    const appServices = allEntries.filter(([, d]) => {
-        const info = d as ServiceInfo;
-        return !corePlatformProcesses.includes(info.process || '');
-    });
+    const hasWebUI = (info: ServiceInfo) => {
+        if (typeof info.default_port === 'number') {
+            return info.default_port > 0;
+        }
+        return (
+            (info.id ? SERVICE_WEB_PORTS[info.id] != null : false) ||
+            (info.process ? SERVICE_WEB_PORTS[info.process] != null : false)
+        );
+    };
+
+    const coreServices = allEntries.filter(([, d]) => isCorePlatformService(d as ServiceInfo));
+    const appServices = allEntries.filter(([, d]) => !isCorePlatformService(d as ServiceInfo));
 
     const runningCount = allEntries.filter(([, d]) => (d as ServiceInfo).status === 'running').length;
 
     const handleOpenWebUI = (name: string, data: ServiceInfo) => {
+        const host = window.location.hostname;
+        if (data.default_port && data.default_port > 0) {
+            const pathSuffix = data.web_path ? (data.web_path.startsWith('/') ? data.web_path : `/${data.web_path}`) : '';
+            window.open(`${window.location.protocol}//${host}:${data.default_port}${pathSuffix}`, '_blank');
+            return;
+        }
         const process = data.process || name;
-        const portOrPath = SERVICE_WEB_PORTS[process];
+        const portOrPath = (data.id ? SERVICE_WEB_PORTS[data.id] : undefined) ?? SERVICE_WEB_PORTS[process];
         if (portOrPath != null) {
-            const host = window.location.hostname;
             const url = typeof portOrPath === 'string'
                 ? portOrPath.startsWith('/') ? `${window.location.protocol}//${host}${portOrPath}` : portOrPath
                 : `${window.location.protocol}//${host}:${portOrPath}`;
@@ -148,7 +180,7 @@ export default function ServicesTab() {
     };
 
     const handleOpenSettings = (name: string, data: ServiceInfo) => {
-        if (corePlatformProcesses.includes(data.process || '')) {
+        if (isCorePlatformService(data)) {
             setActiveTab('settings');
         } else {
             handleOpenWebUI(name, data);
@@ -161,15 +193,17 @@ export default function ServicesTab() {
         const isError = data.status === 'error';
         const isBusy = loadingService === name;
         const controlDisabled = isBusy || !canControlServices;
+        const isCore = isCorePlatformService(data);
+        const webAvailable = hasWebUI(data);
 
         return (
-            <div key={name} className="relative bg-slate-950/80 border border-white/10 rounded-2xl p-6 backdrop-blur-xl transition-all hover:border-indigo-500/50 group cursor-default overflow-hidden">
+            <div key={name} className="glass-card relative bg-slate-950/80 border border-white/10 rounded-2xl p-6 transition-all hover:border-indigo-500/50 group cursor-default overflow-hidden">
                 <div className={`absolute top-0 left-0 w-1 h-full ${isRunning ? 'bg-emerald-500/50' : (isError ? 'bg-red-500/50' : 'bg-slate-500/50')} transition-colors z-20`}></div>
 
                 <div className="flex justify-between items-start mb-6 relative z-10">
                     <div className="flex items-center gap-4">
                         <div className="h-12 w-12 bg-white/5 rounded-xl border border-white/10 flex items-center justify-center shadow-inner overflow-hidden group-hover:scale-105 transition-transform">
-                            {corePlatformProcesses.includes(data.process || '') ? (
+                            {isCore ? (
                                 <Cpu size={24} className={isRunning ? 'text-emerald-400' : (isError ? 'text-red-400' : 'text-slate-500')} />
                             ) : data.id ? (
                                 <div className="relative w-8 h-8 flex items-center justify-center">
@@ -204,14 +238,28 @@ export default function ServicesTab() {
                             </div>
                         </div>
                     </div>
-                    <button 
-                        onClick={() => handleOpenSettings(name, data)}
-                        disabled={isBusy}
-                        className="p-2 text-slate-500 hover:text-slate-300 hover:bg-white/5 rounded-lg transition-colors disabled:opacity-50"
-                        title="Settings"
-                    >
-                        <Settings size={18} />
-                    </button>
+                    <div className="flex items-center gap-1">
+                        {!isCore && webAvailable && (
+                            <button 
+                                onClick={() => setIngressModalApp(data.id || data.process || name)}
+                                disabled={isBusy}
+                                className="obs-touch-target-standard obs-gpu-120hz-interactive p-2.5 text-slate-500 hover:text-indigo-400 hover:bg-white/5 rounded-lg transition-colors disabled:opacity-50 flex items-center justify-center"
+                                title="Ingress & Deployment"
+                            >
+                                <Network size={18} />
+                            </button>
+                        )}
+                        {(isCore || webAvailable) && (
+                            <button 
+                                onClick={() => handleOpenSettings(name, data)}
+                                disabled={isBusy}
+                                className="obs-touch-target-standard obs-gpu-120hz-interactive p-2.5 text-slate-500 hover:text-slate-300 hover:bg-white/5 rounded-lg transition-colors disabled:opacity-50 flex items-center justify-center"
+                                title="Settings"
+                            >
+                                <Settings size={18} />
+                            </button>
+                        )}
+                    </div>
                 </div>
 
                 <div className="grid grid-cols-2 gap-4 mb-6">
@@ -228,19 +276,21 @@ export default function ServicesTab() {
                 <div className="flex gap-2">
                     {isRunning ? (
                         <>
-                            <button
-                                onClick={() => handleOpenWebUI(name, data)}
-                                className="flex-1 py-2 bg-slate-800/80 hover:bg-slate-700 text-slate-300 text-xs font-semibold rounded-lg transition-colors flex items-center justify-center gap-2 disabled:opacity-50"
-                                disabled={isBusy}
-                            >
-                                <Globe size={14} /> Web UI
-                            </button>
+                            {webAvailable && (
+                                <button
+                                    onClick={() => handleOpenWebUI(name, data)}
+                                    className="obs-touch-target-standard obs-gpu-120hz-interactive flex-1 py-2.5 bg-slate-800/80 hover:bg-slate-700 text-slate-300 text-xs font-semibold rounded-lg transition-colors flex items-center justify-center gap-2 disabled:opacity-50"
+                                    disabled={isBusy}
+                                >
+                                    <Globe size={14} /> Web UI
+                                </button>
+                            )}
                             <RequireClaim>
                                 <button
-                                    onClick={() => setLogsModalService(name)}
+                                    onClick={() => setLogsModalService(data.process || name)}
                                     disabled={controlDisabled}
                                     title={canControlServices ? 'View live logs' : 'Admin access required'}
-                                    className="p-2 bg-slate-800/80 hover:bg-indigo-500/20 hover:text-indigo-400 text-slate-400 rounded-lg transition-colors disabled:opacity-50"
+                                    className="obs-touch-target-standard obs-gpu-120hz-interactive p-2.5 bg-slate-800/80 hover:bg-indigo-500/20 hover:text-indigo-400 text-slate-400 rounded-lg transition-colors disabled:opacity-50 flex items-center justify-center"
                                 >
                                     <Terminal size={16} />
                                 </button>
@@ -248,7 +298,7 @@ export default function ServicesTab() {
                                     onClick={() => handleServiceControl(name, data, 'restart')}
                                     disabled={controlDisabled}
                                     title={canControlServices ? 'Restart service' : 'Admin access required'}
-                                    className="p-2 bg-slate-800/80 hover:bg-amber-500/20 hover:text-amber-400 text-slate-400 rounded-lg transition-colors disabled:opacity-50"
+                                    className="obs-touch-target-standard obs-gpu-120hz-interactive p-2.5 bg-slate-800/80 hover:bg-amber-500/20 hover:text-amber-400 text-slate-400 rounded-lg transition-colors disabled:opacity-50 flex items-center justify-center"
                                 >
                                     <RotateCcw size={16} className={isBusy ? 'animate-spin' : ''} />
                                 </button>
@@ -256,7 +306,7 @@ export default function ServicesTab() {
                                     onClick={() => handleServiceControl(name, data, 'stop')}
                                     disabled={controlDisabled}
                                     title={canControlServices ? 'Stop service' : 'Admin access required'}
-                                    className="p-2 bg-slate-800/80 hover:bg-red-500/20 hover:text-red-400 text-slate-400 rounded-lg transition-colors disabled:opacity-50"
+                                    className="obs-touch-target-standard obs-gpu-120hz-interactive p-2.5 bg-slate-800/80 hover:bg-red-500/20 hover:text-red-400 text-slate-400 rounded-lg transition-colors disabled:opacity-50 flex items-center justify-center"
                                 >
                                     <Square size={16} className="fill-current" />
                                 </button>
@@ -268,7 +318,7 @@ export default function ServicesTab() {
                                 onClick={() => handleServiceControl(name, data, 'start')}
                                 disabled={controlDisabled}
                                 title={canControlServices ? 'Start service' : 'Admin access required'}
-                                className="w-full py-2 bg-indigo-500/20 hover:bg-indigo-500 text-indigo-300 hover:text-white text-xs font-semibold rounded-lg transition-colors flex items-center justify-center gap-2 border border-indigo-500/30 disabled:opacity-50"
+                                className="obs-touch-target-standard obs-gpu-120hz-interactive w-full py-2.5 bg-indigo-500/20 hover:bg-indigo-500 text-indigo-300 hover:text-white text-xs font-semibold rounded-lg transition-colors flex items-center justify-center gap-2 border border-indigo-500/30 disabled:opacity-50"
                             >
                                 <Play size={14} className="fill-current" /> {isBusy ? 'Starting...' : 'Start Service'}
                             </button>
@@ -287,9 +337,9 @@ export default function ServicesTab() {
         <div className="space-y-8 animate-fade-in relative z-10 w-full min-h-screen">
             <div className="absolute inset-0 bg-blue-500/5 rounded-full blur-[120px] pointer-events-none -translate-y-1/2 -translate-x-1/2"></div>
             {/* Header */}
-            <div className="flex justify-between items-end">
+            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-end gap-4">
                 <div>
-                    <h2 className="text-2xl font-bold text-slate-100 flex items-center gap-3">
+                    <h2 className="text-2xl font-bold text-slate-100 flex flex-wrap items-center gap-3">
                         App Ecosystem
                         <span className="text-xs font-semibold px-2.5 py-1 bg-white/10 rounded-full text-slate-300 border border-white/5">{allEntries.length} Total</span>
                         <span className="text-xs font-semibold px-2.5 py-1 bg-emerald-500/10 rounded-full text-emerald-400 border border-emerald-500/20">{runningCount} Running</span>
@@ -299,7 +349,7 @@ export default function ServicesTab() {
                 <div className="flex gap-3">
                     <button
                         onClick={() => mutate()}
-                        className="px-4 py-2 bg-white/[0.03] hover:bg-white/[0.08] border border-white/10 rounded-lg text-sm font-medium text-slate-300 transition-all flex items-center gap-2"
+                        className="obs-touch-target-standard obs-gpu-120hz-interactive px-4 py-2 bg-white/[0.03] hover:bg-white/[0.08] border border-white/10 rounded-lg text-sm font-medium text-slate-300 transition-all flex items-center gap-2"
                     >
                         <RefreshCw size={14} /> Sync All
                     </button>
@@ -342,6 +392,29 @@ export default function ServicesTab() {
                 serviceName={logsModalService} 
                 onClose={() => setLogsModalService(null)} 
             />
+
+            {ingressModalApp && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-fade-in">
+                    <div className="glass-panel w-full max-w-xl max-h-[85vh] overflow-y-auto rounded-3xl p-6 border border-white/10 relative shadow-2xl">
+                        <div className="flex items-center justify-between pb-4 border-b border-white/10">
+                            <div className="flex items-center gap-2">
+                                <Network className="text-indigo-400" size={20} />
+                                <h3 className="text-lg font-bold text-white capitalize">{ingressModalApp} Ingress & Deploy</h3>
+                            </div>
+                            <button
+                                onClick={() => setIngressModalApp(null)}
+                                className="obs-touch-target-standard p-2 text-slate-400 hover:text-white rounded-lg hover:bg-white/5 transition-colors flex items-center justify-center"
+                            >
+                                <X size={18} />
+                            </button>
+                        </div>
+                        <div className="space-y-4">
+                            <ExternalAccessCard appName={ingressModalApp} />
+                            <DeploymentStatus appName={ingressModalApp} isTriggered={true} />
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     );
 }

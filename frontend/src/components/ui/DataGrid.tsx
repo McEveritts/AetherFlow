@@ -1,3 +1,5 @@
+'use client';
+
 import React, { useRef, useState } from 'react';
 import {
   useReactTable,
@@ -69,11 +71,11 @@ export function DataGrid<TData, TValue>({
   return (
     <div
       ref={parentRef}
-      className={`overflow-auto rounded-3xl border border-white/[0.05] bg-white/[0.02] backdrop-blur-xl shadow-2xl ${className}`}
+      className={`obs-scroller overflow-auto rounded-2xl glass-panel border border-indigo-500/20 shadow-2xl min-w-0 max-w-full ${className}`}
       style={{ maxHeight: '600px' }}
     >
-      <table className="w-full text-left border-collapse">
-        <thead className="sticky top-0 z-20 bg-slate-950/80 backdrop-blur-md border-b border-white/10 shadow-sm">
+      <table className="w-full text-left border-collapse min-w-0">
+        <thead className="sticky top-0 z-20 bg-black/85 backdrop-blur-md border-b border-white/10 shadow-sm">
           {table.getHeaderGroups().map((headerGroup) => (
             <tr key={headerGroup.id}>
               {headerGroup.headers.map((header) => {
@@ -81,7 +83,7 @@ export function DataGrid<TData, TValue>({
                   <th
                     key={header.id}
                     colSpan={header.colSpan}
-                    className="p-4 text-xs font-semibold text-slate-400 uppercase tracking-wider group select-none first:pl-6 last:pr-6"
+                    className="p-4 text-xs font-semibold text-slate-300 uppercase tracking-wider group select-none first:pl-6 last:pr-6"
                     style={{
                       width: header.getSize() !== 150 ? header.getSize() : 'auto',
                     }}
@@ -89,7 +91,7 @@ export function DataGrid<TData, TValue>({
                     {header.isPlaceholder ? null : (
                       <div
                         className={`flex items-center gap-2 ${
-                          header.column.getCanSort() ? 'cursor-pointer hover:text-slate-200 transition-colors' : ''
+                          header.column.getCanSort() ? 'cursor-pointer hover:text-white transition-colors' : ''
                         }`}
                         onClick={header.column.getToggleSortingHandler()}
                       >
@@ -104,7 +106,7 @@ export function DataGrid<TData, TValue>({
                           (header.column.getCanSort() ? (
                             <ArrowUpDown
                               size={14}
-                              className="text-slate-600 opacity-0 group-hover:opacity-100 transition-opacity"
+                              className="text-slate-500 obs-touch-action-reveal opacity-40 md:opacity-0 md:group-hover:opacity-100 transition-opacity"
                             />
                           ) : null)}
                       </div>
@@ -141,13 +143,13 @@ export function DataGrid<TData, TValue>({
                 {/* Expanded Row Content with Framer Motion */}
                 <AnimatePresence>
                   {row.getIsExpanded() && renderSubComponent && (
-                    <tr className="bg-slate-900/30">
+                    <tr className="bg-slate-900/40">
                       <td colSpan={columns.length} className="p-0">
                         <motion.div
                           initial={{ height: 0, opacity: 0 }}
                           animate={{ height: 'auto', opacity: 1 }}
                           exit={{ height: 0, opacity: 0 }}
-                          transition={{ duration: 0.2, ease: "easeInOut" }}
+                          transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
                           className="overflow-hidden"
                         >
                           {renderSubComponent({ row })}

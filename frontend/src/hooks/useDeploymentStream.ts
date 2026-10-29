@@ -16,8 +16,8 @@ export function useDeploymentStream(appName: string, initiateDeployment: boolean
       setLogs([]);
     }, 0);
 
-    // We assume backend API is hooked to /api/v1/deploy/stream
-    const eventSource = new EventSource(`/api/v1/deploy/stream?appName=${appName}`);
+    // Connect to authenticated deployment stream
+    const eventSource = new EventSource(`/api/v1/auth/deploy/stream?appName=${encodeURIComponent(appName)}`, { withCredentials: true });
 
     eventSource.onmessage = (event) => {
       const message = event.data;

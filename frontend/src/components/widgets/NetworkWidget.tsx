@@ -25,7 +25,7 @@ export default function NetworkWidget({ networkData, hardware, history, density 
     const isImmersive = density === 'immersive';
 
     return (
-        <div className={`bg-white/[0.02] border border-white/[0.05] rounded-2xl relative overflow-hidden group transition-all duration-300 hover:bg-white/[0.04] backdrop-blur-xl ${isImmersive ? 'p-6 space-y-4' : 'p-5'}`}>
+        <div className={`glass-card relative overflow-hidden group transition-all duration-300 hover:bg-white/[0.04] ${isImmersive ? 'p-6 space-y-4' : 'p-5'}`}>
 
             {/* Header */}
             <div className="flex items-center justify-between mb-3">

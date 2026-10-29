@@ -23,6 +23,7 @@ interface AuthContextType {
     login: () => void;
     loginLocal: () => void;
     logout: () => void;
+    refreshSession: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType>({
@@ -32,6 +33,7 @@ const AuthContext = createContext<AuthContextType>({
     login: () => { },
     loginLocal: () => { },
     logout: () => { },
+    refreshSession: async () => { },
 });
 
 export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
@@ -113,7 +115,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     };
 
     return (
-        <AuthContext.Provider value={{ isAuthenticated, isLoading, user, login, loginLocal, logout }}>
+        <AuthContext.Provider value={{ isAuthenticated, isLoading, user, login, loginLocal, logout, refreshSession: checkSession }}>
             {children}
         </AuthContext.Provider>
     );

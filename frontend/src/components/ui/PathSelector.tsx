@@ -2,14 +2,16 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { Folder, ChevronRight, Loader2, CornerLeftUp } from 'lucide-react';
+import { apiFetch } from '@/lib/fetcher';
 
-// Added Props so the parent form can actually use the selected path!
 interface PathSelectorProps {
   value: string;
   onChange: (path: string) => void;
+  placeholder?: string;
+  className?: string;
 }
 
-export default function PathSelector({ value, onChange }: PathSelectorProps) {
+export default function PathSelector({ value, onChange, placeholder = "Enter absolute path (e.g. /mnt/media)", className = "" }: PathSelectorProps) {
   const [isOpen, setIsOpen] = useState<boolean>(false);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [directories, setDirectories] = useState<string[]>([]);
@@ -17,13 +19,13 @@ export default function PathSelector({ value, onChange }: PathSelectorProps) {
   const dropdownRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    const handleClickOutside = (event: MouseEvent) => {
+    const handleClickOutside = (event: PointerEvent | MouseEvent) => {
       if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
         setIsOpen(false);
       }
     };
-    document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
+    document.addEventListener('pointerdown', handleClickOutside);
+    return () => document.removeEventListener('pointerdown', handleClickOutside);
   }, []);
 
   const fetchDirectories = async (path: string) => {
@@ -31,14 +33,23 @@ export default function PathSelector({ value, onChange }: PathSelectorProps) {
     
     setIsLoading(true);
     try {
-      const response = await fetch(`/api/fs?path=${encodeURIComponent(path)}`);
+      const response = await apiFetch(`/api/v1/auth/fs?path=${encodeURIComponent(path)}`);
       if (response.ok) {
         const data = await response.json();
-        setDirectories(data.directories || []);
+        if (Array.isArray(data.directories)) {
+          setDirectories(data.directories);
+        } else if (Array.isArray(data.entries)) {
+          const dirNames = data.entries
+            .filter((entry: { is_dir?: boolean }) => entry.is_dir)
+            .map((entry: { name: string }) => entry.name);
+          setDirectories(dirNames);
+        } else {
+          setDirectories([]);
+        }
       } else {
         setDirectories([]); 
       }
-    } catch (error) {
+    } catch {
       setDirectories([]);
     } finally {
       setIsLoading(false);
@@ -58,7 +69,7 @@ export default function PathSelector({ value, onChange }: PathSelectorProps) {
   };
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    onChange(e.target.value); // Report back to parent form
+    onChange(e.target.value);
   };
 
   const handleSelectDir = (dir: string) => {
@@ -74,68 +85,70 @@ export default function PathSelector({ value, onChange }: PathSelectorProps) {
       newPath = value.endsWith(separator) ? `${value}${dir}` : `${value}${separator}${dir}`;
     }
 
-    onChange(newPath); // Report back to parent form
+    onChange(newPath);
   };
 
-  // Prevent users from going "up" beyond the root directory
   const isRoot = value === '/' || (/^[a-zA-Z]:\\[^\\]*$/.test(value) && value.length <= 3);
 
   return (
-    <div className="relative w-full max-w-xl font-sans" ref={dropdownRef}>
+    <div className={`relative w-full ${className}`} ref={dropdownRef}>
       <div className="relative flex items-center">
         <button
           type="button"
           onClick={handleToggle}
-          className="absolute left-0 p-3 text-gray-400 hover:text-blue-400 focus:outline-none transition-colors z-10"
+          aria-label="Browse Directories"
+          className="absolute left-0 p-3 obs-touch-target-standard text-slate-400 hover:text-indigo-400 focus:outline-none transition-colors z-10 flex items-center justify-center"
         >
-          <Folder size={18} className={isOpen ? "text-blue-500" : "text-gray-400"} />
+          <Folder size={18} className={isOpen ? "text-indigo-400" : "text-slate-400"} />
         </button>
         
         <input
           type="text"
           value={value}
           onChange={handleInputChange}
-          placeholder="Enter absolute path (e.g. /mnt/media/movies)"
-          className="w-full bg-gray-900 border border-gray-700 text-gray-100 placeholder-gray-600 rounded-md py-2.5 pl-10 pr-4 focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500 transition-all shadow-inner"
+          placeholder={placeholder}
+          className="w-full min-h-[44px] bg-black/60 border border-white/10 text-slate-100 placeholder-slate-500 rounded-xl py-2.5 pl-11 pr-4 focus:outline-none focus:border-indigo-500/50 focus:ring-1 focus:ring-indigo-500/30 transition-all text-xs"
         />
       </div>
 
       {isOpen && (
-        <div className="absolute z-20 w-full mt-2 bg-gray-900 border border-gray-700 rounded-md shadow-2xl max-h-64 overflow-y-auto scrollbar-thin scrollbar-thumb-gray-600 scrollbar-track-transparent">
+        <div className="absolute z-30 w-full mt-2 glass-panel bg-black/90 backdrop-blur-2xl border border-white/10 rounded-xl shadow-2xl max-h-64 overflow-y-auto obs-scroller scrollbar-thin scrollbar-thumb-white/10 scrollbar-track-transparent">
           {isLoading ? (
-            <div className="flex justify-center items-center py-8 text-gray-400">
-              <Loader2 className="animate-spin mr-3" size={20} />
-              <span className="text-sm font-medium">Scanning directory...</span>
+            <div className="flex justify-center items-center py-6 text-slate-400">
+              <Loader2 className="animate-spin mr-3 text-indigo-400" size={18} />
+              <span className="text-xs font-medium">Scanning directory...</span>
             </div>
           ) : (
-            <ul className="py-2">
+            <ul className="py-1">
               {!isRoot && value.length > 0 && (
                 <li>
                   <button
+                    type="button"
                     onClick={() => handleSelectDir('..')}
-                    className="w-full text-left px-4 py-2 text-sm text-gray-300 hover:bg-gray-800 hover:text-blue-400 flex items-center transition-colors border-b border-gray-800/50 pb-3 mb-1"
+                    className="w-full min-h-[44px] obs-touch-target-standard text-left px-4 py-2 text-xs text-slate-300 hover:bg-white/[0.06] hover:text-indigo-300 flex items-center transition-colors border-b border-white/5 pb-2 mb-1"
                   >
-                    <CornerLeftUp size={16} className="mr-3 text-gray-500" />
+                    <CornerLeftUp size={14} className="mr-2 text-slate-500" />
                     <span className="font-medium flex-1">..</span>
-                    <span className="text-xs text-gray-500">(Go up)</span>
+                    <span className="text-xs text-slate-500">(Go up)</span>
                   </button>
                 </li>
               )}
               
               {directories.length === 0 ? (
-                <li className="px-4 py-4 text-sm text-gray-500 text-center">
+                <li className="px-4 py-3 text-xs text-slate-500 text-center">
                   No subdirectories found or Access Denied
                 </li>
               ) : (
                 directories.map((dir) => (
                   <li key={dir}>
                     <button
+                      type="button"
                       onClick={() => handleSelectDir(dir)}
-                      className="w-full text-left px-4 py-2 text-sm text-gray-300 hover:bg-gray-800 hover:text-white flex items-center transition-colors group"
+                      className="w-full min-h-[44px] obs-touch-target-standard text-left px-4 py-2 text-xs text-slate-300 hover:bg-white/[0.06] hover:text-white flex items-center transition-colors group"
                     >
-                      <Folder size={16} className="mr-3 text-blue-500/70 group-hover:text-blue-400 transition-colors" />
+                      <Folder size={14} className="mr-2 text-indigo-400/80 group-hover:text-indigo-400 transition-colors" />
                       <span className="truncate flex-1">{dir}</span>
-                      <ChevronRight size={14} className="text-gray-600 opacity-0 group-hover:opacity-100 transition-opacity" />
+                      <ChevronRight size={12} className="text-slate-500 obs-touch-action-reveal opacity-60 md:opacity-0 md:group-hover:opacity-100 transition-opacity" />
                     </button>
                   </li>
                 ))

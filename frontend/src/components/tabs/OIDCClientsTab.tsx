@@ -63,7 +63,7 @@ export default function OIDCClientsTab() {
             setShowSecret(result);
             mutate();
             addToast(`OIDC client "${result.name}" created`, 'success');
-        } catch (e) {
+        } catch {
             addToast('Failed to create OIDC client', 'error');
         } finally {
             setIsSubmitting(false);
@@ -128,7 +128,7 @@ export default function OIDCClientsTab() {
     return (
         <div className="space-y-6">
             {/* Header */}
-            <div className="flex items-center justify-between">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                 <div>
                     <h2 className="text-2xl font-bold text-slate-100 tracking-tight">OIDC Clients</h2>
                     <p className="text-sm text-slate-400 mt-1">
@@ -137,7 +137,7 @@ export default function OIDCClientsTab() {
                 </div>
                 <button
                     onClick={() => setShowCreate(true)}
-                    className="flex items-center gap-2 px-4 py-2.5 bg-indigo-500/20 hover:bg-indigo-500/30 text-indigo-300 rounded-xl text-sm font-medium border border-indigo-500/20 transition-all hover:shadow-[0_0_12px_rgba(99,102,241,0.15)]"
+                    className="obs-touch-target-standard obs-gpu-120hz-interactive flex items-center gap-2 px-4 py-2.5 bg-indigo-500/20 hover:bg-indigo-500/30 text-indigo-300 rounded-xl text-sm font-medium border border-indigo-500/20 transition-all hover:shadow-[0_0_12px_rgba(99,102,241,0.15)] self-start sm:self-auto"
                 >
                     <Plus size={16} />
                     New Client
@@ -168,7 +168,7 @@ export default function OIDCClientsTab() {
                                                 <code className="text-xs text-slate-400 font-mono bg-white/[0.03] px-1.5 py-0.5 rounded">{client.id}</code>
                                                 <button
                                                     onClick={() => handleCopy(client.id, `id-${client.id}`)}
-                                                    className="text-slate-500 hover:text-slate-300 transition-colors"
+                                                    className="p-1 text-slate-500 hover:text-slate-300 transition-colors"
                                                 >
                                                     {copiedField === `id-${client.id}` ? <Check size={12} className="text-emerald-400" /> : <Copy size={12} />}
                                                 </button>
@@ -177,7 +177,8 @@ export default function OIDCClientsTab() {
                                     </div>
                                     <button
                                         onClick={() => setDeleteTarget(client)}
-                                        className="opacity-0 group-hover:opacity-100 p-2 rounded-lg hover:bg-red-500/10 text-slate-500 hover:text-red-400 transition-all"
+                                        className="obs-touch-target-standard obs-touch-action-reveal opacity-100 md:opacity-0 md:group-hover:opacity-100 p-2.5 rounded-lg hover:bg-red-500/10 text-slate-500 hover:text-red-400 transition-all flex items-center justify-center"
+                                        title="Delete Client"
                                     >
                                         <Trash2 size={16} />
                                     </button>
@@ -235,14 +236,14 @@ export default function OIDCClientsTab() {
                         <div className="flex justify-end gap-3 pt-2">
                             <button
                                 onClick={() => setShowCreate(false)}
-                                className="px-4 py-2 text-sm text-slate-400 hover:text-slate-200 transition-colors"
+                                className="obs-touch-target-standard px-4 py-2 text-sm text-slate-400 hover:text-slate-200 transition-colors"
                             >
                                 Cancel
                             </button>
                             <button
                                 onClick={handleCreate}
                                 disabled={!newName.trim() || isSubmitting}
-                                className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed transition-all"
+                                className="obs-touch-target-standard obs-gpu-120hz-interactive px-5 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed transition-all"
                             >
                                 {isSubmitting ? 'Creating...' : 'Create Client'}
                             </button>
@@ -268,7 +269,7 @@ export default function OIDCClientsTab() {
                                 <code className="flex-1 text-sm font-mono text-slate-200 bg-white/[0.03] px-3 py-2 rounded-lg border border-white/[0.08] break-all">
                                     {showSecret.client_id}
                                 </code>
-                                <button onClick={() => handleCopy(showSecret.client_id, 'new-id')} className="p-2 rounded-lg hover:bg-white/[0.05] transition-colors">
+                                <button onClick={() => handleCopy(showSecret.client_id, 'new-id')} className="obs-touch-target-standard p-2.5 rounded-lg hover:bg-white/[0.05] transition-colors flex items-center justify-center">
                                     {copiedField === 'new-id' ? <Check size={14} className="text-emerald-400" /> : <Copy size={14} className="text-slate-400" />}
                                 </button>
                             </div>
@@ -280,7 +281,7 @@ export default function OIDCClientsTab() {
                                 <code className="flex-1 text-sm font-mono text-emerald-300 bg-emerald-500/5 px-3 py-2 rounded-lg border border-emerald-500/20 break-all">
                                     {showSecret.client_secret}
                                 </code>
-                                <button onClick={() => handleCopy(showSecret.client_secret, 'new-secret')} className="p-2 rounded-lg hover:bg-white/[0.05] transition-colors">
+                                <button onClick={() => handleCopy(showSecret.client_secret, 'new-secret')} className="obs-touch-target-standard p-2.5 rounded-lg hover:bg-white/[0.05] transition-colors flex items-center justify-center">
                                     {copiedField === 'new-secret' ? <Check size={14} className="text-emerald-400" /> : <Copy size={14} className="text-slate-400" />}
                                 </button>
                             </div>
@@ -288,7 +289,7 @@ export default function OIDCClientsTab() {
 
                         <button
                             onClick={() => setShowSecret(null)}
-                            className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-sm font-medium transition-all"
+                            className="obs-touch-target-standard obs-gpu-120hz-interactive w-full py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-sm font-medium transition-all"
                         >
                             Done
                         </button>
@@ -307,14 +308,14 @@ export default function OIDCClientsTab() {
                         <div className="flex justify-end gap-3">
                             <button
                                 onClick={() => setDeleteTarget(null)}
-                                className="px-4 py-2 text-sm text-slate-400 hover:text-slate-200 transition-colors"
+                                className="obs-touch-target-standard px-4 py-2 text-sm text-slate-400 hover:text-slate-200 transition-colors"
                             >
                                 Cancel
                             </button>
                             <button
                                 onClick={handleDelete}
                                 disabled={isSubmitting}
-                                className="px-5 py-2.5 bg-red-600 hover:bg-red-500 text-white rounded-xl text-sm font-medium disabled:opacity-40 transition-all"
+                                className="obs-touch-target-standard obs-gpu-120hz-interactive px-5 py-2.5 bg-red-600 hover:bg-red-500 text-white rounded-xl text-sm font-medium disabled:opacity-40 transition-all"
                             >
                                 {isSubmitting ? 'Deleting...' : 'Delete Client'}
                             </button>

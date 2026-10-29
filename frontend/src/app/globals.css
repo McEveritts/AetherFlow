@@ -11,30 +11,733 @@
   };
 }
 
-@layer base {
-  body {
-    @apply antialiased text-slate-200 bg-slate-950;
+/**
+ * ============================================================================
+ * OBSIDIAN DESIGN SYSTEM - CORE DESIGN TOKENS (Obsidian v2.0.0)
+ * ============================================================================
+ */
+:root {
+  /* --- Obsidian Foundations (Pure #000000 Contrast) --- */
+  --obs-bg-base: #000000;
+  --obs-bg-primary: #000000;
+  --obs-bg-secondary: #0f172a;
+  --obs-slate-950: #000000;
+  --obs-slate-900: #0f172a;
+  --obs-slate-800: #1e293b;
+  --obs-slate-700: #334155;
+  --obs-slate-500: #64748b;
+  --obs-slate-400: #94a3b8;
+  --obs-slate-300: #cbd5e1;
+  --obs-slate-200: #e2e8f0;
+  --obs-white: #ffffff;
+  --obs-black: #000000;
+
+  /* --- Luminescent / Holographic Accents --- */
+  --obs-accent-primary: #6366f1;
+  --obs-accent-indigo: #6366f1;
+  --obs-indigo-600: #4f46e5;
+  --obs-indigo-500: #6366f1;
+  --obs-indigo-400: #818cf8;
+  --obs-indigo-300: #a5b4fc;
+  --obs-fuchsia-500: #d946ef;
+  --obs-fuchsia-400: #e879f9;
+  --obs-emerald-400: #34d399;
+  --obs-amber-400: #fbbf24;
+  --obs-rose-500: #f43f5e;
+  --obs-sky-400: #38bdf8;
+  --obs-accent-rose: #f43f5e;
+  --obs-accent-teal: #14b8a6;
+  --obs-accent-amber: #f59e0b;
+  --obs-accent-emerald: #10b981;
+
+  /* --- Typography & Stacks --- */
+  --obs-font-sans: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --obs-font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+
+  /* --- Geometry & Radii --- */
+  --obs-radius-sm: 0.25rem;  /* 4px */
+  --obs-radius-md: 0.5rem;   /* 8px */
+  --obs-radius-xl: 0.75rem;  /* 12px - Panels, buttons, inputs */
+  --obs-radius-2xl: 1rem;    /* 16px - Cards, floating dock */
+  --obs-radius-full: 9999px; /* Pills, badges, avatars */
+
+  /* --- Directional Specular Highlights & Chromatic Glass Edges --- */
+  --obs-specular-top: rgba(255, 255, 255, 0.28);
+  --obs-specular-left: rgba(56, 189, 248, 0.38);
+  --obs-specular-subtle: rgba(255, 255, 255, 0.14);
+  --obs-glass-border: rgba(129, 140, 248, 0.34);
+  --obs-glass-border-hover: rgba(168, 85, 247, 0.68);
+  --obs-chromatic-border-cyan: rgba(56, 189, 248, 0.44);
+  --obs-chromatic-border-indigo: rgba(129, 140, 248, 0.48);
+  --obs-chromatic-border-fuchsia: rgba(217, 70, 239, 0.44);
+  --obs-chromatic-edge-gradient: linear-gradient(
+    135deg,
+    rgba(255, 255, 255, 0.90) 0%,
+    rgba(56, 189, 248, 0.82) 18%,
+    rgba(129, 140, 248, 0.86) 44%,
+    rgba(217, 70, 239, 0.84) 70%,
+    rgba(168, 85, 247, 0.80) 86%,
+    rgba(56, 189, 248, 0.75) 100%
+  );
+  --obs-chromatic-edge-hover: linear-gradient(
+    135deg,
+    rgba(255, 255, 255, 0.98) 0%,
+    rgba(56, 189, 248, 0.92) 18%,
+    rgba(129, 140, 248, 0.94) 44%,
+    rgba(217, 70, 239, 0.92) 70%,
+    rgba(168, 85, 247, 0.90) 86%,
+    rgba(56, 189, 248, 0.86) 100%
+  );
+  --obs-chromatic-inset:
+    inset 0 1px 1px 0 rgba(255, 255, 255, 0.44),
+    inset 1.5px 0 3px 0 rgba(56, 189, 248, 0.38),
+    inset -1.5px 0 3px 0 rgba(217, 70, 239, 0.38),
+    inset 0 -1.5px 3px 0 rgba(129, 140, 248, 0.42);
+  --obs-chromatic-inset-card:
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.36),
+    inset 1px 0 2px 0 rgba(56, 189, 248, 0.30),
+    inset -1px 0 2px 0 rgba(217, 70, 239, 0.30),
+    inset 0 -1px 2px 0 rgba(129, 140, 248, 0.34);
+
+  /* --- Glass Surface Elevations --- */
+  --obs-card-bg: linear-gradient(135deg, rgba(255, 255, 255, 0.06) 0%, rgba(99, 102, 241, 0.03) 55%, rgba(217, 70, 239, 0.025) 100%);
+  --obs-card-bg-hover: linear-gradient(135deg, rgba(255, 255, 255, 0.09) 0%, rgba(99, 102, 241, 0.06) 55%, rgba(217, 70, 239, 0.05) 100%);
+  --obs-panel-bg: linear-gradient(180deg, rgba(16, 18, 38, 0.80) 0%, rgba(12, 10, 30, 0.86) 100%);
+  --obs-hero-bg: linear-gradient(180deg, rgba(10, 12, 26, 0.72) 0%, rgba(16, 14, 38, 0.78) 55%, rgba(24, 12, 48, 0.76) 100%);
+  --obs-input-bg: rgba(0, 0, 0, 0.45);
+  --obs-input-bg-focus: rgba(0, 0, 0, 0.65);
+
+  /* --- Optical Depth Shadows --- */
+  --obs-shadow-card: 0 12px 40px rgba(0, 0, 0, 0.55), 0 0 16px rgba(99, 102, 241, 0.12);
+  --obs-shadow-card-hover: 0 20px 48px rgba(0, 0, 0, 0.75), 0 0 28px rgba(99, 102, 241, 0.32), 0 0 14px rgba(217, 70, 239, 0.24);
+  --obs-shadow-panel: 0 24px 60px rgba(0, 0, 0, 0.75), 0 0 28px rgba(99, 102, 241, 0.18);
+  --obs-shadow-button-primary: 0 4px 20px rgba(99, 102, 241, 0.35);
+  --obs-shadow-button-hover: 0 6px 28px rgba(217, 70, 239, 0.45);
+  --obs-shadow-glow-indigo: 0 0 24px rgba(99, 102, 241, 0.35);
+  --obs-shadow-glow-fuchsia: 0 0 24px rgba(217, 70, 239, 0.35);
+
+  /* --- Semantic Shell Layout Dimensions --- */
+  --obs-shell-header-height-mobile: 65px;
+  --obs-shell-sidebar-width-desktop: 16rem; /* 256px */
+  --obs-shell-bottom-nav-height: 4rem;      /* 64px */
+  --obs-shell-rail-width-tablet: 68px;      /* 68px */
+  --obs-content-max-width: 105rem;          /* 1680px */
+
+  /* --- 120Hz High-Refresh Motion Curves & Physics --- */
+  --obs-ease-out-120: cubic-bezier(0.22, 1, 0.36, 1);
+  --obs-ease-spring-120: cubic-bezier(0.25, 1, 0.5, 1);
+  --obs-duration-fast: 160ms;
+  --obs-duration-card: 200ms;
+
+  /* --- Tunable Atmosphere Parameters --- */
+  --obs-glass-blur: 16px;
+  --obs-glass-blur-heavy: 24px;
+  --obs-glass-saturation: saturate(160%);
+  --obs-aurora-opacity: 0.55;
+  --obs-aurora-animation: none;
+  --obs-grain-display: block;
+  --obs-card-lift: -4px;
+}
+
+/**
+ * ============================================================================
+ * ATMOSPHERIC BACKGROUND ENGINE
+ * Pure #000000 Canvas, 3-Orb Radial Aurora, Fractal Grain & Edge Vignette
+ * ============================================================================
+ */
+html {
+  background-color: var(--obs-bg-base) !important;
+  background-image: none !important;
+  color: var(--obs-white);
+  min-height: 100vh;
+}
+
+body {
+  background-color: transparent !important;
+  background-image: none !important;
+  color: var(--obs-slate-200);
+  font-family: var(--obs-font-sans);
+  margin: 0;
+  padding: 0;
+  min-height: 100vh;
+  position: relative;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Intermediate containers transparent punch-through */
+#root,
+#__next,
+main {
+  background-color: transparent !important;
+}
+
+/* Layer 1: Seamless 3-Orb Cosmic Aurora & Royal-Purple Base Gradient */
+body::before {
+  content: "";
+  position: fixed;
+  inset: -10%;
+  width: 120vw;
+  height: 120vh;
+  z-index: -2;
+  pointer-events: none !important;
+  transform-origin: center center;
+
+  background:
+    /* Orb 1: Lower-Center Royal Purple & Indigo Bloom (#6d28d9 -> #4f46e5) */
+    radial-gradient(ellipse 76vw 56vh at 50% 88%, rgba(109, 40, 217, calc(var(--obs-aurora-opacity) * 0.72)) 0%, rgba(79, 70, 229, calc(var(--obs-aurora-opacity) * 0.34)) 44%, transparent 78%),
+    /* Orb 2: Mid-Left Indigo Aurora (#6366f1) */
+    radial-gradient(ellipse 62vw 52vh at 16% 68%, rgba(99, 102, 241, calc(var(--obs-aurora-opacity) * 0.54)) 0%, rgba(99, 102, 241, calc(var(--obs-aurora-opacity) * 0.20)) 42%, transparent 76%),
+    /* Orb 3: Mid-Right Fuchsia-Violet Aurora (#d946ef -> #9333ea) */
+    radial-gradient(ellipse 62vw 54vh at 84% 66%, rgba(217, 70, 239, calc(var(--obs-aurora-opacity) * 0.46)) 0%, rgba(147, 51, 234, calc(var(--obs-aurora-opacity) * 0.20)) 42%, transparent 76%),
+    /* Continuous Obsidian Black-to-Purple Vertical Base Gradient */
+    linear-gradient(180deg, #000000 0%, #020108 20%, #09041a 46%, #14082e 74%, #1e0b42 100%);
+
+  contain: strict;
+  isolation: isolate;
+  backface-visibility: hidden;
+  transform: translate3d(0, 0, 0);
+  will-change: transform;
+  animation: var(--obs-aurora-animation);
+}
+
+@keyframes obs-aurora-shift {
+  0% {
+    transform: translate3d(0, 0, 0) rotate(0deg);
+  }
+  33% {
+    transform: translate3d(2%, 3%, 0) rotate(1.5deg);
+  }
+  66% {
+    transform: translate3d(-3%, 2%, 0) rotate(-1.5deg);
+  }
+  100% {
+    transform: translate3d(0, 0, 0) rotate(0deg);
   }
 }
 
-@layer components {
-  .glass-card {
-    @apply bg-white/[0.03] backdrop-blur-2xl border border-white/[0.08] rounded-2xl shadow-[0_12px_40px_rgba(0,0,0,0.4)];
+/* Layer 2: Tactile SVG Fractal Micro-Grain + Spatial Edge Vignette */
+body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  z-index: -1;
+  pointer-events: none !important;
+  display: var(--obs-grain-display);
+  contain: strict;
+  backface-visibility: hidden;
+  transform: translateZ(0);
+  background-image:
+    radial-gradient(circle at 50% 50%, transparent 55%, rgba(2, 6, 23, 0.72) 100%),
+    url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.65' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.032'/%3E%3C/svg%3E");
+  background-size: 100% 100%, 200px 200px;
+}
+
+/**
+ * ============================================================================
+ * OBSIDIAN V2 CHROMATIC GLASS SURFACES
+ * ============================================================================
+ */
+.glass-card {
+  position: relative;
+  background: var(--obs-card-bg);
+  backdrop-filter: blur(20px) var(--obs-glass-saturation);
+  -webkit-backdrop-filter: blur(20px) var(--obs-glass-saturation);
+  border: 1px solid var(--obs-chromatic-border-indigo);
+  border-top: 1px solid var(--obs-specular-top);
+  border-left: 1px solid var(--obs-chromatic-border-cyan);
+  border-right: 1px solid var(--obs-chromatic-border-fuchsia);
+  border-radius: var(--obs-radius-2xl);
+  box-shadow: var(--obs-shadow-card), var(--obs-chromatic-inset-card);
+  backface-visibility: hidden;
+  transform: translate3d(0, 0, 0);
+  transition: transform var(--obs-duration-card) var(--obs-ease-spring-120),
+              border-color var(--obs-duration-card) var(--obs-ease-out-120),
+              box-shadow var(--obs-duration-card) var(--obs-ease-out-120),
+              background var(--obs-duration-card) var(--obs-ease-out-120);
+}
+
+/* Pre-allocated GPU-composited chromatic prism rim for 120Hz hover luminance */
+.glass-card::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1px;
+  background: var(--obs-chromatic-edge-gradient);
+  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  mask-composite: exclude;
+  pointer-events: none;
+  z-index: 1;
+  opacity: 0.65;
+  transform: translateZ(0);
+  will-change: opacity;
+  transition: opacity var(--obs-duration-card) var(--obs-ease-out-120);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .glass-card:hover {
+    transform: translate3d(0, var(--obs-card-lift), 0);
+    border-color: var(--obs-glass-border-hover);
+    border-top-color: rgba(255, 255, 255, 0.45);
+    background: var(--obs-card-bg-hover);
+    box-shadow: var(--obs-shadow-card-hover);
   }
-  
-  .glass-panel {
-    @apply bg-slate-950/60 backdrop-blur-3xl border border-white/[0.1] shadow-[0_20px_50px_rgba(0,0,0,0.6)];
+  .glass-card:hover::after {
+    opacity: 1;
   }
-  
-  .glass-button {
-    @apply bg-white/[0.06] hover:bg-white/[0.12] text-white border border-white/[0.12] rounded-xl transition-all duration-300 backdrop-blur-lg shadow-[0_4px_24px_rgba(0,0,0,0.2)] active:scale-95;
+}
+
+.glass-panel {
+  background: var(--obs-panel-bg);
+  backdrop-filter: blur(var(--obs-glass-blur-heavy)) var(--obs-glass-saturation);
+  -webkit-backdrop-filter: blur(var(--obs-glass-blur-heavy)) var(--obs-glass-saturation);
+  border: 1px solid var(--obs-chromatic-border-indigo);
+  border-top: 1px solid var(--obs-specular-top);
+  border-left: 1px solid var(--obs-chromatic-border-cyan);
+  border-right: 1px solid var(--obs-chromatic-border-fuchsia);
+  box-shadow: var(--obs-shadow-panel), var(--obs-chromatic-inset);
+}
+
+.glass-hero {
+  background: var(--obs-hero-bg);
+  backdrop-filter: blur(var(--obs-glass-blur-heavy)) var(--obs-glass-saturation);
+  -webkit-backdrop-filter: blur(var(--obs-glass-blur-heavy)) var(--obs-glass-saturation);
+  border-radius: var(--obs-radius-2xl);
+  border: 1px solid var(--obs-chromatic-border-indigo);
+  border-top: 1px solid var(--obs-specular-top);
+  border-left: 1px solid var(--obs-chromatic-border-cyan);
+  border-right: 1px solid var(--obs-chromatic-border-fuchsia);
+  box-shadow: var(--obs-shadow-panel), var(--obs-chromatic-inset);
+}
+
+.glass-button {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--obs-white);
+  border: 1px solid var(--obs-glass-border);
+  border-top: 1px solid var(--obs-specular-top);
+  border-radius: var(--obs-radius-xl);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+  backface-visibility: hidden;
+  transition: transform var(--obs-duration-fast) var(--obs-ease-out-120),
+              background-color var(--obs-duration-fast) ease,
+              border-color var(--obs-duration-fast) ease,
+              box-shadow var(--obs-duration-fast) ease,
+              color var(--obs-duration-fast) ease;
+}
+
+.glass-button:hover {
+  background: rgba(255, 255, 255, 0.12);
+  color: var(--obs-white);
+  border-color: var(--obs-glass-border-hover);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+}
+
+.glass-button:active {
+  transform: scale3d(0.97, 0.97, 1);
+}
+
+.glass-button-primary {
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.88) 0%, rgba(217, 70, 239, 0.88) 100%);
+  color: var(--obs-white);
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  border-top: 1px solid rgba(255, 255, 255, 0.45);
+  border-radius: var(--obs-radius-xl);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  box-shadow: var(--obs-shadow-button-primary);
+  backface-visibility: hidden;
+  transition: transform var(--obs-duration-fast) var(--obs-ease-out-120),
+              border-color var(--obs-duration-fast) ease,
+              box-shadow var(--obs-duration-fast) ease;
+}
+
+.glass-button-primary:hover {
+  transform: scale3d(1.025, 1.025, 1);
+  border-color: rgba(255, 255, 255, 0.55);
+  box-shadow: var(--obs-shadow-button-hover);
+}
+
+.glass-button-primary:active {
+  transform: scale3d(0.98, 0.98, 1);
+}
+
+.glass-input {
+  background: var(--obs-input-bg);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid var(--obs-glass-border);
+  border-top: 1px solid rgba(0, 0, 0, 0.4);
+  border-radius: var(--obs-radius-xl);
+  color: var(--obs-slate-200);
+  box-shadow: inset 0 2px 8px rgba(0, 0, 0, 0.35);
+  transition: border-color var(--obs-duration-fast) var(--obs-ease-out-120),
+              background-color var(--obs-duration-fast) var(--obs-ease-out-120),
+              box-shadow var(--obs-duration-fast) var(--obs-ease-out-120);
+}
+
+.glass-input:focus {
+  outline: none;
+  border-color: var(--obs-indigo-400);
+  background: var(--obs-input-bg-focus);
+  box-shadow: inset 0 2px 8px rgba(0, 0, 0, 0.45), 0 0 20px rgba(99, 102, 241, 0.32);
+}
+
+/**
+ * ============================================================================
+ * NAVIGATION PILLS & DOCK UTILITIES
+ * ============================================================================
+ */
+.obs-tab-pill {
+  position: relative;
+  font-weight: 600;
+  font-size: 0.85rem;
+  color: var(--obs-slate-400);
+  border-radius: var(--obs-radius-full);
+  border: 1px solid transparent;
+  background: transparent;
+  box-shadow: none;
+  transition: transform var(--obs-duration-fast) var(--obs-ease-out-120),
+              background-color var(--obs-duration-fast) ease,
+              color var(--obs-duration-fast) ease,
+              border-color var(--obs-duration-fast) ease,
+              box-shadow var(--obs-duration-fast) ease;
+}
+
+.obs-tab-pill:hover {
+  color: var(--obs-white);
+  background-color: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.10);
+}
+
+.obs-tab-pill-active {
+  color: var(--obs-white) !important;
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.24) 0%, rgba(217, 70, 239, 0.14) 100%) !important;
+  border: 1px solid rgba(129, 140, 248, 0.50) !important;
+  box-shadow: 0 0 16px rgba(99, 102, 241, 0.32) !important;
+}
+
+/**
+ * ============================================================================
+ * CONNECTION STATUS BEACONS
+ * ============================================================================
+ */
+.obs-beacon-live,
+.beacon-live {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background-color: #10b981;
+  box-shadow: 0 0 10px #10b981, 0 0 20px #10b981;
+  animation: obs-pulse-live 2s infinite ease-in-out;
+}
+
+.obs-beacon-reconnecting,
+.beacon-reconnecting {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background-color: #f59e0b;
+  box-shadow: 0 0 10px #f59e0b;
+  animation: obs-pulse-warn 1s infinite alternate;
+}
+
+.obs-beacon-danger,
+.beacon-danger {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background-color: #ef4444;
+  box-shadow: 0 0 12px #ef4444;
+}
+
+.obs-beacon-offline,
+.beacon-offline {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background-color: #64748b;
+}
+
+@keyframes obs-pulse-live {
+  0%, 100% {
+    transform: scale(1);
+    opacity: 1;
   }
-  
-  .glass-button-primary {
-    @apply bg-indigo-500/80 hover:bg-indigo-400 text-white border border-indigo-400/40 rounded-xl transition-all duration-300 backdrop-blur-lg shadow-[0_4px_24px_rgba(99,102,241,0.4)] active:scale-95;
+  50% {
+    transform: scale(1.25);
+    opacity: 0.75;
+  }
+}
+
+@keyframes obs-pulse-warn {
+  0% {
+    opacity: 0.4;
+  }
+  100% {
+    opacity: 1;
+  }
+}
+
+/**
+ * ============================================================================
+ * ACCESSIBILITY & TOUCH TARGET COMPLIANCE (WCAG 2.2 AAA >= 44px)
+ * ============================================================================
+ */
+.obs-touch-target-huge,
+.touch-target-huge {
+  min-height: 64px;
+  min-width: 64px;
+}
+
+.obs-touch-target-large,
+.touch-target-large {
+  min-height: 52px;
+  min-width: 52px;
+}
+
+.obs-touch-target-standard,
+.touch-target-standard {
+  min-height: 44px;
+  min-width: 44px;
+}
+
+/**
+ * ============================================================================
+ * STRICT SCROLLER CONTAINMENT INVARIANT
+ * Rule: Zero blanket horizontal overflow-x hidden on root html or body elements.
+ * Restrict overflow strictly at container boundaries via scoped scrollers.
+ * ============================================================================
+ */
+.obs-scroller,
+.prototype-scroller {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  max-width: 100%;
+  min-width: 0;
+}
+
+/* Accessible focus-visible state for interactive glass elements */
+.glass-button:focus-visible,
+.glass-button-primary:focus-visible,
+.glass-input:focus-visible {
+  outline: 2px solid rgba(99, 102, 241, 0.8) !important;
+  outline-offset: 2px !important;
+}
+
+/* Thin Glass Desktop Scrollbars */
+@media (min-width: 1024px) {
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255, 255, 255, 0.08) rgba(15, 23, 42, 0.3);
   }
 
-  .glass-input {
-    @apply bg-slate-900/60 backdrop-blur-2xl border border-white/10 text-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500/60 focus:border-indigo-500/60 transition-all placeholder-slate-500 shadow-inner hover:border-white/20;
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
   }
+
+  ::-webkit-scrollbar-track {
+    background: rgba(15, 23, 42, 0.3);
+    border-radius: var(--obs-radius-full);
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid rgba(255, 255, 255, 0.05);
+    border-radius: var(--obs-radius-full);
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.15);
+    border-color: rgba(255, 255, 255, 0.1);
+  }
+}
+
+/* Reduced Motion Fallback */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --obs-aurora-animation: none;
+    --obs-card-lift: 0px;
+  }
+  .glass-card:hover {
+    transform: none !important;
+  }
+  .glass-button-primary:hover {
+    transform: none !important;
+  }
+  .obs-beacon-live,
+  .obs-beacon-reconnecting {
+    animation: none !important;
+  }
+}
+
+/**
+ * ============================================================================
+ * TOUCH SUPPORT & 120Hz PERFORMANCE LAYER
+ * ============================================================================
+ */
+html {
+  -webkit-text-size-adjust: 100%;
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior-y: none;
+}
+
+/* 120Hz GPU-Accelerated Rail & Interactive Primitives */
+.obs-gpu-120hz-rail {
+  transform: translate3d(0, 0, 0);
+  backface-visibility: hidden;
+  will-change: width, transform;
+  transition:
+    width 180ms var(--obs-ease-out-120),
+    transform 180ms var(--obs-ease-out-120),
+    background-color 180ms var(--obs-ease-out-120),
+    border-color 180ms var(--obs-ease-out-120);
+}
+
+.obs-gpu-120hz-interactive {
+  transform: translate3d(0, 0, 0);
+  backface-visibility: hidden;
+  transition:
+    transform var(--obs-duration-fast) var(--obs-ease-out-120),
+    opacity var(--obs-duration-fast) var(--obs-ease-out-120),
+    background-color var(--obs-duration-fast) var(--obs-ease-out-120),
+    border-color var(--obs-duration-fast) var(--obs-ease-out-120),
+    color var(--obs-duration-fast) var(--obs-ease-out-120),
+    box-shadow var(--obs-duration-fast) var(--obs-ease-out-120);
+}
+
+.obs-gpu-120hz-interactive:active {
+  transform: scale3d(0.97, 0.97, 1);
+}
+
+/* Remove 300ms delay / double-tap zoom on all controls; allow native panning */
+a, button, [role="button"], [role="tab"], summary, label, select,
+input[type="checkbox"], input[type="radio"], input[type="range"],
+.glass-button, .glass-button-primary, .obs-tab-pill {
+  touch-action: manipulation;
+}
+
+/* Horizontal scrollers pan natively and stay contained */
+.obs-scroller, .prototype-scroller, [class*="overflow-x-auto"] {
+  touch-action: pan-x pan-y;
+  overscroll-behavior-x: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Horizontal touch pill / category strip with scroll-snap */
+.obs-touch-pills {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-x: contain;
+  touch-action: pan-x pan-y;
+  scroll-snap-type: x proximity;
+  scrollbar-width: none;
+  max-width: 100%;
+  min-width: 0;
+}
+
+.obs-touch-pills::-webkit-scrollbar {
+  display: none;
+}
+
+.obs-touch-pills > * {
+  scroll-snap-align: start;
+  flex-shrink: 0;
+}
+
+/* Safe-area support for notched / rounded displays */
+body {
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
+}
+
+/* Touch (coarse pointer) devices & Explicit Touch Mode: 44px targets, tactile press feedback, always-visible action buttons */
+@media (pointer: coarse), (hover: none) {
+  .glass-button, .glass-button-primary, .obs-tab-pill,
+  button:not(.obs-inline-action), [role="button"], [role="tab"], select {
+    min-height: 44px;
+  }
+  .glass-input, input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), textarea {
+    min-height: 44px;
+    font-size: 16px; /* prevents iOS focus-zoom */
+  }
+  input[type="range"] {
+    min-height: 44px;
+  }
+  .glass-card:active {
+    transform: translate3d(0, 0, 0) scale3d(0.985, 0.985, 1);
+  }
+  .obs-tab-pill:hover, .glass-button:hover {
+    background-color: inherit;
+  }
+  .obs-tab-pill:active, button:not(:disabled):active {
+    transform: scale3d(0.96, 0.96, 1);
+  }
+  /* Reveal hover-gated actions on touch devices */
+  .obs-touch-action-reveal {
+    opacity: 1 !important;
+  }
+  /* Cheaper blur on touch GPUs to hold 120Hz frame rate */
+  .glass-card, .glass-button, .glass-button-primary, .glass-input {
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+  }
+}
+
+html[data-touch-mode="true"] .glass-button,
+html[data-touch-mode="true"] .glass-button-primary,
+html[data-touch-mode="true"] .obs-tab-pill,
+html[data-touch-mode="true"] button:not(.obs-inline-action),
+html[data-touch-mode="true"] [role="button"],
+html[data-touch-mode="true"] [role="tab"],
+html[data-touch-mode="true"] select {
+  min-height: 44px;
+}
+
+html[data-touch-mode="true"] .glass-input,
+html[data-touch-mode="true"] input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+html[data-touch-mode="true"] textarea {
+  min-height: 44px;
+}
+
+html[data-touch-mode="true"] .obs-touch-action-reveal {
+  opacity: 1 !important;
+}
+
+html[data-touch-mode="true"] .glass-card:active {
+  transform: translate3d(0, 0, 0) scale3d(0.985, 0.985, 1);
+}
+
+/* High-refresh displays (>=90Hz / 120Hz ProMotion): crisp 8.33ms-frame-aligned motion */
+@media (update: fast) and (prefers-reduced-motion: no-preference) {
+  :root {
+    --obs-duration-fast: 110ms;
+    --obs-duration-card: 160ms;
+  }
+  .glass-card, .glass-button, .glass-button-primary, .obs-tab-pill, .obs-gpu-120hz-interactive {
+    will-change: transform;
+  }
+  .obs-scroller, .prototype-scroller, .obs-touch-pills {
+    scroll-behavior: smooth;
+  }
+}
+
+html[data-high-refresh="true"] {
+  --obs-duration-fast: 110ms;
+  --obs-duration-card: 150ms;
+}
+
+html[data-high-refresh="true"] .glass-card,
+html[data-high-refresh="true"] .glass-button,
+html[data-high-refresh="true"] .glass-button-primary,
+html[data-high-refresh="true"] .obs-tab-pill,
+html[data-high-refresh="true"] .obs-gpu-120hz-interactive {
+  will-change: transform;
 }

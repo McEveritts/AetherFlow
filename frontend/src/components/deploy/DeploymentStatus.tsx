@@ -18,7 +18,7 @@ export function DeploymentStatus({ appName, isTriggered }: DeploymentStatusProps
   if (!isTriggered) return null;
 
   return (
-    <div className="bg-white/5 border border-white/10 rounded-xl p-6 shadow-2xl backdrop-blur-sm mt-6">
+    <div className="glass-card rounded-2xl p-6 shadow-2xl relative overflow-hidden mt-6">
       <div className="flex items-center justify-between mb-4">
         <div>
           <h3 className="text-lg font-semibold text-white flex items-center gap-2">

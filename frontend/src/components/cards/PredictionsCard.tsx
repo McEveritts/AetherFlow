@@ -1,5 +1,5 @@
 import { BrainCircuit, TrendingUp, AlertTriangle, Shield, Loader2, RefreshCw, ChevronDown, ChevronUp } from 'lucide-react';
-import { useState, useMemo } from 'react';
+import { useState, useEffect } from 'react';
 import { apiFetch } from '@/lib/fetcher';
 import Sparkline from '@/components/charts/Sparkline';
 
@@ -15,20 +15,74 @@ interface PredictionReport {
     confidence_score: number;
 }
 
+interface MetricsSnapshot {
+    id: number;
+    timestamp: string;
+    cpu_avg: number;
+    mem_used_gb: number;
+    mem_total_gb: number;
+    disk_read_bps: number;
+    disk_write_bps: number;
+    net_rx_bytes: number;
+    net_tx_bytes: number;
+    load_avg_1: number;
+    active_conns: number;
+}
+
 export default function PredictionsCard() {
     const [isAnalyzing, setIsAnalyzing] = useState(false);
     const [report, setReport] = useState<PredictionReport | null>(null);
+    const [metricsHistory, setMetricsHistory] = useState<MetricsSnapshot[]>([]);
     const [error, setError] = useState('');
     const [expanded, setExpanded] = useState(false);
+
+    useEffect(() => {
+        let isMounted = true;
+        const fetchInitialTelemetry = async () => {
+            try {
+                const [predRes, histRes] = await Promise.allSettled([
+                    apiFetch('/api/v1/admin/ai/predictions'),
+                    apiFetch('/api/v1/admin/ai/predictions/history?days=30')
+                ]);
+                if (!isMounted) return;
+                if (predRes.status === 'fulfilled' && predRes.value.ok) {
+                    const data = await predRes.value.json();
+                    if (data && data.trend_summary) {
+                        setReport(data);
+                    }
+                }
+                if (histRes.status === 'fulfilled' && histRes.value.ok) {
+                    const histData = await histRes.value.json();
+                    if (Array.isArray(histData)) {
+                        setMetricsHistory(histData);
+                    }
+                }
+            } catch {
+                // Initial load can silently wait for manual run if AI key unconfigured
+            }
+        };
+        fetchInitialTelemetry();
+        return () => { isMounted = false; };
+    }, []);
 
     const analyze = async () => {
         setIsAnalyzing(true);
         setError('');
         try {
-            const res = await apiFetch('/api/v1/admin/ai/predictions/analyze', { method: 'POST' });
+            const [res, histRes] = await Promise.all([
+                apiFetch('/api/v1/admin/ai/predictions/analyze', { method: 'POST' }),
+                apiFetch('/api/v1/admin/ai/predictions/history?days=30')
+            ]);
             const data = await res.json();
-            if (!res.ok) throw new Error(data.error);
+            if (!res.ok) throw new Error(data.error || 'Analysis failed');
             setReport(data);
+
+            if (histRes.ok) {
+                const histData = await histRes.json();
+                if (Array.isArray(histData)) {
+                    setMetricsHistory(histData);
+                }
+            }
         } catch (err) {
             setError(err instanceof Error ? err.message : 'Analysis failed');
         } finally {
@@ -74,22 +128,36 @@ export default function PredictionsCard() {
         }
     };
 
-    const generateTrendData = (trend: string, seed: number) => {
-        const base = 50 + seed;
-        const points = [];
-        for (let i = 0; i < 30; i++) {
-            let val = base;
-            if (trend === 'increasing') val = base + i * 1.5;
-            if (trend === 'critical') val = base + i * 3;
-            if (trend === 'decreasing') val = base - i * 1.2;
-            if (trend === 'stable') val = base + Math.sin(i * 0.5) * 5;
-            points.push(val + Math.sin(i * seed) * 8); // Add pseudo-random noise based on seed
+    const getSparklineData = (metricType: 'cpu' | 'memory' | 'disk' | 'network'): number[] => {
+        if (!metricsHistory || metricsHistory.length === 0) {
+            return [0, 0];
         }
-        return points;
+        switch (metricType) {
+            case 'cpu':
+                return metricsHistory.map(s => Number(s.cpu_avg) || 0);
+            case 'memory':
+                return metricsHistory.map(s => {
+                    const total = Number(s.mem_total_gb) || 0;
+                    const used = Number(s.mem_used_gb) || 0;
+                    return total > 0 ? (used / total) * 100 : used;
+                });
+            case 'disk':
+                return metricsHistory.map(s => {
+                    const read = Number(s.disk_read_bps) || 0;
+                    const write = Number(s.disk_write_bps) || 0;
+                    return (read + write) / 1024;
+                });
+            case 'network':
+                return metricsHistory.map(s => {
+                    const rx = Number(s.net_rx_bytes) || 0;
+                    const tx = Number(s.net_tx_bytes) || 0;
+                    return (rx + tx) / 1024;
+                });
+        }
     };
 
     return (
-        <div className="bg-white/[0.02] border border-white/[0.05] rounded-2xl p-6 backdrop-blur-xl relative overflow-hidden">
+        <div className="glass-card rounded-2xl p-6 relative overflow-hidden">
             <div className="absolute bottom-0 left-0 w-[300px] h-[300px] bg-purple-500/5 rounded-full blur-[80px] pointer-events-none -translate-x-1/3 translate-y-1/3"></div>
 
             <div className="flex items-center justify-between mb-5 relative z-10">
@@ -123,11 +191,11 @@ export default function PredictionsCard() {
                     {/* Trend Badges */}
                     <div className="grid grid-cols-2 gap-2">
                         {[
-                            { label: 'CPU', trend: report.cpu_trend, seed: 1 },
-                            { label: 'Memory', trend: report.memory_trend, seed: 2 },
-                            { label: 'Disk I/O', trend: report.disk_io_trend, seed: 3 },
-                            { label: 'Network', trend: report.network_trend, seed: 4 },
-                        ].map(({ label, trend, seed }) => (
+                            { label: 'CPU', trend: report.cpu_trend, type: 'cpu' as const },
+                            { label: 'Memory', trend: report.memory_trend, type: 'memory' as const },
+                            { label: 'Disk I/O', trend: report.disk_io_trend, type: 'disk' as const },
+                            { label: 'Network', trend: report.network_trend, type: 'network' as const },
+                        ].map(({ label, trend, type }) => (
                             <div key={label} className="bg-slate-900/50 rounded-lg p-3 border border-white/5 flex flex-col gap-3">
                                 <div className="flex items-center justify-between">
                                     <span className="text-xs text-slate-400">{label}</span>
@@ -138,7 +206,7 @@ export default function PredictionsCard() {
                                 </div>
                                 <div className="h-8">
                                     <Sparkline 
-                                        data={generateTrendData(trend, seed)}
+                                        data={getSparklineData(type)}
                                         height={32}
                                         color={getTrendTheme(trend).color}
                                         gradientFrom={getTrendTheme(trend).gradientFrom}

@@ -1,11 +1,13 @@
 import React, { useState, useEffect } from 'react';
 import useSWR from 'swr';
-import { Film, Play, CheckCircle, XCircle, Loader2, ArrowRightCircle, HardDrive } from 'lucide-react';
+import { Film, Play, CheckCircle, XCircle, Loader2, ArrowRightCircle, HardDrive, Sparkles } from 'lucide-react';
 import { Card } from '@/components/ui/Card';
+import { apiFetch } from '@/lib/fetcher';
+import { useToast } from '@/contexts/ToastContext';
+import PathSelector from '@/components/ui/PathSelector';
+import MetadataTab from '@/components/tabs/MetadataTab';
 
-const fetcher = (url: string) => fetch(url, {
-    headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
-}).then(res => res.json());
+const fetcher = (url: string) => apiFetch(url).then(res => res.json());
 
 interface QueueItem {
     id: number;
@@ -34,22 +36,26 @@ function useMediaFlowStream() {
     const [progress, setProgress] = useState<StreamProgress | null>(null);
 
     useEffect(() => {
-        const token = localStorage.getItem('token');
-        if (!token) return;
-
-        const eventSource = new EventSource(`/api/v1/deploy/stream?appName=mediaflow_engine`);
-        
-        eventSource.onmessage = (event) => {
-            try {
-                const data: StreamProgress = JSON.parse(event.data);
-                setProgress(data);
-            } catch (err) {
-                console.error("SSE parse error", err);
-            }
-        };
+        let eventSource: EventSource | null = null;
+        try {
+            eventSource = new EventSource('/api/v1/auth/deploy/stream?appName=mediaflow_engine', { withCredentials: true });
+            
+            eventSource.onmessage = (event) => {
+                try {
+                    const data: StreamProgress = JSON.parse(event.data);
+                    setProgress(data);
+                } catch {
+                    // ignore ping or progress formatting variation
+                }
+            };
+        } catch (err) {
+            console.error("SSE stream error", err);
+        }
 
         return () => {
-            eventSource.close();
+            if (eventSource) {
+                eventSource.close();
+            }
         };
     }, []);
 
@@ -65,61 +71,94 @@ const formatBytes = (bytes: number) => {
 };
 
 export default function MediaFlowTab() {
+    const [activeSection, setActiveSection] = useState<'transcode' | 'metadata'>('transcode');
     const { data: queue, mutate } = useSWR<QueueItem[]>('/api/v1/admin/mediaflow/queue', fetcher);
     const progress = useMediaFlowStream();
     const [scanDir, setScanDir] = useState('/mnt/media/movies');
+    const { addToast } = useToast();
 
     const handleApprove = async (id: number) => {
-        await fetch(`/api/v1/admin/mediaflow/approve/${id}`, {
-            method: 'POST',
-            headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
-        });
-        mutate();
+        try {
+            await apiFetch(`/api/v1/admin/mediaflow/approve/${id}`, {
+                method: 'POST'
+            });
+            mutate();
+            addToast('Transcode job approved and queued.', 'success');
+        } catch {
+            addToast('Failed to approve transcode job.', 'error');
+        }
     };
 
     const triggerScan = async () => {
-        await fetch('/api/v1/admin/mediaflow/scan', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${localStorage.getItem('token')}`
-            },
-            body: JSON.stringify({ directory: scanDir })
-        });
-        alert('Background scan initiated across ' + scanDir);
+        try {
+            await apiFetch('/api/v1/admin/mediaflow/scan', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ directory: scanDir })
+            });
+            addToast(`Background scan initiated across ${scanDir}`, 'info');
+        } catch {
+            addToast(`Failed to initiate scan across ${scanDir}`, 'error');
+        }
     };
 
     const pendingCount = queue?.filter(i => i.status === 'PENDING_APPROVAL').length || 0;
 
     return (
         <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500 max-w-7xl mx-auto">
-            <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
-                <div>
-                    <h2 className="text-3xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-red-400 to-indigo-500 drop-shadow-sm flex items-center gap-3">
-                        <Film className="text-indigo-400" size={32} />
-                        MediaFlow Engine
-                    </h2>
-                    <p className="text-slate-400 text-sm mt-1 max-w-2xl">
-                        Passive bare-metal video transcoder. Aggressively compresses legacy formats using AMD native hardware acceleration. Requires explicit user approval per file.
-                    </p>
-                </div>
-                
-                <div className="flex gap-2 w-full md:w-auto">
-                    <input 
-                        type="text" 
-                        value={scanDir}
-                        onChange={(e) => setScanDir(e.target.value)}
-                        className="bg-black/50 border border-white/10 rounded-lg px-4 py-2 text-sm text-zinc-300 w-full md:w-64 focus:outline-none focus:border-indigo-500/50"
-                    />
-                    <button 
-                        onClick={triggerScan}
-                        className="flex items-center gap-2 bg-indigo-500 hover:bg-indigo-600 text-white px-4 py-2 rounded-lg font-medium shadow-lg transition-colors whitespace-nowrap"
+            {/* Obsidian Segmented Switcher */}
+            <div className="flex items-center justify-between flex-wrap gap-4">
+                <div className="flex items-center gap-1.5 p-1 bg-white/[0.04] border border-white/10 rounded-2xl w-fit backdrop-blur-xl">
+                    <button
+                        onClick={() => setActiveSection('transcode')}
+                        className={`px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-2 ${activeSection === 'transcode' ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-500/25' : 'text-slate-400 hover:text-slate-200'}`}
                     >
-                        <HardDrive size={16} />
-                        Scan Library
+                        <Film size={14} />
+                        Transcode Queue
+                    </button>
+                    <button
+                        onClick={() => setActiveSection('metadata')}
+                        className={`px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-2 ${activeSection === 'metadata' ? 'bg-violet-600 text-white shadow-lg shadow-violet-500/25' : 'text-slate-400 hover:text-slate-200'}`}
+                    >
+                        <Sparkles size={14} />
+                        Metadata Enrichment
                     </button>
                 </div>
             </div>
+
+            {activeSection === 'metadata' ? (
+                <MetadataTab />
+            ) : (
+                <>
+                    <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+                        <div>
+                            <h2 className="text-3xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-red-400 to-indigo-500 drop-shadow-sm flex items-center gap-3">
+                                <Film className="text-indigo-400" size={32} />
+                                MediaFlow Engine
+                            </h2>
+                            <p className="text-slate-400 text-sm mt-1 max-w-2xl">
+                                Passive bare-metal video transcoder. Aggressively compresses legacy formats using AMD native hardware acceleration. Requires explicit user approval per file.
+                            </p>
+                        </div>
+                        
+                        <div className="flex items-center gap-2 w-full md:w-auto">
+                            <PathSelector 
+                                value={scanDir} 
+                                onChange={setScanDir} 
+                                placeholder="/mnt/media/movies" 
+                                className="w-full md:w-72" 
+                            />
+                            <button 
+                                onClick={triggerScan}
+                                className="flex items-center gap-2 bg-indigo-500 hover:bg-indigo-600 text-white px-4 py-2.5 rounded-xl font-medium shadow-lg transition-colors whitespace-nowrap text-xs shrink-0"
+                            >
+                                <HardDrive size={14} />
+                                Scan Library
+                            </button>
+                        </div>
+                    </div>
 
             {/* Active Transcode Section */}
             {(progress && progress.status === 'PROCESSING') && (
@@ -229,6 +268,8 @@ export default function MediaFlowTab() {
                     </table>
                 </div>
             </Card>
+                </>
+            )}
         </div>
     );
 }

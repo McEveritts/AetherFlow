@@ -3,7 +3,7 @@ import type { NextConfig } from "next";
 const isStaticExport = process.env.NEXT_STATIC_EXPORT === "1";
 
 const nextConfig: NextConfig = {
-  output: isStaticExport ? "export" : undefined,
+  output: isStaticExport ? "export" : undefined, // output: 'export' when NEXT_STATIC_EXPORT=1
   images: isStaticExport ? { unoptimized: true } : undefined,
   async rewrites() {
     if (isStaticExport) {

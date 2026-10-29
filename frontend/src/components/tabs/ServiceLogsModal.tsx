@@ -21,9 +21,10 @@ export default function ServiceLogsModal({ serviceName, onClose }: ServiceLogsMo
 
     // Using SWR to poll logs every 2 seconds
     const { data: rawData, error, isLoading, mutate } = useSWR<{ logs: { message: string }[] }>(
-        serviceName ? `/api/v1/admin/logs?source=${encodeURIComponent(serviceName)}` : null,
+        serviceName ? `/api/v1/admin/logs?unit=${encodeURIComponent(serviceName)}` : null,
         { refreshInterval: 2000, keepPreviousData: true } // Stream-like polling
     );
+
     
     // Map raw backend format to legacy string array until UI is updated
     const logs = rawData ? { logs: rawData.logs.map(l => l.message) } : null;

@@ -73,7 +73,7 @@ export default function BandwidthCard() {
     };
 
     return (
-        <div className="bg-white/[0.02] border border-white/[0.05] rounded-2xl p-6 backdrop-blur-xl relative overflow-hidden">
+        <div className="glass-card rounded-2xl p-6 relative overflow-hidden">
             <div className="absolute top-0 right-0 w-[300px] h-[300px] bg-cyan-500/5 rounded-full blur-[80px] pointer-events-none translate-x-1/3 -translate-y-1/3"></div>
 
             <div className="flex items-center justify-between mb-5 relative z-10">

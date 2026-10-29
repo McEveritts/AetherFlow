@@ -1,8 +1,8 @@
-'use client';
-
-import React, { useEffect, useRef, useMemo } from 'react';
+import React, { useEffect, useRef } from 'react';
 import * as d3 from 'd3';
 import { Network } from 'lucide-react';
+import useSWR from 'swr';
+import { apiFetch } from '@/lib/fetcher';
 import { SystemMetrics } from '@/types/dashboard';
 
 interface AppTopologyMapProps {
@@ -25,6 +25,15 @@ interface D3Link extends d3.SimulationLinkDatum<D3Node> {
 export default function AppTopologyMap({ topologyData, density = 'compact' }: AppTopologyMapProps) {
     const isImmersive = density === 'immersive';
 
+    const { data: realTopology } = useSWR<{
+        nodes: { id: string; group: number; status: string; details?: string }[];
+        links: { source: string; target: string; value: number }[];
+    }>(
+        '/api/v1/auth/system/topology',
+        (url: string) => apiFetch(url).then(res => res.json()),
+        { refreshInterval: 15000 }
+    );
+
     const svgRef = useRef<SVGSVGElement>(null);
     const simulationRef = useRef<d3.Simulation<D3Node, D3Link> | null>(null);
     const nodesRef = useRef<D3Node[]>([]);
@@ -35,6 +44,7 @@ export default function AppTopologyMap({ topologyData, density = 'compact' }: Ap
 
         const width = svgRef.current.parentElement?.clientWidth || 800;
         const height = isImmersive ? 600 : 400;
+        const isTouch = typeof window !== 'undefined' && (window.matchMedia('(pointer: coarse)').matches || document.documentElement.dataset.touchMode === 'true');
 
         // 1. Setup SVG only once
         const svg = d3.select(svgRef.current)
@@ -77,27 +87,33 @@ export default function AppTopologyMap({ topologyData, density = 'compact' }: Ap
 
         // 3. Update Data Pattern
         const updateGraph = () => {
-            // Build current node set
-            const newNodes: D3Node[] = [{ id: 'AetherFlow Core', group: 1, status: 'running' }];
+            // Build current node set from live backend runtime topology
+            const newNodes: D3Node[] = [];
             const newLinks: D3Link[] = [];
 
+            if (realTopology?.nodes && realTopology.nodes.length > 0) {
+                realTopology.nodes.forEach(n => {
+                    newNodes.push({ id: n.id, group: n.group, status: n.status });
+                });
+                if (realTopology.links) {
+                    realTopology.links.forEach(l => {
+                        newLinks.push({ source: l.source, target: l.target, value: l.value || 1 });
+                    });
+                }
+            } else {
+                newNodes.push({ id: 'AetherFlow API', group: 1, status: 'running' });
+            }
+
+            // Also attach active system services from props if not already in graph
             if (topologyData) {
+                const apiNodeId = newNodes.find(n => n.group === 1)?.id || 'AetherFlow API';
                 Object.entries(topologyData).forEach(([name, info]) => {
-                    newNodes.push({ id: name, group: 2, status: info.status });
-                    newLinks.push({ source: 'AetherFlow Core', target: name, value: 1 });
+                    if (!newNodes.some(n => n.id === name)) {
+                        newNodes.push({ id: name, group: 4, status: info.status });
+                        newLinks.push({ source: apiNodeId, target: name, value: 1 });
+                    }
                 });
             }
-            
-            // Dummy nodes
-            newNodes.push({ id: 'Proxy Port 8080', group: 3, status: 'running' });
-            newNodes.push({ id: 'Nginx Router', group: 3, status: 'running' });
-            newNodes.push({ id: 'PostgreSQL DB', group: 4, status: 'running' });
-            newNodes.push({ id: 'Redis Cache', group: 4, status: 'running' });
-
-            newLinks.push({ source: 'Proxy Port 8080', target: 'Nginx Router', value: 2 });
-            newLinks.push({ source: 'Nginx Router', target: 'AetherFlow Core', value: 2 });
-            newLinks.push({ source: 'AetherFlow Core', target: 'PostgreSQL DB', value: 2 });
-            newLinks.push({ source: 'AetherFlow Core', target: 'Redis Cache', value: 2 });
 
             // Diffing nodes to preserve coordinates (Crucial fix for jitter)
             const existingNodes = nodesRef.current;
@@ -130,14 +146,14 @@ export default function AppTopologyMap({ topologyData, density = 'compact' }: Ap
                 .data(mergedNodes, (d) => d.id)
                 .join(
                     enter => enter.append("circle")
-                        .attr("r", (d) => d.group === 1 ? 14 : 8)
+                        .attr("r", (d) => d.group === 1 ? (isTouch ? 18 : 14) : (isTouch ? 12 : 8))
                         .attr("stroke", "#1e293b")
                         .attr("stroke-width", 1.5)
                         .call(d3.drag<SVGCircleElement, D3Node>()
                             .on("start", dragstarted)
                             .on("drag", dragged)
                             .on("end", dragended)),
-                    update => update,
+                    update => update.attr("r", (d) => d.group === 1 ? (isTouch ? 18 : 14) : (isTouch ? 12 : 8)),
                     exit => exit.remove()
                 )
                 .attr("fill", (d) => {
@@ -148,19 +164,24 @@ export default function AppTopologyMap({ topologyData, density = 'compact' }: Ap
                     if (d.group === 4) return '#f59e0b';
                     return '#3b82f6';
                 })
-                .style("transition", "fill 0.3s ease"); // Smooth status color changes
+                .style("transition", "fill 0.2s ease");
 
-            node.on("mouseover", (event, d) => {
-                tooltip.transition().duration(200).style("opacity", .9);
+            const showNodeTooltip = (event: MouseEvent | TouchEvent, d: D3Node) => {
+                const pageX = 'touches' in event && event.touches.length > 0 ? event.touches[0].pageX : (event as MouseEvent).pageX;
+                const pageY = 'touches' in event && event.touches.length > 0 ? event.touches[0].pageY : (event as MouseEvent).pageY;
+                tooltip.transition().duration(150).style("opacity", .95);
                 tooltip.html(`<strong>${d.id}</strong><br/>Status: <span style="color: ${d.status === 'running' ? '#4ade80' : '#f87171'}">${d.status}</span>`)
-                    .style("left", (event.pageX + 10) + "px")
-                    .style("top", (event.pageY - 28) + "px");
-                d3.select(event.currentTarget).attr("stroke", "#fff").attr("stroke-width", 3);
-            })
-            .on("mouseout", (event) => {
-                tooltip.transition().duration(500).style("opacity", 0);
-                d3.select(event.currentTarget).attr("stroke", "#1e293b").attr("stroke-width", 1.5);
-            });
+                    .style("left", (pageX + 10) + "px")
+                    .style("top", (pageY - 28) + "px");
+                d3.select(event.currentTarget as SVGCircleElement).attr("stroke", "#fff").attr("stroke-width", 3);
+            };
+
+            node.on("mouseover", showNodeTooltip)
+                .on("click", showNodeTooltip)
+                .on("mouseout", (event) => {
+                    tooltip.transition().duration(350).style("opacity", 0);
+                    d3.select(event.currentTarget).attr("stroke", "#1e293b").attr("stroke-width", 1.5);
+                });
 
             const label = container.select("g.labels")
                 .selectAll<SVGTextElement, D3Node>("text")
@@ -220,10 +241,10 @@ export default function AppTopologyMap({ topologyData, density = 'compact' }: Ap
             event.subject.fy = null;
         }
 
-    }, [topologyData, isImmersive]);
+    }, [topologyData, isImmersive, realTopology]);
 
     return (
-        <div className={`bg-white/[0.02] border border-white/[0.05] rounded-2xl relative overflow-hidden backdrop-blur-xl h-full transition-all duration-300 ${isImmersive ? 'p-6' : 'p-5'}`}>
+        <div className={`glass-card rounded-2xl relative overflow-hidden backdrop-blur-xl h-full transition-all duration-300 ${isImmersive ? 'p-6' : 'p-5'}`}>
             <div className={`flex items-center justify-between relative z-10 ${isImmersive ? 'mb-6' : 'mb-4'}`}>
                 <h2 className={`${isImmersive ? 'text-lg' : 'text-sm'} font-semibold text-slate-200 flex items-center gap-2`}>
                     <Network size={isImmersive ? 18 : 16} className="text-purple-400" /> App Topology Map
@@ -231,7 +252,7 @@ export default function AppTopologyMap({ topologyData, density = 'compact' }: Ap
                 <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider">Live Nodes</span>
             </div>
             <div className="w-full bg-slate-950/30 rounded-xl border border-white/5 overflow-hidden">
-                <svg ref={svgRef} className="w-full cursor-grab active:cursor-grabbing" />
+                <svg ref={svgRef} className="w-full cursor-grab active:cursor-grabbing touch-none" />
             </div>
         </div>
     );

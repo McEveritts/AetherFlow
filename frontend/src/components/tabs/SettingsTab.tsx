@@ -1,6 +1,5 @@
-import { Settings, Sparkles, ChevronRight, DownloadCloud, AlertCircle, Eye, EyeOff, Key, Monitor, Globe, Clock, LayoutDashboard, Radio, HardDriveDownload, Shield, KeyRound, RefreshCw, UserCircle } from 'lucide-react';
+import { Settings, Sparkles, ChevronRight, DownloadCloud, AlertCircle, Eye, EyeOff, Key, Monitor, Globe, Clock, LayoutDashboard, Radio, HardDriveDownload, Shield, KeyRound, RefreshCw, UserCircle, Bell } from 'lucide-react';
 import { AI_MODELS, resolveProviderForModel } from '@/lib/ai-models';
-import type { AIProviderID } from '@/lib/ai-models';
 import { useState, FormEvent } from 'react';
 import useSWR from 'swr';
 import dynamic from 'next/dynamic';
@@ -10,6 +9,7 @@ const SecurityTab = dynamic(() => import('@/components/tabs/SecurityTab'), { ssr
 const ProfileTab = dynamic(() => import('@/components/tabs/ProfileTab'), { ssr: false });
 const DashboardSettingsTab = dynamic(() => import('@/components/tabs/DashboardSettingsTab'), { ssr: false });
 const OIDCClientsTab = dynamic(() => import('@/components/tabs/OIDCClientsTab'), { ssr: false });
+const NotificationsSettingsTab = dynamic(() => import('@/components/tabs/NotificationsSettingsTab'), { ssr: false });
 import { useToast } from '@/contexts/ToastContext';
 import { useSystemStore } from '@/store/useSystemStore';
 import { useTranslations } from 'next-intl';
@@ -20,10 +20,8 @@ import { useConnectionStore } from '@/store/useConnectionStore';
 export default function SettingsTab() {
     const t = useTranslations('Settings');
     const { addToast } = useToast();
-    const { theme, setTheme, language, setLanguage, ambientColor1, setAmbientColor1, ambientColor2, setAmbientColor2, activeSettingsTab: activeTab, setActiveSettingsTab: setActiveTab } = useSystemStore();
+    const { theme, language, setLanguage, ambientColor1, ambientColor2, activeSettingsTab: activeTab, setActiveSettingsTab: setActiveTab } = useSystemStore();
     const { preferredMode, setPreferredMode, pollInterval, setPollInterval } = useConnectionStore();
-    
-    // Tab State is now managed by useSystemStore
     
     // Config State
     const [model, setModel] = useState('gemini-3.1-pro-preview');
@@ -124,7 +122,6 @@ export default function SettingsTab() {
             setupCompleted: true
         };
 
-        // Optimistic update
         const prevData = settingsData;
         mutateSettings({ ...settingsData, ...payload }, false);
 
@@ -137,14 +134,14 @@ export default function SettingsTab() {
 
             if (res.ok) {
                 addToast('Configuration synced to AetherFlow Engine', 'success');
-                mutateSettings(); // revalidate from server
+                mutateSettings();
             } else {
-                mutateSettings(prevData, false); // rollback
+                mutateSettings(prevData, false);
                 const errData = await res.json().catch(() => ({ message: `HTTP ${res.status}` }));
                 addToast(errData.message || errData.error || `Configuration sync rejected (${res.status})`, 'error');
             }
         } catch (_err) {
-            mutateSettings(prevData, false); // rollback
+            mutateSettings(prevData, false);
             addToast('API dispatch failure: Configuration flush.', 'error');
         } finally {
             setIsSaving(false);
@@ -191,62 +188,69 @@ export default function SettingsTab() {
                 </div>
 
                 {/* Horizontal Tabs */}
-                <div className="flex gap-2 mb-8 border-b border-white/5 pb-4 overflow-x-auto relative z-10 hide-scrollbar">
+                <div className="flex gap-2 mb-8 border-b border-white/5 pb-4 overflow-x-auto relative z-10 hide-scrollbar obs-touch-pills">
                     <button 
                         type="button" 
                         onClick={() => setActiveTab('preferences')}
-                        className={`px-4 py-2 rounded-lg text-sm font-semibold transition-colors flex -mt-px border-b-2 items-center gap-2 whitespace-nowrap ${activeTab === 'preferences' ? 'border-indigo-500 text-indigo-400 bg-indigo-500/10' : 'border-transparent text-slate-400 hover:bg-white/5 hover:text-slate-200'}`}
+                        className={`obs-touch-target-standard obs-gpu-120hz-interactive px-4 py-2 rounded-lg text-sm font-semibold transition-colors flex -mt-px border-b-2 items-center gap-2 whitespace-nowrap ${activeTab === 'preferences' ? 'border-indigo-500 text-indigo-400 bg-indigo-500/10' : 'border-transparent text-slate-400 hover:bg-white/5 hover:text-slate-200'}`}
                     >
                         <Monitor size={16} /> {t('interfacePreferences')}
                     </button>
                     <button 
                         type="button" 
                         onClick={() => setActiveTab('ai')}
-                        className={`px-4 py-2 rounded-lg text-sm font-semibold transition-colors flex -mt-px border-b-2 items-center gap-2 whitespace-nowrap ${activeTab === 'ai' ? 'border-indigo-500 text-indigo-400 bg-indigo-500/10' : 'border-transparent text-slate-400 hover:bg-white/5 hover:text-slate-200'}`}
+                        className={`obs-touch-target-standard obs-gpu-120hz-interactive px-4 py-2 rounded-lg text-sm font-semibold transition-colors flex -mt-px border-b-2 items-center gap-2 whitespace-nowrap ${activeTab === 'ai' ? 'border-indigo-500 text-indigo-400 bg-indigo-500/10' : 'border-transparent text-slate-400 hover:bg-white/5 hover:text-slate-200'}`}
                     >
                         <Sparkles size={16} /> {t('flowAIEngine')}
                     </button>
                     <button 
                         type="button" 
                         onClick={() => setActiveTab('system')}
-                        className={`px-4 py-2 rounded-lg text-sm font-semibold transition-colors flex -mt-px border-b-2 items-center gap-2 whitespace-nowrap ${activeTab === 'system' ? 'border-indigo-500 text-indigo-400 bg-indigo-500/10' : 'border-transparent text-slate-400 hover:bg-white/5 hover:text-slate-200'}`}
+                        className={`obs-touch-target-standard obs-gpu-120hz-interactive px-4 py-2 rounded-lg text-sm font-semibold transition-colors flex -mt-px border-b-2 items-center gap-2 whitespace-nowrap ${activeTab === 'system' ? 'border-indigo-500 text-indigo-400 bg-indigo-500/10' : 'border-transparent text-slate-400 hover:bg-white/5 hover:text-slate-200'}`}
                     >
                         <DownloadCloud size={16} /> {t('systemUpdates')}
                     </button>
                     <button 
                         type="button" 
                         onClick={() => setActiveTab('backups')}
-                        className={`px-4 py-2 rounded-lg text-sm font-semibold transition-colors flex -mt-px border-b-2 items-center gap-2 whitespace-nowrap ${activeTab === 'backups' ? 'border-indigo-500 text-indigo-400 bg-indigo-500/10' : 'border-transparent text-slate-400 hover:bg-white/5 hover:text-slate-200'}`}
+                        className={`obs-touch-target-standard obs-gpu-120hz-interactive px-4 py-2 rounded-lg text-sm font-semibold transition-colors flex -mt-px border-b-2 items-center gap-2 whitespace-nowrap ${activeTab === 'backups' ? 'border-indigo-500 text-indigo-400 bg-indigo-500/10' : 'border-transparent text-slate-400 hover:bg-white/5 hover:text-slate-200'}`}
                     >
                         <HardDriveDownload size={16} /> Backups
                     </button>
                     <button 
                         type="button" 
                         onClick={() => setActiveTab('security')}
-                        className={`px-4 py-2 rounded-lg text-sm font-semibold transition-colors flex -mt-px border-b-2 items-center gap-2 whitespace-nowrap ${activeTab === 'security' ? 'border-indigo-500 text-indigo-400 bg-indigo-500/10' : 'border-transparent text-slate-400 hover:bg-white/5 hover:text-slate-200'}`}
+                        className={`obs-touch-target-standard obs-gpu-120hz-interactive px-4 py-2 rounded-lg text-sm font-semibold transition-colors flex -mt-px border-b-2 items-center gap-2 whitespace-nowrap ${activeTab === 'security' ? 'border-indigo-500 text-indigo-400 bg-indigo-500/10' : 'border-transparent text-slate-400 hover:bg-white/5 hover:text-slate-200'}`}
                     >
                         <Shield size={16} /> Security
                     </button>
                     <button 
                         type="button" 
                         onClick={() => setActiveTab('dashboard')}
-                        className={`px-4 py-2 rounded-lg text-sm font-semibold transition-colors flex -mt-px border-b-2 items-center gap-2 whitespace-nowrap ${activeTab === 'dashboard' ? 'border-indigo-500 text-indigo-400 bg-indigo-500/10' : 'border-transparent text-slate-400 hover:bg-white/5 hover:text-slate-200'}`}
+                        className={`obs-touch-target-standard obs-gpu-120hz-interactive px-4 py-2 rounded-lg text-sm font-semibold transition-colors flex -mt-px border-b-2 items-center gap-2 whitespace-nowrap ${activeTab === 'dashboard' ? 'border-indigo-500 text-indigo-400 bg-indigo-500/10' : 'border-transparent text-slate-400 hover:bg-white/5 hover:text-slate-200'}`}
                     >
                         <LayoutDashboard size={16} /> Dashboard
                     </button>
                     <button 
                         type="button" 
                         onClick={() => setActiveTab('profile')}
-                        className={`px-4 py-2 rounded-lg text-sm font-semibold transition-colors flex -mt-px border-b-2 items-center gap-2 whitespace-nowrap ${activeTab === 'profile' ? 'border-indigo-500 text-indigo-400 bg-indigo-500/10' : 'border-transparent text-slate-400 hover:bg-white/5 hover:text-slate-200'}`}
+                        className={`obs-touch-target-standard obs-gpu-120hz-interactive px-4 py-2 rounded-lg text-sm font-semibold transition-colors flex -mt-px border-b-2 items-center gap-2 whitespace-nowrap ${activeTab === 'profile' ? 'border-indigo-500 text-indigo-400 bg-indigo-500/10' : 'border-transparent text-slate-400 hover:bg-white/5 hover:text-slate-200'}`}
                     >
                         <UserCircle size={16} /> Profile
                     </button>
                     <button 
                         type="button" 
                         onClick={() => setActiveTab('oidc-clients')}
-                        className={`px-4 py-2 rounded-lg text-sm font-semibold transition-colors flex -mt-px border-b-2 items-center gap-2 whitespace-nowrap ${activeTab === 'oidc-clients' ? 'border-indigo-500 text-indigo-400 bg-indigo-500/10' : 'border-transparent text-slate-400 hover:bg-white/5 hover:text-slate-200'}`}
+                        className={`obs-touch-target-standard obs-gpu-120hz-interactive px-4 py-2 rounded-lg text-sm font-semibold transition-colors flex -mt-px border-b-2 items-center gap-2 whitespace-nowrap ${activeTab === 'oidc-clients' ? 'border-indigo-500 text-indigo-400 bg-indigo-500/10' : 'border-transparent text-slate-400 hover:bg-white/5 hover:text-slate-200'}`}
                     >
                         <KeyRound size={16} /> OIDC Clients
+                    </button>
+                    <button 
+                        type="button" 
+                        onClick={() => setActiveTab('notifications')}
+                        className={`obs-touch-target-standard obs-gpu-120hz-interactive px-4 py-2 rounded-lg text-sm font-semibold transition-colors flex -mt-px border-b-2 items-center gap-2 whitespace-nowrap ${activeTab === 'notifications' ? 'border-indigo-500 text-indigo-400 bg-indigo-500/10' : 'border-transparent text-slate-400 hover:bg-white/5 hover:text-slate-200'}`}
+                    >
+                        <Bell size={16} /> Notifications
                     </button>
                 </div>
 
@@ -276,7 +280,7 @@ export default function SettingsTab() {
                                                 <select
                                                     value={defaultDashboard}
                                                     onChange={(e) => setDefaultDashboard(e.target.value)}
-                                                    className="w-full bg-slate-900 border border-white/10 rounded-xl px-4 py-3 text-slate-200 text-sm focus:outline-none focus:border-indigo-500/50 transition-colors appearance-none cursor-pointer"
+                                                    className="obs-touch-target-standard w-full bg-slate-900 border border-white/10 rounded-xl px-4 py-3 text-slate-200 text-sm focus:outline-none focus:border-indigo-500/50 transition-colors appearance-none cursor-pointer"
                                                 >
                                                     <option value="overview">Overview / Metrics</option>
                                                     <option value="services">Services</option>
@@ -310,7 +314,7 @@ export default function SettingsTab() {
                                                 <select
                                                     value={timezone}
                                                     onChange={(e) => setTimezone(e.target.value)}
-                                                    className="w-full bg-slate-900 border border-white/10 rounded-xl px-4 py-3 text-slate-200 text-sm focus:outline-none focus:border-indigo-500/50 transition-colors appearance-none cursor-pointer"
+                                                    className="obs-touch-target-standard w-full bg-slate-900 border border-white/10 rounded-xl px-4 py-3 text-slate-200 text-sm focus:outline-none focus:border-indigo-500/50 transition-colors appearance-none cursor-pointer"
                                                 >
                                                     <option value="UTC">UTC (Default)</option>
                                                     <option value="America/New_York">America/New_York (EST/EDT)</option>
@@ -338,7 +342,7 @@ export default function SettingsTab() {
                                                 <select
                                                     value={language}
                                                     onChange={(e) => setLanguage(e.target.value)}
-                                                    className="w-full bg-slate-900 border border-white/10 rounded-xl px-4 py-3 text-slate-200 text-sm focus:outline-none focus:border-indigo-500/50 transition-colors appearance-none cursor-pointer"
+                                                    className="obs-touch-target-standard w-full bg-slate-900 border border-white/10 rounded-xl px-4 py-3 text-slate-200 text-sm focus:outline-none focus:border-indigo-500/50 transition-colors appearance-none cursor-pointer"
                                                 >
                                                     <option value="en">English</option>
                                                     <option value="zh">中文 (Chinese)</option>
@@ -371,7 +375,7 @@ export default function SettingsTab() {
                                                 <select
                                                     value={preferredMode}
                                                     onChange={(e) => setPreferredMode(e.target.value as 'websocket' | 'poll')}
-                                                    className="w-full bg-slate-900 border border-white/10 rounded-xl px-4 py-3 text-slate-200 text-sm focus:outline-none focus:border-indigo-500/50 transition-colors appearance-none cursor-pointer"
+                                                    className="obs-touch-target-standard w-full bg-slate-900 border border-white/10 rounded-xl px-4 py-3 text-slate-200 text-sm focus:outline-none focus:border-indigo-500/50 transition-colors appearance-none cursor-pointer"
                                                 >
                                                     <option value="websocket">Auto-Connect (WebSockets)</option>
                                                     <option value="poll">Nexus Link (REST Polling)</option>
@@ -392,7 +396,7 @@ export default function SettingsTab() {
                                                 <select
                                                     value={pollInterval}
                                                     onChange={(e) => setPollInterval(Number(e.target.value))}
-                                                    className="w-full bg-slate-900 border border-white/10 rounded-xl px-4 py-3 text-slate-200 text-sm focus:outline-none focus:border-indigo-500/50 transition-colors appearance-none cursor-pointer"
+                                                    className="obs-touch-target-standard w-full bg-slate-900 border border-white/10 rounded-xl px-4 py-3 text-slate-200 text-sm focus:outline-none focus:border-indigo-500/50 transition-colors appearance-none cursor-pointer"
                                                 >
                                                     <option value={1000}>1 Second (Hyper)</option>
                                                     <option value={2000}>2 Seconds (Fast)</option>
@@ -438,7 +442,7 @@ export default function SettingsTab() {
                                                     <button
                                                         type="button"
                                                         onClick={() => setShowApiKey(!showApiKey)}
-                                                        className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300 transition-colors"
+                                                        className="obs-touch-target-standard absolute right-1 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300 transition-colors flex items-center justify-center"
                                                     >
                                                         {showApiKey ? <EyeOff size={16} /> : <Eye size={16} />}
                                                     </button>
@@ -447,7 +451,7 @@ export default function SettingsTab() {
                                                     type="button"
                                                     onClick={() => handleTestConnection('gemini')}
                                                     disabled={isTesting || !apiKey}
-                                                    className="w-full py-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 border border-white/10 rounded-lg text-xs font-semibold text-slate-300 transition-colors flex items-center justify-center gap-2"
+                                                    className="obs-touch-target-standard obs-gpu-120hz-interactive w-full py-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 border border-white/10 rounded-lg text-xs font-semibold text-slate-300 transition-colors flex items-center justify-center gap-2"
                                                 >
                                                     {isTesting ? (
                                                         <><div className="w-3 h-3 border-2 border-slate-400/30 border-t-slate-400 rounded-full animate-spin"></div> {t('testing')}</>
@@ -477,7 +481,7 @@ export default function SettingsTab() {
                                                     <button
                                                         type="button"
                                                         onClick={() => setShowOpenaiApiKey(!showOpenaiApiKey)}
-                                                        className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300 transition-colors"
+                                                        className="obs-touch-target-standard absolute right-1 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300 transition-colors flex items-center justify-center"
                                                     >
                                                         {showOpenaiApiKey ? <EyeOff size={16} /> : <Eye size={16} />}
                                                     </button>
@@ -486,7 +490,7 @@ export default function SettingsTab() {
                                                     type="button"
                                                     onClick={() => handleTestConnection('openai')}
                                                     disabled={isTesting || !openaiApiKey}
-                                                    className="w-full py-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 border border-white/10 rounded-lg text-xs font-semibold text-slate-300 transition-colors flex items-center justify-center gap-2"
+                                                    className="obs-touch-target-standard obs-gpu-120hz-interactive w-full py-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 border border-white/10 rounded-lg text-xs font-semibold text-slate-300 transition-colors flex items-center justify-center gap-2"
                                                 >
                                                     {isTesting ? (
                                                         <><div className="w-3 h-3 border-2 border-slate-400/30 border-t-slate-400 rounded-full animate-spin"></div> {t('testing')}</>
@@ -516,7 +520,7 @@ export default function SettingsTab() {
                                                     <button
                                                         type="button"
                                                         onClick={() => setShowAnthropicApiKey(!showAnthropicApiKey)}
-                                                        className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300 transition-colors"
+                                                        className="obs-touch-target-standard absolute right-1 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300 transition-colors flex items-center justify-center"
                                                     >
                                                         {showAnthropicApiKey ? <EyeOff size={16} /> : <Eye size={16} />}
                                                     </button>
@@ -525,7 +529,7 @@ export default function SettingsTab() {
                                                     type="button"
                                                     onClick={() => handleTestConnection('anthropic')}
                                                     disabled={isTesting || !anthropicApiKey}
-                                                    className="w-full py-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 border border-white/10 rounded-lg text-xs font-semibold text-slate-300 transition-colors flex items-center justify-center gap-2"
+                                                    className="obs-touch-target-standard obs-gpu-120hz-interactive w-full py-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 border border-white/10 rounded-lg text-xs font-semibold text-slate-300 transition-colors flex items-center justify-center gap-2"
                                                 >
                                                     {isTesting ? (
                                                         <><div className="w-3 h-3 border-2 border-slate-400/30 border-t-slate-400 rounded-full animate-spin"></div> {t('testing')}</>
@@ -589,7 +593,7 @@ export default function SettingsTab() {
                                                     type="button"
                                                     onClick={() => handleTestConnection('localai', { endpoint: lmStudioEndpoint || 'http://localhost:1234' })}
                                                     disabled={isTesting}
-                                                    className="w-full py-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 border border-white/10 rounded-lg text-xs font-semibold text-slate-300 transition-colors flex items-center justify-center gap-2"
+                                                    className="obs-touch-target-standard obs-gpu-120hz-interactive w-full py-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 border border-white/10 rounded-lg text-xs font-semibold text-slate-300 transition-colors flex items-center justify-center gap-2"
                                                 >
                                                     {isTesting ? (
                                                         <><div className="w-3 h-3 border-2 border-slate-400/30 border-t-slate-400 rounded-full animate-spin"></div> {t('testing')}</>
@@ -601,7 +605,7 @@ export default function SettingsTab() {
                                                     type="button"
                                                     onClick={() => handleTestConnection('localai', { endpoint: ollamaEndpoint || 'http://localhost:11434' })}
                                                     disabled={isTesting}
-                                                    className="w-full py-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 border border-white/10 rounded-lg text-xs font-semibold text-slate-300 transition-colors flex items-center justify-center gap-2"
+                                                    className="obs-touch-target-standard obs-gpu-120hz-interactive w-full py-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 border border-white/10 rounded-lg text-xs font-semibold text-slate-300 transition-colors flex items-center justify-center gap-2"
                                                 >
                                                     {isTesting ? (
                                                         <><div className="w-3 h-3 border-2 border-slate-400/30 border-t-slate-400 rounded-full animate-spin"></div> {t('testing')}</>
@@ -648,7 +652,7 @@ export default function SettingsTab() {
                                                 <select
                                                     value={model}
                                                     onChange={(e) => setModel(e.target.value)}
-                                                    className="w-full bg-slate-900 border border-white/10 rounded-xl px-4 py-3 text-slate-200 text-sm focus:outline-none focus:border-indigo-500/50 transition-colors appearance-none cursor-pointer"
+                                                    className="obs-touch-target-standard w-full bg-slate-900 border border-white/10 rounded-xl px-4 py-3 text-slate-200 text-sm focus:outline-none focus:border-indigo-500/50 transition-colors appearance-none cursor-pointer"
                                                 >
                                                         {Object.entries(AI_MODELS).map(([providerId, models]) => (
                                                         <optgroup key={providerId} label={providerId.charAt(0).toUpperCase() + providerId.slice(1)}>
@@ -705,7 +709,7 @@ export default function SettingsTab() {
                                                 type="button"
                                                 onClick={handleCheckForUpdates}
                                                 disabled={isCheckingUpdate}
-                                                className="bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-400 border border-indigo-500/20 rounded-lg px-3 py-1.5 text-xs font-semibold flex items-center gap-1 transition-colors disabled:opacity-50"
+                                                className="obs-touch-target-standard obs-gpu-120hz-interactive bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-400 border border-indigo-500/20 rounded-lg px-3 py-1.5 text-xs font-semibold flex items-center gap-1 transition-colors disabled:opacity-50"
                                             >
                                                 <RefreshCw size={14} className={isCheckingUpdate ? "animate-spin" : ""} />
                                                 {isCheckingUpdate ? 'Checking...' : 'Check for Updates'}
@@ -727,7 +731,7 @@ export default function SettingsTab() {
                                                 <select
                                                     value={updateChannel}
                                                     onChange={(e) => setUpdateChannel(e.target.value)}
-                                                    className="w-full bg-slate-900 border border-white/10 rounded-xl px-4 py-3 text-slate-200 text-sm focus:outline-none focus:border-indigo-500/50 transition-colors appearance-none cursor-pointer"
+                                                    className="obs-touch-target-standard w-full bg-slate-900 border border-white/10 rounded-xl px-4 py-3 text-slate-200 text-sm focus:outline-none focus:border-indigo-500/50 transition-colors appearance-none cursor-pointer"
                                                 >
                                                     <option value="stable">Stable (Recommended)</option>
                                                     <option value="beta">Beta (Early Access)</option>
@@ -780,7 +784,7 @@ export default function SettingsTab() {
                                                                     type="button"
                                                                     onClick={handleRunUpdate}
                                                                     disabled={isUpdating}
-                                                                    className="w-full px-4 py-3 bg-blue-600 hover:bg-blue-500 disabled:bg-blue-600/50 disabled:cursor-not-allowed text-white font-bold rounded-xl transition-colors shadow-lg shadow-blue-500/20 text-center"
+                                                                    className="obs-touch-target-standard obs-gpu-120hz-interactive w-full px-4 py-3 bg-blue-600 hover:bg-blue-500 disabled:bg-blue-600/50 disabled:cursor-not-allowed text-white font-bold rounded-xl transition-colors shadow-lg shadow-blue-500/20 text-center"
                                                                 >
                                                                     {isUpdating ? 'Updating System...' : `Update to ${updateData.latestVersion}`}
                                                                 </button>
@@ -808,7 +812,7 @@ export default function SettingsTab() {
                             <button
                                 type="submit"
                                 disabled={isSaving}
-                                className="px-8 py-3 bg-indigo-500 hover:bg-indigo-400 disabled:bg-indigo-500/50 rounded-xl text-sm font-bold text-white transition-all shadow-lg shadow-indigo-500/20 flex items-center gap-2"
+                                className="obs-touch-target-standard obs-gpu-120hz-interactive px-8 py-3 bg-indigo-500 hover:bg-indigo-400 disabled:bg-indigo-500/50 rounded-xl text-sm font-bold text-white transition-all shadow-lg shadow-indigo-500/20 flex items-center gap-2"
                             >
                                 {isSaving ? t('saving') : t('saveConfig')}
                             </button>
@@ -822,6 +826,7 @@ export default function SettingsTab() {
                     {activeTab === 'security' && <SecurityTab />}
                     {activeTab === 'profile' && <ProfileTab />}
                     {activeTab === 'oidc-clients' && <OIDCClientsTab />}
+                    {activeTab === 'notifications' && <NotificationsSettingsTab />}
                 </div>
                 )}
             </div>

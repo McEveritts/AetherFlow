@@ -17,6 +17,10 @@ const SettingsTab = dynamic(() => import('@/components/tabs/SettingsTab'), { ssr
 const FileshareTab = dynamic(() => import('@/components/tabs/FileshareTab'), { ssr: false });
 const UsersTab = dynamic(() => import('@/components/tabs/UsersTab'), { ssr: false });
 const AuditTab = dynamic(() => import('@/components/tabs/AuditTab'), { ssr: false });
+const NetworkTab = dynamic(() => import('@/components/tabs/NetworkTab'), { ssr: false });
+const ClusterTab = dynamic(() => import('@/components/tabs/ClusterTab'), { ssr: false });
+const NotificationsSettingsTab = dynamic(() => import('@/components/tabs/NotificationsSettingsTab'), { ssr: false });
+const QuotasBillingTab = dynamic(() => import('@/components/tabs/QuotasBillingTab'), { ssr: false });
 import { useMetrics } from '@/hooks/useMetrics';
 import { OverviewSkeleton } from '@/components/layout/SkeletonBox';
 import OnboardingWizard from '@/components/layout/OnboardingWizard';
@@ -100,13 +104,21 @@ export default function Dashboard() {
         return <FileshareTab />;
       case 'audit':
         return <AuditTab />;
+      case 'network':
+        return <NetworkTab />;
+      case 'cluster':
+        return <ClusterTab />;
+      case 'notifications':
+        return <NotificationsSettingsTab />;
+      case 'quotas':
+        return <QuotasBillingTab />;
       default:
         return <div className="text-slate-400">Please select an option from the sidebar.</div>;
     }
   };
 
   return (
-    <div className="flex min-h-screen bg-slate-950 text-slate-50 overflow-hidden font-sans selection:bg-indigo-500/30">
+    <div className="flex min-h-screen bg-transparent text-slate-50 font-sans selection:bg-indigo-500/30">
 
       {settingsData && !settingsData.setupCompleted && (
         <OnboardingWizard
@@ -115,23 +127,17 @@ export default function Dashboard() {
         />
       )}
 
-      {/* Background ambient lighting */}
-      <div className="fixed top-0 left-1/2 -translate-x-1/2 w-full max-w-7xl h-full pointer-events-none z-0">
-        <div className="absolute top-[-20%] left-[-10%] w-[50%] h-[50%] bg-indigo-900/20 rounded-full blur-[120px]"></div>
-        <div className="absolute top-[20%] right-[-10%] w-[40%] h-[40%] bg-blue-900/10 rounded-full blur-[100px]"></div>
-      </div>
-
       <Sidebar />
 
-      <main className={`flex-1 transition-all duration-300 ease-[cubic-bezier(0.4,0,0.2,1)] relative z-10 h-screen overflow-y-auto no-scrollbar ${isSidebarHovered ? 'md:ml-64' : 'md:ml-20'} ml-0`}>
+      <main className={`flex-1 min-w-0 max-w-full transition-[margin] duration-[180ms] ease-[cubic-bezier(0.22,1,0.36,1)] relative z-10 h-screen overflow-y-auto no-scrollbar ${isSidebarHovered ? 'md:ml-64' : 'md:ml-20'} ml-0`}>
         <Header />
 
         <div className="mt-4">
           <GlobalBanners />
         </div>
 
-        {/* Scrollable Content */}
-        <div className="px-4 pb-4 md:px-10 md:pb-10 max-w-[1600px] mx-auto min-h-[calc(100vh-8rem)]">
+        {/* Scrollable Content with mobile dock bottom clearance (pb-24) */}
+        <div className="px-4 pb-24 md:px-10 md:pb-10 max-w-[1600px] mx-auto min-h-[calc(100vh-8rem)] min-w-0 max-w-full">
           <ErrorBoundary key={activeTab}>
             {renderContent()}
           </ErrorBoundary>

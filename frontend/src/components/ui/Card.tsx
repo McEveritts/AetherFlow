@@ -2,15 +2,17 @@ import { cn } from "@/lib/utils";
 import React from "react";
 
 export interface CardProps extends React.HTMLAttributes<HTMLDivElement> {
-  variant?: "default" | "panel";
+  variant?: "default" | "panel" | "hero";
 }
 
 export function Card({ className, variant = "default", ...props }: CardProps) {
   return (
     <div
       className={cn(
-        variant === "default" ? "glass-card" : "glass-panel",
-        "relative overflow-hidden",
+        variant === "default" && "glass-card",
+        variant === "panel" && "glass-panel rounded-2xl",
+        variant === "hero" && "glass-hero",
+        "relative min-w-0 max-w-full",
         className
       )}
       {...props}
@@ -53,7 +55,7 @@ export function CardContent({
   className,
   ...props
 }: React.HTMLAttributes<HTMLDivElement>) {
-  return <div className={cn("p-6 pt-0", className)} {...props} />;
+  return <div className={cn("p-6 pt-0 min-w-0 max-w-full", className)} {...props} />;
 }
 
 export function CardFooter({
