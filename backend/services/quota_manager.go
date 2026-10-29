@@ -123,6 +123,18 @@ func setdiskScriptPath() string {
 	return resolveSystemScriptPath("AF_SETDISK_PATH", "setdisk")
 }
 
+// ExecuteSetQuotaLocal directly invokes the setdisk script on the host.
+func ExecuteSetQuotaLocal(username, size string) (string, error) {
+	scriptPath := setdiskScriptPath()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	output, err := exec.CommandContext(ctx, "bash", scriptPath, "--username", username, "--size", size, "--json").CombinedOutput()
+	if err != nil {
+		return string(output), fmt.Errorf("setdisk failed: %w (%s)", err, strings.TrimSpace(string(output)))
+	}
+	return string(output), nil
+}
+
 func showspaceScriptPath() string {
 	return resolveSystemScriptPath("AF_SHOWSPACE_PATH", "showspace")
 }
@@ -364,14 +376,14 @@ func SetQuotaForUserID(userID int, quotaBytes int64, source, provider, externalI
 	}
 
 	quotaArg := quotaScriptSize(quotaBytes)
-	scriptPath := setdiskScriptPath()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	output, err := exec.CommandContext(ctx, "bash", scriptPath, "--username", user.Username, "--size", quotaArg, "--json").CombinedOutput()
-	if err != nil {
-		return UserQuotaRecord{}, fmt.Errorf("setdisk failed: %w (%s)", err, strings.TrimSpace(string(output)))
+	if IsRunnerAvailable() {
+		if err := DispatchSetQuota(user.Username, quotaArg); err != nil {
+			return UserQuotaRecord{}, fmt.Errorf("runner setdisk failed: %w", err)
+		}
+	} else {
+		if _, err := ExecuteSetQuotaLocal(user.Username, quotaArg); err != nil {
+			return UserQuotaRecord{}, err
+		}
 	}
 
 	usedBytes, usageErr := DetectUserUsageBytes(user.Username)

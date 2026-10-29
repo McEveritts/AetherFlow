@@ -1,10 +1,23 @@
 package models
 
+import "time"
+
 type ProcessInfo struct {
 	PID  int32   `json:"pid"`
 	Name string  `json:"name"`
 	CPU  float64 `json:"cpu"`
 	Mem  float64 `json:"mem"`
+}
+
+// AppIngressConfig represents persistent ingress configuration for an application.
+type AppIngressConfig struct {
+	AppName               string    `json:"appName"`
+	PublicDomain          string    `json:"publicDomain"`
+	ExternalAccessEnabled bool      `json:"externalAccessEnabled"`
+	ListenPort            int       `json:"listenPort"`
+	TLSEnabled            bool      `json:"tlsEnabled"`
+	CreatedAt             time.Time `json:"createdAt"`
+	UpdatedAt             time.Time `json:"updatedAt"`
 }
 
 type GpuMetric struct {

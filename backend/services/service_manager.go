@@ -2,6 +2,7 @@ package services
 
 import (
 	"log/slog"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 )
@@ -55,18 +56,96 @@ func GetActiveServices() map[string]interface{} {
 		status, uptime, version = GetServiceInfo(serviceName)
 
 		if version == "-" {
-			version = "latest"
+			if pkg.InstalledVersion != "" {
+				version = pkg.InstalledVersion
+			} else {
+				version = "latest"
+			}
 		}
 
 		servicesList[pkg.Label] = gin.H{
-			"status":     status,
-			"uptime":     uptime,
-			"version":    version,
-			"managed_by": managedBy,
-			"process":    serviceName,
-			"id":         pkg.Name,
+			"status":       status,
+			"uptime":       uptime,
+			"version":      version,
+			"managed_by":   managedBy,
+			"process":      serviceName,
+			"id":           pkg.Name,
+			"default_port": pkg.DefaultPort,
+			"web_path":     pkg.WebPath,
+			"units":        pkg.SandboxServiceIDs,
 		}
 	}
 
 	return servicesList
+}
+
+// ResolveServiceUnits returns all systemd units associated with a service or package name.
+// For multi-unit apps (e.g. deluge -> deluged + deluge-web, prometheus -> prometheus + node_exporter,
+// paperless-ngx -> paperless-webserver + paperless-worker + paperless-scheduler, scrutiny -> scrutiny + scrutiny-collector,
+// rclone -> rclone + rclone-vfs, recyclarr -> recyclarr + recyclarr.timer),
+// this ensures start/stop/restart controls all companion units together.
+func ResolveServiceUnits(target string) []string {
+	cleanTarget := strings.TrimSuffix(strings.TrimSpace(target), ".service")
+	if cleanTarget == "" {
+		return nil
+	}
+
+	pkgs, err := GetPackages()
+	if err == nil {
+		for _, pkg := range pkgs {
+			svcName := strings.TrimSuffix(strings.TrimSpace(pkg.ServiceName), ".service")
+			matched := strings.EqualFold(pkg.Name, cleanTarget) ||
+				(svcName != "" && strings.EqualFold(svcName, cleanTarget)) ||
+				(strings.EqualFold(pkg.Name, "paperless-ngx") && strings.EqualFold(cleanTarget, "paperless"))
+
+			if !matched {
+				for _, u := range pkg.SandboxServiceIDs {
+					uRaw := strings.TrimSpace(u)
+					uClean := strings.TrimSuffix(uRaw, ".service")
+					if strings.EqualFold(uClean, cleanTarget) ||
+						strings.EqualFold(uRaw, cleanTarget) ||
+						strings.EqualFold(strings.TrimSuffix(uClean, ".timer"), cleanTarget) {
+						matched = true
+						break
+					}
+				}
+			}
+
+			if matched {
+				if len(pkg.SandboxServiceIDs) > 0 {
+					units := make([]string, 0, len(pkg.SandboxServiceIDs))
+					for _, u := range pkg.SandboxServiceIDs {
+						uClean := strings.TrimSuffix(strings.TrimSpace(u), ".service")
+						if uClean != "" {
+							units = append(units, uClean)
+						}
+					}
+					if len(units) > 0 {
+						return units
+					}
+				}
+				if svcName != "" {
+					return []string{svcName}
+				}
+				return []string{pkg.Name}
+			}
+		}
+	}
+
+	switch strings.ToLower(cleanTarget) {
+	case "deluge", "deluged", "deluge-web":
+		return []string{"deluged", "deluge-web"}
+	case "prometheus", "node_exporter":
+		return []string{"prometheus", "node_exporter"}
+	case "paperless", "paperless-ngx", "paperless-webserver", "paperless-worker", "paperless-scheduler":
+		return []string{"paperless-webserver", "paperless-worker", "paperless-scheduler"}
+	case "scrutiny", "scrutiny-collector", "scrutiny-collector.timer":
+		return []string{"scrutiny", "scrutiny-collector", "scrutiny-collector.timer"}
+	case "recyclarr", "recyclarr.timer":
+		return []string{"recyclarr", "recyclarr.timer"}
+	case "rclone", "rclone-vfs":
+		return []string{"rclone", "rclone-vfs"}
+	}
+
+	return []string{cleanTarget}
 }

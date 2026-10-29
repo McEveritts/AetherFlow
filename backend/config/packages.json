@@ -6,7 +6,9 @@
         "lock_file": "/install/.plex.lock",
         "category": "Media",
         "service_type": "systemd",
-        "service_name": "plexmediaserver"
+        "service_name": "plexmediaserver",
+        "default_port": 32400,
+        "web_path": "/web"
     },
     {
         "name": "jellyfin",
@@ -15,7 +17,8 @@
         "lock_file": "/install/.jellyfin.lock",
         "category": "Media",
         "service_type": "systemd",
-        "service_name": "jellyfin"
+        "service_name": "jellyfin",
+        "default_port": 8096
     },
     {
         "name": "emby",
@@ -24,7 +27,8 @@
         "lock_file": "/install/.emby.lock",
         "category": "Media",
         "service_type": "systemd",
-        "service_name": "emby-server"
+        "service_name": "emby-server",
+        "default_port": 8097
     },
     {
         "name": "sonarr",
@@ -33,7 +37,8 @@
         "lock_file": "/install/.sonarr.lock",
         "category": "Media",
         "service_type": "systemd",
-        "service_name": "sonarr"
+        "service_name": "sonarr",
+        "default_port": 8989
     },
     {
         "name": "radarr",
@@ -42,7 +47,8 @@
         "lock_file": "/install/.radarr.lock",
         "category": "Media",
         "service_type": "systemd",
-        "service_name": "radarr"
+        "service_name": "radarr",
+        "default_port": 7878
     },
     {
         "name": "lidarr",
@@ -51,7 +57,8 @@
         "lock_file": "/install/.lidarr.lock",
         "category": "Media",
         "service_type": "systemd",
-        "service_name": "lidarr"
+        "service_name": "lidarr",
+        "default_port": 8686
     },
     {
         "name": "readarr",
@@ -60,7 +67,8 @@
         "lock_file": "/install/.readarr.lock",
         "category": "Media",
         "service_type": "systemd",
-        "service_name": "readarr"
+        "service_name": "readarr",
+        "default_port": 8787
     },
     {
         "name": "prowlarr",
@@ -69,7 +77,8 @@
         "lock_file": "/install/.prowlarr.lock",
         "category": "Media",
         "service_type": "systemd",
-        "service_name": "prowlarr"
+        "service_name": "prowlarr",
+        "default_port": 9696
     },
     {
         "name": "bazarr",
@@ -78,7 +87,8 @@
         "lock_file": "/install/.bazarr.lock",
         "category": "Media",
         "service_type": "systemd",
-        "service_name": "bazarr"
+        "service_name": "bazarr",
+        "default_port": 6767
     },
     {
         "name": "overseerr",
@@ -87,7 +97,8 @@
         "lock_file": "/install/.overseerr.lock",
         "category": "Media",
         "service_type": "systemd",
-        "service_name": "overseerr"
+        "service_name": "overseerr",
+        "default_port": 5056
     },
     {
         "name": "ombi",
@@ -96,7 +107,8 @@
         "lock_file": "/install/.ombi.lock",
         "category": "Media",
         "service_type": "systemd",
-        "service_name": "ombi"
+        "service_name": "ombi",
+        "default_port": 5000
     },
     {
         "name": "tautulli",
@@ -105,7 +117,8 @@
         "lock_file": "/install/.tautulli.lock",
         "category": "Media",
         "service_type": "systemd",
-        "service_name": "tautulli"
+        "service_name": "tautulli",
+        "default_port": 8181
     },
     {
         "name": "jackett",
@@ -114,7 +127,8 @@
         "lock_file": "/install/.jackett.lock",
         "category": "Media",
         "service_type": "systemd",
-        "service_name": "jackett"
+        "service_name": "jackett",
+        "default_port": 9117
     },
     {
         "name": "flaresolverr",
@@ -123,7 +137,8 @@
         "lock_file": "/install/.flaresolverr.lock",
         "category": "Media",
         "service_type": "systemd",
-        "service_name": "flaresolverr"
+        "service_name": "flaresolverr",
+        "default_port": 8191
     },
     {
         "name": "navidrome",
@@ -132,7 +147,8 @@
         "lock_file": "/install/.navidrome.lock",
         "category": "Media",
         "service_type": "systemd",
-        "service_name": "navidrome"
+        "service_name": "navidrome",
+        "default_port": 4533
     },
     {
         "name": "qbittorrent",
@@ -141,7 +157,8 @@
         "lock_file": "/install/.qbittorrent.lock",
         "category": "Downloaders",
         "service_type": "systemd",
-        "service_name": "qbittorrent"
+        "service_name": "qbittorrent",
+        "default_port": 8180
     },
     {
         "name": "deluge",
@@ -150,7 +167,8 @@
         "lock_file": "/install/.deluge.lock",
         "category": "Downloaders",
         "service_type": "systemd",
-        "service_name": "deluged"
+        "service_name": "deluged",
+        "default_port": 8112
     },
     {
         "name": "transmission",
@@ -159,7 +177,8 @@
         "lock_file": "/install/.transmission.lock",
         "category": "Downloaders",
         "service_type": "systemd",
-        "service_name": "transmission-daemon"
+        "service_name": "transmission-daemon",
+        "default_port": 9091
     },
     {
         "name": "sabnzbd",
@@ -168,7 +187,8 @@
         "lock_file": "/install/.sabnzbd.lock",
         "category": "Downloaders",
         "service_type": "systemd",
-        "service_name": "sabnzbd"
+        "service_name": "sabnzbd",
+        "default_port": 8085
     },
     {
         "name": "nzbget",
@@ -177,7 +197,8 @@
         "lock_file": "/install/.nzbget.lock",
         "category": "Downloaders",
         "service_type": "systemd",
-        "service_name": "nzbget"
+        "service_name": "nzbget",
+        "default_port": 6789
     },
     {
         "name": "flood",
@@ -186,7 +207,8 @@
         "lock_file": "/install/.flood.lock",
         "category": "Downloaders",
         "service_type": "systemd",
-        "service_name": "flood"
+        "service_name": "flood",
+        "default_port": 3001
     },
     {
         "name": "autobrr",
@@ -195,7 +217,8 @@
         "lock_file": "/install/.autobrr.lock",
         "category": "Downloaders",
         "service_type": "systemd",
-        "service_name": "autobrr"
+        "service_name": "autobrr",
+        "default_port": 7474
     },
     {
         "name": "nextcloud",
@@ -204,7 +227,9 @@
         "lock_file": "/install/.nextcloud.lock",
         "category": "Cloud",
         "service_type": "systemd",
-        "service_name": "apache2"
+        "service_name": "apache2",
+        "default_port": 8088,
+        "web_path": "/"
     },
     {
         "name": "syncthing",
@@ -213,7 +238,8 @@
         "lock_file": "/install/.syncthing.lock",
         "category": "Cloud",
         "service_type": "systemd",
-        "service_name": "syncthing"
+        "service_name": "syncthing",
+        "default_port": 8384
     },
     {
         "name": "filebrowser",
@@ -222,7 +248,8 @@
         "lock_file": "/install/.filebrowser.lock",
         "category": "Cloud",
         "service_type": "systemd",
-        "service_name": "filebrowser"
+        "service_name": "filebrowser",
+        "default_port": 8095
     },
     {
         "name": "wireguard",
@@ -231,7 +258,8 @@
         "lock_file": "/install/.wireguard.lock",
         "category": "Network",
         "service_type": "systemd",
-        "service_name": "wg-quick@wg0"
+        "service_name": "wg-quick@wg0",
+        "default_port": 0
     },
     {
         "name": "pihole",
@@ -240,7 +268,9 @@
         "lock_file": "/install/.pihole.lock",
         "category": "Network",
         "service_type": "systemd",
-        "service_name": "pihole-FTL"
+        "service_name": "pihole-FTL",
+        "default_port": 8089,
+        "web_path": "/admin"
     },
     {
         "name": "fail2ban",
@@ -249,7 +279,8 @@
         "lock_file": "/install/.fail2ban.lock",
         "category": "Security",
         "service_type": "systemd",
-        "service_name": "fail2ban"
+        "service_name": "fail2ban",
+        "default_port": 0
     },
     {
         "name": "vaultwarden",
@@ -258,7 +289,8 @@
         "lock_file": "/install/.vaultwarden.lock",
         "category": "Security",
         "service_type": "systemd",
-        "service_name": "vaultwarden"
+        "service_name": "vaultwarden",
+        "default_port": 8343
     },
     {
         "name": "grafana",
@@ -267,7 +299,8 @@
         "lock_file": "/install/.grafana.lock",
         "category": "Monitoring",
         "service_type": "systemd",
-        "service_name": "grafana-server"
+        "service_name": "grafana-server",
+        "default_port": 3000
     },
     {
         "name": "prometheus",
@@ -276,7 +309,8 @@
         "lock_file": "/install/.prometheus.lock",
         "category": "Monitoring",
         "service_type": "systemd",
-        "service_name": "prometheus"
+        "service_name": "prometheus",
+        "default_port": 9090
     },
     {
         "name": "netdata",
@@ -285,7 +319,8 @@
         "lock_file": "/install/.netdata.lock",
         "category": "Monitoring",
         "service_type": "systemd",
-        "service_name": "netdata"
+        "service_name": "netdata",
+        "default_port": 19999
     },
     {
         "name": "uptimekuma",
@@ -294,7 +329,8 @@
         "lock_file": "/install/.uptimekuma.lock",
         "category": "Monitoring",
         "service_type": "systemd",
-        "service_name": "uptime-kuma"
+        "service_name": "uptime-kuma",
+        "default_port": 3004
     },
     {
         "name": "homeassistant",
@@ -303,16 +339,212 @@
         "lock_file": "/install/.homeassistant.lock",
         "category": "Automation",
         "service_type": "systemd",
-        "service_name": "home-assistant@homeassistant"
+        "service_name": "home-assistant@homeassistant",
+        "default_port": 8123
     },
     {
-        "name": "portainer",
-        "label": "Portainer",
-        "description": "Lightweight container management UI for your infrastructure.",
-        "lock_file": "/install/.portainer.lock",
-        "category": "DevOps",
+        "name": "jellyseerr",
+        "label": "Jellyseerr",
+        "description": "Request management and media discovery tool for Jellyfin and Emby.",
+        "lock_file": "/install/.jellyseerr.lock",
+        "category": "Media",
         "service_type": "systemd",
-        "service_name": "portainer"
+        "service_name": "jellyseerr",
+        "default_port": 5055,
+        "web_path": "/"
+    },
+    {
+        "name": "adguardhome",
+        "label": "AdGuard Home",
+        "description": "Network-wide ads and trackers blocking DNS server with web interface.",
+        "lock_file": "/install/.adguardhome.lock",
+        "category": "Network",
+        "service_type": "systemd",
+        "service_name": "adguardhome",
+        "default_port": 3080,
+        "web_path": "/"
+    },
+    {
+        "name": "rtorrent",
+        "label": "rTorrent",
+        "description": "Ncurses BitTorrent client based on libTorrent with high performance and SCGI support.",
+        "lock_file": "/install/.rtorrent.lock",
+        "category": "Downloaders",
+        "service_type": "systemd",
+        "service_name": "rtorrent",
+        "default_port": 0
+    },
+    {
+        "name": "rutorrent",
+        "label": "ruTorrent",
+        "description": "Popular web frontend for rTorrent with extensive plugin support.",
+        "lock_file": "/install/.rutorrent.lock",
+        "category": "Downloaders",
+        "service_type": "systemd",
+        "service_name": "apache2",
+        "default_port": 8087,
+        "web_path": "/"
+    },
+    {
+        "name": "rclone",
+        "label": "Rclone",
+        "description": "Command-line and web GUI tool to manage and sync files on cloud storage.",
+        "lock_file": "/install/.rclone.lock",
+        "category": "Cloud",
+        "service_type": "systemd",
+        "service_name": "rclone",
+        "default_port": 5572,
+        "web_path": "/"
+    },
+    {
+        "name": "mergerfs",
+        "label": "MergerFS",
+        "description": "FUSE union filesystem to pool local storage and cloud mounts into a unified pool.",
+        "lock_file": "/install/.mergerfs.lock",
+        "category": "Cloud",
+        "service_type": "systemd",
+        "service_name": "mergerfs",
+        "default_port": 0
+    },
+    {
+        "name": "cloudplow",
+        "label": "Cloudplow",
+        "description": "Automated rclone background uploader and mergerfs unionfs offloader daemon.",
+        "lock_file": "/install/.cloudplow.lock",
+        "category": "Cloud",
+        "service_type": "systemd",
+        "service_name": "cloudplow",
+        "default_port": 0
+    },
+    {
+        "name": "unpackerr",
+        "label": "Unpackerr",
+        "description": "Extracts downloads for Radarr, Sonarr, Lidarr, and Readarr automatically.",
+        "lock_file": "/install/.unpackerr.lock",
+        "category": "Media",
+        "service_type": "systemd",
+        "service_name": "unpackerr",
+        "default_port": 0
+    },
+    {
+        "name": "autoscan",
+        "label": "Autoscan",
+        "description": "Webhook-driven media scanner replacing default Plex/Jellyfin/Emby library scans.",
+        "lock_file": "/install/.autoscan.lock",
+        "category": "Media",
+        "service_type": "systemd",
+        "service_name": "autoscan",
+        "default_port": 3030,
+        "web_path": "/"
+    },
+    {
+        "name": "recyclarr",
+        "label": "Recyclarr",
+        "description": "Syncs recommended TRaSH Guides quality profiles and custom formats to Sonarr/Radarr.",
+        "lock_file": "/install/.recyclarr.lock",
+        "category": "Media",
+        "service_type": "systemd",
+        "service_name": "recyclarr",
+        "default_port": 0
+    },
+    {
+        "name": "audiobookshelf",
+        "label": "Audiobookshelf",
+        "description": "Self-hosted audiobook and podcast server with streaming web player and mobile apps.",
+        "lock_file": "/install/.audiobookshelf.lock",
+        "category": "Media",
+        "service_type": "systemd",
+        "service_name": "audiobookshelf",
+        "default_port": 13378,
+        "web_path": "/"
+    },
+    {
+        "name": "kavita",
+        "label": "Kavita",
+        "description": "Fast, feature-rich reader server for manga, comics, and ebooks with OPDS support.",
+        "lock_file": "/install/.kavita.lock",
+        "category": "Media",
+        "service_type": "systemd",
+        "service_name": "kavita",
+        "default_port": 5002,
+        "web_path": "/"
+    },
+    {
+        "name": "calibreweb",
+        "label": "Calibre-Web",
+        "description": "Web interface providing a clean interface for browsing and reading Calibre e-book libraries.",
+        "lock_file": "/install/.calibreweb.lock",
+        "category": "Media",
+        "service_type": "systemd",
+        "service_name": "calibreweb",
+        "default_port": 8083,
+        "web_path": "/"
+    },
+    {
+        "name": "librespeed",
+        "label": "LibreSpeed",
+        "description": "Lightweight, self-hosted HTML5 speedtest server powered by speedtest-go.",
+        "lock_file": "/install/.librespeed.lock",
+        "category": "Network",
+        "service_type": "systemd",
+        "service_name": "librespeed",
+        "default_port": 8988,
+        "web_path": "/"
+    },
+    {
+        "name": "thelounge",
+        "label": "The Lounge",
+        "description": "Modern self-hosted web IRC client with persistent sessions and push notifications.",
+        "lock_file": "/install/.thelounge.lock",
+        "category": "Network",
+        "service_type": "systemd",
+        "service_name": "thelounge",
+        "default_port": 9000,
+        "web_path": "/"
+    },
+    {
+        "name": "znc",
+        "label": "ZNC",
+        "description": "Advanced IRC network bouncer with persistent connections, playback, and SSL.",
+        "lock_file": "/install/.znc.lock",
+        "category": "Network",
+        "service_type": "systemd",
+        "service_name": "znc",
+        "default_port": 6501,
+        "web_path": "/"
+    },
+    {
+        "name": "scrutiny",
+        "label": "Scrutiny",
+        "description": "Hard drive S.M.A.R.T. health, temperature, and failure risk monitoring dashboard.",
+        "lock_file": "/install/.scrutiny.lock",
+        "category": "Monitoring",
+        "service_type": "systemd",
+        "service_name": "scrutiny",
+        "default_port": 8098,
+        "web_path": "/"
+    },
+    {
+        "name": "paperless-ngx",
+        "label": "Paperless-ngx",
+        "description": "Community-supported open source document management system with OCR and auto-tagging.",
+        "lock_file": "/install/.paperless-ngx.lock",
+        "category": "Cloud",
+        "service_type": "systemd",
+        "service_name": "paperless-webserver",
+        "default_port": 8010,
+        "web_path": "/"
+    },
+    {
+        "name": "n8n",
+        "label": "n8n",
+        "description": "Fair-code workflow automation tool allowing flexible integration across services.",
+        "lock_file": "/install/.n8n.lock",
+        "category": "Automation",
+        "service_type": "systemd",
+        "service_name": "n8n",
+        "default_port": 5678,
+        "web_path": "/"
     },
     {
         "name": "gitea",
@@ -321,7 +553,8 @@
         "lock_file": "/install/.gitea.lock",
         "category": "DevOps",
         "service_type": "systemd",
-        "service_name": "gitea"
+        "service_name": "gitea",
+        "default_port": 3002
     },
     {
         "name": "organizr",
@@ -330,6 +563,8 @@
         "lock_file": "/install/.organizr.lock",
         "category": "Utilities",
         "service_type": "systemd",
-        "service_name": "apache2"
+        "service_name": "apache2",
+        "default_port": 8086,
+        "web_path": "/"
     }
 ]

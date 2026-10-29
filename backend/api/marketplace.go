@@ -1,6 +1,7 @@
 package api
 
 import (
+	"aetherflow/db"
 	"aetherflow/models"
 	"aetherflow/services"
 	"log/slog"
@@ -10,22 +11,34 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+func init() {
+	services.SetPackageEventBroadcaster(func(pkgId, action, status string, progress int, lastLine string) {
+		BroadcastMarketplaceJobEvent(pkgId, action, status, progress, lastLine)
+	})
+}
+
 type App struct {
-	Id               string  `json:"id"`
-	Name             string  `json:"name"`
-	Desc             string  `json:"desc"`
-	Hits             int     `json:"hits"`
-	Category         string  `json:"category"`
-	Status           string  `json:"status"`
-	Progress         int     `json:"progress"`              // 0-100 estimated install progress
-	StartedAt        *string `json:"started_at,omitempty"`  // ISO timestamp when install started
-	LogLine          string  `json:"log_line,omitempty"`    // most recent log line
-	InstalledVersion string  `json:"installed_version,omitempty"`
-	LatestVersion    string  `json:"latest_version,omitempty"`
-	UpdateAvailable  bool    `json:"update_available"`
-	UpdateCheckedAt  string  `json:"update_checked_at,omitempty"`
-	UpdateURL        string  `json:"update_url,omitempty"`
-	UpdateError      string  `json:"update_error,omitempty"`
+	Id                    string  `json:"id"`
+	Name                  string  `json:"name"`
+	Desc                  string  `json:"desc"`
+	Hits                  int     `json:"hits"`
+	Category              string  `json:"category"`
+	Status                string  `json:"status"`
+	DefaultPort           int     `json:"default_port,omitempty"`
+	ActivePort            int     `json:"active_port,omitempty"`
+	InternalDomain        string  `json:"internal_domain,omitempty"`
+	PublicDomain          string  `json:"public_domain,omitempty"`
+	ExternalAccessEnabled bool    `json:"external_access_enabled,omitempty"`
+	WebPath               string  `json:"web_path,omitempty"`
+	Progress              int     `json:"progress"`              // 0-100 estimated install progress
+	StartedAt             *string `json:"started_at,omitempty"`  // ISO timestamp when install started
+	LogLine               string  `json:"log_line,omitempty"`    // most recent log line
+	InstalledVersion      string  `json:"installed_version,omitempty"`
+	LatestVersion         string  `json:"latest_version,omitempty"`
+	UpdateAvailable       bool    `json:"update_available"`
+	UpdateCheckedAt       string  `json:"update_checked_at,omitempty"`
+	UpdateURL             string  `json:"update_url,omitempty"`
+	UpdateError           string  `json:"update_error,omitempty"`
 }
 
 // GetMarketplaceApps returns the list of marketplace apps
@@ -36,21 +49,49 @@ func GetMarketplaceApps(c *gin.Context) {
 		return
 	}
 
+	ingressMap := make(map[string]models.AppIngressConfig)
+	if configs, err := db.GetAllAppIngressConfigs(); err == nil {
+		for _, cfg := range configs {
+			ingressMap[cfg.AppName] = cfg
+		}
+	}
+
 	apps := []App{}
 	for _, p := range pkgs {
+		activePort := p.DefaultPort
+		internalDomain := ""
+		if bp := services.GetBlueprint(p.Name); bp != nil {
+			internalDomain = bp.InternalDomain
+		}
+		var publicDomain string
+		var externalAccess bool
+		if ing, ok := ingressMap[p.Name]; ok {
+			if ing.ListenPort > 0 {
+				activePort = ing.ListenPort
+			}
+			publicDomain = ing.PublicDomain
+			externalAccess = ing.ExternalAccessEnabled
+		}
+
 		app := App{
-			Id:               p.Name,
-			Name:             p.Label,
-			Desc:             p.Description,
-			Hits:             p.Hits,
-			Category:         p.Category,
-			Status:           p.Status,
-			InstalledVersion: p.InstalledVersion,
-			LatestVersion:    p.LatestVersion,
-			UpdateAvailable:  p.UpdateAvailable,
-			UpdateCheckedAt:  p.UpdateCheckedAt,
-			UpdateURL:        p.UpdateURL,
-			UpdateError:      p.UpdateError,
+			Id:                    p.Name,
+			Name:                  p.Label,
+			Desc:                  p.Description,
+			Hits:                  p.Hits,
+			Category:              p.Category,
+			Status:                p.Status,
+			DefaultPort:           p.DefaultPort,
+			ActivePort:            activePort,
+			InternalDomain:        internalDomain,
+			PublicDomain:          publicDomain,
+			ExternalAccessEnabled: externalAccess,
+			WebPath:               p.WebPath,
+			InstalledVersion:      p.InstalledVersion,
+			LatestVersion:         p.LatestVersion,
+			UpdateAvailable:       p.UpdateAvailable,
+			UpdateCheckedAt:       p.UpdateCheckedAt,
+			UpdateURL:             p.UpdateURL,
+			UpdateError:           p.UpdateError,
 		}
 
 		// Enrich with live progress data if job is active
@@ -105,6 +146,12 @@ func InstallPackage(c *gin.Context) {
 		return
 	}
 
+	userID, _ := c.Get("user_id")
+	username, _ := c.Get("username")
+	uid, _ := userID.(int)
+	uname, _ := username.(string)
+	db.RecordAudit(uid, uname, "package_install", "package", pkg.Name, pkg.Label, c.ClientIP(), c.Request.UserAgent())
+
 	// Trigger async install
 	go services.RunPackageAction("install", pkg.Name, scriptName, pkg.LockFile)
 
@@ -139,6 +186,12 @@ func UninstallPackage(c *gin.Context) {
 		InternalError(c, "Tear-down script is missing or unreadable on the server")
 		return
 	}
+
+	userID, _ := c.Get("user_id")
+	username, _ := c.Get("username")
+	uid, _ := userID.(int)
+	uname, _ := username.(string)
+	db.RecordAudit(uid, uname, "package_uninstall", "package", pkg.Name, pkg.Label, c.ClientIP(), c.Request.UserAgent())
 
 	// Trigger async uninstall
 	go services.RunPackageAction("remove", pkg.Name, scriptName, pkg.LockFile)

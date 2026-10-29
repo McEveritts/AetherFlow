@@ -422,6 +422,31 @@ func BroadcastMarketplaceUpdates(packages []string) {
 	}
 }
 
+func BroadcastMarketplaceJobEvent(pkgId, action, status string, progress int, lastLine string) {
+	payload := map[string]interface{}{
+		"type": "MARKETPLACE_UPDATE",
+		"data": map[string]interface{}{
+			"packages": []string{pkgId},
+			"package":  pkgId,
+			"action":   action,
+			"status":   status,
+			"progress": progress,
+			"log_line": lastLine,
+		},
+	}
+
+	message, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+
+	select {
+	case WSHub.broadcast <- message:
+	default:
+		slog.Warn("WebSocket broadcast channel full, dropping marketplace job event")
+	}
+}
+
 // BroadcastActionQueued sends an ACTION_QUEUED WebSocket message to all connected clients.
 // This enables real-time Inbox updates without relying solely on polling.
 func BroadcastActionQueued(actionID int64, classification, source, action string) {

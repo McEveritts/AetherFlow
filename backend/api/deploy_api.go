@@ -30,16 +30,27 @@ func HandleDeployProcess(c *gin.Context) {
 	// 1. Establish the Event Stream Logging specific to this target
 	statusChan := services.StreamHub.RegisterStream(appBlueprint.AppName)
 
+	targetPort := appBlueprint.DefaultPort
+	if resolvedPort, _, err := services.ResolveDynamicAppPort(appBlueprint.AppName, false); err == nil && resolvedPort > 0 {
+		targetPort = resolvedPort
+	}
+
+	internalDomain := appBlueprint.InternalDomain
+	if internalDomain == "" {
+		internalDomain = fmt.Sprintf("%s.aether.local", appBlueprint.AppName)
+	}
+
 	// In real environment, parameters like TargetCaddyPort and BinaryStaging are dynamically fetched locally.
 	// We'll scaffold safe parameters here before sending down to the logic engine.
 	deployConfig := services.DeployConfig{
 		AppName:         appBlueprint.AppName,
-		VersionStr:      "latest-update", 
+		VersionStr:      "latest-update",
 		ActiveSymlink:   fmt.Sprintf("/opt/%s/active", appBlueprint.AppName),
 		BinaryStaging:   fmt.Sprintf("/opt/%s/latest-update", appBlueprint.AppName),
 		CentralDBPath:   appBlueprint.AppDataPath,
-		TargetInternal:  fmt.Sprintf("%s.aether.local", appBlueprint.AppName),
-		TargetCaddyPort: appBlueprint.DefaultPort + 10000, // Dummy green proxy logic
+		TargetInternal:  internalDomain,
+		TargetCaddyPort: targetPort,
+		HealthCheckPath: appBlueprint.HealthCheckPath,
 		StatusChan:      statusChan,
 	}
 
@@ -64,6 +75,6 @@ func HandleDeployProcess(c *gin.Context) {
 	c.JSON(http.StatusAccepted, gin.H{
 		"status":       "Initiated deployment cycle",
 		"target":       deployConfig.TargetInternal,
-		"streamTarget": fmt.Sprintf("/api/v1/deploy/stream?appName=%s", appBlueprint.AppName),
+		"streamTarget": fmt.Sprintf("/api/v1/auth/deploy/stream?appName=%s", appBlueprint.AppName),
 	})
 }

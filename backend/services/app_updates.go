@@ -111,7 +111,7 @@ func shouldTrackPackage(pkg models.Package) bool {
 	switch pkg.UpdateSource {
 	case "apt":
 		return pkg.UpdatePackage != ""
-	case "github", "git_tags":
+	case "github", "git_tags", "git":
 		return len(pkg.VersionCommand) > 0 && (pkg.UpdateRepo != "" || pkg.UpdateRepoURL != "")
 	default:
 		return len(pkg.VersionCommand) > 0
@@ -276,7 +276,7 @@ func (w *AppUpdateWatcher) detectLatestVersion(pkg models.Package) (string, stri
 		return detectLatestAptVersion(pkg.UpdatePackage)
 	case "github":
 		return w.detectLatestGitHubRelease(pkg.UpdateRepo)
-	case "git_tags":
+	case "git_tags", "git":
 		repoURL := pkg.UpdateRepoURL
 		if repoURL == "" && pkg.UpdateRepo != "" {
 			repoURL = "https://github.com/" + pkg.UpdateRepo + ".git"

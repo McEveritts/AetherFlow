@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"aetherflow/models"
+
 	_ "modernc.org/sqlite"
 )
 
@@ -48,25 +50,44 @@ func migrate(version int, description string, stmts ...string) {
 func InitDB() {
 	dbPath := os.Getenv("DB_PATH")
 	if dbPath == "" {
-		// Anchor the database path to the executable's directory, not the CWD.
-		// This prevents accidental creation of a new empty DB in a random directory.
-		exe, exeErr := os.Executable()
-		if exeErr != nil {
-			log.Fatalf("CRITICAL: Failed to resolve executable path for DB init: %v", exeErr)
-		}
-		exeDir := filepath.Dir(exe)
+		if stateDir := os.Getenv("STATE_DIRECTORY"); stateDir != "" {
+			if mkErr := os.MkdirAll(stateDir, 0700); mkErr != nil {
+				log.Fatalf("CRITICAL: Failed to create state directory at %s: %v", stateDir, mkErr)
+			}
+			dbPath = filepath.Join(stateDir, "aetherflow.sqlite")
+			slog.Info("database path anchored to systemd STATE_DIRECTORY", "path", dbPath)
+		} else {
+			// Anchor the database path to the executable's directory, not the CWD.
+			// This prevents accidental creation of a new empty DB in a random directory.
+			exe, exeErr := os.Executable()
+			if exeErr != nil {
+				log.Fatalf("CRITICAL: Failed to resolve executable path for DB init: %v", exeErr)
+			}
+			exeDir := filepath.Dir(exe)
 
-		dbDir := filepath.Join(exeDir, "data")
-		if mkErr := os.MkdirAll(dbDir, 0700); mkErr != nil {
-			log.Fatalf("CRITICAL: Failed to create database directory at %s: %v", dbDir, mkErr)
-		}
+			dbDir := filepath.Join(exeDir, "data")
+			if mkErr := os.MkdirAll(dbDir, 0700); mkErr != nil {
+				log.Fatalf("CRITICAL: Failed to create database directory at %s: %v", dbDir, mkErr)
+			}
 
-		dbPath = filepath.Join(dbDir, "aetherflow.sqlite")
-		slog.Info("database path anchored", "path", dbPath)
+			dbPath = filepath.Join(dbDir, "aetherflow.sqlite")
+			slog.Info("database path anchored", "path", dbPath)
+		}
+	} else if dbPath != ":memory:" && !strings.HasPrefix(dbPath, "file:") {
+		if dir := filepath.Dir(dbPath); dir != "" && dir != "." {
+			_ = os.MkdirAll(dir, 0700)
+		}
+	}
+
+	// SQLite DSN configuration ensuring concurrent WAL journal mode and busy timeout:
+	// Connection string parameter _journal_mode=WAL and _busy_timeout=5000
+	dsn := dbPath
+	if !strings.Contains(dsn, "?") && dsn != ":memory:" {
+		dsn += "?_journal_mode=WAL&_busy_timeout=5000"
 	}
 
 	var err error
-	DB, err = sql.Open("sqlite", dbPath)
+	DB, err = sql.Open("sqlite", dsn)
 	if err != nil {
 		log.Fatalf("Failed to open SQLite database at %s: %v", dbPath, err)
 	}
@@ -556,6 +577,19 @@ func InitDB() {
 		);`,
 		"CREATE INDEX IF NOT EXISTS idx_mediaflow_status ON mediaflow_queue(status);")
 
+	// ─── Migration v17: App Ingress Configurations ─────────────────────
+	migrate(17, "Add app_ingress_configs table for persistent ingress routing",
+		`CREATE TABLE IF NOT EXISTS app_ingress_configs (
+			app_name TEXT PRIMARY KEY,
+			public_domain TEXT DEFAULT '',
+			external_access_enabled BOOLEAN DEFAULT 0,
+			listen_port INTEGER DEFAULT 0,
+			tls_enabled BOOLEAN DEFAULT 0,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		);`,
+		"CREATE UNIQUE INDEX IF NOT EXISTS idx_ingress_configs_app_name ON app_ingress_configs(app_name);")
+
 	// ─── Ensure singleton settings row ─────────────────────────────────
 	DB.Exec(`INSERT OR IGNORE INTO settings (id) VALUES (1)`)
 
@@ -648,3 +682,104 @@ func StartPruneLoop() {
 	}()
 	slog.Info("database prune loop started", "interval", "15m")
 }
+
+// ─── Phase 30: App Ingress Configurations (Migration 17) ───────────────
+
+// GetAllAppIngressConfigs returns all stored app ingress configurations.
+func GetAllAppIngressConfigs() ([]models.AppIngressConfig, error) {
+	if DB == nil {
+		return []models.AppIngressConfig{}, nil
+	}
+	rows, err := DB.Query(`
+		SELECT app_name, public_domain, external_access_enabled, listen_port, tls_enabled, created_at, updated_at
+		FROM app_ingress_configs
+		ORDER BY app_name ASC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var configs []models.AppIngressConfig
+	for rows.Next() {
+		var c models.AppIngressConfig
+		var createdAt, updatedAt string
+		if err := rows.Scan(&c.AppName, &c.PublicDomain, &c.ExternalAccessEnabled, &c.ListenPort, &c.TLSEnabled, &createdAt, &updatedAt); err != nil {
+			return nil, err
+		}
+		if t, err := time.Parse("2006-01-02 15:04:05", createdAt); err == nil {
+			c.CreatedAt = t
+		} else if t, err := time.Parse(time.RFC3339, createdAt); err == nil {
+			c.CreatedAt = t
+		}
+		if t, err := time.Parse("2006-01-02 15:04:05", updatedAt); err == nil {
+			c.UpdatedAt = t
+		} else if t, err := time.Parse(time.RFC3339, updatedAt); err == nil {
+			c.UpdatedAt = t
+		}
+		configs = append(configs, c)
+	}
+	if configs == nil {
+		configs = []models.AppIngressConfig{}
+	}
+	return configs, nil
+}
+
+// GetAppIngressConfig retrieves the ingress configuration for a specific app.
+func GetAppIngressConfig(appName string) (*models.AppIngressConfig, error) {
+	if DB == nil {
+		return nil, nil
+	}
+	var c models.AppIngressConfig
+	var createdAt, updatedAt string
+	err := DB.QueryRow(`
+		SELECT app_name, public_domain, external_access_enabled, listen_port, tls_enabled, created_at, updated_at
+		FROM app_ingress_configs
+		WHERE app_name = ?
+	`, appName).Scan(&c.AppName, &c.PublicDomain, &c.ExternalAccessEnabled, &c.ListenPort, &c.TLSEnabled, &createdAt, &updatedAt)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if t, err := time.Parse("2006-01-02 15:04:05", createdAt); err == nil {
+		c.CreatedAt = t
+	} else if t, err := time.Parse(time.RFC3339, createdAt); err == nil {
+		c.CreatedAt = t
+	}
+	if t, err := time.Parse("2006-01-02 15:04:05", updatedAt); err == nil {
+		c.UpdatedAt = t
+	} else if t, err := time.Parse(time.RFC3339, updatedAt); err == nil {
+		c.UpdatedAt = t
+	}
+	return &c, nil
+}
+
+// SetAppIngressConfig atomically inserts or updates the ingress configuration for an app.
+func SetAppIngressConfig(cfg models.AppIngressConfig) error {
+	if DB == nil {
+		return nil
+	}
+	_, err := DB.Exec(`
+		INSERT INTO app_ingress_configs (app_name, public_domain, external_access_enabled, listen_port, tls_enabled, updated_at)
+		VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+		ON CONFLICT(app_name) DO UPDATE SET
+			public_domain = excluded.public_domain,
+			external_access_enabled = excluded.external_access_enabled,
+			listen_port = CASE WHEN excluded.listen_port > 0 THEN excluded.listen_port ELSE app_ingress_configs.listen_port END,
+			tls_enabled = excluded.tls_enabled,
+			updated_at = CURRENT_TIMESTAMP
+	`, cfg.AppName, cfg.PublicDomain, cfg.ExternalAccessEnabled, cfg.ListenPort, cfg.TLSEnabled)
+	return err
+}
+
+// DeleteAppIngressConfig removes the persisted ingress configuration for an app on uninstall.
+func DeleteAppIngressConfig(appName string) error {
+	if DB == nil {
+		return nil
+	}
+	_, err := DB.Exec(`DELETE FROM app_ingress_configs WHERE app_name = ?`, appName)
+	return err
+}
+

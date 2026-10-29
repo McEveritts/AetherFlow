@@ -8,15 +8,23 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+func getClusterManager() *cluster.ClusterManager {
+	if cluster.Manager == nil {
+		return cluster.InitClusterManager()
+	}
+	return cluster.Manager
+}
+
 // GetClusterNodes returns a list of all registered worker nodes with their status and metrics.
 func GetClusterNodes(c *gin.Context) {
-	if cluster.Manager == nil {
+	cm := getClusterManager()
+	if cm == nil {
 		RespondError(c, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Cluster manager not initialized")
 		return
 	}
 
-	nodes := cluster.Manager.GetNodes()
-	status := cluster.Manager.GetClusterStatus()
+	nodes := cm.GetNodes()
+	status := cm.GetClusterStatus()
 
 	c.JSON(http.StatusOK, gin.H{
 		"nodes":   nodes,
@@ -26,12 +34,13 @@ func GetClusterNodes(c *gin.Context) {
 
 // EnrollWorker generates an enrollment token for a new worker node.
 func EnrollWorker(c *gin.Context) {
-	if cluster.Manager == nil {
+	cm := getClusterManager()
+	if cm == nil {
 		RespondError(c, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Cluster manager not initialized")
 		return
 	}
 
-	token, err := cluster.Manager.GenerateEnrollmentToken()
+	token, err := cm.GenerateEnrollmentToken()
 	if err != nil {
 		InternalError(c, "Failed to generate enrollment token")
 		return
@@ -45,7 +54,8 @@ func EnrollWorker(c *gin.Context) {
 
 // RemoveWorker removes a worker node from the cluster.
 func RemoveWorker(c *gin.Context) {
-	if cluster.Manager == nil {
+	cm := getClusterManager()
+	if cm == nil {
 		RespondError(c, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Cluster manager not initialized")
 		return
 	}
@@ -56,13 +66,13 @@ func RemoveWorker(c *gin.Context) {
 		return
 	}
 
-	node := cluster.Manager.GetNode(nodeID)
+	node := cm.GetNode(nodeID)
 	if node == nil {
 		NotFoundError(c, "Node not found")
 		return
 	}
 
-	if err := cluster.Manager.RemoveWorker(nodeID); err != nil {
+	if err := cm.RemoveWorker(nodeID); err != nil {
 		InternalError(c, "Failed to remove node: " + err.Error())
 		return
 	}
@@ -72,7 +82,8 @@ func RemoveWorker(c *gin.Context) {
 
 // GetWorkerMetrics returns detailed metrics for a specific worker node.
 func GetWorkerMetrics(c *gin.Context) {
-	if cluster.Manager == nil {
+	cm := getClusterManager()
+	if cm == nil {
 		RespondError(c, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Cluster manager not initialized")
 		return
 	}

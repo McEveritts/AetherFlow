@@ -1,6 +1,7 @@
 package services
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -184,7 +185,21 @@ func ControlService(serviceName, action string) error {
 		return err
 	}
 	slog.Info("systemctl executing", "action", action, "service", serviceName)
-	cmd := exec.Command("sudo", "systemctl", action, "--", serviceName)
+
+	// Prefer the root-owned UNIX socket runner when active (allows NoNewPrivileges=yes on aetherflow-api).
+	if IsRunnerAvailable() {
+		if err := DispatchSystemctl(serviceName, action); err != nil {
+			slog.Error("systemctl runner action failed", "action", action, "service", serviceName, "error", err)
+			return err
+		}
+		slog.Info("systemctl action succeeded via runner", "action", action, "service", serviceName)
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "sudo", "-n", "systemctl", action, "--", serviceName)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		slog.Error("systemctl action failed", "action", action, "service", serviceName, "error", err, "output", string(output))

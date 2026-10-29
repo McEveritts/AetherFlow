@@ -1,0 +1,234 @@
+package services
+
+import (
+	"aetherflow/db"
+	"encoding/json"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
+	"testing"
+)
+
+func setupBlueprintTestDB(t *testing.T) {
+	t.Helper()
+	tmpDir := t.TempDir()
+	t.Setenv("DB_PATH", filepath.Join(tmpDir, "test_blueprint.sqlite"))
+	t.Setenv("AETHERFLOW_PACKAGES_CONFIG", filepath.Join("..", "config", "packages.json"))
+	t.Setenv("AETHERFLOW_PACKAGE_AUTOMATION_CONFIG", filepath.Join("..", "config", "package_automation.json"))
+	db.InitDB()
+	t.Cleanup(func() {
+		if db.DB != nil {
+			_ = db.DB.Close()
+			db.DB = nil
+		}
+	})
+}
+
+func TestDynamicPortResolutionOnBusyHost(t *testing.T) {
+	setupBlueprintTestDB(t)
+
+	// Bind a real ephemeral TCP listener or simulate Radarr's default port (7878) being occupied on the server
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to bind local listener: %v", err)
+	}
+	defer ln.Close()
+	busyPort := ln.Addr().(*net.TCPAddr).Port
+	if !IsTCPPortInUse(busyPort) {
+		t.Fatalf("expected IsTCPPortInUse(%d) to be true for active listener", busyPort)
+	}
+
+	// Simulate 7878 (Radarr default) and 17878 (first fallback) being occupied by existing server software
+	t.Setenv("AETHERFLOW_OCCUPIED_PORTS", "7878,17878")
+
+	port, reassigned, err := ResolveDynamicAppPort("radarr", true)
+	if err != nil {
+		t.Fatalf("ResolveDynamicAppPort(radarr) failed: %v", err)
+	}
+	if !reassigned {
+		t.Fatalf("expected Radarr port to be marked reassigned when 7878 is occupied")
+	}
+	if port != 17879 {
+		t.Errorf("ResolveDynamicAppPort(radarr) = %d, want 17879 (skipping busy 7878 and 17878)", port)
+	}
+}
+
+func TestPilotAppsBlueprintLifecycleAndNetworkingDNS(t *testing.T) {
+	setupBlueprintTestDB(t)
+
+	tmpRoot := t.TempDir()
+	hostsFile := filepath.Join(tmpRoot, "hosts")
+	piholeDir := filepath.Join(tmpRoot, "etc", "pihole")
+	dnsmasqDir := filepath.Join(tmpRoot, "etc", "dnsmasq.d")
+	lighttpdDir := filepath.Join(tmpRoot, "etc", "lighttpd")
+
+	if err := os.MkdirAll(piholeDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dnsmasqDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(lighttpdDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// Seed a baseline pihole.toml so PiHoleMutator can mutate webserver.port and etc_dnsmasq_d
+	piholeTomlPath := filepath.Join(piholeDir, "pihole.toml")
+	_ = os.WriteFile(piholeTomlPath, []byte("[webserver]\n  port = \"80o\"\n[misc]\n  etc_dnsmasq_d = false\n"), 0644)
+
+	t.Setenv("AETHERFLOW_CONFIG_ROOT", tmpRoot)
+	t.Setenv("AETHERFLOW_HOSTS_FILE", hostsFile)
+	t.Setenv("AETHERFLOW_PIHOLE_DIR", piholeDir)
+	t.Setenv("AETHERFLOW_DNSMASQ_DIR", dnsmasqDir)
+	t.Setenv("AETHERFLOW_LAN_IP", "192.168.1.50")
+
+	// Mock Caddy Admin API server
+	var mu sync.Mutex
+	caddyRoutes := make(map[string]string)
+	deletedRoutes := make(map[string]bool)
+	caddySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch r.Method {
+		case http.MethodPatch:
+			w.WriteHeader(http.StatusNotFound)
+		case http.MethodPost:
+			var payload map[string]interface{}
+			_ = json.NewDecoder(r.Body).Decode(&payload)
+			if id, ok := payload["@id"].(string); ok {
+				raw, _ := json.Marshal(payload)
+				caddyRoutes[id] = string(raw)
+			}
+			w.WriteHeader(http.StatusOK)
+		case http.MethodDelete:
+			deletedRoutes[r.URL.Path] = true
+			w.WriteHeader(http.StatusOK)
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer caddySrv.Close()
+	t.Setenv("AETHERFLOW_CADDY_ENDPOINT", caddySrv.URL)
+
+	// Simulate port 8096 (Jellyfin default) being occupied on this host so Jellyfin dynamically shifts to 18096
+	t.Setenv("AETHERFLOW_OCCUPIED_PORTS", "8096")
+
+	// 1. Apply Blueprint Post-Install for the 4 pilot apps: Radarr, Sonarr, Jellyfin, Pi-hole
+	pilotApps := []string{"radarr", "sonarr", "jellyfin", "pihole"}
+	results := make(map[string]*BlueprintSetupResult)
+
+	for _, app := range pilotApps {
+		prePort := PreAllocateAppPort(app)
+		res, err := ApplyBlueprintPostInstall(app, prePort)
+		if err != nil {
+			t.Fatalf("ApplyBlueprintPostInstall(%q) failed: %v", app, err)
+		}
+		results[app] = res
+	}
+
+	// Verify Radarr & Sonarr XML configs and default ports
+	if results["radarr"].AllocatedPort != 7878 {
+		t.Errorf("radarr AllocatedPort = %d, want 7878", results["radarr"].AllocatedPort)
+	}
+	radarrXML, err := os.ReadFile(results["radarr"].ConfigPath)
+	if err != nil {
+		t.Fatalf("failed reading radarr config.xml: %v", err)
+	}
+	if !strings.Contains(string(radarrXML), "<Port>7878</Port>") || !strings.Contains(string(radarrXML), "<AuthenticationRequired>DisabledForLocalAddresses</AuthenticationRequired>") {
+		t.Errorf("unexpected radarr config.xml content:\n%s", string(radarrXML))
+	}
+
+	if results["sonarr"].AllocatedPort != 8989 {
+		t.Errorf("sonarr AllocatedPort = %d, want 8989", results["sonarr"].AllocatedPort)
+	}
+	sonarrXML, err := os.ReadFile(results["sonarr"].ConfigPath)
+	if err != nil {
+		t.Fatalf("failed reading sonarr config.xml: %v", err)
+	}
+	if !strings.Contains(string(sonarrXML), "<Port>8989</Port>") {
+		t.Errorf("unexpected sonarr config.xml content:\n%s", string(sonarrXML))
+	}
+
+	// Verify Jellyfin dynamically shifted to port 18096 and updated network.xml with KnownProxies
+	if results["jellyfin"].AllocatedPort != 18096 || !results["jellyfin"].PortReassigned {
+		t.Errorf("jellyfin AllocatedPort = %d (reassigned=%v), want 18096 (true)",
+			results["jellyfin"].AllocatedPort, results["jellyfin"].PortReassigned)
+	}
+	jellyfinXML, err := os.ReadFile(results["jellyfin"].ConfigPath)
+	if err != nil {
+		t.Fatalf("failed reading jellyfin network.xml: %v", err)
+	}
+	if !strings.Contains(string(jellyfinXML), "<InternalHttpPort>18096</InternalHttpPort>") ||
+		!strings.Contains(string(jellyfinXML), "<string>127.0.0.1</string>") {
+		t.Errorf("unexpected jellyfin network.xml content:\n%s", string(jellyfinXML))
+	}
+
+	// Verify Pi-hole config mutation and DNS auto-wiring for all apps
+	piholeToml, err := os.ReadFile(piholeTomlPath)
+	if err != nil {
+		t.Fatalf("failed reading pihole.toml: %v", err)
+	}
+	if !strings.Contains(string(piholeToml), `port = "8089o"`) || !strings.Contains(string(piholeToml), `etc_dnsmasq_d = true`) {
+		t.Errorf("unexpected pihole.toml content:\n%s", string(piholeToml))
+	}
+
+	customList, err := os.ReadFile(filepath.Join(piholeDir, "custom.list"))
+	if err != nil {
+		t.Fatalf("failed reading Pi-hole custom.list: %v", err)
+	}
+	dnsmasqConf, err := os.ReadFile(filepath.Join(dnsmasqDir, "05-aetherflow-dns.conf"))
+	if err != nil {
+		t.Fatalf("failed reading dnsmasq 05-aetherflow-dns.conf: %v", err)
+	}
+	hostsData, err := os.ReadFile(hostsFile)
+	if err != nil {
+		t.Fatalf("failed reading hosts file: %v", err)
+	}
+
+	for _, app := range pilotApps {
+		domain := app + ".aether.local"
+		if !strings.Contains(string(customList), "192.168.1.50 "+domain) {
+			t.Errorf("Pi-hole custom.list missing entry for %s:\n%s", domain, string(customList))
+		}
+		if !strings.Contains(string(dnsmasqConf), "address=/"+domain+"/192.168.1.50") {
+			t.Errorf("dnsmasq config missing entry for %s:\n%s", domain, string(dnsmasqConf))
+		}
+		if !strings.Contains(string(hostsData), domain) {
+			t.Errorf("/etc/hosts missing entry for %s:\n%s", domain, string(hostsData))
+		}
+		mu.Lock()
+		routeJSON, ok := caddyRoutes[app+"_internal"]
+		mu.Unlock()
+		if !ok {
+			t.Errorf("Caddy missing route %s_internal", app)
+		} else if !strings.Contains(routeJSON, strconv.Itoa(results[app].AllocatedPort)) {
+			t.Errorf("Caddy route for %s missing allocated port %d: %s", app, results[app].AllocatedPort, routeJSON)
+		}
+	}
+
+	// 2. Test Uninstall Teardown for Sonarr
+	if err := TeardownBlueprintUninstall("sonarr"); err != nil {
+		t.Fatalf("TeardownBlueprintUninstall(sonarr) failed: %v", err)
+	}
+
+	// Verify Sonarr removed from SQLite app_ingress_configs, /etc/hosts, Pi-hole custom.list, and Caddy
+	if ing, _ := db.GetAppIngressConfig("sonarr"); ing != nil {
+		t.Errorf("expected sonarr ingress config to be deleted on uninstall, got %+v", ing)
+	}
+	hostsAfter, _ := os.ReadFile(hostsFile)
+	if strings.Contains(string(hostsAfter), "sonarr.aether.local") {
+		t.Errorf("expected sonarr.aether.local to be removed from /etc/hosts:\n%s", string(hostsAfter))
+	}
+	if !strings.Contains(string(hostsAfter), "radarr.aether.local") {
+		t.Errorf("expected radarr.aether.local to remain in /etc/hosts after uninstalling sonarr")
+	}
+
+	customListAfter, _ := os.ReadFile(filepath.Join(piholeDir, "custom.list"))
+	if strings.Contains(string(customListAfter), "sonarr.aether.local") {
+		t.Errorf("expected sonarr.aether.local to be purged from Pi-hole custom.list on uninstall:\n%s", string(customListAfter))
+	}
+}

@@ -1,0 +1,2 @@
+# Placeholder so go:embed all:dist always succeeds during go test / dev builds.
+# Production builds populate backend/web/dist/ from frontend/out/.

@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -566,6 +567,107 @@ func Logout(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "Logged out"})
 }
 
+// RefreshSession godoc
+// @Summary      Refresh session token
+// @Description  Rotates the JWT session token silently using the existing valid cookie or bearer token.
+// @Tags         auth
+// @Produce      json
+// @Success      200  {object}  map[string]interface{}
+// @Failure      401  {object}  map[string]interface{}
+// @Router       /auth/refresh [post]
+func RefreshSession(c *gin.Context) {
+	var tokenStr string
+	authHeader := strings.TrimSpace(c.GetHeader("Authorization"))
+	if strings.HasPrefix(authHeader, "Bearer ") {
+		tokenStr = strings.TrimSpace(strings.TrimPrefix(authHeader, "Bearer "))
+	}
+	if tokenStr == "" {
+		if cookie, err := c.Cookie("aetherflow_session"); err == nil {
+			tokenStr = strings.TrimSpace(cookie)
+		}
+	}
+	if tokenStr == "" {
+		Unauthorized(c, "No session token provided")
+		return
+	}
+
+	token, err := jwt.Parse(tokenStr, func(token *jwt.Token) (interface{}, error) {
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, jwt.ErrSignatureInvalid
+		}
+		return getJWTSecret(), nil
+	})
+
+	if err != nil && !errors.Is(err, jwt.ErrTokenExpired) {
+		Unauthorized(c, "Invalid session token")
+		return
+	}
+
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok {
+		Unauthorized(c, "Invalid token claims")
+		return
+	}
+
+	if expVal, ok := claims["exp"].(float64); ok {
+		expTime := time.Unix(int64(expVal), 0)
+		if time.Since(expTime) > 2*time.Hour {
+			Unauthorized(c, "Refresh window expired")
+			return
+		}
+	}
+
+	if jti, ok := claims["jti"].(string); ok && jti != "" {
+		if db.IsTokenRevoked(jti) {
+			Unauthorized(c, "Session has been revoked")
+			return
+		}
+		db.RevokeToken(jti, 15*time.Minute)
+	}
+
+	if cfp, ok := claims["cfp"].(string); ok && cfp != "" {
+		if cfp != clientFingerprint(c) {
+			slog.Warn("refresh rejected: client fingerprint mismatch", "ip", c.ClientIP())
+			Unauthorized(c, "Client fingerprint mismatch")
+			return
+		}
+	}
+
+	userIDFloat, ok := claims["user_id"].(float64)
+	if !ok {
+		Unauthorized(c, "Missing user ID in claims")
+		return
+	}
+	userID := int(userIDFloat)
+
+	var user models.User
+	err = db.DB.QueryRow("SELECT id, username, role FROM users WHERE id = ?", userID).Scan(&user.ID, &user.Username, &user.Role)
+	if err != nil {
+		Unauthorized(c, "User no longer exists")
+		return
+	}
+
+	newToken, err := GenerateJWT(user.ID, c)
+	if err != nil {
+		InternalError(c, "Failed to create new session")
+		return
+	}
+
+	c.SetSameSite(http.SameSiteLaxMode)
+	c.SetCookie("aetherflow_session", newToken, 900, "/", "", secureCookie(), true)
+
+	c.JSON(http.StatusOK, gin.H{
+		"status":     "success",
+		"token":      newToken,
+		"expires_at": time.Now().Add(15 * time.Minute).Unix(),
+		"user": gin.H{
+			"id":       user.ID,
+			"username": user.Username,
+			"role":     user.Role,
+		},
+	})
+}
+
 // AuthMiddleware validates the JWT session via Bearer token with cookie fallback
 // and sets "user_id" in the Gin context for downstream handlers.
 func AuthMiddleware() gin.HandlerFunc {
@@ -748,8 +850,8 @@ func HostValidationMiddleware() gin.HandlerFunc {
 // Enable by setting CSRF_ENABLED=true in the environment.
 func CSRFMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// Bearer-token API requests are inherently CSRF-safe
-		if strings.HasPrefix(c.GetHeader("Authorization"), "Bearer ") {
+		// Silent refresh requests and Bearer-token requests are exempt from CSRF
+		if c.Request.URL.Path == "/api/v1/auth/refresh" || c.Request.URL.Path == "/api/auth/refresh" || strings.HasPrefix(c.GetHeader("Authorization"), "Bearer ") {
 			c.Next()
 			return
 		}
@@ -868,3 +970,194 @@ func RevokeSession(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{"message": "Session revoked"})
 }
+
+// GenerateJWT generates a standard signed JWT for an authenticated user session.
+func GenerateJWT(userID int, c *gin.Context) (string, error) {
+	return createStandardJWT(userID, c)
+}
+
+// ChangePassword godoc
+// @Summary      Update user password
+// @Description  Verifies current password and updates to a new password using bcrypt.
+// @Tags         auth
+// @Accept       json
+// @Produce      json
+// @Security     ApiKeyAuth
+// @Param        req body object true "Password change request"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      401  {object}  map[string]interface{}
+// @Router       /auth/profile/password [put]
+func ChangePassword(c *gin.Context) {
+	rawUserID, exists := c.Get("user_id")
+	if !exists {
+		Unauthorized(c, "Unauthorized")
+		return
+	}
+	userID, ok := rawUserID.(int)
+	if !ok {
+		Unauthorized(c, "Invalid user context")
+		return
+	}
+
+	var req struct {
+		CurrentPassword string `json:"current_password" binding:"required"`
+		NewPassword     string `json:"new_password" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		BadRequest(c, "current_password and new_password are required")
+		return
+	}
+
+	if len(req.NewPassword) < 8 {
+		BadRequest(c, "New password must be at least 8 characters")
+		return
+	}
+
+	var currentHash string
+	var username string
+	err := db.DB.QueryRow("SELECT username, COALESCE(password_hash, '') FROM users WHERE id = ?", userID).Scan(&username, &currentHash)
+	if err != nil {
+		NotFoundError(c, "User not found")
+		return
+	}
+
+	if currentHash == "" {
+		BadRequest(c, "Cannot change password for OAuth-only account")
+		return
+	}
+
+	if err := bcrypt.CompareHashAndPassword([]byte(currentHash), []byte(req.CurrentPassword)); err != nil {
+		BadRequest(c, "Current password incorrect")
+		return
+	}
+
+	newHash, err := bcrypt.GenerateFromPassword([]byte(req.NewPassword), bcrypt.DefaultCost)
+	if err != nil {
+		InternalError(c, "Failed to hash new password")
+		return
+	}
+
+	if _, err := db.DB.Exec("UPDATE users SET password_hash = ? WHERE id = ?", string(newHash), userID); err != nil {
+		InternalError(c, "Failed to update password")
+		return
+	}
+
+	db.RecordAudit(userID, username, "password_update", "user", strconv.Itoa(userID), "Password updated successfully", c.ClientIP(), c.Request.UserAgent())
+
+	c.JSON(http.StatusOK, gin.H{"status": "success", "message": "Password updated successfully"})
+}
+
+// UpdatePassword aliases ChangePassword for router and caller compatibility.
+func UpdatePassword(c *gin.Context) {
+	ChangePassword(c)
+}
+
+// UpdateAvatar godoc
+// @Summary      Update user avatar
+// @Description  Updates the avatar URL or base64 image string for the authenticated user.
+// @Tags         auth
+// @Accept       json
+// @Produce      json
+// @Security     ApiKeyAuth
+// @Param        req body object true "Avatar URL or Data URI"
+// @Success      200  {object}  map[string]interface{}
+// @Failure      400  {object}  map[string]interface{}
+// @Failure      401  {object}  map[string]interface{}
+// @Router       /auth/profile/avatar [put]
+func UpdateAvatar(c *gin.Context) {
+	rawUserID, exists := c.Get("user_id")
+	if !exists {
+		Unauthorized(c, "Unauthorized")
+		return
+	}
+	userID, ok := rawUserID.(int)
+	if !ok {
+		Unauthorized(c, "Invalid user context")
+		return
+	}
+
+	var req struct {
+		Avatar    string `json:"avatar"`
+		AvatarURL string `json:"avatar_url"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		BadRequest(c, "Invalid request payload")
+		return
+	}
+
+	avatarVal := strings.TrimSpace(req.Avatar)
+	if avatarVal == "" {
+		avatarVal = strings.TrimSpace(req.AvatarURL)
+	}
+	if avatarVal == "" {
+		BadRequest(c, "Avatar image or URL is required")
+		return
+	}
+
+	// Validate scheme - disallow javascript: and file: schemes
+	lowerVal := strings.ToLower(avatarVal)
+	if strings.HasPrefix(lowerVal, "javascript:") || strings.HasPrefix(lowerVal, "file:") {
+		BadRequest(c, "Invalid avatar URI scheme")
+		return
+	}
+
+	// Enforce 2MB size limit on base64 payload or URL length
+	const maxAvatarSize = 2 * 1024 * 1024
+	if len(avatarVal) > maxAvatarSize {
+		RespondError(c, http.StatusRequestEntityTooLarge, "PAYLOAD_TOO_LARGE", "Avatar payload exceeds maximum 2MB size limit")
+		return
+	}
+
+	var username string
+	_ = db.DB.QueryRow("SELECT username FROM users WHERE id = ?", userID).Scan(&username)
+
+	if _, err := db.DB.Exec("UPDATE users SET avatar_url = ? WHERE id = ?", avatarVal, userID); err != nil {
+		InternalError(c, "Failed to update avatar")
+		return
+	}
+
+	db.RecordAudit(userID, username, "avatar_update", "user", strconv.Itoa(userID), "Avatar updated", c.ClientIP(), c.Request.UserAgent())
+
+	c.JSON(http.StatusOK, gin.H{"status": "success", "message": "Avatar updated successfully", "avatar_url": avatarVal})
+}
+
+// DeleteAvatar godoc
+// @Summary      Delete user avatar
+// @Description  Removes the avatar of the authenticated user.
+// @Tags         auth
+// @Produce      json
+// @Security     ApiKeyAuth
+// @Success      200  {object}  map[string]interface{}
+// @Failure      401  {object}  map[string]interface{}
+// @Router       /auth/profile/avatar [delete]
+func DeleteAvatar(c *gin.Context) {
+	rawUserID, exists := c.Get("user_id")
+	if !exists {
+		Unauthorized(c, "Unauthorized")
+		return
+	}
+	userID, ok := rawUserID.(int)
+	if !ok {
+		Unauthorized(c, "Invalid user context")
+		return
+	}
+
+	var username string
+	_ = db.DB.QueryRow("SELECT username FROM users WHERE id = ?", userID).Scan(&username)
+
+	if _, err := db.DB.Exec("UPDATE users SET avatar_url = '' WHERE id = ?", userID); err != nil {
+		InternalError(c, "Failed to remove avatar")
+		return
+	}
+
+	db.RecordAudit(userID, username, "avatar_delete", "user", strconv.Itoa(userID), "Avatar removed", c.ClientIP(), c.Request.UserAgent())
+
+	c.JSON(http.StatusOK, gin.H{"status": "success", "message": "Avatar removed successfully"})
+}
+
+// RemoveAvatar aliases DeleteAvatar for API parity.
+func RemoveAvatar(c *gin.Context) {
+	DeleteAvatar(c)
+}
+

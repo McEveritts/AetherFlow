@@ -106,6 +106,25 @@ func (la *LogAggregator) push(entry LogEntry) {
 	la.listMu.Unlock()
 }
 
+// MatchesUnitFilter compares a log entry's unit against a filter unit (and its companion units), normalizing the .service suffix.
+func MatchesUnitFilter(entryUnit, filterUnit string) bool {
+	if filterUnit == "" {
+		return true
+	}
+	eu := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(entryUnit)), ".service")
+	fu := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(filterUnit)), ".service")
+	if eu == fu {
+		return true
+	}
+	for _, candidate := range ResolveServiceUnits(fu) {
+		cu := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(candidate)), ".service")
+		if eu == cu {
+			return true
+		}
+	}
+	return false
+}
+
 // Query searches the log buffer with the given filter.
 func (la *LogAggregator) Query(filter LogFilter) []LogEntry {
 	la.mu.RLock()
@@ -127,9 +146,10 @@ func (la *LogAggregator) Query(filter LogFilter) []LogEntry {
 		if filter.Source != "" && entry.Source != filter.Source {
 			continue
 		}
-		if filter.Unit != "" && entry.Unit != filter.Unit {
+		if filter.Unit != "" && !MatchesUnitFilter(entry.Unit, filter.Unit) {
 			continue
 		}
+
 		if filter.Priority != "" && entry.Priority != filter.Priority {
 			continue
 		}

@@ -246,30 +246,47 @@ func executeRecovery(displayName, processName, managedBy string, actionID int) {
 	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
 	defer cancel()
 
-	var cmd *exec.Cmd
+	var err error
+	var outputStr string
+
 	switch managedBy {
 	case "systemd":
-		cmd = exec.CommandContext(ctx, "systemctl", "restart", processName)
+		err = ControlService(processName, "restart")
+		if err != nil {
+			outputStr = err.Error()
+		} else {
+			outputStr = "service restarted successfully"
+		}
 	case "pm2":
 		// Attempt PM2 if available, otherwise fall back to systemd
 		pm2Path := findPM2Binary()
 		if pm2Path != "" {
-			cmd = exec.CommandContext(ctx, pm2Path, "restart", processName)
+			cmd := exec.CommandContext(ctx, pm2Path, "restart", processName)
+			out, cmdErr := cmd.CombinedOutput()
+			err = cmdErr
+			outputStr = strings.TrimSpace(string(out))
 		} else {
 			healLog.Warn("pm2 binary not found, falling back to systemd",
 				"service", displayName)
-			cmd = exec.CommandContext(ctx, "systemctl", "restart", processName)
+			err = ControlService(processName, "restart")
+			if err != nil {
+				outputStr = err.Error()
+			} else {
+				outputStr = "service restarted successfully via systemd fallback"
+			}
 		}
 	default:
 		// Default fallback: try systemd for any unrecognized manager
 		healLog.Warn("unknown manager, falling back to systemd",
 			"service", displayName,
 			"manager", managedBy)
-		cmd = exec.CommandContext(ctx, "systemctl", "restart", processName)
+		err = ControlService(processName, "restart")
+		if err != nil {
+			outputStr = err.Error()
+		} else {
+			outputStr = "service restarted successfully via fallback"
+		}
 	}
-
-	output, err := cmd.CombinedOutput()
-	outputStr := strings.TrimSpace(string(output))
 
 	if err != nil {
 		healLog.Error("recovery failed",

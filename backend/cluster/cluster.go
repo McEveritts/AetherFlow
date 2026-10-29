@@ -76,7 +76,10 @@ type PendingCommand struct {
 const heartbeatTimeout = 30 * time.Second
 
 // Manager is the global cluster manager instance.
-var Manager *ClusterManager
+var (
+	Manager  *ClusterManager
+	initOnce sync.Once
+)
 
 // Init initializes the cluster manager and loads persisted nodes from DB.
 func Init() {
@@ -92,6 +95,16 @@ func Init() {
 	go Manager.heartbeatMonitor()
 
 	slog.Info("Cluster manager initialized")
+}
+
+// InitClusterManager reliably and idempotently initializes the ClusterManager.
+func InitClusterManager() *ClusterManager {
+	initOnce.Do(func() {
+		if Manager == nil {
+			Init()
+		}
+	})
+	return Manager
 }
 
 // loadFromDB loads previously enrolled workers from the database.

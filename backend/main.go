@@ -22,7 +22,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"io"
 	"log"
 	"log/slog"
 	"net"
@@ -46,9 +45,11 @@ import (
 	"github.com/joho/godotenv"
 )
 
-var version = "3.1.6"
+var version = "3.1.7"
 
-// discoverOrigins auto-detects local and public IPs and builds CORS origin list
+// discoverOrigins auto-detects loopback and LAN interface origins for local/dev CORS.
+// External public IP lookups (api.ipify.org) are intentionally excluded so the server
+// never phones home or auto-whitelists untrusted public HTTP origins at boot.
 func discoverOrigins() []string {
 	origins := map[string]bool{
 		"http://localhost":      true,
@@ -90,26 +91,6 @@ func discoverOrigins() []string {
 		}
 	}
 
-	// Detect public IP via external service
-	client := &http.Client{Timeout: 3 * time.Second}
-	resp, err := client.Get("https://api.ipify.org")
-	if err == nil {
-		defer resp.Body.Close()
-		body, err := io.ReadAll(resp.Body)
-		if err == nil {
-			publicIP := strings.TrimSpace(string(body))
-			if publicIP != "" {
-				origins[fmt.Sprintf("http://%s", publicIP)] = true
-				origins[fmt.Sprintf("https://%s", publicIP)] = true
-				origins[fmt.Sprintf("http://%s:3000", publicIP)] = true
-				origins[fmt.Sprintf("http://%s:8080", publicIP)] = true
-				slog.Info("detected public IP", "ip", publicIP)
-			}
-		}
-	} else {
-		slog.Warn("could not detect public IP", "error", err)
-	}
-
 	// Also add the machine's hostname if it resolves
 	hostname, err := os.Hostname()
 	if err == nil && hostname != "" {
@@ -129,12 +110,21 @@ func discoverOrigins() []string {
 }
 
 func main() {
-	// Try loading .env from local or parent directory
+	// Try loading .env from FHS /etc/aetherflow/aetherflow.env first, then parent or local directory
+	_ = godotenv.Load("/etc/aetherflow/aetherflow.env")
 	if err := godotenv.Load("../.env"); err != nil {
-		godotenv.Load() // fallback to current dir if any
+		_ = godotenv.Load() // fallback to current dir if any
 	}
 	// Phase 18: Initialize structured logging
 	logging.Init()
+
+	// Privileged Root Socket Runner Mode (`aetherflow-api runner` / `--runner`)
+	if len(os.Args) > 1 && (os.Args[1] == "runner" || os.Args[1] == "--runner") {
+		if err := services.RunPrivilegedDaemon(); err != nil {
+			log.Fatalf("Privileged runner failed: %v", err)
+		}
+		return
+	}
 
 	// Phase 19: Centralized configuration — load all env vars into a typed struct
 	config.Load()
@@ -156,7 +146,7 @@ func main() {
 	}
 
 	// Initialize the Cluster Manager
-	cluster.Init()
+	cluster.InitClusterManager()
 
 	// Initialize the Log Aggregator (Phase 8)
 	services.InitLogAggregator()

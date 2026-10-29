@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"testing"
 
+	"aetherflow/models"
+
 	_ "modernc.org/sqlite"
 )
 
@@ -313,3 +315,104 @@ func TestMigrationChainIntegrity(t *testing.T) {
 		t.Errorf("Idempotency broken: expected 11 migrations after re-run, got %d", migrationCount)
 	}
 }
+
+func TestMigration17AppIngressConfigs(t *testing.T) {
+	var err error
+	DB, err = sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("Failed to open in-memory SQLite: %v", err)
+	}
+	t.Cleanup(func() {
+		DB.Close()
+		DB = nil
+	})
+
+	_, err = DB.Exec(`CREATE TABLE IF NOT EXISTS schema_versions (
+		version INTEGER PRIMARY KEY,
+		description TEXT,
+		applied_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	)`)
+	if err != nil {
+		t.Fatalf("Failed to create schema_versions: %v", err)
+	}
+
+	// Apply Migration 17
+	migrate(17, "Add app_ingress_configs table for persistent ingress routing",
+		`CREATE TABLE IF NOT EXISTS app_ingress_configs (
+			app_name TEXT PRIMARY KEY,
+			public_domain TEXT DEFAULT '',
+			external_access_enabled BOOLEAN DEFAULT 0,
+			listen_port INTEGER DEFAULT 0,
+			tls_enabled BOOLEAN DEFAULT 0,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		);`,
+		"CREATE UNIQUE INDEX IF NOT EXISTS idx_ingress_configs_app_name ON app_ingress_configs(app_name);")
+
+	// Verify columns exist
+	cols := []string{"app_name", "public_domain", "external_access_enabled", "listen_port", "tls_enabled", "created_at", "updated_at"}
+	for _, col := range cols {
+		var cid int
+		var cname, ctype string
+		var notnull, pk int
+		var dfltValue *string
+		err := DB.QueryRow("SELECT cid, name, type, \"notnull\", dflt_value, pk FROM pragma_table_info('app_ingress_configs') WHERE name=?", col).Scan(&cid, &cname, &ctype, &notnull, &dfltValue, &pk)
+		if err != nil {
+			t.Errorf("Column app_ingress_configs.%s does not exist: %v", col, err)
+		}
+	}
+
+	// Verify unique index exists
+	var idxName string
+	err = DB.QueryRow("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_ingress_configs_app_name'").Scan(&idxName)
+	if err != nil {
+		t.Fatalf("Index idx_ingress_configs_app_name does not exist: %v", err)
+	}
+
+	// Test SetAppIngressConfig and GetAppIngressConfig
+	cfg := models.AppIngressConfig{
+		AppName:               "radarr",
+		PublicDomain:          "radarr.aether.local",
+		ExternalAccessEnabled: true,
+		ListenPort:            7878,
+		TLSEnabled:            false,
+	}
+	if err := SetAppIngressConfig(cfg); err != nil {
+		t.Fatalf("SetAppIngressConfig failed: %v", err)
+	}
+
+	retrieved, err := GetAppIngressConfig("radarr")
+	if err != nil {
+		t.Fatalf("GetAppIngressConfig failed: %v", err)
+	}
+	if retrieved == nil {
+		t.Fatalf("Expected retrieved config, got nil")
+	}
+	if retrieved.AppName != "radarr" || retrieved.PublicDomain != "radarr.aether.local" || !retrieved.ExternalAccessEnabled || retrieved.ListenPort != 7878 {
+		t.Errorf("Retrieved config mismatch: %+v", retrieved)
+	}
+
+	// Test update upsert
+	cfg.PublicDomain = "radarr.example.com"
+	if err := SetAppIngressConfig(cfg); err != nil {
+		t.Fatalf("SetAppIngressConfig update failed: %v", err)
+	}
+
+	updated, err := GetAppIngressConfig("radarr")
+	if err != nil || updated == nil {
+		t.Fatalf("Failed to fetch updated config: %v", err)
+	}
+	if updated.PublicDomain != "radarr.example.com" {
+		t.Errorf("Expected updated domain radarr.example.com, got %s", updated.PublicDomain)
+	}
+
+	// Test GetAllAppIngressConfigs
+	all, err := GetAllAppIngressConfigs()
+	if err != nil {
+		t.Fatalf("GetAllAppIngressConfigs failed: %v", err)
+	}
+	if len(all) != 1 {
+		t.Errorf("Expected 1 config, got %d", len(all))
+	}
+}
+

@@ -10,6 +10,7 @@ import (
 	_ "aetherflow/docs"
 	"aetherflow/db"
 	"aetherflow/services"
+	"aetherflow/web"
 
 	"github.com/gin-gonic/gin"
 	swaggerFiles "github.com/swaggo/files"
@@ -42,6 +43,9 @@ func RegisterRoutes(r *gin.Engine) {
 
 	// Phase 30: Prometheus-compatible metrics endpoint.
 	r.GET("/metrics", HandleMetrics)
+
+	// Single-Binary SPA Handler: serve embedded Next.js static export for non-API routes.
+	web.RegisterSPAHandler(r)
 }
 
 func registerV1Routes(apiGroup *gin.RouterGroup) {
@@ -66,6 +70,7 @@ func registerV1Routes(apiGroup *gin.RouterGroup) {
 	publicGroup.POST("/auth/mfa/verify", authLimiter, MFALoginVerify)
 	publicGroup.POST("/auth/setup", authLimiter, SetupAdmin)
 	publicGroup.GET("/auth/setup/check", CheckSetupNeeded)
+	publicGroup.POST("/auth/refresh", RefreshSession)
 
 	publicGroup.POST("/billing/webhooks/:provider", webhookLimiter, HandleBillingWebhook)
 
@@ -97,10 +102,16 @@ func registerV1Routes(apiGroup *gin.RouterGroup) {
 		authGroup.POST("/ai/support", aiLimiter, handleAiSupport)
 
 		authGroup.GET("/session", GetSession)
+		authGroup.POST("/refresh", RefreshSession)
 		authGroup.GET("/sessions", ListActiveSessions)
 		authGroup.DELETE("/sessions/:jti", RevokeSession)
 		authGroup.POST("/logout", Logout)
 		authGroup.PUT("/profile", UpdateProfile)
+		authGroup.PUT("/profile/password", UpdatePassword)
+		authGroup.PUT("/profile/avatar", UpdateAvatar)
+		authGroup.DELETE("/profile/avatar", DeleteAvatar)
+		authGroup.GET("/system/topology", GetSystemTopology)
+		authGroup.GET("/fs", BrowseDirectories)
 
 		authGroup.GET("/user/quota", GetOwnQuota)
 
@@ -130,6 +141,8 @@ func registerV1Routes(apiGroup *gin.RouterGroup) {
 		authGroup.GET("/ws/logs", HandleLogWebSocket)
 		authGroup.GET("/deploy/stream", HandleDeployStream)
 		authGroup.POST("/deploy/:appName", HandleDeployProcess)
+		authGroup.GET("/blueprints", GetBlueprints)
+		authGroup.GET("/blueprints/:appName", GetAppBlueprint)
 	}
 
 	// ── Admin routes (require valid JWT session + admin role) ──
@@ -289,7 +302,21 @@ func registerV1Routes(apiGroup *gin.RouterGroup) {
 		adminGroup.GET("/mediaflow/queue", GetMediaFlowQueue)
 		adminGroup.POST("/mediaflow/scan", TriggerScan)
 		adminGroup.POST("/mediaflow/approve/:id", ApproveItem)
+
+		// Ingress Configurations (Persistent Ingress Routing)
+		// Requires admin context (Phase 8)
+		adminGroup.GET("/ingress/configs", GetIngressConfigs)
+		// Requires admin context (Phase 8)
+		adminGroup.PUT("/ingress/apps/:appName", UpdateAppIngressConfig)
+		// Requires admin context (Phase 8)
+		adminGroup.POST("/blueprints/:appName/sync", SyncAppBlueprint)
 	}
+
+	// Compatibility aliases for frontend and legacy routing (api/ingress)
+	apiGroup.GET("/deploy/stream", AuthMiddleware(), HandleDeployStream)
+	apiGroup.GET("/ingress/configs", AuthMiddleware(), GetIngressConfigs) // api/ingress/configs
+	apiGroup.PUT("/ingress/apps/:appName", AuthMiddleware(), UpdateAppIngressConfig) // api/ingress/apps
+	apiGroup.GET("/fs", AuthMiddleware(), BrowseDirectories)
 }
 
 func getSystemMetrics(c *gin.Context) {
@@ -338,11 +365,19 @@ func controlService(c *gin.Context) {
 			err = services.ControlService(target, req.Action)
 		}
 	} else {
-		err = services.ControlService(target, req.Action)
+		units := services.ResolveServiceUnits(target)
+		if len(units) == 0 {
+			units = []string{target}
+		}
+		for _, unit := range units {
+			if uErr := services.ControlService(unit, req.Action); uErr != nil && err == nil {
+				err = uErr
+			}
+		}
 	}
 
 	if err != nil {
-		InternalError(c, "Failed to " + req.Action + " service: " + err.Error())
+		InternalError(c, "Failed to "+req.Action+" service: "+err.Error())
 		return
 	}
 
@@ -358,3 +393,4 @@ func controlService(c *gin.Context) {
 		"action":  req.Action,
 	})
 }
+

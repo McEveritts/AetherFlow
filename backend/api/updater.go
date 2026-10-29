@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"aetherflow/db"
+	"aetherflow/services"
 
 	"github.com/gin-gonic/gin"
 )
@@ -54,12 +55,21 @@ func init() {
 	if err != nil {
 		slog.Warn("Could not resolve executable path, using relative paths", "error", err)
 		versionFilePath = "../.version"
-		updateScriptPath = "../scripts/deployment_engine.sh"
+		updateScriptPath = "../deploy/release-manager.sh"
 		return
 	}
 	execDir := filepath.Dir(execPath)
-	versionFilePath = filepath.Clean(filepath.Join(execDir, "..", ".version"))
-	updateScriptPath = filepath.Clean(filepath.Join(execDir, "..", "scripts", "deployment_engine.sh"))
+	// Support both single-binary layout (/opt/AetherFlow/current/.version) and repo layout (../.version)
+	if _, statErr := os.Stat(filepath.Join(execDir, ".version")); statErr == nil {
+		versionFilePath = filepath.Clean(filepath.Join(execDir, ".version"))
+	} else {
+		versionFilePath = filepath.Clean(filepath.Join(execDir, "..", ".version"))
+	}
+	if resolved := services.ResolveReleaseManagerScript(); resolved != "" {
+		updateScriptPath = resolved
+	} else {
+		updateScriptPath = filepath.Clean(filepath.Join(execDir, "..", "deploy", "release-manager.sh"))
+	}
 }
 
 // httpClient is a timeout-bound HTTP client for outbound requests.
@@ -259,10 +269,19 @@ func RunUpdate(c *gin.Context) {
 	go func(ch string) {
 		slog.Info("Initiating atomic Blue/Green update sequence...", "channel", ch)
 
+		if services.IsRunnerAvailable() {
+			if err := services.DispatchSelfUpdate("deploy", ch); err != nil {
+				slog.Error("failed to dispatch self-update via privileged runner", "error", err)
+			} else {
+				slog.Info("self-update dispatched to privileged runner", "channel", ch)
+			}
+			return
+		}
+
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 		defer cancel()
 
-		cmd := exec.CommandContext(ctx, "/bin/bash", updateScriptPath, ch)
+		cmd := exec.CommandContext(ctx, "/bin/bash", updateScriptPath, "deploy", "--channel", ch)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 

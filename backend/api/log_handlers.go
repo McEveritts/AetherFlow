@@ -147,10 +147,11 @@ func HandleLogWebSocket(c *gin.Context) {
 		if filter.Source != "" && entry.Source != filter.Source {
 			continue
 		}
-		if filter.Unit != "" && entry.Unit != filter.Unit {
+		if filter.Unit != "" && !services.MatchesUnitFilter(entry.Unit, filter.Unit) {
 			continue
 		}
 		if filter.Priority != "" && entry.Priority != filter.Priority {
+
 			continue
 		}
 

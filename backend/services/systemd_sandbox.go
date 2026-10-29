@@ -48,6 +48,15 @@ func ApplyPackageSandbox(pkgID string) error {
 		return nil
 	}
 
+	if IsRunnerAvailable() {
+		return DispatchSandbox(pkgID)
+	}
+
+	return ApplyPackageSandboxLocal(pkgID)
+}
+
+// ApplyPackageSandboxLocal applies the systemd sandbox configuration directly on the local host.
+func ApplyPackageSandboxLocal(pkgID string) error {
 	pkg, err := getPackageDefinition(pkgID)
 	if err != nil {
 		return fmt.Errorf("load package definitions: %w", err)
@@ -58,7 +67,10 @@ func ApplyPackageSandbox(pkgID string) error {
 	if pkg.ServiceType != "systemd" {
 		return nil
 	}
-	if pkg.SandboxProfile == "" || len(pkg.SandboxReadWrite) == 0 {
+	if pkg.SandboxProfile == "" {
+		return nil
+	}
+	if len(pkg.SandboxReadWrite) == 0 && pkg.SandboxProfile != "privileged" && pkg.SandboxProfile != "none" {
 		return nil
 	}
 

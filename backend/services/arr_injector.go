@@ -7,7 +7,6 @@ import (
 	"io"
 	"log"
 	"os"
-	"os/exec"
 
 	// SQLite driver (Ensure this compiles via CGO if used, alternatively use modernc.org/sqlite for pure-Go)
 	// _ "github.com/mattn/go-sqlite3" 
@@ -115,13 +114,11 @@ func (ai *ArrInjector) injectSQLite(dbPath string, currentHost, newHost string, 
 
 // OS Level Control Wrappers
 func (ai *ArrInjector) stopService(serviceName string) error {
-	cmd := exec.Command("sudo", "systemctl", "stop", serviceName)
-	return cmd.Run()
+	return ControlService(serviceName, "stop")
 }
 
 func (ai *ArrInjector) startService(serviceName string) error {
-	cmd := exec.Command("sudo", "systemctl", "start", serviceName)
-	return cmd.Run()
+	return ControlService(serviceName, "start")
 }
 
 // File I/O for backups

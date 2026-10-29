@@ -97,9 +97,22 @@ func GetNetworkStatus() NetworkStatus {
 
 // getWireGuardStatus parses `wg show` output.
 func getWireGuardStatus() (*WireGuardStatus, error) {
-	out, err := exec.Command("wg", "show", "all", "dump").Output()
-	if err != nil {
-		return nil, fmt.Errorf("wg show failed: %w", err)
+	var out []byte
+	if IsRunnerAvailable() {
+		resp, err := DispatchNetworkAction(NetworkRunnerRequest{
+			Subsystem: "wireguard",
+			Action:    "wg_show",
+		})
+		if err != nil {
+			return nil, fmt.Errorf("wg show via runner failed: %w", err)
+		}
+		out = []byte(resp.Output)
+	} else {
+		var err error
+		out, err = exec.Command("wg", "show", "all", "dump").Output()
+		if err != nil {
+			return nil, fmt.Errorf("wg show failed: %w", err)
+		}
 	}
 
 	status := &WireGuardStatus{}
@@ -163,6 +176,21 @@ func AddWireGuardPeer(publicKey, allowedIPs, endpoint string) error {
 		return fmt.Errorf("WireGuard management requires Linux")
 	}
 
+	if IsRunnerAvailable() {
+		_, err := DispatchNetworkAction(NetworkRunnerRequest{
+			Subsystem:  "wireguard",
+			Action:     "wg_add_peer",
+			PublicKey:  publicKey,
+			AllowedIPs: allowedIPs,
+			Endpoint:   endpoint,
+		})
+		if err != nil {
+			return err
+		}
+		slog.Info("WireGuard peer added via runner", "peer", publicKey[:16]+"...", "allowed_ips", allowedIPs)
+		return nil
+	}
+
 	args := []string{"set", "wg0", "peer", publicKey, "allowed-ips", allowedIPs}
 	if endpoint != "" {
 		args = append(args, "endpoint", endpoint)
@@ -182,6 +210,19 @@ func AddWireGuardPeer(publicKey, allowedIPs, endpoint string) error {
 func RemoveWireGuardPeer(publicKey string) error {
 	if runtime.GOOS != "linux" {
 		return fmt.Errorf("WireGuard management requires Linux")
+	}
+
+	if IsRunnerAvailable() {
+		_, err := DispatchNetworkAction(NetworkRunnerRequest{
+			Subsystem: "wireguard",
+			Action:    "wg_remove_peer",
+			PublicKey: publicKey,
+		})
+		if err != nil {
+			return err
+		}
+		slog.Info("WireGuard peer removed via runner", "peer", publicKey[:16]+"...")
+		return nil
 	}
 
 	cmd := exec.Command("wg", "set", "wg0", "peer", publicKey, "remove")
@@ -320,6 +361,19 @@ func AdvertiseTailscaleRoutes(routes []string) error {
 
 	if len(routes) == 0 {
 		return fmt.Errorf("no routes specified")
+	}
+
+	if IsRunnerAvailable() {
+		_, err := DispatchNetworkAction(NetworkRunnerRequest{
+			Subsystem: "tailscale",
+			Action:    "tailscale_set_routes",
+			Routes:    routes,
+		})
+		if err != nil {
+			return err
+		}
+		slog.Info("Tailscale: advertising routes via runner", "routes", strings.Join(routes, ","))
+		return nil
 	}
 
 	routeStr := strings.Join(routes, ",")

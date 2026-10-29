@@ -1,142 +1,1089 @@
 {
-  "autobrr": {
-    "update_source": "github",
-    "update_repo": "autobrr/autobrr",
-    "version_command": ["/opt/autobrr/autobrr", "--version"],
-    "sandbox_profile": "go",
-    "sandbox_rw_paths": ["/opt/autobrr", "/home/autobrr"],
-    "sandbox_service_units": ["autobrr.service"]
-  },
-  "bazarr": {
-    "sandbox_profile": "python",
-    "sandbox_rw_paths": ["/opt/bazarr"],
-    "sandbox_service_units": ["bazarr.service"]
-  },
-  "deluge": {
+  "plex": {
     "update_source": "apt",
-    "update_package": "deluged",
-    "sandbox_profile": "python",
-    "sandbox_rw_paths": ["/home/deluge", "/var/log/deluge"],
-    "sandbox_service_units": ["deluged.service", "deluge-web.service"]
-  },
-  "emby": {
-    "update_source": "apt",
-    "update_package": "emby-server"
-  },
-  "filebrowser": {
-    "update_source": "github",
-    "update_repo": "filebrowser/filebrowser",
-    "version_command": ["/usr/local/bin/filebrowser", "version"]
-  },
-  "gitea": {
-    "update_source": "github",
-    "update_repo": "go-gitea/gitea",
-    "version_command": ["/usr/local/bin/gitea", "--version"],
-    "sandbox_profile": "go",
-    "sandbox_rw_paths": ["/etc/gitea", "/var/lib/gitea", "/home/gitea"],
-    "sandbox_service_units": ["gitea.service"]
-  },
-  "grafana": {
-    "update_source": "apt",
-    "update_package": "grafana"
+    "update_package": "plexmediaserver",
+    "sandbox_profile": "native",
+    "sandbox_rw_paths": [
+      "/var/lib/plexmediaserver",
+      "/tmp",
+      "-/mnt",
+      "-/media",
+      "-/srv",
+      "-/downloads",
+      "-/mnt/unionfs"
+    ],
+    "sandbox_service_units": [
+      "plexmediaserver.service"
+    ]
   },
   "jellyfin": {
     "update_source": "apt",
-    "update_package": "jellyfin"
+    "update_package": "jellyfin",
+    "sandbox_profile": "dotnet",
+    "sandbox_rw_paths": [
+      "/var/lib/jellyfin",
+      "/var/cache/jellyfin",
+      "/var/log/jellyfin",
+      "/etc/jellyfin",
+      "-/mnt",
+      "-/media",
+      "-/srv",
+      "-/downloads",
+      "-/mnt/unionfs"
+    ],
+    "sandbox_service_units": [
+      "jellyfin.service"
+    ]
+  },
+  "emby": {
+    "update_source": "github",
+    "update_repo": "MediaBrowser/Emby.Releases",
+    "version_command": [
+      "bash",
+      "-lc",
+      "cat /opt/emby-server/.af-version 2>/dev/null || dpkg-query -W -f='${Version}' emby-server 2>/dev/null"
+    ],
+    "sandbox_profile": "dotnet",
+    "sandbox_rw_paths": [
+      "/var/lib/emby",
+      "/opt/emby-server",
+      "-/mnt",
+      "-/media",
+      "-/srv",
+      "-/downloads",
+      "-/mnt/unionfs"
+    ],
+    "sandbox_service_units": [
+      "emby-server.service"
+    ]
+  },
+  "sonarr": {
+    "update_source": "github",
+    "update_repo": "Sonarr/Sonarr",
+    "version_command": [
+      "bash",
+      "-lc",
+      "cat /opt/Sonarr/.af-version 2>/dev/null || strings /opt/Sonarr/Sonarr.dll 2>/dev/null | grep -oE '^[0-9]+\\.[0-9]+\\.[0-9]+(\\.[0-9]+)?$' | head -n1"
+    ],
+    "sandbox_profile": "dotnet",
+    "sandbox_rw_paths": [
+      "/var/lib/sonarr",
+      "/opt/Sonarr",
+      "{{SERVICE_HOME}}",
+      "-/mnt",
+      "-/media",
+      "-/srv",
+      "-/downloads",
+      "-/mnt/unionfs"
+    ],
+    "sandbox_service_units": [
+      "sonarr.service"
+    ]
+  },
+  "radarr": {
+    "update_source": "github",
+    "update_repo": "Radarr/Radarr",
+    "version_command": [
+      "bash",
+      "-lc",
+      "cat /opt/Radarr/.af-version 2>/dev/null || strings /opt/Radarr/Radarr.dll 2>/dev/null | grep -oE '^[0-9]+\\.[0-9]+\\.[0-9]+(\\.[0-9]+)?$' | head -n1"
+    ],
+    "sandbox_profile": "dotnet",
+    "sandbox_rw_paths": [
+      "/var/lib/radarr",
+      "/opt/Radarr",
+      "{{SERVICE_HOME}}",
+      "-/mnt",
+      "-/media",
+      "-/srv",
+      "-/downloads",
+      "-/mnt/unionfs"
+    ],
+    "sandbox_service_units": [
+      "radarr.service"
+    ]
   },
   "lidarr": {
+    "update_source": "github",
+    "update_repo": "Lidarr/Lidarr",
+    "version_command": [
+      "bash",
+      "-lc",
+      "cat /opt/Lidarr/.af-version 2>/dev/null || strings /opt/Lidarr/Lidarr.dll 2>/dev/null | grep -oE '^[0-9]+\\.[0-9]+\\.[0-9]+(\\.[0-9]+)?$' | head -n1"
+    ],
     "sandbox_profile": "dotnet",
-    "sandbox_rw_paths": ["/opt/Lidarr", "/var/lib/lidarr"],
-    "sandbox_service_units": ["lidarr.service"]
+    "sandbox_rw_paths": [
+      "/var/lib/lidarr",
+      "/opt/Lidarr",
+      "{{SERVICE_HOME}}",
+      "-/mnt",
+      "-/media",
+      "-/srv",
+      "-/downloads",
+      "-/mnt/unionfs"
+    ],
+    "sandbox_service_units": [
+      "lidarr.service"
+    ]
   },
-  "navidrome": {
+  "readarr": {
     "update_source": "github",
-    "update_repo": "navidrome/navidrome",
-    "version_command": ["/opt/navidrome/navidrome", "--version"],
-    "sandbox_profile": "go",
-    "sandbox_rw_paths": ["/opt/navidrome", "/var/lib/navidrome", "/music"],
-    "sandbox_service_units": ["navidrome.service"]
-  },
-  "nzbget": {
-    "update_source": "github",
-    "update_repo": "nzbgetcom/nzbget",
-    "version_command": ["bash", "-lc", "/opt/nzbget/nzbget --version 2>/dev/null || /opt/nzbget/nzbget -V 2>/dev/null"],
-    "sandbox_profile": "native",
-    "sandbox_rw_paths": ["/opt/nzbget", "/home/nzbget"],
-    "sandbox_service_units": ["nzbget.service"]
-  },
-  "ombi": {
-    "update_source": "github",
-    "update_repo": "Ombi-app/Ombi",
-    "version_command": ["/opt/Ombi/Ombi", "--version"],
+    "update_repo": "Readarr/Readarr",
+    "version_command": [
+      "bash",
+      "-lc",
+      "cat /opt/Readarr/.af-version 2>/dev/null || strings /opt/Readarr/Readarr.dll 2>/dev/null | grep -oE '^[0-9]+\\.[0-9]+\\.[0-9]+(\\.[0-9]+)?$' | head -n1"
+    ],
     "sandbox_profile": "dotnet",
-    "sandbox_rw_paths": ["/opt/Ombi"],
-    "sandbox_service_units": ["ombi.service"]
+    "sandbox_rw_paths": [
+      "/var/lib/readarr",
+      "/opt/Readarr",
+      "{{SERVICE_HOME}}",
+      "-/mnt",
+      "-/media",
+      "-/srv",
+      "-/downloads",
+      "-/mnt/unionfs"
+    ],
+    "sandbox_service_units": [
+      "readarr.service"
+    ]
+  },
+  "prowlarr": {
+    "update_source": "github",
+    "update_repo": "Prowlarr/Prowlarr",
+    "version_command": [
+      "bash",
+      "-lc",
+      "cat /opt/Prowlarr/.af-version 2>/dev/null || strings /opt/Prowlarr/Prowlarr.dll 2>/dev/null | grep -oE '^[0-9]+\\.[0-9]+\\.[0-9]+(\\.[0-9]+)?$' | head -n1"
+    ],
+    "sandbox_profile": "dotnet",
+    "sandbox_rw_paths": [
+      "/var/lib/prowlarr",
+      "/opt/Prowlarr",
+      "{{SERVICE_HOME}}",
+      "-/mnt/unionfs"
+    ],
+    "sandbox_service_units": [
+      "prowlarr.service"
+    ]
+  },
+  "bazarr": {
+    "update_source": "github",
+    "update_repo": "morpheus65535/bazarr",
+    "version_command": [
+      "bash",
+      "-lc",
+      "cat /opt/bazarr/.af-version 2>/dev/null || cat /opt/bazarr/VERSION 2>/dev/null || grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' /opt/bazarr/bazarr/app/get_args.py 2>/dev/null | head -n1"
+    ],
+    "sandbox_profile": "python",
+    "sandbox_rw_paths": [
+      "/opt/bazarr",
+      "/var/lib/bazarr",
+      "{{SERVICE_HOME}}",
+      "-/mnt",
+      "-/media",
+      "-/srv",
+      "-/downloads",
+      "-/mnt/unionfs"
+    ],
+    "sandbox_service_units": [
+      "bazarr.service"
+    ]
   },
   "overseerr": {
     "update_source": "git_tags",
     "update_repo": "sct/overseerr",
     "update_repo_url": "https://github.com/sct/overseerr.git",
-    "version_command": ["git", "-C", "/opt/overseerr", "describe", "--tags", "--abbrev=0"],
+    "version_command": [
+      "bash",
+      "-lc",
+      "cat /opt/overseerr/.af-version 2>/dev/null || node -p \"require('/opt/overseerr/package.json').version\" 2>/dev/null"
+    ],
     "sandbox_profile": "node",
-    "sandbox_rw_paths": ["/opt/overseerr"],
-    "sandbox_service_units": ["overseerr.service"]
+    "sandbox_rw_paths": [
+      "/opt/overseerr",
+      "/var/lib/overseerr",
+      "{{SERVICE_HOME}}",
+      "-/mnt/unionfs"
+    ],
+    "sandbox_service_units": [
+      "overseerr.service"
+    ]
   },
-  "prometheus": {
+  "ombi": {
     "update_source": "github",
-    "update_repo": "prometheus/prometheus",
-    "version_command": ["/opt/prometheus/prometheus", "--version"],
-    "sandbox_profile": "go",
-    "sandbox_rw_paths": ["/opt/prometheus", "/etc/prometheus", "/var/lib/prometheus"],
-    "sandbox_service_units": ["prometheus.service", "node_exporter.service"]
-  },
-  "prowlarr": {
-    "update_source": "github",
-    "update_repo": "Prowlarr/Prowlarr",
-    "version_command": ["/opt/Prowlarr/Prowlarr", "--version"],
+    "update_repo": "Ombi-app/Ombi",
+    "version_command": [
+      "bash",
+      "-lc",
+      "cat /opt/Ombi/.af-version 2>/dev/null || strings /opt/Ombi/Ombi.dll 2>/dev/null | grep -oE '^[0-9]+\\.[0-9]+\\.[0-9]+(\\.[0-9]+)?$' | head -n1"
+    ],
     "sandbox_profile": "dotnet",
-    "sandbox_rw_paths": ["/opt/Prowlarr", "/var/lib/prowlarr", "/home/prowlarr"],
-    "sandbox_service_units": ["prowlarr.service"]
+    "sandbox_rw_paths": [
+      "/opt/Ombi",
+      "/etc/Ombi",
+      "/var/lib/ombi",
+      "{{SERVICE_HOME}}",
+      "-/mnt/unionfs"
+    ],
+    "sandbox_service_units": [
+      "ombi.service"
+    ]
+  },
+  "tautulli": {
+    "update_source": "git_tags",
+    "update_repo": "Tautulli/Tautulli",
+    "update_repo_url": "https://github.com/Tautulli/Tautulli.git",
+    "version_command": [
+      "bash",
+      "-lc",
+      "cat /opt/Tautulli/.af-version 2>/dev/null || git -C /opt/Tautulli describe --tags --abbrev=0 2>/dev/null"
+    ],
+    "sandbox_profile": "python",
+    "sandbox_rw_paths": [
+      "/opt/Tautulli",
+      "/var/lib/tautulli",
+      "{{SERVICE_HOME}}",
+      "-/mnt/unionfs"
+    ],
+    "sandbox_service_units": [
+      "tautulli.service"
+    ]
+  },
+  "jackett": {
+    "update_source": "github",
+    "update_repo": "Jackett/Jackett",
+    "version_command": [
+      "/opt/Jackett/jackett",
+      "--version"
+    ],
+    "sandbox_profile": "dotnet",
+    "sandbox_rw_paths": [
+      "/opt/Jackett",
+      "/var/lib/jackett",
+      "{{SERVICE_HOME}}",
+      "-/mnt/unionfs"
+    ],
+    "sandbox_service_units": [
+      "jackett.service"
+    ]
+  },
+  "flaresolverr": {
+    "update_source": "github",
+    "update_repo": "FlareSolverr/FlareSolverr",
+    "version_command": [
+      "bash",
+      "-lc",
+      "cat /opt/flaresolverr/.af-version 2>/dev/null || grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' /opt/flaresolverr/package.json 2>/dev/null | head -n1"
+    ],
+    "sandbox_profile": "python",
+    "sandbox_rw_paths": [
+      "/opt/flaresolverr",
+      "/var/lib/flaresolverr",
+      "{{SERVICE_HOME}}",
+      "-/mnt/unionfs"
+    ],
+    "sandbox_service_units": [
+      "flaresolverr.service"
+    ]
+  },
+  "navidrome": {
+    "update_source": "github",
+    "update_repo": "navidrome/navidrome",
+    "version_command": [
+      "/opt/navidrome/navidrome",
+      "--version"
+    ],
+    "sandbox_profile": "go",
+    "sandbox_rw_paths": [
+      "/var/lib/navidrome",
+      "/opt/navidrome",
+      "{{SERVICE_HOME}}",
+      "-/mnt",
+      "-/media",
+      "-/srv",
+      "-/downloads",
+      "-/mnt/unionfs"
+    ],
+    "sandbox_service_units": [
+      "navidrome.service"
+    ]
   },
   "qbittorrent": {
     "update_source": "apt",
     "update_package": "qbittorrent-nox",
     "sandbox_profile": "native",
-    "sandbox_rw_paths": ["/home/qbittorrent"],
-    "sandbox_service_units": ["qbittorrent.service"]
+    "sandbox_rw_paths": [
+      "/var/lib/qbittorrent",
+      "{{SERVICE_HOME}}",
+      "-/mnt",
+      "-/media",
+      "-/srv",
+      "-/downloads",
+      "-/mnt/unionfs"
+    ],
+    "sandbox_service_units": [
+      "qbittorrent.service"
+    ]
   },
-  "radarr": {
-    "sandbox_profile": "dotnet",
-    "sandbox_rw_paths": ["/opt/Radarr", "/var/lib/radarr"],
-    "sandbox_service_units": ["radarr.service"]
-  },
-  "readarr": {
-    "update_source": "github",
-    "update_repo": "Readarr/Readarr",
-    "version_command": ["/opt/Readarr/Readarr", "--version"],
-    "sandbox_profile": "dotnet",
-    "sandbox_rw_paths": ["/opt/Readarr", "/var/lib/readarr"],
-    "sandbox_service_units": ["readarr.service"]
-  },
-  "sonarr": {
+  "deluge": {
     "update_source": "apt",
-    "update_package": "sonarr"
-  },
-  "syncthing": {
-    "update_source": "apt",
-    "update_package": "syncthing"
+    "update_package": "deluged",
+    "sandbox_profile": "python",
+    "sandbox_rw_paths": [
+      "/var/lib/deluge",
+      "/var/log/deluge",
+      "{{SERVICE_HOME}}",
+      "-/mnt",
+      "-/media",
+      "-/srv",
+      "-/downloads",
+      "-/mnt/unionfs"
+    ],
+    "sandbox_service_units": [
+      "deluged.service",
+      "deluge-web.service"
+    ]
   },
   "transmission": {
     "update_source": "apt",
-    "update_package": "transmission-daemon"
+    "update_package": "transmission-daemon",
+    "sandbox_profile": "native",
+    "sandbox_rw_paths": [
+      "/var/lib/transmission-daemon",
+      "/etc/transmission-daemon",
+      "{{SERVICE_HOME}}",
+      "-/mnt",
+      "-/media",
+      "-/srv",
+      "-/downloads",
+      "-/mnt/unionfs"
+    ],
+    "sandbox_service_units": [
+      "transmission-daemon.service"
+    ]
+  },
+  "sabnzbd": {
+    "update_source": "github",
+    "update_repo": "sabnzbd/sabnzbd",
+    "version_command": [
+      "bash",
+      "-lc",
+      "cat /opt/SABnzbd/.af-version 2>/dev/null || /opt/SABnzbd/.venv/bin/python /opt/SABnzbd/SABnzbd.py --version 2>/dev/null || python3 /opt/SABnzbd/SABnzbd.py --version 2>/dev/null"
+    ],
+    "sandbox_profile": "python",
+    "sandbox_rw_paths": [
+      "/opt/SABnzbd",
+      "/var/lib/sabnzbd",
+      "{{SERVICE_HOME}}",
+      "-/mnt",
+      "-/media",
+      "-/srv",
+      "-/downloads",
+      "-/mnt/unionfs"
+    ],
+    "sandbox_service_units": [
+      "sabnzbd.service"
+    ]
+  },
+  "nzbget": {
+    "update_source": "github",
+    "update_repo": "nzbgetcom/nzbget",
+    "version_command": [
+      "/opt/nzbget/nzbget",
+      "-v"
+    ],
+    "sandbox_profile": "native",
+    "sandbox_rw_paths": [
+      "/opt/nzbget",
+      "/var/lib/nzbget",
+      "{{SERVICE_HOME}}",
+      "-/mnt",
+      "-/media",
+      "-/srv",
+      "-/downloads",
+      "-/mnt/unionfs"
+    ],
+    "sandbox_service_units": [
+      "nzbget.service"
+    ]
+  },
+  "flood": {
+    "update_source": "github",
+    "update_repo": "jesec/flood",
+    "version_command": [
+      "bash",
+      "-lc",
+      "cat /var/lib/flood/.af-version 2>/dev/null || flood --version 2>/dev/null"
+    ],
+    "sandbox_profile": "node",
+    "sandbox_rw_paths": [
+      "/var/lib/flood",
+      "{{SERVICE_HOME}}",
+      "-/mnt",
+      "-/media",
+      "-/srv",
+      "-/downloads",
+      "-/mnt/unionfs"
+    ],
+    "sandbox_service_units": [
+      "flood.service"
+    ]
+  },
+  "autobrr": {
+    "update_source": "github",
+    "update_repo": "autobrr/autobrr",
+    "version_command": [
+      "/usr/local/bin/autobrr",
+      "--version"
+    ],
+    "sandbox_profile": "go",
+    "sandbox_rw_paths": [
+      "/var/lib/autobrr",
+      "{{SERVICE_HOME}}",
+      "-/mnt",
+      "-/media",
+      "-/srv",
+      "-/downloads",
+      "-/mnt/unionfs"
+    ],
+    "sandbox_service_units": [
+      "autobrr.service"
+    ]
+  },
+  "nextcloud": {
+    "update_source": "github",
+    "update_repo": "nextcloud/server",
+    "version_command": [
+      "bash",
+      "-lc",
+      "cat /var/www/nextcloud/.af-version 2>/dev/null || grep -oE \"OC_VersionString = '[^']+'\" /var/www/nextcloud/version.php 2>/dev/null | cut -d\"'\" -f2"
+    ],
+    "sandbox_profile": "privileged",
+    "sandbox_rw_paths": [
+      "/var/www/nextcloud",
+      "/var/lib/nextcloud",
+      "-/mnt",
+      "-/media",
+      "-/srv",
+      "-/downloads",
+      "-/mnt/unionfs"
+    ],
+    "sandbox_service_units": [
+      "apache2.service"
+    ]
+  },
+  "syncthing": {
+    "update_source": "apt",
+    "update_package": "syncthing",
+    "sandbox_profile": "go",
+    "sandbox_rw_paths": [
+      "/var/lib/syncthing",
+      "{{SERVICE_HOME}}",
+      "-/mnt",
+      "-/media",
+      "-/srv",
+      "-/downloads",
+      "-/mnt/unionfs"
+    ],
+    "sandbox_service_units": [
+      "syncthing.service"
+    ]
+  },
+  "filebrowser": {
+    "update_source": "github",
+    "update_repo": "filebrowser/filebrowser",
+    "version_command": [
+      "/usr/local/bin/filebrowser",
+      "version"
+    ],
+    "sandbox_profile": "go",
+    "sandbox_rw_paths": [
+      "/opt/filebrowser",
+      "/srv",
+      "{{SERVICE_HOME}}",
+      "-/mnt",
+      "-/media",
+      "-/downloads",
+      "-/mnt/unionfs"
+    ],
+    "sandbox_service_units": [
+      "filebrowser.service"
+    ]
+  },
+  "wireguard": {
+    "update_source": "apt",
+    "update_package": "wireguard-tools",
+    "sandbox_profile": "privileged",
+    "sandbox_rw_paths": [
+      "/etc/wireguard"
+    ],
+    "sandbox_service_units": [
+      "wg-quick@wg0.service"
+    ]
+  },
+  "pihole": {
+    "update_source": "github",
+    "update_repo": "pi-hole/pi-hole",
+    "version_command": [
+      "bash",
+      "-lc",
+      "pihole -v -p -c 2>/dev/null || cat /etc/pihole/.af-version 2>/dev/null"
+    ],
+    "sandbox_profile": "privileged",
+    "sandbox_rw_paths": [
+      "/etc/pihole",
+      "/var/log/pihole"
+    ],
+    "sandbox_service_units": [
+      "pihole-FTL.service"
+    ]
+  },
+  "fail2ban": {
+    "update_source": "apt",
+    "update_package": "fail2ban",
+    "sandbox_profile": "privileged",
+    "sandbox_rw_paths": [
+      "/var/lib/fail2ban",
+      "/var/run/fail2ban",
+      "/etc/fail2ban"
+    ],
+    "sandbox_service_units": [
+      "fail2ban.service"
+    ]
+  },
+  "vaultwarden": {
+    "update_source": "github",
+    "update_repo": "dani-garcia/vaultwarden",
+    "version_command": [
+      "bash",
+      "-lc",
+      "cat /opt/vaultwarden/.af-version 2>/dev/null || /opt/vaultwarden/vaultwarden --version 2>/dev/null"
+    ],
+    "sandbox_profile": "native",
+    "sandbox_rw_paths": [
+      "/var/lib/vaultwarden",
+      "/opt/vaultwarden",
+      "/etc/vaultwarden",
+      "{{SERVICE_HOME}}"
+    ],
+    "sandbox_service_units": [
+      "vaultwarden.service"
+    ]
+  },
+  "grafana": {
+    "update_source": "apt",
+    "update_package": "grafana",
+    "sandbox_profile": "go",
+    "sandbox_rw_paths": [
+      "/var/lib/grafana",
+      "/var/log/grafana",
+      "/etc/grafana"
+    ],
+    "sandbox_service_units": [
+      "grafana-server.service"
+    ]
+  },
+  "prometheus": {
+    "update_source": "github",
+    "update_repo": "prometheus/prometheus",
+    "version_command": [
+      "/usr/local/bin/prometheus",
+      "--version"
+    ],
+    "sandbox_profile": "go",
+    "sandbox_rw_paths": [
+      "/var/lib/prometheus",
+      "/etc/prometheus",
+      "{{SERVICE_HOME}}"
+    ],
+    "sandbox_service_units": [
+      "prometheus.service",
+      "node_exporter.service"
+    ]
+  },
+  "netdata": {
+    "update_source": "github",
+    "update_repo": "netdata/netdata",
+    "version_command": [
+      "bash",
+      "-lc",
+      "netdata -v 2>/dev/null || /usr/sbin/netdata -v 2>/dev/null"
+    ],
+    "sandbox_profile": "privileged",
+    "sandbox_rw_paths": [
+      "/var/lib/netdata",
+      "/var/cache/netdata",
+      "/var/log/netdata",
+      "/etc/netdata"
+    ],
+    "sandbox_service_units": [
+      "netdata.service"
+    ]
   },
   "uptimekuma": {
     "update_source": "git_tags",
     "update_repo": "louislam/uptime-kuma",
     "update_repo_url": "https://github.com/louislam/uptime-kuma.git",
-    "version_command": ["git", "-C", "/opt/uptime-kuma", "describe", "--tags", "--abbrev=0"],
+    "version_command": [
+      "bash",
+      "-lc",
+      "cat /opt/uptime-kuma/.af-version 2>/dev/null || git -C /opt/uptime-kuma describe --tags --abbrev=0 2>/dev/null"
+    ],
     "sandbox_profile": "node",
-    "sandbox_rw_paths": ["/opt/uptime-kuma"],
-    "sandbox_service_units": ["uptime-kuma.service"]
+    "sandbox_rw_paths": [
+      "/opt/uptime-kuma",
+      "{{SERVICE_HOME}}"
+    ],
+    "sandbox_service_units": [
+      "uptime-kuma.service"
+    ]
+  },
+  "homeassistant": {
+    "update_source": "github",
+    "update_repo": "home-assistant/core",
+    "version_command": [
+      "/srv/homeassistant/bin/hass",
+      "--version"
+    ],
+    "sandbox_profile": "python",
+    "sandbox_rw_paths": [
+      "/srv/homeassistant",
+      "/home/homeassistant",
+      "{{SERVICE_HOME}}"
+    ],
+    "sandbox_service_units": [
+      "home-assistant@homeassistant.service"
+    ]
+  },
+  "jellyseerr": {
+    "update_source": "github",
+    "update_repo": "Fallenbagel/jellyseerr",
+    "version_command": [
+      "bash",
+      "-lc",
+      "cat /opt/jellyseerr/.af-version 2>/dev/null || node -p \"require('/opt/jellyseerr/package.json').version\" 2>/dev/null"
+    ],
+    "sandbox_profile": "node",
+    "sandbox_rw_paths": [
+      "/opt/jellyseerr",
+      "/var/lib/jellyseerr",
+      "{{SERVICE_HOME}}",
+      "-/mnt",
+      "-/media",
+      "-/srv",
+      "-/downloads",
+      "-/mnt/unionfs"
+    ],
+    "sandbox_service_units": [
+      "jellyseerr.service"
+    ]
+  },
+  "adguardhome": {
+    "update_source": "github",
+    "update_repo": "AdguardTeam/AdGuardHome",
+    "version_command": [
+      "bash",
+      "-lc",
+      "cat /opt/AdGuardHome/.af-version 2>/dev/null || /opt/AdGuardHome/AdGuardHome --version 2>/dev/null"
+    ],
+    "sandbox_profile": "privileged",
+    "sandbox_rw_paths": [
+      "/opt/AdGuardHome"
+    ],
+    "sandbox_service_units": [
+      "adguardhome.service"
+    ]
+  },
+  "rtorrent": {
+    "update_source": "apt",
+    "update_package": "rtorrent",
+    "version_command": [
+      "bash",
+      "-lc",
+      "rtorrent -h 2>/dev/null | head -n1 || dpkg-query -W -f='${Version}' rtorrent 2>/dev/null"
+    ],
+    "sandbox_profile": "native",
+    "sandbox_rw_paths": [
+      "/var/lib/rtorrent",
+      "/run/rtorrent",
+      "{{SERVICE_HOME}}",
+      "-/mnt",
+      "-/media",
+      "-/srv",
+      "-/downloads",
+      "-/mnt/unionfs"
+    ],
+    "sandbox_service_units": [
+      "rtorrent.service"
+    ]
+  },
+  "rutorrent": {
+    "update_source": "git_tags",
+    "update_repo": "Novik/ruTorrent",
+    "update_repo_url": "https://github.com/Novik/ruTorrent.git",
+    "version_command": [
+      "bash",
+      "-lc",
+      "cat /var/www/rutorrent/.af-version 2>/dev/null || git -C /var/www/rutorrent describe --tags --abbrev=0 2>/dev/null || grep -oE '[0-9]+\\.[0-9]+' /var/www/rutorrent/js/webui.js | head -1"
+    ],
+    "sandbox_profile": "privileged",
+    "sandbox_rw_paths": [
+      "/var/www/rutorrent",
+      "/srv/rutorrent",
+      "/run/rtorrent",
+      "-/mnt",
+      "-/media",
+      "-/srv",
+      "-/downloads",
+      "-/mnt/unionfs"
+    ],
+    "sandbox_service_units": [
+      "apache2.service"
+    ]
+  },
+  "rclone": {
+    "update_source": "github",
+    "update_repo": "rclone/rclone",
+    "version_command": [
+      "/usr/bin/rclone",
+      "version"
+    ],
+    "sandbox_profile": "go",
+    "sandbox_rw_paths": [
+      "/etc/rclone",
+      "/var/lib/rclone",
+      "{{SERVICE_HOME}}",
+      "-/mnt",
+      "-/mnt/remote",
+      "-/mnt/unionfs"
+    ],
+    "sandbox_service_units": [
+      "rclone.service",
+      "rclone-vfs.service"
+    ]
+  },
+  "mergerfs": {
+    "update_source": "github",
+    "update_repo": "trapexit/mergerfs",
+    "version_command": [
+      "bash",
+      "-lc",
+      "mergerfs -v 2>/dev/null | head -n1 || dpkg-query -W -f='${Version}' mergerfs 2>/dev/null"
+    ],
+    "sandbox_profile": "privileged",
+    "sandbox_rw_paths": [
+      "/mnt/local",
+      "/mnt/remote",
+      "-/mnt/unionfs"
+    ],
+    "sandbox_service_units": [
+      "mergerfs.service"
+    ]
+  },
+  "cloudplow": {
+    "update_source": "git_tags",
+    "update_repo": "l3uddz/cloudplow",
+    "update_repo_url": "https://github.com/l3uddz/cloudplow.git",
+    "version_command": [
+      "bash",
+      "-lc",
+      "cat /opt/cloudplow/.af-version 2>/dev/null || /opt/cloudplow/.venv/bin/python /opt/cloudplow/cloudplow.py --version 2>/dev/null || git -C /opt/cloudplow rev-parse --short HEAD 2>/dev/null"
+    ],
+    "sandbox_profile": "python",
+    "sandbox_rw_paths": [
+      "/opt/cloudplow",
+      "/var/log/cloudplow",
+      "-/mnt",
+      "-/mnt/local",
+      "-/mnt/remote",
+      "-/mnt/unionfs"
+    ],
+    "sandbox_service_units": [
+      "cloudplow.service"
+    ]
+  },
+  "unpackerr": {
+    "update_source": "github",
+    "update_repo": "davidnewhall/unpackerr",
+    "version_command": [
+      "bash",
+      "-lc",
+      "cat /opt/unpackerr/.af-version 2>/dev/null || /usr/local/bin/unpackerr -v 2>/dev/null"
+    ],
+    "sandbox_profile": "go",
+    "sandbox_rw_paths": [
+      "/etc/unpackerr",
+      "/var/lib/unpackerr",
+      "-/downloads",
+      "-/mnt",
+      "-/media",
+      "-/srv",
+      "-/mnt/unionfs"
+    ],
+    "sandbox_service_units": [
+      "unpackerr.service"
+    ]
+  },
+  "autoscan": {
+    "update_source": "github",
+    "update_repo": "Cloudbox/autoscan",
+    "version_command": [
+      "bash",
+      "-lc",
+      "cat /opt/autoscan/.af-version 2>/dev/null || /usr/local/bin/autoscan --version 2>/dev/null"
+    ],
+    "sandbox_profile": "go",
+    "sandbox_rw_paths": [
+      "/etc/autoscan",
+      "/var/lib/autoscan",
+      "-/mnt",
+      "-/media",
+      "-/srv",
+      "-/downloads",
+      "-/mnt/unionfs"
+    ],
+    "sandbox_service_units": [
+      "autoscan.service"
+    ]
+  },
+  "recyclarr": {
+    "update_source": "github",
+    "update_repo": "recyclarr/recyclarr",
+    "version_command": [
+      "bash",
+      "-lc",
+      "cat /opt/recyclarr/.af-version 2>/dev/null || /usr/local/bin/recyclarr --version 2>/dev/null"
+    ],
+    "sandbox_profile": "dotnet",
+    "sandbox_rw_paths": [
+      "/var/lib/recyclarr",
+      "/etc/recyclarr",
+      "{{SERVICE_HOME}}",
+      "-/mnt/unionfs"
+    ],
+    "sandbox_service_units": [
+      "recyclarr.service",
+      "recyclarr.timer"
+    ]
+  },
+  "audiobookshelf": {
+    "update_source": "github",
+    "update_repo": "advplyr/audiobookshelf",
+    "version_command": [
+      "bash",
+      "-lc",
+      "cat /opt/audiobookshelf/.af-version 2>/dev/null || dpkg-query -W -f='${Version}' audiobookshelf 2>/dev/null || /usr/bin/audiobookshelf --version 2>/dev/null"
+    ],
+    "sandbox_profile": "node",
+    "sandbox_rw_paths": [
+      "/var/lib/audiobookshelf",
+      "/var/cache/audiobookshelf",
+      "/etc/audiobookshelf",
+      "{{SERVICE_HOME}}",
+      "-/mnt",
+      "-/media",
+      "-/srv",
+      "-/downloads",
+      "-/mnt/unionfs"
+    ],
+    "sandbox_service_units": [
+      "audiobookshelf.service"
+    ]
+  },
+  "kavita": {
+    "update_source": "github",
+    "update_repo": "Kareadita/Kavita",
+    "version_command": [
+      "bash",
+      "-lc",
+      "cat /opt/Kavita/.af-version 2>/dev/null || strings /opt/Kavita/Kavita.dll 2>/dev/null | grep -oE '^[0-9]+\\.[0-9]+\\.[0-9]+(\\.[0-9]+)?$' | head -n1"
+    ],
+    "sandbox_profile": "dotnet",
+    "sandbox_rw_paths": [
+      "/opt/Kavita",
+      "/var/lib/kavita",
+      "{{SERVICE_HOME}}",
+      "-/mnt",
+      "-/media",
+      "-/srv",
+      "-/downloads",
+      "-/mnt/unionfs"
+    ],
+    "sandbox_service_units": [
+      "kavita.service"
+    ]
+  },
+  "calibreweb": {
+    "update_source": "git_tags",
+    "update_repo": "janeczku/calibre-web",
+    "update_repo_url": "https://github.com/janeczku/calibre-web.git",
+    "version_command": [
+      "bash",
+      "-lc",
+      "cat /opt/calibre-web/.af-version 2>/dev/null || /opt/calibre-web/.venv/bin/python -c \"import cps; print(cps.__version__)\" 2>/dev/null || git -C /opt/calibre-web describe --tags --abbrev=0 2>/dev/null"
+    ],
+    "sandbox_profile": "python",
+    "sandbox_rw_paths": [
+      "/opt/calibre-web",
+      "/var/lib/calibre-web",
+      "/var/lib/calibre-library",
+      "{{SERVICE_HOME}}",
+      "-/mnt",
+      "-/media",
+      "-/srv",
+      "-/downloads",
+      "-/mnt/unionfs"
+    ],
+    "sandbox_service_units": [
+      "calibreweb.service"
+    ]
+  },
+  "librespeed": {
+    "update_source": "github",
+    "update_repo": "librespeed/speedtest-go",
+    "version_command": [
+      "bash",
+      "-lc",
+      "cat /opt/librespeed/.af-version 2>/dev/null || /opt/librespeed/speedtest-go --version 2>/dev/null"
+    ],
+    "sandbox_profile": "go",
+    "sandbox_rw_paths": [
+      "/opt/librespeed",
+      "{{SERVICE_HOME}}"
+    ],
+    "sandbox_service_units": [
+      "librespeed.service"
+    ]
+  },
+  "thelounge": {
+    "update_source": "github",
+    "update_repo": "thelounge/thelounge",
+    "version_command": [
+      "bash",
+      "-lc",
+      "cat /var/lib/thelounge/.af-version 2>/dev/null || thelounge -v 2>/dev/null"
+    ],
+    "sandbox_profile": "node",
+    "sandbox_rw_paths": [
+      "/var/lib/thelounge",
+      "{{SERVICE_HOME}}"
+    ],
+    "sandbox_service_units": [
+      "thelounge.service"
+    ]
+  },
+  "znc": {
+    "update_source": "apt",
+    "update_package": "znc",
+    "version_command": [
+      "bash",
+      "-lc",
+      "znc --version 2>/dev/null | head -n1 || dpkg-query -W -f='${Version}' znc 2>/dev/null"
+    ],
+    "sandbox_profile": "native",
+    "sandbox_rw_paths": [
+      "/var/lib/znc",
+      "{{SERVICE_HOME}}"
+    ],
+    "sandbox_service_units": [
+      "znc.service"
+    ]
+  },
+  "scrutiny": {
+    "update_source": "github",
+    "update_repo": "AnalogJ/scrutiny",
+    "version_command": [
+      "bash",
+      "-lc",
+      "cat /opt/scrutiny/.af-version 2>/dev/null || /opt/scrutiny/bin/scrutiny-web-linux-amd64 --version 2>/dev/null"
+    ],
+    "sandbox_profile": "go",
+    "sandbox_rw_paths": [
+      "/opt/scrutiny",
+      "/var/lib/scrutiny"
+    ],
+    "sandbox_service_units": [
+      "scrutiny.service",
+      "scrutiny-collector.service",
+      "scrutiny-collector.timer"
+    ]
+  },
+  "paperless-ngx": {
+    "update_source": "github",
+    "update_repo": "paperless-ngx/paperless-ngx",
+    "version_command": [
+      "bash",
+      "-lc",
+      "cat /opt/paperless/.af-version 2>/dev/null || /opt/paperless/.venv/bin/python /opt/paperless/src/manage.py version 2>/dev/null"
+    ],
+    "sandbox_profile": "python",
+    "sandbox_rw_paths": [
+      "/opt/paperless",
+      "/var/lib/paperless",
+      "/etc/paperless.conf",
+      "{{SERVICE_HOME}}",
+      "-/mnt",
+      "-/mnt/unionfs",
+      "/tmp"
+    ],
+    "sandbox_service_units": [
+      "paperless-webserver.service",
+      "paperless-worker.service",
+      "paperless-scheduler.service"
+    ]
+  },
+  "n8n": {
+    "update_source": "github",
+    "update_repo": "n8n-io/n8n",
+    "version_command": [
+      "bash",
+      "-lc",
+      "cat /var/lib/n8n/.af-version 2>/dev/null || n8n --version 2>/dev/null || /opt/n8n/node_modules/.bin/n8n --version 2>/dev/null"
+    ],
+    "sandbox_profile": "node",
+    "sandbox_rw_paths": [
+      "/var/lib/n8n",
+      "/opt/n8n",
+      "{{SERVICE_HOME}}"
+    ],
+    "sandbox_service_units": [
+      "n8n.service"
+    ]
+  },
+  "gitea": {
+    "update_source": "github",
+    "update_repo": "go-gitea/gitea",
+    "version_command": [
+      "/usr/local/bin/gitea",
+      "--version"
+    ],
+    "sandbox_profile": "go",
+    "sandbox_rw_paths": [
+      "/var/lib/gitea",
+      "/etc/gitea",
+      "{{SERVICE_HOME}}"
+    ],
+    "sandbox_service_units": [
+      "gitea.service"
+    ]
+  },
+  "organizr": {
+    "update_source": "git_tags",
+    "update_repo": "causefx/Organizr",
+    "update_repo_url": "https://github.com/causefx/Organizr.git",
+    "version_command": [
+      "bash",
+      "-lc",
+      "cat /var/www/organizr/.af-version 2>/dev/null || git -C /var/www/organizr describe --tags --abbrev=0 2>/dev/null || grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' /var/www/organizr/api/config/default.php 2>/dev/null | head -n1"
+    ],
+    "sandbox_profile": "privileged",
+    "sandbox_rw_paths": [
+      "/var/www/organizr"
+    ],
+    "sandbox_service_units": [
+      "apache2.service"
+    ]
   }
 }

@@ -12,6 +12,9 @@ type Package struct {
 	Status      string `json:"status"`
 	ServiceType string `json:"service_type"`
 	ServiceName string `json:"service_name"`
+	DefaultPort int    `json:"default_port,omitempty"`
+	WebPath     string `json:"web_path,omitempty"`
+
 
 	// Automation metadata loaded from config/package_automation.json
 	UpdateSource      string   `json:"update_source,omitempty"`

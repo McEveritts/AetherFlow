@@ -2,11 +2,11 @@ package services
 
 import (
 	"bufio"
-	"fmt"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -21,22 +21,51 @@ type JobInfo struct {
 	Progress  int       `json:"progress"`   // estimated 0-100
 }
 
+// PackageEventBroadcaster is an optional callback notified when a package job changes state or progress.
+type PackageEventBroadcaster func(pkgId, action, status string, progress int, lastLine string)
+
 var (
 	// activeJobs tracks packages that are currently installing or uninstalling
 	activeJobs sync.Map
+
+	progressMarkerRegex = regexp.MustCompile(`\[PROGRESS:(\d{1,3})\]\s*(.*)`)
+
+	broadcasterMu           sync.RWMutex
+	packageEventBroadcaster PackageEventBroadcaster
 )
+
+// SetPackageEventBroadcaster registers a callback for real-time WebSocket broadcasts on package actions.
+func SetPackageEventBroadcaster(fn PackageEventBroadcaster) {
+	broadcasterMu.Lock()
+	defer broadcasterMu.Unlock()
+	packageEventBroadcaster = fn
+}
+
+func notifyPackageEvent(pkgId, action, status string, progress int, lastLine string) {
+	broadcasterMu.RLock()
+	fn := packageEventBroadcaster
+	broadcasterMu.RUnlock()
+	if fn != nil {
+		fn(pkgId, action, status, progress, lastLine)
+	}
+}
 
 // ResolvePackageScriptPath finds the bash script location. Returns empty string if missing.
 func ResolvePackageScriptPath(action, scriptName string) string {
 	candidates := []string{
+		filepath.Join("/opt", "AetherFlow", "current", "packages", "package", action, scriptName),
 		filepath.Join("/opt", "AetherFlow", "packages", "package", action, scriptName),
 	}
 	if exeDir != "" {
-		candidates = append(candidates, filepath.Join(exeDir, "..", "packages", "package", action, scriptName))
+		candidates = append(candidates,
+			filepath.Join(exeDir, "packages", "package", action, scriptName),
+			filepath.Join(exeDir, "..", "packages", "package", action, scriptName),
+		)
 	}
 	candidates = append(candidates,
 		filepath.Join("packages", "package", action, scriptName),
 		filepath.Join("..", "packages", "package", action, scriptName),
+		filepath.Join("..", "..", "packages", "package", action, scriptName),
 	)
 
 	for _, c := range candidates {
@@ -45,6 +74,28 @@ func ResolvePackageScriptPath(action, scriptName string) string {
 		}
 	}
 	return ""
+}
+
+// parseProgressLine extracts an explicit [PROGRESS:XX] milestone if present.
+func parseProgressLine(line string) (int, string, bool) {
+	matches := progressMarkerRegex.FindStringSubmatch(line)
+	if len(matches) < 3 {
+		return 0, line, false
+	}
+	pct, err := strconv.Atoi(matches[1])
+	if err != nil {
+		return 0, line, false
+	}
+	if pct < 0 {
+		pct = 0
+	} else if pct > 100 {
+		pct = 100
+	}
+	cleanMsg := strings.TrimSpace(matches[2])
+	if cleanMsg == "" {
+		cleanMsg = line
+	}
+	return pct, cleanMsg, true
 }
 
 // RunPackageAction executes the specified bash script for installing or removing a package.
@@ -63,6 +114,7 @@ func RunPackageAction(action, pkgId, scriptName, lockFile string) {
 		Progress:  0,
 	}
 	activeJobs.Store(pkgId, job)
+	notifyPackageEvent(pkgId, action, job.Status, job.Progress, job.LastLine)
 
 	slog.Info("starting package action", "action", action, "package", pkgId)
 
@@ -81,84 +133,121 @@ func RunPackageAction(action, pkgId, scriptName, lockFile string) {
 		job.Status = "failed"
 		job.LastLine = "Error: Script not found"
 		job.Progress = 100
+		notifyPackageEvent(pkgId, action, job.Status, job.Progress, job.LastLine)
 		return
 	}
 
 	slog.Info("executing script", "action", action, "path", scriptPath)
 
-	// Use sudo -E -n bash -c to run the script with elevated privileges
-	// Redirect stderr into stdout ( 2>&1 ) in the bash shell so it naturally flows into StdoutPipe
-	cmdArg := fmt.Sprintf("%s 2>&1", scriptPath)
-	cmd := exec.Command("sudo", "-E", "-n", "bash", "-c", cmdArg)
-
-	// Use a pipe to stream stdout line-by-line (which now includes stderr)
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		slog.Error("failed to create stdout pipe", "action", action, "script", scriptName, "error", err)
-		// Fallback to async combined output so we don't stall the pipe
-		go func() {
-			output, runErr := exec.Command("sudo", "-E", "-n", "bash", "-c", cmdArg).CombinedOutput()
-			job.LogLines = len(strings.Split(string(output), "\n"))
-			job.Progress = 100
-			if runErr != nil {
-				job.Status = "failed"
-				job.LastLine = "Error: " + runErr.Error()
-				slog.Error("fallback execution error", "action", action, "error", runErr)
-			} else {
-				job.LastLine = "Complete!"
-			}
-		}()
-		return
-	}
-
-	if err := cmd.Start(); err != nil {
-		job.Status = "failed"
-		job.LastLine = "Error: " + err.Error()
-		job.Progress = 100
-		slog.Error("failed to start script", "action", action, "script", scriptName, "error", err)
-		return
-	}
-
-	// Stream lines and update progress
-	scanner := bufio.NewScanner(stdout)
 	lineCount := 0
-	for scanner.Scan() {
+	hasExplicitProgress := false
+	updateProgress := func(line string) {
 		lineCount++
-		line := strings.TrimSpace(scanner.Text())
-
-		// Update the job info atomically
 		job.LogLines = lineCount
-		if line != "" {
-			job.LastLine = line
-		}
 
-		// Estimate progress: typical scripts produce 5-50 lines
-		// Use a logarithmic curve that approaches 95% but never reaches 100%
-		// until the script actually finishes
-		estimated := int(float64(lineCount) / float64(lineCount+8) * 95)
-		if estimated > 95 {
-			estimated = 95
+		if pct, cleanMsg, ok := parseProgressLine(line); ok {
+			hasExplicitProgress = true
+			if pct > job.Progress {
+				job.Progress = pct
+			}
+			job.LastLine = cleanMsg
+			notifyPackageEvent(pkgId, action, job.Status, job.Progress, job.LastLine)
+		} else {
+			if line != "" {
+				job.LastLine = line
+			}
+			if !hasExplicitProgress {
+				estimated := int(float64(lineCount) / float64(lineCount+8) * 95)
+				if estimated > 95 {
+					estimated = 95
+				}
+				job.Progress = estimated
+			}
 		}
-		job.Progress = estimated
-
 		slog.Debug("script output", "action", action, "package", pkgId, "line", lineCount, "text", line)
 	}
 
-	if err := cmd.Wait(); err != nil {
-		slog.Error("script exited with error", "action", action, "script", scriptName, "error", err)
-		job.Status = "failed"
-		job.LastLine = "Error: " + err.Error()
-		job.Progress = 100
-		return
+	allocatedPort := 0
+	if action == "install" {
+		allocatedPort = PreAllocateAppPort(pkgId)
+	}
+
+	if IsRunnerAvailable() {
+		if err := DispatchPackageStream(action, pkgId, scriptName, updateProgress); err != nil {
+			slog.Error("runner package script exited with error", "action", action, "script", scriptName, "error", err)
+			job.Status = "failed"
+			job.LastLine = "Error: " + err.Error()
+			job.Progress = 100
+			notifyPackageEvent(pkgId, action, job.Status, job.Progress, job.LastLine)
+			return
+		}
+	} else {
+		// Serialize all package operations across the host to prevent apt/dpkg lock contention.
+		packageMutex.Lock()
+		defer packageMutex.Unlock()
+
+		cmd := buildHardenedPackageCommand(scriptPath, true)
+		stdout, err := cmd.StdoutPipe()
+		if err != nil {
+			slog.Error("failed to create stdout pipe; running synchronous fallback", "action", action, "script", scriptName, "error", err)
+			output, runErr := buildHardenedPackageCommand(scriptPath, true).CombinedOutput()
+			job.LogLines = len(strings.Split(string(output), "\n"))
+			if runErr != nil {
+				job.Status = "failed"
+				job.LastLine = "Error: " + runErr.Error()
+				job.Progress = 100
+				notifyPackageEvent(pkgId, action, job.Status, job.Progress, job.LastLine)
+				slog.Error("fallback execution error", "action", action, "error", runErr)
+				return
+			}
+		} else {
+			cmd.Stderr = cmd.Stdout
+
+			if err := cmd.Start(); err != nil {
+				job.Status = "failed"
+				job.LastLine = "Error: " + err.Error()
+				job.Progress = 100
+				notifyPackageEvent(pkgId, action, job.Status, job.Progress, job.LastLine)
+				slog.Error("failed to start script", "action", action, "script", scriptName, "error", err)
+				return
+			}
+
+			scanner := bufio.NewScanner(stdout)
+			scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+			for scanner.Scan() {
+				updateProgress(strings.TrimSpace(scanner.Text()))
+			}
+
+			if err := cmd.Wait(); err != nil {
+				slog.Error("script exited with error", "action", action, "script", scriptName, "error", err)
+				job.Status = "failed"
+				job.LastLine = "Error: " + err.Error()
+				job.Progress = 100
+				notifyPackageEvent(pkgId, action, job.Status, job.Progress, job.LastLine)
+				return
+			}
+		}
 	}
 
 	switch action {
 	case "install":
 		if err := ApplyPackageSandbox(pkgId); err != nil {
-				slog.Warn("sandbox hardening warning", "package", pkgId, "error", err)
+			slog.Warn("sandbox hardening warning", "package", pkgId, "error", err)
+		}
+		if bpRes, err := ApplyBlueprintPostInstall(pkgId, allocatedPort); err != nil {
+			slog.Warn("blueprint post-install setup warning", "package", pkgId, "error", err)
+		} else if bpRes != nil {
+			slog.Info("blueprint post-install applied",
+				"package", pkgId,
+				"allocated_port", bpRes.AllocatedPort,
+				"port_reassigned", bpRes.PortReassigned,
+				"internal_domain", bpRes.InternalDomain)
 		}
 		RefreshPackageUpdateByID(pkgId)
 	case "remove":
+		if err := TeardownBlueprintUninstall(pkgId); err != nil {
+			slog.Warn("blueprint uninstall teardown warning", "package", pkgId, "error", err)
+		}
 		if err := DeletePackageUpdateRecord(pkgId); err != nil {
 			slog.Warn("failed to clear update state", "package", pkgId, "error", err)
 		}
@@ -171,6 +260,7 @@ func RunPackageAction(action, pkgId, scriptName, lockFile string) {
 	} else {
 		job.Status = "uninstalled"
 	}
+	notifyPackageEvent(pkgId, action, job.Status, job.Progress, job.LastLine)
 	slog.Info("script completed successfully", "action", action, "script", scriptName, "lines", lineCount)
 }
 

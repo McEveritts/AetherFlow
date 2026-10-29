@@ -5,7 +5,6 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"os/exec"
 	"time"
 )
 
@@ -18,6 +17,7 @@ type DeployConfig struct {
 	CentralDBPath   string // e.g., "/var/lib/radarr/radarr.db"
 	TargetInternal  string // e.g., "qbittorrent.aether.local"
 	TargetCaddyPort int    // Dynamic green port
+	HealthCheckPath string // Blueprint health check endpoint
 	StatusChan      chan string // SSE Livestreaming
 }
 
@@ -66,7 +66,7 @@ func (o *Orchestrator) ExecuteAtomicDeploy(cfg DeployConfig) error {
 		if err := mutator.Backup(); err != nil {
 			return fmt.Errorf("failed config backup: %w", err)
 		}
-		
+
 		// Inject routing loop overrides
 		routes := map[string]string{"localhost": cfg.TargetInternal, "127.0.0.1": cfg.TargetInternal}
 		if err := mutator.InjectRoutes(routes); err != nil {
@@ -93,11 +93,10 @@ func (o *Orchestrator) ExecuteAtomicDeploy(cfg DeployConfig) error {
 	routeState := RoutingState{
 		AppName:               cfg.AppName,
 		ActivePort:            cfg.TargetCaddyPort,
-		InternalDomain:        fmt.Sprintf("%s.aether.local", cfg.AppName), // default inference
-		ExternalAccessEnabled: true, // simplified for pipeline demo
+		InternalDomain:        fmt.Sprintf("%s.aether.local", cfg.AppName),
+		ExternalAccessEnabled: true,
 	}
 	if err := o.CaddyMgr.UpdateAppRoutes(routeState); err != nil {
-		// ROLLBACK
 		o.executeRollback(cfg, oldTarget)
 		return fmt.Errorf("failed routing update: %w", err)
 	}
@@ -110,7 +109,11 @@ func (o *Orchestrator) ExecuteAtomicDeploy(cfg DeployConfig) error {
 
 	o.logToStream(cfg.StatusChan, "[STEP 7] Performing health check on new endpoints...")
 	time.Sleep(3 * time.Second) // wait for init
-	healthURL := fmt.Sprintf("http://127.0.0.1:%d/api/v3/system/status", cfg.TargetCaddyPort)
+	healthPath := cfg.HealthCheckPath
+	if healthPath == "" {
+		healthPath = "/api/v3/system/status"
+	}
+	healthURL := fmt.Sprintf("http://127.0.0.1:%d%s", cfg.TargetCaddyPort, healthPath)
 	resp, err := http.Get(healthURL)
 	if err != nil || resp.StatusCode >= 400 {
 		o.executeRollback(cfg, oldTarget)
@@ -144,28 +147,23 @@ func (o *Orchestrator) executeRollback(cfg DeployConfig, oldTarget string) {
 		os.Rename(tmpLink, cfg.ActiveSymlink)
 	}
 
-	// Caddy routing handled via generic state rebuild in production loops, omitted here for brevity
-	
+	// Caddy routing: restore previous Caddy proxy target if configured
+	if o.CaddyMgr != nil && cfg.TargetCaddyPort > 0 {
+		_ = o.CaddyMgr.UpdateAppRoutes(RoutingState{
+			AppName:        cfg.AppName,
+			ActivePort:     cfg.TargetCaddyPort,
+			InternalDomain: fmt.Sprintf("%s.aether.local", cfg.AppName),
+		})
+	}
+
 	o.startService(cfg.AppName)
 	o.logToStream(cfg.StatusChan, "[ROLLBACK] System restored to previous functional parameters.")
 }
 
 func (o *Orchestrator) stopService(serviceName string) error {
-	return exec.Command("sudo", "systemctl", "stop", serviceName).Run()
+	return ControlService(serviceName, "stop")
 }
 
 func (o *Orchestrator) startService(serviceName string) error {
-	return exec.Command("sudo", "systemctl", "start", serviceName).Run()
+	return ControlService(serviceName, "start")
 }
-
-// OS File copy minimal implementation
-/* func (o *Orchestrator) copyFile(src, dst string) error {
-	in, err := os.Open(src)
-	if err != nil { return err }
-	defer in.Close()
-	out, err := os.Create(dst)
-	if err != nil { return err }
-	defer out.Close()
-	_, err = in.WriteTo(out)
-	return err
-} */
