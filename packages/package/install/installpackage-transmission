@@ -1,113 +1,101 @@
 #!/bin/bash
-#
-# [AetherFlow :: Install Transmission]
-# Fast, easy, and free BitTorrent client
-#
-# Author : McEveritts
-# URL    : https://AetherFlow.io
-# License: GPL-3.0
-#
-set -e
+# AetherFlow Package Installer: Transmission (transmission-daemon)
+# Port: 9091
 
-LOGFILE="/opt/AetherFlow/logs/installer.log"
-mkdir -p /opt/AetherFlow/logs /install
+set -euo pipefail
 
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [transmission] $1" | tee -a "$LOGFILE"; }
-
-# ── Dependencies ─────────────────────────────────────────────────────────────
-log "Installing Transmission Daemon..."
-apt-get update >>"$LOGFILE" 2>&1
-apt-get install -y transmission-daemon transmission-cli >>"$LOGFILE" 2>&1
-
-# Stop the default installed daemon
-systemctl stop transmission-daemon >>"$LOGFILE" 2>&1 || true
-systemctl disable transmission-daemon >>"$LOGFILE" 2>&1 || true
-
-# ── Create transmission user ─────────────────────────────────────────────────
-if ! id -u transmission &>/dev/null; then
-    useradd -r -s /usr/sbin/nologin -d /var/lib/transmission-daemon transmission
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
 fi
 
-# ── Directories ──────────────────────────────────────────────────────────────
-log "Setting up directories..."
-mkdir -p /var/lib/transmission-daemon/.config/transmission-daemon
-mkdir -p /home/transmission/Downloads
-chown -R transmission:transmission /var/lib/transmission-daemon
-chown -R transmission:transmission /home/transmission
+PACKAGE_NAME="transmission"
+export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")" /install
 
-# ── Configuration ────────────────────────────────────────────────────────────
-cat > /var/lib/transmission-daemon/.config/transmission-daemon/settings.json <<EOF
+require_root
+log_info "Starting installation for ${PACKAGE_NAME}..."
+report_progress 15 "Installing transmission-daemon and transmission-cli..."
+
+DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq transmission-cli transmission-common transmission-daemon curl ca-certificates >> "$LOGFILE" 2>&1
+
+systemctl stop transmission-daemon >> "$LOGFILE" 2>&1 || true
+
+# Remove any legacy transmission.service unit so transmission-daemon.service is canonical
+rm -f /etc/systemd/system/transmission.service
+
+if ! id -u debian-transmission >/dev/null 2>&1; then
+    useradd --system --user-group --no-create-home --home-dir /var/lib/transmission-daemon --shell /usr/sbin/nologin debian-transmission
+fi
+
+report_progress 45 "Configuring Transmission daemon on port 9091..."
+mkdir -p /var/lib/transmission-daemon/.config/transmission-daemon /var/lib/transmission-daemon/downloads /etc/transmission-daemon
+
+cat <<'EOF' > /var/lib/transmission-daemon/.config/transmission-daemon/settings.json
 {
-    "rpc-port": 9091,
-    "rpc-enabled": true,
-    "rpc-whitelist-enabled": false,
+    "download-dir": "/var/lib/transmission-daemon/downloads",
+    "incomplete-dir": "/var/lib/transmission-daemon/downloads",
+    "incomplete-dir-enabled": false,
     "rpc-authentication-required": false,
-    "download-dir": "/home/transmission/Downloads"
+    "rpc-bind-address": "0.0.0.0",
+    "rpc-enabled": true,
+    "rpc-host-whitelist-enabled": false,
+    "rpc-port": 9091,
+    "rpc-url": "/transmission/",
+    "rpc-whitelist": "127.0.0.1,::1,*.*.*.*",
+    "rpc-whitelist-enabled": false,
+    "umask": 2
 }
 EOF
-chown transmission:transmission /var/lib/transmission-daemon/.config/transmission-daemon/settings.json
+cp -f /var/lib/transmission-daemon/.config/transmission-daemon/settings.json /etc/transmission-daemon/settings.json
 
-# ── Transmission Web Control (Optional/Modern UI) ────────────────────────────
-log "Installing Transmission Web Control..."
-TWC_URL=$(curl -sL https://api.github.com/repos/ronggang/transmission-web-control/releases/latest | grep -oP '"tarball_url": "\K[^"]+')
-if [[ -z "$TWC_URL" ]]; then
-    log "Failed to find Web Control URL, using default UI."
-else
-    mkdir -p /tmp/AetherFlow/twc
-    cd /tmp/AetherFlow/twc
-    curl -sL "$TWC_URL" -o twc.tar.gz >>"$LOGFILE" 2>&1
-    tar -xzf twc.tar.gz
-    TWC_DIR=$(find . -maxdepth 1 -type d -name "ronggang-transmission-web-control*" | head -1)
-    if [[ -d "$TWC_DIR/src" ]]; then
-        mkdir -p /usr/share/transmission/web
-        cp -r /usr/share/transmission/web/index.html /usr/share/transmission/web/index.original.html 2>/dev/null || true
-        cp -r ${TWC_DIR}/src/* /usr/share/transmission/web/
+report_progress 70 "Installing Transmission Web Control UI..."
+TWC_URL="$(curl -fsSL https://api.github.com/repos/ronggang/transmission-web-control/releases/latest 2>/dev/null | grep -oP '"tarball_url":\s*"\K[^"]+' | head -1 || true)"
+if [[ -n "$TWC_URL" ]]; then
+    TMP_TAR=$(mktemp /tmp/twc-XXXXXX.tar.gz)
+    if curl -fsSL "$TWC_URL" -o "$TMP_TAR" >> "$LOGFILE" 2>&1; then
+        WEB_DIR="/usr/share/transmission/web"
+        mkdir -p "$WEB_DIR"
+        if [[ -f "${WEB_DIR}/index.html" && ! -f "${WEB_DIR}/index.original.html" ]]; then
+            cp "${WEB_DIR}/index.html" "${WEB_DIR}/index.original.html"
+        fi
+        tar -xzf "$TMP_TAR" --strip-components=2 -C "$WEB_DIR" --wildcards '*/src/*' >> "$LOGFILE" 2>&1 || true
     fi
-    rm -rf /tmp/AetherFlow/twc
+    rm -f "$TMP_TAR"
 fi
 
-# ── Systemd service ──────────────────────────────────────────────────────────
-log "Creating systemd service..."
-cat > /etc/systemd/system/transmission.service <<'EOF'
+chown -R debian-transmission:debian-transmission /var/lib/transmission-daemon /etc/transmission-daemon
+
+cat <<'EOF' > /etc/systemd/system/transmission-daemon.service
 [Unit]
 Description=Transmission BitTorrent Daemon
-After=network.target
+After=network-online.target
+Wants=network-online.target
 
 [Service]
-User=transmission
-Type=notify
-ExecStart=/usr/bin/transmission-daemon -f --log-error
+User=debian-transmission
+Group=debian-transmission
+Type=simple
+ExecStart=/usr/bin/transmission-daemon -f --log-error --config-dir /var/lib/transmission-daemon/.config/transmission-daemon
 ExecReload=/bin/kill -s HUP $MAINPID
-NoNewPrivileges=yes
-ProtectSystem=full
-ProtectHome=read-only
-PrivateTmp=yes
-PrivateDevices=yes
-ProtectKernelTunables=yes
-ProtectControlGroups=yes
-RestrictSUIDSGID=yes
-ReadWritePaths=/home/transmission/Downloads /var/lib/transmission-daemon
+NoNewPrivileges=true
+PrivateTmp=true
+Restart=on-failure
+RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reload
-systemctl enable transmission.service >>"$LOGFILE" 2>&1
-systemctl start transmission.service
+report_progress 90 "Starting and enabling transmission-daemon.service..."
+systemctl daemon-reload >> "$LOGFILE" 2>&1
+systemctl enable --now transmission-daemon >> "$LOGFILE" 2>&1
 
-# ── Apache reverse proxy ─────────────────────────────────────────────────────
-log "Configuring Apache reverse proxy..."
-cat > /etc/apache2/sites-enabled/transmission.conf <<'EOF'
-<Location /transmission>
-    ProxyPass http://localhost:9091/transmission
-    ProxyPassReverse http://localhost:9091/transmission
-</Location>
-EOF
-chown www-data:www-data /etc/apache2/sites-enabled/transmission.conf
-a2enmod proxy proxy_http >>/dev/null 2>&1
-service apache2 reload >>"$LOGFILE" 2>&1
-
-# ── Finalize ─────────────────────────────────────────────────────────────────
-touch /install/.transmission.lock
-log "Transmission installation complete! Access at http://your-server:9091"
+write_lock "${PACKAGE_NAME}"
+report_progress 100 "Transmission installed on port 9091."
+log_info "${PACKAGE_NAME} installed successfully"

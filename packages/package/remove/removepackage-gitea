@@ -1,23 +1,33 @@
 #!/bin/bash
-#
-# [AetherFlow :: Remove gitea]
-#
-source /opt/AetherFlow/packages/common.sh
-set -e
+# AetherFlow Package Uninstaller: Gitea
 
-LOGFILE="/opt/AetherFlow/logs/installer.log"
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [remove-gitea] $1" | tee -a "$LOGFILE"; }
+set -euo pipefail
 
-log "Stopping gitea..."
-systemctl stop gitea 2>/dev/null || true
-systemctl disable gitea 2>/dev/null || true
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
+fi
 
-log "Removing gitea files and configuration..."
-rm -rf /var/lib/gitea /etc/gitea /usr/local/bin/gitea /etc/systemd/system/gitea.service /etc/apache2/sites-enabled/gitea.conf
-userdel gitea 2>/dev/null || true
+PACKAGE_NAME="gitea"
+export LOGFILE="/var/log/aetherflow/remove-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")"
 
-systemctl daemon-reload 2>/dev/null || true
-service apache2 reload 2>/dev/null || true
-rm -f /install/.gitea.lock
+require_root
+log_info "Starting removal for ${PACKAGE_NAME}..."
+report_progress 25 "Stopping and removing gitea.service..."
 
-log "gitea has been completely removed."
+purge_systemd_unit "gitea"
+
+report_progress 65 "Removing Gitea binary, repositories, config, and user account..."
+rm -f /usr/local/bin/gitea
+rm -rf /var/lib/gitea /etc/gitea
+purge_system_user "gitea"
+systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
+
+remove_lock "${PACKAGE_NAME}"
+report_progress 100 "Gitea completely removed."
+log_info "${PACKAGE_NAME} removed successfully"

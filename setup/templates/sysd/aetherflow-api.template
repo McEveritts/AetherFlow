@@ -1,7 +1,9 @@
 [Unit]
-Description=AetherFlow Go API Backend
-After=network-online.target
-Wants=network-online.target
+Description=AetherFlow Control Plane & Embedded UI (Single-Binary)
+Documentation=https://github.com/McEveritts/AetherFlow
+After=network-online.target time-sync.target aetherflow-runner.service
+Wants=network-online.target aetherflow-runner.service
+RequiresMountsFor=/opt/AetherFlow
 
 [Service]
 Type=simple
@@ -14,23 +16,29 @@ RestartSec=5
 StandardOutput=journal
 StandardError=journal
 
-# Environment
+# Managed Directories
+StateDirectory=aetherflow
+StateDirectoryMode=0700
+LogsDirectory=aetherflow
+LogsDirectoryMode=0750
+
+# Environment injection from hardened FHS path with legacy fallback
+EnvironmentFile=-/etc/aetherflow/aetherflow.env
 Environment=GIN_MODE=release
-# Fix #5: Correct DB path — backend/data/, not dashboard/db/
 Environment=AETHERFLOW_DB_PATH=/opt/AetherFlow/backend/data/aetherflow.sqlite
-# Fix #5: AES key and JWT secret (installer overwrites with generated values)
+Environment=AETHERFLOW_RUNNER_SOCK=/run/aetherflow/runner.sock
 Environment=AES_MASTER_KEY=__AES_MASTER_KEY__
 Environment=JWT_SECRET=__JWT_SECRET__
-# Fix #7: Allow plain-HTTP session cookies for local/HTTP testing
 Environment=COOKIE_SECURE=false
-# Fix #8: ALLOWED_HOSTS (installer injects the host's LAN + public IP)
 Environment=ALLOWED_HOSTS=localhost:8080,127.0.0.1:8080,__HOST_IP__:8080,__PUBLIC_IP__:8080
-# Fix #9: CORS origins including the frontend port (LAN + public IP)
-Environment=ALLOWED_CORS_ORIGIN=http://localhost:3000,http://127.0.0.1:3000,http://__HOST_IP__:3000,http://__PUBLIC_IP__:3000
+Environment=ALLOWED_CORS_ORIGIN=http://localhost:8080,http://127.0.0.1:8080,http://__HOST_IP__:8080,http://__PUBLIC_IP__:8080
 
-# Security Hardening
+# Zero-Trust Namespace Isolation
+ProtectSystem=strict
+ProtectHome=yes
 PrivateTmp=yes
 PrivateDevices=yes
+NoNewPrivileges=yes
 ProtectClock=yes
 ProtectControlGroups=yes
 ProtectKernelLogs=yes
@@ -41,12 +49,15 @@ ProcSubset=pid
 LockPersonality=yes
 RestrictNamespaces=yes
 RestrictRealtime=yes
+RestrictSUIDSGID=yes
 SystemCallArchitectures=native
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 UMask=0027
-# Fix #5: ReadWritePaths for the backend data directory and logs
-ReadWritePaths=/var/log/aetherflow /opt/AetherFlow/backend/data
+
+ReadWritePaths=/var/lib/aetherflow /var/log/aetherflow /run/aetherflow /opt/AetherFlow/backend/data
 ReadWritePaths=-/var/lib/openclaw
+
+LimitNOFILE=65535
 
 [Install]
 WantedBy=multi-user.target

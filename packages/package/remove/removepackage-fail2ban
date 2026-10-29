@@ -1,23 +1,35 @@
 #!/bin/bash
-#
-# [AetherFlow :: Remove fail2ban]
-#
-source /opt/AetherFlow/packages/common.sh
-set -e
+# AetherFlow Package Uninstaller: Fail2ban
 
-LOGFILE="/opt/AetherFlow/logs/installer.log"
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [remove-fail2ban] $1" | tee -a "$LOGFILE"; }
+set -euo pipefail
 
-log "Stopping fail2ban..."
-systemctl stop fail2ban 2>/dev/null || true
-systemctl disable fail2ban 2>/dev/null || true
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
+fi
 
-log "Removing fail2ban files and configuration..."
-apt-get remove -y --purge fail2ban >/dev/null 2>&1 || true
-rm -f /etc/fail2ban/jail.local
+PACKAGE_NAME="fail2ban"
+export LOGFILE="/var/log/aetherflow/remove-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")"
 
-systemctl daemon-reload 2>/dev/null || true
-service apache2 reload 2>/dev/null || true
-rm -f /install/.fail2ban.lock
+require_root
+log_info "Starting removal for ${PACKAGE_NAME}..."
+report_progress 20 "Stopping and disabling fail2ban.service..."
 
-log "fail2ban has been completely removed."
+purge_systemd_unit "fail2ban"
+
+report_progress 55 "Purging fail2ban APT package..."
+DEBIAN_FRONTEND=noninteractive apt-get purge -y -qq fail2ban >> "$LOGFILE" 2>&1 || true
+DEBIAN_FRONTEND=noninteractive apt-get autoremove -y -qq >> "$LOGFILE" 2>&1 || true
+
+report_progress 85 "Removing Fail2ban configuration and state directories..."
+rm -rf /etc/fail2ban /var/lib/fail2ban /var/run/fail2ban
+systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
+
+remove_lock "${PACKAGE_NAME}"
+report_progress 100 "Fail2ban completely removed."
+log_info "${PACKAGE_NAME} removed successfully"

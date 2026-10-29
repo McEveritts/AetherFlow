@@ -1,17 +1,33 @@
 #!/bin/bash
-source /opt/AetherFlow/packages/common.sh
-# LEGACY REMOVED: master.txt
-MASTER="$AETHERFLOW_USER"
-username="$MASTER"
+# AetherFlow Package Uninstaller: SABnzbd
 
-apt -y remove par2-tbb python-openssl python-sabyenc python-cheetah >/dev/null 2>&1 || true
-rm -rf "/home/$username/SABnzbd"
+set -euo pipefail
 
-systemctl disable "sabnzbd@$username" 2>/dev/null || true
-systemctl stop "sabnzbd@$username" 2>/dev/null || true
-rm -f /etc/systemd/system/sabnzbd@.service
-systemctl daemon-reload 2>/dev/null || true
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
+fi
 
-rm -f /etc/apache2/sites-enabled/sabnzbd.conf
-rm -f /install/.sabnzbd.lock
-service apache2 reload 2>/dev/null || true
+PACKAGE_NAME="sabnzbd"
+export LOGFILE="/var/log/aetherflow/remove-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")"
+
+require_root
+log_info "Starting removal for ${PACKAGE_NAME}..."
+report_progress 25 "Stopping and removing sabnzbd.service..."
+
+purge_systemd_unit "sabnzbd"
+purge_systemd_unit "sabnzbdplus"
+
+report_progress 65 "Removing SABnzbd files, state directories, and user account..."
+rm -rf /opt/SABnzbd /var/lib/sabnzbd /etc/default/sabnzbdplus
+purge_system_user "sabnzbd"
+systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
+
+remove_lock "${PACKAGE_NAME}"
+report_progress 100 "SABnzbd completely removed."
+log_info "${PACKAGE_NAME} removed successfully"

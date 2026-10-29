@@ -1,131 +1,109 @@
 #!/bin/bash
-#
-# [AetherFlow :: Install Jackett]
-# API Support for trackers
-#
-# Author : McEveritts
-# URL    : https://AetherFlow.io
-# License: GPL-3.0
-#
-set -e
+# AetherFlow Package Installer: Jackett
+# Port: 9117
 
-LOGFILE="/opt/AetherFlow/logs/installer.log"
-mkdir -p /opt/AetherFlow/logs /install
+set -euo pipefail
 
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [jackett] $1" | tee -a "$LOGFILE"; }
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
+fi
 
-# ── Dependencies ─────────────────────────────────────────────────────────────
-log "Installing dependencies..."
-apt-get update >>"$LOGFILE" 2>&1
-apt-get install -y curl libicu-dev >>"$LOGFILE" 2>&1
+PACKAGE_NAME="jackett"
+export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")" /install
 
-# ── Download Jackett ─────────────────────────────────────────────────────────
-log "Downloading latest Jackett..."
+require_root
+log_info "Starting installation for ${PACKAGE_NAME}..."
+report_progress 10 "Installing dependencies for Jackett..."
+
+DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl wget jq tar ca-certificates libicu-dev >> "$LOGFILE" 2>&1
+
+if ! id -u jackett >/dev/null 2>&1; then
+    useradd --system --user-group --no-create-home --home-dir /var/lib/jackett --shell /usr/sbin/nologin jackett
+fi
+
+mkdir -p /opt/Jackett /var/lib/jackett/Jackett
+
 ARCH=$(dpkg --print-architecture)
 case "$ARCH" in
-    amd64) JACKETT_ARCH="LinuxAMDx64" ;;
-    arm64) JACKETT_ARCH="LinuxARM64" ;;
-    armhf) JACKETT_ARCH="LinuxARM32" ;;
-    *) JACKETT_ARCH="LinuxAMDx64" ;;
+    amd64) JACKETT_ARCH="AMDx64" ;;
+    arm64) JACKETT_ARCH="ARM64" ;;
+    armhf) JACKETT_ARCH="ARM32" ;;
+    *) print_error "Unsupported architecture: $ARCH"; exit 1 ;;
 esac
 
-JACKETT_URL=$(curl -sL https://api.github.com/repos/Jackett/Jackett/releases/latest | grep "browser_download_url.*${JACKETT_ARCH}.tar.gz" | head -1 | cut -d '"' -f 4)
-if [[ -z "$JACKETT_URL" ]]; then
-    log "Could not determine latest Jackett URL, attempting fallback..."
-    JACKETT_VERSION=$(curl -sL https://api.github.com/repos/Jackett/Jackett/releases/latest | grep '"tag_name"' | sed -E 's/.*"v([^"]+)".*/\1/')
-    JACKETT_URL="https://github.com/Jackett/Jackett/releases/download/v${JACKETT_VERSION}/Jackett.Binaries.${JACKETT_ARCH}.tar.gz"
+report_progress 35 "Downloading latest Jackett (${JACKETT_ARCH})..."
+JACKETT_VERSION="$(curl -fsSL https://api.github.com/repos/Jackett/Jackett/releases/latest 2>/dev/null | grep -oP '"tag_name":\s*"v?\K[^"]+' | head -1 || true)"
+TMP_TAR=$(mktemp /tmp/jackett-XXXXXX.tar.gz)
+curl -fsSL "https://github.com/Jackett/Jackett/releases/latest/download/Jackett.Binaries.Linux${JACKETT_ARCH}.tar.gz" -o "$TMP_TAR" >> "$LOGFILE" 2>&1
+
+report_progress 65 "Extracting Jackett to /opt/Jackett..."
+tar -xzf "$TMP_TAR" -C /opt >> "$LOGFILE" 2>&1
+rm -f "$TMP_TAR"
+if [[ -n "$JACKETT_VERSION" ]]; then
+    printf '%s\n' "${JACKETT_VERSION#v}" > /opt/Jackett/.af-version
 fi
 
-mkdir -p /tmp/AetherFlow
-cd /tmp/AetherFlow
-curl -sL "$JACKETT_URL" -o jackett.tar.gz >>"$LOGFILE" 2>&1
-
-log "Extracting Jackett..."
-rm -rf /opt/Jackett
-tar -xzf jackett.tar.gz -C /opt >>"$LOGFILE" 2>&1
-rm -f jackett.tar.gz
-
-# ── Create jackett user ──────────────────────────────────────────────────────
-if ! id -u jackett &>/dev/null; then
-    useradd -r -s /usr/sbin/nologin -d /opt/Jackett jackett
-fi
-chown -R jackett:jackett /opt/Jackett
-mkdir -p /var/lib/jackett/.config/Jackett
-chown -R jackett:jackett /var/lib/jackett
-
-# ── Configure Jackett ────────────────────────────────────────────────────────
-cat >/var/lib/jackett/.config/Jackett/ServerConfig.json <<EOF
+cat <<'EOF' > /var/lib/jackett/Jackett/ServerConfig.json
 {
   "Port": 9117,
-  "AllowExternal": false,
+  "AllowExternal": true,
   "APIKey": "",
   "AdminPassword": null,
   "InstanceId": "",
-  "BlackholeDir": "",
-  "UpdateDisabled": true,
+  "BlackholeDir": null,
+  "UpdateDisabled": false,
   "UpdatePrerelease": false,
-  "BasePathOverride": "/jackett",
+  "BasePathOverride": "",
   "CacheEnabled": true,
   "CacheTtl": 2100,
   "CacheMaxResultsPerIndexer": 1000,
-  "FlareSolverrUrl": "",
-  "FlareSolverrMaxRequestDelay": 55,
-  "OmdbApiKey": "",
-  "OmdbApiUrl": ""
+  "OmdbApiKey": null,
+  "OmdbApiUrl": null,
+  "ProxyUrl": null,
+  "ProxyType": 0,
+  "ProxyPort": null,
+  "ProxyUsername": null,
+  "ProxyPassword": null,
+  "ProxyIsAnonymous": true
 }
 EOF
-chown -R jackett:jackett /var/lib/jackett/.config/Jackett
 
-# ── Systemd service ──────────────────────────────────────────────────────────
-log "Creating systemd service..."
-cat > /etc/systemd/system/jackett.service <<'EOF'
+chown -R jackett:jackett /opt/Jackett /var/lib/jackett
+
+report_progress 85 "Configuring and starting jackett.service on port 9117..."
+cat <<'EOF' > /etc/systemd/system/jackett.service
 [Unit]
-Description=Jackett Tracker Manager
+Description=Jackett Daemon
 After=network.target
 
 [Service]
-Environment="TMPDIR=/tmp/jackett"
-ExecStartPre=-/bin/mkdir -p /tmp/jackett
-ExecStartPre=-/bin/chown -R jackett:jackett /tmp/jackett
 SyslogIdentifier=jackett
 Restart=always
 RestartSec=5
 Type=simple
 User=jackett
 Group=jackett
+Environment=XDG_CONFIG_HOME=/var/lib/jackett
 WorkingDirectory=/opt/Jackett
-ExecStart=/opt/Jackett/jackett --NoRestart -d /var/lib/jackett/.config/Jackett
+ExecStart=/opt/Jackett/jackett --NoRestart --DataFolder /var/lib/jackett/Jackett
 TimeoutStopSec=20
-NoNewPrivileges=yes
-ProtectSystem=full
-ProtectHome=true
-PrivateTmp=yes
-PrivateDevices=yes
-ProtectKernelTunables=yes
-ProtectControlGroups=yes
-RestrictSUIDSGID=yes
-ReadWritePaths=/var/lib/jackett
+NoNewPrivileges=true
+PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reload
-systemctl enable jackett.service >>"$LOGFILE" 2>&1
-systemctl start jackett.service
+systemctl daemon-reload >> "$LOGFILE" 2>&1
+systemctl enable --now jackett >> "$LOGFILE" 2>&1
 
-# ── Apache reverse proxy ─────────────────────────────────────────────────────
-log "Configuring Apache reverse proxy..."
-cat > /etc/apache2/sites-enabled/jackett.conf <<'EOF'
-<Location /jackett>
-    ProxyPass http://localhost:9117/jackett
-    ProxyPassReverse http://localhost:9117/jackett
-</Location>
-EOF
-chown www-data:www-data /etc/apache2/sites-enabled/jackett.conf
-a2enmod proxy proxy_http >>/dev/null 2>&1
-service apache2 reload >>"$LOGFILE" 2>&1
-
-# ── Finalize ─────────────────────────────────────────────────────────────────
-touch /install/.jackett.lock
-log "Jackett installation complete! Access at http://your-server:9117"
+write_lock "${PACKAGE_NAME}"
+report_progress 100 "Jackett installed on port 9117."
+log_info "${PACKAGE_NAME} installed successfully"

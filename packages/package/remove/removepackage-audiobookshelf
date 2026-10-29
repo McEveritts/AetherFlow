@@ -1,0 +1,33 @@
+#!/bin/bash
+# AetherFlow Package Uninstaller: Audiobookshelf
+
+set -euo pipefail
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
+fi
+
+PACKAGE_NAME="audiobookshelf"
+export LOGFILE="/var/log/aetherflow/remove-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")"
+
+require_root
+log_info "Starting removal for ${PACKAGE_NAME}..."
+report_progress 25 "Stopping and removing audiobookshelf.service..."
+
+purge_systemd_unit "audiobookshelf"
+
+report_progress 65 "Removing Audiobookshelf package, state directories, and user account..."
+DEBIAN_FRONTEND=noninteractive dpkg -r audiobookshelf >> "$LOGFILE" 2>&1 || true
+rm -rf /opt/audiobookshelf /var/lib/audiobookshelf /var/cache/audiobookshelf /etc/audiobookshelf /etc/apt/sources.list.d/audiobookshelf.list /usr/share/keyrings/audiobookshelf-keyring.gpg
+purge_system_user "audiobookshelf"
+systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
+
+remove_lock "${PACKAGE_NAME}"
+report_progress 100 "Audiobookshelf completely removed."
+log_info "${PACKAGE_NAME} removed successfully"

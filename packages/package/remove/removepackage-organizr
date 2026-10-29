@@ -1,21 +1,38 @@
 #!/bin/bash
-#
-# [AetherFlow :: Remove organizr]
-#
-source /opt/AetherFlow/packages/common.sh
-set -e
+# AetherFlow Package Uninstaller: Organizr
 
-LOGFILE="/opt/AetherFlow/logs/installer.log"
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [remove-organizr] $1" | tee -a "$LOGFILE"; }
+set -euo pipefail
 
-log "Stopping organizr..."
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
+fi
 
+PACKAGE_NAME="organizr"
+export LOGFILE="/var/log/aetherflow/remove-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")"
 
-log "Removing organizr files and configuration..."
-rm -rf /var/www/organizr /etc/apache2/sites-enabled/organizr.conf
+require_root
+log_info "Starting removal for ${PACKAGE_NAME}..."
+report_progress 25 "Disabling Apache Organizr site..."
 
-systemctl daemon-reload 2>/dev/null
-service apache2 reload 2>/dev/null
-rm -f /install/.organizr.lock
+a2dissite organizr.conf >> "$LOGFILE" 2>&1 || true
+rm -f /etc/apache2/sites-available/organizr.conf /etc/apache2/sites-enabled/organizr.conf /etc/apache2/conf-available/organizr.conf /etc/apache2/conf-enabled/organizr.conf
+if [[ -f /etc/apache2/ports.conf ]]; then
+    sed -i '/^Listen 8086$/d' /etc/apache2/ports.conf || true
+fi
+rm -f /etc/systemd/system/apache2.service.d/10-aetherflow-sandbox.conf
+rmdir /etc/systemd/system/apache2.service.d 2>/dev/null || true
 
-log "organizr has been completely removed."
+report_progress 65 "Removing Organizr webroot and reloading Apache..."
+rm -rf /var/www/organizr
+systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
+systemctl reload apache2 >> "$LOGFILE" 2>&1 || true
+
+remove_lock "${PACKAGE_NAME}"
+report_progress 100 "Organizr completely removed."
+log_info "${PACKAGE_NAME} removed successfully"

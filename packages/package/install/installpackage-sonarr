@@ -1,97 +1,80 @@
 #!/bin/bash
-#
-# [AetherFlow :: Install Sonarr]
-# TV collection manager for Usenet and BitTorrent
-#
-# Author : McEveritts
-# URL    : https://AetherFlow.io
-# License: GPL-3.0
-#
-set -e
+# AetherFlow Package Installer: Sonarr (v4 .NET standalone)
+# Port: 8989
 
-LOGFILE="/opt/AetherFlow/logs/installer.log"
-mkdir -p /opt/AetherFlow/logs /install
+set -euo pipefail
 
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [sonarr] $1" | tee -a "$LOGFILE"; }
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
+fi
 
-# ── Dependencies ─────────────────────────────────────────────────────────────
-log "Installing dependencies..."
-apt-get update >>"$LOGFILE" 2>&1
-apt-get install -y curl sqlite3 libicu-dev >>"$LOGFILE" 2>&1
+PACKAGE_NAME="sonarr"
+export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")" /install
 
-# ── Download Sonarr ──────────────────────────────────────────────────────────
-log "Downloading latest Sonarr..."
+require_root
+log_info "Starting installation for ${PACKAGE_NAME}..."
+report_progress 10 "Installing dependencies for Sonarr..."
+
+DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl sqlite3 libicu-dev mediainfo ca-certificates >> "$LOGFILE" 2>&1
+
+if ! id -u sonarr >/dev/null 2>&1; then
+    useradd --system --user-group --no-create-home --home-dir /var/lib/sonarr --shell /usr/sbin/nologin sonarr
+fi
+
+mkdir -p /var/lib/sonarr /opt/Sonarr
+
 ARCH=$(dpkg --print-architecture)
 case "$ARCH" in
     amd64) SONARR_ARCH="x64" ;;
     arm64) SONARR_ARCH="arm64" ;;
     armhf) SONARR_ARCH="arm" ;;
-    *) SONARR_ARCH="x64" ;;
+    *) print_error "Unsupported architecture: $ARCH"; exit 1 ;;
 esac
 
-mkdir -p /tmp/AetherFlow
-cd /tmp/AetherFlow
-curl -sL "https://services.sonarr.tv/v1/download/main/latest?version=4&os=linux&arch=${SONARR_ARCH}" -o sonarr.tar.gz >>"$LOGFILE" 2>&1
+report_progress 35 "Downloading Sonarr v4 (${SONARR_ARCH})..."
+SONARR_VERSION="$(curl -fsSL https://api.github.com/repos/Sonarr/Sonarr/releases/latest 2>/dev/null | grep -oP '"tag_name":\s*"v?\K[^"]+' | head -1 || true)"
+TMP_TAR=$(mktemp /tmp/sonarr-XXXXXX.tar.gz)
+curl -fsSL "https://services.sonarr.tv/v1/download/main/latest?version=4&os=linux&arch=${SONARR_ARCH}" -o "$TMP_TAR" >> "$LOGFILE" 2>&1
 
-log "Extracting Sonarr..."
-rm -rf /opt/Sonarr
-tar -xzf sonarr.tar.gz -C /opt >>"$LOGFILE" 2>&1
-rm -f sonarr.tar.gz
-
-# ── Create sonarr user ───────────────────────────────────────────────────────
-if ! id -u sonarr &>/dev/null; then
-    useradd -r -s /usr/sbin/nologin -d /opt/Sonarr sonarr
+report_progress 65 "Extracting Sonarr to /opt/Sonarr..."
+tar -xzf "$TMP_TAR" -C /opt >> "$LOGFILE" 2>&1
+rm -f "$TMP_TAR"
+if [[ -n "$SONARR_VERSION" ]]; then
+    printf '%s\n' "${SONARR_VERSION#v}" > /opt/Sonarr/.af-version
 fi
-chown -R sonarr:sonarr /opt/Sonarr
-mkdir -p /var/lib/sonarr
-chown -R sonarr:sonarr /var/lib/sonarr
+chown -R sonarr:sonarr /opt/Sonarr /var/lib/sonarr
 
-# ── Systemd service ──────────────────────────────────────────────────────────
-log "Creating systemd service..."
-cat > /etc/systemd/system/sonarr.service <<'EOF'
+report_progress 85 "Configuring and starting sonarr.service..."
+cat <<'EOF' > /etc/systemd/system/sonarr.service
 [Unit]
-Description=Sonarr TV Series Manager
+Description=Sonarr Daemon
 After=syslog.target network.target
 
 [Service]
 User=sonarr
 Group=sonarr
 Type=simple
-ExecStart=/opt/Sonarr/Sonarr -nobrowser -data=/var/lib/sonarr/
-Restart=on-failure
-RestartSec=10
+ExecStart=/opt/Sonarr/Sonarr -nobrowser -data=/var/lib/sonarr
 TimeoutStopSec=20
 KillMode=process
-NoNewPrivileges=yes
-ProtectSystem=full
-ProtectHome=true
-PrivateTmp=yes
-PrivateDevices=yes
-ProtectKernelTunables=yes
-ProtectControlGroups=yes
-RestrictSUIDSGID=yes
-ReadWritePaths=/var/lib/sonarr
+Restart=on-failure
+NoNewPrivileges=true
+PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reload
-systemctl enable sonarr.service >>"$LOGFILE" 2>&1
-systemctl start sonarr.service
+systemctl daemon-reload >> "$LOGFILE" 2>&1
+systemctl enable --now sonarr >> "$LOGFILE" 2>&1
 
-# ── Apache reverse proxy ─────────────────────────────────────────────────────
-log "Configuring Apache reverse proxy..."
-cat > /etc/apache2/sites-enabled/sonarr.conf <<'EOF'
-<Location /sonarr>
-    ProxyPass http://localhost:8989/sonarr
-    ProxyPassReverse http://localhost:8989/sonarr
-</Location>
-EOF
-chown www-data:www-data /etc/apache2/sites-enabled/sonarr.conf
-a2enmod proxy proxy_http >>/dev/null 2>&1
-service apache2 reload >>"$LOGFILE" 2>&1
-
-# ── Finalize ─────────────────────────────────────────────────────────────────
-touch /install/.sonarr.lock
-log "Sonarr installation complete! Access at http://your-server:8989"
+write_lock "${PACKAGE_NAME}"
+report_progress 100 "Sonarr installed on port 8989."
+log_info "${PACKAGE_NAME} installed successfully"

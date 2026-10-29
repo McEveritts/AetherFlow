@@ -1,49 +1,79 @@
 #!/bin/bash
-#
-# [AetherFlow :: Install File Browser]
-# Web file manager with a sleek interface
-#
-# Author : McEveritts
-# URL    : https://AetherFlow.io
-# License: GPL-3.0
-#
-source /opt/AetherFlow/packages/common.sh
+# AetherFlow Package Installer: File Browser
+# Port: 8095
+
 set -euo pipefail
 
-# Override common.sh LOGFILE for this specific package
-export LOGFILE="/opt/AetherFlow/logs/installer.log"
-mkdir -p "$(dirname "$LOGFILE")"
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
+fi
 
-# We use print_info to ensure output is visible to the backend installer
-log() { print_info "[$APP_ID] $1"; }
-APP_ID="filebrowser"
+PACKAGE_NAME="filebrowser"
+export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")" /install /opt/AetherFlow/logs
 
-# ── Download and install File Browser ────────────────────────────────────────
-log "Downloading File Browser..."
-fetch_and_run "https://raw.githubusercontent.com/filebrowser/get/master/get.sh" "SKIP" >>"$LOGFILE" 2>&1
+require_root
+log_info "Starting installation for ${PACKAGE_NAME}..."
+report_progress 15 "Installing dependencies for File Browser..."
 
-# ── Create data directory and initial admin with random password ──────────────
-log "Setting up File Browser data directory..."
-mkdir -p /opt/filebrowser
-filebrowser config init --address 0.0.0.0 --port 8085 --root / --database /opt/filebrowser/filebrowser.db >>"$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl tar openssl ca-certificates >> "$LOGFILE" 2>&1
 
-# Generate a secure random password instead of default 'admin/admin'
-FB_PASS=$(head -c 32 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 16)
-filebrowser users add admin "$FB_PASS" --database /opt/filebrowser/filebrowser.db >>"$LOGFILE" 2>&1
-echo "$FB_PASS" > /opt/filebrowser/initial_password.txt
-chmod 600 /opt/filebrowser/initial_password.txt
-log "File Browser admin password: $FB_PASS (also saved to /opt/filebrowser/initial_password.txt)"
+if ! id -u filebrowser >/dev/null 2>&1; then
+    useradd --system --user-group --no-create-home --home-dir /opt/filebrowser --shell /usr/sbin/nologin filebrowser
+fi
 
-# ── Systemd service ──────────────────────────────────────────────────────────
-log "Creating systemd service..."
-cat > /etc/systemd/system/filebrowser.service <<'EOF'
+ARCH=$(dpkg --print-architecture)
+case "$ARCH" in
+    amd64) FB_ARCH="linux-amd64" ;;
+    arm64) FB_ARCH="linux-arm64" ;;
+    armhf) FB_ARCH="linux-armv7" ;;
+    *) print_error "Unsupported architecture: $ARCH"; exit 1 ;;
+esac
+
+report_progress 40 "Downloading latest File Browser (${FB_ARCH})..."
+FB_JSON="$(curl -fsSL https://api.github.com/repos/filebrowser/filebrowser/releases/latest 2>/dev/null || true)"
+FB_VERSION="$(printf '%s' "$FB_JSON" | grep -oP '"tag_name":\s*"\K[^"]+' | head -1 || true)"
+FB_VERSION="${FB_VERSION:-v2.31.2}"
+FB_URL="https://github.com/filebrowser/filebrowser/releases/download/${FB_VERSION}/${FB_ARCH}-filebrowser.tar.gz"
+
+TMP_TAR=$(mktemp /tmp/filebrowser-XXXXXX.tar.gz)
+curl -fsSL "$FB_URL" -o "$TMP_TAR" >> "$LOGFILE" 2>&1
+tar -xzf "$TMP_TAR" -C /usr/local/bin filebrowser >> "$LOGFILE" 2>&1
+rm -f "$TMP_TAR"
+chmod +x /usr/local/bin/filebrowser
+
+report_progress 70 "Initializing File Browser database on port 8095..."
+mkdir -p /opt/filebrowser /srv
+printf '%s\n' "${FB_VERSION#v}" > /opt/filebrowser/.af-version
+
+# Remove any existing DB so config init is idempotent on reinstall
+rm -f /opt/filebrowser/filebrowser.db
+/usr/local/bin/filebrowser config init --database /opt/filebrowser/filebrowser.db >> "$LOGFILE" 2>&1
+/usr/local/bin/filebrowser config set --address 0.0.0.0 --port 8095 --root /srv --database /opt/filebrowser/filebrowser.db >> "$LOGFILE" 2>&1
+
+FB_PASS="$(openssl rand -base64 12 | tr -dc 'a-zA-Z0-9' | head -c 14)"
+/usr/local/bin/filebrowser users add admin "$FB_PASS" --perm.admin --database /opt/filebrowser/filebrowser.db >> "$LOGFILE" 2>&1
+echo "FileBrowser Admin Password: ${FB_PASS}" > /opt/AetherFlow/logs/filebrowser_credentials.txt
+chmod 600 /opt/AetherFlow/logs/filebrowser_credentials.txt
+
+chown -R filebrowser:filebrowser /opt/filebrowser
+
+report_progress 85 "Configuring and starting filebrowser.service on port 8095..."
+cat <<'EOF' > /etc/systemd/system/filebrowser.service
 [Unit]
-Description=File Browser
+Description=File Browser Web File Manager
 After=network.target
 
 [Service]
-Type=simple
-ExecStart=/usr/local/bin/filebrowser --database /opt/filebrowser/filebrowser.db --address 0.0.0.0 --port 8085 --root /
+User=filebrowser
+Group=filebrowser
+ExecStart=/usr/local/bin/filebrowser --database /opt/filebrowser/filebrowser.db
 Restart=on-failure
 RestartSec=5
 
@@ -51,23 +81,9 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reload
-systemctl enable filebrowser.service >>"$LOGFILE" 2>&1
-systemctl start filebrowser.service
+systemctl daemon-reload >> "$LOGFILE" 2>&1
+systemctl enable --now filebrowser >> "$LOGFILE" 2>&1
 
-# ── Apache reverse proxy ─────────────────────────────────────────────────────
-log "Configuring Apache reverse proxy..."
-cat > /etc/apache2/sites-enabled/filebrowser.conf <<'EOF'
-<Location /filebrowser>
-    ProxyPass http://localhost:8085
-    ProxyPassReverse http://localhost:8085
-</Location>
-EOF
-chown www-data:www-data /etc/apache2/sites-enabled/filebrowser.conf
-a2enmod proxy proxy_http >>/dev/null 2>&1
-service apache2 reload >>"$LOGFILE" 2>&1
-
-# ── Finalize ─────────────────────────────────────────────────────────────────
-touch /install/.filebrowser.lock
-log "File Browser installation complete! Default login: admin / admin"
-log "Access at http://your-server:8085"
+write_lock "${PACKAGE_NAME}"
+report_progress 100 "File Browser installed on port 8095."
+log_info "${PACKAGE_NAME} installed successfully"

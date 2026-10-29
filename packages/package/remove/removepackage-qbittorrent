@@ -1,24 +1,36 @@
 #!/bin/bash
-#
-# [AetherFlow :: Remove qbittorrent]
-#
-source /opt/AetherFlow/packages/common.sh
-set -e
+# AetherFlow Package Uninstaller: qBittorrent
 
-LOGFILE="/opt/AetherFlow/logs/installer.log"
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [remove-qbittorrent] $1" | tee -a "$LOGFILE"; }
+set -euo pipefail
 
-log "Stopping qbittorrent..."
-systemctl stop qbittorrent 2>/dev/null || true
-systemctl disable qbittorrent 2>/dev/null || true
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
+fi
 
-log "Removing qbittorrent files and configuration..."
-apt-get remove -y qbittorrent-nox >/dev/null 2>&1 || true
-rm -rf /etc/systemd/system/qbittorrent.service /etc/apache2/sites-enabled/qbittorrent.conf
-userdel qbittorrent 2>/dev/null || true
+PACKAGE_NAME="qbittorrent"
+export LOGFILE="/var/log/aetherflow/remove-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")"
 
-systemctl daemon-reload 2>/dev/null || true
-service apache2 reload 2>/dev/null || true
-rm -f /install/.qbittorrent.lock
+require_root
+log_info "Starting removal for ${PACKAGE_NAME}..."
+report_progress 20 "Stopping and removing qbittorrent.service..."
 
-log "qbittorrent has been completely removed."
+purge_systemd_unit "qbittorrent"
+
+report_progress 50 "Purging qbittorrent-nox package..."
+DEBIAN_FRONTEND=noninteractive apt-get purge -y -qq qbittorrent-nox >> "$LOGFILE" 2>&1 || true
+DEBIAN_FRONTEND=noninteractive apt-get autoremove -y -qq >> "$LOGFILE" 2>&1 || true
+
+report_progress 80 "Removing qBittorrent state directories and user account..."
+rm -rf /var/lib/qbittorrent
+purge_system_user "qbittorrent"
+systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
+
+remove_lock "${PACKAGE_NAME}"
+report_progress 100 "qBittorrent completely removed."
+log_info "${PACKAGE_NAME} removed successfully"

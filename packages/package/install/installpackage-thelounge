@@ -1,0 +1,89 @@
+#!/bin/bash
+# AetherFlow Package Installer: The Lounge
+# Port: 9000
+
+set -euo pipefail
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
+fi
+
+PACKAGE_NAME="thelounge"
+export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")" /install
+
+require_root
+log_info "Starting installation for ${PACKAGE_NAME}..."
+report_progress 10 "Setting up Node.js runtime and prerequisites for The Lounge..."
+
+DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl ca-certificates build-essential python3 >> "$LOGFILE" 2>&1
+
+ensure_node 20
+
+if ! id -u thelounge >/dev/null 2>&1; then
+    useradd --system --user-group --create-home --home-dir /var/lib/thelounge --shell /usr/sbin/nologin thelounge
+fi
+
+mkdir -p /var/lib/thelounge
+
+report_progress 40 "Installing The Lounge package globally via npm..."
+npm install -g thelounge >> "$LOGFILE" 2>&1
+
+TL_VER="$(thelounge -v 2>/dev/null || true)"
+if [[ -n "$TL_VER" ]]; then
+    printf '%s\n' "${TL_VER#v}" > /var/lib/thelounge/.af-version
+fi
+
+report_progress 65 "Configuring The Lounge state and ports..."
+if [[ ! -f /var/lib/thelounge/config.js ]]; then
+    cat <<'EOF' > /var/lib/thelounge/config.js
+module.exports = {
+    public: false,
+    host: "0.0.0.0",
+    port: 9000,
+    bind: undefined,
+    reverseProxy: true,
+    maxHistory: 10000,
+    https: {
+        enable: false
+    }
+};
+EOF
+fi
+
+chown -R thelounge:thelounge /var/lib/thelounge
+
+NODE_PATH="$(command -v node || echo /usr/bin/node)"
+TL_BIN="$(command -v thelounge || echo /usr/local/bin/thelounge)"
+
+report_progress 85 "Configuring and starting thelounge.service on port 9000..."
+cat <<EOF > /etc/systemd/system/thelounge.service
+[Unit]
+Description=The Lounge Web IRC Client
+After=network.target
+
+[Service]
+Type=simple
+User=thelounge
+Group=thelounge
+Environment=THELOUNGE_HOME=/var/lib/thelounge
+ExecStart=${NODE_PATH} ${TL_BIN} start
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload >> "$LOGFILE" 2>&1
+systemctl enable --now thelounge >> "$LOGFILE" 2>&1
+
+write_lock "${PACKAGE_NAME}"
+report_progress 100 "The Lounge installed on port 9000."
+log_info "${PACKAGE_NAME} installed successfully"

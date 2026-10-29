@@ -131,12 +131,24 @@ function _intro() {
 		if [[ "${ID}" == "kali" ]]; then DISTRO="Debian"; fi
 		CODENAME="${VERSION_CODENAME}"
 		VERSION_ID="${VERSION_ID}"
+		if [[ "${DISTRO}" == "Debian" ]]; then
+			if [[ -z "${CODENAME}" && -n "${VERSION_CODENAME}" ]]; then
+				CODENAME="${VERSION_CODENAME}"
+			fi
+			if [[ -z "${VERSION_ID}" && ("${CODENAME}" == "trixie" || "${VERSION_CODENAME}" == "trixie" || "${PRETTY_NAME}" =~ [Tt]rixie) ]]; then
+				VERSION_ID="13"
+				[[ -z "${CODENAME}" ]] && CODENAME="trixie"
+			fi
+		fi
 		SETNAME="${VERSION_ID} ${VERSION_CODENAME}"
 	elif command -v lsb_release >/dev/null 2>&1; then
 		DISTRO=$(lsb_release -is)
 		CODENAME=$(lsb_release -cs)
 		SETNAME=$(lsb_release -rc)
 		VERSION_ID=$(lsb_release -rs)
+		if [[ "${DISTRO}" == "Debian" && -z "${VERSION_ID}" && "${CODENAME}" == "trixie" ]]; then
+			VERSION_ID="13"
+		fi
 	else
 		DISTRO="Unknown"
 	fi
@@ -176,11 +188,16 @@ function _intro() {
 		exit 1
 	fi
 
-	if [[ "${DISTRO}" == "Debian" ]] && ! _version_ge "${VERSION_ID}" "11"; then
-		echo "Unsupported Debian release: ${SETNAME}."
-		echo "AetherFlow requires Debian 11 or newer."
-		echo 'Exiting...'
-		exit 1
+	if [[ "${DISTRO}" == "Debian" ]]; then
+		if [[ -z "${VERSION_ID}" && ("${CODENAME}" == "trixie" || "${VERSION_CODENAME}" == "trixie" || "${PRETTY_NAME}" =~ [Tt]rixie) ]]; then
+			VERSION_ID="13"
+		fi
+		if ! _version_ge "${VERSION_ID:-0}" "11"; then
+			echo "Unsupported Debian release: ${SETNAME}."
+			echo "AetherFlow requires Debian 11 or newer."
+			echo 'Exiting...'
+			exit 1
+		fi
 	fi
 
 	# Set PHP Version based on OS
@@ -191,7 +208,7 @@ function _intro() {
 	elif [[ "${CODENAME}" =~ ("bookworm") ]]; then
 		PHP_VER="8.2"
 	elif [[ "${CODENAME}" =~ ("trixie") ]]; then
-		PHP_VER="8.3"
+		PHP_VER="8.4"
 	elif [[ "${CODENAME}" =~ ("focal") ]]; then
 		PHP_VER="7.4"
 	elif [[ "${CODENAME}" =~ ("jammy") ]]; then

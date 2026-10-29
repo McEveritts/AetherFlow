@@ -1,38 +1,55 @@
 #!/bin/bash
-#
-# [AetherFlow :: Install Pi-hole]
-# Network-wide ad blocking via DNS sinkhole
-#
-# Author : McEveritts
-# URL    : https://AetherFlow.io
-# License: GPL-3.0
-#
-source /opt/AetherFlow/packages/common.sh
+# AetherFlow Package Installer: Pi-hole
+# Port: 8089 (Web Admin /admin), 53 (DNS)
+
 set -euo pipefail
 
-# Override common.sh LOGFILE for this specific package
-export LOGFILE="/opt/AetherFlow/logs/installer.log"
-mkdir -p "$(dirname "$LOGFILE")" /etc/pihole
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
+fi
 
-# We use print_info to ensure output is visible to the backend installer
-log() { print_info "[$APP_ID] $1"; }
-APP_ID="pihole"
+PACKAGE_NAME="pihole"
+export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")" /install
 
-# ── Pre-configure Pi-hole for unattended install ─────────────────────────────
-log "Pre-configuring Pi-hole for automated install..."
-PIHOLE_INTERFACE=$(ip route | grep default | awk '{print $5}' | head -1)
-PIHOLE_IP=$(hostname -I | awk '{print $1}')
+require_root
+log_info "Starting installation for ${PACKAGE_NAME}..."
+report_progress 10 "Installing prerequisites for Pi-hole..."
 
-cat > /etc/pihole/setupVars.conf <<EOF
-PIHOLE_INTERFACE=${PIHOLE_INTERFACE}
-IPV4_ADDRESS=${PIHOLE_IP}/24
-IPV6_ADDRESS=
+DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl dnsutils iproute2 ca-certificates >> "$LOGFILE" 2>&1
+
+report_progress 25 "Freeing port 53 from systemd-resolved stub listener..."
+if systemctl is-active --quiet systemd-resolved 2>/dev/null; then
+    mkdir -p /etc/systemd/resolved.conf.d
+    cat <<'EOF' > /etc/systemd/resolved.conf.d/pihole.conf
+[Resolve]
+DNSStubListener=no
+EOF
+    if [[ -L /etc/resolv.conf ]] && readlink /etc/resolv.conf | grep -q "stub-resolv.conf"; then
+        ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf
+    fi
+    systemctl restart systemd-resolved >> "$LOGFILE" 2>&1 || true
+fi
+
+report_progress 45 "Preparing unattended Pi-hole configuration..."
+mkdir -p /etc/pihole
+DEFAULT_IFACE="$(ip route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev") {print $(i+1); exit}}' || true)"
+DEFAULT_IFACE="${DEFAULT_IFACE:-eth0}"
+
+cat <<EOF > /etc/pihole/setupVars.conf
+PIHOLE_INTERFACE=${DEFAULT_IFACE}
 PIHOLE_DNS_1=1.1.1.1
 PIHOLE_DNS_2=8.8.8.8
 QUERY_LOGGING=true
-INSTALL_WEB_SERVER=false
+INSTALL_WEB_SERVER=true
 INSTALL_WEB_INTERFACE=true
-LIGHTTPD_ENABLED=false
+LIGHTTPD_ENABLED=true
 CACHE_SIZE=10000
 DNS_FQDN_REQUIRED=true
 DNS_BOGUS_PRIV=true
@@ -41,29 +58,26 @@ WEBPASSWORD=
 BLOCKING_ENABLED=true
 EOF
 
-# ── Install Pi-hole ──────────────────────────────────────────────────────────
-log "Downloading and running Pi-hole installer (unattended)..."
-fetch_and_run "https://install.pi-hole.net" "SKIP" --unattended >>"$LOGFILE" 2>&1
+report_progress 65 "Running official Pi-hole installer..."
+fetch_and_run "https://install.pi-hole.net" "SKIP" --unattended >> "$LOGFILE" 2>&1
 
-# ── Set a random web password ────────────────────────────────────────────────
-PIHOLE_PASS=$(openssl rand -base64 12)
-pihole -a -p "$PIHOLE_PASS" >>"$LOGFILE" 2>&1
-log "Pi-hole admin password set to: ${PIHOLE_PASS}"
-echo "$PIHOLE_PASS" > /opt/AetherFlow/logs/pihole_password.txt
-chmod 600 /opt/AetherFlow/logs/pihole_password.txt
+report_progress 85 "Configuring Pi-hole Web Admin interface on port 8089..."
+# Support both Pi-hole v6 (embedded pihole-FTL webserver) and v5 (lighttpd)
+if command_exists pihole-FTL && [[ -f /etc/pihole/pihole.toml ]]; then
+    pihole-FTL --config webserver.port "8089o" >> "$LOGFILE" 2>&1 || sed -i 's/port = "80o,.*/port = "8089o"/g' /etc/pihole/pihole.toml || true
+fi
+if [[ -d /etc/lighttpd ]]; then
+    echo 'server.port := 8089' > /etc/lighttpd/external.conf
+    if [[ -d /etc/lighttpd/conf-enabled ]]; then
+        echo 'server.port := 8089' > /etc/lighttpd/conf-enabled/99-pihole-port.conf
+    fi
+    systemctl restart lighttpd >> "$LOGFILE" 2>&1 || true
+fi
 
-# ── Apache reverse proxy for the admin panel ─────────────────────────────────
-log "Configuring Apache reverse proxy..."
-cat > /etc/apache2/sites-enabled/pihole.conf <<'EOF'
-<Location /pihole>
-    ProxyPass http://localhost:8089/admin
-    ProxyPassReverse http://localhost:8089/admin
-</Location>
-EOF
-chown www-data:www-data /etc/apache2/sites-enabled/pihole.conf
-a2enmod proxy proxy_http >>/dev/null 2>&1
-service apache2 reload >>"$LOGFILE" 2>&1
+systemctl daemon-reload >> "$LOGFILE" 2>&1
+systemctl enable --now pihole-FTL >> "$LOGFILE" 2>&1
+systemctl restart pihole-FTL >> "$LOGFILE" 2>&1 || true
 
-# ── Finalize ─────────────────────────────────────────────────────────────────
-touch /install/.pihole.lock
-log "Pi-hole installation complete! Admin password saved to /opt/AetherFlow/logs/pihole_password.txt"
+write_lock "${PACKAGE_NAME}"
+report_progress 100 "Pi-hole installed on Web port 8089 (/admin) and DNS port 53."
+log_info "${PACKAGE_NAME} installed successfully"

@@ -1,49 +1,97 @@
 #!/bin/bash
-#
-# [Quick Box :: Install ZNC package]
-#
-# GITHUB REPOS
-# GitHub _ packages  :   https://github.com/AetherFlow/AetherFlow_packages
-# LOCAL REPOS
-# Local _ packages   :   /etc/AetherFlow/packages
-# Author             :   AetherFlow.IO | liara
-# URL                :   https://AetherFlow.io
-#
-# AetherFlow Copyright (C) 2017 AetherFlow.io
-# Licensed under GNU General Public License v3.0 GPL-3 (in short)
-#
-#   You may copy, distribute and modify the software as long as you track
-#   changes/dates in source files. Any modifications to our software
-#   including (via compiler) GPL-licensed code must also be made available
-#   under the GPL along with build & install instructions.
+# AetherFlow Package Installer: ZNC
+# Port: 6501
 
-DISTRO=$(lsb_release -is)
-CODENAME=$(lsb_release -cs)
-OUTTO=$LOGFILE
+set -euo pipefail
 
-echo "Installing ZNC. Please wait ... " >> ${OUTTO} 2>&1
-echo "" >> ${OUTTO} 2>&1
-echo "" >> ${OUTTO} 2>&1
-useradd znc -m -s /bin/bash
-passwd znc -l
-
-if [[ $DISTRO == Debian ]]; then
-  echo "deb http://packages.temporal-intelligence.net/znc/debian/ ${CODENAME} main" > /etc/apt/sources.list.d/znc.list
-  echo "#deb-src http://packages.temporal-intelligence.net/znc/debian/ ${CODENAME} main" >> /etc/apt/sources.list.d/znc.list
-  wget --quiet http://packages.temporal-intelligence.net/repo.gpg.key -O - | apt-key add - > /dev/null 2>&1
-elif [[ $DISTRO == Ubuntu ]]; then
-  sudo apt-get install -q -y python-software-properties software-properties-common > /dev/null 2>&1
-  sudo add-apt-repository -q -y ppa:teward/znc > /dev/null 2>&1
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
 fi
-  apt-get update -q -y > /dev/null 2>&1
-  apt-get install znc -q -y > /dev/null 2>&1
-  touch /install/.znc.lock
-  sudo -u znc crontab -l | echo -e "*/10 * * * * /usr/bin/znc >/dev/null 2>&1\n@reboot /usr/bin/znc >/dev/null 2>&1" | crontab -u znc - > /dev/null 2>&1
-  echo "#### ZNC configuration will now run. Please answer the following prompts ####"
-  sleep 5
-  sudo -u znc znc --makeconf
-  echo "$(cat /home/znc/.znc/configs/znc.conf | grep Port | sed -e 's/^[ \t]*//')" > /srv/rutorrent/home/db/znc.txt
-  echo "$(cat /home/znc/.znc/configs/znc.conf | grep SSL |  sed -e 's/^[ \t]*//')" >> /srv/rutorrent/home/db/znc.txt
 
-echo "#### ZNC now installed! ####"
+PACKAGE_NAME="znc"
+export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")" /install
 
+require_root
+log_info "Starting installation for ${PACKAGE_NAME}..."
+report_progress 15 "Installing ZNC packages and cryptographic libraries via apt..."
+
+DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq znc openssl ca-certificates >> "$LOGFILE" 2>&1
+
+if ! id -u znc >/dev/null 2>&1; then
+    useradd --system --user-group --create-home --home-dir /var/lib/znc --shell /usr/sbin/nologin znc
+fi
+
+mkdir -p /var/lib/znc/configs /var/lib/znc/modules /var/lib/znc/users
+
+# Record version
+ZNC_VER="$(znc --version 2>/dev/null | head -n1 | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' || dpkg-query -W -f='${Version}' znc 2>/dev/null || echo "1.8.2")"
+printf '%s\n' "$ZNC_VER" > /var/lib/znc/.af-version
+
+report_progress 50 "Generating initial ZNC configuration and SSL certificate..."
+if [[ ! -f /var/lib/znc/znc.pem ]]; then
+    openssl req -x509 -nodes -newkey rsa:2048 -keyout /var/lib/znc/znc.pem -out /var/lib/znc/znc.pem -days 3650 -subj "/CN=znc" >> "$LOGFILE" 2>&1 || true
+    chmod 600 /var/lib/znc/znc.pem
+fi
+
+if [[ ! -f /var/lib/znc/configs/znc.conf ]]; then
+    cat <<'EOF' > /var/lib/znc/configs/znc.conf
+// ZNC configuration created by AetherFlow
+AnonIPLimit = 10
+AuthOnlyVia = ""
+ConfigWriteDelay = 0
+ConnectDelay = 5
+HideVersion = false
+LoadModule = webadmin
+MaxBufferSize = 500
+ProtectWebSessions = true
+ServerThrottle = 30
+Skin = "default"
+StatusPrefix = "*"
+
+<Listener listener0>
+    AllowIRC = true
+    AllowWeb = true
+    IPv4 = true
+    IPv6 = true
+    Port = 6501
+    SSL = false
+    URIPrefix = /
+</Listener>
+EOF
+fi
+
+chown -R znc:znc /var/lib/znc
+
+report_progress 85 "Configuring and starting znc.service on port 6501..."
+cat <<'EOF' > /etc/systemd/system/znc.service
+[Unit]
+Description=ZNC - Advanced IRC Bouncer
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=znc
+Group=znc
+Type=simple
+WorkingDirectory=/var/lib/znc
+ExecStart=/usr/bin/znc --foreground --datadir=/var/lib/znc
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload >> "$LOGFILE" 2>&1
+systemctl enable --now znc >> "$LOGFILE" 2>&1
+
+write_lock "${PACKAGE_NAME}"
+report_progress 100 "ZNC installed on port 6501."
+log_info "${PACKAGE_NAME} installed successfully"

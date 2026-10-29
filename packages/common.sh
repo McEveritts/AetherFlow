@@ -133,3 +133,54 @@ fetch_and_run() {
     rm -f "$tmp_script"
     return 0
 }
+
+report_progress() {
+    local pct="${1:-0}"
+    local msg="${2:-}"
+    printf '[PROGRESS:%d] %s\n' "$pct" "$msg"
+    log_info "[PROGRESS:$pct] $msg"
+}
+
+ensure_node() {
+    local want_major="${1:-20}"
+    local have_major=0
+    if command_exists node; then
+        have_major=$(node -v 2>/dev/null | sed 's/^v//' | cut -d. -f1 || echo 0)
+    fi
+    if [[ "${have_major:-0}" -lt "$want_major" ]]; then
+        fetch_and_run "https://deb.nodesource.com/setup_${want_major}.x" "SKIP"
+        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nodejs >> "$LOGFILE" 2>&1
+    fi
+    if [[ ! -x /usr/bin/node && -x /usr/local/bin/node ]]; then
+        ln -sf /usr/local/bin/node /usr/bin/node
+    fi
+    if [[ ! -x /usr/bin/npm && -x /usr/local/bin/npm ]]; then
+        ln -sf /usr/local/bin/npm /usr/bin/npm
+    fi
+    if [[ ! -x /usr/bin/npx && -x /usr/local/bin/npx ]]; then
+        ln -sf /usr/local/bin/npx /usr/bin/npx
+    fi
+}
+
+purge_systemd_unit() {
+    local unit="$1"
+    case "$unit" in
+        *.service|*.timer|*.socket) ;;
+        *) unit="${unit}.service" ;;
+    esac
+    systemctl stop "$unit" >/dev/null 2>&1 || true
+    systemctl disable "$unit" >/dev/null 2>&1 || true
+    systemctl reset-failed "$unit" >/dev/null 2>&1 || true
+    rm -f "/etc/systemd/system/${unit}"
+    rm -rf "/etc/systemd/system/${unit}.d"
+}
+
+purge_system_user() {
+    local username="$1"
+    if [[ -n "$username" && "$username" != "root" && "$username" != "www-data" ]]; then
+        userdel -r "$username" >/dev/null 2>&1 || userdel "$username" >/dev/null 2>&1 || true
+        groupdel "$username" >/dev/null 2>&1 || true
+        rm -rf "/home/${username}"
+    fi
+}
+

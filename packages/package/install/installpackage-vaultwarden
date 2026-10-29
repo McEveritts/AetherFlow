@@ -1,156 +1,145 @@
 #!/bin/bash
-#
-# [AetherFlow :: Install Vaultwarden]
-# Lightweight Bitwarden-compatible password manager — Native binary deployment
-#
-# Author : McEveritts
-# URL    : https://AetherFlow.io
-# License: GPL-3.0
-#
-set -e
-set -o pipefail
+# AetherFlow Package Installer: Vaultwarden
+# Port: 8343
 
-LOGFILE="/opt/AetherFlow/logs/installer.log"
-mkdir -p /opt/AetherFlow/logs /install
+set -euo pipefail
 
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [vaultwarden] $1" | tee -a "$LOGFILE"; }
-
-if [[ -f /install/.vaultwarden.lock ]]; then
-    log "Vaultwarden is already installed. Skipping."
-    exit 0
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
 fi
 
-# ── Dependencies ─────────────────────────────────────────────────────────────
-log "Installing dependencies..."
-apt-get update >>"$LOGFILE" 2>&1
-apt-get install -y curl libssl-dev pkg-config ca-certificates >>"$LOGFILE" 2>&1
+PACKAGE_NAME="vaultwarden"
+export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")" /install /opt/AetherFlow/logs
 
-# ── Architecture detection ───────────────────────────────────────────────────
+require_root
+log_info "Starting installation for ${PACKAGE_NAME}..."
+report_progress 10 "Installing dependencies for Vaultwarden..."
+
+DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl jq tar openssl ca-certificates sqlite3 libssl3 >> "$LOGFILE" 2>&1 || \
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl jq tar openssl ca-certificates sqlite3 libssl-dev >> "$LOGFILE" 2>&1
+
+if ! id -u vaultwarden >/dev/null 2>&1; then
+    useradd --system --user-group --no-create-home --home-dir /var/lib/vaultwarden --shell /usr/sbin/nologin vaultwarden
+fi
+
+mkdir -p /opt/vaultwarden /var/lib/vaultwarden/data /etc/vaultwarden
+
 ARCH=$(dpkg --print-architecture)
 case "$ARCH" in
-    amd64) VW_ARCH="x86_64"  ;;
-    arm64) VW_ARCH="aarch64" ;;
-    *)     VW_ARCH="x86_64"  ;;
+    amd64) OCI_ARCH="amd64" ;;
+    arm64) OCI_ARCH="arm64" ;;
+    armhf) OCI_ARCH="arm" ;;
+    *) print_error "Unsupported architecture: $ARCH"; exit 1 ;;
 esac
-log "Detected architecture: ${ARCH} → ${VW_ARCH}"
 
-# ── Download Vaultwarden binary ──────────────────────────────────────────────
-log "Downloading Vaultwarden..."
+report_progress 35 "Fetching latest Vaultwarden release metadata..."
+VW_JSON="$(curl -fsSL https://api.github.com/repos/dani-garcia/vaultwarden/releases/latest 2>/dev/null || true)"
+VW_VERSION="$(printf '%s' "$VW_JSON" | grep -oP '"tag_name":\s*"\K[^"]+' | head -1 || true)"
+VW_VERSION="${VW_VERSION:-1.32.7}"
 
-VW_URL=$(curl -sL https://api.github.com/repos/dani-garcia/vaultwarden/releases/latest \
-    | grep -oP "\"browser_download_url\": \"\K(https://[^\"]+vaultwarden-${VW_ARCH}-unknown-linux-gnu\.tar\.gz)(?=\")" \
-    | head -1) || true
+report_progress 55 "Extracting prebuilt Vaultwarden binary and Web Vault (${OCI_ARCH})..."
+TMP_EXTRACT=$(mktemp -d /tmp/vw-oci-XXXXXX)
+VW_TAG="${VW_VERSION#v}"
+TOKEN="$(curl -fsSL "https://ghcr.io/token?scope=repository:dani-garcia/vaultwarden:pull" 2>/dev/null | jq -r '.token // empty' || true)"
 
-if [[ -z "$VW_URL" ]]; then
-    log "GitHub API did not return matching asset, attempting tag-based fallback..."
-    VW_VERSION=$(curl -sL https://api.github.com/repos/dani-garcia/vaultwarden/releases/latest \
-        | grep -oP '"tag_name": "\K[^"]+') || true
-    if [[ -z "$VW_VERSION" ]]; then
-        log "FATAL: Could not determine Vaultwarden version."
-        exit 1
+if [[ -n "$TOKEN" ]]; then
+    ACCEPT_INDEX="application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json"
+    INDEX="$(curl -fsSL -H "Authorization: Bearer ${TOKEN}" -H "Accept: ${ACCEPT_INDEX}" "https://ghcr.io/v2/dani-garcia/vaultwarden/manifests/${VW_TAG}" 2>/dev/null || \
+             curl -fsSL -H "Authorization: Bearer ${TOKEN}" -H "Accept: ${ACCEPT_INDEX}" "https://ghcr.io/v2/dani-garcia/vaultwarden/manifests/${VW_VERSION}" 2>/dev/null || \
+             curl -fsSL -H "Authorization: Bearer ${TOKEN}" -H "Accept: ${ACCEPT_INDEX}" "https://ghcr.io/v2/dani-garcia/vaultwarden/manifests/latest" 2>/dev/null || true)"
+
+    if [[ -n "$INDEX" ]]; then
+        MANIFEST_DIGEST="$(printf '%s' "$INDEX" | jq -r --arg arch "$OCI_ARCH" 'if .manifests then (.manifests[] | select(.platform.architecture == $arch and .platform.os == "linux" and ((.annotations["vnd.docker.reference.type"] // "") != "attestation-manifest")) | .digest) else empty end' | head -n1 || true)"
+        if [[ -n "$MANIFEST_DIGEST" ]]; then
+            MANIFEST="$(curl -fsSL -H "Authorization: Bearer ${TOKEN}" -H "Accept: application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json" "https://ghcr.io/v2/dani-garcia/vaultwarden/manifests/${MANIFEST_DIGEST}" 2>/dev/null || true)"
+        else
+            MANIFEST="$INDEX"
+        fi
+
+        for LAYER_DIGEST in $(printf '%s' "$MANIFEST" | jq -r '.layers[]?.digest // empty'); do
+            BLOB_FILE="${TMP_EXTRACT}/layer.tar.gz"
+            if curl -fsSL -L -H "Authorization: Bearer ${TOKEN}" "https://ghcr.io/v2/dani-garcia/vaultwarden/blobs/${LAYER_DIGEST}" -o "$BLOB_FILE" >> "$LOGFILE" 2>&1; then
+                tar -xzf "$BLOB_FILE" -C "$TMP_EXTRACT" vaultwarden web-vault 2>/dev/null || tar -xzf "$BLOB_FILE" -C "$TMP_EXTRACT" ./vaultwarden ./web-vault 2>/dev/null || true
+            fi
+            rm -f "$BLOB_FILE"
+        done
     fi
-    VW_URL="https://github.com/dani-garcia/vaultwarden/releases/download/${VW_VERSION}/vaultwarden-${VW_ARCH}-unknown-linux-gnu.tar.gz"
 fi
 
-log "Download URL: ${VW_URL}"
-mkdir -p /tmp/AetherFlow
-cd /tmp/AetherFlow
-curl -sL "$VW_URL" -o vaultwarden.tar.gz >>"$LOGFILE" 2>&1
-
-# ── Download Web Vault frontend ──────────────────────────────────────────────
-log "Downloading Web Vault frontend..."
-WEB_VAULT_URL=$(curl -sL https://api.github.com/repos/dani-garcia/bw_web_builds/releases/latest \
-    | grep -oP "\"browser_download_url\": \"\K(https://[^\"]+bw_web[^\"]+\.tar\.gz)(?=\")" \
-    | head -1) || true
-
-if [[ -z "$WEB_VAULT_URL" ]]; then
-    WEB_VAULT_VERSION=$(curl -sL https://api.github.com/repos/dani-garcia/bw_web_builds/releases/latest \
-        | grep -oP '"tag_name": "\K[^"]+') || true
-    WEB_VAULT_URL="https://github.com/dani-garcia/bw_web_builds/releases/download/${WEB_VAULT_VERSION}/bw_web_${WEB_VAULT_VERSION}.tar.gz"
+if [[ ! -f "${TMP_EXTRACT}/vaultwarden" ]]; then
+    print_error "Failed to extract vaultwarden binary from official OCI package"
+    rm -rf "$TMP_EXTRACT"
+    exit 1
 fi
 
-curl -sL "$WEB_VAULT_URL" -o web-vault.tar.gz >>"$LOGFILE" 2>&1
-
-# ── Extract ──────────────────────────────────────────────────────────────────
-log "Extracting Vaultwarden..."
-rm -rf /opt/vaultwarden
-mkdir -p /opt/vaultwarden
-tar -xzf vaultwarden.tar.gz -C /opt/vaultwarden >>"$LOGFILE" 2>&1
-tar -xzf web-vault.tar.gz -C /opt/vaultwarden >>"$LOGFILE" 2>&1
-rm -f vaultwarden.tar.gz web-vault.tar.gz
-chmod +x /opt/vaultwarden/vaultwarden
-
-# ── Create vaultwarden user ──────────────────────────────────────────────────
-if ! id -u vaultwarden &>/dev/null; then
-    useradd -r -s /usr/sbin/nologin -d /opt/vaultwarden vaultwarden
+install -m 0755 "${TMP_EXTRACT}/vaultwarden" /opt/vaultwarden/vaultwarden
+if [[ -d "${TMP_EXTRACT}/web-vault" ]]; then
+    rm -rf /opt/vaultwarden/web-vault
+    mv "${TMP_EXTRACT}/web-vault" /opt/vaultwarden/web-vault
 fi
-mkdir -p /var/lib/vaultwarden
-chown -R vaultwarden:vaultwarden /opt/vaultwarden /var/lib/vaultwarden
+rm -rf "$TMP_EXTRACT"
 
-# ── Generate admin token ─────────────────────────────────────────────────────
-ADMIN_TOKEN=$(openssl rand -base64 48)
+printf '%s\n' "${VW_VERSION#v}" > /opt/vaultwarden/.af-version
 
-# ── Environment file ─────────────────────────────────────────────────────────
-cat > /etc/vaultwarden.env <<EOF
-DATA_FOLDER=/var/lib/vaultwarden
+report_progress 75 "Configuring Vaultwarden environment on port 8343..."
+ADMIN_TOKEN="$(openssl rand -base64 48 | tr -d '\n')"
+cat <<EOF > /etc/vaultwarden/vaultwarden.env
+DATA_FOLDER=/var/lib/vaultwarden/data
 WEB_VAULT_FOLDER=/opt/vaultwarden/web-vault
+WEB_VAULT_ENABLED=true
+ROCKET_ADDRESS=0.0.0.0
 ROCKET_PORT=8343
-WEBSOCKET_ENABLED=true
 SIGNUPS_ALLOWED=true
+INVITATIONS_ALLOWED=true
+SHOW_PASSWORD_HINT=false
 ADMIN_TOKEN=${ADMIN_TOKEN}
 EOF
-chmod 600 /etc/vaultwarden.env
-chown vaultwarden:vaultwarden /etc/vaultwarden.env
+chmod 600 /etc/vaultwarden/vaultwarden.env
+echo "Vaultwarden Admin Token: ${ADMIN_TOKEN}" > /opt/AetherFlow/logs/vaultwarden_admin_token.txt
+chmod 600 /opt/AetherFlow/logs/vaultwarden_admin_token.txt
 
-# ── Systemd service ──────────────────────────────────────────────────────────
-log "Creating systemd service..."
-cat > /etc/systemd/system/vaultwarden.service <<'EOF'
+chown -R vaultwarden:vaultwarden /opt/vaultwarden /var/lib/vaultwarden
+chown root:vaultwarden /etc/vaultwarden/vaultwarden.env
+chmod 640 /etc/vaultwarden/vaultwarden.env
+
+report_progress 90 "Configuring and starting vaultwarden.service on port 8343..."
+cat <<'EOF' > /etc/systemd/system/vaultwarden.service
 [Unit]
-Description=Vaultwarden Password Manager (AetherFlow Managed)
-After=network-online.target
-Wants=network-online.target
+Description=Vaultwarden Server (Bitwarden compatible)
+Documentation=https://github.com/dani-garcia/vaultwarden
+After=network.target
 
 [Service]
-Type=simple
 User=vaultwarden
 Group=vaultwarden
-WorkingDirectory=/opt/vaultwarden
-EnvironmentFile=/etc/vaultwarden.env
+EnvironmentFile=/etc/vaultwarden/vaultwarden.env
 ExecStart=/opt/vaultwarden/vaultwarden
-Restart=on-failure
-RestartSec=10
-TimeoutStopSec=20
-NoNewPrivileges=yes
-ProtectSystem=full
+LimitNOFILE=65535
+LimitNPROC=4096
+PrivateTmp=true
+PrivateDevices=true
 ProtectHome=true
-PrivateTmp=yes
-PrivateDevices=yes
-ProtectKernelTunables=yes
-ProtectControlGroups=yes
-RestrictSUIDSGID=yes
-ReadWritePaths=/var/lib/vaultwarden
+ProtectSystem=strict
+WorkingDirectory=/var/lib/vaultwarden
+ReadWritePaths=/var/lib/vaultwarden /opt/vaultwarden /etc/vaultwarden
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+Restart=on-failure
+RestartSec=5s
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reload
-systemctl enable vaultwarden.service >>"$LOGFILE" 2>&1
-systemctl start vaultwarden.service
+systemctl daemon-reload >> "$LOGFILE" 2>&1
+systemctl enable --now vaultwarden >> "$LOGFILE" 2>&1
 
-# ── Apache reverse proxy ─────────────────────────────────────────────────────
-log "Configuring Apache reverse proxy..."
-cat > /etc/apache2/sites-enabled/vaultwarden.conf <<'EOF'
-<Location /vaultwarden>
-    ProxyPass http://localhost:8343
-    ProxyPassReverse http://localhost:8343
-    ProxyPreserveHost On
-</Location>
-EOF
-chown www-data:www-data /etc/apache2/sites-enabled/vaultwarden.conf
-a2enmod proxy proxy_http proxy_wstunnel >>/dev/null 2>&1
-service apache2 reload >>"$LOGFILE" 2>&1
-
-# ── Finalize ─────────────────────────────────────────────────────────────────
-touch /install/.vaultwarden.lock
-log "Vaultwarden installation complete! Access at http://your-server:8343"
+write_lock "${PACKAGE_NAME}"
+report_progress 100 "Vaultwarden installed on port 8343."
+log_info "${PACKAGE_NAME} installed successfully"

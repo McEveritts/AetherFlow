@@ -1,23 +1,35 @@
 #!/bin/bash
-#
-# [AetherFlow :: Remove prometheus]
-#
-source /opt/AetherFlow/packages/common.sh
-set -e
+# AetherFlow Package Uninstaller: Prometheus + Node Exporter
 
-LOGFILE="/opt/AetherFlow/logs/installer.log"
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [remove-prometheus] $1" | tee -a "$LOGFILE"; }
+set -euo pipefail
 
-log "Stopping prometheus..."
-systemctl stop prometheus node_exporter 2>/dev/null || true
-systemctl disable prometheus node_exporter 2>/dev/null || true
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
+fi
 
-log "Removing prometheus files and configuration..."
-rm -rf /opt/prometheus /etc/prometheus /var/lib/prometheus /etc/systemd/system/prometheus.service /etc/systemd/system/node_exporter.service /etc/apache2/sites-enabled/prometheus.conf
-userdel prometheus 2>/dev/null || true
+PACKAGE_NAME="prometheus"
+export LOGFILE="/var/log/aetherflow/remove-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")"
 
-systemctl daemon-reload 2>/dev/null || true
-service apache2 reload 2>/dev/null || true
-rm -f /install/.prometheus.lock
+require_root
+log_info "Starting removal for ${PACKAGE_NAME}..."
+report_progress 25 "Stopping and removing prometheus and node_exporter services..."
 
-log "prometheus has been completely removed."
+purge_systemd_unit "prometheus"
+purge_systemd_unit "node_exporter"
+
+report_progress 65 "Removing Prometheus binaries, time-series data, config, and user accounts..."
+rm -f /usr/local/bin/prometheus /usr/local/bin/promtool /usr/local/bin/node_exporter
+rm -rf /etc/prometheus /var/lib/prometheus
+purge_system_user "prometheus"
+purge_system_user "node_exporter"
+systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
+
+remove_lock "${PACKAGE_NAME}"
+report_progress 100 "Prometheus and Node Exporter completely removed."
+log_info "${PACKAGE_NAME} removed successfully"

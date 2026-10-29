@@ -1,0 +1,32 @@
+#!/bin/bash
+# AetherFlow Package Uninstaller: Jellyseerr
+
+set -euo pipefail
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
+fi
+
+PACKAGE_NAME="jellyseerr"
+export LOGFILE="/var/log/aetherflow/remove-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")"
+
+require_root
+log_info "Starting removal for ${PACKAGE_NAME}..."
+report_progress 25 "Stopping and removing jellyseerr.service..."
+
+purge_systemd_unit "jellyseerr"
+
+report_progress 65 "Removing Jellyseerr application bundle, state directories, and user account..."
+rm -rf /opt/jellyseerr /var/lib/jellyseerr
+purge_system_user "jellyseerr"
+systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
+
+remove_lock "${PACKAGE_NAME}"
+report_progress 100 "Jellyseerr completely removed."
+log_info "${PACKAGE_NAME} removed successfully"

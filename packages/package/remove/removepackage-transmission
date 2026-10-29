@@ -1,46 +1,38 @@
 #!/bin/bash
-#
-# [Quick Box :: Remove Transmission-Web package]
-#
-# QUICKLAB REPOS
-# AetherFlow _ packages  :   https://github.com/McEveritts/MediaNexus/packages
-# LOCAL REPOS
-# Local _ packages   :   /etc/AetherFlow/packages
-# Author             :   AetherFlow.IO
-# URL                :   https://AetherFlow.io
-#
-# AetherFlow Copyright (C) 2017 AetherFlow.io
-# Licensed under GNU General Public License v3.0 GPL-3 (in short)
-#
-source /opt/AetherFlow/packages/common.sh
-username="${AETHERFLOW_USER:-$(whoami)}"
+# AetherFlow Package Uninstaller: Transmission
 
-function _removepackage-tr() {
-	# Disable and Stop Transmission services
-	systemctl disable "transmission@${username}" 2>/dev/null || true
-	systemctl stop "transmission@${username}" 2>/dev/null || true
+set -euo pipefail
 
-	# Remove Transmission user and settings directories
-	rm -rf "/home/${username}/torrents/transmission/"
-	rm -rf "/home/${username}/trwatch/"
-	rm -rf /usr/share/transmission
-	rm -rf "/srv/rutorrent/home/${username}.transmission.downloads"
-	rm -rf "/home/${username}/.config/transmission/"
-	rm -rf /etc/apache2/sites-enabled/transmission.conf
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
+fi
 
-	# Remove any package dependencies and settings
-	apt-get -y remove transmission* || true
-	apt-get -y purge transmission* || true
+PACKAGE_NAME="transmission"
+export LOGFILE="/var/log/aetherflow/remove-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")"
 
-	# Remove lock file
-	rm -f /install/.transmission.lock
+require_root
+log_info "Starting removal for ${PACKAGE_NAME}..."
+report_progress 20 "Stopping and removing transmission-daemon service..."
 
-	# Reload apache2
-	service apache2 reload 2>/dev/null || true
-}
+purge_systemd_unit "transmission-daemon"
+purge_systemd_unit "transmission"
 
-# LEGACY REMOVED: master.txt
-MASTER="$AETHERFLOW_USER"
-OUTTO=$LOGFILE
+report_progress 50 "Purging Transmission APT packages..."
+DEBIAN_FRONTEND=noninteractive apt-get purge -y -qq transmission-daemon transmission-cli transmission-common >> "$LOGFILE" 2>&1 || true
+DEBIAN_FRONTEND=noninteractive apt-get autoremove -y -qq >> "$LOGFILE" 2>&1 || true
 
-_removepackage-tr
+report_progress 80 "Removing Transmission configuration, state directories, and user account..."
+rm -rf /var/lib/transmission-daemon /var/lib/transmission /etc/transmission-daemon /usr/share/transmission
+purge_system_user "debian-transmission"
+purge_system_user "transmission"
+systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
+
+remove_lock "${PACKAGE_NAME}"
+report_progress 100 "Transmission completely removed."
+log_info "${PACKAGE_NAME} removed successfully"

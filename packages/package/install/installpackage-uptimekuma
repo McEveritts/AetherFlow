@@ -1,57 +1,55 @@
 #!/bin/bash
-#
-# [AetherFlow :: Install Uptime Kuma]
-# Self-hosted monitoring tool like "Uptime Robot"
-#
-# Author : McEveritts
-# URL    : https://AetherFlow.io
-# License: GPL-3.0
-#
-source /opt/AetherFlow/packages/common.sh
+# AetherFlow Package Installer: Uptime Kuma
+# Port: 3004
+
 set -euo pipefail
 
-# Override common.sh LOGFILE for this specific package
-export LOGFILE="/opt/AetherFlow/logs/installer.log"
-mkdir -p "$(dirname "$LOGFILE")"
-
-# We use print_info to ensure output is visible to the backend installer
-log() { print_info "[$APP_ID] $1"; }
-APP_ID="uptimekuma"
-
-# ── Install Node.js if not present ───────────────────────────────────────────
-if ! command -v node &>/dev/null; then
-    log "Installing Node.js..."
-    fetch_and_run "https://deb.nodesource.com/setup_20.x" "SKIP" - >>"$LOGFILE" 2>&1
-    apt-get install -y nodejs >>"$LOGFILE" 2>&1
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
 fi
 
-# ── Clone and build Uptime Kuma ──────────────────────────────────────────────
-log "Cloning Uptime Kuma..."
-apt-get install -y git >>"$LOGFILE" 2>&1
+PACKAGE_NAME="uptimekuma"
+export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")" /install
+
+require_root
+log_info "Starting installation for ${PACKAGE_NAME}..."
+report_progress 15 "Installing Git and Node.js 20 LTS for Uptime Kuma..."
+
+DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git curl gnupg ca-certificates >> "$LOGFILE" 2>&1
+
+ensure_node 20
+
+if ! id -u uptimekuma >/dev/null 2>&1; then
+    useradd --system --user-group --no-create-home --home-dir /opt/uptime-kuma --shell /usr/sbin/nologin uptimekuma
+fi
+
+report_progress 40 "Cloning Uptime Kuma repository..."
 rm -rf /opt/uptime-kuma
-git clone https://github.com/louislam/uptime-kuma.git /opt/uptime-kuma >>"$LOGFILE" 2>&1
+git clone https://github.com/louislam/uptime-kuma.git /opt/uptime-kuma >> "$LOGFILE" 2>&1
+
+report_progress 65 "Building Uptime Kuma production bundle..."
 cd /opt/uptime-kuma
+npm run setup >> "$LOGFILE" 2>&1
 
-log "Checking out latest stable release..."
-LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
-if [[ -n "$LATEST_TAG" ]]; then
-    git checkout "$LATEST_TAG" >>"$LOGFILE" 2>&1
+UK_VERSION="$(git describe --tags "$(git rev-list --tags --max-count=1)" 2>/dev/null || true)"
+if [[ -n "$UK_VERSION" ]]; then
+    printf '%s\n' "${UK_VERSION#v}" > /opt/uptime-kuma/.af-version
 fi
 
-log "Installing dependencies (this may take a few minutes)..."
-npm run setup >>"$LOGFILE" 2>&1
-
-# ── Create uptime-kuma user ──────────────────────────────────────────────────
-if ! id -u uptimekuma &>/dev/null; then
-    useradd -r -s /usr/sbin/nologin -d /opt/uptime-kuma uptimekuma
-fi
 chown -R uptimekuma:uptimekuma /opt/uptime-kuma
+NODE_BIN="$(command -v node || echo /usr/bin/node)"
 
-# ── Systemd service ──────────────────────────────────────────────────────────
-log "Creating systemd service..."
-cat > /etc/systemd/system/uptime-kuma.service <<'EOF'
+report_progress 85 "Configuring and starting uptime-kuma.service on port 3004..."
+cat <<EOF > /etc/systemd/system/uptime-kuma.service
 [Unit]
-Description=Uptime Kuma - Monitoring Tool
+Description=Uptime Kuma - A fancy self-hosted monitoring tool
 After=network.target
 
 [Service]
@@ -59,33 +57,19 @@ Type=simple
 User=uptimekuma
 Group=uptimekuma
 WorkingDirectory=/opt/uptime-kuma
-ExecStart=/usr/bin/node /opt/uptime-kuma/server/server.js
+Environment=UPTIME_KUMA_PORT=3004
+Environment=PORT=3004
+ExecStart=${NODE_BIN} server/server.js --port=3004
 Restart=on-failure
-RestartSec=10
-Environment=NODE_ENV=production
-Environment=UPTIME_KUMA_PORT=3009
+RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reload
-systemctl enable uptime-kuma.service >>"$LOGFILE" 2>&1
-systemctl start uptime-kuma.service
+systemctl daemon-reload >> "$LOGFILE" 2>&1
+systemctl enable --now uptime-kuma >> "$LOGFILE" 2>&1
 
-# ── Apache reverse proxy ─────────────────────────────────────────────────────
-log "Configuring Apache reverse proxy..."
-cat > /etc/apache2/sites-enabled/uptimekuma.conf <<'EOF'
-<Location /uptimekuma>
-    ProxyPass http://localhost:3009
-    ProxyPassReverse http://localhost:3009
-    ProxyPreserveHost On
-</Location>
-EOF
-chown www-data:www-data /etc/apache2/sites-enabled/uptimekuma.conf
-a2enmod proxy proxy_http proxy_wstunnel >>/dev/null 2>&1
-service apache2 reload >>"$LOGFILE" 2>&1
-
-# ── Finalize ─────────────────────────────────────────────────────────────────
-touch /install/.uptimekuma.lock
-log "Uptime Kuma installation complete! Access at http://your-server:3009"
+write_lock "${PACKAGE_NAME}"
+report_progress 100 "Uptime Kuma installed on port 3004."
+log_info "${PACKAGE_NAME} installed successfully"

@@ -1,24 +1,18 @@
 #!/bin/bash
 ###############################################################################
-# AetherFlow Release Manager — Phase 2: State Snapshot & Systemd Migration
+# AetherFlow Release Manager v3.0 — Pull-Based Single-Binary Atomic Engine
 #
-# Implements a Blue/Green symlink-based deployment engine with forensic
-# state snapshots and an optional PM2 → systemd migration path.
+# Pulls pre-built, checksum-verified single-binary releases from GitHub Releases
+# (or builds in fallback --from-source mode), snapshots /var/lib/aetherflow
+# SQLite state using online backup + flock, atomically swaps /opt/AetherFlow/current,
+# restarts systemd units (aetherflow-runner + aetherflow-api), and runs a deep
+# readiness probe with automatic rollback + SQLite PRAGMA integrity recovery.
 #
 # Usage:
-#   release-manager.sh deploy              Full deploy cycle
-#   release-manager.sh rollback            Manual rollback to previous release
-#   release-manager.sh cleanup             Prune old release directories
-#   release-manager.sh migrate-systemd     One-shot PM2 → systemd handoff
-#   release-manager.sh deploy --dry-run    Simulate without touching /opt
-#
-# Exit Codes:
-#   0 — Success
-#   1 — Build failure (pre-swap, no rollback needed)
-#   2 — Health probe failure (rollback executed)
-#   3 — Rollback failure (manual intervention required)
-#   4 — Configuration or environment error
-#   5 — Systemd migration failure
+#   release-manager.sh deploy [--channel stable|beta|nightly] [--from-source] [--dry-run]
+#   release-manager.sh rollback [--dry-run]
+#   release-manager.sh cleanup [--dry-run]
+#   release-manager.sh migrate-systemd [--dry-run]
 ###############################################################################
 set -euo pipefail
 
@@ -34,12 +28,35 @@ else
     exit 4
 fi
 
-# ── Runtime Flags ────────────────────────────────────────────────────────────
+# ── Parse CLI Arguments ──────────────────────────────────────────────────────
+COMMAND="${1:-deploy}"
+shift || true
+
 DRY_RUN=false
-MIGRATE_SYSTEMD=false
-for arg in "$@"; do
-    case "${arg}" in
-        --dry-run) DRY_RUN=true ;;
+FROM_SOURCE=false
+CHANNEL="${RELEASE_CHANNEL:-stable}"
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --dry-run)
+            DRY_RUN=true
+            shift
+            ;;
+        --from-source)
+            FROM_SOURCE=true
+            shift
+            ;;
+        --channel)
+            CHANNEL="${2:-stable}"
+            shift 2
+            ;;
+        stable|beta|nightly)
+            CHANNEL="$1"
+            shift
+            ;;
+        *)
+            shift
+            ;;
     esac
 done
 
@@ -49,8 +66,10 @@ if [[ "${DRY_RUN}" == true ]]; then
     CURRENT_LINK="/tmp/aetherflow-dryrun/current"
     REPO_DIR="/tmp/aetherflow-dryrun/repo"
     DATA_DIR="/tmp/aetherflow-dryrun/data"
+    ENV_DIR="/tmp/aetherflow-dryrun/etc"
+    ENV_FILE="/tmp/aetherflow-dryrun/etc/aetherflow.env"
     LOG_FILE="/tmp/aetherflow-dryrun/deploy.log"
-    mkdir -p "${REPO_DIR}" "${DATA_DIR}"
+    mkdir -p "${REPO_DIR}" "${DATA_DIR}" "${ENV_DIR}"
 fi
 
 # ── Logging ──────────────────────────────────────────────────────────────────
@@ -71,96 +90,183 @@ log_warn()  { log "WARN"  "$@"; }
 log_error() { log "ERROR" "$@"; }
 log_fatal() { log "FATAL" "$@"; exit 4; }
 
-# ── Epoch Generation ─────────────────────────────────────────────────────────
 EPOCH="$(date +%s)"
 RELEASE_DIR="${RELEASES_DIR}/${EPOCH}"
 
 ###############################################################################
-# STAGE 1: Directory Scaffolding
+# STAGE 0: FHS State & Secret Migration
 ###############################################################################
-release_scaffold() {
-    log_info "=== STAGE 1: Release Scaffold ==="
-    log_info "Creating release directory: ${RELEASE_DIR}"
-    mkdir -p "${RELEASE_DIR}"
+ensure_fhs_layout() {
+    log_info "=== STAGE 0: Verifying FHS State & Secret Layout ==="
+    mkdir -p "${RELEASES_DIR}" "${DATA_DIR}" "${ENV_DIR}"
 
-    if [[ "${DRY_RUN}" == true ]]; then
-        log_info "[DRY-RUN] Simulating source copy and build."
-        mkdir -p "${RELEASE_DIR}/backend"
-        mkdir -p "${RELEASE_DIR}/frontend"
-        # Create a stub binary for dry-run verification
-        echo "#!/bin/bash" > "${RELEASE_DIR}/backend/aetherflow-api"
-        chmod +x "${RELEASE_DIR}/backend/aetherflow-api"
-        return 0
-    fi
-
-    # ── Git Fetch & Verify ───────────────────────────────────────────────────
-    log_info "Fetching latest from ${GIT_REMOTE}/${GIT_BRANCH}..."
-    cd "${REPO_DIR}" || log_fatal "Repository directory not found: ${REPO_DIR}"
-    git fetch "${GIT_REMOTE}" "${GIT_BRANCH}" >> "${LOG_FILE}" 2>&1
-
-    local LOCAL_HEAD REMOTE_HEAD
-    LOCAL_HEAD="$(git rev-parse HEAD)"
-    REMOTE_HEAD="$(git rev-parse "${GIT_REMOTE}/${GIT_BRANCH}")"
-
-    if [[ "${LOCAL_HEAD}" == "${REMOTE_HEAD}" ]]; then
-        log_info "Already at latest commit (${LOCAL_HEAD:0:8}). Nothing to deploy."
-        rmdir "${RELEASE_DIR}"
-        exit 0
-    fi
-
-    # Stash local changes, pull, restore
-    git stash --include-untracked -m "release-manager-${EPOCH}" >> "${LOG_FILE}" 2>&1 || true
-    if ! git pull --ff-only "${GIT_REMOTE}" "${GIT_BRANCH}" >> "${LOG_FILE}" 2>&1; then
-        log_warn "Fast-forward failed, attempting rebase..."
-        if ! git pull --rebase "${GIT_REMOTE}" "${GIT_BRANCH}" >> "${LOG_FILE}" 2>&1; then
-            log_error "Rebase failed. Aborting scaffold."
-            git rebase --abort >> "${LOG_FILE}" 2>&1 || true
-            rmdir "${RELEASE_DIR}" 2>/dev/null || true
-            exit 1
+    if [[ "${DRY_RUN}" == false ]]; then
+        if id -u aetherflow &>/dev/null; then
+            chown -R aetherflow:aetherflow "${DATA_DIR}"
+            chmod 0700 "${DATA_DIR}"
         fi
     fi
 
-    # ── Copy Source into Isolated Release ─────────────────────────────────────
-    log_info "Copying source tree into ${RELEASE_DIR}..."
-    rsync -a --exclude='.git' --exclude='node_modules' --exclude='.next' \
+    # Migrate legacy SQLite DB if /var/lib/aetherflow/aetherflow.sqlite is not yet populated
+    local target_db="${DATA_DIR}/${SQLITE_DB}"
+    if [[ ! -f "${target_db}" ]]; then
+        for legacy_db in "/opt/AetherFlow/backend/data/${SQLITE_DB}" "/opt/AetherFlow/backend/${SQLITE_DB}"; do
+            if [[ -f "${legacy_db}" ]]; then
+                log_info "Migrating legacy SQLite database from ${legacy_db} to ${target_db}..."
+                cp -pf "${legacy_db}" "${target_db}"
+                if [[ "${DRY_RUN}" == false ]] && id -u aetherflow &>/dev/null; then
+                    chown aetherflow:aetherflow "${target_db}"
+                    chmod 0600 "${target_db}"
+                fi
+                break
+            fi
+        done
+    fi
+
+    # Migrate legacy .env if /etc/aetherflow/aetherflow.env is not yet populated
+    if [[ ! -f "${ENV_FILE}" ]]; then
+        for legacy_env in "/opt/AetherFlow/backend/.env" "/opt/AetherFlow/.env"; do
+            if [[ -f "${legacy_env}" ]]; then
+                log_info "Migrating legacy environment secrets from ${legacy_env} to ${ENV_FILE}..."
+                cp -pf "${legacy_env}" "${ENV_FILE}"
+                chmod 0600 "${ENV_FILE}"
+                break
+            fi
+        done
+    fi
+}
+
+###############################################################################
+# STAGE 1: Release Scaffold (Pull Pre-Built Signed Artifact or Source Fallback)
+###############################################################################
+resolve_release_tag() {
+    local channel="$1"
+    local api_url="https://api.github.com/repos/${GITHUB_REPO}/releases"
+
+    if [[ "${channel}" == "nightly" ]]; then
+        echo "nightly"
+        return 0
+    fi
+
+    local releases_json
+    releases_json="$(curl -sfL --max-time 15 "${api_url}" 2>/dev/null)" || return 1
+
+    if [[ "${channel}" == "beta" ]]; then
+        echo "${releases_json}" | grep -o '"tag_name"\s*:\s*"[^"]*"' | head -1 | cut -d'"' -f4
+    else
+        # Stable: first release without a pre-release hyphen in tag_name
+        echo "${releases_json}" | grep -o '"tag_name"\s*:\s*"[^"]*"' | cut -d'"' -f4 | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1
+    fi
+}
+
+pull_prebuilt_artifact() {
+    local tag="$1"
+    local base_url="https://github.com/${GITHUB_REPO}/releases/download/${tag}"
+    local tmp_dir
+    tmp_dir="$(mktemp -d /tmp/af-release-XXXXXX)"
+
+    log_info "Downloading pre-built release ${tag} (${ARTIFACT_NAME})..."
+    if ! curl -fsSL --max-time 120 -o "${tmp_dir}/${ARTIFACT_NAME}" "${base_url}/${ARTIFACT_NAME}"; then
+        rm -rf "${tmp_dir}"
+        return 1
+    fi
+
+    log_info "Downloading SHA-256 manifest (${CHECKSUM_NAME})..."
+    if ! curl -fsSL --max-time 30 -o "${tmp_dir}/${CHECKSUM_NAME}" "${base_url}/${CHECKSUM_NAME}"; then
+        log_error "Missing SHA256SUMS manifest for release ${tag}. Refusing unverified binary."
+        rm -rf "${tmp_dir}"
+        return 1
+    fi
+
+    log_info "Verifying cryptographic SHA-256 digest..."
+    (
+        cd "${tmp_dir}"
+        local expected_hash actual_hash
+        expected_hash="$(awk -v f="${ARTIFACT_NAME}" '$2 == f || $2 == "*"f {print tolower($1); exit}' "${CHECKSUM_NAME}")"
+        actual_hash="$(sha256sum "${ARTIFACT_NAME}" | awk '{print tolower($1)}')"
+        [[ -n "${expected_hash}" && "${#expected_hash}" -eq 64 && "${actual_hash}" == "${expected_hash}" ]]
+    ) || {
+        log_error "SHA-256 verification FAILED for ${ARTIFACT_NAME}! Aborting deployment."
+        rm -rf "${tmp_dir}"
+        return 1
+    }
+
+    log_info "SHA-256 checksum verified. Extracting into ${RELEASE_DIR}..."
+    tar -xzf "${tmp_dir}/${ARTIFACT_NAME}" -C "${RELEASE_DIR}"
+    echo "${tag}" > "${RELEASE_DIR}/.version"
+    chmod +x "${RELEASE_DIR}/aetherflow-api"
+    rm -rf "${tmp_dir}"
+    return 0
+}
+
+build_from_source() {
+    log_info "Building single-binary release from source (${GIT_REMOTE}/${GIT_BRANCH})..."
+    cd "${REPO_DIR}" || log_fatal "Repository directory not found: ${REPO_DIR}"
+    git fetch "${GIT_REMOTE}" "${GIT_BRANCH}" --tags >> "${LOG_FILE}" 2>&1
+
+    rsync -a --exclude='.git' --exclude='node_modules' --exclude='.next' --exclude='*.sqlite' \
         "${REPO_DIR}/" "${RELEASE_DIR}/" >> "${LOG_FILE}" 2>&1
 
-    # ── Build Go API ─────────────────────────────────────────────────────────
-    log_info "Building Go API binary..."
-    cd "${RELEASE_DIR}/backend" || log_fatal "Backend directory missing in release."
-    export GOOS=linux GOARCH=amd64 CGO_ENABLED=1
-    if ! "${GO_BIN}" mod tidy >> "${LOG_FILE}" 2>&1; then
-        log_error "go mod tidy failed."
-        exit 1
-    fi
-    if ! "${GO_BIN}" build -trimpath -buildvcs=false -o aetherflow-api main.go >> "${LOG_FILE}" 2>&1; then
-        log_error "go build failed. Release directory will be removed."
-        rm -rf "${RELEASE_DIR}"
-        exit 1
-    fi
-    log_info "Go API binary compiled successfully."
-
-    # ── Build Next.js Frontend ───────────────────────────────────────────────
-    log_info "Building Next.js frontend..."
-    cd "${RELEASE_DIR}/frontend" || log_fatal "Frontend directory missing in release."
+    log_info "Building Next.js static export (NEXT_STATIC_EXPORT=1)..."
+    cd "${RELEASE_DIR}/frontend" || log_fatal "Frontend directory missing."
     export NODE_OPTIONS="${NODE_OPTIONS:+${NODE_OPTIONS} }--max-old-space-size=${NODE_HEAP_MB}"
-    if ! npm ci --no-fund --no-audit >> "${LOG_FILE}" 2>&1; then
-        log_error "npm ci failed."
+    export NEXT_STATIC_EXPORT="1"
+    npm ci --no-fund --no-audit >> "${LOG_FILE}" 2>&1
+    npm run build >> "${LOG_FILE}" 2>&1
+
+    log_info "Embedding frontend static bundle into Go binary (backend/web/dist)..."
+    rm -rf "${RELEASE_DIR}/backend/web/dist"
+    mkdir -p "${RELEASE_DIR}/backend/web/dist"
+    cp -R "${RELEASE_DIR}/frontend/out/." "${RELEASE_DIR}/backend/web/dist/"
+
+    log_info "Compiling single-binary AetherFlow control plane..."
+    cd "${RELEASE_DIR}/backend" || log_fatal "Backend directory missing."
+    export GOOS=linux GOARCH=amd64 CGO_ENABLED=0
+    "${GO_BIN}" build -trimpath -buildvcs=false -o "${RELEASE_DIR}/aetherflow-api" . >> "${LOG_FILE}" 2>&1
+    chmod +x "${RELEASE_DIR}/aetherflow-api"
+
+    # Retain only runtime essentials (binary, config, packages, deploy, .version)
+    rm -rf "${RELEASE_DIR}/frontend" "${RELEASE_DIR}/backend/web/dist"
+}
+
+release_scaffold() {
+    log_info "=== STAGE 1: Release Scaffold (Channel: ${CHANNEL}) ==="
+    mkdir -p "${RELEASE_DIR}"
+
+    if [[ "${DRY_RUN}" == true ]]; then
+        log_info "[DRY-RUN] Simulating single-binary artifact verification and extraction."
+        mkdir -p "${RELEASE_DIR}/deploy/systemd" "${RELEASE_DIR}/packages" "${RELEASE_DIR}/config"
+        echo "#!/bin/bash" > "${RELEASE_DIR}/aetherflow-api"
+        chmod +x "${RELEASE_DIR}/aetherflow-api"
+        echo "v3.1.7-dryrun" > "${RELEASE_DIR}/.version"
+        return 0
+    fi
+
+    if [[ "${FROM_SOURCE}" == false ]]; then
+        local target_tag=""
+        target_tag="$(resolve_release_tag "${CHANNEL}" || true)"
+        if [[ -n "${target_tag}" ]]; then
+            if pull_prebuilt_artifact "${target_tag}"; then
+                log_info "=== STAGE 1 COMPLETE: Pre-built release ${target_tag} staged at ${RELEASE_DIR} ==="
+                return 0
+            fi
+            log_warn "Pre-built artifact pull failed for ${target_tag}; falling back to source build."
+        else
+            log_warn "Could not resolve pre-built release tag for channel ${CHANNEL}; falling back to source build."
+        fi
+    fi
+
+    if ! build_from_source; then
+        log_error "Source build failed. Cleaning up ${RELEASE_DIR}."
         rm -rf "${RELEASE_DIR}"
         exit 1
     fi
-    if ! npm run build >> "${LOG_FILE}" 2>&1; then
-        log_error "npm run build failed. Release directory will be removed."
-        rm -rf "${RELEASE_DIR}"
-        exit 1
-    fi
-    log_info "Next.js frontend built successfully."
 
     log_info "=== STAGE 1 COMPLETE: Release ${EPOCH} scaffolded ==="
 }
 
 ###############################################################################
-# STAGE 1.5: State Snapshot (Phase 2)
+# STAGE 1.5: State Snapshot (Online SQLite Backup + SHA-256 Manifest)
 ###############################################################################
 state_snapshot() {
     log_info "=== STAGE 1.5: State Snapshot ==="
@@ -168,76 +274,38 @@ state_snapshot() {
     local snapshot_dir="${RELEASE_DIR}/data-snapshot"
     mkdir -p "${snapshot_dir}"
 
-    # ── Bootstrap Data Directory ─────────────────────────────────────────────
-    if [[ ! -d "${DATA_DIR}" ]]; then
-        log_warn "Data directory ${DATA_DIR} does not exist. Creating (fresh node bootstrap)."
-        mkdir -p "${DATA_DIR}"
-    fi
-
     local db_path="${DATA_DIR}/${SQLITE_DB}"
-    local config_path="${DATA_DIR}/config.json"
 
-    if [[ "${DRY_RUN}" == true ]]; then
-        # Create mock data files for dry-run snapshot simulation
-        if [[ ! -f "${db_path}" ]]; then
-            # Create a minimal SQLite database for testing
-            if command -v sqlite3 &>/dev/null; then
-                sqlite3 "${db_path}" "CREATE TABLE IF NOT EXISTS _meta (key TEXT, value TEXT); INSERT INTO _meta VALUES ('version','dryrun');"
-            else
-                touch "${db_path}"
-            fi
-        fi
-        if [[ ! -f "${config_path}" ]]; then
-            echo '{"mode":"dryrun"}' > "${config_path}"
+    if [[ "${DRY_RUN}" == true ]] && [[ ! -f "${db_path}" ]]; then
+        if command -v sqlite3 &>/dev/null; then
+            sqlite3 "${db_path}" "CREATE TABLE IF NOT EXISTS _meta (key TEXT, value TEXT); INSERT INTO _meta VALUES ('version','dryrun');"
+        else
+            touch "${db_path}"
         fi
     fi
 
-    # ── Flock-Guarded Snapshot ────────────────────────────────────────────────
     local lock_file="${DATA_DIR}/.snapshot.lock"
-    log_info "Acquiring snapshot lock: ${lock_file}"
-
     (
         if ! flock -w "${SNAPSHOT_TIMEOUT}" 200; then
             log_error "Failed to acquire snapshot lock within ${SNAPSHOT_TIMEOUT}s."
             return 1
         fi
 
-        # SQLite Hot Backup (Online Backup API — does not lock the live WAL)
         if [[ -f "${db_path}" ]]; then
             local bak_path="${snapshot_dir}/${SQLITE_DB}.bak"
             if command -v sqlite3 &>/dev/null; then
                 log_info "Executing SQLite online backup: ${db_path} -> ${bak_path}"
                 sqlite3 "${db_path}" ".backup '${bak_path}'" 2>>"${LOG_FILE}"
             else
-                # Fallback: raw copy (less safe, but better than nothing)
-                log_warn "sqlite3 not found. Using raw copy for database backup."
-                cp "${db_path}" "${bak_path}"
+                cp -pf "${db_path}" "${bak_path}"
             fi
-        else
-            log_warn "No SQLite database found at ${db_path}. Skipping DB snapshot."
         fi
-
-        # JSON Configuration Snapshot
-        if [[ -f "${config_path}" ]]; then
-            cp "${config_path}" "${snapshot_dir}/config.json.bak"
-            log_info "Configuration snapshot captured."
-        else
-            log_warn "No config.json found at ${config_path}. Skipping config snapshot."
-        fi
-
     ) 200>"${lock_file}"
 
-    # ── SHA-256 Manifest ─────────────────────────────────────────────────────
-    log_info "Generating SHA-256 checksum manifest..."
     (
         cd "${snapshot_dir}"
         sha256sum -- *.bak 2>/dev/null > MANIFEST.sha256 || true
     )
-
-    if [[ -f "${snapshot_dir}/MANIFEST.sha256" ]]; then
-        log_info "Manifest written: ${snapshot_dir}/MANIFEST.sha256"
-    fi
-
     log_info "=== STAGE 1.5 COMPLETE: State snapshot captured ==="
 }
 
@@ -245,55 +313,56 @@ state_snapshot() {
 # STAGE 2: Atomic Symlink Swap
 ###############################################################################
 symlink_swap() {
-    log_info "=== STAGE 2: Symlink Swap ==="
+    log_info "=== STAGE 2: Atomic Symlink Swap ==="
 
-    # Record the previous release target for rollback
     if [[ -L "${CURRENT_LINK}" ]]; then
         local previous_target
         previous_target="$(readlink -f "${CURRENT_LINK}")"
         echo "${previous_target}" > "${RELEASES_DIR}/.previous_release"
         log_info "Previous release recorded: ${previous_target}"
-    else
-        log_warn "No existing symlink at ${CURRENT_LINK}. First deployment."
     fi
 
-    # Atomic swap: ln -sfn creates a new symlink then renames over the old one
-    # We use a temporary link + mv for true atomicity (ln -sfn is not atomic on
-    # all filesystems when the target already exists).
     local tmp_link="${CURRENT_LINK}.tmp.${EPOCH}"
     ln -s "${RELEASE_DIR}" "${tmp_link}"
     mv -Tf "${tmp_link}" "${CURRENT_LINK}"
 
-    log_info "Symlink updated: ${CURRENT_LINK} -> ${RELEASE_DIR}"
-    log_info "=== STAGE 2 COMPLETE ==="
+    log_info "Symlink updated atomically: ${CURRENT_LINK} -> ${RELEASE_DIR}"
 }
 
 ###############################################################################
-# STAGE 3: Service Restart & Deep Health Probe
+# STAGE 3: Systemd Service Restart & Deep Readiness Probe
 ###############################################################################
+restart_systemd_units() {
+    if [[ -d "${CURRENT_LINK}/deploy/systemd" ]]; then
+        cp -f "${CURRENT_LINK}/deploy/systemd/aetherflow-runner.service" "${SYSTEMD_UNITS_DST}/" 2>/dev/null || true
+        cp -f "${CURRENT_LINK}/deploy/systemd/aetherflow-api.service" "${SYSTEMD_UNITS_DST}/" 2>/dev/null || true
+    fi
+
+    systemctl daemon-reload
+
+    # Stop legacy separate frontend service or PM2 if still present
+    systemctl stop aetherflow-frontend.service 2>/dev/null || true
+    systemctl disable aetherflow-frontend.service 2>/dev/null || true
+    if command -v pm2 &>/dev/null; then
+        pm2 delete aetherflow-frontend aetherflow-api 2>/dev/null || true
+    fi
+
+    systemctl enable aetherflow-runner.service aetherflow-api.service >> "${LOG_FILE}" 2>&1 || true
+    systemctl restart aetherflow-runner.service
+    systemctl restart aetherflow-api.service
+}
+
 health_probe() {
-    log_info "=== STAGE 3: Health Probe ==="
+    log_info "=== STAGE 3: Systemd Restart & Deep Readiness Probe ==="
 
     if [[ "${DRY_RUN}" == true ]]; then
-        log_info "[DRY-RUN] Skipping service restart and health probe."
+        log_info "[DRY-RUN] Skipping systemctl restart and health probe."
         return 0
     fi
 
-    # Restart services via PM2 (Phase 1 — systemd migration deferred)
-    log_info "Restarting Go API via PM2..."
-    pm2 restart aetherflow-api 2>/dev/null || \
-        pm2 start "${CURRENT_LINK}/backend/aetherflow-api" --name "aetherflow-api" >> "${LOG_FILE}" 2>&1
+    restart_systemd_units
 
-    log_info "Restarting Next.js frontend via PM2..."
-    cd "${CURRENT_LINK}/frontend" || log_fatal "Frontend directory not found in current release."
-    pm2 restart aetherflow-frontend 2>/dev/null || \
-        pm2 start npm --name "aetherflow-frontend" -- start >> "${LOG_FILE}" 2>&1
-
-    pm2 save >> "${LOG_FILE}" 2>&1
-
-    # ── Deep Readiness Polling ───────────────────────────────────────────────
     log_info "Polling ${HEALTH_ENDPOINT} (${HEALTH_RETRIES} attempts, ${HEALTH_INTERVAL}s interval)..."
-
     local attempt=1
     while [[ ${attempt} -le ${HEALTH_RETRIES} ]]; do
         local http_code response
@@ -301,19 +370,12 @@ health_probe() {
         http_code="$(curl -so /dev/null -w "%{http_code}" --max-time 5 "${HEALTH_ENDPOINT}" 2>/dev/null)" || http_code="000"
 
         if [[ "${http_code}" == "200" ]]; then
-            # Parse the deep status field — must be "ready", not just "alive"
             local status
             status="$(echo "${response}" | grep -o '"status"\s*:\s*"[^"]*"' | head -1 | grep -o '"[^"]*"$' | tr -d '"')" || status="unknown"
-
-            if [[ "${status}" == "ready" ]]; then
+            if [[ "${status}" == "ready" || "${status}" == "ok" ]]; then
                 log_info "Health probe PASSED on attempt ${attempt}/${HEALTH_RETRIES} (status=${status})"
-                log_info "=== STAGE 3 COMPLETE ==="
                 return 0
-            else
-                log_warn "Attempt ${attempt}/${HEALTH_RETRIES}: HTTP 200 but status=\"${status}\" (expected \"ready\")"
             fi
-        else
-            log_warn "Attempt ${attempt}/${HEALTH_RETRIES}: HTTP ${http_code}"
         fi
 
         sleep "${HEALTH_INTERVAL}"
@@ -325,299 +387,144 @@ health_probe() {
 }
 
 ###############################################################################
-# STAGE 4: Rollback (with State Integrity Check)
-###############################################################################
-rollback() {
-    log_error "=== STAGE 4: ROLLBACK INITIATED ==="
-
-    local prev_file="${RELEASES_DIR}/.previous_release"
-    if [[ ! -f "${prev_file}" ]]; then
-        log_fatal "No previous release record found at ${prev_file}. Manual intervention required."
-        exit 3
-    fi
-
-    local previous_target
-    previous_target="$(cat "${prev_file}")"
-
-    if [[ ! -d "${previous_target}" ]]; then
-        log_fatal "Previous release directory does not exist: ${previous_target}. MANUAL INTERVENTION REQUIRED."
-        exit 3
-    fi
-
-    # Revert symlink
-    local tmp_link="${CURRENT_LINK}.rollback.${EPOCH}"
-    ln -s "${previous_target}" "${tmp_link}"
-    mv -Tf "${tmp_link}" "${CURRENT_LINK}"
-    log_info "Symlink reverted: ${CURRENT_LINK} -> ${previous_target}"
-
-    # ── State Integrity Check & Conditional Restore ───────────────────────────
-    state_restore "${previous_target}"
-
-    if [[ "${DRY_RUN}" == true ]]; then
-        log_info "[DRY-RUN] Skipping service restart on rollback."
-        log_info "=== ROLLBACK COMPLETE (DRY-RUN) ==="
-        return 0
-    fi
-
-    # Restart services against the reverted release
-    pm2 restart aetherflow-api 2>/dev/null || \
-        pm2 start "${CURRENT_LINK}/backend/aetherflow-api" --name "aetherflow-api" >> "${LOG_FILE}" 2>&1
-    cd "${CURRENT_LINK}/frontend" || true
-    pm2 restart aetherflow-frontend 2>/dev/null || \
-        pm2 start npm --name "aetherflow-frontend" -- start >> "${LOG_FILE}" 2>&1
-    pm2 save >> "${LOG_FILE}" 2>&1
-
-    log_error "=== ROLLBACK COMPLETE: Reverted to ${previous_target} ==="
-}
-
-###############################################################################
-# STAGE 4.5: State Integrity Verification & Restore
+# STAGE 4: Rollback & SQLite Integrity Recovery
 ###############################################################################
 state_restore() {
     local target_release="${1}"
     local db_path="${DATA_DIR}/${SQLITE_DB}"
-    local snapshot_dir="${target_release}/data-snapshot"
-    local bak_path="${snapshot_dir}/${SQLITE_DB}.bak"
+    local bak_path="${target_release}/data-snapshot/${SQLITE_DB}.bak"
 
-    log_info "=== STAGE 4.5: State Integrity Check ==="
+    [[ ! -f "${db_path}" ]] && return 0
+    [[ "${DRY_RUN}" == true ]] && return 0
 
-    # Skip if no database exists (fresh node)
-    if [[ ! -f "${db_path}" ]]; then
-        log_warn "No live database found. Skipping integrity check."
-        return 0
-    fi
-
-    if [[ "${DRY_RUN}" == true ]]; then
-        log_info "[DRY-RUN] Simulating integrity check."
-        if command -v sqlite3 &>/dev/null && [[ -f "${db_path}" ]]; then
-            local integrity
-            integrity="$(sqlite3 "${db_path}" 'PRAGMA integrity_check;' 2>/dev/null)" || integrity="error"
-            log_info "[DRY-RUN] Integrity result: ${integrity}"
-        fi
-        return 0
-    fi
-
-    # ── PRAGMA Integrity Check ────────────────────────────────────────────────
     if command -v sqlite3 &>/dev/null; then
         local integrity
         integrity="$(sqlite3 "${db_path}" 'PRAGMA integrity_check;' 2>/dev/null)" || integrity="error"
-
         if [[ "${integrity}" == "ok" ]]; then
             log_info "Database integrity check PASSED."
             return 0
         fi
 
-        # ── Corruption Detected — Restore from Snapshot ──────────────────────
-        log "CRITICAL" "DATABASE CORRUPTION DETECTED: ${integrity}"
-
+        log "CRITICAL" "DATABASE CORRUPTION DETECTED (${integrity}) — Restoring snapshot..."
         if [[ -f "${bak_path}" ]]; then
-            # Verify the backup's own integrity before restoring
             local bak_integrity
             bak_integrity="$(sqlite3 "${bak_path}" 'PRAGMA integrity_check;' 2>/dev/null)" || bak_integrity="error"
-
             if [[ "${bak_integrity}" == "ok" ]]; then
-                # Quarantine the corrupted database
-                local quarantine="${db_path}.corrupted.$(date +%s)"
-                mv "${db_path}" "${quarantine}"
-                log_info "Corrupted database quarantined: ${quarantine}"
-
-                # Restore from verified backup
-                cp "${bak_path}" "${db_path}"
-                log "CRITICAL" "Database RESTORED from snapshot: ${bak_path}"
-            else
-                log_error "Backup snapshot is ALSO corrupted (${bak_integrity}). Manual intervention required."
+                mv "${db_path}" "${db_path}.corrupted.$(date +%s)"
+                cp -pf "${bak_path}" "${db_path}"
+                log "CRITICAL" "Database RESTORED from verified snapshot: ${bak_path}"
             fi
-        else
-            log_error "No backup snapshot found at ${bak_path}. Cannot auto-restore."
         fi
-
-        # Restore config.json if available
-        local config_bak="${snapshot_dir}/config.json.bak"
-        local config_live="${DATA_DIR}/config.json"
-        if [[ -f "${config_bak}" ]] && [[ -f "${config_live}" ]]; then
-            cp "${config_bak}" "${config_live}"
-            log_info "Configuration restored from snapshot."
-        fi
-    else
-        log_warn "sqlite3 not available. Skipping integrity check."
     fi
+}
+
+rollback() {
+    log_error "=== STAGE 4: ROLLBACK INITIATED ==="
+    local prev_file="${RELEASES_DIR}/.previous_release"
+    if [[ ! -f "${prev_file}" ]]; then
+        log_fatal "No previous release record found at ${prev_file}."
+        exit 3
+    fi
+
+    local previous_target
+    previous_target="$(cat "${prev_file}")"
+    if [[ ! -d "${previous_target}" ]]; then
+        log_fatal "Previous release directory missing: ${previous_target}."
+        exit 3
+    fi
+
+    local tmp_link="${CURRENT_LINK}.rollback.${EPOCH}"
+    ln -s "${previous_target}" "${tmp_link}"
+    mv -Tf "${tmp_link}" "${CURRENT_LINK}"
+    log_info "Symlink reverted: ${CURRENT_LINK} -> ${previous_target}"
+
+    state_restore "${previous_target}"
+
+    if [[ "${DRY_RUN}" == false ]]; then
+        restart_systemd_units
+    fi
+    log_error "=== ROLLBACK COMPLETE: Reverted to ${previous_target} ==="
 }
 
 ###############################################################################
 # STAGE 5: Housekeeping
 ###############################################################################
 cleanup_old_releases() {
-    log_info "=== Housekeeping: Pruning old releases ==="
+    log_info "=== STAGE 5: Pruning Old Releases (retaining ${MAX_RELEASES}) ==="
 
     local current_target=""
-    if [[ -L "${CURRENT_LINK}" ]]; then
-        current_target="$(readlink -f "${CURRENT_LINK}")"
-    fi
+    [[ -L "${CURRENT_LINK}" ]] && current_target="$(readlink -f "${CURRENT_LINK}")"
 
     local previous_target=""
-    if [[ -f "${RELEASES_DIR}/.previous_release" ]]; then
-        previous_target="$(cat "${RELEASES_DIR}/.previous_release")"
-    fi
+    [[ -f "${RELEASES_DIR}/.previous_release" ]] && previous_target="$(cat "${RELEASES_DIR}/.previous_release")"
 
-    # List release directories sorted oldest first
     local releases=()
     while IFS= read -r dir; do
         releases+=("${dir}")
     done < <(find "${RELEASES_DIR}" -mindepth 1 -maxdepth 1 -type d | sort -n)
 
     local count=${#releases[@]}
-    if [[ ${count} -le ${MAX_RELEASES} ]]; then
-        log_info "Only ${count} releases exist (max=${MAX_RELEASES}). Nothing to prune."
-        return 0
-    fi
+    [[ ${count} -le ${MAX_RELEASES} ]] && return 0
 
     local to_prune=$((count - MAX_RELEASES))
     local pruned=0
     for dir in "${releases[@]}"; do
-        if [[ ${pruned} -ge ${to_prune} ]]; then
-            break
-        fi
-        # Never delete the current or previous release
+        [[ ${pruned} -ge ${to_prune} ]] && break
         if [[ "${dir}" == "${current_target}" ]] || [[ "${dir}" == "${previous_target}" ]]; then
-            log_warn "Skipping protected release: ${dir}"
             continue
         fi
-        log_info "Pruning old release: ${dir}"
         rm -rf "${dir}"
         pruned=$((pruned + 1))
     done
-
     log_info "Pruned ${pruned} old release(s)."
 }
 
 ###############################################################################
-# STAGE 6: PM2 → Systemd Migration (One-Shot)
+# STAGE 6: One-Shot PM2 -> Systemd Migration
 ###############################################################################
 migrate_systemd() {
-    log_info "=== STAGE 6: PM2 → Systemd Migration ==="
-
+    log_info "=== STAGE 6: PM2 -> Systemd Single-Binary Migration ==="
+    ensure_fhs_layout
     if [[ "${DRY_RUN}" == true ]]; then
-        log_info "[DRY-RUN] Would copy service units from ${SYSTEMD_UNITS_SRC}/ to ${SYSTEMD_UNITS_DST}/"
-        log_info "[DRY-RUN] Would execute: pm2 kill → systemctl daemon-reload → systemctl start"
-        log_info "=== STAGE 6 COMPLETE (DRY-RUN) ==="
+        log_info "[DRY-RUN] Would install aetherflow-runner.service and aetherflow-api.service and stop PM2."
         return 0
     fi
-
-    # Validate prerequisites
-    if [[ ! -d "${SYSTEMD_UNITS_SRC}" ]]; then
-        log_fatal "Systemd unit source directory not found: ${SYSTEMD_UNITS_SRC}"
+    if command -v pm2 &>/dev/null; then
+        pm2 kill >> "${LOG_FILE}" 2>&1 || true
+        pm2 unstartup >> "${LOG_FILE}" 2>&1 || true
+        sleep 2
     fi
-
-    if ! command -v systemctl &>/dev/null; then
-        log_fatal "systemctl not found. Cannot perform systemd migration."
-    fi
-
-    # ── Step 1: Install service unit files ────────────────────────────────────
-    log_info "Installing systemd unit files..."
-    for unit_file in "${SYSTEMD_UNITS_SRC}"/*.service; do
-        local basename
-        basename="$(basename "${unit_file}")"
-        cp "${unit_file}" "${SYSTEMD_UNITS_DST}/${basename}"
-        log_info "Installed: ${SYSTEMD_UNITS_DST}/${basename}"
-    done
-
-    # ── Step 2: Reload systemd daemon ─────────────────────────────────────────
-    systemctl daemon-reload
-    log_info "systemd daemon reloaded."
-
-    # ── Step 3: Kill PM2 to release bound sockets ────────────────────────────
-    log_warn "Killing PM2 to release port binds (EADDRINUSE prevention)..."
-    pm2 kill >> "${LOG_FILE}" 2>&1 || log_warn "PM2 was not running."
-    # Brief pause to ensure sockets are fully released by the kernel
-    sleep 2
-
-    # ── Step 4: Start services via systemd ────────────────────────────────────
-    log_info "Starting aetherflow-api.service..."
-    if ! systemctl start aetherflow-api.service >> "${LOG_FILE}" 2>&1; then
-        log_error "Failed to start aetherflow-api.service. Attempting PM2 recovery."
-        _migration_rollback_pm2
-        exit 5
-    fi
-
-    log_info "Starting aetherflow-frontend.service..."
-    if ! systemctl start aetherflow-frontend.service >> "${LOG_FILE}" 2>&1; then
-        log_error "Failed to start aetherflow-frontend.service. Attempting PM2 recovery."
-        systemctl stop aetherflow-api.service >> "${LOG_FILE}" 2>&1 || true
-        _migration_rollback_pm2
-        exit 5
-    fi
-
-    # ── Step 5: Deep health probe ─────────────────────────────────────────────
+    restart_systemd_units
     if ! health_probe; then
-        log_error "Health probe failed after systemd migration. Rolling back to PM2."
-        systemctl stop aetherflow-api.service >> "${LOG_FILE}" 2>&1 || true
-        systemctl stop aetherflow-frontend.service >> "${LOG_FILE}" 2>&1 || true
-        _migration_rollback_pm2
-        exit 5
+        log_fatal "Health probe failed after systemd migration."
     fi
-
-    # ── Step 6: Enable units and remove PM2 from startup ─────────────────────
-    systemctl enable aetherflow-api.service >> "${LOG_FILE}" 2>&1
-    systemctl enable aetherflow-frontend.service >> "${LOG_FILE}" 2>&1
-    log_info "Systemd units enabled for boot."
-
-    # Remove PM2 startup hook (if it exists)
-    pm2 unstartup >> "${LOG_FILE}" 2>&1 || true
-
-    log_info "========================================================"
-    log_info "MIGRATION COMPLETE: PM2 → systemd. All services healthy."
-    log_info "========================================================"
+    log_info "MIGRATION COMPLETE: AetherFlow is running under hardened systemd units."
 }
 
-# Helper: Rollback to PM2 if systemd migration fails
-_migration_rollback_pm2() {
-    log_warn "Restoring PM2 process management..."
-    pm2 start "${CURRENT_LINK}/backend/aetherflow-api" --name "aetherflow-api" >> "${LOG_FILE}" 2>&1 || true
-    cd "${CURRENT_LINK}/frontend" 2>/dev/null || true
-    pm2 start npm --name "aetherflow-frontend" -- start >> "${LOG_FILE}" 2>&1 || true
-    pm2 save >> "${LOG_FILE}" 2>&1 || true
-    log_warn "PM2 restored. Systemd migration ABORTED."
-}
-
-###############################################################################
-# ENTRYPOINT
-###############################################################################
-main() {
-    local command="${1:-deploy}"
-
-    log_info "========================================================"
-    log_info "AetherFlow Release Manager v2.0"
-    log_info "Command: ${command} | Epoch: ${EPOCH} | Dry-Run: ${DRY_RUN}"
-    log_info "========================================================"
-
-    case "${command}" in
-        deploy)
-            release_scaffold
-            state_snapshot
-            symlink_swap
-            if ! health_probe; then
-                rollback
-                exit 2
-            fi
-            cleanup_old_releases
-            log_info "========================================================"
-            log_info "DEPLOYMENT SUCCESSFUL: Release ${EPOCH} is now live."
-            log_info "========================================================"
-            ;;
-        rollback)
+case "${COMMAND}" in
+    deploy)
+        ensure_fhs_layout
+        release_scaffold
+        state_snapshot
+        symlink_swap
+        if ! health_probe; then
             rollback
-            ;;
-        cleanup)
-            cleanup_old_releases
-            ;;
-        migrate-systemd)
-            migrate_systemd
-            ;;
-        *)
-            echo "Usage: $0 {deploy|rollback|cleanup|migrate-systemd} [--dry-run]"
-            exit 4
-            ;;
-    esac
-}
-
-main "$@"
+            exit 2
+        fi
+        cleanup_old_releases
+        log_info "DEPLOYMENT SUCCESSFUL: Release ${EPOCH} (${CHANNEL}) is now live."
+        ;;
+    rollback)
+        rollback
+        ;;
+    cleanup)
+        cleanup_old_releases
+        ;;
+    migrate-systemd)
+        migrate_systemd
+        ;;
+    *)
+        echo "Usage: $0 {deploy|rollback|cleanup|migrate-systemd} [--channel stable|beta|nightly] [--from-source] [--dry-run]"
+        exit 4
+        ;;
+esac

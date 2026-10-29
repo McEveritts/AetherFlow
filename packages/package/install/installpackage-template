@@ -86,8 +86,8 @@ fi
 #       curl -sL <key_url> -o /usr/share/keyrings/<app>-archive-keyring.gpg
 #       echo "deb [signed-by=...] <url> ..." > /etc/apt/sources.list.d/<app>.list
 log "Installing dependencies..."
-apt-get update >>"$LOGFILE" 2>&1
-apt-get install -y curl sqlite3 libicu-dev ca-certificates >>"$LOGFILE" 2>&1
+apt-get -o DPkg::Lock::Timeout=120 update >>"$LOGFILE" 2>&1
+apt-get -o DPkg::Lock::Timeout=120 install -y curl sqlite3 libicu-dev ca-certificates >>"$LOGFILE" 2>&1
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # PHASE 6: OS-AGNOSTIC ARCHITECTURE DETECTION
@@ -308,15 +308,10 @@ log "Service ${APP_NAME}.service started successfully."
 # APACHE REVERSE PROXY
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 log "Configuring Apache reverse proxy..."
-cat > "/etc/apache2/sites-enabled/${APP_NAME}.conf" <<EOF
-<Location /${APP_NAME}>
-    ProxyPass http://localhost:${APP_PORT}/${APP_NAME}
-    ProxyPassReverse http://localhost:${APP_PORT}/${APP_NAME}
-</Location>
-EOF
-chown www-data:www-data "/etc/apache2/sites-enabled/${APP_NAME}.conf"
-a2enmod proxy proxy_http >>/dev/null 2>&1
-service apache2 reload >>"$LOGFILE" 2>&1
+: # Apache2 heredoc replaced by Caddy switchboard
+: # routing handled by Caddy switchboard
+: # routing handled by Caddy switchboard
+: # routing handled by Caddy switchboard
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # FINALIZE — LOCK FILE CREATION

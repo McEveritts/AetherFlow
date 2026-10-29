@@ -23,14 +23,13 @@ function _repos() {
 			--allow-releaseinfo-change \
 			update >>"${OUTTO}" 2>&1 || return 1
 	fi
-	_af_apt_install software-properties-common lsb-release sudo ca-certificates gnupg wget || return 1
 	if [[ ${DISTRO} == Ubuntu ]]; then
+		_af_apt_install software-properties-common lsb-release sudo ca-certificates gnupg wget || return 1
 		LC_ALL=en_US.UTF-8 apt-add-repository ppa:ondrej/php -y >>"${OUTTO}" 2>&1 || return 1
-	fi
-
-	if [[ ${DISTRO} == Debian ]]; then
+	elif [[ ${DISTRO} == Debian ]]; then
+		_af_apt_install lsb-release sudo ca-certificates gnupg wget || return 1
 		wget -qO - https://packages.sury.org/php/apt.gpg | gpg --dearmor -o /usr/share/keyrings/deb.sury.org-php.gpg || return 1
-		echo "deb [signed-by=/usr/share/keyrings/deb.sury.org-php.gpg] https://packages.sury.org/php/ $(lsb_release -sc) main" > /etc/apt/sources.list.d/php.list
+		echo "deb [signed-by=/usr/share/keyrings/deb.sury.org-php.gpg] https://packages.sury.org/php/ ${CODENAME} main" > /etc/apt/sources.list.d/php.list
 	fi
 
 }
@@ -45,8 +44,8 @@ function _updates() {
 			-o Acquire::AllowInsecureRepositories=true \
 			-o Acquire::AllowDowngradeToInsecureRepositories=true \
 			update >>"${OUTTO}" 2>&1 || return 1
-		_af_apt_install --allow-unauthenticated build-essential debian-archive-keyring software-properties-common || return 1
-		_af_apt_install --allow-unauthenticated deb-multimedia-keyring || return 1
+		_af_apt_install --allow-unauthenticated build-essential debian-archive-keyring || return 1
+		_af_apt_install --allow-unauthenticated deb-multimedia-keyring >>"${OUTTO}" 2>&1 || true
 	else
 		\cp -f "${local_setup}templates/apt.sources/ubuntu.template" /etc/apt/sources.list
 		sed -i "s/RELEASE/${CODENAME}/g" /etc/apt/sources.list
@@ -63,7 +62,7 @@ function _updates() {
 	if [[ -e /etc/ssh/sshd_config ]]; then
 		sed -i 's/.*Port .*/Port 4747/g' /etc/ssh/sshd_config
 		#sed -i 's/SendEnv LANG LC_*/#SendEnv LANG LC_*/g' /etc/ssh/ssh_config
-		#sed -i 's/AcceptEnv LANG LC_*/#AcceptEnv LANG LC_*/g' /etc/ssh/sshd_config
+		#sed -i 's/AcceptEnv LANG LC_*/#AcceptEnv LANG LC_*/g' /etc/ssh/ssh_config
 		service ssh restart >>"${OUTTO}" 2>&1
 	fi
 
@@ -81,12 +80,16 @@ function _depends() {
 	prefetch_pid=$!
 
 	if [[ ${DISTRO} == Debian ]]; then
-		_af_apt_install fail2ban bc build-essential ed sudo screen zip irssi unzip nano bwm-ng htop nethogs speedtest-cli iotop git dos2unix subversion dstat automake make mktorrent libtool libcppunit-dev libssl-dev pkg-config libxml2-dev libcurl4-openssl-dev libsigc++-2.0-dev apache2-utils autoconf cron curl libapache2-mod-fcgid libapache2-mod-php"${PHP_VER}" libxslt-dev libncurses5-dev yasm pcregrep apache2 php-net-socket libapache2-mod-php"${PHP_VER}" php-memcached memcached php"${PHP_VER}" php"${PHP_VER}"-cli php"${PHP_VER}"-curl php"${PHP_VER}"-fpm php"${PHP_VER}"-gd php"${PHP_VER}"-mbstring php"${PHP_VER}"-msgpack php"${PHP_VER}"-mysql php"${PHP_VER}"-opcache php"${PHP_VER}"-xml php"${PHP_VER}"-xmlrpc php"${PHP_VER}"-zip libfcgi0ldbl mcrypt libmcrypt-dev python3-lxml python3-lxml fontconfig comerr-dev ca-certificates libfontconfig1-dev libdbd-mysql-perl libdbi-perl libfontconfig1 rar unrar mediainfo ifstat ttf-mscorefonts-installer checkinstall dtach libarchive-zip-perl libnet-ssleay-perl ca-certificates-java libxslt1-dev libxslt1.1 libxml2 libffi-dev python3-pip python3-dev libhtml-parser-perl libxml-libxml-perl libjson-perl libjson-xs-perl libxml-libxslt-perl zlib1g-dev vnstat vnstati openvpn iptables iptables-persistent xz-utils || {
+		local stat_pkg="dstat"
+		if [[ "${CODENAME}" =~ ("trixie") || "${VERSION_ID}" == "13" ]]; then
+			stat_pkg="dool"
+		fi
+		_af_apt_install fail2ban bc build-essential ed sudo screen zip irssi unzip nano bwm-ng htop nethogs speedtest-cli iotop git dos2unix subversion "${stat_pkg}" automake make mktorrent libtool libcppunit-dev libssl-dev pkg-config libxml2-dev libcurl4-openssl-dev libsigc++-2.0-dev apache2-utils autoconf cron curl libapache2-mod-fcgid libapache2-mod-php"${PHP_VER}" libncurses-dev yasm pcre2-utils apache2 php-net-socket php-memcached memcached php"${PHP_VER}" php"${PHP_VER}"-cli php"${PHP_VER}"-curl php"${PHP_VER}"-fpm php"${PHP_VER}"-gd php"${PHP_VER}"-mbstring php"${PHP_VER}"-msgpack php"${PHP_VER}"-mysql php"${PHP_VER}"-opcache php"${PHP_VER}"-xml php"${PHP_VER}"-zip python3-lxml fontconfig comerr-dev ca-certificates libfontconfig1-dev libdbd-mysql-perl libdbi-perl libfontconfig1 rar unrar mediainfo ifstat ttf-mscorefonts-installer checkinstall dtach libarchive-zip-perl libnet-ssleay-perl ca-certificates-java libxslt1-dev libxml2 libffi-dev python3-pip python3-dev libhtml-parser-perl libxml-libxml-perl libjson-perl libjson-xs-perl libxml-libxslt-perl zlib1g-dev vnstat vnstati openvpn iptables iptables-persistent xz-utils || {
 			wait "${prefetch_pid}" 2>/dev/null || true
 			return 1
 		}
 	elif [[ ${DISTRO} == Ubuntu ]]; then
-		_af_apt_install --allow-unauthenticated build-essential debian-archive-keyring fail2ban bc sudo screen zip irssi unzip nano bwm-ng htop iotop git dos2unix subversion dstat automake make mktorrent libtool libcppunit-dev libssl-dev pkg-config libxml2-dev libcurl4-openssl-dev libsigc++-2.0-dev apache2-utils autoconf cron curl libapache2-mod-php"${PHP_VER}" libxslt-dev libncurses5-dev yasm pcregrep apache2 php-net-socket libdbd-mysql-perl libdbi-perl php-memcached memcached php"${PHP_VER}" php"${PHP_VER}"-cli php"${PHP_VER}"-curl php"${PHP_VER}"-fpm php"${PHP_VER}"-gd php"${PHP_VER}"-mbstring php"${PHP_VER}"-msgpack php"${PHP_VER}"-mysql php"${PHP_VER}"-opcache php"${PHP_VER}"-xml php"${PHP_VER}"-xmlrpc php"${PHP_VER}"-zip libfcgi0ldbl mcrypt libmcrypt-dev fontconfig comerr-dev ca-certificates libfontconfig1-dev libfontconfig1 rar unrar mediainfo ifstat libapache2-mod-php"${PHP_VER}" python3-lxml python3-lxml ttf-mscorefonts-installer checkinstall dtach libarchive-zip-perl libnet-ssleay-perl openjdk-8-jre-headless openjdk-8-jre openjdk-8-jdk libxslt1-dev libxslt1.1 libxml2 libffi-dev python3-pip python3-dev libhtml-parser-perl libxml-libxml-perl libjson-perl libjson-xs-perl libxml-libxslt-perl zlib1g-dev vnstat vnstati openvpn iptables iptables-persistent xz-utils || {
+		_af_apt_install --allow-unauthenticated build-essential debian-archive-keyring fail2ban bc sudo screen zip irssi unzip nano bwm-ng htop iotop git dos2unix subversion dstat automake make mktorrent libtool libcppunit-dev libssl-dev pkg-config libxml2-dev libcurl4-openssl-dev libsigc++-2.0-dev apache2-utils autoconf cron curl libapache2-mod-php"${PHP_VER}" libncurses-dev yasm pcre2-utils apache2 php-net-socket libdbd-mysql-perl libdbi-perl php-memcached memcached php"${PHP_VER}" php"${PHP_VER}"-cli php"${PHP_VER}"-curl php"${PHP_VER}"-fpm php"${PHP_VER}"-gd php"${PHP_VER}"-mbstring php"${PHP_VER}"-msgpack php"${PHP_VER}"-mysql php"${PHP_VER}"-opcache php"${PHP_VER}"-xml php"${PHP_VER}"-zip fontconfig comerr-dev ca-certificates libfontconfig1-dev libfontconfig1 rar unrar mediainfo ifstat python3-lxml ttf-mscorefonts-installer checkinstall dtach libarchive-zip-perl libnet-ssleay-perl openjdk-8-jre-headless openjdk-8-jre openjdk-8-jdk libxslt1-dev libxml2 libffi-dev python3-pip python3-dev libhtml-parser-perl libxml-libxml-perl libjson-perl libjson-xs-perl libxml-libxslt-perl zlib1g-dev vnstat vnstati openvpn iptables iptables-persistent xz-utils || {
 			wait "${prefetch_pid}" 2>/dev/null || true
 			return 1
 		}

@@ -20,16 +20,20 @@
 #
 
 # To get most output from commands that are run, set to nothing
-source /opt/AetherFlow/packages/common.sh
+
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+  # shellcheck source=/dev/null
+  source /opt/AetherFlow/packages/common.sh
+elif [[ -f "$(dirname "${BASH_SOURCE[0]}")/../../common.sh" ]]; then
+  # shellcheck source=/dev/null
+  source "$(dirname "${BASH_SOURCE[0]}")/../../common.sh"
+fi
 MIN_OUTPUT=  #yes
 
 # To print to shell, set to nothing, otherwise output to LOGFILE
 USE_LOGFILE=yes
-LOGFILE=/srv/rutorrent/home/db/output.log # AetherFlow logfile
-
-# To print to shell, set to nothing, otherwise output to LOGFILE
-# LEGACY: rutorrent path no longer used
-# rutorrent=/srv/rutorrent/
+LOGFILE="${LOGFILE:-/srv/rutorrent/home/db/output.log}"
+rutorrent="${rutorrent:-/var/www/rutorrent/}"
 
 # Location of AetherFlow ruTorrent plugins on localhost
 PLUGINVAULT=/etc/AetherFlow/rtplugins/
@@ -43,14 +47,14 @@ PLUGIN=spectrogram
 
 _print() {
   if [[ -z "${USE_LOGFILE}" ]]; then
-    echo $1
+    echo "$1"
   else
-    echo $1 >>"${LOGFILE}" 2>&1
+    echo "$1" >>"${LOGFILE}" 2>&1
   fi
 }
 
 _do() {
-  if [[ ! -z "${MIN_OUTPUT}" ]]; then
+  if [[ -n "${MIN_OUTPUT}" ]]; then
     ($1 >/dev/null 2>&1)
   else
     ($1)
@@ -63,7 +67,7 @@ _sudo() {
 _installBaseDeps() {
   _print "Installing plugin dependencies: sox ..."
 
-  if [[ ! -n `which sox` ]]; then
+  if ! command -v sox >/dev/null 2>&1; then
     _sudo "apt-get -yqq install sox"
   else
     _print "OK, sox found"
@@ -72,31 +76,48 @@ _installBaseDeps() {
 
 _installplugin-spectrogram() {
   username=$(whoami);
+  rutorrent="${rutorrent:-/var/www/rutorrent/}"
   _print "Accessing $PLUGIN in the plugin vault ... "
-  cd ${rutorrent}plugins
-  sleep 5
+  mkdir -p "${rutorrent}plugins"
+  cd "${rutorrent}plugins"
 
   _print "Installing $PLUGIN plugin ... "
-    for i in $PLUGIN; do
+  for i in $PLUGIN; do
+    if [[ -d "${PLUGINVAULT}$i" ]]; then
       cp -R "${PLUGINVAULT}$i" .
-    done
-  sleep 5
+    elif [[ -d "${rutorrent}plugins/$i" ]]; then
+      _print "Plugin $i is already present in ${rutorrent}plugins"
+    else
+      _print "Plugin vault directory not found: ${PLUGINVAULT}$i. Attempting fallback clone..."
+      tmp_git="/tmp/rutorrent-git-$$"
+      if git clone --depth 1 https://github.com/Novik/ruTorrent.git "$tmp_git" >>"${LOGFILE}" 2>&1; then
+        if [[ -d "${tmp_git}/plugins/$i" ]]; then
+          cp -R "${tmp_git}/plugins/$i" .
+        fi
+        rm -rf "$tmp_git"
+      else
+        rm -rf "$tmp_git"
+        _print "Warning: Plugin vault missing and upstream fallback unavailable for $i"
+      fi
+    fi
+  done
 
   _print "Adjusting permissions ... "
-  chown -R www-data: ${rutorrent}plugins/$PLUGIN
+  for i in $PLUGIN; do
+    if [[ -d "${rutorrent}plugins/$i" ]]; then
+      chown -R www-data: "${rutorrent}plugins/$i" >>"${LOGFILE}" 2>&1 || true
+    fi
+  done
   _print "$PLUGIN Plugin Install Complete!"
-
-  sleep 5
 }
 
 _done() {
-  _print
-  _print
+  _print ""
+  _print ""
   _print "Close this dialog box to refresh your browser"
-  exit
+  exit 0
 }
 
 _installBaseDeps
 _installplugin-spectrogram
 _done
-

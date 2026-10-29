@@ -1,0 +1,90 @@
+#!/bin/bash
+# AetherFlow Package Installer: Kavita
+# Port: 5002
+
+set -euo pipefail
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
+fi
+
+PACKAGE_NAME="kavita"
+export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")" /install
+
+require_root
+log_info "Starting installation for ${PACKAGE_NAME}..."
+report_progress 10 "Installing system runtime dependencies for Kavita..."
+
+DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl tar libicu-dev sqlite3 ca-certificates >> "$LOGFILE" 2>&1
+
+if ! id -u kavita >/dev/null 2>&1; then
+    useradd --system --user-group --create-home --home-dir /var/lib/kavita --shell /usr/sbin/nologin kavita
+fi
+
+mkdir -p /opt/Kavita /var/lib/kavita
+
+ARCH=$(dpkg --print-architecture)
+case "$ARCH" in
+    amd64) KAV_ARCH="x64" ;;
+    arm64) KAV_ARCH="arm64" ;;
+    armhf) KAV_ARCH="arm" ;;
+    *) print_error "Unsupported architecture: $ARCH"; exit 1 ;;
+esac
+
+report_progress 35 "Resolving latest Kavita release (${KAV_ARCH})..."
+KAV_JSON="$(curl -fsSL https://api.github.com/repos/Kareadita/Kavita/releases/latest 2>/dev/null || true)"
+KAV_VERSION="$(printf '%s' "$KAV_JSON" | grep -oP '"tag_name":\s*"v\K[^"]+' | head -1 || true)"
+KAV_VERSION="${KAV_VERSION:-0.8.2}"
+KAV_URL="$(printf '%s' "$KAV_JSON" | grep -oP '"browser_download_url":\s*"\K[^"]*kavita-linux-'${KAV_ARCH}'\.tar\.gz' | head -1 || true)"
+if [[ -z "$KAV_URL" ]]; then
+    KAV_URL="https://github.com/Kareadita/Kavita/releases/download/v${KAV_VERSION}/kavita-linux-${KAV_ARCH}.tar.gz"
+fi
+
+report_progress 60 "Downloading and extracting Kavita ${KAV_VERSION}..."
+TMP_TAR=$(mktemp /tmp/kavita-XXXXXX.tar.gz)
+curl -fsSL "$KAV_URL" -o "$TMP_TAR" >> "$LOGFILE" 2>&1
+rm -rf /opt/Kavita/*
+tar -xzf "$TMP_TAR" -C /opt/Kavita --strip-components=1 2>/dev/null || tar -xzf "$TMP_TAR" -C /opt >> "$LOGFILE" 2>&1
+rm -f "$TMP_TAR"
+chmod +x /opt/Kavita/Kavita
+printf '%s\n' "${KAV_VERSION#v}" > /opt/Kavita/.af-version
+
+if [[ -f /opt/Kavita/appsettings.json ]]; then
+    sed -i 's/"Port": [0-9]*/"Port": 5002/' /opt/Kavita/appsettings.json 2>/dev/null || true
+fi
+
+chown -R kavita:kavita /opt/Kavita /var/lib/kavita
+
+report_progress 85 "Configuring and starting kavita.service on port 5002..."
+cat <<'EOF' > /etc/systemd/system/kavita.service
+[Unit]
+Description=Kavita Dedicated Comic and Manga Server
+After=network.target
+
+[Service]
+User=kavita
+Group=kavita
+Type=simple
+WorkingDirectory=/opt/Kavita
+Environment=ASPNETCORE_URLS=http://0.0.0.0:5002
+ExecStart=/opt/Kavita/Kavita
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload >> "$LOGFILE" 2>&1
+systemctl enable --now kavita >> "$LOGFILE" 2>&1
+
+write_lock "${PACKAGE_NAME}"
+report_progress 100 "Kavita installed on port 5002."
+log_info "${PACKAGE_NAME} installed successfully"

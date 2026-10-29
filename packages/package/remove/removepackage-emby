@@ -1,32 +1,36 @@
 #!/bin/bash
-#
-# [Quick Box :: Remove emby-server package]
-#
-# GITHUB REPOS
-# GitHub _ packages  :   https://github.com/AetherFlow/AetherFlow_packages
-# LOCAL REPOS
-# Local _ packages   :   /etc/AetherFlow/packages
-# Author             :   McEveritts
-# URL                :   https://AetherFlow.io
-#
-# AetherFlow Copyright (C) 2017 AetherFlow.io
-# Licensed under GNU General Public License v3.0 GPL-3 (in short)
-#
-#   You may copy, distribute and modify the software as long as you track
-#   changes/dates in source files. Any modifications to our software
-#   including (via compiler) GPL-licensed code must also be made available
-#   under the GPL along with build & install instructions.
-#
+# AetherFlow Package Uninstaller: Emby Server
 
-source /opt/AetherFlow/packages/common.sh
-function _removeEmby() {
-  dpkg -r emby-server >/dev/null 2>&1
-  sudo apt-get purge -y emby-server >/dev/null 2>&1
-  rm -rf /etc/apt/sources.list.d/emby-server.list
-  rm -rf /etc/apache2/sites-enabled/emby.conf
-  rm -rf /install/.emby.lock
-  pkill -f emby-server
-}
+set -euo pipefail
 
-_removeEmby
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
+fi
 
+PACKAGE_NAME="emby"
+export LOGFILE="/var/log/aetherflow/remove-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")"
+
+require_root
+log_info "Starting removal for ${PACKAGE_NAME}..."
+report_progress 20 "Stopping and disabling emby-server service..."
+
+purge_systemd_unit "emby-server"
+
+report_progress 50 "Purging emby-server package..."
+DEBIAN_FRONTEND=noninteractive apt-get purge -y -qq emby-server >> "$LOGFILE" 2>&1 || dpkg --purge emby-server >> "$LOGFILE" 2>&1 || true
+DEBIAN_FRONTEND=noninteractive apt-get autoremove -y -qq >> "$LOGFILE" 2>&1 || true
+
+report_progress 80 "Removing Emby binaries, data directories, and user account..."
+rm -rf /opt/emby-server /var/lib/emby /var/lib/emby-server /etc/emby-server.conf
+purge_system_user "emby"
+systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
+
+remove_lock "${PACKAGE_NAME}"
+report_progress 100 "Emby Server completely removed."
+log_info "${PACKAGE_NAME} removed successfully"

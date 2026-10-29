@@ -1,103 +1,91 @@
 #!/bin/bash
-#
-# [AetherFlow :: Install Navidrome]
-# Modern music server and streamer (Subsonic compatible)
-#
-# Author : McEveritts
-# URL    : https://AetherFlow.io
-# License: GPL-3.0
-#
-set -e
+# AetherFlow Package Installer: Navidrome
+# Port: 4533
 
-LOGFILE="/opt/AetherFlow/logs/installer.log"
-mkdir -p /opt/AetherFlow/logs /install
+set -euo pipefail
 
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [navidrome] $1" | tee -a "$LOGFILE"; }
-
-# ── Dependencies ─────────────────────────────────────────────────────────────
-log "Installing dependencies..."
-apt-get update >>"$LOGFILE" 2>&1
-apt-get install -y ffmpeg >>"$LOGFILE" 2>&1
-
-# ── Create navidrome user ────────────────────────────────────────────────────
-if ! id -u navidrome &>/dev/null; then
-    useradd -r -s /usr/sbin/nologin -d /opt/navidrome navidrome
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
 fi
 
-# ── Download Navidrome ───────────────────────────────────────────────────────
-log "Downloading latest Navidrome..."
+PACKAGE_NAME="navidrome"
+export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")" /install
+
+require_root
+log_info "Starting installation for ${PACKAGE_NAME}..."
+report_progress 10 "Installing dependencies for Navidrome..."
+
+DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl ffmpeg ca-certificates >> "$LOGFILE" 2>&1
+
+if ! id -u navidrome >/dev/null 2>&1; then
+    useradd --system --user-group --no-create-home --home-dir /var/lib/navidrome --shell /usr/sbin/nologin navidrome
+fi
+
+mkdir -p /opt/navidrome /var/lib/navidrome /var/lib/navidrome/music
+
 ARCH=$(dpkg --print-architecture)
 case "$ARCH" in
-    amd64) NAV_ARCH="amd64" ;;
-    arm64) NAV_ARCH="arm64" ;;
-    armhf) NAV_ARCH="armv7" ;;
-    *) NAV_ARCH="amd64" ;;
+    amd64) ND_ARCH="linux_amd64" ;;
+    arm64) ND_ARCH="linux_arm64" ;;
+    armhf) ND_ARCH="linux_armv7" ;;
+    *) print_error "Unsupported architecture: $ARCH"; exit 1 ;;
 esac
 
-NAV_VERSION=$(curl -sL https://api.github.com/repos/navidrome/navidrome/releases/latest | grep '"tag_name"' | sed -E 's/.*"v([^"]+)".*/\1/')
-if [[ -z "$NAV_VERSION" ]]; then
-    NAV_VERSION="0.52.5"
-fi
+report_progress 35 "Resolving latest Navidrome release (${ND_ARCH})..."
+ND_JSON="$(curl -fsSL https://api.github.com/repos/navidrome/navidrome/releases/latest 2>/dev/null || true)"
+ND_VERSION="$(printf '%s' "$ND_JSON" | grep -oP '"tag_name":\s*"v\K[^"]+' | head -1 || true)"
+ND_VERSION="${ND_VERSION:-0.53.3}"
+ND_URL="https://github.com/navidrome/navidrome/releases/download/v${ND_VERSION}/navidrome_${ND_VERSION}_${ND_ARCH}.tar.gz"
 
-mkdir -p /opt/navidrome /var/lib/navidrome /tmp/AetherFlow
-cd /tmp/AetherFlow
-curl -sL "https://github.com/navidrome/navidrome/releases/download/v${NAV_VERSION}/navidrome_${NAV_VERSION}_linux_${NAV_ARCH}.tar.gz" -o navidrome.tar.gz >>"$LOGFILE" 2>&1
-tar -xzf navidrome.tar.gz -C /opt/navidrome >>"$LOGFILE" 2>&1
-rm -f navidrome.tar.gz
+report_progress 60 "Downloading and extracting Navidrome ${ND_VERSION}..."
+TMP_TAR=$(mktemp /tmp/navidrome-XXXXXX.tar.gz)
+curl -fsSL "$ND_URL" -o "$TMP_TAR" >> "$LOGFILE" 2>&1
+tar -xzf "$TMP_TAR" -C /opt/navidrome navidrome >> "$LOGFILE" 2>&1
+rm -f "$TMP_TAR"
 chmod +x /opt/navidrome/navidrome
+printf '%s\n' "${ND_VERSION#v}" > /opt/navidrome/.af-version
 
-# ── Configuration ────────────────────────────────────────────────────────────
-log "Writing configuration..."
-mkdir -p /var/lib/navidrome /music
-cat > /opt/navidrome/navidrome.toml <<'EOF'
-MusicFolder = "/music"
+cat <<'EOF' > /var/lib/navidrome/navidrome.toml
+MusicFolder = "/var/lib/navidrome/music"
 DataFolder = "/var/lib/navidrome"
 Address = "0.0.0.0"
 Port = 4533
 LogLevel = "info"
-ScanSchedule = "@every 1m"
 EOF
 
 chown -R navidrome:navidrome /opt/navidrome /var/lib/navidrome
 
-# ── Systemd service ──────────────────────────────────────────────────────────
-log "Creating systemd service..."
-cat > /etc/systemd/system/navidrome.service <<'EOF'
+report_progress 85 "Configuring and starting navidrome.service on port 4533..."
+cat <<'EOF' > /etc/systemd/system/navidrome.service
 [Unit]
-Description=Navidrome Music Server
-After=network.target
+Description=Navidrome Music Server and Streamer
+After=remote-fs.target network.target
+AssertPathExists=/var/lib/navidrome
 
 [Service]
-Type=simple
 User=navidrome
 Group=navidrome
-WorkingDirectory=/opt/navidrome
-ExecStart=/opt/navidrome/navidrome --configfile /opt/navidrome/navidrome.toml
-Restart=on-failure
-RestartSec=5
+Type=simple
+ExecStart=/opt/navidrome/navidrome --configfile "/var/lib/navidrome/navidrome.toml"
+WorkingDirectory=/var/lib/navidrome
 TimeoutStopSec=20
+KillMode=process
+Restart=on-failure
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reload
-systemctl enable navidrome.service >>"$LOGFILE" 2>&1
-systemctl start navidrome.service
+systemctl daemon-reload >> "$LOGFILE" 2>&1
+systemctl enable --now navidrome >> "$LOGFILE" 2>&1
 
-# ── Apache reverse proxy ─────────────────────────────────────────────────────
-log "Configuring Apache reverse proxy..."
-cat > /etc/apache2/sites-enabled/navidrome.conf <<'EOF'
-<Location /navidrome>
-    ProxyPass http://localhost:4533
-    ProxyPassReverse http://localhost:4533
-</Location>
-EOF
-chown www-data:www-data /etc/apache2/sites-enabled/navidrome.conf
-a2enmod proxy proxy_http >>/dev/null 2>&1
-service apache2 reload >>"$LOGFILE" 2>&1
-
-# ── Finalize ─────────────────────────────────────────────────────────────────
-touch /install/.navidrome.lock
-log "Navidrome installation complete! Access at http://your-server:4533"
-log "Point your music to /music on the server."
+write_lock "${PACKAGE_NAME}"
+report_progress 100 "Navidrome installed on port 4533."
+log_info "${PACKAGE_NAME} installed successfully"

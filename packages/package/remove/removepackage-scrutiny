@@ -1,0 +1,36 @@
+#!/bin/bash
+# AetherFlow Package Uninstaller: Scrutiny
+
+set -euo pipefail
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
+fi
+
+PACKAGE_NAME="scrutiny"
+export LOGFILE="/var/log/aetherflow/remove-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")"
+
+require_root
+log_info "Starting removal for ${PACKAGE_NAME}..."
+report_progress 20 "Stopping and disabling companion scrutiny-collector.timer and service..."
+
+purge_systemd_unit "scrutiny-collector.timer"
+purge_systemd_unit "scrutiny-collector.service"
+
+report_progress 50 "Stopping and removing scrutiny.service dashboard..."
+purge_systemd_unit "scrutiny.service"
+
+report_progress 75 "Removing Scrutiny binaries, database, and user account..."
+rm -rf /opt/scrutiny /var/lib/scrutiny /etc/scrutiny
+purge_system_user "scrutiny"
+systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
+
+remove_lock "${PACKAGE_NAME}"
+report_progress 100 "Scrutiny completely removed."
+log_info "${PACKAGE_NAME} removed successfully"

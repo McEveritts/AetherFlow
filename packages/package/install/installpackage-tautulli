@@ -1,84 +1,69 @@
 #!/bin/bash
-#
-# [AetherFlow :: Install Tautulli]
-# Plex monitoring and tracking tool
-#
-# Author : McEveritts
-# URL    : https://AetherFlow.io
-# License: GPL-3.0
-#
-set -e
+# AetherFlow Package Installer: Tautulli
+# Port: 8181
 
-LOGFILE="/opt/AetherFlow/logs/installer.log"
-mkdir -p /opt/AetherFlow/logs /install
+set -euo pipefail
 
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [tautulli] $1" | tee -a "$LOGFILE"; }
-
-# ── Dependencies ─────────────────────────────────────────────────────────────
-log "Installing dependencies..."
-apt-get update >>"$LOGFILE" 2>&1
-apt-get install -y python3 python3-setuptools git wget >>"$LOGFILE" 2>&1
-
-# ── Create tautulli user ─────────────────────────────────────────────────────
-if ! id -u tautulli &>/dev/null; then
-    useradd -r -s /usr/sbin/nologin -d /opt/Tautulli tautulli
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
 fi
 
-# ── Download Tautulli ────────────────────────────────────────────────────────
-log "Downloading Tautulli from latest Github repo..."
+PACKAGE_NAME="tautulli"
+export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")" /install
+
+require_root
+log_info "Starting installation for ${PACKAGE_NAME}..."
+report_progress 10 "Installing Python and Git prerequisites for Tautulli..."
+
+DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git python3 python3-setuptools python3-pip ca-certificates >> "$LOGFILE" 2>&1
+
+if ! id -u tautulli >/dev/null 2>&1; then
+    useradd --system --user-group --no-create-home --home-dir /var/lib/tautulli --shell /usr/sbin/nologin tautulli
+fi
+
+mkdir -p /var/lib/tautulli
+
+report_progress 40 "Cloning Tautulli repository..."
 rm -rf /opt/Tautulli
-cd /opt
-git clone https://github.com/Tautulli/Tautulli.git >>"$LOGFILE" 2>&1
+git clone --depth 1 https://github.com/Tautulli/Tautulli.git /opt/Tautulli >> "$LOGFILE" 2>&1
+TAUTULLI_VERSION="$(git -C /opt/Tautulli describe --tags --abbrev=0 2>/dev/null || true)"
+if [[ -n "$TAUTULLI_VERSION" ]]; then
+    printf '%s\n' "${TAUTULLI_VERSION#v}" > /opt/Tautulli/.af-version
+fi
+chown -R tautulli:tautulli /opt/Tautulli /var/lib/tautulli
 
-chown -R tautulli:tautulli /opt/Tautulli
-
-# ── Systemd service ──────────────────────────────────────────────────────────
-log "Creating systemd service..."
-cat > /etc/systemd/system/tautulli.service <<'EOF'
+report_progress 80 "Configuring and starting tautulli.service on port 8181..."
+cat <<'EOF' > /etc/systemd/system/tautulli.service
 [Unit]
-Description=Tautulli - Plex Monitor
-After=network.target
+Description=Tautulli - Stats for Plex Media Server usage
+Wants=network-online.target
+After=network-online.target
 
 [Service]
-Environment=LANG=en_US.UTF-8
-Environment=LC_ALL=en_US.UTF-8
-ExecStart=/usr/bin/python3 /opt/Tautulli/Tautulli.py
+ExecStart=/usr/bin/python3 /opt/Tautulli/Tautulli.py --config /var/lib/tautulli/config.ini --datadir /var/lib/tautulli --quiet --nolaunch --port 8181
+GuessMainPID=no
+Type=simple
 User=tautulli
 Group=tautulli
 Restart=on-failure
 RestartSec=5
-Type=simple
-TimeoutStopSec=20
-NoNewPrivileges=yes
-ProtectSystem=full
-ProtectHome=true
-PrivateTmp=yes
-PrivateDevices=yes
-ProtectKernelTunables=yes
-ProtectControlGroups=yes
-RestrictSUIDSGID=yes
-ReadWritePaths=/opt/Tautulli
+NoNewPrivileges=true
+PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reload
-systemctl enable tautulli.service >>"$LOGFILE" 2>&1
-systemctl start tautulli.service
+systemctl daemon-reload >> "$LOGFILE" 2>&1
+systemctl enable --now tautulli >> "$LOGFILE" 2>&1
 
-# ── Apache reverse proxy ─────────────────────────────────────────────────────
-log "Configuring Apache reverse proxy..."
-cat > /etc/apache2/sites-enabled/tautulli.conf <<'EOF'
-<Location /tautulli>
-    ProxyPass http://localhost:8181/tautulli
-    ProxyPassReverse http://localhost:8181/tautulli
-</Location>
-EOF
-chown www-data:www-data /etc/apache2/sites-enabled/tautulli.conf
-a2enmod proxy proxy_http >>/dev/null 2>&1
-service apache2 reload >>"$LOGFILE" 2>&1
-
-# ── Finalize ─────────────────────────────────────────────────────────────────
-touch /install/.tautulli.lock
-log "Tautulli installation complete! Access at http://your-server:8181"
+write_lock "${PACKAGE_NAME}"
+report_progress 100 "Tautulli installed on port 8181."
+log_info "${PACKAGE_NAME} installed successfully"

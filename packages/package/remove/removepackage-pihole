@@ -1,21 +1,44 @@
 #!/bin/bash
-#
-# [AetherFlow :: Remove pihole]
-#
-source /opt/AetherFlow/packages/common.sh
-set -e
+# AetherFlow Package Uninstaller: Pi-hole
 
-LOGFILE="/opt/AetherFlow/logs/installer.log"
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [remove-pihole] $1" | tee -a "$LOGFILE"; }
+set -euo pipefail
 
-log "Stopping pihole..."
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
+fi
 
+PACKAGE_NAME="pihole"
+export LOGFILE="/var/log/aetherflow/remove-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")"
 
-log "Removing pihole files and configuration..."
-pihole uninstall 2>/dev/null; rm -rf /etc/pihole /opt/pihole /etc/apache2/sites-enabled/pihole.conf
+require_root
+log_info "Starting removal for ${PACKAGE_NAME}..."
+report_progress 20 "Stopping Pi-hole FTL service..."
 
-systemctl daemon-reload 2>/dev/null
-service apache2 reload 2>/dev/null
-rm -f /install/.pihole.lock
+purge_systemd_unit "pihole-FTL"
 
-log "pihole has been completely removed."
+report_progress 50 "Running Pi-hole uninstaller and cleaning directories..."
+if command_exists pihole; then
+    pihole uninstall -f >> "$LOGFILE" 2>&1 || true
+fi
+
+rm -rf /etc/pihole /opt/pihole /var/www/html/admin /var/www/html/pihole /var/log/pihole /etc/.pihole
+rm -f /usr/local/bin/pihole /usr/bin/pihole-FTL /etc/dnsmasq.d/01-pihole.conf
+rm -f /etc/lighttpd/external.conf /etc/lighttpd/conf-enabled/99-pihole-port.conf
+rm -f /etc/systemd/resolved.conf.d/pihole.conf
+
+report_progress 80 "Removing pihole user and reloading services..."
+purge_system_user "pihole"
+if systemctl is-active --quiet systemd-resolved 2>/dev/null; then
+    systemctl restart systemd-resolved >> "$LOGFILE" 2>&1 || true
+fi
+systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
+
+remove_lock "${PACKAGE_NAME}"
+report_progress 100 "Pi-hole completely removed."
+log_info "${PACKAGE_NAME} removed successfully"

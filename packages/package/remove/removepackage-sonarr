@@ -1,55 +1,32 @@
 #!/bin/bash
-#
-# [AetherFlow :: Remove Sonarr package]
-#
-# Author             :   McEveritts
-# URL                :   https://AetherFlow.io
-#
-# AetherFlow Copyright (C) 2016
-# Licensed under GNU General Public License v3.0 GPL-3
-#
-source /opt/AetherFlow/packages/common.sh
-username="${AETHERFLOW_USER:-$(whoami)}"
+# AetherFlow Package Uninstaller: Sonarr
 
-function _removeSonarr() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [sonarr] Starting Sonarr removal..."
+set -euo pipefail
 
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [sonarr] Stopping Sonarr service..."
-    systemctl stop "sonarr@${username}" 2>/dev/null || true
-    systemctl stop sonarr 2>/dev/null || true
-    systemctl disable "sonarr@${username}" 2>/dev/null || true
-    systemctl disable sonarr 2>/dev/null || true
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
+fi
 
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [sonarr] Removing Sonarr packages..."
-    apt-get remove -y nzbdrone >/dev/null 2>&1 || true
-    apt-get remove -y sonarr >/dev/null 2>&1 || true
-    apt-get -y autoremove >/dev/null 2>&1 || true
+PACKAGE_NAME="sonarr"
+export LOGFILE="/var/log/aetherflow/remove-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")"
 
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [sonarr] Cleaning up configuration..."
-    rm -f /etc/apt/sources.list.d/sonarr.list
-    rm -f /etc/apache2/sites-enabled/sonarr.conf
-    rm -rf /opt/Sonarr
-    rm -rf /var/lib/sonarr
+require_root
+log_info "Starting removal for ${PACKAGE_NAME}..."
+report_progress 25 "Stopping and removing sonarr.service..."
 
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [sonarr] Removing init scripts..."
-    if [[ -f /etc/init.d/sonarr ]]; then
-        update-rc.d -f sonarr remove >/dev/null 2>&1 || true
-        rm -f /etc/default/sonarr
-        rm -f /etc/init.d/sonarr
-    fi
+purge_systemd_unit "sonarr"
 
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [sonarr] Removing systemd unit..."
-    rm -f /etc/systemd/system/sonarr.service
-    rm -f /etc/systemd/system/sonarr@.service
-    systemctl daemon-reload 2>/dev/null || true
+report_progress 65 "Removing Sonarr binaries, state directories, and user account..."
+rm -rf /opt/Sonarr /opt/NzbDrone /var/lib/sonarr
+purge_system_user "sonarr"
+systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
 
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [sonarr] Reloading web server..."
-    service apache2 reload 2>/dev/null || true
-    
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [sonarr] Removing lockfile..."
-    rm -f /install/.sonarr.lock
-    
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [sonarr] Sonarr removal complete!"
-}
-
-_removeSonarr
+remove_lock "${PACKAGE_NAME}"
+report_progress 100 "Sonarr completely removed."
+log_info "${PACKAGE_NAME} removed successfully"

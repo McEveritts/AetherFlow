@@ -1,23 +1,32 @@
 #!/bin/bash
-#
-# [AetherFlow :: Remove navidrome]
-#
-source /opt/AetherFlow/packages/common.sh
-set -e
+# AetherFlow Package Uninstaller: Navidrome
 
-LOGFILE="/opt/AetherFlow/logs/installer.log"
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [remove-navidrome] $1" | tee -a "$LOGFILE"; }
+set -euo pipefail
 
-log "Stopping navidrome..."
-systemctl stop navidrome 2>/dev/null || true
-systemctl disable navidrome 2>/dev/null || true
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
+fi
 
-log "Removing navidrome files and configuration..."
-rm -rf /opt/navidrome /var/lib/navidrome /etc/systemd/system/navidrome.service /etc/apache2/sites-enabled/navidrome.conf
-userdel navidrome 2>/dev/null || true
+PACKAGE_NAME="navidrome"
+export LOGFILE="/var/log/aetherflow/remove-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")"
 
-systemctl daemon-reload 2>/dev/null || true
-service apache2 reload 2>/dev/null || true
-rm -f /install/.navidrome.lock
+require_root
+log_info "Starting removal for ${PACKAGE_NAME}..."
+report_progress 25 "Stopping and removing navidrome.service..."
 
-log "navidrome has been completely removed."
+purge_systemd_unit "navidrome"
+
+report_progress 65 "Removing Navidrome binaries, data directories, and user account..."
+rm -rf /opt/navidrome /var/lib/navidrome
+purge_system_user "navidrome"
+systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
+
+remove_lock "${PACKAGE_NAME}"
+report_progress 100 "Navidrome completely removed."
+log_info "${PACKAGE_NAME} removed successfully"

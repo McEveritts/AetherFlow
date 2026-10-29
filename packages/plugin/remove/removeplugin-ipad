@@ -19,29 +19,35 @@
 #   including (via compiler) GPL-licensed code must also be made available
 #   under the GPL along with build & install instructions.
 #
-source /opt/AetherFlow/packages/common.sh
-OUTTO=$LOGFILE
+
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+  # shellcheck source=/dev/null
+  source /opt/AetherFlow/packages/common.sh
+elif [[ -f "$(dirname "${BASH_SOURCE[0]}")/../../common.sh" ]]; then
+  # shellcheck source=/dev/null
+  source "$(dirname "${BASH_SOURCE[0]}")/../../common.sh"
+fi
+OUTTO="${LOGFILE:-/var/log/aetherflow/install.log}"
+rutorrent="${rutorrent:-/var/www/rutorrent/}"
 
 function _removeplugin-ipad() {
   username=$(whoami);
-  # LEGACY: rutorrent path no longer used
-# rutorrent="/srv/rutorrent/";
+  rutorrent="${rutorrent:-/var/www/rutorrent/}"
   echo "Uninstalling the ipad plugin ... " >>"${OUTTO}" 2>&1;
   PLUGIN="ipad"
-    for i in $PLUGIN; do
+  for i in $PLUGIN; do
+    if [[ -n "${rutorrent}" && -n "$i" && ( -d "${rutorrent}plugins/$i" || -L "${rutorrent}plugins/$i" ) ]]; then
       rm -rf "${rutorrent}plugins/$i"
-    done
-  sleep 5
+    fi
+  done
 
   echo "Ipad Plugin Uninstall Complete!" >>"${OUTTO}" 2>&1;
-  
-  sleep 5
+
   echo >>"${OUTTO}" 2>&1;
   echo >>"${OUTTO}" 2>&1;
   echo "Close this dialog box to refresh your browser" >>"${OUTTO}" 2>&1;
 
-    exit
+  exit 0
 }
 
 _removeplugin-ipad
-

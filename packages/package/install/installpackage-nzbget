@@ -1,90 +1,85 @@
 #!/bin/bash
-#
-# [AetherFlow :: Install NZBGet]
-# Efficient Usenet downloader
-#
-# Author : McEveritts
-# URL    : https://AetherFlow.io
-# License: GPL-3.0
-#
-set -e
+# AetherFlow Package Installer: NZBGet (nzbgetcom/nzbget fork)
+# Port: 6789
 
-LOGFILE="/opt/AetherFlow/logs/installer.log"
-mkdir -p /opt/AetherFlow/logs /install
+set -euo pipefail
 
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [nzbget] $1" | tee -a "$LOGFILE"; }
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
+fi
 
-# ── Dependencies ─────────────────────────────────────────────────────────────
-log "Installing dependencies..."
-apt-get update >>"$LOGFILE" 2>&1
-apt-get install -y unrar p7zip-full >>"$LOGFILE" 2>&1
+PACKAGE_NAME="nzbget"
+export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")" /install
 
-# ── Download NZBGet ──────────────────────────────────────────────────────────
-log "Downloading latest NZBGet..."
-ARCH=$(dpkg --print-architecture)
-case "$ARCH" in
-    amd64) NZBGET_ARCH="linux" ;;
-    arm64) NZBGET_ARCH="linux" ;;
-    *) NZBGET_ARCH="linux" ;;
-esac
+require_root
+log_info "Starting installation for ${PACKAGE_NAME}..."
+report_progress 10 "Installing dependencies for NZBGet..."
 
-NZBGET_URL=$(curl -sL https://api.github.com/repos/nzbgetcom/nzbget/releases/latest | grep -oP '"browser_download_url": "\K(https://[^"]+linux-bin\.run)(?=")' | head -1)
+DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl p7zip-full par2 unzip unrar-free python3 ca-certificates >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq unrar >> "$LOGFILE" 2>&1 || true
+
+if ! id -u nzbget >/dev/null 2>&1; then
+    useradd --system --user-group --no-create-home --home-dir /var/lib/nzbget --shell /usr/sbin/nologin nzbget
+fi
+
+mkdir -p /opt/nzbget /var/lib/nzbget
+
+report_progress 35 "Resolving latest NZBGet release..."
+NZBGET_JSON="$(curl -fsSL https://api.github.com/repos/nzbgetcom/nzbget/releases/latest 2>/dev/null || true)"
+NZBGET_VERSION="$(printf '%s' "$NZBGET_JSON" | grep -oP '"tag_name":\s*"v?\K[^"]+' | head -1 || true)"
+NZBGET_VERSION="${NZBGET_VERSION:-24.3}"
+NZBGET_URL="$(printf '%s' "$NZBGET_JSON" | grep -oP '"browser_download_url":\s*"\K[^"]*bin-linux\.run' | head -1 || true)"
+
 if [[ -z "$NZBGET_URL" ]]; then
-    log "Could not determine latest NZBGet URL via API, attempting fallback..."
-    NZBGET_URL="https://github.com/nzbgetcom/nzbget/releases/latest/download/nzbget-linux.run"
+    NZBGET_URL="https://github.com/nzbgetcom/nzbget/releases/download/v${NZBGET_VERSION}/nzbget-${NZBGET_VERSION}-bin-linux.run"
 fi
 
-mkdir -p /tmp/AetherFlow
-cd /tmp/AetherFlow
-curl -sL "$NZBGET_URL" -o nzbget-installer.run >>"$LOGFILE" 2>&1
-chmod +x nzbget-installer.run
-sh nzbget-installer.run --destdir /opt/nzbget >>"$LOGFILE" 2>&1
-rm -f nzbget-installer.run
+report_progress 60 "Downloading and installing NZBGet ${NZBGET_VERSION}..."
+TMP_RUN=$(mktemp /tmp/nzbget-XXXXXX.run)
+curl -fsSL "$NZBGET_URL" -o "$TMP_RUN" >> "$LOGFILE" 2>&1
+sh "$TMP_RUN" --destdir /opt/nzbget >> "$LOGFILE" 2>&1
+rm -f "$TMP_RUN"
 
-# ── Create nzbget user ───────────────────────────────────────────────────────
-if ! id -u nzbget &>/dev/null; then
-    useradd -r -s /usr/sbin/nologin -d /opt/nzbget nzbget
+printf '%s\n' "${NZBGET_VERSION#v}" > /opt/nzbget/.af-version
+
+if [[ -f /opt/nzbget/nzbget.conf ]]; then
+    sed -i 's|^MainDir=.*|MainDir=/var/lib/nzbget|g' /opt/nzbget/nzbget.conf
+    sed -i 's|^ControlIP=.*|ControlIP=0.0.0.0|g' /opt/nzbget/nzbget.conf
+    sed -i 's|^ControlPort=.*|ControlPort=6789|g' /opt/nzbget/nzbget.conf
 fi
-mkdir -p /home/nzbget/Downloads
-chown -R nzbget:nzbget /opt/nzbget /home/nzbget
 
-# ── Systemd service ──────────────────────────────────────────────────────────
-log "Creating systemd service..."
-cat > /etc/systemd/system/nzbget.service <<'EOF'
+chown -R nzbget:nzbget /opt/nzbget /var/lib/nzbget
+
+report_progress 85 "Configuring and starting nzbget.service on port 6789..."
+cat <<'EOF' > /etc/systemd/system/nzbget.service
 [Unit]
-Description=NZBGet Usenet Downloader
+Description=NZBGet Daemon
 After=network.target
 
 [Service]
-Type=forking
 User=nzbget
 Group=nzbget
-ExecStart=/opt/nzbget/nzbget -D
+Type=forking
+ExecStart=/opt/nzbget/nzbget -c /opt/nzbget/nzbget.conf -D
 ExecStop=/opt/nzbget/nzbget -Q
+ExecReload=/opt/nzbget/nzbget -O
+KillMode=process
 Restart=on-failure
-RestartSec=10
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reload
-systemctl enable nzbget.service >>"$LOGFILE" 2>&1
-systemctl start nzbget.service
+systemctl daemon-reload >> "$LOGFILE" 2>&1
+systemctl enable --now nzbget >> "$LOGFILE" 2>&1
 
-# ── Apache reverse proxy ─────────────────────────────────────────────────────
-log "Configuring Apache reverse proxy..."
-cat > /etc/apache2/sites-enabled/nzbget.conf <<'EOF'
-<Location /nzbget>
-    ProxyPass http://localhost:6789
-    ProxyPassReverse http://localhost:6789
-</Location>
-EOF
-chown www-data:www-data /etc/apache2/sites-enabled/nzbget.conf
-a2enmod proxy proxy_http >>/dev/null 2>&1
-service apache2 reload >>"$LOGFILE" 2>&1
-
-# ── Finalize ─────────────────────────────────────────────────────────────────
-touch /install/.nzbget.lock
-log "NZBGet installation complete! Default login: nzbget / tegbzn6789"
-log "Access at http://your-server:6789"
+write_lock "${PACKAGE_NAME}"
+report_progress 100 "NZBGet installed on port 6789."
+log_info "${PACKAGE_NAME} installed successfully"

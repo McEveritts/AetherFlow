@@ -1,0 +1,37 @@
+#!/bin/bash
+# AetherFlow Package Uninstaller: Paperless-ngx
+
+set -euo pipefail
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
+fi
+
+PACKAGE_NAME="paperless-ngx"
+export LOGFILE="/var/log/aetherflow/remove-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")"
+
+require_root
+log_info "Starting removal for ${PACKAGE_NAME}..."
+report_progress 15 "Stopping and purging companion paperless-scheduler.service..."
+purge_systemd_unit "paperless-scheduler"
+
+report_progress 35 "Stopping and purging companion paperless-worker.service..."
+purge_systemd_unit "paperless-worker"
+
+report_progress 55 "Stopping and purging primary paperless-webserver.service..."
+purge_systemd_unit "paperless-webserver"
+
+report_progress 75 "Removing Paperless-ngx virtualenv, app binaries, state, and user account..."
+rm -rf /opt/paperless /var/lib/paperless /etc/paperless.conf
+purge_system_user "paperless"
+systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
+
+remove_lock "${PACKAGE_NAME}"
+report_progress 100 "Paperless-ngx completely removed."
+log_info "${PACKAGE_NAME} removed successfully"

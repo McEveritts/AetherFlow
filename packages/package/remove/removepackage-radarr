@@ -1,48 +1,32 @@
 #!/bin/bash
-source /opt/AetherFlow/packages/common.sh
+# AetherFlow Package Uninstaller: Radarr
 
-systemctl stop radarr 2>/dev/null || true
-systemctl disable radarr 2>/dev/null || true
-rm -f /etc/systemd/system/radarr.service
-systemctl daemon-reload 2>/dev/null || true
+set -euo pipefail
 
-rm -rf /opt/Radarr
-rm -f /etc/apache2/sites-enabled/radarr.conf
-
-if [[ -f /install/.jackett.lock ]]; then
-    for list in /etc/apt/sources.list.d/mono-*; do
-        if [[ -f $list ]]; then
-            rm -f "/etc/apt/sources.list.d/mono-*"
-            sudo apt-key adv --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys 3FA7E0328081BFF6A14DA29AA6A19B38D3D831EF
-            echo "deb http://download.mono-project.com/repo/ubuntu stable-xenial main" | sudo tee /etc/apt/sources.list.d/mono-official-stable.list
-            break
-        fi
-    done
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
 fi
 
-if [[ -f /install/.lidarr.lock ]]; then
-    for list in /etc/apt/sources.list.d/mono-*; do
-        if [[ -f $list ]]; then
-            rm -f "/etc/apt/sources.list.d/mono-*"
-            sudo apt-key adv --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys 3FA7E0328081BFF6A14DA29AA6A19B38D3D831EF
-            echo "deb http://download.mono-project.com/repo/ubuntu stable-xenial main" | sudo tee /etc/apt/sources.list.d/mono-official-stable.list
-            break
-        fi
-    done
-fi
+PACKAGE_NAME="radarr"
+export LOGFILE="/var/log/aetherflow/remove-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")"
 
-if [[ -f /install/.sonarr.lock ]]; then
-    for list in /etc/apt/sources.list.d/mono-*; do
-        if [[ -f $list ]]; then
-            rm -f "/etc/apt/sources.list.d/mono-*"
-            sudo apt-key adv --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys 3FA7E0328081BFF6A14DA29AA6A19B38D3D831EF
-            echo "deb http://download.mono-project.com/repo/ubuntu stable-xenial main" | sudo tee /etc/apt/sources.list.d/mono-official-stable.list
-            break
-        fi
-    done
-fi
+require_root
+log_info "Starting removal for ${PACKAGE_NAME}..."
+report_progress 25 "Stopping and removing radarr.service..."
 
-rm -f /install/.radarr.lock
-apt-get -y autoremove && apt-get -y autoclean
-service apache2 reload 2>/dev/null || true
-echo "Radarr uninstalled!"
+purge_systemd_unit "radarr"
+
+report_progress 65 "Removing Radarr binaries, state directories, and user account..."
+rm -rf /opt/Radarr /var/lib/radarr
+purge_system_user "radarr"
+systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
+
+remove_lock "${PACKAGE_NAME}"
+report_progress 100 "Radarr completely removed."
+log_info "${PACKAGE_NAME} removed successfully"

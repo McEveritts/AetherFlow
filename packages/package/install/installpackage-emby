@@ -1,65 +1,76 @@
 #!/bin/bash
-#
-# [AetherFlow :: Install Emby]
-# Open Media Library Server
-#
-# Author : McEveritts
-# URL    : https://AetherFlow.io
-# License: GPL-3.0
-#
-set -e
+# AetherFlow Package Installer: Emby Server
+# Port: 8097
 
-LOGFILE="/opt/AetherFlow/logs/installer.log"
-mkdir -p /opt/AetherFlow/logs /install
+set -euo pipefail
 
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [emby] $1" | tee -a "$LOGFILE"; }
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
+fi
 
-# ── Dependencies ─────────────────────────────────────────────────────────────
-log "Installing dependencies..."
-apt-get update >>"$LOGFILE" 2>&1
-apt-get install -y curl wget >>"$LOGFILE" 2>&1
+PACKAGE_NAME="emby"
+export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")" /install
 
-# ── Download Emby Server ─────────────────────────────────────────────────────
-log "Downloading latest Emby Server release..."
+require_root
+log_info "Starting installation for ${PACKAGE_NAME}..."
+report_progress 10 "Installing prerequisites for Emby Server..."
+
+DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl ca-certificates >> "$LOGFILE" 2>&1
+
 ARCH=$(dpkg --print-architecture)
+case "$ARCH" in
+    amd64) EMBY_ARCH="amd64" ;;
+    arm64) EMBY_ARCH="arm64" ;;
+    *) print_error "Unsupported architecture: $ARCH"; exit 1 ;;
+esac
 
-EMBY_URL=$(curl -sL https://api.github.com/repos/MediaBrowser/Emby.Releases/releases/latest | grep -oP '"browser_download_url": "\K(https://[^"]+emby-server-deb_[^"]+'${ARCH}'\.deb)(?=")' | head -1)
+report_progress 30 "Resolving latest Emby release for ${EMBY_ARCH}..."
+EMBY_JSON="$(curl -fsSL https://api.github.com/repos/MediaBrowser/Emby.Releases/releases/latest 2>/dev/null || true)"
+EMBY_VERSION="$(printf '%s' "$EMBY_JSON" | grep -oP '"tag_name":\s*"\K[^"]+' | head -1 || true)"
+EMBY_VERSION="${EMBY_VERSION:-4.8.10.0}"
+EMBY_URL="$(printf '%s' "$EMBY_JSON" | grep -oP '"browser_download_url":\s*"\K[^"]*emby-server-deb_[^"]*_'${EMBY_ARCH}'\.deb' | head -1 || true)"
 
 if [[ -z "$EMBY_URL" ]]; then
-    log "Could not parse API download URL, attempting fallback to known latest..."
-    EMBY_VERSION=$(curl -sL https://api.github.com/repos/MediaBrowser/Emby.Releases/releases/latest | grep -oP '"tag_name": "\K[^"]+')
-    EMBY_URL="https://github.com/MediaBrowser/Emby.Releases/releases/download/${EMBY_VERSION}/emby-server-deb_${EMBY_VERSION}_amd64.deb"
+    EMBY_URL="https://github.com/MediaBrowser/Emby.Releases/releases/download/${EMBY_VERSION}/emby-server-deb_${EMBY_VERSION}_${EMBY_ARCH}.deb"
 fi
 
-mkdir -p /tmp/AetherFlow
-cd /tmp/AetherFlow
-curl -sL "$EMBY_URL" -o emby-server.deb >>"$LOGFILE" 2>&1
+report_progress 50 "Downloading Emby Server ${EMBY_VERSION}..."
+TMP_DEB=$(mktemp /tmp/emby-XXXXXX.deb)
+curl -fsSL "$EMBY_URL" -o "$TMP_DEB" >> "$LOGFILE" 2>&1
 
-# ── Install Package ──────────────────────────────────────────────────────────
-log "Installing Emby dpkg..."
-dpkg -i emby-server.deb >>"$LOGFILE" 2>&1 || apt-get install -y -f >>"$LOGFILE" 2>&1
-rm -f emby-server.deb
+report_progress 75 "Installing Emby Server package..."
+DEBIAN_FRONTEND=noninteractive dpkg -i "$TMP_DEB" >> "$LOGFILE" 2>&1 || DEBIAN_FRONTEND=noninteractive apt-get install -f -y -qq >> "$LOGFILE" 2>&1
+rm -f "$TMP_DEB"
 
-# ── Create emby system configuration ─────────────────────────────────────────
-if ! id -u emby &>/dev/null; then
-    useradd -r -s /usr/sbin/nologin -d /var/lib/emby emby || true
-fi
+mkdir -p /opt/emby-server /var/lib/emby/config
+printf '%s\n' "${EMBY_VERSION#v}" > /opt/emby-server/.af-version
 
-# ── Apache reverse proxy ─────────────────────────────────────────────────────
-log "Configuring Apache reverse proxy..."
-cat > /etc/apache2/sites-enabled/emby.conf <<'EOF'
-<Location /emby>
-    ProxyPass http://localhost:8096/emby
-    ProxyPassReverse http://localhost:8096/emby
-</Location>
+if [[ -f /var/lib/emby/config/system.xml ]]; then
+    sed -i 's|<HttpServerPortNumber>.*</HttpServerPortNumber>|<HttpServerPortNumber>8097</HttpServerPortNumber>|g' /var/lib/emby/config/system.xml
+    sed -i 's|<PublicPort>.*</PublicPort>|<PublicPort>8097</PublicPort>|g' /var/lib/emby/config/system.xml
+else
+    cat <<'EOF' > /var/lib/emby/config/system.xml
+<?xml version="1.0"?>
+<ServerConfiguration xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+  <HttpServerPortNumber>8097</HttpServerPortNumber>
+  <PublicPort>8097</PublicPort>
+</ServerConfiguration>
 EOF
-chown www-data:www-data /etc/apache2/sites-enabled/emby.conf
-a2enmod proxy proxy_http >>/dev/null 2>&1
-service apache2 reload >>"$LOGFILE" 2>&1
+fi
+chown -R emby:emby /var/lib/emby 2>/dev/null || true
 
-# ── Finalize ─────────────────────────────────────────────────────────────────
-systemctl enable emby-server >>"$LOGFILE" 2>&1
-systemctl restart emby-server >>"$LOGFILE" 2>&1
+report_progress 90 "Starting and enabling emby-server service on port 8097..."
+systemctl daemon-reload >> "$LOGFILE" 2>&1
+systemctl enable --now emby-server >> "$LOGFILE" 2>&1
+systemctl restart emby-server >> "$LOGFILE" 2>&1 || true
 
-touch /install/.emby.lock
-log "Emby installation complete! Access at http://your-server:8096"
+write_lock "${PACKAGE_NAME}"
+report_progress 100 "Emby Server installed on port 8097."
+log_info "${PACKAGE_NAME} installed successfully"

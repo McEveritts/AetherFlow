@@ -1,23 +1,32 @@
 #!/bin/bash
-#
-# [AetherFlow :: Remove readarr]
-#
-source /opt/AetherFlow/packages/common.sh
-set -e
+# AetherFlow Package Uninstaller: Readarr
 
-LOGFILE="/opt/AetherFlow/logs/installer.log"
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [remove-readarr] $1" | tee -a "$LOGFILE"; }
+set -euo pipefail
 
-log "Stopping readarr..."
-systemctl stop readarr 2>/dev/null || true
-systemctl disable readarr 2>/dev/null || true
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
+fi
 
-log "Removing readarr files and configuration..."
-rm -rf /opt/Readarr /var/lib/readarr /etc/systemd/system/readarr.service /etc/apache2/sites-enabled/readarr.conf
-userdel readarr 2>/dev/null || true
+PACKAGE_NAME="readarr"
+export LOGFILE="/var/log/aetherflow/remove-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")"
 
-systemctl daemon-reload 2>/dev/null || true
-service apache2 reload 2>/dev/null || true
-rm -f /install/.readarr.lock
+require_root
+log_info "Starting removal for ${PACKAGE_NAME}..."
+report_progress 25 "Stopping and removing readarr.service..."
 
-log "readarr has been completely removed."
+purge_systemd_unit "readarr"
+
+report_progress 65 "Removing Readarr binaries, state directories, and user account..."
+rm -rf /opt/Readarr /var/lib/readarr
+purge_system_user "readarr"
+systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
+
+remove_lock "${PACKAGE_NAME}"
+report_progress 100 "Readarr completely removed."
+log_info "${PACKAGE_NAME} removed successfully"

@@ -1,0 +1,33 @@
+#!/bin/bash
+# AetherFlow Package Uninstaller: Unpackerr
+
+set -euo pipefail
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
+fi
+
+PACKAGE_NAME="unpackerr"
+export LOGFILE="/var/log/aetherflow/remove-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")"
+
+require_root
+log_info "Starting removal for ${PACKAGE_NAME}..."
+report_progress 25 "Stopping and removing unpackerr.service..."
+
+purge_systemd_unit "unpackerr"
+
+report_progress 65 "Removing Unpackerr binary, configuration, and state directories..."
+rm -f /usr/local/bin/unpackerr
+rm -rf /etc/unpackerr /var/lib/unpackerr /opt/unpackerr
+purge_system_user "unpackerr"
+systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
+
+remove_lock "${PACKAGE_NAME}"
+report_progress 100 "Unpackerr completely removed."
+log_info "${PACKAGE_NAME} removed successfully"

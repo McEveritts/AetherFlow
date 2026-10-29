@@ -1,0 +1,85 @@
+#!/bin/bash
+# AetherFlow Package Installer: ruTorrent
+# Port: 8087
+
+set -euo pipefail
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
+fi
+
+PACKAGE_NAME="rutorrent"
+export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")" /install
+
+require_root
+log_info "Starting installation for ${PACKAGE_NAME}..."
+report_progress 15 "Installing Apache, PHP, and media utility dependencies for ruTorrent..."
+
+DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+    apache2 libapache2-mod-php git curl unzip unrar-free mediainfo sox ca-certificates \
+    php php-cli php-fpm php-sqlite3 php-curl php-zip php-xml php-mbstring php-gd >> "$LOGFILE" 2>&1
+
+report_progress 40 "Cloning ruTorrent repository to /var/www/rutorrent..."
+rm -rf /var/www/rutorrent /srv/rutorrent
+git clone --depth 1 https://github.com/Novik/ruTorrent.git /var/www/rutorrent >> "$LOGFILE" 2>&1
+ln -sfn /var/www/rutorrent /srv/rutorrent
+
+RUT_TAG="$(git -C /var/www/rutorrent describe --tags --abbrev=0 2>/dev/null || true)"
+if [[ -n "$RUT_TAG" ]]; then
+    printf '%s\n' "${RUT_TAG#v}" > /var/www/rutorrent/.af-version
+fi
+
+report_progress 65 "Configuring ruTorrent SCGI connection parameters..."
+if [[ -f /var/www/rutorrent/conf/config.php ]]; then
+    sed -i 's/\$scgi_port\s*=\s*[0-9]*;/\$scgi_port = 15000;/' /var/www/rutorrent/conf/config.php
+    sed -i 's/\$scgi_host\s*=\s*"[^"]*";/\$scgi_host = "127.0.0.1";/' /var/www/rutorrent/conf/config.php
+fi
+
+mkdir -p /var/www/rutorrent/share/torrents \
+         /var/www/rutorrent/share/users \
+         /var/www/rutorrent/share/settings
+
+chown -R www-data:www-data /var/www/rutorrent /srv/rutorrent
+chmod -R 775 /var/www/rutorrent
+
+report_progress 85 "Configuring Apache VirtualHost on port 8087..."
+if ! grep -q "^Listen 8087$" /etc/apache2/ports.conf 2>/dev/null; then
+    echo "Listen 8087" >> /etc/apache2/ports.conf
+fi
+
+cat <<'EOF' > /etc/apache2/sites-available/rutorrent.conf
+Alias /rutorrent "/var/www/rutorrent"
+
+<Directory /var/www/rutorrent>
+    Options FollowSymLinks
+    AllowOverride All
+    Require all granted
+    DirectoryIndex index.php index.html
+</Directory>
+
+<VirtualHost *:8087>
+    DocumentRoot /var/www/rutorrent
+    <Directory /var/www/rutorrent>
+        Options FollowSymLinks
+        AllowOverride All
+        Require all granted
+        DirectoryIndex index.php index.html
+    </Directory>
+</VirtualHost>
+EOF
+
+a2enmod rewrite headers env dir mime >> "$LOGFILE" 2>&1
+a2ensite rutorrent.conf >> "$LOGFILE" 2>&1
+systemctl enable --now apache2 >> "$LOGFILE" 2>&1
+systemctl reload apache2 >> "$LOGFILE" 2>&1 || systemctl restart apache2 >> "$LOGFILE" 2>&1
+
+write_lock "${PACKAGE_NAME}"
+report_progress 100 "ruTorrent installed on port 8087."
+log_info "${PACKAGE_NAME} installed successfully"

@@ -1,4 +1,5 @@
 #!/bin/bash
+set -e
 
 _af_ensure_path_entry() {
     local path_entry="$1"
@@ -96,19 +97,55 @@ _install_node() {
 
     _af_ensure_path_entry "/usr/local/nodejs/bin" 'export PATH=/usr/local/nodejs/bin:$PATH'
 
-    if ! command -v pm2 >/dev/null 2>&1; then
-        npm install -g pm2 || return 1
-    fi
-
     _af_cleanup_runtime_cache
 }
 
 _build_modern_stack() {
-    local backend_pid=""
-    local frontend_pid=""
     local have_backend=false
     local have_frontend=false
 
+    # ── Build Frontend with Static Export ────────────────────────────────
+    if [ -d "/opt/AetherFlow/frontend" ]; then
+        have_frontend=true
+        local frontend_build_log="/tmp/aetherflow-frontend-build.log"
+        (
+            cd /opt/AetherFlow/frontend || exit 1
+            export PATH="/usr/local/nodejs/bin:${PATH}"
+            # Increase heap for low-memory VMs (default V8 limit can OOM on 1GB boxes)
+            export NODE_OPTIONS="${NODE_OPTIONS:+${NODE_OPTIONS} }--max-old-space-size=1024"
+            export NEXT_STATIC_EXPORT=1
+
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Starting npm install ..." >> "${frontend_build_log}" 2>&1
+            if ! npm install --no-fund --no-audit >> "${frontend_build_log}" 2>&1; then
+                echo "[FAIL] npm install failed. See ${frontend_build_log}" >&2
+                exit 1
+            fi
+
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Starting Next.js static export build ..." >> "${frontend_build_log}" 2>&1
+            if ! NEXT_STATIC_EXPORT=1 npm run build >> "${frontend_build_log}" 2>&1; then
+                echo "[FAIL] npm run build failed. See ${frontend_build_log}" >&2
+                exit 1
+            fi
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Frontend build completed successfully." >> "${frontend_build_log}" 2>&1
+        ) || {
+            echo ""
+            echo "══════════════════════════════════════════════════════════"
+            echo "  Frontend build failed. Dumping last 50 lines of log:"
+            echo "══════════════════════════════════════════════════════════"
+            tail -n 50 "${frontend_build_log}" 2>/dev/null || true
+            echo "══════════════════════════════════════════════════════════"
+            return 1
+        }
+
+        # Populate backend/web/dist for single-binary embedding
+        mkdir -p /opt/AetherFlow/backend/web/dist
+        rm -rf /opt/AetherFlow/backend/web/dist/*
+        if [ -d "/opt/AetherFlow/frontend/out" ]; then
+            cp -r /opt/AetherFlow/frontend/out/* /opt/AetherFlow/backend/web/dist/
+        fi
+    fi
+
+    # ── Compile Go Single Binary with Embedded UI Assets ─────────────────
     if [ -d "/opt/AetherFlow/backend" ]; then
         have_backend=true
         (
@@ -118,7 +155,6 @@ _build_modern_stack() {
             # go-sqlite3 requires CGO (gcc)
             _af_apt_install gcc build-essential || exit 1
 
-            # Fix #5: Ensure backend data directory exists (not dashboard/db)
             mkdir -p /opt/AetherFlow/backend/data
 
             export GOOS=linux
@@ -127,55 +163,10 @@ _build_modern_stack() {
             /usr/local/go/bin/go build -o aetherflow-api main.go || exit 1
             /usr/local/go/bin/go clean -cache -modcache -testcache >/dev/null 2>&1 || true
             rm -rf /tmp/go-build /root/.cache/go-build /root/go/pkg/mod "${AF_RUNTIME_CACHE_DIR}"
-        ) &
-        backend_pid=$!
-    fi
-
-    if [ -d "/opt/AetherFlow/frontend" ]; then
-        have_frontend=true
-        local frontend_build_log="/tmp/aetherflow-frontend-build.log"
-        (
-            cd /opt/AetherFlow/frontend || exit 1
-            export PATH="/usr/local/nodejs/bin:${PATH}"
-            # Increase heap for low-memory VMs (default V8 limit can OOM on 1GB boxes)
-            export NODE_OPTIONS="${NODE_OPTIONS:+${NODE_OPTIONS} }--max-old-space-size=1024"
-
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Starting npm install ..." >> "${frontend_build_log}" 2>&1
-            if ! npm install --no-fund --no-audit >> "${frontend_build_log}" 2>&1; then
-                echo "[FAIL] npm install failed. See ${frontend_build_log}" >&2
-                exit 1
-            fi
-
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Starting npm run build ..." >> "${frontend_build_log}" 2>&1
-            if ! npm run build >> "${frontend_build_log}" 2>&1; then
-                echo "[FAIL] npm run build failed. See ${frontend_build_log}" >&2
-                exit 1
-            fi
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Frontend build completed successfully." >> "${frontend_build_log}" 2>&1
-        ) &
-        frontend_pid=$!
-    fi
-
-    local parallel_ok=true
-    if [[ "${have_backend}" == "true" && "${have_frontend}" == "true" ]]; then
-        _af_parallel_wait "${backend_pid}" "${frontend_pid}" || parallel_ok=false
-    elif [[ "${have_backend}" == "true" ]]; then
-        wait "${backend_pid}" || parallel_ok=false
-    elif [[ "${have_frontend}" == "true" ]]; then
-        wait "${frontend_pid}" || parallel_ok=false
-    fi
-
-    if [[ "${parallel_ok}" == "false" ]]; then
-        echo ""
-        echo "══════════════════════════════════════════════════════════"
-        echo "  Build failed. Dumping last 50 lines of build logs:"
-        echo "══════════════════════════════════════════════════════════"
-        if [[ -f "/tmp/aetherflow-frontend-build.log" ]]; then
-            echo "── Frontend build log (/tmp/aetherflow-frontend-build.log):"
-            tail -n 50 /tmp/aetherflow-frontend-build.log
-        fi
-        echo "══════════════════════════════════════════════════════════"
-        return 1
+        ) || {
+            echo "Backend compilation failed." >&2
+            return 1
+        }
     fi
 
     # ── Create system user for systemd services ──────────────────────────
@@ -183,28 +174,17 @@ _build_modern_stack() {
         useradd --system --no-create-home --shell /usr/sbin/nologin aetherflow || true
     fi
 
-    # Fix #10: Ensure aetherflow user has sudo privileges for marketplace operations
-    # Allows the Go backend to trigger installation scripts and manage services.
-    if [[ ! -f /etc/sudoers.d/aetherflow ]]; then
-        echo "aetherflow ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/aetherflow
-        chmod 0440 /etc/sudoers.d/aetherflow
-    fi
+    # Enforce Least-Privilege Boundary: Remove legacy sudoers permissions
+    rm -f /etc/sudoers.d/aether* 2>/dev/null || true
 
-    # Fix #6: chown frontend/.next so the aetherflow user can start Next.js
-    if [[ "${have_frontend}" == "true" ]]; then
-        chown -R aetherflow:aetherflow /opt/AetherFlow/frontend/.next 2>/dev/null || true
-    fi
-
-    # Fix #5: Ensure backend data dir is owned by the service user
+    # Ensure backend data dir is owned by the service user
     if [[ "${have_backend}" == "true" ]]; then
         chown -R aetherflow:aetherflow /opt/AetherFlow/backend/data 2>/dev/null || true
     fi
 
     # ── Generate cryptographic keys ──────────────────────────────────────
-    # Fix #5: AES_MASTER_KEY must be exactly 32 bytes of printable ASCII
     local aes_key
     aes_key="$(head -c 32 /dev/urandom | tr -dc 'A-Za-z0-9' | head -c 32)"
-    # Pad if tr reduced output below 32 chars (extremely unlikely)
     while [[ ${#aes_key} -lt 32 ]]; do
         aes_key="${aes_key}$(head -c 4 /dev/urandom | tr -dc 'A-Za-z0-9' | head -c 1)"
     done
@@ -213,26 +193,57 @@ _build_modern_stack() {
     jwt_secret="$(head -c 64 /dev/urandom | tr -dc 'A-Za-z0-9' | head -c 64)"
 
     # ── Detect host IPs for ALLOWED_HOSTS / CORS ──────────────────────────
-    # Fix #8: Inject the host's actual LAN IP so HostValidationMiddleware passes
     local host_ip
     host_ip="$(ip route get 8.8.8.8 2>/dev/null | awk 'NR==1 {print $7}')"
     [[ -z "${host_ip}" ]] && host_ip="127.0.0.1"
 
-    # Public-IP fix: Also detect the public IP for remote access
     local public_ip=""
     public_ip="$(curl -4 -s --max-time 5 https://api.ipify.org 2>/dev/null || true)"
     if [[ -n "${public_ip}" ]]; then
         echo "Detected public IP: ${public_ip}"
     fi
-    # Fallback: if public IP matches LAN IP or is empty, clear it
     if [[ "${public_ip}" == "${host_ip}" ]]; then
         public_ip=""
     fi
 
+    # ── Hardened Environment File (/etc/aetherflow/aetherflow.env) ────────
+    mkdir -p /etc/aetherflow
+    chmod 0750 /etc/aetherflow
+    chown root:aetherflow /etc/aetherflow 2>/dev/null || true
+
+    local cors_origins="http://localhost:8080,http://127.0.0.1:8080"
+    local allowed_hosts="localhost:8080,127.0.0.1:8080"
+    if [[ -n "${host_ip}" && "${host_ip}" != "127.0.0.1" ]]; then
+        cors_origins="${cors_origins},http://${host_ip}:8080"
+        allowed_hosts="${allowed_hosts},${host_ip}:8080"
+    fi
+    if [[ -n "${public_ip}" ]]; then
+        cors_origins="${cors_origins},http://${public_ip}:8080"
+        allowed_hosts="${allowed_hosts},${public_ip}:8080"
+    fi
+
+    cat > /etc/aetherflow/aetherflow.env <<EOF
+AES_MASTER_KEY=${aes_key}
+JWT_SECRET=${jwt_secret}
+PORT=8080
+BIND_ADDR=0.0.0.0
+ALLOWED_HOSTS=${allowed_hosts}
+ALLOWED_CORS_ORIGIN=${cors_origins}
+AETHERFLOW_DB_PATH=/opt/AetherFlow/backend/data/aetherflow.sqlite
+AETHERFLOW_RUNNER_SOCK=/run/aetherflow/runner.sock
+PRIVILEGED_RUNNER_ENABLED=true
+COOKIE_SECURE=false
+GIN_MODE=release
+EOF
+    chmod 0640 /etc/aetherflow/aetherflow.env
+    chown root:aetherflow /etc/aetherflow/aetherflow.env 2>/dev/null || true
+
     # ── Install systemd unit files from templates ────────────────────────
     local sysd_dir="/opt/AetherFlow/setup/templates/sysd"
+    if [[ -f "${sysd_dir}/aetherflow-runner.template" ]]; then
+        cp "${sysd_dir}/aetherflow-runner.template" /etc/systemd/system/aetherflow-runner.service
+    fi
     if [[ -f "${sysd_dir}/aetherflow-api.template" ]]; then
-        # Build public IP substitution — empty string if not detected
         local public_ip_sed=""
         if [[ -n "${public_ip}" ]]; then
             public_ip_sed="${public_ip}"
@@ -242,30 +253,23 @@ _build_modern_stack() {
             -e "s|__HOST_IP__|${host_ip}|g" \
             -e "s|__PUBLIC_IP__|${public_ip_sed}|g" \
             "${sysd_dir}/aetherflow-api.template" > /etc/systemd/system/aetherflow-api.service
-        # Clean up any leftover empty entries from missing public IP
         if [[ -z "${public_ip}" ]]; then
-            sed -i 's/,:8080//g; s/,http:\/\/:3000//g' /etc/systemd/system/aetherflow-api.service
+            sed -i 's/,:8080//g; s/,http:\/\/:8080//g; s/,http:\/\/:3000//g' /etc/systemd/system/aetherflow-api.service
         fi
     fi
-    if [[ -f "${sysd_dir}/aetherflow-frontend.template" ]]; then
-        cp "${sysd_dir}/aetherflow-frontend.template" /etc/systemd/system/aetherflow-frontend.service
-    fi
+
+    # Purge legacy frontend service unit if present
+    rm -f /etc/systemd/system/aetherflow-front*.service 2>/dev/null || true
     systemctl daemon-reload 2>/dev/null || true
 
-    # ── Legacy PM2 start (kept for backward compat) ──────────────────────
-    if [[ "${have_backend}" == "true" ]]; then
-        cd /opt/AetherFlow/backend || return 1
-        pm2 delete "aetherflow-api" 2>/dev/null
-        pm2 start ./aetherflow-api --name "aetherflow-api" || return 1
+    # Clean up any legacy PM2 processes
+    if command -v pm2 >/dev/null 2>&1; then
+        pm2 delete "aetherflow-api" "aetherflow-frontend" 2>/dev/null || true
+        pm2 save 2>/dev/null || true
     fi
 
-    if [[ "${have_frontend}" == "true" ]]; then
-        cd /opt/AetherFlow/frontend || return 1
-        pm2 delete "aetherflow-frontend" 2>/dev/null
-        pm2 start npm --name "aetherflow-frontend" -- start || return 1
-    fi
-
-    pm2 save || return 1
-    pm2 startup systemd -u root --hp /root || return 1
+    # Enable modern systemd units
+    systemctl enable aetherflow-runner.service >/dev/null 2>&1 || true
+    systemctl enable aetherflow-api.service >/dev/null 2>&1 || true
 }
 

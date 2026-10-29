@@ -1,91 +1,85 @@
 #!/bin/bash
-#
-# [AetherFlow :: Install Overseerr]
-# Request management and media discovery for Plex
-#
-# Author : McEveritts
-# URL    : https://AetherFlow.io
-# License: GPL-3.0
-#
-source /opt/AetherFlow/packages/common.sh
+# AetherFlow Package Installer: Overseerr
+# Port: 5056
+
 set -euo pipefail
 
-# Override common.sh LOGFILE for this specific package
-export LOGFILE="/opt/AetherFlow/logs/installer.log"
-mkdir -p "$(dirname "$LOGFILE")"
-
-# We use print_info to ensure output is visible to the backend installer
-log() { print_info "[$APP_ID] $1"; }
-APP_ID="overseerr"
-
-# ── Dependencies ──────────────────────────────────────────────────────────────
-log "Installing Node.js (if not present)..."
-if ! command -v node &>/dev/null; then
-    fetch_and_run "https://deb.nodesource.com/setup_20.x" "SKIP" - >>"$LOGFILE" 2>&1
-    apt-get install -y nodejs >>"$LOGFILE" 2>&1
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
 fi
 
-log "Installing build dependencies..."
-apt-get install -y git >>"$LOGFILE" 2>&1
+PACKAGE_NAME="overseerr"
+export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")" /install
 
-# ── Install Overseerr ─────────────────────────────────────────────────────────
-log "Cloning Overseerr repository..."
-if [[ -d /opt/overseerr ]]; then
-    rm -rf /opt/overseerr
+require_root
+log_info "Starting installation for ${PACKAGE_NAME}..."
+report_progress 10 "Installing system and Node.js prerequisites for Overseerr..."
+
+DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl git gnupg ca-certificates build-essential python3 >> "$LOGFILE" 2>&1
+
+ensure_node 20
+if ! command_exists yarn; then
+    npm install -g yarn >> "$LOGFILE" 2>&1
 fi
-git clone https://github.com/sct/overseerr.git /opt/overseerr >>"$LOGFILE" 2>&1
+
+if ! id -u overseerr >/dev/null 2>&1; then
+    useradd --system --user-group --create-home --home-dir /var/lib/overseerr --shell /usr/sbin/nologin overseerr
+fi
+
+mkdir -p /var/lib/overseerr
+
+report_progress 30 "Cloning Overseerr repository..."
+rm -rf /opt/overseerr
+git clone https://github.com/sct/overseerr.git /opt/overseerr >> "$LOGFILE" 2>&1
 cd /opt/overseerr
-
-log "Installing Overseerr npm dependencies (this may take several minutes)..."
-npm install --production >>"$LOGFILE" 2>&1
-
-log "Building Overseerr..."
-npx next build >>"$LOGFILE" 2>&1
-
-# ── Create dedicated user ────────────────────────────────────────────────────
-if ! id -u overseerr &>/dev/null; then
-    useradd -r -s /usr/sbin/nologin -d /opt/overseerr overseerr
+LATEST_TAG="$(git describe --tags "$(git rev-list --tags --max-count=1)" 2>/dev/null || true)"
+if [[ -n "$LATEST_TAG" ]]; then
+    git checkout "$LATEST_TAG" >> "$LOGFILE" 2>&1 || true
+    printf '%s\n' "${LATEST_TAG#v}" > /opt/overseerr/.af-version
 fi
-chown -R overseerr:overseerr /opt/overseerr
 
-# ── Systemd service ──────────────────────────────────────────────────────────
-log "Creating systemd service..."
-cat > /etc/systemd/system/overseerr.service <<'EOF'
+report_progress 55 "Installing Overseerr dependencies and building production bundle..."
+export CYPRESS_INSTALL_BINARY=0
+yarn install --ignore-engines --frozen-lockfile --network-timeout 1000000 >> "$LOGFILE" 2>&1 || yarn install --ignore-engines --network-timeout 1000000 >> "$LOGFILE" 2>&1
+yarn build >> "$LOGFILE" 2>&1
+
+chown -R overseerr:overseerr /opt/overseerr /var/lib/overseerr
+
+NODE_BIN="$(command -v node || echo /usr/bin/node)"
+
+report_progress 85 "Configuring and starting overseerr.service on port 5056..."
+cat <<EOF > /etc/systemd/system/overseerr.service
 [Unit]
-Description=Overseerr - Request management for Plex
-After=network.target
+Description=Overseerr Service
+Wants=network-online.target
+After=network-online.target
 
 [Service]
-Type=simple
 User=overseerr
 Group=overseerr
 WorkingDirectory=/opt/overseerr
-ExecStart=/usr/bin/node /opt/overseerr/dist/index.js
-Restart=on-failure
-RestartSec=10
 Environment=NODE_ENV=production
-Environment=PORT=5055
+Environment=PORT=5056
+Environment=CONFIG_DIRECTORY=/var/lib/overseerr
+Type=simple
+Restart=on-failure
+RestartSec=5
+ExecStart=${NODE_BIN} dist/index.js
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reload
-systemctl enable overseerr.service >>"$LOGFILE" 2>&1
-systemctl start overseerr.service
+systemctl daemon-reload >> "$LOGFILE" 2>&1
+systemctl enable --now overseerr >> "$LOGFILE" 2>&1
 
-# ── Apache reverse proxy ─────────────────────────────────────────────────────
-log "Configuring Apache reverse proxy..."
-cat > /etc/apache2/sites-enabled/overseerr.conf <<'EOF'
-<Location /overseerr>
-    ProxyPass http://localhost:5055/overseerr
-    ProxyPassReverse http://localhost:5055/overseerr
-</Location>
-EOF
-chown www-data:www-data /etc/apache2/sites-enabled/overseerr.conf
-a2enmod proxy proxy_http >>/dev/null 2>&1
-service apache2 reload >>"$LOGFILE" 2>&1
-
-# ── Finalize ─────────────────────────────────────────────────────────────────
-touch /install/.overseerr.lock
-log "Overseerr installation complete! Access at http://your-server:5055"
+write_lock "${PACKAGE_NAME}"
+report_progress 100 "Overseerr installed on port 5056."
+log_info "${PACKAGE_NAME} installed successfully"

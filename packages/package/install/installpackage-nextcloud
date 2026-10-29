@@ -1,119 +1,122 @@
 #!/bin/bash
-#
-# [Quick Box :: Install nextcloud package]
-#
-# GITHUB REPOS
-# GitHub _ packages  :   https://github.com/AetherFlow/AetherFlow_packages
-# LOCAL REPOS
-# Local _ packages   :   /etc/AetherFlow/packages
-# Author             :   AetherFlow.IO | liara
-# URL                :   https://AetherFlow.io
-#
-# AetherFlow Copyright (C) 2017 AetherFlow.io
-# Licensed under GNU General Public License v3.0 GPL-3 (in short)
-#
-#   You may copy, distribute and modify the software as long as you track
-#   changes/dates in source files. Any modifications to our software
-#   including (via compiler) GPL-licensed code must also be made available
-#   under the GPL along with build & install instructions.
+# AetherFlow Package Installer: Nextcloud
+# Port: 8088 (and Apache /nextcloud alias)
 
-inst=$(which mysql)
-ip=$(ip route get 8.8.8.8 | awk 'NR==1 {print $NF}')
+set -euo pipefail
 
-echo "Please choose a password for the nextcloud mysql user."
-read -s -p "Password: " 'nextpass'
-#Check for existing mysql and install if not found
-if [[ -n $inst ]]; then
-  echo -n -e "Existing mysql server detected!\n"
-  echo -n -e "Please enter mysql root password so that installation may continue:\n"
-  read -s -p "Password: " 'password'
-  echo -e "Please wait while nextcloud is installed ... "
-
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
 else
-  echo -n -e "No mysql server found! Setup will install. \n"
-  echo -n -e "Please enter a mysql root password \n"
-  while [ -z "$password" ]; do
-    read -s -p "Password: " 'pass1'
-    echo
-    read -s -p "Re-enter password to verify: " 'pass2'
-    if [ $pass1 = $pass2 ]; then
-       password=$pass1
-    else
-       echo
-       echo "Passwords do not match"
-    fi
-  done
-  echo -e "Please wait while nextcloud is installed ... "
-  DEBIAN_FRONTEND=non‌​interactive apt-get -y install mariadb-server > /dev/null 2>&1
-  mysqladmin -u root password ${password}
-fi
-#Depends
-apt-get install -y -q php7.3-mysql libxml2-dev php7.3-common php7.3-gd php7.3-json php7.3-curl  php7.3-zip php7.3-xml php7.3-mbstring > /dev/null 2>&1
-a2enmod rewrite > /dev/null 2>&1
-cd /root
-wget -q https://download.nextcloud.com/server/releases/latest.zip > /dev/null 2>&1
-unzip latest.zip > /dev/null 2>&1
-mv nextcloud /srv
-
-#Set permissions as per nextcloud
-ocpath='/srv/nextcloud'
-htuser='www-data'
-htgroup='www-data'
-rootuser='root'
-
-mkdir -p $ocpath/data
-mkdir -p $ocpath/assets
-mkdir -p $ocpath/updater
-find ${ocpath}/ -type f -print0 | xargs -0 chmod 0640
-find ${ocpath}/ -type d -print0 | xargs -0 chmod 0750
-chown -R ${rootuser}:${htgroup} ${ocpath}/
-chown -R ${htuser}:${htgroup} ${ocpath}/apps/
-chown -R ${htuser}:${htgroup} ${ocpath}/assets/
-chown -R ${htuser}:${htgroup} ${ocpath}/config/
-chown -R ${htuser}:${htgroup} ${ocpath}/data/
-chown -R ${htuser}:${htgroup} ${ocpath}/themes/
-chown -R ${htuser}:${htgroup} ${ocpath}/updater/
-chmod +x ${ocpath}/occ
-if [ -f ${ocpath}/.htaccess ]
-then
- chmod 0644 ${ocpath}/.htaccess
- chown ${rootuser}:${htgroup} ${ocpath}/.htaccess
-fi
-if [ -f ${ocpath}/data/.htaccess ]
-then
- chmod 0644 ${ocpath}/data/.htaccess
- chown ${rootuser}:${htgroup} ${ocpath}/data/.htaccess
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
 fi
 
-cat > /etc/apache2/sites-enabled/nextcloud.conf <<EOF
-Alias /nextcloud "/srv/nextcloud/"
+PACKAGE_NAME="nextcloud"
+export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")" /install /opt/AetherFlow/logs
 
-<Directory /srv/nextcloud/>
- Options +FollowSymlinks
- AllowOverride All
- Require all granted
+require_root
+log_info "Starting installation for ${PACKAGE_NAME}..."
+report_progress 10 "Installing Apache, MariaDB, and PHP extensions for Nextcloud..."
 
-<IfModule mod_dav.c>
- Dav off
-</IfModule>
+DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+    apache2 mariadb-server libapache2-mod-php \
+    php php-cli php-mysql php-gd php-curl php-zip php-xml php-mbstring php-intl php-bcmath php-gmp \
+    unzip curl openssl ca-certificates >> "$LOGFILE" 2>&1
 
-SetEnv HOME /srv/nextcloud
-SetEnv HTTP_HOME /srv/nextcloud
+systemctl enable --now mariadb >> "$LOGFILE" 2>&1
+systemctl enable --now apache2 >> "$LOGFILE" 2>&1
 
-</Directory>
+report_progress 30 "Provisioning MariaDB database for Nextcloud..."
+DB_PASS="$(openssl rand -hex 16)"
+ADMIN_USER="admin"
+ADMIN_PASS="$(openssl rand -base64 12 | tr -dc 'a-zA-Z0-9' | head -c 14)"
+
+mysql -u root <<EOF >> "$LOGFILE" 2>&1
+CREATE DATABASE IF NOT EXISTS nextcloud CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+CREATE USER IF NOT EXISTS 'nextclouduser'@'localhost' IDENTIFIED BY '${DB_PASS}';
+ALTER USER 'nextclouduser'@'localhost' IDENTIFIED BY '${DB_PASS}';
+GRANT ALL PRIVILEGES ON nextcloud.* TO 'nextclouduser'@'localhost';
+FLUSH PRIVILEGES;
 EOF
 
-mysql --user="root" --password="$password" --execute="CREATE DATABASE nextcloud;"
-mysql --user="root" --password="$password" --execute="CREATE USER nextcloud@localhost IDENTIFIED BY '$nextpass';"
-mysql --user="root" --password="$password" --execute="GRANT ALL PRIVILEGES ON nextcloud.* TO nextcloud@localhost;"
-mysql --user="root" --password="$password" --execute="FLUSH PRIVILEGES;"
+report_progress 50 "Downloading and extracting latest Nextcloud Server..."
+TMP_ZIP=$(mktemp /tmp/nextcloud-XXXXXX.zip)
+curl -fsSL "https://download.nextcloud.com/server/releases/latest.zip" -o "$TMP_ZIP" >> "$LOGFILE" 2>&1
+rm -rf /var/www/nextcloud /var/lib/nextcloud/data
+mkdir -p /var/www /var/lib/nextcloud/data
+unzip -qo "$TMP_ZIP" -d /var/www >> "$LOGFILE" 2>&1
+rm -f "$TMP_ZIP"
 
-service apache2 reload
-rm -rf /root/nextcloud*
-touch /install/.nextcloud.lock
+chown -R www-data:www-data /var/www/nextcloud /var/lib/nextcloud
 
-echo -e "Visit https://${ip}/nextcloud to finish installation."
-echo -e "Database user: nextcloud"
-echo -e "Database password: ${nextpass}"
-echo -e "Database name: nextcloud"
+report_progress 75 "Running unattended Nextcloud initialization..."
+sudo -u www-data php /var/www/nextcloud/occ maintenance:install \
+    --database "mysql" \
+    --database-name "nextcloud" \
+    --database-user "nextclouduser" \
+    --database-pass "${DB_PASS}" \
+    --admin-user "${ADMIN_USER}" \
+    --admin-pass "${ADMIN_PASS}" \
+    --data-dir "/var/lib/nextcloud/data" >> "$LOGFILE" 2>&1
 
+PRIMARY_IP="$(hostname -I 2>/dev/null | awk '{print $1}' || echo 127.0.0.1)"
+sudo -u www-data php /var/www/nextcloud/occ config:system:set trusted_domains 0 --value="localhost" >> "$LOGFILE" 2>&1
+sudo -u www-data php /var/www/nextcloud/occ config:system:set trusted_domains 1 --value="127.0.0.1" >> "$LOGFILE" 2>&1
+sudo -u www-data php /var/www/nextcloud/occ config:system:set trusted_domains 2 --value="${PRIMARY_IP}" >> "$LOGFILE" 2>&1
+sudo -u www-data php /var/www/nextcloud/occ config:system:set trusted_domains 3 --value="$(hostname -f 2>/dev/null || hostname)" >> "$LOGFILE" 2>&1
+
+NC_VER="$(grep -oE "OC_VersionString = '[^']+'" /var/www/nextcloud/version.php 2>/dev/null | cut -d"'" -f2 || true)"
+if [[ -n "$NC_VER" ]]; then
+    printf '%s\n' "$NC_VER" > /var/www/nextcloud/.af-version
+fi
+
+cat <<EOF > /opt/AetherFlow/logs/nextcloud_credentials.txt
+Nextcloud Admin User: ${ADMIN_USER}
+Nextcloud Admin Pass: ${ADMIN_PASS}
+Database Name: nextcloud
+Database User: nextclouduser
+Database Pass: ${DB_PASS}
+EOF
+chmod 600 /opt/AetherFlow/logs/nextcloud_credentials.txt
+
+report_progress 90 "Configuring Apache VirtualHost on port 8088..."
+if ! grep -q "^Listen 8088$" /etc/apache2/ports.conf 2>/dev/null; then
+    echo "Listen 8088" >> /etc/apache2/ports.conf
+fi
+
+cat <<'EOF' > /etc/apache2/sites-available/nextcloud.conf
+Alias /nextcloud "/var/www/nextcloud/"
+
+<Directory /var/www/nextcloud/>
+    Require all granted
+    AllowOverride All
+    Options FollowSymLinks MultiViews
+    <IfModule mod_dav.c>
+        Dav off
+    </IfModule>
+</Directory>
+
+<VirtualHost *:8088>
+    DocumentRoot /var/www/nextcloud
+    <Directory /var/www/nextcloud/>
+        Require all granted
+        AllowOverride All
+        Options FollowSymLinks MultiViews
+        <IfModule mod_dav.c>
+            Dav off
+        </IfModule>
+    </Directory>
+</VirtualHost>
+EOF
+
+a2enmod rewrite headers env dir mime >> "$LOGFILE" 2>&1
+a2ensite nextcloud.conf >> "$LOGFILE" 2>&1
+systemctl reload apache2 >> "$LOGFILE" 2>&1 || systemctl restart apache2 >> "$LOGFILE" 2>&1
+
+write_lock "${PACKAGE_NAME}"
+report_progress 100 "Nextcloud installed on port 8088."
+log_info "${PACKAGE_NAME} installed successfully"

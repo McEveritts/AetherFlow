@@ -1,89 +1,108 @@
 #!/bin/bash
-#
-# [AetherFlow :: Install Gitea]
-# Painless self-hosted Git service
-#
-# Author : McEveritts
-# URL    : https://AetherFlow.io
-# License: GPL-3.0
-#
-set -e
+# AetherFlow Package Installer: Gitea
+# Port: 3002
 
-LOGFILE="/opt/AetherFlow/logs/installer.log"
-mkdir -p /opt/AetherFlow/logs /install
+set -euo pipefail
 
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [gitea] $1" | tee -a "$LOGFILE"; }
-
-# ── Dependencies ─────────────────────────────────────────────────────────────
-log "Installing dependencies..."
-apt-get update >>"$LOGFILE" 2>&1
-apt-get install -y git sqlite3 >>"$LOGFILE" 2>&1
-
-# ── Create gitea user ────────────────────────────────────────────────────────
-log "Creating gitea system user..."
-if ! id -u gitea &>/dev/null; then
-    adduser --system --shell /bin/bash --gecos 'Gitea' --group --disabled-password --home /home/gitea gitea >>"$LOGFILE" 2>&1
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
 fi
 
-# ── Download Gitea binary ────────────────────────────────────────────────────
-log "Downloading latest Gitea..."
+PACKAGE_NAME="gitea"
+export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")" /install
+
+require_root
+log_info "Starting installation for ${PACKAGE_NAME}..."
+report_progress 15 "Installing Git and SQLite dependencies for Gitea..."
+
+DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git curl sqlite3 ca-certificates >> "$LOGFILE" 2>&1
+
+if ! id -u gitea >/dev/null 2>&1; then
+    useradd --system --user-group --create-home --home-dir /var/lib/gitea --shell /bin/bash gitea
+fi
+
+mkdir -p /var/lib/gitea/{custom,data,log} /etc/gitea
+
 ARCH=$(dpkg --print-architecture)
+case "$ARCH" in
+    amd64) GITEA_ARCH="linux-amd64" ;;
+    arm64) GITEA_ARCH="linux-arm64" ;;
+    armhf) GITEA_ARCH="linux-arm-6" ;;
+    *) print_error "Unsupported architecture: $ARCH"; exit 1 ;;
+esac
 
-GITEA_VERSION=$(curl -sL https://api.github.com/repos/go-gitea/gitea/releases/latest | grep -oP '"tag_name": "v\K[^"]+')
-if [[ -z "$GITEA_VERSION" ]]; then
-    GITEA_VERSION="1.22.0"
-fi
+report_progress 40 "Resolving latest Gitea release (${GITEA_ARCH})..."
+GITEA_JSON="$(curl -fsSL https://api.github.com/repos/go-gitea/gitea/releases/latest 2>/dev/null || true)"
+GITEA_VERSION="$(printf '%s' "$GITEA_JSON" | grep -oP '"tag_name":\s*"v\K[^"]+' | head -1 || true)"
+GITEA_VERSION="${GITEA_VERSION:-1.22.3}"
+GITEA_URL="https://github.com/go-gitea/gitea/releases/download/v${GITEA_VERSION}/gitea-${GITEA_VERSION}-${GITEA_ARCH}"
 
-curl -sL "https://dl.gitea.com/gitea/${GITEA_VERSION}/gitea-${GITEA_VERSION}-linux-${ARCH}" -o /usr/local/bin/gitea >>"$LOGFILE" 2>&1
+report_progress 65 "Downloading Gitea ${GITEA_VERSION} binary..."
+curl -fsSL "$GITEA_URL" -o /usr/local/bin/gitea >> "$LOGFILE" 2>&1
 chmod +x /usr/local/bin/gitea
 
-# ── Create required directories ──────────────────────────────────────────────
-log "Setting up directories..."
-mkdir -p /etc/gitea /var/lib/gitea/{custom,data,log}
-chown -R gitea:gitea /var/lib/gitea
-chmod 750 /var/lib/gitea
-chown root:gitea /etc/gitea
-chmod 770 /etc/gitea
+if [[ ! -f /etc/gitea/app.ini ]]; then
+    cat <<'EOF' > /etc/gitea/app.ini
+APP_NAME = Gitea: Git with a cup of tea
+RUN_USER = gitea
+RUN_MODE = prod
+WORK_PATH = /var/lib/gitea
 
-# ── Systemd service ──────────────────────────────────────────────────────────
-log "Creating systemd service..."
-cat > /etc/systemd/system/gitea.service <<'EOF'
+[server]
+HTTP_ADDR = 0.0.0.0
+HTTP_PORT = 3002
+DOMAIN = localhost
+ROOT_URL = http://localhost:3002/
+
+[database]
+DB_TYPE = sqlite3
+PATH = /var/lib/gitea/data/gitea.db
+
+[log]
+MODE = console
+LEVEL = info
+ROOT_PATH = /var/lib/gitea/log
+EOF
+else
+    sed -i 's/^HTTP_PORT\s*=.*/HTTP_PORT = 3002/' /etc/gitea/app.ini || true
+fi
+
+chown -R gitea:gitea /var/lib/gitea
+chown -R root:gitea /etc/gitea
+chmod 770 /etc/gitea
+chmod 660 /etc/gitea/app.ini
+
+report_progress 85 "Configuring and starting gitea.service on port 3002..."
+cat <<'EOF' > /etc/systemd/system/gitea.service
 [Unit]
-Description=Gitea - Git with a cup of tea
-After=syslog.target network.target
+Description=Gitea (Git with a cup of tea)
+After=syslog.target
+After=network.target
 
 [Service]
+RestartSec=2s
 Type=simple
 User=gitea
 Group=gitea
-WorkingDirectory=/var/lib/gitea
-ExecStart=/usr/local/bin/gitea web --config /etc/gitea/app.ini
-Restart=on-failure
-RestartSec=10
-Environment=USER=gitea HOME=/home/gitea GITEA_WORK_DIR=/var/lib/gitea
+WorkingDirectory=/var/lib/gitea/
+ExecStart=/usr/local/bin/gitea web --config /etc/gitea/app.ini --port 3002
+Restart=always
+Environment=USER=gitea HOME=/var/lib/gitea GITEA_WORK_DIR=/var/lib/gitea
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reload
-systemctl enable gitea.service >>"$LOGFILE" 2>&1
-systemctl start gitea.service
+systemctl daemon-reload >> "$LOGFILE" 2>&1
+systemctl enable --now gitea >> "$LOGFILE" 2>&1
 
-# ── Apache reverse proxy ─────────────────────────────────────────────────────
-log "Configuring Apache reverse proxy..."
-cat > /etc/apache2/sites-enabled/gitea.conf <<'EOF'
-<Location /gitea>
-    ProxyPass http://localhost:3000
-    ProxyPassReverse http://localhost:3000
-    ProxyPreserveHost On
-</Location>
-EOF
-chown www-data:www-data /etc/apache2/sites-enabled/gitea.conf
-a2enmod proxy proxy_http >>/dev/null 2>&1
-service apache2 reload >>"$LOGFILE" 2>&1
-
-# ── Finalize ─────────────────────────────────────────────────────────────────
-touch /install/.gitea.lock
-log "Gitea installation complete! Access at http://your-server:3000"
-log "Complete setup via the web installer on first visit."
+write_lock "${PACKAGE_NAME}"
+report_progress 100 "Gitea installed on port 3002."
+log_info "${PACKAGE_NAME} installed successfully"

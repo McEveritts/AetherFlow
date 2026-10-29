@@ -1,0 +1,125 @@
+#!/bin/bash
+# AetherFlow Package Installer: AdGuard Home
+# Port: 3080
+
+set -euo pipefail
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
+fi
+
+PACKAGE_NAME="adguardhome"
+export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")" /install
+
+require_root
+log_info "Starting installation for ${PACKAGE_NAME}..."
+report_progress 10 "Installing prerequisites and preparing network environment..."
+
+DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl tar ca-certificates libcap2-bin >> "$LOGFILE" 2>&1
+
+# Resolve port 53 conflict with systemd-resolved if present
+if [[ -f /etc/systemd/resolved.conf ]]; then
+    if grep -q '^#*DNSStubListener=' /etc/systemd/resolved.conf 2>/dev/null; then
+        sed -i 's/^#*DNSStubListener=.*/DNSStubListener=no/' /etc/systemd/resolved.conf
+    else
+        printf '\n[Resolve]\nDNSStubListener=no\n' >> /etc/systemd/resolved.conf
+    fi
+    systemctl restart systemd-resolved >> "$LOGFILE" 2>&1 || true
+fi
+
+if ! id -u adguardhome >/dev/null 2>&1; then
+    useradd --system --user-group --no-create-home --home-dir /opt/AdGuardHome --shell /usr/sbin/nologin adguardhome
+fi
+
+mkdir -p /opt/AdGuardHome
+
+ARCH=$(dpkg --print-architecture)
+case "$ARCH" in
+    amd64) AGH_ARCH="linux_amd64" ;;
+    arm64) AGH_ARCH="linux_arm64" ;;
+    armhf) AGH_ARCH="linux_armv7" ;;
+    *) print_error "Unsupported architecture: $ARCH"; exit 1 ;;
+esac
+
+report_progress 35 "Resolving latest AdGuard Home release (${AGH_ARCH})..."
+AGH_JSON="$(curl -fsSL https://api.github.com/repos/AdguardTeam/AdGuardHome/releases/latest 2>/dev/null || true)"
+AGH_VERSION="$(printf '%s' "$AGH_JSON" | grep -oP '"tag_name":\s*"v\K[^"]+' | head -1 || true)"
+AGH_VERSION="${AGH_VERSION:-0.107.56}"
+AGH_URL="https://github.com/AdguardTeam/AdGuardHome/releases/download/v${AGH_VERSION}/AdGuardHome_${AGH_ARCH}.tar.gz"
+
+report_progress 60 "Downloading and extracting AdGuard Home ${AGH_VERSION}..."
+TMP_TAR=$(mktemp /tmp/agh-XXXXXX.tar.gz)
+if ! curl -fsSL "$AGH_URL" -o "$TMP_TAR" >> "$LOGFILE" 2>&1; then
+    # Fallback to static cdn URL
+    STATIC_URL="https://static.adguard.com/adguardhome/release/AdGuardHome_${AGH_ARCH}.tar.gz"
+    curl -fsSL "$STATIC_URL" -o "$TMP_TAR" >> "$LOGFILE" 2>&1
+fi
+
+tar -xzf "$TMP_TAR" -C /opt >> "$LOGFILE" 2>&1
+rm -f "$TMP_TAR"
+chmod +x /opt/AdGuardHome/AdGuardHome
+setcap 'cap_net_bind_service,cap_net_raw,cap_net_admin=+ep' /opt/AdGuardHome/AdGuardHome >> "$LOGFILE" 2>&1 || true
+printf '%s\n' "${AGH_VERSION#v}" > /opt/AdGuardHome/.af-version
+
+if [[ ! -f /opt/AdGuardHome/AdGuardHome.yaml ]]; then
+    cat <<'EOF' > /opt/AdGuardHome/AdGuardHome.yaml
+bind_host: 0.0.0.0
+bind_port: 3080
+auth_attempts: 5
+block_auth_min: 15
+http:
+  pprof:
+    port: 0
+    enabled: false
+  address: 0.0.0.0:3080
+  session_ttl: 720h
+users: []
+dns:
+  bind_hosts:
+    - 0.0.0.0
+  port: 53
+  upstream_dns:
+    - 1.1.1.1
+    - 8.8.8.8
+EOF
+fi
+
+chown -R adguardhome:adguardhome /opt/AdGuardHome
+
+report_progress 85 "Configuring and starting adguardhome.service on port 3080..."
+cat <<'EOF' > /etc/systemd/system/adguardhome.service
+[Unit]
+Description=AdGuard Home: Network-level HTTP & DNS Blocker
+ConditionFileIsExecutable=/opt/AdGuardHome/AdGuardHome
+After=syslog.target network-online.target
+Wants=network-online.target
+
+[Service]
+StartLimitInterval=5
+StartLimitBurst=10
+ExecStart=/opt/AdGuardHome/AdGuardHome -c /opt/AdGuardHome/AdGuardHome.yaml -w /opt/AdGuardHome
+WorkingDirectory=/opt/AdGuardHome
+User=adguardhome
+Group=adguardhome
+AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_RAW CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_RAW CAP_NET_ADMIN
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload >> "$LOGFILE" 2>&1
+systemctl enable --now adguardhome >> "$LOGFILE" 2>&1
+
+write_lock "${PACKAGE_NAME}"
+report_progress 100 "AdGuard Home installed on port 3080."
+log_info "${PACKAGE_NAME} installed successfully"

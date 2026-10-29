@@ -1,97 +1,80 @@
 #!/bin/bash
-#
-# [AetherFlow :: Install Lidarr]
-# Music collection manager for Usenet and BitTorrent
-#
-# Author : McEveritts
-# URL    : https://AetherFlow.io
-# License: GPL-3.0
-#
-set -e
+# AetherFlow Package Installer: Lidarr
+# Port: 8686
 
-LOGFILE="/opt/AetherFlow/logs/installer.log"
-mkdir -p /opt/AetherFlow/logs /install
+set -euo pipefail
 
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [lidarr] $1" | tee -a "$LOGFILE"; }
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
+fi
 
-# ── Dependencies ─────────────────────────────────────────────────────────────
-log "Installing dependencies..."
-apt-get update >>"$LOGFILE" 2>&1
-apt-get install -y curl sqlite3 libicu-dev chromaprint-tools >>"$LOGFILE" 2>&1
+PACKAGE_NAME="lidarr"
+export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")" /install
 
-# ── Download Lidarr ──────────────────────────────────────────────────────────
-log "Downloading latest Lidarr..."
+require_root
+log_info "Starting installation for ${PACKAGE_NAME}..."
+report_progress 10 "Installing dependencies for Lidarr..."
+
+DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl sqlite3 libicu-dev libchromaprint-tools mediainfo ca-certificates >> "$LOGFILE" 2>&1
+
+if ! id -u lidarr >/dev/null 2>&1; then
+    useradd --system --user-group --no-create-home --home-dir /var/lib/lidarr --shell /usr/sbin/nologin lidarr
+fi
+
+mkdir -p /var/lib/lidarr /opt/Lidarr
+
 ARCH=$(dpkg --print-architecture)
 case "$ARCH" in
     amd64) LIDARR_ARCH="x64" ;;
     arm64) LIDARR_ARCH="arm64" ;;
     armhf) LIDARR_ARCH="arm" ;;
-    *) LIDARR_ARCH="x64" ;;
+    *) print_error "Unsupported architecture: $ARCH"; exit 1 ;;
 esac
 
-mkdir -p /tmp/AetherFlow
-cd /tmp/AetherFlow
-curl -sL "https://lidarr.servarr.com/v1/update/master/updatefile?os=linux&runtime=netcore&arch=${LIDARR_ARCH}" -o lidarr.tar.gz >>"$LOGFILE" 2>&1
+report_progress 35 "Downloading Lidarr (${LIDARR_ARCH})..."
+LIDARR_VERSION="$(curl -fsSL https://api.github.com/repos/Lidarr/Lidarr/releases/latest 2>/dev/null | grep -oP '"tag_name":\s*"v?\K[^"]+' | head -1 || true)"
+TMP_TAR=$(mktemp /tmp/lidarr-XXXXXX.tar.gz)
+curl -fsSL "https://lidarr.servarr.com/v1/update/master/updatefile?os=linux&runtime=netcore&arch=${LIDARR_ARCH}" -o "$TMP_TAR" >> "$LOGFILE" 2>&1
 
-log "Extracting Lidarr..."
-rm -rf /opt/Lidarr
-tar -xzf lidarr.tar.gz -C /opt >>"$LOGFILE" 2>&1
-rm -f lidarr.tar.gz
-
-# ── Create lidarr user ───────────────────────────────────────────────────────
-if ! id -u lidarr &>/dev/null; then
-    useradd -r -s /usr/sbin/nologin -d /opt/Lidarr lidarr
+report_progress 65 "Extracting Lidarr to /opt/Lidarr..."
+tar -xzf "$TMP_TAR" -C /opt >> "$LOGFILE" 2>&1
+rm -f "$TMP_TAR"
+if [[ -n "$LIDARR_VERSION" ]]; then
+    printf '%s\n' "${LIDARR_VERSION#v}" > /opt/Lidarr/.af-version
 fi
-chown -R lidarr:lidarr /opt/Lidarr
-mkdir -p /var/lib/lidarr
-chown -R lidarr:lidarr /var/lib/lidarr
+chown -R lidarr:lidarr /opt/Lidarr /var/lib/lidarr
 
-# ── Systemd service ──────────────────────────────────────────────────────────
-log "Creating systemd service..."
-cat > /etc/systemd/system/lidarr.service <<'EOF'
+report_progress 85 "Configuring and starting lidarr.service..."
+cat <<'EOF' > /etc/systemd/system/lidarr.service
 [Unit]
-Description=Lidarr Music Manager
+Description=Lidarr Daemon
 After=syslog.target network.target
 
 [Service]
 User=lidarr
 Group=lidarr
 Type=simple
-ExecStart=/opt/Lidarr/Lidarr -nobrowser -data=/var/lib/lidarr/
-Restart=on-failure
-RestartSec=10
+ExecStart=/opt/Lidarr/Lidarr -nobrowser -data=/var/lib/lidarr
 TimeoutStopSec=20
 KillMode=process
-NoNewPrivileges=yes
-ProtectSystem=full
-ProtectHome=true
-PrivateTmp=yes
-PrivateDevices=yes
-ProtectKernelTunables=yes
-ProtectControlGroups=yes
-RestrictSUIDSGID=yes
-ReadWritePaths=/var/lib/lidarr
+Restart=on-failure
+NoNewPrivileges=true
+PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reload
-systemctl enable lidarr.service >>"$LOGFILE" 2>&1
-systemctl start lidarr.service
+systemctl daemon-reload >> "$LOGFILE" 2>&1
+systemctl enable --now lidarr >> "$LOGFILE" 2>&1
 
-# ── Apache reverse proxy ─────────────────────────────────────────────────────
-log "Configuring Apache reverse proxy..."
-cat > /etc/apache2/sites-enabled/lidarr.conf <<'EOF'
-<Location /lidarr>
-    ProxyPass http://localhost:8686/lidarr
-    ProxyPassReverse http://localhost:8686/lidarr
-</Location>
-EOF
-chown www-data:www-data /etc/apache2/sites-enabled/lidarr.conf
-a2enmod proxy proxy_http >>/dev/null 2>&1
-service apache2 reload >>"$LOGFILE" 2>&1
-
-# ── Finalize ─────────────────────────────────────────────────────────────────
-touch /install/.lidarr.lock
-log "Lidarr installation complete! Access at http://your-server:8686"
+write_lock "${PACKAGE_NAME}"
+report_progress 100 "Lidarr installed on port 8686."
+log_info "${PACKAGE_NAME} installed successfully"

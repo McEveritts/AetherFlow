@@ -1,35 +1,39 @@
 #!/bin/bash
-#
-# [Quick Box :: Unistall rclone]
-#
-# GITHUB REPOS
-# GitHub _ packages  :   https://github.com/AetherFlow/AetherFlow_packages
-# LOCAL REPOS
-# Local _ packages   :   /etc/AetherFlow/packages
-# Author             :   DedSec
-# URL                :   https://AetherFlow.io
-#
-# AetherFlow Copyright (C) 2017 AetherFlow.io
-# Licensed under GNU General Public License v3.0 GPL-3 (in short)
-#
-#   You may copy, distribute and modify the software as long as you track
-#   changes/dates in source files. Any modifications to our software
-#   including (via compiler) GPL-licensed code must also be made available
-#   under the GPL along with build & install instructions.
+# AetherFlow Package Uninstaller: Rclone
 
-source /opt/AetherFlow/packages/common.sh
-local_setup=/opt/AetherFlow/setup/
-OUTTO=$LOGFILE
-# LEGACY REMOVED: master.txt
-MASTER="$AETHERFLOW_USER"
+set -euo pipefail
 
-echo "Removing rclone ... " >>"${OUTTO}" 2>&1;
-  rm -f  /usr/sbin/rclone
-  rm -f /usr/bin/rclone
-  rm -f /install/.rclone.lock
-  
-echo "Rclone Uninstall complete!" >>"${OUTTO}" 2>&1;
-echo >>"${OUTTO}" 2>&1;
-echo >>"${OUTTO}" 2>&1;
-echo "Close this dialog box to refresh your browser" >>"${OUTTO}" 2>&1;
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
+fi
 
+PACKAGE_NAME="rclone"
+export LOGFILE="/var/log/aetherflow/remove-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")"
+
+require_root
+log_info "Starting removal for ${PACKAGE_NAME}..."
+report_progress 20 "Stopping and unmounting rclone-vfs.service..."
+
+purge_systemd_unit "rclone-vfs"
+if mountpoint -q /mnt/remote 2>/dev/null; then
+    fusermount -uz /mnt/remote >> "$LOGFILE" 2>&1 || true
+fi
+
+report_progress 50 "Stopping and removing rclone.service..."
+purge_systemd_unit "rclone"
+
+report_progress 75 "Removing rclone binary, state directories, and user account..."
+rm -f /usr/bin/rclone
+rm -rf /etc/rclone /var/lib/rclone
+purge_system_user "rclone"
+systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
+
+remove_lock "${PACKAGE_NAME}"
+report_progress 100 "Rclone completely removed."
+log_info "${PACKAGE_NAME} removed successfully"

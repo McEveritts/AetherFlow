@@ -1,23 +1,36 @@
 #!/bin/bash
-#
-# [AetherFlow :: Remove wireguard]
-#
-source /opt/AetherFlow/packages/common.sh
-set -e
+# AetherFlow Package Uninstaller: WireGuard
 
-LOGFILE="/opt/AetherFlow/logs/installer.log"
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [remove-wireguard] $1" | tee -a "$LOGFILE"; }
+set -euo pipefail
 
-log "Stopping wireguard..."
-systemctl stop wg-quick@wg0 2>/dev/null || true
-systemctl disable wg-quick@wg0 2>/dev/null || true
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
+fi
 
-log "Removing wireguard files and configuration..."
-apt-get remove -y wireguard wireguard-tools >/dev/null 2>&1 || true
-rm -rf /etc/wireguard
+PACKAGE_NAME="wireguard"
+export LOGFILE="/var/log/aetherflow/remove-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")"
 
-systemctl daemon-reload 2>/dev/null || true
-service apache2 reload 2>/dev/null || true
-rm -f /install/.wireguard.lock
+require_root
+log_info "Starting removal for ${PACKAGE_NAME}..."
+report_progress 20 "Stopping and disabling wg-quick@wg0 service..."
 
-log "wireguard has been completely removed."
+purge_systemd_unit "wg-quick@wg0"
+
+report_progress 50 "Purging WireGuard APT packages..."
+DEBIAN_FRONTEND=noninteractive apt-get purge -y -qq wireguard wireguard-tools >> "$LOGFILE" 2>&1 || true
+DEBIAN_FRONTEND=noninteractive apt-get autoremove -y -qq >> "$LOGFILE" 2>&1 || true
+
+report_progress 80 "Removing WireGuard keys, configuration, and sysctl rules..."
+rm -rf /etc/wireguard /etc/sysctl.d/99-wireguard.conf
+sysctl --system >> "$LOGFILE" 2>&1 || true
+systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
+
+remove_lock "${PACKAGE_NAME}"
+report_progress 100 "WireGuard completely removed."
+log_info "${PACKAGE_NAME} removed successfully"

@@ -1,23 +1,32 @@
 #!/bin/bash
-#
-# [AetherFlow :: Remove nzbget]
-#
-source /opt/AetherFlow/packages/common.sh
-set -e
+# AetherFlow Package Uninstaller: NZBGet
 
-LOGFILE="/opt/AetherFlow/logs/installer.log"
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [remove-nzbget] $1" | tee -a "$LOGFILE"; }
+set -euo pipefail
 
-log "Stopping nzbget..."
-systemctl stop nzbget 2>/dev/null || true
-systemctl disable nzbget 2>/dev/null || true
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
+fi
 
-log "Removing nzbget files and configuration..."
-rm -rf /opt/nzbget /etc/systemd/system/nzbget.service /etc/apache2/sites-enabled/nzbget.conf
-userdel nzbget 2>/dev/null || true
+PACKAGE_NAME="nzbget"
+export LOGFILE="/var/log/aetherflow/remove-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")"
 
-systemctl daemon-reload 2>/dev/null || true
-service apache2 reload 2>/dev/null || true
-rm -f /install/.nzbget.lock
+require_root
+log_info "Starting removal for ${PACKAGE_NAME}..."
+report_progress 25 "Stopping and removing nzbget.service..."
 
-log "nzbget has been completely removed."
+purge_systemd_unit "nzbget"
+
+report_progress 65 "Removing NZBGet binaries, state directories, and user account..."
+rm -rf /opt/nzbget /var/lib/nzbget /usr/local/share/nzbget /usr/local/bin/nzbget /etc/nzbget.conf
+purge_system_user "nzbget"
+systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
+
+remove_lock "${PACKAGE_NAME}"
+report_progress 100 "NZBGet completely removed."
+log_info "${PACKAGE_NAME} removed successfully"

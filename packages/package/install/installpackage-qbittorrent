@@ -1,91 +1,79 @@
 #!/bin/bash
-#
-# [AetherFlow :: Install qBittorrent]
-# Lightweight and feature-rich BitTorrent client
-#
-# Author : McEveritts
-# URL    : https://AetherFlow.io
-# License: GPL-3.0
-#
-set -e
+# AetherFlow Package Installer: qBittorrent (qbittorrent-nox)
+# Port: 8180
 
-LOGFILE="/opt/AetherFlow/logs/installer.log"
-mkdir -p /opt/AetherFlow/logs /install
+set -euo pipefail
 
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [qbittorrent] $1" | tee -a "$LOGFILE"; }
-
-# ── Install qBittorrent-nox ──────────────────────────────────────────────────
-log "Installing qBittorrent-nox (headless)..."
-apt-get update >>"$LOGFILE" 2>&1
-apt-get install -y qbittorrent-nox >>"$LOGFILE" 2>&1
-
-# ── Create qbittorrent user ─────────────────────────────────────────────────
-if ! id -u qbittorrent &>/dev/null; then
-    useradd -r -s /usr/sbin/nologin -m -d /home/qbittorrent qbittorrent
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
 fi
 
-# ── Create required directories ──────────────────────────────────────────────
-mkdir -p /home/qbittorrent/Downloads /home/qbittorrent/.config/qBittorrent
-chown -R qbittorrent:qbittorrent /home/qbittorrent
+PACKAGE_NAME="qbittorrent"
+export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")" /install
 
-# ── Initial configuration ────────────────────────────────────────────────────
-log "Writing initial configuration..."
-cat > /home/qbittorrent/.config/qBittorrent/qBittorrent.conf <<'EOF'
+require_root
+log_info "Starting installation for ${PACKAGE_NAME}..."
+report_progress 15 "Installing qbittorrent-nox via APT..."
+
+DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq qbittorrent-nox >> "$LOGFILE" 2>&1
+
+if ! id -u qbittorrent >/dev/null 2>&1; then
+    useradd --system --user-group --create-home --home-dir /var/lib/qbittorrent --shell /usr/sbin/nologin qbittorrent
+fi
+
+report_progress 55 "Configuring qBittorrent WebUI on port 8180..."
+mkdir -p /var/lib/qbittorrent/.config/qBittorrent /var/lib/qbittorrent/Downloads
+
+cat <<'EOF' > /var/lib/qbittorrent/.config/qBittorrent/qBittorrent.conf
+[LegalNotice]
+Accepted=true
+
 [Preferences]
 WebUI\Port=8180
-WebUI\Address=0.0.0.0
-WebUI\Username=admin
+WebUI\Address=*
+WebUI\ServerDomains=*
 WebUI\CSRFProtection=false
-Downloads\SavePath=/home/qbittorrent/Downloads
-Connection\PortRangeMin=6881
+WebUI\HostHeaderValidation=false
+WebUI\Username=admin
+WebUI\Password_PBKDF2="@ByteArray(ARQ77eY1NUZaQsuDHbIMCA==:0WMRkYTUWVT9wVvdDtHAjU9b3b7uB8NR1Gur2hmQCvCDpm39Q+PsJRJPaCU51dEiz+dTzh8qbPsL8WkFljQYFQ==)"
+Downloads\SavePath=/var/lib/qbittorrent/Downloads/
 EOF
-chown -R qbittorrent:qbittorrent /home/qbittorrent/.config
 
-# ── Systemd service ──────────────────────────────────────────────────────────
-log "Creating systemd service..."
-cat > /etc/systemd/system/qbittorrent.service <<'EOF'
+chown -R qbittorrent:qbittorrent /var/lib/qbittorrent
+
+report_progress 85 "Configuring and starting qbittorrent.service on port 8180..."
+cat <<'EOF' > /etc/systemd/system/qbittorrent.service
 [Unit]
 Description=qBittorrent-nox Daemon
-After=network.target
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
 User=qbittorrent
 Group=qbittorrent
-ExecStart=/usr/bin/qbittorrent-nox --webui-port=8180
+UMask=007
+Environment=HOME=/var/lib/qbittorrent
+ExecStart=/usr/bin/qbittorrent-nox --webui-port=8180 --profile=/var/lib/qbittorrent/.config
 Restart=on-failure
-RestartSec=5
-NoNewPrivileges=yes
-ProtectSystem=full
-ProtectHome=read-only
-PrivateTmp=yes
-PrivateDevices=yes
-ProtectKernelTunables=yes
-ProtectControlGroups=yes
-RestrictSUIDSGID=yes
-ReadWritePaths=/home/qbittorrent
+TimeoutStopSec=300
+NoNewPrivileges=true
+PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reload
-systemctl enable qbittorrent.service >>"$LOGFILE" 2>&1
-systemctl start qbittorrent.service
+systemctl daemon-reload >> "$LOGFILE" 2>&1
+systemctl enable --now qbittorrent >> "$LOGFILE" 2>&1
 
-# ── Apache reverse proxy ─────────────────────────────────────────────────────
-log "Configuring Apache reverse proxy..."
-cat > /etc/apache2/sites-enabled/qbittorrent.conf <<'EOF'
-<Location /qbittorrent>
-    ProxyPass http://localhost:8180
-    ProxyPassReverse http://localhost:8180
-</Location>
-EOF
-chown www-data:www-data /etc/apache2/sites-enabled/qbittorrent.conf
-a2enmod proxy proxy_http >>/dev/null 2>&1
-service apache2 reload >>"$LOGFILE" 2>&1
-
-# ── Finalize ─────────────────────────────────────────────────────────────────
-touch /install/.qbittorrent.lock
-log "qBittorrent installation complete! Default login: admin / adminadmin"
-log "Access at http://your-server:8180"
+write_lock "${PACKAGE_NAME}"
+report_progress 100 "qBittorrent installed on port 8180."
+log_info "${PACKAGE_NAME} installed successfully"

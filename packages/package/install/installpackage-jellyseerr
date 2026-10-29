@@ -1,0 +1,85 @@
+#!/bin/bash
+# AetherFlow Package Installer: Jellyseerr
+# Port: 5055
+
+set -euo pipefail
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
+fi
+
+PACKAGE_NAME="jellyseerr"
+export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")" /install
+
+require_root
+log_info "Starting installation for ${PACKAGE_NAME}..."
+report_progress 10 "Installing system and Node.js prerequisites for Jellyseerr..."
+
+DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl git gnupg ca-certificates build-essential python3 >> "$LOGFILE" 2>&1
+
+ensure_node 20
+if ! command_exists yarn; then
+    npm install -g yarn >> "$LOGFILE" 2>&1
+fi
+
+if ! id -u jellyseerr >/dev/null 2>&1; then
+    useradd --system --user-group --create-home --home-dir /var/lib/jellyseerr --shell /usr/sbin/nologin jellyseerr
+fi
+
+mkdir -p /var/lib/jellyseerr /opt/jellyseerr
+
+report_progress 30 "Fetching Jellyseerr source repository..."
+rm -rf /opt/jellyseerr
+git clone https://github.com/Fallenbagel/jellyseerr.git /opt/jellyseerr >> "$LOGFILE" 2>&1
+cd /opt/jellyseerr
+LATEST_TAG="$(git describe --tags "$(git rev-list --tags --max-count=1)" 2>/dev/null || true)"
+if [[ -n "$LATEST_TAG" ]]; then
+    git checkout "$LATEST_TAG" >> "$LOGFILE" 2>&1 || true
+    printf '%s\n' "${LATEST_TAG#v}" > /opt/jellyseerr/.af-version
+fi
+
+report_progress 55 "Installing Jellyseerr dependencies and compiling production build..."
+export CYPRESS_INSTALL_BINARY=0
+yarn install --ignore-engines --frozen-lockfile --network-timeout 1000000 >> "$LOGFILE" 2>&1 || yarn install --ignore-engines --network-timeout 1000000 >> "$LOGFILE" 2>&1
+yarn build >> "$LOGFILE" 2>&1
+
+chown -R jellyseerr:jellyseerr /opt/jellyseerr /var/lib/jellyseerr
+
+NODE_BIN="$(command -v node || echo /usr/bin/node)"
+
+report_progress 85 "Configuring and starting jellyseerr.service on port 5055..."
+cat <<EOF > /etc/systemd/system/jellyseerr.service
+[Unit]
+Description=Jellyseerr Service
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+User=jellyseerr
+Group=jellyseerr
+WorkingDirectory=/opt/jellyseerr
+Environment=NODE_ENV=production
+Environment=PORT=5055
+Environment=CONFIG_DIRECTORY=/var/lib/jellyseerr
+Type=simple
+Restart=on-failure
+RestartSec=5
+ExecStart=${NODE_BIN} dist/index.js
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload >> "$LOGFILE" 2>&1
+systemctl enable --now jellyseerr >> "$LOGFILE" 2>&1
+
+write_lock "${PACKAGE_NAME}"
+report_progress 100 "Jellyseerr installed on port 5055."
+log_info "${PACKAGE_NAME} installed successfully"

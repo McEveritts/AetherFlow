@@ -1,11 +1,48 @@
 #!/bin/bash
-# nextcloud uninstaller
-source /opt/AetherFlow/packages/common.sh
-echo -n -e "Please enter mysql root password so that nextcloud database and user can be dropped.\n"
-read -s -p "Password: " 'password'
-rm -rf /srv/nextcloud
-rm -f /etc/apache2/sites-enabled/nextcloud.conf
-mysql --user="root" --password="$password" --execute="DROP DATABASE nextcloud;"
-mysql --user="root" --password="$password" --execute="DROP USER nextcloud@localhost;"
-rm -f /install/.nextcloud.lock
+# AetherFlow Package Uninstaller: Nextcloud
 
+set -euo pipefail
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
+fi
+
+PACKAGE_NAME="nextcloud"
+export LOGFILE="/var/log/aetherflow/remove-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")"
+
+require_root
+log_info "Starting removal for ${PACKAGE_NAME}..."
+report_progress 20 "Disabling Apache Nextcloud site..."
+
+a2dissite nextcloud.conf >> "$LOGFILE" 2>&1 || true
+rm -f /etc/apache2/sites-available/nextcloud.conf /etc/apache2/sites-enabled/nextcloud.conf /etc/apache2/conf-available/nextcloud.conf /etc/apache2/conf-enabled/nextcloud.conf
+if [[ -f /etc/apache2/ports.conf ]]; then
+    sed -i '/^Listen 8088$/d' /etc/apache2/ports.conf || true
+fi
+rm -f /etc/systemd/system/apache2.service.d/10-aetherflow-sandbox.conf
+rmdir /etc/systemd/system/apache2.service.d 2>/dev/null || true
+
+report_progress 50 "Dropping Nextcloud database and user..."
+if command_exists mysql; then
+    mysql -u root <<'EOF' >> "$LOGFILE" 2>&1 || true
+DROP DATABASE IF EXISTS nextcloud;
+DROP USER IF EXISTS 'nextclouduser'@'localhost';
+FLUSH PRIVILEGES;
+EOF
+fi
+
+report_progress 80 "Removing Nextcloud webroot, data directory, and credentials file..."
+rm -rf /var/www/nextcloud /var/www/html/nextcloud /var/lib/nextcloud
+rm -f /opt/AetherFlow/logs/nextcloud_credentials.txt
+systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
+systemctl reload apache2 >> "$LOGFILE" 2>&1 || true
+
+remove_lock "${PACKAGE_NAME}"
+report_progress 100 "Nextcloud completely removed."
+log_info "${PACKAGE_NAME} removed successfully"

@@ -1,23 +1,32 @@
 #!/bin/bash
-#
-# [AetherFlow :: Remove overseerr]
-#
-source /opt/AetherFlow/packages/common.sh
-set -e
+# AetherFlow Package Uninstaller: Overseerr
 
-LOGFILE="/opt/AetherFlow/logs/installer.log"
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [remove-overseerr] $1" | tee -a "$LOGFILE"; }
+set -euo pipefail
 
-log "Stopping overseerr..."
-systemctl stop overseerr 2>/dev/null || true
-systemctl disable overseerr 2>/dev/null || true
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
+fi
 
-log "Removing overseerr files and configuration..."
-rm -rf /opt/overseerr /etc/systemd/system/overseerr.service /etc/apache2/sites-enabled/overseerr.conf
-userdel overseerr 2>/dev/null || true
+PACKAGE_NAME="overseerr"
+export LOGFILE="/var/log/aetherflow/remove-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")"
 
-systemctl daemon-reload 2>/dev/null || true
-service apache2 reload 2>/dev/null || true
-rm -f /install/.overseerr.lock
+require_root
+log_info "Starting removal for ${PACKAGE_NAME}..."
+report_progress 25 "Stopping and removing overseerr.service..."
 
-log "overseerr has been completely removed."
+purge_systemd_unit "overseerr"
+
+report_progress 65 "Removing Overseerr files, config directory, and user account..."
+rm -rf /opt/overseerr /var/lib/overseerr
+purge_system_user "overseerr"
+systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
+
+remove_lock "${PACKAGE_NAME}"
+report_progress 100 "Overseerr completely removed."
+log_info "${PACKAGE_NAME} removed successfully"

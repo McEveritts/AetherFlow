@@ -1,0 +1,93 @@
+#!/bin/bash
+# AetherFlow Package Installer: LibreSpeed
+# Port: 8988
+
+set -euo pipefail
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
+fi
+
+PACKAGE_NAME="librespeed"
+export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")" /install
+
+require_root
+log_info "Starting installation for ${PACKAGE_NAME}..."
+report_progress 10 "Installing prerequisites for LibreSpeed..."
+
+DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl tar ca-certificates >> "$LOGFILE" 2>&1
+
+if ! id -u librespeed >/dev/null 2>&1; then
+    useradd --system --user-group --create-home --home-dir /opt/librespeed --shell /usr/sbin/nologin librespeed
+fi
+
+mkdir -p /opt/librespeed
+
+ARCH=$(dpkg --print-architecture)
+case "$ARCH" in
+    amd64) LS_ARCH="amd64" ;;
+    arm64) LS_ARCH="arm64" ;;
+    armhf) LS_ARCH="armv7" ;;
+    *) print_error "Unsupported architecture: $ARCH"; exit 1 ;;
+esac
+
+report_progress 35 "Resolving latest speedtest-go release..."
+LS_JSON="$(curl -fsSL https://api.github.com/repos/librespeed/speedtest-go/releases/latest 2>/dev/null || true)"
+LS_VERSION="$(printf '%s' "$LS_JSON" | grep -oP '"tag_name":\s*"v\K[^"]+' | head -1 || true)"
+LS_VERSION="${LS_VERSION:-1.1.5}"
+LS_URL="$(printf '%s' "$LS_JSON" | grep -oP '"browser_download_url":\s*"\K[^"]*speedtest-go_'${LS_VERSION}'_linux_'${LS_ARCH}'\.tar\.gz' | head -1 || true)"
+if [[ -z "$LS_URL" ]]; then
+    LS_URL="https://github.com/librespeed/speedtest-go/releases/download/v${LS_VERSION}/speedtest-go_${LS_VERSION}_linux_${LS_ARCH}.tar.gz"
+fi
+
+report_progress 60 "Downloading and extracting LibreSpeed ${LS_VERSION}..."
+TMP_TAR=$(mktemp /tmp/librespeed-XXXXXX.tar.gz)
+curl -fsSL "$LS_URL" -o "$TMP_TAR" >> "$LOGFILE" 2>&1
+tar -xzf "$TMP_TAR" -C /opt/librespeed >> "$LOGFILE" 2>&1
+rm -f "$TMP_TAR"
+chmod +x /opt/librespeed/speedtest-go
+printf '%s\n' "${LS_VERSION#v}" > /opt/librespeed/.af-version
+
+cat <<'EOF' > /opt/librespeed/settings.toml
+# LibreSpeed speedtest-go configuration
+bind_address = "0.0.0.0"
+bind_port = 8988
+ipinfo_api_key = ""
+password = ""
+enable_telemetry = false
+EOF
+
+chown -R librespeed:librespeed /opt/librespeed
+
+report_progress 85 "Configuring and starting librespeed.service on port 8988..."
+cat <<'EOF' > /etc/systemd/system/librespeed.service
+[Unit]
+Description=LibreSpeed Speedtest Daemon (speedtest-go)
+After=network.target
+
+[Service]
+User=librespeed
+Group=librespeed
+Type=simple
+WorkingDirectory=/opt/librespeed
+ExecStart=/opt/librespeed/speedtest-go --c /opt/librespeed/settings.toml
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload >> "$LOGFILE" 2>&1
+systemctl enable --now librespeed >> "$LOGFILE" 2>&1
+
+write_lock "${PACKAGE_NAME}"
+report_progress 100 "LibreSpeed installed on port 8988."
+log_info "${PACKAGE_NAME} installed successfully"

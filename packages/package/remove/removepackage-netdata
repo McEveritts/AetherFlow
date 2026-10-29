@@ -1,23 +1,40 @@
 #!/bin/bash
-#
-# [AetherFlow :: Remove netdata]
-#
-source /opt/AetherFlow/packages/common.sh
-set -e
+# AetherFlow Package Uninstaller: Netdata
 
-LOGFILE="/opt/AetherFlow/logs/installer.log"
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [remove-netdata] $1" | tee -a "$LOGFILE"; }
+set -euo pipefail
 
-log "Stopping netdata..."
-systemctl stop netdata 2>/dev/null || true
-systemctl disable netdata 2>/dev/null || true
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
+fi
 
-log "Removing netdata files and configuration..."
-fetch_and_run "https://get.netdata.cloud/kickstart.sh" "SKIP" --uninstall --non-interactive 2>/dev/null || true
-rm -f /etc/apache2/sites-enabled/netdata.conf
+PACKAGE_NAME="netdata"
+export LOGFILE="/var/log/aetherflow/remove-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")"
 
-systemctl daemon-reload 2>/dev/null || true
-service apache2 reload 2>/dev/null || true
-rm -f /install/.netdata.lock
+require_root
+log_info "Starting removal for ${PACKAGE_NAME}..."
+report_progress 20 "Stopping and disabling netdata.service..."
 
-log "netdata has been completely removed."
+purge_systemd_unit "netdata"
+
+report_progress 50 "Uninstalling Netdata packages..."
+if [[ -x /usr/libexec/netdata/netdata-uninstaller.sh ]]; then
+    /usr/libexec/netdata/netdata-uninstaller.sh --yes --force >> "$LOGFILE" 2>&1 || true
+fi
+DEBIAN_FRONTEND=noninteractive apt-get purge -y -qq "netdata*" >> "$LOGFILE" 2>&1 || true
+DEBIAN_FRONTEND=noninteractive apt-get autoremove -y -qq >> "$LOGFILE" 2>&1 || true
+rm -f /etc/apt/sources.list.d/netdata*.list /usr/share/keyrings/netdata*.gpg
+
+report_progress 80 "Removing Netdata directories and user account..."
+rm -rf /etc/netdata /var/lib/netdata /var/cache/netdata /var/log/netdata /usr/lib/netdata /usr/share/netdata /opt/netdata
+purge_system_user "netdata"
+systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
+
+remove_lock "${PACKAGE_NAME}"
+report_progress 100 "Netdata completely removed."
+log_info "${PACKAGE_NAME} removed successfully"

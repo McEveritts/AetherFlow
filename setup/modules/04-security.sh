@@ -167,11 +167,7 @@ function _lshell() {
 function _apachesudo() {
 	rm -f /etc/sudoers
 	\cp -f ${local_setup}templates/sudoers.template /etc/sudoers
-	#if [[ $sudoers == "yes" ]]; then
-	awk -v username=${username} '/^root/ && !x {print username    " ALL=(ALL:ALL) NOPASSWD: ALL"; x=1} 1' /etc/sudoers >/tmp/sudoers
-	mv /tmp/sudoers /etc
 	echo -n "${username}" >/etc/apache2/master.txt
-	#fi
 	cd || exit 1
 }
 

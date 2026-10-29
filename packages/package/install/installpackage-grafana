@@ -1,58 +1,50 @@
 #!/bin/bash
-#
-# [AetherFlow :: Install Grafana]
-# Analytics and interactive visualization platform
-#
-# Author : McEveritts
-# URL    : https://AetherFlow.io
-# License: GPL-3.0
-#
-set -e
+# AetherFlow Package Installer: Grafana
+# Port: 3000
 
-LOGFILE="/opt/AetherFlow/logs/installer.log"
-mkdir -p /opt/AetherFlow/logs /install
+set -euo pipefail
 
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [grafana] $1" | tee -a "$LOGFILE"; }
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
+fi
 
-# ── Add Grafana official repository ──────────────────────────────────────────
-log "Adding Grafana GPG key and repository..."
-apt-get install -y apt-transport-https software-properties-common gnupg2 curl >>"$LOGFILE" 2>&1
+PACKAGE_NAME="grafana"
+export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")" /install
 
-mkdir -p /etc/apt/keyrings
-curl -fsSL https://apt.grafana.com/gpg.key | gpg --dearmor -o /etc/apt/keyrings/grafana.gpg 2>>"$LOGFILE"
+require_root
+log_info "Starting installation for ${PACKAGE_NAME}..."
+report_progress 15 "Installing prerequisites for Grafana..."
 
+DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq apt-transport-https software-properties-common curl gnupg ca-certificates >> "$LOGFILE" 2>&1
+
+report_progress 35 "Adding official Grafana APT repository..."
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://apt.grafana.com/gpg.key | gpg --dearmor --yes -o /etc/apt/keyrings/grafana.gpg >> "$LOGFILE" 2>&1
+chmod a+r /etc/apt/keyrings/grafana.gpg
 echo "deb [signed-by=/etc/apt/keyrings/grafana.gpg] https://apt.grafana.com stable main" > /etc/apt/sources.list.d/grafana.list
 
-# ── Install Grafana ──────────────────────────────────────────────────────────
-log "Updating package lists and installing Grafana..."
-apt-get update >>"$LOGFILE" 2>&1
-apt-get install -y grafana >>"$LOGFILE" 2>&1
+report_progress 65 "Installing Grafana server..."
+DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq grafana >> "$LOGFILE" 2>&1
 
-# ── Configure Grafana ────────────────────────────────────────────────────────
-log "Configuring Grafana..."
-# Set root URL for reverse proxy
-sed -i 's|;root_url = .*|root_url = %(protocol)s://%(domain)s:%(http_port)s/grafana/|' /etc/grafana/grafana.ini
-sed -i 's|;serve_from_sub_path = .*|serve_from_sub_path = true|' /etc/grafana/grafana.ini
+report_progress 85 "Configuring Grafana on port 3000 and starting service..."
+if [[ -f /etc/grafana/grafana.ini ]]; then
+    sed -i 's/^;http_port = 3000/http_port = 3000/' /etc/grafana/grafana.ini
+    sed -i 's/^http_port = .*/http_port = 3000/' /etc/grafana/grafana.ini
+    sed -i 's/^serve_from_sub_path = true/;serve_from_sub_path = false/' /etc/grafana/grafana.ini
+fi
 
-# ── Enable and start ─────────────────────────────────────────────────────────
-log "Enabling and starting Grafana..."
-systemctl daemon-reload
-systemctl enable grafana-server >>"$LOGFILE" 2>&1
-systemctl start grafana-server
+systemctl daemon-reload >> "$LOGFILE" 2>&1
+systemctl enable --now grafana-server >> "$LOGFILE" 2>&1
+systemctl restart grafana-server >> "$LOGFILE" 2>&1
 
-# ── Apache reverse proxy ─────────────────────────────────────────────────────
-log "Configuring Apache reverse proxy..."
-cat > /etc/apache2/sites-enabled/grafana.conf <<'EOF'
-<Location /grafana>
-    ProxyPass http://localhost:3000/grafana
-    ProxyPassReverse http://localhost:3000/grafana
-</Location>
-EOF
-chown www-data:www-data /etc/apache2/sites-enabled/grafana.conf
-a2enmod proxy proxy_http >>/dev/null 2>&1
-service apache2 reload >>"$LOGFILE" 2>&1
-
-# ── Finalize ─────────────────────────────────────────────────────────────────
-touch /install/.grafana.lock
-log "Grafana installation complete! Default login: admin / admin"
-log "Access at http://your-server:3000"
+write_lock "${PACKAGE_NAME}"
+report_progress 100 "Grafana installed on port 3000."
+log_info "${PACKAGE_NAME} installed successfully"

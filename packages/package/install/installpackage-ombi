@@ -1,88 +1,86 @@
 #!/bin/bash
-#
-# [AetherFlow :: Install Ombi]
-# Media request management for Plex/Emby/Jellyfin
-#
-# Author : McEveritts
-# URL    : https://AetherFlow.io
-# License: GPL-3.0
-#
-set -e
+# AetherFlow Package Installer: Ombi
+# Port: 5000
 
-LOGFILE="/opt/AetherFlow/logs/installer.log"
-mkdir -p /opt/AetherFlow/logs /install
+set -euo pipefail
 
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [ombi] $1" | tee -a "$LOGFILE"; }
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
+fi
 
-# ── Dependencies ─────────────────────────────────────────────────────────────
-log "Installing dependencies..."
-apt-get update >>"$LOGFILE" 2>&1
-apt-get install -y curl libicu-dev >>"$LOGFILE" 2>&1
+PACKAGE_NAME="ombi"
+export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")" /install
 
-# ── Download Ombi ────────────────────────────────────────────────────────────
-log "Downloading latest Ombi..."
+require_root
+log_info "Starting installation for ${PACKAGE_NAME}..."
+report_progress 10 "Installing dependencies for Ombi..."
+
+DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl unzip libicu-dev ca-certificates >> "$LOGFILE" 2>&1
+
+if ! id -u ombi >/dev/null 2>&1; then
+    useradd --system --user-group --no-create-home --home-dir /var/lib/ombi --shell /usr/sbin/nologin ombi
+fi
+
+mkdir -p /opt/Ombi /etc/Ombi /var/lib/ombi
+
 ARCH=$(dpkg --print-architecture)
 case "$ARCH" in
     amd64) OMBI_ARCH="linux-x64" ;;
     arm64) OMBI_ARCH="linux-arm64" ;;
-    *) OMBI_ARCH="linux-x64" ;;
+    armhf) OMBI_ARCH="linux-arm" ;;
+    *) print_error "Unsupported architecture: $ARCH"; exit 1 ;;
 esac
 
-OMBI_URL=$(curl -sL https://api.github.com/repos/Ombi-app/Ombi/releases/latest | grep "browser_download_url.*${OMBI_ARCH}.tar.gz" | head -1 | cut -d '"' -f 4)
+report_progress 35 "Resolving latest Ombi release for ${OMBI_ARCH}..."
+OMBI_JSON="$(curl -fsSL https://api.github.com/repos/Ombi-app/Ombi/releases/latest 2>/dev/null || true)"
+OMBI_VERSION="$(printf '%s' "$OMBI_JSON" | grep -oP '"tag_name":\s*"v?\K[^"]+' | head -1 || true)"
+OMBI_VERSION="${OMBI_VERSION:-4.43.5}"
+OMBI_URL="$(printf '%s' "$OMBI_JSON" | grep -oP '"browser_download_url":\s*"\K[^"]*'${OMBI_ARCH}'\.tar\.gz' | head -1 || true)"
+
 if [[ -z "$OMBI_URL" ]]; then
-    log "Could not determine latest Ombi URL, using latest tag..."
-    OMBI_VERSION=$(curl -sL https://api.github.com/repos/Ombi-app/Ombi/releases/latest | grep '"tag_name"' | sed -E 's/.*"v([^"]+)".*/\1/')
-    OMBI_URL="https://github.com/Ombi-app/Ombi/releases/download/v${OMBI_VERSION}/linux-x64.tar.gz"
+    OMBI_URL="https://github.com/Ombi-app/Ombi/releases/download/v${OMBI_VERSION}/${OMBI_ARCH}.tar.gz"
 fi
 
-mkdir -p /opt/Ombi /tmp/AetherFlow
-cd /tmp/AetherFlow
-curl -sL "$OMBI_URL" -o ombi.tar.gz >>"$LOGFILE" 2>&1
-tar -xzf ombi.tar.gz -C /opt/Ombi >>"$LOGFILE" 2>&1
-rm -f ombi.tar.gz
+report_progress 60 "Downloading and extracting Ombi ${OMBI_VERSION}..."
+TMP_TAR=$(mktemp /tmp/ombi-XXXXXX.tar.gz)
+curl -fsSL "$OMBI_URL" -o "$TMP_TAR" >> "$LOGFILE" 2>&1
+tar -xzf "$TMP_TAR" -C /opt/Ombi >> "$LOGFILE" 2>&1
+rm -f "$TMP_TAR"
+chmod +x /opt/Ombi/Ombi
+printf '%s\n' "${OMBI_VERSION#v}" > /opt/Ombi/.af-version
 
-# ── Create ombi user ─────────────────────────────────────────────────────────
-if ! id -u ombi &>/dev/null; then
-    useradd -r -s /usr/sbin/nologin -d /opt/Ombi ombi
-fi
-chown -R ombi:ombi /opt/Ombi
+chown -R ombi:ombi /opt/Ombi /etc/Ombi /var/lib/ombi
 
-# ── Systemd service ──────────────────────────────────────────────────────────
-log "Creating systemd service..."
-cat > /etc/systemd/system/ombi.service <<'EOF'
+report_progress 85 "Configuring and starting ombi.service on port 5000..."
+cat <<'EOF' > /etc/systemd/system/ombi.service
 [Unit]
-Description=Ombi - Media Request Manager
-After=network.target
+Description=Ombi - PMS Requests System
+After=network-online.target
 
 [Service]
-Type=simple
 User=ombi
 Group=ombi
 WorkingDirectory=/opt/Ombi
-ExecStart=/opt/Ombi/Ombi --host http://0.0.0.0:5000 --storage /opt/Ombi
+ExecStart=/opt/Ombi/Ombi --storage /etc/Ombi --host http://*:5000
+Type=simple
+TimeoutStopSec=30
 Restart=on-failure
-RestartSec=10
+RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reload
-systemctl enable ombi.service >>"$LOGFILE" 2>&1
-systemctl start ombi.service
+systemctl daemon-reload >> "$LOGFILE" 2>&1
+systemctl enable --now ombi >> "$LOGFILE" 2>&1
 
-# ── Apache reverse proxy ─────────────────────────────────────────────────────
-log "Configuring Apache reverse proxy..."
-cat > /etc/apache2/sites-enabled/ombi.conf <<'EOF'
-<Location /ombi>
-    ProxyPass http://localhost:5000/ombi
-    ProxyPassReverse http://localhost:5000/ombi
-</Location>
-EOF
-chown www-data:www-data /etc/apache2/sites-enabled/ombi.conf
-a2enmod proxy proxy_http >>/dev/null 2>&1
-service apache2 reload >>"$LOGFILE" 2>&1
-
-# ── Finalize ─────────────────────────────────────────────────────────────────
-touch /install/.ombi.lock
-log "Ombi installation complete! Access at http://your-server:5000"
+write_lock "${PACKAGE_NAME}"
+report_progress 100 "Ombi installed on port 5000."
+log_info "${PACKAGE_NAME} installed successfully"

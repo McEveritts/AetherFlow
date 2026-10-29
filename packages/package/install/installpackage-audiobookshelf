@@ -1,0 +1,95 @@
+#!/bin/bash
+# AetherFlow Package Installer: Audiobookshelf
+# Port: 13378
+
+set -euo pipefail
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
+fi
+
+PACKAGE_NAME="audiobookshelf"
+export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")" /install
+
+require_root
+log_info "Starting installation for ${PACKAGE_NAME}..."
+report_progress 10 "Installing prerequisites and multimedia libraries for Audiobookshelf..."
+
+DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl ffmpeg ca-certificates >> "$LOGFILE" 2>&1
+
+if ! id -u audiobookshelf >/dev/null 2>&1; then
+    useradd --system --user-group --create-home --home-dir /var/lib/audiobookshelf --shell /usr/sbin/nologin audiobookshelf
+fi
+
+mkdir -p /var/lib/audiobookshelf /var/cache/audiobookshelf /etc/audiobookshelf /opt/audiobookshelf
+
+ARCH=$(dpkg --print-architecture)
+case "$ARCH" in
+    amd64) ABS_ARCH="amd64" ;;
+    arm64) ABS_ARCH="arm64" ;;
+    armhf) ABS_ARCH="armv7l" ;;
+    *) print_error "Unsupported architecture: $ARCH"; exit 1 ;;
+esac
+
+report_progress 35 "Resolving latest Audiobookshelf debian release..."
+ABS_JSON="$(curl -fsSL https://api.github.com/repos/advplyr/audiobookshelf/releases/latest 2>/dev/null || true)"
+ABS_VERSION="$(printf '%s' "$ABS_JSON" | grep -oP '"tag_name":\s*"v\K[^"]+' | head -1 || true)"
+ABS_VERSION="${ABS_VERSION:-2.19.0}"
+ABS_URL="$(printf '%s' "$ABS_JSON" | grep -oP '"browser_download_url":\s*"\K[^"]*audiobookshelf_'${ABS_VERSION}'_'${ABS_ARCH}'\.deb' | head -1 || true)"
+
+if [[ -z "$ABS_URL" ]]; then
+    ABS_URL="https://github.com/advplyr/audiobookshelf/releases/download/v${ABS_VERSION}/audiobookshelf_${ABS_VERSION}_${ABS_ARCH}.deb"
+fi
+
+report_progress 60 "Downloading and installing Audiobookshelf ${ABS_VERSION}..."
+TMP_DEB=$(mktemp /tmp/abs-XXXXXX.deb)
+if curl -fsSL "$ABS_URL" -o "$TMP_DEB" >> "$LOGFILE" 2>&1; then
+    dpkg -i "$TMP_DEB" >> "$LOGFILE" 2>&1 || DEBIAN_FRONTEND=noninteractive apt-get install -f -y -qq >> "$LOGFILE" 2>&1
+    rm -f "$TMP_DEB"
+else
+    # Fallback to debian repository keyring method
+    curl -fsSL https://deb.audiobookshelf.org/static/audiobookshelf.gpg | gpg --dearmor -o /usr/share/keyrings/audiobookshelf-keyring.gpg >> "$LOGFILE" 2>&1 || true
+    echo "deb [signed-by=/usr/share/keyrings/audiobookshelf-keyring.gpg] https://deb.audiobookshelf.org/ /" > /etc/apt/sources.list.d/audiobookshelf.list
+    apt-get update -y -qq >> "$LOGFILE" 2>&1
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq audiobookshelf >> "$LOGFILE" 2>&1
+fi
+
+printf '%s\n' "${ABS_VERSION#v}" > /opt/audiobookshelf/.af-version
+
+chown -R audiobookshelf:audiobookshelf /var/lib/audiobookshelf /var/cache/audiobookshelf /etc/audiobookshelf /opt/audiobookshelf
+
+report_progress 85 "Configuring audiobookshelf.service environment on port 13378..."
+cat <<'EOF' > /etc/systemd/system/audiobookshelf.service
+[Unit]
+Description=Audiobookshelf Server
+After=network.target
+
+[Service]
+Type=simple
+User=audiobookshelf
+Group=audiobookshelf
+Environment=PORT=13378
+Environment=HOST=0.0.0.0
+Environment=CONFIG_PATH=/var/lib/audiobookshelf
+Environment=METADATA_PATH=/var/cache/audiobookshelf
+ExecStart=/usr/bin/audiobookshelf
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload >> "$LOGFILE" 2>&1
+systemctl enable --now audiobookshelf >> "$LOGFILE" 2>&1
+
+write_lock "${PACKAGE_NAME}"
+report_progress 100 "Audiobookshelf installed on port 13378."
+log_info "${PACKAGE_NAME} installed successfully"

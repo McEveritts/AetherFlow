@@ -1,23 +1,33 @@
 #!/bin/bash
-#
-# [AetherFlow :: Remove autobrr]
-#
-source /opt/AetherFlow/packages/common.sh
-set -e
+# AetherFlow Package Uninstaller: Autobrr
 
-LOGFILE="/opt/AetherFlow/logs/installer.log"
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [remove-autobrr] $1" | tee -a "$LOGFILE"; }
+set -euo pipefail
 
-log "Stopping autobrr..."
-systemctl stop autobrr 2>/dev/null || true
-systemctl disable autobrr 2>/dev/null || true
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
+fi
 
-log "Removing autobrr files and configuration..."
-rm -rf /opt/autobrr /home/autobrr /etc/systemd/system/autobrr.service /etc/apache2/sites-enabled/autobrr.conf
-userdel autobrr 2>/dev/null || true
+PACKAGE_NAME="autobrr"
+export LOGFILE="/var/log/aetherflow/remove-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")"
 
-systemctl daemon-reload 2>/dev/null || true
-service apache2 reload 2>/dev/null || true
-rm -f /install/.autobrr.lock
+require_root
+log_info "Starting removal for ${PACKAGE_NAME}..."
+report_progress 25 "Stopping and removing autobrr.service..."
 
-log "autobrr has been completely removed."
+purge_systemd_unit "autobrr"
+
+report_progress 65 "Removing Autobrr binaries, state directories, and user account..."
+rm -f /usr/local/bin/autobrr /usr/local/bin/autobrrctl
+rm -rf /var/lib/autobrr
+purge_system_user "autobrr"
+systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
+
+remove_lock "${PACKAGE_NAME}"
+report_progress 100 "Autobrr completely removed."
+log_info "${PACKAGE_NAME} removed successfully"

@@ -1,48 +1,57 @@
 [Unit]
-Description=AetherFlow Go API Gateway
+Description=AetherFlow Control Plane & Embedded UI (Single-Binary)
 Documentation=https://github.com/McEveritts/AetherFlow
 
 # ── Boot Race Prevention ─────────────────────────────────────────────────────
-# Wait for true network connectivity (not just daemon start).
-After=network-online.target time-sync.target
-Wants=network-online.target
-
-# Block startup until the release directory mount is confirmed.
+After=network-online.target time-sync.target aetherflow-runner.service
+Wants=network-online.target aetherflow-runner.service
 RequiresMountsFor=/opt/AetherFlow
 
 [Service]
 Type=simple
 User=aetherflow
 Group=aetherflow
-WorkingDirectory=/opt/AetherFlow/backend
+WorkingDirectory=/opt/AetherFlow/current
+
+# ── FHS Managed Directories ──────────────────────────────────────────────────
+# Automatically provisions /var/lib/aetherflow and /var/log/aetherflow owned by
+# aetherflow:aetherflow and grants write access inside ProtectSystem=strict.
+StateDirectory=aetherflow
+StateDirectoryMode=0700
+LogsDirectory=aetherflow
+LogsDirectoryMode=0750
 
 # ── Execution ────────────────────────────────────────────────────────────────
-# Start the Go API Gateway.
-ExecStart=/opt/AetherFlow/backend/aetherflow-api
+ExecStart=/opt/AetherFlow/current/aetherflow-api
 
-# Environment injection via .env file (non-secret tunables).
-EnvironmentFile=-/opt/AetherFlow/backend/.env
+# Environment injection from hardened FHS path (with legacy fallback).
+EnvironmentFile=-/etc/aetherflow/aetherflow.env
+EnvironmentFile=-/opt/AetherFlow/current/backend/.env
+Environment=GIN_MODE=release
+Environment=DB_PATH=/var/lib/aetherflow/aetherflow.sqlite
+Environment=AETHERFLOW_RUNNER_SOCK=/run/aetherflow/runner.sock
 
 # ── Signal Traps & Graceful Shutdown ─────────────────────────────────────────
-# Reap ALL processes in the cgroup, not just the main PID.
 KillMode=control-group
 KillSignal=SIGTERM
-
-# Grace period before SIGKILL. Must align with Go's shutdown context (30s).
-# Set slightly higher to let the application complete its drain first.
 TimeoutStopSec=35s
 
 # ── Restart Policy ───────────────────────────────────────────────────────────
 Restart=on-failure
 RestartSec=5s
 
-# ── Security Hardening (Namespace Isolation) ──────────────────────
-
-# Isolate /tmp per-service to prevent cross-process payload sharing.
+# ── Zero-Trust Namespace Isolation ───────────────────────────────────────────
+# Safe to enforce strictly because state lives in /var/lib/aetherflow and
+# root host operations are dispatched over /run/aetherflow/runner.sock.
+ProtectSystem=strict
+ProtectHome=yes
 PrivateTmp=yes
+NoNewPrivileges=yes
+ProtectControlGroups=yes
+ProtectKernelTunables=yes
+RestrictSUIDSGID=yes
 
-# Restrict writable paths to only what the API needs.
-ReadWritePaths=/var/log/aetherflow /opt/AetherFlow/backend/data
+ReadWritePaths=/var/lib/aetherflow /var/log/aetherflow /run/aetherflow
 ReadWritePaths=-/var/lib/openclaw
 
 # ── Resource Limits ──────────────────────────────────────────────────────────

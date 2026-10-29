@@ -1,87 +1,107 @@
 #!/bin/bash
-#
-# [Quick Box :: Install rclone]
-#
-# GITHUB REPOS
-# GitHub _ packages  :   https://github.com/AetherFlow/AetherFlow_packages
-# LOCAL REPOS
-# Local _ packages   :   /etc/AetherFlow/packages
-# Author             :   DedSec | d2dyno
-# URL                :   https://AetherFlow.io
-#
-# AetherFlow Copyright (C) 2017 AetherFlow.io
-# Licensed under GNU General Public License v3.0 GPL-3 (in short)
-#
-#   You may copy, distribute and modify the software as long as you track
-#   changes/dates in source files. Any modifications to our software
-#   including (via compiler) GPL-licensed code must also be made available
-#   under the GPL along with build & install instructions.
+# AetherFlow Package Installer: Rclone
+# Port: 5572
 
-local_setup=/opt/AetherFlow/setup/
-source /opt/AetherFlow/packages/common.sh
-OUTTO=$LOGFILE
-MASTER=$AETHERFLOW_USER
-arch=$(arch)
+set -euo pipefail
 
-echo "Downloading rclone ... " >>"${OUTTO}" 2>&1;
-
-if [[ $arch == x86_64 ]]; then
-  cd /tmp
-  curl -O https://downloads.rclone.org/rclone-current-linux-amd64.zip
-  unzip rclone-*
-  cd rclone-*-linux-amd64
-  cp rclone /usr/sbin/
-  chown root:root /usr/sbin/rclone
-  chmod 755 /usr/sbin/rclone
-  ln -s /usr/sbin/rclone /usr/bin/rclone
-  sudo mkdir -p /usr/local/share/man/man1
-  sudo cp rclone.1 /usr/local/share/man/man1/
-  sudo mandb
-  cd /tmp
-  rm -rf rclone-*
-fi
-if [[ $arch == i386 ]]; then
-  cd /tmp
-  curl -O https://downloads.rclone.org/rclone-current-linux-386.zip
-  unzip rclone-*
-  cd rclone-*-linux-386
-  cp rclone /usr/sbin/
-  chown root:root /usr/sbin/rclone
-  chmod 755 /usr/sbin/rclone
-  ln -s /usr/sbin/rclone /usr/bin/rclone
-  sudo mkdir -p /usr/local/share/man/man1
-  sudo cp rclone.1 /usr/local/share/man/man1/
-  sudo mandb
-  cd /tmp
-  rm -rf rclone-*
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
 fi
 
-echo "Installing rclone ... " >>"${OUTTO}" 2>&1;
+PACKAGE_NAME="rclone"
+export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")" /install
 
-cat >/etc/systemd/system/rclone@.service<<EOF
+require_root
+log_info "Starting installation for ${PACKAGE_NAME}..."
+report_progress 10 "Installing system dependencies and FUSE runtime for Rclone..."
+
+DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl unzip ca-certificates fuse3 >> "$LOGFILE" 2>&1
+
+if ! id -u rclone >/dev/null 2>&1; then
+    useradd --system --user-group --no-create-home --home-dir /var/lib/rclone --shell /usr/sbin/nologin rclone
+fi
+
+mkdir -p /etc/rclone /var/lib/rclone/cache /mnt/remote
+
+ARCH=$(dpkg --print-architecture)
+case "$ARCH" in
+    amd64) RCLONE_ARCH="amd64" ;;
+    arm64) RCLONE_ARCH="arm64" ;;
+    armhf) RCLONE_ARCH="arm-v7" ;;
+    *) print_error "Unsupported architecture: $ARCH"; exit 1 ;;
+esac
+
+report_progress 35 "Downloading official Rclone binary (${RCLONE_ARCH})..."
+TMP_ZIP=$(mktemp /tmp/rclone-XXXXXX.zip)
+TMP_DIR=$(mktemp -d /tmp/rclone-extract-XXXXXX)
+
+RCLONE_URL="https://downloads.rclone.org/rclone-current-linux-${RCLONE_ARCH}.zip"
+curl -fsSL "$RCLONE_URL" -o "$TMP_ZIP" >> "$LOGFILE" 2>&1
+unzip -qo "$TMP_ZIP" -d "$TMP_DIR" >> "$LOGFILE" 2>&1
+find "$TMP_DIR" -type f -name rclone -exec cp {} /usr/bin/rclone \;
+chmod 755 /usr/bin/rclone
+rm -rf "$TMP_ZIP" "$TMP_DIR"
+
+# Record version
+RCLONE_VER="$(/usr/bin/rclone version 2>/dev/null | head -n1 | awk '{print $2}' || true)"
+if [[ -n "$RCLONE_VER" ]]; then
+    printf '%s\n' "${RCLONE_VER#v}" > /var/lib/rclone/.af-version
+fi
+
+# Ensure baseline rclone.conf exists
+touch /etc/rclone/rclone.conf
+chmod 600 /etc/rclone/rclone.conf
+chown -R rclone:rclone /etc/rclone /var/lib/rclone
+
+report_progress 70 "Scaffolding rclone.service (GUI on 5572) and companion rclone-vfs.service..."
+cat <<'EOF' > /etc/systemd/system/rclone.service
 [Unit]
-Description=rclonemount
-After=network.target
+Description=Rclone Remote Control GUI Daemon
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
-User=%I
-Group=%I
-ExecStart=/usr/sbin/rclone mount /home/%I/cloud --allow-non-empty --allow-other --dir-cache-time 10m --max-read-ahead 9G --checkers 32 --contimeout 15s --quiet
-ExecStop=/bin/fusermount -u /home/%I/cloud
+User=rclone
+Group=rclone
+ExecStart=/usr/bin/rclone rcd --rc-web-gui --rc-addr=0.0.0.0:5572 --rc-no-auth --config=/etc/rclone/rclone.conf --cache-dir=/var/lib/rclone/cache
 Restart=on-failure
-RestartSec=30
-StartLimitInterval=60s
-StartLimitBurst=3
+RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
-
 EOF
 
-touch /install/.rclone.lock
-echo "rclone installation complete!" >>"${OUTTO}" 2>&1;
-echo >>"${OUTTO}" 2>&1;
-echo >>"${OUTTO}" 2>&1;
-echo "Close this dialog box to refresh your browser" >>"${OUTTO}" 2>&1;
+cat <<'EOF' > /etc/systemd/system/rclone-vfs.service
+[Unit]
+Description=Rclone VFS FUSE Mount Daemon
+After=network-online.target
+Wants=network-online.target
 
+[Service]
+Type=simple
+User=root
+ExecStartPre=-/bin/mkdir -p /mnt/remote
+ExecStart=/usr/bin/rclone mount remote: /mnt/remote --config=/etc/rclone/rclone.conf --vfs-cache-mode=full --allow-other --dir-cache-time=72h
+ExecStop=/bin/fusermount -uz /mnt/remote
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload >> "$LOGFILE" 2>&1
+systemctl enable --now rclone >> "$LOGFILE" 2>&1
+systemctl enable rclone-vfs >> "$LOGFILE" 2>&1 || true
+
+write_lock "${PACKAGE_NAME}"
+report_progress 100 "Rclone installed on port 5572 (rcd web GUI & rclone-vfs companion ready)."
+log_info "${PACKAGE_NAME} installed successfully"

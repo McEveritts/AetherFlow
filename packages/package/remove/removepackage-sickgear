@@ -1,3 +1,0 @@
-# Install script contains removal instructions
-bash /usr/local/bin/AetherFlow/package/install/installpackage-sickgear remove
-

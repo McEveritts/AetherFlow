@@ -1,52 +1,57 @@
 #!/bin/bash
-#
-# [AetherFlow :: Install Deluge]
-# Feature-rich BitTorrent client with web UI
-#
-# Author : McEveritts
-# URL    : https://AetherFlow.io
-# License: GPL-3.0
-#
-set -e
+# AetherFlow Package Installer: Deluge (deluged + deluge-web)
+# Port: 8112
 
-LOGFILE="/opt/AetherFlow/logs/installer.log"
-mkdir -p /opt/AetherFlow/logs /install
+set -euo pipefail
 
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [deluge] $1" | tee -a "$LOGFILE"; }
-
-# ── Install Deluge ───────────────────────────────────────────────────────────
-log "Installing Deluge daemon and web UI..."
-apt-get update >>"$LOGFILE" 2>&1
-apt-get install -y deluged deluge-web deluge-console >>"$LOGFILE" 2>&1
-
-# ── Create deluge user ───────────────────────────────────────────────────────
-if ! id -u deluge &>/dev/null; then
-    useradd -r -s /usr/sbin/nologin -m -d /home/deluge deluge
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
 fi
-mkdir -p /home/deluge/Downloads /home/deluge/.config/deluge
-chown -R deluge:deluge /home/deluge
 
-# ── Systemd services (daemon + web) ─────────────────────────────────────────
-log "Creating systemd services..."
-cat > /etc/systemd/system/deluged.service <<'EOF'
+PACKAGE_NAME="deluge"
+export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")" /install
+
+require_root
+log_info "Starting installation for ${PACKAGE_NAME}..."
+report_progress 15 "Installing deluged, deluge-web, and deluge-console..."
+
+DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq deluged deluge-web deluge-console python3-libtorrent >> "$LOGFILE" 2>&1
+
+if ! id -u deluge >/dev/null 2>&1; then
+    useradd --system --user-group --no-create-home --home-dir /var/lib/deluge --shell /usr/sbin/nologin deluge
+fi
+
+report_progress 55 "Configuring Deluge daemon and WebUI on port 8112..."
+mkdir -p /var/lib/deluge/.config/deluge /var/log/deluge /var/lib/deluge/Downloads
+chown -R deluge:deluge /var/lib/deluge /var/log/deluge
+chmod 750 /var/lib/deluge /var/log/deluge
+
+cat <<'EOF' > /etc/systemd/system/deluged.service
 [Unit]
 Description=Deluge Bittorrent Client Daemon
 After=network-online.target
-Wants=network-online.target
 
 [Service]
 Type=simple
 User=deluge
 Group=deluge
-ExecStart=/usr/bin/deluged -d -l /var/log/deluge/daemon.log -L warning
+UMask=007
+ExecStart=/usr/bin/deluged -d -c /var/lib/deluge/.config/deluge -l /var/log/deluge/daemon.log -L info
 Restart=on-failure
-RestartSec=5
+TimeoutStopSec=300
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-cat > /etc/systemd/system/deluge-web.service <<'EOF'
+cat <<'EOF' > /etc/systemd/system/deluge-web.service
 [Unit]
 Description=Deluge Bittorrent Client Web Interface
 After=network-online.target deluged.service
@@ -56,35 +61,19 @@ Wants=deluged.service
 Type=simple
 User=deluge
 Group=deluge
-ExecStart=/usr/bin/deluge-web -d -l /var/log/deluge/web.log -L warning
+UMask=027
+ExecStart=/usr/bin/deluge-web -d -c /var/lib/deluge/.config/deluge -l /var/log/deluge/web.log -L info -p 8112
 Restart=on-failure
-RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-mkdir -p /var/log/deluge
-chown -R deluge:deluge /var/log/deluge
-systemctl daemon-reload
-systemctl enable deluged.service deluge-web.service >>"$LOGFILE" 2>&1
-systemctl start deluged.service
-sleep 2
-systemctl start deluge-web.service
+report_progress 85 "Starting deluged and deluge-web services..."
+systemctl daemon-reload >> "$LOGFILE" 2>&1
+systemctl enable --now deluged >> "$LOGFILE" 2>&1
+systemctl enable --now deluge-web >> "$LOGFILE" 2>&1
 
-# ── Apache reverse proxy ─────────────────────────────────────────────────────
-log "Configuring Apache reverse proxy..."
-cat > /etc/apache2/sites-enabled/deluge.conf <<'EOF'
-<Location /deluge>
-    ProxyPass http://localhost:8112/deluge
-    ProxyPassReverse http://localhost:8112/deluge
-</Location>
-EOF
-chown www-data:www-data /etc/apache2/sites-enabled/deluge.conf
-a2enmod proxy proxy_http >>/dev/null 2>&1
-service apache2 reload >>"$LOGFILE" 2>&1
-
-# ── Finalize ─────────────────────────────────────────────────────────────────
-touch /install/.deluge.lock
-log "Deluge installation complete! Default web password: deluge"
-log "Access at http://your-server:8112"
+write_lock "${PACKAGE_NAME}"
+report_progress 100 "Deluge installed on port 8112."
+log_info "${PACKAGE_NAME} installed successfully"

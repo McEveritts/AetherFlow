@@ -1,119 +1,118 @@
 #!/bin/bash
-#
-# [AetherFlow :: Install Prometheus]
-# Systems monitoring and alerting toolkit
-#
-# Author : McEveritts
-# URL    : https://AetherFlow.io
-# License: GPL-3.0
-#
-set -e
+# AetherFlow Package Installer: Prometheus + Node Exporter
+# Ports: 9090 (Prometheus), 9100 (Node Exporter)
 
-LOGFILE="/opt/AetherFlow/logs/installer.log"
-mkdir -p /opt/AetherFlow/logs /install
+set -euo pipefail
 
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [prometheus] $1" | tee -a "$LOGFILE"; }
-
-# ── Create prometheus user ────────────────────────────────────────────────────
-log "Creating prometheus system user..."
-if ! id -u prometheus &>/dev/null; then
-    useradd -r -s /usr/sbin/nologin -d /opt/prometheus prometheus
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
 fi
 
-# ── Download Prometheus ───────────────────────────────────────────────────────
-log "Downloading latest Prometheus..."
+PACKAGE_NAME="prometheus"
+export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")" /install
+
+require_root
+log_info "Starting installation for ${PACKAGE_NAME}..."
+report_progress 10 "Installing dependencies for Prometheus..."
+
+DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl tar ca-certificates >> "$LOGFILE" 2>&1
+
+if ! id -u prometheus >/dev/null 2>&1; then
+    useradd --system --user-group --no-create-home --shell /usr/sbin/nologin prometheus
+fi
+if ! id -u node_exporter >/dev/null 2>&1; then
+    useradd --system --user-group --no-create-home --shell /usr/sbin/nologin node_exporter
+fi
+
+mkdir -p /etc/prometheus /var/lib/prometheus
+
 ARCH=$(dpkg --print-architecture)
 case "$ARCH" in
     amd64) PROM_ARCH="linux-amd64" ;;
     arm64) PROM_ARCH="linux-arm64" ;;
     armhf) PROM_ARCH="linux-armv7" ;;
-    *) PROM_ARCH="linux-amd64" ;;
+    *) print_error "Unsupported architecture: $ARCH"; exit 1 ;;
 esac
 
-PROM_VERSION=$(curl -sL https://api.github.com/repos/prometheus/prometheus/releases/latest | grep -oP '"tag_name": "v\K[^"]+')
-if [[ -z "$PROM_VERSION" ]]; then
-    PROM_VERSION="2.51.2"
+report_progress 30 "Downloading latest Prometheus (${PROM_ARCH})..."
+PROM_JSON="$(curl -fsSL https://api.github.com/repos/prometheus/prometheus/releases/latest 2>/dev/null || true)"
+PROM_VERSION="$(printf '%s' "$PROM_JSON" | grep -oP '"tag_name":\s*"v\K[^"]+' | head -1 || true)"
+PROM_VERSION="${PROM_VERSION:-2.53.1}"
+PROM_URL="https://github.com/prometheus/prometheus/releases/download/v${PROM_VERSION}/prometheus-${PROM_VERSION}.${PROM_ARCH}.tar.gz"
+
+TMP_TAR=$(mktemp /tmp/prometheus-XXXXXX.tar.gz)
+curl -fsSL "$PROM_URL" -o "$TMP_TAR" >> "$LOGFILE" 2>&1
+tar -xzf "$TMP_TAR" -C /tmp >> "$LOGFILE" 2>&1
+rm -f "$TMP_TAR"
+
+PROM_EXTRACTED="/tmp/prometheus-${PROM_VERSION}.${PROM_ARCH}"
+cp "${PROM_EXTRACTED}/prometheus" /usr/local/bin/
+cp "${PROM_EXTRACTED}/promtool" /usr/local/bin/
+if [[ -d "${PROM_EXTRACTED}/consoles" ]]; then
+    cp -r "${PROM_EXTRACTED}/consoles" /etc/prometheus/
 fi
+if [[ -d "${PROM_EXTRACTED}/console_libraries" ]]; then
+    cp -r "${PROM_EXTRACTED}/console_libraries" /etc/prometheus/
+fi
+rm -rf "$PROM_EXTRACTED"
+chmod +x /usr/local/bin/prometheus /usr/local/bin/promtool
 
-cd /tmp
-curl -sLO "https://github.com/prometheus/prometheus/releases/download/v${PROM_VERSION}/prometheus-${PROM_VERSION}.${PROM_ARCH}.tar.gz" >>"$LOGFILE" 2>&1
-tar -xzf "prometheus-${PROM_VERSION}.${PROM_ARCH}.tar.gz" >>"$LOGFILE" 2>&1
+report_progress 60 "Downloading and installing Node Exporter..."
+NE_JSON="$(curl -fsSL https://api.github.com/repos/prometheus/node_exporter/releases/latest 2>/dev/null || true)"
+NE_VERSION="$(printf '%s' "$NE_JSON" | grep -oP '"tag_name":\s*"v\K[^"]+' | head -1 || true)"
+NE_VERSION="${NE_VERSION:-1.8.2}"
+NE_URL="https://github.com/prometheus/node_exporter/releases/download/v${NE_VERSION}/node_exporter-${NE_VERSION}.${PROM_ARCH}.tar.gz"
 
-# ── Install binaries and config ───────────────────────────────────────────────
-log "Installing Prometheus binaries..."
-mkdir -p /opt/prometheus /etc/prometheus /var/lib/prometheus
+TMP_NE=$(mktemp /tmp/node_exporter-XXXXXX.tar.gz)
+curl -fsSL "$NE_URL" -o "$TMP_NE" >> "$LOGFILE" 2>&1
+tar -xzf "$TMP_NE" -C /tmp >> "$LOGFILE" 2>&1
+rm -f "$TMP_NE"
 
-cp "prometheus-${PROM_VERSION}.${PROM_ARCH}/prometheus" /opt/prometheus/
-cp "prometheus-${PROM_VERSION}.${PROM_ARCH}/promtool" /opt/prometheus/
-cp -r "prometheus-${PROM_VERSION}.${PROM_ARCH}/consoles" /etc/prometheus/
-cp -r "prometheus-${PROM_VERSION}.${PROM_ARCH}/console_libraries" /etc/prometheus/
+cp "/tmp/node_exporter-${NE_VERSION}.${PROM_ARCH}/node_exporter" /usr/local/bin/
+rm -rf "/tmp/node_exporter-${NE_VERSION}.${PROM_ARCH}"
+chmod +x /usr/local/bin/node_exporter
 
-# Default config: scrape itself
-cat > /etc/prometheus/prometheus.yml <<'EOF'
+cat <<'EOF' > /etc/prometheus/prometheus.yml
 global:
   scrape_interval: 15s
   evaluation_interval: 15s
 
 scrape_configs:
-  - job_name: "prometheus"
+  - job_name: 'prometheus'
     static_configs:
-      - targets: ["localhost:9090"]
+      - targets: ['localhost:9090']
 
-  - job_name: "node"
+  - job_name: 'node_exporter'
     static_configs:
-      - targets: ["localhost:9100"]
+      - targets: ['localhost:9100']
 EOF
 
-chown -R prometheus:prometheus /opt/prometheus /etc/prometheus /var/lib/prometheus
-rm -rf "/tmp/prometheus-${PROM_VERSION}.${PROM_ARCH}"*
+chown -R prometheus:prometheus /etc/prometheus /var/lib/prometheus
+chown prometheus:prometheus /usr/local/bin/prometheus /usr/local/bin/promtool
+chown node_exporter:node_exporter /usr/local/bin/node_exporter
 
-# ── Also install node_exporter ────────────────────────────────────────────────
-log "Installing node_exporter for system metrics..."
-NODE_VERSION=$(curl -sL https://api.github.com/repos/prometheus/node_exporter/releases/latest | grep -oP '"tag_name": "v\K[^"]+')
-if [[ -z "$NODE_VERSION" ]]; then
-    NODE_VERSION="1.8.1"
-fi
-
-cd /tmp
-curl -sLO "https://github.com/prometheus/node_exporter/releases/download/v${NODE_VERSION}/node_exporter-${NODE_VERSION}.${PROM_ARCH}.tar.gz" >>"$LOGFILE" 2>&1
-tar -xzf "node_exporter-${NODE_VERSION}.${PROM_ARCH}.tar.gz" >>"$LOGFILE" 2>&1
-cp "node_exporter-${NODE_VERSION}.${PROM_ARCH}/node_exporter" /opt/prometheus/
-rm -rf "/tmp/node_exporter-${NODE_VERSION}.${PROM_ARCH}"*
-
-# ── Systemd services ─────────────────────────────────────────────────────────
-log "Creating systemd services..."
-cat > /etc/systemd/system/prometheus.service <<'EOF'
+report_progress 85 "Configuring and starting prometheus.service and node_exporter.service..."
+cat <<'EOF' > /etc/systemd/system/prometheus.service
 [Unit]
-Description=Prometheus Monitoring System
-After=network.target
+Description=Prometheus Monitoring Time-Series Database
+Wants=network-online.target
+After=network-online.target
 
 [Service]
-Type=simple
 User=prometheus
 Group=prometheus
-ExecStart=/opt/prometheus/prometheus \
-    --config.file=/etc/prometheus/prometheus.yml \
-    --storage.tsdb.path=/var/lib/prometheus/ \
-    --web.console.templates=/etc/prometheus/consoles \
-    --web.console.libraries=/etc/prometheus/console_libraries \
-    --web.listen-address=:9090
-Restart=on-failure
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-cat > /etc/systemd/system/node_exporter.service <<'EOF'
-[Unit]
-Description=Prometheus Node Exporter
-After=network.target
-
-[Service]
 Type=simple
-User=prometheus
-Group=prometheus
-ExecStart=/opt/prometheus/node_exporter
+ExecStart=/usr/local/bin/prometheus \
+    --config.file /etc/prometheus/prometheus.yml \
+    --storage.tsdb.path /var/lib/prometheus/ \
+    --web.listen-address=0.0.0.0:9090
 Restart=on-failure
 RestartSec=5
 
@@ -121,22 +120,28 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reload
-systemctl enable prometheus.service node_exporter.service >>"$LOGFILE" 2>&1
-systemctl start prometheus.service node_exporter.service
+cat <<'EOF' > /etc/systemd/system/node_exporter.service
+[Unit]
+Description=Prometheus Node Exporter
+Wants=network-online.target
+After=network-online.target
 
-# ── Apache reverse proxy ─────────────────────────────────────────────────────
-log "Configuring Apache reverse proxy..."
-cat > /etc/apache2/sites-enabled/prometheus.conf <<'EOF'
-<Location /prometheus>
-    ProxyPass http://localhost:9090/prometheus
-    ProxyPassReverse http://localhost:9090/prometheus
-</Location>
+[Service]
+User=node_exporter
+Group=node_exporter
+Type=simple
+ExecStart=/usr/local/bin/node_exporter
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
 EOF
-chown www-data:www-data /etc/apache2/sites-enabled/prometheus.conf
-a2enmod proxy proxy_http >>/dev/null 2>&1
-service apache2 reload >>"$LOGFILE" 2>&1
 
-# ── Finalize ─────────────────────────────────────────────────────────────────
-touch /install/.prometheus.lock
-log "Prometheus + node_exporter installation complete! Access at http://your-server:9090"
+systemctl daemon-reload >> "$LOGFILE" 2>&1
+systemctl enable --now node_exporter >> "$LOGFILE" 2>&1
+systemctl enable --now prometheus >> "$LOGFILE" 2>&1
+
+write_lock "${PACKAGE_NAME}"
+report_progress 100 "Prometheus installed on port 9090 (with Node Exporter on port 9100)."
+log_info "${PACKAGE_NAME} installed successfully"

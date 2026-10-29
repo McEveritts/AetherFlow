@@ -1,78 +1,73 @@
 #!/bin/bash
-#
-# [AetherFlow :: Install Flood]
-# Modern web UI for rTorrent, qBittorrent, Deluge, Transmission
-#
-# Author : McEveritts
-# URL    : https://AetherFlow.io
-# License: GPL-3.0
-#
-source /opt/AetherFlow/packages/common.sh
+# AetherFlow Package Installer: Flood (@jesec/flood)
+# Port: 3001
+
 set -euo pipefail
 
-# Override common.sh LOGFILE for this specific package
-export LOGFILE="/opt/AetherFlow/logs/installer.log"
-mkdir -p "$(dirname "$LOGFILE")"
-
-# We use print_info to ensure output is visible to the backend installer
-log() { print_info "[$APP_ID] $1"; }
-APP_ID="flood"
-
-# ── Install Node.js if not present ───────────────────────────────────────────
-if ! command -v node &>/dev/null; then
-    log "Installing Node.js..."
-    fetch_and_run "https://deb.nodesource.com/setup_20.x" "SKIP" - >>"$LOGFILE" 2>&1
-    apt-get install -y nodejs >>"$LOGFILE" 2>&1
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
 fi
 
-# ── Install Flood globally ──────────────────────────────────────────────────
-log "Installing Flood via npm..."
-npm install -g flood >>"$LOGFILE" 2>&1
+PACKAGE_NAME="flood"
+export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")" /install
 
-# ── Create flood user ────────────────────────────────────────────────────────
-if ! id -u flood &>/dev/null; then
-    useradd -r -s /usr/sbin/nologin -m -d /home/flood flood
+require_root
+log_info "Starting installation for ${PACKAGE_NAME}..."
+report_progress 15 "Installing Node.js 20 LTS for Flood..."
+
+DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl gnupg ca-certificates >> "$LOGFILE" 2>&1
+
+ensure_node 20
+
+if ! id -u flood >/dev/null 2>&1; then
+    useradd --system --user-group --no-create-home --home-dir /var/lib/flood --shell /usr/sbin/nologin flood
 fi
-mkdir -p /home/flood/.config/flood
-chown -R flood:flood /home/flood
 
-# ── Systemd service ──────────────────────────────────────────────────────────
-log "Creating systemd service..."
-cat > /etc/systemd/system/flood.service <<'EOF'
+mkdir -p /var/lib/flood
+chown -R flood:flood /var/lib/flood
+
+report_progress 55 "Installing @jesec/flood via npm..."
+npm install -g @jesec/flood >> "$LOGFILE" 2>&1
+
+FLOOD_BIN="$(command -v flood || echo /usr/local/bin/flood)"
+if [[ ! -x /usr/bin/flood && -x "$FLOOD_BIN" ]]; then
+    ln -sf "$FLOOD_BIN" /usr/bin/flood
+fi
+
+FLOOD_VER="$("$FLOOD_BIN" --version 2>/dev/null | head -n1 || true)"
+if [[ -n "$FLOOD_VER" ]]; then
+    printf '%s\n' "${FLOOD_VER#v}" > /var/lib/flood/.af-version
+fi
+chown -R flood:flood /var/lib/flood
+
+report_progress 85 "Configuring and starting flood.service on port 3001..."
+cat <<EOF > /etc/systemd/system/flood.service
 [Unit]
-Description=Flood - Torrent Client Web UI
+Description=Flood Web UI for Torrent Clients
 After=network.target
 
 [Service]
-Type=simple
 User=flood
 Group=flood
-ExecStart=/usr/bin/flood --host 0.0.0.0 --port 3001 --rundir /home/flood/.config/flood
+WorkingDirectory=/var/lib/flood
+ExecStart=${FLOOD_BIN} --host 0.0.0.0 --port 3001 --rundir /var/lib/flood
 Restart=on-failure
 RestartSec=5
-Environment=NODE_ENV=production
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reload
-systemctl enable flood.service >>"$LOGFILE" 2>&1
-systemctl start flood.service
+systemctl daemon-reload >> "$LOGFILE" 2>&1
+systemctl enable --now flood >> "$LOGFILE" 2>&1
 
-# ── Apache reverse proxy ─────────────────────────────────────────────────────
-log "Configuring Apache reverse proxy..."
-cat > /etc/apache2/sites-enabled/flood.conf <<'EOF'
-<Location /flood>
-    ProxyPass http://localhost:3001
-    ProxyPassReverse http://localhost:3001
-    ProxyPreserveHost On
-</Location>
-EOF
-chown www-data:www-data /etc/apache2/sites-enabled/flood.conf
-a2enmod proxy proxy_http >>/dev/null 2>&1
-service apache2 reload >>"$LOGFILE" 2>&1
-
-# ── Finalize ─────────────────────────────────────────────────────────────────
-touch /install/.flood.lock
-log "Flood installation complete! Access at http://your-server:3001"
+write_lock "${PACKAGE_NAME}"
+report_progress 100 "Flood installed on port 3001."
+log_info "${PACKAGE_NAME} installed successfully"

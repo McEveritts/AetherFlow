@@ -1,0 +1,126 @@
+#!/bin/bash
+# AetherFlow Package Installer: Scrutiny
+# Port: 8098
+
+set -euo pipefail
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
+fi
+
+PACKAGE_NAME="scrutiny"
+export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")" /install
+
+require_root
+log_info "Starting installation for ${PACKAGE_NAME}..."
+report_progress 10 "Installing SMART drive telemetry utilities and libraries..."
+
+DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl smartmontools udev ca-certificates >> "$LOGFILE" 2>&1
+
+if ! id -u scrutiny >/dev/null 2>&1; then
+    useradd --system --user-group --create-home --home-dir /var/lib/scrutiny --shell /usr/sbin/nologin scrutiny
+fi
+
+mkdir -p /opt/scrutiny/bin /var/lib/scrutiny /etc/scrutiny
+
+ARCH=$(dpkg --print-architecture)
+case "$ARCH" in
+    amd64) SCRUT_ARCH="amd64" ;;
+    arm64) SCRUT_ARCH="arm64" ;;
+    *) print_error "Unsupported architecture: $ARCH"; exit 1 ;;
+esac
+
+report_progress 35 "Resolving latest Scrutiny binaries from GitHub..."
+SCRUT_JSON="$(curl -fsSL https://api.github.com/repos/AnalogJ/scrutiny/releases/latest 2>/dev/null || true)"
+SCRUT_VER="$(printf '%s' "$SCRUT_JSON" | grep -oP '"tag_name":\s*"v\K[^"]+' | head -1 || true)"
+SCRUT_VER="${SCRUT_VER:-0.8.1}"
+
+WEB_URL="https://github.com/AnalogJ/scrutiny/releases/download/v${SCRUT_VER}/scrutiny-web-linux-${SCRUT_ARCH}"
+COLLECTOR_URL="https://github.com/AnalogJ/scrutiny/releases/download/v${SCRUT_VER}/scrutiny-collector-metrics-linux-${SCRUT_ARCH}"
+
+report_progress 60 "Downloading Scrutiny Web UI and Collector binaries..."
+curl -fsSL "$WEB_URL" -o "/opt/scrutiny/bin/scrutiny-web-linux-${SCRUT_ARCH}" >> "$LOGFILE" 2>&1
+curl -fsSL "$COLLECTOR_URL" -o "/opt/scrutiny/bin/scrutiny-collector-metrics-linux-${SCRUT_ARCH}" >> "$LOGFILE" 2>&1
+
+chmod +x "/opt/scrutiny/bin/scrutiny-web-linux-${SCRUT_ARCH}" \
+         "/opt/scrutiny/bin/scrutiny-collector-metrics-linux-${SCRUT_ARCH}"
+
+ln -sfn "/opt/scrutiny/bin/scrutiny-web-linux-${SCRUT_ARCH}" /opt/scrutiny/bin/scrutiny-web
+ln -sfn "/opt/scrutiny/bin/scrutiny-collector-metrics-linux-${SCRUT_ARCH}" /opt/scrutiny/bin/scrutiny-collector
+
+# Ensure amd64 path exists for version_command compatibility on all systems
+if [[ "$SCRUT_ARCH" != "amd64" ]]; then
+    ln -sfn "/opt/scrutiny/bin/scrutiny-web-linux-${SCRUT_ARCH}" /opt/scrutiny/bin/scrutiny-web-linux-amd64
+fi
+
+printf '%s\n' "${SCRUT_VER#v}" > /opt/scrutiny/.af-version
+
+cat <<'EOF' > /etc/scrutiny/scrutiny.yaml
+version: 1
+web:
+  listen:
+    port: 8098
+    host: "0.0.0.0"
+  database:
+    location: /var/lib/scrutiny/scrutiny.db
+EOF
+
+chown -R scrutiny:scrutiny /opt/scrutiny /var/lib/scrutiny /etc/scrutiny
+
+report_progress 80 "Configuring scrutiny.service, collector service, and timer..."
+cat <<EOF > /etc/systemd/system/scrutiny.service
+[Unit]
+Description=Scrutiny SMART Hard Drive Telemetry Dashboard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=scrutiny
+Group=scrutiny
+Type=simple
+WorkingDirectory=/opt/scrutiny
+ExecStart=/opt/scrutiny/bin/scrutiny-web start --config /etc/scrutiny/scrutiny.yaml
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+cat <<'EOF' > /etc/systemd/system/scrutiny-collector.service
+[Unit]
+Description=Scrutiny SMART Metrics Collector
+After=network.target scrutiny.service
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/opt/scrutiny/bin/scrutiny-collector run --api-endpoint "http://127.0.0.1:8098"
+EOF
+
+cat <<'EOF' > /etc/systemd/system/scrutiny-collector.timer
+[Unit]
+Description=Hourly Scrutiny SMART Metrics Collection Timer
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+
+systemctl daemon-reload >> "$LOGFILE" 2>&1
+systemctl enable --now scrutiny >> "$LOGFILE" 2>&1
+systemctl enable --now scrutiny-collector.timer >> "$LOGFILE" 2>&1
+
+write_lock "${PACKAGE_NAME}"
+report_progress 100 "Scrutiny installed on port 8098 (companion collector timer active)."
+log_info "${PACKAGE_NAME} installed successfully"

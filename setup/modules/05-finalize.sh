@@ -60,21 +60,23 @@ function _boot() {
 	_safe_overlay_config "${local_setup}templates/sysd/aetherflow-heal.timer" \
 		/etc/systemd/system/aetherflow-heal.timer
 
-	# Install Next.js and Go API systemd service files
+	# Install AetherFlow Runner and Control Plane single-binary systemd service files
+	_safe_overlay_config "${local_setup}templates/sysd/aetherflow-runner.template" \
+		/etc/systemd/system/aetherflow-runner.service
 	_safe_overlay_config "${local_setup}templates/sysd/aetherflow-api.template" \
 		/etc/systemd/system/aetherflow-api.service
-	_safe_overlay_config "${local_setup}templates/sysd/aetherflow-frontend.template" \
-		/etc/systemd/system/aetherflow-frontend.service
+	rm -f /etc/systemd/system/aetherflow-front*.service 2>/dev/null || true
 
 	systemctl daemon-reload >/dev/null 2>&1
 	systemctl enable {rtorrent,irssi,deluged,deluge-web}@${username} >/dev/null 2>&1
 	systemctl start {rtorrent,irssi,deluged,deluge-web}@${username} >/dev/null 2>&1
 	systemctl enable --now aetherflow-heal.timer >/dev/null 2>&1 || true
 
-	# Enable (but don't start) the modern stack services — they're managed by PM2
-	# during initial install, but the units are available for manual switchover.
+	# Enable and start the privileged runner daemon and control plane single binary
+	systemctl enable aetherflow-runner.service >/dev/null 2>&1 || true
+	systemctl restart aetherflow-runner.service >/dev/null 2>&1 || true
 	systemctl enable aetherflow-api.service >/dev/null 2>&1 || true
-	systemctl enable aetherflow-frontend.service >/dev/null 2>&1 || true
+	systemctl restart aetherflow-api.service >/dev/null 2>&1 || true
 
 	echo "*/1 * * * * root bash /usr/local/bin/AetherFlow/system/set_interface" >/etc/cron.d/set_interface
 	/usr/local/bin/AetherFlow/system/set_interface >/dev/null 2>&1
@@ -157,44 +159,27 @@ _harden_permissions() {
 	echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✓ Permission hardening complete for ${af_root}" >> "${INSTALL_LOG}"
 }
 
-# Post-check: warn if any AetherFlow services are running as root
+# Post-check: ensure aetherflow-api runs as unprivileged user
 _validate_no_root_services() {
 	local warnings=0
 
-	# Check PM2 processes
-	if command -v pm2 >/dev/null 2>&1; then
-		local pm2_root_procs
-		pm2_root_procs="$(pm2 jlist 2>/dev/null | grep -o '"pm_exec_path":"[^"]*aetherflow[^"]*"' | head -5)" || true
-		if [[ -n "${pm2_root_procs}" ]] && [[ "$(whoami)" == "root" ]]; then
-			echo ""
-			echo -e "[ ${yellow:-\033[33m}WARN${normal:-\033[0m} ] AetherFlow PM2 processes are running as root."
-			echo "         Consider switching to systemd units (aetherflow-api.service,"
-			echo "         aetherflow-frontend.service) which run as the 'aetherflow' user."
-			echo ""
-			echo "[$(date '+%Y-%m-%d %H:%M:%S')] ⚠ WARNING: PM2 AetherFlow processes running as root" >> "${INSTALL_LOG}"
-			((warnings++))
+	# Validate aetherflow-api.service runs as unprivileged user
+	if systemctl is-active aetherflow-api.service >/dev/null 2>&1; then
+		local exec_user
+		exec_user="$(systemctl show -p MainPID aetherflow-api.service --value 2>/dev/null)"
+		if [[ -n "${exec_user}" ]] && [[ "${exec_user}" != "0" ]]; then
+			local running_user
+			running_user="$(ps -o user= -p "${exec_user}" 2>/dev/null)" || true
+			if [[ "${running_user}" == "root" ]]; then
+				echo -e "[ ${yellow:-\033[33m}WARN${normal:-\033[0m} ] aetherflow-api.service is running as root!"
+				echo "[$(date '+%Y-%m-%d %H:%M:%S')] ⚠ WARNING: aetherflow-api.service running as root" >> "${INSTALL_LOG}"
+				((warnings++))
+			fi
 		fi
 	fi
 
-	# Check systemd units if active
-	for unit in aetherflow-api.service aetherflow-frontend.service; do
-		if systemctl is-active "${unit}" >/dev/null 2>&1; then
-			local exec_user
-			exec_user="$(systemctl show -p MainPID "${unit}" --value 2>/dev/null)"
-			if [[ -n "${exec_user}" ]] && [[ "${exec_user}" != "0" ]]; then
-				local running_user
-				running_user="$(ps -o user= -p "${exec_user}" 2>/dev/null)" || true
-				if [[ "${running_user}" == "root" ]]; then
-					echo -e "[ ${yellow:-\033[33m}WARN${normal:-\033[0m} ] ${unit} is running as root!"
-					echo "[$(date '+%Y-%m-%d %H:%M:%S')] ⚠ WARNING: ${unit} running as root" >> "${INSTALL_LOG}"
-					((warnings++))
-				fi
-			fi
-		fi
-	done
-
 	if [[ ${warnings} -eq 0 ]]; then
-		echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✓ No AetherFlow services running as root" >> "${INSTALL_LOG}"
+		echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✓ AetherFlow services running with verified least privilege" >> "${INSTALL_LOG}"
 	fi
 
 	return 0
@@ -240,7 +225,7 @@ function _finished() {
 	echo -e " │ ${bold}Next Steps:${normal}                                              │"
 	echo -e " │ Please complete the setup using the web onboarding UI:   │"
 	echo -e " │                                                          │"
-	echo -e " │ 👉 ${bold}${magenta}http://${ip}:3000${normal}                              │"
+	echo -e " │ 👉 ${bold}${magenta}http://${ip}:8080${normal}                              │"
 	echo -e " │                                                          │"
 	echo -e " │ Log in using the administrator credentials you created   │"
 	echo -e " │ during this setup process.                               │"
@@ -255,7 +240,7 @@ function _finished() {
 	
 	cat >/root/information.info <<EOF
 AetherFlow Seedbox Initialized successfully.
-Dashboard Onboarding: http://${ip}:3000
+Dashboard Onboarding: http://${ip}:8080
 Admin Username: ${username}
 Admin Password: ${passwd}
 EOF

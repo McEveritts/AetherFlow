@@ -1,109 +1,72 @@
 #!/bin/bash
-#
-# [AetherFlow :: Install Syncthing]
-# Continuous file synchronization
-#
-# Author : McEveritts
-# URL    : https://AetherFlow.io
-# License: GPL-3.0
-#
-set -e
+# AetherFlow Package Installer: Syncthing
+# Port: 8384
 
-LOGFILE="/opt/AetherFlow/logs/installer.log"
-mkdir -p /opt/AetherFlow/logs /install
+set -euo pipefail
 
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [syncthing] $1" | tee -a "$LOGFILE"; }
-
-# ── Dependencies ─────────────────────────────────────────────────────────────
-log "Installing dependencies..."
-apt-get update >>"$LOGFILE" 2>&1
-apt-get install -y curl apt-transport-https gnupg2 >>"$LOGFILE" 2>&1
-
-# ── Create syncthing user ────────────────────────────────────────────────────
-if ! id -u syncthing &>/dev/null; then
-    useradd -r -s /usr/sbin/nologin -d /var/lib/syncthing syncthing
-fi
-mkdir -p /var/lib/syncthing /home/syncthing
-chown -R syncthing:syncthing /var/lib/syncthing /home/syncthing
-
-# ── Download Syncthing ───────────────────────────────────────────────────────
-log "Downloading latest Syncthing..."
-ARCH=$(dpkg --print-architecture)
-case "$ARCH" in
-    amd64) SYNC_ARCH="linux-amd64" ;;
-    arm64) SYNC_ARCH="linux-arm64" ;;
-    armhf) SYNC_ARCH="linux-arm" ;;
-    *) SYNC_ARCH="linux-amd64" ;;
-esac
-
-SYNC_URL=$(curl -sL https://api.github.com/repos/syncthing/syncthing/releases/latest | grep -oP '"browser_download_url": "\K(https://[^"]+'${SYNC_ARCH}'\.tar\.gz)(?=")' | head -1)
-
-if [[ -z "$SYNC_URL" ]]; then
-    log "Could not parse API download URL, attempting fallback to known latest..."
-    SYNC_VERSION=$(curl -sL https://api.github.com/repos/syncthing/syncthing/releases/latest | grep -oP '"tag_name": "\K[^"]+')
-    SYNC_URL="https://github.com/syncthing/syncthing/releases/download/${SYNC_VERSION}/syncthing-${SYNC_ARCH}-${SYNC_VERSION}.tar.gz"
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
 fi
 
-mkdir -p /tmp/AetherFlow
-cd /tmp/AetherFlow
-curl -sL "$SYNC_URL" -o syncthing.tar.gz >>"$LOGFILE" 2>&1
+PACKAGE_NAME="syncthing"
+export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")" /install
 
-log "Extracting Syncthing..."
-tar -xzf syncthing.tar.gz >>"$LOGFILE" 2>&1
-rm -f syncthing.tar.gz
+require_root
+log_info "Starting installation for ${PACKAGE_NAME}..."
+report_progress 15 "Installing prerequisites for Syncthing..."
 
-SYNC_DIR=$(find . -maxdepth 1 -name "syncthing-linux-*" -type d | head -1)
-if [[ -n "$SYNC_DIR" ]]; then
-    cp "$SYNC_DIR/syncthing" /usr/local/bin/
-    chmod +x /usr/local/bin/syncthing
+DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl gnupg ca-certificates apt-transport-https >> "$LOGFILE" 2>&1
+
+report_progress 35 "Adding official Syncthing APT repository..."
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://syncthing.net/release-key.gpg -o /etc/apt/keyrings/syncthing-archive-keyring.gpg >> "$LOGFILE" 2>&1
+chmod a+r /etc/apt/keyrings/syncthing-archive-keyring.gpg
+echo "deb [signed-by=/etc/apt/keyrings/syncthing-archive-keyring.gpg] https://apt.syncthing.net/ syncthing stable" > /etc/apt/sources.list.d/syncthing.list
+
+report_progress 60 "Installing Syncthing package..."
+DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq syncthing >> "$LOGFILE" 2>&1
+
+if ! id -u syncthing >/dev/null 2>&1; then
+    useradd --system --user-group --create-home --home-dir /var/lib/syncthing --shell /usr/sbin/nologin syncthing
 fi
-rm -rf "$SYNC_DIR"
 
-# ── Systemd service ──────────────────────────────────────────────────────────
-log "Creating systemd service..."
-cat > /etc/systemd/system/syncthing.service <<'EOF'
+mkdir -p /var/lib/syncthing
+chown -R syncthing:syncthing /var/lib/syncthing
+
+report_progress 85 "Configuring and starting syncthing.service on port 8384..."
+cat <<'EOF' > /etc/systemd/system/syncthing.service
 [Unit]
 Description=Syncthing - Open Source Continuous File Synchronization
+Documentation=man:syncthing(1)
 After=network.target
 
 [Service]
 User=syncthing
 Group=syncthing
-ExecStart=/usr/local/bin/syncthing -no-browser -no-restart -logflags=0
+Environment=HOME=/var/lib/syncthing
+ExecStart=/usr/bin/syncthing serve --no-browser --no-restart --logflags=0 --gui-address=0.0.0.0:8384 --home=/var/lib/syncthing
 Restart=on-failure
-RestartSec=10
+RestartSec=5
 SuccessExitStatus=3 4
 RestartForceExitStatus=3 4
-NoNewPrivileges=yes
-ProtectSystem=full
-ProtectHome=read-only
-PrivateTmp=yes
-PrivateDevices=yes
-ProtectKernelTunables=yes
-ProtectControlGroups=yes
-RestrictSUIDSGID=yes
-ReadWritePaths=/var/lib/syncthing
+NoNewPrivileges=true
+PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reload
-systemctl enable syncthing.service >>"$LOGFILE" 2>&1
-systemctl start syncthing.service
+systemctl daemon-reload >> "$LOGFILE" 2>&1
+systemctl enable --now syncthing >> "$LOGFILE" 2>&1
 
-# ── Apache reverse proxy ─────────────────────────────────────────────────────
-log "Configuring Apache reverse proxy..."
-cat > /etc/apache2/sites-enabled/syncthing.conf <<'EOF'
-<Location /syncthing>
-    ProxyPass http://localhost:8384
-    ProxyPassReverse http://localhost:8384
-</Location>
-EOF
-chown www-data:www-data /etc/apache2/sites-enabled/syncthing.conf
-a2enmod proxy proxy_http >>/dev/null 2>&1
-service apache2 reload >>"$LOGFILE" 2>&1
-
-# ── Finalize ─────────────────────────────────────────────────────────────────
-touch /install/.syncthing.lock
-log "Syncthing installation complete! Access at http://your-server:8384"
+write_lock "${PACKAGE_NAME}"
+report_progress 100 "Syncthing installed on port 8384."
+log_info "${PACKAGE_NAME} installed successfully"

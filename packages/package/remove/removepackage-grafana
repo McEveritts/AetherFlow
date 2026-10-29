@@ -1,23 +1,37 @@
 #!/bin/bash
-#
-# [AetherFlow :: Remove grafana]
-#
-source /opt/AetherFlow/packages/common.sh
-set -e
+# AetherFlow Package Uninstaller: Grafana
 
-LOGFILE="/opt/AetherFlow/logs/installer.log"
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [remove-grafana] $1" | tee -a "$LOGFILE"; }
+set -euo pipefail
 
-log "Stopping grafana..."
-systemctl stop grafana-server 2>/dev/null || true
-systemctl disable grafana-server 2>/dev/null || true
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
+fi
 
-log "Removing grafana files and configuration..."
-apt-get remove -y --purge grafana >/dev/null 2>&1 || true
-rm -f /etc/apt/sources.list.d/grafana.list /etc/apt/keyrings/grafana.gpg /etc/apache2/sites-enabled/grafana.conf
+PACKAGE_NAME="grafana"
+export LOGFILE="/var/log/aetherflow/remove-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")"
 
-systemctl daemon-reload 2>/dev/null || true
-service apache2 reload 2>/dev/null || true
-rm -f /install/.grafana.lock
+require_root
+log_info "Starting removal for ${PACKAGE_NAME}..."
+report_progress 20 "Stopping and disabling grafana-server.service..."
 
-log "grafana has been completely removed."
+purge_systemd_unit "grafana-server"
+
+report_progress 50 "Purging Grafana APT package and repository..."
+DEBIAN_FRONTEND=noninteractive apt-get purge -y -qq grafana >> "$LOGFILE" 2>&1 || true
+DEBIAN_FRONTEND=noninteractive apt-get autoremove -y -qq >> "$LOGFILE" 2>&1 || true
+rm -f /etc/apt/sources.list.d/grafana.list /etc/apt/keyrings/grafana.gpg
+
+report_progress 80 "Removing Grafana state, logs, configuration, and user account..."
+rm -rf /var/lib/grafana /var/log/grafana /etc/grafana /usr/share/grafana
+purge_system_user "grafana"
+systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
+
+remove_lock "${PACKAGE_NAME}"
+report_progress 100 "Grafana completely removed."
+log_info "${PACKAGE_NAME} removed successfully"

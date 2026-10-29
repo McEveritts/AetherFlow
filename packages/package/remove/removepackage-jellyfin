@@ -1,23 +1,37 @@
 #!/bin/bash
-#
-# [AetherFlow :: Remove jellyfin]
-#
-source /opt/AetherFlow/packages/common.sh
-set -e
+# AetherFlow Package Uninstaller: Jellyfin
 
-LOGFILE="/opt/AetherFlow/logs/installer.log"
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [remove-jellyfin] $1" | tee -a "$LOGFILE"; }
+set -euo pipefail
 
-log "Stopping jellyfin..."
-systemctl stop jellyfin 2>/dev/null || true
-systemctl disable jellyfin 2>/dev/null || true
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
+fi
 
-log "Removing jellyfin files and configuration..."
-apt-get remove -y --purge jellyfin* >/dev/null 2>&1 || true
-rm -f /etc/apt/sources.list.d/jellyfin.sources /etc/apt/keyrings/jellyfin.gpg /etc/apache2/sites-enabled/jellyfin.conf
+PACKAGE_NAME="jellyfin"
+export LOGFILE="/var/log/aetherflow/remove-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")"
 
-systemctl daemon-reload 2>/dev/null || true
-service apache2 reload 2>/dev/null || true
-rm -f /install/.jellyfin.lock
+require_root
+log_info "Starting removal for ${PACKAGE_NAME}..."
+report_progress 20 "Stopping and disabling jellyfin service..."
 
-log "jellyfin has been completely removed."
+purge_systemd_unit "jellyfin"
+
+report_progress 50 "Purging jellyfin APT packages and repository..."
+DEBIAN_FRONTEND=noninteractive apt-get purge -y -qq "jellyfin*" >> "$LOGFILE" 2>&1 || true
+DEBIAN_FRONTEND=noninteractive apt-get autoremove -y -qq >> "$LOGFILE" 2>&1 || true
+rm -f /etc/apt/sources.list.d/jellyfin.list /etc/apt/sources.list.d/jellyfin.sources /etc/apt/keyrings/jellyfin.gpg
+
+report_progress 80 "Removing Jellyfin state, caches, logs, and user account..."
+rm -rf /var/lib/jellyfin /var/cache/jellyfin /var/log/jellyfin /etc/jellyfin /usr/share/jellyfin
+purge_system_user "jellyfin"
+systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
+
+remove_lock "${PACKAGE_NAME}"
+report_progress 100 "Jellyfin completely removed."
+log_info "${PACKAGE_NAME} removed successfully"

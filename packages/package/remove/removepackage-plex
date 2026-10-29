@@ -1,41 +1,37 @@
 #!/bin/bash
-#
-# [Quick Box :: Remove plexmediaserver package]
-#
-# GITHUB REPOS
-# GitHub _ packages  :   https://github.com/AetherFlow/AetherFlow_packages
-# LOCAL REPOS
-# Local _ packages   :   /etc/AetherFlow/packages
-# Author             :   AetherFlow.IO
-# URL                :   https://AetherFlow.io
-#
-# AetherFlow Copyright (C) 2017 AetherFlow.io
-# Licensed under GNU General Public License v3.0 GPL-3 (in short)
-#
-#   You may copy, distribute and modify the software as long as you track
-#   changes/dates in source files. Any modifications to our software
-#   including (via compiler) GPL-licensed code must also be made available
-#   under the GPL along with build & install instructions.
-#
+# AetherFlow Package Uninstaller: Plex Media Server
 
-source /opt/AetherFlow/packages/common.sh
-function _removePlex() {
-  dpkg -r plexmediaserver >/dev/null 2>&1
-  sudo apt-get -y purge plexmediaserver >/dev/null 2>&1
-  rm -f /etc/systemd/system/plexmediaserver.service
-  systemctl daemon-reload >/dev/null 2>&1
-  rm -rf /var/lib/plexmediaserver
-  rm -rf /usr/lib/plexmediaserver
-  rm -f /etc/init/plexmediaserver.conf
-  rm -f /etc/default/plexmediaserver
-  rm -f /etc/apache2/conf-available/fqdn.conf
-  rm -f /etc/apache2/conf-enabled/fqdn.conf
-  rm -f /etc/apache2/sites-enabled/plex.conf
-  rm -f /srv/rutorrent/home/.plex
-  rm -f /install/.plex.lock
-  sudo userdel plex >/dev/null 2>&1
-  pkill -f plex
-}
+set -euo pipefail
 
-_removePlex
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
+fi
 
+PACKAGE_NAME="plex"
+export LOGFILE="/var/log/aetherflow/remove-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")"
+
+require_root
+log_info "Starting removal for ${PACKAGE_NAME}..."
+report_progress 20 "Stopping and disabling plexmediaserver service..."
+
+purge_systemd_unit "plexmediaserver"
+
+report_progress 50 "Purging plexmediaserver APT package and repositories..."
+DEBIAN_FRONTEND=noninteractive apt-get purge -y -qq plexmediaserver >> "$LOGFILE" 2>&1 || true
+DEBIAN_FRONTEND=noninteractive apt-get autoremove -y -qq >> "$LOGFILE" 2>&1 || true
+rm -f /etc/apt/sources.list.d/plexmediaserver.list /etc/apt/keyrings/plex.gpg
+
+report_progress 80 "Removing Plex data, caches, and user account..."
+rm -rf /var/lib/plexmediaserver /usr/lib/plexmediaserver /etc/default/plexmediaserver
+purge_system_user "plex"
+systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
+
+remove_lock "${PACKAGE_NAME}"
+report_progress 100 "Plex Media Server completely removed."
+log_info "${PACKAGE_NAME} removed successfully"

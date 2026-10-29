@@ -1,0 +1,33 @@
+[Unit]
+Description=AetherFlow Privileged Host Runner (UNIX Socket Helper)
+Documentation=https://github.com/McEveritts/AetherFlow
+After=network-online.target
+Wants=network-online.target
+RequiresMountsFor=/opt/AetherFlow
+
+[Service]
+Type=simple
+User=root
+Group=aetherflow
+WorkingDirectory=/opt/AetherFlow/current
+
+# Creates /run/aetherflow owned by root:aetherflow (0750)
+RuntimeDirectory=aetherflow
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=restart
+
+EnvironmentFile=-/etc/aetherflow/aetherflow.env
+Environment=AETHERFLOW_RUNNER_SOCK=/run/aetherflow/runner.sock
+
+ExecStart=/opt/AetherFlow/current/aetherflow-api runner
+
+KillMode=process
+KillSignal=SIGTERM
+TimeoutStopSec=30s
+Restart=on-failure
+RestartSec=3s
+
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

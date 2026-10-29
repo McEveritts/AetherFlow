@@ -1,39 +1,43 @@
 #!/bin/bash
-#
-# [AetherFlow :: Install Netdata]
-# Real-time performance and health monitoring
-#
-# Author : McEveritts
-# URL    : https://AetherFlow.io
-# License: GPL-3.0
-#
-source /opt/AetherFlow/packages/common.sh
+# AetherFlow Package Installer: Netdata
+# Port: 19999
+
 set -euo pipefail
 
-# Override common.sh LOGFILE for this specific package
-export LOGFILE="/opt/AetherFlow/logs/installer.log"
-mkdir -p "$(dirname "$LOGFILE")"
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
+fi
 
-# We use print_info to ensure output is visible to the backend installer
-log() { print_info "[$APP_ID] $1"; }
-APP_ID="netdata"
+PACKAGE_NAME="netdata"
+export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")" /install
 
-# ── Install Netdata using official kickstart ─────────────────────────────────
-log "Running Netdata kickstart installer..."
-fetch_and_run "https://get.netdata.cloud/kickstart.sh" "SKIP" --non-interactive --dont-wait >>"$LOGFILE" 2>&1
+require_root
+log_info "Starting installation for ${PACKAGE_NAME}..."
+report_progress 15 "Installing prerequisites for Netdata..."
 
-# ── Apache reverse proxy ─────────────────────────────────────────────────────
-log "Configuring Apache reverse proxy..."
-cat > /etc/apache2/sites-enabled/netdata.conf <<'EOF'
-<Location /netdata>
-    ProxyPass http://localhost:19999
-    ProxyPassReverse http://localhost:19999
-</Location>
-EOF
-chown www-data:www-data /etc/apache2/sites-enabled/netdata.conf
-a2enmod proxy proxy_http >>/dev/null 2>&1
-service apache2 reload >>"$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl ca-certificates >> "$LOGFILE" 2>&1
 
-# ── Finalize ─────────────────────────────────────────────────────────────────
-touch /install/.netdata.lock
-log "Netdata installation complete! Access at http://your-server:19999"
+report_progress 45 "Running official Netdata kickstart installer..."
+if ! fetch_and_run "https://get.netdata.cloud/kickstart.sh" "SKIP" --non-interactive --stable-channel --disable-telemetry >> "$LOGFILE" 2>&1; then
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq netdata >> "$LOGFILE" 2>&1
+fi
+
+if [[ -f /etc/netdata/netdata.conf ]]; then
+    sed -i 's/bind socket to IP = 127.0.0.1/bind socket to IP = 0.0.0.0/g' /etc/netdata/netdata.conf || true
+fi
+
+report_progress 85 "Starting and enabling netdata.service on port 19999..."
+systemctl daemon-reload >> "$LOGFILE" 2>&1
+systemctl enable --now netdata >> "$LOGFILE" 2>&1
+systemctl restart netdata >> "$LOGFILE" 2>&1 || true
+
+write_lock "${PACKAGE_NAME}"
+report_progress 100 "Netdata installed on port 19999."
+log_info "${PACKAGE_NAME} installed successfully"

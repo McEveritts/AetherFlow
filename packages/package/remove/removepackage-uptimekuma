@@ -1,23 +1,32 @@
 #!/bin/bash
-#
-# [AetherFlow :: Remove uptimekuma]
-#
-source /opt/AetherFlow/packages/common.sh
-set -e
+# AetherFlow Package Uninstaller: Uptime Kuma
 
-LOGFILE="/opt/AetherFlow/logs/installer.log"
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [remove-uptimekuma] $1" | tee -a "$LOGFILE"; }
+set -euo pipefail
 
-log "Stopping uptimekuma..."
-systemctl stop uptime-kuma 2>/dev/null || true
-systemctl disable uptime-kuma 2>/dev/null || true
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
+fi
 
-log "Removing uptimekuma files and configuration..."
-rm -rf /opt/uptime-kuma /etc/systemd/system/uptime-kuma.service /etc/apache2/sites-enabled/uptimekuma.conf
-userdel uptimekuma 2>/dev/null || true
+PACKAGE_NAME="uptimekuma"
+export LOGFILE="/var/log/aetherflow/remove-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")"
 
-systemctl daemon-reload 2>/dev/null || true
-service apache2 reload 2>/dev/null || true
-rm -f /install/.uptimekuma.lock
+require_root
+log_info "Starting removal for ${PACKAGE_NAME}..."
+report_progress 25 "Stopping and removing uptime-kuma.service..."
 
-log "uptimekuma has been completely removed."
+purge_systemd_unit "uptime-kuma"
+
+report_progress 65 "Removing Uptime Kuma directory and user account..."
+rm -rf /opt/uptime-kuma
+purge_system_user "uptimekuma"
+systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
+
+remove_lock "${PACKAGE_NAME}"
+report_progress 100 "Uptime Kuma completely removed."
+log_info "${PACKAGE_NAME} removed successfully"

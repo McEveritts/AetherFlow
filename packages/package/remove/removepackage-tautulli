@@ -1,10 +1,34 @@
 #!/bin/bash
-source /opt/AetherFlow/packages/common.sh
-systemctl stop Tautulli 2>/dev/null || true
-systemctl disable Tautulli 2>/dev/null || true
-rm -rf /opt/Tautulli
-rm -f /install/.Tautulli.lock
-rm -f /etc/apache2/sites-enabled/Tautulli.conf
-service apache2 reload 2>/dev/null || true
-rm -f /etc/systemd/system/Tautulli.service
-systemctl daemon-reload 2>/dev/null || true
+# AetherFlow Package Uninstaller: Tautulli
+
+set -euo pipefail
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
+fi
+
+PACKAGE_NAME="tautulli"
+export LOGFILE="/var/log/aetherflow/remove-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")"
+
+require_root
+log_info "Starting removal for ${PACKAGE_NAME}..."
+report_progress 25 "Stopping and removing tautulli.service..."
+
+purge_systemd_unit "tautulli"
+purge_systemd_unit "plexpy"
+
+report_progress 65 "Removing Tautulli files, state directories, and user account..."
+rm -rf /opt/Tautulli /opt/plexpy /var/lib/tautulli
+purge_system_user "tautulli"
+purge_system_user "plexpy"
+systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
+
+remove_lock "${PACKAGE_NAME}"
+report_progress 100 "Tautulli completely removed."
+log_info "${PACKAGE_NAME} removed successfully"

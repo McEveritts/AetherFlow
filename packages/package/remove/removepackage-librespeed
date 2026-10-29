@@ -1,0 +1,32 @@
+#!/bin/bash
+# AetherFlow Package Uninstaller: LibreSpeed
+
+set -euo pipefail
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
+fi
+
+PACKAGE_NAME="librespeed"
+export LOGFILE="/var/log/aetherflow/remove-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")"
+
+require_root
+log_info "Starting removal for ${PACKAGE_NAME}..."
+report_progress 25 "Stopping and removing librespeed.service..."
+
+purge_systemd_unit "librespeed"
+
+report_progress 65 "Removing LibreSpeed application directory and user account..."
+rm -rf /opt/librespeed
+purge_system_user "librespeed"
+systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
+
+remove_lock "${PACKAGE_NAME}"
+report_progress 100 "LibreSpeed completely removed."
+log_info "${PACKAGE_NAME} removed successfully"

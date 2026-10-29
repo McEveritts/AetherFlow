@@ -1,21 +1,32 @@
 #!/bin/bash
-#
-# [AetherFlow :: Remove flaresolverr]
-#
-source /opt/AetherFlow/packages/common.sh
-set -e
+# AetherFlow Package Uninstaller: FlareSolverr
 
-LOGFILE="/opt/AetherFlow/logs/installer.log"
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [remove-flaresolverr] $1" | tee -a "$LOGFILE"; }
+set -euo pipefail
 
-log "Stopping flaresolverr..."
-docker stop flaresolverr; docker rm -f flaresolverr
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
+fi
 
-log "Removing flaresolverr files and configuration..."
+PACKAGE_NAME="flaresolverr"
+export LOGFILE="/var/log/aetherflow/remove-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")"
 
+require_root
+log_info "Starting removal for ${PACKAGE_NAME}..."
+report_progress 25 "Stopping and removing flaresolverr.service..."
 
-systemctl daemon-reload 2>/dev/null
-service apache2 reload 2>/dev/null
-rm -f /install/.flaresolverr.lock
+purge_systemd_unit "flaresolverr"
 
-log "flaresolverr has been completely removed."
+report_progress 65 "Removing FlareSolverr binaries, state directories, and user account..."
+rm -rf /opt/flaresolverr /var/lib/flaresolverr
+purge_system_user "flaresolverr"
+systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
+
+remove_lock "${PACKAGE_NAME}"
+report_progress 100 "FlareSolverr completely removed."
+log_info "${PACKAGE_NAME} removed successfully"

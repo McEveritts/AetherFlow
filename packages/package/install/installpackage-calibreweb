@@ -1,0 +1,80 @@
+#!/bin/bash
+# AetherFlow Package Installer: Calibre-Web
+# Port: 8083
+
+set -euo pipefail
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
+fi
+
+PACKAGE_NAME="calibreweb"
+export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")" /install
+
+require_root
+log_info "Starting installation for ${PACKAGE_NAME}..."
+report_progress 10 "Installing Python and e-book parsing prerequisites..."
+
+DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+    python3 python3-venv python3-pip python3-dev git curl ca-certificates \
+    libffi-dev libssl-dev libxml2-dev libxslt1-dev zlib1g-dev imagemagick sqlite3 >> "$LOGFILE" 2>&1
+
+if ! id -u calibreweb >/dev/null 2>&1; then
+    useradd --system --user-group --create-home --home-dir /var/lib/calibre-web --shell /usr/sbin/nologin calibreweb
+fi
+
+mkdir -p /opt/calibre-web /var/lib/calibre-web /var/lib/calibre-library
+
+report_progress 35 "Cloning Calibre-Web repository into /opt/calibre-web..."
+rm -rf /opt/calibre-web
+git clone --depth 1 https://github.com/janeczku/calibre-web.git /opt/calibre-web >> "$LOGFILE" 2>&1
+cd /opt/calibre-web
+CW_TAG="$(git describe --tags --abbrev=0 2>/dev/null || true)"
+if [[ -n "$CW_TAG" ]]; then
+    printf '%s\n' "${CW_TAG#v}" > /opt/calibre-web/.af-version
+fi
+
+report_progress 60 "Setting up Python virtual environment and installing dependencies..."
+python3 -m venv /opt/calibre-web/.venv >> "$LOGFILE" 2>&1
+/opt/calibre-web/.venv/bin/pip install --upgrade pip setuptools wheel >> "$LOGFILE" 2>&1
+/opt/calibre-web/.venv/bin/pip install -r /opt/calibre-web/requirements.txt >> "$LOGFILE" 2>&1
+
+# Initialize baseline calibre metadata.db if missing
+if [[ ! -f /var/lib/calibre-library/metadata.db ]]; then
+    sqlite3 /var/lib/calibre-library/metadata.db "CREATE TABLE IF NOT EXISTS books (id INTEGER PRIMARY KEY, title TEXT, sort TEXT, timestamp TEXT, pubdate TEXT, series_index REAL, modify_date TEXT, path TEXT, flags INTEGER, has_cover BOOL DEFAULT 0);" >> "$LOGFILE" 2>&1 || true
+fi
+
+chown -R calibreweb:calibreweb /opt/calibre-web /var/lib/calibre-web /var/lib/calibre-library
+
+report_progress 85 "Configuring and starting calibreweb.service on port 8083..."
+cat <<'EOF' > /etc/systemd/system/calibreweb.service
+[Unit]
+Description=Calibre-Web E-book Reader
+After=network.target
+
+[Service]
+User=calibreweb
+Group=calibreweb
+Type=simple
+WorkingDirectory=/opt/calibre-web
+ExecStart=/opt/calibre-web/.venv/bin/python /opt/calibre-web/cps.py -p /var/lib/calibre-web/app.db -g /var/lib/calibre-web
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload >> "$LOGFILE" 2>&1
+systemctl enable --now calibreweb >> "$LOGFILE" 2>&1
+
+write_lock "${PACKAGE_NAME}"
+report_progress 100 "Calibre-Web installed on port 8083."
+log_info "${PACKAGE_NAME} installed successfully"

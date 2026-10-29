@@ -1,97 +1,80 @@
 #!/bin/bash
-#
-# [AetherFlow :: Install Radarr]
-# Movie collection manager for Usenet and BitTorrent
-#
-# Author : McEveritts
-# URL    : https://AetherFlow.io
-# License: GPL-3.0
-#
-set -e
+# AetherFlow Package Installer: Radarr
+# Port: 7878
 
-LOGFILE="/opt/AetherFlow/logs/installer.log"
-mkdir -p /opt/AetherFlow/logs /install
+set -euo pipefail
 
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [radarr] $1" | tee -a "$LOGFILE"; }
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
+fi
 
-# ── Dependencies ─────────────────────────────────────────────────────────────
-log "Installing dependencies..."
-apt-get update >>"$LOGFILE" 2>&1
-apt-get install -y curl sqlite3 libicu-dev >>"$LOGFILE" 2>&1
+PACKAGE_NAME="radarr"
+export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")" /install
 
-# ── Download Radarr ──────────────────────────────────────────────────────────
-log "Downloading latest Radarr..."
+require_root
+log_info "Starting installation for ${PACKAGE_NAME}..."
+report_progress 10 "Installing dependencies for Radarr..."
+
+DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl sqlite3 libicu-dev mediainfo ca-certificates >> "$LOGFILE" 2>&1
+
+if ! id -u radarr >/dev/null 2>&1; then
+    useradd --system --user-group --no-create-home --home-dir /var/lib/radarr --shell /usr/sbin/nologin radarr
+fi
+
+mkdir -p /var/lib/radarr /opt/Radarr
+
 ARCH=$(dpkg --print-architecture)
 case "$ARCH" in
     amd64) RADARR_ARCH="x64" ;;
     arm64) RADARR_ARCH="arm64" ;;
     armhf) RADARR_ARCH="arm" ;;
-    *) RADARR_ARCH="x64" ;;
+    *) print_error "Unsupported architecture: $ARCH"; exit 1 ;;
 esac
 
-mkdir -p /tmp/AetherFlow
-cd /tmp/AetherFlow
-curl -sL "https://radarr.servarr.com/v1/update/master/updatefile?os=linux&runtime=netcore&arch=${RADARR_ARCH}" -o radarr.tar.gz >>"$LOGFILE" 2>&1
+report_progress 35 "Downloading Radarr (${RADARR_ARCH})..."
+RADARR_VERSION="$(curl -fsSL https://api.github.com/repos/Radarr/Radarr/releases/latest 2>/dev/null | grep -oP '"tag_name":\s*"v?\K[^"]+' | head -1 || true)"
+TMP_TAR=$(mktemp /tmp/radarr-XXXXXX.tar.gz)
+curl -fsSL "https://radarr.servarr.com/v1/update/master/updatefile?os=linux&runtime=netcore&arch=${RADARR_ARCH}" -o "$TMP_TAR" >> "$LOGFILE" 2>&1
 
-log "Extracting Radarr..."
-rm -rf /opt/Radarr
-tar -xzf radarr.tar.gz -C /opt >>"$LOGFILE" 2>&1
-rm -f radarr.tar.gz
-
-# ── Create radarr user ───────────────────────────────────────────────────────
-if ! id -u radarr &>/dev/null; then
-    useradd -r -s /usr/sbin/nologin -d /opt/Radarr radarr
+report_progress 65 "Extracting Radarr to /opt/Radarr..."
+tar -xzf "$TMP_TAR" -C /opt >> "$LOGFILE" 2>&1
+rm -f "$TMP_TAR"
+if [[ -n "$RADARR_VERSION" ]]; then
+    printf '%s\n' "${RADARR_VERSION#v}" > /opt/Radarr/.af-version
 fi
-chown -R radarr:radarr /opt/Radarr
-mkdir -p /var/lib/radarr
-chown -R radarr:radarr /var/lib/radarr
+chown -R radarr:radarr /opt/Radarr /var/lib/radarr
 
-# ── Systemd service ──────────────────────────────────────────────────────────
-log "Creating systemd service..."
-cat > /etc/systemd/system/radarr.service <<'EOF'
+report_progress 85 "Configuring and starting radarr.service..."
+cat <<'EOF' > /etc/systemd/system/radarr.service
 [Unit]
-Description=Radarr Movie Manager
+Description=Radarr Daemon
 After=syslog.target network.target
 
 [Service]
 User=radarr
 Group=radarr
 Type=simple
-ExecStart=/opt/Radarr/Radarr -nobrowser -data=/var/lib/radarr/
-Restart=on-failure
-RestartSec=10
+ExecStart=/opt/Radarr/Radarr -nobrowser -data=/var/lib/radarr
 TimeoutStopSec=20
 KillMode=process
-NoNewPrivileges=yes
-ProtectSystem=full
-ProtectHome=true
-PrivateTmp=yes
-PrivateDevices=yes
-ProtectKernelTunables=yes
-ProtectControlGroups=yes
-RestrictSUIDSGID=yes
-ReadWritePaths=/var/lib/radarr
+Restart=on-failure
+NoNewPrivileges=true
+PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reload
-systemctl enable radarr.service >>"$LOGFILE" 2>&1
-systemctl start radarr.service
+systemctl daemon-reload >> "$LOGFILE" 2>&1
+systemctl enable --now radarr >> "$LOGFILE" 2>&1
 
-# ── Apache reverse proxy ─────────────────────────────────────────────────────
-log "Configuring Apache reverse proxy..."
-cat > /etc/apache2/sites-enabled/radarr.conf <<'EOF'
-<Location /radarr>
-    ProxyPass http://localhost:7878/radarr
-    ProxyPassReverse http://localhost:7878/radarr
-</Location>
-EOF
-chown www-data:www-data /etc/apache2/sites-enabled/radarr.conf
-a2enmod proxy proxy_http >>/dev/null 2>&1
-service apache2 reload >>"$LOGFILE" 2>&1
-
-# ── Finalize ─────────────────────────────────────────────────────────────────
-touch /install/.radarr.lock
-log "Radarr installation complete! Access at http://your-server:7878"
+write_lock "${PACKAGE_NAME}"
+report_progress 100 "Radarr installed on port 7878."
+log_info "${PACKAGE_NAME} installed successfully"

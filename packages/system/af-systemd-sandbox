@@ -16,9 +16,10 @@ usage() {
     cat <<'EOF'
 Usage:
   af-systemd-sandbox apply --profile <profile> [--rw <path>]... <unit> [<unit>...]
+  af-systemd-sandbox remove <unit> [<unit>...]
 
 Profiles:
-  native, go, python, node, mono, dotnet, java
+  native, go, python, node, mono, dotnet, java, privileged, none
 EOF
 }
 
@@ -27,6 +28,18 @@ normalize_unit() {
     case "${unit}" in
         *.service|*.timer|*.socket) printf '%s\n' "${unit}" ;;
         *) printf '%s.service\n' "${unit}" ;;
+    esac
+}
+
+is_exempt_unit() {
+    local unit="$1"
+    case "${unit}" in
+        wg-quick@*|wireguard*|fail2ban.service|pihole-FTL.service|netdata.service|node_exporter.service|apache2.service|mariadb.service|mysql.service|mergerfs*|rclone-vfs*|scrutiny-collector*)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
     esac
 }
 
@@ -56,10 +69,21 @@ expand_rw_path() {
     local raw_path="$1"
     local service_user="$2"
     local service_home="$3"
+    local optional_prefix=""
+    if [[ "${raw_path}" == -* ]]; then
+        optional_prefix="-"
+        raw_path="${raw_path#-}"
+    fi
     local expanded="${raw_path}"
     expanded="${expanded//\{\{SERVICE_USER\}\}/${service_user}}"
     expanded="${expanded//\{\{SERVICE_HOME\}\}/${service_home}}"
-    printf '%s\n' "${expanded}"
+    # Always prefix with '-' if optional or if directory does not currently exist on disk
+    # so systemd never fails with 226/NAMESPACE on optional/missing directories.
+    if [[ -n "${optional_prefix}" || ! -e "${expanded}" ]]; then
+        printf -- '-%s\n' "${expanded}"
+    else
+        printf '%s\n' "${expanded}"
+    fi
 }
 
 profile_block() {
@@ -98,10 +122,25 @@ EOF
     esac
 }
 
+remove_sandbox_dropin() {
+    local unit="$1"
+    local dropin_dir="/etc/systemd/system/${unit}.d"
+    local dropin_file="${dropin_dir}/10-aetherflow-sandbox.conf"
+    rm -f "${dropin_file}"
+    rmdir "${dropin_dir}" >/dev/null 2>&1 || true
+    log_info "Removed sandbox drop-in for ${unit}"
+}
+
 apply_sandbox_dropin() {
     local profile="$1"
     local unit="$2"
     shift 2
+
+    if [[ "${profile}" == "privileged" || "${profile}" == "none" ]] || is_exempt_unit "${unit}"; then
+        remove_sandbox_dropin "${unit}"
+        log_info "Unit ${unit} is exempt from strict sandboxing (profile=${profile})"
+        return 0
+    fi
 
     local service_user service_home dropin_dir dropin_file
     service_user="$(service_user_for_unit "${unit}")"
@@ -186,6 +225,21 @@ case "${command_name}" in
             restart_if_active "${unit}"
         done
         ;;
+    remove)
+        units=()
+        while [[ "$#" -gt 0 ]]; do
+            units+=("$(normalize_unit "$1")")
+            shift
+        done
+        if [[ "${#units[@]}" -eq 0 ]]; then
+            usage
+            exit 1
+        fi
+        for unit in "${units[@]}"; do
+            remove_sandbox_dropin "${unit}"
+        done
+        systemctl daemon-reload >/dev/null 2>&1 || true
+        ;;
     --help|-h)
         usage
         ;;
@@ -194,3 +248,4 @@ case "${command_name}" in
         exit 1
         ;;
 esac
+

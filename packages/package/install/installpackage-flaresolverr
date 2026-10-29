@@ -1,110 +1,111 @@
 #!/bin/bash
-#
-# [AetherFlow :: Install FlareSolverr]
-# Proxy server to bypass Cloudflare and DDoS-GUARD — Native deployment
-#
-# Author : McEveritts
-# URL    : https://AetherFlow.io
-# License: GPL-3.0
-#
-set -e
-set -o pipefail
+# AetherFlow Package Installer: FlareSolverr
+# Port: 8191
 
-LOGFILE="/opt/AetherFlow/logs/installer.log"
-mkdir -p /opt/AetherFlow/logs /install
+set -euo pipefail
 
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [flaresolverr] $1" | tee -a "$LOGFILE"; }
-
-if [[ -f /install/.flaresolverr.lock ]]; then
-    log "FlareSolverr is already installed. Skipping."
-    exit 0
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
 fi
 
-# ── Dependencies ─────────────────────────────────────────────────────────────
-log "Installing dependencies..."
-apt-get update >>"$LOGFILE" 2>&1
-apt-get install -y curl xvfb chromium chromium-driver >>"$LOGFILE" 2>&1
+PACKAGE_NAME="flaresolverr"
+export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")" /install
 
-# ── Architecture detection ───────────────────────────────────────────────────
+require_root
+log_info "Starting installation for ${PACKAGE_NAME}..."
+report_progress 10 "Installing Chromium and Xvfb dependencies for FlareSolverr..."
+
+DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl xvfb python3 python3-venv python3-pip ca-certificates fonts-liberation libnss3 libatk-bridge2.0-0 libdrm2 libxkbcommon0 libgbm1 libasound2t64 >> "$LOGFILE" 2>&1 || \
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl xvfb python3 python3-venv python3-pip ca-certificates fonts-liberation libnss3 libatk-bridge2.0-0 libdrm2 libxkbcommon0 libgbm1 libasound2 >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq chromium >> "$LOGFILE" 2>&1 || DEBIAN_FRONTEND=noninteractive apt-get install -y -qq chromium-browser >> "$LOGFILE" 2>&1 || true
+
+if ! id -u flaresolverr >/dev/null 2>&1; then
+    useradd --system --user-group --no-create-home --home-dir /var/lib/flaresolverr --shell /usr/sbin/nologin flaresolverr
+fi
+
+mkdir -p /opt/flaresolverr /var/lib/flaresolverr
+
 ARCH=$(dpkg --print-architecture)
 case "$ARCH" in
-    amd64) FS_ARCH="linux-x64"  ;;
-    arm64) FS_ARCH="linux-arm64" ;;
-    *)     FS_ARCH="linux-x64"  ;;
+    amd64) FS_ARCH="linux_x64" ;;
+    arm64) FS_ARCH="linux_arm64" ;;
+    *) print_error "Unsupported architecture: $ARCH"; exit 1 ;;
 esac
-log "Detected architecture: ${ARCH} → ${FS_ARCH}"
 
-# ── Download FlareSolverr ────────────────────────────────────────────────────
-log "Downloading FlareSolverr..."
+report_progress 35 "Resolving latest FlareSolverr release..."
+FS_JSON="$(curl -fsSL https://api.github.com/repos/FlareSolverr/FlareSolverr/releases/latest 2>/dev/null || true)"
+FS_VERSION="$(printf '%s' "$FS_JSON" | grep -oP '"tag_name":\s*"v?\K[^"]+' | head -1 || true)"
+FS_VERSION="${FS_VERSION:-3.3.21}"
+FS_URL="$(printf '%s' "$FS_JSON" | grep -oP '"browser_download_url":\s*"\K[^"]*flaresolverr_'${FS_ARCH}'\.tar\.gz' | head -1 || true)"
 
-FS_URL=$(curl -sL https://api.github.com/repos/FlareSolverr/FlareSolverr/releases/latest \
-    | grep -oP "\"browser_download_url\": \"\K(https://[^\"]+${FS_ARCH}\.tar\.gz)(?=\")" \
-    | head -1) || true
-
-if [[ -z "$FS_URL" ]]; then
-    log "GitHub API did not return matching asset, attempting tag-based fallback..."
-    FS_VERSION=$(curl -sL https://api.github.com/repos/FlareSolverr/FlareSolverr/releases/latest \
-        | grep -oP '"tag_name": "v?\K[^"]+') || true
-    if [[ -z "$FS_VERSION" ]]; then
-        log "FATAL: Could not determine FlareSolverr version."
-        exit 1
-    fi
-    FS_URL="https://github.com/FlareSolverr/FlareSolverr/releases/download/v${FS_VERSION}/flaresolverr_${FS_ARCH}.tar.gz"
+if [[ -z "$FS_URL" && "$FS_ARCH" == "linux_x64" ]]; then
+    FS_URL="https://github.com/FlareSolverr/FlareSolverr/releases/download/v${FS_VERSION}/flaresolverr_linux_x64.tar.gz"
 fi
 
-log "Download URL: ${FS_URL}"
-mkdir -p /tmp/AetherFlow
-cd /tmp/AetherFlow
-curl -sL "$FS_URL" -o flaresolverr.tar.gz >>"$LOGFILE" 2>&1
-
-log "Extracting FlareSolverr..."
+report_progress 60 "Downloading and installing FlareSolverr ${FS_VERSION}..."
 rm -rf /opt/flaresolverr
-mkdir -p /opt/flaresolverr
-tar -xzf flaresolverr.tar.gz -C /opt/flaresolverr --strip-components=1 >>"$LOGFILE" 2>&1
-rm -f flaresolverr.tar.gz
-
-# ── Create flaresolverr user ─────────────────────────────────────────────────
-if ! id -u flaresolverr &>/dev/null; then
-    useradd -r -s /usr/sbin/nologin -d /opt/flaresolverr flaresolverr
+if [[ -n "$FS_URL" ]]; then
+    TMP_TAR=$(mktemp /tmp/flaresolverr-XXXXXX.tar.gz)
+    curl -fsSL "$FS_URL" -o "$TMP_TAR" >> "$LOGFILE" 2>&1
+    tar -xzf "$TMP_TAR" -C /opt >> "$LOGFILE" 2>&1
+    rm -f "$TMP_TAR"
+else
+    # Source + venv fallback for arm64 where prebuilt binary tarball is omitted
+    TMP_TAR=$(mktemp /tmp/flaresolverr-src-XXXXXX.tar.gz)
+    curl -fsSL "https://github.com/FlareSolverr/FlareSolverr/archive/refs/tags/v${FS_VERSION}.tar.gz" -o "$TMP_TAR" >> "$LOGFILE" 2>&1
+    mkdir -p /opt/flaresolverr
+    tar -xzf "$TMP_TAR" -C /opt/flaresolverr --strip-components=1 >> "$LOGFILE" 2>&1
+    rm -f "$TMP_TAR"
+    python3 -m venv /opt/flaresolverr/.venv >> "$LOGFILE" 2>&1
+    /opt/flaresolverr/.venv/bin/pip install --upgrade pip wheel >> "$LOGFILE" 2>&1
+    /opt/flaresolverr/.venv/bin/pip install -r /opt/flaresolverr/requirements.txt >> "$LOGFILE" 2>&1
+    cat <<'WRAP' > /opt/flaresolverr/flaresolverr
+#!/bin/bash
+exec /opt/flaresolverr/.venv/bin/python3 /opt/flaresolverr/src/flaresolverr.py "$@"
+WRAP
+    chmod +x /opt/flaresolverr/flaresolverr
 fi
-chown -R flaresolverr:flaresolverr /opt/flaresolverr
 
-# ── Systemd service ──────────────────────────────────────────────────────────
-log "Creating systemd service..."
-cat > /etc/systemd/system/flaresolverr.service <<'EOF'
+printf '%s\n' "${FS_VERSION#v}" > /opt/flaresolverr/.af-version
+chown -R flaresolverr:flaresolverr /opt/flaresolverr /var/lib/flaresolverr
+
+CHROME_BIN="$(command -v chromium || command -v chromium-browser || echo /usr/bin/chromium)"
+
+report_progress 85 "Configuring and starting flaresolverr.service on port 8191..."
+cat <<EOF > /etc/systemd/system/flaresolverr.service
 [Unit]
-Description=FlareSolverr Proxy (AetherFlow Managed)
-After=network-online.target
-Wants=network-online.target
+Description=FlareSolverr Proxy Daemon
+After=network.target
 
 [Service]
-Type=simple
 User=flaresolverr
 Group=flaresolverr
 WorkingDirectory=/opt/flaresolverr
+Environment=HOST=0.0.0.0
+Environment=PORT=8191
 Environment=LOG_LEVEL=info
-Environment=TZ=America/New_York
+Environment=HEADLESS=true
+Environment=CHROME_EXE=${CHROME_BIN}
+Environment=HOME=/var/lib/flaresolverr
 ExecStart=/opt/flaresolverr/flaresolverr
 Restart=on-failure
-RestartSec=10
+RestartSec=5
 TimeoutStopSec=20
-NoNewPrivileges=yes
-ProtectSystem=full
-ProtectHome=true
-PrivateTmp=yes
-ProtectKernelTunables=yes
-ProtectControlGroups=yes
-RestrictSUIDSGID=yes
-ReadWritePaths=/opt/flaresolverr
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reload
-systemctl enable flaresolverr.service >>"$LOGFILE" 2>&1
-systemctl start flaresolverr.service
+systemctl daemon-reload >> "$LOGFILE" 2>&1
+systemctl enable --now flaresolverr >> "$LOGFILE" 2>&1
 
-# ── Finalize ─────────────────────────────────────────────────────────────────
-touch /install/.flaresolverr.lock
-log "FlareSolverr installation complete! API at http://your-server:8191"
+write_lock "${PACKAGE_NAME}"
+report_progress 100 "FlareSolverr installed on port 8191."
+log_info "${PACKAGE_NAME} installed successfully"

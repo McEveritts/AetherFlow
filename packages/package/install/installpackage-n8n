@@ -1,0 +1,75 @@
+#!/bin/bash
+# AetherFlow Package Installer: n8n
+# Port: 5678
+
+set -euo pipefail
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
+fi
+
+PACKAGE_NAME="n8n"
+export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")" /install
+
+require_root
+log_info "Starting installation for ${PACKAGE_NAME}..."
+report_progress 10 "Setting up Node.js runtime and build prerequisites for n8n..."
+
+DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl ca-certificates build-essential python3 >> "$LOGFILE" 2>&1
+
+ensure_node 20
+
+if ! id -u n8n >/dev/null 2>&1; then
+    useradd --system --user-group --create-home --home-dir /var/lib/n8n --shell /usr/sbin/nologin n8n
+fi
+
+mkdir -p /var/lib/n8n /opt/n8n
+
+report_progress 40 "Installing n8n package globally via npm..."
+npm install -g n8n >> "$LOGFILE" 2>&1
+
+N8N_VER="$(n8n --version 2>/dev/null || true)"
+if [[ -n "$N8N_VER" ]]; then
+    printf '%s\n' "${N8N_VER#v}" > /var/lib/n8n/.af-version
+fi
+
+chown -R n8n:n8n /var/lib/n8n /opt/n8n
+
+NODE_PATH="$(command -v node || echo /usr/bin/node)"
+N8N_BIN="$(command -v n8n || echo /usr/local/bin/n8n)"
+
+report_progress 85 "Configuring and starting n8n.service on port 5678..."
+cat <<EOF > /etc/systemd/system/n8n.service
+[Unit]
+Description=n8n - Workflow Automation Tool
+After=network.target
+
+[Service]
+Type=simple
+User=n8n
+Group=n8n
+Environment=N8N_PORT=5678
+Environment=N8N_LISTEN_ADDRESS=0.0.0.0
+Environment=N8N_USER_FOLDER=/var/lib/n8n
+Environment=NODE_ENV=production
+ExecStart=${NODE_PATH} ${N8N_BIN}
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload >> "$LOGFILE" 2>&1
+systemctl enable --now n8n >> "$LOGFILE" 2>&1
+
+write_lock "${PACKAGE_NAME}"
+report_progress 100 "n8n installed on port 5678."
+log_info "${PACKAGE_NAME} installed successfully"

@@ -1,0 +1,102 @@
+#!/bin/bash
+# AetherFlow Package Installer: Cloudplow
+# Port: 0 (Python venv offloader daemon in /opt/cloudplow)
+
+set -euo pipefail
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
+fi
+
+PACKAGE_NAME="cloudplow"
+export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")" /install
+
+require_root
+log_info "Starting installation for ${PACKAGE_NAME}..."
+report_progress 10 "Installing Python build dependencies for Cloudplow..."
+
+DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+    python3 python3-pip python3-venv python3-dev git curl ca-certificates >> "$LOGFILE" 2>&1
+
+report_progress 35 "Cloning Cloudplow repository into /opt/cloudplow..."
+rm -rf /opt/cloudplow
+git clone https://github.com/l3uddz/cloudplow.git /opt/cloudplow >> "$LOGFILE" 2>&1
+cd /opt/cloudplow
+CL_TAG="$(git describe --tags --abbrev=0 2>/dev/null || git rev-parse --short HEAD 2>/dev/null || true)"
+if [[ -n "$CL_TAG" ]]; then
+    printf '%s\n' "$CL_TAG" > /opt/cloudplow/.af-version
+fi
+
+report_progress 60 "Creating Python virtualenv and installing dependencies..."
+python3 -m venv /opt/cloudplow/.venv >> "$LOGFILE" 2>&1
+/opt/cloudplow/.venv/bin/pip install --upgrade pip setuptools wheel >> "$LOGFILE" 2>&1
+if [[ -f /opt/cloudplow/requirements.txt ]]; then
+    /opt/cloudplow/.venv/bin/pip install -r /opt/cloudplow/requirements.txt >> "$LOGFILE" 2>&1
+fi
+
+mkdir -p /var/log/cloudplow /mnt/local /mnt/remote /mnt/unionfs
+
+if [[ ! -f /opt/cloudplow/config.json ]]; then
+    cat <<'EOF' > /opt/cloudplow/config.json
+{
+  "core": {
+    "dry_run": false,
+    "rclone_binary": "/usr/bin/rclone",
+    "rclone_config_path": "/etc/rclone/rclone.conf"
+  },
+  "hidden": {},
+  "notifications": {},
+  "remotes": {
+    "remote": {
+      "rclone_command": "move",
+      "rclone_sleeps": "true",
+      "sync_remote": "remote:media",
+      "upload_folder": "/mnt/local",
+      "upload_remote": "remote:media"
+    }
+  },
+  "syncer": {},
+  "uploader": {
+    "remote": {
+      "check_interval": 30,
+      "max_size_gb": 50,
+      "size_excludes": []
+    }
+  }
+}
+EOF
+fi
+
+report_progress 85 "Configuring and starting cloudplow.service unit..."
+cat <<'EOF' > /etc/systemd/system/cloudplow.service
+[Unit]
+Description=Cloudplow Rclone MergerFS Offloader
+After=network-online.target mergerfs.service rclone.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/cloudplow
+ExecStartPre=-/bin/mkdir -p /var/log/cloudplow
+ExecStart=/opt/cloudplow/.venv/bin/python /opt/cloudplow/cloudplow.py run
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload >> "$LOGFILE" 2>&1
+systemctl enable --now cloudplow >> "$LOGFILE" 2>&1
+
+write_lock "${PACKAGE_NAME}"
+report_progress 100 "Cloudplow installed (daemon active in /opt/cloudplow)."
+log_info "${PACKAGE_NAME} installed successfully"

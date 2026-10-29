@@ -19,35 +19,60 @@
 #   including (via compiler) GPL-licensed code must also be made available
 #   under the GPL along with build & install instructions.
 #
-source /opt/AetherFlow/packages/common.sh
-OUTTO=$LOGFILE
+
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+  # shellcheck source=/dev/null
+  source /opt/AetherFlow/packages/common.sh
+elif [[ -f "$(dirname "${BASH_SOURCE[0]}")/../../common.sh" ]]; then
+  # shellcheck source=/dev/null
+  source "$(dirname "${BASH_SOURCE[0]}")/../../common.sh"
+fi
+OUTTO="${LOGFILE:-/var/log/aetherflow/install.log}"
+rutorrent="${rutorrent:-/var/www/rutorrent/}"
 
 function _installplugin-rutracker_check() {
   username=$(whoami);
-  # LEGACY: rutorrent path no longer used
-# rutorrent="/srv/rutorrent/";
+  rutorrent="${rutorrent:-/var/www/rutorrent/}"
   echo "Accessing rutracker_check in the plugin vault ... " >>"${OUTTO}" 2>&1;
-  PLUGINVAULT="/etc/AetherFlow/rtplugins/"; cd "${rutorrent}plugins"
-  sleep 5
+  PLUGINVAULT="/etc/AetherFlow/rtplugins/"
+  mkdir -p "${rutorrent}plugins"
+  cd "${rutorrent}plugins"
 
   echo "Installing rutracker_check plugin ... " >>"${OUTTO}" 2>&1;
   PLUGIN="rutracker_check"
-    for i in $PLUGIN; do
+  for i in $PLUGIN; do
+    if [[ -d "${PLUGINVAULT}$i" ]]; then
       cp -R "${PLUGINVAULT}$i" .
-    done
-  sleep 5
+    elif [[ -d "${rutorrent}plugins/$i" ]]; then
+      echo "Plugin $i is already present in ${rutorrent}plugins" >>"${OUTTO}" 2>&1
+    else
+      echo "Plugin vault directory not found: ${PLUGINVAULT}$i. Attempting fallback clone..." >>"${OUTTO}" 2>&1
+      tmp_git="/tmp/rutorrent-git-$$"
+      if git clone --depth 1 https://github.com/Novik/ruTorrent.git "$tmp_git" >>"${OUTTO}" 2>&1; then
+        if [[ -d "${tmp_git}/plugins/$i" ]]; then
+          cp -R "${tmp_git}/plugins/$i" .
+        fi
+        rm -rf "$tmp_git"
+      else
+        rm -rf "$tmp_git"
+        echo "Warning: Plugin vault missing and upstream fallback unavailable for $i" >>"${OUTTO}" 2>&1
+      fi
+    fi
+  done
 
   echo "Adjusting permissions ... " >>"${OUTTO}" 2>&1;
-  chown -R www-data: ${rutorrent}plugins/$PLUGIN
+  for i in $PLUGIN; do
+    if [[ -d "${rutorrent}plugins/$i" ]]; then
+      chown -R www-data: "${rutorrent}plugins/$i" 2>>"${OUTTO}" || true
+    fi
+  done
   echo "RUtracker_check Plugin Install Complete!" >>"${OUTTO}" 2>&1;
-  
-  sleep 5
+
   echo >>"${OUTTO}" 2>&1;
   echo >>"${OUTTO}" 2>&1;
   echo "Close this dialog box to refresh your browser" >>"${OUTTO}" 2>&1;
 
-    exit
+  exit 0
 }
 
 _installplugin-rutracker_check
-

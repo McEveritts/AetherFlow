@@ -1,0 +1,99 @@
+#!/bin/bash
+# AetherFlow Package Installer: rTorrent
+# Port: 0 (SCGI on /run/rtorrent/rpc.sock and 127.0.0.1:15000)
+
+set -euo pipefail
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
+fi
+
+PACKAGE_NAME="rtorrent"
+export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")" /install
+
+require_root
+log_info "Starting installation for ${PACKAGE_NAME}..."
+report_progress 15 "Installing rTorrent, screen, and dependencies via apt..."
+
+DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq rtorrent screen curl psmisc ca-certificates >> "$LOGFILE" 2>&1
+
+report_progress 40 "Configuring rtorrent service user and session directories..."
+if ! id -u rtorrent >/dev/null 2>&1; then
+    useradd --system --user-group --create-home --home-dir /var/lib/rtorrent --shell /usr/sbin/nologin rtorrent
+fi
+
+# Ensure rtorrent and www-data have shared socket access
+usermod -aG www-data rtorrent >> "$LOGFILE" 2>&1 || true
+usermod -aG rtorrent www-data >> "$LOGFILE" 2>&1 || true
+
+mkdir -p /var/lib/rtorrent/session \
+         /var/lib/rtorrent/downloads \
+         /var/lib/rtorrent/watch \
+         /run/rtorrent
+
+report_progress 65 "Generating hardened .rtorrent.rc configuration..."
+cat <<'EOF' > /var/lib/rtorrent/.rtorrent.rc
+# AetherFlow rTorrent native configuration
+session.path.set = /var/lib/rtorrent/session/
+directory.default.set = /var/lib/rtorrent/downloads
+schedule2 = watch_directory,5,5,load.start=/var/lib/rtorrent/watch/*.torrent
+
+# SCGI Configuration: both UNIX domain socket and localhost port
+network.scgi.open_local = /run/rtorrent/rpc.sock
+execute.nothrow = chmod,777,/run/rtorrent/rpc.sock
+network.scgi.open_port = 127.0.0.1:15000
+
+encoding.add = UTF-8
+network.port_range.set = 50000-50100
+network.port_random.set = yes
+trackers.use_udp.set = yes
+dht.mode.set = auto
+protocol.pex.set = yes
+
+throttle.global_down.max_rate.set = 0
+throttle.global_up.max_rate.set = 0
+throttle.max_peers.normal.set = 100
+throttle.max_peers.seed.set = -1
+throttle.max_uploads.set = 100
+pieces.hash.on_completion.set = no
+EOF
+
+chown -R rtorrent:www-data /var/lib/rtorrent /run/rtorrent
+chmod 775 /var/lib/rtorrent /run/rtorrent
+
+report_progress 85 "Creating and starting rtorrent.service unit..."
+cat <<'EOF' > /etc/systemd/system/rtorrent.service
+[Unit]
+Description=rTorrent BitTorrent Client
+After=network.target
+
+[Service]
+Type=forking
+User=rtorrent
+Group=www-data
+RuntimeDirectory=rtorrent
+RuntimeDirectoryMode=0775
+WorkingDirectory=/var/lib/rtorrent
+ExecStartPre=-/bin/rm -f /var/lib/rtorrent/session/rtorrent.lock
+ExecStart=/usr/bin/screen -d -m -fa -S rtorrent /usr/bin/rtorrent -n -o import=/var/lib/rtorrent/.rtorrent.rc
+ExecStop=/usr/bin/killall -w -s 2 /usr/bin/rtorrent
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload >> "$LOGFILE" 2>&1
+systemctl enable --now rtorrent >> "$LOGFILE" 2>&1
+
+write_lock "${PACKAGE_NAME}"
+report_progress 100 "rTorrent installed successfully (SCGI 127.0.0.1:15000 / /run/rtorrent/rpc.sock)."
+log_info "${PACKAGE_NAME} installed successfully"

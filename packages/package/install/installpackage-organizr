@@ -1,62 +1,72 @@
 #!/bin/bash
-#
-# [AetherFlow :: Install Organizr]
-# HTPC/Homelab services organizer
-#
-# Author : McEveritts
-# URL    : https://AetherFlow.io
-# License: GPL-3.0
-#
-set -e
+# AetherFlow Package Installer: Organizr
+# Port: 8086 (and Apache /organizr alias)
 
-LOGFILE="/opt/AetherFlow/logs/installer.log"
-mkdir -p /opt/AetherFlow/logs /install
+set -euo pipefail
 
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [organizr] $1" | tee -a "$LOGFILE"; }
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
+fi
 
-# ── Dependencies ─────────────────────────────────────────────────────────────
-log "Installing PHP and web dependencies..."
-apt-get update >>"$LOGFILE" 2>&1
-apt-get install -y php php-sqlite3 php-curl php-xml php-zip php-mbstring \
-    php-ldap php-fpm php-json git >>"$LOGFILE" 2>&1
+PACKAGE_NAME="organizr"
+export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")" /install
 
-# ── Download Organizr ────────────────────────────────────────────────────────
-log "Cloning Organizr v2..."
+require_root
+log_info "Starting installation for ${PACKAGE_NAME}..."
+report_progress 15 "Installing Apache and PHP dependencies for Organizr..."
+
+DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+    apache2 libapache2-mod-php git curl unzip ca-certificates \
+    php php-cli php-fpm php-sqlite3 php-curl php-zip php-xml php-mbstring php-gd >> "$LOGFILE" 2>&1
+
+report_progress 45 "Cloning Organizr v2 repository..."
 rm -rf /var/www/organizr
-git clone https://github.com/causefx/Organizr.git /var/www/organizr >>"$LOGFILE" 2>&1
-
-# ── Set permissions ──────────────────────────────────────────────────────────
-log "Setting permissions..."
+git clone --depth 1 -b v2-master https://github.com/causefx/Organizr.git /var/www/organizr >> "$LOGFILE" 2>&1
+ORG_VER="$(grep -oE '[0-9]+\.[0-9]+\.[0-9]+' /var/www/organizr/api/config/default.php 2>/dev/null | head -n1 || true)"
+if [[ -n "$ORG_VER" ]]; then
+    printf '%s\n' "$ORG_VER" > /var/www/organizr/.af-version
+fi
 chown -R www-data:www-data /var/www/organizr
 chmod -R 775 /var/www/organizr
 
-# ── Apache virtual host ──────────────────────────────────────────────────────
-log "Configuring Apache virtual host..."
-cat > /etc/apache2/sites-enabled/organizr.conf <<'EOF'
-Alias /organizr /var/www/organizr
+report_progress 80 "Configuring Apache VirtualHost on port 8086..."
+if ! grep -q "^Listen 8086$" /etc/apache2/ports.conf 2>/dev/null; then
+    echo "Listen 8086" >> /etc/apache2/ports.conf
+fi
+
+cat <<'EOF' > /etc/apache2/sites-available/organizr.conf
+Alias /organizr "/var/www/organizr"
 
 <Directory /var/www/organizr>
-    Options -Indexes +FollowSymLinks
+    Options FollowSymLinks
     AllowOverride All
     Require all granted
-
-    <IfModule mod_rewrite.c>
-        RewriteEngine On
-        RewriteCond %{REQUEST_FILENAME} !-f
-        RewriteCond %{REQUEST_FILENAME} !-d
-        RewriteRule ^ index.php [QSA,L]
-    </IfModule>
-
-    <IfModule mod_php.c>
-        php_value upload_max_filesize 10M
-        php_value post_max_size 10M
-    </IfModule>
+    DirectoryIndex index.php index.html
 </Directory>
-EOF
-chown www-data:www-data /etc/apache2/sites-enabled/organizr.conf
-a2enmod rewrite >>/dev/null 2>&1
-service apache2 reload >>"$LOGFILE" 2>&1
 
-# ── Finalize ─────────────────────────────────────────────────────────────────
-touch /install/.organizr.lock
-log "Organizr installation complete! Access at http://your-server/organizr"
+<VirtualHost *:8086>
+    DocumentRoot /var/www/organizr
+    <Directory /var/www/organizr>
+        Options FollowSymLinks
+        AllowOverride All
+        Require all granted
+        DirectoryIndex index.php index.html
+    </Directory>
+</VirtualHost>
+EOF
+
+a2enmod rewrite headers env dir mime >> "$LOGFILE" 2>&1
+a2ensite organizr.conf >> "$LOGFILE" 2>&1
+systemctl enable --now apache2 >> "$LOGFILE" 2>&1
+systemctl reload apache2 >> "$LOGFILE" 2>&1 || systemctl restart apache2 >> "$LOGFILE" 2>&1
+
+write_lock "${PACKAGE_NAME}"
+report_progress 100 "Organizr installed on port 8086."
+log_info "${PACKAGE_NAME} installed successfully"

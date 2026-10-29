@@ -1,24 +1,35 @@
 #!/bin/bash
-#
-# [AetherFlow :: Remove flood]
-#
-source /opt/AetherFlow/packages/common.sh
-set -e
+# AetherFlow Package Uninstaller: Flood
 
-LOGFILE="/opt/AetherFlow/logs/installer.log"
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [remove-flood] $1" | tee -a "$LOGFILE"; }
+set -euo pipefail
 
-log "Stopping flood..."
-systemctl stop flood 2>/dev/null || true
-systemctl disable flood 2>/dev/null || true
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
+fi
 
-log "Removing flood files and configuration..."
-npm uninstall -g flood 2>/dev/null || true
-rm -rf /etc/systemd/system/flood.service /etc/apache2/sites-enabled/flood.conf
-userdel flood 2>/dev/null || true
+PACKAGE_NAME="flood"
+export LOGFILE="/var/log/aetherflow/remove-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")"
 
-systemctl daemon-reload 2>/dev/null || true
-service apache2 reload 2>/dev/null || true
-rm -f /install/.flood.lock
+require_root
+log_info "Starting removal for ${PACKAGE_NAME}..."
+report_progress 25 "Stopping and removing flood.service..."
 
-log "flood has been completely removed."
+purge_systemd_unit "flood"
+
+report_progress 60 "Uninstalling Flood npm package and removing data directories..."
+npm uninstall -g @jesec/flood >> "$LOGFILE" 2>&1 || true
+npm uninstall -g flood >> "$LOGFILE" 2>&1 || true
+rm -f /usr/bin/flood /usr/local/bin/flood
+rm -rf /var/lib/flood /srv/rutorrent/home/flood /etc/apache2/sites-enabled/flood.conf /etc/apache2/sites-available/flood.conf
+purge_system_user "flood"
+systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
+
+remove_lock "${PACKAGE_NAME}"
+report_progress 100 "Flood completely removed."
+log_info "${PACKAGE_NAME} removed successfully"

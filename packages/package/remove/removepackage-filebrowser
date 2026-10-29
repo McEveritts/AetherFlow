@@ -1,22 +1,33 @@
 #!/bin/bash
-#
-# [AetherFlow :: Remove filebrowser]
-#
-source /opt/AetherFlow/packages/common.sh
-set -e
+# AetherFlow Package Uninstaller: File Browser
 
-LOGFILE="/opt/AetherFlow/logs/installer.log"
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [remove-filebrowser] $1" | tee -a "$LOGFILE"; }
+set -euo pipefail
 
-log "Stopping filebrowser..."
-systemctl stop filebrowser 2>/dev/null || true
-systemctl disable filebrowser 2>/dev/null || true
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
+fi
 
-log "Removing filebrowser files and configuration..."
-rm -rf /opt/filebrowser /usr/local/bin/filebrowser /etc/systemd/system/filebrowser.service /etc/apache2/sites-enabled/filebrowser.conf
+PACKAGE_NAME="filebrowser"
+export LOGFILE="/var/log/aetherflow/remove-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")"
 
-systemctl daemon-reload 2>/dev/null || true
-service apache2 reload 2>/dev/null || true
-rm -f /install/.filebrowser.lock
+require_root
+log_info "Starting removal for ${PACKAGE_NAME}..."
+report_progress 25 "Stopping and removing filebrowser.service..."
 
-log "filebrowser has been completely removed."
+purge_systemd_unit "filebrowser"
+
+report_progress 65 "Removing File Browser binary, database, and user account..."
+rm -f /usr/local/bin/filebrowser /opt/AetherFlow/logs/filebrowser_credentials.txt
+rm -rf /opt/filebrowser
+purge_system_user "filebrowser"
+systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
+
+remove_lock "${PACKAGE_NAME}"
+report_progress 100 "File Browser completely removed."
+log_info "${PACKAGE_NAME} removed successfully"

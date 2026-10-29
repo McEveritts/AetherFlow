@@ -1,0 +1,78 @@
+#!/bin/bash
+# AetherFlow Package Installer: MergerFS
+# Port: 0 (FUSE union mount pooling /mnt/local and /mnt/remote into /mnt/unionfs)
+
+set -euo pipefail
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
+fi
+
+PACKAGE_NAME="mergerfs"
+export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")" /install
+
+require_root
+log_info "Starting installation for ${PACKAGE_NAME}..."
+report_progress 15 "Installing mergerfs and FUSE3 packages..."
+
+DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
+if ! DEBIAN_FRONTEND=noninteractive apt-get install -y -qq mergerfs fuse3 >> "$LOGFILE" 2>&1; then
+    # Fallback to upstream deb release
+    ARCH=$(dpkg --print-architecture)
+    report_progress 30 "Fetching mergerfs deb package from GitHub releases..."
+    MFS_JSON="$(curl -fsSL https://api.github.com/repos/trapexit/mergerfs/releases/latest 2>/dev/null || true)"
+    MFS_DEB_URL="$(printf '%s' "$MFS_JSON" | grep -oP '"browser_download_url":\s*"\K[^"]*debian-trixie_'${ARCH}'\.deb' | head -1 || true)"
+    if [[ -z "$MFS_DEB_URL" ]]; then
+        MFS_DEB_URL="$(printf '%s' "$MFS_JSON" | grep -oP '"browser_download_url":\s*"\K[^"]*debian-bookworm_'${ARCH}'\.deb' | head -1 || true)"
+    fi
+    if [[ -n "$MFS_DEB_URL" ]]; then
+        TMP_DEB=$(mktemp /tmp/mergerfs-XXXXXX.deb)
+        curl -fsSL "$MFS_DEB_URL" -o "$TMP_DEB" >> "$LOGFILE" 2>&1
+        dpkg -i "$TMP_DEB" >> "$LOGFILE" 2>&1 || apt-get install -f -y -qq >> "$LOGFILE" 2>&1
+        rm -f "$TMP_DEB"
+    fi
+fi
+
+report_progress 55 "Preparing mount branch directories (/mnt/local, /mnt/remote, /mnt/unionfs)..."
+mkdir -p /mnt/local /mnt/remote /mnt/unionfs
+chmod 775 /mnt/local /mnt/remote /mnt/unionfs
+
+# Record version if mergerfs binary is present
+if command -v mergerfs >/dev/null 2>&1; then
+    MFS_VER="$(mergerfs -v 2>/dev/null | head -n1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || dpkg-query -W -f='${Version}' mergerfs 2>/dev/null || echo "2.39.0")"
+    mkdir -p /var/lib/mergerfs
+    printf '%s\n' "$MFS_VER" > /var/lib/mergerfs/.af-version
+fi
+
+report_progress 80 "Configuring and starting mergerfs.service union mount unit..."
+cat <<'EOF' > /etc/systemd/system/mergerfs.service
+[Unit]
+Description=MergerFS Union Filesystem Mount
+After=network-online.target rclone-vfs.service
+Wants=network-online.target
+
+[Service]
+Type=forking
+ExecStartPre=-/bin/mkdir -p /mnt/local /mnt/remote /mnt/unionfs
+ExecStart=/usr/bin/mergerfs -o defaults,allow_other,use_ino,category.create=epmfs,cache.files=partial,dropcacheonclose=true /mnt/local:/mnt/remote /mnt/unionfs
+ExecStop=/bin/fusermount -uz /mnt/unionfs
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload >> "$LOGFILE" 2>&1
+systemctl enable mergerfs >> "$LOGFILE" 2>&1
+systemctl start mergerfs >> "$LOGFILE" 2>&1 || true
+
+write_lock "${PACKAGE_NAME}"
+report_progress 100 "MergerFS installed (pooling /mnt/local & /mnt/remote into /mnt/unionfs)."
+log_info "${PACKAGE_NAME} installed successfully"
