@@ -243,6 +243,11 @@ func ApplyBlueprintAppConfig(bp *AppBlueprint, activePort int) (string, bool, er
 			settings["host_whitelist"] = whitelist
 		}
 		if bp.MutatorType == "ini" && configPath != "" && len(settings) > 0 {
+			if bp.AppName == "qbittorrent" && IsRunnerAvailable() {
+				for _, unit := range ResolveServiceUnits(bp.AppName) {
+					_ = ControlService(unit, "stop")
+				}
+			}
 			iniMut := NewINIMutator(configPath)
 			_ = iniMut.Backup()
 			if err := iniMut.ApplySettings(settings); err == nil {
@@ -508,15 +513,8 @@ func SyncInstalledAppsBaseDomain(oldBaseDomain, newBaseDomain string) {
 			PublicDomain:          pubDomain,
 			ExternalAccessEnabled: true,
 		})
-		if bp.InternalDomain != "" || pubDomain != "" {
-			var doms []string
-			if bp.InternalDomain != "" {
-				doms = append(doms, bp.InternalDomain)
-			}
-			if pubDomain != "" {
-				doms = append(doms, pubDomain)
-			}
-			_ = NewDNSManager().AppendOrUpdateDomains(doms)
+		if bp.InternalDomain != "" {
+			_ = NewDNSManager().AppendOrUpdateDomains([]string{bp.InternalDomain})
 		}
 	}
 
@@ -628,17 +626,10 @@ func ApplyBlueprintPostInstall(appName string, preAllocatedPort int) (*Blueprint
 		}
 	}
 
-	// 4. Register internal domain (<app>.aether.local) and public subdomain in /etc/hosts
-	var hostDomains []string
+	// 4. Register internal domain (<app>.aether.local) in /etc/hosts
 	if bp.InternalDomain != "" {
-		hostDomains = append(hostDomains, bp.InternalDomain)
-	}
-	if ingressCfg.ExternalAccessEnabled && ingressCfg.PublicDomain != "" {
-		hostDomains = append(hostDomains, ingressCfg.PublicDomain)
-	}
-	if len(hostDomains) > 0 {
 		dnsMgr := NewDNSManager()
-		if err := dnsMgr.AppendOrUpdateDomains(hostDomains); err != nil {
+		if err := dnsMgr.AppendOrUpdateDomains([]string{bp.InternalDomain}); err != nil {
 			slog.Warn("blueprint /etc/hosts registration notice", "app", bp.AppName, "warning", err)
 		} else {
 			res.HostsSynced = true
@@ -679,13 +670,9 @@ func TeardownBlueprintUninstall(appName string) error {
 		slog.Warn("blueprint Caddy route removal notice", "app", canonicalName, "warning", err)
 	}
 
-	// 2. Remove internal and public domains from /etc/hosts
-	removeDomains := []string{internalDomain}
-	if existing, err := db.GetAppIngressConfig(canonicalName); err == nil && existing != nil && strings.TrimSpace(existing.PublicDomain) != "" {
-		removeDomains = append(removeDomains, strings.TrimSpace(existing.PublicDomain))
-	}
+	// 2. Remove internal domain from /etc/hosts
 	dnsMgr := NewDNSManager()
-	if err := dnsMgr.RemoveDomains(removeDomains); err != nil {
+	if err := dnsMgr.RemoveDomains([]string{internalDomain}); err != nil {
 		slog.Warn("blueprint /etc/hosts removal notice", "app", canonicalName, "warning", err)
 	}
 

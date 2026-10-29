@@ -27,6 +27,7 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl git gnupg ca-certific
 ensure_node 20
 if ! command_exists yarn; then
     npm install -g yarn >> "$LOGFILE" 2>&1
+    sync_node_global_bins
 fi
 
 if ! id -u overseerr >/dev/null 2>&1; then
@@ -39,7 +40,7 @@ report_progress 30 "Cloning Overseerr repository..."
 rm -rf /opt/overseerr
 git clone https://github.com/sct/overseerr.git /opt/overseerr >> "$LOGFILE" 2>&1
 cd /opt/overseerr
-LATEST_TAG="$(git describe --tags "$(git rev-list --tags --max-count=1)" 2>/dev/null || true)"
+LATEST_TAG="$(git tag -l 'v*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n1 || true)"
 if [[ -n "$LATEST_TAG" ]]; then
     git checkout "$LATEST_TAG" >> "$LOGFILE" 2>&1 || true
     printf '%s\n' "${LATEST_TAG#v}" > /opt/overseerr/.af-version

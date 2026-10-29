@@ -68,6 +68,8 @@ port = 8085
 host = 0.0.0.0
 inet_exposure = 4
 host_whitelist = ${SAB_WHITELIST}
+username = ${MASTER_USER}
+password = ${MASTER_PASS}
 EOF
 fi
 chown -R sabnzbd:sabnzbd /opt/SABnzbd /var/lib/sabnzbd

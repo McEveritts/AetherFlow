@@ -25,8 +25,13 @@ DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl git gnupg ca-certificates build-essential python3 >> "$LOGFILE" 2>&1
 
 ensure_node 20
+if ! command_exists pnpm; then
+    npm install -g pnpm >> "$LOGFILE" 2>&1
+    sync_node_global_bins
+fi
 if ! command_exists yarn; then
-    npm install -g yarn >> "$LOGFILE" 2>&1
+    npm install -g yarn >> "$LOGFILE" 2>&1 || true
+    sync_node_global_bins
 fi
 
 if ! id -u jellyseerr >/dev/null 2>&1; then
@@ -39,16 +44,28 @@ report_progress 30 "Fetching Jellyseerr source repository..."
 rm -rf /opt/jellyseerr
 git clone https://github.com/Fallenbagel/jellyseerr.git /opt/jellyseerr >> "$LOGFILE" 2>&1
 cd /opt/jellyseerr
-LATEST_TAG="$(git describe --tags "$(git rev-list --tags --max-count=1)" 2>/dev/null || true)"
+LATEST_TAG="$(git tag -l 'v2.*' --sort=-v:refname | grep -E '^v2\.[0-9]+\.[0-9]+$' | head -n1 || true)"
+if [[ -z "$LATEST_TAG" ]]; then
+    LATEST_TAG="$(git tag -l 'v*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n1 || true)"
+fi
 if [[ -n "$LATEST_TAG" ]]; then
     git checkout "$LATEST_TAG" >> "$LOGFILE" 2>&1 || true
     printf '%s\n' "${LATEST_TAG#v}" > /opt/jellyseerr/.af-version
 fi
 
+if [[ -f /opt/jellyseerr/.npmrc ]]; then
+    sed -i 's/engine-strict=true/engine-strict=false/g' /opt/jellyseerr/.npmrc || true
+fi
+
 report_progress 55 "Installing Jellyseerr dependencies and compiling production build..."
 export CYPRESS_INSTALL_BINARY=0
-yarn install --ignore-engines --frozen-lockfile --network-timeout 1000000 >> "$LOGFILE" 2>&1 || yarn install --ignore-engines --network-timeout 1000000 >> "$LOGFILE" 2>&1
-yarn build >> "$LOGFILE" 2>&1
+if [[ -f /opt/jellyseerr/pnpm-lock.yaml ]]; then
+    pnpm install --frozen-lockfile --config.engine-strict=false >> "$LOGFILE" 2>&1 || pnpm install --no-frozen-lockfile --config.engine-strict=false >> "$LOGFILE" 2>&1
+    pnpm build >> "$LOGFILE" 2>&1
+else
+    yarn install --ignore-engines --frozen-lockfile --network-timeout 1000000 >> "$LOGFILE" 2>&1 || yarn install --ignore-engines --network-timeout 1000000 >> "$LOGFILE" 2>&1
+    yarn build >> "$LOGFILE" 2>&1
+fi
 
 chown -R jellyseerr:jellyseerr /opt/jellyseerr /var/lib/jellyseerr
 

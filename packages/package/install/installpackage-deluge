@@ -29,7 +29,28 @@ if ! id -u deluge >/dev/null 2>&1; then
 fi
 
 report_progress 55 "Configuring Deluge daemon and WebUI on port 8112..."
+systemctl stop deluge-web deluged >> "$LOGFILE" 2>&1 || true
 mkdir -p /var/lib/deluge/.config/deluge /var/log/deluge /var/lib/deluge/Downloads
+if ! grep -q "^${MASTER_USER}:" /var/lib/deluge/.config/deluge/auth 2>/dev/null; then
+    printf '%s:%s:10\n' "${MASTER_USER}" "${MASTER_PASS}" >> /var/lib/deluge/.config/deluge/auth
+fi
+python3 - "${MASTER_PASS}" <<'PYEOF'
+import sys, os, hashlib, json
+pw = sys.argv[1]
+salt = hashlib.sha1(os.urandom(32)).hexdigest()
+sha1 = hashlib.sha1((salt + pw).encode("utf-8")).hexdigest()
+web_conf = "/var/lib/deluge/.config/deluge/web.conf"
+header = {"file": 1, "format": 1}
+body = {
+    "port": 8112,
+    "pwd_salt": salt,
+    "pwd_sha1": sha1,
+    "first_login": False,
+    "default_daemon": "127.0.0.1:58846"
+}
+with open(web_conf, "w", encoding="utf-8") as f:
+    f.write(json.dumps(header, indent=4) + json.dumps(body, indent=4))
+PYEOF
 chown -R deluge:deluge /var/lib/deluge /var/log/deluge
 chmod 750 /var/lib/deluge /var/log/deluge
 

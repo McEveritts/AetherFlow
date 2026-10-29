@@ -37,6 +37,17 @@ TAUTULLI_VERSION="$(git -C /opt/Tautulli describe --tags --abbrev=0 2>/dev/null 
 if [[ -n "$TAUTULLI_VERSION" ]]; then
     printf '%s\n' "${TAUTULLI_VERSION#v}" > /opt/Tautulli/.af-version
 fi
+if [[ ! -f /var/lib/tautulli/config.ini ]]; then
+    cat <<EOF > /var/lib/tautulli/config.ini
+[General]
+http_port = 8181
+http_host = 0.0.0.0
+http_username = ${MASTER_USER}
+http_password = ${MASTER_PASS}
+launch_browser = 0
+first_run_complete = 1
+EOF
+fi
 chown -R tautulli:tautulli /opt/Tautulli /var/lib/tautulli
 
 report_progress 80 "Configuring and starting tautulli.service on port 8181..."

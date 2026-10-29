@@ -22,8 +22,7 @@ log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 10 "Installing dependencies for Vaultwarden..."
 
 DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl jq tar openssl ca-certificates sqlite3 libssl3 >> "$LOGFILE" 2>&1 || \
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl jq tar openssl ca-certificates sqlite3 libssl-dev >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl jq tar openssl ca-certificates sqlite3 libsqlite3-0 libpq5 libmariadb3 >> "$LOGFILE" 2>&1
 
 if ! id -u vaultwarden >/dev/null 2>&1; then
     useradd --system --user-group --no-create-home --home-dir /var/lib/vaultwarden --shell /usr/sbin/nologin vaultwarden

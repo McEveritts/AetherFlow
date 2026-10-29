@@ -53,6 +53,14 @@ if [[ -f /opt/nzbget/nzbget.conf ]]; then
     sed -i 's|^MainDir=.*|MainDir=/var/lib/nzbget|g' /opt/nzbget/nzbget.conf
     sed -i 's|^ControlIP=.*|ControlIP=0.0.0.0|g' /opt/nzbget/nzbget.conf
     sed -i 's|^ControlPort=.*|ControlPort=6789|g' /opt/nzbget/nzbget.conf
+    python3 - /opt/nzbget/nzbget.conf "${MASTER_USER}" "${MASTER_PASS}" <<'PYEOF'
+import sys, re
+path, user, pw = sys.argv[1:4]
+txt = open(path, "r", encoding="utf-8", errors="ignore").read()
+txt = re.sub(r"(?m)^ControlUsername=.*$", f"ControlUsername={user}", txt)
+txt = re.sub(r"(?m)^ControlPassword=.*$", f"ControlPassword={pw}", txt)
+open(path, "w", encoding="utf-8").write(txt)
+PYEOF
 fi
 
 chown -R nzbget:nzbget /opt/nzbget /var/lib/nzbget

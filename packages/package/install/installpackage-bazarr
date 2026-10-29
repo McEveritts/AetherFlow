@@ -52,6 +52,18 @@ python3 -m venv /opt/bazarr/.venv >> "$LOGFILE" 2>&1
 if [[ -n "$BAZARR_VERSION" ]]; then
     printf '%s\n' "${BAZARR_VERSION#v}" > /opt/bazarr/.af-version
 fi
+mkdir -p /var/lib/bazarr/config
+if [[ ! -f /var/lib/bazarr/config/config.yaml && ! -f /var/lib/bazarr/config/config.ini ]]; then
+    cat <<EOF > /var/lib/bazarr/config/config.yaml
+auth:
+  type: form
+  username: ${MASTER_USER}
+  password: ${MASTER_HA1}
+general:
+  ip: 0.0.0.0
+  port: 6767
+EOF
+fi
 chown -R bazarr:bazarr /opt/bazarr /var/lib/bazarr
 
 report_progress 85 "Configuring and starting bazarr.service..."

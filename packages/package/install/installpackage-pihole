@@ -22,7 +22,7 @@ log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 10 "Installing prerequisites for Pi-hole..."
 
 DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl dnsutils iproute2 ca-certificates >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl bind9-dnsutils iproute2 ca-certificates >> "$LOGFILE" 2>&1
 
 report_progress 25 "Freeing port 53 from systemd-resolved stub listener..."
 if systemctl is-active --quiet systemd-resolved 2>/dev/null; then
@@ -42,6 +42,7 @@ mkdir -p /etc/pihole
 DEFAULT_IFACE="$(ip route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev") {print $(i+1); exit}}' || true)"
 DEFAULT_IFACE="${DEFAULT_IFACE:-eth0}"
 
+PIHOLE_WEBPASS_HASH="$(printf '%s' "${MASTER_PASS}" | sha256sum | awk '{printf "%s", $1}' | sha256sum | awk '{print $1}')"
 cat <<EOF > /etc/pihole/setupVars.conf
 PIHOLE_INTERFACE=${DEFAULT_IFACE}
 PIHOLE_DNS_1=1.1.1.1
@@ -54,12 +55,15 @@ CACHE_SIZE=10000
 DNS_FQDN_REQUIRED=true
 DNS_BOGUS_PRIV=true
 DNSMASQ_LISTENING=local
-WEBPASSWORD=
+WEBPASSWORD=${PIHOLE_WEBPASS_HASH}
 BLOCKING_ENABLED=true
 EOF
 
 report_progress 65 "Running official Pi-hole installer..."
 fetch_and_run "https://install.pi-hole.net" "SKIP" --unattended >> "$LOGFILE" 2>&1
+if command_exists pihole; then
+    pihole setpassword "${MASTER_PASS}" >> "$LOGFILE" 2>&1 || pihole -a -p "${MASTER_PASS}" >> "$LOGFILE" 2>&1 || true
+fi
 
 report_progress 85 "Configuring Pi-hole Web Admin interface on port 8089..."
 # Support both Pi-hole v6 (embedded pihole-FTL webserver) and v5 (lighttpd)

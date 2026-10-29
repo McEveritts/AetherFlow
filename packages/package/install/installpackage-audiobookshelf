@@ -41,11 +41,11 @@ esac
 report_progress 35 "Resolving latest Audiobookshelf debian release..."
 ABS_JSON="$(curl -fsSL https://api.github.com/repos/advplyr/audiobookshelf/releases/latest 2>/dev/null || true)"
 ABS_VERSION="$(printf '%s' "$ABS_JSON" | grep -oP '"tag_name":\s*"v\K[^"]+' | head -1 || true)"
-ABS_VERSION="${ABS_VERSION:-2.19.0}"
+ABS_VERSION="${ABS_VERSION:-2.37.2}"
 ABS_URL="$(printf '%s' "$ABS_JSON" | grep -oP '"browser_download_url":\s*"\K[^"]*audiobookshelf_'${ABS_VERSION}'_'${ABS_ARCH}'\.deb' | head -1 || true)"
 
 if [[ -z "$ABS_URL" ]]; then
-    ABS_URL="https://github.com/advplyr/audiobookshelf/releases/download/v${ABS_VERSION}/audiobookshelf_${ABS_VERSION}_${ABS_ARCH}.deb"
+    ABS_URL="https://advplyr.github.io/audiobookshelf-ppa/audiobookshelf_${ABS_VERSION}_${ABS_ARCH}.deb"
 fi
 
 report_progress 60 "Downloading and installing Audiobookshelf ${ABS_VERSION}..."
@@ -54,10 +54,13 @@ if curl -fsSL "$ABS_URL" -o "$TMP_DEB" >> "$LOGFILE" 2>&1; then
     dpkg -i "$TMP_DEB" >> "$LOGFILE" 2>&1 || DEBIAN_FRONTEND=noninteractive apt-get install -f -y -qq >> "$LOGFILE" 2>&1
     rm -f "$TMP_DEB"
 else
-    # Fallback to debian repository keyring method
-    curl -fsSL https://deb.audiobookshelf.org/static/audiobookshelf.gpg | gpg --dearmor -o /usr/share/keyrings/audiobookshelf-keyring.gpg >> "$LOGFILE" 2>&1 || true
-    echo "deb [signed-by=/usr/share/keyrings/audiobookshelf-keyring.gpg] https://deb.audiobookshelf.org/ /" > /etc/apt/sources.list.d/audiobookshelf.list
-    apt-get update -y -qq >> "$LOGFILE" 2>&1
+    rm -f "$TMP_DEB"
+    # Fallback to official Audiobookshelf PPA repository
+    install -m 0755 -d /etc/apt/keyrings
+    curl -fsSL https://advplyr.github.io/audiobookshelf-ppa/KEY.gpg | gpg --dearmor --yes -o /etc/apt/keyrings/audiobookshelf-archive-keyring.gpg >> "$LOGFILE" 2>&1
+    chmod a+r /etc/apt/keyrings/audiobookshelf-archive-keyring.gpg
+    echo "deb [signed-by=/etc/apt/keyrings/audiobookshelf-archive-keyring.gpg] https://advplyr.github.io/audiobookshelf-ppa ./" > /etc/apt/sources.list.d/audiobookshelf.list
+    DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
     DEBIAN_FRONTEND=noninteractive apt-get install -y -qq audiobookshelf >> "$LOGFILE" 2>&1
 fi
 

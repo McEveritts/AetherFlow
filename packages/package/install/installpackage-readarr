@@ -80,6 +80,7 @@ EOF
 
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now readarr >> "$LOGFILE" 2>&1
+seed_servarr_master_user "readarr" 8787 "v1"
 
 write_lock "${PACKAGE_NAME}"
 report_progress 100 "Readarr installed on port 8787."

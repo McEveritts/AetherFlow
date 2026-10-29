@@ -139,7 +139,7 @@ func TestPilotAppsBlueprintLifecycleAndNetworkingDNS(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed reading radarr config.xml: %v", err)
 	}
-	if !strings.Contains(string(radarrXML), "<Port>7878</Port>") || !strings.Contains(string(radarrXML), "<AuthenticationRequired>DisabledForLocalAddresses</AuthenticationRequired>") {
+	if !strings.Contains(string(radarrXML), "<Port>7878</Port>") || !strings.Contains(string(radarrXML), "<AuthenticationRequired>Enabled</AuthenticationRequired>") {
 		t.Errorf("unexpected radarr config.xml content:\n%s", string(radarrXML))
 	}
 
@@ -288,6 +288,9 @@ func TestAutoSubdomainProvisioningFromSettingsBaseDomain(t *testing.T) {
 	}
 	if res.PublicDomain != "jellyfin.domain.com" || !res.ExternalAccessEnabled {
 		t.Fatalf("expected PublicDomain='jellyfin.domain.com' and ExternalAccessEnabled=true, got %+v", res)
+	}
+	if !res.HostsSynced {
+		t.Errorf("expected res.HostsSynced=true when base_domain is configured, got false")
 	}
 
 	ing, err := db.GetAppIngressConfig("jellyfin")

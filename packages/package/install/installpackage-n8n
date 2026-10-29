@@ -34,6 +34,7 @@ mkdir -p /var/lib/n8n /opt/n8n
 
 report_progress 40 "Installing n8n package globally via npm..."
 npm install -g n8n >> "$LOGFILE" 2>&1
+sync_node_global_bins
 
 N8N_VER="$(n8n --version 2>/dev/null || true)"
 if [[ -n "$N8N_VER" ]]; then

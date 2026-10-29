@@ -74,6 +74,7 @@ EOF
 
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now sonarr >> "$LOGFILE" 2>&1
+seed_servarr_master_user "sonarr" 8989 "v3"
 
 write_lock "${PACKAGE_NAME}"
 report_progress 100 "Sonarr installed on port 8989."

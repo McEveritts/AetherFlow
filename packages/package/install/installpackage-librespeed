@@ -25,7 +25,7 @@ DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl tar ca-certificates >> "$LOGFILE" 2>&1
 
 if ! id -u librespeed >/dev/null 2>&1; then
-    useradd --system --user-group --create-home --home-dir /opt/librespeed --shell /usr/sbin/nologin librespeed
+    useradd --system --user-group --no-create-home --home-dir /opt/librespeed --shell /usr/sbin/nologin librespeed
 fi
 
 mkdir -p /opt/librespeed
@@ -41,7 +41,7 @@ esac
 report_progress 35 "Resolving latest speedtest-go release..."
 LS_JSON="$(curl -fsSL https://api.github.com/repos/librespeed/speedtest-go/releases/latest 2>/dev/null || true)"
 LS_VERSION="$(printf '%s' "$LS_JSON" | grep -oP '"tag_name":\s*"v\K[^"]+' | head -1 || true)"
-LS_VERSION="${LS_VERSION:-1.1.5}"
+LS_VERSION="${LS_VERSION:-1.1.6}"
 LS_URL="$(printf '%s' "$LS_JSON" | grep -oP '"browser_download_url":\s*"\K[^"]*speedtest-go_'${LS_VERSION}'_linux_'${LS_ARCH}'\.tar\.gz' | head -1 || true)"
 if [[ -z "$LS_URL" ]]; then
     LS_URL="https://github.com/librespeed/speedtest-go/releases/download/v${LS_VERSION}/speedtest-go_${LS_VERSION}_linux_${LS_ARCH}.tar.gz"
@@ -50,21 +50,46 @@ fi
 report_progress 60 "Downloading and extracting LibreSpeed ${LS_VERSION}..."
 TMP_TAR=$(mktemp /tmp/librespeed-XXXXXX.tar.gz)
 curl -fsSL "$LS_URL" -o "$TMP_TAR" >> "$LOGFILE" 2>&1
-tar -xzf "$TMP_TAR" -C /opt/librespeed >> "$LOGFILE" 2>&1
+tar --no-same-owner -xzf "$TMP_TAR" -C /opt/librespeed >> "$LOGFILE" 2>&1
 rm -f "$TMP_TAR"
-chmod +x /opt/librespeed/speedtest-go
+
+if [[ -f /opt/librespeed/speedtest-backend ]]; then
+    chmod 755 /opt/librespeed/speedtest-backend
+    ln -sfn /opt/librespeed/speedtest-backend /opt/librespeed/speedtest-go
+elif [[ -f /opt/librespeed/speedtest-go ]]; then
+    chmod 755 /opt/librespeed/speedtest-go
+    ln -sfn /opt/librespeed/speedtest-go /opt/librespeed/speedtest-backend
+else
+    print_error "LibreSpeed binary not found after extracting archive"
+    exit 1
+fi
 printf '%s\n' "${LS_VERSION#v}" > /opt/librespeed/.af-version
 
 cat <<'EOF' > /opt/librespeed/settings.toml
 # LibreSpeed speedtest-go configuration
-bind_address = "0.0.0.0"
-bind_port = 8988
-ipinfo_api_key = ""
-password = ""
-enable_telemetry = false
+bind_address="0.0.0.0"
+listen_port=8988
+url_base=""
+proxyprotocol_port=0
+server_lat=0
+server_lng=0
+ipinfo_api_key=""
+assets_path=""
+statistics_password="PASSWORD"
+redact_ip_addresses=false
+database_type="bolt"
+database_hostname=""
+database_name=""
+database_username=""
+database_password=""
+database_file="/opt/librespeed/speedtest.db"
+enable_tls=false
+tls_cert_file=""
+tls_key_file=""
 EOF
 
 chown -R librespeed:librespeed /opt/librespeed
+chmod 755 /opt/librespeed
 
 report_progress 85 "Configuring and starting librespeed.service on port 8988..."
 cat <<'EOF' > /etc/systemd/system/librespeed.service
@@ -77,7 +102,7 @@ User=librespeed
 Group=librespeed
 Type=simple
 WorkingDirectory=/opt/librespeed
-ExecStart=/opt/librespeed/speedtest-go --c /opt/librespeed/settings.toml
+ExecStart=/opt/librespeed/speedtest-backend -c /opt/librespeed/settings.toml
 Restart=on-failure
 RestartSec=5
 

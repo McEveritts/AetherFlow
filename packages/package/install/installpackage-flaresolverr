@@ -22,7 +22,7 @@ log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 10 "Installing Chromium and Xvfb dependencies for FlareSolverr..."
 
 DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl xvfb python3 python3-venv python3-pip ca-certificates fonts-liberation libnss3 libatk-bridge2.0-0 libdrm2 libxkbcommon0 libgbm1 libasound2t64 >> "$LOGFILE" 2>&1 || \
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl xvfb python3 python3-venv python3-pip ca-certificates fonts-liberation libnss3 libatk-bridge2.0-0t64 libdrm2 libxkbcommon0 libgbm1 libasound2t64 >> "$LOGFILE" 2>&1 || \
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl xvfb python3 python3-venv python3-pip ca-certificates fonts-liberation libnss3 libatk-bridge2.0-0 libdrm2 libxkbcommon0 libgbm1 libasound2 >> "$LOGFILE" 2>&1
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq chromium >> "$LOGFILE" 2>&1 || DEBIAN_FRONTEND=noninteractive apt-get install -y -qq chromium-browser >> "$LOGFILE" 2>&1 || true
 

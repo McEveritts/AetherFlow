@@ -61,6 +61,7 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y -qq jellyfin >> "$LOGFILE" 2>&
 report_progress 85 "Starting and enabling Jellyfin service..."
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now jellyfin >> "$LOGFILE" 2>&1
+seed_jellyfin_master_user 8096
 
 write_lock "${PACKAGE_NAME}"
 report_progress 100 "Jellyfin installed on port 8096."

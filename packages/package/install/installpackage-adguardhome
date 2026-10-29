@@ -22,7 +22,7 @@ log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 10 "Installing prerequisites and preparing network environment..."
 
 DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl tar ca-certificates libcap2-bin >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl tar ca-certificates libcap2-bin apache2-utils >> "$LOGFILE" 2>&1
 
 # Resolve port 53 conflict with systemd-resolved if present
 if [[ -f /etc/systemd/resolved.conf ]]; then
@@ -69,7 +69,8 @@ setcap 'cap_net_bind_service,cap_net_raw,cap_net_admin=+ep' /opt/AdGuardHome/AdG
 printf '%s\n' "${AGH_VERSION#v}" > /opt/AdGuardHome/.af-version
 
 if [[ ! -f /opt/AdGuardHome/AdGuardHome.yaml ]]; then
-    cat <<'EOF' > /opt/AdGuardHome/AdGuardHome.yaml
+    AGH_BCRYPT="$(htpasswd -nbB "${MASTER_USER}" "${MASTER_PASS}" 2>/dev/null | cut -d: -f2- || true)"
+    cat <<EOF > /opt/AdGuardHome/AdGuardHome.yaml
 bind_host: 0.0.0.0
 bind_port: 3080
 auth_attempts: 5
@@ -80,7 +81,9 @@ http:
     enabled: false
   address: 0.0.0.0:3080
   session_ttl: 720h
-users: []
+users:
+  - name: ${MASTER_USER}
+    password: ${AGH_BCRYPT}
 dns:
   bind_hosts:
     - 0.0.0.0

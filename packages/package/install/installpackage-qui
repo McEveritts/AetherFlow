@@ -62,6 +62,11 @@ sessionSecret = "${SESSION_SECRET}"
 EOF
 fi
 
+systemctl stop qui >> "$LOGFILE" 2>&1 || true
+/usr/local/bin/qui create-user --config-dir=/var/lib/qui --username="${MASTER_USER}" --password="${MASTER_PASS}" >> "$LOGFILE" 2>&1 \
+    || /usr/local/bin/qui change-password --config-dir=/var/lib/qui --username="${MASTER_USER}" --new-password="${MASTER_PASS}" >> "$LOGFILE" 2>&1 \
+    || true
+
 chown -R qui:qui /var/lib/qui
 chmod 640 /var/lib/qui/config.toml
 

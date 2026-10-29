@@ -35,6 +35,7 @@ chown -R flood:flood /var/lib/flood
 
 report_progress 55 "Installing @jesec/flood via npm..."
 npm install -g @jesec/flood >> "$LOGFILE" 2>&1
+sync_node_global_bins
 
 FLOOD_BIN="$(command -v flood || echo /usr/local/bin/flood)"
 if [[ ! -x /usr/bin/flood && -x "$FLOOD_BIN" ]]; then

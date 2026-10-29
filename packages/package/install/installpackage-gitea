@@ -69,6 +69,9 @@ PATH = /var/lib/gitea/data/gitea.db
 MODE = console
 LEVEL = info
 ROOT_PATH = /var/lib/gitea/log
+
+[security]
+INSTALL_LOCK = true
 EOF
 else
     sed -i 's/^HTTP_PORT\s*=.*/HTTP_PORT = 3002/' /etc/gitea/app.ini || true
@@ -78,6 +81,15 @@ chown -R gitea:gitea /var/lib/gitea
 chown -R root:gitea /etc/gitea
 chmod 770 /etc/gitea
 chmod 660 /etc/gitea/app.ini
+
+sudo -u gitea HOME=/var/lib/gitea GITEA_WORK_DIR=/var/lib/gitea /usr/local/bin/gitea migrate --config /etc/gitea/app.ini >> "$LOGFILE" 2>&1 || true
+sudo -u gitea HOME=/var/lib/gitea GITEA_WORK_DIR=/var/lib/gitea /usr/local/bin/gitea admin user create \
+    --config /etc/gitea/app.ini \
+    --username "${MASTER_USER}" \
+    --password "${MASTER_PASS}" \
+    --email "${MASTER_USER}@aether.local" \
+    --admin \
+    --must-change-password=false >> "$LOGFILE" 2>&1 || true
 
 report_progress 85 "Configuring and starting gitea.service on port 3002..."
 cat <<'EOF' > /etc/systemd/system/gitea.service

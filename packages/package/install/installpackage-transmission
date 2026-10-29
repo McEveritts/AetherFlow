@@ -36,22 +36,27 @@ fi
 report_progress 45 "Configuring Transmission daemon on port 9091..."
 mkdir -p /var/lib/transmission-daemon/.config/transmission-daemon /var/lib/transmission-daemon/downloads /etc/transmission-daemon
 
-cat <<'EOF' > /var/lib/transmission-daemon/.config/transmission-daemon/settings.json
-{
+python3 - "${MASTER_USER}" "${MASTER_PASS}" > /var/lib/transmission-daemon/.config/transmission-daemon/settings.json <<'PYEOF'
+import sys, json
+user, pw = sys.argv[1], sys.argv[2]
+cfg = {
     "download-dir": "/var/lib/transmission-daemon/downloads",
     "incomplete-dir": "/var/lib/transmission-daemon/downloads",
-    "incomplete-dir-enabled": false,
-    "rpc-authentication-required": false,
+    "incomplete-dir-enabled": False,
+    "rpc-authentication-required": True,
+    "rpc-username": user,
+    "rpc-password": pw,
     "rpc-bind-address": "0.0.0.0",
-    "rpc-enabled": true,
-    "rpc-host-whitelist-enabled": false,
+    "rpc-enabled": True,
+    "rpc-host-whitelist-enabled": False,
     "rpc-port": 9091,
     "rpc-url": "/transmission/",
     "rpc-whitelist": "127.0.0.1,::1,*.*.*.*",
-    "rpc-whitelist-enabled": false,
+    "rpc-whitelist-enabled": False,
     "umask": 2
 }
-EOF
+print(json.dumps(cfg, indent=4))
+PYEOF
 cp -f /var/lib/transmission-daemon/.config/transmission-daemon/settings.json /etc/transmission-daemon/settings.json
 
 report_progress 70 "Installing Transmission Web Control UI..."

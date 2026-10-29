@@ -32,8 +32,8 @@ systemctl enable --now apache2 >> "$LOGFILE" 2>&1
 
 report_progress 30 "Provisioning MariaDB database for Nextcloud..."
 DB_PASS="$(openssl rand -hex 16)"
-ADMIN_USER="admin"
-ADMIN_PASS="$(openssl rand -base64 12 | tr -dc 'a-zA-Z0-9' | head -c 14)"
+ADMIN_USER="${MASTER_USER}"
+ADMIN_PASS="${MASTER_PASS}"
 
 mysql -u root <<EOF >> "$LOGFILE" 2>&1
 CREATE DATABASE IF NOT EXISTS nextcloud CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;

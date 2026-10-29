@@ -70,6 +70,7 @@ report_progress 90 "Starting and enabling emby-server service on port 8097..."
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now emby-server >> "$LOGFILE" 2>&1
 systemctl restart emby-server >> "$LOGFILE" 2>&1 || true
+seed_jellyfin_master_user 8097
 
 write_lock "${PACKAGE_NAME}"
 report_progress 100 "Emby Server installed on port 8097."

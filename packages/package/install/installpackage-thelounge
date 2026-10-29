@@ -34,6 +34,7 @@ mkdir -p /var/lib/thelounge
 
 report_progress 40 "Installing The Lounge package globally via npm..."
 npm install -g thelounge >> "$LOGFILE" 2>&1
+sync_node_global_bins
 
 TL_VER="$(thelounge -v 2>/dev/null || true)"
 if [[ -n "$TL_VER" ]]; then
@@ -61,6 +62,11 @@ chown -R thelounge:thelounge /var/lib/thelounge
 
 NODE_PATH="$(command -v node || echo /usr/bin/node)"
 TL_BIN="$(command -v thelounge || echo /usr/local/bin/thelounge)"
+
+if [[ ! -f "/var/lib/thelounge/users/${MASTER_USER}.json" ]]; then
+    printf '%s\n' "${MASTER_PASS}" | sudo -u thelounge THELOUNGE_HOME=/var/lib/thelounge "${NODE_PATH}" "${TL_BIN}" add "${MASTER_USER}" >> "$LOGFILE" 2>&1 || true
+fi
+chown -R thelounge:thelounge /var/lib/thelounge
 
 report_progress 85 "Configuring and starting thelounge.service on port 9000..."
 cat <<EOF > /etc/systemd/system/thelounge.service

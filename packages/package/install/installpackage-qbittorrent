@@ -29,9 +29,11 @@ if ! id -u qbittorrent >/dev/null 2>&1; then
 fi
 
 report_progress 55 "Configuring qBittorrent WebUI on port 8180..."
+systemctl stop qbittorrent >> "$LOGFILE" 2>&1 || true
 mkdir -p /var/lib/qbittorrent/.config/qBittorrent/config /var/lib/qbittorrent/Downloads
 
-cat <<'EOF' > /var/lib/qbittorrent/.config/qBittorrent/qBittorrent.conf
+QBT_PBKDF2="$(generate_qbittorrent_pbkdf2 "${MASTER_PASS}")"
+cat <<EOF > /var/lib/qbittorrent/.config/qBittorrent/qBittorrent.conf
 [LegalNotice]
 Accepted=true
 
@@ -41,8 +43,9 @@ WebUI\Address=*
 WebUI\ServerDomains=*
 WebUI\CSRFProtection=false
 WebUI\HostHeaderValidation=false
-WebUI\Username=admin
-WebUI\Password_PBKDF2="@ByteArray(ARQ77eY1NUZaQsuDHbIMCA==:0WMRkYTUWVT9wVvdDtHAjU9b3b7uB8NR1Gur2hmQCvCDpm39Q+PsJRJPaCU51dEiz+dTzh8qbPsL8WkFljQYFQ==)"
+WebUI\Username=${MASTER_USER}
+WebUI\Password_PBKDF2="${QBT_PBKDF2}"
+WebUI\Password_ha1=@ByteArray(${MASTER_HA1})
 Downloads\SavePath=/var/lib/qbittorrent/Downloads/
 EOF
 

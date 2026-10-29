@@ -80,6 +80,7 @@ EOF
 
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now prowlarr >> "$LOGFILE" 2>&1
+seed_servarr_master_user "prowlarr" 9696 "v1"
 
 write_lock "${PACKAGE_NAME}"
 report_progress 100 "Prowlarr installed on port 9696."

@@ -22,7 +22,7 @@ log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 15 "Installing prerequisites for Grafana..."
 
 DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq apt-transport-https software-properties-common curl gnupg ca-certificates >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq apt-transport-https curl gnupg ca-certificates >> "$LOGFILE" 2>&1
 
 report_progress 35 "Adding official Grafana APT repository..."
 install -m 0755 -d /etc/apt/keyrings
@@ -39,11 +39,22 @@ if [[ -f /etc/grafana/grafana.ini ]]; then
     sed -i 's/^;http_port = 3000/http_port = 3000/' /etc/grafana/grafana.ini
     sed -i 's/^http_port = .*/http_port = 3000/' /etc/grafana/grafana.ini
     sed -i 's/^serve_from_sub_path = true/;serve_from_sub_path = false/' /etc/grafana/grafana.ini
+    python3 - /etc/grafana/grafana.ini "${MASTER_USER}" "${MASTER_PASS}" <<'PYEOF'
+import sys, re
+path, user, pw = sys.argv[1:4]
+txt = open(path, "r", encoding="utf-8", errors="ignore").read()
+txt = re.sub(r"(?m)^;?admin_user\s*=.*$", f"admin_user = {user}", txt)
+txt = re.sub(r"(?m)^;?admin_password\s*=.*$", f"admin_password = {pw}", txt)
+open(path, "w", encoding="utf-8").write(txt)
+PYEOF
 fi
 
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now grafana-server >> "$LOGFILE" 2>&1
 systemctl restart grafana-server >> "$LOGFILE" 2>&1
+if command_exists grafana-cli; then
+    grafana-cli admin reset-admin-password "${MASTER_PASS}" >> "$LOGFILE" 2>&1 || true
+fi
 
 write_lock "${PACKAGE_NAME}"
 report_progress 100 "Grafana installed on port 3000."

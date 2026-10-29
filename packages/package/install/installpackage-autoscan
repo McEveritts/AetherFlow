@@ -34,7 +34,7 @@ ARCH=$(dpkg --print-architecture)
 case "$ARCH" in
     amd64) AS_ARCH="amd64" ;;
     arm64) AS_ARCH="arm64" ;;
-    armhf) AS_ARCH="armv6" ;;
+    armhf) AS_ARCH="armv7" ;;
     *) print_error "Unsupported architecture: $ARCH"; exit 1 ;;
 esac
 
@@ -42,16 +42,21 @@ report_progress 35 "Resolving latest Autoscan release from Cloudbox..."
 AS_JSON="$(curl -fsSL https://api.github.com/repos/Cloudbox/autoscan/releases/latest 2>/dev/null || true)"
 AS_VERSION="$(printf '%s' "$AS_JSON" | grep -oP '"tag_name":\s*"v\K[^"]+' | head -1 || true)"
 AS_VERSION="${AS_VERSION:-1.4.0}"
-AS_URL="$(printf '%s' "$AS_JSON" | grep -oP '"browser_download_url":\s*"\K[^"]*autoscan_'${AS_VERSION}'_linux_'${AS_ARCH}'\.tar\.gz' | head -1 || true)"
+AS_URL="$(printf '%s' "$AS_JSON" | grep -oP '"browser_download_url":\s*"\K[^"]*autoscan_v?'${AS_VERSION}'_linux_'${AS_ARCH}'(\.tar\.gz)?' | head -1 || true)"
 if [[ -z "$AS_URL" ]]; then
-    AS_URL="https://github.com/Cloudbox/autoscan/releases/download/v${AS_VERSION}/autoscan_${AS_VERSION}_linux_${AS_ARCH}.tar.gz"
+    AS_URL="https://github.com/Cloudbox/autoscan/releases/download/v${AS_VERSION}/autoscan_v${AS_VERSION}_linux_${AS_ARCH}"
 fi
 
 report_progress 60 "Downloading Autoscan ${AS_VERSION} (${AS_ARCH})..."
-TMP_TAR=$(mktemp /tmp/autoscan-XXXXXX.tar.gz)
-curl -fsSL "$AS_URL" -o "$TMP_TAR" >> "$LOGFILE" 2>&1
-tar -xzf "$TMP_TAR" -C /usr/local/bin autoscan >> "$LOGFILE" 2>&1
-rm -f "$TMP_TAR"
+TMP_BIN=$(mktemp /tmp/autoscan-XXXXXX)
+curl -fsSL "$AS_URL" -o "$TMP_BIN" >> "$LOGFILE" 2>&1
+if [[ "$AS_URL" == *.tar.gz ]]; then
+    tar -xzf "$TMP_BIN" -C /usr/local/bin autoscan >> "$LOGFILE" 2>&1
+    rm -f "$TMP_BIN"
+else
+    install -m 0755 "$TMP_BIN" /usr/local/bin/autoscan
+    rm -f "$TMP_BIN"
+fi
 chmod 755 /usr/local/bin/autoscan
 printf '%s\n' "${AS_VERSION#v}" > /opt/autoscan/.af-version
 
