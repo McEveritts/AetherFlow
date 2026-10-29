@@ -24,7 +24,8 @@ yellow=$(tput setaf 3 2>/dev/null || true)
 magenta=$(tput setaf 5 2>/dev/null || true)
 cyan=$(tput setaf 6 2>/dev/null || true)
 white=$(tput setaf 7 2>/dev/null || true)
-# Ensure system binaries are in PATH
+# Ensure system binaries are in PATH and standard 0022 umask is active for system files
+umask 0022
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
 
 on_red=$(tput setab 1 2>/dev/null || true)

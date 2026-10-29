@@ -31,7 +31,9 @@ function _repos() {
 		_af_apt_install lsb-release sudo ca-certificates gnupg wget || return 1
 		if [[ "${OS_ID:-}" != "kali" && "${CODENAME:-}" != "kali-rolling" ]]; then
 			wget -qO - https://packages.sury.org/php/apt.gpg | gpg --dearmor --batch --yes -o /usr/share/keyrings/deb.sury.org-php.gpg || return 1
+			chmod 0644 /usr/share/keyrings/deb.sury.org-php.gpg
 			echo "deb [signed-by=/usr/share/keyrings/deb.sury.org-php.gpg] https://packages.sury.org/php/ ${CODENAME} main" > /etc/apt/sources.list.d/php.list
+			chmod 0644 /etc/apt/sources.list.d/php.list
 		fi
 	fi
 
