@@ -1,0 +1,47 @@
+#!/bin/bash
+#
+# [AetherFlow Install Script - X2Go]
+# Installs X2Go remote desktop server over SSH with XFCE4 session support.
+#
+set -euo pipefail
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+COMMON_SH="/opt/AetherFlow/packages/common.sh"
+if [[ -f "${COMMON_SH}" ]]; then
+    # shellcheck disable=SC1091
+    source "${COMMON_SH}"
+else
+    # shellcheck disable=SC1091
+    source "${SELF_DIR}/../../common.sh"
+fi
+
+require_root
+
+APP_NAME="x2go"
+DATA_DIR="/var/lib/x2go"
+LOCK_FILE="/install/.x2go.lock"
+
+setup_log "${APP_NAME}"
+log "Starting ${APP_NAME} (x2goserver + XFCE4) installation..."
+report_progress 15 "Preparing ${APP_NAME} installation..."
+
+report_progress 45 "Installing x2goserver, x2goserver-xsession, and XFCE4 desktop environment..."
+apt_update
+apt_install x2goserver x2goserver-xsession xfce4 xfce4-goodies dbus-x11 x11-xserver-utils
+
+mkdir -p "${DATA_DIR}"
+report_progress 75 "Initializing X2Go SQLite session database..."
+if command -v x2godbadmin >/dev/null 2>&1; then
+    x2godbadmin --createdb >> "${LOG_FILE}" 2>&1 || true
+fi
+
+INSTALLED_VER="$(dpkg-query -W -f='${Version}' x2goserver 2>/dev/null | cut -d- -f1 | sed 's/^[0-9]*://' || echo '4.1.0')"
+echo "${INSTALLED_VER}" > "${DATA_DIR}/.af-version"
+
+report_progress 90 "Enabling and starting x2goserver.service..."
+systemctl daemon-reload
+systemctl enable --now x2goserver.service >> "${LOG_FILE}" 2>&1
+
+write_lock "${LOCK_FILE}"
+report_progress 100 "${APP_NAME} remote desktop server installed and ready over SSH"
+log "${APP_NAME} installation complete."

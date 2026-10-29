@@ -588,5 +588,135 @@
         "service_name": "apache2",
         "default_port": 8086,
         "web_path": "/"
+    },
+    {
+        "name": "dispatcharr",
+        "label": "Dispatcharr",
+        "description": "Open-source IPTV stream, M3U playlist, and XMLTV EPG management and proxy server.",
+        "lock_file": "/install/.dispatcharr.lock",
+        "category": "Media",
+        "service_type": "systemd",
+        "service_name": "dispatcharr",
+        "default_port": 9191,
+        "web_path": "/"
+    },
+    {
+        "name": "duplicati",
+        "label": "Duplicati",
+        "description": "Encrypted, deduplicated backup client for cloud storage and remote file servers.",
+        "lock_file": "/install/.duplicati.lock",
+        "category": "Cloud",
+        "service_type": "systemd",
+        "service_name": "duplicati",
+        "default_port": 8200,
+        "web_path": "/"
+    },
+    {
+        "name": "filebot",
+        "label": "FileBot",
+        "description": "Automated TV, movie, anime, and music file organizer and renamer with FileBot Node Web UI.",
+        "lock_file": "/install/.filebot.lock",
+        "category": "Media",
+        "service_type": "systemd",
+        "service_name": "filebot",
+        "default_port": 5452,
+        "web_path": "/"
+    },
+    {
+        "name": "listenarr",
+        "label": "Listenarr",
+        "description": "Automated audiobook collection manager and request server for Usenet and BitTorrent.",
+        "lock_file": "/install/.listenarr.lock",
+        "category": "Media",
+        "service_type": "systemd",
+        "service_name": "listenarr",
+        "default_port": 4546,
+        "web_path": "/"
+    },
+    {
+        "name": "notifiarr",
+        "label": "Notifiarr",
+        "description": "Unified notification and integration client for Sonarr, Radarr, Plex, and Discord.",
+        "lock_file": "/install/.notifiarr.lock",
+        "category": "Utilities",
+        "service_type": "systemd",
+        "service_name": "notifiarr",
+        "default_port": 5454,
+        "web_path": "/"
+    },
+    {
+        "name": "novnc",
+        "label": "noVNC",
+        "description": "HTML5 WebSocket VNC desktop environment accessible directly from any web browser.",
+        "lock_file": "/install/.novnc.lock",
+        "category": "Utilities",
+        "service_type": "systemd",
+        "service_name": "novnc",
+        "default_port": 6080,
+        "web_path": "/vnc.html"
+    },
+    {
+        "name": "pyload",
+        "label": "pyLoad",
+        "description": "Lightweight, extensible download manager for one-click hosters, containers, and HTTP/FTP links.",
+        "lock_file": "/install/.pyload.lock",
+        "category": "Downloaders",
+        "service_type": "systemd",
+        "service_name": "pyload",
+        "default_port": 8000,
+        "web_path": "/"
+    },
+    {
+        "name": "quassel",
+        "label": "Quassel",
+        "description": "Modern, cross-platform, distributed IRC client and persistent core bouncer.",
+        "lock_file": "/install/.quassel.lock",
+        "category": "Network",
+        "service_type": "systemd",
+        "service_name": "quasselcore",
+        "default_port": 0
+    },
+    {
+        "name": "requestrr",
+        "label": "Requestrr",
+        "description": "Chatbot for Discord and Matrix connecting users to Sonarr, Radarr, Ombi, and Overseerr.",
+        "lock_file": "/install/.requestrr.lock",
+        "category": "Media",
+        "service_type": "systemd",
+        "service_name": "requestrr",
+        "default_port": 4545,
+        "web_path": "/"
+    },
+    {
+        "name": "seedcross",
+        "label": "SeedCross",
+        "description": "Web-based automated torrent cross-seeding manager for qBittorrent, Deluge, and Transmission.",
+        "lock_file": "/install/.seedcross.lock",
+        "category": "Downloaders",
+        "service_type": "systemd",
+        "service_name": "seedcross",
+        "default_port": 8019,
+        "web_path": "/"
+    },
+    {
+        "name": "unmanic",
+        "label": "Unmanic",
+        "description": "Automated media library optimizer and distributed FFmpeg transcoding manager.",
+        "lock_file": "/install/.unmanic.lock",
+        "category": "Media",
+        "service_type": "systemd",
+        "service_name": "unmanic",
+        "default_port": 8888,
+        "web_path": "/"
+    },
+    {
+        "name": "x2go",
+        "label": "X2Go",
+        "description": "High-performance remote Linux desktop server over SSH with XFCE4 session support.",
+        "lock_file": "/install/.x2go.lock",
+        "category": "Utilities",
+        "service_type": "systemd",
+        "service_name": "x2goserver",
+        "default_port": 0
     }
 ]

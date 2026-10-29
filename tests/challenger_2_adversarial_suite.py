@@ -38,17 +38,17 @@ def test_inventory_and_purges():
     # 1. Install scripts count
     install_scripts = sorted(glob.glob(os.path.join(ROOT_DIR, "packages/package/install/installpackage-*")))
     install_scripts = [f for f in install_scripts if not f.endswith("installpackage-template")]
-    if len(install_scripts) != 57:
-        failures.append(f"Expected 57 installpackage-* scripts, found {len(install_scripts)}")
+    if len(install_scripts) != 69:
+        failures.append(f"Expected 69 installpackage-* scripts, found {len(install_scripts)}")
     else:
-        print(f" [PASS] Exactly 57 installpackage-* scripts found (excluding template)")
+        print(f" [PASS] Exactly 69 installpackage-* scripts found (excluding template)")
 
     # 2. Remove scripts count
     remove_scripts = sorted(glob.glob(os.path.join(ROOT_DIR, "packages/package/remove/removepackage-*")))
-    if len(remove_scripts) != 57:
-        failures.append(f"Expected 57 removepackage-* scripts, found {len(remove_scripts)}")
+    if len(remove_scripts) != 69:
+        failures.append(f"Expected 69 removepackage-* scripts, found {len(remove_scripts)}")
     else:
-        print(f" [PASS] Exactly 57 removepackage-* scripts found")
+        print(f" [PASS] Exactly 69 removepackage-* scripts found")
 
     # 3. ruTorrent plugin install scripts count
     plugin_install = sorted(glob.glob(os.path.join(ROOT_DIR, "packages/plugin/install/installplugin-*")))

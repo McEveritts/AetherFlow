@@ -1,0 +1,134 @@
+#!/bin/bash
+#
+# [AetherFlow Install Script - FileBot]
+# Installs FileBot CLI and FileBot Node Web UI natively on bare-metal Debian/Ubuntu.
+#
+set -euo pipefail
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+COMMON_SH="/opt/AetherFlow/packages/common.sh"
+if [[ -f "${COMMON_SH}" ]]; then
+    # shellcheck disable=SC1091
+    source "${COMMON_SH}"
+else
+    # shellcheck disable=SC1091
+    source "${SELF_DIR}/../../common.sh"
+fi
+
+require_root
+
+APP_NAME="filebot"
+APP_USER="filebot"
+FB_DIR="/opt/filebot"
+NODE_DIR="/opt/filebot-node"
+DATA_DIR="/var/lib/filebot"
+LOCK_FILE="/install/.filebot.lock"
+SERVICE_FILE="/etc/systemd/system/filebot.service"
+APP_PORT="${AF_APP_PORT:-5452}"
+
+setup_log "${APP_NAME}"
+log "Starting ${APP_NAME} installation (target port: ${APP_PORT})..."
+report_progress 10 "Preparing ${APP_NAME} installation..."
+
+ensure_master_credentials
+ADMIN_USER="${MASTER_USER}"
+ADMIN_PASS="${MASTER_PASS}"
+
+report_progress 20 "Installing Java runtime, MediaInfo, Chromaprint, and archive tools..."
+apt_update
+apt_install curl wget jq xz-utils ca-certificates default-jre-headless \
+    mediainfo libchromaprint-tools p7zip-full unrar-free
+
+report_progress 35 "Provisioning Node.js runtime for FileBot Node..."
+ensure_node 20
+
+ensure_service_user "${APP_USER}" "${DATA_DIR}"
+mkdir -p "${FB_DIR}" "${NODE_DIR}" "${DATA_DIR}" "${DATA_DIR}/data"
+
+report_progress 50 "Downloading FileBot portable runtime..."
+FB_VERSION="5.1.6"
+FB_URL="https://get.filebot.net/filebot/FileBot_${FB_VERSION}/FileBot_${FB_VERSION}-portable.tar.xz"
+TMP_FB="$(mktemp --suffix=.tar.xz)"
+if ! wget -qO "${TMP_FB}" "${FB_URL}" >> "${LOG_FILE}" 2>&1; then
+    FB_VERSION="5.2.0"
+    FB_URL="https://get.filebot.net/filebot/FileBot_${FB_VERSION}/FileBot_${FB_VERSION}-portable.tar.xz"
+    wget -qO "${TMP_FB}" "${FB_URL}" >> "${LOG_FILE}" 2>&1
+fi
+tar -xJf "${TMP_FB}" -C "${FB_DIR}" >> "${LOG_FILE}" 2>&1
+rm -f "${TMP_FB}"
+chmod +x "${FB_DIR}/filebot.sh"
+ln -sf "${FB_DIR}/filebot.sh" /usr/local/bin/filebot
+
+report_progress 70 "Downloading FileBot Node Web UI..."
+RELEASE_JSON="$(curl -fsSL https://api.github.com/repos/filebot/filebot-node/releases/latest 2>/dev/null || true)"
+NODE_TAG="$(echo "${RELEASE_JSON}" | jq -r '.tag_name // "0.4.8.1"')"
+if [[ -z "${NODE_TAG}" || "${NODE_TAG}" == "null" ]]; then
+    NODE_TAG="0.4.8.1"
+fi
+NODE_URL="https://github.com/filebot/filebot-node/releases/download/${NODE_TAG}/filebot-node_${NODE_TAG}.tar.xz"
+
+TMP_NODE="$(mktemp --suffix=.tar.xz)"
+wget -qO "${TMP_NODE}" "${NODE_URL}" >> "${LOG_FILE}" 2>&1
+tar -xJf "${TMP_NODE}" -C "${NODE_DIR}" >> "${LOG_FILE}" 2>&1
+rm -f "${TMP_NODE}"
+
+if [[ -f "${NODE_DIR}/server/package.json" ]]; then
+    pushd "${NODE_DIR}/server" >/dev/null
+    npm install --omit=dev >> "${LOG_FILE}" 2>&1 || true
+    popd >/dev/null
+fi
+
+echo "${NODE_TAG#v}" > "${NODE_DIR}/.af-version"
+chmod +x "${NODE_DIR}/task" 2>/dev/null || true
+
+FB_UID="$(id -u "${APP_USER}")"
+FB_GID="$(id -g "${APP_USER}")"
+
+cat > "${DATA_DIR}/filebot-node.env" <<EOF
+FILEBOT_NODE_HOST=0.0.0.0
+FILEBOT_NODE_AUTH=BASIC
+FILEBOT_NODE_AUTH_USER=${ADMIN_USER}
+FILEBOT_NODE_AUTH_PASS=${ADMIN_PASS}
+FILEBOT_NODE_HTTP=YES
+FILEBOT_NODE_HTTP_PORT=${APP_PORT}
+FILEBOT_NODE_DATA=${DATA_DIR}/data
+FILEBOT_TASK_CMD=${NODE_DIR}/task
+FILEBOT_CMD=/usr/local/bin/filebot
+FILEBOT_CMD_CWD=${DATA_DIR}
+FILEBOT_CMD_UID=${FB_UID}
+FILEBOT_CMD_GID=${FB_GID}
+FILEBOT_NODE_CLIENT=client
+JAVA_OPTS=-Djava.awt.headless=true
+EOF
+chmod 600 "${DATA_DIR}/filebot-node.env"
+chown -R "${APP_USER}:${APP_USER}" "${FB_DIR}" "${NODE_DIR}" "${DATA_DIR}"
+
+NODE_BIN="$(command -v node || echo /usr/bin/node)"
+
+report_progress 90 "Configuring ${APP_NAME} systemd service..."
+cat > "${SERVICE_FILE}" <<EOF
+[Unit]
+Description=FileBot Node Web UI & Organizer Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=${APP_USER}
+Group=${APP_USER}
+WorkingDirectory=${NODE_DIR}
+EnvironmentFile=${DATA_DIR}/filebot-node.env
+ExecStart=${NODE_BIN} ${NODE_DIR}/server/app.js
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now filebot.service >> "${LOG_FILE}" 2>&1
+
+write_lock "${LOCK_FILE}"
+report_progress 100 "${APP_NAME} installed and running on port ${APP_PORT}"
+log "${APP_NAME} installation complete."

@@ -1,0 +1,50 @@
+#!/bin/bash
+#
+# [AetherFlow Remove Script - Dispatcharr]
+#
+set -euo pipefail
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+COMMON_SH="/opt/AetherFlow/packages/common.sh"
+if [[ -f "${COMMON_SH}" ]]; then
+    # shellcheck disable=SC1091
+    source "${COMMON_SH}"
+else
+    # shellcheck disable=SC1091
+    source "${SELF_DIR}/../../common.sh"
+fi
+
+require_root
+
+APP_NAME="dispatcharr"
+INSTALL_DIR="/opt/dispatcharr"
+DATA_DIR="/var/lib/dispatcharr"
+CONFIG_DIR="/etc/dispatcharr"
+LOCK_FILE="/install/.dispatcharr.lock"
+
+setup_log "${APP_NAME}-remove"
+log "Removing ${APP_NAME}..."
+report_progress 15 "Stopping ${APP_NAME} services..."
+
+stop_disable_service "dispatcharr-celerybeat.service"
+stop_disable_service "dispatcharr-celery.service"
+stop_disable_service "dispatcharr.service"
+
+rm -f /etc/systemd/system/dispatcharr.service \
+      /etc/systemd/system/dispatcharr-celery.service \
+      /etc/systemd/system/dispatcharr-celerybeat.service
+systemctl daemon-reload
+
+report_progress 55 "Removing ${APP_NAME} runtime files..."
+rm -rf "${INSTALL_DIR}" "${CONFIG_DIR}"
+
+if [[ "${DELETE_DATA:-false}" == "true" ]]; then
+    log "DELETE_DATA=true: Purging ${DATA_DIR} and PostgreSQL database..."
+    rm -rf "${DATA_DIR}"
+    su - postgres -c "psql -c 'DROP DATABASE IF EXISTS dispatcharr;'" >> "${LOG_FILE}" 2>&1 || true
+    su - postgres -c "psql -c 'DROP USER IF EXISTS dispatcharr;'" >> "${LOG_FILE}" 2>&1 || true
+fi
+
+remove_lock "${LOCK_FILE}"
+report_progress 100 "${APP_NAME} removed"
+log "${APP_NAME} removal complete."

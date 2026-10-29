@@ -1,0 +1,118 @@
+#!/bin/bash
+#
+# [AetherFlow Install Script - Duplicati]
+# Installs Duplicati encrypted backup client & web server natively on bare metal.
+#
+set -euo pipefail
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+COMMON_SH="/opt/AetherFlow/packages/common.sh"
+if [[ -f "${COMMON_SH}" ]]; then
+    # shellcheck disable=SC1091
+    source "${COMMON_SH}"
+else
+    # shellcheck disable=SC1091
+    source "${SELF_DIR}/../../common.sh"
+fi
+
+require_root
+
+APP_NAME="duplicati"
+APP_USER="duplicati"
+DATA_DIR="/var/lib/duplicati"
+CONFIG_DIR="/etc/duplicati"
+LOCK_FILE="/install/.duplicati.lock"
+SERVICE_FILE="/etc/systemd/system/duplicati.service"
+APP_PORT="${AF_APP_PORT:-8200}"
+
+setup_log "${APP_NAME}"
+log "Starting ${APP_NAME} installation (target port: ${APP_PORT})..."
+report_progress 10 "Preparing ${APP_NAME} installation..."
+
+ensure_master_credentials
+ADMIN_PASS="${MASTER_PASS}"
+
+report_progress 20 "Installing system dependencies..."
+apt_update
+apt_install curl wget jq ca-certificates libicu-dev libssl-dev
+
+ensure_service_user "${APP_USER}" "${DATA_DIR}"
+mkdir -p "${DATA_DIR}" "${CONFIG_DIR}"
+
+ARCH="$(dpkg --print-architecture)"
+case "${ARCH}" in
+    amd64) DUP_ARCH="x64" ;;
+    arm64) DUP_ARCH="arm64" ;;
+    armhf) DUP_ARCH="arm7" ;;
+    *)
+        log "ERROR: Unsupported architecture: ${ARCH}"
+        exit 1
+        ;;
+esac
+
+report_progress 40 "Fetching latest ${APP_NAME} release from GitHub..."
+RELEASE_JSON="$(curl -fsSL https://api.github.com/repos/duplicati/duplicati/releases/latest)"
+LATEST_TAG="$(echo "${RELEASE_JSON}" | jq -r '.tag_name // empty')"
+DEB_URL="$(echo "${RELEASE_JSON}" | jq -r --arg arch "linux-${DUP_ARCH}-cli.deb" '.assets[] | select(.name | endswith($arch)) | .browser_download_url' | head -n1)"
+
+if [[ -z "${DEB_URL}" ]]; then
+    DEB_URL="$(echo "${RELEASE_JSON}" | jq -r --arg arch "${DUP_ARCH}" '.assets[] | select(.name | test("linux-" + $arch + ".*\\.deb$")) | .browser_download_url' | head -n1)"
+fi
+
+if [[ -z "${DEB_URL}" ]]; then
+    log "ERROR: Unable to resolve Duplicati .deb download URL for ${DUP_ARCH}"
+    exit 1
+fi
+
+TMP_DEB="$(mktemp --suffix=.deb)"
+report_progress 60 "Downloading ${APP_NAME} (${LATEST_TAG})..."
+wget -qO "${TMP_DEB}" "${DEB_URL}" >> "${LOG_FILE}" 2>&1
+
+report_progress 75 "Installing ${APP_NAME} package..."
+apt-get install -y "${TMP_DEB}" >> "${LOG_FILE}" 2>&1 || {
+    dpkg -i "${TMP_DEB}" >> "${LOG_FILE}" 2>&1 || true
+    apt-get install -f -y >> "${LOG_FILE}" 2>&1
+}
+rm -f "${TMP_DEB}"
+
+echo "${LATEST_TAG#v}" > "${DATA_DIR}/.af-version"
+
+cat > "${CONFIG_DIR}/duplicati.env" <<EOF
+DUPLICATI_PASS=${ADMIN_PASS}
+DUPLICATI_PORT=${APP_PORT}
+EOF
+chmod 600 "${CONFIG_DIR}/duplicati.env"
+chown -R "${APP_USER}:${APP_USER}" "${DATA_DIR}" "${CONFIG_DIR}"
+
+SERVER_BIN="/usr/bin/duplicati-server"
+if [[ ! -x "${SERVER_BIN}" && -x "/usr/lib/duplicati/duplicati-server" ]]; then
+    SERVER_BIN="/usr/lib/duplicati/duplicati-server"
+fi
+
+report_progress 90 "Configuring ${APP_NAME} systemd service..."
+cat > "${SERVICE_FILE}" <<EOF
+[Unit]
+Description=Duplicati Backup Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=${APP_USER}
+Group=${APP_USER}
+WorkingDirectory=${DATA_DIR}
+EnvironmentFile=${CONFIG_DIR}/duplicati.env
+ExecStart=${SERVER_BIN} --webservice-port=${APP_PORT} --webservice-interface=any --webservice-password=\${DUPLICATI_PASS} --webservice-allowed-hostnames=* --server-datafolder=${DATA_DIR}
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now duplicati.service >> "${LOG_FILE}" 2>&1
+
+write_lock "${LOCK_FILE}"
+report_progress 100 "${APP_NAME} installed and running on port ${APP_PORT}"
+log "${APP_NAME} installation complete."

@@ -1,0 +1,106 @@
+#!/bin/bash
+#
+# [AetherFlow Install Script - Unmanic]
+# Installs Unmanic automated media library optimizer and FFmpeg transcoding manager.
+#
+set -euo pipefail
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+COMMON_SH="/opt/AetherFlow/packages/common.sh"
+if [[ -f "${COMMON_SH}" ]]; then
+    # shellcheck disable=SC1091
+    source "${COMMON_SH}"
+else
+    # shellcheck disable=SC1091
+    source "${SELF_DIR}/../../common.sh"
+fi
+
+require_root
+
+APP_NAME="unmanic"
+APP_USER="unmanic"
+INSTALL_DIR="/opt/unmanic"
+DATA_DIR="/var/lib/unmanic"
+LOCK_FILE="/install/.unmanic.lock"
+SERVICE_FILE="/etc/systemd/system/unmanic.service"
+APP_PORT="${AF_APP_PORT:-8888}"
+
+setup_log "${APP_NAME}"
+log "Starting ${APP_NAME} installation (target port: ${APP_PORT})..."
+report_progress 10 "Preparing ${APP_NAME} installation..."
+
+ensure_master_credentials
+
+report_progress 25 "Installing FFmpeg, VAAPI drivers, and Python virtualenv dependencies..."
+apt_update
+apt_install curl wget jq ca-certificates build-essential \
+    python3 python3-venv python3-dev python3-pip \
+    ffmpeg mediainfo sqlite3
+
+ensure_service_user "${APP_USER}" "${DATA_DIR}"
+mkdir -p "${INSTALL_DIR}" "${DATA_DIR}" "${DATA_DIR}/.unmanic/config" "${DATA_DIR}/.unmanic/userdata"
+
+# Grant GPU device group access for hardware transcoding (/dev/dri)
+if getent group video >/dev/null 2>&1; then
+    usermod -aG video "${APP_USER}" || true
+fi
+if getent group render >/dev/null 2>&1; then
+    usermod -aG render "${APP_USER}" || true
+fi
+
+report_progress 55 "Creating Python virtualenv and installing Unmanic..."
+if [[ ! -d "${INSTALL_DIR}/.venv" ]]; then
+    python3 -m venv "${INSTALL_DIR}/.venv" >> "${LOG_FILE}" 2>&1
+fi
+"${INSTALL_DIR}/.venv/bin/pip" install --upgrade pip setuptools wheel >> "${LOG_FILE}" 2>&1
+"${INSTALL_DIR}/.venv/bin/pip" install --no-cache-dir unmanic >> "${LOG_FILE}" 2>&1
+
+UNMANIC_VER="$("${INSTALL_DIR}/.venv/bin/python" -c "import importlib.metadata; print(importlib.metadata.version('unmanic'))" 2>/dev/null || echo '0.4.1')"
+echo "${UNMANIC_VER}" > "${INSTALL_DIR}/.af-version"
+
+report_progress 75 "Configuring ${APP_NAME} on port ${APP_PORT}..."
+SETTINGS_FILE="${DATA_DIR}/.unmanic/config/settings.json"
+if [[ ! -f "${SETTINGS_FILE}" ]]; then
+    cat > "${SETTINGS_FILE}" <<EOF
+{
+  "ui_port": ${APP_PORT},
+  "enable_inotify": false,
+  "run_full_scan_on_start": false,
+  "concurrent_workers": 2
+}
+EOF
+else
+    jq --argjson port "${APP_PORT}" '.ui_port = $port' "${SETTINGS_FILE}" > "${SETTINGS_FILE}.tmp" && \
+        mv "${SETTINGS_FILE}.tmp" "${SETTINGS_FILE}" || true
+fi
+
+chown -R "${APP_USER}:${APP_USER}" "${INSTALL_DIR}" "${DATA_DIR}"
+
+report_progress 90 "Configuring ${APP_NAME} systemd service..."
+cat > "${SERVICE_FILE}" <<EOF
+[Unit]
+Description=Unmanic Automated Library Optimizer
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=${APP_USER}
+Group=${APP_USER}
+WorkingDirectory=${DATA_DIR}
+Environment="HOME=${DATA_DIR}"
+Environment="PYTHONUNBUFFERED=1"
+ExecStart=${INSTALL_DIR}/.venv/bin/unmanic --port ${APP_PORT}
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now unmanic.service >> "${LOG_FILE}" 2>&1
+
+write_lock "${LOCK_FILE}"
+report_progress 100 "${APP_NAME} installed and running on port ${APP_PORT}"
+log "${APP_NAME} installation complete."

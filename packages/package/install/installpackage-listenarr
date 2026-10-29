@@ -1,0 +1,113 @@
+#!/bin/bash
+#
+# [AetherFlow Install Script - Listenarr]
+# Installs Listenarr automated audiobook collection manager on bare-metal Linux.
+#
+set -euo pipefail
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+COMMON_SH="/opt/AetherFlow/packages/common.sh"
+if [[ -f "${COMMON_SH}" ]]; then
+    # shellcheck disable=SC1091
+    source "${COMMON_SH}"
+else
+    # shellcheck disable=SC1091
+    source "${SELF_DIR}/../../common.sh"
+fi
+
+require_root
+
+APP_NAME="listenarr"
+APP_USER="listenarr"
+INSTALL_DIR="/opt/Listenarr"
+DATA_DIR="/var/lib/listenarr"
+LOCK_FILE="/install/.listenarr.lock"
+SERVICE_FILE="/etc/systemd/system/listenarr.service"
+APP_PORT="${AF_APP_PORT:-4546}"
+
+setup_log "${APP_NAME}"
+log "Starting ${APP_NAME} installation (target port: ${APP_PORT})..."
+report_progress 10 "Preparing ${APP_NAME} installation..."
+
+ensure_master_credentials
+
+report_progress 25 "Installing system dependencies..."
+apt_update
+apt_install curl wget jq unzip ca-certificates libicu-dev libssl-dev sqlite3
+
+ensure_service_user "${APP_USER}" "${DATA_DIR}"
+mkdir -p "${INSTALL_DIR}" "${DATA_DIR}" "${DATA_DIR}/config"
+
+ARCH="$(dpkg --print-architecture)"
+case "${ARCH}" in
+    amd64) L_ARCH="linux-x64" ;;
+    arm64) L_ARCH="linux-arm64" ;;
+    *)
+        log "ERROR: Unsupported architecture for Listenarr: ${ARCH}"
+        exit 1
+        ;;
+esac
+
+report_progress 45 "Resolving latest ${APP_NAME} release from GitHub..."
+RELEASES_JSON="$(curl -fsSL https://api.github.com/repos/Listenarrs/Listenarr/releases)"
+LATEST_TAG="$(echo "${RELEASES_JSON}" | jq -r '.[0].tag_name // empty')"
+ASSET_URL="$(echo "${RELEASES_JSON}" | jq -r --arg arch "${L_ARCH}.zip" '.[0].assets[] | select(.name | endswith($arch)) | .browser_download_url' | head -n1)"
+
+if [[ -z "${ASSET_URL}" ]]; then
+    log "ERROR: Failed to locate Listenarr release asset for ${L_ARCH}"
+    exit 1
+fi
+
+TMP_ZIP="$(mktemp --suffix=.zip)"
+TMP_EXTRACT="$(mktemp -d)"
+report_progress 65 "Downloading ${APP_NAME} (${LATEST_TAG})..."
+wget -qO "${TMP_ZIP}" "${ASSET_URL}" >> "${LOG_FILE}" 2>&1
+
+report_progress 80 "Extracting ${APP_NAME} to ${INSTALL_DIR}..."
+unzip -qo "${TMP_ZIP}" -d "${TMP_EXTRACT}" >> "${LOG_FILE}" 2>&1
+rm -f "${TMP_ZIP}"
+
+if [[ -f "${TMP_EXTRACT}/Listenarr.Api" ]]; then
+    cp -a "${TMP_EXTRACT}/." "${INSTALL_DIR}/"
+else
+    SUBDIR="$(find "${TMP_EXTRACT}" -mindepth 1 -maxdepth 1 -type d | head -n1)"
+    if [[ -n "${SUBDIR}" ]]; then
+        cp -a "${SUBDIR}/." "${INSTALL_DIR}/"
+    fi
+fi
+rm -rf "${TMP_EXTRACT}"
+
+chmod +x "${INSTALL_DIR}/Listenarr.Api"
+echo "${LATEST_TAG#v}" > "${INSTALL_DIR}/.af-version"
+chown -R "${APP_USER}:${APP_USER}" "${INSTALL_DIR}" "${DATA_DIR}"
+
+report_progress 90 "Configuring ${APP_NAME} systemd service..."
+cat > "${SERVICE_FILE}" <<EOF
+[Unit]
+Description=Listenarr Audiobook Collection Manager
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=${APP_USER}
+Group=${APP_USER}
+WorkingDirectory=${INSTALL_DIR}
+Environment="ASPNETCORE_URLS=http://*:${APP_PORT}"
+Environment="DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=false"
+Environment="HOME=${DATA_DIR}"
+Environment="XDG_CONFIG_HOME=${DATA_DIR}/config"
+ExecStart=${INSTALL_DIR}/Listenarr.Api
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now listenarr.service >> "${LOG_FILE}" 2>&1
+
+write_lock "${LOCK_FILE}"
+report_progress 100 "${APP_NAME} installed and running on port ${APP_PORT}"
+log "${APP_NAME} installation complete."

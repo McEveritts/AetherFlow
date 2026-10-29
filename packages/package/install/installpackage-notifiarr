@@ -1,0 +1,183 @@
+#!/bin/bash
+#
+# [AetherFlow Install Script - Notifiarr]
+# Installs Notifiarr client daemon on bare-metal Linux with automatic Arr stack wiring.
+#
+set -euo pipefail
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+COMMON_SH="/opt/AetherFlow/packages/common.sh"
+if [[ -f "${COMMON_SH}" ]]; then
+    # shellcheck disable=SC1091
+    source "${COMMON_SH}"
+else
+    # shellcheck disable=SC1091
+    source "${SELF_DIR}/../../common.sh"
+fi
+
+require_root
+
+APP_NAME="notifiarr"
+APP_USER="notifiarr"
+CONFIG_DIR="/etc/notifiarr"
+DATA_DIR="/var/lib/notifiarr"
+LOG_DIR="/var/log/notifiarr"
+BIN_PATH="/usr/local/bin/notifiarr"
+LOCK_FILE="/install/.notifiarr.lock"
+SERVICE_FILE="/etc/systemd/system/notifiarr.service"
+APP_PORT="${AF_APP_PORT:-5454}"
+
+setup_log "${APP_NAME}"
+log "Starting ${APP_NAME} installation (target port: ${APP_PORT})..."
+report_progress 10 "Preparing ${APP_NAME} installation..."
+
+ensure_master_credentials
+ADMIN_USER="${MASTER_USER}"
+ADMIN_PASS="${MASTER_PASS}"
+
+report_progress 25 "Installing system dependencies..."
+apt_update
+apt_install curl wget jq gzip ca-certificates
+
+ensure_service_user "${APP_USER}" "${DATA_DIR}"
+mkdir -p "${CONFIG_DIR}" "${DATA_DIR}" "${LOG_DIR}"
+
+ARCH="$(dpkg --print-architecture)"
+case "${ARCH}" in
+    amd64) N_ARCH="amd64" ;;
+    arm64) N_ARCH="arm64" ;;
+    armhf) N_ARCH="arm" ;;
+    *)
+        log "ERROR: Unsupported architecture for Notifiarr: ${ARCH}"
+        exit 1
+        ;;
+esac
+
+report_progress 45 "Resolving latest ${APP_NAME} release from GitHub..."
+RELEASE_JSON="$(curl -fsSL https://api.github.com/repos/Notifiarr/notifiarr/releases/latest)"
+LATEST_TAG="$(echo "${RELEASE_JSON}" | jq -r '.tag_name // empty')"
+ASSET_URL="$(echo "${RELEASE_JSON}" | jq -r --arg name "notifiarr.${N_ARCH}.linux.gz" '.assets[] | select(.name == $name) | .browser_download_url' | head -n1)"
+
+if [[ -z "${ASSET_URL}" ]]; then
+    log "ERROR: Unable to resolve Notifiarr binary asset for ${N_ARCH}"
+    exit 1
+fi
+
+TMP_GZ="$(mktemp --suffix=.gz)"
+report_progress 65 "Downloading ${APP_NAME} (${LATEST_TAG})..."
+wget -qO "${TMP_GZ}" "${ASSET_URL}" >> "${LOG_FILE}" 2>&1
+gzip -dc "${TMP_GZ}" > "${BIN_PATH}"
+rm -f "${TMP_GZ}"
+chmod 755 "${BIN_PATH}"
+
+echo "${LATEST_TAG#v}" > "${CONFIG_DIR}/.af-version"
+
+report_progress 80 "Generating ${APP_NAME} configuration and discovering local Arr services..."
+extract_arr_key() {
+    local xml_file="$1"
+    if [[ -f "${xml_file}" ]]; then
+        grep -oP '(?<=<ApiKey>)[^<]+' "${xml_file}" 2>/dev/null | head -n1 || true
+    fi
+}
+
+SONARR_KEY="$(extract_arr_key /var/lib/sonarr/config.xml)"
+RADARR_KEY="$(extract_arr_key /var/lib/radarr/config.xml)"
+LIDARR_KEY="$(extract_arr_key /var/lib/lidarr/config.xml)"
+READARR_KEY="$(extract_arr_key /var/lib/readarr/config.xml)"
+PROWLARR_KEY="$(extract_arr_key /var/lib/prowlarr/config.xml)"
+
+if [[ ! -f "${CONFIG_DIR}/notifiarr.conf" ]]; then
+    cat > "${CONFIG_DIR}/notifiarr.conf" <<EOF
+## AetherFlow Notifiarr Client Configuration
+api_key = "00000000-0000-0000-0000-000000000000"
+bind_addr = "0.0.0.0:${APP_PORT}"
+ui_password = "${ADMIN_USER}:${ADMIN_PASS}"
+urlbase = "/"
+quiet = false
+log_file = "${LOG_DIR}/app.log"
+http_log = "${LOG_DIR}/http.log"
+EOF
+
+    if [[ -n "${SONARR_KEY}" ]]; then
+        cat >> "${CONFIG_DIR}/notifiarr.conf" <<EOF
+
+[[sonarr]]
+  name = "AetherFlow Sonarr"
+  url = "http://127.0.0.1:8989"
+  api_key = "${SONARR_KEY}"
+EOF
+    fi
+
+    if [[ -n "${RADARR_KEY}" ]]; then
+        cat >> "${CONFIG_DIR}/notifiarr.conf" <<EOF
+
+[[radarr]]
+  name = "AetherFlow Radarr"
+  url = "http://127.0.0.1:7878"
+  api_key = "${RADARR_KEY}"
+EOF
+    fi
+
+    if [[ -n "${LIDARR_KEY}" ]]; then
+        cat >> "${CONFIG_DIR}/notifiarr.conf" <<EOF
+
+[[lidarr]]
+  name = "AetherFlow Lidarr"
+  url = "http://127.0.0.1:8686"
+  api_key = "${LIDARR_KEY}"
+EOF
+    fi
+
+    if [[ -n "${READARR_KEY}" ]]; then
+        cat >> "${CONFIG_DIR}/notifiarr.conf" <<EOF
+
+[[readarr]]
+  name = "AetherFlow Readarr"
+  url = "http://127.0.0.1:8787"
+  api_key = "${READARR_KEY}"
+EOF
+    fi
+
+    if [[ -n "${PROWLARR_KEY}" ]]; then
+        cat >> "${CONFIG_DIR}/notifiarr.conf" <<EOF
+
+[[prowlarr]]
+  name = "AetherFlow Prowlarr"
+  url = "http://127.0.0.1:9696"
+  api_key = "${PROWLARR_KEY}"
+EOF
+    fi
+else
+    sed -i "s|^bind_addr = .*|bind_addr = \"0.0.0.0:${APP_PORT}\"|" "${CONFIG_DIR}/notifiarr.conf" || true
+    sed -i "s|^ui_password = .*|ui_password = \"${ADMIN_USER}:${ADMIN_PASS}\"|" "${CONFIG_DIR}/notifiarr.conf" || true
+fi
+
+chmod 600 "${CONFIG_DIR}/notifiarr.conf"
+chown -R "${APP_USER}:${APP_USER}" "${CONFIG_DIR}" "${DATA_DIR}" "${LOG_DIR}"
+
+report_progress 90 "Configuring ${APP_NAME} systemd service..."
+cat > "${SERVICE_FILE}" <<EOF
+[Unit]
+Description=Notifiarr Unified Notification Client
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=${APP_USER}
+Group=${APP_USER}
+WorkingDirectory=${DATA_DIR}
+ExecStart=${BIN_PATH} -c ${CONFIG_DIR}/notifiarr.conf
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now notifiarr.service >> "${LOG_FILE}" 2>&1
+
+write_lock "${LOCK_FILE}"
+report_progress 100 "${APP_NAME} installed and running on port ${APP_PORT}"
+log "${APP_NAME} installation complete."

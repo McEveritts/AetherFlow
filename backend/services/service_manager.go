@@ -191,6 +191,10 @@ func ResolveServiceUnits(target string) []string {
 		return []string{"recyclarr", "recyclarr.timer"}
 	case "rclone", "rclone-vfs":
 		return []string{"rclone", "rclone-vfs"}
+	case "dispatcharr", "dispatcharr-celery", "dispatcharr-celerybeat":
+		return []string{"dispatcharr", "dispatcharr-celery", "dispatcharr-celerybeat"}
+	case "novnc", "novnc-xvnc":
+		return []string{"novnc", "novnc-xvnc"}
 	}
 
 	return []string{cleanTarget}

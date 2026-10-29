@@ -426,8 +426,10 @@ func extractServiceTarget(message string) string {
 		"apache2", "apache", "aetherflow-api", "aetherflow-runner",
 		"nginx", "postgres", "postgresql", "redis",
 		"qbittorrent", "qui", "autobrr", "sonarr", "radarr", "lidarr", "prowlarr",
-		"plex", "jellyfin", "emby", "threadfin", "transmission", "deluge",
+		"plex", "jellyfin", "emby", "threadfin", "dispatcharr", "transmission", "deluge",
 		"jackett", "wireguard", "tailscale", "caddy", "traefik",
+		"duplicati", "filebot", "listenarr", "notifiarr", "novnc",
+		"pyload", "quassel", "requestrr", "seedcross", "unmanic", "x2go",
 	}
 	for _, svc := range knownServices {
 		if strings.Contains(lower, svc) {

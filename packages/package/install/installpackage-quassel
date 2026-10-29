@@ -1,0 +1,70 @@
+#!/bin/bash
+#
+# [AetherFlow Install Script - Quassel]
+# Installs Quassel Core persistent distributed IRC bouncer on bare-metal Debian/Ubuntu.
+#
+set -euo pipefail
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+COMMON_SH="/opt/AetherFlow/packages/common.sh"
+if [[ -f "${COMMON_SH}" ]]; then
+    # shellcheck disable=SC1091
+    source "${COMMON_SH}"
+else
+    # shellcheck disable=SC1091
+    source "${SELF_DIR}/../../common.sh"
+fi
+
+require_root
+
+APP_NAME="quassel"
+DATA_DIR="/var/lib/quassel"
+LOG_DIR="/var/log/quassel"
+LOCK_FILE="/install/.quassel.lock"
+LISTEN_PORT="${AF_QUASSEL_PORT:-4242}"
+
+setup_log "${APP_NAME}"
+log "Starting ${APP_NAME} (quassel-core) installation..."
+report_progress 15 "Preparing ${APP_NAME} installation..."
+
+report_progress 45 "Installing quassel-core via APT..."
+apt_update
+apt_install quassel-core openssl
+
+mkdir -p "${DATA_DIR}" "${LOG_DIR}"
+if id -u quasselcore >/dev/null 2>&1; then
+    QUASSEL_USER="quasselcore"
+else
+    ensure_service_user "quasselcore" "${DATA_DIR}"
+    QUASSEL_USER="quasselcore"
+fi
+
+report_progress 75 "Generating TLS certificate and default configuration for Quassel Core..."
+if [[ ! -f "${DATA_DIR}/quasselCert.pem" ]]; then
+    openssl req -x509 -nodes -days 3650 -newkey rsa:4096 \
+        -keyout "${DATA_DIR}/quasselCert.pem" \
+        -out "${DATA_DIR}/quasselCert.pem" \
+        -subj "/CN=quassel.aether.local" >> "${LOG_FILE}" 2>&1
+    chmod 600 "${DATA_DIR}/quasselCert.pem"
+fi
+
+cat > /etc/default/quasselcore <<EOF
+LISTEN="0.0.0.0"
+PORT="${LISTEN_PORT}"
+CONFIGDIR="${DATA_DIR}"
+LOGFILE="${LOG_DIR}/quasselcore.log"
+LOGLEVEL="Info"
+EOF
+
+chown -R "${QUASSEL_USER}:${QUASSEL_USER}" "${DATA_DIR}" "${LOG_DIR}"
+
+INSTALLED_VER="$(dpkg-query -W -f='${Version}' quassel-core 2>/dev/null | cut -d- -f1 | sed 's/^[0-9]*://' || echo '0.14.0')"
+echo "${INSTALLED_VER}" > "${DATA_DIR}/.af-version"
+
+report_progress 90 "Enabling and starting quasselcore.service..."
+systemctl daemon-reload
+systemctl enable --now quasselcore.service >> "${LOG_FILE}" 2>&1
+
+write_lock "${LOCK_FILE}"
+report_progress 100 "${APP_NAME} Core installed and listening on TCP port ${LISTEN_PORT}"
+log "${APP_NAME} installation complete."

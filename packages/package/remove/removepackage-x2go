@@ -1,0 +1,41 @@
+#!/bin/bash
+#
+# [AetherFlow Remove Script - X2Go]
+#
+set -euo pipefail
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+COMMON_SH="/opt/AetherFlow/packages/common.sh"
+if [[ -f "${COMMON_SH}" ]]; then
+    # shellcheck disable=SC1091
+    source "${COMMON_SH}"
+else
+    # shellcheck disable=SC1091
+    source "${SELF_DIR}/../../common.sh"
+fi
+
+require_root
+
+APP_NAME="x2go"
+DATA_DIR="/var/lib/x2go"
+LOCK_FILE="/install/.x2go.lock"
+
+setup_log "${APP_NAME}-remove"
+log "Removing ${APP_NAME}..."
+report_progress 20 "Stopping x2goserver service..."
+
+stop_disable_service "x2goserver.service"
+systemctl daemon-reload
+
+report_progress 60 "Removing x2goserver packages..."
+apt-get remove -y x2goserver x2goserver-xsession >> "${LOG_FILE}" 2>&1 || true
+rm -f "${DATA_DIR}/.af-version"
+
+if [[ "${DELETE_DATA:-false}" == "true" ]]; then
+    log "DELETE_DATA=true: Purging ${DATA_DIR} and /etc/x2go..."
+    rm -rf "${DATA_DIR}" /etc/x2go
+fi
+
+remove_lock "${LOCK_FILE}"
+report_progress 100 "${APP_NAME} removed"
+log "${APP_NAME} removal complete."

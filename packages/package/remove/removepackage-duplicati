@@ -1,0 +1,43 @@
+#!/bin/bash
+#
+# [AetherFlow Remove Script - Duplicati]
+#
+set -euo pipefail
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+COMMON_SH="/opt/AetherFlow/packages/common.sh"
+if [[ -f "${COMMON_SH}" ]]; then
+    # shellcheck disable=SC1091
+    source "${COMMON_SH}"
+else
+    # shellcheck disable=SC1091
+    source "${SELF_DIR}/../../common.sh"
+fi
+
+require_root
+
+APP_NAME="duplicati"
+DATA_DIR="/var/lib/duplicati"
+CONFIG_DIR="/etc/duplicati"
+LOCK_FILE="/install/.duplicati.lock"
+
+setup_log "${APP_NAME}-remove"
+log "Removing ${APP_NAME}..."
+report_progress 20 "Stopping ${APP_NAME} service..."
+
+stop_disable_service "duplicati.service"
+rm -f /etc/systemd/system/duplicati.service
+systemctl daemon-reload
+
+report_progress 60 "Removing ${APP_NAME} package..."
+apt-get remove -y duplicati >> "${LOG_FILE}" 2>&1 || true
+rm -rf "${CONFIG_DIR}"
+
+if [[ "${DELETE_DATA:-false}" == "true" ]]; then
+    log "DELETE_DATA=true: Purging ${DATA_DIR}..."
+    rm -rf "${DATA_DIR}"
+fi
+
+remove_lock "${LOCK_FILE}"
+report_progress 100 "${APP_NAME} removed"
+log "${APP_NAME} removal complete."

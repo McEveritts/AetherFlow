@@ -1,0 +1,107 @@
+#!/bin/bash
+#
+# [AetherFlow Install Script - noVNC]
+# Installs noVNC HTML5 WebSocket VNC proxy paired with TigerVNC and XFCE4 desktop.
+#
+set -euo pipefail
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+COMMON_SH="/opt/AetherFlow/packages/common.sh"
+if [[ -f "${COMMON_SH}" ]]; then
+    # shellcheck disable=SC1091
+    source "${COMMON_SH}"
+else
+    # shellcheck disable=SC1091
+    source "${SELF_DIR}/../../common.sh"
+fi
+
+require_root
+
+APP_NAME="novnc"
+APP_USER="novnc"
+DATA_DIR="/var/lib/novnc"
+CONFIG_DIR="/etc/novnc"
+LOCK_FILE="/install/.novnc.lock"
+XVNC_SERVICE_FILE="/etc/systemd/system/novnc-xvnc.service"
+SERVICE_FILE="/etc/systemd/system/novnc.service"
+APP_PORT="${AF_APP_PORT:-6080}"
+VNC_PORT="5901"
+
+setup_log "${APP_NAME}"
+log "Starting ${APP_NAME} installation (target port: ${APP_PORT})..."
+report_progress 10 "Preparing ${APP_NAME} installation..."
+
+ensure_master_credentials
+ADMIN_PASS="${MASTER_PASS}"
+
+report_progress 30 "Installing noVNC, websockify, TigerVNC, and XFCE4 desktop environment..."
+apt_update
+apt_install novnc python3-websockify tigervnc-standalone-server tigervnc-common \
+    dbus-x11 xfce4 xfce4-terminal x11-xserver-utils curl jq
+
+ensure_service_user "${APP_USER}" "${DATA_DIR}"
+mkdir -p "${DATA_DIR}/.vnc" "${CONFIG_DIR}"
+
+report_progress 65 "Configuring VNC session credentials and XFCE4 startup..."
+printf '%s\n' "${ADMIN_PASS}" | vncpasswd -f > "${DATA_DIR}/.vnc/passwd"
+chmod 600 "${DATA_DIR}/.vnc/passwd"
+
+cat > "${DATA_DIR}/.vnc/xstartup" <<'EOF'
+#!/bin/sh
+unset SESSION_MANAGER
+unset DBUS_SESSION_BUS_ADDRESS
+exec dbus-launch --exit-with-session startxfce4
+EOF
+chmod 755 "${DATA_DIR}/.vnc/xstartup"
+chown -R "${APP_USER}:${APP_USER}" "${DATA_DIR}" "${CONFIG_DIR}"
+
+INSTALLED_VER="$(dpkg-query -W -f='${Version}' novnc 2>/dev/null | cut -d- -f1 | sed 's/^[0-9]*://' || echo '1.5.0')"
+echo "${INSTALLED_VER}" > "${CONFIG_DIR}/.af-version"
+
+report_progress 85 "Creating systemd units for TigerVNC (:1) and noVNC WebSocket proxy..."
+cat > "${XVNC_SERVICE_FILE}" <<EOF
+[Unit]
+Description=TigerVNC Headless X11 Desktop Server for noVNC
+After=network-online.target
+
+[Service]
+Type=simple
+User=${APP_USER}
+Group=${APP_USER}
+WorkingDirectory=${DATA_DIR}
+Environment="HOME=${DATA_DIR}"
+Environment="DISPLAY=:1"
+ExecStart=/usr/bin/Xtigervnc :1 -geometry 1920x1080 -depth 24 -localhost yes -rfbport ${VNC_PORT} -PasswordFile ${DATA_DIR}/.vnc/passwd -AlwaysShared
+ExecStartPost=/bin/sh -c 'sleep 1 && DISPLAY=:1 ${DATA_DIR}/.vnc/xstartup &'
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+cat > "${SERVICE_FILE}" <<EOF
+[Unit]
+Description=noVNC HTML5 WebSocket VNC Client Proxy
+After=network-online.target novnc-xvnc.service
+Requires=novnc-xvnc.service
+
+[Service]
+Type=simple
+User=${APP_USER}
+Group=${APP_USER}
+WorkingDirectory=${DATA_DIR}
+ExecStart=/usr/bin/websockify --web=/usr/share/novnc 0.0.0.0:${APP_PORT} 127.0.0.1:${VNC_PORT}
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now novnc-xvnc.service novnc.service >> "${LOG_FILE}" 2>&1
+
+write_lock "${LOCK_FILE}"
+report_progress 100 "${APP_NAME} installed and running on port ${APP_PORT}"
+log "${APP_NAME} installation complete."

@@ -1129,5 +1129,272 @@
     "sandbox_service_units": [
       "apache2.service"
     ]
+  },
+  "dispatcharr": {
+    "update_source": "github",
+    "update_repo": "Dispatcharr/Dispatcharr",
+    "version_command": [
+      "bash",
+      "-lc",
+      "cat /opt/dispatcharr/.af-version 2>/dev/null || git -C /opt/dispatcharr describe --tags --abbrev=0 2>/dev/null"
+    ],
+    "sandbox_profile": "python",
+    "sandbox_rw_paths": [
+      "/opt/dispatcharr",
+      "/var/lib/dispatcharr",
+      "/etc/dispatcharr",
+      "{{SERVICE_HOME}}",
+      "-/mnt",
+      "-/media",
+      "-/srv",
+      "-/downloads",
+      "-/mnt/unionfs",
+      "/tmp"
+    ],
+    "sandbox_service_units": [
+      "dispatcharr.service",
+      "dispatcharr-celery.service",
+      "dispatcharr-celerybeat.service"
+    ]
+  },
+  "duplicati": {
+    "update_source": "github",
+    "update_repo": "duplicati/duplicati",
+    "version_command": [
+      "bash",
+      "-lc",
+      "cat /var/lib/duplicati/.af-version 2>/dev/null || dpkg-query -W -f='${Version}' duplicati 2>/dev/null || /usr/bin/duplicati-cli --version 2>/dev/null"
+    ],
+    "sandbox_profile": "dotnet",
+    "sandbox_rw_paths": [
+      "/var/lib/duplicati",
+      "/etc/duplicati",
+      "{{SERVICE_HOME}}",
+      "-/mnt",
+      "-/media",
+      "-/srv",
+      "-/downloads",
+      "-/mnt/unionfs",
+      "/tmp"
+    ],
+    "sandbox_service_units": [
+      "duplicati.service"
+    ]
+  },
+  "filebot": {
+    "update_source": "github",
+    "update_repo": "filebot/filebot-node",
+    "version_command": [
+      "bash",
+      "-lc",
+      "cat /opt/filebot-node/.af-version 2>/dev/null || /usr/local/bin/filebot -version 2>/dev/null"
+    ],
+    "sandbox_profile": "java",
+    "sandbox_rw_paths": [
+      "/opt/filebot",
+      "/opt/filebot-node",
+      "/var/lib/filebot",
+      "{{SERVICE_HOME}}",
+      "-/mnt",
+      "-/media",
+      "-/srv",
+      "-/downloads",
+      "-/mnt/unionfs",
+      "/tmp"
+    ],
+    "sandbox_service_units": [
+      "filebot.service"
+    ]
+  },
+  "listenarr": {
+    "update_source": "git_tags",
+    "update_repo": "Listenarrs/Listenarr",
+    "update_repo_url": "https://github.com/Listenarrs/Listenarr.git",
+    "version_command": [
+      "bash",
+      "-lc",
+      "cat /opt/Listenarr/.af-version 2>/dev/null || strings /opt/Listenarr/Listenarr.Api.dll 2>/dev/null | grep -oE '^[0-9]+\\.[0-9]+\\.[0-9]+' | head -n1"
+    ],
+    "sandbox_profile": "dotnet",
+    "sandbox_rw_paths": [
+      "/opt/Listenarr",
+      "/var/lib/listenarr",
+      "{{SERVICE_HOME}}",
+      "-/mnt",
+      "-/media",
+      "-/srv",
+      "-/downloads",
+      "-/mnt/unionfs"
+    ],
+    "sandbox_service_units": [
+      "listenarr.service"
+    ]
+  },
+  "notifiarr": {
+    "update_source": "github",
+    "update_repo": "Notifiarr/notifiarr",
+    "version_command": [
+      "bash",
+      "-lc",
+      "cat /etc/notifiarr/.af-version 2>/dev/null || /usr/local/bin/notifiarr -v 2>/dev/null"
+    ],
+    "sandbox_profile": "go",
+    "sandbox_rw_paths": [
+      "/etc/notifiarr",
+      "/var/log/notifiarr",
+      "/var/lib/notifiarr",
+      "{{SERVICE_HOME}}"
+    ],
+    "sandbox_service_units": [
+      "notifiarr.service"
+    ]
+  },
+  "novnc": {
+    "update_source": "github",
+    "update_repo": "novnc/noVNC",
+    "version_command": [
+      "bash",
+      "-lc",
+      "cat /etc/novnc/.af-version 2>/dev/null || dpkg-query -W -f='${Version}' novnc 2>/dev/null"
+    ],
+    "sandbox_profile": "python",
+    "sandbox_rw_paths": [
+      "/etc/novnc",
+      "/var/lib/novnc",
+      "{{SERVICE_HOME}}",
+      "/tmp"
+    ],
+    "sandbox_service_units": [
+      "novnc.service",
+      "novnc-xvnc.service"
+    ]
+  },
+  "pyload": {
+    "update_source": "git_tags",
+    "update_repo": "pyload/pyload",
+    "update_repo_url": "https://github.com/pyload/pyload.git",
+    "version_command": [
+      "bash",
+      "-lc",
+      "cat /opt/pyload/.af-version 2>/dev/null || /opt/pyload/.venv/bin/pyload --version 2>/dev/null"
+    ],
+    "sandbox_profile": "python",
+    "sandbox_rw_paths": [
+      "/opt/pyload",
+      "/var/lib/pyload",
+      "{{SERVICE_HOME}}",
+      "-/mnt",
+      "-/media",
+      "-/srv",
+      "-/downloads",
+      "-/mnt/unionfs",
+      "/tmp"
+    ],
+    "sandbox_service_units": [
+      "pyload.service"
+    ]
+  },
+  "quassel": {
+    "update_source": "apt",
+    "update_package": "quassel-core",
+    "version_command": [
+      "bash",
+      "-lc",
+      "quasselcore --version 2>/dev/null | head -n1 || dpkg-query -W -f='${Version}' quassel-core 2>/dev/null"
+    ],
+    "sandbox_profile": "native",
+    "sandbox_rw_paths": [
+      "/var/lib/quassel",
+      "/var/log/quassel",
+      "{{SERVICE_HOME}}"
+    ],
+    "sandbox_service_units": [
+      "quasselcore.service"
+    ]
+  },
+  "requestrr": {
+    "update_source": "github",
+    "update_repo": "thomst08/requestrr",
+    "version_command": [
+      "bash",
+      "-lc",
+      "cat /opt/requestrr/.af-version 2>/dev/null || strings /opt/requestrr/Requestrr.WebApi.dll 2>/dev/null | grep -oE '^[0-9]+\\.[0-9]+\\.[0-9]+' | head -n1"
+    ],
+    "sandbox_profile": "dotnet",
+    "sandbox_rw_paths": [
+      "/opt/requestrr",
+      "/var/lib/requestrr",
+      "{{SERVICE_HOME}}",
+      "-/mnt/unionfs"
+    ],
+    "sandbox_service_units": [
+      "requestrr.service"
+    ]
+  },
+  "seedcross": {
+    "update_source": "git_tags",
+    "update_repo": "ccf-2012/seedcross",
+    "update_repo_url": "https://github.com/ccf-2012/seedcross.git",
+    "version_command": [
+      "bash",
+      "-lc",
+      "cat /opt/seedcross/.af-version 2>/dev/null || git -C /opt/seedcross rev-parse --short HEAD 2>/dev/null"
+    ],
+    "sandbox_profile": "python",
+    "sandbox_rw_paths": [
+      "/opt/seedcross",
+      "/var/lib/seedcross",
+      "{{SERVICE_HOME}}",
+      "-/mnt",
+      "-/media",
+      "-/srv",
+      "-/downloads",
+      "-/mnt/unionfs"
+    ],
+    "sandbox_service_units": [
+      "seedcross.service"
+    ]
+  },
+  "unmanic": {
+    "update_source": "github",
+    "update_repo": "Unmanic/unmanic",
+    "version_command": [
+      "bash",
+      "-lc",
+      "cat /opt/unmanic/.af-version 2>/dev/null || /opt/unmanic/.venv/bin/unmanic --version 2>/dev/null"
+    ],
+    "sandbox_profile": "python",
+    "sandbox_rw_paths": [
+      "/opt/unmanic",
+      "/var/lib/unmanic",
+      "{{SERVICE_HOME}}",
+      "-/mnt",
+      "-/media",
+      "-/srv",
+      "-/downloads",
+      "-/mnt/unionfs",
+      "/tmp"
+    ],
+    "sandbox_service_units": [
+      "unmanic.service"
+    ]
+  },
+  "x2go": {
+    "update_source": "apt",
+    "update_package": "x2goserver",
+    "version_command": [
+      "bash",
+      "-lc",
+      "x2goversion 2>/dev/null | head -n1 || dpkg-query -W -f='${Version}' x2goserver 2>/dev/null"
+    ],
+    "sandbox_profile": "privileged",
+    "sandbox_rw_paths": [
+      "/var/lib/x2go",
+      "/etc/x2go",
+      "/tmp"
+    ],
+    "sandbox_service_units": [
+      "x2goserver.service"
+    ]
   }
 }

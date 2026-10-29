@@ -16,15 +16,15 @@ The AetherMarketplace is your portal to extending the capabilities of your infra
 AetherFlow manages a wide range of services across multiple categories.
 
 ### Media & Downloaders
-- **Video**: Plex, Jellyfin, Emby, Threadfin, Tautulli, Overseerr.
-- **Automation (The Arrs)**: Sonarr, Radarr, Lidarr, Bazarr, Prowlarr, Readarr.
-- **Downloaders**: qBittorrent, Qui, Autobrr, Flood, Deluge, Transmission, Sabnzbd, NZBGet, rTorrent, ruTorrent.
+- **Video & IPTV**: Plex, Jellyfin, Emby, Dispatcharr, Threadfin, Tautulli, Overseerr, Jellyseerr, Requestrr, FileBot, Unmanic.
+- **Automation (The Arrs)**: Sonarr, Radarr, Lidarr, Readarr, Listenarr, Bazarr, Prowlarr, Notifiarr.
+- **Downloaders**: qBittorrent, Qui, Autobrr, Flood, SeedCross, pyLoad, Deluge, Transmission, Sabnzbd, NZBGet, rTorrent, ruTorrent.
 
 ### System & Utilities
-- **Observability**: Netdata, Grafana, Prometheus.
-- **File Management**: Nextcloud, FileBrowser, Syncthing, Rclone.
-- **Security**: Vaultwarden, Fail2Ban, CSF, Wireguard.
-- **Core**: Gitea, Portainer, HomeAssistant, Pi-hole.
+- **Observability**: Netdata, Grafana, Prometheus, Uptime Kuma, Scrutiny.
+- **File & Backup Management**: Nextcloud, FileBrowser, Syncthing, Duplicati, Rclone, MergerFS, Cloudplow, Paperless-ngx.
+- **Security & Network**: Vaultwarden, Fail2Ban, WireGuard, Pi-hole, AdGuard Home, The Lounge, ZNC, Quassel.
+- **Core & Remote Desktop**: Gitea, Home Assistant, n8n, Organizr, noVNC, X2Go.
 
 > [!NOTE]
 > The availability of certain applications depends on your host OS and architecture. AetherFlow performs a compatibility check before allowing an installation.
