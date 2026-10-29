@@ -173,7 +173,8 @@ _harden_permissions() {
 			chmod 755 "${af_root}/backend/aetherflow-api"
 		fi
 
-		# Node binaries in node_modules/.bin need execute
+		# Node binaries in node_modules/.bin (including workspace root) need execute
+		chmod 755 "${af_root}"/node_modules/.bin/* "${af_root}"/frontend/node_modules/.bin/* 2>/dev/null || true
 		if [[ -d "${af_root}/frontend/node_modules/.bin" ]]; then
 			find "${af_root}/frontend/node_modules/.bin" -type f -exec chmod 755 {} + 2>/dev/null || true
 			find "${af_root}/frontend/node_modules/.bin" -type l -exec chmod 755 {} + 2>/dev/null || true

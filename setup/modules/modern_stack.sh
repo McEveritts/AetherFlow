@@ -121,6 +121,7 @@ _build_modern_stack() {
                 exit 1
             fi
 
+            chmod 755 /opt/AetherFlow/node_modules/.bin/* /opt/AetherFlow/frontend/node_modules/.bin/* 2>/dev/null || true
             echo "[$(date '+%Y-%m-%d %H:%M:%S')] Starting Next.js static export build ..." >> "${frontend_build_log}" 2>&1
             if ! NEXT_STATIC_EXPORT=1 npm run build >> "${frontend_build_log}" 2>&1; then
                 echo "[FAIL] npm run build failed. See ${frontend_build_log}" >&2
