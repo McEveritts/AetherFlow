@@ -6,12 +6,18 @@ kernel_version_min=4.9
 function version_gt() { test "$(echo "$@" | tr " " "\n" | sort -V | head -n 1)" != "$1"; }
 if version_gt "$kernel_version" "$kernel_version_min"; then
   echo "Your kernel version is greater than 4.9, directly setting TCP BBR..."
+  modprobe tcp_bbr 2>/dev/null || true
+  mkdir -p /etc/sysctl.d
+  cat >/etc/sysctl.d/99-aetherflow-bbr.conf <<EOF
+net.core.default_qdisc=fq
+net.ipv4.tcp_congestion_control=bbr
+EOF
   [ ! -f /etc/sysctl.conf ] && touch /etc/sysctl.conf
   sed -i '/net.core.default_qdisc.*/d' /etc/sysctl.conf
   sed -i '/net.ipv4.tcp_congestion_control.*/d' /etc/sysctl.conf
   echo "net.core.default_qdisc=fq" >>/etc/sysctl.conf
   echo "net.ipv4.tcp_congestion_control=bbr" >>/etc/sysctl.conf
-  sysctl -p
+  sysctl --system >/dev/null 2>&1 || sysctl -p >/dev/null 2>&1 || true
   echo "Finish! "
 else
   [ $# -gt 1 ] && [ "$1" == '-f' ] && tmpKernelVer="$2" || tmpKernelVer='v4.14.32';

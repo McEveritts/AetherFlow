@@ -42,7 +42,7 @@ function _repos() {
 function _updates() {
 	if type _ensure_distro_vars &>/dev/null; then _ensure_distro_vars; fi
 	if [[ ${DISTRO} == Debian ]]; then
-		if [[ "${OS_ID:-}" != "kali" && "${CODENAME:-}" != "kali-rolling" ]]; then
+		if [[ "${OS_ID:-}" != "kali" && "${CODENAME:-}" != "kali-rolling" && ! -f /etc/apt/sources.list.d/debian.sources ]]; then
 			\cp -f "${local_setup}templates/apt.sources/debian.template" /etc/apt/sources.list
 			sed -i "s/RELEASE/${CODENAME}/g" /etc/apt/sources.list
 		fi
@@ -82,15 +82,11 @@ function _depends() {
 	prefetch_pid=$!
 
 	if [[ ${DISTRO} == Debian ]]; then
-		local stat_pkg="dstat"
-		if [[ "${CODENAME}" =~ ("trixie"|"kali-rolling") || "${VERSION_ID}" == "13" ]] || ! apt-cache show dstat >/dev/null 2>&1; then
-			stat_pkg="dool"
-		fi
-		_af_apt_install fail2ban bc build-essential ed sudo screen zip irssi unzip nano bwm-ng htop nethogs iotop git dos2unix subversion "${stat_pkg}" automake make mktorrent libtool libcppunit-dev libssl-dev pkg-config libxml2-dev libcurl4-openssl-dev libsigc++-2.0-dev apache2-utils autoconf cron curl libapache2-mod-fcgid libapache2-mod-php"${PHP_VER}" libncurses-dev yasm pcre2-utils apache2 php-net-socket php-memcached memcached php"${PHP_VER}" php"${PHP_VER}"-cli php"${PHP_VER}"-curl php"${PHP_VER}"-fpm php"${PHP_VER}"-gd php"${PHP_VER}"-mbstring php"${PHP_VER}"-msgpack php"${PHP_VER}"-mysql php"${PHP_VER}"-opcache php"${PHP_VER}"-xml php"${PHP_VER}"-zip python3-lxml fontconfig comerr-dev ca-certificates libfontconfig1-dev libdbd-mysql-perl libdbi-perl libfontconfig1 mediainfo ifstat checkinstall dtach libarchive-zip-perl libnet-ssleay-perl ca-certificates-java libxslt1-dev libxml2 libffi-dev python3-pip python3-dev libhtml-parser-perl libxml-libxml-perl libjson-perl libjson-xs-perl libxml-libxslt-perl zlib1g-dev vnstat vnstati openvpn iptables iptables-persistent xz-utils || {
+		_af_apt_install fail2ban bc build-essential ed sudo screen zip irssi unzip nano bwm-ng htop nethogs iotop git dos2unix subversion automake make mktorrent libtool libcppunit-dev libssl-dev pkg-config libxml2-dev libcurl4-openssl-dev libsigc++-2.0-dev apache2-utils autoconf cron curl libapache2-mod-fcgid libapache2-mod-php"${PHP_VER}" libncurses-dev yasm pcre2-utils apache2 php-net-socket php-memcached memcached php"${PHP_VER}" php"${PHP_VER}"-cli php"${PHP_VER}"-curl php"${PHP_VER}"-fpm php"${PHP_VER}"-gd php"${PHP_VER}"-mbstring php"${PHP_VER}"-msgpack php"${PHP_VER}"-mysql php"${PHP_VER}"-opcache php"${PHP_VER}"-xml php"${PHP_VER}"-zip python3-lxml fontconfig comerr-dev ca-certificates libfontconfig1-dev libdbd-mysql-perl libdbi-perl libfontconfig1 mediainfo ifstat checkinstall dtach libarchive-zip-perl libnet-ssleay-perl ca-certificates-java libxslt1-dev libxml2 libffi-dev python3-pip python3-dev libhtml-parser-perl libxml-libxml-perl libjson-perl libjson-xs-perl libxml-libxslt-perl zlib1g-dev vnstat vnstati openvpn iptables iptables-persistent xz-utils || {
 			wait "${prefetch_pid}" 2>/dev/null || true
 			return 1
 		}
-		for opt_pkg in speedtest-cli rar unrar ttf-mscorefonts-installer; do
+		for opt_pkg in dool dstat speedtest-cli rar unrar ttf-mscorefonts-installer; do
 			_af_apt_install "${opt_pkg}" >>"${OUTTO}" 2>&1 || true
 		done
 	elif [[ ${DISTRO} == Ubuntu ]]; then
@@ -183,21 +179,13 @@ function _skel() {
 	# mkdir -p /usr/share/GeoIP >>"${OUTTO}" 2>&1
 	# rm -rf GeoLiteCity.dat.gz
 	# mv GeoLiteCity.dat /usr/share/GeoIP/GeoIPCity.dat >>"${OUTTO}" 2>&1
-	(
-		echo y
-		echo o conf prerequisites_policy follow
-		echo o conf commit
-	) >/dev/null 2>&1 | cpan Digest::SHA1 >>"${OUTTO}" 2>&1
-	(
-		echo y
-		echo o conf prerequisites_policy follow
-		echo o conf commit
-	) >/dev/null 2>&1 | cpan Digest::SHA >>"${OUTTO}" 2>&1
-	if [[ ${DELUGE} != NO ]]; then
+	_af_apt_install libdigest-sha-perl >>"${OUTTO}" 2>&1 || true
+	if [[ ${DELUGE:-YES} != NO ]]; then
 		mkdir -p /etc/skel/.config/deluge/plugins/
-		cd /etc/skel/.config/deluge/plugins/
-		wget -q https://github.com/ratanakvlun/deluge-ltconfig/releases/download/v0.3.1/ltConfig-0.3.1-py2.7.egg
+		cd /etc/skel/.config/deluge/plugins/ || true
+		wget -q https://github.com/ratanakvlun/deluge-ltconfig/releases/download/v0.3.1/ltConfig-0.3.1-py2.7.egg || true
 	fi
+	cd /root || true
 }
 
 
