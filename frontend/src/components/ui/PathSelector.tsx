@@ -135,8 +135,22 @@ export default function PathSelector({ value, onChange, placeholder = "Enter abs
               )}
               
               {directories.length === 0 ? (
-                <li className="px-4 py-3 text-xs text-slate-500 text-center">
-                  No subdirectories found or Access Denied
+                <li className="px-4 py-3 text-xs text-slate-400">
+                  <div className="text-center text-slate-500 mb-2">
+                    {value === '/' ? 'Select an allowed root directory:' : 'No subdirectories found in this path'}
+                  </div>
+                  <div className="flex flex-wrap gap-1.5 justify-center">
+                    {['/home', '/mnt', '/opt/AetherFlow', '/var/lib/aetherflow'].map((root) => (
+                      <button
+                        key={root}
+                        type="button"
+                        onClick={() => onChange(root)}
+                        className="px-2.5 py-1 rounded-lg bg-white/[0.05] hover:bg-indigo-500/20 border border-white/[0.08] hover:border-indigo-500/40 text-slate-300 hover:text-indigo-200 font-mono text-[11px] transition-colors"
+                      >
+                        {root}
+                      </button>
+                    ))}
+                  </div>
                 </li>
               ) : (
                 directories.map((dir) => (

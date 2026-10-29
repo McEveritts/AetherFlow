@@ -39,13 +39,8 @@ case "$ARCH" in
 esac
 
 report_progress 35 "Resolving latest speedtest-go release..."
-LS_JSON="$(curl -fsSL https://api.github.com/repos/librespeed/speedtest-go/releases/latest 2>/dev/null || true)"
-LS_VERSION="$(printf '%s' "$LS_JSON" | grep -oP '"tag_name":\s*"v\K[^"]+' | head -1 || true)"
-LS_VERSION="${LS_VERSION:-1.1.6}"
-LS_URL="$(printf '%s' "$LS_JSON" | grep -oP '"browser_download_url":\s*"\K[^"]*speedtest-go_'${LS_VERSION}'_linux_'${LS_ARCH}'\.tar\.gz' | head -1 || true)"
-if [[ -z "$LS_URL" ]]; then
-    LS_URL="https://github.com/librespeed/speedtest-go/releases/download/v${LS_VERSION}/speedtest-go_${LS_VERSION}_linux_${LS_ARCH}.tar.gz"
-fi
+LS_VERSION="$(github_latest_tag "librespeed/speedtest-go" "1.1.6")"
+LS_URL="https://github.com/librespeed/speedtest-go/releases/download/v${LS_VERSION}/speedtest-go_${LS_VERSION}_linux_${LS_ARCH}.tar.gz"
 
 report_progress 60 "Downloading and extracting LibreSpeed ${LS_VERSION}..."
 TMP_TAR=$(mktemp /tmp/librespeed-XXXXXX.tar.gz)
@@ -65,7 +60,8 @@ else
 fi
 printf '%s\n' "${LS_VERSION#v}" > /opt/librespeed/.af-version
 
-cat <<'EOF' > /opt/librespeed/settings.toml
+LS_STATS_PASS="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "${MASTER_PASS}")"
+cat <<EOF > /opt/librespeed/settings.toml
 # LibreSpeed speedtest-go configuration
 bind_address="0.0.0.0"
 listen_port=8988
@@ -75,7 +71,7 @@ server_lat=0
 server_lng=0
 ipinfo_api_key=""
 assets_path=""
-statistics_password="PASSWORD"
+statistics_password=${LS_STATS_PASS}
 redact_ip_addresses=false
 database_type="bolt"
 database_hostname=""
@@ -90,6 +86,7 @@ EOF
 
 chown -R librespeed:librespeed /opt/librespeed
 chmod 755 /opt/librespeed
+chmod 640 /opt/librespeed/settings.toml
 
 report_progress 85 "Configuring and starting librespeed.service on port 8988..."
 cat <<'EOF' > /etc/systemd/system/librespeed.service

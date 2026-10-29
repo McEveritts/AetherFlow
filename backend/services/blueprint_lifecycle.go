@@ -255,10 +255,18 @@ func ApplyBlueprintAppConfig(bp *AppBlueprint, activePort int) (string, bool, er
 			}
 		}
 		if bp.MutatorType == "ini" && configPath != "" && len(settings) > 0 {
-			if bp.AppName == "qbittorrent" && IsRunnerAvailable() {
+			stoppedUnits := []string(nil)
+			if bp.AppName == "qbittorrent" && IsRunnerAvailable() && isConfigPathWritable(configPath) {
 				for _, unit := range ResolveServiceUnits(bp.AppName) {
-					_ = ControlService(unit, "stop")
+					if err := ControlService(unit, "stop"); err == nil {
+						stoppedUnits = append(stoppedUnits, unit)
+					}
 				}
+				defer func() {
+					for _, unit := range stoppedUnits {
+						_ = ControlService(unit, "start")
+					}
+				}()
 			}
 			iniMut := NewINIMutator(configPath)
 			_ = iniMut.Backup()
@@ -284,6 +292,25 @@ func ApplyBlueprintAppConfig(bp *AppBlueprint, activePort int) (string, bool, er
 	}
 
 	return configPath, applied, nil
+}
+
+// isConfigPathWritable checks whether the current process has permission to write to configPath or its parent directory.
+func isConfigPathWritable(configPath string) bool {
+	if configPath == "" {
+		return false
+	}
+	if f, err := os.OpenFile(configPath, os.O_WRONLY|os.O_APPEND, 0600); err == nil {
+		_ = f.Close()
+		return true
+	}
+	dir := filepath.Dir(configPath)
+	if f, err := os.CreateTemp(dir, ".af-write-check-*"); err == nil {
+		name := f.Name()
+		_ = f.Close()
+		_ = os.Remove(name)
+		return true
+	}
+	return false
 }
 
 // detectPrimaryLANIP resolves the server's primary non-loopback IPv4 address for LAN DNS records.

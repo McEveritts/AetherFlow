@@ -3,6 +3,8 @@ package api
 import (
 	"context"
 	"net/http"
+	"os"
+	"strings"
 	"time"
 
 	"aetherflow/db"
@@ -26,17 +28,26 @@ type MediaFlowQueueItem struct {
 
 // GetMediaFlowQueue fetches the current items requested for approval or running
 func GetMediaFlowQueue(c *gin.Context) {
-	rows, err := db.DB.Query("SELECT id, file_path, status, original_codec, original_size, new_codec, new_size, error_log, created_at FROM mediaflow_queue ORDER BY created_at DESC LIMIT 100")
+	rows, err := db.DB.Query(`
+		SELECT id, file_path, status,
+		       COALESCE(original_codec, ''), COALESCE(original_size, 0),
+		       COALESCE(new_codec, ''), COALESCE(new_size, 0),
+		       COALESCE(error_log, ''), COALESCE(created_at, '')
+		FROM mediaflow_queue
+		ORDER BY created_at DESC LIMIT 100
+	`)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch queue"})
 		return
 	}
 	defer rows.Close()
 
-	var items []MediaFlowQueueItem
+	items := make([]MediaFlowQueueItem, 0)
 	for rows.Next() {
 		var i MediaFlowQueueItem
-		rows.Scan(&i.ID, &i.FilePath, &i.Status, &i.OriginalCodec, &i.OriginalSize, &i.NewCodec, &i.NewSize, &i.ErrorLog, &i.CreatedAt)
+		if scanErr := rows.Scan(&i.ID, &i.FilePath, &i.Status, &i.OriginalCodec, &i.OriginalSize, &i.NewCodec, &i.NewSize, &i.ErrorLog, &i.CreatedAt); scanErr != nil {
+			continue
+		}
 		items = append(items, i)
 	}
 
@@ -53,14 +64,21 @@ func TriggerScan(c *gin.Context) {
 		return
 	}
 
+	cleanDir := strings.TrimSpace(request.Directory)
+	info, statErr := os.Stat(cleanDir)
+	if statErr != nil || !info.IsDir() {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Directory does not exist or is not accessible: " + cleanDir})
+		return
+	}
+
 	// Run passively in background so we don't block API response
 	go func(dir string) {
 		ctx, cancel := context.WithTimeout(context.Background(), 24*time.Hour)
 		defer cancel()
 		services.ScanLibrary(ctx, dir)
-	}(request.Directory)
+	}(cleanDir)
 
-	c.JSON(http.StatusAccepted, gin.H{"message": "Scan initiated in background"})
+	c.JSON(http.StatusAccepted, gin.H{"message": "Scan initiated in background", "directory": cleanDir})
 }
 
 // ApproveItem flips status to APPROVED moving the item into the passive execution list

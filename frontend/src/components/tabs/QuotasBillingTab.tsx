@@ -167,7 +167,7 @@ export default function QuotasBillingTab() {
     return (
         <div className="space-y-6 w-full animate-fade-in text-slate-100">
             {/* Header Banner */}
-            <div className="glass-card p-6 md:p-8 rounded-3xl relative overflow-hidden border border-white/10">
+            <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-5 md:p-6 relative overflow-hidden">
                 <div className="absolute top-0 right-0 w-96 h-96 bg-gradient-to-bl from-indigo-500/10 via-cyan-500/5 to-transparent rounded-full blur-3xl pointer-events-none" />
                 <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 relative z-10">
                     <div className="flex items-center gap-4">
@@ -250,7 +250,7 @@ export default function QuotasBillingTab() {
             {/* SECTION 1: DISK QUOTAS */}
             {activeSection === 'quotas' && (
                 <div className="space-y-4">
-                    <div className="glass-card rounded-2xl border border-white/10 overflow-hidden divide-y divide-white/5">
+                    <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl overflow-hidden divide-y divide-white/[0.04]">
                         {quotasLoading ? (
                             <div className="p-8 text-center text-slate-400 text-sm flex items-center justify-center gap-3">
                                 <RefreshCw size={18} className="animate-spin text-indigo-400" />
@@ -351,7 +351,7 @@ export default function QuotasBillingTab() {
             {/* SECTION 2: BILLING WEBHOOK AUDIT LOG */}
             {activeSection === 'webhooks' && (
                 <div className="space-y-4">
-                    <div className="glass-card rounded-2xl border border-white/10 overflow-hidden divide-y divide-white/5">
+                    <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl overflow-hidden divide-y divide-white/[0.04]">
                         {webhooksLoading ? (
                             <div className="p-8 text-center text-slate-400 text-sm flex items-center justify-center gap-3">
                                 <RefreshCw size={18} className="animate-spin text-indigo-400" />
@@ -442,7 +442,7 @@ export default function QuotasBillingTab() {
             {/* MODAL: EDIT DISK QUOTA */}
             {selectedQuota && (
                 <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4">
-                    <div className="glass-card w-full max-w-md p-6 rounded-3xl border border-white/10 shadow-[0_20px_60px_rgba(0,0,0,0.8)] relative animate-fade-in">
+                    <div className="rounded-2xl border border-white/[0.08] bg-slate-900/95 backdrop-blur-2xl w-full max-w-md p-6 shadow-2xl relative animate-fade-in">
                         <div className="flex items-center justify-between pb-4 border-b border-white/10 mb-5">
                             <h3 className="text-base font-bold text-white flex items-center gap-2">
                                 <Edit3 size={18} className="text-indigo-400" /> Update Disk Quota

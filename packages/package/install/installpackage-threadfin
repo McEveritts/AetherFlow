@@ -39,9 +39,7 @@ case "$ARCH" in
 esac
 
 report_progress 40 "Resolving latest Threadfin release (${TF_ASSET})..."
-TF_JSON="$(curl -fsSL https://api.github.com/repos/Threadfin/Threadfin/releases/latest 2>/dev/null || true)"
-TF_TAG="$(printf '%s' "$TF_JSON" | grep -oP '"tag_name":\s*"\K[^"]+' | head -1 || true)"
-TF_TAG="${TF_TAG:-1.2.37}"
+TF_TAG="$(github_latest_tag "Threadfin/Threadfin" "1.2.37" "false")"
 TF_URL="https://github.com/Threadfin/Threadfin/releases/download/${TF_TAG}/${TF_ASSET}"
 
 report_progress 65 "Downloading and installing Threadfin ${TF_TAG}..."

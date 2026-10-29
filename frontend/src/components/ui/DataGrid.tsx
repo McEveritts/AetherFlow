@@ -71,11 +71,11 @@ export function DataGrid<TData, TValue>({
   return (
     <div
       ref={parentRef}
-      className={`obs-scroller overflow-auto rounded-2xl glass-panel border border-indigo-500/20 shadow-2xl min-w-0 max-w-full ${className}`}
+      className={`obs-scroller overflow-auto rounded-2xl bg-slate-900/40 backdrop-blur-xl border border-white/[0.08] shadow-sm min-w-0 max-w-full ${className}`}
       style={{ maxHeight: '600px' }}
     >
       <table className="w-full text-left border-collapse min-w-0">
-        <thead className="sticky top-0 z-20 bg-black/85 backdrop-blur-md border-b border-white/10 shadow-sm">
+        <thead className="sticky top-0 z-20 bg-slate-950/90 backdrop-blur-md border-b border-white/[0.08] shadow-sm">
           {table.getHeaderGroups().map((headerGroup) => (
             <tr key={headerGroup.id}>
               {headerGroup.headers.map((header) => {

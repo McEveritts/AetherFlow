@@ -32,14 +32,8 @@ case "$ARCH" in
 esac
 
 report_progress 30 "Resolving latest Emby release for ${EMBY_ARCH}..."
-EMBY_JSON="$(curl -fsSL https://api.github.com/repos/MediaBrowser/Emby.Releases/releases/latest 2>/dev/null || true)"
-EMBY_VERSION="$(printf '%s' "$EMBY_JSON" | grep -oP '"tag_name":\s*"\K[^"]+' | head -1 || true)"
-EMBY_VERSION="${EMBY_VERSION:-4.8.10.0}"
-EMBY_URL="$(printf '%s' "$EMBY_JSON" | grep -oP '"browser_download_url":\s*"\K[^"]*emby-server-deb_[^"]*_'${EMBY_ARCH}'\.deb' | head -1 || true)"
-
-if [[ -z "$EMBY_URL" ]]; then
-    EMBY_URL="https://github.com/MediaBrowser/Emby.Releases/releases/download/${EMBY_VERSION}/emby-server-deb_${EMBY_VERSION}_${EMBY_ARCH}.deb"
-fi
+EMBY_VERSION="$(github_latest_tag "MediaBrowser/Emby.Releases" "4.8.10.0")"
+EMBY_URL="https://github.com/MediaBrowser/Emby.Releases/releases/download/${EMBY_VERSION}/emby-server-deb_${EMBY_VERSION}_${EMBY_ARCH}.deb"
 
 report_progress 50 "Downloading Emby Server ${EMBY_VERSION}..."
 TMP_DEB=$(mktemp /tmp/emby-XXXXXX.deb)

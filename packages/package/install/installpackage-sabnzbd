@@ -32,13 +32,8 @@ fi
 mkdir -p /opt/SABnzbd /var/lib/sabnzbd
 
 report_progress 35 "Resolving latest SABnzbd release..."
-SAB_JSON="$(curl -fsSL https://api.github.com/repos/sabnzbd/sabnzbd/releases/latest 2>/dev/null || true)"
-SAB_VERSION="$(printf '%s' "$SAB_JSON" | grep -oP '"tag_name":\s*"\K[^"]+' | head -1 || true)"
-SAB_VERSION="${SAB_VERSION:-4.3.3}"
-SAB_URL="$(printf '%s' "$SAB_JSON" | grep -oP '"browser_download_url":\s*"\K[^"]*-src\.tar\.gz' | head -1 || true)"
-if [[ -z "$SAB_URL" ]]; then
-    SAB_URL="https://github.com/sabnzbd/sabnzbd/releases/download/${SAB_VERSION}/SABnzbd-${SAB_VERSION}-src.tar.gz"
-fi
+SAB_VERSION="$(github_latest_tag "sabnzbd/sabnzbd" "4.3.3")"
+SAB_URL="https://github.com/sabnzbd/sabnzbd/releases/download/${SAB_VERSION}/SABnzbd-${SAB_VERSION}-src.tar.gz"
 
 report_progress 55 "Downloading and extracting SABnzbd ${SAB_VERSION}..."
 TMP_TAR=$(mktemp /tmp/sabnzbd-XXXXXX.tar.gz)

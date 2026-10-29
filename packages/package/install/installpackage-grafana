@@ -43,8 +43,8 @@ if [[ -f /etc/grafana/grafana.ini ]]; then
 import sys, re
 path, user, pw = sys.argv[1:4]
 txt = open(path, "r", encoding="utf-8", errors="ignore").read()
-txt = re.sub(r"(?m)^;?admin_user\s*=.*$", f"admin_user = {user}", txt)
-txt = re.sub(r"(?m)^;?admin_password\s*=.*$", f"admin_password = {pw}", txt)
+txt = re.sub(r"(?m)^;?admin_user\s*=.*$", lambda _: f"admin_user = {user}", txt)
+txt = re.sub(r"(?m)^;?admin_password\s*=.*$", lambda _: f"admin_password = {pw}", txt)
 open(path, "w", encoding="utf-8").write(txt)
 PYEOF
 fi

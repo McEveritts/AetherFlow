@@ -39,12 +39,8 @@ case "$ARCH" in
 esac
 
 report_progress 35 "Downloading Prowlarr (${PROWLARR_ARCH})..."
-PROWLARR_JSON="$(curl -fsSL https://api.github.com/repos/Prowlarr/Prowlarr/releases/latest 2>/dev/null || true)"
-PROWLARR_VERSION="$(printf '%s' "$PROWLARR_JSON" | grep -oP '"tag_name":\s*"v?\K[^"]+' | head -1 || true)"
-PROWLARR_URL="$(printf '%s' "$PROWLARR_JSON" | grep -oP '"browser_download_url":\s*"\K[^"]*linux-core-'${PROWLARR_ARCH}'\.tar\.gz' | head -1 || true)"
-if [[ -z "$PROWLARR_URL" ]]; then
-    PROWLARR_URL="https://prowlarr.servarr.com/v1/update/master/updatefile?os=linux&runtime=netcore&arch=${PROWLARR_ARCH}"
-fi
+PROWLARR_VERSION="$(github_latest_tag "Prowlarr/Prowlarr" "1.28.2.4885")"
+PROWLARR_URL="https://prowlarr.servarr.com/v1/update/master/updatefile?os=linux&runtime=netcore&arch=${PROWLARR_ARCH}"
 
 TMP_TAR=$(mktemp /tmp/prowlarr-XXXXXX.tar.gz)
 curl -fsSL "$PROWLARR_URL" -o "$TMP_TAR" >> "$LOGFILE" 2>&1

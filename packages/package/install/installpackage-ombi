@@ -39,14 +39,8 @@ case "$ARCH" in
 esac
 
 report_progress 35 "Resolving latest Ombi release for ${OMBI_ARCH}..."
-OMBI_JSON="$(curl -fsSL https://api.github.com/repos/Ombi-app/Ombi/releases/latest 2>/dev/null || true)"
-OMBI_VERSION="$(printf '%s' "$OMBI_JSON" | grep -oP '"tag_name":\s*"v?\K[^"]+' | head -1 || true)"
-OMBI_VERSION="${OMBI_VERSION:-4.43.5}"
-OMBI_URL="$(printf '%s' "$OMBI_JSON" | grep -oP '"browser_download_url":\s*"\K[^"]*'${OMBI_ARCH}'\.tar\.gz' | head -1 || true)"
-
-if [[ -z "$OMBI_URL" ]]; then
-    OMBI_URL="https://github.com/Ombi-app/Ombi/releases/download/v${OMBI_VERSION}/${OMBI_ARCH}.tar.gz"
-fi
+OMBI_VERSION="$(github_latest_tag "Ombi-app/Ombi" "4.43.5")"
+OMBI_URL="https://github.com/Ombi-app/Ombi/releases/download/v${OMBI_VERSION}/${OMBI_ARCH}.tar.gz"
 
 report_progress 60 "Downloading and extracting Ombi ${OMBI_VERSION}..."
 TMP_TAR=$(mktemp /tmp/ombi-XXXXXX.tar.gz)

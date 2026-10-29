@@ -101,11 +101,10 @@ export default function OIDCClientsTab() {
     if (isLoading && !data) {
         return (
             <div className="space-y-4">
-                <h2 className="text-2xl font-bold text-slate-100 tracking-tight">OIDC Clients</h2>
-                <div className="glass-card p-8 rounded-2xl border border-white/[0.08]">
+                <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-8">
                     <div className="flex items-center justify-center gap-3 text-slate-400">
                         <div className="w-5 h-5 border-2 border-indigo-500/30 border-t-indigo-500 rounded-full animate-spin"></div>
-                        <span>Loading clients...</span>
+                        <span className="text-sm">Loading clients...</span>
                     </div>
                 </div>
             </div>
@@ -116,8 +115,7 @@ export default function OIDCClientsTab() {
     if (error) {
         return (
             <div className="space-y-4">
-                <h2 className="text-2xl font-bold text-slate-100 tracking-tight">OIDC Clients</h2>
-                <div className="glass-card p-8 rounded-2xl border border-red-500/20 bg-red-500/5 text-center">
+                <div className="rounded-2xl border border-red-500/20 bg-red-500/5 backdrop-blur-xl p-8 text-center">
                     <Shield className="w-10 h-10 text-red-400 mx-auto mb-3" />
                     <p className="text-red-400 font-medium">Failed to load OIDC clients</p>
                 </div>
@@ -128,25 +126,25 @@ export default function OIDCClientsTab() {
     return (
         <div className="space-y-6">
             {/* Header */}
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-2 border-b border-white/[0.06]">
                 <div>
-                    <h2 className="text-2xl font-bold text-slate-100 tracking-tight">OIDC Clients</h2>
-                    <p className="text-sm text-slate-400 mt-1">
+                    <h3 className="text-base font-semibold text-slate-100">Client Applications</h3>
+                    <p className="text-xs text-slate-400 mt-0.5">
                         Manage OAuth2/OIDC client applications registered with AetherFlow as an identity provider.
                     </p>
                 </div>
                 <button
                     onClick={() => setShowCreate(true)}
-                    className="obs-touch-target-standard obs-gpu-120hz-interactive flex items-center gap-2 px-4 py-2.5 bg-indigo-500/20 hover:bg-indigo-500/30 text-indigo-300 rounded-xl text-sm font-medium border border-indigo-500/20 transition-all hover:shadow-[0_0_12px_rgba(99,102,241,0.15)] self-start sm:self-auto"
+                    className="flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-bold transition-all shadow-lg shadow-indigo-500/20 self-start sm:self-auto"
                 >
-                    <Plus size={16} />
+                    <Plus size={15} />
                     New Client
                 </button>
             </div>
 
             {/* Client List */}
             {clients.length === 0 ? (
-                <div className="glass-card p-12 rounded-2xl border border-white/[0.08] text-center">
+                <div className="p-12 rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl text-center">
                     <Key className="w-10 h-10 text-slate-600 mx-auto mb-3" />
                     <p className="text-sm text-slate-400">No OIDC clients registered.</p>
                     <p className="text-xs text-slate-500 mt-1">Create one to enable third-party auth integration.</p>
@@ -156,7 +154,7 @@ export default function OIDCClientsTab() {
                     {clients.map((client) => {
                         const uris = parseRedirectURIs(client.redirect_uris);
                         return (
-                            <div key={client.id} className="glass-card rounded-2xl border border-white/[0.08] p-5 hover:border-white/[0.12] transition-all group">
+                            <div key={client.id} className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-5 hover:border-white/10 transition-all group">
                                 <div className="flex items-start justify-between">
                                     <div className="flex items-center gap-3">
                                         <div className="w-10 h-10 rounded-xl bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center">

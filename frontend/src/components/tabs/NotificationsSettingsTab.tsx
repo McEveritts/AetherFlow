@@ -290,49 +290,44 @@ export default function NotificationsSettingsTab() {
 
     return (
         <div className="space-y-6 w-full animate-fade-in text-slate-100">
-            {/* Header & Stats Banner */}
-            <div className="glass-card p-6 md:p-8 rounded-3xl relative overflow-hidden border border-white/10">
-                <div className="absolute top-0 right-0 w-96 h-96 bg-gradient-to-bl from-indigo-500/10 via-fuchsia-500/5 to-transparent rounded-full blur-3xl pointer-events-none" />
-                <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 relative z-10">
-                    <div className="flex items-center gap-4">
-                        <div className="w-12 h-12 rounded-2xl bg-indigo-500/15 border border-indigo-500/30 flex items-center justify-center text-indigo-400 shadow-[0_0_24px_rgba(99,102,241,0.3)]">
-                            <Bell size={24} />
-                        </div>
-                        <div>
-                            <h2 className="text-2xl font-extrabold tracking-tight text-white flex items-center gap-2">
-                                Alert Dispatcher & Rules
-                            </h2>
-                            <p className="text-sm text-slate-400">
-                                Real-time monitoring rules, threshold alerts, and outbound webhook dispatchers.
-                            </p>
-                        </div>
+            {/* Sub-toolbar with Segmented Switcher */}
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-white/[0.06]">
+                <div className="flex items-center gap-3">
+                    <div className="h-9 w-9 rounded-xl flex items-center justify-center border bg-indigo-500/20 border-indigo-500/30 text-indigo-400">
+                        <Bell size={18} />
                     </div>
+                    <div>
+                        <h3 className="text-base font-semibold text-slate-100">Alert Dispatcher & Rules</h3>
+                        <p className="text-xs text-slate-400 mt-0.5">
+                            Real-time monitoring rules, threshold alerts, and outbound webhook dispatchers.
+                        </p>
+                    </div>
+                </div>
 
-                    {/* Segmented Switcher */}
-                    <div className="flex items-center bg-black/40 border border-white/10 p-1 rounded-2xl backdrop-blur-md">
-                        <button
-                            type="button"
-                            onClick={() => setActiveSection('rules')}
-                            className={`px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-2 ${
-                                activeSection === 'rules'
-                                    ? 'bg-gradient-to-r from-indigo-500/30 to-fuchsia-500/20 text-white border border-indigo-500/40 shadow-[0_0_12px_rgba(99,102,241,0.25)]'
-                                    : 'text-slate-400 hover:text-slate-200'
-                            }`}
-                        >
-                            <Sliders size={14} /> Alert Rules ({rules.length})
-                        </button>
-                        <button
-                            type="button"
-                            onClick={() => setActiveSection('channels')}
-                            className={`px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-2 ${
-                                activeSection === 'channels'
-                                    ? 'bg-gradient-to-r from-indigo-500/30 to-fuchsia-500/20 text-white border border-indigo-500/40 shadow-[0_0_12px_rgba(99,102,241,0.25)]'
-                                    : 'text-slate-400 hover:text-slate-200'
-                            }`}
-                        >
-                            <Radio size={14} /> Delivery Channels ({channels.length})
-                        </button>
-                    </div>
+                {/* Segmented Switcher */}
+                <div className="flex items-center bg-slate-900/60 border border-white/[0.06] p-1 rounded-xl">
+                    <button
+                        type="button"
+                        onClick={() => setActiveSection('rules')}
+                        className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center gap-2 ${
+                            activeSection === 'rules'
+                                ? 'bg-indigo-600 text-white shadow-sm'
+                                : 'text-slate-400 hover:text-slate-200'
+                        }`}
+                    >
+                        <Sliders size={13} /> Alert Rules ({rules.length})
+                    </button>
+                    <button
+                        type="button"
+                        onClick={() => setActiveSection('channels')}
+                        className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center gap-2 ${
+                            activeSection === 'channels'
+                                ? 'bg-indigo-600 text-white shadow-sm'
+                                : 'text-slate-400 hover:text-slate-200'
+                        }`}
+                    >
+                        <Radio size={13} /> Delivery Channels ({channels.length})
+                    </button>
                 </div>
             </div>
 
@@ -357,7 +352,7 @@ export default function NotificationsSettingsTab() {
                         </button>
                     </div>
 
-                    <div className="glass-card rounded-2xl border border-white/10 overflow-hidden divide-y divide-white/5">
+                    <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl overflow-hidden divide-y divide-white/[0.06]">
                         {rulesLoading ? (
                             <div className="p-8 text-center text-slate-400 text-sm flex items-center justify-center gap-3">
                                 <RefreshCw size={18} className="animate-spin text-indigo-400" />
@@ -462,7 +457,7 @@ export default function NotificationsSettingsTab() {
                                 Loading delivery channels...
                             </div>
                         ) : channels.length === 0 ? (
-                            <div className="col-span-full glass-card p-12 text-center rounded-2xl border border-white/10 space-y-3">
+                            <div className="col-span-full p-12 text-center rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl space-y-3">
                                 <MessageSquare size={32} className="mx-auto text-slate-600" />
                                 <h4 className="text-sm font-semibold text-slate-300">No Delivery Channels Connected</h4>
                                 <p className="text-xs text-slate-500 max-w-sm mx-auto">
@@ -473,7 +468,7 @@ export default function NotificationsSettingsTab() {
                             channels.map((channel) => (
                                 <div
                                     key={channel.id}
-                                    className="glass-card p-5 rounded-2xl border border-white/10 flex flex-col justify-between gap-4 relative overflow-hidden group hover:border-indigo-500/40 transition-all"
+                                    className="p-5 rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl flex flex-col justify-between gap-4 relative overflow-hidden group hover:border-white/10 transition-all"
                                 >
                                     <div className="flex items-start justify-between gap-3">
                                         <div className="flex items-center gap-3">
@@ -538,7 +533,7 @@ export default function NotificationsSettingsTab() {
             {/* MODAL: ADD ALERT RULE */}
             {showAddRuleModal && (
                 <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4">
-                    <div className="glass-card w-full max-w-md p-6 rounded-3xl border border-white/10 shadow-[0_20px_60px_rgba(0,0,0,0.8)] relative animate-fade-in">
+                    <div className="w-full max-w-md p-6 rounded-2xl border border-white/[0.08] bg-slate-900/95 backdrop-blur-2xl shadow-2xl relative animate-fade-in">
                         <div className="flex items-center justify-between pb-4 border-b border-white/10 mb-5">
                             <h3 className="text-base font-bold text-white flex items-center gap-2">
                                 <Plus size={18} className="text-indigo-400" /> Add Alert Threshold Rule
@@ -635,7 +630,7 @@ export default function NotificationsSettingsTab() {
             {/* MODAL: ADD DELIVERY CHANNEL */}
             {showAddChannelModal && (
                 <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4">
-                    <div className="glass-card w-full max-w-md p-6 rounded-3xl border border-white/10 shadow-[0_20px_60px_rgba(0,0,0,0.8)] relative animate-fade-in">
+                    <div className="w-full max-w-md p-6 rounded-2xl border border-white/[0.08] bg-slate-900/95 backdrop-blur-2xl shadow-2xl relative animate-fade-in">
                         <div className="flex items-center justify-between pb-4 border-b border-white/10 mb-5">
                             <h3 className="text-base font-bold text-white flex items-center gap-2">
                                 <Plus size={18} className="text-indigo-400" /> Connect Notification Channel

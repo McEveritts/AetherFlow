@@ -39,7 +39,7 @@ case "$ARCH" in
 esac
 
 report_progress 35 "Downloading Lidarr (${LIDARR_ARCH})..."
-LIDARR_VERSION="$(curl -fsSL https://api.github.com/repos/Lidarr/Lidarr/releases/latest 2>/dev/null | grep -oP '"tag_name":\s*"v?\K[^"]+' | head -1 || true)"
+LIDARR_VERSION="$(github_latest_tag "Lidarr/Lidarr" "2.8.2.4493")"
 TMP_TAR=$(mktemp /tmp/lidarr-XXXXXX.tar.gz)
 curl -fsSL "https://lidarr.servarr.com/v1/update/master/updatefile?os=linux&runtime=netcore&arch=${LIDARR_ARCH}" -o "$TMP_TAR" >> "$LOGFILE" 2>&1
 

@@ -19,7 +19,7 @@ import (
 // services use this factory.
 
 // DefaultAIModel is the fallback model when settings are unavailable.
-const DefaultAIModel = "gemini-3.8-flash"
+const DefaultAIModel = "gemini-4-argon"
 
 var (
 	providerMu        sync.Mutex

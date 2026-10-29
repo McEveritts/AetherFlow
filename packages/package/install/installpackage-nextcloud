@@ -36,7 +36,8 @@ ADMIN_USER="${MASTER_USER}"
 ADMIN_PASS="${MASTER_PASS}"
 
 mysql -u root <<EOF >> "$LOGFILE" 2>&1
-CREATE DATABASE IF NOT EXISTS nextcloud CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+DROP DATABASE IF EXISTS nextcloud;
+CREATE DATABASE nextcloud CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
 CREATE USER IF NOT EXISTS 'nextclouduser'@'localhost' IDENTIFIED BY '${DB_PASS}';
 ALTER USER 'nextclouduser'@'localhost' IDENTIFIED BY '${DB_PASS}';
 GRANT ALL PRIVILEGES ON nextcloud.* TO 'nextclouduser'@'localhost';

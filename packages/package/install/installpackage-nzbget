@@ -32,14 +32,8 @@ fi
 mkdir -p /opt/nzbget /var/lib/nzbget
 
 report_progress 35 "Resolving latest NZBGet release..."
-NZBGET_JSON="$(curl -fsSL https://api.github.com/repos/nzbgetcom/nzbget/releases/latest 2>/dev/null || true)"
-NZBGET_VERSION="$(printf '%s' "$NZBGET_JSON" | grep -oP '"tag_name":\s*"v?\K[^"]+' | head -1 || true)"
-NZBGET_VERSION="${NZBGET_VERSION:-24.3}"
-NZBGET_URL="$(printf '%s' "$NZBGET_JSON" | grep -oP '"browser_download_url":\s*"\K[^"]*bin-linux\.run' | head -1 || true)"
-
-if [[ -z "$NZBGET_URL" ]]; then
-    NZBGET_URL="https://github.com/nzbgetcom/nzbget/releases/download/v${NZBGET_VERSION}/nzbget-${NZBGET_VERSION}-bin-linux.run"
-fi
+NZBGET_VERSION="$(github_latest_tag "nzbgetcom/nzbget" "24.3")"
+NZBGET_URL="https://github.com/nzbgetcom/nzbget/releases/download/v${NZBGET_VERSION}/nzbget-${NZBGET_VERSION}-bin-linux.run"
 
 report_progress 60 "Downloading and installing NZBGet ${NZBGET_VERSION}..."
 TMP_RUN=$(mktemp /tmp/nzbget-XXXXXX.run)
@@ -57,8 +51,8 @@ if [[ -f /opt/nzbget/nzbget.conf ]]; then
 import sys, re
 path, user, pw = sys.argv[1:4]
 txt = open(path, "r", encoding="utf-8", errors="ignore").read()
-txt = re.sub(r"(?m)^ControlUsername=.*$", f"ControlUsername={user}", txt)
-txt = re.sub(r"(?m)^ControlPassword=.*$", f"ControlPassword={pw}", txt)
+txt = re.sub(r"(?m)^ControlUsername=.*$", lambda _: f"ControlUsername={user}", txt)
+txt = re.sub(r"(?m)^ControlPassword=.*$", lambda _: f"ControlPassword={pw}", txt)
 open(path, "w", encoding="utf-8").write(txt)
 PYEOF
 fi

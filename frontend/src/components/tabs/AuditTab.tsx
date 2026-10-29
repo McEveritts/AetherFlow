@@ -2,7 +2,7 @@
 
 import { useState, useCallback } from 'react';
 import useSWR from 'swr';
-import { Search, Filter, ChevronLeft, ChevronRight, Clock, User, Activity, FileText } from 'lucide-react';
+import { Search, Filter, ChevronLeft, ChevronRight, Clock, User, Activity, FileText, RefreshCw, Shield, Zap, CheckCircle2 } from 'lucide-react';
 import { useToast } from '@/contexts/ToastContext';
 import { apiFetch } from '@/lib/fetcher';
 import { ActionDetailModal } from '@/components/tabs/ActionDetailModal';
@@ -85,7 +85,7 @@ export default function AuditTab() {
         return `/api/v1/admin/audit-log?${params.toString()}`;
     }, [page, actionFilter, usernameFilter]);
 
-    const { data, isLoading, error } = useSWR<AuditResponse>(buildKey(), {
+    const { data, isLoading, isValidating, error, mutate } = useSWR<AuditResponse>(buildKey(), {
         refreshInterval: 10000,
         revalidateOnFocus: true,
     });
@@ -108,12 +108,12 @@ export default function AuditTab() {
             try {
                 const res = await apiFetch(`/api/v1/admin/actions/${id}`);
                 if (res.ok) {
-                    const data = await res.json();
-                    setSelectedAction(data);
+                    const actionData = await res.json();
+                    setSelectedAction(actionData);
                 } else {
                     addToast('Failed to load action details', 'error');
                 }
-            } catch (err) {
+            } catch {
                 addToast('Network error loading action', 'error');
             } finally {
                 setIsFetchingDetail(false);
@@ -125,144 +125,197 @@ export default function AuditTab() {
 
     const availableActions = Object.keys(ACTION_BADGE_MAP);
 
-    // Loading state
-    if (isLoading && !data) {
-        return (
-            <div className="space-y-4">
-                <h2 className="text-2xl font-bold text-slate-100 tracking-tight">Audit Trail</h2>
-                <div className="glass-card p-8 rounded-2xl border border-white/[0.08]">
-                    <div className="flex items-center justify-center gap-3 text-slate-400">
-                        <div className="w-5 h-5 border-2 border-indigo-500/30 border-t-indigo-500 rounded-full animate-spin"></div>
-                        <span>Loading audit entries...</span>
-                    </div>
-                </div>
-            </div>
-        );
-    }
-
-    // Error state
-    if (error) {
-        return (
-            <div className="space-y-4">
-                <h2 className="text-2xl font-bold text-slate-100 tracking-tight">Audit Trail</h2>
-                <div className="glass-card p-8 rounded-2xl border border-red-500/20 bg-red-500/5">
-                    <div className="text-center">
-                        <div className="w-12 h-12 mx-auto mb-3 rounded-full bg-red-500/10 flex items-center justify-center">
-                            <Activity className="w-6 h-6 text-red-400" />
-                        </div>
-                        <p className="text-red-400 font-medium">Failed to load audit log</p>
-                        <p className="text-sm text-slate-500 mt-1">Check admin access and backend connectivity.</p>
-                    </div>
-                </div>
-            </div>
-        );
-    }
+    const operatorActionsCount = entries.filter(e => e.action.startsWith('action_')).length;
+    const aiActionsCount = entries.filter(e => e.action.includes('ai_')).length;
+    const systemActionsCount = entries.filter(e => e.action.includes('service_') || e.action.includes('system') || e.action.includes('user_')).length;
 
     return (
-        <div className="space-y-6">
-            {/* Header */}
-            <div className="flex items-center justify-between">
-                <div>
-                    <h2 className="text-2xl font-bold text-slate-100 tracking-tight">Audit Trail</h2>
-                    <p className="text-sm text-slate-400 mt-1">
-                        {total} total events recorded
-                    </p>
+        <div className="space-y-6 animate-fade-in relative z-10 w-full min-w-0">
+            {/* Open Top Toolbar with Inline Controls */}
+            <div className="flex flex-wrap items-center justify-between gap-4 pb-4 mb-2 border-b border-white/[0.06] relative z-30 shrink-0">
+                <div className="flex items-center gap-3.5">
+                    <div className="h-10 w-10 rounded-xl flex items-center justify-center border bg-indigo-500/20 border-indigo-500/30 shadow-[0_0_20px_rgba(99,102,241,0.15)] text-indigo-400">
+                        <FileText size={20} />
+                    </div>
+                    <div>
+                        <div className="flex items-center gap-2.5">
+                            <h2 className="text-lg font-bold text-slate-100 tracking-tight">Audit Trail &amp; Compliance</h2>
+                            <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full border bg-indigo-500/15 text-indigo-300 border-indigo-500/30">
+                                Immutable Spine
+                            </span>
+                        </div>
+                        <div className="flex items-center gap-2 mt-0.5">
+                            <span className="relative flex h-1.5 w-1.5">
+                                <span className="absolute inline-flex h-full w-full rounded-full opacity-75 bg-emerald-400"></span>
+                                <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-emerald-500"></span>
+                            </span>
+                            <span className="text-xs text-slate-400 font-medium tracking-wide">
+                                Live Event Logging &middot; {total} events indexed
+                            </span>
+                        </div>
+                    </div>
                 </div>
-            </div>
 
-            {/* Filters */}
-            <div className="glass-card rounded-2xl border border-white/[0.08] p-4">
-                <div className="flex flex-col sm:flex-row gap-3">
-                    {/* Username search */}
-                    <div className="relative flex-1">
-                        <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
+                <div className="flex flex-wrap items-center gap-2">
+                    {/* Inline Actor Search */}
+                    <div className="relative">
+                        <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-500" />
                         <input
                             type="text"
                             value={searchInput}
                             onChange={(e) => setSearchInput(e.target.value)}
                             onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
                             placeholder="Filter by actor..."
-                            className="w-full pl-10 pr-4 py-2.5 bg-white/[0.03] border border-white/[0.08] rounded-xl text-sm text-slate-200 placeholder-slate-500 focus:outline-none focus:border-indigo-500/50 focus:ring-1 focus:ring-indigo-500/20 transition-all"
+                            className="pl-8 pr-3 py-1.5 bg-white/[0.04] border border-white/10 rounded-xl text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-indigo-500/50 w-40 sm:w-48 transition-all"
                         />
                     </div>
 
-                    {/* Action filter */}
+                    {/* Inline Action Filter Dropdown */}
                     <div className="relative">
-                        <Filter className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
+                        <Filter className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-500 pointer-events-none" />
                         <select
                             value={actionFilter}
                             onChange={(e) => { setActionFilter(e.target.value); setPage(0); }}
-                            className="pl-10 pr-8 py-2.5 bg-white/[0.03] border border-white/[0.08] rounded-xl text-sm text-slate-200 focus:outline-none focus:border-indigo-500/50 appearance-none cursor-pointer min-w-[180px]"
+                            className="pl-8 pr-7 py-1.5 bg-white/[0.04] border border-white/10 rounded-xl text-xs text-slate-200 focus:outline-none focus:border-indigo-500/50 appearance-none cursor-pointer"
                         >
-                            <option value="">All Actions</option>
+                            <option value="" className="bg-slate-900 text-slate-200">All Actions</option>
                             {availableActions.map(a => (
-                                <option key={a} value={a}>{ACTION_BADGE_MAP[a].label}</option>
+                                <option key={a} value={a} className="bg-slate-900 text-slate-200">{ACTION_BADGE_MAP[a].label}</option>
                             ))}
                         </select>
                     </div>
 
-                    {/* Search button */}
                     <button
                         onClick={handleSearch}
-                        className="px-4 py-2.5 bg-indigo-500/20 hover:bg-indigo-500/30 text-indigo-300 rounded-xl text-sm font-medium border border-indigo-500/20 transition-all"
+                        className="obs-touch-target-standard obs-gpu-120hz-interactive px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-semibold shadow-md shadow-indigo-500/20 transition-all"
                     >
-                        Search
+                        Filter
+                    </button>
+
+                    <button
+                        onClick={() => mutate()}
+                        className="obs-touch-target-standard obs-gpu-120hz-interactive flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs font-semibold bg-white/[0.04] border border-white/10 text-slate-300 hover:bg-white/[0.08] hover:text-white transition-all"
+                        title="Refresh Logs"
+                    >
+                        <RefreshCw size={13} className={isValidating ? 'animate-spin text-indigo-400' : 'text-slate-400'} />
+                        <span>Refresh</span>
                     </button>
                 </div>
             </div>
 
-            {/* Table */}
-            <div className="glass-card rounded-2xl border border-white/[0.08] overflow-hidden">
-                {entries.length === 0 ? (
+            {/* Open 4-Card Summary Strip */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-4 flex items-center justify-between">
+                    <div>
+                        <p className="text-xs text-slate-400 font-medium uppercase tracking-wider">Total Events</p>
+                        <p className="text-2xl font-bold text-slate-100 mt-1">{total}</p>
+                        <p className="text-[11px] text-slate-500 mt-0.5">Recorded in SQLite spine</p>
+                    </div>
+                    <div className="h-10 w-10 rounded-xl bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center text-indigo-400">
+                        <FileText size={20} />
+                    </div>
+                </div>
+
+                <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-4 flex items-center justify-between">
+                    <div>
+                        <p className="text-xs text-slate-400 font-medium uppercase tracking-wider">Operator Approvals</p>
+                        <p className="text-2xl font-bold text-emerald-400 mt-1">{operatorActionsCount}</p>
+                        <p className="text-[11px] text-slate-500 mt-0.5">Resolved in active page</p>
+                    </div>
+                    <div className="h-10 w-10 rounded-xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-400">
+                        <CheckCircle2 size={20} />
+                    </div>
+                </div>
+
+                <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-4 flex items-center justify-between">
+                    <div>
+                        <p className="text-xs text-slate-400 font-medium uppercase tracking-wider">AI Operations</p>
+                        <p className="text-2xl font-bold text-purple-400 mt-1">{aiActionsCount}</p>
+                        <p className="text-[11px] text-slate-500 mt-0.5">FlowAI proposals</p>
+                    </div>
+                    <div className="h-10 w-10 rounded-xl bg-purple-500/10 border border-purple-500/20 flex items-center justify-center text-purple-400">
+                        <Zap size={20} />
+                    </div>
+                </div>
+
+                <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-4 flex items-center justify-between">
+                    <div>
+                        <p className="text-xs text-slate-400 font-medium uppercase tracking-wider">System &amp; Roles</p>
+                        <p className="text-2xl font-bold text-cyan-400 mt-1">{systemActionsCount}</p>
+                        <p className="text-[11px] text-slate-500 mt-0.5">Service &amp; privilege events</p>
+                    </div>
+                    <div className="h-10 w-10 rounded-xl bg-cyan-500/10 border border-cyan-500/20 flex items-center justify-center text-cyan-400">
+                        <Shield size={20} />
+                    </div>
+                </div>
+            </div>
+
+            {/* Error banner */}
+            {error && (
+                <div className="rounded-2xl border border-red-500/20 bg-red-950/20 p-4 text-center">
+                    <Activity className="w-6 h-6 text-red-400 mx-auto mb-1" />
+                    <p className="text-red-300 font-medium text-xs">Failed to load audit log</p>
+                    <p className="text-[11px] text-slate-500 mt-0.5">Check admin access and backend connectivity.</p>
+                </div>
+            )}
+
+            {/* Audit Log Table */}
+            <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl overflow-hidden">
+                {isLoading && !data ? (
+                    <div className="p-12 text-center text-slate-500 text-xs flex items-center justify-center gap-2">
+                        <RefreshCw size={16} className="animate-spin text-indigo-400" />
+                        <span>Loading audit entries...</span>
+                    </div>
+                ) : entries.length === 0 ? (
                     <div className="p-12 text-center">
-                        <FileText className="w-10 h-10 text-slate-600 mx-auto mb-3" />
-                        <p className="text-sm text-slate-400">No audit entries found.</p>
-                        <p className="text-xs text-slate-500 mt-1">Try adjusting your filters.</p>
+                        <FileText className="w-10 h-10 text-slate-600 mx-auto mb-2" />
+                        <p className="text-sm font-semibold text-slate-300">No audit entries found</p>
+                        <p className="text-xs text-slate-500 mt-1">Try adjusting your filters or actor search.</p>
                     </div>
                 ) : (
                     <div className="overflow-x-auto">
-                        <table className="w-full text-sm">
+                        <table className="w-full text-xs text-left border-collapse">
                             <thead>
-                                <tr className="border-b border-white/[0.06]">
-                                    <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase tracking-wider">
+                                <tr className="border-b border-white/[0.06] text-slate-400 uppercase tracking-wider text-[11px]">
+                                    <th className="py-2.5 px-3.5 font-semibold">
                                         <div className="flex items-center gap-1.5"><Clock size={12} /> Time</div>
                                     </th>
-                                    <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase tracking-wider">
+                                    <th className="py-2.5 px-3.5 font-semibold">
                                         <div className="flex items-center gap-1.5"><User size={12} /> Actor</div>
                                     </th>
-                                    <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase tracking-wider">Action</th>
-                                    <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase tracking-wider">Target</th>
-                                    <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase tracking-wider">Detail</th>
-                                    <th className="px-4 py-3 text-left text-xs font-semibold text-slate-400 uppercase tracking-wider">IP</th>
+                                    <th className="py-2.5 px-3.5 font-semibold">Action</th>
+                                    <th className="py-2.5 px-3.5 font-semibold">Target</th>
+                                    <th className="py-2.5 px-3.5 font-semibold">Detail</th>
+                                    <th className="py-2.5 px-3.5 font-semibold">IP</th>
                                 </tr>
                             </thead>
                             <tbody className="divide-y divide-white/[0.04]">
                                 {entries.map((entry) => (
                                     <tr 
                                         key={entry.id} 
-                                        className={`transition-colors ${entry.target_type === 'pending_action' || entry.target_type === 'service' ? 'hover:bg-white/[0.06] cursor-pointer' : 'hover:bg-white/[0.02]'}`}
+                                        className={`transition-colors ${entry.target_type === 'pending_action' || entry.target_type === 'service' ? 'hover:bg-white/[0.04] cursor-pointer' : 'hover:bg-white/[0.02]'}`}
                                         onClick={() => handleRowClick(entry)}
                                     >
-                                        <td className="px-4 py-3 text-slate-400 whitespace-nowrap font-mono text-xs">
+                                        <td className="py-3 px-3.5 text-slate-400 whitespace-nowrap font-mono text-[11px]">
                                             {formatTimestamp(entry.created_at)}
                                         </td>
-                                        <td className="px-4 py-3">
-                                            <span className="text-slate-200 font-medium">{entry.username}</span>
+                                        <td className="py-3 px-3.5">
+                                            <span className="text-slate-200 font-semibold">{entry.username}</span>
                                         </td>
-                                        <td className="px-4 py-3">
+                                        <td className="py-3 px-3.5">
                                             <ActionBadge action={entry.action} />
                                         </td>
-                                        <td className="px-4 py-3">
-                                            <span className="text-slate-300 text-xs font-mono">
+                                        <td className="py-3 px-3.5">
+                                            <span className="text-slate-300 text-[11px] font-mono">
                                                 {entry.target_type}/{entry.target_id}
                                             </span>
                                         </td>
-                                        <td className="px-4 py-3">
-                                            <span className="text-slate-400 text-xs max-w-[200px] truncate block" title={entry.detail}>
+                                        <td className="py-3 px-3.5">
+                                            <span className="text-slate-400 text-xs max-w-[220px] truncate block" title={entry.detail}>
                                                 {entry.detail || '—'}
                                             </span>
                                         </td>
-                                        <td className="px-4 py-3 text-slate-500 text-xs font-mono">{entry.ip_address}</td>
+                                        <td className="py-3 px-3.5 text-slate-500 text-[11px] font-mono">{entry.ip_address}</td>
                                     </tr>
                                 ))}
                             </tbody>
@@ -272,8 +325,8 @@ export default function AuditTab() {
 
                 {/* Pagination */}
                 {totalPages > 1 && (
-                    <div className="flex items-center justify-between px-4 py-3 border-t border-white/[0.06]">
-                        <span className="text-xs text-slate-500">
+                    <div className="flex items-center justify-between px-4 py-3 border-t border-white/[0.06] text-xs">
+                        <span className="text-slate-500">
                             Showing {page * PAGE_SIZE + 1}–{Math.min((page + 1) * PAGE_SIZE, total)} of {total}
                         </span>
                         <div className="flex items-center gap-2">
@@ -284,7 +337,7 @@ export default function AuditTab() {
                             >
                                 <ChevronLeft size={14} className="text-slate-400" />
                             </button>
-                            <span className="text-xs text-slate-400 font-medium px-2">
+                            <span className="text-slate-300 font-medium px-2">
                                 {page + 1} / {totalPages}
                             </span>
                             <button
@@ -314,18 +367,20 @@ export default function AuditTab() {
                                     headers: { 'Content-Type': 'application/json' },
                                     body: JSON.stringify({ action: match[1].toLowerCase(), process: match[2] })
                                 });
-                            } catch (e) {}
+                            } catch {}
                         }
                     }
                     apiFetch(`/api/v1/admin/actions/${id}/approve`, { method: 'POST' }).then(() => {
                         addToast('Action authorized', 'success');
                         setSelectedAction(null);
+                        mutate();
                     }).catch(() => addToast('Failed to authorize action', 'error'));
                 }}
                 onReject={(id) => {
                     apiFetch(`/api/v1/admin/actions/${id}/reject`, { method: 'POST' }).then(() => {
                         addToast('Action rejected', 'success');
                         setSelectedAction(null);
+                        mutate();
                     }).catch(() => addToast('Failed to reject action', 'error'));
                 }}
                 isProcessing={isFetchingDetail}

@@ -2,7 +2,7 @@
 
 import React, { useState } from 'react';
 import useSWR from 'swr';
-import { Network, Shield, KeyRound, Plus, Trash2, RefreshCw, Send, CheckCircle2, AlertCircle, Laptop, Radio, Server, Globe } from 'lucide-react';
+import { Network, Shield, KeyRound, Plus, Trash2, RefreshCw, Send, CheckCircle2, AlertCircle, Laptop, Radio, Server, Globe, Activity, ArrowDownUp } from 'lucide-react';
 import { apiFetch } from '@/lib/fetcher';
 import { useToast } from '@/contexts/ToastContext';
 
@@ -55,7 +55,7 @@ export default function NetworkTab() {
     const [activeSection, setActiveSection] = useState<'wireguard' | 'tailscale'>('wireguard');
 
     // Network status query
-    const { data: networkStatus, mutate: mutateStatus } = useSWR<NetworkStatusResponse>(
+    const { data: networkStatus, isValidating: isValidatingStatus, mutate: mutateStatus } = useSWR<NetworkStatusResponse>(
         '/api/v1/admin/network/status',
         fetcher,
         { refreshInterval: 15000 }
@@ -185,95 +185,185 @@ export default function NetworkTab() {
     const wgPeers = wgPeersData?.peers || networkStatus?.wireguard?.peers || [];
     const tsPeers = tsPeersData?.peers || networkStatus?.tailscale?.peers || [];
     const tsStatus = networkStatus?.tailscale;
+    const activeWgPeers = wgPeers.filter(p => p.latest_handshake && p.latest_handshake !== 'Never').length;
+    const onlineTsPeers = tsPeers.filter(p => p.online).length;
 
     return (
-        <div className="space-y-6 animate-fade-in relative z-10 w-full max-w-7xl mx-auto pb-12">
-            {/* Header & Segmented Switcher */}
-            <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 border-b border-white/5 pb-4">
-                <div>
-                    <h2 className="text-2xl font-black text-slate-100 flex items-center gap-3">
-                        <Network size={28} className="text-indigo-400" />
-                        Network & VPN Infrastructure
-                    </h2>
-                    <p className="text-xs text-slate-400 mt-1">
-                        High-performance WireGuard tunnels and zero-config Tailscale mesh networking
-                    </p>
+        <div className="space-y-6 animate-fade-in relative z-10 w-full min-w-0">
+            {/* Open Top Toolbar with Integrated View Switcher */}
+            <div className="flex flex-wrap items-center justify-between gap-4 pb-4 mb-2 border-b border-white/[0.06] relative z-30 shrink-0">
+                <div className="flex items-center gap-3.5">
+                    <div className="h-10 w-10 rounded-xl flex items-center justify-center border bg-indigo-500/20 border-indigo-500/30 shadow-[0_0_20px_rgba(99,102,241,0.15)] text-indigo-400">
+                        {activeSection === 'wireguard' ? <Shield size={20} /> : <Radio size={20} />}
+                    </div>
+                    <div>
+                        <div className="flex items-center gap-2.5">
+                            <h2 className="text-lg font-bold text-slate-100 tracking-tight">Network &amp; VPN Mesh</h2>
+                            <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full border bg-indigo-500/15 text-indigo-300 border-indigo-500/30">
+                                {activeSection === 'wireguard' ? 'WireGuard Kernel' : 'Tailscale Mesh'}
+                            </span>
+                        </div>
+                        <div className="flex items-center gap-2 mt-0.5">
+                            <span className="relative flex h-1.5 w-1.5">
+                                <span className={`absolute inline-flex h-full w-full rounded-full opacity-75 ${networkStatus?.wireguard_available ? 'bg-emerald-400' : 'bg-amber-400'}`}></span>
+                                <span className={`relative inline-flex rounded-full h-1.5 w-1.5 ${networkStatus?.wireguard_available ? 'bg-emerald-500' : 'bg-amber-500'}`}></span>
+                            </span>
+                            <span className="text-xs text-slate-400 font-medium tracking-wide">
+                                Mesh Health · {wgPeers.length} WireGuard Peers / {tsPeers.length} Tailnet Devices
+                            </span>
+                        </div>
+                    </div>
                 </div>
 
-                <div className="flex items-center gap-1.5 p-1 bg-white/[0.04] border border-white/10 rounded-2xl backdrop-blur-xl">
+                <div className="flex flex-wrap items-center gap-2">
+                    {/* View Switcher */}
+                    <div className="flex items-center gap-1 p-1 bg-white/[0.04] border border-white/10 rounded-xl">
+                        <button
+                            type="button"
+                            onClick={() => setActiveSection('wireguard')}
+                            className={`obs-touch-target-standard obs-gpu-120hz-interactive px-3 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center gap-1.5 ${
+                                activeSection === 'wireguard'
+                                    ? 'bg-indigo-500/20 border border-indigo-500/30 text-indigo-300 shadow-md shadow-indigo-500/10'
+                                    : 'text-slate-400 hover:text-white'
+                            }`}
+                        >
+                            <Shield size={13} />
+                            WireGuard VPN
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => setActiveSection('tailscale')}
+                            className={`obs-touch-target-standard obs-gpu-120hz-interactive px-3 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center gap-1.5 ${
+                                activeSection === 'tailscale'
+                                    ? 'bg-violet-500/20 border border-violet-500/30 text-violet-300 shadow-md shadow-violet-500/10'
+                                    : 'text-slate-400 hover:text-white'
+                            }`}
+                        >
+                            <Radio size={13} />
+                            Tailscale Mesh
+                        </button>
+                    </div>
+
+                    {activeSection === 'wireguard' && (
+                        <button
+                            onClick={() => setShowAddWgModal(true)}
+                            className="obs-touch-target-standard obs-gpu-120hz-interactive flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl text-xs font-semibold bg-indigo-600 hover:bg-indigo-500 text-white transition-all shadow-lg shadow-indigo-500/20"
+                        >
+                            <Plus size={13} />
+                            <span>Add Peer</span>
+                        </button>
+                    )}
+
                     <button
-                        onClick={() => setActiveSection('wireguard')}
-                        className={`px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-2 ${
-                            activeSection === 'wireguard'
-                                ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-500/25'
-                                : 'text-slate-400 hover:text-slate-200'
-                        }`}
+                        onClick={() => { mutateStatus(); mutateWgPeers(); mutateTsPeers(); }}
+                        className="obs-touch-target-standard obs-gpu-120hz-interactive flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs font-semibold bg-white/[0.04] border border-white/10 text-slate-300 hover:bg-white/[0.08] hover:text-white transition-all"
+                        title="Refresh Network"
                     >
-                        <Shield size={14} />
-                        WireGuard VPN
-                    </button>
-                    <button
-                        onClick={() => setActiveSection('tailscale')}
-                        className={`px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-2 ${
-                            activeSection === 'tailscale'
-                                ? 'bg-violet-600 text-white shadow-lg shadow-violet-500/25'
-                                : 'text-slate-400 hover:text-slate-200'
-                        }`}
-                    >
-                        <Radio size={14} />
-                        Tailscale Mesh
+                        <RefreshCw size={13} className={isValidatingStatus ? 'animate-spin text-indigo-400' : 'text-slate-400'} />
+                        <span>Refresh</span>
                     </button>
                 </div>
             </div>
 
-            {/* WireGuard Section */}
+            {/* Open 4-Card Telemetry Strip */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-4 flex items-center justify-between">
+                    <div>
+                        <p className="text-xs text-slate-400 font-medium uppercase tracking-wider">Tunnel Health</p>
+                        <p className="text-base font-bold text-slate-100 mt-1">
+                            {networkStatus?.wireguard_available ? 'wg0 Active' : 'Standby'}
+                        </p>
+                        <p className="text-[11px] text-slate-500 mt-0.5">
+                            Port {networkStatus?.wireguard?.listen_port || '51820'} · Kernel Active
+                        </p>
+                    </div>
+                    <div className="h-10 w-10 rounded-xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-400">
+                        <CheckCircle2 size={20} />
+                    </div>
+                </div>
+
+                <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-4 flex items-center justify-between">
+                    <div>
+                        <p className="text-xs text-slate-400 font-medium uppercase tracking-wider">Active Peers</p>
+                        <p className="text-2xl font-bold text-slate-100 mt-1">{wgPeers.length}</p>
+                        <p className="text-[11px] text-slate-500 mt-0.5">
+                            {activeWgPeers} connected handshakes
+                        </p>
+                    </div>
+                    <div className="h-10 w-10 rounded-xl bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center text-indigo-400">
+                        <Shield size={20} />
+                    </div>
+                </div>
+
+                <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-4 flex items-center justify-between">
+                    <div>
+                        <p className="text-xs text-slate-400 font-medium uppercase tracking-wider">Transfer Metrics</p>
+                        <p className="text-base font-bold text-slate-100 mt-1">
+                            {wgPeers.length > 0 ? `${wgPeers.length} Active` : '0 bps'}
+                        </p>
+                        <p className="text-[11px] text-slate-500 mt-0.5">Encrypted WireGuard Pipeline</p>
+                    </div>
+                    <div className="h-10 w-10 rounded-xl bg-cyan-500/10 border border-cyan-500/20 flex items-center justify-center text-cyan-400">
+                        <ArrowDownUp size={20} />
+                    </div>
+                </div>
+
+                <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-4 flex items-center justify-between">
+                    <div>
+                        <p className="text-xs text-slate-400 font-medium uppercase tracking-wider">Tailnet Mesh Status</p>
+                        <p className="text-base font-bold text-slate-100 mt-1">
+                            {tsStatus?.backend_state || 'Standalone'}
+                        </p>
+                        <p className="text-[11px] text-slate-500 mt-0.5">
+                            {onlineTsPeers} Online / {tsPeers.length} Mesh Devices
+                        </p>
+                    </div>
+                    <div className="h-10 w-10 rounded-xl bg-violet-500/10 border border-violet-500/20 flex items-center justify-center text-violet-400">
+                        <Radio size={20} />
+                    </div>
+                </div>
+            </div>
+
+            {/* WireGuard View */}
             {activeSection === 'wireguard' && (
                 <div className="space-y-6">
                     {/* Interface Status Card */}
-                    <div className="glass-card rounded-2xl p-6 relative overflow-hidden">
-                        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-6">
+                    <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-5">
+                        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-4">
                             <div className="flex items-center gap-3">
-                                <div className="h-10 w-10 bg-indigo-500/20 rounded-xl flex items-center justify-center border border-indigo-500/30">
-                                    <Shield size={20} className="text-indigo-400" />
+                                <div className="h-9 w-9 bg-indigo-500/20 rounded-xl flex items-center justify-center border border-indigo-500/30 text-indigo-400">
+                                    <Shield size={18} />
                                 </div>
                                 <div>
                                     <h3 className="text-sm font-bold text-slate-200">
                                         Interface: {networkStatus?.wireguard?.interface || 'wg0'}
                                     </h3>
-                                    <p className="text-xs text-slate-500 font-mono">
-                                        Port: {networkStatus?.wireguard?.listen_port || '51820'} · {networkStatus?.wireguard_available ? 'Kernel Module Active' : 'Fallback / Userland'}
+                                    <p className="text-xs text-slate-400 font-mono mt-0.5">
+                                        Port: {networkStatus?.wireguard?.listen_port || '51820'} &middot; {networkStatus?.wireguard_available ? 'Kernel Module Active' : 'Fallback / Userland'}
                                     </p>
                                 </div>
                             </div>
-                            <div className="flex items-center gap-3">
-                                <span className={`px-3 py-1 rounded-full text-[10px] font-bold uppercase border flex items-center gap-1.5 ${
-                                    networkStatus?.wireguard_available 
-                                        ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' 
-                                        : 'bg-amber-500/10 text-amber-400 border-amber-500/20'
-                                }`}>
-                                    <div className={`w-1.5 h-1.5 rounded-full ${networkStatus?.wireguard_available ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
-                                    {networkStatus?.wireguard_available ? 'Interface Running' : 'Standby / Offline'}
-                                </span>
-                                <button
-                                    onClick={() => setShowAddWgModal(true)}
-                                    className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-xl transition-all shadow-lg shadow-indigo-500/20 flex items-center gap-1.5"
-                                >
-                                    <Plus size={14} /> Add Peer
-                                </button>
-                            </div>
+                            <span className={`px-3 py-1 rounded-full text-[10px] font-bold uppercase border flex items-center gap-1.5 self-start md:self-auto ${
+                                networkStatus?.wireguard_available 
+                                    ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' 
+                                    : 'bg-amber-500/10 text-amber-400 border-amber-500/20'
+                            }`}>
+                                <div className={`w-1.5 h-1.5 rounded-full ${networkStatus?.wireguard_available ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
+                                {networkStatus?.wireguard_available ? 'Interface Running' : 'Standby / Offline'}
+                            </span>
                         </div>
 
                         {networkStatus?.wireguard?.public_key && (
-                            <div className="bg-black/40 rounded-xl p-3 border border-white/5 font-mono text-xs flex items-center justify-between gap-4">
+                            <div className="bg-black/40 rounded-xl p-3 border border-white/[0.06] font-mono text-xs flex items-center justify-between gap-4">
                                 <span className="text-slate-500 shrink-0">Server Public Key:</span>
-                                <span className="text-slate-300 truncate">{networkStatus.wireguard.public_key}</span>
+                                <span className="text-slate-300 truncate select-all">{networkStatus.wireguard.public_key}</span>
                             </div>
                         )}
                     </div>
 
-                    {/* Peers Table */}
-                    <div className="glass-card rounded-2xl overflow-hidden">
-                        <div className="p-4 border-b border-white/5 flex items-center justify-between">
+                    {/* WireGuard Peers Table */}
+                    <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-5">
+                        <div className="flex items-center justify-between mb-4 pb-3 border-b border-white/[0.06]">
                             <h4 className="text-xs font-bold text-slate-300 uppercase tracking-wider">
                                 Registered Peers ({wgPeers.length})
                             </h4>
@@ -287,46 +377,46 @@ export default function NetworkTab() {
                         </div>
 
                         <div className="overflow-x-auto">
-                            <table className="w-full text-left border-collapse">
+                            <table className="w-full text-left border-collapse text-xs">
                                 <thead>
-                                    <tr className="bg-black/40 text-slate-400 text-[10px] uppercase tracking-wider border-b border-white/5">
-                                        <th className="p-4">Public Key</th>
-                                        <th className="p-4">Allowed IPs</th>
-                                        <th className="p-4">Endpoint</th>
-                                        <th className="p-4">Latest Handshake</th>
-                                        <th className="p-4">Transfer</th>
-                                        <th className="p-4 text-right">Actions</th>
+                                    <tr className="border-b border-white/[0.06] text-slate-400 text-[11px] uppercase tracking-wider">
+                                        <th className="py-2.5 px-3">Public Key</th>
+                                        <th className="py-2.5 px-3">Allowed IPs</th>
+                                        <th className="py-2.5 px-3">Endpoint</th>
+                                        <th className="py-2.5 px-3">Latest Handshake</th>
+                                        <th className="py-2.5 px-3">Transfer</th>
+                                        <th className="py-2.5 px-3 text-right">Actions</th>
                                     </tr>
                                 </thead>
-                                <tbody className="divide-y divide-white/5 text-xs">
+                                <tbody className="divide-y divide-white/[0.04]">
                                     {wgPeers.length === 0 ? (
                                         <tr>
-                                            <td colSpan={6} className="p-8 text-center text-slate-500">
+                                            <td colSpan={6} className="py-12 text-center text-slate-500">
                                                 No WireGuard peers configured. Click &quot;Add Peer&quot; to register a client.
                                             </td>
                                         </tr>
                                     ) : (
                                         wgPeers.map((peer, idx) => (
                                             <tr key={idx} className="hover:bg-white/[0.02] transition-colors">
-                                                <td className="p-4 font-mono text-indigo-300 truncate max-w-[180px]" title={peer.public_key}>
+                                                <td className="py-3 px-3 font-mono text-indigo-300 truncate max-w-[180px]" title={peer.public_key}>
                                                     {peer.public_key.substring(0, 16)}...
                                                 </td>
-                                                <td className="p-4 font-mono text-slate-300">
+                                                <td className="py-3 px-3 font-mono text-slate-300">
                                                     {peer.allowed_ips || '-'}
                                                 </td>
-                                                <td className="p-4 font-mono text-slate-400">
+                                                <td className="py-3 px-3 font-mono text-slate-400">
                                                     {peer.endpoint || 'Roaming'}
                                                 </td>
-                                                <td className="p-4 text-slate-400">
+                                                <td className="py-3 px-3 text-slate-400">
                                                     {peer.latest_handshake || 'Never'}
                                                 </td>
-                                                <td className="p-4 text-slate-400 font-mono text-[11px]">
+                                                <td className="py-3 px-3 text-slate-400 font-mono text-[11px]">
                                                     {peer.transfer_rx ? `↓ ${peer.transfer_rx} · ↑ ${peer.transfer_tx}` : '-'}
                                                 </td>
-                                                <td className="p-4 text-right">
+                                                <td className="py-3 px-3 text-right">
                                                     <button
                                                         onClick={() => handleRemoveWgPeer(peer.public_key)}
-                                                        className="p-1.5 text-slate-400 hover:text-red-400 rounded-lg hover:bg-white/5 transition-colors"
+                                                        className="p-1.5 text-slate-400 hover:text-red-400 rounded-lg hover:bg-red-500/10 transition-colors"
                                                         title="Remove peer"
                                                     >
                                                         <Trash2 size={14} />
@@ -342,26 +432,26 @@ export default function NetworkTab() {
                 </div>
             )}
 
-            {/* Tailscale Section */}
+            {/* Tailscale View */}
             {activeSection === 'tailscale' && (
                 <div className="space-y-6">
                     {/* Tailscale Status Card */}
-                    <div className="glass-card rounded-2xl p-6 relative overflow-hidden">
-                        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-6">
+                    <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-5">
+                        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-4">
                             <div className="flex items-center gap-3">
-                                <div className="h-10 w-10 bg-violet-500/20 rounded-xl flex items-center justify-center border border-violet-500/30">
-                                    <Radio size={20} className="text-violet-400" />
+                                <div className="h-9 w-9 bg-violet-500/20 rounded-xl flex items-center justify-center border border-violet-500/30 text-violet-400">
+                                    <Radio size={18} />
                                 </div>
                                 <div>
                                     <h3 className="text-sm font-bold text-slate-200">
                                         Tailscale Node: {tsStatus?.self?.hostname || 'aetherflow-node'}
                                     </h3>
-                                    <p className="text-xs text-slate-500 font-mono">
-                                        IP: {tsStatus?.self?.tailscale_ip || 'Offline'} · Backend: {tsStatus?.backend_state || 'Unknown'}
+                                    <p className="text-xs text-slate-400 font-mono mt-0.5">
+                                        IP: {tsStatus?.self?.tailscale_ip || 'Offline'} &middot; Backend: {tsStatus?.backend_state || 'Unknown'}
                                     </p>
                                 </div>
                             </div>
-                            <span className={`px-3 py-1 rounded-full text-[10px] font-bold uppercase border flex items-center gap-1.5 ${
+                            <span className={`px-3 py-1 rounded-full text-[10px] font-bold uppercase border flex items-center gap-1.5 self-start md:self-auto ${
                                 tsStatus?.backend_state === 'Running'
                                     ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
                                     : 'bg-amber-500/10 text-amber-400 border-amber-500/20'
@@ -372,7 +462,7 @@ export default function NetworkTab() {
                         </div>
 
                         {/* Subnet Route Form */}
-                        <form onSubmit={handleAdvertiseRoutes} className="pt-4 border-t border-white/5 flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
+                        <form onSubmit={handleAdvertiseRoutes} className="pt-4 border-t border-white/[0.06] flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
                             <div className="flex-1">
                                 <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">
                                     Advertise Subnet Routes (comma-separated CIDRs)
@@ -382,23 +472,23 @@ export default function NetworkTab() {
                                     value={subnetRouteInput}
                                     onChange={(e) => setSubnetRouteInput(e.target.value)}
                                     placeholder="10.0.0.0/24, 192.168.1.0/24"
-                                    className="w-full bg-black/60 border border-white/10 rounded-xl px-4 py-2 text-xs text-slate-100 font-mono focus:outline-none focus:border-violet-500/50"
+                                    className="w-full bg-black/60 border border-white/[0.08] rounded-xl px-4 py-2 text-xs text-slate-100 font-mono focus:outline-none focus:border-violet-500/50"
                                 />
                             </div>
                             <button
                                 type="submit"
                                 disabled={isAdvertisingRoutes || !subnetRouteInput.trim()}
-                                className="px-5 py-2 bg-violet-600 hover:bg-violet-500 disabled:opacity-50 text-white text-xs font-bold rounded-xl transition-all self-end flex items-center gap-1.5 shrink-0"
+                                className="obs-touch-target-standard obs-gpu-120hz-interactive px-5 py-2 bg-violet-600 hover:bg-violet-500 disabled:opacity-50 text-white text-xs font-bold rounded-xl transition-all self-end flex items-center gap-1.5 shrink-0"
                             >
-                                <Send size={14} />
-                                {isAdvertisingRoutes ? 'Advertising...' : 'Advertise Routes'}
+                                <Send size={13} />
+                                <span>{isAdvertisingRoutes ? 'Advertising...' : 'Advertise Routes'}</span>
                             </button>
                         </form>
                     </div>
 
                     {/* Tailscale Peers Table */}
-                    <div className="glass-card rounded-2xl overflow-hidden">
-                        <div className="p-4 border-b border-white/5 flex items-center justify-between">
+                    <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-5">
+                        <div className="flex items-center justify-between mb-4 pb-3 border-b border-white/[0.06]">
                             <h4 className="text-xs font-bold text-slate-300 uppercase tracking-wider">
                                 Tailnet Mesh Devices ({tsPeers.length})
                             </h4>
@@ -412,45 +502,45 @@ export default function NetworkTab() {
                         </div>
 
                         <div className="overflow-x-auto">
-                            <table className="w-full text-left border-collapse">
+                            <table className="w-full text-left border-collapse text-xs">
                                 <thead>
-                                    <tr className="bg-black/40 text-slate-400 text-[10px] uppercase tracking-wider border-b border-white/5">
-                                        <th className="p-4">Device Hostname</th>
-                                        <th className="p-4">Tailscale IP</th>
-                                        <th className="p-4">OS</th>
-                                        <th className="p-4">Status</th>
-                                        <th className="p-4">Exit Node</th>
+                                    <tr className="border-b border-white/[0.06] text-slate-400 text-[11px] uppercase tracking-wider">
+                                        <th className="py-2.5 px-3">Device Hostname</th>
+                                        <th className="py-2.5 px-3">Tailscale IP</th>
+                                        <th className="py-2.5 px-3">OS</th>
+                                        <th className="py-2.5 px-3">Status</th>
+                                        <th className="py-2.5 px-3">Exit Node</th>
                                     </tr>
                                 </thead>
-                                <tbody className="divide-y divide-white/5 text-xs">
+                                <tbody className="divide-y divide-white/[0.04]">
                                     {tsPeers.length === 0 ? (
                                         <tr>
-                                            <td colSpan={5} className="p-8 text-center text-slate-500">
+                                            <td colSpan={5} className="py-12 text-center text-slate-500">
                                                 No Tailscale mesh peers discovered or Tailscale daemon offline.
                                             </td>
                                         </tr>
                                     ) : (
                                         tsPeers.map((peer, idx) => (
                                             <tr key={idx} className="hover:bg-white/[0.02] transition-colors">
-                                                <td className="p-4 font-semibold text-slate-200 flex items-center gap-2">
+                                                <td className="py-3 px-3 font-semibold text-slate-200 flex items-center gap-2">
                                                     <Laptop size={14} className="text-slate-500" />
                                                     {peer.hostname}
                                                     {peer.dns_name && <span className="text-[10px] text-slate-500">({peer.dns_name})</span>}
                                                 </td>
-                                                <td className="p-4 font-mono text-violet-300">
+                                                <td className="py-3 px-3 font-mono text-violet-300">
                                                     {peer.tailscale_ip}
                                                 </td>
-                                                <td className="p-4 text-slate-400 capitalize">
+                                                <td className="py-3 px-3 text-slate-400 capitalize">
                                                     {peer.os || 'Linux'}
                                                 </td>
-                                                <td className="p-4">
+                                                <td className="py-3 px-3">
                                                     <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${
                                                         peer.online ? 'bg-emerald-500/10 text-emerald-400' : 'bg-slate-800 text-slate-500'
                                                     }`}>
                                                         {peer.online ? 'Online' : 'Idle'}
                                                     </span>
                                                 </td>
-                                                <td className="p-4 text-slate-400">
+                                                <td className="py-3 px-3 text-slate-400">
                                                     {peer.exit_node ? <span className="text-emerald-400 font-bold">Yes</span> : 'No'}
                                                 </td>
                                             </tr>
@@ -466,17 +556,17 @@ export default function NetworkTab() {
             {/* Add WireGuard Peer Modal */}
             {showAddWgModal && (
                 <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-fade-in">
-                    <div className="glass-panel w-full max-w-lg rounded-3xl p-6 border border-white/10 shadow-2xl relative">
-                        <div className="flex items-center justify-between pb-4 border-b border-white/10 mb-6">
+                    <div className="rounded-2xl border border-white/[0.08] bg-slate-900/95 backdrop-blur-2xl w-full max-w-lg p-6 shadow-2xl relative">
+                        <div className="flex items-center justify-between pb-4 border-b border-white/[0.06] mb-5">
                             <div className="flex items-center gap-2">
-                                <KeyRound className="text-indigo-400" size={20} />
-                                <h3 className="text-lg font-bold text-white">Enroll WireGuard Peer</h3>
+                                <KeyRound className="text-indigo-400" size={18} />
+                                <h3 className="text-base font-bold text-white">Enroll WireGuard Peer</h3>
                             </div>
                             <button
                                 onClick={() => setShowAddWgModal(false)}
                                 className="p-1.5 text-slate-400 hover:text-white rounded-lg hover:bg-white/5 transition-colors"
                             >
-                                ✕
+                                &times;
                             </button>
                         </div>
 
@@ -500,7 +590,7 @@ export default function NetworkTab() {
                                 onChange={(e) => setNewPeerPubKey(e.target.value)}
                                 placeholder="Base64 public key (44 characters)"
                                 required
-                                className="w-full bg-black/60 border border-white/10 rounded-xl px-4 py-2.5 text-slate-100 text-xs font-mono focus:outline-none focus:border-indigo-500/50"
+                                className="w-full bg-black/60 border border-white/[0.08] rounded-xl px-4 py-2 text-slate-100 text-xs font-mono focus:outline-none focus:border-indigo-500/50"
                             />
 
                             {generatedPrivKey && (
@@ -515,29 +605,29 @@ export default function NetworkTab() {
                             )}
 
                             <div>
-                                <label className="block text-xs font-semibold text-slate-300 mb-1.5">Allowed IPs</label>
+                                <label className="block text-xs font-semibold text-slate-300 mb-1">Allowed IPs</label>
                                 <input
                                     type="text"
                                     value={newPeerAllowedIPs}
                                     onChange={(e) => setNewPeerAllowedIPs(e.target.value)}
                                     placeholder="10.0.0.2/32"
                                     required
-                                    className="w-full bg-black/60 border border-white/10 rounded-xl px-4 py-2.5 text-slate-100 text-xs font-mono focus:outline-none focus:border-indigo-500/50"
+                                    className="w-full bg-black/60 border border-white/[0.08] rounded-xl px-4 py-2 text-slate-100 text-xs font-mono focus:outline-none focus:border-indigo-500/50"
                                 />
                             </div>
 
                             <div>
-                                <label className="block text-xs font-semibold text-slate-300 mb-1.5">Optional Endpoint</label>
+                                <label className="block text-xs font-semibold text-slate-300 mb-1">Optional Endpoint</label>
                                 <input
                                     type="text"
                                     value={newPeerEndpoint}
                                     onChange={(e) => setNewPeerEndpoint(e.target.value)}
                                     placeholder="client.example.com:51820"
-                                    className="w-full bg-black/60 border border-white/10 rounded-xl px-4 py-2.5 text-slate-100 text-xs font-mono focus:outline-none focus:border-indigo-500/50"
+                                    className="w-full bg-black/60 border border-white/[0.08] rounded-xl px-4 py-2 text-slate-100 text-xs font-mono focus:outline-none focus:border-indigo-500/50"
                                 />
                             </div>
 
-                            <div className="flex justify-end gap-3 pt-4 border-t border-white/10">
+                            <div className="flex justify-end gap-2.5 pt-4 border-t border-white/[0.06]">
                                 <button
                                     type="button"
                                     onClick={() => setShowAddWgModal(false)}
@@ -548,7 +638,7 @@ export default function NetworkTab() {
                                 <button
                                     type="submit"
                                     disabled={isSubmittingPeer || !newPeerPubKey.trim()}
-                                    className="px-6 py-2.5 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-xs font-bold text-white rounded-xl transition-all shadow-lg shadow-indigo-500/20"
+                                    className="obs-touch-target-standard obs-gpu-120hz-interactive px-5 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-xs font-bold text-white rounded-xl transition-all shadow-lg shadow-indigo-500/20"
                                 >
                                     {isSubmittingPeer ? 'Adding Peer...' : 'Enroll Peer'}
                                 </button>

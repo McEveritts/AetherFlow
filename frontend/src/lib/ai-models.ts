@@ -28,7 +28,6 @@ export const AI_PROVIDERS: AIProviderDef[] = [
 
 export const AI_MODELS: Record<AIProviderID, AIModelDef[]> = {
     gemini: [
-        { id: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash', tier: 'latest' },
         { id: 'gemini-4-argon', name: 'Gemini 4 Argon', tier: 'latest' },
     ],
     openai: [

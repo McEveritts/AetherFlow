@@ -61,7 +61,13 @@ function shouldAttachCSRF(input: RequestInfo | URL, init: RequestInit | undefine
     if (path === '/api/v1/auth/refresh' || path === '/api/v1/public/auth/refresh' || path === '/api/auth/refresh') {
         return false;
     }
-    return path.startsWith('/api/v1/auth/') || path.startsWith('/api/v1/public/auth/') || path.startsWith('/api/auth/');
+    return (
+        path.startsWith('/api/v1/auth/') ||
+        path.startsWith('/api/v1/public/auth/') ||
+        path.startsWith('/api/auth/') ||
+        path.startsWith('/api/v1/admin/') ||
+        path.startsWith('/api/admin/')
+    );
 }
 
 async function getCSRFToken(): Promise<string | null> {

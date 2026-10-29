@@ -39,9 +39,7 @@ case "$ARCH" in
 esac
 
 report_progress 40 "Resolving latest Autobrr release (${AB_ARCH})..."
-AB_JSON="$(curl -fsSL https://api.github.com/repos/autobrr/autobrr/releases/latest 2>/dev/null || true)"
-AB_VERSION="$(printf '%s' "$AB_JSON" | grep -oP '"tag_name":\s*"v\K[^"]+' | head -1 || true)"
-AB_VERSION="${AB_VERSION:-1.46.0}"
+AB_VERSION="$(github_latest_tag "autobrr/autobrr" "1.46.0")"
 AB_URL="https://github.com/autobrr/autobrr/releases/download/v${AB_VERSION}/autobrr_${AB_VERSION}_${AB_ARCH}.tar.gz"
 
 report_progress 65 "Downloading and installing Autobrr ${AB_VERSION}..."

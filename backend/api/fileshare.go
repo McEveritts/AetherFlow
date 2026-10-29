@@ -2,10 +2,13 @@ package api
 
 import (
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -13,7 +16,7 @@ import (
 )
 
 const (
-	// Maximum upload file size: 50 MiB
+	// Maximum upload chunk/file size: 50 MiB
 	maxUploadSize = 50 * 1024 * 1024
 )
 
@@ -22,6 +25,7 @@ type FileInfo struct {
 	Size      int64  `json:"size"`
 	ModTime   string `json:"modTime"`
 	Extension string `json:"extension"`
+	IsDir     bool   `json:"isDir"`
 }
 
 func getUploadDir() string {
@@ -52,32 +56,81 @@ func getUploadDir() string {
 	return defaultPath
 }
 
+// resolveUploadSubdir safely resolves a relative virtual path (e.g. "/" or "/docs") inside uploadDir.
+func resolveUploadSubdir(rawSubPath string) (string, error) {
+	baseDir, err := filepath.Abs(getUploadDir())
+	if err != nil {
+		return "", err
+	}
+	trimmed := strings.TrimSpace(rawSubPath)
+	if trimmed == "" || trimmed == "/" || trimmed == "." {
+		return baseDir, nil
+	}
+	// If the user selected an absolute path matching baseDir via PathSelector, allow it
+	if filepath.IsAbs(trimmed) {
+		cleanedAbs := filepath.Clean(trimmed)
+		rel, relErr := filepath.Rel(baseDir, cleanedAbs)
+		if relErr == nil && !strings.HasPrefix(rel, "..") {
+			return cleanedAbs, nil
+		}
+	}
+	relSub := strings.TrimLeft(trimmed, "/\\")
+	target := filepath.Clean(filepath.Join(baseDir, relSub))
+	rel, err := filepath.Rel(baseDir, target)
+	if err != nil || strings.HasPrefix(rel, "..") {
+		return "", &uploadError{"Invalid directory path"}
+	}
+	return target, nil
+}
+
 func GetFilesList(c *gin.Context) {
-	uploadDir := getUploadDir()
-	files, err := os.ReadDir(uploadDir)
+	targetDir, err := resolveUploadSubdir(c.Query("path"))
+	if err != nil {
+		BadRequest(c, err.Error())
+		return
+	}
+
+	if _, statErr := os.Stat(targetDir); os.IsNotExist(statErr) {
+		if mkErr := os.MkdirAll(targetDir, 0755); mkErr != nil {
+			c.JSON(http.StatusOK, []FileInfo{})
+			return
+		}
+	}
+
+	files, err := os.ReadDir(targetDir)
 	if err != nil {
 		slog.Error("reading upload directory", "error", err)
 		InternalError(c, "Failed to read files directory")
 		return
 	}
 
-	var fileList []FileInfo
+	fileList := make([]FileInfo, 0, len(files))
 	for _, f := range files {
-		if f.IsDir() {
-			continue
-		}
 		info, err := f.Info()
 		if err != nil {
 			continue
+		}
+
+		ext := ""
+		if !f.IsDir() {
+			ext = filepath.Ext(info.Name())
 		}
 
 		fileList = append(fileList, FileInfo{
 			Name:      info.Name(),
 			Size:      info.Size(),
 			ModTime:   info.ModTime().Format(time.RFC3339),
-			Extension: filepath.Ext(info.Name()),
+			Extension: ext,
+			IsDir:     f.IsDir(),
 		})
 	}
+
+	sort.Slice(fileList, func(i, j int) bool {
+		if fileList[i].IsDir != fileList[j].IsDir {
+			return fileList[i].IsDir
+		}
+		return strings.ToLower(fileList[i].Name) < strings.ToLower(fileList[j].Name)
+	})
 
 	c.JSON(http.StatusOK, fileList)
 }
@@ -154,8 +207,14 @@ func UploadFile(c *gin.Context) {
 		return
 	}
 
+	// Support explicit filename header from chunked uploads when FormData blob name is "blob"
+	rawFilename := file.Filename
+	if headerFilename := strings.TrimSpace(c.GetHeader("X-File-Name")); headerFilename != "" && (rawFilename == "" || rawFilename == "blob") {
+		rawFilename = headerFilename
+	}
+
 	// Sanitize filename (strips nulls, checks all extensions)
-	safeName, err := sanitizeFilename(file.Filename)
+	safeName, err := sanitizeFilename(rawFilename)
 	if err != nil {
 		BadRequest(c, err.Error())
 		return
@@ -174,15 +233,45 @@ func UploadFile(c *gin.Context) {
 	detectedType := http.DetectContentType(sniffBuf[:n])
 
 	if blockedContentTypes[detectedType] {
-		BadRequest(c, "File content type not allowed: " + detectedType)
+		BadRequest(c, "File content type not allowed: "+detectedType)
 		return
 	}
 
-	uploadDir := getUploadDir()
+	if _, seekErr := src.Seek(0, io.SeekStart); seekErr != nil {
+		InternalError(c, "Failed to reset file stream")
+		return
+	}
+
+	uploadDir, dirErr := resolveUploadSubdir(c.GetHeader("X-Target-Path"))
+	if dirErr != nil {
+		BadRequest(c, dirErr.Error())
+		return
+	}
+	if mkErr := os.MkdirAll(uploadDir, 0755); mkErr != nil {
+		InternalError(c, "Failed to prepare target directory")
+		return
+	}
+
 	dst := filepath.Join(uploadDir, safeName)
 
-	if err := c.SaveUploadedFile(file, dst); err != nil {
-		slog.Error("failed to save uploaded file", "error", err)
+	chunkIdx, _ := strconv.Atoi(c.GetHeader("X-Chunk-Index"))
+	openFlags := os.O_CREATE | os.O_WRONLY
+	if chunkIdx > 0 {
+		openFlags |= os.O_APPEND
+	} else {
+		openFlags |= os.O_TRUNC
+	}
+
+	out, openErr := os.OpenFile(dst, openFlags, 0640)
+	if openErr != nil {
+		slog.Error("failed to open target file for upload", "error", openErr)
+		InternalError(c, "Failed to save file securely")
+		return
+	}
+	defer out.Close()
+
+	if _, copyErr := io.Copy(out, src); copyErr != nil {
+		slog.Error("failed to write uploaded file chunk", "error", copyErr)
 		InternalError(c, "Failed to save file securely")
 		return
 	}
@@ -204,7 +293,11 @@ func HandleDownloadFile(c *gin.Context) {
 		return
 	}
 
-	uploadDir := getUploadDir()
+	uploadDir, dirErr := resolveUploadSubdir(c.Query("path"))
+	if dirErr != nil {
+		BadRequest(c, dirErr.Error())
+		return
+	}
 	filePath := filepath.Join(uploadDir, safeName)
 
 	if _, err := os.Stat(filePath); os.IsNotExist(err) {
@@ -214,6 +307,48 @@ func HandleDownloadFile(c *gin.Context) {
 
 	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", safeName))
 	c.File(filePath)
+}
+
+// DeleteSharedFile deletes a file from the fileshare directory.
+func DeleteSharedFile(c *gin.Context) {
+	filename := c.Param("filename")
+	safeName, err := sanitizeFilename(filename)
+	if err != nil {
+		BadRequest(c, err.Error())
+		return
+	}
+
+	uploadDir, dirErr := resolveUploadSubdir(c.Query("path"))
+	if dirErr != nil {
+		BadRequest(c, dirErr.Error())
+		return
+	}
+	filePath := filepath.Join(uploadDir, safeName)
+
+	info, statErr := os.Stat(filePath)
+	if os.IsNotExist(statErr) {
+		NotFoundError(c, "File not found")
+		return
+	}
+	if statErr != nil {
+		InternalError(c, "Failed to inspect file")
+		return
+	}
+	if info.IsDir() {
+		BadRequest(c, "Cannot delete directory via file endpoint")
+		return
+	}
+
+	if rmErr := os.Remove(filePath); rmErr != nil {
+		slog.Error("failed to delete shared file", "path", filePath, "error", rmErr)
+		InternalError(c, "Failed to delete file")
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":  "File deleted",
+		"filename": safeName,
+	})
 }
 
 // DownloadFile preserves the legacy admin handler name while delegating to the canonical auth-safe download path.

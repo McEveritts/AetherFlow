@@ -202,6 +202,8 @@ func registerV1Routes(apiGroup *gin.RouterGroup) {
 		adminGroup.POST("/fileshare/upload", QuotaUploadGuard(), UploadFile)
 		// Requires admin context (Phase 8)
 		adminGroup.GET("/fileshare/download/:filename", HandleDownloadFile)
+		// Requires admin context (Phase 8)
+		adminGroup.DELETE("/fileshare/:filename", DeleteSharedFile)
 
 		// Headless Operator APIs - CLI/Automation Integration Only
 		// Requires admin context (Phase 8)

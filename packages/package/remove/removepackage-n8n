@@ -24,6 +24,7 @@ purge_systemd_unit "n8n"
 
 report_progress 65 "Uninstalling npm package and removing state directories..."
 npm uninstall -g n8n >> "$LOGFILE" 2>&1 || true
+rm -f /usr/bin/n8n /usr/local/bin/n8n
 rm -rf /var/lib/n8n /opt/n8n
 purge_system_user "n8n"
 systemctl daemon-reload >> "$LOGFILE" 2>&1 || true

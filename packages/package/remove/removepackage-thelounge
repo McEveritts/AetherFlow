@@ -24,6 +24,7 @@ purge_systemd_unit "thelounge"
 
 report_progress 65 "Uninstalling npm package and removing state directories..."
 npm uninstall -g thelounge >> "$LOGFILE" 2>&1 || true
+rm -f /usr/bin/thelounge /usr/local/bin/thelounge
 rm -rf /var/lib/thelounge
 purge_system_user "thelounge"
 systemctl daemon-reload >> "$LOGFILE" 2>&1 || true

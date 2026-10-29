@@ -39,13 +39,8 @@ case "$ARCH" in
 esac
 
 report_progress 35 "Resolving latest Autoscan release from Cloudbox..."
-AS_JSON="$(curl -fsSL https://api.github.com/repos/Cloudbox/autoscan/releases/latest 2>/dev/null || true)"
-AS_VERSION="$(printf '%s' "$AS_JSON" | grep -oP '"tag_name":\s*"v\K[^"]+' | head -1 || true)"
-AS_VERSION="${AS_VERSION:-1.4.0}"
-AS_URL="$(printf '%s' "$AS_JSON" | grep -oP '"browser_download_url":\s*"\K[^"]*autoscan_v?'${AS_VERSION}'_linux_'${AS_ARCH}'(\.tar\.gz)?' | head -1 || true)"
-if [[ -z "$AS_URL" ]]; then
-    AS_URL="https://github.com/Cloudbox/autoscan/releases/download/v${AS_VERSION}/autoscan_v${AS_VERSION}_linux_${AS_ARCH}"
-fi
+AS_VERSION="$(github_latest_tag "Cloudbox/autoscan" "1.4.0")"
+AS_URL="https://github.com/Cloudbox/autoscan/releases/download/v${AS_VERSION}/autoscan_v${AS_VERSION}_linux_${AS_ARCH}"
 
 report_progress 60 "Downloading Autoscan ${AS_VERSION} (${AS_ARCH})..."
 TMP_BIN=$(mktemp /tmp/autoscan-XXXXXX)

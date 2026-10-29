@@ -107,7 +107,8 @@ class TestF15DesktopExpandableRail(TestCase):
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
         sidebar = inspector.read_file("frontend/src/components/layout/Sidebar.tsx")
-        self.assert_true(bool(sidebar and "w-20" in sidebar and "w-64" in sidebar), "F15: Sidebar must support expandable width rail")
+        has_collapsed_width = "w-20" in sidebar or "md:w-[4.5rem]" in sidebar or "w-[4.5rem]" in sidebar
+        self.assert_true(bool(sidebar and has_collapsed_width and "w-64" in sidebar), "F15: Sidebar must support expandable width rail")
 
 class TestF15TouchTargetEnforcement(TestCase):
     def __init__(self):

@@ -24,7 +24,7 @@ func NewGeminiProvider(cfg ProviderConfig) (*GeminiProvider, error) {
 
 	model := cfg.Model
 	if model == "" {
-		model = "gemini-3.8-flash"
+		model = "gemini-4-argon"
 	}
 
 	ctx := context.Background()
@@ -43,8 +43,6 @@ func resolveGeminiFallbackModel(modelName string) (string, bool) {
 	switch strings.TrimSpace(modelName) {
 	case "gemini-4-argon":
 		return "gemini-2.5-pro", true
-	case "gemini-3.8-flash":
-		return "gemini-2.5-flash", true
 	default:
 		return "", false
 	}
@@ -129,7 +127,7 @@ func (g *GeminiProvider) Generate(ctx context.Context, prompt string) (*Response
 
 // TestConnection implements AIProvider.TestConnection for Gemini.
 func (g *GeminiProvider) TestConnection(ctx context.Context) error {
-	testModel := "gemini-3.8-flash"
+	testModel := "gemini-4-argon"
 	model := g.client.GenerativeModel(testModel)
 	resp, err := model.GenerateContent(ctx, genai.Text("Reply with the exact word: SUCCESS"))
 	if err != nil && isGeminiModelNotFoundError(err) {

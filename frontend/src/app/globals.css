@@ -274,7 +274,7 @@ body::after {
   mask-composite: exclude;
   pointer-events: none;
   z-index: 1;
-  opacity: 0.65;
+  opacity: 0.28;
   transform: translateZ(0);
   will-change: opacity;
   transition: opacity var(--obs-duration-card) var(--obs-ease-out-120);
@@ -289,30 +289,25 @@ body::after {
     box-shadow: var(--obs-shadow-card-hover);
   }
   .glass-card:hover::after {
-    opacity: 1;
+    opacity: 0.75;
   }
 }
 
 .glass-panel {
-  background: var(--obs-panel-bg);
+  background: linear-gradient(180deg, rgba(15, 18, 34, 0.72) 0%, rgba(10, 12, 24, 0.82) 100%);
   backdrop-filter: blur(var(--obs-glass-blur-heavy)) var(--obs-glass-saturation);
   -webkit-backdrop-filter: blur(var(--obs-glass-blur-heavy)) var(--obs-glass-saturation);
-  border: 1px solid var(--obs-chromatic-border-indigo);
-  border-top: 1px solid var(--obs-specular-top);
-  border-left: 1px solid var(--obs-chromatic-border-cyan);
-  border-right: 1px solid var(--obs-chromatic-border-fuchsia);
-  box-shadow: var(--obs-shadow-panel), var(--obs-chromatic-inset);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-top: 1px solid rgba(255, 255, 255, 0.14);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.55), inset 0 1px 0 0 rgba(255, 255, 255, 0.06);
 }
 
 .obs-sidebar-surface {
-  background: var(--obs-sidebar-bg);
+  background: linear-gradient(180deg, rgba(7, 8, 18, 0.98) 0%, rgba(5, 6, 14, 0.99) 100%);
   backdrop-filter: blur(32px) saturate(180%);
   -webkit-backdrop-filter: blur(32px) saturate(180%);
-  border: 1px solid rgba(99, 102, 241, 0.25);
-  border-top: 1px solid var(--obs-specular-top);
-  border-left: 1px solid var(--obs-chromatic-border-cyan);
-  border-right: 1px solid var(--obs-chromatic-border-fuchsia);
-  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.9), 0 0 32px rgba(99, 102, 241, 0.16), var(--obs-chromatic-inset);
+  border-right: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 16px 0 48px rgba(0, 0, 0, 0.85);
 }
 
 .glass-hero {

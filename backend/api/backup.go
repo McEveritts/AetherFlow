@@ -230,7 +230,7 @@ func GetBackupsList(c *gin.Context) {
 		return
 	}
 
-	var backups []BackupFile
+	backups := make([]BackupFile, 0)
 	for _, entry := range entries {
 		if entry.IsDir() || filepath.Ext(entry.Name()) != ".sqlite" {
 			continue

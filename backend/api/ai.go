@@ -20,7 +20,6 @@ type ChatMessage struct {
 // allowedAIModels is the set of valid model identifiers across all providers.
 var allowedAIModels = map[string]bool{
 	// Gemini (current frontier)
-	"gemini-3.8-flash":                true,
 	"gemini-4-argon":                  true,
 	"gemini-3.1-pro-preview":          true,
 	"gemini-3-flash-preview":          true,
@@ -323,7 +322,7 @@ func TestAiConnection(c *gin.Context) {
 	}
 
 	// Select an appropriate test model per provider
-	testModel := "gemini-3.8-flash"
+	testModel := "gemini-4-argon"
 	switch providerType {
 	case "openai":
 		testModel = "gpt-4o"

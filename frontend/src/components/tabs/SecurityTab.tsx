@@ -44,7 +44,7 @@ export default function SecurityTab() {
     // ── Session Actions ──
     const revokeSession = async (jti: string) => {
         try {
-            const res = await fetch(`/api/v1/auth/sessions/${encodeURIComponent(jti)}`, { method: 'DELETE' });
+            const res = await apiFetch(`/api/v1/auth/sessions/${encodeURIComponent(jti)}`, { method: 'DELETE' });
             if (!res.ok) throw new Error('Failed to revoke session');
             mutate();
             addToast('Session forcefully terminated.', 'success');
@@ -54,11 +54,18 @@ export default function SecurityTab() {
     };
 
     const revokeAllOthers = async () => {
+        const others = sessions.filter(s => !s.is_current);
+        if (others.length === 0) {
+            addToast('No other active sessions to revoke.', 'info');
+            return;
+        }
         try {
-            const others = sessions.filter(s => !s.is_current);
-            await Promise.all(
-                others.map(s => fetch(`/api/v1/auth/sessions/${encodeURIComponent(s.jti)}`, { method: 'DELETE' }))
+            const responses = await Promise.all(
+                others.map(s => apiFetch(`/api/v1/auth/sessions/${encodeURIComponent(s.jti)}`, { method: 'DELETE' }))
             );
+            if (responses.some(res => !res.ok)) {
+                throw new Error('Failed to revoke some sessions');
+            }
             mutate();
             addToast('All unauthorized sessions revoked.', 'info');
         } catch {
@@ -211,7 +218,8 @@ export default function SecurityTab() {
                             </div>
                             <button 
                                 onClick={revokeAllOthers}
-                                className="glass-button text-sm px-4 py-2 text-red-300 hover:text-red-200 border-red-500/30 hover:border-red-500/50 hover:bg-red-500/10 transition-colors whitespace-nowrap">
+                                disabled={sessions.filter(s => !s.is_current).length === 0}
+                                className="glass-button text-sm px-4 py-2 text-red-300 hover:text-red-200 border-red-500/30 hover:border-red-500/50 hover:bg-red-500/10 transition-colors whitespace-nowrap disabled:opacity-50 disabled:cursor-not-allowed">
                                 Revoke All Others
                             </button>
                         </div>

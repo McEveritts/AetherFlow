@@ -37,14 +37,12 @@ case "$ARCH" in
 esac
 
 report_progress 40 "Downloading latest File Browser (${FB_ARCH})..."
-FB_JSON="$(curl -fsSL https://api.github.com/repos/filebrowser/filebrowser/releases/latest 2>/dev/null || true)"
-FB_VERSION="$(printf '%s' "$FB_JSON" | grep -oP '"tag_name":\s*"\K[^"]+' | head -1 || true)"
-FB_VERSION="${FB_VERSION:-v2.31.2}"
+FB_VERSION="$(github_latest_tag "filebrowser/filebrowser" "v2.31.2" "false")"
 FB_URL="https://github.com/filebrowser/filebrowser/releases/download/${FB_VERSION}/${FB_ARCH}-filebrowser.tar.gz"
 
 TMP_TAR=$(mktemp /tmp/filebrowser-XXXXXX.tar.gz)
 curl -fsSL "$FB_URL" -o "$TMP_TAR" >> "$LOGFILE" 2>&1
-tar -xzf "$TMP_TAR" -C /usr/local/bin filebrowser >> "$LOGFILE" 2>&1
+tar --no-same-owner -xzf "$TMP_TAR" -C /usr/local/bin filebrowser >> "$LOGFILE" 2>&1
 rm -f "$TMP_TAR"
 chmod +x /usr/local/bin/filebrowser
 
@@ -55,11 +53,15 @@ printf '%s\n' "${FB_VERSION#v}" > /opt/filebrowser/.af-version
 # Remove any existing DB so config init is idempotent on reinstall
 rm -f /opt/filebrowser/filebrowser.db
 /usr/local/bin/filebrowser config init --database /opt/filebrowser/filebrowser.db >> "$LOGFILE" 2>&1
-/usr/local/bin/filebrowser config set --address 0.0.0.0 --port 8095 --root /srv --minimum-password-length 1 --database /opt/filebrowser/filebrowser.db >> "$LOGFILE" 2>&1
+/usr/local/bin/filebrowser config set --address 0.0.0.0 --port 8095 --root /srv --minimum-password-length 1 --database /opt/filebrowser/filebrowser.db >> "$LOGFILE" 2>&1 || \
+    /usr/local/bin/filebrowser config set --address 0.0.0.0 --port 8095 --root /srv --database /opt/filebrowser/filebrowser.db >> "$LOGFILE" 2>&1
 
 FB_USER="${MASTER_USER}"
 FB_PASS="${MASTER_PASS}"
-/usr/local/bin/filebrowser users add "$FB_USER" "$FB_PASS" --perm.admin --database /opt/filebrowser/filebrowser.db >> "$LOGFILE" 2>&1
+if ! /usr/local/bin/filebrowser users add "$FB_USER" "$FB_PASS" --perm.admin --database /opt/filebrowser/filebrowser.db >> "$LOGFILE" 2>&1; then
+    FB_PASS="$(openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | head -c 16)aA1!"
+    /usr/local/bin/filebrowser users add "$FB_USER" "$FB_PASS" --perm.admin --database /opt/filebrowser/filebrowser.db >> "$LOGFILE" 2>&1
+fi
 printf 'FileBrowser Admin User: %s\nFileBrowser Admin Password: %s\n' "${FB_USER}" "${FB_PASS}" > /opt/AetherFlow/logs/filebrowser_credentials.txt
 chmod 600 /opt/AetherFlow/logs/filebrowser_credentials.txt
 

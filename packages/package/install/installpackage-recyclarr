@@ -38,13 +38,8 @@ case "$ARCH" in
 esac
 
 report_progress 35 "Resolving latest Recyclarr release..."
-REC_JSON="$(curl -fsSL https://api.github.com/repos/recyclarr/recyclarr/releases/latest 2>/dev/null || true)"
-REC_VERSION="$(printf '%s' "$REC_JSON" | grep -oP '"tag_name":\s*"v\K[^"]+' | head -1 || true)"
-REC_VERSION="${REC_VERSION:-7.4.0}"
-REC_URL="$(printf '%s' "$REC_JSON" | grep -oP '"browser_download_url":\s*"\K[^"]*recyclarr-linux-'${REC_ARCH}'\.tar\.xz' | head -1 || true)"
-if [[ -z "$REC_URL" ]]; then
-    REC_URL="https://github.com/recyclarr/recyclarr/releases/download/v${REC_VERSION}/recyclarr-linux-${REC_ARCH}.tar.xz"
-fi
+REC_VERSION="$(github_latest_tag "recyclarr/recyclarr" "7.4.0")"
+REC_URL="https://github.com/recyclarr/recyclarr/releases/download/v${REC_VERSION}/recyclarr-linux-${REC_ARCH}.tar.xz"
 
 report_progress 60 "Downloading Recyclarr ${REC_VERSION} (${REC_ARCH})..."
 TMP_XZ=$(mktemp /tmp/recyclarr-XXXXXX.tar.xz)

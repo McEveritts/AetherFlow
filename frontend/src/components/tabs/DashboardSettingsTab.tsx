@@ -72,7 +72,7 @@ export default function DashboardSettingsTab() {
                     </div>
                 </div>
 
-                <div className="glass-panel border border-indigo-500/20 rounded-2xl divide-y divide-white/10 overflow-hidden shadow-2xl">
+                <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl divide-y divide-white/[0.04] overflow-hidden">
                     {/* 120Hz High-Refresh Motion Cadence */}
                     <div className="p-5 flex flex-col md:flex-row md:items-center justify-between gap-4 hover:bg-white/[0.02] transition-colors">
                         <div>
@@ -182,7 +182,7 @@ export default function DashboardSettingsTab() {
                     <Sparkles size={14} className="text-indigo-400" />
                     Obsidian V2 Atmosphere & Visual Tuning
                 </h4>
-                <div className="glass-panel border border-indigo-500/20 rounded-2xl divide-y divide-white/10 overflow-hidden shadow-2xl">
+                <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl divide-y divide-white/[0.04] overflow-hidden">
                     
                     {/* Aurora Intensity / Opacity Slider */}
                     <div className="p-5 flex flex-col md:flex-row md:items-center justify-between gap-4 hover:bg-white/[0.02] transition-colors">
@@ -296,7 +296,7 @@ export default function DashboardSettingsTab() {
             {/* CATEGORY: Layout & Density */}
             <div>
                 <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3 px-2">Visualization Density</h4>
-                <div className="glass-panel border border-indigo-500/20 rounded-2xl divide-y divide-white/10 overflow-hidden shadow-2xl">
+                <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl divide-y divide-white/[0.04] overflow-hidden">
                     
                     {/* Density Picker */}
                     <div className="p-5 flex flex-col md:flex-row md:items-center justify-between gap-4 hover:bg-white/[0.02] transition-colors">
@@ -380,7 +380,7 @@ export default function DashboardSettingsTab() {
             {/* CATEGORY: Connectivity */}
             <div>
                 <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3 px-2">Telemetrics Engine</h4>
-                <div className="glass-panel border border-indigo-500/20 rounded-2xl divide-y divide-white/10 overflow-hidden shadow-2xl">
+                <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl divide-y divide-white/[0.04] overflow-hidden">
                     
                     {/* Mode */}
                     <div className="p-5 flex flex-col md:flex-row md:items-center justify-between gap-4 hover:bg-white/[0.02] transition-colors">
@@ -430,7 +430,7 @@ export default function DashboardSettingsTab() {
                 </div>
             </div>
 
-            <div className="glass-panel border border-indigo-500/30 rounded-2xl p-5 flex items-start gap-4">
+            <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-5 flex items-start gap-4">
                 <Maximize2 size={20} className="text-indigo-400 shrink-0 mt-0.5" />
                 <div>
                     <h5 className="text-sm font-bold text-indigo-200">Obsidian V2 Architecture</h5>

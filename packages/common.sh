@@ -159,6 +159,36 @@ report_progress() {
     log_info "[PROGRESS:$pct] $msg"
 }
 
+github_latest_tag() {
+    local repo="$1"
+    local fallback="${2:-}"
+    local strip_v="${3:-true}"
+    local tag=""
+    local eff_url=""
+
+    eff_url="$(curl -fsSL -o /dev/null -w '%{url_effective}' "https://github.com/${repo}/releases/latest" 2>/dev/null || true)"
+    if [[ "$eff_url" == *"/releases/tag/"* ]]; then
+        tag="${eff_url##*/releases/tag/}"
+        tag="${tag%%\?*}"
+        tag="${tag%%#*}"
+    fi
+
+    if [[ -z "$tag" ]]; then
+        tag="$(curl -fsSL "https://api.github.com/repos/${repo}/releases/latest" 2>/dev/null \
+            | grep -oP '"tag_name":\s*"\K[^"]+' | head -n1 || true)"
+    fi
+
+    if [[ -z "$tag" ]]; then
+        tag="$fallback"
+    fi
+
+    if [[ "$strip_v" == "true" ]]; then
+        tag="${tag#v}"
+    fi
+
+    printf '%s\n' "$tag"
+}
+
 sync_node_global_bins() {
     local npm_prefix=""
     if command_exists npm; then

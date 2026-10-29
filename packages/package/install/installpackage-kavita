@@ -39,13 +39,8 @@ case "$ARCH" in
 esac
 
 report_progress 35 "Resolving latest Kavita release (${KAV_ARCH})..."
-KAV_JSON="$(curl -fsSL https://api.github.com/repos/Kareadita/Kavita/releases/latest 2>/dev/null || true)"
-KAV_VERSION="$(printf '%s' "$KAV_JSON" | grep -oP '"tag_name":\s*"v\K[^"]+' | head -1 || true)"
-KAV_VERSION="${KAV_VERSION:-0.8.2}"
-KAV_URL="$(printf '%s' "$KAV_JSON" | grep -oP '"browser_download_url":\s*"\K[^"]*kavita-linux-'${KAV_ARCH}'\.tar\.gz' | head -1 || true)"
-if [[ -z "$KAV_URL" ]]; then
-    KAV_URL="https://github.com/Kareadita/Kavita/releases/download/v${KAV_VERSION}/kavita-linux-${KAV_ARCH}.tar.gz"
-fi
+KAV_VERSION="$(github_latest_tag "Kareadita/Kavita" "0.8.2")"
+KAV_URL="https://github.com/Kareadita/Kavita/releases/download/v${KAV_VERSION}/kavita-linux-${KAV_ARCH}.tar.gz"
 
 report_progress 60 "Downloading and extracting Kavita ${KAV_VERSION}..."
 TMP_TAR=$(mktemp /tmp/kavita-XXXXXX.tar.gz)

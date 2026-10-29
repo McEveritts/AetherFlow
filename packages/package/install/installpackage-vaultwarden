@@ -39,9 +39,7 @@ case "$ARCH" in
 esac
 
 report_progress 35 "Fetching latest Vaultwarden release metadata..."
-VW_JSON="$(curl -fsSL https://api.github.com/repos/dani-garcia/vaultwarden/releases/latest 2>/dev/null || true)"
-VW_VERSION="$(printf '%s' "$VW_JSON" | grep -oP '"tag_name":\s*"\K[^"]+' | head -1 || true)"
-VW_VERSION="${VW_VERSION:-1.32.7}"
+VW_VERSION="$(github_latest_tag "dani-garcia/vaultwarden" "1.32.7")"
 
 report_progress 55 "Extracting prebuilt Vaultwarden binary and Web Vault (${OCI_ARCH})..."
 TMP_EXTRACT=$(mktemp -d /tmp/vw-oci-XXXXXX)

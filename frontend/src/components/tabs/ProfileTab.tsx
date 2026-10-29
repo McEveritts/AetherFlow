@@ -1,6 +1,6 @@
 import { useAuth } from '@/contexts/AuthContext';
 import { useToast } from '@/contexts/ToastContext';
-import { UserCircle, Mail, AlertCircle, Save, HardDrive, KeyRound, Lock, X, Loader2 } from 'lucide-react';
+import { Mail, AlertCircle, Save, HardDrive, KeyRound, Lock, X, Loader2 } from 'lucide-react';
 import { useState, useEffect, useRef } from 'react';
 import useSWR from 'swr';
 import SkeletonBox from '@/components/layout/SkeletonBox';
@@ -172,14 +172,9 @@ export default function ProfileTab() {
 
     return (
         <div className="space-y-6 animate-fade-in relative z-10 w-full mb-8">
-            <h3 className="text-xl font-bold text-slate-100 flex items-center gap-3 border-b border-white/[0.06] pb-4">
-                <UserCircle size={24} className="text-indigo-400" />
-                Local Profile
-            </h3>
-
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 w-full relative z-10">
                 {/* LEFT COLUMN: Account Overview & Email Preferences */}
-                <div className="glass-panel rounded-2xl p-6 border border-white/[0.06] flex flex-col justify-between space-y-8">
+                <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-6 flex flex-col justify-between space-y-8">
                     {/* Avatar & Basics */}
                     <div className="flex flex-col sm:flex-row items-center sm:items-start gap-6 pb-6 border-b border-white/[0.06]">
                         <div className="flex flex-col items-center gap-3 shrink-0">
@@ -270,7 +265,7 @@ export default function ProfileTab() {
                 {/* RIGHT COLUMN: Authentication & Security + Storage Quota */}
                 <div className="space-y-6">
                     {/* Security Section */}
-                    <div className="glass-panel rounded-2xl p-6 border border-white/[0.06] space-y-4">
+                    <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-6 space-y-4">
                         <div className="flex items-center justify-between border-b border-white/[0.06] pb-3">
                             <h4 className="text-sm font-bold text-slate-100 flex items-center gap-2">
                                 <KeyRound size={16} className="text-indigo-400" /> Authentication & Security
@@ -319,7 +314,7 @@ export default function ProfileTab() {
                     </div>
 
                     {/* Account Storage Quota */}
-                    <div className="glass-panel rounded-2xl p-6 border border-white/[0.06] space-y-4">
+                    <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-6 space-y-4">
                         <div className="flex items-center gap-3">
                             <div className="p-2.5 bg-emerald-500/15 border border-emerald-500/20 text-emerald-400 rounded-xl">
                                 <HardDrive size={18} />
@@ -373,7 +368,7 @@ export default function ProfileTab() {
             {/* Change Password Modal */}
             {showPasswordModal && (
                 <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-fade-in">
-                    <div className="glass-panel w-full max-w-md rounded-3xl p-6 border border-white/10 shadow-2xl relative">
+                    <div className="w-full max-w-md rounded-2xl p-6 border border-white/[0.08] bg-slate-900/95 backdrop-blur-2xl shadow-2xl relative">
                         <div className="flex items-center justify-between pb-4 border-b border-white/10 mb-6">
                             <div className="flex items-center gap-2">
                                 <Lock className="text-indigo-400" size={20} />

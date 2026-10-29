@@ -29,7 +29,7 @@ const PROVIDER_CARDS: {
     {
         id: 'gemini',
         label: 'Google Gemini',
-        subtitle: 'Gemini 3.8 Flash & 4 Argon',
+        subtitle: 'Gemini 4 Argon',
         accent: 'text-amber-400',
         activeBorder: 'border-amber-500/40',
         activeBg: 'bg-amber-500/10',
@@ -76,7 +76,7 @@ export default function SettingsTab() {
     const { preferredMode, setPreferredMode, pollInterval, setPollInterval } = useConnectionStore();
     
     // Config State
-    const [model, setModel] = useState('gemini-3.8-flash');
+    const [model, setModel] = useState('gemini-4-argon');
     const [prompt, setPrompt] = useState("You are FlowAI, a highly intelligent infrastructure assistant connected to a local Next.js + Go Nexus environment. Always prioritize safe and performant configurations.");
     const [apiKey, setApiKey] = useState('');
     const [openaiApiKey, setOpenaiApiKey] = useState('');
@@ -136,7 +136,7 @@ export default function SettingsTab() {
         {
             onSuccess: (data: Record<string, string>) => {
                 if (data.aiModel) {
-                    setModel(ALL_MODEL_IDS.includes(data.aiModel) ? data.aiModel : 'gemini-3.8-flash');
+                    setModel(ALL_MODEL_IDS.includes(data.aiModel) ? data.aiModel : 'gemini-4-argon');
                 }
                 if (data.systemPrompt) setPrompt(data.systemPrompt);
                 if (data.geminiApiKey) setApiKey(data.geminiApiKey);
@@ -262,19 +262,44 @@ export default function SettingsTab() {
     };
 
     return (
-        <div className="space-y-8 animate-fade-in relative pb-12 w-full">
-            {/* Open Page Header */}
-            <div className="flex flex-col md:flex-row justify-between items-start md:items-end gap-4 relative z-10">
-                <div>
-                    <h2 className="text-2xl font-bold text-slate-100 flex items-center gap-3 tracking-tight">
-                        <div className="p-2 rounded-xl bg-indigo-500/10 border border-indigo-500/20 text-indigo-400">
-                            <Settings size={22} />
+        <div className="space-y-6 animate-fade-in relative pb-12 w-full min-w-0">
+            {/* Open Top Toolbar */}
+            <div className="flex flex-wrap items-center justify-between gap-4 pb-4 mb-2 border-b border-white/[0.06] relative z-30 shrink-0">
+                <div className="flex items-center gap-3.5">
+                    <div className="h-10 w-10 rounded-xl flex items-center justify-center border bg-indigo-500/20 border-indigo-500/30 shadow-[0_0_20px_rgba(99,102,241,0.15)] text-indigo-400">
+                        <Settings size={20} />
+                    </div>
+                    <div>
+                        <div className="flex items-center gap-2.5">
+                            <h2 className="text-lg font-bold text-slate-100 tracking-tight">System &amp; Workspace Settings</h2>
+                            <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full border bg-indigo-500/15 text-indigo-300 border-indigo-500/30">
+                                Global Control
+                            </span>
                         </div>
-                        {t('title')}
-                    </h2>
-                    <p className="text-xs text-slate-400 mt-1.5">
-                        Configure global interface preferences, FlowAI inference engines, system update channels, and security policies.
-                    </p>
+                        <div className="flex items-center gap-2 mt-0.5">
+                            <span className="relative flex h-1.5 w-1.5">
+                                <span className="absolute inline-flex h-full w-full rounded-full opacity-75 bg-emerald-400"></span>
+                                <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-emerald-500"></span>
+                            </span>
+                            <span className="text-xs text-slate-400 font-medium tracking-wide">
+                                Active Environment &middot; AetherFlow Linux Runtime
+                            </span>
+                        </div>
+                    </div>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                    {['preferences', 'ai', 'system'].includes(activeTab) && (
+                        <button
+                            type="button"
+                            onClick={handleSave}
+                            disabled={isSaving}
+                            className="obs-touch-target-standard obs-gpu-120hz-interactive flex items-center gap-1.5 px-4 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-bold transition-all shadow-lg shadow-indigo-500/20 disabled:opacity-50"
+                        >
+                            <Save size={13} />
+                            <span>{isSaving ? 'Saving...' : 'Save Configuration'}</span>
+                        </button>
+                    )}
                 </div>
             </div>
 
@@ -477,10 +502,10 @@ export default function SettingsTab() {
                                                     <label className="text-sm font-semibold text-slate-200 flex items-center gap-2">
                                                         <Globe size={15} className="text-indigo-400" /> Server Base Domain
                                                     </label>
-                                                    <span className="text-[10px] font-mono uppercase tracking-wider text-indigo-400">Caddy Auto-Route</span>
+                                                    <span className="text-[10px] font-mono uppercase tracking-wider text-indigo-400">Apache2 / Caddy Auto-Route</span>
                                                 </div>
                                                 <p className="text-xs text-slate-500">
-                                                    Automatically assigns <span className="font-mono text-indigo-300">jellyfin.{baseDomain.trim().replace(/^\*\./, '') || 'domain.com'}</span> via Caddy reverse proxy when installing apps.
+                                                    Automatically assigns <span className="font-mono text-indigo-300">jellyfin.{baseDomain.trim().replace(/^\*\./, '') || 'domain.com'}</span> via Apache2 / Caddy reverse proxy when installing apps.
                                                 </p>
                                                 <input
                                                     type="text"

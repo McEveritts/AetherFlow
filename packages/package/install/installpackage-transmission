@@ -60,7 +60,8 @@ PYEOF
 cp -f /var/lib/transmission-daemon/.config/transmission-daemon/settings.json /etc/transmission-daemon/settings.json
 
 report_progress 70 "Installing Transmission Web Control UI..."
-TWC_URL="$(curl -fsSL https://api.github.com/repos/ronggang/transmission-web-control/releases/latest 2>/dev/null | grep -oP '"tarball_url":\s*"\K[^"]+' | head -1 || true)"
+TWC_TAG="$(github_latest_tag "ronggang/transmission-web-control" "v1.6.1-update1" "false")"
+TWC_URL="https://github.com/ronggang/transmission-web-control/archive/refs/tags/${TWC_TAG}.tar.gz"
 if [[ -n "$TWC_URL" ]]; then
     TMP_TAR=$(mktemp /tmp/twc-XXXXXX.tar.gz)
     if curl -fsSL "$TWC_URL" -o "$TMP_TAR" >> "$LOGFILE" 2>&1; then

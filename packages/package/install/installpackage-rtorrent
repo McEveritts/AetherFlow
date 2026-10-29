@@ -45,9 +45,7 @@ session.path.set = /var/lib/rtorrent/session/
 directory.default.set = /var/lib/rtorrent/downloads
 schedule2 = watch_directory,5,5,load.start=/var/lib/rtorrent/watch/*.torrent
 
-# SCGI Configuration: both UNIX domain socket and localhost port
-network.scgi.open_local = /run/rtorrent/rpc.sock
-execute.nothrow = chmod,777,/run/rtorrent/rpc.sock
+# SCGI Configuration: localhost TCP port (used by ruTorrent and Flood)
 network.scgi.open_port = 127.0.0.1:15000
 
 encoding.add = UTF-8

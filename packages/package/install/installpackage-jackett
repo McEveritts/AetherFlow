@@ -39,7 +39,7 @@ case "$ARCH" in
 esac
 
 report_progress 35 "Downloading latest Jackett (${JACKETT_ARCH})..."
-JACKETT_VERSION="$(curl -fsSL https://api.github.com/repos/Jackett/Jackett/releases/latest 2>/dev/null | grep -oP '"tag_name":\s*"v?\K[^"]+' | head -1 || true)"
+JACKETT_VERSION="$(github_latest_tag "Jackett/Jackett" "0.22.1000")"
 TMP_TAR=$(mktemp /tmp/jackett-XXXXXX.tar.gz)
 curl -fsSL "https://github.com/Jackett/Jackett/releases/latest/download/Jackett.Binaries.Linux${JACKETT_ARCH}.tar.gz" -o "$TMP_TAR" >> "$LOGFILE" 2>&1
 

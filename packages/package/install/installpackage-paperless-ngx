@@ -24,8 +24,8 @@ report_progress 10 "Installing OCR, Redis, and Python system dependencies for Pa
 DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
     redis-server tesseract-ocr tesseract-ocr-eng imagemagick ghostscript \
-    poppler-utils gnupg libpq-dev libmagic-dev \
-    python3 python3-pip python3-venv python3-dev build-essential xz-utils curl ca-certificates >> "$LOGFILE" 2>&1
+    poppler-utils gnupg libpq-dev libmagic-dev pkg-config default-libmysqlclient-dev \
+    python3 python3-pip python3-venv python3-dev build-essential xz-utils curl git ca-certificates >> "$LOGFILE" 2>&1
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq libzbar0t64 >> "$LOGFILE" 2>&1 || \
     DEBIAN_FRONTEND=noninteractive apt-get install -y -qq libzbar0 >> "$LOGFILE" 2>&1 || true
 
@@ -42,18 +42,13 @@ mkdir -p /opt/paperless \
          /var/lib/paperless/export
 
 report_progress 35 "Resolving latest Paperless-ngx release tarball..."
-PNGX_JSON="$(curl -fsSL https://api.github.com/repos/paperless-ngx/paperless-ngx/releases/latest 2>/dev/null || true)"
-PNGX_VER="$(printf '%s' "$PNGX_JSON" | grep -oP '"tag_name":\s*"v\K[^"]+' | head -1 || true)"
-PNGX_VER="${PNGX_VER:-2.14.7}"
-PNGX_URL="$(printf '%s' "$PNGX_JSON" | grep -oP '"browser_download_url":\s*"\K[^"]*paperless-ngx-v'${PNGX_VER}'\.tar\.xz' | head -1 || true)"
-if [[ -z "$PNGX_URL" ]]; then
-    PNGX_URL="https://github.com/paperless-ngx/paperless-ngx/releases/download/v${PNGX_VER}/paperless-ngx-v${PNGX_VER}.tar.xz"
-fi
+PNGX_VER="$(github_latest_tag "paperless-ngx/paperless-ngx" "2.14.7")"
+PNGX_URL="https://github.com/paperless-ngx/paperless-ngx/releases/download/v${PNGX_VER}/paperless-ngx-v${PNGX_VER}.tar.xz"
 
 report_progress 55 "Downloading and extracting Paperless-ngx ${PNGX_VER}..."
 TMP_XZ=$(mktemp /tmp/paperless-XXXXXX.tar.xz)
 if curl -fsSL "$PNGX_URL" -o "$TMP_XZ" >> "$LOGFILE" 2>&1; then
-    tar -xJf "$TMP_XZ" -C /opt/paperless --strip-components=1 2>/dev/null || tar -xJf "$TMP_XZ" -C /opt >> "$LOGFILE" 2>&1
+    tar --no-same-owner -xJf "$TMP_XZ" -C /opt/paperless --strip-components=1 2>/dev/null || tar --no-same-owner -xJf "$TMP_XZ" -C /opt >> "$LOGFILE" 2>&1
     rm -f "$TMP_XZ"
 else
     # Fallback to git shallow clone
@@ -104,7 +99,11 @@ if [[ -f /opt/paperless/src/manage.py ]]; then
     export PAPERLESS_ADMIN_USER="${MASTER_USER}"
     export PAPERLESS_ADMIN_PASSWORD="${MASTER_PASS}"
     export PAPERLESS_ADMIN_MAIL="${MASTER_USER}@aether.local"
+    export DJANGO_SUPERUSER_USERNAME="${MASTER_USER}"
+    export DJANGO_SUPERUSER_PASSWORD="${MASTER_PASS}"
+    export DJANGO_SUPERUSER_EMAIL="${MASTER_USER}@aether.local"
     /opt/paperless/.venv/bin/python /opt/paperless/src/manage.py migrate >> "$LOGFILE" 2>&1 || true
+    /opt/paperless/.venv/bin/python /opt/paperless/src/manage.py createsuperuser --noinput >> "$LOGFILE" 2>&1 || true
     /opt/paperless/.venv/bin/python /opt/paperless/src/manage.py collectstatic --no-input >> "$LOGFILE" 2>&1 || true
 fi
 

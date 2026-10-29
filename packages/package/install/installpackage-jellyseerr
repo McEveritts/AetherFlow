@@ -22,11 +22,15 @@ log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 10 "Installing system and Node.js prerequisites for Jellyseerr..."
 
 DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl git gnupg ca-certificates build-essential python3 >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl git gnupg ca-certificates build-essential python3 python3-setuptools >> "$LOGFILE" 2>&1
 
 ensure_node 20
-if ! command_exists pnpm; then
-    npm install -g pnpm >> "$LOGFILE" 2>&1
+PNPM_MAJOR=0
+if command_exists pnpm; then
+    PNPM_MAJOR="$(pnpm -v 2>/dev/null | cut -d. -f1 || echo 0)"
+fi
+if [[ "${PNPM_MAJOR:-0}" -ne 9 ]]; then
+    npm install -g pnpm@9 >> "$LOGFILE" 2>&1
     sync_node_global_bins
 fi
 if ! command_exists yarn; then

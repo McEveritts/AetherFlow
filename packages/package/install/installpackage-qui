@@ -39,9 +39,7 @@ case "$ARCH" in
 esac
 
 report_progress 40 "Resolving latest Qui release (${QUI_ARCH})..."
-QUI_JSON="$(curl -fsSL https://api.github.com/repos/autobrr/qui/releases/latest 2>/dev/null || true)"
-QUI_VERSION="$(printf '%s' "$QUI_JSON" | grep -oP '"tag_name":\s*"v\K[^"]+' | head -1 || true)"
-QUI_VERSION="${QUI_VERSION:-1.33.1}"
+QUI_VERSION="$(github_latest_tag "autobrr/qui" "1.33.1")"
 QUI_URL="https://github.com/autobrr/qui/releases/download/v${QUI_VERSION}/qui_${QUI_VERSION}_${QUI_ARCH}.tar.gz"
 
 report_progress 65 "Downloading and installing Qui ${QUI_VERSION}..."

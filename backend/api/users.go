@@ -21,7 +21,7 @@ func GetUsers(c *gin.Context) {
 	}
 	defer rows.Close()
 
-	var users []models.User
+	users := make([]models.User, 0)
 	for rows.Next() {
 		var u models.User
 		if err := rows.Scan(&u.ID, &u.Username, &u.Email, &u.AvatarURL, &u.Role); err != nil {

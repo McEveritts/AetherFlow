@@ -32,26 +32,26 @@ mkdir -p /etc/unpackerr /var/lib/unpackerr /opt/unpackerr
 
 ARCH=$(dpkg --print-architecture)
 case "$ARCH" in
-    amd64) UP_ARCH="amd64.linux.gz" ;;
-    arm64) UP_ARCH="arm64.linux.gz" ;;
-    armhf) UP_ARCH="arm.linux.gz" ;;
+    amd64) UP_TAR_ARCH="amd64"; UP_GZ_ARCH="amd64.linux.gz" ;;
+    arm64) UP_TAR_ARCH="arm64"; UP_GZ_ARCH="arm64.linux.gz" ;;
+    armhf) UP_TAR_ARCH="armhf"; UP_GZ_ARCH="arm.linux.gz" ;;
     *) print_error "Unsupported architecture: $ARCH"; exit 1 ;;
 esac
 
 report_progress 35 "Resolving latest Unpackerr binary release..."
-UP_JSON="$(curl -fsSL https://api.github.com/repos/davidnewhall/unpackerr/releases/latest 2>/dev/null || true)"
-UP_VERSION="$(printf '%s' "$UP_JSON" | grep -oP '"tag_name":\s*"v\K[^"]+' | head -1 || true)"
-UP_VERSION="${UP_VERSION:-0.14.5}"
-UP_URL="$(printf '%s' "$UP_JSON" | grep -oP '"browser_download_url":\s*"\K[^"]*unpackerr\.'${UP_ARCH} | head -1 || true)"
-if [[ -z "$UP_URL" ]]; then
-    UP_URL="https://github.com/davidnewhall/unpackerr/releases/download/v${UP_VERSION}/unpackerr.${UP_ARCH}"
-fi
+UP_VERSION="$(github_latest_tag "Unpackerr/unpackerr" "1.0.0")"
+UP_TAR_URL="https://github.com/Unpackerr/unpackerr/releases/download/v${UP_VERSION}/unpackerr_${UP_VERSION}_linux_${UP_TAR_ARCH}.tar.gz"
+UP_GZ_URL="https://github.com/davidnewhall/unpackerr/releases/download/v${UP_VERSION}/unpackerr.${UP_GZ_ARCH}"
 
 report_progress 60 "Downloading Unpackerr ${UP_VERSION}..."
-TMP_GZ=$(mktemp /tmp/unpackerr-XXXXXX.gz)
-curl -fsSL "$UP_URL" -o "$TMP_GZ" >> "$LOGFILE" 2>&1
-gzip -dc "$TMP_GZ" > /usr/local/bin/unpackerr
-rm -f "$TMP_GZ"
+TMP_ARCHIVE=$(mktemp /tmp/unpackerr-XXXXXX)
+if curl -fsSL "$UP_TAR_URL" -o "$TMP_ARCHIVE" >> "$LOGFILE" 2>&1; then
+    tar --no-same-owner -xzf "$TMP_ARCHIVE" -C /usr/local/bin unpackerr >> "$LOGFILE" 2>&1
+else
+    curl -fsSL "$UP_GZ_URL" -o "$TMP_ARCHIVE" >> "$LOGFILE" 2>&1
+    gzip -dc "$TMP_ARCHIVE" > /usr/local/bin/unpackerr
+fi
+rm -f "$TMP_ARCHIVE"
 chmod 755 /usr/local/bin/unpackerr
 printf '%s\n' "${UP_VERSION#v}" > /opt/unpackerr/.af-version
 

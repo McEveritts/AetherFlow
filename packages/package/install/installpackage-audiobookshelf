@@ -39,14 +39,8 @@ case "$ARCH" in
 esac
 
 report_progress 35 "Resolving latest Audiobookshelf debian release..."
-ABS_JSON="$(curl -fsSL https://api.github.com/repos/advplyr/audiobookshelf/releases/latest 2>/dev/null || true)"
-ABS_VERSION="$(printf '%s' "$ABS_JSON" | grep -oP '"tag_name":\s*"v\K[^"]+' | head -1 || true)"
-ABS_VERSION="${ABS_VERSION:-2.37.2}"
-ABS_URL="$(printf '%s' "$ABS_JSON" | grep -oP '"browser_download_url":\s*"\K[^"]*audiobookshelf_'${ABS_VERSION}'_'${ABS_ARCH}'\.deb' | head -1 || true)"
-
-if [[ -z "$ABS_URL" ]]; then
-    ABS_URL="https://advplyr.github.io/audiobookshelf-ppa/audiobookshelf_${ABS_VERSION}_${ABS_ARCH}.deb"
-fi
+ABS_VERSION="$(github_latest_tag "advplyr/audiobookshelf" "2.37.2")"
+ABS_URL="https://advplyr.github.io/audiobookshelf-ppa/audiobookshelf_${ABS_VERSION}_${ABS_ARCH}.deb"
 
 report_progress 60 "Downloading and installing Audiobookshelf ${ABS_VERSION}..."
 TMP_DEB=$(mktemp /tmp/abs-XXXXXX.deb)

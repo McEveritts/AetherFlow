@@ -49,9 +49,7 @@ case "$ARCH" in
 esac
 
 report_progress 35 "Resolving latest AdGuard Home release (${AGH_ARCH})..."
-AGH_JSON="$(curl -fsSL https://api.github.com/repos/AdguardTeam/AdGuardHome/releases/latest 2>/dev/null || true)"
-AGH_VERSION="$(printf '%s' "$AGH_JSON" | grep -oP '"tag_name":\s*"v\K[^"]+' | head -1 || true)"
-AGH_VERSION="${AGH_VERSION:-0.107.56}"
+AGH_VERSION="$(github_latest_tag "AdguardTeam/AdGuardHome" "0.107.56")"
 AGH_URL="https://github.com/AdguardTeam/AdGuardHome/releases/download/v${AGH_VERSION}/AdGuardHome_${AGH_ARCH}.tar.gz"
 
 report_progress 60 "Downloading and extracting AdGuard Home ${AGH_VERSION}..."

@@ -22,7 +22,7 @@ log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 10 "Installing system and Node.js prerequisites for Overseerr..."
 
 DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl git gnupg ca-certificates build-essential python3 >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl git gnupg ca-certificates build-essential python3 python3-setuptools >> "$LOGFILE" 2>&1
 
 ensure_node 20
 if ! command_exists yarn; then

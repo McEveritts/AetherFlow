@@ -346,5 +346,13 @@ func TestMasterCredentialsSyncIntoAppBlueprint(t *testing.T) {
 	if !strings.Contains(content, `WebUI\Username=betheenvy`) || !strings.Contains(content, `WebUI\Password_PBKDF2="@ByteArray(`) {
 		t.Errorf("qBittorrent.conf missing master credentials:\n%s", content)
 	}
+
+	if !isConfigPathWritable(cfgPath) {
+		t.Errorf("expected isConfigPathWritable(%q) to be true for writable file", cfgPath)
+	}
+	nonExistentParent := filepath.Join(tmpRoot, "missing-dir", "subdir", "qBittorrent.conf")
+	if isConfigPathWritable(nonExistentParent) {
+		t.Errorf("expected isConfigPathWritable(%q) to be false when parent directory does not exist", nonExistentParent)
+	}
 }
 

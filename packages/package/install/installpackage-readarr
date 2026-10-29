@@ -39,12 +39,8 @@ case "$ARCH" in
 esac
 
 report_progress 35 "Downloading Readarr (${READARR_ARCH})..."
-READARR_JSON="$(curl -fsSL https://api.github.com/repos/Readarr/Readarr/releases/latest 2>/dev/null || true)"
-READARR_VERSION="$(printf '%s' "$READARR_JSON" | grep -oP '"tag_name":\s*"v?\K[^"]+' | head -1 || true)"
-READARR_URL="$(printf '%s' "$READARR_JSON" | grep -oP '"browser_download_url":\s*"\K[^"]*linux-core-'${READARR_ARCH}'\.tar\.gz' | head -1 || true)"
-if [[ -z "$READARR_URL" ]]; then
-    READARR_URL="https://readarr.servarr.com/v1/update/develop/updatefile?os=linux&runtime=netcore&arch=${READARR_ARCH}"
-fi
+READARR_VERSION="$(github_latest_tag "Readarr/Readarr" "0.4.12.2738")"
+READARR_URL="https://readarr.servarr.com/v1/update/develop/updatefile?os=linux&runtime=netcore&arch=${READARR_ARCH}"
 
 TMP_TAR=$(mktemp /tmp/readarr-XXXXXX.tar.gz)
 curl -fsSL "$READARR_URL" -o "$TMP_TAR" >> "$LOGFILE" 2>&1

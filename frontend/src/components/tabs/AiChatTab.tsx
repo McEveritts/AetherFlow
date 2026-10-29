@@ -56,7 +56,7 @@ export default function AiChatTab() {
     const [input, setInput] = useState('');
     const [isTyping, setIsTyping] = useState(false);
     const [selectedProvider, setSelectedProvider] = useState<AIProviderID>('gemini');
-    const [selectedModel, setSelectedModel] = useState('gemini-3.8-flash');
+    const [selectedModel, setSelectedModel] = useState('gemini-4-argon');
     const [showModelPicker, setShowModelPicker] = useState(false);
     const [supportMode, setSupportMode] = useState(false);
     const [contextMode, setContextMode] = useState('full');

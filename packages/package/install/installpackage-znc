@@ -41,10 +41,13 @@ if [[ ! -f /var/lib/znc/znc.pem ]]; then
 fi
 
 if [[ ! -f /var/lib/znc/configs/znc.conf ]]; then
+    ZNC_CFG_VER="$(printf '%s' "$ZNC_VER" | grep -oE '^[0-9]+\.[0-9]+' || echo "1.9")"
+    ZNC_CFG_VER="${ZNC_CFG_VER:-1.9}"
     ZNC_SALT="aetherflowzncsalt123"
     ZNC_HASH="$(python3 -c 'import sys,hashlib; print(hashlib.sha256((sys.argv[1]+sys.argv[2]).encode("utf-8")).hexdigest())' "${MASTER_PASS}" "${ZNC_SALT}")"
     cat <<EOF > /var/lib/znc/configs/znc.conf
 // ZNC configuration created by AetherFlow
+Version = ${ZNC_CFG_VER}
 AnonIPLimit = 10
 AuthOnlyVia = ""
 ConfigWriteDelay = 0

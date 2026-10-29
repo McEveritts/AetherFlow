@@ -39,7 +39,7 @@ case "$ARCH" in
 esac
 
 report_progress 35 "Downloading Radarr (${RADARR_ARCH})..."
-RADARR_VERSION="$(curl -fsSL https://api.github.com/repos/Radarr/Radarr/releases/latest 2>/dev/null | grep -oP '"tag_name":\s*"v?\K[^"]+' | head -1 || true)"
+RADARR_VERSION="$(github_latest_tag "Radarr/Radarr" "5.16.3.9541")"
 TMP_TAR=$(mktemp /tmp/radarr-XXXXXX.tar.gz)
 curl -fsSL "https://radarr.servarr.com/v1/update/master/updatefile?os=linux&runtime=netcore&arch=${RADARR_ARCH}" -o "$TMP_TAR" >> "$LOGFILE" 2>&1
 

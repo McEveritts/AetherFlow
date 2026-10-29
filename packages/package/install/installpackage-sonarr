@@ -39,7 +39,7 @@ case "$ARCH" in
 esac
 
 report_progress 35 "Downloading Sonarr v4 (${SONARR_ARCH})..."
-SONARR_VERSION="$(curl -fsSL https://api.github.com/repos/Sonarr/Sonarr/releases/latest 2>/dev/null | grep -oP '"tag_name":\s*"v?\K[^"]+' | head -1 || true)"
+SONARR_VERSION="$(github_latest_tag "Sonarr/Sonarr" "4.0.12.2823")"
 TMP_TAR=$(mktemp /tmp/sonarr-XXXXXX.tar.gz)
 curl -fsSL "https://services.sonarr.tv/v1/download/main/latest?version=4&os=linux&arch=${SONARR_ARCH}" -o "$TMP_TAR" >> "$LOGFILE" 2>&1
 

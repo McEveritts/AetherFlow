@@ -104,7 +104,7 @@ func TestIngressConfigs_PersistenceAndSync(t *testing.T) {
 			ListenPort: 8096,
 		})
 
-		settingsPayload := `{"aiModel":"gemini-3.8-flash","language":"en","timezone":"UTC","updateChannel":"stable","defaultDashboard":"overview","setupCompleted":true,"baseDomain":"domain.com"}`
+		settingsPayload := `{"aiModel":"gemini-4-argon","language":"en","timezone":"UTC","updateChannel":"stable","defaultDashboard":"overview","setupCompleted":true,"baseDomain":"domain.com"}`
 		w := httptest.NewRecorder()
 		req, _ := http.NewRequest("PUT", "/settings", bytes.NewBufferString(settingsPayload))
 		req.Header.Set("Content-Type", "application/json")

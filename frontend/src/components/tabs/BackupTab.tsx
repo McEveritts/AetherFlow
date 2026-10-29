@@ -137,34 +137,37 @@ export default function BackupTab() {
     };
 
     return (
-        <div className="animate-fade-in relative z-10 w-full">
+        <div className="animate-fade-in relative z-10 w-full min-w-0">
             {/* Background glow */}
             <div className="absolute top-0 right-0 w-[400px] h-[400px] bg-emerald-500/10 rounded-full blur-[100px] pointer-events-none -translate-y-1/2 translate-x-1/2"></div>
 
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-8 pb-4 border-b border-white/5 relative z-10">
-                    <h2 className="text-2xl font-bold text-slate-100 flex items-center gap-3">
-                        <HardDriveDownload size={24} className="text-emerald-400" />
-                        System Backups & Snapshots
-                    </h2>
-                    <div className="flex items-center gap-2 text-sm text-slate-400 bg-emerald-500/10 text-emerald-400 px-4 py-2 rounded-xl border border-emerald-500/20 self-start sm:self-auto">
-                        <ShieldCheck size={16} />
-                        {schedule?.mode === 'smart' ? 'Smart backup automation active' : 'Manual backup mode'}
-                    </div>
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-6 pb-3 border-b border-white/[0.06] relative z-10">
+                <div>
+                    <h3 className="text-base font-bold text-slate-100 flex items-center gap-2">
+                        <HardDriveDownload size={18} className="text-emerald-400" />
+                        Database Snapshots &amp; Automated Archive
+                    </h3>
+                    <p className="text-xs text-slate-400 mt-0.5">Automated and on-demand SQLite zero-downtime snapshots.</p>
                 </div>
+                <div className="flex items-center gap-2 text-xs font-semibold text-emerald-400 bg-emerald-500/10 px-3 py-1.5 rounded-xl border border-emerald-500/20 self-start sm:self-auto">
+                    <ShieldCheck size={14} />
+                    {schedule?.mode === 'smart' ? 'Smart automation active' : 'Manual backup mode'}
+                </div>
+            </div>
 
-                <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 relative z-10">
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 relative z-10">
 
-                    {/* Manual Backup Trigger */}
-                    <div className="bg-slate-950/50 border border-white/10 rounded-3xl p-8 flex flex-col justify-between">
-                        <div>
-                            <div className="w-16 h-16 bg-emerald-500/10 rounded-2xl flex items-center justify-center text-emerald-400 mb-6 border border-emerald-500/20">
-                                <Database size={32} />
-                            </div>
-                            <h3 className="text-xl font-bold text-slate-200 mb-2">Manual Snapshot</h3>
-                            <p className="text-slate-400 text-sm leading-relaxed mb-8">
-                                Triggers an immediate zero-downtime hot backup of the full AetherFlow SQLite database.
-                            </p>
+                {/* Manual Backup Trigger */}
+                <div className="bg-slate-900/40 border border-white/[0.06] backdrop-blur-xl rounded-2xl p-6 flex flex-col justify-between">
+                    <div>
+                        <div className="w-12 h-12 bg-emerald-500/10 rounded-xl flex items-center justify-center text-emerald-400 mb-4 border border-emerald-500/20">
+                            <Database size={24} />
                         </div>
+                        <h4 className="text-base font-bold text-slate-100 mb-1">Manual Snapshot</h4>
+                        <p className="text-slate-400 text-xs leading-relaxed mb-6">
+                            Triggers an immediate zero-downtime hot backup of the full AetherFlow SQLite database.
+                        </p>
+                    </div>
 
                         <button
                             onClick={handleRunBackup}
@@ -189,13 +192,13 @@ export default function BackupTab() {
                     </div>
 
                     {/* Smart Schedule Card */}
-                    <div className="bg-slate-950/50 border border-white/10 rounded-3xl p-8 flex flex-col justify-between">
+                    <div className="bg-slate-900/40 border border-white/[0.06] backdrop-blur-xl rounded-2xl p-6 flex flex-col justify-between">
                         <div>
-                            <div className="w-16 h-16 bg-purple-500/10 rounded-2xl flex items-center justify-center text-purple-400 mb-6 border border-purple-500/20">
-                                <BrainCircuit size={32} />
+                            <div className="w-12 h-12 bg-purple-500/10 rounded-xl flex items-center justify-center text-purple-400 mb-4 border border-purple-500/20">
+                                <BrainCircuit size={24} />
                             </div>
-                            <h3 className="text-xl font-bold text-slate-200 mb-2">Smart Schedule</h3>
-                            <p className="text-slate-400 text-sm leading-relaxed mb-4">
+                            <h4 className="text-base font-bold text-slate-100 mb-1">Smart Schedule</h4>
+                            <p className="text-slate-400 text-xs leading-relaxed mb-4">
                                 AI analyzes 30-day I/O patterns to find the optimal low-traffic backup window automatically.
                             </p>
 
@@ -246,7 +249,7 @@ export default function BackupTab() {
                     </div>
 
                     {/* Status Console & Previous Backups */}
-                    <div className="bg-slate-900 border border-white/5 rounded-3xl p-8 flex flex-col h-[500px]">
+                    <div className="bg-slate-900/40 border border-white/[0.06] backdrop-blur-xl rounded-2xl p-6 flex flex-col h-[500px]">
                         <h3 className="text-sm font-bold text-slate-500 uppercase tracking-wider mb-6 flex justify-between items-center">
                             <span className="flex items-center gap-2"><Clock size={16} /> Archive Snapshots</span>
                             <span className="text-xs bg-slate-800 px-2 py-1 rounded-md">{backups.length} Total</span>

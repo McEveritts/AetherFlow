@@ -39,9 +39,7 @@ case "$ARCH" in
 esac
 
 report_progress 40 "Resolving latest Gitea release (${GITEA_ARCH})..."
-GITEA_JSON="$(curl -fsSL https://api.github.com/repos/go-gitea/gitea/releases/latest 2>/dev/null || true)"
-GITEA_VERSION="$(printf '%s' "$GITEA_JSON" | grep -oP '"tag_name":\s*"v\K[^"]+' | head -1 || true)"
-GITEA_VERSION="${GITEA_VERSION:-1.22.3}"
+GITEA_VERSION="$(github_latest_tag "go-gitea/gitea" "1.22.3")"
 GITEA_URL="https://github.com/go-gitea/gitea/releases/download/v${GITEA_VERSION}/gitea-${GITEA_VERSION}-${GITEA_ARCH}"
 
 report_progress 65 "Downloading Gitea ${GITEA_VERSION} binary..."

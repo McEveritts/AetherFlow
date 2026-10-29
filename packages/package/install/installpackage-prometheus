@@ -42,9 +42,7 @@ case "$ARCH" in
 esac
 
 report_progress 30 "Downloading latest Prometheus (${PROM_ARCH})..."
-PROM_JSON="$(curl -fsSL https://api.github.com/repos/prometheus/prometheus/releases/latest 2>/dev/null || true)"
-PROM_VERSION="$(printf '%s' "$PROM_JSON" | grep -oP '"tag_name":\s*"v\K[^"]+' | head -1 || true)"
-PROM_VERSION="${PROM_VERSION:-2.53.1}"
+PROM_VERSION="$(github_latest_tag "prometheus/prometheus" "2.53.1")"
 PROM_URL="https://github.com/prometheus/prometheus/releases/download/v${PROM_VERSION}/prometheus-${PROM_VERSION}.${PROM_ARCH}.tar.gz"
 
 TMP_TAR=$(mktemp /tmp/prometheus-XXXXXX.tar.gz)
@@ -65,9 +63,7 @@ rm -rf "$PROM_EXTRACTED"
 chmod +x /usr/local/bin/prometheus /usr/local/bin/promtool
 
 report_progress 60 "Downloading and installing Node Exporter..."
-NE_JSON="$(curl -fsSL https://api.github.com/repos/prometheus/node_exporter/releases/latest 2>/dev/null || true)"
-NE_VERSION="$(printf '%s' "$NE_JSON" | grep -oP '"tag_name":\s*"v\K[^"]+' | head -1 || true)"
-NE_VERSION="${NE_VERSION:-1.8.2}"
+NE_VERSION="$(github_latest_tag "prometheus/node_exporter" "1.8.2")"
 NE_URL="https://github.com/prometheus/node_exporter/releases/download/v${NE_VERSION}/node_exporter-${NE_VERSION}.${PROM_ARCH}.tar.gz"
 
 TMP_NE=$(mktemp /tmp/node_exporter-XXXXXX.tar.gz)

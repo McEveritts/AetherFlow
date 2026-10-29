@@ -39,9 +39,7 @@ case "$ARCH" in
 esac
 
 report_progress 35 "Resolving latest Navidrome release (${ND_ARCH})..."
-ND_JSON="$(curl -fsSL https://api.github.com/repos/navidrome/navidrome/releases/latest 2>/dev/null || true)"
-ND_VERSION="$(printf '%s' "$ND_JSON" | grep -oP '"tag_name":\s*"v\K[^"]+' | head -1 || true)"
-ND_VERSION="${ND_VERSION:-0.53.3}"
+ND_VERSION="$(github_latest_tag "navidrome/navidrome" "0.53.3")"
 ND_URL="https://github.com/navidrome/navidrome/releases/download/v${ND_VERSION}/navidrome_${ND_VERSION}_${ND_ARCH}.tar.gz"
 
 report_progress 60 "Downloading and extracting Navidrome ${ND_VERSION}..."

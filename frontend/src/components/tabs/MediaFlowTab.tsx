@@ -1,7 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import useSWR from 'swr';
-import { Film, Play, CheckCircle, XCircle, Loader2, ArrowRightCircle, HardDrive, Sparkles } from 'lucide-react';
-import { Card } from '@/components/ui/Card';
+import { Film, Play, CheckCircle, XCircle, Loader2, ArrowRightCircle, HardDrive, Sparkles, RefreshCw, Zap } from 'lucide-react';
 import { apiFetch } from '@/lib/fetcher';
 import { useToast } from '@/contexts/ToastContext';
 import PathSelector from '@/components/ui/PathSelector';
@@ -63,7 +62,7 @@ function useMediaFlowStream() {
 }
 
 const formatBytes = (bytes: number) => {
-    if (bytes === 0) return '0 B';
+    if (!bytes || bytes === 0) return '0 B';
     const k = 1024;
     const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
@@ -72,9 +71,10 @@ const formatBytes = (bytes: number) => {
 
 export default function MediaFlowTab() {
     const [activeSection, setActiveSection] = useState<'transcode' | 'metadata'>('transcode');
-    const { data: queue, mutate } = useSWR<QueueItem[]>('/api/v1/admin/mediaflow/queue', fetcher);
+    const { data: queue, error, isLoading, isValidating, mutate } = useSWR<QueueItem[]>('/api/v1/admin/mediaflow/queue', fetcher);
     const progress = useMediaFlowStream();
-    const [scanDir, setScanDir] = useState('/mnt/media/movies');
+    const [scanDir, setScanDir] = useState('/home/hdd');
+    const [isScanning, setIsScanning] = useState(false);
     const { addToast } = useToast();
 
     const handleApprove = async (id: number) => {
@@ -90,6 +90,7 @@ export default function MediaFlowTab() {
     };
 
     const triggerScan = async () => {
+        setIsScanning(true);
         try {
             await apiFetch('/api/v1/admin/mediaflow/scan', {
                 method: 'POST',
@@ -101,30 +102,84 @@ export default function MediaFlowTab() {
             addToast(`Background scan initiated across ${scanDir}`, 'info');
         } catch {
             addToast(`Failed to initiate scan across ${scanDir}`, 'error');
+        } finally {
+            setIsScanning(false);
         }
     };
 
-    const pendingCount = queue?.filter(i => i.status === 'PENDING_APPROVAL').length || 0;
+    const queueList = Array.isArray(queue) ? queue : [];
+    const pendingCount = queueList.filter(i => i.status === 'PENDING_APPROVAL').length;
+    const completedCount = queueList.filter(i => i.status === 'COMPLETED').length;
+    const totalSavedBytes = queueList
+        .filter(i => i.status === 'COMPLETED' && i.originalSize > i.newSize)
+        .reduce((acc, i) => acc + (i.originalSize - i.newSize), 0);
 
     return (
-        <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500 max-w-7xl mx-auto">
-            {/* Obsidian Segmented Switcher */}
-            <div className="flex items-center justify-between flex-wrap gap-4">
-                <div className="flex items-center gap-1.5 p-1 bg-white/[0.04] border border-white/10 rounded-2xl w-fit backdrop-blur-xl">
-                    <button
-                        onClick={() => setActiveSection('transcode')}
-                        className={`px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-2 ${activeSection === 'transcode' ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-500/25' : 'text-slate-400 hover:text-slate-200'}`}
-                    >
-                        <Film size={14} />
-                        Transcode Queue
-                    </button>
-                    <button
-                        onClick={() => setActiveSection('metadata')}
-                        className={`px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-2 ${activeSection === 'metadata' ? 'bg-violet-600 text-white shadow-lg shadow-violet-500/25' : 'text-slate-400 hover:text-slate-200'}`}
-                    >
-                        <Sparkles size={14} />
-                        Metadata Enrichment
-                    </button>
+        <div className="space-y-6 animate-fade-in relative z-10 w-full min-w-0">
+            {/* Unified FlowAI Open Top Toolbar */}
+            <div className="flex flex-wrap items-center justify-between gap-4 pb-4 mb-2 border-b border-white/[0.06] relative z-30 shrink-0">
+                <div className="flex items-center gap-3.5">
+                    <div className="h-10 w-10 rounded-xl flex items-center justify-center border bg-indigo-500/20 border-indigo-500/30 shadow-[0_0_20px_rgba(99,102,241,0.15)] text-indigo-400">
+                        {activeSection === 'transcode' ? <Film size={20} /> : <Sparkles size={20} />}
+                    </div>
+                    <div>
+                        <div className="flex items-center gap-2.5">
+                            <h2 className="text-lg font-bold text-slate-100 tracking-tight">MediaFlow Engine</h2>
+                            <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full border bg-indigo-500/15 text-indigo-300 border-indigo-500/30">
+                                Hardware Accelerated
+                            </span>
+                        </div>
+                        <div className="flex items-center gap-2 mt-0.5">
+                            <span className="relative flex h-1.5 w-1.5">
+                                <span className="absolute inline-flex h-full w-full rounded-full opacity-75 bg-emerald-400"></span>
+                                <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-emerald-500"></span>
+                            </span>
+                            <span className="text-xs text-slate-400 font-medium tracking-wide">
+                                VAAPI / AMF · Live Transcode & AI Metadata
+                            </span>
+                        </div>
+                    </div>
+                </div>
+
+                {/* Section Switcher & Controls */}
+                <div className="flex flex-wrap items-center gap-2">
+                    <div className="flex items-center gap-1 p-1 bg-white/[0.04] border border-white/10 rounded-xl">
+                        <button
+                            type="button"
+                            onClick={() => setActiveSection('transcode')}
+                            className={`obs-touch-target-standard obs-gpu-120hz-interactive px-3 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center gap-1.5 ${
+                                activeSection === 'transcode'
+                                    ? 'bg-indigo-500/20 border border-indigo-500/30 text-indigo-300 shadow-md shadow-indigo-500/10'
+                                    : 'text-slate-400 hover:text-white'
+                            }`}
+                        >
+                            <Film size={13} />
+                            Transcode Queue
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => setActiveSection('metadata')}
+                            className={`obs-touch-target-standard obs-gpu-120hz-interactive px-3 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center gap-1.5 ${
+                                activeSection === 'metadata'
+                                    ? 'bg-violet-500/20 border border-violet-500/30 text-violet-300 shadow-md shadow-violet-500/10'
+                                    : 'text-slate-400 hover:text-white'
+                            }`}
+                        >
+                            <Sparkles size={13} />
+                            Metadata Enrichment
+                        </button>
+                    </div>
+
+                    {activeSection === 'transcode' && (
+                        <button
+                            onClick={() => mutate()}
+                            className="obs-touch-target-standard obs-gpu-120hz-interactive flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs font-semibold bg-white/[0.04] border border-white/10 text-slate-300 hover:bg-white/[0.08] hover:text-white transition-all"
+                            title="Refresh Queue"
+                        >
+                            <RefreshCw size={14} className={isValidating ? 'animate-spin text-indigo-400' : 'text-slate-400'} />
+                            <span>Refresh</span>
+                        </button>
+                    )}
                 </div>
             </div>
 
@@ -132,142 +187,223 @@ export default function MediaFlowTab() {
                 <MetadataTab />
             ) : (
                 <>
-                    <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
-                        <div>
-                            <h2 className="text-3xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-red-400 to-indigo-500 drop-shadow-sm flex items-center gap-3">
-                                <Film className="text-indigo-400" size={32} />
-                                MediaFlow Engine
-                            </h2>
-                            <p className="text-slate-400 text-sm mt-1 max-w-2xl">
-                                Passive bare-metal video transcoder. Aggressively compresses legacy formats using AMD native hardware acceleration. Requires explicit user approval per file.
-                            </p>
+                    {/* Open Telemetry Metric Strip */}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                        <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-4 flex items-center justify-between">
+                            <div>
+                                <p className="text-xs text-slate-400 font-medium uppercase tracking-wider">Pending Approvals</p>
+                                <p className="text-2xl font-bold text-amber-400 mt-1">{pendingCount}</p>
+                                <p className="text-[11px] text-slate-500 mt-0.5">Awaiting operator signoff</p>
+                            </div>
+                            <div className="h-10 w-10 rounded-xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center text-amber-400">
+                                <ArrowRightCircle size={20} />
+                            </div>
                         </div>
-                        
-                        <div className="flex items-center gap-2 w-full md:w-auto">
-                            <PathSelector 
-                                value={scanDir} 
-                                onChange={setScanDir} 
-                                placeholder="/mnt/media/movies" 
-                                className="w-full md:w-72" 
+
+                        <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-4 flex items-center justify-between">
+                            <div>
+                                <p className="text-xs text-slate-400 font-medium uppercase tracking-wider">Completed Jobs</p>
+                                <p className="text-2xl font-bold text-emerald-400 mt-1">{completedCount}</p>
+                                <p className="text-[11px] text-slate-500 mt-0.5">Transcoded & verified</p>
+                            </div>
+                            <div className="h-10 w-10 rounded-xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-400">
+                                <CheckCircle size={20} />
+                            </div>
+                        </div>
+
+                        <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-4 flex items-center justify-between">
+                            <div>
+                                <p className="text-xs text-slate-400 font-medium uppercase tracking-wider">Space Saved</p>
+                                <p className="text-2xl font-bold text-slate-100 mt-1">{formatBytes(totalSavedBytes)}</p>
+                                <p className="text-[11px] text-slate-500 mt-0.5">Compression reduction</p>
+                            </div>
+                            <div className="h-10 w-10 rounded-xl bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center text-indigo-400">
+                                <HardDrive size={20} />
+                            </div>
+                        </div>
+
+                        <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-4 flex items-center justify-between">
+                            <div>
+                                <p className="text-xs text-slate-400 font-medium uppercase tracking-wider">Hardware Engine</p>
+                                <p className="text-base font-bold text-slate-100 mt-1">
+                                    {progress && progress.status === 'PROCESSING' ? `${progress.speed}x Active` : 'VAAPI / AMF Standby'}
+                                </p>
+                                <p className="text-[11px] text-slate-500 mt-0.5">AMD / Intel Native GPU</p>
+                            </div>
+                            <div className="h-10 w-10 rounded-xl bg-purple-500/10 border border-purple-500/20 flex items-center justify-center text-purple-400">
+                                <Zap size={20} />
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Scan Trigger Bar */}
+                    <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-4 flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3">
+                        <div className="flex items-center gap-3">
+                            <div className="w-8 h-8 rounded-lg bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center text-indigo-400 shrink-0">
+                                <HardDrive size={16} />
+                            </div>
+                            <div>
+                                <h3 className="text-xs font-bold text-slate-200">Library Scanner</h3>
+                                <p className="text-[11px] text-slate-400">Scan filesystem to queue videos with legacy codecs for transcode optimization</p>
+                            </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                            <PathSelector
+                                value={scanDir}
+                                onChange={setScanDir}
+                                placeholder="/home/hdd"
+                                className="w-full md:w-72 text-xs"
                             />
-                            <button 
+                            <button
                                 onClick={triggerScan}
-                                className="flex items-center gap-2 bg-indigo-500 hover:bg-indigo-600 text-white px-4 py-2.5 rounded-xl font-medium shadow-lg transition-colors whitespace-nowrap text-xs shrink-0"
+                                disabled={isScanning}
+                                className="obs-touch-target-standard obs-gpu-120hz-interactive px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-bold transition-all shadow-lg shadow-indigo-500/20 flex items-center gap-1.5 shrink-0 disabled:opacity-50"
                             >
-                                <HardDrive size={14} />
-                                Scan Library
+                                {isScanning ? <Loader2 size={13} className="animate-spin" /> : <HardDrive size={13} />}
+                                <span>Scan Library</span>
                             </button>
                         </div>
                     </div>
 
-            {/* Active Transcode Section */}
-            {(progress && progress.status === 'PROCESSING') && (
-                <Card className="bg-gradient-to-tr from-indigo-900/30 to-black/40 border-indigo-500/30 overflow-hidden relative">
-                    <div className="absolute top-0 left-0 w-full h-1 bg-black/50">
-                        {/* Fake pulsing bar as native ffmpeg doesn't emit pure % without duration knowledge, but we simulate activity */}
-                        <div className="h-full bg-indigo-500 animate-pulse w-full"></div>
-                    </div>
-                    <div className="p-6">
-                        <div className="flex justify-between items-center mb-4">
-                            <h3 className="text-xl font-bold text-white flex items-center gap-3">
-                                <Loader2 className="animate-spin text-indigo-400" size={24} />
-                                Active Hardware Transcode
+                    {/* Active Hardware Transcode */}
+                    {progress && progress.status === 'PROCESSING' && (
+                        <div className="rounded-2xl border border-indigo-500/30 bg-slate-900/60 backdrop-blur-xl p-5 relative overflow-hidden">
+                            <div className="absolute top-0 left-0 w-full h-1 bg-black/50">
+                                <div className="h-full bg-indigo-500 animate-pulse w-full"></div>
+                            </div>
+                            <div className="flex justify-between items-center mb-3">
+                                <h3 className="text-base font-bold text-white flex items-center gap-2">
+                                    <Loader2 className="animate-spin text-indigo-400" size={18} />
+                                    Active Hardware Transcode
+                                </h3>
+                                <span className="bg-indigo-500/20 text-indigo-300 px-2.5 py-0.5 rounded-full text-[10px] font-mono font-bold tracking-wider border border-indigo-500/30">
+                                    VAAPI/AMF ACTIVE
+                                </span>
+                            </div>
+                            <p className="text-indigo-200 text-sm font-medium mb-4 truncate" title={progress.filePath}>{progress.filePath}</p>
+
+                            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                                <div className="bg-black/30 rounded-xl p-3 border border-white/5">
+                                    <span className="text-slate-500 text-[10px] font-bold uppercase tracking-wider block mb-0.5">FPS</span>
+                                    <span className="text-xl font-mono text-white">{progress.fps}</span>
+                                </div>
+                                <div className="bg-black/30 rounded-xl p-3 border border-white/5">
+                                    <span className="text-slate-500 text-[10px] font-bold uppercase tracking-wider block mb-0.5">Speed</span>
+                                    <span className="text-xl font-mono text-amber-400">{progress.speed}x</span>
+                                </div>
+                                <div className="bg-black/30 rounded-xl p-3 border border-white/5">
+                                    <span className="text-slate-500 text-[10px] font-bold uppercase tracking-wider block mb-0.5">Elapsed</span>
+                                    <span className="text-xl font-mono text-white">{progress.time}</span>
+                                </div>
+                                <div className="bg-black/30 rounded-xl p-3 border border-white/5">
+                                    <span className="text-slate-500 text-[10px] font-bold uppercase tracking-wider block mb-0.5">Size</span>
+                                    <span className="text-xl font-mono text-white">{progress.size}</span>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Transcode Queue Table */}
+                    <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-5">
+                        <div className="flex items-center justify-between mb-4 pb-3 border-b border-white/[0.06]">
+                            <h3 className="text-sm font-bold text-slate-200 flex items-center gap-2">
+                                <Film size={16} className="text-indigo-400" />
+                                Transcode Approval Queue
+                                {pendingCount > 0 && (
+                                    <span className="bg-amber-500/20 text-amber-400 text-[10px] font-bold px-2 py-0.5 rounded-full border border-amber-500/30">
+                                        {pendingCount} Pending
+                                    </span>
+                                )}
                             </h3>
-                            <div className="bg-indigo-500/20 text-indigo-300 px-3 py-1 rounded-full text-xs font-mono font-bold tracking-wider border border-indigo-500/30">
-                                VAAPI/AMF ACTIVE
-                            </div>
+                            <span className="text-xs text-slate-500">{queueList.length} total items</span>
                         </div>
-                        
-                        <p className="text-indigo-200 font-medium text-lg mb-6 truncate" title={progress.filePath}>{progress.filePath}</p>
 
-                        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                            <div className="bg-black/40 rounded-lg p-4 border border-white/5">
-                                <span className="text-zinc-500 text-xs font-bold uppercase tracking-wider block mb-1">FPS</span>
-                                <span className="text-2xl font-mono text-white">{progress.fps}</span>
-                            </div>
-                            <div className="bg-black/40 rounded-lg p-4 border border-white/5">
-                                <span className="text-zinc-500 text-xs font-bold uppercase tracking-wider block mb-1">Speed</span>
-                                <span className="text-2xl font-mono text-amber-400">{progress.speed}x</span>
-                            </div>
-                            <div className="bg-black/40 rounded-lg p-4 border border-white/5">
-                                <span className="text-zinc-500 text-xs font-bold uppercase tracking-wider block mb-1">Time Elapsed</span>
-                                <span className="text-2xl font-mono text-white">{progress.time}</span>
-                            </div>
-                            <div className="bg-black/40 rounded-lg p-4 border border-white/5">
-                                <span className="text-zinc-500 text-xs font-bold uppercase tracking-wider block mb-1">Current Size</span>
-                                <span className="text-2xl font-mono text-white">{progress.size}</span>
-                            </div>
+                        <div className="overflow-x-auto">
+                            <table className="w-full text-left border-collapse text-xs">
+                                <thead>
+                                    <tr className="border-b border-white/[0.06] text-slate-400 uppercase tracking-wider text-[11px]">
+                                        <th className="py-2.5 px-3 font-semibold">File</th>
+                                        <th className="py-2.5 px-3 font-semibold">Size</th>
+                                        <th className="py-2.5 px-3 font-semibold">Codec Transition</th>
+                                        <th className="py-2.5 px-3 font-semibold">Status</th>
+                                        <th className="py-2.5 px-3 font-semibold text-right">Action</th>
+                                    </tr>
+                                </thead>
+                                <tbody className="divide-y divide-white/[0.04]">
+                                    {error ? (
+                                        <tr><td colSpan={5} className="py-12 text-center text-red-400">Failed to load transcode queue</td></tr>
+                                    ) : isLoading || !queue ? (
+                                        <tr><td colSpan={5} className="py-12 text-center text-slate-500">
+                                            <div className="flex items-center justify-center gap-2">
+                                                <Loader2 size={16} className="animate-spin text-indigo-400" />
+                                                <span>Loading queue...</span>
+                                            </div>
+                                        </td></tr>
+                                    ) : queueList.length === 0 ? (
+                                        <tr><td colSpan={5} className="py-12 text-center text-slate-500">No media queued. Run a scan against /home/hdd to index videos.</td></tr>
+                                    ) : (
+                                        queueList.map(item => (
+                                            <tr key={item.id} className="hover:bg-white/[0.02] transition-colors">
+                                                <td className="py-3 px-3">
+                                                    <p className="font-medium text-slate-200 truncate max-w-xs md:max-w-md" title={item.filePath}>
+                                                        {item.filePath.split(/[/\\]/).pop()}
+                                                    </p>
+                                                    <p className="text-[10px] text-slate-500 truncate max-w-xs md:max-w-md mt-0.5">{item.filePath}</p>
+                                                </td>
+                                                <td className="py-3 px-3 text-slate-400 font-mono">
+                                                    {formatBytes(item.originalSize)}
+                                                </td>
+                                                <td className="py-3 px-3">
+                                                    <span className="bg-white/10 text-slate-300 text-[10px] px-2 py-0.5 rounded font-mono border border-white/5">{item.originalCodec}</span>
+                                                    {item.newCodec && (
+                                                        <span className="ml-1.5 bg-indigo-500/20 text-indigo-300 text-[10px] px-2 py-0.5 rounded font-mono border border-indigo-500/20">&rarr; {item.newCodec}</span>
+                                                    )}
+                                                </td>
+                                                <td className="py-3 px-3">
+                                                    {item.status === 'PENDING_APPROVAL' && (
+                                                        <span className="text-amber-400 text-xs flex items-center gap-1 font-semibold">
+                                                            <ArrowRightCircle size={13} /> Needs Approval
+                                                        </span>
+                                                    )}
+                                                    {item.status === 'APPROVED' && (
+                                                        <span className="text-blue-400 text-xs flex items-center gap-1">
+                                                            <Loader2 size={13} className="animate-spin" /> Queued
+                                                        </span>
+                                                    )}
+                                                    {item.status === 'PROCESSING' && (
+                                                        <span className="text-indigo-400 text-xs font-bold flex items-center gap-1">
+                                                            <Loader2 size={13} className="animate-spin" /> Processing
+                                                        </span>
+                                                    )}
+                                                    {item.status === 'COMPLETED' && (
+                                                        <span className="text-emerald-400 text-xs flex items-center gap-1 font-semibold">
+                                                            <CheckCircle size={13} /> Saved {formatBytes(item.originalSize - item.newSize)}
+                                                        </span>
+                                                    )}
+                                                    {item.status === 'FAILED' && (
+                                                        <span className="text-red-400 text-xs flex items-center gap-1">
+                                                            <XCircle size={13} /> Failed
+                                                        </span>
+                                                    )}
+                                                </td>
+                                                <td className="py-3 px-3 text-right">
+                                                    {item.status === 'PENDING_APPROVAL' && (
+                                                        <button
+                                                            onClick={() => handleApprove(item.id)}
+                                                            className="obs-touch-target-standard obs-gpu-120hz-interactive bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-500/40 text-emerald-300 px-3 py-1 rounded-lg text-xs font-bold transition-all inline-flex items-center gap-1.5"
+                                                        >
+                                                            <Play size={12} />
+                                                            <span>Authorize</span>
+                                                        </button>
+                                                    )}
+                                                </td>
+                                            </tr>
+                                        ))
+                                    )}
+                                </tbody>
+                            </table>
                         </div>
                     </div>
-                </Card>
-            )}
-
-            {/* Approval Inbox */}
-            <Card className="overflow-hidden">
-                <div className="p-4 border-b border-white/5 flex justify-between items-center bg-black/20">
-                    <h3 className="text-lg font-bold text-slate-200 flex items-center gap-2">
-                        Approval Inbox
-                        <span className="bg-amber-500/20 text-amber-500 text-xs px-2 py-0.5 rounded-full">{pendingCount}</span>
-                    </h3>
-                </div>
-
-                <div className="overflow-x-auto">
-                    <table className="w-full text-left border-collapse">
-                        <thead>
-                            <tr className="bg-black/40 text-zinc-500 text-xs uppercase tracking-widest border-b border-white/5">
-                                <th className="p-4 font-semibold">File</th>
-                                <th className="p-4 font-semibold">Size</th>
-                                <th className="p-4 font-semibold">Codec</th>
-                                <th className="p-4 font-semibold">Status</th>
-                                <th className="p-4 font-semibold text-right">Action</th>
-                            </tr>
-                        </thead>
-                        <tbody className="divide-y divide-white/5">
-                            {!queue ? (
-                                <tr><td colSpan={5} className="p-8 text-center text-zinc-500">Loading queue...</td></tr>
-                            ) : queue.length === 0 ? (
-                                <tr><td colSpan={5} className="p-8 text-center text-zinc-500">No media queued. Run a scan.</td></tr>
-                            ) : (
-                                queue.map(item => (
-                                    <tr key={item.id} className="hover:bg-white/[0.02] transition-colors group">
-                                        <td className="p-4">
-                                            <p className="text-sm font-medium text-slate-300 truncate max-w-sm md:max-w-md" title={item.filePath}>
-                                                {item.filePath.split(/[/\\]/).pop()}
-                                            </p>
-                                        </td>
-                                        <td className="p-4 text-sm text-zinc-400 font-mono">
-                                            {formatBytes(item.originalSize)}
-                                        </td>
-                                        <td className="p-4">
-                                            <span className="bg-white/10 text-zinc-300 text-xs px-2 py-1 rounded font-mono border border-white/5">{item.originalCodec}</span>
-                                            {item.newCodec && (
-                                                <span className="ml-2 bg-indigo-500/20 text-indigo-300 text-xs px-2 py-1 rounded font-mono border border-indigo-500/20">{'->'} {item.newCodec}</span>
-                                            )}
-                                        </td>
-                                        <td className="p-4">
-                                            {item.status === 'PENDING_APPROVAL' && <span className="text-amber-500 text-sm flex items-center gap-1"><ArrowRightCircle size={14}/> Needs Approval</span>}
-                                            {item.status === 'APPROVED' && <span className="text-blue-400 text-sm flex items-center gap-1"><Loader2 size={14} className="animate-spin"/> Queued</span>}
-                                            {item.status === 'PROCESSING' && <span className="text-indigo-400 text-sm font-bold flex items-center gap-1"><Loader2 size={14} className="animate-spin"/> Processing</span>}
-                                            {item.status === 'COMPLETED' && <span className="text-emerald-500 text-sm flex items-center gap-1"><CheckCircle size={14}/> Saved {formatBytes(item.originalSize - item.newSize)}</span>}
-                                            {item.status === 'FAILED' && <span className="text-red-500 text-sm flex items-center gap-1"><XCircle size={14}/> Failed</span>}
-                                        </td>
-                                        <td className="p-4 text-right">
-                                            {item.status === 'PENDING_APPROVAL' && (
-                                                <button 
-                                                    onClick={() => handleApprove(item.id)}
-                                                    className="bg-zinc-800 hover:bg-emerald-600 border border-zinc-700 hover:border-emerald-500 text-zinc-300 hover:text-white px-3 py-1.5 rounded text-sm font-medium transition-all flex items-center gap-2 ml-auto"
-                                                >
-                                                    <Play size={14} /> Process
-                                                </button>
-                                            )}
-                                        </td>
-                                    </tr>
-                                ))
-                            )}
-                        </tbody>
-                    </table>
-                </div>
-            </Card>
                 </>
             )}
         </div>

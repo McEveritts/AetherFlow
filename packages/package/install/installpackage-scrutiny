@@ -38,9 +38,7 @@ case "$ARCH" in
 esac
 
 report_progress 35 "Resolving latest Scrutiny binaries from GitHub..."
-SCRUT_JSON="$(curl -fsSL https://api.github.com/repos/AnalogJ/scrutiny/releases/latest 2>/dev/null || true)"
-SCRUT_VER="$(printf '%s' "$SCRUT_JSON" | grep -oP '"tag_name":\s*"v\K[^"]+' | head -1 || true)"
-SCRUT_VER="${SCRUT_VER:-0.8.1}"
+SCRUT_VER="$(github_latest_tag "AnalogJ/scrutiny" "0.8.1")"
 
 WEB_URL="https://github.com/AnalogJ/scrutiny/releases/download/v${SCRUT_VER}/scrutiny-web-linux-${SCRUT_ARCH}"
 COLLECTOR_URL="https://github.com/AnalogJ/scrutiny/releases/download/v${SCRUT_VER}/scrutiny-collector-metrics-linux-${SCRUT_ARCH}"
