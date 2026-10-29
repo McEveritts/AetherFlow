@@ -4,6 +4,9 @@
 
 # xmlrpc-c function
 function _xmlrpc() {
+	if _af_apt_install libxmlrpc-core-c3-dev >>"${OUTTO}" 2>&1; then
+		return 0
+	fi
 	mkdir -p /tmp && cd /tmp || exit 1
 	if [[ -d /tmp/xmlrpc-c ]]; then rm -rf /tmp/xmlrpc-c; fi
 	\cp -rf ${local_setup}sources/xmlrpc-c_1-39-13/ .
@@ -20,8 +23,11 @@ function _xmlrpc() {
 # apt rtorrent handles the libtorrent install
 # remember this is temporary until patched
 function _libtorrent() {
+	if [[ "${LTORRENT:-0.13.7}" == "0.13.7" ]] && _af_apt_install libtorrent-dev >>"${OUTTO}" 2>&1; then
+		return 0
+	fi
 	mkdir -p /tmp && cd /tmp || exit 1
-	MAXCPUS=$(echo "$(nproc) / 2" | bc)
+	MAXCPUS="$(_af_build_jobs)"
 	rm -rf xmlrpc-c* >>"${OUTTO}" 2>&1
 	if [[ -e /tmp/libtorrent-${LTORRENT}.tar.gz ]]; then rm -rf libtorrent-"${LTORRENT}".tar.gz; fi
 	mkdir -p /tmp/libtorrent
@@ -57,8 +63,14 @@ function _libtorrent() {
 # using apt install rtorrent in the meantime
 # shellcheck disable=2215,2312,2250
 function _rtorrent() {
+	if [[ "${RTVERSION:-0.9.7}" == "0.9.7" ]] && _af_apt_install rtorrent screen psmisc >>"${OUTTO}" 2>&1; then
+		ldconfig >>"${OUTTO}" 2>&1 || true
+		mkdir -p /install
+		touch /install/.rtorrent.lock
+		return 0
+	fi
 	mkdir -p /tmp && cd /tmp || exit 1
-	MAXCPUS=$(echo "$(nproc) / 2" | bc)
+	MAXCPUS="$(_af_build_jobs)"
 	rm -rf libtorrent* >>"${OUTTO}" 2>&1
 	if [[ -e /tmp/libtorrent-${LTORRENT}.tar.gz ]]; then rm -rf /tmp/libtorrent-${LTORRENT}.tar.gz; fi
 	mkdir -p /tmp/rtorrent

@@ -5,6 +5,7 @@
 # package and repo addition (silently add php7) _add respo sources_
 # shellcheck disable=2312
 function _repos() {
+	if type _ensure_distro_vars &>/dev/null; then _ensure_distro_vars; fi
 	# Fix #1: Gracefully handle broken / unsigned third-party APT lists.
 	# Try a clean update first. If it fails, disable offending third-party
 	# source lists (e.g., php.list, deb-multimedia.list) that Kali or other
@@ -28,8 +29,10 @@ function _repos() {
 		LC_ALL=en_US.UTF-8 apt-add-repository ppa:ondrej/php -y >>"${OUTTO}" 2>&1 || return 1
 	elif [[ ${DISTRO} == Debian ]]; then
 		_af_apt_install lsb-release sudo ca-certificates gnupg wget || return 1
-		wget -qO - https://packages.sury.org/php/apt.gpg | gpg --dearmor -o /usr/share/keyrings/deb.sury.org-php.gpg || return 1
-		echo "deb [signed-by=/usr/share/keyrings/deb.sury.org-php.gpg] https://packages.sury.org/php/ ${CODENAME} main" > /etc/apt/sources.list.d/php.list
+		if [[ "${OS_ID:-}" != "kali" && "${CODENAME:-}" != "kali-rolling" ]]; then
+			wget -qO - https://packages.sury.org/php/apt.gpg | gpg --dearmor --batch --yes -o /usr/share/keyrings/deb.sury.org-php.gpg || return 1
+			echo "deb [signed-by=/usr/share/keyrings/deb.sury.org-php.gpg] https://packages.sury.org/php/ ${CODENAME} main" > /etc/apt/sources.list.d/php.list
+		fi
 	fi
 
 }
@@ -37,9 +40,12 @@ function _repos() {
 # package and repo addition _update and upgrade_
 # shellcheck disable=2312
 function _updates() {
+	if type _ensure_distro_vars &>/dev/null; then _ensure_distro_vars; fi
 	if [[ ${DISTRO} == Debian ]]; then
-		\cp -f "${local_setup}templates/apt.sources/debian.template" /etc/apt/sources.list
-		sed -i "s/RELEASE/${CODENAME}/g" /etc/apt/sources.list
+		if [[ "${OS_ID:-}" != "kali" && "${CODENAME:-}" != "kali-rolling" ]]; then
+			\cp -f "${local_setup}templates/apt.sources/debian.template" /etc/apt/sources.list
+			sed -i "s/RELEASE/${CODENAME}/g" /etc/apt/sources.list
+		fi
 		DEBIAN_FRONTEND=noninteractive apt-get -yqq \
 			-o Acquire::AllowInsecureRepositories=true \
 			-o Acquire::AllowDowngradeToInsecureRepositories=true \
@@ -47,8 +53,10 @@ function _updates() {
 		_af_apt_install --allow-unauthenticated build-essential debian-archive-keyring || return 1
 		_af_apt_install --allow-unauthenticated deb-multimedia-keyring >>"${OUTTO}" 2>&1 || true
 	else
-		\cp -f "${local_setup}templates/apt.sources/ubuntu.template" /etc/apt/sources.list
-		sed -i "s/RELEASE/${CODENAME}/g" /etc/apt/sources.list
+		if [[ ! -f /etc/apt/sources.list.d/ubuntu.sources ]]; then
+			\cp -f "${local_setup}templates/apt.sources/ubuntu.template" /etc/apt/sources.list
+			sed -i "s/RELEASE/${CODENAME}/g" /etc/apt/sources.list
+		fi
 		DEBIAN_FRONTEND=noninteractive apt-get -yqq update >>"${OUTTO}" 2>&1 || return 1
 		_af_apt_install build-essential debian-archive-keyring software-properties-common || return 1
 		#apt-get -y -f --allow-unauthenticated install deb-multimedia-keyring >>"${OUTTO}" 2>&1
@@ -56,15 +64,8 @@ function _updates() {
 
 	export DEBIAN_FRONTEND=noninteractive
 	apt-get -yqq update >>"${OUTTO}" 2>&1 || return 1
-	apt-get -yqq purge samba samba-common >>"${OUTTO}" 2>&1 || return 1
+	apt-get -yqq purge samba samba-common >>"${OUTTO}" 2>&1 || true
 	apt-get -yqq full-upgrade >>"${OUTTO}" 2>&1 || return 1
-
-	if [[ -e /etc/ssh/sshd_config ]]; then
-		sed -i 's/.*Port .*/Port 4747/g' /etc/ssh/sshd_config
-		#sed -i 's/SendEnv LANG LC_*/#SendEnv LANG LC_*/g' /etc/ssh/ssh_config
-		#sed -i 's/AcceptEnv LANG LC_*/#AcceptEnv LANG LC_*/g' /etc/ssh/ssh_config
-		service ssh restart >>"${OUTTO}" 2>&1
-	fi
 
 	# Create the service lock file directory
 	if [[ -d /install ]]; then cd /; else mkdir -p /install; fi
@@ -75,24 +76,50 @@ function _updates() {
 # package and repo addition _install softwares and packages_
 # shellcheck disable=2312
 function _depends() {
+	if type _ensure_distro_vars &>/dev/null; then _ensure_distro_vars; fi
 	local prefetch_pid=""
 	(_af_prefetch_runtime_archives >>"${OUTTO}" 2>&1) &
 	prefetch_pid=$!
 
 	if [[ ${DISTRO} == Debian ]]; then
 		local stat_pkg="dstat"
-		if [[ "${CODENAME}" =~ ("trixie") || "${VERSION_ID}" == "13" ]]; then
+		if [[ "${CODENAME}" =~ ("trixie"|"kali-rolling") || "${VERSION_ID}" == "13" ]] || ! apt-cache show dstat >/dev/null 2>&1; then
 			stat_pkg="dool"
 		fi
-		_af_apt_install fail2ban bc build-essential ed sudo screen zip irssi unzip nano bwm-ng htop nethogs speedtest-cli iotop git dos2unix subversion "${stat_pkg}" automake make mktorrent libtool libcppunit-dev libssl-dev pkg-config libxml2-dev libcurl4-openssl-dev libsigc++-2.0-dev apache2-utils autoconf cron curl libapache2-mod-fcgid libapache2-mod-php"${PHP_VER}" libncurses-dev yasm pcre2-utils apache2 php-net-socket php-memcached memcached php"${PHP_VER}" php"${PHP_VER}"-cli php"${PHP_VER}"-curl php"${PHP_VER}"-fpm php"${PHP_VER}"-gd php"${PHP_VER}"-mbstring php"${PHP_VER}"-msgpack php"${PHP_VER}"-mysql php"${PHP_VER}"-opcache php"${PHP_VER}"-xml php"${PHP_VER}"-zip python3-lxml fontconfig comerr-dev ca-certificates libfontconfig1-dev libdbd-mysql-perl libdbi-perl libfontconfig1 rar unrar mediainfo ifstat ttf-mscorefonts-installer checkinstall dtach libarchive-zip-perl libnet-ssleay-perl ca-certificates-java libxslt1-dev libxml2 libffi-dev python3-pip python3-dev libhtml-parser-perl libxml-libxml-perl libjson-perl libjson-xs-perl libxml-libxslt-perl zlib1g-dev vnstat vnstati openvpn iptables iptables-persistent xz-utils || {
+		_af_apt_install fail2ban bc build-essential ed sudo screen zip irssi unzip nano bwm-ng htop nethogs iotop git dos2unix subversion "${stat_pkg}" automake make mktorrent libtool libcppunit-dev libssl-dev pkg-config libxml2-dev libcurl4-openssl-dev libsigc++-2.0-dev apache2-utils autoconf cron curl libapache2-mod-fcgid libapache2-mod-php"${PHP_VER}" libncurses-dev yasm pcre2-utils apache2 php-net-socket php-memcached memcached php"${PHP_VER}" php"${PHP_VER}"-cli php"${PHP_VER}"-curl php"${PHP_VER}"-fpm php"${PHP_VER}"-gd php"${PHP_VER}"-mbstring php"${PHP_VER}"-msgpack php"${PHP_VER}"-mysql php"${PHP_VER}"-opcache php"${PHP_VER}"-xml php"${PHP_VER}"-zip python3-lxml fontconfig comerr-dev ca-certificates libfontconfig1-dev libdbd-mysql-perl libdbi-perl libfontconfig1 mediainfo ifstat checkinstall dtach libarchive-zip-perl libnet-ssleay-perl ca-certificates-java libxslt1-dev libxml2 libffi-dev python3-pip python3-dev libhtml-parser-perl libxml-libxml-perl libjson-perl libjson-xs-perl libxml-libxslt-perl zlib1g-dev vnstat vnstati openvpn iptables iptables-persistent xz-utils || {
 			wait "${prefetch_pid}" 2>/dev/null || true
 			return 1
 		}
+		for opt_pkg in speedtest-cli rar unrar ttf-mscorefonts-installer; do
+			_af_apt_install "${opt_pkg}" >>"${OUTTO}" 2>&1 || true
+		done
 	elif [[ ${DISTRO} == Ubuntu ]]; then
-		_af_apt_install --allow-unauthenticated build-essential debian-archive-keyring fail2ban bc sudo screen zip irssi unzip nano bwm-ng htop iotop git dos2unix subversion dstat automake make mktorrent libtool libcppunit-dev libssl-dev pkg-config libxml2-dev libcurl4-openssl-dev libsigc++-2.0-dev apache2-utils autoconf cron curl libapache2-mod-php"${PHP_VER}" libncurses-dev yasm pcre2-utils apache2 php-net-socket libdbd-mysql-perl libdbi-perl php-memcached memcached php"${PHP_VER}" php"${PHP_VER}"-cli php"${PHP_VER}"-curl php"${PHP_VER}"-fpm php"${PHP_VER}"-gd php"${PHP_VER}"-mbstring php"${PHP_VER}"-msgpack php"${PHP_VER}"-mysql php"${PHP_VER}"-opcache php"${PHP_VER}"-xml php"${PHP_VER}"-zip fontconfig comerr-dev ca-certificates libfontconfig1-dev libfontconfig1 rar unrar mediainfo ifstat python3-lxml ttf-mscorefonts-installer checkinstall dtach libarchive-zip-perl libnet-ssleay-perl openjdk-8-jre-headless openjdk-8-jre openjdk-8-jdk libxslt1-dev libxml2 libffi-dev python3-pip python3-dev libhtml-parser-perl libxml-libxml-perl libjson-perl libjson-xs-perl libxml-libxslt-perl zlib1g-dev vnstat vnstati openvpn iptables iptables-persistent xz-utils || {
+		local stat_pkg="dstat"
+		if [[ "${CODENAME}" =~ ("noble") ]] || ! apt-cache show dstat >/dev/null 2>&1; then
+			stat_pkg="dool"
+		fi
+		_af_apt_install build-essential debian-archive-keyring fail2ban bc sudo screen zip irssi unzip nano bwm-ng htop iotop git dos2unix subversion "${stat_pkg}" automake make mktorrent libtool libcppunit-dev libssl-dev pkg-config libxml2-dev libcurl4-openssl-dev libsigc++-2.0-dev apache2-utils autoconf cron curl libapache2-mod-php"${PHP_VER}" libncurses-dev yasm pcre2-utils apache2 php-net-socket libdbd-mysql-perl libdbi-perl php-memcached memcached php"${PHP_VER}" php"${PHP_VER}"-cli php"${PHP_VER}"-curl php"${PHP_VER}"-fpm php"${PHP_VER}"-gd php"${PHP_VER}"-mbstring php"${PHP_VER}"-msgpack php"${PHP_VER}"-mysql php"${PHP_VER}"-opcache php"${PHP_VER}"-xml php"${PHP_VER}"-zip fontconfig comerr-dev ca-certificates libfontconfig1-dev libfontconfig1 mediainfo ifstat python3-lxml checkinstall dtach libarchive-zip-perl libnet-ssleay-perl libxslt1-dev libxml2 libffi-dev python3-pip python3-dev libhtml-parser-perl libxml-libxml-perl libjson-perl libjson-xs-perl libxml-libxslt-perl zlib1g-dev vnstat vnstati openvpn iptables iptables-persistent xz-utils || {
 			wait "${prefetch_pid}" 2>/dev/null || true
 			return 1
 		}
+		local avail_opt_pkgs=()
+		if apt-cache show default-jre-headless >/dev/null 2>&1; then
+			avail_opt_pkgs+=("default-jre-headless")
+		elif apt-cache show openjdk-8-jre-headless >/dev/null 2>&1; then
+			avail_opt_pkgs+=("openjdk-8-jre-headless")
+		fi
+		for opt_pkg in rar unrar ttf-mscorefonts-installer; do
+			if apt-cache show "${opt_pkg}" >/dev/null 2>&1; then
+				avail_opt_pkgs+=("${opt_pkg}")
+			fi
+		done
+		if (( ${#avail_opt_pkgs[@]} > 0 )); then
+			_af_apt_install "${avail_opt_pkgs[@]}" >>"${OUTTO}" 2>&1 || {
+				for opt_pkg in "${avail_opt_pkgs[@]}"; do
+					_af_apt_install "${opt_pkg}" >>"${OUTTO}" 2>&1 || true
+				done
+			}
+		fi
 	fi
 
 	wait "${prefetch_pid}" || return 1
@@ -114,6 +141,30 @@ function _syscommands() {
 	\cp -f /usr/local/bin/AetherFlow/system/reload /usr/bin/reload
 	\cp -f /usr/local/bin/AetherFlow/system/af-heal /usr/bin/af-heal
 	\cp -f /usr/local/bin/AetherFlow/system/af-systemd-sandbox /usr/bin/af-systemd-sandbox
+	ln -sf /usr/local/bin/AetherFlow/system/af /usr/local/bin/af
+	ln -sf /usr/local/bin/AetherFlow/system/af /usr/bin/af
+	cat > /usr/local/bin/aetherflow <<'EOF'
+#!/bin/bash
+case "${1:-}" in
+	logs)
+		shift
+		exec journalctl -u aetherflow-api -u aetherflow-runner -f "$@"
+		;;
+	restart)
+		shift
+		exec systemctl restart aetherflow-runner aetherflow-api "$@"
+		;;
+	status)
+		shift
+		exec systemctl status aetherflow-api aetherflow-runner "$@"
+		;;
+	*)
+		exec /usr/local/bin/AetherFlow/system/af "$@"
+		;;
+esac
+EOF
+	chmod +x /usr/local/bin/aetherflow
+	ln -sf /usr/local/bin/aetherflow /usr/bin/aetherflow
 }
 
 # install skel template
@@ -156,6 +207,14 @@ function _skel() {
 function _ffmpeg() {
 	if [[ ${ffmpeg} == "yes" ]]; then
 		apt-get -qy update >>"${OUTTO}" 2>&1
+		if _af_apt_install ffmpeg; then
+			if command -v ffmpeg >/dev/null 2>&1; then
+				mkdir -p /usr/local/bin
+				[[ -x /usr/bin/ffmpeg && ! -e /usr/local/bin/ffmpeg ]] && ln -sf /usr/bin/ffmpeg /usr/local/bin/ffmpeg
+				[[ -x /usr/bin/ffprobe && ! -e /usr/local/bin/ffprobe ]] && ln -sf /usr/bin/ffprobe /usr/local/bin/ffprobe
+				return 0
+			fi
+		fi
 		local -a ffmpeg_packages=(
 			autotools-dev autoconf automake cmake cmake-curses-gui
 			build-essential mercurial libass-dev

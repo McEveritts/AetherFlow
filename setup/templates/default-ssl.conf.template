@@ -53,9 +53,9 @@
         ProxyPass /api/ http://127.0.0.1:8080/api/ retry=0 timeout=300
         ProxyPassReverse /api/ http://127.0.0.1:8080/api/
 
-        ProxyPass /_next/ http://127.0.0.1:3000/_next/ retry=0 timeout=300
-        ProxyPassReverse /_next/ http://127.0.0.1:3000/_next/
+        ProxyPass /_next/ http://127.0.0.1:8080/_next/ retry=0 timeout=300
+        ProxyPassReverse /_next/ http://127.0.0.1:8080/_next/
 
-        ProxyPass / http://127.0.0.1:3000/ retry=0 timeout=300
-        ProxyPassReverse / http://127.0.0.1:3000/
+        ProxyPass / http://127.0.0.1:8080/ retry=0 timeout=300
+        ProxyPassReverse / http://127.0.0.1:8080/
 </VirtualHost>

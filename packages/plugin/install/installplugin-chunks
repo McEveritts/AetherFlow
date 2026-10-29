@@ -33,13 +33,13 @@ rutorrent="${rutorrent:-/var/www/rutorrent/}"
 function _installplugin-chunks() {
   username=$(whoami);
   rutorrent="${rutorrent:-/var/www/rutorrent/}"
+  PLUGIN="chunks"
   echo "Accessing $PLUGIN in the plugin vault ... " >>"${OUTTO}" 2>&1;
   PLUGINVAULT="/etc/AetherFlow/rtplugins/"
   mkdir -p "${rutorrent}plugins"
   cd "${rutorrent}plugins"
 
   echo "Installing $PLUGIN plugin ... " >>"${OUTTO}" 2>&1;
-  PLUGIN="chunks"
   for i in $PLUGIN; do
     if [[ -d "${PLUGINVAULT}$i" ]]; then
       cp -R "${PLUGINVAULT}$i" .

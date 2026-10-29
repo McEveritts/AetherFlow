@@ -125,10 +125,14 @@ function _intro() {
 	if [[ -r /etc/os-release ]]; then
 		# shellcheck disable=1091
 		. /etc/os-release
+		OS_ID="${ID:-}"
 		if [[ "${ID}" == "ubuntu" ]]; then DISTRO="Ubuntu"; fi
 		if [[ "${ID}" == "debian" ]]; then DISTRO="Debian"; fi
 		# Kali Linux is Debian-based (ID=kali, ID_LIKE=debian). Treat as Debian.
-		if [[ "${ID}" == "kali" ]]; then DISTRO="Debian"; fi
+		if [[ "${ID}" == "kali" ]]; then
+			DISTRO="Debian"
+			[[ -z "${VERSION_ID}" ]] && VERSION_ID="12"
+		fi
 		CODENAME="${VERSION_CODENAME}"
 		VERSION_ID="${VERSION_ID}"
 		if [[ "${DISTRO}" == "Debian" ]]; then
@@ -219,8 +223,42 @@ function _intro() {
 		PHP_VER="8.2"
 	fi
 	export PHP_VER
+	_save_config DISTRO "${DISTRO}"
+	_save_config OS_ID "${OS_ID:-}"
+	_save_config CODENAME "${CODENAME}"
+	_save_config VERSION_ID "${VERSION_ID}"
+	_save_config SETNAME "${SETNAME}"
 	_save_config PHP_VER "${PHP_VER}"
 	echo "Selected PHP Version: ${PHP_VER}"
+}
+
+function _ensure_distro_vars() {
+	if [[ -z "${DISTRO:-}" || -z "${CODENAME:-}" ]] && [[ -r /etc/os-release ]]; then
+		# shellcheck disable=1091
+		. /etc/os-release
+		OS_ID="${OS_ID:-${ID:-}}"
+		if [[ -z "${DISTRO:-}" ]]; then
+			if [[ "${ID:-}" == "ubuntu" ]]; then DISTRO="Ubuntu"; fi
+			if [[ "${ID:-}" == "debian" || "${ID:-}" == "kali" ]]; then DISTRO="Debian"; fi
+		fi
+		CODENAME="${CODENAME:-${VERSION_CODENAME:-}}"
+		VERSION_ID="${VERSION_ID:-}"
+		if [[ "${DISTRO:-}" == "Debian" && -z "${VERSION_ID}" && "${CODENAME}" == "trixie" ]]; then
+			VERSION_ID="13"
+		fi
+		SETNAME="${SETNAME:-${VERSION_ID} ${CODENAME}}"
+	fi
+	if [[ -z "${PHP_VER:-}" ]]; then
+		case "${CODENAME:-}" in
+			bionic|buster|bullseye|focal) PHP_VER="7.4" ;;
+			jammy) PHP_VER="8.1" ;;
+			bookworm) PHP_VER="8.2" ;;
+			noble) PHP_VER="8.3" ;;
+			trixie) PHP_VER="8.4" ;;
+			*) PHP_VER="8.2" ;;
+		esac
+		export PHP_VER
+	fi
 }
 
 # check if root function (2)

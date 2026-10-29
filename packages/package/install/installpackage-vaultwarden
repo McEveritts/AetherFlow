@@ -50,15 +50,15 @@ VW_TAG="${VW_VERSION#v}"
 TOKEN="$(curl -fsSL "https://ghcr.io/token?scope=repository:dani-garcia/vaultwarden:pull" 2>/dev/null | jq -r '.token // empty' || true)"
 
 if [[ -n "$TOKEN" ]]; then
-    ACCEPT_INDEX="application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json"
+    ACCEPT_INDEX="application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json"
     INDEX="$(curl -fsSL -H "Authorization: Bearer ${TOKEN}" -H "Accept: ${ACCEPT_INDEX}" "https://ghcr.io/v2/dani-garcia/vaultwarden/manifests/${VW_TAG}" 2>/dev/null || \
              curl -fsSL -H "Authorization: Bearer ${TOKEN}" -H "Accept: ${ACCEPT_INDEX}" "https://ghcr.io/v2/dani-garcia/vaultwarden/manifests/${VW_VERSION}" 2>/dev/null || \
              curl -fsSL -H "Authorization: Bearer ${TOKEN}" -H "Accept: ${ACCEPT_INDEX}" "https://ghcr.io/v2/dani-garcia/vaultwarden/manifests/latest" 2>/dev/null || true)"
 
     if [[ -n "$INDEX" ]]; then
-        MANIFEST_DIGEST="$(printf '%s' "$INDEX" | jq -r --arg arch "$OCI_ARCH" 'if .manifests then (.manifests[] | select(.platform.architecture == $arch and .platform.os == "linux" and ((.annotations["vnd.docker.reference.type"] // "") != "attestation-manifest")) | .digest) else empty end' | head -n1 || true)"
+        MANIFEST_DIGEST="$(printf '%s' "$INDEX" | jq -r --arg arch "$OCI_ARCH" 'if .manifests then (.manifests[] | select(.platform.architecture == $arch and .platform.os == "linux") | .digest) else empty end' | head -n1 || true)"
         if [[ -n "$MANIFEST_DIGEST" ]]; then
-            MANIFEST="$(curl -fsSL -H "Authorization: Bearer ${TOKEN}" -H "Accept: application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json" "https://ghcr.io/v2/dani-garcia/vaultwarden/manifests/${MANIFEST_DIGEST}" 2>/dev/null || true)"
+            MANIFEST="$(curl -fsSL -H "Authorization: Bearer ${TOKEN}" -H "Accept: application/vnd.oci.image.manifest.v1+json" "https://ghcr.io/v2/dani-garcia/vaultwarden/manifests/${MANIFEST_DIGEST}" 2>/dev/null || true)"
         else
             MANIFEST="$INDEX"
         fi

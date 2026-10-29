@@ -50,6 +50,9 @@ func migrate(version int, description string, stmts ...string) {
 func InitDB() {
 	dbPath := os.Getenv("DB_PATH")
 	if dbPath == "" {
+		dbPath = os.Getenv("AETHERFLOW_DB_PATH")
+	}
+	if dbPath == "" {
 		if stateDir := os.Getenv("STATE_DIRECTORY"); stateDir != "" {
 			if mkErr := os.MkdirAll(stateDir, 0700); mkErr != nil {
 				log.Fatalf("CRITICAL: Failed to create state directory at %s: %v", stateDir, mkErr)

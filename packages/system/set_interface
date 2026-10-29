@@ -15,8 +15,13 @@
 source /opt/AetherFlow/packages/common.sh
 
 if [ ! -f /opt/AetherFlow/config/interface.txt ]; then
-    echo "No interface config found at /opt/AetherFlow/config/interface.txt"
-    exit 1
+    mkdir -p /opt/AetherFlow/config
+    ADAPT="$(ip route get 8.8.8.8 2>/dev/null | awk 'NR==1 {for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' || true)"
+    if [ -z "${ADAPT}" ]; then
+        ADAPT="$(ip link show 2>/dev/null | grep -i broadcast | grep -m1 UP | cut -d: -f 2 | cut -d@ -f 1 | sed -e 's/ //g' || true)"
+    fi
+    ADAPT="${ADAPT:-eth0}"
+    printf '%s\n' "${ADAPT}" > /opt/AetherFlow/config/interface.txt
 fi
 
 ADAPT=$(cat /opt/AetherFlow/config/interface.txt)

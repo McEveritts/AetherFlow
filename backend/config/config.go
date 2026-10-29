@@ -88,7 +88,7 @@ func Load() {
 		CSRFDisabled:      strings.ToLower(os.Getenv("CSRF_DISABLED")) == "true",
 
 		// Database
-		DBPath:        envOr("DB_PATH", "aetherflow.db"),
+		DBPath:        coalesce(os.Getenv("DB_PATH"), os.Getenv("AETHERFLOW_DB_PATH"), "aetherflow.db"),
 		RedisAddr:     envOr("REDIS_ADDR", "localhost:6379"),
 		RedisPassword: os.Getenv("REDIS_PASSWORD"),
 

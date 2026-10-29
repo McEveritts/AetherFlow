@@ -131,7 +131,7 @@ function _updated() {
 
 function _updatesyscommands() {
   cd ${usrbin}
-  yes | cp -rf ${local_packages}. ${usrbin}AetherFlow
+  \cp -rf ${local_packages}. ${usrbin}AetherFlow
   if [[ -f ${usrbin}AetherFlow/system/changeUserpass ]]; then
     rm -rf ${usrbin}AetherFlow/system/changeUserpass
   fi
@@ -254,9 +254,9 @@ function _updatedeluge() {
 
 function _updateznc() {
   if [[ -f /install/.znc.lock ]]; then
-    bin=$(crontab -u znc -l | grep /usr/local/bin)
+    bin=$(crontab -u znc -l 2>/dev/null | grep /usr/local/bin || true)
     if [[ -n $bin ]]; then
-      sudo -u znc crontab -l | echo -e "*/10 * * * * /usr/bin/znc >/dev/null 2>&1\n@reboot /usr/bin/znc >/dev/null 2>&1" | crontab -u znc - > /dev/null 2>&1
+      printf "*/10 * * * * /usr/bin/znc >/dev/null 2>&1\n@reboot /usr/bin/znc >/dev/null 2>&1\n" | crontab -u znc - > /dev/null 2>&1 || true
     fi
   fi
 }
@@ -267,8 +267,10 @@ function _updaterttheme() { :; }
 
 
 function _updatesudo() {
-  mv /etc/sudoers /etc/sudoers.BAK
-  cp ${local_setup}templates/sudoers.template /etc/sudoers
+  if visudo -cf "${local_setup}templates/sudoers.template" >/dev/null 2>&1; then
+    cp -a /etc/sudoers /etc/sudoers.BAK 2>/dev/null || true
+    install -o root -g root -m 0440 "${local_setup}templates/sudoers.template" /etc/sudoers
+  fi
 }
 
 function _updateappsproxy() {
@@ -303,26 +305,37 @@ function _perms() {
 }
 
 function _buildmodernstack() {
-    # Compile Go API
+    export PATH="/usr/local/nodejs/bin:/usr/local/go/bin:$PATH"
+    export NODE_OPTIONS="${NODE_OPTIONS:+${NODE_OPTIONS} }--max-old-space-size=1024"
+
+    # 1. Build Next.js Frontend (static export for single-binary embed)
+    if [ -d "/opt/AetherFlow/frontend" ]; then
+        cd /opt/AetherFlow/frontend
+        npm install --legacy-peer-deps --no-fund --no-audit >>"${OUTTO}" 2>&1 || npm install --no-fund --no-audit >>"${OUTTO}" 2>&1
+        NEXT_STATIC_EXPORT=1 npm run build >>"${OUTTO}" 2>&1
+        if [ -d "/opt/AetherFlow/frontend/out" ] && [ -d "/opt/AetherFlow/backend" ]; then
+            mkdir -p /opt/AetherFlow/backend/web/dist
+            find /opt/AetherFlow/backend/web/dist -mindepth 1 ! -name '.gitkeep' -delete 2>/dev/null || true
+            cp -r /opt/AetherFlow/frontend/out/. /opt/AetherFlow/backend/web/dist/
+        fi
+    fi
+
+    # 2. Compile Go Control Plane Single Binary
     if [ -d "/opt/AetherFlow/backend" ]; then
         cd /opt/AetherFlow/backend
         export GOOS=linux
         export GOARCH=amd64
-        /usr/local/go/bin/go mod tidy >>"${OUTTO}" 2>&1
-        /usr/local/go/bin/go build -o aetherflow-api main.go >>"${OUTTO}" 2>&1
-        
-        # Restart Go API via systemd
-        systemctl restart aetherflow-api >>"${OUTTO}" 2>&1
-    fi
+        export CGO_ENABLED=1
+        if go build -tags "fts5" -o aetherflow-api.tmp . >>"${OUTTO}" 2>&1; then
+            chmod 755 /opt/AetherFlow/backend/aetherflow-api.tmp
+            mv -f /opt/AetherFlow/backend/aetherflow-api.tmp /opt/AetherFlow/backend/aetherflow-api
+        fi
 
-    # Build Next.js Frontend
-    if [ -d "/opt/AetherFlow/frontend" ]; then
-        cd /opt/AetherFlow/frontend
-        npm install >>"${OUTTO}" 2>&1
-        npm run build >>"${OUTTO}" 2>&1
-        
-        # Restart Next.js via systemd
-        systemctl restart aetherflow-frontend >>"${OUTTO}" 2>&1
+        # Purge legacy frontend unit if present and restart control plane services
+        rm -f /etc/systemd/system/aetherflow-front*.service 2>/dev/null || true
+        systemctl daemon-reload >>"${OUTTO}" 2>&1 || true
+        systemctl restart aetherflow-runner >>"${OUTTO}" 2>&1 || true
+        systemctl restart aetherflow-api >>"${OUTTO}" 2>&1 || true
     fi
 }
 
@@ -400,8 +413,10 @@ local_setup=/opt/AetherFlow/setup/
 local_packages=/opt/AetherFlow/packages/
 local_themes=/opt/AetherFlow/themes/
 
-IFACE=$(ip link show|grep -i broadcast|grep -m1 UP|cut -d: -f 2|cut -d@ -f 1|sed -e 's/ //g');
-A1="$AETHERFLOW_USER"
+IFACE=$(ip link show|grep -i broadcast|grep -m1 UP|cut -d: -f 2|cut -d@ -f 1|sed -e 's/ //g' || true);
+A1="${AETHERFLOW_USER:-$(cat /etc/apache2/master.txt 2>/dev/null || cut -d: -f1 /etc/htpasswd 2>/dev/null | head -n1 || true)}"
+A1="${A1:-admin}"
+export AETHERFLOW_USER="${A1}"
 usrbin=/usr/local/bin/
 
 # AetherFlow Update STRUCTURE

@@ -61,10 +61,12 @@ function _installplugin-fileshare() {
     fi
   done
 
+  mkdir -p "${rutorrent}plugins/fileshare"
+  touch "${rutorrent}plugins/fileshare/share.php" 2>/dev/null || true
   mkdir -p "${rutorrent}home/fileshare/"
   cd "${rutorrent}home/fileshare/"
   rm -f share.php
-  ln -sf ../../plugins/fileshare/share.php share.php
+  ln -sf ../../plugins/fileshare/share.php share.php 2>/dev/null || cp -f "${rutorrent}plugins/fileshare/share.php" share.php 2>/dev/null || true
   if [[ -f "${local_setup}templates/rutorrent/plugins/fileshare/conf.php.template" ]]; then
     mkdir -p "${rutorrent}plugins/fileshare"
     cp "${local_setup}templates/rutorrent/plugins/fileshare/conf.php.template" "${rutorrent}plugins/fileshare/conf.php"

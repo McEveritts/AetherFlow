@@ -61,15 +61,29 @@ function _boot() {
 		/etc/systemd/system/aetherflow-heal.timer
 
 	# Install AetherFlow Runner and Control Plane single-binary systemd service files
-	_safe_overlay_config "${local_setup}templates/sysd/aetherflow-runner.template" \
-		/etc/systemd/system/aetherflow-runner.service
-	_safe_overlay_config "${local_setup}templates/sysd/aetherflow-api.template" \
-		/etc/systemd/system/aetherflow-api.service
+	if [[ ! -f /etc/systemd/system/aetherflow-runner.service ]]; then
+		_safe_overlay_config "${local_setup}templates/sysd/aetherflow-runner.template" \
+			/etc/systemd/system/aetherflow-runner.service
+	fi
+	if [[ ! -f /etc/systemd/system/aetherflow-api.service ]] || grep -q "__AES_MASTER_KEY__" /etc/systemd/system/aetherflow-api.service 2>/dev/null; then
+		_safe_overlay_config "${local_setup}templates/sysd/aetherflow-api.template" \
+			/etc/systemd/system/aetherflow-api.service
+	fi
 	rm -f /etc/systemd/system/aetherflow-front*.service 2>/dev/null || true
 
+	# Ensure permissions and service user are configured before starting services
+	_harden_permissions
+	if type _mark_step &>/dev/null; then
+		_mark_step "harden_perms"
+	fi
+
 	systemctl daemon-reload >/dev/null 2>&1
-	systemctl enable {rtorrent,irssi,deluged,deluge-web}@${username} >/dev/null 2>&1
-	systemctl start {rtorrent,irssi,deluged,deluge-web}@${username} >/dev/null 2>&1
+	systemctl enable {rtorrent,irssi}@${username} >/dev/null 2>&1 || true
+	systemctl start {rtorrent,irssi}@${username} >/dev/null 2>&1 || true
+	if command -v deluged >/dev/null 2>&1; then
+		systemctl enable {deluged,deluge-web}@${username} >/dev/null 2>&1 || true
+		systemctl start {deluged,deluge-web}@${username} >/dev/null 2>&1 || true
+	fi
 	systemctl enable --now aetherflow-heal.timer >/dev/null 2>&1 || true
 
 	# Enable and start the privileged runner daemon and control plane single binary
@@ -78,8 +92,12 @@ function _boot() {
 	systemctl enable aetherflow-api.service >/dev/null 2>&1 || true
 	systemctl restart aetherflow-api.service >/dev/null 2>&1 || true
 
+	mkdir -p /opt/AetherFlow/config
+	if [[ -n "${IFACE:-}" ]]; then
+		printf '%s\n' "${IFACE}" > /opt/AetherFlow/config/interface.txt
+	fi
 	echo "*/1 * * * * root bash /usr/local/bin/AetherFlow/system/set_interface" >/etc/cron.d/set_interface
-	/usr/local/bin/AetherFlow/system/set_interface >/dev/null 2>&1
+	/usr/local/bin/AetherFlow/system/set_interface >/dev/null 2>&1 || true
 }
 
 # function to set permissions on first user
@@ -138,15 +156,39 @@ _harden_permissions() {
 			find "${af_root}/frontend/node_modules/.bin" -type l -exec chmod 755 {} + 2>/dev/null || true
 		fi
 
-		# Shell scripts in setup need execute
+		# Shell scripts in setup, packages, deploy, scripts, and root need execute and root ownership
+		if [[ -f "${af_root}/backend/aetherflow-api" ]]; then
+			chown root:aetherflow "${af_root}/backend/aetherflow-api" 2>/dev/null || true
+		fi
 		if [[ -d "${af_root}/setup" ]]; then
+			chown -R root:aetherflow "${af_root}/setup" 2>/dev/null || true
 			find "${af_root}/setup" -name "*.sh" -type f -exec chmod 755 {} + 2>/dev/null || true
 			if [[ -f "${af_root}/setup/AetherFlow-Setup" ]]; then
 				chmod 755 "${af_root}/setup/AetherFlow-Setup"
 			fi
 		fi
+		if [[ -d "${af_root}/packages" ]]; then
+			chown -R root:aetherflow "${af_root}/packages" 2>/dev/null || true
+			find "${af_root}/packages" -type f -exec chmod 755 {} + 2>/dev/null || true
+		fi
+		if [[ -d "${af_root}/deploy" ]]; then
+			chown -R root:aetherflow "${af_root}/deploy" 2>/dev/null || true
+			find "${af_root}/deploy" -name "*.sh" -type f -exec chmod 755 {} + 2>/dev/null || true
+		fi
+		if [[ -d "${af_root}/scripts" ]]; then
+			chown -R root:aetherflow "${af_root}/scripts" 2>/dev/null || true
+			find "${af_root}/scripts" -name "*.sh" -type f -exec chmod 755 {} + 2>/dev/null || true
+		fi
+		if [[ -f "${af_root}/build_gold.sh" ]]; then
+			chown root:aetherflow "${af_root}/build_gold.sh" 2>/dev/null || true
+			chmod 755 "${af_root}/build_gold.sh"
+		fi
 
-		# Database directory: writable by the service user
+		# Database directories: writable by the service user
+		mkdir -p "${af_root}/backend/data" /var/lib/aetherflow /var/log/aetherflow
+		chown -R aetherflow:aetherflow "${af_root}/backend/data" /var/lib/aetherflow /var/log/aetherflow 2>/dev/null || true
+		chmod 750 "${af_root}/backend/data" /var/log/aetherflow 2>/dev/null || true
+		chmod 700 /var/lib/aetherflow 2>/dev/null || true
 		if [[ -d "${af_root}/dashboard/db" ]]; then
 			chmod 750 "${af_root}/dashboard/db"
 		fi
@@ -244,7 +286,9 @@ Dashboard Onboarding: http://${ip}:8080
 Admin Username: ${username}
 Admin Password: ${passwd}
 EOF
-	rm -rf "$0" >>"${OUTTO}" 2>&1
+	if [[ "$(realpath "$0" 2>/dev/null || echo "$0")" != /opt/AetherFlow/* ]]; then
+		rm -rf "$0" >>"${OUTTO}" 2>&1
+	fi
 	for i in ssh apache2 vsftpd fail2ban memcached cron; do
 		systemctl restart "${i}" >>/dev/null 2>&1 || true
 		systemctl enable "${i}" >>/dev/null 2>&1 || true

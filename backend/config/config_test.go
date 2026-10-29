@@ -74,8 +74,12 @@ func TestLoadAndValidate(t *testing.T) {
 	// Set minimum required env vars
 	os.Setenv("JWT_SECRET", "test-secret")
 	os.Setenv("AES_MASTER_KEY", "0123456789abcdef0123456789abcdef")
+	os.Unsetenv("DB_PATH")
+	os.Unsetenv("AETHERFLOW_DB_PATH")
 	defer os.Unsetenv("JWT_SECRET")
 	defer os.Unsetenv("AES_MASTER_KEY")
+	defer os.Unsetenv("DB_PATH")
+	defer os.Unsetenv("AETHERFLOW_DB_PATH")
 
 	Load()
 
@@ -88,6 +92,21 @@ func TestLoadAndValidate(t *testing.T) {
 	if Cfg.Port != "8443" {
 		// Default port
 		t.Errorf("expected default port 8443, got %s", Cfg.Port)
+	}
+	if Cfg.DBPath != "aetherflow.db" {
+		t.Errorf("expected default DBPath aetherflow.db, got %s", Cfg.DBPath)
+	}
+
+	os.Setenv("AETHERFLOW_DB_PATH", "/var/lib/aetherflow/fallback.sqlite")
+	Load()
+	if Cfg.DBPath != "/var/lib/aetherflow/fallback.sqlite" {
+		t.Errorf("expected AETHERFLOW_DB_PATH fallback, got %s", Cfg.DBPath)
+	}
+
+	os.Setenv("DB_PATH", "/opt/AetherFlow/backend/data/aetherflow.sqlite")
+	Load()
+	if Cfg.DBPath != "/opt/AetherFlow/backend/data/aetherflow.sqlite" {
+		t.Errorf("expected DB_PATH to take precedence over AETHERFLOW_DB_PATH, got %s", Cfg.DBPath)
 	}
 
 	err := Validate()

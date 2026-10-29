@@ -16,22 +16,23 @@
 #
 #################################################################################
 #Script Console Colors
-black=$(tput setaf 0)
-red=$(tput setaf 1)
-green=$(tput setaf 2)
-yellow=$(tput setaf 3)
-magenta=$(tput setaf 5)
-cyan=$(tput setaf 6)
-white=$(tput setaf 7)
+export TERM="${TERM:-xterm-256color}"
+black=$(tput setaf 0 2>/dev/null || true)
+red=$(tput setaf 1 2>/dev/null || true)
+green=$(tput setaf 2 2>/dev/null || true)
+yellow=$(tput setaf 3 2>/dev/null || true)
+magenta=$(tput setaf 5 2>/dev/null || true)
+cyan=$(tput setaf 6 2>/dev/null || true)
+white=$(tput setaf 7 2>/dev/null || true)
 # Ensure system binaries are in PATH
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
 
-on_red=$(tput setab 1)
-on_green=$(tput setab 2)
-on_magenta=$(tput setab 5)
-bold=$(tput bold)
-standout=$(tput smso)
-normal=$(tput sgr0)
+on_red=$(tput setab 1 2>/dev/null || true)
+on_green=$(tput setab 2 2>/dev/null || true)
+on_magenta=$(tput setab 5 2>/dev/null || true)
+bold=$(tput bold 2>/dev/null || true)
+standout=$(tput smso 2>/dev/null || true)
+normal=$(tput sgr0 2>/dev/null || true)
 alert=${white}${on_red}
 title=${standout}
 repo_title=${black}${on_green}
@@ -416,6 +417,8 @@ for module in "${SCRIPT_DIR}/modules/"*.sh; do
     # shellcheck disable=1090
     source "$module"
 done
+# Ensure module-level errexit (e.g. modern_stack.sh) does not leak into top-level step runner
+set +e
 
 ################################################################################
 # Seed Handling
@@ -553,6 +556,9 @@ if [[ -f "${CONFIG_FILE}" ]]; then
     # shellcheck disable=1090
     source "${CONFIG_FILE}" 2>/dev/null
 fi
+if type _ensure_distro_vars &>/dev/null; then
+    _ensure_distro_vars
+fi
 
 # Failsafe: ensure OUTTO always has a valid value
 OUTTO="${OUTTO:-/dev/null}"
@@ -568,7 +574,7 @@ if [[ -z "${REPAIR_STEPS}" ]] && [[ "${FRESH_INSTALL}" == "false" ]]; then
     _detect_previous_install
 fi
 
-clear
+clear 2>/dev/null || true
 
 # shellcheck disable=2312,2243,1003
 spinner() {
@@ -583,7 +589,12 @@ spinner() {
 		printf "\b\b\b\b\b\b"
 	done
 	printf "    \b\b\b\b"
-	echo -ne "${OK}"
+	wait "${pid}"
+	local rc=$?
+	if [[ ${rc} -eq 0 ]]; then
+		echo -ne "${OK}"
+	fi
+	return ${rc}
 }
 
 port_is_listening() {
@@ -633,7 +644,7 @@ _run_step_fg "hostname" "Setting hostname" _hostname
 _run_step_fg "askcontinue" "Ready to proceed" _askcontinue
 _run_step_fg "ssdpblock" "Blocking insecure SSDP port" _ssdpblock
 _run_step_fg "locale" "Setting locale" _locale
-clear
+clear 2>/dev/null || true
 
 _run_step_fg "askpartition" "Partition selection" _askpartition
 _run_step_fg "ask10g" "10G network check" _ask10g
@@ -647,7 +658,7 @@ _run_step_fg "askffmpeg" "FFmpeg preference" _askffmpeg
 _run_step_fg "askvsftpd" "FTP configuration" _askvsftpd
 _run_step_fg "denyhosts" "Public tracker blocking" _denyhosts
 _run_step_fg "askbbr" "BBR congestion control preference" _askbbr
-clear
+clear 2>/dev/null || true
 
 ################################################################################
 # PHASE 2: Installation
@@ -723,7 +734,7 @@ if [[ ${bbr} == "yes" ]]; then
 	_run_step "bbr" "Installing BBR" _insbbr
 fi
 # shellcheck disable=2312
-if lspci | grep -i bcm >/dev/null; then
+if command -v lspci >/dev/null 2>&1 && lspci 2>/dev/null | grep -i bcm >/dev/null; then
 	_run_step "bcm" "Installing firmware for BCM NIC" _insbcm
 fi
 
@@ -732,7 +743,7 @@ _validate_no_root_services
 
 cd
 E=$(date +%s)
-DIFF=$(echo "${E}" - "${S}" | bc)
-FIN=$(echo "${DIFF}" / 60 | bc)
-clear
+DIFF=$((E - S))
+FIN=$((DIFF / 60))
+clear 2>/dev/null || true
 _finished

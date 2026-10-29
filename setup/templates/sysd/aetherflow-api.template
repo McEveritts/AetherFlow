@@ -23,15 +23,14 @@ LogsDirectory=aetherflow
 LogsDirectoryMode=0750
 
 # Environment injection from hardened FHS path with legacy fallback
-EnvironmentFile=-/etc/aetherflow/aetherflow.env
 Environment=GIN_MODE=release
+Environment=PORT=8080
+Environment=DB_PATH=/opt/AetherFlow/backend/data/aetherflow.sqlite
 Environment=AETHERFLOW_DB_PATH=/opt/AetherFlow/backend/data/aetherflow.sqlite
 Environment=AETHERFLOW_RUNNER_SOCK=/run/aetherflow/runner.sock
-Environment=AES_MASTER_KEY=__AES_MASTER_KEY__
-Environment=JWT_SECRET=__JWT_SECRET__
+Environment=PRIVILEGED_RUNNER_ENABLED=true
 Environment=COOKIE_SECURE=false
-Environment=ALLOWED_HOSTS=localhost:8080,127.0.0.1:8080,__HOST_IP__:8080,__PUBLIC_IP__:8080
-Environment=ALLOWED_CORS_ORIGIN=http://localhost:8080,http://127.0.0.1:8080,http://__HOST_IP__:8080,http://__PUBLIC_IP__:8080
+EnvironmentFile=-/etc/aetherflow/aetherflow.env
 
 # Zero-Trust Namespace Isolation
 ProtectSystem=strict

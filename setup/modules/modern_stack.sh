@@ -229,6 +229,7 @@ PORT=8080
 BIND_ADDR=0.0.0.0
 ALLOWED_HOSTS=${allowed_hosts}
 ALLOWED_CORS_ORIGIN=${cors_origins}
+DB_PATH=/opt/AetherFlow/backend/data/aetherflow.sqlite
 AETHERFLOW_DB_PATH=/opt/AetherFlow/backend/data/aetherflow.sqlite
 AETHERFLOW_RUNNER_SOCK=/run/aetherflow/runner.sock
 PRIVILEGED_RUNNER_ENABLED=true
@@ -241,20 +242,19 @@ EOF
     # ── Install systemd unit files from templates ────────────────────────
     local sysd_dir="/opt/AetherFlow/setup/templates/sysd"
     if [[ -f "${sysd_dir}/aetherflow-runner.template" ]]; then
-        cp "${sysd_dir}/aetherflow-runner.template" /etc/systemd/system/aetherflow-runner.service
+        if type _safe_overlay_config &>/dev/null; then
+            _safe_overlay_config "${sysd_dir}/aetherflow-runner.template" /etc/systemd/system/aetherflow-runner.service
+        else
+            cp "${sysd_dir}/aetherflow-runner.template" /etc/systemd/system/aetherflow-runner.service
+            sha256sum /etc/systemd/system/aetherflow-runner.service | awk '{print $1}' > /etc/systemd/system/aetherflow-runner.service.aetherflow-sha256
+        fi
     fi
     if [[ -f "${sysd_dir}/aetherflow-api.template" ]]; then
-        local public_ip_sed=""
-        if [[ -n "${public_ip}" ]]; then
-            public_ip_sed="${public_ip}"
-        fi
-        sed -e "s|__AES_MASTER_KEY__|${aes_key}|g" \
-            -e "s|__JWT_SECRET__|${jwt_secret}|g" \
-            -e "s|__HOST_IP__|${host_ip}|g" \
-            -e "s|__PUBLIC_IP__|${public_ip_sed}|g" \
-            "${sysd_dir}/aetherflow-api.template" > /etc/systemd/system/aetherflow-api.service
-        if [[ -z "${public_ip}" ]]; then
-            sed -i 's/,:8080//g; s/,http:\/\/:8080//g; s/,http:\/\/:3000//g' /etc/systemd/system/aetherflow-api.service
+        if type _safe_overlay_config &>/dev/null; then
+            _safe_overlay_config "${sysd_dir}/aetherflow-api.template" /etc/systemd/system/aetherflow-api.service
+        else
+            cp "${sysd_dir}/aetherflow-api.template" /etc/systemd/system/aetherflow-api.service
+            sha256sum /etc/systemd/system/aetherflow-api.service | awk '{print $1}' > /etc/systemd/system/aetherflow-api.service.aetherflow-sha256
         fi
     fi
 

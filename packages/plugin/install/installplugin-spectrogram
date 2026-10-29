@@ -61,7 +61,11 @@ _do() {
   fi
 }
 _sudo() {
-  _do "sudo $1"
+  if [[ ${EUID:-0} -eq 0 ]]; then
+    _do "$1" || true
+  else
+    _do "sudo $1" || _do "$1" || true
+  fi
 }
 
 _installBaseDeps() {

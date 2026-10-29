@@ -443,8 +443,15 @@ _detect_previous_install() {
     local total=${#ALL_STEPS[@]}
     local completed=0
     for step in "${ALL_STEPS[@]}"; do
-        _step_done "${step}" && ((completed++))
+        if _step_done "${step}"; then
+            completed=$((completed + 1))
+        fi
     done
+
+    if [[ ${completed} -eq 0 ]]; then
+        echo "No previous installation state found. Starting fresh."
+        return 1
+    fi
 
     echo ""
     echo "═══════════════════════════════════════════════════════════════"

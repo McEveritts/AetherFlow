@@ -293,7 +293,8 @@ EOF
 
 local_setup=/opt/AetherFlow/setup/
 # LEGACY REMOVED: master.txt
-MASTER="$AETHERFLOW_USER"
+MASTER="${AETHERFLOW_USER:-$(cat /etc/apache2/master.txt 2>/dev/null || cut -d: -f1 /etc/htpasswd 2>/dev/null | head -n1 || true)}"
+MASTER="${MASTER:-admin}"
 
 if [[ -f /install/.couchpotato.lock ]]; then _couchpotato; fi
 if [[ -f /install/.emby.lock ]]; then _emby; fi

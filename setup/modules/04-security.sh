@@ -15,7 +15,7 @@ function _ssdpblock() {
 }
 
 _fw_allowed_ports() {
-	echo "22/tcp 80/tcp 443/tcp 3000/tcp"
+	echo "22/tcp 80/tcp 443/tcp 3000/tcp 8080/tcp"
 }
 
 _setup_firewall() {
@@ -145,19 +145,31 @@ function _denyhosts() {
 
 # Setup LShell configuration file
 function _lshell() {
-	#apt-get -y install lshell >> /dev/null 2>&1
-	#cp ${local_setup}templates/lshell.conf.template /etc/lshell.conf
-	cd /root || { printf -- "%s" "Unable to enter /root" && return 1; }
-	git clone https://github.com/ghantoos/lshell.git lshell >>/dev/null 2>&1
-	cd lshell || { printf -- "%s" "Unable to enter lshell" && return 1; }
-	python3 setup.py install --no-compile --install-scripts=/usr/bin/ >>/dev/null 2>&1
+	if type _ensure_distro_vars &>/dev/null; then _ensure_distro_vars; fi
+	if ! command -v lshell >/dev/null 2>&1; then
+		if ! _af_apt_install lshell >>"${OUTTO}" 2>&1; then
+			cd /root || { printf -- "%s" "Unable to enter /root" && return 1; }
+			rm -rf /root/lshell
+			if git clone https://github.com/ghantoos/lshell.git lshell >>/dev/null 2>&1; then
+				cd lshell || { printf -- "%s" "Unable to enter lshell" && return 1; }
+				python3 setup.py install --no-compile --install-scripts=/usr/bin/ >>/dev/null 2>&1 \
+					|| pip3 install --break-system-packages . >>/dev/null 2>&1 \
+					|| pip3 install . >>/dev/null 2>&1 \
+					|| true
+				if [[ ! -x /usr/bin/lshell && -x /usr/local/bin/lshell ]]; then
+					ln -sf /usr/local/bin/lshell /usr/bin/lshell
+				fi
+			fi
+			cd /root || true
+		fi
+	fi
 	if [[ "${CODENAME}" == "focal" || "${CODENAME}" == "bionic" ]]; then
 		\cp -f ${local_setup}templates/lshell.conf-focal.template /etc/lshell.conf
 	else
 		\cp -f ${local_setup}templates/lshell.conf.template /etc/lshell.conf
 	fi
-	echo "/usr/bin/lshell" >>/etc/shells
-	groupadd lshell
+	grep -qxF "/usr/bin/lshell" /etc/shells 2>/dev/null || echo "/usr/bin/lshell" >>/etc/shells
+	groupadd -f lshell
 	mkdir -p /var/log/lshell
 	chown :lshell /var/log/lshell
 	chmod 770 /var/log/lshell
@@ -165,8 +177,13 @@ function _lshell() {
 
 # function to enable sudo for www-data function
 function _apachesudo() {
-	rm -f /etc/sudoers
-	\cp -f ${local_setup}templates/sudoers.template /etc/sudoers
+	mkdir -p /etc/apache2
+	if visudo -cf "${local_setup}templates/sudoers.template" >/dev/null 2>&1; then
+		install -o root -g root -m 0440 "${local_setup}templates/sudoers.template" /etc/sudoers
+	else
+		echo "ERROR: Invalid sudoers.template; refusing to overwrite /etc/sudoers" >&2
+		return 1
+	fi
 	echo -n "${username}" >/etc/apache2/master.txt
 	cd || exit 1
 }
