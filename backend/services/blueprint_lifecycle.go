@@ -235,12 +235,24 @@ func ApplyBlueprintAppConfig(bp *AppBlueprint, activePort int) (string, bool, er
 		}
 
 	default:
+		masterUser, masterPass, masterHA1 := LoadMasterCredentials()
 		if bp.AppName == "sabnzbd" {
 			whitelist := "sabnzbd.aether.local, localhost, 127.0.0.1"
 			if baseDomain := ResolveBaseDomain(); baseDomain != "" {
 				whitelist = fmt.Sprintf("%s, %s", FormatAppPublicDomain("sabnzbd", baseDomain), whitelist)
 			}
 			settings["host_whitelist"] = whitelist
+			if masterUser != "" && masterPass != "" {
+				settings["username"] = masterUser
+				settings["password"] = masterPass
+			}
+		}
+		if bp.AppName == "qbittorrent" && masterUser != "" && masterPass != "" {
+			settings[`WebUI\Username`] = masterUser
+			settings[`WebUI\Password_PBKDF2`] = GenerateQBittorrentPBKDF2(masterPass)
+			if masterHA1 != "" {
+				settings[`WebUI\Password_ha1`] = fmt.Sprintf("@ByteArray(%s)", masterHA1)
+			}
 		}
 		if bp.MutatorType == "ini" && configPath != "" && len(settings) > 0 {
 			if bp.AppName == "qbittorrent" && IsRunnerAvailable() {

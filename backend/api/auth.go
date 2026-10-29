@@ -21,6 +21,7 @@ import (
 
 	"aetherflow/db"
 	"aetherflow/models"
+	"aetherflow/services"
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
@@ -113,6 +114,8 @@ func SetupAdmin(c *gin.Context) {
 		RespondError(c, http.StatusInternalServerError, ErrCodeInternal, "Failed to verify new user creation")
 		return
 	}
+
+	services.SaveMasterCredentials(req.Username, req.Password)
 
 	// Issue JWT via centralized factory (includes jti + short expiry + client fingerprint)
 	tokenString, err := createStandardJWT(int(id), c)
@@ -1054,6 +1057,7 @@ func ChangePassword(c *gin.Context) {
 		return
 	}
 
+	services.SaveMasterCredentials(username, req.NewPassword)
 	db.RecordAudit(userID, username, "password_update", "user", strconv.Itoa(userID), "Password updated successfully", c.ClientIP(), c.Request.UserAgent())
 
 	c.JSON(http.StatusOK, gin.H{"status": "success", "message": "Password updated successfully"})

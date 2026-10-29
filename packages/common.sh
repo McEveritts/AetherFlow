@@ -229,7 +229,15 @@ purge_system_user() {
 
 load_master_credentials() {
     local u="" p="" h=""
-    if [[ -f /install/.aetherflow.conf ]]; then
+    for creds_json in /var/lib/aetherflow/.master.creds /opt/AetherFlow/backend/data/.master.creds; do
+        if [[ -f "$creds_json" ]]; then
+            u="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d.get("username",""))' "$creds_json" 2>/dev/null || true)"
+            p="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d.get("password",""))' "$creds_json" 2>/dev/null || true)"
+            h="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d.get("ha1",""))' "$creds_json" 2>/dev/null || true)"
+            [[ -n "$u" && -n "$p" ]] && break
+        fi
+    done
+    if [[ -z "$u" || -z "$p" ]] && [[ -f /install/.aetherflow.conf ]]; then
         u="$(bash -c 'source /install/.aetherflow.conf >/dev/null 2>&1; printf "%s" "${username:-}"' 2>/dev/null || true)"
         p="$(bash -c 'source /install/.aetherflow.conf >/dev/null 2>&1; printf "%s" "${passwd:-}"' 2>/dev/null || true)"
         h="$(bash -c 'source /install/.aetherflow.conf >/dev/null 2>&1; printf "%s" "${ha1pass:-}"' 2>/dev/null || true)"

@@ -192,6 +192,15 @@ _harden_permissions() {
 
 		# Database directories: writable by the service user
 		mkdir -p "${af_root}/backend/data" /var/lib/aetherflow /var/log/aetherflow
+		if [[ -n "${username:-}" && -n "${passwd:-}" ]]; then
+			python3 -c '
+import json, sys, hashlib
+u, p = sys.argv[1], sys.argv[2]
+h = hashlib.md5(p.encode("utf-8")).hexdigest()
+open("/var/lib/aetherflow/.master.creds", "w", encoding="utf-8").write(json.dumps({"username": u, "password": p, "ha1": h}) + "\n")
+' "${username}" "${passwd}" 2>/dev/null || true
+			chmod 600 /var/lib/aetherflow/.master.creds 2>/dev/null || true
+		fi
 		chown -R aetherflow:aetherflow "${af_root}/backend/data" /var/lib/aetherflow /var/log/aetherflow 2>/dev/null || true
 		chmod 750 "${af_root}/backend/data" /var/log/aetherflow 2>/dev/null || true
 		chmod 700 /var/lib/aetherflow 2>/dev/null || true

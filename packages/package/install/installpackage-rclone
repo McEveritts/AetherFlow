@@ -55,9 +55,15 @@ if [[ -n "$RCLONE_VER" ]]; then
     printf '%s\n' "${RCLONE_VER#v}" > /var/lib/rclone/.af-version
 fi
 
-# Ensure baseline rclone.conf exists
+# Ensure baseline rclone.conf and credentials env exist
 touch /etc/rclone/rclone.conf
-chmod 600 /etc/rclone/rclone.conf
+python3 - "${MASTER_USER}" "${MASTER_PASS}" > /etc/rclone/rclone.env <<'PYEOF'
+import sys
+u, p = sys.argv[1], sys.argv[2].replace('\\', '\\\\').replace('"', '\\"')
+print(f'RCLONE_RC_USER="{u}"')
+print(f'RCLONE_RC_PASS="{p}"')
+PYEOF
+chmod 600 /etc/rclone/rclone.conf /etc/rclone/rclone.env
 chown -R rclone:rclone /etc/rclone /var/lib/rclone
 
 report_progress 70 "Scaffolding rclone.service (GUI on 5572) and companion rclone-vfs.service..."
@@ -71,7 +77,8 @@ Wants=network-online.target
 Type=simple
 User=rclone
 Group=rclone
-ExecStart=/usr/bin/rclone rcd --rc-web-gui --rc-addr=0.0.0.0:5572 --rc-no-auth --config=/etc/rclone/rclone.conf --cache-dir=/var/lib/rclone/cache
+EnvironmentFile=/etc/rclone/rclone.env
+ExecStart=/usr/bin/rclone rcd --rc-web-gui --rc-addr=0.0.0.0:5572 --config=/etc/rclone/rclone.conf --cache-dir=/var/lib/rclone/cache
 Restart=on-failure
 RestartSec=5
 

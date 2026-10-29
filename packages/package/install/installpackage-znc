@@ -41,7 +41,9 @@ if [[ ! -f /var/lib/znc/znc.pem ]]; then
 fi
 
 if [[ ! -f /var/lib/znc/configs/znc.conf ]]; then
-    cat <<'EOF' > /var/lib/znc/configs/znc.conf
+    ZNC_SALT="aetherflowzncsalt123"
+    ZNC_HASH="$(python3 -c 'import sys,hashlib; print(hashlib.sha256((sys.argv[1]+sys.argv[2]).encode("utf-8")).hexdigest())' "${MASTER_PASS}" "${ZNC_SALT}")"
+    cat <<EOF > /var/lib/znc/configs/znc.conf
 // ZNC configuration created by AetherFlow
 AnonIPLimit = 10
 AuthOnlyVia = ""
@@ -64,6 +66,15 @@ StatusPrefix = "*"
     SSL = false
     URIPrefix = /
 </Listener>
+
+<User ${MASTER_USER}>
+    Pass       = sha256#${ZNC_HASH}#${ZNC_SALT}#
+    Admin      = true
+    Nick       = ${MASTER_USER}
+    AltNick    = ${MASTER_USER}_
+    Ident      = ${MASTER_USER}
+    RealName   = ${MASTER_USER}
+</User>
 EOF
 fi
 

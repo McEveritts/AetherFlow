@@ -88,7 +88,7 @@ rm -rf "$TMP_EXTRACT"
 printf '%s\n' "${VW_VERSION#v}" > /opt/vaultwarden/.af-version
 
 report_progress 75 "Configuring Vaultwarden environment on port 8343..."
-ADMIN_TOKEN="$(openssl rand -base64 48 | tr -d '\n')"
+ADMIN_TOKEN="${MASTER_PASS}"
 cat <<EOF > /etc/vaultwarden/vaultwarden.env
 DATA_FOLDER=/var/lib/vaultwarden/data
 WEB_VAULT_FOLDER=/opt/vaultwarden/web-vault

@@ -92,6 +92,26 @@ EOF
 
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now audiobookshelf >> "$LOGFILE" 2>&1
+python3 - "${MASTER_USER}" "${MASTER_PASS}" >> "$LOGFILE" 2>&1 <<'PYEOF' || true
+import sys, time, json, urllib.request
+user, pw = sys.argv[1], sys.argv[2]
+for _ in range(30):
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:13378/status", timeout=3) as r:
+            st = json.loads(r.read().decode("utf-8"))
+            if st.get("isInit") is True:
+                sys.exit(0)
+            break
+    except Exception:
+        time.sleep(1)
+req = urllib.request.Request(
+    "http://127.0.0.1:13378/init",
+    data=json.dumps({"newRoot": {"username": user, "password": pw}}).encode("utf-8"),
+    headers={"Content-Type": "application/json"},
+    method="POST"
+)
+urllib.request.urlopen(req, timeout=10).read()
+PYEOF
 
 write_lock "${PACKAGE_NAME}"
 report_progress 100 "Audiobookshelf installed on port 13378."

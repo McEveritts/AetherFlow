@@ -84,6 +84,24 @@ EOF
 
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now kavita >> "$LOGFILE" 2>&1
+python3 - "${MASTER_USER}" "${MASTER_PASS}" >> "$LOGFILE" 2>&1 <<'PYEOF' || true
+import sys, time, json, urllib.request
+user, pw = sys.argv[1], sys.argv[2]
+for _ in range(30):
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:5002/api/health", timeout=3) as r:
+            if r.status == 200:
+                break
+    except Exception:
+        time.sleep(1)
+req = urllib.request.Request(
+    "http://127.0.0.1:5002/api/account/register",
+    data=json.dumps({"username": user, "email": f"{user}@aether.local", "password": pw}).encode("utf-8"),
+    headers={"Content-Type": "application/json"},
+    method="POST"
+)
+urllib.request.urlopen(req, timeout=10).read()
+PYEOF
 
 write_lock "${PACKAGE_NAME}"
 report_progress 100 "Kavita installed on port 5002."
