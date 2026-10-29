@@ -1,0 +1,114 @@
+#!/bin/bash
+# Automatically expands Apache2's Let's Encrypt certificate when new *.BASE_DOMAIN
+# app subdomains resolve in DNS and are registered in AetherFlow.
+set -euo pipefail
+
+DB="/opt/AetherFlow/backend/data/aetherflow.sqlite"
+if [[ ! -f "$DB" ]] || ! command -v certbot >/dev/null 2>&1; then
+    exit 0
+fi
+
+BASE_DOMAIN=""
+if command -v sqlite3 >/dev/null 2>&1; then
+    BASE_DOMAIN="$(sqlite3 "$DB" "SELECT base_domain FROM settings WHERE id = 1;" 2>/dev/null | sed 's/^\*\.//' | tr -d '[:space:]' || true)"
+fi
+if [[ -z "$BASE_DOMAIN" && -f /etc/aetherflow/aetherflow.env ]]; then
+    BASE_DOMAIN="$(grep -oP '^AETHERFLOW_BASE_DOMAIN=\K.*' /etc/aetherflow/aetherflow.env 2>/dev/null | sed 's/^\*\.//' | tr -d '[:space:]' || true)"
+fi
+if [[ -z "$BASE_DOMAIN" || "$BASE_DOMAIN" == "localhost" || "$BASE_DOMAIN" == *.local ]]; then
+    exit 0
+fi
+
+public_dns_resolves() {
+    local host="$1"
+    if command -v dig >/dev/null 2>&1; then
+        [[ -n "$(dig +short +time=2 +tries=1 A "$host" @1.1.1.1 2>/dev/null | grep -E '^[0-9]+\.' || true)" ]] && return 0
+        [[ -n "$(dig +short +time=2 +tries=1 A "$host" @8.8.8.8 2>/dev/null | grep -E '^[0-9]+\.' || true)" ]] && return 0
+        return 1
+    fi
+    getent ahosts "$host" 2>/dev/null | awk '{print $1}' | grep -qvE '^(127\.|::1)'
+}
+
+# Reconcile /etc/hosts internal and base-domain loopback entries for installed apps
+HOSTS_DOMAINS=("aetherflow.aether.local" "${BASE_DOMAIN}" "direct.${BASE_DOMAIN}")
+while IFS= read -r dom; do
+    dom="$(echo "$dom" | tr -d '[:space:]')"
+    [[ -n "$dom" ]] && HOSTS_DOMAINS+=("$dom")
+done < <(sqlite3 "$DB" "SELECT DISTINCT public_domain FROM app_ingress_configs WHERE external_access_enabled = 1 AND public_domain != '';" 2>/dev/null || true)
+
+for lock in /install/.*.lock; do
+    [[ -e "$lock" ]] || continue
+    app="$(basename "$lock")"
+    app="${app#.}"
+    app="${app%.lock}"
+    [[ "$app" == "core" ]] && continue
+    HOSTS_DOMAINS+=("${app}.aether.local" "${app}.${BASE_DOMAIN}")
+done
+
+if [[ -w /etc/hosts ]]; then
+    mapfile -t UNIQUE_HOSTS < <(printf '%s\n' "${HOSTS_DOMAINS[@]}" | awk 'NF && !seen[$0]++' | sort)
+    TMP_HOSTS="$(mktemp)"
+    awk '
+        /^# --- AETHERFLOW INTERNAL DNS ---$/ { skip=1; next }
+        /^# --- END AETHERFLOW INTERNAL DNS ---$/ { skip=0; next }
+        !skip { print }
+    ' /etc/hosts > "$TMP_HOSTS"
+    {
+        echo "# --- AETHERFLOW INTERNAL DNS ---"
+        for h in "${UNIQUE_HOSTS[@]}"; do
+            printf "127.0.0.1\t%s\n" "$h"
+        done
+        echo "# --- END AETHERFLOW INTERNAL DNS ---"
+    } >> "$TMP_HOSTS"
+    cat "$TMP_HOSTS" > /etc/hosts
+    rm -f "$TMP_HOSTS"
+fi
+
+CERT_FILE="/etc/letsencrypt/live/${BASE_DOMAIN}/fullchain.pem"
+if [[ ! -f "$CERT_FILE" ]]; then
+    exit 0
+fi
+
+CURRENT_SANS="$(openssl x509 -in "$CERT_FILE" -noout -ext subjectAltName 2>/dev/null || true)"
+if echo "$CURRENT_SANS" | grep -q "DNS:\*\.${BASE_DOMAIN}"; then
+    # Wildcard certificate already covers all subdomains
+    exit 0
+fi
+
+DOMAINS=("$BASE_DOMAIN" "www.${BASE_DOMAIN}" "direct.${BASE_DOMAIN}")
+while IFS= read -r dom; do
+    dom="$(echo "$dom" | tr -d '[:space:]')"
+    [[ -z "$dom" ]] && continue
+    if public_dns_resolves "$dom"; then
+        DOMAINS+=("$dom")
+    fi
+done < <(sqlite3 "$DB" "SELECT DISTINCT public_domain FROM app_ingress_configs WHERE external_access_enabled = 1 AND public_domain LIKE '%.${BASE_DOMAIN}';" 2>/dev/null || true)
+
+for lock in /install/.*.lock; do
+    [[ -e "$lock" ]] || continue
+    app="$(basename "$lock")"
+    app="${app#.}"
+    app="${app%.lock}"
+    cand="${app}.${BASE_DOMAIN}"
+    if public_dns_resolves "$cand"; then
+        DOMAINS+=("$cand")
+    fi
+done
+
+mapfile -t UNIQUE_DOMAINS < <(printf '%s\n' "${DOMAINS[@]}" | awk '!seen[$0]++')
+
+NEED_EXPAND=0
+CERT_ARGS=()
+for d in "${UNIQUE_DOMAINS[@]}"; do
+    CERT_ARGS+=("-d" "$d")
+    if ! echo "$CURRENT_SANS" | grep -qE "DNS:${d}(,|$| )"; then
+        NEED_EXPAND=1
+    fi
+done
+
+if [[ "$NEED_EXPAND" -eq 1 ]]; then
+    mkdir -p /srv/aetherflow/.well-known/acme-challenge
+    if certbot certonly --webroot -w /srv/aetherflow --cert-name "$BASE_DOMAIN" --expand --non-interactive --agree-tos "${CERT_ARGS[@]}"; then
+        systemctl reload apache2
+    fi
+fi

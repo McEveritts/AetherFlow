@@ -1,6 +1,8 @@
 package services
 
 import (
+	"aetherflow/db"
+	"aetherflow/models"
 	"fmt"
 	"log"
 	"net/http"
@@ -89,7 +91,28 @@ func (o *Orchestrator) ExecuteAtomicDeploy(cfg DeployConfig) error {
 		return fmt.Errorf("failed atomic symlink execution: %w", err)
 	}
 
-	o.logToStream(cfg.StatusChan, "[STEP 5] Updating Caddy dual-routing API targets...")
+	o.logToStream(cfg.StatusChan, "[STEP 5] Updating Apache2 / Subdomain Gateway & reverse-proxy targets...")
+	var prevIngress *models.AppIngressConfig
+	if db.DB != nil {
+		prevIngress, _ = db.GetAppIngressConfig(cfg.AppName)
+		pubDomain := ""
+		extEnabled := true
+		tlsEnabled := true
+		if prevIngress != nil {
+			pubDomain = prevIngress.PublicDomain
+			extEnabled = prevIngress.ExternalAccessEnabled
+			tlsEnabled = prevIngress.TLSEnabled
+		} else if baseDomain := ResolveBaseDomain(); baseDomain != "" {
+			pubDomain = FormatAppPublicDomain(cfg.AppName, baseDomain)
+		}
+		_ = db.SetAppIngressConfig(models.AppIngressConfig{
+			AppName:               cfg.AppName,
+			PublicDomain:          pubDomain,
+			ListenPort:            cfg.TargetCaddyPort,
+			ExternalAccessEnabled: extEnabled,
+			TLSEnabled:            tlsEnabled,
+		})
+	}
 	routeState := RoutingState{
 		AppName:               cfg.AppName,
 		ActivePort:            cfg.TargetCaddyPort,
@@ -97,6 +120,9 @@ func (o *Orchestrator) ExecuteAtomicDeploy(cfg DeployConfig) error {
 		ExternalAccessEnabled: true,
 	}
 	if err := o.CaddyMgr.UpdateAppRoutes(routeState); err != nil {
+		if prevIngress != nil && db.DB != nil {
+			_ = db.SetAppIngressConfig(*prevIngress)
+		}
 		o.executeRollback(cfg, oldTarget)
 		return fmt.Errorf("failed routing update: %w", err)
 	}

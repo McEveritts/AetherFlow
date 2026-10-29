@@ -1,9 +1,12 @@
 package api
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"regexp"
 	"strings"
 
@@ -119,11 +122,14 @@ func UpdateAppIngressConfig(c *gin.Context) {
 		slog.Warn("local dns hot-reload notice", "app", appName, "warning", err)
 	}
 
-	// Sync blueprint native config and networking DNS providers (Pi-hole / dnsmasq)
+	// Sync blueprint native config, networking DNS providers (Pi-hole / dnsmasq), and Apache Let's Encrypt SANs
 	if bp := services.GetBlueprint(appName); bp != nil {
 		_, _, _ = services.ApplyBlueprintAppConfig(bp, listenPort)
 	}
 	_, _ = services.SyncNetworkDNSProviders()
+	if cfg.ExternalAccessEnabled && cfg.PublicDomain != "" {
+		services.TriggerApacheCertSync()
+	}
 
 	actorID, _ := c.Get("user_id")
 	actorName, _ := c.Get("username")
@@ -136,3 +142,65 @@ func UpdateAppIngressConfig(c *gin.Context) {
 		"config":  cfg,
 	})
 }
+
+// AppSubdomainProxyMiddleware intercepts incoming HTTP and WebSocket requests whose Host
+// header matches an installed application's public subdomain (e.g., qbittorrent.mcflow.stream)
+// or internal domain (<app>.aether.local) and reverse-proxies them directly to 127.0.0.1:<port>.
+// This allows Apache/Nginx-fronted deployments (where Caddy is not running on :80/:443) to
+// transparently route all application subdomains through the single AetherFlow gateway port.
+func AppSubdomainProxyMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if c.GetBool("af_subdomain_checked") {
+			c.Next()
+			return
+		}
+		c.Set("af_subdomain_checked", true)
+
+		if strings.HasPrefix(c.Request.URL.Path, "/.well-known/acme-challenge/") {
+			c.Next()
+			return
+		}
+
+		targetPort, appName, matched := services.ResolveAppTargetForHost(c.Request.Host)
+		if !matched || targetPort <= 0 {
+			c.Next()
+			return
+		}
+
+		targetURL := &url.URL{
+			Scheme: "http",
+			Host:   fmt.Sprintf("127.0.0.1:%d", targetPort),
+		}
+
+		proxy := httputil.NewSingleHostReverseProxy(targetURL)
+		proxy.FlushInterval = -1
+		origDirector := proxy.Director
+		incomingHost := c.Request.Host
+		proxy.Director = func(req *http.Request) {
+			origDirector(req)
+			req.Host = incomingHost
+			if req.Header.Get("X-Forwarded-Host") == "" {
+				req.Header.Set("X-Forwarded-Host", incomingHost)
+			}
+			if req.Header.Get("X-Forwarded-Proto") == "" {
+				if c.Request.TLS != nil {
+					req.Header.Set("X-Forwarded-Proto", "https")
+				} else {
+					req.Header.Set("X-Forwarded-Proto", "http")
+				}
+			}
+		}
+		proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+			slog.Warn("subdomain reverse proxy upstream error", "app", appName, "host", incomingHost, "port", targetPort, "error", err)
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.WriteHeader(http.StatusBadGateway)
+			_, _ = fmt.Fprintf(w, `{"error":"bad_gateway","message":"Upstream service %s on port %d is unavailable."}`, appName, targetPort)
+		}
+
+		reqCtx, cancel := context.WithCancel(c.Request.Context())
+		defer cancel()
+		proxy.ServeHTTP(c.Writer, c.Request.WithContext(reqCtx))
+		c.Abort()
+	}
+}
+

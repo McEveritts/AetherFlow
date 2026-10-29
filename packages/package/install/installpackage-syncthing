@@ -40,6 +40,12 @@ fi
 
 mkdir -p /var/lib/syncthing
 chown -R syncthing:syncthing /var/lib/syncthing
+sudo -u syncthing HOME=/var/lib/syncthing /usr/bin/syncthing generate --home=/var/lib/syncthing >> "$LOGFILE" 2>&1 || true
+for st_cfg in /var/lib/syncthing/config.xml /var/lib/syncthing/.local/state/syncthing/config.xml; do
+    if [[ -f "$st_cfg" ]] && ! grep -q "insecureSkipHostcheck" "$st_cfg"; then
+        sed -i 's|<gui \([^>]*\)>|<gui \1>\n        <insecureSkipHostcheck>true</insecureSkipHostcheck>|' "$st_cfg" || true
+    fi
+done
 
 report_progress 85 "Configuring and starting syncthing.service on port 8384..."
 cat <<'EOF' > /etc/systemd/system/syncthing.service

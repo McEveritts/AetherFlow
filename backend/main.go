@@ -280,6 +280,10 @@ func main() {
 		corsConfig.AllowOrigins = discoverOrigins()
 	}
 
+	// Route application subdomains (<app>.<baseDomain> / <app>.aether.local) before CORS
+	// so same-origin app requests with Origin: https://<app>.<baseDomain> are proxied cleanly.
+	r.Use(api.AppSubdomainProxyMiddleware())
+
 	r.Use(cors.New(corsConfig))
 
 	// Register all API routes from the api package

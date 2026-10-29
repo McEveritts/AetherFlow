@@ -24,11 +24,21 @@ func GetActiveServices() map[string]interface{} {
 	// 2. Core Systemd Services
 	for displayName, systemdName := range systemdCoreServices {
 		status, uptime, version := GetServiceInfo(systemdName)
+		managedBy := "systemd"
+		// In single-binary architecture, the frontend SPA is embedded directly inside aetherflow-api.
+		if systemdName == "aetherflow-frontend" && status == "stopped" {
+			if apiSt, apiUp, apiVer := GetServiceInfo("aetherflow-api"); apiSt == "running" {
+				status = apiSt
+				uptime = apiUp
+				version = apiVer
+				managedBy = "embedded"
+			}
+		}
 		servicesList[displayName] = gin.H{
 			"status":     status,
 			"uptime":     uptime,
 			"version":    version,
-			"managed_by": "systemd",
+			"managed_by": managedBy,
 			"process":    systemdName,
 			"id":         systemdName,
 		}

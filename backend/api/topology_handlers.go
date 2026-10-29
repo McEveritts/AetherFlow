@@ -122,38 +122,40 @@ func GetSystemTopology(c *gin.Context) {
 		})
 	}
 
-	// 5. Caddy Reverse Proxy
-	caddyStatus := "stopped"
-	caddyDetails := "Port 443 / 80"
-	client := &http.Client{Timeout: 500 * time.Millisecond}
-	resp, err := client.Get("http://127.0.0.1:2019/config/")
-	if err == nil {
-		resp.Body.Close()
-		if resp.StatusCode < 500 {
-			caddyStatus = "running"
-			caddyDetails = "Caddy Admin API active (443 / 80)"
-		}
-	}
-	if caddyStatus == "stopped" {
-		st, _, _ := services.GetServiceInfo("caddy")
-		if st == "running" {
-			caddyStatus = "running"
-		} else {
-			nst, _, _ := services.GetServiceInfo("nginx")
-			if nst == "running" {
-				caddyStatus = "running"
-				caddyDetails = "Nginx active (443 / 80)"
+	// 5. Apache2 / Reverse Proxy Gateway (prefers Apache2 over Caddy)
+	proxyNodeID := "Apache2 Reverse Proxy"
+	proxyStatus := "stopped"
+	proxyDetails := "Port 443 / 80"
+	if ast, _, _ := services.GetServiceInfo("apache2"); ast == "running" {
+		proxyStatus = "running"
+		proxyDetails = "Apache2 + AetherFlow Subdomain Gateway (443 / 80)"
+	} else if nst, _, _ := services.GetServiceInfo("nginx"); nst == "running" {
+		proxyNodeID = "Nginx Reverse Proxy"
+		proxyStatus = "running"
+		proxyDetails = "Nginx active (443 / 80)"
+	} else if cst, _, _ := services.GetServiceInfo("caddy"); cst == "running" {
+		proxyNodeID = "Caddy Reverse Proxy"
+		proxyStatus = "running"
+		proxyDetails = "Caddy active (443 / 80)"
+	} else {
+		client := &http.Client{Timeout: 200 * time.Millisecond}
+		if resp, err := client.Get("http://127.0.0.1:2019/config/"); err == nil {
+			resp.Body.Close()
+			if resp.StatusCode < 500 {
+				proxyNodeID = "Caddy Reverse Proxy"
+				proxyStatus = "running"
+				proxyDetails = "Caddy Admin API active (443 / 80)"
 			}
 		}
 	}
 	nodes = append(nodes, TopologyNode{
-		ID:      "Caddy Reverse Proxy",
+		ID:      proxyNodeID,
 		Group:   3,
-		Status:  caddyStatus,
-		Details: caddyDetails,
+		Status:  proxyStatus,
+		Details: proxyDetails,
 	})
 	links = append(links, TopologyLink{
-		Source: "Caddy Reverse Proxy",
+		Source: proxyNodeID,
 		Target: "AetherFlow API",
 		Value:  1,
 	})
@@ -161,14 +163,27 @@ func GetSystemTopology(c *gin.Context) {
 	// 6. Installed and Running App Services
 	if pkgs, err := services.GetPackages(); err == nil {
 		for _, pkg := range pkgs {
-			if pkg.Status == "running" && pkg.Name != "" {
+			if (pkg.Status == "running" || pkg.Status == "installed") && pkg.Name != "" {
+				svcName := pkg.ServiceName
+				if svcName == "" {
+					svcName = pkg.Name
+				}
+				if pkg.Status != "running" {
+					if st, _, _ := services.GetServiceInfo(svcName); st != "running" {
+						continue
+					}
+				}
 				displayName := pkg.Label
 				if displayName == "" {
 					displayName = pkg.Name
 				}
 				detailStr := "Running"
 				if ingressCfg, err := db.GetAppIngressConfig(pkg.Name); err == nil && ingressCfg != nil && ingressCfg.ListenPort > 0 {
-					detailStr = fmt.Sprintf("Port %d", ingressCfg.ListenPort)
+					if ingressCfg.PublicDomain != "" {
+						detailStr = fmt.Sprintf("%s (Port %d)", ingressCfg.PublicDomain, ingressCfg.ListenPort)
+					} else {
+						detailStr = fmt.Sprintf("Port %d", ingressCfg.ListenPort)
+					}
 				} else if bp := services.GetBlueprint(pkg.Name); bp != nil && bp.DefaultPort > 0 {
 					detailStr = fmt.Sprintf("Port %d", bp.DefaultPort)
 				}
@@ -179,7 +194,7 @@ func GetSystemTopology(c *gin.Context) {
 					Details: detailStr,
 				})
 				links = append(links, TopologyLink{
-					Source: "Caddy Reverse Proxy",
+					Source: proxyNodeID,
 					Target: displayName,
 					Value:  1,
 				})

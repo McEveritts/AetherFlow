@@ -23,10 +23,10 @@ func init() {
 }
 
 func resolveConfigPaths(envKey, fileName string) []string {
-	paths := []string{}
 	if customPath := os.Getenv(envKey); customPath != "" {
-		paths = append(paths, customPath)
+		return []string{customPath}
 	}
+	paths := []string{}
 
 	// Executable-relative: always works no matter the CWD
 	if exeDir != "" {
@@ -159,7 +159,7 @@ func GetPackages() ([]models.Package, error) {
 			}
 
 			// 2. For systemd services, check if the unit actually exists on the system
-			lockPath := pkgs[idx].LockFile
+			lockPath := resolveFilesystemPath(pkgs[idx].LockFile)
 			if lockPath != "" {
 				if _, err := os.Stat(lockPath); err == nil {
 					mu.Lock()

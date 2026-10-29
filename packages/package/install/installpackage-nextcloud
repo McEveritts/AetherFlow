@@ -64,10 +64,17 @@ sudo -u www-data php /var/www/nextcloud/occ maintenance:install \
     --data-dir "/var/lib/nextcloud/data" >> "$LOGFILE" 2>&1
 
 PRIMARY_IP="$(hostname -I 2>/dev/null | awk '{print $1}' || echo 127.0.0.1)"
+BASE_DOMAIN="$(get_base_domain || true)"
 sudo -u www-data php /var/www/nextcloud/occ config:system:set trusted_domains 0 --value="localhost" >> "$LOGFILE" 2>&1
 sudo -u www-data php /var/www/nextcloud/occ config:system:set trusted_domains 1 --value="127.0.0.1" >> "$LOGFILE" 2>&1
 sudo -u www-data php /var/www/nextcloud/occ config:system:set trusted_domains 2 --value="${PRIMARY_IP}" >> "$LOGFILE" 2>&1
 sudo -u www-data php /var/www/nextcloud/occ config:system:set trusted_domains 3 --value="$(hostname -f 2>/dev/null || hostname)" >> "$LOGFILE" 2>&1
+sudo -u www-data php /var/www/nextcloud/occ config:system:set trusted_domains 4 --value="nextcloud.aether.local" >> "$LOGFILE" 2>&1
+if [[ -n "$BASE_DOMAIN" ]]; then
+    sudo -u www-data php /var/www/nextcloud/occ config:system:set trusted_domains 5 --value="nextcloud.${BASE_DOMAIN}" >> "$LOGFILE" 2>&1
+fi
+sudo -u www-data php /var/www/nextcloud/occ config:system:set trusted_proxies 0 --value="127.0.0.1" >> "$LOGFILE" 2>&1
+sudo -u www-data php /var/www/nextcloud/occ config:system:set trusted_proxies 1 --value="::1" >> "$LOGFILE" 2>&1
 
 NC_VER="$(grep -oE "OC_VersionString = '[^']+'" /var/www/nextcloud/version.php 2>/dev/null | cut -d"'" -f2 || true)"
 if [[ -n "$NC_VER" ]]; then

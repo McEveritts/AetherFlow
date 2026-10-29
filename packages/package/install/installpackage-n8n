@@ -58,6 +58,8 @@ Group=n8n
 Environment=N8N_PORT=5678
 Environment=N8N_LISTEN_ADDRESS=0.0.0.0
 Environment=N8N_USER_FOLDER=/var/lib/n8n
+Environment=N8N_PROXY_HOPS=1
+Environment=N8N_SECURE_COOKIE=false
 Environment=NODE_ENV=production
 ExecStart=${NODE_PATH} ${N8N_BIN}
 Restart=on-failure

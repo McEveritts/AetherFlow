@@ -18,6 +18,7 @@ func setupBlueprintTestDB(t *testing.T) {
 	t.Helper()
 	tmpDir := t.TempDir()
 	t.Setenv("DB_PATH", filepath.Join(tmpDir, "test_blueprint.sqlite"))
+	t.Setenv("AETHERFLOW_RUNNER_SOCK", filepath.Join(tmpDir, "nonexistent-runner.sock"))
 	t.Setenv("AETHERFLOW_PACKAGES_CONFIG", filepath.Join("..", "config", "packages.json"))
 	t.Setenv("AETHERFLOW_PACKAGE_AUTOMATION_CONFIG", filepath.Join("..", "config", "package_automation.json"))
 	db.InitDB()

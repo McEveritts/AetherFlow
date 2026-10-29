@@ -69,6 +69,13 @@ fi
 
 report_progress 80 "Generating /etc/paperless.conf and initializing database..."
 SECRET_KEY="$(openssl rand -hex 32)"
+BASE_DOMAIN="$(get_base_domain || true)"
+PAPERLESS_URL_VAL="http://localhost:8010"
+PAPERLESS_CSRF_ORIGINS="http://localhost:8010,http://127.0.0.1:8010,http://paperless-ngx.aether.local"
+if [[ -n "$BASE_DOMAIN" ]]; then
+    PAPERLESS_URL_VAL="https://paperless-ngx.${BASE_DOMAIN}"
+    PAPERLESS_CSRF_ORIGINS="https://paperless-ngx.${BASE_DOMAIN},${PAPERLESS_CSRF_ORIGINS}"
+fi
 cat <<EOF > /etc/paperless.conf
 PAPERLESS_REDIS=redis://localhost:6379
 PAPERLESS_DATA_DIR=/var/lib/paperless/data
@@ -76,7 +83,11 @@ PAPERLESS_MEDIA_ROOT=/var/lib/paperless/media
 PAPERLESS_CONSUMPTION_DIR=/var/lib/paperless/consume
 PAPERLESS_EXPORT_DIR=/var/lib/paperless/export
 PAPERLESS_SECRET_KEY=${SECRET_KEY}
-PAPERLESS_URL=http://localhost:8010
+PAPERLESS_URL=${PAPERLESS_URL_VAL}
+PAPERLESS_ALLOWED_HOSTS=*
+PAPERLESS_CSRF_TRUSTED_ORIGINS=${PAPERLESS_CSRF_ORIGINS}
+PAPERLESS_USE_X_FORWARD_HOST=true
+PAPERLESS_PROXY_SSL_HEADER=["HTTP_X_FORWARDED_PROTO", "https"]
 PAPERLESS_PORT=8010
 PAPERLESS_BIND_ADDR=0.0.0.0
 EOF

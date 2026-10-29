@@ -22,6 +22,8 @@ func RegisterRoutes(r *gin.Engine) {
 	r.Use(RecoveryMiddleware())
 	// Phase 17: Request ID for tracing
 	r.Use(RequestIDMiddleware())
+	// Application Subdomain Reverse Proxy (<app>.<baseDomain> & <app>.aether.local -> 127.0.0.1:<port>)
+	r.Use(AppSubdomainProxyMiddleware())
 	// Phase 21: Security headers on every response
 	r.Use(SecurityHeadersMiddleware())
 

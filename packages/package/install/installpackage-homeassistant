@@ -33,6 +33,17 @@ if ! id -u homeassistant >/dev/null 2>&1; then
 fi
 
 mkdir -p /srv/homeassistant /home/homeassistant/.homeassistant
+if [[ ! -f /home/homeassistant/.homeassistant/configuration.yaml ]]; then
+    cat <<'EOF' > /home/homeassistant/.homeassistant/configuration.yaml
+default_config:
+
+http:
+  use_x_forwarded_for: true
+  trusted_proxies:
+    - 127.0.0.1
+    - ::1
+EOF
+fi
 chown -R homeassistant:homeassistant /srv/homeassistant /home/homeassistant
 
 report_progress 45 "Creating Home Assistant Python virtual environment..."

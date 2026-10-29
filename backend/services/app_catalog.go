@@ -327,6 +327,12 @@ var blueprintRegistry = map[string]AppBlueprint{
 		MutatorType:    "ini",
 		ConfigFilePath: "/var/lib/sabnzbd/sabnzbd.ini",
 		AppDataPath:    "/var/lib/sabnzbd/sabnzbd.ini",
+		DefaultConfigs: map[string]string{
+			"port":           "8085",
+			"host":           "0.0.0.0",
+			"inet_exposure":  "4",
+			"host_whitelist": "sabnzbd.aether.local, localhost, 127.0.0.1",
+		},
 	},
 	"nzbget":      {AppName: "nzbget", ServiceName: "nzbget", Category: "Downloaders", DefaultPort: 6789},
 	"flood":       {AppName: "flood", ServiceName: "flood", Category: "Downloaders", DefaultPort: 3001},

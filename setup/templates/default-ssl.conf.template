@@ -1,6 +1,7 @@
 <VirtualHost *:80>
         ServerName _
         RewriteEngine On
+        RewriteCond %{REQUEST_URI} !^/\.well-known/acme-challenge/
         RewriteRule ^/?(.*)$ https://%{HTTP_HOST}/$1 [R=301,L]
 
         DocumentRoot "/srv/aetherflow"
@@ -38,6 +39,9 @@
                 AuthUserFile "/etc/htpasswd"
                 Require valid-user
         </Directory>
+        <Location "/.well-known/acme-challenge/">
+                Require all granted
+        </Location>
 
         ProxyRequests Off
         ProxyPreserveHost On
@@ -46,9 +50,11 @@
         RequestHeader set X-Forwarded-Port "443"
 
         RewriteEngine On
-        RewriteCond %{HTTP:Upgrade} =websocket [NC]
+        RewriteCond %{HTTP:Upgrade} websocket [NC]
         RewriteCond %{HTTP:Connection} upgrade [NC]
-        RewriteRule ^/api/(.*)$ ws://127.0.0.1:8080/api/$1 [P,L]
+        RewriteRule ^/?(.*)$ ws://127.0.0.1:8080/$1 [P,L]
+
+        ProxyPass /.well-known/acme-challenge/ !
 
         ProxyPass /api/ http://127.0.0.1:8080/api/ retry=0 timeout=300
         ProxyPassReverse /api/ http://127.0.0.1:8080/api/

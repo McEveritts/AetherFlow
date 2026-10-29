@@ -88,11 +88,23 @@ expand_rw_path() {
 
 profile_block() {
     local profile="$1"
+    local unit="${2:-}"
+    local private_devices="yes"
+    local restrict_namespaces="yes"
+
+    case "${unit}" in
+        jellyfin*|plex*|emby*|tdarr*|threadfin*|scrutiny*)
+            private_devices="no"
+            ;;
+        flaresolverr*)
+            restrict_namespaces="no"
+            ;;
+    esac
 
     cat <<EOF
 NoNewPrivileges=yes
 PrivateTmp=yes
-PrivateDevices=yes
+PrivateDevices=${private_devices}
 ProtectSystem=strict
 ProtectHome=read-only
 ProtectClock=yes
@@ -103,18 +115,18 @@ ProtectKernelTunables=yes
 ProtectProc=invisible
 ProcSubset=pid
 LockPersonality=yes
-RestrictNamespaces=yes
+RestrictNamespaces=${restrict_namespaces}
 RestrictRealtime=yes
 RestrictSUIDSGID=yes
 SystemCallArchitectures=native
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 CapabilityBoundingSet=
 AmbientCapabilities=
 UMask=0077
 EOF
 
     case "${profile}" in
-        node|mono|dotnet|java)
+        node|mono|dotnet|java|python)
             ;;
         *)
             echo "MemoryDenyWriteExecute=yes"
@@ -152,7 +164,7 @@ apply_sandbox_dropin() {
 
     {
         echo "[Service]"
-        profile_block "${profile}"
+        profile_block "${profile}" "${unit}"
 
         if [[ "$#" -gt 0 ]]; then
             local expanded_paths=()

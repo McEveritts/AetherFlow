@@ -424,6 +424,7 @@ func extractProposedAction(aiReply string, userMessage string) *ProposedAction {
 func extractServiceTarget(message string) string {
 	lower := strings.ToLower(message)
 	knownServices := []string{
+		"apache2", "apache", "aetherflow-api", "aetherflow-runner",
 		"nginx", "postgres", "postgresql", "redis",
 		"qbittorrent", "qui", "autobrr", "sonarr", "radarr", "lidarr", "prowlarr",
 		"plex", "jellyfin", "emby", "threadfin", "transmission", "deluge",

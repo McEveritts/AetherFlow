@@ -278,6 +278,12 @@ EOF
             sha256sum /etc/systemd/system/aetherflow-api.service | awk '{print $1}' > /etc/systemd/system/aetherflow-api.service.aetherflow-sha256
         fi
     fi
+    if [[ -f "${sysd_dir}/af-certbot-sync.service" ]]; then
+        cp -f "${sysd_dir}/af-certbot-sync.service" /etc/systemd/system/af-certbot-sync.service
+    fi
+    if [[ -f "${sysd_dir}/af-certbot-sync.timer" ]]; then
+        cp -f "${sysd_dir}/af-certbot-sync.timer" /etc/systemd/system/af-certbot-sync.timer
+    fi
 
     # Purge legacy frontend service unit if present
     rm -f /etc/systemd/system/aetherflow-front*.service 2>/dev/null || true
@@ -292,5 +298,6 @@ EOF
     # Enable modern systemd units
     systemctl enable aetherflow-runner.service >/dev/null 2>&1 || true
     systemctl enable aetherflow-api.service >/dev/null 2>&1 || true
+    systemctl enable --now af-certbot-sync.timer >/dev/null 2>&1 || true
 }
 

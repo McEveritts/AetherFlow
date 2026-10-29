@@ -54,6 +54,22 @@ python3 -m venv /opt/SABnzbd/.venv >> "$LOGFILE" 2>&1
 /opt/SABnzbd/.venv/bin/pip install -r /opt/SABnzbd/requirements.txt >> "$LOGFILE" 2>&1
 
 printf '%s\n' "${SAB_VERSION#v}" > /opt/SABnzbd/.af-version
+BASE_DOMAIN="$(get_base_domain || true)"
+SAB_WHITELIST="sabnzbd.aether.local, localhost, 127.0.0.1, $(hostname -f 2>/dev/null || hostname)"
+if [[ -n "$BASE_DOMAIN" ]]; then
+    SAB_WHITELIST="sabnzbd.${BASE_DOMAIN}, ${SAB_WHITELIST}"
+fi
+if [[ ! -f /var/lib/sabnzbd/sabnzbd.ini ]]; then
+    cat <<EOF > /var/lib/sabnzbd/sabnzbd.ini
+__version__ = 19
+__encoding__ = utf-8
+[misc]
+port = 8085
+host = 0.0.0.0
+inet_exposure = 4
+host_whitelist = ${SAB_WHITELIST}
+EOF
+fi
 chown -R sabnzbd:sabnzbd /opt/SABnzbd /var/lib/sabnzbd
 
 report_progress 90 "Configuring and starting sabnzbd.service on port 8085..."

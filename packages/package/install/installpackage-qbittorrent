@@ -29,7 +29,7 @@ if ! id -u qbittorrent >/dev/null 2>&1; then
 fi
 
 report_progress 55 "Configuring qBittorrent WebUI on port 8180..."
-mkdir -p /var/lib/qbittorrent/.config/qBittorrent /var/lib/qbittorrent/Downloads
+mkdir -p /var/lib/qbittorrent/.config/qBittorrent/config /var/lib/qbittorrent/Downloads
 
 cat <<'EOF' > /var/lib/qbittorrent/.config/qBittorrent/qBittorrent.conf
 [LegalNotice]
@@ -46,6 +46,8 @@ WebUI\Password_PBKDF2="@ByteArray(ARQ77eY1NUZaQsuDHbIMCA==:0WMRkYTUWVT9wVvdDtHAj
 Downloads\SavePath=/var/lib/qbittorrent/Downloads/
 EOF
 
+cp -f /var/lib/qbittorrent/.config/qBittorrent/qBittorrent.conf /var/lib/qbittorrent/.config/qBittorrent/config/qBittorrent.conf
+
 chown -R qbittorrent:qbittorrent /var/lib/qbittorrent
 
 report_progress 85 "Configuring and starting qbittorrent.service on port 8180..."
@@ -61,7 +63,7 @@ User=qbittorrent
 Group=qbittorrent
 UMask=007
 Environment=HOME=/var/lib/qbittorrent
-ExecStart=/usr/bin/qbittorrent-nox --webui-port=8180 --profile=/var/lib/qbittorrent/.config
+ExecStart=/usr/bin/qbittorrent-nox --webui-port=8180
 Restart=on-failure
 TimeoutStopSec=300
 NoNewPrivileges=true

@@ -50,12 +50,13 @@ func IsTCPPortInUse(port int) bool {
 		return false
 	}
 
-	if envOccupied := strings.TrimSpace(os.Getenv("AETHERFLOW_OCCUPIED_PORTS")); envOccupied != "" {
+	if envOccupied, ok := os.LookupEnv("AETHERFLOW_OCCUPIED_PORTS"); ok {
 		for _, tok := range strings.Split(envOccupied, ",") {
 			if p, err := strconv.Atoi(strings.TrimSpace(tok)); err == nil && p == port {
 				return true
 			}
 		}
+		return false
 	}
 
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
@@ -234,11 +235,27 @@ func ApplyBlueprintAppConfig(bp *AppBlueprint, activePort int) (string, bool, er
 		}
 
 	default:
+		if bp.AppName == "sabnzbd" {
+			whitelist := "sabnzbd.aether.local, localhost, 127.0.0.1"
+			if baseDomain := ResolveBaseDomain(); baseDomain != "" {
+				whitelist = fmt.Sprintf("%s, %s", FormatAppPublicDomain("sabnzbd", baseDomain), whitelist)
+			}
+			settings["host_whitelist"] = whitelist
+		}
 		if bp.MutatorType == "ini" && configPath != "" && len(settings) > 0 {
 			iniMut := NewINIMutator(configPath)
 			_ = iniMut.Backup()
 			if err := iniMut.ApplySettings(settings); err == nil {
 				applied = true
+			}
+			if bp.AppName == "qbittorrent" {
+				altPath := resolveFilesystemPath("/var/lib/qbittorrent/.config/qBittorrent/config/qBittorrent.conf")
+				if altDir := filepath.Dir(altPath); altDir != "" {
+					if info, err := os.Stat(altDir); err == nil && info.IsDir() {
+						altMut := NewINIMutator(altPath)
+						_ = altMut.ApplySettings(settings)
+					}
+				}
 			}
 		} else if bp.MutatorType == "xml" && configPath != "" && len(settings) > 0 {
 			xmlMut := NewXMLMutator(configPath, "")
@@ -491,9 +508,31 @@ func SyncInstalledAppsBaseDomain(oldBaseDomain, newBaseDomain string) {
 			PublicDomain:          pubDomain,
 			ExternalAccessEnabled: true,
 		})
+		if bp.InternalDomain != "" || pubDomain != "" {
+			var doms []string
+			if bp.InternalDomain != "" {
+				doms = append(doms, bp.InternalDomain)
+			}
+			if pubDomain != "" {
+				doms = append(doms, pubDomain)
+			}
+			_ = NewDNSManager().AppendOrUpdateDomains(doms)
+		}
 	}
 
 	_, _ = SyncNetworkDNSProviders()
+	TriggerApacheCertSync()
+}
+
+// TriggerApacheCertSync asynchronously invokes the root af-certbot-sync oneshot unit
+// via the privileged runner when available so Apache2's Let's Encrypt SAN certificate
+// automatically expands to cover newly provisioned subdomains.
+func TriggerApacheCertSync() {
+	if IsRunnerAvailable() {
+		go func() {
+			_ = DispatchSystemctl("af-certbot-sync", "start")
+		}()
+	}
 }
 
 // ApplyBlueprintPostInstall executes the complete post-installation setup for an application:
@@ -568,6 +607,9 @@ func ApplyBlueprintPostInstall(appName string, preAllocatedPort int) (*Blueprint
 	}
 	res.PublicDomain = ingressCfg.PublicDomain
 	res.ExternalAccessEnabled = ingressCfg.ExternalAccessEnabled
+	if ingressCfg.ExternalAccessEnabled && ingressCfg.PublicDomain != "" {
+		TriggerApacheCertSync()
+	}
 
 	// 3. Register route in Caddy Reverse Proxy if the app exposes an HTTP port
 	if activePort > 0 {
@@ -586,10 +628,17 @@ func ApplyBlueprintPostInstall(appName string, preAllocatedPort int) (*Blueprint
 		}
 	}
 
-	// 4. Register internal domain (<app>.aether.local) in /etc/hosts
+	// 4. Register internal domain (<app>.aether.local) and public subdomain in /etc/hosts
+	var hostDomains []string
 	if bp.InternalDomain != "" {
+		hostDomains = append(hostDomains, bp.InternalDomain)
+	}
+	if ingressCfg.ExternalAccessEnabled && ingressCfg.PublicDomain != "" {
+		hostDomains = append(hostDomains, ingressCfg.PublicDomain)
+	}
+	if len(hostDomains) > 0 {
 		dnsMgr := NewDNSManager()
-		if err := dnsMgr.AppendOrUpdateDomains([]string{bp.InternalDomain}); err != nil {
+		if err := dnsMgr.AppendOrUpdateDomains(hostDomains); err != nil {
 			slog.Warn("blueprint /etc/hosts registration notice", "app", bp.AppName, "warning", err)
 		} else {
 			res.HostsSynced = true
@@ -630,9 +679,13 @@ func TeardownBlueprintUninstall(appName string) error {
 		slog.Warn("blueprint Caddy route removal notice", "app", canonicalName, "warning", err)
 	}
 
-	// 2. Remove internal domain from /etc/hosts
+	// 2. Remove internal and public domains from /etc/hosts
+	removeDomains := []string{internalDomain}
+	if existing, err := db.GetAppIngressConfig(canonicalName); err == nil && existing != nil && strings.TrimSpace(existing.PublicDomain) != "" {
+		removeDomains = append(removeDomains, strings.TrimSpace(existing.PublicDomain))
+	}
 	dnsMgr := NewDNSManager()
-	if err := dnsMgr.RemoveDomains([]string{internalDomain}); err != nil {
+	if err := dnsMgr.RemoveDomains(removeDomains); err != nil {
 		slog.Warn("blueprint /etc/hosts removal notice", "app", canonicalName, "warning", err)
 	}
 
@@ -646,3 +699,72 @@ func TeardownBlueprintUninstall(appName string) error {
 
 	return nil
 }
+
+// ResolveAppTargetForHost inspects an incoming HTTP Host header and determines whether
+// it matches an installed application's public subdomain (<app>.<baseDomain> or custom
+// PublicDomain) or internal domain (<app>.aether.local), returning its loopback port and app name.
+func ResolveAppTargetForHost(hostHeader string) (int, string, bool) {
+	host := strings.ToLower(strings.TrimSpace(hostHeader))
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	host = strings.TrimSuffix(host, ".")
+	if host == "" || host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "aetherflow.aether.local" {
+		return 0, "", false
+	}
+	if net.ParseIP(host) != nil {
+		return 0, "", false
+	}
+
+	baseDomain := ResolveBaseDomain()
+	if baseDomain != "" {
+		if host == baseDomain || host == "www."+baseDomain || host == "direct."+baseDomain || host == "aetherflow."+baseDomain {
+			return 0, "", false
+		}
+	}
+
+	// 1. Check persisted app_ingress_configs
+	if configs, err := db.GetAllAppIngressConfigs(); err == nil {
+		for _, cfg := range configs {
+			if cfg.ListenPort <= 0 {
+				continue
+			}
+			pub := strings.ToLower(strings.TrimSpace(cfg.PublicDomain))
+			if cfg.ExternalAccessEnabled && pub != "" && host == pub {
+				return cfg.ListenPort, cfg.AppName, true
+			}
+			internalDom := fmt.Sprintf("%s.aether.local", strings.ToLower(strings.TrimSpace(cfg.AppName)))
+			if host == internalDom {
+				return cfg.ListenPort, cfg.AppName, true
+			}
+		}
+	}
+
+	// 2. Fallback: match <app>.aether.local or <app>.<baseDomain> against catalog blueprints
+	var candidateApp string
+	isInternal := false
+	if strings.HasSuffix(host, ".aether.local") {
+		candidateApp = strings.TrimSuffix(host, ".aether.local")
+		isInternal = true
+	} else if baseDomain != "" && strings.HasSuffix(host, "."+baseDomain) {
+		candidateApp = strings.TrimSuffix(host, "."+baseDomain)
+	}
+
+	if candidateApp != "" && !strings.Contains(candidateApp, ".") {
+		if bp := GetBlueprint(candidateApp); bp != nil && bp.DefaultPort > 0 {
+			port := bp.DefaultPort
+			if ing, err := db.GetAppIngressConfig(bp.AppName); err == nil && ing != nil {
+				if !isInternal && !ing.ExternalAccessEnabled && strings.TrimSpace(ing.PublicDomain) != "" {
+					return 0, "", false
+				}
+				if ing.ListenPort > 0 {
+					port = ing.ListenPort
+				}
+			}
+			return port, bp.AppName, true
+		}
+	}
+
+	return 0, "", false
+}
+

@@ -1,0 +1,7 @@
+[Unit]
+Description=AetherFlow Let's Encrypt Subdomain SAN Auto-Sync for Apache2
+After=network-online.target apache2.service aetherflow-api.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/af-certbot-sync

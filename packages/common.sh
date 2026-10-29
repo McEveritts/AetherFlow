@@ -68,6 +68,23 @@ has_lock() {
 write_lock() {
     local package_name="$1"
     touch "$(lock_path "$package_name")"
+    if [[ -x /usr/local/bin/af-certbot-sync ]]; then
+        /usr/local/bin/af-certbot-sync >/dev/null 2>&1 &
+    fi
+}
+
+get_base_domain() {
+    local dom=""
+    if command -v sqlite3 >/dev/null 2>&1 && [[ -f /opt/AetherFlow/backend/data/aetherflow.sqlite ]]; then
+        dom="$(sqlite3 /opt/AetherFlow/backend/data/aetherflow.sqlite "SELECT base_domain FROM settings WHERE id = 1;" 2>/dev/null | sed 's/^\*\.//' | tr -d '[:space:]' || true)"
+    fi
+    if [[ -z "$dom" && -f /etc/aetherflow/aetherflow.env ]]; then
+        dom="$(grep -oP '^AETHERFLOW_BASE_DOMAIN=\K.*' /etc/aetherflow/aetherflow.env 2>/dev/null | sed 's/^\*\.//' | tr -d '[:space:]' || true)"
+    fi
+    if [[ "$dom" == "localhost" || "$dom" == *.local ]]; then
+        dom=""
+    fi
+    printf '%s\n' "$dom"
 }
 
 remove_lock() {

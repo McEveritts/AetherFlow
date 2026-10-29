@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 
 	"aetherflow/db"
@@ -116,6 +119,67 @@ func TestIngressConfigs_PersistenceAndSync(t *testing.T) {
 		}
 		if jfCfg.PublicDomain != "jellyfin.domain.com" || !jfCfg.ExternalAccessEnabled || !jfCfg.TLSEnabled {
 			t.Fatalf("expected jellyfin.domain.com to be auto-provisioned, got: %+v", jfCfg)
+		}
+	}
+
+	// 5. Subdomain Reverse Proxy routes <app>.<baseDomain> and /api/v2/* to the app's loopback port
+	{
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			w.Header().Set("X-Upstream-App", "qbittorrent")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("qBittorrent WebUI:" + req.URL.Path))
+		}))
+		defer upstream.Close()
+
+		u, err := url.Parse(upstream.URL)
+		if err != nil {
+			t.Fatalf("failed to parse upstream URL: %v", err)
+		}
+		parts := strings.Split(u.Host, ":")
+		upstreamPort, _ := strconv.Atoi(parts[len(parts)-1])
+
+		_ = db.SetAppIngressConfig(models.AppIngressConfig{
+			AppName:               "qbittorrent",
+			PublicDomain:          "qbittorrent.domain.com",
+			ExternalAccessEnabled: true,
+			ListenPort:            upstreamPort,
+			TLSEnabled:            true,
+		})
+
+		gw := gin.New()
+		gw.Use(AppSubdomainProxyMiddleware())
+		gw.GET("/", func(c *gin.Context) {
+			c.String(http.StatusOK, "AetherFlow Dashboard")
+		})
+		gw.POST("/api/v2/auth/login", func(c *gin.Context) {
+			c.String(http.StatusNotFound, "AetherFlow API 404")
+		})
+
+		// Request to qbittorrent.domain.com/ should be proxied to upstream
+		w1 := httptest.NewRecorder()
+		req1, _ := http.NewRequest("GET", "http://qbittorrent.domain.com/", nil)
+		req1.Host = "qbittorrent.domain.com"
+		gw.ServeHTTP(w1, req1)
+		if w1.Code != http.StatusOK || w1.Body.String() != "qBittorrent WebUI:/" {
+			t.Fatalf("expected proxied qBittorrent root, got %d: %s", w1.Code, w1.Body.String())
+		}
+
+		// Request to qbittorrent.domain.com/api/v2/auth/login should also be proxied to upstream
+		w2 := httptest.NewRecorder()
+		req2, _ := http.NewRequest("POST", "http://qbittorrent.domain.com/api/v2/auth/login", nil)
+		req2.Host = "qbittorrent.domain.com"
+		gw.ServeHTTP(w2, req2)
+		if w2.Code != http.StatusOK || w2.Body.String() != "qBittorrent WebUI:/api/v2/auth/login" {
+			t.Fatalf("expected proxied qBittorrent /api/v2/auth/login, got %d: %s", w2.Code, w2.Body.String())
+		}
+
+		// Request to base domain (domain.com) should serve AetherFlow Dashboard
+		w3 := httptest.NewRecorder()
+		req3, _ := http.NewRequest("GET", "http://domain.com/", nil)
+		req3.Host = "domain.com"
+		gw.ServeHTTP(w3, req3)
+		if w3.Code != http.StatusOK || w3.Body.String() != "AetherFlow Dashboard" {
+			t.Fatalf("expected AetherFlow Dashboard on base domain, got %d: %s", w3.Code, w3.Body.String())
 		}
 	}
 }

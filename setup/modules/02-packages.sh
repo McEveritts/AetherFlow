@@ -139,6 +139,8 @@ function _syscommands() {
 	\cp -f /usr/local/bin/AetherFlow/system/reload /usr/bin/reload
 	\cp -f /usr/local/bin/AetherFlow/system/af-heal /usr/bin/af-heal
 	\cp -f /usr/local/bin/AetherFlow/system/af-systemd-sandbox /usr/bin/af-systemd-sandbox
+	\cp -f /usr/local/bin/AetherFlow/system/af-certbot-sync /usr/local/bin/af-certbot-sync
+	\cp -f /usr/local/bin/AetherFlow/system/af-certbot-sync /usr/bin/af-certbot-sync
 	ln -sf /usr/local/bin/AetherFlow/system/af /usr/local/bin/af
 	ln -sf /usr/local/bin/AetherFlow/system/af /usr/bin/af
 	cat > /usr/local/bin/aetherflow <<'EOF'

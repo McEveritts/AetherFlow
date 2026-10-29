@@ -1,0 +1,10 @@
+[Unit]
+Description=Periodic AetherFlow Let's Encrypt Subdomain SAN Auto-Sync
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=15min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -19,23 +21,48 @@ type RoutingState struct {
 	ExternalAccessEnabled bool   `json:"external_access_enabled"`
 }
 
-// CaddyManager handles dynamic JSON updates to Caddy API
+// CaddyManager handles dynamic route synchronization.
+// On Apache2-fronted AetherFlow servers (the default architecture), AetherFlow's
+// built-in AppSubdomainProxyMiddleware resolves routes directly from SQLite,
+// so Caddy Admin API calls are skipped cleanly when no Caddy listener is active.
 type CaddyManager struct {
 	APIEndpoint string // e.g. "http://127.0.0.1:2019"
+	Optional    bool   // true when using default endpoint without explicit AETHERFLOW_CADDY_ENDPOINT
 }
 
 // NewCaddyManager creates a new instance of the ingress gateway manager.
 func NewCaddyManager(apiEndpoint string) *CaddyManager {
+	optional := false
 	if apiEndpoint == "" {
 		if envEndpoint := strings.TrimSpace(os.Getenv("AETHERFLOW_CADDY_ENDPOINT")); envEndpoint != "" {
 			apiEndpoint = envEndpoint
 		} else {
 			apiEndpoint = "http://127.0.0.1:2019"
+			optional = true
 		}
 	}
 	return &CaddyManager{
 		APIEndpoint: apiEndpoint,
+		Optional:    optional,
 	}
+}
+
+// isCaddyReachable performs a fast loopback TCP check when Caddy is optional
+// (Apache2 + built-in AppSubdomainProxyMiddleware is primary) to avoid 3s HTTP timeouts.
+func (cm *CaddyManager) isCaddyReachable() bool {
+	if !cm.Optional {
+		return true
+	}
+	parsed, err := url.Parse(cm.APIEndpoint)
+	if err != nil || parsed.Host == "" {
+		return false
+	}
+	conn, err := net.DialTimeout("tcp", parsed.Host, 50*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
 }
 
 // buildCaddyRoute constructs a full Caddy HTTP route object with @id, host matcher, and reverse_proxy handler.
@@ -60,8 +87,13 @@ func buildCaddyRoute(routeID, domain, dialTarget string) ([]byte, error) {
 	return json.Marshal(route)
 }
 
-// UpdateAppRoutes hot-reloads or upserts the target routes and ports for an application in Caddy.
+// UpdateAppRoutes hot-reloads or upserts the target routes and ports for an application.
+// When Apache2 + AppSubdomainProxyMiddleware is active without a local Caddy listener,
+// routing is already live via SQLite and this returns nil immediately.
 func (cm *CaddyManager) UpdateAppRoutes(state RoutingState) error {
+	if !cm.isCaddyReachable() {
+		return nil
+	}
 	target := fmt.Sprintf("127.0.0.1:%d", state.ActivePort)
 
 	upstreamPayload := []map[string]string{
@@ -117,10 +149,13 @@ func (cm *CaddyManager) UpdateAppRoutes(state RoutingState) error {
 	return nil
 }
 
-// RemoveAppRoutes deletes both internal and public routes for an uninstalled application from Caddy.
+// RemoveAppRoutes deletes both internal and public routes for an uninstalled application.
 func (cm *CaddyManager) RemoveAppRoutes(appName string) error {
 	cleanName := strings.ToLower(strings.TrimSpace(appName))
 	if cleanName == "" {
+		return nil
+	}
+	if !cm.isCaddyReachable() {
 		return nil
 	}
 	internalRouteID := fmt.Sprintf("%s_internal", cleanName)
