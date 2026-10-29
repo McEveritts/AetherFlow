@@ -122,122 +122,17 @@ function _askdashtheme() {
 	dash_theme=smoked
 }
 
-# ask what rtorrent version (9.1)
-# shellcheck disable=2250,2162
+# NOTE: _askrtorrent, _askqb, and _asktr removed — torrent client installation deferred to AetherFlow Marketplace
 function _askrtorrent() {
-	local saved_rt=$(_load_config RTVERSION)
-	local saved_lt=$(_load_config LTORRENT)
-	if [[ -n "${saved_rt}" && -n "${saved_lt}" ]]; then
-		RTVERSION="${saved_rt}"
-		LTORRENT="${saved_lt}"
-		echo "Using saved preference: rtorrent-${green}${RTVERSION}${normal}/libtorrent-${green}${LTORRENT}${normal}"
-		return 0
-	fi
-
-	if [[ "${UNATTENDED:-false}" == "true" ]]; then
-		RTVERSION="0.9.7"
-		LTORRENT="0.13.7"
-		echo "Unattended mode: using rtorrent-${green}${RTVERSION}${normal}/libtorrent-${green}${LTORRENT}${normal}"
-		_save_config RTVERSION "${RTVERSION}"
-		_save_config LTORRENT "${LTORRENT}"
-		return 0
-	fi
-
-	echo -e "1) rtorrent ${green}0.9.7 (with ipv6 support)${normal}"
-	echo -e "2) rtorrent ${green}0.9.6 (with ipv6 support)${normal}"
-	echo -e "3) rtorrent ${green}0.9.4 (with ipv6 support)${normal}"
-	echo -e "4) rtorrent ${green}0.9.3${normal}"
-	echo -ne "${bold}${yellow}What version of rtorrent do you want?${normal} (Default ${green}1${normal}): "
-	read -r version
-	case $version in
-	1 | "")
-		RTVERSION="0.9.7"
-		LTORRENT="0.13.7"
-		;;
-	2)
-		RTVERSION="0.9.6"
-		LTORRENT="0.13.6"
-		;;
-	3)
-		RTVERSION="0.9.4"
-		LTORRENT="0.13.4"
-		;;
-	*)
-		RTVERSION="0.9.7"
-		LTORRENT="0.13.7"
-		;;
-	esac
-	echo "We will be using rtorrent-${green}${RTVERSION}${normal}/libtorrent-${green}${LTORRENT}${normal}"
-	echo
-	_save_config RTVERSION "${RTVERSION}"
-	_save_config LTORRENT "${LTORRENT}"
+	return 0
 }
 
-
-
-# install qBittorrent question (9.3)
-# shellcheck disable=2215,2312,2250,2162
 function _askqb() {
-	local saved=$(_load_config QBVERSION)
-	if [[ -n "${saved}" ]]; then
-		QBVERSION="${saved}"
-		echo "Using saved preference: qBittorrent=${QBVERSION}"
-		return 0
-	fi
-
-	if [[ "${UNATTENDED:-false}" == "true" ]]; then
-		QBVERSION="no"
-		echo "${bold}${green}qBittorrent ${normal}${bold}will NOT be installed${normal}"
-		echo
-		_save_config QBVERSION "${QBVERSION}"
-		return 0
-	fi
-
-	echo -e "${green}0)${normal} Do not install qBittorrent${normal}"
-	echo -e "${green}1)${normal} Install qBittorrent (latest repo version)${normal}"
-	echo -ne "${bold}${yellow}Which version of qBittorrent do you want?${normal} (Default ${green}0${normal}): "
-	read -r -e version
-	case $version in
-	0) QBVERSION=no ;;
-	1) QBVERSION=yes ;;
-	* | "") QBVERSION=no ;;
-	esac
-
-	if [[ ${QBVERSION} == "yes" ]]; then
-		echo "${bold}${green}qBittorrent ${normal} ${bold}will be installed from repositories${normal}"
-	else
-		echo "${bold}${green}qBittorrent ${normal} ${bold}will NOT be installed${normal}"
-	fi
-	echo
-	_save_config QBVERSION "${QBVERSION}"
+	return 0
 }
 
-# install transmission question (9.4)
-# shellcheck disable=2162
 function _asktr() {
-	local saved=$(_load_config tr)
-	if [[ -n "${saved}" ]]; then
-		tr="${saved}"
-		echo "Using saved preference: transmission=${tr}"
-		return 0
-	fi
-
-	if [[ "${UNATTENDED:-false}" == "true" ]]; then
-		tr="no"
-		echo
-		_save_config tr "${tr}"
-		return 0
-	fi
-
-	echo -ne "${bold}${yellow}Would you like to install transmission? ${normal} [y]es or [${green}n${normal}]o: "
-	read -r response
-	case ${response} in
-	[yY] | [yY][Ee][Ss]) tr="yes" ;;
-	[nN] | [nN][Oo] | "") tr="no" ;;
-	*) tr="no" ;;
-	esac
-	echo
-	_save_config tr "${tr}"
+	return 0
 }
 
 # adduser function (10)

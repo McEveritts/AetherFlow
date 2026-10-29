@@ -83,7 +83,7 @@ af_usage() {
     echo "  bash AetherFlow-Setup"
     echo "  bash AetherFlow-Setup --resume"
     echo "  bash AetherFlow-Setup --repair build_modern"
-    echo "  bash AetherFlow-Setup --repair xmlrpc libtorrent rtorrent"
+    echo "  bash AetherFlow-Setup --repair install_go install_node build_modern"
     echo "  bash AetherFlow-Setup --unattended --username admin --password secret --domain aether.local"
     echo "  bash AetherFlow-Setup --env-seed /root/.env.seed --unattended"
     echo ""
@@ -469,10 +469,6 @@ _apply_seed_config() {
     local seeded_primaryroot=""
     local seeded_kernel=""
     local seeded_10g=""
-    local seeded_rt=""
-    local seeded_lt=""
-    local seeded_tr=""
-    local seeded_qb=""
     local seeded_ffmpeg=""
     local seeded_bbr=""
     local seeded_denyhosts=""
@@ -486,10 +482,6 @@ _apply_seed_config() {
     seeded_primaryroot="$(af_first_nonempty "${AETHERFLOW_PRIMARYROOT:-}" "${primaryroot:-}")"
     seeded_kernel="$(af_first_nonempty "${AETHERFLOW_INSTALL_DISTRIBUTION_KERNEL:-}" "${kernel:-}")"
     seeded_10g="$(af_first_nonempty "${AETHERFLOW_IS_10G:-}" "${AETHERFLOW_10G:-}" "${is10g:-}")"
-    seeded_rt="$(af_first_nonempty "${AETHERFLOW_RTORRENT_VERSION:-}" "${RTVERSION:-}")"
-    seeded_lt="$(af_first_nonempty "${AETHERFLOW_LIBTORRENT_VERSION:-}" "${LTORRENT:-}")"
-    seeded_tr="$(af_first_nonempty "${AETHERFLOW_TRANSMISSION:-}" "${tr:-}")"
-    seeded_qb="$(af_first_nonempty "${AETHERFLOW_QBITTORRENT:-}" "${QBVERSION:-}")"
     seeded_ffmpeg="$(af_first_nonempty "${AETHERFLOW_FFMPEG:-}" "${ffmpeg:-}")"
     seeded_bbr="$(af_first_nonempty "${AETHERFLOW_BBR:-}" "${bbr:-}")"
     seeded_denyhosts="$(af_first_nonempty "${AETHERFLOW_BLOCK_PUBLIC_TRACKERS:-}" "${denyhosts:-}")"
@@ -502,12 +494,8 @@ _apply_seed_config() {
     _save_seed_value IP "${seeded_public_ip}"
     _save_seed_value OUTTO "${seeded_log_file}"
     _save_seed_value primaryroot "${seeded_primaryroot}"
-    _save_seed_value RTVERSION "${seeded_rt}"
-    _save_seed_value LTORRENT "${seeded_lt}"
     _save_seed_yes_no kernel "${seeded_kernel}" "yes"
     _save_seed_yes_no is10g "${seeded_10g}" "no"
-    _save_seed_yes_no tr "${seeded_tr}" "no"
-    _save_seed_yes_no QBVERSION "${seeded_qb}" "no"
     _save_seed_yes_no ffmpeg "${seeded_ffmpeg}" "yes"
     _save_seed_yes_no bbr "${seeded_bbr}" "yes"
     _save_seed_yes_no denyhosts "${seeded_denyhosts}" "yes"
@@ -519,10 +507,6 @@ _apply_seed_config() {
         [[ -n "${seeded_username}" ]] || _save_config username "admin"
         [[ -n "${seeded_10g}" ]] || _save_config is10g "no"
         [[ -n "${seeded_primaryroot}" ]] || _save_config primaryroot "root"
-        [[ -n "${seeded_rt}" ]] || _save_config RTVERSION "0.9.7"
-        [[ -n "${seeded_lt}" ]] || _save_config LTORRENT "0.13.7"
-        [[ -n "${seeded_tr}" ]] || _save_config tr "no"
-        [[ -n "${seeded_qb}" ]] || _save_config QBVERSION "no"
         [[ -n "${seeded_ffmpeg}" ]] || _save_config ffmpeg "yes"
         [[ -n "${seeded_bbr}" ]] || _save_config bbr "yes"
         [[ -n "${seeded_denyhosts}" ]] || _save_config denyhosts "yes"
@@ -655,10 +639,7 @@ clear 2>/dev/null || true
 
 _run_step_fg "askpartition" "Partition selection" _askpartition
 _run_step_fg "ask10g" "10G network check" _ask10g
-_run_step_fg "askrtorrent" "rTorrent version selection" _askrtorrent
-
-_run_step_fg "asktr" "Transmission preference" _asktr
-_run_step_fg "askqb" "qBittorrent preference" _askqb
+# NOTE: Torrent client prompts (rTorrent, Transmission, qBittorrent) removed — deferred to AetherFlow Marketplace
 _run_step_fg "askdashtheme" "Dashboard theme" _askdashtheme
 _run_step_fg "adduser" "Adding master user" _adduser
 _run_step_fg "askffmpeg" "FFmpeg preference" _askffmpeg
@@ -682,10 +663,6 @@ _run_step "repos" "Pulling AetherFlow Ecosystem" _repos
 _run_step "updates" "Updating system" _updates
 _run_step "depends" "Installing all needed dependencies" _depends
 
-if [[ ${RTVERSION} != 0.9.7 ]]; then
-	_run_step "openssl" "Installing openssl" _openssl
-fi
-
 _run_step "syscommands" "Setting up system executables" _syscommands
 _run_step "skel" "Building required user directories" _skel
 
@@ -698,22 +675,9 @@ if [[ ${ffmpeg} == "yes" ]]; then
 fi
 
 _run_step_fg "apachesudo" "Configuring Apache sudo" _apachesudo
-_run_step "xmlrpc" "Installing xmlrpc-c" _xmlrpc
-_run_step "libtorrent" "Installing libtorrent-rakshasa ${green}${LTORRENT}${normal}" _libtorrent
-_run_step "rtorrent" "Installing rtorrent-${green}${RTVERSION}${normal}" _rtorrent
 
-# NOTE: ruTorrent installation removed — sunset in favor of Next.js frontend
-
-if [[ ${tr} == "yes" ]]; then
-	_run_step "transmission" "Configuring Transmission" _insTr
-	_run_step "transmission_web" "Installing Transmission Web Control" _insTrWeb
-	_run_step "transmission_apache" "Setting up Transmission Reverse Proxy" _insTrApache
-fi
-if [[ ${QBVERSION} != "no" ]]; then
-	_run_step "qbittorrent" "Installing qBittorrent" _qbittorrent
-	_run_step "qbittorrent_apache" "Setting up qBittorrent Reverse Proxy" _insqBApache
-fi
-
+# NOTE: Torrent client installation (rTorrent, qBittorrent, Transmission, Deluge, AutoDL-irssi)
+#       removed from bootstrap — deferred to AetherFlow Marketplace.
 # NOTE: Legacy PHP dashboard removed — Next.js frontend is the sole UI
 _run_step "install_go" "Installing Go compiler" _install_go
 _run_step "install_node" "Installing Node.js and PM2" _install_node
@@ -721,9 +685,6 @@ _run_step "build_modern" "Building Next.js and Go API" _build_modern_stack
 
 _run_step "apacheconf" "Setting up seedbox.conf for apache" _apacheconf
 _run_step "fix_cert" "Fix SSL Cert for apache" _fix_cert
-_run_step "rconf" "Installing .rtorrent.rc for ${username}" _rconf
-# NOTE: ruTorrent plugin configuration removed
-_run_step "autodl" "Installing autodl-irssi" _autodl
 _run_step "makedirs" "Making ${username} directory structure" _makedirs
 # NOTE: ruTorrent user config removed
 _run_step "installftpd" "Installing vsftpd" _installftpd
@@ -732,7 +693,7 @@ _run_step "ftpdconfig" "Setting up vsftpd" _ftpdconfig
 # NOTE: shellinabox web console removed from install path — it's optional
 # and kept breaking deploys. Install separately if needed.
 # _run_step_fg "quickconsole" "Setting up web console" _quickconsole
-_run_step "boot" "Setting irssi/rtorrent to start on boot" _boot
+_run_step "boot" "Configuring AetherFlow services to start on boot" _boot
 _run_step "firewall" "Configuring firewall (UFW)" _setup_firewall
 _run_step "harden_perms" "Hardening file permissions" _harden_permissions
 _run_step "perms" "Setting permissions on ${username}" _perms

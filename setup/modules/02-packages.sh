@@ -182,11 +182,6 @@ function _skel() {
 	# rm -rf GeoLiteCity.dat.gz
 	# mv GeoLiteCity.dat /usr/share/GeoIP/GeoIPCity.dat >>"${OUTTO}" 2>&1
 	_af_apt_install libdigest-sha-perl >>"${OUTTO}" 2>&1 || true
-	if [[ ${DELUGE:-YES} != NO ]]; then
-		mkdir -p /etc/skel/.config/deluge/plugins/
-		cd /etc/skel/.config/deluge/plugins/ || true
-		wget -q https://github.com/ratanakvlun/deluge-ltconfig/releases/download/v0.3.1/ltConfig-0.3.1-py2.7.egg || true
-	fi
 	cd /root || true
 }
 

@@ -46,15 +46,7 @@ EOF
 
 # seedbox boot for first user
 function _boot() {
-	# Use safe overlay for all systemd unit files — preserves user modifications
-	_safe_overlay_config "${local_setup}templates/sysd/rtorrent.template" \
-		/etc/systemd/system/rtorrent@.service
-	_safe_overlay_config "${local_setup}templates/sysd/autodlirssi.template" \
-		/etc/systemd/system/irssi@.service
-	_safe_overlay_config "${local_setup}templates/sysd/deluged.template" \
-		/etc/systemd/system/deluged@.service
-	_safe_overlay_config "${local_setup}templates/sysd/deluge-web.template" \
-		/etc/systemd/system/deluge-web@.service
+	# Use safe overlay for AetherFlow systemd unit files — preserves user modifications
 	_safe_overlay_config "${local_setup}templates/sysd/aetherflow-heal.service" \
 		/etc/systemd/system/aetherflow-heal.service
 	_safe_overlay_config "${local_setup}templates/sysd/aetherflow-heal.timer" \
@@ -78,12 +70,6 @@ function _boot() {
 	fi
 
 	systemctl daemon-reload >/dev/null 2>&1
-	systemctl enable {rtorrent,irssi}@${username} >/dev/null 2>&1 || true
-	systemctl start {rtorrent,irssi}@${username} >/dev/null 2>&1 || true
-	if command -v deluged >/dev/null 2>&1; then
-		systemctl enable {deluged,deluge-web}@${username} >/dev/null 2>&1 || true
-		systemctl start {deluged,deluge-web}@${username} >/dev/null 2>&1 || true
-	fi
 	systemctl enable --now aetherflow-heal.timer >/dev/null 2>&1 || true
 
 	# Enable and start the privileged runner daemon and control plane single binary
@@ -129,10 +115,6 @@ function _perms() {
 	chmod +x /etc/cron.daily/denypublic >/dev/null 2>&1
 	# Tightened from 777 → 770 (owner + group only, no world access)
 	chmod 770 /home/${username}/.sessions >/dev/null 2>&1
-	if [[ ${tr} == "yes" ]]; then
-		chown -R ${username}:debian-transmission /home/${username}/torrents/transmission >/dev/null 2>&1
-		service transmission-daemon reload >>"${OUTTO}" 2>&1
-	fi
 }
 
 ################################################################################

@@ -418,14 +418,12 @@ _run_step_fg() {
 # All known step IDs in order
 ALL_STEPS=(
     bashrc intro checkroot logcheck checkkernel hostname locale
-    ssdpblock askcontinue askpartition ask10g askrtorrent
-    asktr askqb askdashtheme adduser askffmpeg askvsftpd denyhosts askbbr
-    repos updates depends openssl syscommands skel lshell ffmpeg
-    apachesudo xmlrpc libtorrent rtorrent
-    transmission transmission_web transmission_apache
-    qbittorrent qbittorrent_apache
+    ssdpblock askcontinue askpartition ask10g
+    askdashtheme adduser askffmpeg askvsftpd denyhosts askbbr
+    repos updates depends syscommands skel lshell ffmpeg
+    apachesudo
     install_go install_node build_modern
-    apacheconf fix_cert rconf autodl makedirs
+    apacheconf fix_cert makedirs
     installftpd ftpdconfig boot
     firewall harden_perms perms bbr bcm
 )
