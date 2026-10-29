@@ -31,7 +31,7 @@ RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 CapabilityBoundingSet=
 AmbientCapabilities=
 UMask=0077
-ReadWritePaths=/home/%I
+ReadWritePaths=/home/%I -/home/hdd
 
 [Install]
 WantedBy=multi-user.target

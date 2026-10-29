@@ -5,8 +5,8 @@ After=network.target
 [Service]
 Type=forking
 User=%I
-ExecStart=/usr/local/bin/qbittorrent-nox -d
-ExecStop=/usr/bin/killall -w -s 9 /usr/local/bin/qbittorrent-nox
+ExecStart=/usr/bin/qbittorrent-nox -d
+ExecStop=/usr/bin/killall -w -s 9 qbittorrent-nox
 TimeoutSec=300
 NoNewPrivileges=yes
 PrivateTmp=yes
@@ -29,7 +29,7 @@ RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 CapabilityBoundingSet=
 AmbientCapabilities=
 UMask=0077
-ReadWritePaths=/home/%I
+ReadWritePaths=/home/%I -/home/hdd
 
 [Install]
 WantedBy=multi-user.target

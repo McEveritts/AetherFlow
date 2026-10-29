@@ -273,7 +273,8 @@ EOF
 # shellcheck disable=2312
 function _qbittorrent() {
 	apt-get -qy update >>"${OUTTO}" 2>&1
-	apt-get -y install qbittorrent-nox >>"${OUTTO}" 2>&1
+	_af_apt_install qbittorrent-nox || return 1
+	[[ -x /usr/bin/qbittorrent-nox && ! -e /usr/local/bin/qbittorrent-nox ]] && ln -sf /usr/bin/qbittorrent-nox /usr/local/bin/qbittorrent-nox
 	
 	if [[ ! -d /home/${username}/.config/qBittorrent ]]; then
 		mkdir -p /home/${username}/.config/qBittorrent
@@ -286,11 +287,18 @@ function _qbittorrent() {
 	sed -i "s/admin/${username}/g" /home/${username}/.config/qBittorrent/qBittorrent.conf
 	sed -i "s/5ebe2294ecd0e0f08eab7690d2a6ee69/${ha1pass}/g" /home/${username}/.config/qBittorrent/qBittorrent.conf
 	sed -i "s/mySavePath/\/home\/${username}\/torrents\/qbittorrent/g" /home/${username}/.config/qBittorrent/qBittorrent.conf
+	local pbkdf2_hash
+	pbkdf2_hash="$(python3 -c 'import os, hashlib, base64, sys; s=os.urandom(16); dk=hashlib.pbkdf2_hmac("sha512", sys.argv[1].encode(), s, 100000, 64); print(f"@ByteArray({base64.b64encode(s).decode()}:{base64.b64encode(dk).decode()})")' "${passwd}" 2>/dev/null || true)"
+	if [[ -n "${pbkdf2_hash}" ]]; then
+		echo "WebUI\\Password_PBKDF2=\"${pbkdf2_hash}\"" >> /home/${username}/.config/qBittorrent/qBittorrent.conf
+	fi
 	chmod -R 755 /home/${username}/.config/
+	chown -R ${username}:${username} /home/${username}/.config/
 	mkdir -p /home/${username}/torrents/qbittorrent
-	chown ${username}: /home/${username}/torrents/qbittorrent
-	systemctl enable qbittorrent@${username} >/dev/null 2>&1
-	systemctl start qbittorrent@${username} >/dev/null 2>&1
+	chown -R ${username}:${username} /home/${username}/torrents/qbittorrent
+	systemctl daemon-reload >/dev/null 2>&1 || true
+	systemctl enable qbittorrent@${username} >/dev/null 2>&1 || true
+	systemctl start qbittorrent@${username} >/dev/null 2>&1 || true
 }
 
 function _insqBApache() {
