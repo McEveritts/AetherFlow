@@ -300,7 +300,7 @@ export default function Sidebar() {
                                         </h1>
                                         <div className="flex items-center gap-1.5 mt-0.5">
                                             <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shadow-[0_0_6px_#34d399]" />
-                                            <span className="text-[10px] font-mono text-slate-400 uppercase tracking-wider truncate">
+                                            <span className="text-xs font-mono text-slate-400 uppercase tracking-wider truncate">
                                                 Nexus OS
                                             </span>
                                         </div>
@@ -327,7 +327,7 @@ export default function Sidebar() {
                         {/* Primary Navigation List */}
                         <nav className="flex-1 px-2.5 py-3 space-y-1 overflow-y-auto no-scrollbar relative z-10">
                             {isSidebarHovered && (
-                                <div className="px-2.5 pb-1.5 text-[10px] font-bold text-slate-500 uppercase tracking-widest whitespace-nowrap">
+                                <div className="px-2.5 pb-1.5 text-xs font-bold text-slate-500 uppercase tracking-widest whitespace-nowrap">
                                     Workspace
                                 </div>
                             )}
@@ -376,7 +376,7 @@ export default function Sidebar() {
 
                                         {item.id === 'inbox' && pendingCount > 0 && (
                                             isSidebarHovered ? (
-                                                <span className="ml-auto bg-indigo-500/20 text-indigo-300 border border-indigo-500/40 text-[11px] font-bold px-2 py-0.5 rounded-full shrink-0">
+                                                <span className="ml-auto bg-indigo-500/20 text-indigo-300 border border-indigo-500/40 text-xs font-bold px-2 py-0.5 rounded-full shrink-0">
                                                     {pendingCount}
                                                 </span>
                                             ) : (
@@ -399,7 +399,7 @@ export default function Sidebar() {
                         {/* Bottom System & Admin Navigation — continuous surface, no opaque black overlay */}
                         <div className="px-2.5 py-3 border-t border-white/[0.06] relative z-10 shrink-0 space-y-1">
                             {isSidebarHovered && (
-                                <div className="px-2.5 pb-1 text-[10px] font-bold text-slate-500 uppercase tracking-widest whitespace-nowrap">
+                                <div className="px-2.5 pb-1 text-xs font-bold text-slate-500 uppercase tracking-widest whitespace-nowrap">
                                     System
                                 </div>
                             )}

@@ -272,7 +272,7 @@ export default function SettingsTab() {
                     <div>
                         <div className="flex items-center gap-2.5">
                             <h2 className="text-lg font-bold text-slate-100 tracking-tight">System &amp; Workspace Settings</h2>
-                            <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full border bg-indigo-500/15 text-indigo-300 border-indigo-500/30">
+                            <span className="text-xs font-bold uppercase tracking-wider px-2 py-0.5 rounded-full border bg-indigo-500/15 text-indigo-300 border-indigo-500/30">
                                 Global Control
                             </span>
                         </div>
@@ -401,7 +401,7 @@ export default function SettingsTab() {
                                                     <label className="text-sm font-semibold text-slate-200 flex items-center gap-2">
                                                         <LayoutDashboard size={15} className="text-indigo-400" /> Default Dashboard
                                                     </label>
-                                                    <span className="text-[10px] font-mono uppercase tracking-wider text-slate-500">Post-Login Route</span>
+                                                    <span className="text-xs font-mono uppercase tracking-wider text-slate-500">Post-Login Route</span>
                                                 </div>
                                                 <p className="text-xs text-slate-500">Select the default view presented immediately after authentication.</p>
                                                 <div className="relative">
@@ -428,7 +428,7 @@ export default function SettingsTab() {
                                                     <label className="text-sm font-semibold text-slate-200 flex items-center gap-2">
                                                         <Clock size={15} className="text-blue-400" /> Timezone
                                                     </label>
-                                                    <span className="text-[10px] font-mono uppercase tracking-wider text-slate-500">{timezone}</span>
+                                                    <span className="text-xs font-mono uppercase tracking-wider text-slate-500">{timezone}</span>
                                                 </div>
                                                 <p className="text-xs text-slate-500">Set your local timezone for system telemetry, cron schedules, and audit logs.</p>
                                                 <div className="relative">
@@ -457,7 +457,7 @@ export default function SettingsTab() {
                                                     <label className="text-sm font-semibold text-slate-200 flex items-center gap-2">
                                                         <Globe size={15} className="text-emerald-400" /> {t('language')}
                                                     </label>
-                                                    <span className="text-[10px] font-mono uppercase tracking-wider text-slate-500">{language.toUpperCase()}</span>
+                                                    <span className="text-xs font-mono uppercase tracking-wider text-slate-500">{language.toUpperCase()}</span>
                                                 </div>
                                                 <p className="text-xs text-slate-500">Determine the primary display language of the AetherFlow interface.</p>
                                                 <div className="relative">
@@ -502,7 +502,7 @@ export default function SettingsTab() {
                                                     <label className="text-sm font-semibold text-slate-200 flex items-center gap-2">
                                                         <Globe size={15} className="text-indigo-400" /> Server Base Domain
                                                     </label>
-                                                    <span className="text-[10px] font-mono uppercase tracking-wider text-indigo-400">Apache2 / Caddy Auto-Route</span>
+                                                    <span className="text-xs font-mono uppercase tracking-wider text-indigo-400">Apache2 / Caddy Auto-Route</span>
                                                 </div>
                                                 <p className="text-xs text-slate-500">
                                                     Automatically assigns <span className="font-mono text-indigo-300">jellyfin.{baseDomain.trim().replace(/^\*\./, '') || 'domain.com'}</span> via Apache2 / Caddy reverse proxy when installing apps.
@@ -522,7 +522,7 @@ export default function SettingsTab() {
                                                     <label className="text-sm font-semibold text-slate-200 flex items-center gap-2">
                                                         <Radio size={15} className="text-indigo-400" /> Preferred Connectivity
                                                     </label>
-                                                    <span className="text-[10px] font-mono uppercase tracking-wider text-emerald-400">{preferredMode}</span>
+                                                    <span className="text-xs font-mono uppercase tracking-wider text-emerald-400">{preferredMode}</span>
                                                 </div>
                                                 <p className="text-xs text-slate-500">Choose between full-duplex WebSockets or stateless REST Polling.</p>
                                                 <div className="relative">
@@ -544,7 +544,7 @@ export default function SettingsTab() {
                                                     <label className="text-sm font-semibold text-slate-200 flex items-center gap-2">
                                                         <Clock size={15} className="text-blue-400" /> Refresh Heartbeat
                                                     </label>
-                                                    <span className="text-[10px] font-mono uppercase tracking-wider text-slate-400">{pollInterval / 1000}s</span>
+                                                    <span className="text-xs font-mono uppercase tracking-wider text-slate-400">{pollInterval / 1000}s</span>
                                                 </div>
                                                 <p className="text-xs text-slate-500">Set the telemetry synchronization frequency for the dashboard.</p>
                                                 <div className="relative">
@@ -587,7 +587,7 @@ export default function SettingsTab() {
                                                     <p className="text-xs text-slate-400">Select your primary AI ecosystem and default inference model.</p>
                                                 </div>
                                             </div>
-                                            <span className="px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider bg-indigo-500/15 text-indigo-300 border border-indigo-500/30">
+                                            <span className="px-2.5 py-1 rounded-full text-xs font-bold uppercase tracking-wider bg-indigo-500/15 text-indigo-300 border border-indigo-500/30">
                                                 {activeModelDef.name}
                                             </span>
                                         </div>
@@ -621,7 +621,7 @@ export default function SettingsTab() {
                                                             </div>
                                                             <div>
                                                                 <div className="text-xs font-bold text-slate-100 leading-tight">{prov.label}</div>
-                                                                <div className="text-[10px] text-slate-500 mt-0.5 line-clamp-1">{prov.subtitle}</div>
+                                                                <div className="text-xs text-slate-500 mt-0.5 line-clamp-1">{prov.subtitle}</div>
                                                             </div>
                                                         </button>
                                                     );
@@ -638,7 +638,7 @@ export default function SettingsTab() {
                                                     </label>
                                                     <p className="text-xs text-slate-500 mt-0.5">Default model loaded when launching FlowAI Assistant. Can be switched per-chat.</p>
                                                 </div>
-                                                <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
+                                                <span className="text-xs font-bold uppercase tracking-wider px-2 py-0.5 rounded bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
                                                     Tier: {activeModelDef.tier}
                                                 </span>
                                             </div>
@@ -657,7 +657,7 @@ export default function SettingsTab() {
                                                         }`}
                                                     >
                                                         <span>{m.name}</span>
-                                                        <span className="text-[9px] uppercase tracking-wider px-1.5 py-0.2 rounded bg-black/30 text-slate-400">
+                                                        <span className="text-xs uppercase tracking-wider px-1.5 py-0.2 rounded bg-black/30 text-slate-400">
                                                             {m.tier}
                                                         </span>
                                                     </button>
@@ -709,7 +709,7 @@ export default function SettingsTab() {
                                                             Get your API key from <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer" className="text-indigo-400 hover:text-indigo-300 underline">Google AI Studio</a>.
                                                         </p>
                                                     </div>
-                                                    <span className={`text-[10px] font-bold uppercase tracking-wider px-2.5 py-0.5 rounded-full border ${apiKey ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30' : 'bg-slate-800 text-slate-400 border-white/10'}`}>
+                                                    <span className={`text-xs font-bold uppercase tracking-wider px-2.5 py-0.5 rounded-full border ${apiKey ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30' : 'bg-slate-800 text-slate-400 border-white/10'}`}>
                                                         {apiKey ? 'Key Configured' : 'Not Configured'}
                                                     </span>
                                                 </div>
@@ -754,7 +754,7 @@ export default function SettingsTab() {
                                                         </label>
                                                         <p className="text-xs text-slate-500 mt-0.5">Connect to OpenAI for GPT 5.4 and GPT-4o model families.</p>
                                                     </div>
-                                                    <span className={`text-[10px] font-bold uppercase tracking-wider px-2.5 py-0.5 rounded-full border ${openaiApiKey ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30' : 'bg-slate-800 text-slate-400 border-white/10'}`}>
+                                                    <span className={`text-xs font-bold uppercase tracking-wider px-2.5 py-0.5 rounded-full border ${openaiApiKey ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30' : 'bg-slate-800 text-slate-400 border-white/10'}`}>
                                                         {openaiApiKey ? 'Key Configured' : 'Not Configured'}
                                                     </span>
                                                 </div>
@@ -799,7 +799,7 @@ export default function SettingsTab() {
                                                         </label>
                                                         <p className="text-xs text-slate-500 mt-0.5">Connect to Anthropic for Claude Opus and Sonnet models.</p>
                                                     </div>
-                                                    <span className={`text-[10px] font-bold uppercase tracking-wider px-2.5 py-0.5 rounded-full border ${anthropicApiKey ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30' : 'bg-slate-800 text-slate-400 border-white/10'}`}>
+                                                    <span className={`text-xs font-bold uppercase tracking-wider px-2.5 py-0.5 rounded-full border ${anthropicApiKey ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30' : 'bg-slate-800 text-slate-400 border-white/10'}`}>
                                                         {anthropicApiKey ? 'Key Configured' : 'Not Configured'}
                                                     </span>
                                                 </div>
@@ -899,7 +899,7 @@ export default function SettingsTab() {
                                             <label className="text-xs font-semibold text-slate-200 flex items-center gap-2">
                                                 <Radio size={14} className="text-orange-400" /> Anthropic Custom Endpoint
                                             </label>
-                                            <p className="text-[11px] text-slate-500">Override the default Anthropic API URL if using an enterprise gateway or local simulator.</p>
+                                            <p className="text-xs text-slate-500">Override the default Anthropic API URL if using an enterprise gateway or local simulator.</p>
                                             <input
                                                 type="text"
                                                 value={anthropicEndpoint}
@@ -925,7 +925,7 @@ export default function SettingsTab() {
                                                     <p className="text-xs text-slate-400">Live runtime summary & autonomous capabilities.</p>
                                                 </div>
                                             </div>
-                                            <span className={`px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider border ${
+                                            <span className={`px-2.5 py-1 rounded-full text-xs font-bold uppercase tracking-wider border ${
                                                 isActiveProviderConfigured
                                                     ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30'
                                                     : 'bg-amber-500/15 text-amber-300 border-amber-500/30'
@@ -936,15 +936,15 @@ export default function SettingsTab() {
 
                                         <div className="grid grid-cols-2 gap-3">
                                             <div className="p-3.5 rounded-xl bg-slate-950/60 border border-white/[0.05]">
-                                                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 block">Selected Provider</span>
+                                                <span className="text-xs font-bold uppercase tracking-wider text-slate-500 block">Selected Provider</span>
                                                 <span className="text-sm font-bold text-slate-100 mt-1 block capitalize">{activeProvider}</span>
                                             </div>
                                             <div className="p-3.5 rounded-xl bg-slate-950/60 border border-white/[0.05]">
-                                                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 block">Default Model</span>
+                                                <span className="text-xs font-bold uppercase tracking-wider text-slate-500 block">Default Model</span>
                                                 <span className="text-sm font-bold text-indigo-300 mt-1 block truncate">{activeModelDef.name}</span>
                                             </div>
                                             <div className="p-3.5 rounded-xl bg-slate-950/60 border border-white/[0.05] col-span-2">
-                                                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 block">Active Endpoint Route</span>
+                                                <span className="text-xs font-bold uppercase tracking-wider text-slate-500 block">Active Endpoint Route</span>
                                                 <span className="text-xs font-mono text-slate-300 mt-1 block truncate">{activeEndpointSummary}</span>
                                             </div>
                                         </div>
@@ -954,13 +954,13 @@ export default function SettingsTab() {
                                                 <span className="text-slate-300 flex items-center gap-2 font-medium">
                                                     <CheckCircle2 size={14} className="text-emerald-400" /> Approval Inbox Action Queueing
                                                 </span>
-                                                <span className="text-[10px] font-mono uppercase text-emerald-400">Enabled</span>
+                                                <span className="text-xs font-mono uppercase text-emerald-400">Enabled</span>
                                             </div>
                                             <div className="flex items-center justify-between p-3 rounded-xl bg-white/[0.02] border border-white/[0.05] text-xs">
                                                 <span className="text-slate-300 flex items-center gap-2 font-medium">
                                                     <Layers size={14} className="text-indigo-400" /> Live Telemetry & Log Context Injection
                                                 </span>
-                                                <span className="text-[10px] font-mono uppercase text-indigo-400">Active</span>
+                                                <span className="text-xs font-mono uppercase text-indigo-400">Active</span>
                                             </div>
                                         </div>
 
@@ -1037,7 +1037,7 @@ export default function SettingsTab() {
                                             <label className="text-sm font-semibold text-slate-200 flex items-center gap-2">
                                                 <Radio size={15} className="text-indigo-400" /> Update Channel
                                             </label>
-                                            <span className="text-[10px] font-mono uppercase tracking-wider text-indigo-400">{updateChannel}</span>
+                                            <span className="text-xs font-mono uppercase tracking-wider text-indigo-400">{updateChannel}</span>
                                         </div>
                                         <p className="text-xs text-slate-500">Select the release branch. Save configuration to apply channel changes.</p>
                                         <div className="relative">
@@ -1125,7 +1125,7 @@ export default function SettingsTab() {
                                                 </div>
                                             </div>
                                             {updateData && updateData.updateAvailable && (
-                                                <span className="bg-blue-500/20 text-blue-400 text-[10px] font-bold px-2.5 py-1 rounded-full uppercase tracking-wider animate-pulse border border-blue-500/30">
+                                                <span className="bg-blue-500/20 text-blue-400 text-xs font-bold px-2.5 py-1 rounded-full uppercase tracking-wider animate-pulse border border-blue-500/30">
                                                     {t('updateAvailable')}
                                                 </span>
                                             )}
@@ -1133,7 +1133,7 @@ export default function SettingsTab() {
 
                                         {updateData?.message ? (
                                             <div className="space-y-2">
-                                                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 block">Upstream Release Notes & Diagnostics</span>
+                                                <span className="text-xs font-bold uppercase tracking-wider text-slate-500 block">Upstream Release Notes & Diagnostics</span>
                                                 <div className={`text-xs ${updateData.latestVersion?.includes('Unknown') ? 'text-amber-400' : 'text-slate-300'} bg-slate-950/60 border border-white/[0.06] p-4 rounded-xl overflow-y-auto max-h-56 break-words whitespace-pre-wrap font-mono leading-relaxed`}>
                                                     {updateData.message}
                                                 </div>
@@ -1146,11 +1146,11 @@ export default function SettingsTab() {
 
                                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                                             <div className="p-3.5 rounded-xl bg-slate-950/50 border border-white/[0.06]">
-                                                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 block">Pre-Update Snapshot</span>
+                                                <span className="text-xs font-bold uppercase tracking-wider text-slate-500 block">Pre-Update Snapshot</span>
                                                 <span className="text-xs font-semibold text-emerald-400 mt-1 block">Automatic SQLite Backup</span>
                                             </div>
                                             <div className="p-3.5 rounded-xl bg-slate-950/50 border border-white/[0.06]">
-                                                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 block">Service Continuity</span>
+                                                <span className="text-xs font-bold uppercase tracking-wider text-slate-500 block">Service Continuity</span>
                                                 <span className="text-xs font-semibold text-slate-200 mt-1 block">Zero-Downtime Container Keepalive</span>
                                             </div>
                                         </div>

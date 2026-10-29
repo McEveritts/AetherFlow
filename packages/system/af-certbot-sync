@@ -15,7 +15,8 @@ fi
 if [[ -z "$BASE_DOMAIN" && -f /etc/aetherflow/aetherflow.env ]]; then
     BASE_DOMAIN="$(grep -oP '^AETHERFLOW_BASE_DOMAIN=\K.*' /etc/aetherflow/aetherflow.env 2>/dev/null | sed 's/^\*\.//' | tr -d '[:space:]' || true)"
 fi
-if [[ -z "$BASE_DOMAIN" || "$BASE_DOMAIN" == "localhost" || "$BASE_DOMAIN" == *.local ]]; then
+DOMAIN_REGEX='^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$'
+if [[ -z "$BASE_DOMAIN" || "$BASE_DOMAIN" == "localhost" || "$BASE_DOMAIN" == *.local ]] || [[ ! "$BASE_DOMAIN" =~ $DOMAIN_REGEX ]]; then
     exit 0
 fi
 
@@ -25,24 +26,30 @@ public_dns_resolves() {
         [[ -n "$(dig +short +time=2 +tries=1 A "$host" @1.1.1.1 2>/dev/null | grep -E '^[0-9]+\.' || true)" ]] && return 0
         [[ -n "$(dig +short +time=2 +tries=1 A "$host" @8.8.8.8 2>/dev/null | grep -E '^[0-9]+\.' || true)" ]] && return 0
         return 1
+    elif command -v host >/dev/null 2>&1; then
+        host -W 2 -t A "$host" 1.1.1.1 >/dev/null 2>&1 && return 0
+        host -W 2 -t A "$host" 8.8.8.8 >/dev/null 2>&1 && return 0
+        return 1
+    elif command -v nslookup >/dev/null 2>&1; then
+        nslookup -timeout=2 "$host" 1.1.1.1 >/dev/null 2>&1 && return 0
+        nslookup -timeout=2 "$host" 8.8.8.8 >/dev/null 2>&1 && return 0
+        return 1
     fi
-    getent ahosts "$host" 2>/dev/null | awk '{print $1}' | grep -qvE '^(127\.|::1)'
+    getent ahosts "$host" 2>/dev/null | awk '{print $1}' | grep -qvE '^(127\.|::1$)'
 }
 
-# Reconcile /etc/hosts internal and base-domain loopback entries for installed apps
-HOSTS_DOMAINS=("aetherflow.aether.local" "${BASE_DOMAIN}" "direct.${BASE_DOMAIN}")
-while IFS= read -r dom; do
-    dom="$(echo "$dom" | tr -d '[:space:]')"
-    [[ -n "$dom" ]] && HOSTS_DOMAINS+=("$dom")
-done < <(sqlite3 "$DB" "SELECT DISTINCT public_domain FROM app_ingress_configs WHERE external_access_enabled = 1 AND public_domain != '';" 2>/dev/null || true)
-
+# Reconcile /etc/hosts internal .aether.local loopback entries ONLY.
+# Never write public domains into /etc/hosts, or getent ahosts will self-poison to 127.0.0.1.
+HOSTS_DOMAINS=("aetherflow.aether.local")
 for lock in /install/.*.lock; do
     [[ -e "$lock" ]] || continue
     app="$(basename "$lock")"
     app="${app#.}"
     app="${app%.lock}"
     [[ "$app" == "core" ]] && continue
-    HOSTS_DOMAINS+=("${app}.aether.local" "${app}.${BASE_DOMAIN}")
+    if [[ "$app" =~ ^[a-zA-Z0-9-]+$ ]]; then
+        HOSTS_DOMAINS+=("${app}.aether.local")
+    fi
 done
 
 if [[ -w /etc/hosts ]]; then
@@ -70,25 +77,36 @@ if [[ ! -f "$CERT_FILE" ]]; then
 fi
 
 CURRENT_SANS="$(openssl x509 -in "$CERT_FILE" -noout -ext subjectAltName 2>/dev/null || true)"
-if echo "$CURRENT_SANS" | grep -q "DNS:\*\.${BASE_DOMAIN}"; then
+ESCAPED_BASE="${BASE_DOMAIN//./\.}"
+if echo "$CURRENT_SANS" | grep -qE "DNS:\*\.${ESCAPED_BASE}(,|$| )"; then
     # Wildcard certificate already covers all subdomains
     exit 0
 fi
 
-DOMAINS=("$BASE_DOMAIN" "www.${BASE_DOMAIN}" "direct.${BASE_DOMAIN}")
+DOMAINS=("$BASE_DOMAIN")
+for sub in "www.${BASE_DOMAIN}" "direct.${BASE_DOMAIN}"; do
+    if public_dns_resolves "$sub"; then
+        DOMAINS+=("$sub")
+    fi
+done
+
 while IFS= read -r dom; do
     dom="$(echo "$dom" | tr -d '[:space:]')"
     [[ -z "$dom" ]] && continue
-    if public_dns_resolves "$dom"; then
+    if [[ "$dom" =~ $DOMAIN_REGEX ]] && public_dns_resolves "$dom"; then
         DOMAINS+=("$dom")
     fi
-done < <(sqlite3 "$DB" "SELECT DISTINCT public_domain FROM app_ingress_configs WHERE external_access_enabled = 1 AND public_domain LIKE '%.${BASE_DOMAIN}';" 2>/dev/null || true)
+done < <(sqlite3 "$DB" "SELECT DISTINCT public_domain FROM app_ingress_configs WHERE external_access_enabled = 1 AND public_domain != '';" 2>/dev/null || true)
 
 for lock in /install/.*.lock; do
     [[ -e "$lock" ]] || continue
     app="$(basename "$lock")"
     app="${app#.}"
     app="${app%.lock}"
+    [[ "$app" == "core" ]] && continue
+    [[ "$app" =~ ^[a-zA-Z0-9-]+$ ]] || continue
+    ext_disabled="$(sqlite3 "$DB" "SELECT 1 FROM app_ingress_configs WHERE LOWER(app_name) = LOWER('${app}') AND (external_access_enabled = 0 OR (public_domain != '' AND LOWER(public_domain) != LOWER('${app}.${BASE_DOMAIN}'))) LIMIT 1;" 2>/dev/null || true)"
+    [[ -n "$ext_disabled" ]] && continue
     cand="${app}.${BASE_DOMAIN}"
     if public_dns_resolves "$cand"; then
         DOMAINS+=("$cand")
@@ -101,7 +119,8 @@ NEED_EXPAND=0
 CERT_ARGS=()
 for d in "${UNIQUE_DOMAINS[@]}"; do
     CERT_ARGS+=("-d" "$d")
-    if ! echo "$CURRENT_SANS" | grep -qE "DNS:${d}(,|$| )"; then
+    escaped_d="${d//./\.}"
+    if ! echo "$CURRENT_SANS" | grep -qE "DNS:${escaped_d}(,|$| )"; then
         NEED_EXPAND=1
     fi
 done

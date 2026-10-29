@@ -93,11 +93,11 @@ func (o *Orchestrator) ExecuteAtomicDeploy(cfg DeployConfig) error {
 
 	o.logToStream(cfg.StatusChan, "[STEP 5] Updating Apache2 / Subdomain Gateway & reverse-proxy targets...")
 	var prevIngress *models.AppIngressConfig
+	pubDomain := ""
+	extEnabled := true
+	tlsEnabled := true
 	if db.DB != nil {
 		prevIngress, _ = db.GetAppIngressConfig(cfg.AppName)
-		pubDomain := ""
-		extEnabled := true
-		tlsEnabled := true
 		if prevIngress != nil {
 			pubDomain = prevIngress.PublicDomain
 			extEnabled = prevIngress.ExternalAccessEnabled
@@ -117,19 +117,17 @@ func (o *Orchestrator) ExecuteAtomicDeploy(cfg DeployConfig) error {
 		AppName:               cfg.AppName,
 		ActivePort:            cfg.TargetCaddyPort,
 		InternalDomain:        fmt.Sprintf("%s.aether.local", cfg.AppName),
-		ExternalAccessEnabled: true,
+		PublicDomain:          pubDomain,
+		ExternalAccessEnabled: extEnabled,
 	}
 	if err := o.CaddyMgr.UpdateAppRoutes(routeState); err != nil {
-		if prevIngress != nil && db.DB != nil {
-			_ = db.SetAppIngressConfig(*prevIngress)
-		}
-		o.executeRollback(cfg, oldTarget)
+		o.executeRollback(cfg, oldTarget, prevIngress)
 		return fmt.Errorf("failed routing update: %w", err)
 	}
 
 	o.logToStream(cfg.StatusChan, "[STEP 6] Spinning up Green environment...")
 	if err := o.startService(cfg.AppName); err != nil {
-		o.executeRollback(cfg, oldTarget)
+		o.executeRollback(cfg, oldTarget, prevIngress)
 		return fmt.Errorf("failed starting green service: %w", err)
 	}
 
@@ -142,7 +140,7 @@ func (o *Orchestrator) ExecuteAtomicDeploy(cfg DeployConfig) error {
 	healthURL := fmt.Sprintf("http://127.0.0.1:%d%s", cfg.TargetCaddyPort, healthPath)
 	resp, err := http.Get(healthURL)
 	if err != nil || resp.StatusCode >= 400 {
-		o.executeRollback(cfg, oldTarget)
+		o.executeRollback(cfg, oldTarget, prevIngress)
 		if resp != nil {
 			resp.Body.Close()
 		}
@@ -156,9 +154,18 @@ func (o *Orchestrator) ExecuteAtomicDeploy(cfg DeployConfig) error {
 	return nil
 }
 
-func (o *Orchestrator) executeRollback(cfg DeployConfig, oldTarget string) {
+func (o *Orchestrator) executeRollback(cfg DeployConfig, oldTarget string, prevIngress *models.AppIngressConfig) {
 	o.logToStream(cfg.StatusChan, "[ROLLBACK] Initiation sequence started due to deploy failure.")
 	o.stopService(cfg.AppName)
+
+	// Restore SQLite ingress record to pre-deploy state
+	if db.DB != nil {
+		if prevIngress != nil {
+			_ = db.SetAppIngressConfig(*prevIngress)
+		} else {
+			_ = db.DeleteAppIngressConfig(cfg.AppName)
+		}
+	}
 
 	// Restore polymorphic Config Backup
 	mutator := GetMutatorForApp(cfg.AppName, cfg.CentralDBPath)
@@ -173,13 +180,27 @@ func (o *Orchestrator) executeRollback(cfg DeployConfig, oldTarget string) {
 		os.Rename(tmpLink, cfg.ActiveSymlink)
 	}
 
-	// Caddy routing: restore previous Caddy proxy target if configured
-	if o.CaddyMgr != nil && cfg.TargetCaddyPort > 0 {
-		_ = o.CaddyMgr.UpdateAppRoutes(RoutingState{
-			AppName:        cfg.AppName,
-			ActivePort:     cfg.TargetCaddyPort,
-			InternalDomain: fmt.Sprintf("%s.aether.local", cfg.AppName),
-		})
+	// Caddy routing: restore previous Blue proxy port & domains
+	if o.CaddyMgr != nil {
+		rollbackPort := 0
+		rollbackPub := ""
+		rollbackExt := true
+		if prevIngress != nil && prevIngress.ListenPort > 0 {
+			rollbackPort = prevIngress.ListenPort
+			rollbackPub = prevIngress.PublicDomain
+			rollbackExt = prevIngress.ExternalAccessEnabled
+		} else if bp := GetBlueprint(cfg.AppName); bp != nil && bp.DefaultPort > 0 {
+			rollbackPort = bp.DefaultPort
+		}
+		if rollbackPort > 0 {
+			_ = o.CaddyMgr.UpdateAppRoutes(RoutingState{
+				AppName:               cfg.AppName,
+				ActivePort:            rollbackPort,
+				InternalDomain:        fmt.Sprintf("%s.aether.local", cfg.AppName),
+				PublicDomain:          rollbackPub,
+				ExternalAccessEnabled: rollbackExt,
+			})
+		}
 	}
 
 	o.startService(cfg.AppName)

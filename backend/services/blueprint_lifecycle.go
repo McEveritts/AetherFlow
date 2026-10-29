@@ -238,8 +238,17 @@ func ApplyBlueprintAppConfig(bp *AppBlueprint, activePort int) (string, bool, er
 		masterUser, masterPass, masterHA1 := LoadMasterCredentials()
 		if bp.AppName == "sabnzbd" {
 			whitelist := "sabnzbd.aether.local, localhost, 127.0.0.1"
+			defaultPub := ""
 			if baseDomain := ResolveBaseDomain(); baseDomain != "" {
-				whitelist = fmt.Sprintf("%s, %s", FormatAppPublicDomain("sabnzbd", baseDomain), whitelist)
+				defaultPub = FormatAppPublicDomain("sabnzbd", baseDomain)
+				if defaultPub != "" {
+					whitelist = fmt.Sprintf("%s, %s", defaultPub, whitelist)
+				}
+			}
+			if ing, err := db.GetAppIngressConfig("sabnzbd"); err == nil && ing != nil && ing.ExternalAccessEnabled {
+				if customPub := strings.ToLower(strings.TrimSpace(ing.PublicDomain)); customPub != "" && !strings.EqualFold(customPub, defaultPub) {
+					whitelist = fmt.Sprintf("%s, %s", customPub, whitelist)
+				}
 			}
 			settings["host_whitelist"] = whitelist
 			if masterUser != "" && masterPass != "" {
@@ -344,10 +353,13 @@ func SyncNetworkDNSProviders() (bool, error) {
 	}
 
 	// 1. Gather domains from persisted AppIngressConfigs
+	configuredApps := make(map[string]models.AppIngressConfig)
 	if configs, err := db.GetAllAppIngressConfigs(); err == nil {
 		for _, cfg := range configs {
 			if cfg.AppName != "" {
-				domainSet[fmt.Sprintf("%s.aether.local", strings.ToLower(cfg.AppName))] = true
+				lowerApp := strings.ToLower(strings.TrimSpace(cfg.AppName))
+				configuredApps[lowerApp] = cfg
+				domainSet[fmt.Sprintf("%s.aether.local", lowerApp)] = true
 			}
 			if cfg.ExternalAccessEnabled && cfg.PublicDomain != "" {
 				domainSet[strings.ToLower(strings.TrimSpace(cfg.PublicDomain))] = true
@@ -360,8 +372,12 @@ func SyncNetworkDNSProviders() (bool, error) {
 	if pkgs, err := GetPackages(); err == nil {
 		for _, pkg := range pkgs {
 			if (pkg.Status == "installed" || pkg.Status == "running") && pkg.Name != "" {
-				domainSet[fmt.Sprintf("%s.aether.local", strings.ToLower(pkg.Name))] = true
+				lowerName := strings.ToLower(strings.TrimSpace(pkg.Name))
+				domainSet[fmt.Sprintf("%s.aether.local", lowerName)] = true
 				if baseDomain != "" && pkg.DefaultPort > 0 {
+					if cfg, hasCfg := configuredApps[lowerName]; hasCfg && (!cfg.ExternalAccessEnabled || strings.TrimSpace(cfg.PublicDomain) != "") {
+						continue
+					}
 					if pub := FormatAppPublicDomain(pkg.Name, baseDomain); pub != "" {
 						domainSet[pub] = true
 					}
@@ -525,32 +541,41 @@ func SyncInstalledAppsBaseDomain(oldBaseDomain, newBaseDomain string) {
 		}
 
 		shouldUpdateDomain := existing == nil ||
-			strings.TrimSpace(existing.PublicDomain) == "" ||
+			(strings.TrimSpace(existing.PublicDomain) == "" && cleanOld == "") ||
 			(cleanOld != "" && strings.EqualFold(strings.TrimSpace(existing.PublicDomain), FormatAppPublicDomain(bp.AppName, cleanOld)))
 
 		if !shouldUpdateDomain {
 			continue
 		}
 
+		extEnabled := true
+		tlsEnabled := true
+		if existing != nil && strings.TrimSpace(existing.PublicDomain) != "" {
+			extEnabled = existing.ExternalAccessEnabled
+			tlsEnabled = existing.TLSEnabled
+		}
+
 		pubDomain := FormatAppPublicDomain(bp.AppName, cleanNew)
 		cfg := models.AppIngressConfig{
 			AppName:               bp.AppName,
 			PublicDomain:          pubDomain,
-			ExternalAccessEnabled: true,
+			ExternalAccessEnabled: extEnabled,
 			ListenPort:            activePort,
-			TLSEnabled:            true,
+			TLSEnabled:            tlsEnabled,
 		}
 		if err := db.SetAppIngressConfig(cfg); err != nil {
 			slog.Warn("failed to auto-provision base domain ingress config", "app", bp.AppName, "domain", pubDomain, "error", err)
 			continue
 		}
 
+		_, _, _ = ApplyBlueprintAppConfig(bp, activePort)
+
 		_ = caddyMgr.UpdateAppRoutes(RoutingState{
 			AppName:               bp.AppName,
 			ActivePort:            activePort,
 			InternalDomain:        bp.InternalDomain,
 			PublicDomain:          pubDomain,
-			ExternalAccessEnabled: true,
+			ExternalAccessEnabled: extEnabled,
 		})
 		if bp.InternalDomain != "" {
 			_ = NewDNSManager().AppendOrUpdateDomains([]string{bp.InternalDomain})
@@ -780,8 +805,13 @@ func ResolveAppTargetForHost(hostHeader string) (int, string, bool) {
 		if bp := GetBlueprint(candidateApp); bp != nil && bp.DefaultPort > 0 {
 			port := bp.DefaultPort
 			if ing, err := db.GetAppIngressConfig(bp.AppName); err == nil && ing != nil {
-				if !isInternal && !ing.ExternalAccessEnabled && strings.TrimSpace(ing.PublicDomain) != "" {
-					return 0, "", false
+				if !isInternal {
+					if !ing.ExternalAccessEnabled {
+						return 0, "", false
+					}
+					if pub := strings.ToLower(strings.TrimSpace(ing.PublicDomain)); pub != "" && pub != host {
+						return 0, "", false
+					}
 				}
 				if ing.ListenPort > 0 {
 					port = ing.ListenPort

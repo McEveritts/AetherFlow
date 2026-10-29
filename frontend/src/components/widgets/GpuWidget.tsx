@@ -25,13 +25,13 @@ export default function GpuWidget({ gpus, density }: GpuWidgetProps) {
                         <h3 className={`font-bold text-white tracking-tight ${isImmersive ? 'text-lg' : 'text-sm'}`}>
                             Compute Accelerators
                         </h3>
-                        <p className="text-[10px] text-slate-500 font-mono uppercase tracking-widest">{gpus.length} Device(s) Detected</p>
+                        <p className="text-xs text-slate-500 font-mono uppercase tracking-widest">{gpus.length} Device(s) Detected</p>
                     </div>
                 </div>
                 {isImmersive && (
                     <div className="flex items-center gap-2 px-2 py-1 bg-emerald-500/10 border border-emerald-500/20 rounded-full">
                         <span className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-pulse" />
-                        <span className="text-[10px] font-bold text-emerald-400 uppercase tracking-tighter">Active</span>
+                        <span className="text-xs font-bold text-emerald-400 uppercase tracking-tighter">Active</span>
                     </div>
                 )}
             </div>
@@ -51,9 +51,9 @@ export default function GpuWidget({ gpus, density }: GpuWidgetProps) {
                                 <div className="space-y-1 flex-1 min-w-0 mr-4">
                                     <p className="text-xs font-bold text-slate-200 truncate">{gpu.name}</p>
                                     <div className="flex items-center gap-2 flex-wrap">
-                                        <p className="text-[10px] text-slate-500 font-medium">Index: {gpu.index}</p>
+                                        <p className="text-xs text-slate-500 font-medium">Index: {gpu.index}</p>
                                         {!hasDedicatedVram && (
-                                            <span className="text-[9px] font-semibold text-indigo-300/80 bg-indigo-500/10 border border-indigo-500/20 px-1.5 py-0.5 rounded">
+                                            <span className="text-xs font-semibold text-indigo-300/80 bg-indigo-500/10 border border-indigo-500/20 px-1.5 py-0.5 rounded">
                                                 Shared System Memory · Integrated GPU
                                             </span>
                                         )}
@@ -61,7 +61,7 @@ export default function GpuWidget({ gpus, density }: GpuWidgetProps) {
                                 </div>
                                 <div className="text-right shrink-0 flex items-center gap-2">
                                     {tempC > 0 && (
-                                        <span className={`text-[10px] font-mono font-bold px-1.5 py-0.5 rounded border ${
+                                        <span className={`text-xs font-mono font-bold px-1.5 py-0.5 rounded border ${
                                             tempC >= 80
                                                 ? 'text-red-400 bg-red-500/10 border-red-500/20'
                                                 : tempC >= 65
@@ -78,7 +78,7 @@ export default function GpuWidget({ gpus, density }: GpuWidgetProps) {
                             {/* Real-time telemetry */}
                             <div className="space-y-3">
                                 <div>
-                                    <div className="flex justify-between text-[10px] font-bold mb-1 uppercase tracking-tight">
+                                    <div className="flex justify-between text-xs font-bold mb-1 uppercase tracking-tight">
                                         <span className="text-slate-400">Core Load</span>
                                         <span className="text-blue-400">{usagePct.toFixed(1)}%</span>
                                     </div>
@@ -92,7 +92,7 @@ export default function GpuWidget({ gpus, density }: GpuWidgetProps) {
 
                                 {(hasDedicatedVram || isImmersive) && (
                                     <div>
-                                        <div className="flex justify-between text-[10px] font-bold mb-1 uppercase tracking-tight">
+                                        <div className="flex justify-between text-xs font-bold mb-1 uppercase tracking-tight">
                                             <span className="text-slate-400">{hasDedicatedVram ? 'VRAM Usage' : 'Memory Allocation'}</span>
                                             <span className="text-purple-400">
                                                 {hasDedicatedVram
@@ -117,7 +117,7 @@ export default function GpuWidget({ gpus, density }: GpuWidgetProps) {
             </div>
             
             {isImmersive && (
-                <p className="text-[9px] text-slate-600 text-center italic mt-4">
+                <p className="text-xs text-slate-600 text-center italic mt-4">
                     Dynamic hardware detection active. Headless environments with no GPU will automatically hide this panel.
                 </p>
             )}

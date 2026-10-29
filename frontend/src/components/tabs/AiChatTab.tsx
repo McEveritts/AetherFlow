@@ -177,7 +177,7 @@ export default function AiChatTab() {
                             <h2 className="text-lg font-bold text-slate-100 tracking-tight">
                                 {supportMode ? 'FlowAI Support' : 'FlowAI Assistant'}
                             </h2>
-                            <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full border ${
+                            <span className={`text-xs font-bold uppercase tracking-wider px-2 py-0.5 rounded-full border ${
                                 supportMode
                                     ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
                                     : 'bg-indigo-500/15 text-indigo-300 border-indigo-500/30'
@@ -227,7 +227,7 @@ export default function AiChatTab() {
                             {showContextPicker && (
                                 <div className="absolute right-0 top-full mt-2 w-64 bg-slate-900/95 backdrop-blur-2xl border border-white/15 rounded-2xl shadow-2xl z-50 overflow-hidden">
                                     <div className="p-2.5 border-b border-white/[0.06]">
-                                        <p className="text-[10px] uppercase tracking-wider text-slate-400 font-bold px-2 py-0.5">Context Source</p>
+                                        <p className="text-xs uppercase tracking-wider text-slate-400 font-bold px-2 py-0.5">Context Source</p>
                                     </div>
                                     <div className="p-1.5 space-y-0.5">
                                         {CONTEXT_MODES.map((mode) => (
@@ -244,7 +244,7 @@ export default function AiChatTab() {
                                                     <mode.icon size={14} className={contextMode === mode.id ? 'text-amber-400' : 'text-slate-500'} />
                                                     <div className="text-left">
                                                         <span className="font-medium block text-xs">{mode.name}</span>
-                                                        <span className="text-[10px] text-slate-500">{mode.description}</span>
+                                                        <span className="text-xs text-slate-500">{mode.description}</span>
                                                     </div>
                                                 </div>
                                             </button>
@@ -270,7 +270,7 @@ export default function AiChatTab() {
                         {showModelPicker && (
                             <div className="absolute right-0 top-full mt-2 w-72 bg-slate-900/95 backdrop-blur-2xl border border-white/15 rounded-2xl shadow-2xl z-50 overflow-hidden">
                                 <div className="p-2.5 border-b border-white/[0.06] flex items-center justify-between gap-2">
-                                    <p className="text-[10px] uppercase tracking-wider text-slate-400 font-bold px-2 py-0.5">AI Provider & Model</p>
+                                    <p className="text-xs uppercase tracking-wider text-slate-400 font-bold px-2 py-0.5">AI Provider & Model</p>
                                     <select
                                         className="obs-touch-target-standard bg-slate-800 text-xs text-slate-200 font-semibold rounded-lg border border-white/10 px-2.5 py-1 outline-none focus:border-indigo-500/50 cursor-pointer"
                                         value={selectedProvider}
@@ -306,7 +306,7 @@ export default function AiChatTab() {
                                                 <div className={`h-2 w-2 rounded-full ${selectedModel === model.id ? 'bg-indigo-400 shadow-[0_0_8px_rgba(129,140,248,0.8)]' : 'bg-slate-600'}`}></div>
                                                 <span className="font-medium text-xs">{model.name}</span>
                                             </div>
-                                            <span className={`text-[10px] uppercase tracking-wider font-bold px-2 py-0.5 rounded-md ${model.tier === 'latest'
+                                            <span className={`text-xs uppercase tracking-wider font-bold px-2 py-0.5 rounded-md ${model.tier === 'latest'
                                                     ? 'bg-indigo-500/20 text-indigo-400 border border-indigo-500/20'
                                                     : 'bg-slate-800 text-slate-400 border border-white/5'
                                                 }`}>
@@ -372,7 +372,7 @@ export default function AiChatTab() {
                                                 <Wrench size={16} />
                                             </div>
                                             <span className="font-bold text-slate-100 flex-1">{msg.payload.title as string}</span>
-                                            <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-1 rounded border ${
+                                            <span className={`text-xs font-bold uppercase tracking-wider px-2 py-1 rounded border ${
                                                 msg.payload.danger_level === 'critical' ? 'bg-red-500/20 text-red-400 border-red-500/30' :
                                                 msg.payload.danger_level === 'warn' ? 'bg-amber-500/20 text-amber-400 border-amber-500/30' :
                                                 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30'
@@ -382,7 +382,7 @@ export default function AiChatTab() {
                                         </div>
                                         <p className="text-slate-400 text-xs mb-4 border-l-2 border-white/10 pl-3 ml-1">{msg.payload.description as string}</p>
                                         <div className="flex items-center justify-between pt-2 border-t border-white/5">
-                                            <span className="text-[10px] text-slate-500 font-mono">
+                                            <span className="text-xs text-slate-500 font-mono">
                                                 {msg.payload.action_id ? `Action #${msg.payload.action_id as string} queued` : 'Queued for approval'}
                                             </span>
                                             <button 
@@ -411,7 +411,7 @@ export default function AiChatTab() {
                     {/* Quick Starter Prompt Chips when conversation just started */}
                     {messages.length <= 1 && !isTyping && (
                         <div className="pt-2 pl-0 md:pl-13">
-                            <p className="text-[11px] font-bold uppercase tracking-wider text-slate-500 mb-3">
+                            <p className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-3">
                                 Suggested Infrastructure Prompts
                             </p>
                             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -430,7 +430,7 @@ export default function AiChatTab() {
                                                 <span>{item.label}</span>
                                                 <ChevronRight size={13} className="text-slate-600 group-hover:text-indigo-400 group-hover:translate-x-0.5 transition-all shrink-0" />
                                             </div>
-                                            <p className="text-[11px] text-slate-500 line-clamp-1 mt-0.5">{item.prompt}</p>
+                                            <p className="text-xs text-slate-500 line-clamp-1 mt-0.5">{item.prompt}</p>
                                         </div>
                                     </button>
                                 ))}
@@ -493,10 +493,10 @@ export default function AiChatTab() {
                         </div>
                     </form>
                     <div className="flex items-center justify-between px-2 mt-2">
-                        <p className="text-[10px] text-slate-500 font-medium">
+                        <p className="text-xs text-slate-500 font-medium">
                             FlowAI can make mistakes. Critical system actions require explicit sign-off in your Approval Inbox.
                         </p>
-                        <span className="text-[10px] text-slate-500 font-mono hidden sm:inline">
+                        <span className="text-xs text-slate-500 font-mono hidden sm:inline">
                             {currentModel.name} · Enter to send
                         </span>
                     </div>

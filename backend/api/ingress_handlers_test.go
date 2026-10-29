@@ -181,5 +181,26 @@ func TestIngressConfigs_PersistenceAndSync(t *testing.T) {
 		if w3.Code != http.StatusOK || w3.Body.String() != "AetherFlow Dashboard" {
 			t.Fatalf("expected AetherFlow Dashboard on base domain, got %d: %s", w3.Code, w3.Body.String())
 		}
+
+		// S-03 Regression: External client spoofing Host: qbittorrent.aether.local via X-Forwarded-For or public RemoteAddr is blocked (403)
+		w4 := httptest.NewRecorder()
+		req4, _ := http.NewRequest("GET", "http://qbittorrent.aether.local/", nil)
+		req4.Host = "qbittorrent.aether.local"
+		req4.RemoteAddr = "127.0.0.1:45678"
+		req4.Header.Set("X-Forwarded-For", "198.51.100.42")
+		gw.ServeHTTP(w4, req4)
+		if w4.Code != http.StatusForbidden {
+			t.Fatalf("expected 403 Forbidden for external client spoofing .aether.local, got %d: %s", w4.Code, w4.Body.String())
+		}
+
+		// Local LAN client requesting Host: qbittorrent.aether.local is allowed
+		w5 := httptest.NewRecorder()
+		req5, _ := http.NewRequest("GET", "http://qbittorrent.aether.local/", nil)
+		req5.Host = "qbittorrent.aether.local"
+		req5.RemoteAddr = "192.168.1.25:45678"
+		gw.ServeHTTP(w5, req5)
+		if w5.Code != http.StatusOK || w5.Body.String() != "qBittorrent WebUI:/" {
+			t.Fatalf("expected 200 OK for LAN client accessing .aether.local, got %d: %s", w5.Code, w5.Body.String())
+		}
 	}
 }

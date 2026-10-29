@@ -136,9 +136,30 @@ func GetSystemMetricsCore() models.SystemMetrics {
 				allZero = false
 			}
 		}
-		if !allZero || len(lastValidPerCoreCPU) == 0 {
+		if !allZero {
 			perCoreCPU = corePercents
 			lastValidPerCoreCPU = append([]float64(nil), corePercents...)
+		} else if len(lastValidPerCoreCPU) == 0 {
+			if cpuSampleElapsed < 350*time.Millisecond {
+				if retryCore, retryErr := cpu.Percent(100*time.Millisecond, true); retryErr == nil && len(retryCore) > 0 {
+					retryNonZero := false
+					for i, pct := range retryCore {
+						clamped := math.Min(100, math.Max(0, sanitizeFloat64(pct)))
+						retryCore[i] = math.Round(clamped*10) / 10
+						if retryCore[i] > 0 {
+							retryNonZero = true
+						}
+					}
+					perCoreCPU = retryCore
+					if retryNonZero {
+						lastValidPerCoreCPU = append([]float64(nil), retryCore...)
+					}
+				} else {
+					perCoreCPU = corePercents
+				}
+			} else {
+				perCoreCPU = corePercents
+			}
 		} else if cpuSampleElapsed < 350*time.Millisecond {
 			// Sub-jiffy sample window: keep last valid per-core reading
 			perCoreCPU = append([]float64(nil), lastValidPerCoreCPU...)
@@ -613,7 +634,25 @@ func updateGPUMetrics(gpus []models.GpuMetric) []models.GpuMetric {
 					continue
 				}
 				idx, idxErr := strconv.Atoi(strings.TrimSpace(fields[0]))
-				if idxErr != nil || idx < 0 || idx >= len(updated) {
+				if idxErr != nil || idx < 0 {
+					continue
+				}
+				targetIdx := -1
+				nvCount := 0
+				for i := range updated {
+					lowerName := strings.ToLower(updated[i].Name)
+					if strings.Contains(lowerName, "nvidia") || strings.Contains(lowerName, "geforce") || strings.Contains(lowerName, "quadro") || strings.Contains(lowerName, "tesla") || strings.Contains(lowerName, "rtx") || strings.Contains(lowerName, "gtx") {
+						if nvCount == idx {
+							targetIdx = i
+							break
+						}
+						nvCount++
+					}
+				}
+				if targetIdx == -1 && idx < len(updated) {
+					targetIdx = idx
+				}
+				if targetIdx < 0 || targetIdx >= len(updated) {
 					continue
 				}
 				util, _ := strconv.ParseFloat(strings.TrimSpace(fields[1]), 64)
@@ -621,17 +660,23 @@ func updateGPUMetrics(gpus []models.GpuMetric) []models.GpuMetric {
 				memUsed, _ := strconv.ParseFloat(strings.TrimSpace(fields[3]), 64)
 				memTotal, _ := strconv.ParseFloat(strings.TrimSpace(fields[4]), 64)
 
-				updated[idx].UsagePct = math.Round(math.Min(100, math.Max(0, sanitizeFloat64(util)))*10) / 10
-				updated[idx].Temp = math.Round(sanitizeFloat64(temp)*10) / 10
-				updated[idx].MemoryUsed = math.Round(sanitizeFloat64(memUsed)*10) / 10
-				updated[idx].MemoryTotal = math.Round(sanitizeFloat64(memTotal)*10) / 10
-				nvidiaUpdated[idx] = true
+				updated[targetIdx].UsagePct = math.Round(math.Min(100, math.Max(0, sanitizeFloat64(util)))*10) / 10
+				updated[targetIdx].Temp = math.Round(sanitizeFloat64(temp)*10) / 10
+				updated[targetIdx].MemoryUsed = math.Round(sanitizeFloat64(memUsed)*10) / 10
+				updated[targetIdx].MemoryTotal = math.Round(sanitizeFloat64(memTotal)*10) / 10
+				nvidiaUpdated[targetIdx] = true
 			}
 		}
 	}
 
 	// 2. Check Linux DRM sysfs (/sys/class/drm/card*) for Intel (i915/xe) and AMD (amdgpu) GPUs
-	cards, _ := filepath.Glob("/sys/class/drm/card[0-9]*")
+	rawCards, _ := filepath.Glob("/sys/class/drm/card[0-9]*")
+	var cards []string
+	for _, c := range rawCards {
+		if !strings.Contains(filepath.Base(c), "-") {
+			cards = append(cards, c)
+		}
+	}
 	sort.Strings(cards)
 
 	for i := range updated {

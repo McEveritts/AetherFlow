@@ -316,6 +316,23 @@ func TestAutoSubdomainProvisioningFromSettingsBaseDomain(t *testing.T) {
 	if ingAfter == nil || ingAfter.PublicDomain != "jellyfin.newbox.io" {
 		t.Errorf("expected jellyfin domain to update to 'jellyfin.newbox.io', got %+v", ingAfter)
 	}
+
+	// 4. S-04 & S-02 Regression: Disable external access on Jellyfin, migrate domain again, and verify ExternalAccessEnabled=false is preserved and blocks public host resolution
+	ingAfter.ExternalAccessEnabled = false
+	_ = db.SetAppIngressConfig(*ingAfter)
+	_ = db.SetBaseDomain(" migrated.io ")
+	SyncInstalledAppsBaseDomain("newbox.io", "migrated.io")
+
+	ingPreserved, _ := db.GetAppIngressConfig("jellyfin")
+	if ingPreserved == nil || ingPreserved.PublicDomain != "jellyfin.migrated.io" || ingPreserved.ExternalAccessEnabled {
+		t.Errorf("expected SyncInstalledAppsBaseDomain to preserve ExternalAccessEnabled=false, got %+v", ingPreserved)
+	}
+	if _, _, matched := ResolveAppTargetForHost("jellyfin.migrated.io"); matched {
+		t.Errorf("expected ResolveAppTargetForHost(jellyfin.migrated.io) to be blocked when ExternalAccessEnabled=false")
+	}
+	if port, _, matched := ResolveAppTargetForHost("jellyfin.aether.local"); !matched || port != 8096 {
+		t.Errorf("expected internal domain jellyfin.aether.local to remain routable on port 8096, got port=%d matched=%v", port, matched)
+	}
 }
 
 func TestMasterCredentialsSyncIntoAppBlueprint(t *testing.T) {

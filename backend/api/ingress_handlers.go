@@ -161,6 +161,38 @@ func AppSubdomainProxyMiddleware() gin.HandlerFunc {
 			return
 		}
 
+		cleanHost := strings.ToLower(strings.TrimSpace(c.Request.Host))
+		if idx := strings.LastIndex(cleanHost, ":"); idx != -1 && !strings.Contains(cleanHost[idx:], "]") {
+			cleanHost = cleanHost[:idx]
+		}
+		cleanHost = strings.TrimSuffix(cleanHost, ".")
+		if cleanHost == "aether.local" || strings.HasSuffix(cleanHost, ".aether.local") {
+			isPrivateIP := regexp.MustCompile(`^(127\.|10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|::1$|\[::1\]|fc[0-9a-f]{2}:|fd[0-9a-f]{2}:|fe80:)`).MatchString
+			allowed := true
+			if remoteAddr := strings.ToLower(strings.TrimSpace(c.Request.RemoteAddr)); remoteAddr != "" {
+				remoteIP := remoteAddr
+				if idx := strings.LastIndex(remoteIP, ":"); idx != -1 && !strings.Contains(remoteIP[idx:], "]") {
+					remoteIP = strings.Trim(remoteIP[:idx], "[]")
+				}
+				if remoteIP != "" && !isPrivateIP(remoteIP) {
+					allowed = false
+				}
+			}
+			if xff := strings.TrimSpace(c.GetHeader("X-Forwarded-For")); xff != "" {
+				for _, hop := range strings.Split(xff, ",") {
+					hopIP := strings.ToLower(strings.Trim(strings.TrimSpace(hop), "[]"))
+					if hopIP == "" || !isPrivateIP(hopIP) {
+						allowed = false
+						break
+					}
+				}
+			}
+			if !allowed {
+				c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "Internal .aether.local domains are restricted to local network clients"})
+				return
+			}
+		}
+
 		targetPort, appName, matched := services.ResolveAppTargetForHost(c.Request.Host)
 		if !matched || targetPort <= 0 {
 			c.Next()

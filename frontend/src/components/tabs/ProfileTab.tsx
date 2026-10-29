@@ -213,7 +213,7 @@ export default function ProfileTab() {
                         </div>
                         
                         <div className="text-center sm:text-left flex-1">
-                            <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 block">Account Identity</span>
+                            <span className="text-xs font-bold uppercase tracking-wider text-slate-500 block">Account Identity</span>
                             <h3 className="text-2xl font-bold text-slate-100 tracking-tight mt-0.5">{user.username}</h3>
                             <div className="flex flex-wrap items-center justify-center sm:justify-start gap-2 mt-3">
                                 <span className="bg-indigo-500/10 text-indigo-400 text-xs font-bold px-3 py-1 rounded-full uppercase tracking-widest border border-indigo-500/20">
@@ -236,7 +236,7 @@ export default function ProfileTab() {
                     <form onSubmit={handleUpdate} className="space-y-4">
                         <div className="flex items-center justify-between">
                             <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider">Email Preferences</h4>
-                            <span className="text-[10px] font-mono uppercase text-slate-500">System Alerts</span>
+                            <span className="text-xs font-mono uppercase text-slate-500">System Alerts</span>
                         </div>
                         <div className="p-4 rounded-xl bg-slate-950/50 border border-white/[0.06] space-y-3">
                             <label className="text-sm font-semibold text-slate-300 flex items-center gap-2">
@@ -291,9 +291,9 @@ export default function ProfileTab() {
                                     <h5 className="text-sm font-semibold text-slate-200 flex items-center gap-2">
                                         Two-Factor Authentication
                                         {user.totp_enabled ? (
-                                            <span className="px-2 py-0.5 rounded text-[10px] uppercase font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/20">Active</span>
+                                            <span className="px-2 py-0.5 rounded text-xs uppercase font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/20">Active</span>
                                         ) : (
-                                            <span className="px-2 py-0.5 rounded text-[10px] uppercase font-bold bg-slate-700/50 text-slate-400 border border-white/10">Inactive</span>
+                                            <span className="px-2 py-0.5 rounded text-xs uppercase font-bold bg-slate-700/50 text-slate-400 border border-white/10">Inactive</span>
                                         )}
                                     </h5>
                                     <p className="text-xs text-slate-500 mt-0.5">
@@ -339,7 +339,7 @@ export default function ProfileTab() {
                                         {quota.totalGB > 0 ? (
                                             <span className="text-slate-500 text-xs ml-1">/ {quota.totalGB} GB</span>
                                         ) : (
-                                            <span className="text-slate-500 text-[10px] ml-1 uppercase">(No Limit Set)</span>
+                                            <span className="text-slate-500 text-xs ml-1 uppercase">(No Limit Set)</span>
                                         )}
                                     </div>
                                 </div>
@@ -353,7 +353,7 @@ export default function ProfileTab() {
                                     ></div>
                                 </div>
                                 {quota.totalGB > 0 && (
-                                    <p className="text-[11px] text-slate-500 text-right mt-1">{(quota.percentage || 0).toFixed(1)}% utilized</p>
+                                    <p className="text-xs text-slate-500 text-right mt-1">{(quota.percentage || 0).toFixed(1)}% utilized</p>
                                 )}
                             </div>
                         ) : (

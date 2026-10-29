@@ -48,32 +48,35 @@ export default function DataUsageHistoryWidget({ density = 'compact' }: DataUsag
                 const rawData = await fetcher<MetricsSnapshot[]>(`/api/v1/admin/ai/predictions/history?days=${days}`);
                 if (!isMounted) return;
                 
-                // Group by Day (YYYY-MM-DD)
-                const dailyGroups = new Map<string, { minRx: number; maxRx: number; minTx: number; maxTx: number }>();
+                // Group by Day (YYYY-MM-DD) and sum positive chronological deltas
+                const dailySamples = new Map<string, { ts: number; rx: number; tx: number }[]>();
 
                 (Array.isArray(rawData) ? rawData : []).forEach(record => {
                     const date = record.timestamp.split(/[ T]/)[0];
-                    if (!dailyGroups.has(date)) {
-                        dailyGroups.set(date, { 
-                            minRx: record.net_rx_bytes, maxRx: record.net_rx_bytes,
-                            minTx: record.net_tx_bytes, maxTx: record.net_tx_bytes
-                        });
+                    const ts = new Date(record.timestamp).getTime() || 0;
+                    const sample = { ts, rx: record.net_rx_bytes ?? 0, tx: record.net_tx_bytes ?? 0 };
+                    const existing = dailySamples.get(date);
+                    if (!existing) {
+                        dailySamples.set(date, [sample]);
                     } else {
-                        const group = dailyGroups.get(date)!;
-                        group.minRx = Math.min(group.minRx, record.net_rx_bytes);
-                        group.maxRx = Math.max(group.maxRx, record.net_rx_bytes);
-                        group.minTx = Math.min(group.minTx, record.net_tx_bytes);
-                        group.maxTx = Math.max(group.maxTx, record.net_tx_bytes);
+                        existing.push(sample);
                     }
                 });
 
-                const chartData: DailyUsage[] = Array.from(dailyGroups.entries()).map(([date, group]) => {
-                    const dlDelta = group.maxRx - group.minRx;
-                    const ulDelta = group.maxTx - group.minTx;
+                const chartData: DailyUsage[] = Array.from(dailySamples.entries()).map(([date, samples]) => {
+                    samples.sort((a, b) => a.ts - b.ts);
+                    let dlDelta = 0;
+                    let ulDelta = 0;
+                    for (let i = 1; i < samples.length; i++) {
+                        const prev = samples[i - 1];
+                        const curr = samples[i];
+                        dlDelta += curr.rx >= prev.rx ? curr.rx - prev.rx : curr.rx;
+                        ulDelta += curr.tx >= prev.tx ? curr.tx - prev.tx : curr.tx;
+                    }
                     return {
                         date,
-                        downloadedBytes: dlDelta === 0 && dailyGroups.size === 1 ? group.maxRx : dlDelta,
-                        uploadedBytes: ulDelta === 0 && dailyGroups.size === 1 ? group.maxTx : ulDelta,
+                        downloadedBytes: dlDelta,
+                        uploadedBytes: ulDelta,
                     };
                 }).sort((a, b) => a.date.localeCompare(b.date)); // Sort chronologically
 
@@ -229,7 +232,7 @@ export default function DataUsageHistoryWidget({ density = 'compact' }: DataUsag
                                 <Download size={14} className="text-indigo-400" />
                             </div>
                             <div>
-                                <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider block">DL ({days}d)</span>
+                                <span className="text-xs font-semibold text-slate-500 uppercase tracking-wider block">DL ({days}d)</span>
                                 <span className="text-sm font-bold text-slate-200">
                                     {loading && data.length === 0 ? '...' : formatBytes(totalDL)}
                                 </span>
@@ -240,7 +243,7 @@ export default function DataUsageHistoryWidget({ density = 'compact' }: DataUsag
                                 <Upload size={14} className="text-teal-400" />
                             </div>
                             <div>
-                                <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider block">UL ({days}d)</span>
+                                <span className="text-xs font-semibold text-slate-500 uppercase tracking-wider block">UL ({days}d)</span>
                                 <span className="text-sm font-bold text-slate-200">
                                     {loading && data.length === 0 ? '...' : formatBytes(totalUL)}
                                 </span>
