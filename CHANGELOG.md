@@ -12,7 +12,7 @@ _Direct comparison against `v3.2.01` (`v3.2.01...v3.2.1`), consolidating catalog
 * **57-Point McSurgeon Surgical Audit Resolution**: Resolved 57 security, concurrency, ingress, DNS, hardware telemetry, and UI findings across backend and frontend components.
 
 ### Ingress, Auth & Systemd Hardening
-* **Apache2 Subdomain Gateway & Certbot SAN Sync (Caddy Removal)**: Consolidated ingress routing exclusively onto Apache2 VirtualHosts and the built-in Go `AppSubdomainProxyMiddleware`, removed the legacy Caddy compatibility layer (`caddy_manager.go`), automated Certbot SAN certificate synchronization via `af-certbot-sync`, and hardened `.aether.local` and SSO identity header routing (`ingress_handlers.go`, `blueprint_lifecycle.go`, `deploy_orchestrator.go`).
+* **Apache2 Subdomain Gateway & Certbot SAN Sync**: Consolidated ingress routing onto Apache2 VirtualHosts and the built-in Go `AppSubdomainProxyMiddleware`, automated Certbot SAN certificate synchronization via `af-certbot-sync`, and hardened `.aether.local` and SSO identity header routing (`ingress_handlers.go`, `blueprint_lifecycle.go`, `deploy_orchestrator.go`).
 * **Systemd `AF_NETLINK` Sandboxing**: Added `AF_NETLINK` to `RestrictAddressFamilies` in `aetherflow-api.service` so `net.Interfaces()` LAN origin discovery operates cleanly inside strict systemd sandboxing.
 * **Session Hijacking & Silent JWT Refresh Fixes**: Prevented false-positive session hijacking invalidations during browser socket rotation and stabilized background silent JWT refresh.
 
@@ -28,7 +28,7 @@ _Direct comparison against `v3.1.5` (`v3.1.5...v3.2.01`), consolidating all arch
 ---
 
 ### Release Highlights (since `v3.1.5`)
-* **Whatbox-Style Server Base Domain & Automatic Subdomain Provisioning**: Added `baseDomain` support across Settings, Onboarding Wizard, and environment seeding (`AETHERFLOW_BASE_DOMAIN`). Installing any web-capable Marketplace app automatically provisions `<app>.<baseDomain>` (e.g., `jellyfin.domain.com`) with external access and TLS enabled via the Caddy ingress layer, and updating `baseDomain` retroactively syncs existing installed apps.
+* **Whatbox-Style Server Base Domain & Automatic Subdomain Provisioning**: Added `baseDomain` support across Settings, Onboarding Wizard, and environment seeding (`AETHERFLOW_BASE_DOMAIN`). Installing any web-capable Marketplace app automatically provisions `<app>.<baseDomain>` (e.g., `jellyfin.domain.com`) with external access and TLS enabled via the Apache2 Subdomain Gateway, and updating `baseDomain` retroactively syncs existing installed apps.
 * **Frame-0 Real-Time Telemetry & Hardware Metric Smoothing**: WebSocket clients now receive an immediate `METRICS_UPDATE` snapshot on connection (`frame 0`) with pre-seeded system/service state, loopback IP-binding tolerance (`127.0.0.1` / `::1` / `localhost`), non-blocking `cpu.Times` delta calculation in `hardware.go`, cached GPU hardware discovery, and two-point sparkline initialization so charts render immediately without waiting or stuttering.
 * **Single-Binary Embedded SPA & Privileged Runner Daemon**: Compiled the Next.js static export (`backend/web/dist`) directly into the `aetherflow-api` Go binary (`CGO_ENABLED=0`) and split privileged root operations into a dedicated UNIX domain socket daemon (`aetherflow-runner.service` on `/run/aetherflow/runner.sock`) with strict regex/enum allowlists.
 * **Debian 13 (Trixie) & Ubuntu 24.04 Modernization**: Migrated APT repositories to DEB822 `.sources` format with `0644` `/etc/apt/keyrings` permissions for `sqv`, enforced `umask 0022`, preserved execute bits on hoisted workspace `node_modules/.bin` binaries during permission hardening, migrated `sysctl` BBR tuning to `/etc/sysctl.d/99-aetherflow-bbr.conf`, and hardened `vsftpd` TLS and `qbittorrent-nox` PBKDF2 WebUI provisioning.
@@ -36,8 +36,8 @@ _Direct comparison against `v3.1.5` (`v3.1.5...v3.2.01`), consolidating all arch
 * **FlowAI Multi-Provider Architecture & MediaFlow Engine**: Finalized provider-agnostic AI routing (Gemini, Anthropic, OpenAI, Ollama, LM Studio) with encrypted credential storage, plus hardware-agnostic MediaFlow transcoding (AMD VAAPI / Intel QSV) and non-destructive `.mediaflow_trash` retention.
 
 ### Ingress, Networking & Reverse Proxy
-* **Automatic App Subdomain Lifecycle**: `BlueprintLifecycleManager` now resolves `baseDomain` from SQLite settings or environment variables and writes `<app>.<baseDomain>` into `app_ingress_configs` on installation, immediately syncing Caddy reverse-proxy routes.
-* **Retroactive Base Domain Sync**: Updating `baseDomain` via `PUT /api/v1/auth/settings` automatically provisions subdomains for all existing installed/running apps and triggers a live Caddy configuration reload.
+* **Automatic App Subdomain Lifecycle**: `BlueprintLifecycleManager` now resolves `baseDomain` from SQLite settings or environment variables and writes `<app>.<baseDomain>` into `app_ingress_configs` on installation, immediately syncing Apache2 Subdomain Gateway reverse-proxy routes and Certbot SANs.
+* **Retroactive Base Domain Sync**: Updating `baseDomain` via `PUT /api/v1/auth/settings` automatically provisions subdomains for all existing installed/running apps and triggers a live Subdomain Gateway and Certbot SAN sync.
 * **Apache SSL WebSocket Rewrite Fix**: Updated `setup/templates/default-ssl.conf.template` to proxy WebSocket upgrade requests across all `/api/(.*)` endpoints (`ws://127.0.0.1:8080/api/$1`), fixing `/api/v1/ws` upgrades behind Apache SSL.
 * **CORS & Host Validation Auto-Discovery**: Added automatic LAN interface IP and configured `saved_domain` (`http://` and `https://`) registration in `/etc/aetherflow/aetherflow.env` and `HostValidationMiddleware`.
 

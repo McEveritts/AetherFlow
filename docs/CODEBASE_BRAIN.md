@@ -16,7 +16,7 @@ When executing an action on AetherFlow, the request traverses the following hard
 
 ```mermaid
 graph TD
-    Client[Next.js Client SPA] -->|HTTPS / JWT| Proxy[Reverse Proxy nginx/traefik]
+    Client[Next.js Client SPA] -->|HTTPS / JWT| Proxy[Reverse Proxy Apache2]
     Proxy -->|127.0.0.1:8080| GinRouter(Go Gin HTTP Server)
     
     subgraph Control_Plane

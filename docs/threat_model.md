@@ -100,7 +100,7 @@ Spoofed Host header → getBaseURL() returns attacker domain
 ## 4. Trust Boundaries
 
 ```
-[Internet] → [Reverse Proxy (nginx)] → [Gin HTTP Server (127.0.0.1:8080)]
+[Internet] → [Reverse Proxy (Apache2)] → [Gin HTTP Server (127.0.0.1:8080)]
                                               ↓
                                         [AuthMiddleware]
                                               ↓

@@ -1,6 +1,6 @@
 <div align="center">
 
-![AetherFlow Banner](./docs/assets/banner.svg)
+![AetherFlow Banner](./docs/assets/banner.svg?v=3.2.1)
 
 [![Latest Release](https://img.shields.io/github/v/release/McEveritts/AetherFlow?style=flat-square&logo=github&label=Release&color=6366f1)](https://github.com/McEveritts/AetherFlow/releases/latest)
 [![Go Version](https://img.shields.io/badge/Control_Plane-Go_1.26-00ADD8?style=flat-square&logo=go&logoColor=white)](./backend)
