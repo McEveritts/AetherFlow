@@ -160,7 +160,7 @@ export default function Sidebar() {
                     className="fixed inset-0 bg-black/75 backdrop-blur-md z-50 md:hidden transition-opacity"
                     onClick={() => setIsMobileMenuOpen(false)}
                 >
-                    <div 
+                    <aside 
                         className="fixed inset-y-0 left-0 w-72 max-w-[85vw] glass-panel p-5 flex flex-col z-50 border-r border-indigo-500/30 shadow-[0_24px_60px_rgba(0,0,0,0.9)] overflow-y-auto no-scrollbar obs-gpu-120hz-rail"
                         onClick={(e) => e.stopPropagation()}
                         onTouchStart={handleDrawerTouchStart}
@@ -243,7 +243,7 @@ export default function Sidebar() {
                                 </button>
                             ))}
                         </div>
-                    </div>
+                    </aside>
                 </div>
             )}
 
