@@ -1,0 +1,93 @@
+#!/bin/bash
+# AetherFlow Package Installer: Qui
+# Port: 7476
+
+set -euo pipefail
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
+fi
+
+PACKAGE_NAME="qui"
+export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")" /install
+
+require_root
+log_info "Starting installation for ${PACKAGE_NAME}..."
+report_progress 15 "Installing dependencies for Qui..."
+
+DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl wget tar openssl ca-certificates >> "$LOGFILE" 2>&1
+
+if ! id -u qui >/dev/null 2>&1; then
+    useradd --system --user-group --no-create-home --home-dir /var/lib/qui --shell /usr/sbin/nologin qui
+fi
+
+mkdir -p /var/lib/qui
+
+ARCH=$(dpkg --print-architecture)
+case "$ARCH" in
+    amd64) QUI_ARCH="linux_x86_64" ;;
+    arm64) QUI_ARCH="linux_arm64" ;;
+    armhf) QUI_ARCH="linux_arm" ;;
+    *) print_error "Unsupported architecture: $ARCH"; exit 1 ;;
+esac
+
+report_progress 40 "Resolving latest Qui release (${QUI_ARCH})..."
+QUI_JSON="$(curl -fsSL https://api.github.com/repos/autobrr/qui/releases/latest 2>/dev/null || true)"
+QUI_VERSION="$(printf '%s' "$QUI_JSON" | grep -oP '"tag_name":\s*"v\K[^"]+' | head -1 || true)"
+QUI_VERSION="${QUI_VERSION:-1.33.1}"
+QUI_URL="https://github.com/autobrr/qui/releases/download/v${QUI_VERSION}/qui_${QUI_VERSION}_${QUI_ARCH}.tar.gz"
+
+report_progress 65 "Downloading and installing Qui ${QUI_VERSION}..."
+TMP_TAR=$(mktemp /tmp/qui-XXXXXX.tar.gz)
+curl -fsSL "$QUI_URL" -o "$TMP_TAR" >> "$LOGFILE" 2>&1
+tar -xzf "$TMP_TAR" -C /usr/local/bin qui >> "$LOGFILE" 2>&1
+rm -f "$TMP_TAR"
+chmod 755 /usr/local/bin/qui
+printf '%s\n' "${QUI_VERSION#v}" > /var/lib/qui/.af-version
+
+if [[ ! -f /var/lib/qui/config.toml ]]; then
+    SESSION_SECRET="$(openssl rand -hex 32)"
+    cat <<EOF > /var/lib/qui/config.toml
+host = "0.0.0.0"
+port = 7476
+logLevel = "INFO"
+sessionSecret = "${SESSION_SECRET}"
+EOF
+fi
+
+chown -R qui:qui /var/lib/qui
+chmod 640 /var/lib/qui/config.toml
+
+report_progress 85 "Configuring and starting qui.service on port 7476..."
+cat <<'EOF' > /etc/systemd/system/qui.service
+[Unit]
+Description=qui qBittorrent Web UI service
+After=syslog.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=qui
+Group=qui
+WorkingDirectory=/var/lib/qui
+ExecStart=/usr/local/bin/qui serve --config-dir=/var/lib/qui
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload >> "$LOGFILE" 2>&1
+systemctl enable --now qui >> "$LOGFILE" 2>&1
+
+write_lock "${PACKAGE_NAME}"
+report_progress 100 "Qui installed on port 7476."
+log_info "${PACKAGE_NAME} installed successfully"

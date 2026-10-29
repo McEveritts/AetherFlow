@@ -43,7 +43,7 @@ type AppBlueprint struct {
 	Dependencies      []string          `json:"dependencies,omitempty"`
 }
 
-// blueprintRegistry holds baseline definitions for all 55 catalog apps, while
+// blueprintRegistry holds baseline definitions for all 57 catalog apps, while
 // GetBlueprint dynamically overlays config/packages.json as the single source of truth.
 var blueprintRegistry = map[string]AppBlueprint{
 	"plex": {
@@ -273,6 +273,16 @@ var blueprintRegistry = map[string]AppBlueprint{
 		DefaultPort: 4533,
 		AppDataPath: "/var/lib/navidrome",
 	},
+	"threadfin": {
+		AppName:         "threadfin",
+		ServiceName:     "threadfin",
+		Category:        "Media",
+		DefaultPort:     34400,
+		WebPath:         "/web",
+		HealthCheckPath: "/web",
+		AppDataPath:     "/var/lib/threadfin",
+		Dependencies:    []string{"plex", "jellyfin", "emby"},
+	},
 	"qbittorrent": {
 		AppName:           "qbittorrent",
 		ServiceName:       "qbittorrent",
@@ -321,6 +331,17 @@ var blueprintRegistry = map[string]AppBlueprint{
 	"nzbget":      {AppName: "nzbget", ServiceName: "nzbget", Category: "Downloaders", DefaultPort: 6789},
 	"flood":       {AppName: "flood", ServiceName: "flood", Category: "Downloaders", DefaultPort: 3001},
 	"autobrr":     {AppName: "autobrr", ServiceName: "autobrr", Category: "Downloaders", DefaultPort: 7474},
+	"qui": {
+		AppName:         "qui",
+		ServiceName:     "qui",
+		Category:        "Downloaders",
+		DefaultPort:     7476,
+		WebPath:         "/",
+		HealthCheckPath: "/",
+		ConfigFilePath:  "/var/lib/qui/config.toml",
+		AppDataPath:     "/var/lib/qui",
+		Dependencies:    []string{"qbittorrent"},
+	},
 	"nextcloud":   {AppName: "nextcloud", ServiceName: "apache2", Category: "Cloud", DefaultPort: 8088, WebPath: "/"},
 	"syncthing":   {AppName: "syncthing", ServiceName: "syncthing", Category: "Cloud", DefaultPort: 8384},
 	"filebrowser": {AppName: "filebrowser", ServiceName: "filebrowser", Category: "Cloud", DefaultPort: 8095},

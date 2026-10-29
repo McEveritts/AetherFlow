@@ -6,10 +6,10 @@
 [![Go Version](https://img.shields.io/badge/Control_Plane-Go_1.26-00ADD8?style=flat-square&logo=go&logoColor=white)](./backend)
 [![Frontend](https://img.shields.io/badge/Interface-Next.js_16_%28Obsidian_V2%29-000000?style=flat-square&logo=next.js&logoColor=white)](./frontend)
 [![OS Support](https://img.shields.io/badge/Target_OS-Debian_12%2F13_%7C_Ubuntu_22.04%2F24.04-A81D33?style=flat-square&logo=debian&logoColor=white)](./setup)
-[![Catalog](https://img.shields.io/badge/Bare--Metal_Catalog-55_Apps-9333ea?style=flat-square)](./packages)
+[![Catalog](https://img.shields.io/badge/Bare--Metal_Catalog-57_Apps-9333ea?style=flat-square)](./packages)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-10b981?style=flat-square)](./LICENSE.md)
 
-**[Quickstart](#-quick-installation)** • **[Architecture](#️-system-architecture)** • **[55-App Catalog](#-55-package-bare-metal-catalog)** • **[FlowAI](#-human-gated-flowai)** • **[Documentation](#-documentation)** • **[Latest Release](https://github.com/McEveritts/AetherFlow/releases/latest)**
+**[Quickstart](#-quick-installation)** • **[Architecture](#️-system-architecture)** • **[57-App Catalog](#-57-package-bare-metal-catalog)** • **[FlowAI](#-human-gated-flowai)** • **[Documentation](#-documentation)** • **[Latest Release](https://github.com/McEveritts/AetherFlow/releases/latest)**
 
 </div>
 
@@ -17,7 +17,7 @@
 
 ## ⚡ Overview
 
-**AetherFlow** is a sovereign, bare-metal infrastructure and media-server orchestration platform. Built to replace fragile scripts and heavy container overlays with a compiled, single-binary control plane, AetherFlow orchestrates **55 native Linux services**, real-time hardware telemetry, automated subdomain ingress, and human-gated AI operations directly against `systemd`.
+**AetherFlow** is a sovereign, bare-metal infrastructure and media-server orchestration platform. Built to replace fragile scripts and heavy container overlays with a compiled, single-binary control plane, AetherFlow orchestrates **57 native Linux services**, real-time hardware telemetry, automated subdomain ingress, and human-gated AI operations directly against `systemd`.
 
 ![AetherFlow Overview Dashboard](./docs/assets/dashboard.png)
 
@@ -33,7 +33,7 @@
 
 ## 🖥️ Platform Showcase
 
-| **AetherMarketplace (55 Native Apps)** | **FlowAI Infrastructure Assistant** |
+| **AetherMarketplace (57 Native Apps)** | **FlowAI Infrastructure Assistant** |
 |:---:|:---:|
 | ![AetherMarketplace](./docs/assets/marketplace.png) | ![FlowAI Assistant](./docs/assets/flowai.png) |
 | One-click bare-metal provisioning, live SSE install logs, automatic subdomain wiring, and Zero-Touch Arr API discovery. | Context-aware diagnostics connected to live system metrics, service journals, and the global **Action Approval Inbox**. |
@@ -67,7 +67,7 @@ flowchart LR
 
     subgraph BareMetal["Bare-Metal Host (Debian 12/13 • Ubuntu 22.04/24.04)"]
         Systemd["systemd Service Manager"]
-        Catalog["55 Native Applications<br/>(Plex, Arr Stack, qBittorrent, WireGuard...)"]
+        Catalog["57 Native Applications<br/>(Plex, Arr Stack, qBittorrent, Qui, Threadfin, WireGuard...)"]
         CaddyRoutes["Dynamic Caddyfile<br/>&lt;app&gt;.&lt;baseDomain&gt;"]
     end
 
@@ -78,15 +78,15 @@ flowchart LR
 
 ---
 
-## 📦 55-Package Bare-Metal Catalog
+## 📦 57-Package Bare-Metal Catalog
 
-AetherFlow manages **55 native Linux packages** across 7 infrastructure domains, complete with idempotent install/uninstall lifecycles, `DPkg::Lock::Timeout` serialization, and Zero-Touch API key discovery for the `*Arr` ecosystem:
+AetherFlow manages **57 native Linux packages** across 7 infrastructure domains, complete with idempotent install/uninstall lifecycles, `DPkg::Lock::Timeout` serialization, and Zero-Touch API key discovery for the `*Arr` ecosystem:
 
 | Domain | Managed Applications |
 | :--- | :--- |
-| **🎬 Media & Streaming (14)** | Plex Media Server, Jellyfin, Emby, Navidrome, Jellyseerr, Overseerr, Audiobookshelf, Kavita, Calibre-Web, Unpackerr, Autoscan, Recyclarr, Tautulli, Ombi |
+| **🎬 Media & Streaming (15)** | Plex Media Server, Jellyfin, Emby, Threadfin, Navidrome, Jellyseerr, Overseerr, Audiobookshelf, Kavita, Calibre-Web, Unpackerr, Autoscan, Recyclarr, Tautulli, Ombi |
 | **🤖 Arr Automation Stack (6)** | Sonarr, Radarr, Lidarr, Readarr, Prowlarr, Bazarr |
-| **⬇️ Download Clients (6)** | qBittorrent (`qbittorrent-nox`), rTorrent, ruTorrent, SABnzbd, Deluge, Transmission |
+| **⬇️ Download Clients (7)** | qBittorrent (`qbittorrent-nox`), Qui, rTorrent, ruTorrent, SABnzbd, Deluge, Transmission |
 | **☁️ Cloud & Union Storage (7)** | Nextcloud, Syncthing, File Browser, Rclone (`rclone-vfs`), MergerFS, Cloudplow, Paperless-ngx |
 | **🌐 Network, DNS & VPN (10)** | WireGuard, Tailscale, Pi-hole, AdGuard Home, Librespeed, The Lounge, ZNC, Fail2ban, Quassel, Shell In A Box |
 | **📈 Monitoring & Security (7)** | Grafana, Prometheus, Netdata, Uptime Kuma, Scrutiny (SMART), CSF, LFD |

@@ -310,6 +310,28 @@
       "navidrome.service"
     ]
   },
+  "threadfin": {
+    "update_source": "github",
+    "update_repo": "Threadfin/Threadfin",
+    "version_command": [
+      "bash",
+      "-lc",
+      "cat /var/lib/threadfin/.af-version 2>/dev/null || /usr/local/bin/threadfin -info 2>/dev/null | grep -oP 'Version:\\s*\\K\\S+'"
+    ],
+    "sandbox_profile": "go",
+    "sandbox_rw_paths": [
+      "/var/lib/threadfin",
+      "{{SERVICE_HOME}}",
+      "-/mnt",
+      "-/media",
+      "-/srv",
+      "-/downloads",
+      "-/mnt/unionfs"
+    ],
+    "sandbox_service_units": [
+      "threadfin.service"
+    ]
+  },
   "qbittorrent": {
     "update_source": "apt",
     "update_package": "qbittorrent-nox",
@@ -450,6 +472,28 @@
     ],
     "sandbox_service_units": [
       "autobrr.service"
+    ]
+  },
+  "qui": {
+    "update_source": "github",
+    "update_repo": "autobrr/qui",
+    "version_command": [
+      "bash",
+      "-lc",
+      "cat /var/lib/qui/.af-version 2>/dev/null || /usr/local/bin/qui version 2>/dev/null || /usr/local/bin/qui --version 2>/dev/null"
+    ],
+    "sandbox_profile": "go",
+    "sandbox_rw_paths": [
+      "/var/lib/qui",
+      "{{SERVICE_HOME}}",
+      "-/mnt",
+      "-/media",
+      "-/srv",
+      "-/downloads",
+      "-/mnt/unionfs"
+    ],
+    "sandbox_service_units": [
+      "qui.service"
     ]
   },
   "nextcloud": {

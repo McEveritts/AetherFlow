@@ -151,6 +151,17 @@
         "default_port": 4533
     },
     {
+        "name": "threadfin",
+        "label": "Threadfin",
+        "description": "M3U and HDHomeRun IPTV proxy for Plex, Jellyfin, and Emby Live TV.",
+        "lock_file": "/install/.threadfin.lock",
+        "category": "Media",
+        "service_type": "systemd",
+        "service_name": "threadfin",
+        "default_port": 34400,
+        "web_path": "/web"
+    },
+    {
         "name": "qbittorrent",
         "label": "qBittorrent",
         "description": "Lightweight and feature-rich BitTorrent client with a web UI.",
@@ -219,6 +230,17 @@
         "service_type": "systemd",
         "service_name": "autobrr",
         "default_port": 7474
+    },
+    {
+        "name": "qui",
+        "label": "Qui",
+        "description": "High-performance multi-instance web UI and automation manager for qBittorrent.",
+        "lock_file": "/install/.qui.lock",
+        "category": "Downloaders",
+        "service_type": "systemd",
+        "service_name": "qui",
+        "default_port": 7476,
+        "web_path": "/"
     },
     {
         "name": "nextcloud",

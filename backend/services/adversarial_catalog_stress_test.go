@@ -17,7 +17,7 @@ func setupCatalogEnv(t *testing.T) {
 	t.Setenv("AETHERFLOW_PACKAGE_AUTOMATION_CONFIG", filepath.Join("..", "config", "package_automation.json"))
 }
 
-// TestAdversarial_BlueprintResolutionEdgeCases tests resolution across all 55 packages,
+// TestAdversarial_BlueprintResolutionEdgeCases tests resolution across all 57 packages,
 // service names, aliases, casing variants, whitespace padding, and invalid/nonexistent queries.
 func TestAdversarial_BlueprintResolutionEdgeCases(t *testing.T) {
 	setupCatalogEnv(t)
@@ -26,8 +26,8 @@ func TestAdversarial_BlueprintResolutionEdgeCases(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadPackagesCatalog failed: %v", err)
 	}
-	if len(pkgs) != 55 {
-		t.Fatalf("expected exactly 55 packages, got %d", len(pkgs))
+	if len(pkgs) != 57 {
+		t.Fatalf("expected exactly 57 packages, got %d", len(pkgs))
 	}
 
 	// 1. Every package name in packages.json must resolve to a valid blueprint
@@ -118,6 +118,8 @@ func TestAdversarial_BlueprintResolutionEdgeCases(t *testing.T) {
 		{"RTORRENT", "rtorrent"},
 		{"MERGERFS", "mergerfs"},
 		{"CLOUDPLOW", "cloudplow"},
+		{"  Qui\t", "qui"},
+		{"  Threadfin\n", "threadfin"},
 	}
 	for _, sv := range stressVariants {
 		t.Run("variant_"+strings.TrimSpace(sv.input), func(t *testing.T) {
@@ -194,7 +196,7 @@ func TestAdversarial_BlueprintResolutionEdgeCases(t *testing.T) {
 }
 
 // TestAdversarial_PortUniquenessAndCollisions validates:
-// - Zero collisions across all 55 packages (excluding headless 0)
+// - Zero collisions across all 57 packages (excluding headless 0)
 // - Exclusion of reserved system ports (80, 443, 8080)
 // - FallbackPortRange sanity and non-collision with default ports
 func TestAdversarial_PortUniquenessAndCollisions(t *testing.T) {
@@ -280,12 +282,12 @@ func TestAdversarial_PortUniquenessAndCollisions(t *testing.T) {
 		t.Errorf("expected exactly %d headless packages, found %d: %v", len(knownHeadless), len(headlessFound), headlessFound)
 	}
 
-	if webFacingCount != 48 {
-		t.Errorf("expected exactly 48 web-facing packages, found %d", webFacingCount)
+	if webFacingCount != 50 {
+		t.Errorf("expected exactly 50 web-facing packages, found %d", webFacingCount)
 	}
 
-	if len(seenPorts) != 48 {
-		t.Errorf("expected exactly 48 unique web ports, got %d", len(seenPorts))
+	if len(seenPorts) != 50 {
+		t.Errorf("expected exactly 50 unique web ports, got %d", len(seenPorts))
 	}
 }
 

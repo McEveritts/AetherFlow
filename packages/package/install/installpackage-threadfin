@@ -1,0 +1,81 @@
+#!/bin/bash
+# AetherFlow Package Installer: Threadfin
+# Port: 34400
+
+set -euo pipefail
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
+fi
+
+PACKAGE_NAME="threadfin"
+export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")" /install
+
+require_root
+log_info "Starting installation for ${PACKAGE_NAME}..."
+report_progress 15 "Installing dependencies for Threadfin..."
+
+DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl wget ca-certificates ffmpeg >> "$LOGFILE" 2>&1
+
+if ! id -u threadfin >/dev/null 2>&1; then
+    useradd --system --user-group --no-create-home --home-dir /var/lib/threadfin --shell /usr/sbin/nologin threadfin
+fi
+
+mkdir -p /var/lib/threadfin/conf /var/lib/threadfin/temp
+
+ARCH=$(dpkg --print-architecture)
+case "$ARCH" in
+    amd64) TF_ASSET="Threadfin_linux_amd64" ;;
+    arm64) TF_ASSET="Threadfin_linux_arm64" ;;
+    armhf) TF_ASSET="Threadfin_linux_arm" ;;
+    *) print_error "Unsupported architecture: $ARCH"; exit 1 ;;
+esac
+
+report_progress 40 "Resolving latest Threadfin release (${TF_ASSET})..."
+TF_JSON="$(curl -fsSL https://api.github.com/repos/Threadfin/Threadfin/releases/latest 2>/dev/null || true)"
+TF_TAG="$(printf '%s' "$TF_JSON" | grep -oP '"tag_name":\s*"\K[^"]+' | head -1 || true)"
+TF_TAG="${TF_TAG:-1.2.37}"
+TF_URL="https://github.com/Threadfin/Threadfin/releases/download/${TF_TAG}/${TF_ASSET}"
+
+report_progress 65 "Downloading and installing Threadfin ${TF_TAG}..."
+TMP_BIN=$(mktemp /tmp/threadfin-XXXXXX)
+curl -fsSL "$TF_URL" -o "$TMP_BIN" >> "$LOGFILE" 2>&1
+install -m 0755 "$TMP_BIN" /usr/local/bin/threadfin
+rm -f "$TMP_BIN"
+printf '%s\n' "${TF_TAG#v}" > /var/lib/threadfin/.af-version
+
+chown -R threadfin:threadfin /var/lib/threadfin
+
+report_progress 85 "Configuring and starting threadfin.service on port 34400..."
+cat <<'EOF' > /etc/systemd/system/threadfin.service
+[Unit]
+Description=Threadfin M3U and HDHomeRun IPTV Proxy
+After=syslog.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=threadfin
+Group=threadfin
+WorkingDirectory=/var/lib/threadfin
+ExecStart=/usr/local/bin/threadfin -port=34400 -bind=0.0.0.0 -config=/var/lib/threadfin/conf
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload >> "$LOGFILE" 2>&1
+systemctl enable --now threadfin >> "$LOGFILE" 2>&1
+
+write_lock "${PACKAGE_NAME}"
+report_progress 100 "Threadfin installed on port 34400."
+log_info "${PACKAGE_NAME} installed successfully"

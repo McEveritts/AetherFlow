@@ -16,9 +16,9 @@ The AetherMarketplace is your portal to extending the capabilities of your infra
 AetherFlow manages a wide range of services across multiple categories.
 
 ### Media & Downloaders
-- **Video**: Plex, Jellyfin, Emby, Tautulli, Overseerr.
+- **Video**: Plex, Jellyfin, Emby, Threadfin, Tautulli, Overseerr.
 - **Automation (The Arrs)**: Sonarr, Radarr, Lidarr, Bazarr, Prowlarr, Readarr.
-- **Downloaders**: qBittorrent, Deluge, Transmission, Sabnzbd, NZBGet.
+- **Downloaders**: qBittorrent, Qui, Autobrr, Flood, Deluge, Transmission, Sabnzbd, NZBGet, rTorrent, ruTorrent.
 
 ### System & Utilities
 - **Observability**: Netdata, Grafana, Prometheus.

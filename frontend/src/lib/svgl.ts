@@ -80,9 +80,9 @@ export function matchSVGLLogo(
     // Normalize the remote item title
     const itemTitle = item.title.toLowerCase().replace(/[^a-z0-9]/g, '');
     
-    // Check for exact matches first, then fuzzy inclusions
+    // Check for exact matches first, then fuzzy inclusions (minimum 4 chars to prevent short IDs like "qui" matching unrelated logos)
     const isExactMatch = itemTitle === normalizedId || itemTitle === normalizedName;
-    const isFuzzyMatch = itemTitle.includes(normalizedName) || normalizedName.includes(itemTitle);
+    const isFuzzyMatch = normalizedName.length >= 4 && itemTitle.length >= 4 && (itemTitle.includes(normalizedName) || normalizedName.includes(itemTitle));
     
     return isExactMatch || isFuzzyMatch;
   });

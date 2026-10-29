@@ -19,8 +19,8 @@ func TestCatalogBlueprintsAndAutomationCoverage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadPackagesCatalog() failed: %v", err)
 	}
-	if len(pkgs) != 55 {
-		t.Fatalf("expected 55 catalog packages, got %d", len(pkgs))
+	if len(pkgs) != 57 {
+		t.Fatalf("expected 57 catalog packages, got %d", len(pkgs))
 	}
 
 	automation := loadPackageAutomation()
@@ -75,6 +75,7 @@ func TestCatalogBlueprintsAndAutomationCoverage(t *testing.T) {
 		"rclone":         5572,
 		"n8n":            5678,
 		"znc":            6501,
+		"qui":            7476,
 		"paperless-ngx":  8010,
 		"calibreweb":     8083,
 		"sabnzbd":        8085,
@@ -92,6 +93,7 @@ func TestCatalogBlueprintsAndAutomationCoverage(t *testing.T) {
 		"thelounge":      9000,
 		"audiobookshelf": 13378,
 		"plex":           32400,
+		"threadfin":      34400,
 	}
 	for app, wantPort := range expectedPorts {
 		bp := GetBlueprint(app)
@@ -118,7 +120,7 @@ func TestCatalogBlueprintsAndAutomationCoverage(t *testing.T) {
 		seenPorts[pkg.DefaultPort] = pkg.Name
 	}
 
-	// Verify all 55 packages have valid, trackable update configurations
+	// Verify all 57 packages have valid, trackable update configurations
 	mergedPkgs, err := GetPackages()
 	if err != nil {
 		t.Fatalf("GetPackages() failed: %v", err)
@@ -144,8 +146,8 @@ func TestCatalogBlueprintsAndAutomationCoverage(t *testing.T) {
 				count++
 			}
 		}
-		if count != 55 {
-			t.Errorf("expected 55 installpackage-* scripts, found %d", count)
+		if count != 57 {
+			t.Errorf("expected 57 installpackage-* scripts, found %d", count)
 		}
 	}
 	removeEntries, err := os.ReadDir(filepath.Join("..", "..", "packages", "package", "remove"))
@@ -156,8 +158,8 @@ func TestCatalogBlueprintsAndAutomationCoverage(t *testing.T) {
 				count++
 			}
 		}
-		if count != 55 {
-			t.Errorf("expected 55 removepackage-* scripts, found %d", count)
+		if count != 57 {
+			t.Errorf("expected 57 removepackage-* scripts, found %d", count)
 		}
 	}
 }

@@ -425,8 +425,8 @@ func extractServiceTarget(message string) string {
 	lower := strings.ToLower(message)
 	knownServices := []string{
 		"nginx", "postgres", "postgresql", "redis",
-		"qbittorrent", "sonarr", "radarr", "lidarr", "prowlarr",
-		"plex", "jellyfin", "emby", "transmission", "deluge",
+		"qbittorrent", "qui", "autobrr", "sonarr", "radarr", "lidarr", "prowlarr",
+		"plex", "jellyfin", "emby", "threadfin", "transmission", "deluge",
 		"jackett", "wireguard", "tailscale", "caddy", "traefik",
 	}
 	for _, svc := range knownServices {
