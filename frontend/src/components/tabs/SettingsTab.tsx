@@ -1,5 +1,5 @@
 import { Settings, Sparkles, ChevronRight, DownloadCloud, AlertCircle, Eye, EyeOff, Key, Monitor, Globe, Clock, LayoutDashboard, Radio, HardDriveDownload, Shield, KeyRound, RefreshCw, UserCircle, Bell } from 'lucide-react';
-import { AI_MODELS, resolveProviderForModel } from '@/lib/ai-models';
+import { AI_MODELS, ALL_MODEL_IDS, resolveProviderForModel } from '@/lib/ai-models';
 import { useState, FormEvent } from 'react';
 import useSWR from 'swr';
 import dynamic from 'next/dynamic';
@@ -24,7 +24,7 @@ export default function SettingsTab() {
     const { preferredMode, setPreferredMode, pollInterval, setPollInterval } = useConnectionStore();
     
     // Config State
-    const [model, setModel] = useState('gemini-3.1-pro-preview');
+    const [model, setModel] = useState('gemini-3.8-flash');
     const [prompt, setPrompt] = useState("You are FlowAI, a highly intelligent infrastructure assistant connected to a local Next.js + Go Nexus environment. Always prioritize safe and performant configurations.");
     const [apiKey, setApiKey] = useState('');
     const [openaiApiKey, setOpenaiApiKey] = useState('');
@@ -82,7 +82,9 @@ export default function SettingsTab() {
         '/api/v1/auth/settings',
         {
             onSuccess: (data: Record<string, string>) => {
-                if (data.aiModel) setModel(data.aiModel);
+                if (data.aiModel) {
+                    setModel(ALL_MODEL_IDS.includes(data.aiModel) ? data.aiModel : 'gemini-3.8-flash');
+                }
                 if (data.systemPrompt) setPrompt(data.systemPrompt);
                 if (data.geminiApiKey) setApiKey(data.geminiApiKey);
                 if (data.openaiApiKey) setOpenaiApiKey(data.openaiApiKey);
@@ -542,6 +544,57 @@ export default function SettingsTab() {
                                     </div>
                                 </div>
 
+                                {/* CATEGORY: Model Configuration */}
+                                <div>
+                                    <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3 px-2">Model Configuration</h4>
+                                    <div className="bg-slate-950/50 border border-white/10 rounded-2xl divide-y divide-white/10 overflow-hidden">
+                                        
+                                        {/* Model Selector */}
+                                        <div className="p-5 flex flex-col md:flex-row md:items-center justify-between gap-4 hover:bg-white/[0.02] transition-colors">
+                                            <div>
+                                                <label className="text-sm font-semibold text-slate-200 flex items-center gap-2">
+                                                    <Monitor size={16} className="text-blue-400" /> {t('defaultModel')}
+                                                </label>
+                                                <p className="text-xs text-slate-500 mt-1">Default model for FlowAI. Can be overridden per-chat.</p>
+                                            </div>
+                                            <div className="shrink-0 w-full md:w-80 relative">
+                                                <select
+                                                    value={model}
+                                                    onChange={(e) => setModel(e.target.value)}
+                                                    className="obs-touch-target-standard w-full bg-slate-900 border border-white/10 rounded-xl px-4 py-3 text-slate-200 text-sm focus:outline-none focus:border-indigo-500/50 transition-colors appearance-none cursor-pointer"
+                                                >
+                                                        {Object.entries(AI_MODELS).map(([providerId, models]) => (
+                                                        <optgroup key={providerId} label={providerId.charAt(0).toUpperCase() + providerId.slice(1)}>
+                                                            {models.map((m) => (
+                                                                <option key={m.id} value={m.id}>{m.name}</option>
+                                                            ))}
+                                                        </optgroup>
+                                                    ))}
+                                                </select>
+                                                <ChevronRight size={16} className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-500 rotate-90 pointer-events-none" />
+                                            </div>
+                                        </div>
+
+                                        {/* System Prompt */}
+                                        <div className="p-5 flex flex-col gap-3 hover:bg-white/[0.02] transition-colors">
+                                            <div>
+                                                <label className="text-sm font-semibold text-slate-200 flex items-center gap-2">
+                                                    <Settings size={16} className="text-purple-400" /> {t('defaultPrompt')}
+                                                </label>
+                                                <p className="text-xs text-slate-500 mt-1">Tune the prompt to modify the assistant&apos;s behavior and strictness.</p>
+                                            </div>
+                                            <div className="w-full">
+                                                <textarea
+                                                    value={prompt}
+                                                    onChange={(e) => setPrompt(e.target.value)}
+                                                    className="w-full bg-slate-900 border border-white/10 rounded-xl px-4 py-3 text-slate-200 text-sm focus:outline-none focus:border-indigo-500/50 transition-colors min-h-[100px] resize-none"
+                                                />
+                                            </div>
+                                        </div>
+
+                                    </div>
+                                </div>
+
                                 {/* CATEGORY: Local Engines */}
                                 <div>
                                     <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3 px-2">Local AI Engines</h4>
@@ -632,57 +685,6 @@ export default function SettingsTab() {
                                                 />
                                             </div>
                                         </div>
-                                    </div>
-                                </div>
-
-                                {/* CATEGORY: Model Configuration */}
-                                <div>
-                                    <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-3 px-2">Model Configuration</h4>
-                                    <div className="bg-slate-950/50 border border-white/10 rounded-2xl divide-y divide-white/10 overflow-hidden">
-                                        
-                                        {/* Model Selector */}
-                                        <div className="p-5 flex flex-col md:flex-row md:items-center justify-between gap-4 hover:bg-white/[0.02] transition-colors">
-                                            <div>
-                                                <label className="text-sm font-semibold text-slate-200 flex items-center gap-2">
-                                                    <Monitor size={16} className="text-blue-400" /> {t('defaultModel')}
-                                                </label>
-                                                <p className="text-xs text-slate-500 mt-1">Default model for FlowAI. Can be overridden per-chat.</p>
-                                            </div>
-                                            <div className="shrink-0 w-full md:w-80 relative">
-                                                <select
-                                                    value={model}
-                                                    onChange={(e) => setModel(e.target.value)}
-                                                    className="obs-touch-target-standard w-full bg-slate-900 border border-white/10 rounded-xl px-4 py-3 text-slate-200 text-sm focus:outline-none focus:border-indigo-500/50 transition-colors appearance-none cursor-pointer"
-                                                >
-                                                        {Object.entries(AI_MODELS).map(([providerId, models]) => (
-                                                        <optgroup key={providerId} label={providerId.charAt(0).toUpperCase() + providerId.slice(1)}>
-                                                            {models.map((m) => (
-                                                                <option key={m.id} value={m.id}>{m.name}</option>
-                                                            ))}
-                                                        </optgroup>
-                                                    ))}
-                                                </select>
-                                                <ChevronRight size={16} className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-500 rotate-90 pointer-events-none" />
-                                            </div>
-                                        </div>
-
-                                        {/* System Prompt */}
-                                        <div className="p-5 flex flex-col gap-3 hover:bg-white/[0.02] transition-colors">
-                                            <div>
-                                                <label className="text-sm font-semibold text-slate-200 flex items-center gap-2">
-                                                    <Settings size={16} className="text-purple-400" /> {t('defaultPrompt')}
-                                                </label>
-                                                <p className="text-xs text-slate-500 mt-1">Tune the prompt to modify the assistant&apos;s behavior and strictness.</p>
-                                            </div>
-                                            <div className="w-full">
-                                                <textarea
-                                                    value={prompt}
-                                                    onChange={(e) => setPrompt(e.target.value)}
-                                                    className="w-full bg-slate-900 border border-white/10 rounded-xl px-4 py-3 text-slate-200 text-sm focus:outline-none focus:border-indigo-500/50 transition-colors min-h-[100px] resize-none"
-                                                />
-                                            </div>
-                                        </div>
-
                                     </div>
                                 </div>
 

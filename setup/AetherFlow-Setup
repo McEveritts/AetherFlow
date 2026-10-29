@@ -552,6 +552,10 @@ if [[ "${FRESH_INSTALL}" == "true" ]]; then
     echo "Wiping previous installation state..."
     _cleanup_state
 fi
+if [[ -f "${CONFIG_FILE}" ]]; then
+    # shellcheck disable=1090
+    source "${CONFIG_FILE}" 2>/dev/null
+fi
 _apply_seed_config
 if [[ -f "${CONFIG_FILE}" ]]; then
     # shellcheck disable=1090

@@ -24,7 +24,7 @@ func NewGeminiProvider(cfg ProviderConfig) (*GeminiProvider, error) {
 
 	model := cfg.Model
 	if model == "" {
-		model = "gemini-2.0-flash"
+		model = "gemini-3.8-flash"
 	}
 
 	ctx := context.Background()
@@ -88,7 +88,7 @@ func (g *GeminiProvider) Generate(ctx context.Context, prompt string) (*Response
 
 // TestConnection implements AIProvider.TestConnection for Gemini.
 func (g *GeminiProvider) TestConnection(ctx context.Context) error {
-	model := g.client.GenerativeModel("gemini-2.0-flash")
+	model := g.client.GenerativeModel("gemini-3.8-flash")
 	resp, err := model.GenerateContent(ctx, genai.Text("Reply with the exact word: SUCCESS"))
 	if err != nil {
 		return fmt.Errorf("gemini connection test failed: %w", err)

@@ -28,14 +28,8 @@ export const AI_PROVIDERS: AIProviderDef[] = [
 
 export const AI_MODELS: Record<AIProviderID, AIModelDef[]> = {
     gemini: [
-        { id: 'gemini-3.1-pro-preview', name: 'Gemini 3.1 Pro Preview', tier: 'preview' },
-        { id: 'gemini-3-flash-preview', name: 'Gemini 3.0 Flash Preview', tier: 'preview' },
-        { id: 'gemini-3.1-flash-lite-preview', name: 'Gemini 3.1 Flash Lite Preview', tier: 'preview' },
-        { id: 'gemini-3-pro-image-preview', name: 'Gemini 3.0 Pro Image Preview', tier: 'preview' },
-        { id: 'gemini-3.1-flash-image-preview', name: 'Gemini 3.1 Flash Image Preview', tier: 'preview' },
-        { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro', tier: 'stable' },
-        { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash', tier: 'stable' },
-        { id: 'gemini-2.0-flash', name: 'Gemini 2.0 Flash', tier: 'stable' },
+        { id: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash', tier: 'latest' },
+        { id: 'gemini-4-argon', name: 'Gemini 4 Argon', tier: 'latest' },
     ],
     openai: [
         { id: 'gpt-5.4', name: 'GPT 5.4', tier: 'latest' },

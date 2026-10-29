@@ -19,7 +19,6 @@ import {
     ClipboardList,
     Film,
     ChevronLeft,
-    ChevronRight,
     Menu,
     X,
     Radio,
@@ -248,25 +247,17 @@ export default function Sidebar() {
 
             {/* ========================================================================= */}
             {/* 3. TABLET & DESKTOP GLASS RAIL (md:block)                                */}
-            {/* Tablet: 68px icon rail | Desktop: Expandable 256px rail with top accent   */}
+            {/* Ghost Spacer holds w-20 in document flow so the page never shifts        */}
             {/* ========================================================================= */}
-            <div className={`hidden md:block md:sticky md:top-4 z-40 shrink-0 md:w-20 md:h-[calc(100vh-2rem)]`}>
+            <div className="hidden md:block md:sticky md:top-4 z-50 shrink-0 md:w-20 md:h-[calc(100vh-2rem)]">
                 <aside
                     className={`fixed inset-y-0 left-0 md:absolute md:top-0 md:bottom-0 md:h-full flex flex-col obs-gpu-120hz-rail ${
                         isSidebarHovered ? 'md:w-64 md:shadow-[0_20px_50px_rgba(0,0,0,0.8)]' : 'md:w-20 md:shadow-none'
                     }`}
-                    onMouseEnter={() => {
-                        if (!useSystemStore.getState().detectedTouchDevice) {
-                            setIsSidebarHovered(true);
-                        }
-                    }}
-                    onMouseLeave={() => {
-                        if (!useSystemStore.getState().detectedTouchDevice) {
-                            setIsSidebarHovered(false);
-                        }
-                    }}
+                    onMouseEnter={() => setIsSidebarHovered(true)}
+                    onMouseLeave={() => setIsSidebarHovered(false)}
                 >
-                    <div className="absolute inset-0 glass-panel rounded-none md:rounded-2xl overflow-hidden flex flex-col border border-indigo-500/20">
+                    <div className="absolute inset-0 glass-panel rounded-none md:rounded-2xl overflow-hidden flex flex-col">
                         {/* Header Area with Chromatic Top Accent */}
                         <div className="flex h-20 items-center px-5 border-b border-white/5 relative shrink-0">
                             <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-cyan-400/40 via-indigo-500/80 to-fuchsia-400/40" />
@@ -280,12 +271,12 @@ export default function Sidebar() {
                                     }}
                                     aria-label={isSidebarHovered ? 'Collapse Sidebar' : 'Expand Sidebar'}
                                     title={isSidebarHovered ? 'Collapse Sidebar' : 'Expand Sidebar'}
-                                    className="w-11 h-11 shrink-0 rounded-2xl shadow-[0_0_24px_rgba(99,102,241,0.5)] relative overflow-hidden bg-indigo-500/10 border border-indigo-500/30 flex items-center justify-center obs-touch-target-standard obs-gpu-120hz-interactive"
+                                    className="w-10 h-10 shrink-0 rounded-2xl shadow-[0_0_24px_rgba(99,102,241,0.5)] relative overflow-hidden bg-indigo-500/10 border border-indigo-500/30 flex items-center justify-center obs-inline-action obs-gpu-120hz-interactive"
                                 >
                                     <img src="/img/af-logo.png" alt="AetherFlow Logo" className="w-[130%] h-[130%] object-cover" />
                                 </button>
                                 <h1 className={`text-xl font-bold tracking-tight bg-gradient-to-r from-slate-100 to-slate-400 bg-clip-text text-transparent transition-opacity duration-200 whitespace-nowrap ${
-                                    isSidebarHovered ? 'opacity-100' : 'opacity-0 w-0'
+                                    isSidebarHovered ? 'opacity-100' : 'opacity-0 w-0 overflow-hidden'
                                 }`}>
                                     AetherFlow
                                 </h1>
@@ -293,8 +284,8 @@ export default function Sidebar() {
                         </div>
 
                         {/* Navigation List */}
-                        <nav className="flex-1 px-3 py-6 space-y-1.5 overflow-y-auto no-scrollbar relative z-10">
-                            <div className={`px-4 pb-2 text-xs font-bold text-slate-500 uppercase tracking-widest transition-opacity duration-200 whitespace-nowrap ${
+                        <nav className="flex-1 px-3 py-4 space-y-1 overflow-y-auto no-scrollbar relative z-10">
+                            <div className={`px-4 pb-1.5 text-[10px] font-bold text-slate-500 uppercase tracking-widest transition-opacity duration-200 whitespace-nowrap ${
                                 isSidebarHovered ? 'opacity-100' : 'opacity-0'
                             }`}>
                                 Nexus
@@ -308,9 +299,9 @@ export default function Sidebar() {
                                             triggerHaptic(8, hapticFeedback);
                                             setActiveTab(item.id);
                                         }}
-                                        className={`w-full flex items-center relative gap-3 p-2 rounded-xl obs-gpu-120hz-interactive group overflow-hidden obs-touch-target-standard ${
+                                        className={`w-full flex items-center relative gap-3 px-2 py-1.5 rounded-xl obs-gpu-120hz-interactive group overflow-hidden obs-inline-action ${
                                             isActive
-                                                ? 'bg-gradient-to-r from-indigo-500/20 to-purple-500/20 text-white shadow-[0_0_15px_rgba(99,102,241,0.2)] border border-indigo-500/30'
+                                                ? 'bg-gradient-to-r from-indigo-500/20 to-purple-500/20 text-white shadow-[0_0_15px_rgba(99,102,241,0.2)]'
                                                 : 'text-slate-400 hover:bg-white/5 hover:text-slate-200'
                                         }`}
                                     >
@@ -318,14 +309,14 @@ export default function Sidebar() {
                                             isActive ? 'scale-y-100 opacity-100' : 'scale-y-0 opacity-0'
                                         }`} />
 
-                                        <div className={`w-10 h-10 shrink-0 flex items-center justify-center transition-colors ${
+                                        <div className={`w-10 h-9 shrink-0 flex items-center justify-center transition-colors ${
                                             isActive ? 'text-indigo-400 drop-shadow-[0_0_8px_rgba(129,140,248,0.5)]' : 'group-hover:text-slate-300'
                                         }`}>
                                             {item.icon}
                                         </div>
 
                                         <span className={`font-semibold transition-all duration-200 whitespace-nowrap text-sm tracking-wide ${
-                                            isSidebarHovered ? 'opacity-100 translate-x-0' : 'opacity-0 md:-translate-x-4'
+                                            isSidebarHovered ? 'opacity-100 translate-x-0' : 'opacity-0 md:-translate-x-4 pointer-events-none'
                                         }`}>
                                             {item.label}
                                         </span>
@@ -339,7 +330,7 @@ export default function Sidebar() {
                         </nav>
 
                         {/* Bottom Admin Navigation */}
-                        <div className="p-3 border-t border-white/5 bg-black/40 backdrop-blur-md relative z-10 shrink-0">
+                        <div className="p-3 border-t border-white/5 bg-slate-950/50 backdrop-blur-md relative z-10 shrink-0 space-y-0.5">
                             {BOTTOM_NAVIGATION.filter(item => {
                                 if (['settings', 'security', 'users', 'audit', 'oidc-clients', 'network', 'cluster'].includes(item.id)) {
                                     return user?.role === 'admin';
@@ -353,15 +344,15 @@ export default function Sidebar() {
                                         if (item.id === 'logout') logout();
                                         else setActiveTab(item.id);
                                     }}
-                                    className={`w-full flex items-center gap-3 p-2 rounded-xl text-slate-400 hover:text-slate-200 hover:bg-white/5 obs-gpu-120hz-interactive group overflow-hidden obs-touch-target-standard ${
+                                    className={`w-full flex items-center gap-3 px-2 py-1 rounded-xl text-slate-400 hover:text-slate-200 hover:bg-white/5 obs-gpu-120hz-interactive group overflow-hidden obs-inline-action ${
                                         activeTab === item.id ? 'bg-gradient-to-r from-indigo-500/20 to-purple-500/20 text-white shadow-[0_0_15px_rgba(99,102,241,0.2)]' : ''
                                     }`}
                                 >
-                                    <div className="w-10 h-10 shrink-0 flex items-center justify-center group-hover:scale-110 transition-transform">
+                                    <div className="w-10 h-8 shrink-0 flex items-center justify-center group-hover:scale-110 transition-transform">
                                         {item.icon}
                                     </div>
                                     <span className={`text-sm font-semibold tracking-wide transition-all duration-200 whitespace-nowrap ${
-                                        isSidebarHovered ? 'opacity-100 translate-x-0' : 'opacity-0 -translate-x-4'
+                                        isSidebarHovered ? 'opacity-100 translate-x-0' : 'opacity-0 -translate-x-4 pointer-events-none'
                                     }`}>
                                         {item.label}
                                     </span>
@@ -370,10 +361,12 @@ export default function Sidebar() {
                         </div>
                     </div>
 
-                    {/* Always-Reachable Floating Collapse/Expand Toggle Button for Tablet & Desktop */}
+                    {/* Floating Collapse Button on right edge (vertically centered, never overlaps nav items) */}
                     <button
                         type="button"
-                        className="hidden md:flex absolute -right-4 top-24 w-8 h-8 obs-touch-target-standard rounded-full bg-slate-900/95 border border-indigo-500/40 text-slate-300 hover:text-white items-center justify-center shadow-[0_0_16px_rgba(0,0,0,0.6)] obs-gpu-120hz-interactive z-[60]"
+                        className={`hidden md:flex absolute -right-3.5 top-1/2 -translate-y-1/2 w-7 h-7 obs-inline-action rounded-full bg-slate-800 border border-slate-700 text-slate-400 hover:text-white items-center justify-center shadow-lg transition-all duration-200 z-[60] ${
+                            isSidebarHovered ? 'opacity-100 scale-100' : 'opacity-0 scale-50 pointer-events-none'
+                        }`}
                         onClick={(e) => {
                             e.stopPropagation();
                             triggerHaptic(6, hapticFeedback);
@@ -381,7 +374,7 @@ export default function Sidebar() {
                         }}
                         aria-label={isSidebarHovered ? 'Collapse Sidebar Rail' : 'Expand Sidebar Rail'}
                     >
-                        {isSidebarHovered ? <ChevronLeft size={16} /> : <ChevronRight size={16} />}
+                        <ChevronLeft size={16} />
                     </button>
                 </aside>
             </div>

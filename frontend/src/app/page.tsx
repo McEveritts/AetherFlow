@@ -28,10 +28,9 @@ import { ErrorBoundary } from '@/components/ui/ErrorBoundary';
 import useSWR from 'swr';
 
 export default function Dashboard() {
-  const { activeTab, isSidebarHovered } = useSystemStore(
+  const { activeTab } = useSystemStore(
     useShallow((state) => ({
       activeTab: state.activeTab,
-      isSidebarHovered: state.isSidebarHovered
     }))
   );
   const { metrics, hardware, history, isLoading, isError, connectionState } = useMetrics();
@@ -129,7 +128,7 @@ export default function Dashboard() {
 
       <Sidebar />
 
-      <main className={`flex-1 min-w-0 max-w-full transition-[margin] duration-[180ms] ease-[cubic-bezier(0.22,1,0.36,1)] relative z-10 h-screen overflow-y-auto no-scrollbar ${isSidebarHovered ? 'md:ml-64' : 'md:ml-20'} ml-0`}>
+      <main className="flex-1 min-w-0 max-w-full relative z-10 h-screen overflow-y-auto no-scrollbar">
         <Header />
 
         <div className="mt-4">

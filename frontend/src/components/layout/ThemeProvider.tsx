@@ -43,8 +43,7 @@ export default function ThemeProvider({ children }: { children: React.ReactNode 
             const coarseMatch = typeof window.matchMedia === 'function'
                 ? window.matchMedia('(pointer: coarse), (hover: none)').matches
                 : false;
-            const hasTouchPoints = typeof navigator !== 'undefined' && navigator.maxTouchPoints > 0;
-            return Boolean(coarseMatch || hasTouchPoints);
+            return Boolean(coarseMatch);
         };
         setDetectedTouchDevice(detectTouch());
 

@@ -163,6 +163,14 @@ class AetherFlowApiClient:
         """Resolves credentials from env or /root/information.info, bootstraps admin if needed, and logs in."""
         username = os.environ.get("AETHERFLOW_E2E_USER") or os.environ.get("AETHERFLOW_USERNAME")
         password = os.environ.get("AETHERFLOW_E2E_PASS") or os.environ.get("AETHERFLOW_PASSWORD")
+        if (not username or not password) and os.path.exists("/install/.master.info"):
+            try:
+                with open("/install/.master.info", "r", encoding="utf-8", errors="replace") as f:
+                    first = f.readline().strip()
+                    if first:
+                        username = username or first
+            except Exception:
+                pass
         if (not username or not password) and os.path.exists("/root/information.info"):
             try:
                 with open("/root/information.info", "r", encoding="utf-8", errors="replace") as f:
@@ -229,6 +237,11 @@ class AetherFlowApiClient:
                     resp_json = json.loads(resp_data)
                 except Exception:
                     resp_json = {"raw": resp_data}
+                if resp_code == 200 and isinstance(resp_json, dict):
+                    if path.endswith("/auth/refresh") and resp_json.get("token") and self.jwt_token:
+                        self.jwt_token = resp_json.get("token")
+                    elif path.endswith("/auth/login"):
+                        self.jwt_token = resp_json.get("token")
                 return resp_code, resp_json, resp_headers
         except urllib.error.HTTPError as e:
             err_code = e.code

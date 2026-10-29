@@ -112,7 +112,8 @@ class TestB02MalformedCookieRejected(TestCase):
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
         if mode == "live" and client.is_server_reachable():
-            code, _, _ = client.request("POST", "/api/v1/auth/refresh", headers={"Cookie": "aetherflow_session=!!!not_a_valid_jwt!!!"})
+            unauth_client = AetherFlowApiClient(client.base_url)
+            code, _, _ = unauth_client.request("POST", "/api/v1/auth/refresh", headers={"Cookie": "aetherflow_session=!!!not_a_valid_jwt!!!"})
             self.assert_status_code(code, 401)
         else:
             self.assert_true(True, "B02: Malformed cookie handling contract verified")

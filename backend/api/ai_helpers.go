@@ -42,7 +42,7 @@ func ResolveProviderSettings() (*ProviderSettings, error) {
 		&ps.DefaultModel, &ps.SystemPrompt,
 	)
 	if err != nil {
-		ps.DefaultModel = "gemini-2.0-flash"
+		ps.DefaultModel = "gemini-3.8-flash"
 		ps.SystemPrompt = "You are FlowAI, a helpful server assistant."
 		slog.Warn("Using fallback AI settings. DB Error", "error", err)
 	}
@@ -75,7 +75,7 @@ func ResolveProviderSettings() (*ProviderSettings, error) {
 		ps.AnthropicAPIKey = os.Getenv("ANTHROPIC_API_KEY")
 	}
 	if ps.DefaultModel == "" {
-		ps.DefaultModel = "gemini-2.0-flash"
+		ps.DefaultModel = "gemini-3.8-flash"
 	}
 
 	return ps, nil

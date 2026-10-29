@@ -42,10 +42,11 @@ export default function Header() {
     }, []);
 
     const getTabLabel = () => {
-        if (activeTab === 'settings' || activeTab === 'logout') {
-            return BOTTOM_NAVIGATION.find(n => n.id === activeTab)?.label;
-        }
-        return NAVIGATION.find(n => n.id === activeTab)?.label || activeTab;
+        return (
+            NAVIGATION.find(n => n.id === activeTab)?.label ||
+            BOTTOM_NAVIGATION.find(n => n.id === activeTab)?.label ||
+            activeTab
+        );
     };
 
     // Trust States mapped to Obsidian Beacons and Tokens
@@ -104,7 +105,7 @@ export default function Header() {
     const status = statusConfig[connectionState] || statusConfig.DISCONNECTED;
 
     return (
-        <header className="h-20 px-6 md:px-10 flex items-center justify-between border-b border-white/[0.08] bg-black/50 backdrop-blur-2xl sticky top-0 z-30 relative">
+        <header className="h-20 px-6 md:px-10 flex items-center justify-between border-b border-white/[0.08] bg-slate-950/40 backdrop-blur-2xl sticky top-0 z-30">
             {/* Chromatic Bottom Rim */}
             <div className="absolute inset-x-0 bottom-0 h-px bg-gradient-to-r from-transparent via-indigo-500/30 to-transparent pointer-events-none" />
 

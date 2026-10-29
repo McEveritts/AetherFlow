@@ -128,7 +128,7 @@ func InitDB() {
 	_, err = DB.Exec(`
 		CREATE TABLE IF NOT EXISTS settings (
 			id INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
-			ai_model TEXT DEFAULT 'gemini-2.0-flash',
+			ai_model TEXT DEFAULT 'gemini-3.8-flash',
 			system_prompt TEXT DEFAULT 'You are FlowAI, a highly intelligent infrastructure assistant connected to a local Next.js + Go Nexus environment. Always prioritize safe and performant configurations.',
 			language TEXT DEFAULT 'en',
 			timezone TEXT DEFAULT 'UTC',
@@ -595,6 +595,7 @@ func InitDB() {
 
 	// ─── Ensure singleton settings row ─────────────────────────────────
 	DB.Exec(`INSERT OR IGNORE INTO settings (id) VALUES (1)`)
+	DB.Exec(`UPDATE settings SET ai_model = 'gemini-3.8-flash' WHERE id = 1 AND ai_model IN ('gemini-2.0-flash', 'gemini-2.0-flash-lite', 'gemini-1.5-pro', 'gemini-1.5-flash', 'gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-3.1-pro-preview', 'gemini-3-flash-preview', 'gemini-3.1-flash-lite-preview', 'gemini-3-pro-image-preview', 'gemini-3.1-flash-image-preview')`)
 
 	slog.Info("database connected", "path", dbPath)
 }

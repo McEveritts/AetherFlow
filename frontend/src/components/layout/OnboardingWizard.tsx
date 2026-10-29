@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useToast } from '@/contexts/ToastContext';
-import { Sparkles, ArrowRight, Check, Shield, Server, Box } from 'lucide-react';
+import { ArrowRight, Check, Shield, Server, Box } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { apiFetch } from '@/lib/fetcher';
 import { MotionPresets } from '@/lib/design';
@@ -10,17 +10,12 @@ interface OnboardingWizardProps {
     onComplete: () => void;
 }
 
-// Imported MotionPresets instead
-
 export default function OnboardingWizard({ initialSettings, onComplete }: OnboardingWizardProps) {
     const { addToast } = useToast();
     const [step, setStep] = useState(1);
     const [isSaving, setIsSaving] = useState(false);
 
-    // We only expose a few settings for onboarding to keep it simple
-    const [aiModel, setAiModel] = useState(initialSettings?.aiModel || 'gemini-3.1-pro-preview');
-
-    const handleNext = () => setStep(s => Math.min(s + 1, 3));
+    const handleNext = () => setStep(s => Math.min(s + 1, 2));
     const handlePrev = () => setStep(s => Math.max(s - 1, 1));
 
     const handleFinish = async () => {
@@ -28,7 +23,6 @@ export default function OnboardingWizard({ initialSettings, onComplete }: Onboar
         try {
             const payload = {
                 ...initialSettings,
-                aiModel: aiModel,
                 setupCompleted: true
             };
 
@@ -80,7 +74,7 @@ export default function OnboardingWizard({ initialSettings, onComplete }: Onboar
             <div className="relative w-full max-w-2xl glass-card p-8 overflow-hidden backdrop-blur-3xl shadow-[0_0_50px_rgba(0,0,0,0.5)] border-white/10">
                 {/* Progress Bar */}
                 <div className="flex items-center gap-2 mb-8">
-                    {[1, 2, 3].map((s) => (
+                    {[1, 2].map((s) => (
                         <div key={s} className={`h-1.5 flex-1 rounded-full transition-all duration-500 ${step >= s ? 'bg-indigo-500 shadow-[0_0_10px_rgba(99,102,241,0.5)]' : 'bg-white/5'}`}></div>
                     ))}
                 </div>
@@ -127,43 +121,6 @@ export default function OnboardingWizard({ initialSettings, onComplete }: Onboar
                                 key="step2"
                                 variants={MotionPresets.slideUp}
                                 initial="hidden" animate="visible" exit="exit"
-                                className="space-y-6"
-                            >
-                                <div className="flex items-center gap-3 mb-6">
-                                    <div className="p-3 bg-indigo-500/20 text-indigo-400 rounded-xl">
-                                        <Sparkles size={24} />
-                                    </div>
-                                    <h2 className="text-2xl font-bold text-white tracking-tight">Configure FlowAI</h2>
-                                </div>
-
-                                <p className="text-slate-400 text-sm">
-                                    AetherFlow uses a local conversational assistant to help you debug systems, write container configurations, and analyze logs.
-                                </p>
-
-                                <div className="bg-slate-950/50 border border-white/10 rounded-2xl p-6 mt-6 shadow-inner">
-                                    <label className="block text-sm font-semibold text-slate-300 mb-3">Primary Language Model</label>
-                                    <div className="space-y-3">
-                                        {['gemini-3.1-pro-preview', 'gemini-3-flash-preview', 'gemini-3.1-flash-lite-preview', 'gemini-3-pro-image-preview', 'gemini-3.1-flash-image-preview'].map((m) => (
-                                            <button
-                                                key={m}
-                                                onClick={() => setAiModel(m)}
-                                                className={`w-full flex items-center justify-between p-4 rounded-xl border transition-all ${aiModel === m ? 'bg-indigo-500/10 border-indigo-500/50 text-indigo-300 shadow-[0_4px_15px_rgba(99,102,241,0.15)] scale-[1.02]' : 'bg-white/5 border-white/5 text-slate-400 hover:bg-white/10 hover:scale-[1.01]'}`}
-                                            >
-                                                <span className="font-medium tracking-wide">{m}</span>
-                                                {aiModel === m && <Check size={18} />}
-                                            </button>
-                                        ))}
-                                    </div>
-                                    <p className="text-xs text-slate-500 mt-4">This can be changed later in the Settings tab.</p>
-                                </div>
-                            </motion.div>
-                        )}
-
-                        {step === 3 && (
-                            <motion.div 
-                                key="step3"
-                                variants={MotionPresets.slideUp}
-                                initial="hidden" animate="visible" exit="exit"
                                 className="space-y-6 h-full flex flex-col justify-center py-8"
                             >
                                 <div className="text-center space-y-4">
@@ -173,7 +130,7 @@ export default function OnboardingWizard({ initialSettings, onComplete }: Onboar
                                     </div>
                                     <h2 className="text-3xl font-bold text-white tracking-tight">All Set!</h2>
                                     <p className="text-slate-400 max-w-sm mx-auto">
-                                        Your environment is fully configured. You are ready to manage your infrastructure through the Nexus ring.
+                                        Your environment is fully configured. You can manage AI models and API keys anytime in the Settings page.
                                     </p>
                                 </div>
                             </motion.div>
@@ -190,7 +147,7 @@ export default function OnboardingWizard({ initialSettings, onComplete }: Onboar
                         Back
                     </button>
 
-                    {step < 3 ? (
+                    {step < 2 ? (
                         <button
                             onClick={handleNext}
                             className="px-6 py-2.5 bg-indigo-500 hover:bg-indigo-400 text-white rounded-xl font-bold text-sm shadow-[0_0_15px_rgba(99,102,241,0.4)] flex items-center gap-2 transition-all"

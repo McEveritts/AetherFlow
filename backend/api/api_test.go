@@ -53,7 +53,9 @@ func TestAllowedAIModels(t *testing.T) {
 		model string
 		want  bool
 	}{
-		// Gemini preview models
+		// Gemini frontier & preview models
+		{"gemini-3.8-flash", true},
+		{"gemini-4-argon", true},
 		{"gemini-3.1-pro-preview", true},
 		{"gemini-3-flash-preview", true},
 		{"gemini-3.1-flash-lite-preview", true},
