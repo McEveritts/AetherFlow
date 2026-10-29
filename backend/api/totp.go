@@ -78,8 +78,8 @@ func validateRecoveryCode(userID int, code string) bool {
 	if err != nil {
 		return false
 	}
-	defer rows.Close()
 
+	matchedID := -1
 	for rows.Next() {
 		var id int
 		var hash string
@@ -87,10 +87,16 @@ func validateRecoveryCode(userID int, code string) bool {
 			continue
 		}
 		if bcrypt.CompareHashAndPassword([]byte(hash), []byte(code)) == nil {
-			// Valid match — mark as used
-			db.DB.Exec("UPDATE recovery_codes SET used = 1 WHERE id = ?", id)
-			return true
+			matchedID = id
+			break
 		}
+	}
+	rows.Close()
+
+	if matchedID != -1 {
+		// Valid match — mark as used after closing rows to avoid SQLite MaxOpenConns(1) deadlock
+		db.DB.Exec("UPDATE recovery_codes SET used = 1 WHERE id = ?", matchedID)
+		return true
 	}
 	return false
 }
@@ -425,7 +431,7 @@ func MFALoginVerify(c *gin.Context) {
 	}
 
 	c.SetSameSite(http.SameSiteLaxMode)
-	c.SetCookie("aetherflow_session", tokenString, 900, "/", "", secureCookie(), true)
+	c.SetCookie("aetherflow_session", tokenString, sessionCookieMaxAge, "/", "", secureCookie(), true)
 
 	method := "totp"
 	if isRecoveryCode {

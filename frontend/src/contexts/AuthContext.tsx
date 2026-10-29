@@ -75,9 +75,50 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
             }
         };
 
+        // Same-tab hard 401 listener when silent token refresh also fails
+        const handleSessionExpired = () => {
+            setIsAuthenticated(false);
+            setUser(null);
+            useConnectionStore.getState().reset();
+            globalMutate(() => true, undefined, { revalidate: false });
+        };
+
         window.addEventListener('storage', handleStorageChange);
-        return () => window.removeEventListener('storage', handleStorageChange);
+        window.addEventListener('af:session-expired', handleSessionExpired);
+        return () => {
+            window.removeEventListener('storage', handleStorageChange);
+            window.removeEventListener('af:session-expired', handleSessionExpired);
+        };
     }, []);
+
+    // Proactive session rotation while authenticated so 15-minute JWTs never expire mid-session
+    useEffect(() => {
+        if (!isAuthenticated) return;
+
+        let lastRefreshAt = Date.now();
+        const rotateSession = async () => {
+            lastRefreshAt = Date.now();
+            try {
+                await apiFetch('/api/v1/auth/refresh', { method: 'POST' });
+            } catch {
+                // Silent failure; apiFetch handles hard 401 expiration dispatch
+            }
+        };
+
+        const intervalId = window.setInterval(rotateSession, 10 * 60 * 1000);
+
+        const handleVisibilityChange = () => {
+            if (document.visibilityState === 'visible' && Date.now() - lastRefreshAt >= 60 * 1000) {
+                void rotateSession();
+            }
+        };
+
+        document.addEventListener('visibilitychange', handleVisibilityChange);
+        return () => {
+            window.clearInterval(intervalId);
+            document.removeEventListener('visibilitychange', handleVisibilityChange);
+        };
+    }, [isAuthenticated]);
 
     const login = () => {
         // Redirect to the Go backend to start the OAuth2 flow

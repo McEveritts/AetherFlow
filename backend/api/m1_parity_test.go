@@ -127,6 +127,74 @@ func TestRefreshSession_Lifecycle(t *testing.T) {
 			t.Fatalf("expected old jti to be revoked after refresh")
 		}
 	}
+
+	// 5. Expired token within 2h grace window behind AuthMiddleware -> 200 OK + extended cookie Max-Age
+	{
+		authRouter := gin.New()
+		authGroup := authRouter.Group("/api/v1/auth")
+		authGroup.Use(AuthMiddleware())
+		authGroup.POST("/refresh", RefreshSession)
+		authGroup.GET("/protected", func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{"ok": true})
+		})
+
+		graceClaims := jwt.MapClaims{
+			"user_id":  float64(101),
+			"username": "refresh_tester",
+			"role":     "admin",
+			"jti":      "grace-expired-jti-99",
+			"exp":      time.Now().Add(-10 * time.Minute).Unix(),
+		}
+		tok := jwt.NewWithClaims(jwt.SigningMethodHS256, graceClaims)
+		signed, _ := tok.SignedString(getJWTSecret())
+
+		w := httptest.NewRecorder()
+		req, _ := http.NewRequest("POST", "/api/v1/auth/refresh", nil)
+		req.Header.Set("User-Agent", "Mozilla/5.0 AetherFlowTest/1.0")
+		req.RemoteAddr = "127.0.0.1:41000"
+		req.AddCookie(&http.Cookie{Name: "aetherflow_session", Value: signed})
+		authRouter.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 for expired token within grace window behind AuthMiddleware, got %d: %s", w.Code, w.Body.String())
+		}
+
+		cookies := w.Result().Cookies()
+		var sessionCookie *http.Cookie
+		for _, ck := range cookies {
+			if ck.Name == "aetherflow_session" {
+				sessionCookie = ck
+				break
+			}
+		}
+		if sessionCookie == nil {
+			t.Fatalf("expected aetherflow_session cookie to be set on refresh")
+		}
+		if sessionCookie.MaxAge != sessionCookieMaxAge {
+			t.Fatalf("expected session cookie MaxAge=%d, got %d", sessionCookieMaxAge, sessionCookie.MaxAge)
+		}
+
+		// 6. Verify socket/IP rotation (IPv4 -> IPv6) with same User-Agent does not trigger SESSION_HIJACKED
+		w2 := httptest.NewRecorder()
+		req2, _ := http.NewRequest("GET", "/api/v1/auth/protected", nil)
+		req2.Header.Set("User-Agent", "Mozilla/5.0 AetherFlowTest/1.0")
+		req2.RemoteAddr = "[::1]:52000"
+		req2.AddCookie(sessionCookie)
+		authRouter.ServeHTTP(w2, req2)
+		if w2.Code != http.StatusOK {
+			t.Fatalf("expected 200 when client IP rotates between IPv4 and IPv6 with same User-Agent, got %d: %s", w2.Code, w2.Body.String())
+		}
+
+		// 7. Verify different User-Agent still triggers 401 SESSION_HIJACKED
+		w3 := httptest.NewRecorder()
+		req3, _ := http.NewRequest("GET", "/api/v1/auth/protected", nil)
+		req3.Header.Set("User-Agent", "curl/8.5.0 AttackerClient")
+		req3.RemoteAddr = "[::1]:52000"
+		req3.AddCookie(sessionCookie)
+		authRouter.ServeHTTP(w3, req3)
+		if w3.Code != http.StatusUnauthorized {
+			t.Fatalf("expected 401 when User-Agent changes, got %d", w3.Code)
+		}
+	}
 }
 
 func TestUserProfile_PasswordAndAvatar(t *testing.T) {

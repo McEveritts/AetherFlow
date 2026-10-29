@@ -926,12 +926,30 @@ func createStandardJWT(userID int, c *gin.Context) (string, error) {
 	return tokenString, nil
 }
 
-// clientFingerprint produces a deterministic fingerprint of the client's identity.
-// Used to bind JWTs to a specific client (IP + UserAgent) to detect session hijacking.
+// clientFingerprint produces a deterministic fingerprint of the client's User-Agent.
+// Binding to User-Agent (instead of ClientIP + User-Agent) prevents false
+// SESSION_HIJACKED errors when browsers rotate IPv4/IPv6 connections (Happy Eyeballs)
+// or transition across reverse-proxy / CGNAT sockets after HTTP keep-alive idle timeouts.
 func clientFingerprint(c *gin.Context) string {
+	raw := strings.TrimSpace(c.Request.UserAgent())
+	hash := sha256.Sum256([]byte(raw))
+	return hex.EncodeToString(hash[:])
+}
+
+// legacyClientFingerprint computes the legacy IP + User-Agent hash so in-flight
+// tokens issued prior to the User-Agent-only binding continue to validate cleanly.
+func legacyClientFingerprint(c *gin.Context) string {
 	raw := c.ClientIP() + "|" + c.Request.UserAgent()
 	hash := sha256.Sum256([]byte(raw))
 	return hex.EncodeToString(hash[:])
+}
+
+// matchesClientFingerprint checks whether a token's cfp claim matches the current client.
+func matchesClientFingerprint(cfp string, c *gin.Context) bool {
+	if cfp == "" {
+		return true
+	}
+	return cfp == clientFingerprint(c) || cfp == legacyClientFingerprint(c)
 }
 
 // recordActiveSession persists session metadata for the session listing endpoint.

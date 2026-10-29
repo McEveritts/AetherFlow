@@ -41,6 +41,11 @@ func getJWTSecret() []byte {
 	return jwtSecret
 }
 
+// sessionCookieMaxAge defines the browser Max-Age (in seconds) for the aetherflow_session
+// cookie. This must exceed the 15-minute JWT lifetime so the browser still sends the
+// cookie to /api/v1/auth/refresh during the 2-hour silent refresh grace window.
+const sessionCookieMaxAge = 86400
+
 // secureCookie returns whether cookies should have the Secure flag set.
 // Defaults to true (HTTPS-only). Set COOKIE_SECURE=false in env for local HTTP dev.
 func secureCookie() bool {
@@ -116,7 +121,7 @@ func SetupAdmin(c *gin.Context) {
 		return
 	}
 	c.SetSameSite(http.SameSiteLaxMode)
-	c.SetCookie("aetherflow_session", tokenString, 900, "/", "", secureCookie(), true)
+	c.SetCookie("aetherflow_session", tokenString, sessionCookieMaxAge, "/", "", secureCookie(), true)
 
 	c.JSON(http.StatusOK, gin.H{"message": "Admin account created", "username": req.Username})
 }
@@ -206,7 +211,7 @@ func LocalLogin(c *gin.Context) {
 	}
 
 	c.SetSameSite(http.SameSiteLaxMode)
-	c.SetCookie("aetherflow_session", tokenString, 900, "/", "", secureCookie(), true)
+	c.SetCookie("aetherflow_session", tokenString, sessionCookieMaxAge, "/", "", secureCookie(), true)
 	c.JSON(http.StatusOK, gin.H{"message": "Login successful", "user": user})
 }
 
@@ -413,7 +418,7 @@ func GoogleCallback(c *gin.Context) {
 	}
 
 	c.SetSameSite(http.SameSiteLaxMode)
-	c.SetCookie("aetherflow_session", tokenString, 900, "/", "", secureCookie(), true)
+	c.SetCookie("aetherflow_session", tokenString, sessionCookieMaxAge, "/", "", secureCookie(), true)
 	c.Redirect(http.StatusTemporaryRedirect, baseURL+"/")
 }
 
@@ -626,7 +631,7 @@ func RefreshSession(c *gin.Context) {
 	}
 
 	if cfp, ok := claims["cfp"].(string); ok && cfp != "" {
-		if cfp != clientFingerprint(c) {
+		if !matchesClientFingerprint(cfp, c) {
 			slog.Warn("refresh rejected: client fingerprint mismatch", "ip", c.ClientIP())
 			Unauthorized(c, "Client fingerprint mismatch")
 			return
@@ -654,7 +659,7 @@ func RefreshSession(c *gin.Context) {
 	}
 
 	c.SetSameSite(http.SameSiteLaxMode)
-	c.SetCookie("aetherflow_session", newToken, 900, "/", "", secureCookie(), true)
+	c.SetCookie("aetherflow_session", newToken, sessionCookieMaxAge, "/", "", secureCookie(), true)
 
 	c.JSON(http.StatusOK, gin.H{
 		"status":     "success",
@@ -672,6 +677,12 @@ func RefreshSession(c *gin.Context) {
 // and sets "user_id" in the Gin context for downstream handlers.
 func AuthMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		// Allow RefreshSession to validate expired tokens within its 2-hour grace window
+		if c.Request.URL.Path == "/api/v1/auth/refresh" || c.Request.URL.Path == "/api/auth/refresh" || c.Request.URL.Path == "/api/v1/public/auth/refresh" {
+			c.Next()
+			return
+		}
+
 		_, claims, err := resolveSessionToken(c)
 		if err != nil {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, APIError{Code: ErrCodeUnauthorized, Message: "Unauthorized"})
@@ -702,12 +713,12 @@ func AuthMiddleware() gin.HandlerFunc {
 		// Phase 6: Validate client fingerprint to detect session hijacking.
 		// If the JWT contains a cfp claim, it must match the current client's fingerprint.
 		if cfp, hasCfp := claims["cfp"].(string); hasCfp {
-			expectedCfp := clientFingerprint(c)
-			if cfp != expectedCfp {
+			if !matchesClientFingerprint(cfp, c) {
+				expectedCfp := clientFingerprint(c)
 				slog.Warn("session fingerprint mismatch",
 					"user_id", userId,
-					"expected", cfp[:8],
-					"got", expectedCfp[:8],
+					"expected", cfp[:min(8, len(cfp))],
+					"got", expectedCfp[:min(8, len(expectedCfp))],
 					"ip", c.ClientIP(),
 				)
 				c.AbortWithStatusJSON(http.StatusUnauthorized, APIError{Code: ErrCodeSessionHijacked, Message: "Session bound to a different client"})
@@ -851,7 +862,7 @@ func HostValidationMiddleware() gin.HandlerFunc {
 func CSRFMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		// Silent refresh requests and Bearer-token requests are exempt from CSRF
-		if c.Request.URL.Path == "/api/v1/auth/refresh" || c.Request.URL.Path == "/api/auth/refresh" || strings.HasPrefix(c.GetHeader("Authorization"), "Bearer ") {
+		if c.Request.URL.Path == "/api/v1/auth/refresh" || c.Request.URL.Path == "/api/auth/refresh" || c.Request.URL.Path == "/api/v1/public/auth/refresh" || strings.HasPrefix(c.GetHeader("Authorization"), "Bearer ") {
 			c.Next()
 			return
 		}

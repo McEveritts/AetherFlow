@@ -59,4 +59,53 @@ describe("fetcher", () => {
     const headers = fetchMock.mock.calls[0][1]?.headers as Headers;
     expect(headers.get("X-CSRF-Token")).toBe("test-token");
   });
+
+  it("transparently refreshes and retries when a request receives 401", async () => {
+    const fetchMock = jest
+      .spyOn(global, "fetch")
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 401,
+        statusText: "Unauthorized",
+      } as Response)
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ status: "success" }),
+      } as Response)
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ services: ["plex"] }),
+      } as Response);
+
+    const result = await fetcher<{ services: string[] }>("/api/v1/admin/services");
+    expect(result).toEqual({ services: ["plex"] });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock.mock.calls[1][0]).toBe("/api/v1/auth/refresh");
+  });
+
+  it("dispatches af:session-expired when silent token refresh fails with 401", async () => {
+    jest
+      .spyOn(global, "fetch")
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 401,
+        statusText: "Unauthorized",
+      } as Response)
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 401,
+        statusText: "Unauthorized",
+      } as Response);
+
+    const expiredListener = jest.fn();
+    window.addEventListener("af:session-expired", expiredListener);
+
+    const res = await apiFetch("/api/v1/admin/services");
+    window.removeEventListener("af:session-expired", expiredListener);
+
+    expect(res.status).toBe(401);
+    expect(expiredListener).toHaveBeenCalledTimes(1);
+  });
 });

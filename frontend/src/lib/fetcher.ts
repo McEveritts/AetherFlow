@@ -58,6 +58,9 @@ function shouldAttachCSRF(input: RequestInfo | URL, init: RequestInit | undefine
     }
 
     const path = getRequestPath(input);
+    if (path === '/api/v1/auth/refresh' || path === '/api/v1/public/auth/refresh' || path === '/api/auth/refresh') {
+        return false;
+    }
     return path.startsWith('/api/v1/auth/') || path.startsWith('/api/v1/public/auth/') || path.startsWith('/api/auth/');
 }
 
@@ -134,10 +137,15 @@ export async function apiFetch(input: RequestInfo | URL, init?: RequestInit): Pr
     if (res.status === 401) {
         const path = getRequestPath(input);
         
-        // Prevent infinite loops on auth endpoints
-        if (!path.startsWith('/api/v1/auth/session') && 
-            !path.startsWith('/api/v1/auth/refresh') && 
+        // Prevent infinite loops on auth login/refresh/logout endpoints.
+        // Note: /api/v1/auth/session is allowed to attempt a one-shot silent refresh
+        // so expired 15m JWTs within the 2h refresh grace window recover seamlessly.
+        if (!path.startsWith('/api/v1/auth/refresh') && 
+            !path.startsWith('/api/v1/public/auth/refresh') && 
             !path.startsWith('/api/v1/auth/login') && 
+            !path.startsWith('/api/v1/public/auth/login') && 
+            !path.startsWith('/api/v1/public/auth/mfa') && 
+            !path.startsWith('/api/v1/public/auth/setup') && 
             !path.startsWith('/api/v1/auth/logout')) {
             
             if (!refreshTokenPromise) {
@@ -163,11 +171,16 @@ export async function apiFetch(input: RequestInfo | URL, init?: RequestInit): Pr
         }
     }
 
-    // Broadcast session expiration for multi-tab sync if it's a hard 401
+    // Broadcast session expiration for both same-tab and multi-tab sync if a request
+    // still ends in a hard 401 after the silent refresh attempt.
     if (res.status === 401 && typeof window !== 'undefined') {
         const path = getRequestPath(input);
-        if (path.startsWith('/api/v1/auth/session') || path.startsWith('/api/v1/auth/refresh')) {
+        if (!path.startsWith('/api/v1/auth/login') &&
+            !path.startsWith('/api/v1/public/auth/login') &&
+            !path.startsWith('/api/v1/public/auth/mfa') &&
+            !path.startsWith('/api/v1/public/auth/setup')) {
             window.localStorage.setItem('af_logout_sync', String(Date.now()));
+            window.dispatchEvent(new CustomEvent('af:session-expired'));
         }
     }
 
