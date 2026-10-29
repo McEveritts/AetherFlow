@@ -149,7 +149,7 @@ export function useMetrics() {
         netUp: [parseSpeed(metrics.network?.up as string), parseSpeed(metrics.network?.up as string)],
         diskRead: [metrics.disk_io?.read_bytes_sec || 0, metrics.disk_io?.read_bytes_sec || 0],
         diskWrite: [metrics.disk_io?.write_bytes_sec || 0, metrics.disk_io?.write_bytes_sec || 0],
-        timestamps: [Date.now(), Date.now()],
+        timestamps: [0, 1],
     } : visibleHistory;
 
     return {

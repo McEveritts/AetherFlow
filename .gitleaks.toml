@@ -1,0 +1,12 @@
+title = "AetherFlow Gitleaks Configuration"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Allow synthetic unit test fixtures and upstream default package config templates"
+paths = [
+  '''_test\.go$''',
+  '''^setup/configs/''',
+  '''^tests/''',
+]

@@ -1,0 +1,108 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 320" width="100%" height="100%">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#05060b"/>
+      <stop offset="50%" stop-color="#0a0d1a"/>
+      <stop offset="100%" stop-color="#070810"/>
+    </linearGradient>
+    <radialGradient id="auroraIndigo" cx="25%" cy="20%" r="55%">
+      <stop offset="0%" stop-color="#4f46e5" stop-opacity="0.28"/>
+      <stop offset="60%" stop-color="#4f46e5" stop-opacity="0.05"/>
+      <stop offset="100%" stop-color="#4f46e5" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="auroraViolet" cx="82%" cy="80%" r="50%">
+      <stop offset="0%" stop-color="#9333ea" stop-opacity="0.24"/>
+      <stop offset="60%" stop-color="#7c3aed" stop-opacity="0.04"/>
+      <stop offset="100%" stop-color="#7c3aed" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="logoGrad" x1="0%" y1="100%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#1d4ed8"/>
+      <stop offset="55%" stop-color="#4f46e5"/>
+      <stop offset="100%" stop-color="#9333ea"/>
+    </linearGradient>
+    <linearGradient id="borderGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#6366f1" stop-opacity="0.45"/>
+      <stop offset="50%" stop-color="#ffffff" stop-opacity="0.08"/>
+      <stop offset="100%" stop-color="#a855f7" stop-opacity="0.4"/>
+    </linearGradient>
+    <linearGradient id="pillGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#4f46e5" stop-opacity="0.25"/>
+      <stop offset="100%" stop-color="#9333ea" stop-opacity="0.25"/>
+    </linearGradient>
+    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
+      <path d="M 32 0 L 0 0 0 32" fill="none" stroke="#ffffff" stroke-width="0.6" stroke-opacity="0.035"/>
+    </pattern>
+  </defs>
+
+  <!-- Outer Card -->
+  <rect x="2" y="2" width="1196" height="316" rx="22" fill="url(#bgGrad)" stroke="url(#borderGrad)" stroke-width="2"/>
+  <rect x="2" y="2" width="1196" height="316" rx="22" fill="url(#auroraIndigo)"/>
+  <rect x="2" y="2" width="1196" height="316" rx="22" fill="url(#auroraViolet)"/>
+  <rect x="2" y="2" width="1196" height="316" rx="22" fill="url(#grid)"/>
+
+  <!-- Top Subtle Highlight Line -->
+  <line x1="80" y1="2" x2="1120" y2="2" stroke="#818cf8" stroke-opacity="0.5" stroke-width="1.5"/>
+
+  <!-- AF App Icon Emblem -->
+  <g transform="translate(68, 66)">
+    <!-- Ambient Glow -->
+    <rect x="-6" y="-6" width="140" height="140" rx="34" fill="url(#logoGrad)" opacity="0.25"/>
+    <!-- Icon Body -->
+    <rect x="0" y="0" width="128" height="128" rx="30" fill="url(#logoGrad)" stroke="#a5b4fc" stroke-opacity="0.35" stroke-width="1.5"/>
+    <!-- Interlocked AF Monogram -->
+    <path d="M 24 98 L 48 30 L 66 30 L 79 67 C 79 74 75 78 68 78 L 46 78 L 39 98 Z" fill="#ffffff"/>
+    <path d="M 55 46 L 47 70 L 64 70 L 55 46 Z" fill="url(#logoGrad)"/>
+    <path d="M 44 82 L 66 82 C 78 82 84 74 84 62 L 84 44 C 84 34 90 30 100 30 L 112 30 L 112 44 L 99 44 C 95 44 94 46 94 50 L 94 60 L 109 60 L 109 73 L 94 73 L 94 98 L 79 98 L 79 79 C 74 82 68 83 61 83 L 44 83 Z" fill="#ffffff"/>
+  </g>
+
+  <!-- Title & Version Badge -->
+  <g transform="translate(230, 108)">
+    <text x="0" y="0" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, Roboto, Helvetica, Arial, sans-serif" font-size="52" font-weight="800" fill="#ffffff" letter-spacing="-1.2">AetherFlow</text>
+
+    <!-- Version Pill -->
+    <g transform="translate(292, -36)">
+      <rect x="0" y="0" width="166" height="30" rx="15" fill="url(#pillGrad)" stroke="#818cf8" stroke-opacity="0.5" stroke-width="1"/>
+      <circle cx="16" cy="15" r="4" fill="#34d399"/>
+      <text x="28" y="19.5" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="12.5" font-weight="700" fill="#e0e7ff" letter-spacing="0.6">v3.2.01 • OBSIDIAN</text>
+    </g>
+
+    <!-- Tagline -->
+    <text x="2" y="38" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, Roboto, Helvetica, Arial, sans-serif" font-size="19.5" font-weight="500" fill="#cbd5e1" letter-spacing="-0.2">
+      Sovereign Bare-Metal Infrastructure, Media Automation &amp; AI Control Plane
+    </text>
+    <text x="2" y="66" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, Roboto, Helvetica, Arial, sans-serif" font-size="14.5" font-weight="400" fill="#94a3b8">
+      Compiled Go 1.26 + Embedded Next.js SPA • Root Privileged Socket Daemon • Automated Caddy TLS Ingress
+    </text>
+  </g>
+
+  <!-- Bottom Feature Pills -->
+  <g transform="translate(68, 236)">
+    <!-- Pill 1 -->
+    <g transform="translate(0, 0)">
+      <rect x="0" y="0" width="246" height="40" rx="10" fill="#0f1428" fill-opacity="0.85" stroke="#334155" stroke-opacity="0.7" stroke-width="1"/>
+      <circle cx="20" cy="20" r="4.5" fill="#6366f1"/>
+      <text x="34" y="24.5" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="12.5" font-weight="600" fill="#e2e8f0">Single-Binary Go + SPA</text>
+    </g>
+
+    <!-- Pill 2 -->
+    <g transform="translate(262, 0)">
+      <rect x="0" y="0" width="256" height="40" rx="10" fill="#0f1428" fill-opacity="0.85" stroke="#334155" stroke-opacity="0.7" stroke-width="1"/>
+      <circle cx="20" cy="20" r="4.5" fill="#a855f7"/>
+      <text x="34" y="24.5" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="12.5" font-weight="600" fill="#e2e8f0">Zero-Docker • systemd</text>
+    </g>
+
+    <!-- Pill 3 -->
+    <g transform="translate(534, 0)">
+      <rect x="0" y="0" width="256" height="40" rx="10" fill="#0f1428" fill-opacity="0.85" stroke="#334155" stroke-opacity="0.7" stroke-width="1"/>
+      <circle cx="20" cy="20" r="4.5" fill="#38bdf8"/>
+      <text x="34" y="24.5" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="12.5" font-weight="600" fill="#e2e8f0">55 Bare-Metal Packages</text>
+    </g>
+
+    <!-- Pill 4 -->
+    <g transform="translate(806, 0)">
+      <rect x="0" y="0" width="258" height="40" rx="10" fill="#0f1428" fill-opacity="0.85" stroke="#334155" stroke-opacity="0.7" stroke-width="1"/>
+      <circle cx="20" cy="20" r="4.5" fill="#10b981"/>
+      <text x="34" y="24.5" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="12.5" font-weight="600" fill="#e2e8f0">FlowAI Human-Gated Ops</text>
+    </g>
+  </g>
+</svg>

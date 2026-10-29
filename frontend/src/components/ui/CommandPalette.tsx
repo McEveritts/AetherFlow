@@ -92,11 +92,13 @@ export function CommandPalette() {
     : actions.filter((action) => fuzzyMatch(query, action.title));
 
   useEffect(() => {
-    if (isOpen) {
+    if (!isOpen) return;
+    const timer = setTimeout(() => {
       setQuery('');
       setSelectedIndex(0);
-      setTimeout(() => inputRef.current?.focus(), 60);
-    }
+      inputRef.current?.focus();
+    }, 60);
+    return () => clearTimeout(timer);
   }, [isOpen]);
 
   useEffect(() => {

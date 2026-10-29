@@ -54,8 +54,11 @@ patch_*.py
 *.db
 *.bak
 
-# Agent teamwork state
+# Agent teamwork & IDE state
 .agents/
+.vscode/
+tag_message.txt
+lint_results.txt
 
 # Python bytecode cache
 __pycache__/

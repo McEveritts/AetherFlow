@@ -572,7 +572,7 @@ export default function NotificationsSettingsTab() {
                                 </label>
                                 <select
                                     value={conditionType}
-                                    onChange={(e) => setConditionType(e.target.value as any)}
+                                    onChange={(e) => setConditionType(e.target.value as typeof conditionType)}
                                     className="w-full bg-black/50 border border-white/10 rounded-xl px-3.5 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-indigo-500/60"
                                 >
                                     <option value="cpu_usage">CPU Usage (%)</option>
@@ -602,7 +602,7 @@ export default function NotificationsSettingsTab() {
                                 </label>
                                 <select
                                     value={ruleLevel}
-                                    onChange={(e) => setRuleLevel(e.target.value as any)}
+                                    onChange={(e) => setRuleLevel(e.target.value as typeof ruleLevel)}
                                     className="w-full bg-black/50 border border-white/10 rounded-xl px-3.5 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-indigo-500/60"
                                 >
                                     <option value="info">Info</option>
@@ -669,7 +669,7 @@ export default function NotificationsSettingsTab() {
                                 </label>
                                 <select
                                     value={channelType}
-                                    onChange={(e) => setChannelType(e.target.value as any)}
+                                    onChange={(e) => setChannelType(e.target.value as typeof channelType)}
                                     className="w-full bg-black/50 border border-white/10 rounded-xl px-3.5 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-indigo-500/60"
                                 >
                                     <option value="discord">Discord Webhook</option>

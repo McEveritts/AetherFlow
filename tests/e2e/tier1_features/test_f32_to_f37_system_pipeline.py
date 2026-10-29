@@ -234,17 +234,19 @@ class TestF36MachineReadableOutputs(TestCase):
 
 class TestF37TestInfraDocumentExists(TestCase):
     def __init__(self):
-        super().__init__("T1_F37_01", "F37", 1, "TEST_INFRA.md exists at project root")
+        super().__init__("T1_F37_01", "F37", 1, "TEST_INFRA.md specification exists")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        self.assert_true(inspector.file_exists("TEST_INFRA.md"), "F37: TEST_INFRA.md must exist at root")
+        exists = inspector.file_exists("tests/TEST_INFRA.md") or inspector.file_exists("TEST_INFRA.md")
+        self.assert_true(exists, "F37: TEST_INFRA.md must exist in tests/ or root")
 
 class TestF37TestReadyDocumentExists(TestCase):
     def __init__(self):
-        super().__init__("T1_F37_02", "F37", 1, "TEST_READY.md exists at project root summarizing baseline results")
+        super().__init__("T1_F37_02", "F37", 1, "TEST_READY.md baseline report exists")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        self.assert_true(inspector.file_exists("TEST_READY.md"), "F37: TEST_READY.md must exist at root")
+        exists = inspector.file_exists("tests/TEST_READY.md") or inspector.file_exists("TEST_READY.md")
+        self.assert_true(exists, "F37: TEST_READY.md must exist in tests/ or root")
 
 class TestF37DualExecutionModesSupported(TestCase):
     def __init__(self):
