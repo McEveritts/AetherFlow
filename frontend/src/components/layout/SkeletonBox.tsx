@@ -12,28 +12,43 @@ export default function SkeletonBox({ className = "", animated = true }: { class
 
 export function OverviewSkeleton() {
     return (
-        <div className="space-y-6 animate-fade-in w-full">
-            <h2 className="text-2xl font-bold text-slate-100 flex items-center gap-3 mb-8">
-                <SkeletonBox className="h-6 w-6 rounded-md bg-white/10" animated={false} />
-                <SkeletonBox className="h-8 w-48 rounded-md bg-white/10" animated={false} />
-            </h2>
+        <div className="space-y-5 animate-fade-in w-full">
+            {/* Top Command Header Skeleton */}
+            <div className="flex items-center justify-between pb-4 border-b border-white/[0.06]">
+                <div className="flex items-center gap-3.5">
+                    <SkeletonBox className="h-11 w-11 rounded-2xl bg-indigo-500/20" animated={false} />
+                    <div className="space-y-2">
+                        <SkeletonBox className="h-6 w-48 rounded-md bg-white/10" animated={false} />
+                        <SkeletonBox className="h-3.5 w-72 rounded-md bg-white/5" animated={false} />
+                    </div>
+                </div>
+                <div className="flex items-center gap-2">
+                    <SkeletonBox className="h-9 w-36 rounded-xl bg-white/5" animated={false} />
+                    <SkeletonBox className="h-9 w-24 rounded-xl bg-white/5" animated={false} />
+                </div>
+            </div>
 
-            {/* Metric Cards Skeleton Grid */}
-            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-6">
+            {/* 6-Cell Telemetry Ribbon Skeleton */}
+            <SkeletonBox className="h-20 w-full rounded-2xl" />
+
+            {/* Band 1: 4-Column Real-Time Vitals */}
+            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
                 {[...Array(4)].map((_, i) => (
-                    <SkeletonBox key={i} className="h-40 w-full" />
+                    <SkeletonBox key={i} className="h-60 w-full rounded-2xl" />
                 ))}
             </div>
 
-            <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
-                {/* Large Chart Skeleton */}
-                <SkeletonBox className="col-span-1 xl:col-span-2 h-[400px]" />
+            {/* Band 2: Topology & Bandwidth History */}
+            <div className="grid grid-cols-1 xl:grid-cols-12 gap-4">
+                <SkeletonBox className="xl:col-span-6 h-[380px] rounded-2xl" />
+                <SkeletonBox className="xl:col-span-6 h-[380px] rounded-2xl" />
+            </div>
 
-                {/* Sidebar Cards Skeleton */}
-                <div className="space-y-6">
-                    <SkeletonBox className="h-[250px] w-full" />
-                    <SkeletonBox className="h-[250px] w-full" />
-                </div>
+            {/* Band 3: Storage, Accelerators & Processes */}
+            <div className="grid grid-cols-1 xl:grid-cols-12 gap-4">
+                <SkeletonBox className="xl:col-span-4 h-[320px] rounded-2xl" />
+                <SkeletonBox className="xl:col-span-4 h-[320px] rounded-2xl" />
+                <SkeletonBox className="xl:col-span-4 h-[320px] rounded-2xl" />
             </div>
         </div>
     );

@@ -1,4 +1,4 @@
-import { Clock, Activity, Zap, Wifi, ArrowDown, ArrowUp, Server, Settings2, Maximize2, Minimize2, Sparkles } from 'lucide-react';
+import { Clock, Activity, Zap, Wifi, ArrowDown, ArrowUp, Server, Settings2, Sparkles, Layers, Cpu } from 'lucide-react';
 import { SystemMetrics, HardwareReport, MetricsHistory, ProcessInfo, DiskPartition, GpuMetric } from '@/types/dashboard';
 import CpuWidget from '@/components/widgets/CpuWidget';
 import MemoryWidget from '@/components/widgets/MemoryWidget';
@@ -17,8 +17,8 @@ import { useSystemStore } from '@/store/useSystemStore';
 import { useShallow } from 'zustand/react/shallow';
 
 // Memoize dashboard widgets with custom, primitive-level comparators to block render cascades
-const MemoCpuWidget = React.memo(CpuWidget, (prev, next) => 
-    prev.cpuData.usage === next.cpuData.usage && 
+const MemoCpuWidget = React.memo(CpuWidget, (prev, next) =>
+    prev.cpuData.usage === next.cpuData.usage &&
     prev.cpuData.freq === next.cpuData.freq &&
     prev.cpuData.cores === next.cpuData.cores &&
     (prev.cpuData.cores || []).join(',') === (next.cpuData.cores || []).join(',') &&
@@ -26,22 +26,22 @@ const MemoCpuWidget = React.memo(CpuWidget, (prev, next) =>
     prev.density === next.density &&
     prev.hardware === next.hardware
 );
-const MemoMemoryWidget = React.memo(MemoryWidget, (prev, next) => 
-    prev.memoryData.memory.used === next.memoryData.memory.used && 
+const MemoMemoryWidget = React.memo(MemoryWidget, (prev, next) =>
+    prev.memoryData.memory.used === next.memoryData.memory.used &&
     prev.memoryData.swap.used === next.memoryData.swap.used &&
     prev.history === next.history &&
     prev.density === next.density &&
     prev.hardware === next.hardware
 );
-const MemoNetworkWidget = React.memo(NetworkWidget, (prev, next) => 
+const MemoNetworkWidget = React.memo(NetworkWidget, (prev, next) =>
     `${prev.networkData.network.active_connections}-${prev.networkData.network.down}-${prev.networkData.network.up}-${prev.networkData.total?.rx}-${prev.networkData.total?.tx}` ===
     `${next.networkData.network.active_connections}-${next.networkData.network.down}-${next.networkData.network.up}-${next.networkData.total?.rx}-${next.networkData.total?.tx}` &&
     prev.history === next.history &&
     prev.density === next.density &&
     prev.hardware === next.hardware
 );
-const MemoDiskIOWidget = React.memo(DiskIOWidget, (prev, next) => 
-    prev.diskIoData?.read_bytes_sec === next.diskIoData?.read_bytes_sec && 
+const MemoDiskIOWidget = React.memo(DiskIOWidget, (prev, next) =>
+    prev.diskIoData?.read_bytes_sec === next.diskIoData?.read_bytes_sec &&
     prev.diskIoData?.write_bytes_sec === next.diskIoData?.write_bytes_sec &&
     prev.history === next.history &&
     prev.density === next.density
@@ -97,205 +97,299 @@ export default function OverviewTab({ metrics, hardware, history }: OverviewTabP
             setActiveSettingsTab: state.setActiveSettingsTab
         }))
     );
-    
-    // Direct prop pass-through — the upstream Zustand store already throttles
-    // at 250ms via pushMetrics. React.memo on child widgets prevents unnecessary
-    // re-renders, so no additional render gating is needed.
+
     const tMetrics = metrics;
     const tHistory = history;
 
+    const hasGpuPanel = Boolean(showGpuWidget && tMetrics.gpus && tMetrics.gpus.length > 0);
+    const serviceEntries = Object.values(tMetrics.services || {});
+    const runningServicesCount = serviceEntries.filter((s) => s.status === 'running').length;
+
+    const platformIdentity = hardware
+        ? [hardware.system_vendor, hardware.system_product].filter(Boolean).join(' · ')
+        : '';
+    const computeIdentity = hardware
+        ? [
+            hardware.cpu?.model,
+            hardware.gpus && hardware.gpus.length > 0 ? hardware.gpus.map((g) => g.product).join(' + ') : ''
+        ].filter(Boolean).join(' · ')
+        : '';
+
     return (
-        <div className="space-y-6 animate-fade-in pb-10">
-            {/* AetherNexus Live Status Control */}
-            <div className="bg-gradient-to-r from-indigo-500/10 via-purple-500/10 to-blue-500/10 border border-white/[0.08] rounded-2xl p-4 flex flex-col md:flex-row items-start md:items-center justify-between gap-4 backdrop-blur-xl shadow-2xl">
-                <div className="flex items-center gap-4">
-                    <div className="relative">
-                        <div className={`p-3 rounded-xl ${
-                            connectionState === 'CONNECTED'
-                                ? 'bg-emerald-500/20 text-emerald-400'
-                                : 'bg-amber-500/20 text-amber-400'
-                        } border border-white/10`}>
-                            <Zap size={20} className="animate-pulse" />
-                        </div>
-                        <div className={`absolute -bottom-1 -right-1 w-3 h-3 rounded-full border-2 border-[#0B0E14] ${
-                            connectionState === 'CONNECTED'
-                                ? 'bg-emerald-500'
-                                : 'bg-amber-500'
-                        }`} />
+        <div className="space-y-5 animate-fade-in pb-10 relative z-10 w-full min-w-0">
+            {/* ========================================================================= */}
+            {/* 1. OPEN TOP COMMAND HEADER                                                */}
+            {/* ========================================================================= */}
+            <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-4 pb-4 border-b border-white/[0.06] relative z-30 shrink-0">
+                <div className="flex items-start sm:items-center gap-3.5">
+                    <div className="h-11 w-11 rounded-2xl flex items-center justify-center border bg-indigo-500/20 border-indigo-500/30 shadow-[0_0_24px_rgba(99,102,241,0.2)] text-indigo-400 shrink-0">
+                        <Zap size={22} />
                     </div>
-                    <div>
-                        <h2 className="text-xl font-black text-white tracking-tight flex items-center gap-2">
-                            AetherNexus
-                            <span className="text-[10px] bg-white/10 px-2 py-0.5 rounded-full font-bold uppercase tracking-widest text-slate-400 border border-white/5">
-                                Live WS
+                    <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-2.5">
+                            <h2 className="text-lg md:text-xl font-extrabold text-slate-100 tracking-tight">
+                                AetherNexus
+                            </h2>
+                            <span
+                                className={`inline-flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider px-2.5 py-0.5 rounded-full border ${
+                                    connectionState === 'CONNECTED'
+                                        ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+                                        : 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+                                }`}
+                            >
+                                <span
+                                    className={`h-1.5 w-1.5 rounded-full ${
+                                        connectionState === 'CONNECTED'
+                                            ? 'bg-emerald-400 shadow-[0_0_6px_#34d399] animate-pulse'
+                                            : 'bg-amber-400 animate-pulse'
+                                    }`}
+                                />
+                                {connectionState === 'CONNECTED' ? 'Live WS · 1.0s Stream' : 'Reconnecting Stream'}
                             </span>
-                        </h2>
-                        <p className="text-xs text-slate-400 font-medium">
-                            {connectionState === 'CONNECTED'
-                                ? 'Hyper-Link connection active (WS · 1.0s Live Stream)'
-                                : 'Reconnecting to Hyper-Link WebSocket stream...'}
+
+                            {platformIdentity && (
+                                <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold px-2.5 py-0.5 rounded-full border bg-white/[0.03] text-slate-300 border-white/10">
+                                    <Server size={11} className="text-indigo-400" />
+                                    {platformIdentity}
+                                </span>
+                            )}
+                        </div>
+                        <p className="text-xs text-slate-400 mt-1 truncate">
+                            {computeIdentity
+                                ? computeIdentity
+                                : connectionState === 'CONNECTED'
+                                    ? 'Real-time kernel telemetry, storage pool diagnostics, service mesh topology, and predictive AI capacity planning'
+                                    : 'Synchronizing real-time telemetry stream with local Nexus daemon...'}
                         </p>
                     </div>
                 </div>
 
-                <div className="flex flex-wrap items-center gap-2 w-full md:w-auto justify-end">
-                    {/* Perspective / Immersion Toggle */}
-                    <button 
-                        onClick={() => setDashboardDensity(dashboardDensity === 'compact' ? 'immersive' : 'compact')}
-                        className={`obs-touch-target-standard obs-gpu-120hz-interactive p-2.5 rounded-xl border border-white/10 transition-all flex items-center justify-center ${dashboardDensity === 'immersive' ? 'bg-indigo-500/20 text-indigo-400 shadow-[0_0_15px_rgba(99,102,241,0.2)]' : 'bg-white/5 text-slate-400 hover:text-white dark:hover:bg-white/5'}`}
-                        title={dashboardDensity === 'immersive' ? 'Exit Immersive Mode' : 'Enter Immersive Mode'}
-                    >
-                        {dashboardDensity === 'immersive' ? <Minimize2 size={18} /> : <Maximize2 size={18} />}
-                    </button>
+                {/* Right Command Controls */}
+                <div className="flex flex-wrap items-center gap-2 shrink-0">
+                    {/* Density View Switcher */}
+                    <div className="flex items-center gap-1 p-1 bg-white/[0.04] border border-white/10 rounded-xl">
+                        <button
+                            type="button"
+                            onClick={() => setDashboardDensity('compact')}
+                            className={`obs-touch-target-standard obs-gpu-120hz-interactive px-3 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center gap-1.5 ${
+                                dashboardDensity === 'compact'
+                                    ? 'bg-indigo-500/20 border border-indigo-500/30 text-indigo-300 shadow-md shadow-indigo-500/10'
+                                    : 'text-slate-400 hover:text-white'
+                            }`}
+                        >
+                            <Layers size={13} />
+                            <span>Standard</span>
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => setDashboardDensity('immersive')}
+                            className={`obs-touch-target-standard obs-gpu-120hz-interactive px-3 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center gap-1.5 ${
+                                dashboardDensity === 'immersive'
+                                    ? 'bg-indigo-500/20 border border-indigo-500/30 text-indigo-300 shadow-md shadow-indigo-500/10'
+                                    : 'text-slate-400 hover:text-white'
+                            }`}
+                        >
+                            <Activity size={13} />
+                            <span>Expanded</span>
+                        </button>
+                    </div>
 
-                    {/* Dashboard Settings Navigation */}
-                    <button 
+                    {serviceEntries.length > 0 && (
+                        <button
+                            type="button"
+                            onClick={() => setActiveTab('services')}
+                            className="obs-touch-target-standard obs-gpu-120hz-interactive flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-white/[0.04] border border-white/10 text-slate-300 hover:bg-white/[0.08] hover:text-white transition-all"
+                            title="Inspect Managed Services"
+                        >
+                            <Cpu size={13} className="text-emerald-400" />
+                            <span>{runningServicesCount}/{serviceEntries.length} Services</span>
+                        </button>
+                    )}
+
+                    <button
+                        type="button"
                         onClick={() => {
                             setActiveTab('settings');
                             setActiveSettingsTab('dashboard');
                         }}
-                        className="obs-touch-target-standard obs-gpu-120hz-interactive p-2.5 rounded-xl border border-white/10 transition-all bg-white/5 text-slate-400 hover:text-white hover:bg-white/10 flex items-center justify-center"
-                        title="Manage Dashboard Settings"
+                        className="obs-touch-target-standard obs-gpu-120hz-interactive flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-white/[0.04] border border-white/10 text-slate-300 hover:bg-white/[0.08] hover:text-white transition-all"
+                        title="Configure Display & Telemetry Preferences"
                     >
-                        <Settings2 size={18} />
+                        <Settings2 size={14} className="text-indigo-400" />
+                        <span>Configure</span>
                     </button>
-
-                    <div className="flex items-center gap-2 bg-black/20 p-1.5 rounded-xl border border-white/5">
-                        <div className="obs-touch-target-standard px-3.5 py-2 rounded-lg text-xs font-bold flex items-center gap-2 bg-indigo-500 text-white shadow-lg">
-                            <Zap size={14} />
-                            WebSocket
-                        </div>
-                    </div>
                 </div>
             </div>
 
-            {/* Hero Stats Row */}
-            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
-                <StatPill
-                    icon={<Clock size={15} />}
+            {/* ========================================================================= */}
+            {/* 2. PERMANENT 6-CELL TELEMETRY RIBBON                                      */}
+            {/* ========================================================================= */}
+            <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 divide-y md:divide-y-0 md:divide-x divide-white/[0.06] overflow-hidden">
+                <TelemetryCell
+                    icon={<Clock size={16} />}
                     iconColor="text-blue-400"
-                    iconBg="bg-blue-500/10"
+                    iconBg="bg-blue-500/10 border-blue-500/20"
                     label="Uptime"
                     value={metrics.uptime}
+                    sublabel="Continuous runtime"
                 />
-                <StatPill
-                    icon={<Activity size={15} />}
+                <TelemetryCell
+                    icon={<Activity size={16} />}
                     iconColor="text-emerald-400"
-                    iconBg="bg-emerald-500/10"
+                    iconBg="bg-emerald-500/10 border-emerald-500/20"
                     label="Load (1/5/15)"
-                    value={metrics.load_average.map(l => l.toFixed(2)).join(' · ')}
+                    value={metrics.load_average.map((l) => l.toFixed(2)).join(' · ')}
+                    sublabel="Kernel load avg"
                 />
-                <StatPill
-                    icon={<Zap size={15} />}
+                <TelemetryCell
+                    icon={<Zap size={16} />}
                     iconColor="text-amber-400"
-                    iconBg="bg-amber-500/10"
-                    label="CPU Freq"
+                    iconBg="bg-amber-500/10 border-amber-500/20"
+                    label="CPU Clock"
                     value={metrics.cpu_freq_mhz > 0 ? `${(metrics.cpu_freq_mhz / 1000).toFixed(2)} GHz` : 'N/A'}
+                    sublabel={`${metrics.per_core_cpu?.length || hardware?.cpu?.threads || 1} logical threads`}
                 />
-                <StatPill
-                    icon={<Wifi size={15} />}
+                <TelemetryCell
+                    icon={<Wifi size={16} />}
                     iconColor="text-indigo-400"
-                    iconBg="bg-indigo-500/10"
+                    iconBg="bg-indigo-500/10 border-indigo-500/20"
                     label="Connections"
                     value={String(metrics.network.active_connections)}
+                    sublabel="Active sockets"
                 />
-                <StatPill
-                    icon={<ArrowDown size={15} />}
+                <TelemetryCell
+                    icon={<ArrowDown size={16} />}
                     iconColor="text-emerald-400"
-                    iconBg="bg-emerald-500/10"
+                    iconBg="bg-emerald-500/10 border-emerald-500/20"
                     label="Downloaded"
                     value={formatTotalBytes(metrics.total_net_bytes?.rx || 0)}
+                    sublabel={`Live: ${metrics.network.down}`}
                 />
-                <StatPill
-                    icon={<ArrowUp size={15} />}
+                <TelemetryCell
+                    icon={<ArrowUp size={16} />}
                     iconColor="text-indigo-400"
-                    iconBg="bg-indigo-500/10"
+                    iconBg="bg-indigo-500/10 border-indigo-500/20"
                     label="Uploaded"
                     value={formatTotalBytes(metrics.total_net_bytes?.tx || 0)}
+                    sublabel={`Live: ${metrics.network.up}`}
                 />
             </div>
 
-            {/* System Identity */}
-            {hardware && (hardware.system_vendor || hardware.system_product) && (
-                <div className="flex items-center gap-2 px-1">
-                    <Server size={12} className="text-slate-500" />
-                    <span className="text-[11px] text-slate-500 font-medium">
-                        {[hardware.system_vendor, hardware.system_product].filter(Boolean).join(' · ')}
-                        {hardware.cpu?.model && ` · ${hardware.cpu.model}`}
-                        {hardware.gpus && hardware.gpus.length > 0 && ` · ${hardware.gpus.map(g => g.product).join(' + ')}`}
-                    </span>
-                </div>
-            )}
+            {/* ========================================================================= */}
+            {/* 3. BAND 1: REAL-TIME COMPUTE, MEMORY & I/O VITALS                         */}
+            {/* ========================================================================= */}
+            <div className={`grid gap-4 items-stretch ${
+                dashboardDensity === 'immersive'
+                    ? 'grid-cols-1 lg:grid-cols-2'
+                    : 'grid-cols-1 md:grid-cols-2 xl:grid-cols-4'
+            }`}>
+                <MemoCpuWidget
+                    cpuData={{ usage: tMetrics.cpu_usage, freq: tMetrics.cpu_freq_mhz, cores: tMetrics.per_core_cpu }}
+                    hardware={hardware}
+                    history={tHistory}
+                    density={dashboardDensity}
+                />
+                <MemoMemoryWidget
+                    memoryData={{ memory: tMetrics.memory, swap: tMetrics.swap }}
+                    hardware={hardware}
+                    history={tHistory}
+                    density={dashboardDensity}
+                />
+                <MemoNetworkWidget
+                    networkData={{ network: tMetrics.network, total: tMetrics.total_net_bytes }}
+                    hardware={hardware}
+                    history={tHistory}
+                    density={dashboardDensity}
+                />
+                <MemoDiskIOWidget
+                    diskIoData={tMetrics.disk_io}
+                    history={tHistory}
+                    density={dashboardDensity}
+                />
+            </div>
 
-            {/* Core Widgets Grid */}
-            <div className={`grid gap-6 items-start ${dashboardDensity === 'immersive' ? 'grid-cols-1 xl:grid-cols-2' : 'grid-cols-1 md:grid-cols-2 lg:grid-cols-3'}`}>
-                
-                {/* 1. Primary Metrics */}
-                <div className="space-y-6">
-                    <MemoCpuWidget cpuData={{ usage: tMetrics.cpu_usage, freq: tMetrics.cpu_freq_mhz, cores: tMetrics.per_core_cpu }} hardware={hardware} history={tHistory} density={dashboardDensity} />
-                    <MemoMemoryWidget memoryData={{ memory: tMetrics.memory, swap: tMetrics.swap }} hardware={hardware} history={tHistory} density={dashboardDensity} />
-                    
-                    {/* GPU Widget - Auto Detectable & User Enabled */}
-                    {(showGpuWidget && tMetrics.gpus && tMetrics.gpus.length > 0) && (
-                        <MemoGpuWidget gpus={tMetrics.gpus} density={dashboardDensity} />
-                    )}
+            {/* ========================================================================= */}
+            {/* 4. BAND 2: SERVICE TOPOLOGY MESH & HISTORICAL BANDWIDTH                   */}
+            {/* ========================================================================= */}
+            <div className="grid grid-cols-1 xl:grid-cols-12 gap-4 items-stretch">
+                <div className={showDataUsageWidget ? 'xl:col-span-6' : 'xl:col-span-12'}>
+                    <MemoAppTopologyMap topologyData={tMetrics.services} density={dashboardDensity} />
                 </div>
-
-                {/* 2. Secondary Metrics */}
-                <div className="space-y-6">
-                    <MemoNetworkWidget networkData={{ network: tMetrics.network, total: tMetrics.total_net_bytes }} hardware={hardware} history={tHistory} density={dashboardDensity} />
-                    <MemoDiskIOWidget diskIoData={tMetrics.disk_io} history={tHistory} density={dashboardDensity} />
-                    
-                    {/* Data Usage History Widget - User Enabled */}
-                    {showDataUsageWidget && (
+                {showDataUsageWidget && (
+                    <div className="xl:col-span-6">
                         <DataUsageHistoryWidget density={dashboardDensity} />
-                    )}
-                </div>
-
-                {/* 3. System Visualization & Processes */}
-                <div className={`space-y-6 ${dashboardDensity === 'immersive' ? 'xl:col-span-2' : ''}`}>
-                    <div className={`grid gap-6 items-start ${dashboardDensity === 'immersive' ? 'grid-cols-1 lg:grid-cols-3' : 'grid-cols-1'}`}>
-                        <div className={dashboardDensity === 'immersive' ? 'lg:col-span-2' : ''}>
-                            <MemoAppTopologyMap topologyData={tMetrics.services} density={dashboardDensity} />
-                        </div>
-                        <div className="space-y-6">
-                            <MemoStorageWidget storageData={tMetrics.disks} hardware={hardware} density={dashboardDensity} />
-                            <MemoProcessWidget processes={tMetrics.processes || []} density={dashboardDensity} />
-                        </div>
                     </div>
+                )}
+            </div>
+
+            {/* ========================================================================= */}
+            {/* 5. BAND 3: STORAGE POOLS, COMPUTE ACCELERATORS & ACTIVE PROCESSES         */}
+            {/* ========================================================================= */}
+            <div className="grid grid-cols-1 xl:grid-cols-12 gap-4 items-stretch">
+                <div className={hasGpuPanel ? 'xl:col-span-4' : 'xl:col-span-5'}>
+                    <MemoStorageWidget storageData={tMetrics.disks} hardware={hardware} density={dashboardDensity} />
+                </div>
+                {hasGpuPanel && (
+                    <div className="xl:col-span-4">
+                        <MemoGpuWidget gpus={tMetrics.gpus || []} density={dashboardDensity} />
+                    </div>
+                )}
+                <div className={hasGpuPanel ? 'xl:col-span-4' : 'xl:col-span-7'}>
+                    <MemoProcessWidget processes={tMetrics.processes || []} density={dashboardDensity} />
                 </div>
             </div>
 
-            {/* 4. AI Telemetry & Capacity Section */}
+            {/* ========================================================================= */}
+            {/* 6. BAND 4: AI TELEMETRY & CAPACITY PLANNING                               */}
+            {/* ========================================================================= */}
             <div className="pt-2 space-y-4">
-                <div className="flex items-center gap-2 px-1">
-                    <Sparkles size={16} className="text-fuchsia-400" />
-                    <h3 className="text-sm font-bold text-slate-200">AI Telemetry & Capacity Planning</h3>
-                    <span className="text-xs text-slate-500 font-medium">Predictive resource forecasting & peering optimization</span>
+                <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-white/[0.06]">
+                    <div className="flex items-center gap-2.5">
+                        <div className="h-7 w-7 rounded-lg bg-fuchsia-500/10 border border-fuchsia-500/20 flex items-center justify-center text-fuchsia-400">
+                            <Sparkles size={14} />
+                        </div>
+                        <h3 className="text-sm font-bold text-slate-100 tracking-tight">AI Telemetry &amp; Capacity Planning</h3>
+                        <span className="text-xs text-slate-500 font-medium hidden sm:inline">
+                            · Predictive resource forecasting &amp; peering optimization
+                        </span>
+                    </div>
+                    <span className="text-[10px] font-mono font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-fuchsia-500/10 text-fuchsia-300 border border-fuchsia-500/20">
+                        FlowAI Engine
+                    </span>
                 </div>
-                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 items-stretch">
                     <PredictionsCard />
                     <BandwidthCard />
                 </div>
             </div>
         </div>
-
     );
 }
 
-function StatPill({ icon, iconColor, iconBg, label, value }: {
+function TelemetryCell({
+    icon,
+    iconColor,
+    iconBg,
+    label,
+    value,
+    sublabel,
+}: {
     icon: React.ReactNode;
     iconColor: string;
     iconBg: string;
     label: string;
     value: string;
+    sublabel: string;
 }) {
     return (
-        <div className="glass-card rounded-xl px-4 py-3 flex items-center gap-3 group hover:bg-white/[0.04] transition-colors">
-            <div className={`p-2 ${iconBg} rounded-lg ${iconColor}`}>{icon}</div>
-            <div className="min-w-0">
-                <p className="text-[10px] text-slate-500 uppercase font-bold tracking-wider">{label}</p>
-                <p className="text-sm font-bold text-slate-100 truncate">{value}</p>
+        <div className="p-4 flex items-center justify-between gap-3 hover:bg-white/[0.02] transition-colors min-w-0">
+            <div className="min-w-0 flex-1">
+                <p className="text-[10px] text-slate-400 uppercase font-bold tracking-wider truncate">{label}</p>
+                <p className="text-base font-extrabold text-slate-100 truncate mt-0.5 tabular-nums">{value}</p>
+                <p className="text-[10px] text-slate-500 truncate mt-0.5 font-medium">{sublabel}</p>
+            </div>
+            <div className={`h-9 w-9 rounded-xl border ${iconBg} ${iconColor} flex items-center justify-center shrink-0`}>
+                {icon}
             </div>
         </div>
     );

@@ -1,7 +1,7 @@
 'use client';
 
 import React from 'react';
-import { Monitor } from 'lucide-react';
+import { Monitor, Cpu } from 'lucide-react';
 import { GpuMetric } from '@/types/dashboard';
 
 interface GpuWidgetProps {
@@ -15,55 +15,68 @@ export default function GpuWidget({ gpus, density }: GpuWidgetProps) {
     const isImmersive = density === 'immersive';
 
     return (
-        <div className={`glass-card relative overflow-hidden transition-all duration-300 ${isImmersive ? 'p-6 space-y-4 shadow-blue-500/10 shadow-2xl' : 'p-4'}`}>
-            <div className="flex items-center justify-between mb-2">
-                <div className="flex items-center gap-3">
-                    <div className="p-2 bg-blue-500/20 rounded-lg text-blue-400">
-                        <Monitor size={isImmersive ? 24 : 18} />
+        <div className={`rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl relative overflow-hidden flex flex-col justify-between h-full ${isImmersive ? 'p-6' : 'p-5'}`}>
+            <div>
+                {/* Header */}
+                <div className="flex items-center justify-between gap-2 pb-3 mb-3.5 border-b border-white/[0.06]">
+                    <div className="flex items-center gap-2.5">
+                        <div className="h-8 w-8 rounded-lg bg-blue-500/10 border border-blue-500/20 flex items-center justify-center text-blue-400 shrink-0">
+                            <Monitor size={16} />
+                        </div>
+                        <div>
+                            <h3 className="text-sm font-bold text-slate-100 tracking-tight leading-none">
+                                Compute Accelerators
+                            </h3>
+                            <p className="text-[11px] text-slate-500 mt-1">
+                                {gpus.length} hardware engine{gpus.length !== 1 ? 's' : ''} detected
+                            </p>
+                        </div>
                     </div>
-                    <div>
-                        <h3 className={`font-bold text-white tracking-tight ${isImmersive ? 'text-lg' : 'text-sm'}`}>
-                            Compute Accelerators
-                        </h3>
-                        <p className="text-xs text-slate-500 font-mono uppercase tracking-widest">{gpus.length} Device(s) Detected</p>
-                    </div>
+                    <span className="inline-flex items-center gap-1.5 px-2 py-0.5 bg-emerald-500/10 border border-emerald-500/20 rounded-full text-[10px] font-bold text-emerald-400 uppercase tracking-wider">
+                        <span className="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-pulse" />
+                        Active
+                    </span>
                 </div>
-                {isImmersive && (
-                    <div className="flex items-center gap-2 px-2 py-1 bg-emerald-500/10 border border-emerald-500/20 rounded-full">
-                        <span className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-pulse" />
-                        <span className="text-xs font-bold text-emerald-400 uppercase tracking-tighter">Active</span>
-                    </div>
-                )}
-            </div>
 
-            <div className={`grid gap-4 ${isImmersive && gpus.length > 1 ? 'grid-cols-2' : 'grid-cols-1'}`}>
-                {gpus.map((gpu, idx) => {
-                    const usagePct = Number(gpu.usage_pct || 0);
-                    const hasDedicatedVram = Number(gpu.memory_total || 0) > 0;
-                    const vramPct = hasDedicatedVram
-                        ? Math.min(100, Math.max(0, (Number(gpu.memory_used || 0) / Number(gpu.memory_total)) * 100))
-                        : 0;
-                    const tempC = Number(gpu.temp || 0);
+                {/* Accelerator Cards */}
+                <div className={`grid gap-3 ${isImmersive && gpus.length > 1 ? 'grid-cols-2' : 'grid-cols-1'}`}>
+                    {gpus.map((gpu, idx) => {
+                        const usagePct = Number(gpu.usage_pct || 0);
+                        const hasDedicatedVram = Number(gpu.memory_total || 0) > 0;
+                        const vramPct = hasDedicatedVram
+                            ? Math.min(100, Math.max(0, (Number(gpu.memory_used || 0) / Number(gpu.memory_total)) * 100))
+                            : 0;
+                        const tempC = Number(gpu.temp || 0);
+                        const lowerName = (gpu.name || '').toLowerCase();
+                        const pipelineLabel = lowerName.includes('nvidia')
+                            ? 'NVENC / CUDA'
+                            : lowerName.includes('amd') || lowerName.includes('radeon')
+                            ? 'VAAPI / AMF'
+                            : 'VAAPI / QuickSync';
 
-                    return (
-                        <div key={idx} className="bg-white/[0.03] border border-white/5 rounded-xl p-4">
-                            <div className="flex items-start justify-between mb-3">
-                                <div className="space-y-1 flex-1 min-w-0 mr-4">
-                                    <p className="text-xs font-bold text-slate-200 truncate">{gpu.name}</p>
-                                    <div className="flex items-center gap-2 flex-wrap">
-                                        <p className="text-xs text-slate-500 font-medium">Index: {gpu.index}</p>
-                                        {!hasDedicatedVram && (
-                                            <span className="text-xs font-semibold text-indigo-300/80 bg-indigo-500/10 border border-indigo-500/20 px-1.5 py-0.5 rounded">
-                                                Shared System Memory · Integrated GPU
+                        return (
+                            <div key={idx} className="bg-black/30 border border-white/[0.04] rounded-xl p-3.5 space-y-3">
+                                <div className="flex items-start justify-between gap-2">
+                                    <div className="min-w-0 flex-1">
+                                        <p className="text-xs font-bold text-slate-100 truncate">{gpu.name}</p>
+                                        <div className="flex items-center gap-1.5 flex-wrap mt-1">
+                                            <span className="text-[10px] font-mono text-slate-400 bg-white/[0.04] border border-white/[0.06] px-1.5 py-0.5 rounded">
+                                                GPU #{gpu.index}
                                             </span>
-                                        )}
+                                            <span className="text-[10px] font-semibold text-indigo-300 bg-indigo-500/10 border border-indigo-500/20 px-1.5 py-0.5 rounded">
+                                                {pipelineLabel}
+                                            </span>
+                                            {!hasDedicatedVram && (
+                                                <span className="text-[10px] font-medium text-slate-400">
+                                                    Shared System Memory
+                                                </span>
+                                            )}
+                                        </div>
                                     </div>
-                                </div>
-                                <div className="text-right shrink-0 flex items-center gap-2">
                                     {tempC > 0 && (
-                                        <span className={`text-xs font-mono font-bold px-1.5 py-0.5 rounded border ${
+                                        <span className={`text-xs font-mono font-bold px-2 py-0.5 rounded-lg border shrink-0 tabular-nums ${
                                             tempC >= 80
-                                                ? 'text-red-400 bg-red-500/10 border-red-500/20'
+                                                ? 'text-rose-400 bg-rose-500/10 border-rose-500/20'
                                                 : tempC >= 65
                                                     ? 'text-amber-400 bg-amber-500/10 border-amber-500/20'
                                                     : 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20'
@@ -71,56 +84,61 @@ export default function GpuWidget({ gpus, density }: GpuWidgetProps) {
                                             {tempC.toFixed(0)}°C
                                         </span>
                                     )}
-                                    <p className="text-xs font-black text-blue-400">#{gpu.index}</p>
-                                </div>
-                            </div>
-
-                            {/* Real-time telemetry */}
-                            <div className="space-y-3">
-                                <div>
-                                    <div className="flex justify-between text-xs font-bold mb-1 uppercase tracking-tight">
-                                        <span className="text-slate-400">Core Load</span>
-                                        <span className="text-blue-400">{usagePct.toFixed(1)}%</span>
-                                    </div>
-                                    <div className="h-1.5 w-full bg-white/5 rounded-full overflow-hidden">
-                                        <div 
-                                            className="h-full bg-gradient-to-r from-blue-500 to-indigo-500 transition-all duration-300" 
-                                            style={{ width: `${usagePct > 0 ? Math.max(3, Math.min(100, usagePct)) : 0}%` }}
-                                        />
-                                    </div>
                                 </div>
 
-                                {(hasDedicatedVram || isImmersive) && (
+                                {/* Core & Memory Bars */}
+                                <div className="space-y-2.5">
                                     <div>
-                                        <div className="flex justify-between text-xs font-bold mb-1 uppercase tracking-tight">
-                                            <span className="text-slate-400">{hasDedicatedVram ? 'VRAM Usage' : 'Memory Allocation'}</span>
-                                            <span className="text-purple-400">
+                                        <div className="flex justify-between text-[10px] font-bold mb-1 uppercase tracking-wider">
+                                            <span className="text-slate-400">Render Engine Load</span>
+                                            <span className="text-blue-400 font-mono tabular-nums">{usagePct.toFixed(1)}%</span>
+                                        </div>
+                                        <div className="h-1.5 w-full bg-slate-800/90 rounded-full overflow-hidden">
+                                            <div
+                                                className="h-full bg-gradient-to-r from-blue-500 to-indigo-500 transition-all duration-300 rounded-full"
+                                                style={{ width: `${usagePct > 0 ? Math.max(3, Math.min(100, usagePct)) : 0}%` }}
+                                            />
+                                        </div>
+                                    </div>
+
+                                    <div>
+                                        <div className="flex justify-between text-[10px] font-bold mb-1 uppercase tracking-wider">
+                                            <span className="text-slate-400">{hasDedicatedVram ? 'Dedicated VRAM' : 'Memory Architecture'}</span>
+                                            <span className="text-purple-300 font-mono tabular-nums">
                                                 {hasDedicatedVram
                                                     ? `${Math.round(gpu.memory_used || 0)} / ${Math.round(gpu.memory_total)} MB (${vramPct.toFixed(0)}%)`
-                                                    : 'Dynamic Shared RAM'}
+                                                    : 'Dynamic Unified RAM'}
                                             </span>
                                         </div>
                                         {hasDedicatedVram && (
-                                            <div className="h-1.5 w-full bg-white/5 rounded-full overflow-hidden">
-                                                <div 
-                                                    className="h-full bg-gradient-to-r from-purple-500 to-pink-500 transition-all duration-300 shadow-[0_0_10px_rgba(168,85,247,0.5)]" 
+                                            <div className="h-1.5 w-full bg-slate-800/90 rounded-full overflow-hidden">
+                                                <div
+                                                    className="h-full bg-gradient-to-r from-purple-500 to-pink-500 transition-all duration-300 rounded-full"
                                                     style={{ width: `${Math.max(2, vramPct)}%` }}
                                                 />
                                             </div>
                                         )}
                                     </div>
-                                )}
+                                </div>
                             </div>
-                        </div>
-                    );
-                })}
+                        );
+                    })}
+                </div>
             </div>
-            
-            {isImmersive && (
-                <p className="text-xs text-slate-600 text-center italic mt-4">
-                    Dynamic hardware detection active. Headless environments with no GPU will automatically hide this panel.
-                </p>
-            )}
+
+            {/* Hardware Acceleration Telemetry Footer */}
+            <div className="grid grid-cols-2 gap-2.5 mt-3.5">
+                <div className="bg-black/30 rounded-xl px-3 py-2 border border-white/[0.04] flex items-center justify-between">
+                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider flex items-center gap-1.5">
+                        <Cpu size={12} className="text-indigo-400" /> Device Node
+                    </span>
+                    <span className="text-[11px] font-mono font-semibold text-slate-300">/dev/dri/renderD128</span>
+                </div>
+                <div className="bg-black/30 rounded-xl px-3 py-2 border border-white/[0.04] flex items-center justify-between">
+                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Transcode API</span>
+                    <span className="text-[11px] font-mono font-semibold text-emerald-400">Ready</span>
+                </div>
+            </div>
         </div>
     );
 }

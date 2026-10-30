@@ -1087,7 +1087,8 @@ func ChangePassword(c *gin.Context) {
 
 	var currentHash string
 	var username string
-	err := db.DB.QueryRow("SELECT username, COALESCE(password_hash, '') FROM users WHERE id = ?", userID).Scan(&username, &currentHash)
+	var role string
+	err := db.DB.QueryRow("SELECT username, COALESCE(role, 'member'), COALESCE(password_hash, '') FROM users WHERE id = ?", userID).Scan(&username, &role, &currentHash)
 	if err != nil {
 		NotFoundError(c, "User not found")
 		return
@@ -1114,7 +1115,9 @@ func ChangePassword(c *gin.Context) {
 		return
 	}
 
-	services.SaveMasterCredentials(username, req.NewPassword)
+	if role == "admin" {
+		services.SaveMasterCredentials(username, req.NewPassword)
+	}
 	db.RecordAudit(userID, username, "password_update", "user", strconv.Itoa(userID), "Password updated successfully", c.ClientIP(), c.Request.UserAgent())
 
 	c.JSON(http.StatusOK, gin.H{"status": "success", "message": "Password updated successfully"})

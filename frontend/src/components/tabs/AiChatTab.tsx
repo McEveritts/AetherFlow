@@ -1,4 +1,4 @@
-import { Sparkles, Settings, Bot, User, ChevronRight, Lock, ChevronDown, Wrench, Activity, FileText, Layers, Cpu, ShieldAlert, HardDrive, Zap } from 'lucide-react';
+import { Sparkles, Settings, Bot, User, ChevronRight, Lock, ChevronDown, Wrench, Activity, FileText, Layers, Cpu, ShieldAlert, HardDrive, Zap, Copy, Check } from 'lucide-react';
 import { useState, useRef, useEffect, FormEvent } from 'react';
 import useSWR from 'swr';
 import { useSystemStore } from '@/store/useSystemStore';
@@ -7,6 +7,7 @@ import { useMetrics } from '@/hooks/useMetrics';
 import { useToast } from '@/contexts/ToastContext';
 import { AI_PROVIDERS, AI_MODELS, ALL_MODEL_IDS, resolveProviderForModel } from '@/lib/ai-models';
 import type { AIProviderID } from '@/lib/ai-models';
+import FlowAiMarkdown from '@/components/ui/FlowAiMarkdown';
 
 interface ChatMessage {
     role: 'user' | 'assistant';
@@ -61,6 +62,7 @@ export default function AiChatTab() {
     const [supportMode, setSupportMode] = useState(false);
     const [contextMode, setContextMode] = useState('full');
     const [showContextPicker, setShowContextPicker] = useState(false);
+    const [copiedMsgIndex, setCopiedMsgIndex] = useState<number | null>(null);
     const scrollRef = useRef<HTMLDivElement>(null);
     const modelPickerRef = useRef<HTMLDivElement>(null);
     const contextPickerRef = useRef<HTMLDivElement>(null);
@@ -358,11 +360,33 @@ export default function AiChatTab() {
                                 </div>
                             )}
 
-                            <div className={`p-5 rounded-2xl text-sm leading-relaxed whitespace-pre-wrap ${msg.role === 'user'
-                                ? 'bg-gradient-to-br from-indigo-600 to-indigo-500 text-white rounded-tr-sm font-medium shadow-lg shadow-indigo-500/15 border border-indigo-400/20'
-                                : 'glass-panel bg-slate-900/60 backdrop-blur-xl border border-white/[0.07] text-slate-200 rounded-tl-sm shadow-xl'
+                            <div className={`p-5 rounded-2xl text-sm leading-relaxed relative group/msg ${msg.role === 'user'
+                                ? 'bg-gradient-to-br from-indigo-600 to-indigo-500 text-white rounded-tr-sm font-medium shadow-lg shadow-indigo-500/15 border border-indigo-400/20 whitespace-pre-wrap'
+                                : 'glass-panel bg-slate-900/60 backdrop-blur-xl border border-white/[0.07] text-slate-200 rounded-tl-sm shadow-xl flex-1 min-w-0'
                                 }`}>
-                                {msg.text}
+                                {msg.role === 'assistant' && index > 0 && (
+                                    <button
+                                        type="button"
+                                        onClick={async () => {
+                                            try {
+                                                await navigator.clipboard.writeText(msg.text);
+                                                setCopiedMsgIndex(index);
+                                                setTimeout(() => setCopiedMsgIndex(null), 2000);
+                                            } catch {
+                                                // Ignore clipboard error
+                                            }
+                                        }}
+                                        title="Copy response"
+                                        className="absolute top-3 right-3 p-1.5 rounded-lg bg-slate-800/80 hover:bg-slate-700/80 border border-white/10 text-slate-400 hover:text-white opacity-0 group-hover/msg:opacity-100 focus:opacity-100 transition-all cursor-pointer"
+                                    >
+                                        {copiedMsgIndex === index ? <Check size={13} className="text-emerald-400" /> : <Copy size={13} />}
+                                    </button>
+                                )}
+                                {msg.role === 'assistant' ? (
+                                    <FlowAiMarkdown content={msg.text} />
+                                ) : (
+                                    msg.text
+                                )}
 
                                 {/* Render Contextual Payload if present */}
                                 {msg.payload && msg.payload.type === 'system_action' && (

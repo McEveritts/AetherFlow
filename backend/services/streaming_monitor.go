@@ -288,10 +288,15 @@ func resolveDefaultJellyfinURL() string {
 	if envURL := strings.TrimSpace(os.Getenv("JELLYFIN_URL")); envURL != "" {
 		return strings.TrimRight(envURL, "/")
 	}
-	if cfg, err := db.GetAppIngressConfig("jellyfin"); err == nil && cfg != nil && cfg.ListenPort > 0 {
-		return fmt.Sprintf("http://127.0.0.1:%d", cfg.ListenPort)
+	if cfg, err := db.GetAppIngressConfig("jellyfin"); err == nil && cfg != nil {
+		if dom := strings.TrimSpace(cfg.PublicDomain); dom != "" && cfg.ExternalAccessEnabled {
+			return fmt.Sprintf("https://%s", dom)
+		}
+		if cfg.ListenPort > 0 {
+			return fmt.Sprintf("http://127.0.0.1:%d", cfg.ListenPort)
+		}
 	}
-	return "http://127.0.0.1:8096"
+	return "https://jellyfin.mcflow.stream"
 }
 
 // GetStoredJellyfinConfig loads the Jellyfin server configuration from SQLite (or env fallback).
@@ -1346,7 +1351,15 @@ func FetchJellyfinArtwork(ctx context.Context, itemID string) ([]byte, string, e
 	if err != nil {
 		return nil, "", err
 	}
-	req.Header.Set("X-Emby-Token", apiKey)
+	cleanToken := strings.Map(func(r rune) rune {
+		if r == '"' || r == '\r' || r == '\n' || r < 0x20 {
+			return -1
+		}
+		return r
+	}, apiKey)
+	req.Header.Set("X-Emby-Token", cleanToken)
+	req.Header.Set("X-MediaBrowser-Token", cleanToken)
+	req.Header.Set("Authorization", fmt.Sprintf(`MediaBrowser Client="AetherFlow", Device="Nexus", DeviceId="aetherflow-nexus", Version="3.2", Token="%s"`, cleanToken))
 
 	client := newJellyfinHTTPClient(5 * time.Second)
 	resp, err := client.Do(req)

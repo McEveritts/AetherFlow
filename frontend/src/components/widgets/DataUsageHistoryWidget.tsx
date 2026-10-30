@@ -17,7 +17,6 @@ interface MetricsSnapshot {
     net_tx_bytes: number;
 }
 
-// Helper to format bytes cleanly (B, KB, MB, GB, TB)
 function formatBytes(bytes: number, decimals = 1): string {
     if (!+bytes) return '0 B';
     const k = 1024;
@@ -33,7 +32,7 @@ interface DataUsageHistoryWidgetProps {
 
 export default function DataUsageHistoryWidget({ density = 'compact' }: DataUsageHistoryWidgetProps) {
     const isImmersive = density === 'immersive';
-    const [days, setDays] = useState<number>(30); // Default to 30 as user requested
+    const [days, setDays] = useState<number>(30);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
     const [data, setData] = useState<DailyUsage[]>([]);
@@ -44,11 +43,9 @@ export default function DataUsageHistoryWidget({ density = 'compact' }: DataUsag
             setLoading(true);
             setError(null);
             try {
-                // Fetch the last X days of samples (sampled every 15m)
                 const rawData = await fetcher<MetricsSnapshot[]>(`/api/v1/admin/ai/predictions/history?days=${days}`);
                 if (!isMounted) return;
-                
-                // Group by Day (YYYY-MM-DD) and sum positive chronological deltas
+
                 const dailySamples = new Map<string, { ts: number; rx: number; tx: number }[]>();
 
                 (Array.isArray(rawData) ? rawData : []).forEach(record => {
@@ -78,10 +75,8 @@ export default function DataUsageHistoryWidget({ density = 'compact' }: DataUsag
                         downloadedBytes: dlDelta,
                         uploadedBytes: ulDelta,
                     };
-                }).sort((a, b) => a.date.localeCompare(b.date)); // Sort chronologically
+                }).sort((a, b) => a.date.localeCompare(b.date));
 
-                // Recharts AreaChart requires at least 2 points along the X-axis to draw an area polygon.
-                // When only 1 day of history exists, prepend a prior-day baseline point (0 B).
                 if (chartData.length === 1) {
                     const firstDate = new Date(`${chartData[0].date}T00:00:00`);
                     if (!isNaN(firstDate.getTime())) {
@@ -124,7 +119,6 @@ export default function DataUsageHistoryWidget({ density = 'compact' }: DataUsag
         return () => { isMounted = false; };
     }, [days]);
 
-    // Calculate totals for the summary UI
     const { totalDL, totalUL } = useMemo(() => {
         return data.reduce(
             (acc, curr) => {
@@ -136,54 +130,67 @@ export default function DataUsageHistoryWidget({ density = 'compact' }: DataUsag
         );
     }, [data]);
 
+    const chartHeight = isImmersive ? 360 : 260;
+
     return (
-        <div className={`glass-card relative overflow-hidden group transition-all duration-300 hover:bg-white/[0.04] flex flex-col h-full ${isImmersive ? 'p-6 py-7' : 'p-5'}`}>
-            {/* Header & Controls */}
-            <div className={`flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${isImmersive ? 'mb-8' : 'mb-6'}`}>
-                <h2 className={`${isImmersive ? 'text-lg' : 'text-sm'} font-semibold text-slate-200 flex items-center gap-2`}>
-                    <Activity size={isImmersive ? 18 : 16} className="text-indigo-400" /> Historical Data Usage
-                </h2>
-                <div className="flex bg-slate-900/50 p-1 rounded-lg border border-white/[0.05] self-start sm:self-auto">
-                    {[7, 30, 90].map((d) => (
-                        <button
-                            key={d}
-                            onClick={() => setDays(d)}
-                            className={`obs-touch-target-standard obs-gpu-120hz-interactive px-3 py-1.5 text-xs font-medium rounded-md transition-all ${
-                                days === d
-                                    ? 'bg-indigo-500/20 text-indigo-300 shadow-sm'
-                                    : 'text-slate-400 hover:text-slate-200 hover:bg-white/[0.02]'
-                            }`}
-                        >
-                            {d} Days
-                        </button>
-                    ))}
+        <div className={`rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl relative overflow-hidden flex flex-col justify-between h-full ${isImmersive ? 'p-6' : 'p-5'}`}>
+            <div>
+                {/* Header & Controls */}
+                <div className="flex flex-wrap items-center justify-between gap-2 pb-3 mb-3.5 border-b border-white/[0.06]">
+                    <div className="flex items-center gap-2.5">
+                        <div className="h-8 w-8 rounded-lg bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center text-indigo-400 shrink-0">
+                            <Activity size={16} />
+                        </div>
+                        <div>
+                            <h2 className="text-sm font-bold text-slate-100 tracking-tight leading-none">Historical Data Usage</h2>
+                            <p className="text-[11px] text-slate-500 mt-1">
+                                Cumulative ingress &amp; egress bandwidth ledger
+                            </p>
+                        </div>
+                    </div>
+                    <div className="flex bg-black/40 p-1 rounded-xl border border-white/[0.06]">
+                        {[7, 30, 90].map((d) => (
+                            <button
+                                key={d}
+                                type="button"
+                                onClick={() => setDays(d)}
+                                className={`obs-touch-target-standard obs-gpu-120hz-interactive px-2.5 py-1 text-[11px] font-semibold rounded-lg transition-all ${
+                                    days === d
+                                        ? 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 shadow-sm'
+                                        : 'text-slate-400 hover:text-slate-200'
+                                }`}
+                            >
+                                {d}d
+                            </button>
+                        ))}
+                    </div>
                 </div>
-            </div>
 
-            {/* Error State */}
-            {error && !loading && (
-                <div className="flex flex-col items-center justify-center flex-1 py-10 text-center">
-                    <ServerCrash className="text-red-400/50 mb-3" size={32} />
-                    <p className="text-sm font-medium text-slate-300 mb-1">Failed to load payload</p>
-                    <p className="text-xs text-slate-500">{error}</p>
-                </div>
-            )}
-
-            {/* Loading / Data State */}
-            {!error && (
-                <div className={`flex-1 flex flex-col ${isImmersive ? 'min-h-[350px]' : 'min-h-[240px]'}`}>
-                    {/* The Chart */}
+                {/* Error State */}
+                {error && !loading && (
                     <div
-                        className={`relative -mx-2 select-none w-full ${isImmersive ? 'h-[280px] min-h-[280px]' : 'h-[180px] min-h-[180px]'}`}
-                        style={{ touchAction: 'pan-y' }}
+                        className="flex flex-col items-center justify-center bg-black/30 rounded-xl border border-white/[0.04] text-center"
+                        style={{ height: chartHeight }}
+                    >
+                        <ServerCrash className="text-rose-400/50 mb-2" size={28} />
+                        <p className="text-xs font-semibold text-slate-300 mb-0.5">Failed to load payload</p>
+                        <p className="text-[11px] text-slate-500">{error}</p>
+                    </div>
+                )}
+
+                {/* Chart Surface */}
+                {!error && (
+                    <div
+                        className="relative select-none w-full bg-black/30 rounded-xl border border-white/[0.04] overflow-hidden pt-3 pr-2"
+                        style={{ height: chartHeight, touchAction: 'pan-y' }}
                     >
                         {loading && data.length === 0 ? (
-                             <div className="absolute inset-0 flex items-center justify-center">
-                                 <div className="w-5 h-5 border-2 border-indigo-500/30 border-t-indigo-500 rounded-full animate-spin" />
-                             </div>
+                            <div className="absolute inset-0 flex items-center justify-center">
+                                <div className="w-5 h-5 border-2 border-indigo-500/30 border-t-indigo-500 rounded-full animate-spin" />
+                            </div>
                         ) : (
-                            <ResponsiveContainer width="100%" height={isImmersive ? 280 : 180}>
-                                <AreaChart data={data} margin={{ top: 10, right: 12, left: 0, bottom: 0 }}>
+                            <ResponsiveContainer width="100%" height={chartHeight - 16}>
+                                <AreaChart data={data} margin={{ top: 6, right: 8, left: 0, bottom: 0 }}>
                                     <defs>
                                         <linearGradient id="colorDl" x1="0" y1="0" x2="0" y2="1">
                                             <stop offset="5%" stopColor="#818cf8" stopOpacity={0.35} />
@@ -195,24 +202,24 @@ export default function DataUsageHistoryWidget({ density = 'compact' }: DataUsag
                                         </linearGradient>
                                     </defs>
                                     <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" vertical={false} />
-                                    <XAxis 
-                                        dataKey="date" 
-                                        stroke="rgba(255,255,255,0.2)" 
-                                        tick={{ fill: 'rgba(255,255,255,0.4)', fontSize: 10 }}
+                                    <XAxis
+                                        dataKey="date"
+                                        stroke="rgba(255,255,255,0.15)"
+                                        tick={{ fill: 'rgba(255,255,255,0.45)', fontSize: 10 }}
                                         tickFormatter={(val) => {
                                             const parts = String(val).split('-');
                                             return parts.length === 3 ? `${parts[1]}/${parts[2]}` : String(val);
                                         }}
                                         minTickGap={20}
                                     />
-                                    <YAxis 
-                                        stroke="rgba(255,255,255,0.2)" 
-                                        tick={{ fill: 'rgba(255,255,255,0.4)', fontSize: 10 }}
+                                    <YAxis
+                                        stroke="rgba(255,255,255,0.15)"
+                                        tick={{ fill: 'rgba(255,255,255,0.45)', fontSize: 10 }}
                                         tickFormatter={(val) => formatBytes(val, 0)}
-                                        width={55}
+                                        width={54}
                                     />
                                     <Tooltip
-                                        contentStyle={{ backgroundColor: 'rgba(15, 23, 42, 0.9)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '12px', backdropFilter: 'blur(16px)' }}
+                                        contentStyle={{ backgroundColor: 'rgba(15, 23, 42, 0.94)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '12px', backdropFilter: 'blur(16px)' }}
                                         itemStyle={{ color: '#f8fafc', fontSize: '12px', fontWeight: 'bold' }}
                                         labelStyle={{ color: '#94a3b8', fontSize: '11px', marginBottom: '4px' }}
                                         formatter={(value) => [formatBytes(Number(value || 0)), '']}
@@ -224,34 +231,30 @@ export default function DataUsageHistoryWidget({ density = 'compact' }: DataUsag
                             </ResponsiveContainer>
                         )}
                     </div>
+                )}
+            </div>
 
-                    {/* Summary Footer */}
-                    <div className="grid grid-cols-2 gap-3 mt-4 pt-4 border-t border-white/[0.05]">
-                        <div className="flex items-center gap-3">
-                            <div className="w-8 h-8 rounded-full bg-indigo-500/10 flex items-center justify-center">
-                                <Download size={14} className="text-indigo-400" />
-                            </div>
-                            <div>
-                                <span className="text-xs font-semibold text-slate-500 uppercase tracking-wider block">DL ({days}d)</span>
-                                <span className="text-sm font-bold text-slate-200">
-                                    {loading && data.length === 0 ? '...' : formatBytes(totalDL)}
-                                </span>
-                            </div>
-                        </div>
-                        <div className="flex items-center gap-3">
-                            <div className="w-8 h-8 rounded-full bg-teal-500/10 flex items-center justify-center">
-                                <Upload size={14} className="text-teal-400" />
-                            </div>
-                            <div>
-                                <span className="text-xs font-semibold text-slate-500 uppercase tracking-wider block">UL ({days}d)</span>
-                                <span className="text-sm font-bold text-slate-200">
-                                    {loading && data.length === 0 ? '...' : formatBytes(totalUL)}
-                                </span>
-                            </div>
-                        </div>
+            {/* Summary Footer */}
+            <div className="grid grid-cols-2 gap-2.5 mt-3.5">
+                <div className="bg-black/30 rounded-xl px-3.5 py-2.5 border border-white/[0.04] flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                        <Download size={13} className="text-indigo-400 shrink-0" />
+                        <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">DL ({days}d)</span>
                     </div>
+                    <span className="text-xs font-mono font-bold text-indigo-300 tabular-nums">
+                        {loading && data.length === 0 ? '...' : formatBytes(totalDL)}
+                    </span>
                 </div>
-            )}
+                <div className="bg-black/30 rounded-xl px-3.5 py-2.5 border border-white/[0.04] flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                        <Upload size={13} className="text-teal-400 shrink-0" />
+                        <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">UL ({days}d)</span>
+                    </div>
+                    <span className="text-xs font-mono font-bold text-teal-300 tabular-nums">
+                        {loading && data.length === 0 ? '...' : formatBytes(totalUL)}
+                    </span>
+                </div>
+            </div>
         </div>
     );
 }

@@ -6,6 +6,7 @@ import { apiFetch } from '@/lib/fetcher';
 import { useState } from 'react';
 import { useToast } from '@/contexts/ToastContext';
 import type { AIProposedAction } from '@/types/api';
+import FlowAiMarkdown from '@/components/ui/FlowAiMarkdown';
 
 interface ServiceLogsModalProps {
     serviceName: string | null;
@@ -151,10 +152,10 @@ export default function ServiceLogsModal({ serviceName, onClose }: ServiceLogsMo
                                     )}
                                 </h4>
                             </div>
-                            <p className="text-xs text-slate-400 mt-2 font-mono leading-relaxed bg-black/20 p-2 rounded border border-white/5">
-                                <span className="text-slate-500 font-sans font-semibold mb-1 block">Root Cause Pattern:</span>
-                                {aiAnalysis.rootCause}
-                            </p>
+                            <div className="text-xs text-slate-300 mt-2 leading-relaxed bg-black/20 p-3 rounded-lg border border-white/5">
+                                <span className="text-slate-500 font-sans font-semibold mb-1.5 block">Root Cause Pattern:</span>
+                                <FlowAiMarkdown content={aiAnalysis.rootCause} />
+                            </div>
                             <p className="text-xs text-indigo-300 mt-2 font-medium">
                                 <span className="text-slate-500 font-sans font-semibold mb-1 block">Suggested Remediation:</span>
                                 {aiAnalysis.recommendation}

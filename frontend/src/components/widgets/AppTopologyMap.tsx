@@ -39,11 +39,15 @@ export default function AppTopologyMap({ topologyData, density = 'compact' }: Ap
     const nodesRef = useRef<D3Node[]>([]);
     const linksRef = useRef<D3Link[]>([]);
 
+    const serviceEntries = Object.entries(topologyData || {});
+    const runningServices = serviceEntries.filter(([, s]) => s.status === 'running').length;
+    const totalNodesCount = realTopology?.nodes?.length || Math.max(1, serviceEntries.length + 1);
+
     useEffect(() => {
         if (!svgRef.current) return;
 
-        const width = svgRef.current.parentElement?.clientWidth || 800;
-        const height = isImmersive ? 600 : 400;
+        const width = svgRef.current.parentElement?.clientWidth || 720;
+        const height = isImmersive ? 360 : 260;
         const isTouch = typeof window !== 'undefined' && (window.matchMedia('(pointer: coarse)').matches || document.documentElement.dataset.touchMode === 'true');
 
         // 1. Setup SVG only once
@@ -51,7 +55,6 @@ export default function AppTopologyMap({ topologyData, density = 'compact' }: Ap
             .attr('width', '100%')
             .attr('height', height)
             .attr('viewBox', [0, 0, width, height]);
-
 
         if (svg.select('g.container').empty()) {
             const container = svg.append("g").attr("class", "container");
@@ -71,23 +74,23 @@ export default function AppTopologyMap({ topologyData, density = 'compact' }: Ap
         // 2. Initialize simulation only once
         if (!simulationRef.current) {
             simulationRef.current = d3.forceSimulation<D3Node, D3Link>()
-                .force("link", d3.forceLink<D3Node, D3Link>().id((d) => (d as D3Node).id).distance(isImmersive ? 150 : 120))
-                .force("charge", d3.forceManyBody().strength(isImmersive ? -600 : -400))
+                .force("link", d3.forceLink<D3Node, D3Link>().id((d) => (d as D3Node).id).distance(isImmersive ? 130 : 95))
+                .force("charge", d3.forceManyBody().strength(isImmersive ? -480 : -320))
                 .force("center", d3.forceCenter(width / 2, height / 2))
-                .force("collide", d3.forceCollide().radius(isImmersive ? 50 : 40));
+                .force("collide", d3.forceCollide().radius(isImmersive ? 42 : 32));
 
-            // Tooltip setup (once)
             if (d3.select("body").select(".d3-tooltip").empty()) {
                 d3.select("body").append("div")
                     .attr("class", "d3-tooltip absolute opacity-0 bg-slate-900 border border-white/10 p-2 rounded-lg text-xs text-white shadow-xl pointer-events-none z-[100] font-mono");
             }
+        } else {
+            simulationRef.current.force("center", d3.forceCenter(width / 2, height / 2));
         }
 
         const simulation = simulationRef.current;
 
         // 3. Update Data Pattern
         const updateGraph = () => {
-            // Build current node set from live backend runtime topology
             const newNodes: D3Node[] = [];
             const newLinks: D3Link[] = [];
 
@@ -104,7 +107,6 @@ export default function AppTopologyMap({ topologyData, density = 'compact' }: Ap
                 newNodes.push({ id: 'AetherFlow API', group: 1, status: 'running' });
             }
 
-            // Also attach active system services from props if not already in graph
             if (topologyData) {
                 const apiNodeId = newNodes.find(n => n.group === 1)?.id || 'AetherFlow API';
                 Object.entries(topologyData).forEach(([name, info]) => {
@@ -115,7 +117,6 @@ export default function AppTopologyMap({ topologyData, density = 'compact' }: Ap
                 });
             }
 
-            // Diffing nodes to preserve coordinates (Crucial fix for jitter)
             const existingNodes = nodesRef.current;
             const mergedNodes = newNodes.map(newNode => {
                 const existing = existingNodes.find(en => en.id === newNode.id);
@@ -125,11 +126,9 @@ export default function AppTopologyMap({ topologyData, density = 'compact' }: Ap
                 return newNode;
             });
 
-            // Update refs
             nodesRef.current = mergedNodes;
             linksRef.current = newLinks.map(l => ({ ...l }));
 
-            // 4. Bind to D3
             const container = svg.select('g.container');
             const tooltip = d3.select("body").select(".d3-tooltip");
 
@@ -146,14 +145,14 @@ export default function AppTopologyMap({ topologyData, density = 'compact' }: Ap
                 .data(mergedNodes, (d) => d.id)
                 .join(
                     enter => enter.append("circle")
-                        .attr("r", (d) => d.group === 1 ? (isTouch ? 18 : 14) : (isTouch ? 12 : 8))
-                        .attr("stroke", "#1e293b")
+                        .attr("r", (d) => d.group === 1 ? (isTouch ? 16 : 12) : (isTouch ? 11 : 7.5))
+                        .attr("stroke", "#0f172a")
                         .attr("stroke-width", 1.5)
                         .call(d3.drag<SVGCircleElement, D3Node>()
                             .on("start", dragstarted)
                             .on("drag", dragged)
                             .on("end", dragended)),
-                    update => update.attr("r", (d) => d.group === 1 ? (isTouch ? 18 : 14) : (isTouch ? 12 : 8)),
+                    update => update.attr("r", (d) => d.group === 1 ? (isTouch ? 16 : 12) : (isTouch ? 11 : 7.5)),
                     exit => exit.remove()
                 )
                 .attr("fill", (d) => {
@@ -173,14 +172,14 @@ export default function AppTopologyMap({ topologyData, density = 'compact' }: Ap
                 tooltip.html(`<strong>${d.id}</strong><br/>Status: <span style="color: ${d.status === 'running' ? '#4ade80' : '#f87171'}">${d.status}</span>`)
                     .style("left", (pageX + 10) + "px")
                     .style("top", (pageY - 28) + "px");
-                d3.select(event.currentTarget as SVGCircleElement).attr("stroke", "#fff").attr("stroke-width", 3);
+                d3.select(event.currentTarget as SVGCircleElement).attr("stroke", "#fff").attr("stroke-width", 2.5);
             };
 
             node.on("mouseover", showNodeTooltip)
                 .on("click", showNodeTooltip)
                 .on("mouseout", (event) => {
                     tooltip.transition().duration(350).style("opacity", 0);
-                    d3.select(event.currentTarget).attr("stroke", "#1e293b").attr("stroke-width", 1.5);
+                    d3.select(event.currentTarget).attr("stroke", "#0f172a").attr("stroke-width", 1.5);
                 });
 
             const label = container.select("g.labels")
@@ -189,18 +188,15 @@ export default function AppTopologyMap({ topologyData, density = 'compact' }: Ap
                 .join("text")
                 .text((d) => d.id)
                 .attr('font-size', '10px')
-                .attr('font-weight', 'bold')
-                .attr('fill', '#94a3b8')
-                .attr('dx', 15)
-                .attr('dy', 4)
+                .attr('font-weight', '600')
+                .attr('fill', '#cbd5e1')
+                .attr('dx', 13)
+                .attr('dy', 3.5)
                 .style('pointer-events', 'none');
 
-            // Update simulation
             simulation.nodes(mergedNodes);
             simulation.force<d3.ForceLink<D3Node, D3Link>>("link")?.links(linksRef.current);
-            
-            // Re-heat simulation slightly to let it settle if new nodes added, 
-            // but don't full reset if just updating status.
+
             if (mergedNodes.length !== existingNodes.length) {
                 simulation.alpha(0.3).restart();
             }
@@ -244,15 +240,49 @@ export default function AppTopologyMap({ topologyData, density = 'compact' }: Ap
     }, [topologyData, isImmersive, realTopology]);
 
     return (
-        <div className={`glass-card rounded-2xl relative overflow-hidden backdrop-blur-xl h-full transition-all duration-300 ${isImmersive ? 'p-6' : 'p-5'}`}>
-            <div className={`flex items-center justify-between relative z-10 ${isImmersive ? 'mb-6' : 'mb-4'}`}>
-                <h2 className={`${isImmersive ? 'text-lg' : 'text-sm'} font-semibold text-slate-200 flex items-center gap-2`}>
-                    <Network size={isImmersive ? 18 : 16} className="text-purple-400" /> App Topology Map
-                </h2>
-                <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider">Live Nodes</span>
+        <div className={`rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl relative overflow-hidden flex flex-col justify-between h-full ${isImmersive ? 'p-6' : 'p-5'}`}>
+            <div>
+                <div className="flex flex-wrap items-center justify-between gap-2 pb-3 mb-3.5 border-b border-white/[0.06] relative z-10">
+                    <div className="flex items-center gap-2.5">
+                        <div className="h-8 w-8 rounded-lg bg-purple-500/10 border border-purple-500/20 flex items-center justify-center text-purple-400 shrink-0">
+                            <Network size={16} />
+                        </div>
+                        <div>
+                            <h2 className="text-sm font-bold text-slate-100 tracking-tight leading-none">Service Topology Mesh</h2>
+                            <p className="text-[11px] text-slate-500 mt-1">
+                                Live daemon &amp; reverse-proxy interconnect graph
+                            </p>
+                        </div>
+                    </div>
+                    <div className="flex items-center gap-3 text-[10px] font-semibold text-slate-400">
+                        <span className="inline-flex items-center gap-1.5">
+                            <span className="w-2 h-2 rounded-full bg-indigo-500" /> Core
+                        </span>
+                        <span className="inline-flex items-center gap-1.5">
+                            <span className="w-2 h-2 rounded-full bg-emerald-500" /> Active
+                        </span>
+                        <span className="inline-flex items-center gap-1.5">
+                            <span className="w-2 h-2 rounded-full bg-amber-500" /> Managed
+                        </span>
+                    </div>
+                </div>
+
+                <div className="w-full bg-black/30 rounded-xl border border-white/[0.04] overflow-hidden">
+                    <svg ref={svgRef} className="w-full cursor-grab active:cursor-grabbing touch-none block" />
+                </div>
             </div>
-            <div className="w-full bg-slate-950/30 rounded-xl border border-white/5 overflow-hidden">
-                <svg ref={svgRef} className="w-full cursor-grab active:cursor-grabbing touch-none" />
+
+            <div className="grid grid-cols-2 gap-2.5 mt-3.5">
+                <div className="bg-black/30 rounded-xl px-3.5 py-2.5 border border-white/[0.04] flex items-center justify-between">
+                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Indexed Nodes</span>
+                    <span className="text-xs font-mono font-bold text-slate-200 tabular-nums">{totalNodesCount} Nodes</span>
+                </div>
+                <div className="bg-black/30 rounded-xl px-3.5 py-2.5 border border-white/[0.04] flex items-center justify-between">
+                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Healthy Daemons</span>
+                    <span className="text-xs font-mono font-bold text-emerald-400 tabular-nums">
+                        {runningServices} / {serviceEntries.length || runningServices} Online
+                    </span>
+                </div>
             </div>
         </div>
     );

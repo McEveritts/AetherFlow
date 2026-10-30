@@ -21,6 +21,10 @@ func TestIngressConfigs_PersistenceAndSync(t *testing.T) {
 	tempDir := t.TempDir()
 	dbPath := filepath.Join(tempDir, "ingress_test.sqlite")
 	t.Setenv("DB_PATH", dbPath)
+	t.Setenv("AETHERFLOW_CONFIG_ROOT", tempDir)
+	t.Setenv("AETHERFLOW_MASTER_CREDS_FILE", filepath.Join(tempDir, ".master.creds"))
+	t.Setenv("AETHERFLOW_HOSTS_FILE", filepath.Join(tempDir, "hosts"))
+	t.Setenv("AETHERFLOW_RUNNER_SOCK", filepath.Join(tempDir, "nonexistent-runner.sock"))
 	if db.DB != nil {
 		_ = db.DB.Close()
 	}

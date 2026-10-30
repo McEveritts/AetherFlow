@@ -24,15 +24,13 @@ type masterCredsPayload struct {
 }
 
 func masterCredsPaths() []string {
-	var paths []string
 	if custom := strings.TrimSpace(os.Getenv("AETHERFLOW_MASTER_CREDS_FILE")); custom != "" {
-		paths = append(paths, custom)
+		return []string{custom}
 	}
-	paths = append(paths,
+	return []string{
 		resolveFilesystemPath("/var/lib/aetherflow/.master.creds"),
 		resolveFilesystemPath("/opt/AetherFlow/backend/data/.master.creds"),
-	)
-	return paths
+	}
 }
 
 // SaveMasterCredentials persists the master administrator username and password so that

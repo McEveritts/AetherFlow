@@ -116,6 +116,15 @@ func runChatSession(c *gin.Context, systemPrompt string, modelOverride string, p
 	prompt := systemPrompt
 	if prompt == "" {
 		prompt = ps.SystemPrompt
+		if role, exists := c.Get("user_role"); exists && role == "admin" {
+			var sb strings.Builder
+			sb.WriteString(ps.SystemPrompt)
+			sb.WriteString("\n\nLive system telemetry and recent logs from this AetherFlow server are attached below. Reference these metrics and logs directly when answering infrastructure, performance, or service health questions:\n\n")
+			sb.WriteString(getSystemMetricsContext())
+			sb.WriteString("\n")
+			sb.WriteString(getRecentLogContext(20))
+			prompt = sb.String()
+		}
 	}
 
 	// 4. Create provider and execute chat
