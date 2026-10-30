@@ -14,6 +14,11 @@ const WINDOW_SIZES: Record<TimeWindow, number> = {
     '1h': 1800,  // 1 hour
 };
 
+function roundTwo(val: number): number {
+    if (!Number.isFinite(val)) return 0;
+    return Number(val.toFixed(2));
+}
+
 function parseSpeed(speed: string): number {
     if (!speed) return 0;
     const match = speed.match(/([\d.]+)\s*([KMGTPE]?)B\/s/i);
@@ -21,7 +26,7 @@ function parseSpeed(speed: string): number {
     const val = parseFloat(match[1]);
     const unit = match[2].toUpperCase();
     const multipliers: Record<string, number> = { '': 1, 'K': 1024, 'M': 1048576, 'G': 1073741824 };
-    return val * (multipliers[unit] || 1);
+    return roundTwo(val * (multipliers[unit] || 1));
 }
 
 // Helper: slice history to the visible window
@@ -81,15 +86,15 @@ const useHistoryStore = create<{
 
         set((state) => {
             const memPct = metrics.memory && metrics.memory.total > 0
-                ? (metrics.memory.used / metrics.memory.total) * 100
+                ? roundTwo((metrics.memory.used / metrics.memory.total) * 100)
                 : 0;
             const newHistory: MetricsHistory = {
-                cpu: push(state.history.cpu, metrics.cpu_usage),
+                cpu: push(state.history.cpu, roundTwo(metrics.cpu_usage)),
                 memory: push(state.history.memory, memPct),
                 netDown: push(state.history.netDown, parseSpeed(metrics.network?.down as string)),
                 netUp: push(state.history.netUp, parseSpeed(metrics.network?.up as string)),
-                diskRead: push(state.history.diskRead, metrics.disk_io?.read_bytes_sec || 0),
-                diskWrite: push(state.history.diskWrite, metrics.disk_io?.write_bytes_sec || 0),
+                diskRead: push(state.history.diskRead, roundTwo(metrics.disk_io?.read_bytes_sec || 0)),
+                diskWrite: push(state.history.diskWrite, roundTwo(metrics.disk_io?.write_bytes_sec || 0)),
                 timestamps: push(state.history.timestamps, now),
             };
             return {
@@ -140,15 +145,15 @@ export function useMetrics() {
     const isConnected = connectionState === 'CONNECTED' || connectionState === 'FALLBACK' || connectionState === 'DEGRADED';
 
     const effectiveHistory: MetricsHistory = (visibleHistory.timestamps.length === 0 && metrics) ? {
-        cpu: [metrics.cpu_usage, metrics.cpu_usage],
+        cpu: [roundTwo(metrics.cpu_usage), roundTwo(metrics.cpu_usage)],
         memory: [
-            metrics.memory && metrics.memory.total > 0 ? (metrics.memory.used / metrics.memory.total) * 100 : 0,
-            metrics.memory && metrics.memory.total > 0 ? (metrics.memory.used / metrics.memory.total) * 100 : 0,
+            metrics.memory && metrics.memory.total > 0 ? roundTwo((metrics.memory.used / metrics.memory.total) * 100) : 0,
+            metrics.memory && metrics.memory.total > 0 ? roundTwo((metrics.memory.used / metrics.memory.total) * 100) : 0,
         ],
         netDown: [parseSpeed(metrics.network?.down as string), parseSpeed(metrics.network?.down as string)],
         netUp: [parseSpeed(metrics.network?.up as string), parseSpeed(metrics.network?.up as string)],
-        diskRead: [metrics.disk_io?.read_bytes_sec || 0, metrics.disk_io?.read_bytes_sec || 0],
-        diskWrite: [metrics.disk_io?.write_bytes_sec || 0, metrics.disk_io?.write_bytes_sec || 0],
+        diskRead: [roundTwo(metrics.disk_io?.read_bytes_sec || 0), roundTwo(metrics.disk_io?.read_bytes_sec || 0)],
+        diskWrite: [roundTwo(metrics.disk_io?.write_bytes_sec || 0), roundTwo(metrics.disk_io?.write_bytes_sec || 0)],
         timestamps: [0, 1],
     } : visibleHistory;
 

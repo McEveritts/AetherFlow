@@ -132,26 +132,27 @@ export default function PredictionsCard() {
         if (!metricsHistory || metricsHistory.length === 0) {
             return [0, 0];
         }
+        const roundTwo = (v: number) => (Number.isFinite(v) ? Number(v.toFixed(2)) : 0);
         switch (metricType) {
             case 'cpu':
-                return metricsHistory.map(s => Number(s.cpu_avg) || 0);
+                return metricsHistory.map(s => roundTwo(Number(s.cpu_avg) || 0));
             case 'memory':
                 return metricsHistory.map(s => {
                     const total = Number(s.mem_total_gb) || 0;
                     const used = Number(s.mem_used_gb) || 0;
-                    return total > 0 ? (used / total) * 100 : used;
+                    return roundTwo(total > 0 ? (used / total) * 100 : used);
                 });
             case 'disk':
                 return metricsHistory.map(s => {
                     const read = Number(s.disk_read_bps) || 0;
                     const write = Number(s.disk_write_bps) || 0;
-                    return (read + write) / 1024;
+                    return roundTwo((read + write) / 1024);
                 });
             case 'network':
                 return metricsHistory.map(s => {
                     const rx = Number(s.net_rx_bytes) || 0;
                     const tx = Number(s.net_tx_bytes) || 0;
-                    return (rx + tx) / 1024;
+                    return roundTwo((rx + tx) / 1024);
                 });
         }
     };
