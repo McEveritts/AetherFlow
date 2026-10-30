@@ -2,6 +2,9 @@ name: Production Release Pipeline
 
 on:
   push:
+    branches:
+      - nightly
+      - Nightly
     tags:
       - 'v*'
   workflow_dispatch:
@@ -75,8 +78,10 @@ jobs:
         run: |
           if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
             RELEASE_TAG="${GITHUB_REF_NAME}"
+            VERSION_STAMP="${RELEASE_TAG}"
           else
             RELEASE_TAG="nightly"
+            VERSION_STAMP="nightly-${GITHUB_SHA::7}"
           fi
           echo "RELEASE_TAG=${RELEASE_TAG}" >> "$GITHUB_ENV"
 
@@ -85,14 +90,14 @@ jobs:
 
           cd backend
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -buildvcs=false \
-            -ldflags="-s -w -X main.version=${RELEASE_TAG}" \
+            -ldflags="-s -w -X main.version=${VERSION_STAMP}" \
             -o "${STAGE_DIR}/aetherflow-api" .
           cd ..
 
           cp -R backend/config "${STAGE_DIR}/config"
           cp -R packages "${STAGE_DIR}/packages"
           cp -R deploy "${STAGE_DIR}/deploy"
-          echo "${RELEASE_TAG}" > "${STAGE_DIR}/.version"
+          echo "${VERSION_STAMP}" > "${STAGE_DIR}/.version"
           chmod +x "${STAGE_DIR}/aetherflow-api" "${STAGE_DIR}/deploy/release-manager.sh"
 
           mkdir -p release-dist

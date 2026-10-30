@@ -157,15 +157,17 @@ func CheckUpdate(c *gin.Context) {
 
 	switch channel {
 	case "nightly":
-		resp, reqErr := httpClient.Get("https://api.github.com/repos/" + githubRepo + "/commits/master")
-		if reqErr != nil {
-			slog.Error("[updater] nightly commits API request failed", "error", reqErr)
-		} else {
-			defer resp.Body.Close()
+		for _, branch := range []string{"nightly", "Nightly", "master"} {
+			resp, reqErr := httpClient.Get("https://api.github.com/repos/" + githubRepo + "/commits/" + branch)
+			if reqErr != nil {
+				slog.Error("[updater] nightly commits API request failed", "branch", branch, "error", reqErr)
+				continue
+			}
 			if resp.StatusCode == 200 {
 				var commit GitHubCommit
 				bodyBytes, _ := io.ReadAll(resp.Body)
-				if jsonErr := json.Unmarshal(bodyBytes, &commit); jsonErr == nil {
+				resp.Body.Close()
+				if jsonErr := json.Unmarshal(bodyBytes, &commit); jsonErr == nil && commit.Sha != "" {
 					shortSha := commit.Sha
 					if len(shortSha) > 7 {
 						shortSha = shortSha[:7]
@@ -174,9 +176,11 @@ func CheckUpdate(c *gin.Context) {
 					message = commit.Commit.Message
 					htmlUrl = commit.HtmlUrl
 					updateAvailable = (currentVersion != latestVersion)
+					break
 				}
 			} else {
-				slog.Warn("[updater] nightly commits API returned non-200", "status", resp.StatusCode)
+				resp.Body.Close()
+				slog.Warn("[updater] nightly commits API returned non-200", "branch", branch, "status", resp.StatusCode)
 			}
 		}
 

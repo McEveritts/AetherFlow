@@ -193,19 +193,39 @@ pull_prebuilt_artifact() {
 
     log_info "SHA-256 checksum verified. Extracting into ${RELEASE_DIR}..."
     tar -xzf "${tmp_dir}/${ARTIFACT_NAME}" -C "${RELEASE_DIR}"
-    echo "${tag}" > "${RELEASE_DIR}/.version"
+    if [[ ! -s "${RELEASE_DIR}/.version" ]]; then
+        echo "${tag}" > "${RELEASE_DIR}/.version"
+    fi
     chmod +x "${RELEASE_DIR}/aetherflow-api"
     rm -rf "${tmp_dir}"
     return 0
 }
 
 build_from_source() {
-    log_info "Building single-binary release from source (${GIT_REMOTE}/${GIT_BRANCH})..."
+    local target_branch="${GIT_BRANCH}"
+    if [[ "${CHANNEL}" == "nightly" ]]; then
+        target_branch="nightly"
+    fi
+    log_info "Building single-binary release from source (${GIT_REMOTE}/${target_branch})..."
     cd "${REPO_DIR}" || log_fatal "Repository directory not found: ${REPO_DIR}"
-    git fetch "${GIT_REMOTE}" "${GIT_BRANCH}" --tags >> "${LOG_FILE}" 2>&1
+    if ! git fetch "${GIT_REMOTE}" "${target_branch}" --tags >> "${LOG_FILE}" 2>&1; then
+        if [[ "${CHANNEL}" == "nightly" ]] && git fetch "${GIT_REMOTE}" "Nightly" --tags >> "${LOG_FILE}" 2>&1; then
+            target_branch="Nightly"
+        else
+            log_warn "Branch ${target_branch} not found on ${GIT_REMOTE}; falling back to ${GIT_BRANCH}."
+            target_branch="${GIT_BRANCH}"
+            git fetch "${GIT_REMOTE}" "${target_branch}" --tags >> "${LOG_FILE}" 2>&1
+        fi
+    fi
+    git checkout -f "${GIT_REMOTE}/${target_branch}" >> "${LOG_FILE}" 2>&1 || true
+    local source_sha
+    source_sha="$(git rev-parse --short=7 HEAD 2>/dev/null || echo 'unknown')"
 
     rsync -a --exclude='.git' --exclude='node_modules' --exclude='.next' --exclude='*.sqlite' \
         "${REPO_DIR}/" "${RELEASE_DIR}/" >> "${LOG_FILE}" 2>&1
+    if [[ "${CHANNEL}" == "nightly" ]]; then
+        echo "nightly-${source_sha}" > "${RELEASE_DIR}/.version"
+    fi
 
     log_info "Building Next.js static export (NEXT_STATIC_EXPORT=1)..."
     cd "${RELEASE_DIR}/frontend" || log_fatal "Frontend directory missing."

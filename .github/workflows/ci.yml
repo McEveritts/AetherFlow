@@ -6,11 +6,15 @@ on:
       - main
       - master
       - development
+      - nightly
+      - Nightly
   push:
     branches:
       - main
       - master
       - development
+      - nightly
+      - Nightly
 
 permissions:
   contents: read
