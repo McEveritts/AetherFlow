@@ -1,9 +1,10 @@
-import { Settings, Sparkles, ChevronRight, DownloadCloud, AlertCircle, Eye, EyeOff, Key, Monitor, Globe, Clock, LayoutDashboard, Radio, HardDriveDownload, Shield, KeyRound, RefreshCw, UserCircle, Bell, Cpu, CheckCircle2, ArrowUpRight, Terminal, Layers, Save } from 'lucide-react';
+import { Settings, Sparkles, DownloadCloud, AlertCircle, Eye, EyeOff, Key, Monitor, Globe, Clock, LayoutDashboard, Radio, HardDriveDownload, Shield, KeyRound, RefreshCw, UserCircle, Bell, Cpu, CheckCircle2, ArrowUpRight, Terminal, Layers, Save } from 'lucide-react';
 import { AI_MODELS, ALL_MODEL_IDS, resolveProviderForModel } from '@/lib/ai-models';
 import type { AIProviderID } from '@/lib/ai-models';
 import { useState, FormEvent } from 'react';
 import useSWR from 'swr';
 import dynamic from 'next/dynamic';
+import GlassSelect, { type GlassSelectOption } from '@/components/ui/GlassSelect';
 
 const BackupTab = dynamic(() => import('@/components/tabs/BackupTab'), { ssr: false });
 const SecurityTab = dynamic(() => import('@/components/tabs/SecurityTab'), { ssr: false });
@@ -56,6 +57,56 @@ const PROVIDER_CARDS: {
         accent: 'text-purple-400',
         activeBorder: 'border-purple-500/40',
         activeBg: 'bg-purple-500/10',
+    },
+];
+
+const DEFAULT_DASHBOARD_OPTIONS: GlassSelectOption[] = [
+    { value: 'overview', label: 'Overview / Metrics', description: 'Live hardware telemetry and system vitals' },
+    { value: 'services', label: 'Services', description: 'Active systemd daemons and container processes' },
+    { value: 'marketplace', label: 'Marketplace', description: 'One-click self-hosted application catalog' },
+    { value: 'fileshare', label: 'Cloud Files', description: 'Browser-based storage and media explorer' },
+    { value: 'ai', label: 'AI Chat', description: 'FlowAI autonomous infrastructure assistant' },
+    { value: 'backups', label: 'Backups', description: 'Snapshots and disaster recovery archives' },
+    { value: 'security', label: 'Security', description: 'Zero-trust policies, sessions, and firewall' },
+];
+
+const TIMEZONE_OPTIONS: GlassSelectOption[] = [
+    { value: 'UTC', label: 'UTC', badge: 'Default', badgeVariant: 'indigo' },
+    { value: 'America/New_York', label: 'America/New_York', badge: 'EST/EDT', badgeVariant: 'slate' },
+    { value: 'America/Chicago', label: 'America/Chicago', badge: 'CST/CDT', badgeVariant: 'slate' },
+    { value: 'America/Denver', label: 'America/Denver', badge: 'MST/MDT', badgeVariant: 'slate' },
+    { value: 'America/Los_Angeles', label: 'America/Los_Angeles', badge: 'PST/PDT', badgeVariant: 'slate' },
+    { value: 'Europe/London', label: 'Europe/London', badge: 'GMT/BST', badgeVariant: 'slate' },
+    { value: 'Europe/Berlin', label: 'Europe/Berlin', badge: 'CET/CEST', badgeVariant: 'slate' },
+    { value: 'Asia/Tokyo', label: 'Asia/Tokyo', badge: 'JST', badgeVariant: 'slate' },
+    { value: 'Australia/Sydney', label: 'Australia/Sydney', badge: 'AEST/AEDT', badgeVariant: 'slate' },
+];
+
+const LANGUAGE_OPTIONS: GlassSelectOption[] = [
+    { value: 'en', label: 'English', badge: 'EN', badgeVariant: 'indigo' },
+    { value: 'zh', label: '中文 (Chinese)', badge: 'ZH', badgeVariant: 'slate' },
+    { value: 'es', label: 'Español (Spanish)', badge: 'ES', badgeVariant: 'slate' },
+    { value: 'de', label: 'Deutsch (German)', badge: 'DE', badgeVariant: 'slate' },
+    { value: 'fr', label: 'Français (French)', badge: 'FR', badgeVariant: 'slate' },
+    { value: 'dk', label: 'Dansk (Danish)', badge: 'DK', badgeVariant: 'slate' },
+];
+
+const UPDATE_CHANNEL_OPTIONS: GlassSelectOption[] = [
+    {
+        value: 'stable',
+        label: 'Stable',
+        description: 'Verified production releases with atomic rollback protection',
+        badge: 'Recommended',
+        badgeVariant: 'emerald',
+        dotColor: 'bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.85)]',
+    },
+    {
+        value: 'nightly',
+        label: 'Nightly',
+        description: 'Bleeding-edge builds directly from the nightly branch',
+        badge: 'Unstable',
+        badgeVariant: 'amber',
+        dotColor: 'bg-amber-400 shadow-[0_0_8px_rgba(251,191,36,0.85)]',
     },
 ];
 
@@ -144,7 +195,7 @@ export default function SettingsTab() {
                 if (data.ollamaEndpoint) setOllamaEndpoint(data.ollamaEndpoint);
                 if (data.anthropicEndpoint) setAnthropicEndpoint(data.anthropicEndpoint);
                 if (data.timezone) setTimezone(data.timezone);
-                if (data.updateChannel) setUpdateChannel(data.updateChannel);
+                if (data.updateChannel) setUpdateChannel(data.updateChannel === 'nightly' ? 'nightly' : 'stable');
                 if (data.defaultDashboard) setDefaultDashboard(data.defaultDashboard);
                 if (typeof data.baseDomain === 'string') setBaseDomain(data.baseDomain);
             }
@@ -378,7 +429,7 @@ export default function SettingsTab() {
                         {activeTab === 'preferences' && (
                             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 animate-fade-in w-full">
                                 {/* LEFT CARD: Navigation & Localization */}
-                                <div className="glass-panel p-6 rounded-2xl border border-white/[0.06] flex flex-col justify-between space-y-6">
+                                <div className="glass-panel p-6 rounded-2xl border border-white/[0.06] flex flex-col justify-between space-y-6 relative z-20">
                                     <div className="space-y-6">
                                         <div className="flex items-center justify-between border-b border-white/[0.06] pb-4">
                                             <div className="flex items-center gap-3">
@@ -402,22 +453,12 @@ export default function SettingsTab() {
                                                     <span className="text-xs font-mono uppercase tracking-wider text-slate-500">Post-Login Route</span>
                                                 </div>
                                                 <p className="text-xs text-slate-500">Select the default view presented immediately after authentication.</p>
-                                                <div className="relative">
-                                                    <select
-                                                        value={defaultDashboard}
-                                                        onChange={(e) => setDefaultDashboard(e.target.value)}
-                                                        className="obs-touch-target-standard w-full bg-slate-900 border border-white/10 rounded-xl px-4 py-3 text-slate-200 text-sm focus:outline-none focus:border-indigo-500/50 transition-colors appearance-none cursor-pointer"
-                                                    >
-                                                        <option value="overview">Overview / Metrics</option>
-                                                        <option value="services">Services</option>
-                                                        <option value="marketplace">Marketplace</option>
-                                                        <option value="fileshare">Cloud Files</option>
-                                                        <option value="ai">AI Chat</option>
-                                                        <option value="backups">Backups</option>
-                                                        <option value="security">Security</option>
-                                                    </select>
-                                                    <ChevronRight size={16} className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-500 rotate-90 pointer-events-none" />
-                                                </div>
+                                                <GlassSelect
+                                                    value={defaultDashboard}
+                                                    onChange={setDefaultDashboard}
+                                                    options={DEFAULT_DASHBOARD_OPTIONS}
+                                                    ariaLabel="Default Dashboard"
+                                                />
                                             </div>
 
                                             {/* Timezone */}
@@ -429,24 +470,12 @@ export default function SettingsTab() {
                                                     <span className="text-xs font-mono uppercase tracking-wider text-slate-500">{timezone}</span>
                                                 </div>
                                                 <p className="text-xs text-slate-500">Set your local timezone for system telemetry, cron schedules, and audit logs.</p>
-                                                <div className="relative">
-                                                    <select
-                                                        value={timezone}
-                                                        onChange={(e) => setTimezone(e.target.value)}
-                                                        className="obs-touch-target-standard w-full bg-slate-900 border border-white/10 rounded-xl px-4 py-3 text-slate-200 text-sm focus:outline-none focus:border-indigo-500/50 transition-colors appearance-none cursor-pointer"
-                                                    >
-                                                        <option value="UTC">UTC (Default)</option>
-                                                        <option value="America/New_York">America/New_York (EST/EDT)</option>
-                                                        <option value="America/Chicago">America/Chicago (CST/CDT)</option>
-                                                        <option value="America/Denver">America/Denver (MST/MDT)</option>
-                                                        <option value="America/Los_Angeles">America/Los_Angeles (PST/PDT)</option>
-                                                        <option value="Europe/London">Europe/London (GMT/BST)</option>
-                                                        <option value="Europe/Berlin">Europe/Berlin (CET/CEST)</option>
-                                                        <option value="Asia/Tokyo">Asia/Tokyo (JST)</option>
-                                                        <option value="Australia/Sydney">Australia/Sydney (AEST/AEDT)</option>
-                                                    </select>
-                                                    <ChevronRight size={16} className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-500 rotate-90 pointer-events-none" />
-                                                </div>
+                                                <GlassSelect
+                                                    value={timezone}
+                                                    onChange={setTimezone}
+                                                    options={TIMEZONE_OPTIONS}
+                                                    ariaLabel="Timezone"
+                                                />
                                             </div>
 
                                             {/* Language */}
@@ -458,21 +487,12 @@ export default function SettingsTab() {
                                                     <span className="text-xs font-mono uppercase tracking-wider text-slate-500">{language.toUpperCase()}</span>
                                                 </div>
                                                 <p className="text-xs text-slate-500">Determine the primary display language of the AetherFlow interface.</p>
-                                                <div className="relative">
-                                                    <select
-                                                        value={language}
-                                                        onChange={(e) => setLanguage(e.target.value)}
-                                                        className="obs-touch-target-standard w-full bg-slate-900 border border-white/10 rounded-xl px-4 py-3 text-slate-200 text-sm focus:outline-none focus:border-indigo-500/50 transition-colors appearance-none cursor-pointer"
-                                                    >
-                                                        <option value="en">English</option>
-                                                        <option value="zh">中文 (Chinese)</option>
-                                                        <option value="es">Español (Spanish)</option>
-                                                        <option value="de">Deutsch (German)</option>
-                                                        <option value="fr">Français (French)</option>
-                                                        <option value="dk">Dansk (Danish)</option>
-                                                    </select>
-                                                    <ChevronRight size={16} className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-500 rotate-90 pointer-events-none" />
-                                                </div>
+                                                <GlassSelect
+                                                    value={language}
+                                                    onChange={setLanguage}
+                                                    options={LANGUAGE_OPTIONS}
+                                                    ariaLabel={t('language')}
+                                                />
                                             </div>
                                         </div>
                                     </div>
@@ -538,7 +558,7 @@ export default function SettingsTab() {
                                 {/* LEFT/MAIN COLUMN: Active Provider, Model Selector, and Credentials */}
                                 <div className="lg:col-span-7 space-y-6">
                                     {/* Active Provider & Default Model Card */}
-                                    <div className="glass-panel p-6 rounded-2xl border border-white/[0.06] space-y-6">
+                                    <div className="glass-panel p-6 rounded-2xl border border-white/[0.06] space-y-6 relative z-20">
                                         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/[0.06] pb-4">
                                             <div className="flex items-center gap-3">
                                                 <div className="p-2.5 rounded-xl bg-indigo-500/15 text-indigo-400 border border-indigo-500/20">
@@ -626,21 +646,21 @@ export default function SettingsTab() {
                                                 ))}
                                             </div>
 
-                                            <div className="relative pt-1">
-                                                <select
+                                            <div className="pt-1">
+                                                <GlassSelect
                                                     value={model}
-                                                    onChange={(e) => setModel(e.target.value)}
-                                                    className="obs-touch-target-standard w-full bg-slate-900 border border-white/10 rounded-xl px-4 py-3 text-slate-200 text-sm focus:outline-none focus:border-indigo-500/50 transition-colors appearance-none cursor-pointer"
-                                                >
-                                                    {Object.entries(AI_MODELS).map(([providerId, models]) => (
-                                                        <optgroup key={providerId} label={providerId.charAt(0).toUpperCase() + providerId.slice(1)}>
-                                                            {models.map((m) => (
-                                                                <option key={m.id} value={m.id}>{m.name}</option>
-                                                            ))}
-                                                        </optgroup>
-                                                    ))}
-                                                </select>
-                                                <ChevronRight size={16} className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-500 rotate-90 pointer-events-none" />
+                                                    onChange={setModel}
+                                                    ariaLabel={t('defaultModel')}
+                                                    options={Object.entries(AI_MODELS).flatMap(([providerId, models]) =>
+                                                        models.map((m) => ({
+                                                            value: m.id,
+                                                            label: m.name,
+                                                            badge: m.tier,
+                                                            badgeVariant: m.tier === 'latest' ? 'indigo' : 'slate',
+                                                            group: providerId.charAt(0).toUpperCase() + providerId.slice(1),
+                                                        }))
+                                                    )}
+                                                />
                                             </div>
                                         </div>
                                     </div>
@@ -972,7 +992,7 @@ export default function SettingsTab() {
                         {activeTab === 'system' && (
                             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 animate-fade-in w-full">
                                 {/* LEFT CARD: Release Channel & Update Status */}
-                                <div className="glass-panel p-6 rounded-2xl border border-white/[0.06] space-y-6">
+                                <div className="glass-panel p-6 rounded-2xl border border-white/[0.06] space-y-6 relative z-20">
                                     <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/[0.06] pb-4">
                                         <div className="flex items-center gap-3">
                                             <div className="p-2.5 rounded-xl bg-indigo-500/15 text-indigo-400 border border-indigo-500/20">
@@ -994,26 +1014,28 @@ export default function SettingsTab() {
                                         </button>
                                     </div>
 
-                                    <div className="p-4 rounded-xl bg-slate-950/50 border border-white/[0.06] space-y-2.5">
+                                    <div className="p-4 rounded-xl bg-slate-950/50 border border-white/[0.06] space-y-2.5 relative z-30">
                                         <div className="flex items-center justify-between">
                                             <label className="text-sm font-semibold text-slate-200 flex items-center gap-2">
                                                 <Radio size={15} className="text-indigo-400" /> Update Channel
                                             </label>
-                                            <span className="text-xs font-mono uppercase tracking-wider text-indigo-400">{updateChannel}</span>
+                                            <span
+                                                className={`text-[11px] font-mono font-bold uppercase tracking-wider px-2.5 py-0.5 rounded-full border ${
+                                                    updateChannel === 'nightly'
+                                                        ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+                                                        : 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+                                                }`}
+                                            >
+                                                {updateChannel}
+                                            </span>
                                         </div>
                                         <p className="text-xs text-slate-500">Select the release branch. Save configuration to apply channel changes.</p>
-                                        <div className="relative">
-                                            <select
-                                                value={updateChannel}
-                                                onChange={(e) => setUpdateChannel(e.target.value)}
-                                                className="obs-touch-target-standard w-full bg-slate-900 border border-white/10 rounded-xl px-4 py-3 text-slate-200 text-sm focus:outline-none focus:border-indigo-500/50 transition-colors appearance-none cursor-pointer"
-                                            >
-                                                <option value="stable">Stable (Recommended)</option>
-                                                <option value="beta">Beta (Early Access)</option>
-                                                <option value="nightly">Nightly (Unstable)</option>
-                                            </select>
-                                            <ChevronRight size={16} className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-500 rotate-90 pointer-events-none" />
-                                        </div>
+                                        <GlassSelect
+                                            value={updateChannel}
+                                            onChange={setUpdateChannel}
+                                            options={UPDATE_CHANNEL_OPTIONS}
+                                            ariaLabel="Update Channel"
+                                        />
                                     </div>
 
                                     <div className="space-y-4 text-sm text-slate-400">

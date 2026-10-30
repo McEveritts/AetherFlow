@@ -9,7 +9,7 @@
 # readiness probe with automatic rollback + SQLite PRAGMA integrity recovery.
 #
 # Usage:
-#   release-manager.sh deploy [--channel stable|beta|nightly] [--from-source] [--dry-run]
+#   release-manager.sh deploy [--channel stable|nightly] [--from-source] [--dry-run]
 #   release-manager.sh rollback [--dry-run]
 #   release-manager.sh cleanup [--dry-run]
 #   release-manager.sh migrate-systemd [--dry-run]
@@ -50,7 +50,7 @@ while [[ $# -gt 0 ]]; do
             CHANNEL="${2:-stable}"
             shift 2
             ;;
-        stable|beta|nightly)
+        stable|nightly)
             CHANNEL="$1"
             shift
             ;;
@@ -151,12 +151,8 @@ resolve_release_tag() {
     local releases_json
     releases_json="$(curl -sfL --max-time 15 "${api_url}" 2>/dev/null)" || return 1
 
-    if [[ "${channel}" == "beta" ]]; then
-        echo "${releases_json}" | grep -o '"tag_name"\s*:\s*"[^"]*"' | head -1 | cut -d'"' -f4
-    else
-        # Stable: first release without a pre-release hyphen in tag_name
-        echo "${releases_json}" | grep -o '"tag_name"\s*:\s*"[^"]*"' | cut -d'"' -f4 | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1
-    fi
+    # Stable: first release without a pre-release hyphen in tag_name
+    echo "${releases_json}" | grep -o '"tag_name"\s*:\s*"[^"]*"' | cut -d'"' -f4 | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1
 }
 
 pull_prebuilt_artifact() {
@@ -544,7 +540,7 @@ case "${COMMAND}" in
         migrate_systemd
         ;;
     *)
-        echo "Usage: $0 {deploy|rollback|cleanup|migrate-systemd} [--channel stable|beta|nightly] [--from-source] [--dry-run]"
+        echo "Usage: $0 {deploy|rollback|cleanup|migrate-systemd} [--channel stable|nightly] [--from-source] [--dry-run]"
         exit 4
         ;;
 esac

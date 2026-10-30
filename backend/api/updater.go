@@ -29,11 +29,6 @@ type GitHubRelease struct {
 	} `json:"author"`
 }
 
-// GitHubTag represents a tag from the GitHub Tags API (fallback)
-type GitHubTag struct {
-	Name string `json:"name"`
-}
-
 // GitHubCommit represents the structure of the GitHub Commits API response
 type GitHubCommit struct {
 	Sha     string `json:"sha"`
@@ -119,34 +114,13 @@ func fetchLatestStableRelease() (tagName, body, htmlUrl string, err error) {
 	return "", "", "", nil
 }
 
-// fetchLatestBetaRelease returns the latest tag via the Tags API.
-func fetchLatestBetaRelease() (tagName, body, htmlUrl string, err error) {
-	tagsResp, tagsErr := httpClient.Get("https://api.github.com/repos/" + githubRepo + "/tags?per_page=5")
-	if tagsErr != nil {
-		return "", "", "", tagsErr
-	}
-	defer tagsResp.Body.Close()
-
-	if tagsResp.StatusCode == 200 {
-		var tags []GitHubTag
-		tagsBody, _ := io.ReadAll(tagsResp.Body)
-		if jsonErr := json.Unmarshal(tagsBody, &tags); jsonErr == nil && len(tags) > 0 {
-			url := "https://github.com/" + githubRepo + "/releases/tag/" + tags[0].Name
-			slog.Info("[updater] resolved beta version via Tags API", "version", tags[0].Name)
-			return tags[0].Name, "", url, nil
-		}
-	}
-
-	return "", "", "", nil
-}
-
 // CheckUpdate queries the GitHub API to see if a newer release exists based on the Update Channel
 func CheckUpdate(c *gin.Context) {
 	currentVersion := getLocalVersion()
 
 	var channel string
 	err := db.DB.QueryRow("SELECT update_channel FROM settings WHERE id = 1").Scan(&channel)
-	if err != nil || channel == "" {
+	if err != nil || channel != "nightly" {
 		channel = "stable"
 	}
 
@@ -182,17 +156,6 @@ func CheckUpdate(c *gin.Context) {
 				resp.Body.Close()
 				slog.Warn("[updater] nightly commits API returned non-200", "branch", branch, "status", resp.StatusCode)
 			}
-		}
-
-	case "beta":
-		tag, releaseBody, url, fetchErr := fetchLatestBetaRelease()
-		if fetchErr != nil {
-			slog.Error("[updater] beta version resolution failed", "error", fetchErr)
-		} else if tag != "" {
-			latestVersion = tag
-			message = releaseBody
-			htmlUrl = url
-			updateAvailable = isNewerVersion(currentVersion, latestVersion)
 		}
 
 	default: // "stable"
@@ -273,7 +236,7 @@ func isNewerVersion(local, remote string) bool {
 func RunUpdate(c *gin.Context) {
 	var channel string
 	err := db.DB.QueryRow("SELECT update_channel FROM settings WHERE id = 1").Scan(&channel)
-	if err != nil || channel == "" {
+	if err != nil || channel != "nightly" {
 		channel = "stable"
 	}
 

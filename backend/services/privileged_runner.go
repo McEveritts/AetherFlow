@@ -29,7 +29,7 @@ var (
 	packageMutex sync.Mutex
 
 	safeScriptName        = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$`)
-	safeChannel           = map[string]bool{"stable": true, "beta": true, "nightly": true}
+	safeChannel           = map[string]bool{"stable": true, "nightly": true}
 	safeUsernameRegex     = regexp.MustCompile(`^[a-zA-Z0-9_.-]{1,64}$`)
 	safeQuotaSizeRegex    = regexp.MustCompile(`^(?:[0-9]+(?:\.[0-9]+)?\s*[KMGTPEkmgtpe]?[Bb]?|0)$`)
 	safeBase64KeyRegex    = regexp.MustCompile(`^[a-zA-Z0-9+/=]{40,48}$`)
@@ -90,7 +90,7 @@ type PackageRunnerRequest struct {
 // SelfUpdateRequest represents an atomic release manager request.
 type SelfUpdateRequest struct {
 	Command string `json:"command"` // "deploy" or "rollback"
-	Channel string `json:"channel"` // "stable", "beta", "nightly"
+	Channel string `json:"channel"` // "stable", "nightly"
 }
 
 // SandboxRunnerRequest represents a systemd sandboxing request.
