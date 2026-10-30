@@ -237,7 +237,7 @@ export default function MediaFlowTab() {
                     </div>
 
                     {/* Scan Trigger Bar */}
-                    <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-4 flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3">
+                    <div className="relative z-20 rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-4 flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3">
                         <div className="flex items-center gap-3">
                             <div className="w-8 h-8 rounded-lg bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center text-indigo-400 shrink-0">
                                 <HardDrive size={16} />
@@ -267,7 +267,7 @@ export default function MediaFlowTab() {
 
                     {/* Active Hardware Transcode */}
                     {progress && progress.status === 'PROCESSING' && (
-                        <div className="rounded-2xl border border-indigo-500/30 bg-slate-900/60 backdrop-blur-xl p-5 relative overflow-hidden">
+                        <div className="rounded-2xl border border-indigo-500/30 bg-slate-900/60 backdrop-blur-xl p-5 relative z-10 overflow-hidden">
                             <div className="absolute top-0 left-0 w-full h-1 bg-black/50">
                                 <div className="h-full bg-indigo-500 animate-pulse w-full"></div>
                             </div>
@@ -304,7 +304,7 @@ export default function MediaFlowTab() {
                     )}
 
                     {/* Transcode Queue Table */}
-                    <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-5">
+                    <div className="relative z-10 rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-5">
                         <div className="flex items-center justify-between mb-4 pb-3 border-b border-white/[0.06]">
                             <h3 className="text-sm font-bold text-slate-200 flex items-center gap-2">
                                 <Film size={16} className="text-indigo-400" />

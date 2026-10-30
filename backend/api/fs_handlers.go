@@ -143,14 +143,22 @@ func BrowseDirectories(c *gin.Context) {
 		}
 
 		fullEntryPath := filepath.Join(resolvedPath, entry.Name())
-		if entry.IsDir() {
+		isDir := entry.IsDir()
+		if !isDir && entry.Type()&os.ModeSymlink != 0 {
+			if targetInfo, statErr := os.Stat(fullEntryPath); statErr == nil && targetInfo.IsDir() {
+				if realTarget, evalErr := filepath.EvalSymlinks(fullEntryPath); evalErr == nil && isPathAllowed(realTarget, allowedRoots) {
+					isDir = true
+				}
+			}
+		}
+		if isDir {
 			directories = append(directories, entry.Name())
 		}
 
 		fsEntries = append(fsEntries, FSEntry{
 			Name:    entry.Name(),
 			Path:    fullEntryPath,
-			IsDir:   entry.IsDir(),
+			IsDir:   isDir,
 			Size:    size,
 			ModTime: modTime,
 		})

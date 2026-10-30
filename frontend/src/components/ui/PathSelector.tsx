@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useEffect, useRef } from 'react';
-import { Folder, ChevronRight, Loader2, CornerLeftUp } from 'lucide-react';
+import { Folder, ChevronRight, ChevronDown, Loader2, CornerLeftUp } from 'lucide-react';
 import { apiFetch } from '@/lib/fetcher';
 
 interface PathSelectorProps {
@@ -11,12 +11,15 @@ interface PathSelectorProps {
   className?: string;
 }
 
+const ALLOWED_ROOT_PRESETS = ['/home', '/mnt', '/media', '/opt/AetherFlow', '/var/lib/aetherflow'];
+
 export default function PathSelector({ value, onChange, placeholder = "Enter absolute path (e.g. /mnt/media)", className = "" }: PathSelectorProps) {
   const [isOpen, setIsOpen] = useState<boolean>(false);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [directories, setDirectories] = useState<string[]>([]);
   
   const dropdownRef = useRef<HTMLDivElement>(null);
+  const skipDebounceRef = useRef<boolean>(false);
 
   useEffect(() => {
     const handleClickOutside = (event: PointerEvent | MouseEvent) => {
@@ -29,11 +32,17 @@ export default function PathSelector({ value, onChange, placeholder = "Enter abs
   }, []);
 
   const fetchDirectories = async (path: string) => {
-    if (!path.trim()) return;
+    const trimmed = path.trim();
+    if (!trimmed) return;
+    if (trimmed === '/') {
+      setDirectories([]);
+      setIsLoading(false);
+      return;
+    }
     
     setIsLoading(true);
     try {
-      const response = await apiFetch(`/api/v1/auth/fs?path=${encodeURIComponent(path)}`);
+      const response = await apiFetch(`/api/v1/auth/fs?path=${encodeURIComponent(trimmed)}`);
       if (response.ok) {
         const data = await response.json();
         if (Array.isArray(data.directories)) {
@@ -57,15 +66,29 @@ export default function PathSelector({ value, onChange, placeholder = "Enter abs
   };
 
   useEffect(() => {
-    if (isOpen && value) {
-      const timer = setTimeout(() => fetchDirectories(value), 300);
-      return () => clearTimeout(timer);
+    if (!isOpen || !value) return;
+    if (skipDebounceRef.current) {
+      skipDebounceRef.current = false;
+      fetchDirectories(value);
+      return;
     }
+    const timer = setTimeout(() => fetchDirectories(value), 250);
+    return () => clearTimeout(timer);
   }, [isOpen, value]);
 
   const handleToggle = () => {
-    setIsOpen(!isOpen);
-    if (!isOpen && value) fetchDirectories(value);
+    const nextOpen = !isOpen;
+    if (nextOpen) {
+      skipDebounceRef.current = true;
+    }
+    setIsOpen(nextOpen);
+  };
+
+  const handleInputFocus = () => {
+    if (!isOpen) {
+      skipDebounceRef.current = true;
+      setIsOpen(true);
+    }
   };
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -85,13 +108,19 @@ export default function PathSelector({ value, onChange, placeholder = "Enter abs
       newPath = value.endsWith(separator) ? `${value}${dir}` : `${value}${separator}${dir}`;
     }
 
+    skipDebounceRef.current = true;
     onChange(newPath);
+  };
+
+  const handleSelectRoot = (root: string) => {
+    skipDebounceRef.current = true;
+    onChange(root);
   };
 
   const isRoot = value === '/' || (/^[a-zA-Z]:\\[^\\]*$/.test(value) && value.length <= 3);
 
   return (
-    <div className={`relative w-full ${className}`} ref={dropdownRef}>
+    <div className={`relative w-full ${isOpen ? 'z-50' : 'z-20'} ${className}`} ref={dropdownRef}>
       <div className="relative flex items-center">
         <button
           type="button"
@@ -106,13 +135,24 @@ export default function PathSelector({ value, onChange, placeholder = "Enter abs
           type="text"
           value={value}
           onChange={handleInputChange}
+          onFocus={handleInputFocus}
           placeholder={placeholder}
-          className="w-full min-h-[44px] bg-black/60 border border-white/10 text-slate-100 placeholder-slate-500 rounded-xl py-2.5 pl-11 pr-4 focus:outline-none focus:border-indigo-500/50 focus:ring-1 focus:ring-indigo-500/30 transition-all text-xs"
+          className="w-full min-h-[44px] bg-black/60 border border-white/10 text-slate-100 placeholder-slate-500 rounded-xl py-2.5 pl-11 pr-9 focus:outline-none focus:border-indigo-500/50 focus:ring-1 focus:ring-indigo-500/30 transition-all text-xs"
         />
+
+        <button
+          type="button"
+          onClick={handleToggle}
+          tabIndex={-1}
+          aria-label="Toggle Directory Dropdown"
+          className="absolute right-0 px-2.5 h-full text-slate-400 hover:text-indigo-400 focus:outline-none transition-colors z-10 flex items-center justify-center"
+        >
+          <ChevronDown size={15} className={`transition-transform duration-200 ${isOpen ? 'rotate-180 text-indigo-400' : 'text-slate-400'}`} />
+        </button>
       </div>
 
       {isOpen && (
-        <div className="absolute z-30 w-full mt-2 glass-panel bg-black/90 backdrop-blur-2xl border border-white/10 rounded-xl shadow-2xl max-h-64 overflow-y-auto obs-scroller scrollbar-thin scrollbar-thumb-white/10 scrollbar-track-transparent">
+        <div className="absolute left-0 right-0 z-50 w-full mt-2 glass-panel bg-slate-950/95 backdrop-blur-2xl border border-white/15 rounded-xl shadow-[0_20px_50px_rgba(0,0,0,0.85)] max-h-64 overflow-y-auto obs-scroller scrollbar-thin scrollbar-thumb-white/10 scrollbar-track-transparent">
           {isLoading ? (
             <div className="flex justify-center items-center py-6 text-slate-400">
               <Loader2 className="animate-spin mr-3 text-indigo-400" size={18} />
@@ -140,11 +180,11 @@ export default function PathSelector({ value, onChange, placeholder = "Enter abs
                     {value === '/' ? 'Select an allowed root directory:' : 'No subdirectories found in this path'}
                   </div>
                   <div className="flex flex-wrap gap-1.5 justify-center">
-                    {['/home', '/mnt', '/opt/AetherFlow', '/var/lib/aetherflow'].map((root) => (
+                    {ALLOWED_ROOT_PRESETS.map((root) => (
                       <button
                         key={root}
                         type="button"
-                        onClick={() => onChange(root)}
+                        onClick={() => handleSelectRoot(root)}
                         className="px-2.5 py-1 rounded-lg bg-white/[0.05] hover:bg-indigo-500/20 border border-white/[0.08] hover:border-indigo-500/40 text-slate-300 hover:text-indigo-200 font-mono text-[11px] transition-colors"
                       >
                         {root}

@@ -118,7 +118,7 @@ export default function MetadataTab() {
     return (
         <div className="space-y-6 animate-fade-in relative z-10 w-full min-w-0">
             {/* Scan Controls Card */}
-            <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-5">
+            <div className="relative z-20 rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-5">
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
                     <div className="flex items-center gap-3">
                         <div className="h-10 w-10 bg-violet-500/20 rounded-xl flex items-center justify-center border border-violet-500/30 text-violet-400 shrink-0">
@@ -188,7 +188,7 @@ export default function MetadataTab() {
             </div>
 
             {/* Results Table */}
-            <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-5">
+            <div className="relative z-10 rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-5">
                 <div className="flex items-center justify-between mb-4 pb-3 border-b border-white/[0.06]">
                     <div className="flex items-center gap-2">
                         <Film size={16} className="text-violet-400" />

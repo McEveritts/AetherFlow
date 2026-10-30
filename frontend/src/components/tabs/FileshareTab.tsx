@@ -308,7 +308,7 @@ export default function FileshareTab() {
                 {/* File Browser Table */}
                 <div className="lg:col-span-2 rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-5 flex flex-col">
                     {/* Path Breadcrumbs & Selector */}
-                    <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 mb-4 pb-3 border-b border-white/[0.06]">
+                    <div className="relative z-20 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 mb-4 pb-3 border-b border-white/[0.06]">
                         <div className="flex items-center gap-2 text-xs font-bold text-slate-400 uppercase tracking-wider overflow-x-auto max-w-full obs-touch-pills">
                             <button onClick={() => setCurrentPath('/')} className="hover:text-blue-400 cursor-pointer py-1 px-1.5 rounded hover:bg-white/[0.04]">Root</button>
                             {currentPath !== '/' && currentPath.split('/').filter(Boolean).map((part, idx, arr) => (
