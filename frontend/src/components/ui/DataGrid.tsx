@@ -59,7 +59,7 @@ export function DataGrid<TData, TValue>({
     count: rows.length,
     getScrollElement: () => parentRef.current,
     estimateSize: () => rowHeight,
-    overscan: 5,
+    overscan: 10,
   });
 
   const virtualItems = virtualizer.getVirtualItems();

@@ -34,7 +34,7 @@ normalize_unit() {
 is_exempt_unit() {
     local unit="$1"
     case "${unit}" in
-        wg-quick@*|wireguard*|fail2ban.service|pihole-FTL.service|netdata.service|node_exporter.service|apache2.service|mariadb.service|mysql.service|mergerfs*|rclone-vfs*|scrutiny-collector*|x2goserver*|novnc-xvnc*)
+        aetherflow-api.service|aetherflow-runner.service|wg-quick@*|wireguard*|fail2ban.service|pihole-FTL.service|netdata.service|node_exporter.service|apache2.service|mariadb.service|mysql.service|mergerfs*|rclone-vfs*|scrutiny-collector*|x2goserver*|novnc-xvnc*)
             return 0
             ;;
         *)

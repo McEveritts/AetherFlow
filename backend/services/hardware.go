@@ -82,6 +82,17 @@ func init() {
 	}
 
 	prevProcCPUTimes = make(map[int32]float64)
+	if procs, err := process.Processes(); err == nil {
+		for _, p := range procs {
+			if p.Pid == 2 {
+				continue
+			}
+			if times, err := p.Times(); err == nil && times != nil {
+				prevProcCPUTimes[p.Pid] = times.User + times.System
+			}
+		}
+		lastProcessScan = time.Now()
+	}
 }
 
 // sanitizeFloat64 clamps +Inf and NaN to 0 so json.Marshal never panics.
@@ -416,6 +427,12 @@ func GetSystemMetricsCore() models.SystemMetrics {
 			}
 			var entries []procEntry
 			for _, p := range procs {
+				if p.Pid == 2 {
+					continue
+				}
+				if ppid, err := p.Ppid(); err == nil && ppid == 2 {
+					continue
+				}
 				name, err := p.Name()
 				if err != nil || name == "" {
 					continue
@@ -436,10 +453,26 @@ func GetSystemMetricsCore() models.SystemMetrics {
 				if err != nil {
 					memPct = 0
 				}
-				entries = append(entries, procEntry{pid: p.Pid, name: name, cpu: cpuPct, mem: memPct})
+				entries = append(entries, procEntry{
+					pid:  p.Pid,
+					name: name,
+					cpu:  sanitizeFloat64(cpuPct),
+					mem:  float32(sanitizeFloat64(float64(memPct))),
+				})
 			}
 			sort.Slice(entries, func(i, j int) bool {
-				return entries[i].cpu > entries[j].cpu
+				cpuI := math.Round(entries[i].cpu*10) / 10
+				cpuJ := math.Round(entries[j].cpu*10) / 10
+				if cpuI != cpuJ {
+					return entries[i].cpu > entries[j].cpu
+				}
+				if entries[i].mem != entries[j].mem {
+					return entries[i].mem > entries[j].mem
+				}
+				if entries[i].cpu != entries[j].cpu {
+					return entries[i].cpu > entries[j].cpu
+				}
+				return entries[i].pid < entries[j].pid
 			})
 			limit := 10
 			if len(entries) < limit {

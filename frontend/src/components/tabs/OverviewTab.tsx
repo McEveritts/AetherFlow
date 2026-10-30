@@ -47,7 +47,7 @@ const MemoDiskIOWidget = React.memo(DiskIOWidget, (prev, next) =>
     prev.density === next.density
 );
 const MemoProcessWidget = React.memo(ProcessWidget, (prev, next) => {
-    const getProcHash = (p: ProcessInfo[]) => (p || []).slice(0, 5).map(proc => `${proc.pid}-${proc.cpu}`).join(':');
+    const getProcHash = (p: ProcessInfo[]) => (p || []).map(proc => `${proc.pid}-${proc.cpu}-${proc.mem}`).join(':');
     return getProcHash(prev.processes) === getProcHash(next.processes) && prev.density === next.density;
 });
 const MemoStorageWidget = React.memo(StorageWidget, (prev, next) => {

@@ -57,7 +57,7 @@ function _boot() {
 		_safe_overlay_config "${local_setup}templates/sysd/aetherflow-runner.template" \
 			/etc/systemd/system/aetherflow-runner.service
 	fi
-	if [[ ! -f /etc/systemd/system/aetherflow-api.service ]] || grep -q "__AES_MASTER_KEY__" /etc/systemd/system/aetherflow-api.service 2>/dev/null; then
+	if [[ ! -f /etc/systemd/system/aetherflow-api.service ]] || grep -qE "__AES_MASTER_KEY__|ProtectProc=invisible|ProcSubset=pid" /etc/systemd/system/aetherflow-api.service 2>/dev/null; then
 		_safe_overlay_config "${local_setup}templates/sysd/aetherflow-api.template" \
 			/etc/systemd/system/aetherflow-api.service
 	fi

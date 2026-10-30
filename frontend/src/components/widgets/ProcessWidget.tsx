@@ -13,7 +13,7 @@ interface ProcessWidgetProps {
 
 export default function ProcessWidget({ processes, density = 'compact' }: ProcessWidgetProps) {
     const isImmersive = density === 'immersive';
-    const { data: services } = useSWR<Record<string, { status: string; uptime: string; version: string; process?: string }>>('/api/v1/auth/services');
+    const { data: services } = useSWR<Record<string, { status: string; uptime: string; version: string; process?: string; id?: string }>>('/api/v1/auth/services');
     const setActiveTab = useSystemStore((state) => state.setActiveTab);
 
     const columns = useMemo<ColumnDef<ProcessInfo>[]>(() => [
@@ -28,10 +28,23 @@ export default function ProcessWidget({ processes, density = 'compact' }: Proces
             header: 'Process',
             cell: info => {
                 const name = info.getValue() as string;
+                const normName = name.toLowerCase();
 
                 let isService = false;
                 if (services) {
-                    isService = Object.entries(services).some(([serviceName, data]) => data.process === name || serviceName === name);
+                    isService = Object.entries(services).some(([serviceName, data]) => {
+                        const procBase = (data.process || '').split('@')[0].replace(/\.service$/i, '').toLowerCase();
+                        const procStem = procBase.replace(/-(web|nox|server|daemon)$/i, '');
+                        const idLower = (data.id || '').toLowerCase();
+                        const labelLower = serviceName.toLowerCase();
+                        return (
+                            procBase === normName ||
+                            procStem === normName ||
+                            idLower === normName ||
+                            labelLower === normName ||
+                            (normName.replace(/-(nox|server|daemon)$/i, '') === idLower && idLower.length > 0)
+                        );
+                    });
                 }
 
                 if (isService) {
