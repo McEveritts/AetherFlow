@@ -121,8 +121,8 @@ const htmlTemplate = `<!DOCTYPE html>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
 <link rel="shortcut icon" href="images/favicon.svg" />
-<link rel="stylesheet" type="text/css" href="styling/fonts.css" />
-<link rel="stylesheet" type="text/css" href="styling/obsidian.css" />
+<link rel="stylesheet" type="text/css" href="styling/fonts.css?v=2.1" />
+<link rel="stylesheet" type="text/css" href="styling/obsidian.css?v=2.1" />
 <title>LibreSpeed · Telemetry Vault (Obsidian V2)</title>
 <style type="text/css">
 	html {
@@ -134,46 +134,54 @@ const htmlTemplate = `<!DOCTYPE html>
 		display: flex;
 		flex-direction: column;
 		min-height: 100vh;
-		padding: 0 2rem 4rem 2rem;
+		padding: 0 2.8rem 4rem 2.8rem;
 	}
 	.obs-stats-shell {
 		width: 100%;
-		max-width: 112rem;
+		max-width: 118rem;
 		margin: 0 auto;
 		flex: 1;
 	}
+	.obs-stats-header-band {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: flex-end;
+		justify-content: space-between;
+		gap: 1.6rem;
+		padding: 2.4rem 0 1.8rem 0;
+		border-bottom: 1px solid var(--obs-hairline);
+		margin-bottom: 2.4rem;
+	}
 	h1.obs-stats-title {
-		text-align: center;
-		margin: 1.8rem auto 0.6rem auto;
-		font-size: 3.6rem;
+		margin: 0;
+		font-size: 2.8rem;
 		font-weight: 800;
-		letter-spacing: -0.12rem;
-		background: linear-gradient(135deg, #ffffff 0%, #e2e8f0 45%, #a5b4fc 80%, #e879f9 100%);
-		-webkit-background-clip: text;
-		background-clip: text;
-		color: transparent;
+		letter-spacing: -0.08rem;
+		color: var(--obs-white);
 	}
 	p.obs-stats-sub {
-		text-align: center;
 		color: var(--obs-slate-400);
-		font-size: 1.5rem;
-		margin: 0 auto 2.8rem auto;
+		font-size: 1.35rem;
+		margin: 0.4rem 0 0 0;
 	}
-	.obs-auth-card {
-		max-width: 48rem;
-		margin: 2.4rem auto;
-		padding: 3.2rem;
+	.obs-auth-panel {
+		max-width: 44rem;
+		margin: 4.8rem auto;
+		padding: 3.2rem 0;
+		border-top: 1px solid var(--obs-hairline);
+		border-bottom: 1px solid var(--obs-hairline);
 		text-align: center;
 	}
-	.obs-auth-card h3 {
+	.obs-auth-panel h3 {
 		font-size: 2.0rem;
 		font-weight: 700;
 		color: var(--obs-white);
-		margin-bottom: 1.6rem;
+		margin-bottom: 1.4rem;
 	}
-	.obs-toolbar-card {
-		padding: 2.0rem 2.4rem;
+	.obs-toolbar-strip {
+		padding: 0 0 2.0rem 0;
 		margin-bottom: 2.4rem;
+		border-bottom: 1px solid var(--obs-hairline);
 		display: flex;
 		flex-wrap: wrap;
 		align-items: center;
@@ -188,59 +196,57 @@ const htmlTemplate = `<!DOCTYPE html>
 		flex: 1;
 	}
 	.obs-input {
-		background: var(--obs-input-bg);
-		border: 1px solid var(--obs-glass-border);
-		border-radius: var(--obs-radius-xl);
-		padding: 1.1rem 1.6rem;
+		background: rgba(15, 23, 42, 0.45);
+		border: 1px solid rgba(255, 255, 255, 0.10);
+		border-radius: 1.0rem;
+		padding: 1.0rem 1.5rem;
 		color: var(--obs-white);
 		font-family: var(--obs-font-mono);
-		font-size: 1.4rem;
+		font-size: 1.35rem;
 		min-width: 24rem;
 		outline: none;
 		transition: border-color 0.2s, box-shadow 0.2s;
 	}
 	.obs-input:focus {
 		border-color: var(--obs-indigo-400);
-		box-shadow: 0 0 20px rgba(99, 102, 241, 0.32);
+		box-shadow: 0 0 18px rgba(99, 102, 241, 0.25);
 	}
 	.obs-btn-primary {
-		background: linear-gradient(135deg, rgba(99, 102, 241, 0.92) 0%, rgba(217, 70, 239, 0.92) 100%);
+		background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 55%, #c026d3 100%);
 		color: var(--obs-white);
-		border: 1px solid rgba(255, 255, 255, 0.32);
-		border-top: 1px solid rgba(255, 255, 255, 0.48);
-		border-radius: var(--obs-radius-xl);
-		padding: 1.1rem 2.2rem;
+		border: 1px solid rgba(129, 140, 248, 0.40);
+		border-radius: 1.0rem;
+		padding: 1.0rem 2.0rem;
 		font-family: var(--obs-font-sans);
-		font-size: 1.4rem;
+		font-size: 1.3rem;
 		font-weight: 700;
 		cursor: pointer;
-		box-shadow: var(--obs-shadow-button-primary);
+		box-shadow: 0 6px 20px rgba(99, 102, 241, 0.25);
 		transition: transform 0.16s, box-shadow 0.16s;
 	}
 	.obs-btn-primary:hover {
-		transform: scale(1.02);
-		box-shadow: var(--obs-shadow-button-hover);
+		transform: translateY(-1px);
+		box-shadow: 0 10px 26px rgba(168, 85, 247, 0.35);
 	}
 	.obs-btn-secondary {
-		background: rgba(255, 255, 255, 0.06);
+		background: rgba(255, 255, 255, 0.04);
 		color: var(--obs-slate-200);
-		border: 1px solid var(--obs-glass-border);
-		border-top: 1px solid var(--obs-specular-top);
-		border-radius: var(--obs-radius-xl);
-		padding: 1.1rem 1.8rem;
+		border: 1px solid rgba(255, 255, 255, 0.10);
+		border-radius: 1.0rem;
+		padding: 1.0rem 1.8rem;
 		font-family: var(--obs-font-sans);
-		font-size: 1.35rem;
+		font-size: 1.3rem;
 		font-weight: 600;
 		cursor: pointer;
 		transition: background 0.16s, color 0.16s;
 	}
 	.obs-btn-secondary:hover {
-		background: rgba(255, 255, 255, 0.12);
+		background: rgba(255, 255, 255, 0.09);
 		color: var(--obs-white);
 	}
-	.obs-record-card {
-		padding: 2.0rem 2.4rem;
-		margin-bottom: 1.8rem;
+	.obs-record-block {
+		padding: 1.8rem 0;
+		border-bottom: 1px solid var(--obs-hairline);
 		overflow-x: auto;
 	}
 	table.obs-table {
@@ -248,7 +254,7 @@ const htmlTemplate = `<!DOCTYPE html>
 		border-collapse: collapse;
 	}
 	table.obs-table tr {
-		border-bottom: 1px solid rgba(148, 163, 184, 0.12);
+		border-bottom: 1px solid rgba(148, 163, 184, 0.08);
 	}
 	table.obs-table tr:last-child {
 		border-bottom: none;
@@ -256,16 +262,16 @@ const htmlTemplate = `<!DOCTYPE html>
 	table.obs-table th {
 		width: 18rem;
 		text-align: left;
-		padding: 1.0rem 1.2rem;
-		font-size: 1.2rem;
+		padding: 0.85rem 1.2rem 0.85rem 0;
+		font-size: 1.15rem;
 		font-weight: 700;
 		text-transform: uppercase;
 		letter-spacing: 0.08em;
-		color: var(--obs-indigo-300);
+		color: var(--obs-slate-400);
 		vertical-align: top;
 	}
 	table.obs-table td {
-		padding: 1.0rem 1.2rem;
+		padding: 0.85rem 1.2rem;
 		font-family: var(--obs-font-mono);
 		font-size: 1.35rem;
 		color: var(--obs-slate-200);
@@ -275,13 +281,17 @@ const htmlTemplate = `<!DOCTYPE html>
 </head>
 <body>
 <header class="obs-header">
-	<a class="obs-brand" href="./">
-		<img src="images/logo.svg" alt="LibreSpeed" />
-		<span class="obs-badge">
-			<span class="obs-beacon-live"></span>
-			Obsidian V2
-		</span>
-	</a>
+	<div class="obs-header-left">
+		<a class="obs-brand" href="./">
+			<img src="images/logo.svg" alt="LibreSpeed" />
+			<span class="obs-brand-divider" aria-hidden="true"></span>
+			<span class="obs-badge">
+				<span class="obs-beacon-live"></span>
+				Obsidian V2
+			</span>
+		</a>
+		<span class="obs-header-subtitle">High-BDP Multi-Stream Network Telemetry</span>
+	</div>
 	<nav class="obs-nav-pills" aria-label="Telemetry View Switcher">
 		<a class="obs-tab-pill" href="./">Speedtest Stage</a>
 		<a class="obs-tab-pill obs-tab-pill-active" href="stats">Telemetry Vault</a>
@@ -289,16 +299,20 @@ const htmlTemplate = `<!DOCTYPE html>
 </header>
 
 <div class="obs-stats-shell">
-	<h1 class="obs-stats-title">Telemetry Statistics Vault</h1>
-	<p class="obs-stats-sub">Recorded BoltDB Throughput &amp; Latency Benchmarks</p>
+	<div class="obs-stats-header-band">
+		<div>
+			<h1 class="obs-stats-title">Telemetry Statistics Vault</h1>
+			<p class="obs-stats-sub">Recorded BoltDB Throughput &amp; Latency Benchmarks</p>
+		</div>
+	</div>
 
 	{{ if .NoPassword }}
-	<div class="obs-auth-card glass-card">
+	<div class="obs-auth-panel">
 		<h3>Telemetry Vault Locked</h3>
 		<p style="color:var(--obs-slate-400);">Please set <code>statistics_password</code> in <code>settings.toml</code> to enable access.</p>
 	</div>
 	{{ else if .LoggedIn }}
-	<div class="obs-toolbar-card glass-card">
+	<div class="obs-toolbar-strip">
 		<form class="obs-search-form" action="stats" method="GET">
 			<input type="hidden" name="op" value="id" />
 			<input class="obs-input" type="text" name="id" id="id" placeholder="Enter Test ULID..." value="" />
@@ -312,7 +326,7 @@ const htmlTemplate = `<!DOCTYPE html>
 	</div>
 
 	{{ range $i, $v := .Data }}
-	<div class="obs-record-card glass-card">
+	<div class="obs-record-block">
 		<table class="obs-table">
 			<tr><th>Test ID</th><td style="color:var(--obs-sky-400);font-weight:700;">{{ $v.UUID }}</td></tr>
 			<tr><th>Timestamp</th><td>{{ $v.Timestamp }}</td></tr>
@@ -328,7 +342,7 @@ const htmlTemplate = `<!DOCTYPE html>
 	</div>
 	{{ end }}
 	{{ else }}
-	<div class="obs-auth-card glass-card">
+	<div class="obs-auth-panel">
 		<h3>Operator Authentication</h3>
 		<form action="stats?op=login" method="POST" style="display:flex;flex-direction:column;gap:1.4rem;align-items:center;">
 			<input class="obs-input" style="width:100%;" type="password" name="password" placeholder="Operator Password" value="" />

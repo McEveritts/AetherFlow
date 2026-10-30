@@ -7,10 +7,12 @@ import (
 	"image/color"
 	"image/draw"
 	"image/png"
+	"math"
 	"math/rand"
 	"net"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -288,6 +290,15 @@ func DrawPNG(w http.ResponseWriter, r *http.Request) {
 	// ping value
 	drawer.Face = pingJitterValueFace
 	pingValue := strings.Split(record.Ping, ".")[0]
+	if pf, err := strconv.ParseFloat(record.Ping, 64); err == nil && pf > 0 {
+		if pf < 10 {
+			pingValue = strconv.FormatFloat(pf, 'f', 2, 64)
+		} else if pf < 100 {
+			pingValue = strconv.FormatFloat(pf, 'f', 1, 64)
+		} else {
+			pingValue = strconv.FormatFloat(math.Round(pf), 'f', 0, 64)
+		}
+	}
 	p = drawer.MeasureString(pingValue)
 
 	x = canvasWidth/4 - (p.Round()+msLength.Round())/2

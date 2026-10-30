@@ -1,16 +1,16 @@
 /**
  * LibreSpeed Obsidian V2 Stylesheet Entrypoint
- * Grounded in AetherFlow v3.2 & Jellyfin 12.2 Obsidian V2
+ * Grounded in AetherFlow v3.2.1 Open-Canvas Architecture
  */
 
-@import url("obsidian.css");
-@import url("colors.css");
-@import url("fonts.css");
-@import url("main.css");
-@import url("server-selector.css");
-@import url("button.css");
-@import url("results.css");
-@import url("dialog.css");
+@import url("obsidian.css?v=2.1");
+@import url("colors.css?v=2.1");
+@import url("fonts.css?v=2.1");
+@import url("main.css?v=2.1");
+@import url("server-selector.css?v=2.1");
+@import url("button.css?v=2.1");
+@import url("results.css?v=2.1");
+@import url("dialog.css?v=2.1");
 
 /* Setting up the basic structure (Zero blanket overflow-x hidden) */
 
@@ -33,7 +33,7 @@ html {
   font-size: 10px;
 
   @media screen and (max-width: 800px) {
-    font-size: 8px;
+    font-size: 8.5px;
   }
 }
 
@@ -43,42 +43,45 @@ body {
   color: var(--primary-text-color);
   display: flex;
   flex-direction: column;
-  padding: 0 2rem;
+  padding: 0 2.8rem;
+
+  @media screen and (max-width: 640px) {
+    padding: 0 1.6rem;
+  }
 }
 
-/* Footer link & metadata */
+/* Open-Canvas Footer Metadata */
 
 footer {
-  margin: auto auto 0 auto;
-  padding: 3.6rem 2rem;
+  width: 100%;
+  max-width: 118rem;
+  margin: 0 auto;
+  padding: 1.2rem 0 1.8rem 0;
   text-align: center;
 
   & > p.source {
     display: inline-flex;
     align-items: center;
-    gap: 1.2rem;
-    padding: 0.8rem 1.8rem;
-    border-radius: var(--obs-radius-full);
-    background: rgba(255, 255, 255, 0.04);
-    border: 1px solid rgba(129, 140, 248, 0.24);
-    font-size: 1.3rem;
-    color: var(--obs-slate-400);
+    justify-content: center;
+    gap: 0.8rem;
+    font-size: 1.2rem;
+    font-weight: 500;
+    color: var(--obs-slate-500);
+  }
+
+  & > p.source .source-dot {
+    color: var(--obs-slate-700);
   }
 
   & > p.source a {
-    font-size: 1.3rem;
+    font-size: 1.2rem;
     font-weight: 600;
-    letter-spacing: -0.02rem;
-    color: var(--obs-indigo-300);
+    color: var(--obs-indigo-400);
     text-decoration: none;
     transition: color var(--obs-duration-fast) var(--obs-ease-out-120);
 
     &:hover {
       color: var(--obs-fuchsia-400);
     }
-  }
-
-  @media screen and (max-width: 800px) {
-    padding: 2.8rem 1.6rem;
   }
 }

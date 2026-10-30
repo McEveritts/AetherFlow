@@ -1,39 +1,44 @@
 /* ============================================================================
-   3. CENTRAL MASTER 270° SPEEDOMETER GAUGE POD (Speedtest.net + Obsidian V2)
+   3. OPEN-CANVAS 270° SPEEDOMETER & BENCHMARK COMPLETE SHOWCASE
+   Zero Outer Box — Pure Open-Canvas Choreography
    ============================================================================ */
 
 .st-gauge-pod {
-  width: min(50rem, 96vw);
-  padding: 2.0rem 2.8rem 2.2rem 2.8rem;
+  width: 100%;
+  max-width: 82rem;
+  padding: 0.4rem 0;
+  background: transparent;
+  border: none;
+  box-shadow: none;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  transition: opacity 0.38s var(--obs-ease-out-120),
-              transform 0.42s var(--obs-ease-spring-120);
+  transition: opacity 0.36s var(--obs-ease-out-120),
+              transform 0.40s var(--obs-ease-spring-120);
 }
 
 main.st-main[data-stage="idle"] .st-gauge-pod {
   opacity: 0;
   pointer-events: none;
-  transform: scale(0.86);
+  transform: scale(0.90);
   position: absolute;
 }
 
 .st-phase-header {
-  margin-bottom: 0.4rem;
+  margin-bottom: 0.8rem;
 }
 
 .st-phase-badge {
   display: inline-flex;
   align-items: center;
   gap: 0.8rem;
-  padding: 0.5rem 1.4rem;
+  padding: 0.5rem 1.5rem;
   border-radius: var(--obs-radius-full);
-  background: rgba(15, 23, 42, 0.72);
-  border: 1px solid rgba(129, 140, 248, 0.38);
+  background: rgba(15, 23, 42, 0.55);
+  border: 1px solid rgba(129, 140, 248, 0.30);
   font-family: var(--obs-font-mono);
-  font-size: 1.15rem;
+  font-size: 1.1rem;
   font-weight: 700;
   letter-spacing: 0.12em;
   text-transform: uppercase;
@@ -41,8 +46,8 @@ main.st-main[data-stage="idle"] .st-gauge-pod {
 }
 
 .st-phase-dot {
-  width: 8px;
-  height: 8px;
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
   background: var(--obs-sky-400);
   box-shadow: 0 0 10px var(--obs-sky-400);
@@ -50,47 +55,51 @@ main.st-main[data-stage="idle"] .st-gauge-pod {
 }
 
 main.st-main[data-phase="ping"] .st-phase-badge {
-  border-color: rgba(52, 211, 153, 0.50);
+  background: rgba(16, 185, 129, 0.10);
+  border-color: rgba(52, 211, 153, 0.35);
   color: var(--obs-emerald-400);
   & .st-phase-dot {
     background: var(--obs-emerald-400);
-    box-shadow: 0 0 12px var(--obs-emerald-400);
+    box-shadow: 0 0 10px var(--obs-emerald-400);
   }
 }
 
 main.st-main[data-phase="download"] .st-phase-badge {
-  border-color: rgba(217, 70, 239, 0.55);
+  background: rgba(217, 70, 239, 0.10);
+  border-color: rgba(217, 70, 239, 0.38);
   color: var(--obs-fuchsia-400);
   & .st-phase-dot {
     background: var(--obs-fuchsia-500);
-    box-shadow: 0 0 12px var(--obs-fuchsia-500);
+    box-shadow: 0 0 10px var(--obs-fuchsia-500);
   }
 }
 
 main.st-main[data-phase="upload"] .st-phase-badge {
-  border-color: rgba(56, 189, 248, 0.55);
+  background: rgba(56, 189, 248, 0.10);
+  border-color: rgba(56, 189, 248, 0.38);
   color: var(--obs-sky-400);
   & .st-phase-dot {
     background: var(--obs-sky-400);
-    box-shadow: 0 0 12px var(--obs-sky-400);
+    box-shadow: 0 0 10px var(--obs-sky-400);
   }
 }
 
 main.st-main[data-phase="finished"] .st-phase-badge {
-  border-color: rgba(52, 211, 153, 0.55);
+  background: rgba(16, 185, 129, 0.12);
+  border-color: rgba(52, 211, 153, 0.38);
   color: var(--obs-emerald-400);
   & .st-phase-dot {
     background: var(--obs-emerald-400);
-    box-shadow: 0 0 12px var(--obs-emerald-400);
+    box-shadow: 0 0 10px var(--obs-emerald-400);
     animation: none;
   }
 }
 
-/* SVG Master Speedometer Dial */
+/* Open-Canvas SVG Master Speedometer Dial */
 .st-speedometer-wrap {
   position: relative;
   width: 100%;
-  max-width: 42rem;
+  max-width: 46rem;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -120,7 +129,7 @@ main.st-main[data-phase="finished"] .st-phase-badge {
 
 .st-arc-track {
   fill: none;
-  stroke: rgba(30, 41, 59, 0.78);
+  stroke: rgba(30, 41, 59, 0.72);
   stroke-width: 20;
   stroke-linecap: butt;
 }
@@ -174,7 +183,7 @@ main.st-main[data-phase="ping"] .st-arc-active {
 /* Digital Speed Readout + Waveform inside Gauge Bowl */
 .st-gauge-readout {
   position: absolute;
-  bottom: 0.2rem;
+  bottom: 0.4rem;
   left: 50%;
   transform: translateX(-50%);
   display: flex;
@@ -184,25 +193,25 @@ main.st-main[data-phase="ping"] .st-arc-active {
 }
 
 #st-gauge-wave {
-  width: 11.4rem;
-  height: 2.5rem;
-  margin-bottom: 0.3rem;
+  width: 12.4rem;
+  height: 2.8rem;
+  margin-bottom: 0.4rem;
 }
 
 .st-master-number {
   font-family: var(--obs-font-mono);
   font-variant-numeric: tabular-nums;
-  font-size: 4.3rem;
+  font-size: 4.8rem;
   font-weight: 800;
-  letter-spacing: -0.15rem;
+  letter-spacing: -0.16rem;
   line-height: 1;
   color: var(--obs-white);
-  text-shadow: 0 0 28px rgba(129, 140, 248, 0.45);
+  text-shadow: 0 0 32px rgba(129, 140, 248, 0.42);
 }
 
 .st-master-unit {
-  margin-top: 0.3rem;
-  font-size: 1.3rem;
+  margin-top: 0.4rem;
+  font-size: 1.25rem;
   font-weight: 700;
   letter-spacing: 0.14em;
   text-transform: uppercase;
@@ -214,12 +223,12 @@ main.st-main[data-phase="ping"] .st-arc-active {
   flex-wrap: wrap;
   align-items: center;
   justify-content: center;
-  gap: 1.2rem;
-  margin-top: 1.2rem;
+  gap: 1.4rem;
+  margin-top: 2.0rem;
 }
 
 /* ============================================================================
-   4. BENCHMARK COMPLETE TELEMETRY RESULT CARD (Obsidian V2)
+   4. OPEN-CANVAS BENCHMARK COMPLETE SHOWCASE (Zero Nested Boxes)
    ============================================================================ */
 
 main.st-main[data-stage="finished"] .st-speedometer-wrap,
@@ -232,8 +241,8 @@ main.st-main[data-phase="finished"] .st-speedometer-wrap {
   width: 100%;
   justify-content: center;
   align-items: center;
-  margin: 0.8rem 0 0.6rem 0;
-  animation: st-complete-reveal 0.34s var(--obs-ease-spring-120);
+  margin: 0.6rem 0 0.2rem 0;
+  animation: st-complete-reveal 0.36s var(--obs-ease-spring-120);
 }
 
 main.st-main[data-stage="finished"] .st-complete-summary,
@@ -244,7 +253,7 @@ main.st-main[data-phase="finished"] .st-complete-summary {
 @keyframes st-complete-reveal {
   0% {
     opacity: 0;
-    transform: translateY(8px) scale(0.96);
+    transform: translateY(10px) scale(0.98);
   }
   100% {
     opacity: 1;
@@ -253,138 +262,202 @@ main.st-main[data-phase="finished"] .st-complete-summary {
 }
 
 .st-complete-card {
-  position: relative;
-  width: min(50rem, 100%);
-  aspect-ratio: 500 / 286;
-  background: #080a18;
-  border-radius: var(--obs-radius-xl);
-  border: 1px solid var(--obs-chromatic-border-indigo);
-  box-shadow: var(--obs-shadow-card);
-  overflow: hidden;
+  width: 100%;
+  max-width: 78rem;
+  background: transparent;
+  border: none;
+  box-shadow: none;
   display: flex;
   flex-direction: column;
-  justify-content: space-between;
-  padding: 2.0rem 0 0 0;
   user-select: text;
 }
 
-.st-complete-grid {
+/* Dual Throughput Open Hero Grid */
+.st-complete-hero-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  row-gap: 1.6rem;
   width: 100%;
-  flex: 1;
-  align-content: center;
-  padding: 0 1.6rem;
+  padding: 1.0rem 0 1.8rem 0;
+
+  @media screen and (max-width: 680px) {
+    grid-template-columns: 1fr;
+    gap: 2.0rem;
+  }
 }
 
-.st-complete-cell {
+.st-complete-hero-col {
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
+  padding: 0.6rem 3.2rem;
   text-align: center;
+
+  &.download {
+    border-right: 1px solid var(--obs-hairline-strong);
+  }
+
+  @media screen and (max-width: 680px) {
+    padding: 0.8rem 1.2rem;
+    &.download {
+      border-right: none;
+      border-bottom: 1px solid var(--obs-hairline);
+      padding-bottom: 2.0rem;
+    }
+  }
 }
 
-.st-complete-label {
-  color: #cbd5e1;
-  font-family: var(--obs-font-sans);
-  font-weight: 500;
-  letter-spacing: 0.01em;
+.st-complete-hero-head {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.85rem;
+  margin-bottom: 0.8rem;
 }
 
-.st-complete-label.st-label-sm {
-  font-size: 2.2rem;
+.st-complete-hero-label {
+  font-size: 1.25rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--obs-slate-300);
+}
+
+.st-complete-hero-unit {
+  font-family: var(--obs-font-mono);
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--obs-slate-400);
+  padding: 0.15rem 0.65rem;
+  border-radius: 0.5rem;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+.st-complete-hero-val {
+  font-family: var(--obs-font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 5.8rem;
+  font-weight: 800;
+  letter-spacing: -0.2rem;
+  line-height: 1.04;
+  margin: 0.2rem 0 1.0rem 0;
+
+  &.download {
+    background: linear-gradient(135deg, #ffffff 0%, #f5d0fe 45%, #d946ef 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    filter: drop-shadow(0 0 28px rgba(217, 70, 239, 0.28));
+  }
+
+  &.upload {
+    background: linear-gradient(135deg, #ffffff 0%, #e0f2fe 45%, #38bdf8 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    filter: drop-shadow(0 0 28px rgba(56, 189, 248, 0.28));
+  }
+}
+
+canvas.st-complete-hero-wave {
+  width: 100%;
+  max-width: 30rem;
+  height: 4.8rem;
+  display: block;
+}
+
+/* Open Hairline 4-Cell Telemetry Metadata Strip */
+.st-complete-meta-strip {
+  display: grid;
+  grid-template-columns: 0.85fr 0.85fr 1.4fr 1.1fr;
+  width: 100%;
+  border-top: 1px solid var(--obs-hairline);
+  border-bottom: 1px solid var(--obs-hairline);
+  padding: 1.5rem 0;
+
+  @media screen and (max-width: 780px) {
+    grid-template-columns: 1fr 1fr;
+    row-gap: 1.4rem;
+  }
+}
+
+.st-complete-meta-cell {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding: 0.2rem 2.0rem;
+  border-right: 1px solid var(--obs-hairline);
+  min-width: 0;
+
+  &:first-child {
+    padding-left: 0.8rem;
+  }
+
+  &:last-child {
+    border-right: none;
+    padding-right: 0.8rem;
+  }
+
+  @media screen and (max-width: 780px) {
+    &:nth-child(2n) {
+      border-right: none;
+    }
+  }
+}
+
+.st-complete-meta-label {
+  font-size: 1.05rem;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--obs-slate-500);
   margin-bottom: 0.4rem;
 }
 
-.st-complete-label.st-label-lg {
-  font-size: 2.6rem;
-  margin-bottom: 0.4rem;
-}
-
-.st-complete-val-row {
+.st-complete-meta-val-row {
   display: inline-flex;
   align-items: baseline;
-  justify-content: center;
-  gap: 0.5rem;
+  gap: 0.45rem;
 }
 
 .st-complete-val {
-  font-family: var(--obs-font-sans);
-  font-weight: 300;
+  font-family: var(--obs-font-mono);
+  font-weight: 800;
   font-variant-numeric: tabular-nums;
-  line-height: 1.08;
-}
+  font-size: 2.2rem;
+  line-height: 1.1;
 
-.st-complete-val.ping {
-  font-size: 3.1rem;
-  color: #34d399;
-}
+  &.ping {
+    color: var(--obs-emerald-400);
+  }
 
-.st-complete-val.jitter {
-  font-size: 3.1rem;
-  color: #818cf8;
-}
-
-.st-complete-val.download {
-  font-size: 3.6rem;
-  color: #d946ef;
-}
-
-.st-complete-val.upload {
-  font-size: 3.6rem;
-  color: #38bdf8;
+  &.jitter {
+    color: var(--obs-indigo-300);
+  }
 }
 
 .st-complete-unit-inline {
-  font-size: 1.9rem;
-  font-weight: 500;
-  color: #94a3b8;
-}
-
-.st-complete-unit-block {
-  margin-top: 0.3rem;
-  font-size: 1.9rem;
-  font-weight: 500;
-  color: #94a3b8;
+  font-family: var(--obs-font-mono);
+  font-size: 1.25rem;
+  font-weight: 600;
+  color: var(--obs-slate-500);
 }
 
 .st-complete-isp {
-  padding: 0 1.2rem 0.6rem 1.2rem;
-  font-size: 1.55rem;
-  font-weight: 600;
-  color: #e2e8f0;
-  text-align: left;
+  font-size: 1.45rem;
+  font-weight: 700;
+  color: var(--obs-slate-200);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-.st-complete-footer {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0.45rem 1.0rem 0.5rem 1.2rem;
-  border-top: 1px solid rgba(99, 102, 241, 0.55);
-  font-size: 1.2rem;
-  font-weight: 400;
-  color: #818cf8;
-}
-
-.st-complete-img {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  object-fit: fill;
-  display: block;
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 0.18s ease;
-}
-
-.st-complete-img.is-loaded {
-  opacity: 1;
-  pointer-events: auto;
+.st-complete-ts {
+  font-family: var(--obs-font-mono);
+  font-size: 1.35rem;
+  font-weight: 600;
+  color: var(--obs-slate-400);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }

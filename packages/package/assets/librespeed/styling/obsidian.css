@@ -1,7 +1,7 @@
 /**
  * ============================================================================
- * OBSIDIAN V2 DESIGN SYSTEM — LIBRESPEED TELEMETRY SUITE
- * Grounded in the AetherFlow v3.2, Looplet & Jellyfin 12.2 Obsidian V2 Specification
+ * OBSIDIAN V2 DESIGN SYSTEM — LIBRESPEED OPEN-CANVAS TELEMETRY SUITE
+ * Grounded in the AetherFlow v3.2.1 Open-Canvas Architecture
  * ============================================================================
  */
 
@@ -50,58 +50,28 @@
   --obs-radius-2xl: 1.6rem;
   --obs-radius-full: 9999px;
 
-  /* --- Directional Specular Highlights & Chromatic Glass Edges --- */
-  --obs-specular-top: rgba(255, 255, 255, 0.28);
-  --obs-specular-left: rgba(56, 189, 248, 0.38);
-  --obs-specular-subtle: rgba(255, 255, 255, 0.14);
-  --obs-glass-border: rgba(129, 140, 248, 0.34);
-  --obs-glass-border-hover: rgba(168, 85, 247, 0.68);
-  --obs-chromatic-border-cyan: rgba(56, 189, 248, 0.44);
-  --obs-chromatic-border-indigo: rgba(129, 140, 248, 0.48);
-  --obs-chromatic-border-fuchsia: rgba(217, 70, 239, 0.44);
-  --obs-chromatic-edge-gradient: linear-gradient(
-    135deg,
-    rgba(255, 255, 255, 0.90) 0%,
-    rgba(56, 189, 248, 0.82) 18%,
-    rgba(129, 140, 248, 0.86) 44%,
-    rgba(217, 70, 239, 0.84) 70%,
-    rgba(168, 85, 247, 0.80) 86%,
-    rgba(56, 189, 248, 0.75) 100%
-  );
-  --obs-chromatic-edge-hover: linear-gradient(
-    135deg,
-    rgba(255, 255, 255, 0.98) 0%,
-    rgba(56, 189, 248, 0.92) 18%,
-    rgba(129, 140, 248, 0.94) 44%,
-    rgba(217, 70, 239, 0.92) 70%,
-    rgba(168, 85, 247, 0.90) 86%,
-    rgba(56, 189, 248, 0.86) 100%
-  );
-  --obs-chromatic-inset:
-    inset 0 1px 1px 0 rgba(255, 255, 255, 0.44),
-    inset 1.5px 0 3px 0 rgba(56, 189, 248, 0.38),
-    inset -1.5px 0 3px 0 rgba(217, 70, 239, 0.38),
-    inset 0 -1.5px 3px 0 rgba(129, 140, 248, 0.42);
-  --obs-chromatic-inset-card:
-    inset 0 1px 0 0 rgba(255, 255, 255, 0.36),
-    inset 1px 0 2px 0 rgba(56, 189, 248, 0.30),
-    inset -1px 0 2px 0 rgba(217, 70, 239, 0.30),
-    inset 0 -1px 2px 0 rgba(129, 140, 248, 0.34);
+  /* --- Open-Canvas Hairlines & Subtle Surfaces --- */
+  --obs-hairline: rgba(255, 255, 255, 0.06);
+  --obs-hairline-strong: rgba(255, 255, 255, 0.10);
+  --obs-specular-top: rgba(255, 255, 255, 0.18);
+  --obs-glass-border: rgba(255, 255, 255, 0.08);
+  --obs-glass-border-hover: rgba(129, 140, 248, 0.35);
+  --obs-chromatic-border-cyan: rgba(56, 189, 248, 0.28);
+  --obs-chromatic-border-indigo: rgba(129, 140, 248, 0.28);
+  --obs-chromatic-border-fuchsia: rgba(217, 70, 239, 0.28);
 
-  /* --- Glass Surface Elevations --- */
-  --obs-card-bg: linear-gradient(135deg, rgba(10, 12, 26, 0.78) 0%, rgba(8, 10, 22, 0.84) 55%, rgba(12, 10, 28, 0.80) 100%);
-  --obs-card-bg-hover: linear-gradient(135deg, rgba(14, 18, 36, 0.84) 0%, rgba(12, 14, 30, 0.86) 55%, rgba(18, 14, 38, 0.84) 100%);
-  --obs-panel-bg: linear-gradient(180deg, rgba(10, 12, 26, 0.88) 0%, rgba(6, 8, 18, 0.94) 100%);
-  --obs-hero-bg: linear-gradient(180deg, rgba(8, 10, 22, 0.82) 0%, rgba(12, 10, 28, 0.86) 55%, rgba(16, 10, 34, 0.84) 100%);
+  /* --- Glass Surface Elevations (Modals & Dropdowns) --- */
+  --obs-card-bg: rgba(15, 23, 42, 0.38);
+  --obs-card-bg-hover: rgba(15, 23, 42, 0.56);
+  --obs-panel-bg: linear-gradient(180deg, rgba(12, 15, 30, 0.92) 0%, rgba(7, 9, 20, 0.96) 100%);
   --obs-input-bg: rgba(0, 0, 0, 0.45);
   --obs-input-bg-focus: rgba(0, 0, 0, 0.65);
 
   /* --- Optical Depth Shadows --- */
-  --obs-shadow-card: 0 12px 40px rgba(0, 0, 0, 0.72), 0 0 14px rgba(99, 102, 241, 0.08);
-  --obs-shadow-card-hover: 0 20px 48px rgba(0, 0, 0, 0.82), 0 0 24px rgba(99, 102, 241, 0.24), 0 0 12px rgba(217, 70, 239, 0.18);
-  --obs-shadow-panel: 0 24px 60px rgba(0, 0, 0, 0.84), 0 0 22px rgba(99, 102, 241, 0.16);
-  --obs-shadow-button-primary: 0 6px 24px rgba(99, 102, 241, 0.34), 0 0 14px rgba(217, 70, 239, 0.18);
-  --obs-shadow-button-hover: 0 10px 32px rgba(217, 70, 239, 0.42), 0 0 20px rgba(99, 102, 241, 0.32);
+  --obs-shadow-card: 0 12px 36px rgba(0, 0, 0, 0.55);
+  --obs-shadow-panel: 0 24px 60px rgba(0, 0, 0, 0.84), 0 0 24px rgba(99, 102, 241, 0.14);
+  --obs-shadow-button-primary: 0 6px 24px rgba(99, 102, 241, 0.32), 0 0 14px rgba(217, 70, 239, 0.16);
+  --obs-shadow-button-hover: 0 10px 32px rgba(217, 70, 239, 0.40), 0 0 20px rgba(99, 102, 241, 0.30);
 
   /* --- 120Hz High-Refresh Motion Curves & Atmosphere Tuning --- */
   --obs-ease-out-120: cubic-bezier(0.22, 1, 0.36, 1);
@@ -112,10 +82,9 @@
   --obs-glass-blur: 16px;
   --obs-glass-blur-heavy: 24px;
   --obs-glass-saturation: saturate(150%);
-  --obs-aurora-opacity: 0.28;
+  --obs-aurora-opacity: 0.32;
   --obs-aurora-animation: none;
   --obs-grain-display: block;
-  --obs-card-lift: -3px;
 }
 
 /**
@@ -191,82 +160,38 @@ body::after {
   backface-visibility: hidden;
   transform: translateZ(0);
   background-image:
-    radial-gradient(circle at 50% 45%, transparent 42%, rgba(0, 0, 0, 0.80) 100%),
+    radial-gradient(circle at 50% 45%, transparent 44%, rgba(0, 0, 0, 0.78) 100%),
     url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.65' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.032'/%3E%3C/svg%3E");
   background-size: 100% 100%, 200px 200px;
 }
 
 /**
  * ============================================================================
- * OBSIDIAN V2 CHROMATIC GLASS SURFACES
+ * SUBTLE OPEN-CANVAS SURFACES (Used in Telemetry Vault & Modals)
  * ============================================================================
  */
 .glass-card {
   position: relative;
-  background: var(--obs-card-bg);
-  backdrop-filter: blur(20px) var(--obs-glass-saturation);
-  -webkit-backdrop-filter: blur(20px) var(--obs-glass-saturation);
-  border: 1px solid var(--obs-chromatic-border-indigo);
-  border-top: 1px solid var(--obs-specular-top);
-  border-left: 1px solid var(--obs-chromatic-border-cyan);
-  border-right: 1px solid var(--obs-chromatic-border-fuchsia);
+  background: rgba(15, 23, 42, 0.36);
+  backdrop-filter: blur(16px) var(--obs-glass-saturation);
+  -webkit-backdrop-filter: blur(16px) var(--obs-glass-saturation);
+  border: 1px solid var(--obs-hairline);
   border-radius: var(--obs-radius-2xl);
-  box-shadow: var(--obs-shadow-card), var(--obs-chromatic-inset-card);
-  backface-visibility: hidden;
-  transform: translate3d(0, 0, 0);
-  transition: transform var(--obs-duration-card) var(--obs-ease-spring-120),
-              border-color var(--obs-duration-card) var(--obs-ease-out-120),
-              box-shadow var(--obs-duration-card) var(--obs-ease-out-120),
-              background var(--obs-duration-card) var(--obs-ease-out-120);
-}
-
-.glass-card::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  border-radius: inherit;
-  padding: 1px;
-  background: var(--obs-chromatic-edge-gradient);
-  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
-  -webkit-mask-composite: xor;
-  mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
-  mask-composite: exclude;
-  pointer-events: none;
-  z-index: 1;
-  opacity: 0.28;
-  transform: translateZ(0);
-  will-change: opacity;
-  transition: opacity var(--obs-duration-card) var(--obs-ease-out-120);
-}
-
-@media (hover: hover) and (pointer: fine) {
-  .glass-card:hover {
-    transform: translate3d(0, var(--obs-card-lift), 0);
-    border-color: var(--obs-glass-border-hover);
-    border-top-color: rgba(255, 255, 255, 0.45);
-    background: var(--obs-card-bg-hover);
-    box-shadow: var(--obs-shadow-card-hover);
-  }
-  .glass-card:hover::after {
-    opacity: 0.72;
-  }
 }
 
 .glass-panel {
   background: var(--obs-panel-bg);
   backdrop-filter: blur(var(--obs-glass-blur-heavy)) var(--obs-glass-saturation);
   -webkit-backdrop-filter: blur(var(--obs-glass-blur-heavy)) var(--obs-glass-saturation);
-  border: 1px solid var(--obs-chromatic-border-indigo);
-  border-top: 1px solid var(--obs-specular-top);
-  border-left: 1px solid var(--obs-chromatic-border-cyan);
-  border-right: 1px solid var(--obs-chromatic-border-fuchsia);
+  border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: var(--obs-radius-2xl);
-  box-shadow: var(--obs-shadow-panel), var(--obs-chromatic-inset);
+  box-shadow: var(--obs-shadow-panel);
 }
 
 /**
  * ============================================================================
- * OBSIDIAN V2 NAVIGATION HEADER & STATUS BEACONS
+ * OPEN-CANVAS TOP COMMAND HEADER & STATUS BEACONS
+ * Grounded in AetherFlow OverviewTab & NetworkTab Open Top Bar
  * ============================================================================
  */
 header.obs-header {
@@ -276,57 +201,77 @@ header.obs-header {
   flex-wrap: wrap;
   gap: 1.6rem;
   width: 100%;
-  max-width: 120rem;
-  margin: 1.4rem auto 0.6rem auto;
-  padding: 1.1rem 2.2rem;
-  background: linear-gradient(180deg, rgba(15, 18, 36, 0.76) 0%, rgba(9, 11, 24, 0.84) 100%);
-  backdrop-filter: blur(20px) var(--obs-glass-saturation);
-  -webkit-backdrop-filter: blur(20px) var(--obs-glass-saturation);
-  border: 1px solid var(--obs-chromatic-border-indigo);
-  border-top: 1px solid var(--obs-specular-top);
-  border-left: 1px solid var(--obs-chromatic-border-cyan);
-  border-right: 1px solid var(--obs-chromatic-border-fuchsia);
-  border-radius: var(--obs-radius-2xl);
-  box-shadow: var(--obs-shadow-card), var(--obs-chromatic-inset-card);
+  max-width: 118rem;
+  margin: 0 auto;
+  padding: 1.8rem 0 1.5rem 0;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--obs-hairline);
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.obs-header-left {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 1.4rem;
 }
 
 .obs-brand {
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: 1.4rem;
+  gap: 1.2rem;
   text-decoration: none;
 }
 
 .obs-brand img {
-  height: 2.0rem;
+  height: 1.9rem;
   width: auto;
   display: block;
-  filter: drop-shadow(0 0 12px rgba(99, 102, 241, 0.35));
+  filter: drop-shadow(0 0 10px rgba(99, 102, 241, 0.30));
+}
+
+.obs-brand-divider {
+  width: 1px;
+  height: 1.8rem;
+  background: rgba(255, 255, 255, 0.12);
+  display: inline-block;
 }
 
 .obs-badge {
   display: inline-flex;
   align-items: center;
-  gap: 0.7rem;
-  padding: 0.4rem 1.1rem;
+  gap: 0.65rem;
+  padding: 0.35rem 1.0rem;
   border-radius: var(--obs-radius-full);
-  background: linear-gradient(135deg, rgba(99, 102, 241, 0.18) 0%, rgba(217, 70, 239, 0.12) 100%);
-  border: 1px solid rgba(129, 140, 248, 0.42);
-  border-top-color: rgba(255, 255, 255, 0.28);
-  color: var(--obs-indigo-300);
+  background: rgba(16, 185, 129, 0.12);
+  border: 1px solid rgba(16, 185, 129, 0.28);
+  color: #6ee7b7;
   font-family: var(--obs-font-mono);
-  font-size: 1.1rem;
+  font-size: 1.05rem;
   font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
 }
 
+.obs-header-subtitle {
+  font-size: 1.25rem;
+  font-weight: 500;
+  color: var(--obs-slate-500);
+  letter-spacing: -0.01em;
+
+  @media screen and (max-width: 960px) {
+    display: none;
+  }
+}
+
 .obs-beacon-live {
-  width: 8px;
-  height: 8px;
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
-  background-color: #10b981;
-  box-shadow: 0 0 8px #10b981, 0 0 16px #10b981;
+  background-color: #34d399;
+  box-shadow: 0 0 8px #34d399;
   animation: obs-pulse-live 2s infinite ease-in-out;
   flex-shrink: 0;
 }
@@ -338,17 +283,18 @@ header.obs-header {
   }
   50% {
     transform: scale(1.22);
-    opacity: 0.75;
+    opacity: 0.72;
   }
 }
 
+/* AetherFlow Open-Canvas View Switcher */
 .obs-nav-pills {
   display: flex;
   align-items: center;
-  gap: 0.6rem;
+  gap: 0.4rem;
   padding: 0.4rem;
-  border-radius: var(--obs-radius-full);
-  background: rgba(0, 0, 0, 0.42);
+  border-radius: 1.2rem;
+  background: rgba(255, 255, 255, 0.035);
   border: 1px solid rgba(255, 255, 255, 0.08);
   overflow-x: auto;
   max-width: 100%;
@@ -360,19 +306,18 @@ header.obs-header {
   align-items: center;
   justify-content: center;
   gap: 0.6rem;
-  padding: 0.7rem 1.5rem;
-  min-height: 36px;
+  padding: 0.65rem 1.4rem;
+  min-height: 34px;
   font-family: var(--obs-font-sans);
   font-weight: 600;
-  font-size: 1.3rem;
+  font-size: 1.25rem;
   letter-spacing: -0.01em;
   color: var(--obs-slate-400);
   text-decoration: none;
-  border-radius: var(--obs-radius-full);
+  border-radius: 0.85rem;
   border: 1px solid transparent;
   background: transparent;
-  transition: transform var(--obs-duration-fast) var(--obs-ease-out-120),
-              background-color var(--obs-duration-fast) ease,
+  transition: background-color var(--obs-duration-fast) ease,
               color var(--obs-duration-fast) ease,
               border-color var(--obs-duration-fast) ease,
               box-shadow var(--obs-duration-fast) ease;
@@ -382,23 +327,20 @@ header.obs-header {
 
 .obs-tab-pill:hover {
   color: var(--obs-white);
-  background-color: rgba(255, 255, 255, 0.06);
-  border-color: rgba(255, 255, 255, 0.12);
+  background-color: rgba(255, 255, 255, 0.05);
 }
 
 .obs-tab-pill-active {
-  color: var(--obs-white) !important;
-  background: linear-gradient(135deg, rgba(99, 102, 241, 0.28) 0%, rgba(217, 70, 239, 0.18) 100%) !important;
-  border: 1px solid rgba(129, 140, 248, 0.54) !important;
-  border-top-color: rgba(255, 255, 255, 0.32) !important;
-  box-shadow: 0 0 16px rgba(99, 102, 241, 0.32) !important;
+  color: #c7d2fe !important;
+  background: rgba(99, 102, 241, 0.20) !important;
+  border: 1px solid rgba(129, 140, 248, 0.32) !important;
+  box-shadow: 0 2px 10px rgba(99, 102, 241, 0.12) !important;
 }
 
-@media screen and (max-width: 800px) {
+@media screen and (max-width: 760px) {
   header.obs-header {
-    margin: 1.4rem auto;
-    padding: 1.4rem 1.6rem;
-    justify-content: center;
+    padding: 1.4rem 0;
+    justify-content: space-between;
   }
 }
 
@@ -429,10 +371,6 @@ header.obs-header {
 @media (prefers-reduced-motion: reduce) {
   :root {
     --obs-aurora-animation: none;
-    --obs-card-lift: 0px;
-  }
-  .glass-card:hover {
-    transform: none !important;
   }
   .obs-beacon-live {
     animation: none !important;

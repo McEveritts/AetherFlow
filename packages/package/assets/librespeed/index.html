@@ -5,26 +5,31 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
   <meta name="description"
-    content="LibreSpeed Network Telemetry — Obsidian V2 Speedtest Edition hosted on AetherFlow." />
+    content="LibreSpeed Network Telemetry — Obsidian V2 Open-Canvas Edition hosted on AetherFlow." />
   <link rel="shortcut icon" href="images/favicon.svg" />
   <script type="text/javascript" src="speedtest.js"></script>
   <script type="text/javascript">
     var SPEEDTEST_SERVERS = "server-list.json";
   </script>
-  <script type="text/javascript" src="javascript/index.js"></script>
-  <link rel="stylesheet" type="text/css" href="styling/index.css" />
+  <script type="text/javascript" src="javascript/index.js?v=2.1"></script>
+  <link rel="stylesheet" type="text/css" href="styling/index.css?v=2.1" />
   <title>LibreSpeed · Obsidian V2 Network Telemetry</title>
 </head>
 
 <body>
+  <!-- 1. OPEN TOP COMMAND HEADER -->
   <header class="obs-header">
-    <a class="obs-brand" href="./">
-      <img src="images/logo.svg" alt="LibreSpeed" />
-      <span class="obs-badge">
-        <span class="obs-beacon-live"></span>
-        Obsidian V2
-      </span>
-    </a>
+    <div class="obs-header-left">
+      <a class="obs-brand" href="./">
+        <img src="images/logo.svg" alt="LibreSpeed" />
+        <span class="obs-brand-divider" aria-hidden="true"></span>
+        <span class="obs-badge">
+          <span class="obs-beacon-live"></span>
+          Obsidian V2
+        </span>
+      </a>
+      <span class="obs-header-subtitle">High-BDP Multi-Stream Network Telemetry</span>
+    </div>
     <nav class="obs-nav-pills" aria-label="Telemetry View Switcher">
       <a class="obs-tab-pill obs-tab-pill-active" href="./">Speedtest Stage</a>
       <a class="obs-tab-pill" href="stats">Telemetry Vault</a>
@@ -33,45 +38,52 @@
   </header>
 
   <main class="st-main" data-stage="idle" data-phase="idle">
-    <!-- TOP TELEMETRY RIBBON (Speedtest.net Live Scoreboard + Sparklines) -->
+    <!-- 2. PERMANENT OPEN-CANVAS 4-CELL TELEMETRY RIBBON -->
     <section class="st-metrics-ribbon" aria-label="Live Telemetry Metrics">
-      <!-- Ping Metric Card -->
-      <div class="st-metric-card glass-card ping" id="card-ping">
+      <!-- Ping Metric Cell -->
+      <div class="st-metric-card ping" id="card-ping">
         <div class="st-metric-header">
-          <svg class="st-metric-icon emerald" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
-          </svg>
+          <span class="st-metric-icon-box emerald">
+            <svg class="st-metric-icon emerald" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+              <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
+            </svg>
+          </span>
           <span class="label">Ping</span>
           <span class="st-metric-unit">ms</span>
         </div>
         <div class="st-metric-body">
           <span class="value" id="ping">--</span>
+          <span class="st-metric-sub">Round-trip latency</span>
         </div>
       </div>
 
-      <!-- Jitter Metric Card -->
-      <div class="st-metric-card glass-card jitter" id="card-jitter">
+      <!-- Jitter Metric Cell -->
+      <div class="st-metric-card jitter" id="card-jitter">
         <div class="st-metric-header">
-          <svg class="st-metric-icon indigo" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M2 12h4l3-9 4 18 3-9h6"></path>
-          </svg>
+          <span class="st-metric-icon-box indigo">
+            <svg class="st-metric-icon indigo" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+              <path d="M2 12h4l3-9 4 18 3-9h6"></path>
+            </svg>
+          </span>
           <span class="label">Jitter</span>
           <span class="st-metric-unit">ms</span>
         </div>
         <div class="st-metric-body">
           <span class="value" id="jitter">--</span>
+          <span class="st-metric-sub">Packet delay variance</span>
         </div>
       </div>
 
-      <!-- Download Metric Card + Live Sparkline -->
-      <div class="st-metric-card st-metric-wide glass-card" id="card-download">
+      <!-- Download Metric Cell + Live Sparkline -->
+      <div class="st-metric-card st-metric-wide download" id="card-download">
         <div class="st-metric-top">
           <div class="st-metric-header">
-            <svg class="st-metric-icon fuchsia" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
-              <circle cx="12" cy="12" r="10"></circle>
-              <polyline points="8 12 12 16 16 12"></polyline>
-              <line x1="12" y1="8" x2="12" y2="16"></line>
-            </svg>
+            <span class="st-metric-icon-box fuchsia">
+              <svg class="st-metric-icon fuchsia" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+                <polyline points="7 13 12 18 17 13"></polyline>
+                <line x1="12" y1="6" x2="12" y2="18"></line>
+              </svg>
+            </span>
             <span class="label">Download</span>
             <span class="st-metric-unit">Mbps</span>
           </div>
@@ -79,18 +91,19 @@
             <span class="value" id="download-speed">--</span>
           </div>
         </div>
-        <canvas id="dl-sparkline" class="st-sparkline" width="220" height="36"></canvas>
+        <canvas id="dl-sparkline" class="st-sparkline" width="260" height="40"></canvas>
       </div>
 
-      <!-- Upload Metric Card + Live Sparkline -->
-      <div class="st-metric-card st-metric-wide glass-card" id="card-upload">
+      <!-- Upload Metric Cell + Live Sparkline -->
+      <div class="st-metric-card st-metric-wide upload" id="card-upload">
         <div class="st-metric-top">
           <div class="st-metric-header">
-            <svg class="st-metric-icon cyan" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
-              <circle cx="12" cy="12" r="10"></circle>
-              <polyline points="16 12 12 8 8 12"></polyline>
-              <line x1="12" y1="16" x2="12" y2="8"></line>
-            </svg>
+            <span class="st-metric-icon-box cyan">
+              <svg class="st-metric-icon cyan" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+                <polyline points="17 11 12 6 7 11"></polyline>
+                <line x1="12" y1="18" x2="12" y2="6"></line>
+              </svg>
+            </span>
             <span class="label">Upload</span>
             <span class="st-metric-unit">Mbps</span>
           </div>
@@ -98,13 +111,13 @@
             <span class="value" id="upload-speed">--</span>
           </div>
         </div>
-        <canvas id="ul-sparkline" class="st-sparkline" width="220" height="36"></canvas>
+        <canvas id="ul-sparkline" class="st-sparkline" width="260" height="40"></canvas>
       </div>
     </section>
 
-    <!-- CENTER STAGE: MORPHING "GO" RING BUTTON <-> MASTER 270° SPEEDOMETER -->
+    <!-- 3. OPEN-CANVAS CENTER STAGE: PULSING "GO" RING <-> 270° SPEEDOMETER <-> OPEN HERO SUMMARY -->
     <section class="st-stage">
-      <!-- State 1: Iconic Speedtest.net Pulsing "GO" Ring Button -->
+      <!-- State 1: Iconic Pulsing "GO" Ring Button on Open Canvas -->
       <div class="st-go-wrapper" id="go-wrapper">
         <div class="st-go-sonar st-go-sonar-1"></div>
         <div class="st-go-sonar st-go-sonar-2"></div>
@@ -118,8 +131,8 @@
         </button>
       </div>
 
-      <!-- State 2 & 3: Central Master 270° Speedometer Gauge Pod -->
-      <div class="st-gauge-pod glass-card" id="master-gauge-pod">
+      <!-- State 2 & 3: Open-Canvas Speedometer & Benchmark Complete Showcase -->
+      <div class="st-gauge-pod" id="master-gauge-pod">
         <div class="st-phase-header">
           <span class="st-phase-badge" id="st-phase-badge">
             <span class="st-phase-dot"></span>
@@ -127,6 +140,7 @@
           </span>
         </div>
 
+        <!-- State 2: Open-Canvas 270° Master Speedometer Dial -->
         <div class="st-speedometer-wrap">
           <svg class="st-speedometer-svg" viewBox="0 0 440 340" aria-hidden="true">
             <defs>
@@ -215,45 +229,73 @@
           </div>
         </div>
 
-        <!-- Benchmark Complete Telemetry Summary Card (Displayed when data-phase="finished") -->
+        <!-- State 3: Open-Canvas Benchmark Complete Showcase (Displayed when data-phase="finished") -->
         <div class="st-complete-summary" id="st-complete-summary" aria-live="polite">
           <div class="st-complete-card" id="st-complete-card">
-            <div class="st-complete-grid">
-              <div class="st-complete-cell">
-                <div class="st-complete-label st-label-sm">Ping</div>
-                <div class="st-complete-val-row">
+            <!-- Primary Dual Throughput Hero on Open Canvas -->
+            <div class="st-complete-hero-grid">
+              <!-- Download Hero Column -->
+              <div class="st-complete-hero-col download">
+                <div class="st-complete-hero-head">
+                  <span class="st-metric-icon-box fuchsia">
+                    <svg class="st-metric-icon fuchsia" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+                      <polyline points="7 13 12 18 17 13"></polyline>
+                      <line x1="12" y1="6" x2="12" y2="18"></line>
+                    </svg>
+                  </span>
+                  <span class="st-complete-hero-label">Download Throughput</span>
+                  <span class="st-complete-hero-unit">Mbps</span>
+                </div>
+                <div class="st-complete-hero-val download" id="st-res-dl">--</div>
+                <canvas id="st-res-dl-wave" class="st-complete-hero-wave" width="320" height="54"></canvas>
+              </div>
+
+              <!-- Upload Hero Column -->
+              <div class="st-complete-hero-col upload">
+                <div class="st-complete-hero-head">
+                  <span class="st-metric-icon-box cyan">
+                    <svg class="st-metric-icon cyan" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+                      <polyline points="17 11 12 6 7 11"></polyline>
+                      <line x1="12" y1="18" x2="12" y2="6"></line>
+                    </svg>
+                  </span>
+                  <span class="st-complete-hero-label">Upload Throughput</span>
+                  <span class="st-complete-hero-unit">Mbps</span>
+                </div>
+                <div class="st-complete-hero-val upload" id="st-res-ul">--</div>
+                <canvas id="st-res-ul-wave" class="st-complete-hero-wave" width="320" height="54"></canvas>
+              </div>
+            </div>
+
+            <!-- Open Hairline Latency & Session Telemetry Strip -->
+            <div class="st-complete-meta-strip">
+              <div class="st-complete-meta-cell">
+                <span class="st-complete-meta-label">Ping Latency</span>
+                <div class="st-complete-meta-val-row">
                   <span class="st-complete-val ping" id="st-res-ping">--</span>
                   <span class="st-complete-unit-inline">ms</span>
                 </div>
               </div>
-              <div class="st-complete-cell">
-                <div class="st-complete-label st-label-sm">Jitter</div>
-                <div class="st-complete-val-row">
+              <div class="st-complete-meta-cell">
+                <span class="st-complete-meta-label">Jitter Variance</span>
+                <div class="st-complete-meta-val-row">
                   <span class="st-complete-val jitter" id="st-res-jitter">--</span>
                   <span class="st-complete-unit-inline">ms</span>
                 </div>
               </div>
-              <div class="st-complete-cell st-cell-throughput">
-                <div class="st-complete-label st-label-lg">Download</div>
-                <div class="st-complete-val download" id="st-res-dl">--</div>
-                <div class="st-complete-unit-block">Mbit/s</div>
+              <div class="st-complete-meta-cell">
+                <span class="st-complete-meta-label">Client Network / ISP</span>
+                <div class="st-complete-isp" id="st-res-isp">--</div>
               </div>
-              <div class="st-complete-cell st-cell-throughput">
-                <div class="st-complete-label st-label-lg">Upload</div>
-                <div class="st-complete-val upload" id="st-res-ul">--</div>
-                <div class="st-complete-unit-block">Mbit/s</div>
+              <div class="st-complete-meta-cell">
+                <span class="st-complete-meta-label">Completed At</span>
+                <div class="st-complete-ts" id="st-res-ts">--</div>
               </div>
             </div>
-            <div class="st-complete-isp" id="st-res-isp">ISP: --</div>
-            <div class="st-complete-footer">
-              <span class="st-complete-ts" id="st-res-ts">--</span>
-              <span class="st-complete-wm">LibreSpeed &middot; Obsidian V2</span>
-            </div>
-            <img id="st-complete-img" class="st-complete-img" src="" alt="Benchmark Complete Telemetry Result Card" />
           </div>
         </div>
 
-        <!-- Action Controls Bar inside/below Master Gauge Pod -->
+        <!-- Action Controls Bar on Open Canvas -->
         <div class="st-gauge-actions">
           <button type="button" class="st-action-btn st-abort-btn" id="abort-button">
             Abort Test
@@ -283,12 +325,12 @@
       </div>
     </section>
 
-    <!-- BOTTOM CONNECTION TOPOLOGY BAR (Speedtest.net Client <-> Fiber Stream <-> Server Node) -->
+    <!-- 4. OPEN-CANVAS CONNECTION TOPOLOGY BAR (Client Endpoint <-> Fiber Stream <-> Server Node) -->
     <section class="st-topology-bar" aria-label="Connection Topology">
       <!-- Left: Client Endpoint Node -->
-      <div class="st-node-card glass-card" id="client-node-card">
+      <div class="st-node-card" id="client-node-card">
         <div class="st-node-icon cyan">
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <circle cx="12" cy="12" r="10"></circle>
             <line x1="2" y1="12" x2="22" y2="12"></line>
             <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path>
@@ -312,10 +354,10 @@
       </div>
 
       <!-- Right: Target Telemetry Server Selector Node -->
-      <div class="st-node-card glass-card server-selector" id="server-selector-card">
+      <div class="st-node-card server-selector" id="server-selector-card">
         <div class="chosen">
           <div class="st-node-icon indigo">
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <rect x="2" y="2" width="20" height="8" rx="2" ry="2"></rect>
               <rect x="2" y="14" width="20" height="8" rx="2" ry="2"></rect>
               <line x1="6" y1="6" x2="6.01" y2="6"></line>
@@ -339,7 +381,7 @@
   <footer>
     <p class="source">
       <span>Powered by AetherFlow Obsidian V2</span>
-      &middot;
+      <span class="source-dot">&middot;</span>
       <a href="https://github.com/librespeed/speedtest-go" target="_blank" rel="noopener noreferrer">LibreSpeed Engine</a>
     </p>
   </footer>
@@ -348,8 +390,10 @@
     <div class="close-dialog">
       <img src="images/close-button.svg" alt="Close" />
     </div>
+    <h2 class="share-dialog-title">Share Benchmark Telemetry</h2>
+    <p class="share-dialog-sub">Direct forum &amp; diagnostic result card generated by this node</p>
     <img id="results" src="" alt="Test results in graphical form" />
-    <button id="copy-link">Copy link</button>
+    <button id="copy-link">Copy Result Link</button>
   </dialog>
 
   <dialog id="privacy">

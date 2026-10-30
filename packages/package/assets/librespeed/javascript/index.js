@@ -1,6 +1,6 @@
 /**
- * LibreSpeed Obsidian V2 — Speedtest.net Stage & 120Hz Telemetry Engine
- * Grounded in AetherFlow v3.2 & Ookla Speedtest Choreography
+ * LibreSpeed Obsidian V2 — Open-Canvas Speedtest Stage & 120Hz Telemetry Engine
+ * Grounded in AetherFlow v3.2.1 Open-Canvas Architecture & Ookla Speedtest Choreography
  */
 
 const INITIALIZING = 0;
@@ -201,6 +201,7 @@ function drawWaveform(canvas, samples, strokeColor, fillTop, fillBottom) {
   const dpr = window.devicePixelRatio || 1;
   const w = canvas.clientWidth || canvas.width;
   const h = canvas.clientHeight || canvas.height;
+  if (!w || !h) return;
   const pw = Math.round(w * dpr);
   const ph = Math.round(h * dpr);
   if (canvas.width !== pw || canvas.height !== ph) {
@@ -213,7 +214,7 @@ function drawWaveform(canvas, samples, strokeColor, fillTop, fillBottom) {
 
   // Subtle baseline
   ctx.beginPath();
-  ctx.strokeStyle = "rgba(148, 163, 184, 0.16)";
+  ctx.strokeStyle = "rgba(148, 163, 184, 0.14)";
   ctx.lineWidth = 1 * dpr;
   ctx.moveTo(0, ph - 2 * dpr);
   ctx.lineTo(pw, ph - 2 * dpr);
@@ -289,6 +290,20 @@ function initSparklines() {
     "rgba(168, 85, 247, 0.30)",
     "rgba(168, 85, 247, 0.0)"
   );
+  drawWaveform(
+    document.querySelector("#st-res-dl-wave"),
+    [],
+    "#d946ef",
+    "rgba(217, 70, 239, 0.35)",
+    "rgba(217, 70, 239, 0.0)"
+  );
+  drawWaveform(
+    document.querySelector("#st-res-ul-wave"),
+    [],
+    "#38bdf8",
+    "rgba(56, 189, 248, 0.35)",
+    "rgba(56, 189, 248, 0.0)"
+  );
 }
 
 function createSpeedtest() {
@@ -327,11 +342,11 @@ function formatCardIsp(clientIp) {
   if (!clientIp) return "--";
   if (clientIp.includes("-")) {
     const idx = clientIp.indexOf("-");
-    let str = clientIp.substring(idx + 1);
+    let str = clientIp.substring(idx + 1).trim();
     if (str.includes("(")) {
-      str = str.split("(")[0];
+      str = str.split("(")[0].trim();
     }
-    return str;
+    return str || clientIp;
   }
   return clientIp;
 }
@@ -366,11 +381,6 @@ function beginBenchmark() {
   testState.targetFraction = 0;
   testState.currentProgress = 0;
   testState.targetProgress = 0;
-  const completeImg = document.querySelector("#st-complete-img");
-  if (completeImg) {
-    completeImg.classList.remove("is-loaded");
-    completeImg.removeAttribute("src");
-  }
   initSparklines();
   testState.speedtest.start();
   testState.state = RUNNING;
@@ -442,7 +452,7 @@ async function copyLinkButtonClickHandler() {
   button.textContent = "Copied!";
   setTimeout(() => {
     button.classList.remove("active");
-    button.textContent = "Copy link";
+    button.textContent = "Copy Result Link";
   }, 3000);
 }
 
@@ -596,6 +606,8 @@ function startRenderingLoop() {
   const dlSparkCanvas = document.querySelector("#dl-sparkline");
   const ulSparkCanvas = document.querySelector("#ul-sparkline");
   const gaugeWaveCanvas = document.querySelector("#st-gauge-wave");
+  const resDlWaveCanvas = document.querySelector("#st-res-dl-wave");
+  const resUlWaveCanvas = document.querySelector("#st-res-ul-wave");
 
   const arcActive = document.querySelector("#st-arc-active");
   const arcProgress = document.querySelector("#st-arc-progress");
@@ -615,13 +627,22 @@ function startRenderingLoop() {
   const resUl = document.querySelector("#st-res-ul");
   const resIsp = document.querySelector("#st-res-isp");
   const resTs = document.querySelector("#st-res-ts");
-  const completeImg = document.querySelector("#st-complete-img");
-  if (completeImg) {
-    completeImg.addEventListener("load", () => {
-      if (completeImg.getAttribute("src")) {
-        completeImg.classList.add("is-loaded");
-      }
-    });
+
+  function drawCompletionWaveforms() {
+    drawWaveform(
+      resDlWaveCanvas,
+      testState.dlHistory,
+      "#d946ef",
+      "rgba(217, 70, 239, 0.36)",
+      "rgba(217, 70, 239, 0.0)"
+    );
+    drawWaveform(
+      resUlWaveCanvas,
+      testState.ulHistory,
+      "#38bdf8",
+      "rgba(56, 189, 248, 0.36)",
+      "rgba(56, 189, 248, 0.0)"
+    );
   }
 
   function renderUI() {
@@ -634,6 +655,9 @@ function startRenderingLoop() {
         : "idle";
     if (mainEl.dataset.stage !== stageStr) {
       mainEl.dataset.stage = stageStr;
+      if (stageStr === "finished") {
+        requestAnimationFrame(drawCompletionWaveforms);
+      }
     }
 
     startButton.classList.toggle("disabled", testState.state === INITIALIZING);
@@ -695,7 +719,7 @@ function startRenderingLoop() {
       mainEl.dataset.phase = phase;
     }
 
-    // Highlight active scoreboard card
+    // Highlight active scoreboard cell
     cardPing.classList.toggle("is-active-phase", phase === "ping");
     cardJitter.classList.toggle("is-active-phase", phase === "ping");
     cardDownload.classList.toggle("is-active-phase", phase === "download");
@@ -742,7 +766,6 @@ function startRenderingLoop() {
         setGaugeScale(SCALE_10G);
       }
       if (dlProg >= 1) {
-        // Inter-phase settle between Download and Upload: return needle toward 0
         phaseText.textContent = "Preparing Upload Test";
         masterUnit.textContent = "Mbps";
         testState.targetMbps = 0;
@@ -781,12 +804,14 @@ function startRenderingLoop() {
 
     if (testState.testDataDirty && d) {
       if (d.pingStatus) {
-        pingText.textContent = numberToText(d.pingStatus);
-        if (resPing) resPing.textContent = String(d.pingStatus).split(".")[0];
+        const formattedPing = numberToText(d.pingStatus);
+        pingText.textContent = formattedPing;
+        if (resPing) resPing.textContent = formattedPing;
       }
       if (d.jitterStatus) {
-        jitterText.textContent = numberToText(d.jitterStatus);
-        if (resJitter) resJitter.textContent = d.jitterStatus;
+        const formattedJitter = numberToText(d.jitterStatus);
+        jitterText.textContent = formattedJitter;
+        if (resJitter) resJitter.textContent = formattedJitter;
       }
       if (d.dlStatus) {
         downloadText.textContent = numberToText(d.dlStatus);
@@ -801,7 +826,7 @@ function startRenderingLoop() {
         resTs.textContent = formatCardTimestamp(new Date());
       }
 
-      // Update sparklines
+      // Update top ribbon sparklines
       drawWaveform(
         dlSparkCanvas,
         testState.dlHistory,
@@ -835,12 +860,16 @@ function startRenderingLoop() {
         );
       }
 
+      if (testState.state === FINISHED) {
+        drawCompletionWaveforms();
+      }
+
       if (d.clientIp) {
         const parts = d.clientIp.split(" - ");
         clientIpText.textContent = parts[0] || d.clientIp;
         privacyWarning.textContent = parts[1] || "Direct Telemetry Session";
         if (resIsp) {
-          resIsp.textContent = "ISP: " + formatCardIsp(d.clientIp);
+          resIsp.textContent = formatCardIsp(d.clientIp);
         }
       }
 
@@ -853,9 +882,6 @@ function startRenderingLoop() {
           "/results/?id=" +
           d.testId;
         resultsImage.src = resultUrl;
-        if (completeImg && completeImg.getAttribute("src") !== resultUrl) {
-          completeImg.src = resultUrl;
-        }
       }
 
       testState.testDataDirty = false;

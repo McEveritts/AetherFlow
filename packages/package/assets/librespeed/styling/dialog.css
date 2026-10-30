@@ -4,24 +4,21 @@ dialog {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  width: min(72rem, 92vw);
-  max-height: 82vh;
+  width: min(68rem, 92vw);
+  max-height: 84vh;
   margin: auto;
-  padding: 3.6rem 3.2rem;
+  padding: 3.2rem 3.0rem;
 
   background: var(--obs-panel-bg);
   backdrop-filter: blur(28px) var(--obs-glass-saturation);
   -webkit-backdrop-filter: blur(28px) var(--obs-glass-saturation);
-  border: 1px solid var(--obs-chromatic-border-indigo);
-  border-top: 1px solid var(--obs-specular-top);
-  border-left: 1px solid var(--obs-chromatic-border-cyan);
-  border-right: 1px solid var(--obs-chromatic-border-fuchsia);
+  border: 1px solid rgba(255, 255, 255, 0.10);
   border-radius: var(--obs-radius-2xl);
-  box-shadow: var(--obs-shadow-panel), var(--obs-chromatic-inset);
+  box-shadow: var(--obs-shadow-panel);
   color: var(--obs-slate-200);
 
   &::backdrop {
-    background: rgba(0, 0, 0, 0.76);
+    background: rgba(0, 0, 0, 0.78);
     backdrop-filter: blur(8px);
     -webkit-backdrop-filter: blur(8px);
   }
@@ -29,7 +26,7 @@ dialog {
   @media screen and (max-width: 800px) {
     width: 94vw;
     max-height: 88vh;
-    padding: 2.8rem 2.0rem;
+    padding: 2.6rem 2.0rem;
   }
 
   animation: fade-out 0.2s var(--obs-ease-out-120);
@@ -38,25 +35,39 @@ dialog {
     animation: fade-in 0.25s var(--obs-ease-spring-120);
   }
 
+  & > .share-dialog-title {
+    font-size: 2.2rem;
+    font-weight: 800;
+    letter-spacing: -0.04rem;
+    color: var(--obs-white);
+    margin-bottom: 0.4rem;
+  }
+
+  & > .share-dialog-sub {
+    font-size: 1.3rem;
+    color: var(--obs-slate-400);
+    margin-bottom: 0.6rem;
+  }
+
   & > .close-dialog {
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 4.0rem;
-    height: 4.0rem;
+    width: 3.6rem;
+    height: 3.6rem;
     position: absolute;
-    top: 2.0rem;
-    right: 2.0rem;
-    border-radius: var(--obs-radius-full);
-    background: rgba(255, 255, 255, 0.06);
-    border: 1px solid rgba(255, 255, 255, 0.12);
+    top: 1.8rem;
+    right: 1.8rem;
+    border-radius: 0.9rem;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.10);
     cursor: pointer;
     transition: background-color var(--obs-duration-fast) ease,
                 transform var(--obs-duration-fast) ease;
 
     &:hover {
-      background: rgba(255, 255, 255, 0.14);
-      transform: scale(1.06);
+      background: rgba(255, 255, 255, 0.12);
+      transform: scale(1.05);
     }
   }
 
@@ -64,37 +75,37 @@ dialog {
     max-width: 100%;
     height: auto;
     border-radius: var(--obs-radius-xl);
-    border: 1px solid var(--obs-chromatic-border-indigo);
+    border: 1px solid rgba(255, 255, 255, 0.10);
     box-shadow: var(--obs-shadow-card);
-    margin: 1.6rem 0;
+    margin: 1.4rem 0 1.8rem 0;
   }
 
   & > section {
-    max-width: 64rem;
+    max-width: 60rem;
     overflow-y: auto;
-    margin: 1.6rem 0;
+    margin: 1.2rem 0 1.8rem 0;
     padding: 0 1.2rem 0 0;
     text-align: left;
 
     & h1,
     & h2 {
-      margin: 2.0rem 0 1.0rem 0;
-      font-size: 2.8rem;
-      font-weight: 700;
-      letter-spacing: -0.06rem;
+      margin: 1.8rem 0 0.8rem 0;
+      font-size: 2.6rem;
+      font-weight: 800;
+      letter-spacing: -0.05rem;
       color: var(--primary-text-color);
     }
     & h2 {
-      margin: 1.8rem 0 0.8rem 0;
-      font-size: 2.0rem;
+      margin: 1.6rem 0 0.6rem 0;
+      font-size: 1.8rem;
       color: var(--obs-indigo-300);
     }
 
     & p,
     & li {
-      margin: 0.8rem 0;
-      font-size: 1.5rem;
-      line-height: 2.4rem;
+      margin: 0.7rem 0;
+      font-size: 1.45rem;
+      line-height: 2.3rem;
       font-weight: 400;
       color: var(--obs-slate-300);
     }
@@ -109,7 +120,7 @@ dialog {
     }
 
     & a {
-      font-size: 1.5rem;
+      font-size: 1.45rem;
       font-weight: 600;
       color: var(--obs-sky-400);
       text-underline-offset: 0.3rem;
@@ -124,7 +135,7 @@ dialog {
 @keyframes fade-in {
   0% {
     opacity: 0;
-    transform: scale(0.92);
+    transform: scale(0.94);
     display: none;
   }
   0.1% {
@@ -148,7 +159,7 @@ dialog {
   }
   100% {
     opacity: 0;
-    transform: scale(0.92);
+    transform: scale(0.94);
     display: none;
   }
 }
