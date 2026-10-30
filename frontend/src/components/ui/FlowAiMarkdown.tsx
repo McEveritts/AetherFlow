@@ -65,7 +65,7 @@ function CodeBlock({ lang, code }: { lang: string; code: string }) {
 }
 
 const INLINE_TOKEN_REGEX =
-    /(`[^`\n]+`)|(\[([^\]]+)\]\((https?:\/\/[^\s)]+|\/[^\s)]*|#[^\s)]*)\))|(\*\*\*((?:`[^`\n]*`|(?!\*\*\*)[^\n])+?)\*\*\*)|(\*\*((?:`[^`\n]*`|(?!\*\*)[^\n])+?)\*\*)|(__(?:`[^`\n]*`|(?!__)[^\n])+?__)|(~~((?:`[^`\n]*`|(?!~~)[^\n])+?)~~)|(\*((?:`[^`\n]*`|[^*\n])+?)\*)|((?:^|(?<=[\s(]))_((?:`[^`\n]*`|[^_\n])+?)_(?=$|[\s.,!?:;)]))/g;
+    /(`[^`\n]+`)|(\[([^\]]+)\]\((https?:\/\/[^\s)]+|\/[^\s)]*|#[^\s)]*)\))|(\*\*\*((?:`[^`\n]*`|(?!\*\*\*)[^\n])+?)\*\*\*)|(\*\*((?:`[^`\n]*`|(?!\*\*)[^\n])+?)\*\*)|(__(?:`[^`\n]*`|(?!__)[^\n])+?__)|(~~((?:`[^`\n]*`|(?!~~)[^\n])+?)~~)|(\*((?:`[^`\n]*`|[^*\n])+?)\*)|((?:^|(?<=[\s(]))_((?:`[^`\n]*`|[^_\n])+?)_(?=$|[\s.,!?:;)]))|(https?:\/\/[^\s<>()]+?(?=[.,!?:;)]*(?:\s|$)))/g;
 
 export function renderInlineMarkdown(text: string, keyPrefix = 'inl'): React.ReactNode[] {
     if (!text) return [];
@@ -157,6 +157,20 @@ export function renderInlineMarkdown(text: string, keyPrefix = 'inl'): React.Rea
                     {renderInlineMarkdown(inner, `${key}-iu`)}
                 </em>
             );
+        } else if (match[16]) {
+            // Bare URL: https://...
+            const url = match[16];
+            nodes.push(
+                <a
+                    key={key}
+                    href={url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-indigo-400 hover:text-indigo-300 underline underline-offset-2 font-medium transition-colors break-all"
+                >
+                    {url}
+                </a>
+            );
         }
 
         lastIndex = regex.lastIndex;
@@ -181,7 +195,7 @@ function splitTableRow(line: string): string[] {
 }
 
 export function parseMarkdownBlocks(raw: string): BlockNode[] {
-    const lines = raw.replace(/\r\n/g, '\n').split('\n');
+    const lines = raw.replace(/^\uFEFF/, '').replace(/\r\n/g, '\n').split('\n');
     const blocks: BlockNode[] = [];
     let i = 0;
 

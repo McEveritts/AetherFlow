@@ -85,4 +85,20 @@ describe('FlowAiMarkdown', () => {
         expect(container.textContent).not.toContain('#### ');
         expect(container.textContent).not.toContain('**paste');
     });
+
+    it('renders release notes markdown with BOM stripping, bold links, and bare URLs cleanly', () => {
+        const releaseNotes = `\uFEFF# AetherFlow v3.2.1 Release Notes — 69-App Bare-Metal Catalog\n\n**AetherFlow v3.2.1** compares against [**AetherFlow v3.2.01**](https://github.com/McEveritts/AetherFlow/releases/tag/v3.2.01).\n\n---\n\n## Highlights Since \`v3.2.01\`\n\n**Full Changelog**: https://github.com/McEveritts/AetherFlow/compare/v3.2.01...v3.2.1`;
+        const { container } = render(<FlowAiMarkdown content={releaseNotes} />);
+
+        expect(screen.getByRole('heading', { level: 1, name: /AetherFlow v3\.2\.1 Release Notes — 69-App Bare-Metal Catalog/i })).toBeInTheDocument();
+        expect(screen.getByRole('heading', { level: 2, name: /Highlights Since v3\.2\.01/i })).toBeInTheDocument();
+
+        const links = Array.from(container.querySelectorAll('a'));
+        expect(links.length).toBe(2);
+        expect(links[0]).toHaveAttribute('href', 'https://github.com/McEveritts/AetherFlow/releases/tag/v3.2.01');
+        expect(links[0].textContent).toBe('AetherFlow v3.2.01');
+        expect(links[1]).toHaveAttribute('href', 'https://github.com/McEveritts/AetherFlow/compare/v3.2.01...v3.2.1');
+        expect(container.textContent).not.toContain('# AetherFlow');
+        expect(container.textContent).not.toContain('**AetherFlow');
+    });
 });

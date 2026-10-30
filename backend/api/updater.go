@@ -106,7 +106,9 @@ func fetchLatestStableRelease() (tagName, body, htmlUrl string, err error) {
 	for _, release := range releases {
 		if strings.EqualFold(release.Author.Login, "McEveritts") && !strings.Contains(release.TagName, "-") {
 			slog.Info("[updater] resolved latest version via Releases API", "version", release.TagName)
-			return release.TagName, release.Body, release.HtmlUrl, nil
+			cleanBody := strings.TrimPrefix(release.Body, "\uFEFF")
+			cleanBody = strings.ReplaceAll(cleanBody, "Release Notes ? ", "Release Notes — ")
+			return release.TagName, cleanBody, release.HtmlUrl, nil
 		}
 	}
 

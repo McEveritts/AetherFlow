@@ -5,6 +5,7 @@ import { useState, FormEvent } from 'react';
 import useSWR from 'swr';
 import dynamic from 'next/dynamic';
 import GlassSelect, { type GlassSelectOption } from '@/components/ui/GlassSelect';
+import FlowAiMarkdown from '@/components/ui/FlowAiMarkdown';
 
 const BackupTab = dynamic(() => import('@/components/tabs/BackupTab'), { ssr: false });
 const SecurityTab = dynamic(() => import('@/components/tabs/SecurityTab'), { ssr: false });
@@ -1118,8 +1119,13 @@ export default function SettingsTab() {
                                         {updateData?.message ? (
                                             <div className="space-y-2">
                                                 <span className="text-xs font-bold uppercase tracking-wider text-slate-500 block">Upstream Release Notes & Diagnostics</span>
-                                                <div className={`text-xs ${updateData.latestVersion?.includes('Unknown') ? 'text-amber-400' : 'text-slate-300'} bg-slate-950/60 border border-white/[0.06] p-4 rounded-xl overflow-y-auto max-h-56 break-words whitespace-pre-wrap font-mono leading-relaxed`}>
-                                                    {updateData.message}
+                                                <div className={`${updateData.latestVersion?.includes('Unknown') ? 'text-amber-400' : 'text-slate-300'} bg-slate-950/60 border border-white/[0.06] p-4 rounded-xl overflow-y-auto max-h-64 break-words custom-scrollbar`}>
+                                                    <FlowAiMarkdown
+                                                        content={String(updateData.message)
+                                                            .replace(/^\uFEFF/, '')
+                                                            .replace(/Release Notes \? /g, 'Release Notes — ')}
+                                                        className={updateData.latestVersion?.includes('Unknown') ? 'text-xs text-amber-400' : 'text-xs'}
+                                                    />
                                                 </div>
                                             </div>
                                         ) : (
