@@ -398,7 +398,7 @@ func NewRunnerMux() *http.ServeMux {
 			return
 		}
 
-		if req.Action != "install" && req.Action != "remove" {
+		if req.Action != "install" && req.Action != "remove" && req.Action != "update" {
 			http.Error(w, "disallowed package action", http.StatusBadRequest)
 			return
 		}

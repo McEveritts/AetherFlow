@@ -452,6 +452,13 @@ func BroadcastNotification(n services.Notification) {
 }
 
 func BroadcastMarketplaceUpdates(packages []string) {
+	go func() {
+		s := services.GetActiveServices()
+		systemStateMutex.Lock()
+		cachedServices = s
+		systemStateMutex.Unlock()
+	}()
+
 	payload := map[string]interface{}{
 		"type": "MARKETPLACE_UPDATE",
 		"data": map[string]interface{}{
@@ -472,6 +479,15 @@ func BroadcastMarketplaceUpdates(packages []string) {
 }
 
 func BroadcastMarketplaceJobEvent(pkgId, action, status string, progress int, lastLine string) {
+	if progress <= 1 || status == "installed" || status == "uninstalled" || status == "failed" {
+		go func() {
+			s := services.GetActiveServices()
+			systemStateMutex.Lock()
+			cachedServices = s
+			systemStateMutex.Unlock()
+		}()
+	}
+
 	payload := map[string]interface{}{
 		"type": "MARKETPLACE_UPDATE",
 		"data": map[string]interface{}{

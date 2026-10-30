@@ -58,6 +58,31 @@ func TestRunnerMuxValidation(t *testing.T) {
 		t.Fatalf("expected 400 for path traversal in script name, got %d", w.Code)
 	}
 
+	// 4b. Reject disallowed package action verb, but allow 'update' past action validation
+	badActionBody, _ := json.Marshal(PackageRunnerRequest{
+		Action:     "purge",
+		PackageID:  "radarr",
+		ScriptName: "updatepackage-radarr",
+	})
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/v1/package", bytes.NewReader(badActionBody))
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for disallowed package action, got %d", w.Code)
+	}
+
+	updateActionBody, _ := json.Marshal(PackageRunnerRequest{
+		Action:     "update",
+		PackageID:  "nonexistentpkg",
+		ScriptName: "updatepackage-nonexistentpkg",
+	})
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/v1/package", bytes.NewReader(updateActionBody))
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 'update' action to pass validation and reach script lookup (404 in empty temp dir), got %d", w.Code)
+	}
+
 	// 5. Reject invalid channel in self-update
 	updBody, _ := json.Marshal(SelfUpdateRequest{
 		Command: "deploy",

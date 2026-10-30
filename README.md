@@ -1,6 +1,6 @@
 <div align="center">
 
-![AetherFlow Banner](./docs/assets/banner.svg?v=3.2.1)
+![AetherFlow Banner](./docs/assets/banner.svg?v=3.2.5)
 
 [![Latest Release](https://img.shields.io/github/v/release/McEveritts/AetherFlow?style=flat-square&logo=github&label=Release&color=6366f1)](https://github.com/McEveritts/AetherFlow/releases/latest)
 [![Go Version](https://img.shields.io/badge/Control_Plane-Go_1.26-00ADD8?style=flat-square&logo=go&logoColor=white)](./backend)
@@ -21,7 +21,7 @@
 
 ![AetherFlow Overview Dashboard](./docs/assets/dashboard.png)
 
-### Why AetherFlow v3.2.1?
+### Why AetherFlow v3.2.5?
 
 - **Single-Binary Control Plane (`aetherflow-api`)** — The entire **Next.js (Obsidian V2)** static frontend is embedded directly inside the compiled **Go (Gin)** binary (`CGO_ENABLED=0`), eliminating separate Node.js runtime daemons and port-proxy sprawl.
 - **Zero-Sudo Privileged Socket Boundary (`aetherflow-runner`)** — The API server runs as an unprivileged `aetherflow` user under `ProtectSystem=strict` and `NoNewPrivileges=yes`. Root-level package installations, `systemctl` transitions, quota updates, and atomic rollbacks are isolated behind `/run/aetherflow/runner.sock` with strict allowlists.

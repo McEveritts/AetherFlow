@@ -196,6 +196,12 @@ func registerV1Routes(apiGroup *gin.RouterGroup) {
 		adminGroup.POST("/packages/:id/install", InstallPackage)
 		// Requires admin context (Phase 8)
 		adminGroup.POST("/packages/:id/uninstall", UninstallPackage)
+		// Requires admin context (Phase 8)
+		adminGroup.POST("/packages/:id/update", UpdatePackage)
+		// Requires admin context (Phase 8)
+		adminGroup.POST("/packages/:id/check-update", CheckSinglePackageUpdate)
+		// Requires admin context (Phase 8)
+		adminGroup.POST("/packages/updates/check", CheckPackageUpdates)
 
 		// Requires admin context (Phase 8)
 		adminGroup.GET("/system/update/check", CheckUpdate)

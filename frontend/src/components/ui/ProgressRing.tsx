@@ -31,9 +31,10 @@ export function ProgressRing({ progress, status, logLine, startedAt, size = 72, 
     const circumference = 2 * Math.PI * radius;
     const offset = circumference - (progress / 100) * circumference;
     const isUninstalling = status === 'uninstalling';
-    const color = isUninstalling ? '#ef4444' : '#818cf8'; // red for uninstall, indigo for install
-    const glowColor = isUninstalling ? 'rgba(239,68,68,0.5)' : 'rgba(99,102,241,0.5)';
-    const label = isUninstalling ? 'Removing' : 'Installing';
+    const isUpdating = status === 'updating';
+    const color = isUninstalling ? '#ef4444' : isUpdating ? '#f59e0b' : '#818cf8'; // red for uninstall, amber for update, indigo for install
+    const glowColor = isUninstalling ? 'rgba(239,68,68,0.5)' : isUpdating ? 'rgba(245,158,11,0.5)' : 'rgba(99,102,241,0.5)';
+    const label = isUninstalling ? 'Removing' : isUpdating ? 'Updating' : 'Installing';
 
     // Truncate log line for display
     const displayLine = logLine && logLine.length > 40 ? logLine.slice(0, 37) + '...' : logLine;

@@ -21,10 +21,13 @@ import (
 
 // GitHubRelease represents the structure of the GitHub Releases API response
 type GitHubRelease struct {
-	TagName string `json:"tag_name"`
-	Body    string `json:"body"`
-	HtmlUrl string `json:"html_url"`
-	Author  struct {
+	TagName         string `json:"tag_name"`
+	TargetCommitish string `json:"target_commitish"`
+	Prerelease      bool   `json:"prerelease"`
+	Draft           bool   `json:"draft"`
+	Body            string `json:"body"`
+	HtmlUrl         string `json:"html_url"`
+	Author          struct {
 		Login string `json:"login"`
 	} `json:"author"`
 }
@@ -80,39 +83,82 @@ func getLocalVersion() string {
 	return strings.TrimSpace(string(versionBytes))
 }
 
-// fetchLatestStableRelease gets the latest version via the Releases API,
-// ensuring that the release was authored by "McEveritts" and is not a pre-release.
-func fetchLatestStableRelease() (tagName, body, htmlUrl string, err error) {
+func sanitizeReleaseBody(body string) string {
+	cleanBody := strings.TrimPrefix(body, "\uFEFF")
+	return strings.ReplaceAll(cleanBody, "Release Notes ? ", "Release Notes — ")
+}
+
+func selectReleaseForChannel(releases []GitHubRelease, channel string) (tagName, body, htmlUrl string) {
+	for _, release := range releases {
+		if release.Draft || !strings.EqualFold(release.Author.Login, "McEveritts") || release.TagName == "" {
+			continue
+		}
+		isNightlyTarget := strings.EqualFold(release.TargetCommitish, "nightly") ||
+			release.Prerelease ||
+			strings.Contains(strings.ToLower(release.TagName), "nightly")
+
+		if channel == "nightly" {
+			if isNightlyTarget && !strings.EqualFold(release.TagName, "nightly") {
+				return release.TagName, sanitizeReleaseBody(release.Body), release.HtmlUrl
+			}
+		} else {
+			if !isNightlyTarget && !strings.Contains(release.TagName, "-") {
+				return release.TagName, sanitizeReleaseBody(release.Body), release.HtmlUrl
+			}
+		}
+	}
+	return "", "", ""
+}
+
+func fetchReleasesFromGitHub() ([]GitHubRelease, error) {
 	resp, reqErr := httpClient.Get("https://api.github.com/repos/" + githubRepo + "/releases")
 	if reqErr != nil {
 		slog.Warn("[updater] releases API request failed", "error", reqErr)
-		return "", "", "", reqErr
+		return nil, reqErr
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
 		slog.Info("[updater] releases API returned non-200", "status", resp.StatusCode)
-		return "", "", "", nil
+		return nil, nil
 	}
 
 	var releases []GitHubRelease
 	bodyBytes, _ := io.ReadAll(resp.Body)
 	if jsonErr := json.Unmarshal(bodyBytes, &releases); jsonErr != nil {
 		slog.Error("[updater] failed to parse releases response", "error", jsonErr)
-		return "", "", "", jsonErr
+		return nil, jsonErr
 	}
+	return releases, nil
+}
 
-	// Find the first release matching criteria
-	for _, release := range releases {
-		if strings.EqualFold(release.Author.Login, "McEveritts") && !strings.Contains(release.TagName, "-") {
-			slog.Info("[updater] resolved latest version via Releases API", "version", release.TagName)
-			cleanBody := strings.TrimPrefix(release.Body, "\uFEFF")
-			cleanBody = strings.ReplaceAll(cleanBody, "Release Notes ? ", "Release Notes — ")
-			return release.TagName, cleanBody, release.HtmlUrl, nil
-		}
+// fetchLatestStableRelease gets the latest version via the Releases API,
+// ensuring that the release was authored by "McEveritts" and is not a pre-release or nightly build.
+func fetchLatestStableRelease() (tagName, body, htmlUrl string, err error) {
+	releases, err := fetchReleasesFromGitHub()
+	if err != nil || len(releases) == 0 {
+		return "", "", "", err
 	}
-
+	tag, cleanBody, url := selectReleaseForChannel(releases, "stable")
+	if tag != "" {
+		slog.Info("[updater] resolved latest stable version via Releases API", "version", tag)
+		return tag, cleanBody, url, nil
+	}
 	slog.Warn("[updater] no stable releases authored by McEveritts found")
+	return "", "", "", nil
+}
+
+// fetchLatestNightlyRelease resolves the latest versioned release published under the nightly branch or marked as a pre-release.
+func fetchLatestNightlyRelease() (tagName, body, htmlUrl string, err error) {
+	releases, err := fetchReleasesFromGitHub()
+	if err != nil || len(releases) == 0 {
+		return "", "", "", err
+	}
+	tag, cleanBody, url := selectReleaseForChannel(releases, "nightly")
+	if tag != "" {
+		slog.Info("[updater] resolved latest nightly version via Releases API", "version", tag)
+		return tag, cleanBody, url, nil
+	}
 	return "", "", "", nil
 }
 
@@ -133,30 +179,41 @@ func CheckUpdate(c *gin.Context) {
 
 	switch channel {
 	case "nightly":
-		for _, branch := range []string{"nightly", "Nightly", "master"} {
-			resp, reqErr := httpClient.Get("https://api.github.com/repos/" + githubRepo + "/commits/" + branch)
-			if reqErr != nil {
-				slog.Error("[updater] nightly commits API request failed", "branch", branch, "error", reqErr)
-				continue
-			}
-			if resp.StatusCode == 200 {
-				var commit GitHubCommit
-				bodyBytes, _ := io.ReadAll(resp.Body)
-				resp.Body.Close()
-				if jsonErr := json.Unmarshal(bodyBytes, &commit); jsonErr == nil && commit.Sha != "" {
-					shortSha := commit.Sha
-					if len(shortSha) > 7 {
-						shortSha = shortSha[:7]
-					}
-					latestVersion = "nightly-" + shortSha
-					message = commit.Commit.Message
-					htmlUrl = commit.HtmlUrl
-					updateAvailable = (currentVersion != latestVersion)
-					break
-				}
+		if tag, releaseBody, url, fetchErr := fetchLatestNightlyRelease(); fetchErr == nil && tag != "" {
+			latestVersion = tag
+			message = releaseBody
+			htmlUrl = url
+			if strings.HasPrefix(strings.ToLower(currentVersion), "nightly-") {
+				updateAvailable = !strings.EqualFold(currentVersion, latestVersion)
 			} else {
-				resp.Body.Close()
-				slog.Warn("[updater] nightly commits API returned non-200", "branch", branch, "status", resp.StatusCode)
+				updateAvailable = isNewerVersion(currentVersion, latestVersion)
+			}
+		} else {
+			for _, branch := range []string{"nightly", "Nightly", "master"} {
+				resp, reqErr := httpClient.Get("https://api.github.com/repos/" + githubRepo + "/commits/" + branch)
+				if reqErr != nil {
+					slog.Error("[updater] nightly commits API request failed", "branch", branch, "error", reqErr)
+					continue
+				}
+				if resp.StatusCode == 200 {
+					var commit GitHubCommit
+					bodyBytes, _ := io.ReadAll(resp.Body)
+					resp.Body.Close()
+					if jsonErr := json.Unmarshal(bodyBytes, &commit); jsonErr == nil && commit.Sha != "" {
+						shortSha := commit.Sha
+						if len(shortSha) > 7 {
+							shortSha = shortSha[:7]
+						}
+						latestVersion = "nightly-" + shortSha
+						message = commit.Commit.Message
+						htmlUrl = commit.HtmlUrl
+						updateAvailable = (currentVersion != latestVersion)
+						break
+					}
+				} else {
+					resp.Body.Close()
+					slog.Warn("[updater] nightly commits API returned non-200", "branch", branch, "status", resp.StatusCode)
+				}
 			}
 		}
 

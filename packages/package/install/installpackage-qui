@@ -43,12 +43,14 @@ QUI_VERSION="$(github_latest_tag "autobrr/qui" "1.33.1")"
 QUI_URL="https://github.com/autobrr/qui/releases/download/v${QUI_VERSION}/qui_${QUI_VERSION}_${QUI_ARCH}.tar.gz"
 
 report_progress 65 "Downloading and installing Qui ${QUI_VERSION}..."
+systemctl stop qui >> "$LOGFILE" 2>&1 || true
 TMP_TAR=$(mktemp /tmp/qui-XXXXXX.tar.gz)
 curl -fsSL "$QUI_URL" -o "$TMP_TAR" >> "$LOGFILE" 2>&1
 tar -xzf "$TMP_TAR" -C /usr/local/bin qui >> "$LOGFILE" 2>&1
 rm -f "$TMP_TAR"
 chmod 755 /usr/local/bin/qui
 printf '%s\n' "${QUI_VERSION#v}" > /var/lib/qui/.af-version
+chmod 644 /var/lib/qui/.af-version
 
 if [[ ! -f /var/lib/qui/config.toml ]]; then
     SESSION_SECRET="$(openssl rand -hex 32)"
@@ -60,13 +62,17 @@ sessionSecret = "${SESSION_SECRET}"
 EOF
 fi
 
-systemctl stop qui >> "$LOGFILE" 2>&1 || true
-/usr/local/bin/qui create-user --config-dir=/var/lib/qui --username="${MASTER_USER}" --password="${MASTER_PASS}" >> "$LOGFILE" 2>&1 \
-    || /usr/local/bin/qui change-password --config-dir=/var/lib/qui --username="${MASTER_USER}" --new-password="${MASTER_PASS}" >> "$LOGFILE" 2>&1 \
-    || true
+if [[ ! -f /var/lib/qui/qui.db && -n "${MASTER_USER:-}" && -n "${MASTER_PASS:-}" ]]; then
+    /usr/local/bin/qui create-user --config-dir=/var/lib/qui --username="${MASTER_USER}" --password="${MASTER_PASS}" >> "$LOGFILE" 2>&1 \
+        || /usr/local/bin/qui change-password --config-dir=/var/lib/qui --username="${MASTER_USER}" --new-password="${MASTER_PASS}" >> "$LOGFILE" 2>&1 \
+        || true
+fi
 
 chown -R qui:qui /var/lib/qui
+chmod 755 /var/lib/qui
+chmod 644 /var/lib/qui/.af-version
 chmod 640 /var/lib/qui/config.toml
+[[ -f /var/lib/qui/qui.db ]] && chmod 640 /var/lib/qui/qui.db
 
 report_progress 85 "Configuring and starting qui.service on port 7476..."
 cat <<'EOF' > /etc/systemd/system/qui.service
@@ -90,6 +96,7 @@ EOF
 
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now qui >> "$LOGFILE" 2>&1
+systemctl restart qui >> "$LOGFILE" 2>&1
 
 write_lock "${PACKAGE_NAME}"
 report_progress 100 "Qui installed on port 7476."

@@ -71,9 +71,28 @@ func RegisterSPAHandler(r *gin.Engine) {
 			cleanPath = "index.html"
 		}
 
-		// Set aggressive caching for hashed Next.js static chunks.
+		// Set aggressive caching for hashed Next.js static chunks; force revalidation for HTML, RSC, and Service Worker.
 		if strings.HasPrefix(cleanPath, "_next/static/") {
 			c.Header("Cache-Control", "public, max-age=31536000, immutable")
+		} else if cleanPath == "sw.js" || cleanPath == "manifest.json" || strings.HasSuffix(cleanPath, ".html") || strings.HasSuffix(cleanPath, ".txt") {
+			c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+		}
+
+		// 0. Next.js App Router RSC flight payload resolution (prevents soft navigation fallback to hard MPA reload)
+		if c.GetHeader("RSC") == "1" || c.Query("_rsc") != "" {
+			rscCandidates := []string{}
+			if cleanPath == "index.html" {
+				rscCandidates = append(rscCandidates, "index.txt")
+			} else {
+				rscCandidates = append(rscCandidates, cleanPath+".txt", path.Join(cleanPath, "index.txt"))
+			}
+			for _, candidate := range rscCandidates {
+				if data, err := fs.ReadFile(staticFS, candidate); err == nil {
+					c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+					c.Data(http.StatusOK, "text/x-component; charset=utf-8", data)
+					return
+				}
+			}
 		}
 
 		// 1. Direct file match (e.g., _next/static/..., favicon.ico, index.html)
@@ -85,6 +104,7 @@ func RegisterSPAHandler(r *gin.Engine) {
 		// 2. Clean route match for Next.js static export (e.g., /login -> login.html)
 		htmlCandidate := cleanPath + ".html"
 		if info, err := fs.Stat(staticFS, htmlCandidate); err == nil && !info.IsDir() {
+			c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
 			c.Request.URL.Path = "/" + htmlCandidate
 			fileServer.ServeHTTP(c.Writer, c.Request)
 			return
@@ -93,6 +113,7 @@ func RegisterSPAHandler(r *gin.Engine) {
 		// 3. Directory index match (e.g., /login/ -> login/index.html)
 		dirIndexCandidate := path.Join(cleanPath, "index.html")
 		if info, err := fs.Stat(staticFS, dirIndexCandidate); err == nil && !info.IsDir() {
+			c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
 			c.Request.URL.Path = "/" + dirIndexCandidate
 			fileServer.ServeHTTP(c.Writer, c.Request)
 			return
@@ -104,6 +125,7 @@ func RegisterSPAHandler(r *gin.Engine) {
 			c.Status(http.StatusNotFound)
 			return
 		}
+		c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
 		c.Data(http.StatusOK, "text/html; charset=utf-8", data)
 	})
 }

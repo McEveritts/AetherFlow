@@ -325,6 +325,7 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
                 eventsToProcess.forEach(ev => {
                     if (ev.type === 'MARKETPLACE_UPDATE') {
                         globalMutate('/api/v1/public/marketplace');
+                        globalMutate('/api/v1/auth/services');
                     } else if (ev.type === 'SYSTEM_HEAL') {
                         const healData = ev.data as { service?: string, reason?: string, action?: string };
                         addToast(`Self-Healing: ${healData.action || 'Restarted'} ${healData.service || 'service'} (${healData.reason || 'unresponsive'})`, 'info');

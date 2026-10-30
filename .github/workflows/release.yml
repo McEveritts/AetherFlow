@@ -80,8 +80,14 @@ jobs:
             RELEASE_TAG="${GITHUB_REF_NAME}"
             VERSION_STAMP="${RELEASE_TAG}"
           else
-            RELEASE_TAG="nightly"
-            VERSION_STAMP="nightly-${GITHUB_SHA::7}"
+            REPO_VERSION="$(tr -d '[:space:]' < .version 2>/dev/null || true)"
+            if [[ "${REPO_VERSION}" == v* ]]; then
+              RELEASE_TAG="${REPO_VERSION}"
+              VERSION_STAMP="${REPO_VERSION}"
+            else
+              RELEASE_TAG="nightly"
+              VERSION_STAMP="nightly-${GITHUB_SHA::7}"
+            fi
           fi
           echo "RELEASE_TAG=${RELEASE_TAG}" >> "$GITHUB_ENV"
 
@@ -123,7 +129,7 @@ jobs:
               --prerelease
           else
             PRERELEASE_FLAG=""
-            if [[ "${RELEASE_TAG}" == *-* ]]; then
+            if [[ "${RELEASE_TAG}" == *-* || "${GITHUB_REF_NAME}" == "nightly" || "${GITHUB_REF_NAME}" == "Nightly" ]]; then
               PRERELEASE_FLAG="--prerelease"
             fi
             if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then

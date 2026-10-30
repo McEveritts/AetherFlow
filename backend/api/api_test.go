@@ -256,6 +256,8 @@ func TestIsNewerVersion(t *testing.T) {
 		{"v3.2.0-dev", "v3.1.0", false},  // local is higher
 		{"v3.2.01", "v3.2.1", true},      // 3.2.1 is newer than decimal sub-patch 3.2.01
 		{"v3.2.1", "v3.2.01", false},     // 3.2.01 is older than 3.2.1
+		{"v3.2.1", "v3.2.5", true},       // 3.2.5 is newer than 3.2.1
+		{"v3.2.5", "v3.2.1", false},      // 3.2.1 is older than 3.2.5
 	}
 
 	for _, tt := range tests {
@@ -263,6 +265,40 @@ func TestIsNewerVersion(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("isNewerVersion(%q, %q) = %v, want %v", tt.local, tt.remote, got, tt.want)
 		}
+	}
+}
+
+func TestSelectReleaseForChannel(t *testing.T) {
+	releases := []GitHubRelease{
+		{
+			TagName:         "v3.2.5",
+			TargetCommitish: "nightly",
+			Prerelease:      true,
+			Body:            "\uFEFF# AetherFlow v3.2.5 Release Notes ? Nightly",
+			HtmlUrl:         "https://github.com/McEveritts/AetherFlow/releases/tag/v3.2.5",
+		},
+		{
+			TagName:         "v3.2.1",
+			TargetCommitish: "master",
+			Prerelease:      false,
+			Body:            "# AetherFlow v3.2.1 Release Notes",
+			HtmlUrl:         "https://github.com/McEveritts/AetherFlow/releases/tag/v3.2.1",
+		},
+	}
+	releases[0].Author.Login = "McEveritts"
+	releases[1].Author.Login = "McEveritts"
+
+	nTag, nBody, _ := selectReleaseForChannel(releases, "nightly")
+	if nTag != "v3.2.5" {
+		t.Fatalf("selectReleaseForChannel(nightly) tag = %q, want v3.2.5", nTag)
+	}
+	if nBody != "# AetherFlow v3.2.5 Release Notes — Nightly" {
+		t.Fatalf("selectReleaseForChannel(nightly) body = %q", nBody)
+	}
+
+	sTag, _, _ := selectReleaseForChannel(releases, "stable")
+	if sTag != "v3.2.1" {
+		t.Fatalf("selectReleaseForChannel(stable) tag = %q, want v3.2.1", sTag)
 	}
 }
 

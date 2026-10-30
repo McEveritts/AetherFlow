@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useMemo, useId, useRef, useState, useCallback } from 'react';
+import React, { useMemo, useId, useState, useCallback } from 'react';
 import { AreaChart, Area, ResponsiveContainer, Tooltip as RechartsTooltip } from 'recharts';
 
 interface SparklineProps {
@@ -174,8 +174,7 @@ export default function Sparkline({
 }: SparklineProps) {
     const rawId = useId();
     const id = useMemo(() => rawId.replace(/:/g, ''), [rawId]);
-    const isHoveredRef = useRef(false);
-    const [, setResumeTick] = useState(0);
+    const [frozenChartData, setFrozenChartData] = useState<ChartDataPoint[] | null>(null);
 
     // Convert array of numbers to array of objects for Recharts, capped at 0.XX precision
     const liveChartData = useMemo<ChartDataPoint[]>(() => {
@@ -194,23 +193,15 @@ export default function Sparkline({
         }));
     }, [data, data2]);
 
-    const displayedDataRef = useRef<ChartDataPoint[]>(liveChartData);
-    if (!isHoveredRef.current) {
-        displayedDataRef.current = liveChartData;
-    }
-    const activeChartData = displayedDataRef.current;
+    const activeChartData = frozenChartData ?? liveChartData;
 
     const handleMouseEnter = useCallback(() => {
-        isHoveredRef.current = true;
-    }, []);
+        setFrozenChartData((prev) => prev ?? liveChartData);
+    }, [liveChartData]);
 
     const handleMouseLeave = useCallback(() => {
-        if (isHoveredRef.current) {
-            isHoveredRef.current = false;
-            displayedDataRef.current = liveChartData;
-            setResumeTick((t) => t + 1);
-        }
-    }, [liveChartData]);
+        setFrozenChartData(null);
+    }, []);
 
     const gFrom = gradientFrom || color;
     const gTo = gradientTo || 'transparent';

@@ -46,12 +46,12 @@ export interface App {
     update_error?: string;
 }
 
-export type PendingAction = 'installing' | 'uninstalling';
+export type PendingAction = 'installing' | 'uninstalling' | 'updating';
 
 const TERMINAL_STATES = new Set(['installed', 'uninstalled', 'failed']);
 
 export function useMarketplace() {
-    // Map of appId -> action type so we know if it's an install or uninstall
+    // Map of appId -> action type so we know if it's an install, uninstall, or update
     const pendingRef = useRef<Map<string, PendingAction>>(new Map());
     const [pendingJobs, setPendingJobs] = useState<Map<string, PendingAction>>(new Map());
 
@@ -64,7 +64,7 @@ export function useMarketplace() {
                 if (!currentData) return 0;
                 // Keep polling while ANY app is in a transient state
                 const hasActiveJobs = currentData.some(
-                    app => app.status === 'installing' || app.status === 'uninstalling'
+                    app => app.status === 'installing' || app.status === 'uninstalling' || app.status === 'updating'
                 );
                 return hasActiveJobs ? 2000 : 0;
             },

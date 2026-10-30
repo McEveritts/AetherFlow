@@ -9,17 +9,13 @@ import { ExternalAccessCard } from '@/components/ingress/ExternalAccessCard';
 import { DeploymentStatus } from '@/components/deploy/DeploymentStatus';
 
 const AppIcon = ({ app }: { app: App }) => {
-    const [localFailed, setLocalFailed] = useState(false);
-    const [svglUrl, setSvglUrl] = useState<string | null>(null);
-    const [iconError, setIconError] = useState(false);
+    const [failedAppId, setFailedAppId] = useState<string | null>(null);
+    const [svglState, setSvglState] = useState<{ appId: string; url: string | null; error: boolean } | null>(null);
+    const localFailed = failedAppId === app.id;
+    const svglUrl = svglState?.appId === app.id ? svglState.url : null;
+    const iconError = svglState?.appId === app.id ? svglState.error : false;
     const localIconPath = `/img/${app.id.toLowerCase()}.png`;
     const primaryIconPath = localFailed ? svglUrl : localIconPath;
-
-    useEffect(() => {
-        setLocalFailed(false);
-        setSvglUrl(null);
-        setIconError(false);
-    }, [app.id]);
 
     useEffect(() => {
         if (!localFailed) return;
@@ -28,9 +24,9 @@ const AppIcon = ({ app }: { app: App }) => {
             if (cancelled) return;
             const match = matchSVGLLogo(catalog, app.id, app.name);
             if (match) {
-                setSvglUrl(match);
+                setSvglState({ appId: app.id, url: match, error: false });
             } else {
-                setIconError(true);
+                setSvglState({ appId: app.id, url: null, error: true });
             }
         });
         return () => {
@@ -53,9 +49,9 @@ const AppIcon = ({ app }: { app: App }) => {
                 src={primaryIconPath || localIconPath}
                 onError={() => {
                     if (!localFailed) {
-                        setLocalFailed(true);
+                        setFailedAppId(app.id);
                     } else {
-                        setIconError(true);
+                        setSvglState({ appId: app.id, url: null, error: true });
                     }
                 }}
                 className="w-full h-full object-contain p-2 drop-shadow-lg"
@@ -94,6 +90,14 @@ export default function MarketplaceTab() {
                         setTimeout(() => notifiedRef.current.delete(app.id), 5000);
                     }
                 }
+                if (prevApp.status === 'updating' && app.status === 'installed') {
+                    if (!notifiedRef.current.has(app.id)) {
+                        notifiedRef.current.add(app.id);
+                        const verSuffix = app.installed_version ? ` to v${app.installed_version.replace(/^v/i, '')}` : '';
+                        addToast(`${app.name} has been updated${verSuffix}.`, 'success');
+                        setTimeout(() => notifiedRef.current.delete(app.id), 5000);
+                    }
+                }
                 if (prevApp.status === 'uninstalling' && app.status !== 'uninstalling' && app.status !== 'installed') {
                     if (!notifiedRef.current.has(app.id)) {
                         notifiedRef.current.add(app.id);
@@ -101,7 +105,7 @@ export default function MarketplaceTab() {
                         setTimeout(() => notifiedRef.current.delete(app.id), 5000);
                     }
                 }
-                if ((prevApp.status === 'installing' || prevApp.status === 'uninstalling') && app.status === 'failed') {
+                if ((prevApp.status === 'installing' || prevApp.status === 'uninstalling' || prevApp.status === 'updating') && app.status === 'failed') {
                     if (!notifiedRef.current.has(app.id)) {
                         notifiedRef.current.add(app.id);
                         addToast(`Operation failed for ${app.name}. Check system logs.`, 'error');
@@ -117,6 +121,11 @@ export default function MarketplaceTab() {
                     notifiedRef.current.add(app.id);
                     const domainSuffix = app.public_domain ? ` (${app.public_domain})` : '';
                     addToast(`${app.name} has been successfully installed${domainSuffix}.`, 'success');
+                    setTimeout(() => notifiedRef.current.delete(app.id), 5000);
+                } else if (action === 'updating' && app.status === 'installed') {
+                    notifiedRef.current.add(app.id);
+                    const verSuffix = app.installed_version ? ` to v${app.installed_version.replace(/^v/i, '')}` : '';
+                    addToast(`${app.name} has been updated${verSuffix}.`, 'success');
                     setTimeout(() => notifiedRef.current.delete(app.id), 5000);
                 } else if (action === 'uninstalling' && app.status === 'uninstalled') {
                     notifiedRef.current.add(app.id);
@@ -150,11 +159,11 @@ export default function MarketplaceTab() {
     }, [apps, searchQuery, categoryFilter]);
 
     const isAppBusy = (app: App): boolean => {
-        return app.status === 'installing' || app.status === 'uninstalling' || operatingApp === app.id || pendingJobs.has(app.id);
+        return app.status === 'installing' || app.status === 'uninstalling' || app.status === 'updating' || operatingApp === app.id || pendingJobs.has(app.id);
     };
 
     const getEffectiveStatus = (app: App): string => {
-        if (app.status === 'installing' || app.status === 'uninstalling') return app.status;
+        if (app.status === 'installing' || app.status === 'uninstalling' || app.status === 'updating') return app.status;
         if (pendingJobs.has(app.id)) return pendingJobs.get(app.id) as string;
         if (operatingApp === app.id) return 'installing';
         return app.status;
@@ -171,6 +180,26 @@ export default function MarketplaceTab() {
                 throw new Error(data.message || 'Installation request failed');
             }
             addToast(`Installation started for ${app.name}`, 'info');
+            setOperatingApp(null);
+            mutate();
+        } catch (error: unknown) {
+            addToast(error instanceof Error ? error.message : 'Network error.', 'error');
+            clearPending(app.id);
+            setOperatingApp(null);
+        }
+    };
+
+    const handleUpdate = async (app: App) => {
+        setOperatingApp(app.id);
+        markPending(app.id, 'updating');
+        try {
+            const res = await apiFetch(`/api/v1/admin/packages/${encodeURIComponent(app.id)}/update`, { method: 'POST' });
+            if (!res.ok) {
+                const data = await res.json().catch(() => ({}));
+                clearPending(app.id);
+                throw new Error(data.message || 'Update request failed');
+            }
+            addToast(`Updating ${app.name}${app.latest_version ? ` to v${app.latest_version.replace(/^v/i, '')}` : ''}...`, 'info');
             setOperatingApp(null);
             mutate();
         } catch (error: unknown) {
@@ -357,12 +386,23 @@ export default function MarketplaceTab() {
                                                     <Globe size={14} />
                                                 </button>
                                             )}
+                                            {effectiveStatus === 'installed' && app.update_available && (
+                                                <button
+                                                    onClick={() => busy ? null : handleUpdate(app)}
+                                                    disabled={busy}
+                                                    className={`obs-touch-target-standard obs-gpu-120hz-interactive px-4 py-2.5 rounded-xl text-xs font-black transition-all flex items-center gap-1.5 ${busy ? 'bg-slate-900 text-slate-600 cursor-not-allowed shadow-none' : 'bg-amber-500/15 text-amber-300 hover:bg-amber-500 hover:text-slate-950 border border-amber-500/30 shadow-lg shadow-amber-900/10'}`}
+                                                    title={app.latest_version ? `Update to v${app.latest_version.replace(/^v/i, '')}` : 'Update available'}
+                                                >
+                                                    <RefreshCw size={12} />
+                                                    Update
+                                                </button>
+                                            )}
                                             <button
-                                                onClick={() => busy ? null : (app.status === 'installed' ? handleUninstall(app) : handleInstall(app))}
+                                                onClick={() => busy ? null : (effectiveStatus === 'installed' ? handleUninstall(app) : handleInstall(app))}
                                                 disabled={busy}
-                                                className={`obs-touch-target-standard obs-gpu-120hz-interactive px-6 py-2.5 rounded-xl text-xs font-black transition-all ${busy ? 'bg-slate-900 text-slate-600 cursor-not-allowed shadow-none' : (app.status === 'installed' ? 'bg-white/5 text-slate-300 hover:bg-red-500/10 hover:text-red-400 hover:border-red-500/20 border border-transparent shadow-lg' : 'bg-indigo-600 text-white hover:bg-indigo-500 hover:shadow-indigo-500/30 border border-indigo-400/30 shadow-xl shadow-indigo-900/10')}`}
+                                                className={`obs-touch-target-standard obs-gpu-120hz-interactive px-6 py-2.5 rounded-xl text-xs font-black transition-all ${busy ? 'bg-slate-900 text-slate-600 cursor-not-allowed shadow-none' : (effectiveStatus === 'installed' ? 'bg-white/5 text-slate-300 hover:bg-red-500/10 hover:text-red-400 hover:border-red-500/20 border border-transparent shadow-lg' : 'bg-indigo-600 text-white hover:bg-indigo-500 hover:shadow-indigo-500/30 border border-indigo-400/30 shadow-xl shadow-indigo-900/10')}`}
                                             >
-                                                {app.status === 'installed' ? 'Teardown' : (app.status === 'installing' ? 'Deploying...' : 'Provision')}
+                                                {effectiveStatus === 'installed' ? 'Teardown' : (effectiveStatus === 'installing' ? 'Deploying...' : (effectiveStatus === 'updating' ? 'Updating...' : (effectiveStatus === 'uninstalling' ? 'Removing...' : 'Provision')))}
                                             </button>
                                         </div>
                                     </div>

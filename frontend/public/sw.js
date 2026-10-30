@@ -1,6 +1,5 @@
-const CACHE_NAME = 'aetherflow-cache-v1';
-const urlsToCache = [
-  '/',
+const CACHE_NAME = 'aetherflow-cache-v2';
+const PRECACHE_URLS = [
   '/manifest.json',
   '/favicon.ico'
 ];
@@ -8,73 +7,113 @@ const urlsToCache = [
 self.addEventListener('install', event => {
   event.waitUntil(
     caches.open(CACHE_NAME)
-      .then(cache => {
-        console.log('Opened cache');
-        return cache.addAll(urlsToCache);
-      })
+      .then(cache => cache.addAll(PRECACHE_URLS))
+      .then(() => self.skipWaiting())
   );
-  self.skipWaiting();
 });
 
 self.addEventListener('activate', event => {
   const cacheWhitelist = [CACHE_NAME];
   event.waitUntil(
-    caches.keys().then(cacheNames => {
-      return Promise.all(
-        cacheNames.map(cacheName => {
-          if (cacheWhitelist.indexOf(cacheName) === -1) {
-            return caches.delete(cacheName);
-          }
-        })
-      );
-    })
+    caches.keys()
+      .then(cacheNames =>
+        Promise.all(
+          cacheNames.map(cacheName => {
+            if (cacheWhitelist.indexOf(cacheName) === -1) {
+              return caches.delete(cacheName);
+            }
+          })
+        )
+      )
+      .then(() => self.clients.claim())
   );
 });
 
 self.addEventListener('fetch', event => {
-  // Only intercept GET requests
   if (event.request.method !== 'GET') return;
 
-  event.respondWith(
-    caches.match(event.request)
-      .then(response => {
-        // Cache hit - return response
-        if (response) {
-          return response;
-        }
+  const url = new URL(event.request.url);
+  if (url.origin !== self.location.origin) return;
 
-        // Clone the request because it's a one-time use stream
-        const fetchRequest = event.request.clone();
+  // Never intercept API calls, WebSockets, the Service Worker script itself, or Next.js RSC flight requests
+  if (
+    url.pathname.startsWith('/api/') ||
+    url.pathname === '/api' ||
+    url.pathname.startsWith('/ws/') ||
+    url.pathname === '/sw.js' ||
+    url.searchParams.has('_rsc') ||
+    event.request.headers.get('RSC') === '1' ||
+    url.pathname.endsWith('.txt')
+  ) {
+    return;
+  }
 
-        return fetch(fetchRequest).then(
-          response => {
-            // Check if we received a valid response
-            if (!response || response.status !== 200 || response.type !== 'basic') {
-              return response;
-            }
+  const acceptHeader = event.request.headers.get('accept') || '';
+  const isNavigationOrHTML =
+    event.request.mode === 'navigate' ||
+    acceptHeader.includes('text/html') ||
+    url.pathname === '/' ||
+    url.pathname.endsWith('.html');
 
-            // Clone the response because it's a one-time use stream
-            const responseToCache = response.clone();
-
-            // Aggressively cache the UI shell (Next.js static assets, imagery, fonts)
-            const url = new URL(event.request.url);
-            if (
-              url.pathname.startsWith('/_next/static/') ||
-              url.pathname.startsWith('/img/') ||
-              url.pathname.match(/\.(woff2|css|js|svg|png|jpg)$/)
-            ) {
-              caches.open(CACHE_NAME)
-                .then(cache => {
-                  cache.put(event.request, responseToCache);
-                });
-            }
-
-            return response;
+  // 1. Network-First for HTML / document navigations so new deployments are always served immediately
+  if (isNavigationOrHTML) {
+    event.respondWith(
+      fetch(event.request, { cache: 'no-store' })
+        .then(response => {
+          if (response && response.status === 200 && response.type === 'basic') {
+            const responseClone = response.clone();
+            caches.open(CACHE_NAME).then(cache => {
+              cache.put(event.request, responseClone);
+            });
           }
-        ).catch(() => {
-            // Offline fallback strategy could be implemented here
-            // e.g., return caches.match('/offline.html');
+          return response;
+        })
+        .catch(() => caches.match(event.request))
+    );
+    return;
+  }
+
+  // 2. Cache-First for content-hashed immutable Next.js static bundles
+  if (url.pathname.startsWith('/_next/static/')) {
+    event.respondWith(
+      caches.match(event.request).then(cached => {
+        if (cached) {
+          return cached;
+        }
+        return fetch(event.request).then(response => {
+          if (response && response.status === 200 && response.type === 'basic') {
+            const responseClone = response.clone();
+            caches.open(CACHE_NAME).then(cache => {
+              cache.put(event.request, responseClone);
+            });
+          }
+          return response;
         });
       })
-  );
+    );
+    return;
+  }
+
+  // 3. Stale-While-Revalidate for imagery, icons, and fonts
+  if (
+    url.pathname.startsWith('/img/') ||
+    /\.(woff2|svg|png|jpg|jpeg|webp|ico)$/.test(url.pathname)
+  ) {
+    event.respondWith(
+      caches.match(event.request).then(cached => {
+        const networkFetch = fetch(event.request)
+          .then(response => {
+            if (response && response.status === 200 && response.type === 'basic') {
+              const responseClone = response.clone();
+              caches.open(CACHE_NAME).then(cache => {
+                cache.put(event.request, responseClone);
+              });
+            }
+            return response;
+          })
+          .catch(() => cached);
+        return cached || networkFetch;
+      })
+    );
+  }
 });

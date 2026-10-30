@@ -41,8 +41,10 @@ type AppUpdateWatcher struct {
 var (
 	AppUpdateWatcherInstance *AppUpdateWatcher
 
+	dottedVersionPattern  = regexp.MustCompile(`(?i)\bv?(\d+\.\d+(?:\.\d+)*(?:[._:+~-][0-9A-Za-z]+)*)\b`)
 	defaultVersionPattern = regexp.MustCompile(`(?i)\bv?([0-9]+(?:[._:+~-][0-9A-Za-z]+)*)\b`)
 	numericVersionPattern = regexp.MustCompile(`\d+`)
+	initialCheckTriggered sync.Map
 )
 
 func defaultUpdateInterval() time.Duration {
@@ -169,6 +171,27 @@ func (w *AppUpdateWatcher) RefreshInstalledPackages() {
 	}
 }
 
+func RefreshAllPackageUpdates() map[string]PackageUpdateRecord {
+	watcher := AppUpdateWatcherInstance
+	if watcher == nil {
+		watcher = NewAppUpdateWatcher(nil, 0, nil)
+	}
+	watcher.RefreshInstalledPackages()
+	return GetPackageUpdateMap()
+}
+
+func TriggerInitialPackageUpdateCheck(pkgID string) {
+	if pkgID == "" {
+		return
+	}
+	if _, loaded := initialCheckTriggered.LoadOrStore(pkgID, true); loaded {
+		return
+	}
+	go func(id string) {
+		RefreshPackageUpdateByID(id)
+	}(pkgID)
+}
+
 func RefreshPackageUpdateByID(pkgID string) {
 	if pkgID == "" {
 		return
@@ -190,16 +213,19 @@ func RefreshPackageUpdateByID(pkgID string) {
 			continue
 		}
 
-		if _, notify, err := watcher.refreshPackage(pkg); err != nil {
+		if record, notify, err := watcher.refreshPackage(pkg); err != nil {
 			slog.Error("package update refresh failed", "package", pkgID, "error", err)
-		} else if notify && Notifier != nil {
-			updateMap := GetPackageUpdateMap()
-			record := updateMap[pkg.Name]
-			Notifier.Dispatch(Notification{
-				Level:   NotifyInfo,
-				Title:   pkg.Label + " update available",
-				Message: fmt.Sprintf("Installed %s, latest %s.", record.InstalledVersion, record.LatestVersion),
-			})
+		} else {
+			if notify && record != nil && Notifier != nil {
+				Notifier.Dispatch(Notification{
+					Level:   NotifyInfo,
+					Title:   pkg.Label + " update available",
+					Message: fmt.Sprintf("Installed %s, latest %s.", record.InstalledVersion, record.LatestVersion),
+				})
+			}
+			if record != nil && watcher.callback != nil {
+				watcher.callback([]string{pkg.Name})
+			}
 		}
 		return
 	}
@@ -402,6 +428,10 @@ func extractVersion(raw, customExpr string) string {
 		}
 	}
 
+	if dottedMatches := dottedVersionPattern.FindStringSubmatch(text); len(dottedMatches) > 1 {
+		return strings.TrimSpace(dottedMatches[1])
+	}
+
 	matches := defaultVersionPattern.FindStringSubmatch(text)
 	if len(matches) > 1 {
 		return strings.TrimSpace(matches[1])
@@ -520,6 +550,9 @@ func upsertPackageUpdate(record PackageUpdateRecord) (bool, bool, error) {
 }
 
 func DeletePackageUpdateRecord(pkgID string) error {
+	if pkgID != "" {
+		initialCheckTriggered.Delete(pkgID)
+	}
 	if db.DB == nil || pkgID == "" {
 		return nil
 	}

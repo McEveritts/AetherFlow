@@ -9,11 +9,16 @@ import (
 	"runtime"
 	"testing"
 	"time"
+
+	"github.com/gin-gonic/gin"
 )
 
 func TestExtractVersionAndCompare(t *testing.T) {
 	if got := extractVersion("gitea version 1.22.1 built with go1.25.0", ""); got != "1.22.1" {
 		t.Fatalf("extractVersion() = %q, want 1.22.1", got)
+	}
+	if got := extractVersion("2026-10-30T12:00:00Z INF qui version v1.33.1", ""); got != "1.33.1" {
+		t.Fatalf("extractVersion() with log timestamp = %q, want 1.33.1", got)
 	}
 
 	if !IsRemoteVersionNewer("1.22.1", "1.23.0") {
@@ -136,5 +141,20 @@ func TestAppUpdateWatcherRefreshesGitHubPackage(t *testing.T) {
 	}
 	if pkgs[0].LatestVersion != "1.1.0" {
 		t.Fatalf("GetPackages latest version = %q, want 1.1.0", pkgs[0].LatestVersion)
+	}
+
+	activeServices := GetActiveServices()
+	autobrrSvc, ok := activeServices["Autobrr"].(gin.H)
+	if !ok {
+		t.Fatalf("expected Autobrr in GetActiveServices(), got %#v", activeServices["Autobrr"])
+	}
+	if autobrrSvc["update_available"] != true {
+		t.Fatalf("expected GetActiveServices Autobrr update_available=true, got %#v", autobrrSvc["update_available"])
+	}
+	if autobrrSvc["installed_version"] != "1.0.0" {
+		t.Fatalf("expected GetActiveServices Autobrr installed_version=1.0.0, got %#v", autobrrSvc["installed_version"])
+	}
+	if autobrrSvc["latest_version"] != "1.1.0" {
+		t.Fatalf("expected GetActiveServices Autobrr latest_version=1.1.0, got %#v", autobrrSvc["latest_version"])
 	}
 }

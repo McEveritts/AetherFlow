@@ -5,6 +5,7 @@ import (
 	"aetherflow/models"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 )
@@ -60,8 +61,12 @@ func GetActiveServices() map[string]interface{} {
 	baseDomain := ResolveBaseDomain()
 
 	for _, pkg := range pkgs {
-		if pkg.Status != "installed" && pkg.Status != "running" {
+		if pkg.Status != "installed" && pkg.Status != "running" && pkg.Status != "updating" {
 			continue
+		}
+
+		if pkg.InstalledVersion == "" && pkg.UpdateCheckedAt == "" && shouldTrackPackage(pkg) {
+			TriggerInitialPackageUpdateCheck(pkg.Name)
 		}
 
 		// Use ServiceName from packages.json if available, else fall back to package name
@@ -74,6 +79,9 @@ func GetActiveServices() map[string]interface{} {
 		managedBy := "systemd"
 
 		status, uptime, version = GetServiceInfo(serviceName)
+		if pkg.Status == "updating" {
+			status = "updating"
+		}
 
 		if version == "-" {
 			if pkg.InstalledVersion != "" {
@@ -104,7 +112,7 @@ func GetActiveServices() map[string]interface{} {
 			tlsEnabled = true
 		}
 
-		servicesList[pkg.Label] = gin.H{
+		entry := gin.H{
 			"status":                  status,
 			"uptime":                  uptime,
 			"version":                 version,
@@ -119,7 +127,22 @@ func GetActiveServices() map[string]interface{} {
 			"tls_enabled":             tlsEnabled,
 			"web_path":                pkg.WebPath,
 			"units":                   pkg.SandboxServiceIDs,
+			"installed_version":       pkg.InstalledVersion,
+			"latest_version":          pkg.LatestVersion,
+			"update_available":        pkg.UpdateAvailable,
+			"update_checked_at":       pkg.UpdateCheckedAt,
+			"update_url":              pkg.UpdateURL,
+			"update_error":            pkg.UpdateError,
 		}
+
+		if jobInfo := GetPackageJobInfo(pkg.Name); jobInfo != nil {
+			entry["job_status"] = jobInfo.Status
+			entry["progress"] = jobInfo.Progress
+			entry["log_line"] = jobInfo.LastLine
+			entry["started_at"] = jobInfo.StartedAt.Format(time.RFC3339)
+		}
+
+		servicesList[pkg.Label] = entry
 	}
 
 	return servicesList

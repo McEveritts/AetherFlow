@@ -159,7 +159,7 @@ describe('Operator Management Panels (M3 Features F24-F27)', () => {
     describe('NetworkTab (F24)', () => {
         it('renders WireGuard and Tailscale segmented switcher', () => {
             render(<NetworkTab />);
-            expect(screen.getByText(/Network & VPN Infrastructure/i)).toBeInTheDocument();
+            expect(screen.getByText(/Network & VPN Mesh/i)).toBeInTheDocument();
             expect(screen.getByRole('button', { name: /WireGuard VPN/i })).toBeInTheDocument();
             expect(screen.getByRole('button', { name: /Tailscale Mesh/i })).toBeInTheDocument();
         });
@@ -211,7 +211,7 @@ describe('Operator Management Panels (M3 Features F24-F27)', () => {
     describe('ClusterTab (F27)', () => {
         it('renders multi-node cluster mesh with worker node card and metrics', () => {
             render(<ClusterTab />);
-            expect(screen.getByText(/Multi-Node Cluster Mesh/i)).toBeInTheDocument();
+            expect(screen.getByText(/Cluster Fleet & Topology/i)).toBeInTheDocument();
             expect(screen.getByRole('button', { name: /Enroll Worker Node/i })).toBeInTheDocument();
             expect(screen.getByText(/worker-fra-01/i)).toBeInTheDocument();
             expect(screen.getByText(/10.0.0.15:50051/i)).toBeInTheDocument();

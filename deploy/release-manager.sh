@@ -142,16 +142,60 @@ ensure_fhs_layout() {
 resolve_release_tag() {
     local channel="$1"
     local api_url="https://api.github.com/repos/${GITHUB_REPO}/releases"
+    local releases_json
+    releases_json="$(curl -sfL --max-time 15 "${api_url}" 2>/dev/null)" || true
 
     if [[ "${channel}" == "nightly" ]]; then
+        if [[ -n "${releases_json}" ]] && command -v python3 &>/dev/null; then
+            local nightly_tag=""
+            nightly_tag="$(printf '%s' "${releases_json}" | python3 -c '
+import json, sys
+try:
+    for r in json.load(sys.stdin):
+        if r.get("draft"):
+            continue
+        tag = (r.get("tag_name") or "").strip()
+        target = (r.get("target_commitish") or "").strip().lower()
+        if tag and tag.lower() != "nightly" and (target == "nightly" or r.get("prerelease") or "nightly" in tag.lower()):
+            print(tag)
+            break
+except Exception:
+    pass
+' 2>/dev/null)"
+            if [[ -n "${nightly_tag}" ]]; then
+                echo "${nightly_tag}"
+                return 0
+            fi
+        fi
         echo "nightly"
         return 0
     fi
 
-    local releases_json
-    releases_json="$(curl -sfL --max-time 15 "${api_url}" 2>/dev/null)" || return 1
+    [[ -z "${releases_json}" ]] && return 1
 
-    # Stable: first release without a pre-release hyphen in tag_name
+    if command -v python3 &>/dev/null; then
+        local stable_tag=""
+        stable_tag="$(printf '%s' "${releases_json}" | python3 -c '
+import json, sys
+try:
+    for r in json.load(sys.stdin):
+        if r.get("draft") or r.get("prerelease"):
+            continue
+        tag = (r.get("tag_name") or "").strip()
+        target = (r.get("target_commitish") or "").strip().lower()
+        if tag and "-" not in tag and target != "nightly":
+            print(tag)
+            break
+except Exception:
+    pass
+' 2>/dev/null)"
+        if [[ -n "${stable_tag}" ]]; then
+            echo "${stable_tag}"
+            return 0
+        fi
+    fi
+
+    # Fallback: first release without a pre-release hyphen in tag_name
     echo "${releases_json}" | grep -o '"tag_name"\s*:\s*"[^"]*"' | cut -d'"' -f4 | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1
 }
 
@@ -219,7 +263,7 @@ build_from_source() {
 
     rsync -a --exclude='.git' --exclude='node_modules' --exclude='.next' --exclude='*.sqlite' \
         "${REPO_DIR}/" "${RELEASE_DIR}/" >> "${LOG_FILE}" 2>&1
-    if [[ "${CHANNEL}" == "nightly" ]]; then
+    if [[ "${CHANNEL}" == "nightly" && ! -s "${RELEASE_DIR}/.version" ]]; then
         echo "nightly-${source_sha}" > "${RELEASE_DIR}/.version"
     fi
 

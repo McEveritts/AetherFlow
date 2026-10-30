@@ -1,3 +1,18 @@
+## CHANGELOG v3.2.5 - App Update Engine, Nightly Release Pipeline, Open-Canvas Telemetry & Ingress Consolidation
+_Direct comparison against `v3.2.1` (`v3.2.1...v3.2.5`), consolidating in-place Marketplace/Service updates, Nightly release channel orchestration, Open-Canvas UI & LibreSpeed V2, and runtime hardening._
+
+---
+
+### Release Highlights (since `v3.2.1`)
+* **Marketplace & Services App Update Engine**: Added end-to-end in-place package updating (`POST /api/v1/admin/packages/:id/update`, `/packages/:id/check-update`, `/packages/updates/check`), live update badges, confirmation modals, and amber `ProgressRing` status across `ServicesTab.tsx` and `MarketplaceTab.tsx`, plus automatic systemd unit stop/restart orchestration in `installer.go` and hardened `Kavita`, `Navidrome`, and `Qui` installers.
+* **Nightly Release Channel & Markdown Release Notes**: Wired the `nightly` branch and pre-release channel into `updater.go`, `deploy/release-manager.sh`, and `.github/workflows/release.yml`, replaced the legacy channel selector with `GlassSelect` (`stable` / `nightly`), and added rich Markdown rendering (`FlowAiMarkdown`) with BOM/encoding sanitization for upstream release notes.
+* **Open-Canvas Dashboard, Sparkline Hover-Pause & LibreSpeed Obsidian V2**: Redesigned the Overview dashboard and LibreSpeed speedtest stage to a permanent open-canvas layout with an Obsidian V2 completion card and high-BDP tuning, added hover-pause inspection and `0.XX` decimal capping to `Sparkline.tsx`, and removed legacy REST polling in favor of full-duplex WebSocket telemetry.
+* **FlowAI Model & Telemetry Context Upgrade**: Updated AI provider catalogs to support OpenAI **GPT-6 / GPT-6.1** and Anthropic **Claude 5.1 / Claude 5.5**, and injected live system telemetry and markdown formatting into FlowAI responses.
+* **Apache2 Subdomain Gateway Consolidation & Concurrency Fixes**: Removed the legacy Caddy compatibility layer to standardize on the Apache2 Subdomain Gateway, resolved Apache worker starvation, SQLite ingress contention, auth refresh races, and AI prediction stalls.
+* **Systemd, Storage & PWA Cache Hardening**: Configured `ProtectProc=default` in `aetherflow-api.service` with kernel-thread filtering in Top Processes, deduplicated bind-mounts and ramdisks in storage telemetry, fixed `PathSelector` symlink browsing, and upgraded `sw.js` (`aetherflow-cache-v2`) + `embed.go` with network-first HTML revalidation and Next.js RSC flight payload (`index.txt`) resolution.
+
+---
+
 ## CHANGELOG v3.2.1 - 69-App Bare-Metal Catalog, Jellyfin Streaming Telemetry, FlowAI Open Canvas & 57-Point Surgical Audit
 _Direct comparison against `v3.2.01` (`v3.2.01...v3.2.1`), consolidating catalog expansion, streaming intelligence, ingress hardening, and McSurgeon audit resolutions._
 

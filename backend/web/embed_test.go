@@ -17,8 +17,14 @@ func TestRegisterSPAHandler(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(tmpDir, "index.html"), []byte("<html>AetherFlow SPA</html>"), 0600); err != nil {
 		t.Fatalf("write index.html: %v", err)
 	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "index.txt"), []byte("1:\"$Sreact.fragment\""), 0600); err != nil {
+		t.Fatalf("write index.txt: %v", err)
+	}
 	if err := os.WriteFile(filepath.Join(tmpDir, "login.html"), []byte("<html>Login Page</html>"), 0600); err != nil {
 		t.Fatalf("write login.html: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "sw.js"), []byte("const CACHE_NAME = 'aetherflow-cache-v2';"), 0600); err != nil {
+		t.Fatalf("write sw.js: %v", err)
 	}
 	nextStaticDir := filepath.Join(tmpDir, "_next", "static", "chunks")
 	if err := os.MkdirAll(nextStaticDir, 0750); err != nil {
@@ -66,5 +72,31 @@ func TestRegisterSPAHandler(t *testing.T) {
 	r.ServeHTTP(w, req)
 	if w.Code != http.StatusOK || w.Body.String() != "<html>AetherFlow SPA</html>" {
 		t.Fatalf("expected SPA index.html fallback, got status=%d body=%q", w.Code, w.Body.String())
+	}
+	if got := w.Header().Get("Cache-Control"); got != "no-cache, no-store, must-revalidate" {
+		t.Fatalf("expected no-cache on SPA fallback, got %q", got)
+	}
+
+	// 5. Service Worker and HTML routes must return no-cache headers
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/sw.js", nil)
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 for /sw.js, got %d", w.Code)
+	}
+	if got := w.Header().Get("Cache-Control"); got != "no-cache, no-store, must-revalidate" {
+		t.Fatalf("expected no-cache on /sw.js, got %q", got)
+	}
+
+	// 6. Next.js RSC flight payload resolution
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/?_rsc=abc123", nil)
+	req.Header.Set("RSC", "1")
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK || w.Body.String() != "1:\"$Sreact.fragment\"" {
+		t.Fatalf("expected RSC index.txt payload, got status=%d body=%q", w.Code, w.Body.String())
+	}
+	if got := w.Header().Get("Cache-Control"); got != "no-cache, no-store, must-revalidate" {
+		t.Fatalf("expected no-cache on RSC payload, got %q", got)
 	}
 }

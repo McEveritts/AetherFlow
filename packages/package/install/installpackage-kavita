@@ -51,9 +51,11 @@ rm -f "$TMP_TAR"
 chmod +x /opt/Kavita/Kavita
 printf '%s\n' "${KAV_VERSION#v}" > /opt/Kavita/.af-version
 
-if [[ -f /opt/Kavita/appsettings.json ]]; then
-    sed -i 's/"Port": [0-9]*/"Port": 5002/' /opt/Kavita/appsettings.json 2>/dev/null || true
-fi
+for kav_cfg in /opt/Kavita/appsettings.json /opt/Kavita/config/appsettings.json; do
+    if [[ -f "$kav_cfg" ]]; then
+        sed -i 's/"Port": [0-9]*/"Port": 5002/' "$kav_cfg" 2>/dev/null || true
+    fi
+done
 
 chown -R kavita:kavita /opt/Kavita /var/lib/kavita
 

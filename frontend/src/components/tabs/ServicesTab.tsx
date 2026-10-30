@@ -1,8 +1,8 @@
 'use client';
 
-import { RefreshCw, Box, Settings, Globe, RotateCcw, Square, Play, Server, Cpu, X, Network } from 'lucide-react';
-import { useState } from 'react';
-import useSWR from 'swr';
+import { RefreshCw, Box, Settings, Globe, RotateCcw, Square, Play, Server, Cpu, X, Network, ArrowUpCircle, ExternalLink } from 'lucide-react';
+import { useState, useEffect, useRef } from 'react';
+import useSWR, { useSWRConfig } from 'swr';
 import { useToast } from '@/contexts/ToastContext';
 import { useAuth } from '@/contexts/AuthContext';
 import { ServicesSkeleton } from '@/components/layout/SkeletonBox';
@@ -13,6 +13,7 @@ import { Terminal } from 'lucide-react';
 import { useSystemStore } from '@/store/useSystemStore';
 import { ExternalAccessCard } from '@/components/ingress/ExternalAccessCard';
 import { DeploymentStatus } from '@/components/deploy/DeploymentStatus';
+import { ProgressRing } from '@/components/ui/ProgressRing';
 
 // Fallback map when default_port is not provided by backend
 const SERVICE_WEB_PORTS: Record<string, number | string> = {
@@ -85,6 +86,16 @@ const SERVICE_WEB_PORTS: Record<string, number | string> = {
 interface ServiceInfo {
     status: string;
     version: string;
+    installed_version?: string;
+    latest_version?: string;
+    update_available?: boolean;
+    update_checked_at?: string;
+    update_url?: string;
+    update_error?: string;
+    job_status?: string;
+    progress?: number;
+    log_line?: string;
+    started_at?: string;
     uptime: string;
     managed_by?: string;
     process?: string;
@@ -103,16 +114,180 @@ interface ServiceInfo {
 export default function ServicesTab() {
     const { addToast } = useToast();
     const { user } = useAuth();
+    const { mutate: globalMutate } = useSWRConfig();
     const [loadingService, setLoadingService] = useState<string | null>(null);
+    const [updatingServices, setUpdatingServices] = useState<Set<string>>(new Set());
+    const [checkingUpdates, setCheckingUpdates] = useState(false);
+    const [checkingSingleService, setCheckingSingleService] = useState<string | null>(null);
     const [logsModalService, setLogsModalService] = useState<string | null>(null);
     const [ingressModalApp, setIngressModalApp] = useState<string | null>(null);
     const canControlServices = user?.role === 'admin';
     const { setActiveTab } = useSystemStore();
 
+    const prevServicesRef = useRef<Record<string, ServiceInfo> | undefined>(undefined);
+    const notifiedUpdateRef = useRef<Set<string>>(new Set());
+
     const { data: services, mutate, isLoading } = useSWR<Record<string, ServiceInfo>>(
         '/api/v1/auth/services',
-        { refreshInterval: 15000 }
+        {
+            refreshInterval: (currentData) => {
+                if (updatingServices.size > 0) return 1500;
+                if (!currentData) return 15000;
+                const hasActiveJob = Object.values(currentData).some(
+                    (s) => s.status === 'updating' || s.job_status === 'updating' || s.job_status === 'installing' || s.job_status === 'uninstalling'
+                );
+                return hasActiveJob ? 1500 : 15000;
+            }
+        }
     );
+
+    useEffect(() => {
+        if (!services) return;
+        const prev = prevServicesRef.current;
+
+        Object.entries(services).forEach(([name, info]) => {
+            const appId = info.id || name;
+            const prevInfo = prev?.[name];
+            const wasUpdating =
+                prevInfo?.status === 'updating' ||
+                prevInfo?.job_status === 'updating' ||
+                updatingServices.has(appId);
+            const isNowUpdating = info.status === 'updating' || info.job_status === 'updating';
+
+            if (wasUpdating && !isNowUpdating) {
+                if (updatingServices.has(appId)) {
+                    setUpdatingServices((curr) => {
+                        const next = new Set(curr);
+                        next.delete(appId);
+                        return next;
+                    });
+                }
+
+                if (!notifiedUpdateRef.current.has(appId)) {
+                    notifiedUpdateRef.current.add(appId);
+                    if (info.job_status === 'failed' || info.status === 'error') {
+                        addToast(`Update failed for ${name}. Check system logs for details.`, 'error');
+                    } else {
+                        const ver = info.installed_version || info.version;
+                        const verSuffix = ver ? ` to v${ver.replace(/^v/i, '')}` : '';
+                        addToast(`${name} updated${verSuffix} and restarted.`, 'success');
+                    }
+                    globalMutate('/api/v1/public/marketplace');
+                    setTimeout(() => notifiedUpdateRef.current.delete(appId), 5000);
+                }
+            }
+        });
+
+        prevServicesRef.current = services;
+    }, [services, updatingServices, addToast, globalMutate]);
+
+    const handleCheckAllUpdates = async () => {
+        setCheckingUpdates(true);
+        try {
+            if (canControlServices) {
+                const res = await apiFetch('/api/v1/admin/packages/updates/check', { method: 'POST' });
+                if (res.ok) {
+                    const payload = await res.json().catch(() => null);
+                    await mutate();
+                    globalMutate('/api/v1/public/marketplace');
+                    if (payload && typeof payload.updates_available === 'number') {
+                        if (payload.updates_available > 0) {
+                            addToast(`${payload.updates_available} application update${payload.updates_available === 1 ? '' : 's'} available.`, 'info');
+                        } else {
+                            addToast('All installed applications are up to date.', 'success');
+                        }
+                    } else {
+                        addToast('Synchronized service states and update metadata.', 'success');
+                    }
+                    return;
+                }
+            }
+            await mutate();
+            addToast('Synchronized service states.', 'info');
+        } catch {
+            await mutate();
+            addToast('Failed to check remote updates; refreshed local service status.', 'error');
+        } finally {
+            setCheckingUpdates(false);
+        }
+    };
+
+    const handleCheckSingleUpdate = async (name: string, data: ServiceInfo) => {
+        if (!canControlServices || !data.id) return;
+        setCheckingSingleService(name);
+        try {
+            const res = await apiFetch(`/api/v1/admin/packages/${encodeURIComponent(data.id)}/check-update`, {
+                method: 'POST',
+            });
+            if (!res.ok) {
+                const d = await res.json().catch(() => ({}));
+                throw new Error(d.message || d.error || 'Update check failed.');
+            }
+            const result = await res.json().catch(() => ({}));
+            await mutate();
+            globalMutate('/api/v1/public/marketplace');
+            if (result.update_available) {
+                addToast(`Update available for ${name}: v${(result.latest_version || '').replace(/^v/i, '')}`, 'info');
+            } else {
+                addToast(`${name} is up to date${result.installed_version ? ` (v${result.installed_version.replace(/^v/i, '')})` : ''}.`, 'success');
+            }
+        } catch (err: unknown) {
+            addToast(err instanceof Error ? err.message : 'Unable to check for updates.', 'error');
+        } finally {
+            setCheckingSingleService(null);
+        }
+    };
+
+    const handleUpdateService = async (name: string, data: ServiceInfo) => {
+        if (!canControlServices) {
+            addToast('Authorization constraint: Admin privileges required to update applications.', 'error');
+            return;
+        }
+        const appId = data.id;
+        if (!appId) {
+            addToast(`Cannot resolve package identifier for ${name}.`, 'error');
+            return;
+        }
+
+        try {
+            const res = await apiFetch(`/api/v1/admin/packages/${encodeURIComponent(appId)}/update`, {
+                method: 'POST',
+            });
+            if (!res.ok) {
+                const d = await res.json().catch(() => ({}));
+                throw new Error(d.message || d.error || 'Package update request rejected.');
+            }
+            setUpdatingServices((curr) => new Set(curr).add(appId));
+            if (services) {
+                mutate(
+                    {
+                        ...services,
+                        [name]: {
+                            ...data,
+                            status: 'updating',
+                            job_status: 'updating',
+                            progress: 5,
+                            log_line: `Preparing update for ${name}...`,
+                            started_at: new Date().toISOString(),
+                        },
+                    },
+                    false
+                );
+            }
+            const targetVer = data.latest_version ? ` to v${data.latest_version.replace(/^v/i, '')}` : '';
+            addToast(`Updating ${name}${targetVer}...`, 'info');
+            mutate();
+            globalMutate('/api/v1/public/marketplace');
+        } catch (err: unknown) {
+            setUpdatingServices((curr) => {
+                const next = new Set(curr);
+                next.delete(appId);
+                return next;
+            });
+            mutate();
+            addToast(err instanceof Error ? err.message : 'Update failed to start.', 'error');
+        }
+    };
 
     const handleServiceControl = async (name: string, data: ServiceInfo, action: 'start' | 'stop' | 'restart') => {
         if (!canControlServices) {
@@ -176,6 +351,12 @@ export default function ServicesTab() {
     const appServices = allEntries.filter(([, d]) => !isCorePlatformService(d as ServiceInfo));
 
     const runningCount = allEntries.filter(([, d]) => (d as ServiceInfo).status === 'running').length;
+    const updatesAvailableCount = appServices.filter(([, d]) => Boolean((d as ServiceInfo).update_available)).length;
+
+    const formatVersion = (ver?: string) => {
+        if (!ver || ver === '-') return '-';
+        return ver.startsWith('v') || ver.startsWith('V') ? ver : `v${ver}`;
+    };
 
     const handleOpenWebUI = (name: string, data: ServiceInfo) => {
         const pathSuffix = data.web_path ? (data.web_path.startsWith('/') ? data.web_path : `/${data.web_path}`) : '';
@@ -212,16 +393,36 @@ export default function ServicesTab() {
 
     const renderServiceCard = (name: string, rawData: unknown) => {
         const data = rawData as ServiceInfo;
-        const isRunning = data.status === 'running';
-        const isError = data.status === 'error';
-        const isBusy = loadingService === name;
-        const controlDisabled = isBusy || !canControlServices;
         const isCore = isCorePlatformService(data);
+        const appId = data.id || '';
+        const isUpdating =
+            data.status === 'updating' ||
+            data.job_status === 'updating' ||
+            (appId ? updatingServices.has(appId) : false);
+        const isRunning = data.status === 'running' && !isUpdating;
+        const isError = data.status === 'error';
+        const isBusy = loadingService === name || isUpdating;
+        const controlDisabled = isBusy || !canControlServices;
         const webAvailable = hasWebUI(data);
+        const hasUpdate = Boolean(!isCore && data.update_available);
+        const installedVer = data.installed_version || data.version || '-';
+        const latestVer = data.latest_version;
+        const isCheckingThis = checkingSingleService === name;
 
         return (
-            <div key={name} className="glass-card relative bg-slate-950/80 border border-white/10 rounded-2xl p-6 transition-all hover:border-indigo-500/50 group cursor-default overflow-hidden">
-                <div className={`absolute top-0 left-0 w-1 h-full ${isRunning ? 'bg-emerald-500/50' : (isError ? 'bg-red-500/50' : 'bg-slate-500/50')} transition-colors z-20`}></div>
+            <div key={name} className={`glass-card relative bg-slate-950/80 border rounded-2xl p-6 transition-all group cursor-default overflow-hidden ${hasUpdate ? 'border-amber-500/30 hover:border-amber-400/60' : 'border-white/10 hover:border-indigo-500/50'}`}>
+                <div className={`absolute top-0 left-0 w-1 h-full ${isUpdating ? 'bg-amber-400 animate-pulse' : (hasUpdate ? 'bg-amber-500/70' : (isRunning ? 'bg-emerald-500/50' : (isError ? 'bg-red-500/50' : 'bg-slate-500/50')))} transition-colors z-20`}></div>
+
+                {isUpdating && (
+                    <div className="absolute inset-0 bg-slate-950/90 backdrop-blur-md rounded-2xl z-30 flex items-center justify-center p-6 text-center">
+                        <ProgressRing
+                            progress={data.progress || 10}
+                            status="updating"
+                            logLine={data.log_line || `Updating ${name}...`}
+                            startedAt={data.started_at}
+                        />
+                    </div>
+                )}
 
                 <div className="flex justify-between items-start mb-6 relative z-10">
                     <div className="flex items-center gap-4">
@@ -246,13 +447,21 @@ export default function ServicesTab() {
                             )}
                         </div>
                         <div>
-                            <h3 className="text-base font-bold text-slate-200 group-hover:text-white transition-colors">{name}</h3>
-                            <div className="flex items-center gap-2 mt-1">
+                            <div className="flex items-center gap-2 flex-wrap">
+                                <h3 className="text-base font-bold text-slate-200 group-hover:text-white transition-colors">{name}</h3>
+                                {hasUpdate && (
+                                    <span className="inline-flex items-center gap-1 text-xs font-bold px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-300 border border-amber-500/30">
+                                        <ArrowUpCircle size={12} className="text-amber-400" />
+                                        {latestVer ? `Update ${formatVersion(latestVer)}` : 'Update Available'}
+                                    </span>
+                                )}
+                            </div>
+                            <div className="flex items-center gap-2 mt-1 flex-wrap">
                                 <span className="relative flex h-2 w-2">
                                     {isRunning && <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>}
-                                    <span className={`relative inline-flex rounded-full h-2 w-2 ${isRunning ? 'bg-emerald-500' : (isError ? 'bg-red-500' : 'bg-slate-500')}`}></span>
+                                    <span className={`relative inline-flex rounded-full h-2 w-2 ${isUpdating ? 'bg-amber-400' : (isRunning ? 'bg-emerald-500' : (isError ? 'bg-red-500' : 'bg-slate-500'))}`}></span>
                                 </span>
-                                <span className="text-xs font-medium text-slate-400 capitalize">{data.status}</span>
+                                <span className="text-xs font-medium text-slate-400 capitalize">{isUpdating ? 'updating' : data.status}</span>
                                 {data.managed_by && (
                                     <span className="text-[10px] px-1.5 py-0.5 rounded bg-white/5 text-slate-500 border border-white/5 uppercase tracking-wider">
                                         {data.managed_by}
@@ -291,15 +500,61 @@ export default function ServicesTab() {
                 </div>
 
                 <div className="grid grid-cols-2 gap-4 mb-6">
-                    <div className="bg-slate-900/50 rounded-xl p-3 border border-white/[0.02]">
-                        <span className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">Version</span>
-                        <p className="text-sm font-medium text-slate-300 mt-0.5">{data.version || '-'}</p>
+                    <div className={`bg-slate-900/50 rounded-xl p-3 border ${hasUpdate ? 'border-amber-500/20 bg-amber-500/[0.03]' : 'border-white/[0.02]'}`}>
+                        <div className="flex items-center justify-between">
+                            <span className="text-xs uppercase font-bold text-slate-500 tracking-wider">Version</span>
+                            {!isCore && data.id && canControlServices && (
+                                <button
+                                    onClick={() => handleCheckSingleUpdate(name, data)}
+                                    disabled={isBusy || isCheckingThis}
+                                    title="Check for updates"
+                                    className="text-slate-500 hover:text-slate-300 transition-colors disabled:opacity-40"
+                                >
+                                    <RefreshCw size={11} className={isCheckingThis ? 'animate-spin text-indigo-400' : ''} />
+                                </button>
+                            )}
+                        </div>
+                        <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
+                            <span className="text-sm font-medium text-slate-300">{formatVersion(installedVer)}</span>
+                            {hasUpdate && latestVer && (
+                                data.update_url && /^https?:\/\//i.test(data.update_url) ? (
+                                    <a
+                                        href={data.update_url}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="inline-flex items-center gap-0.5 text-xs font-bold text-amber-400 hover:text-amber-300 transition-colors"
+                                        title="View release notes"
+                                    >
+                                        → {formatVersion(latestVer)}
+                                        <ExternalLink size={10} />
+                                    </a>
+                                ) : (
+                                    <span className="text-xs font-bold text-amber-400">
+                                        → {formatVersion(latestVer)}
+                                    </span>
+                                )
+                            )}
+                        </div>
                     </div>
                     <div className="bg-slate-900/50 rounded-xl p-3 border border-white/[0.02]">
                         <span className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">Uptime</span>
                         <p className="text-sm font-medium text-slate-300 mt-0.5">{data.uptime || '-'}</p>
                     </div>
                 </div>
+
+                {hasUpdate && data.id && (
+                    <RequireClaim>
+                        <button
+                            onClick={() => handleUpdateService(name, data)}
+                            disabled={controlDisabled}
+                            title={canControlServices ? `Update ${name}${latestVer ? ` to ${formatVersion(latestVer)}` : ''}` : 'Admin access required'}
+                            className="obs-touch-target-standard obs-gpu-120hz-interactive w-full mb-2.5 py-2.5 bg-amber-500/15 hover:bg-amber-500 text-amber-300 hover:text-slate-950 text-xs font-bold rounded-lg transition-all flex items-center justify-center gap-2 border border-amber-500/30 shadow-lg shadow-amber-950/20 disabled:opacity-50"
+                        >
+                            <ArrowUpCircle size={15} />
+                            {isUpdating ? 'Updating...' : `Update ${name}${latestVer ? ` to ${formatVersion(latestVer)}` : ''}`}
+                        </button>
+                    </RequireClaim>
+                )}
 
                 <div className="flex gap-2">
                     {isRunning ? (
@@ -371,15 +626,23 @@ export default function ServicesTab() {
                         App Ecosystem
                         <span className="text-xs font-semibold px-2.5 py-1 bg-white/10 rounded-full text-slate-300 border border-white/5">{allEntries.length} Total</span>
                         <span className="text-xs font-semibold px-2.5 py-1 bg-emerald-500/10 rounded-full text-emerald-400 border border-emerald-500/20">{runningCount} Running</span>
+                        {updatesAvailableCount > 0 && (
+                            <span className="text-xs font-semibold px-2.5 py-1 bg-amber-500/15 rounded-full text-amber-300 border border-amber-500/30 flex items-center gap-1.5">
+                                <ArrowUpCircle size={13} className="text-amber-400" />
+                                {updatesAvailableCount} {updatesAvailableCount === 1 ? 'Update' : 'Updates'} Available
+                            </span>
+                        )}
                     </h2>
-                    <p className="text-slate-400 text-sm mt-2">Manage and monitor containerized services within the nexus.</p>
+                    <p className="text-slate-400 text-sm mt-2">Manage, monitor, and update services within the nexus.</p>
                 </div>
                 <div className="flex gap-3">
                     <button
-                        onClick={() => mutate()}
-                        className="obs-touch-target-standard obs-gpu-120hz-interactive px-4 py-2 bg-white/[0.03] hover:bg-white/[0.08] border border-white/10 rounded-lg text-sm font-medium text-slate-300 transition-all flex items-center gap-2"
+                        onClick={handleCheckAllUpdates}
+                        disabled={checkingUpdates}
+                        className="obs-touch-target-standard obs-gpu-120hz-interactive px-4 py-2 bg-white/[0.03] hover:bg-white/[0.08] border border-white/10 rounded-lg text-sm font-medium text-slate-300 transition-all flex items-center gap-2 disabled:opacity-50"
                     >
-                        <RefreshCw size={14} /> Sync All
+                        <RefreshCw size={14} className={checkingUpdates ? 'animate-spin text-indigo-400' : ''} />
+                        {checkingUpdates ? 'Checking Updates...' : 'Check Updates & Sync'}
                     </button>
                 </div>
             </div>

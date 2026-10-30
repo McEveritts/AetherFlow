@@ -63,7 +63,7 @@
     <g transform="translate(292, -36)">
       <rect x="0" y="0" width="166" height="30" rx="15" fill="url(#pillGrad)" stroke="#818cf8" stroke-opacity="0.5" stroke-width="1"/>
       <circle cx="16" cy="15" r="4" fill="#34d399"/>
-      <text x="28" y="19.5" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="12.5" font-weight="700" fill="#e0e7ff" letter-spacing="0.6">v3.2.1 • OBSIDIAN</text>
+      <text x="28" y="19.5" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="12.5" font-weight="700" fill="#e0e7ff" letter-spacing="0.6">v3.2.5 • OBSIDIAN</text>
     </g>
 
     <!-- Tagline -->

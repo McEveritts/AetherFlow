@@ -45,7 +45,7 @@ import (
 	"github.com/joho/godotenv"
 )
 
-var version = "3.2.1"
+var version = "3.2.5"
 
 // discoverOrigins auto-detects loopback and LAN interface origins for local/dev CORS.
 // External public IP lookups (api.ipify.org) are intentionally excluded so the server

@@ -52,21 +52,42 @@ func notifyPackageEvent(pkgId, action, status string, progress int, lastLine str
 
 // ResolvePackageScriptPath finds the bash script location. Returns empty string if missing.
 func ResolvePackageScriptPath(action, scriptName string) string {
-	candidates := []string{
-		filepath.Join("/opt", "AetherFlow", "current", "packages", "package", action, scriptName),
-		filepath.Join("/opt", "AetherFlow", "packages", "package", action, scriptName),
+	if (action != "install" && action != "remove" && action != "update") || !safeScriptName.MatchString(scriptName) {
+		return ""
 	}
-	if exeDir != "" {
-		candidates = append(candidates,
-			filepath.Join(exeDir, "packages", "package", action, scriptName),
-			filepath.Join(exeDir, "..", "packages", "package", action, scriptName),
-		)
+	dirs := []string{action}
+	scripts := []string{scriptName}
+	if action == "update" {
+		dirs = []string{"update", "install"}
+		if strings.HasPrefix(scriptName, "updatepackage-") {
+			pkgPart := strings.TrimPrefix(scriptName, "updatepackage-")
+			scripts = []string{scriptName, "installpackage-" + pkgPart}
+		} else if strings.HasPrefix(scriptName, "installpackage-") {
+			pkgPart := strings.TrimPrefix(scriptName, "installpackage-")
+			scripts = []string{"updatepackage-" + pkgPart, scriptName}
+		}
 	}
-	candidates = append(candidates,
-		filepath.Join("packages", "package", action, scriptName),
-		filepath.Join("..", "packages", "package", action, scriptName),
-		filepath.Join("..", "..", "packages", "package", action, scriptName),
-	)
+
+	var candidates []string
+	for _, dir := range dirs {
+		for _, sc := range scripts {
+			candidates = append(candidates,
+				filepath.Join("/opt", "AetherFlow", "current", "packages", "package", dir, sc),
+				filepath.Join("/opt", "AetherFlow", "packages", "package", dir, sc),
+			)
+			if exeDir != "" {
+				candidates = append(candidates,
+					filepath.Join(exeDir, "packages", "package", dir, sc),
+					filepath.Join(exeDir, "..", "packages", "package", dir, sc),
+				)
+			}
+			candidates = append(candidates,
+				filepath.Join("packages", "package", dir, sc),
+				filepath.Join("..", "packages", "package", dir, sc),
+				filepath.Join("..", "..", "packages", "package", dir, sc),
+			)
+		}
+	}
 
 	for _, c := range candidates {
 		if _, err := os.Stat(c); err == nil {
@@ -98,12 +119,15 @@ func parseProgressLine(line string) (int, string, bool) {
 	return pct, cleanMsg, true
 }
 
-// RunPackageAction executes the specified bash script for installing or removing a package.
+// RunPackageAction executes the specified bash script for installing, updating, or removing a package.
 // It streams output line-by-line so we can track progress in real time.
 func RunPackageAction(action, pkgId, scriptName, lockFile string) {
 	status := "installing"
-	if action == "remove" {
+	switch action {
+	case "remove":
 		status = "uninstalling"
+	case "update":
+		status = "updating"
 	}
 
 	job := &JobInfo{
@@ -122,7 +146,7 @@ func RunPackageAction(action, pkgId, scriptName, lockFile string) {
 		// Use a delayed deletion to allow frontend SWR polling to catch failure states
 		go func() {
 			time.Sleep(30 * time.Second)
-			activeJobs.Delete(pkgId)
+			activeJobs.CompareAndDelete(pkgId, job)
 			slog.Info("package action finalized", "action", action, "package", pkgId)
 		}()
 	}()
@@ -168,8 +192,15 @@ func RunPackageAction(action, pkgId, scriptName, lockFile string) {
 	}
 
 	allocatedPort := 0
-	if action == "install" {
+	if action == "install" || action == "update" {
 		allocatedPort = PreAllocateAppPort(pkgId)
+	}
+
+	if action == "update" {
+		updateProgress("[PROGRESS:5] Stopping running service units before binary update...")
+		for _, unit := range ResolveServiceUnits(pkgId) {
+			_ = ControlService(unit, "stop")
+		}
 	}
 
 	if IsRunnerAvailable() {
@@ -230,7 +261,7 @@ func RunPackageAction(action, pkgId, scriptName, lockFile string) {
 	}
 
 	switch action {
-	case "install":
+	case "install", "update":
 		if err := ApplyPackageSandbox(pkgId); err != nil {
 			slog.Warn("sandbox hardening warning", "package", pkgId, "error", err)
 		}
@@ -243,7 +274,11 @@ func RunPackageAction(action, pkgId, scriptName, lockFile string) {
 				"port_reassigned", bpRes.PortReassigned,
 				"internal_domain", bpRes.InternalDomain)
 		}
-		RefreshPackageUpdateByID(pkgId)
+		if action == "update" {
+			for _, unit := range ResolveServiceUnits(pkgId) {
+				_ = ControlService(unit, "restart")
+			}
+		}
 	case "remove":
 		if err := TeardownBlueprintUninstall(pkgId); err != nil {
 			slog.Warn("blueprint uninstall teardown warning", "package", pkgId, "error", err)
@@ -255,8 +290,9 @@ func RunPackageAction(action, pkgId, scriptName, lockFile string) {
 
 	job.Progress = 100
 	job.LastLine = "Complete!"
-	if action == "install" {
+	if action == "install" || action == "update" {
 		job.Status = "installed"
+		RefreshPackageUpdateByID(pkgId)
 	} else {
 		job.Status = "uninstalled"
 	}
