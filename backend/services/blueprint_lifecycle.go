@@ -688,6 +688,8 @@ func ApplyBlueprintPostInstall(appName string, preAllocatedPort int) (*Blueprint
 		}
 	}
 
+	ClearAppRuntimeMetaCache()
+
 	return res, nil
 }
 
@@ -717,6 +719,8 @@ func TeardownBlueprintUninstall(appName string) error {
 
 	// 3. Re-sync networking DNS providers (Pi-hole / dnsmasq) so removed domain is purged
 	_, _ = SyncNetworkDNSProviders()
+
+	ClearAppRuntimeMetaCache()
 
 	return nil
 }

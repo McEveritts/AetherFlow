@@ -660,6 +660,36 @@ func NewRunnerMux() *http.ServeMux {
 		_ = json.NewEncoder(w).Encode(RunnerResponse{Success: true, Output: out})
 	})
 
+	mux.HandleFunc("/v1/app-meta", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			_ = json.NewEncoder(w).Encode(RunnerResponse{Error: "method not allowed"})
+			return
+		}
+
+		r.Body = http.MaxBytesReader(w, r.Body, 4096)
+		var req AppMetaRunnerRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(RunnerResponse{Error: "invalid JSON"})
+			return
+		}
+
+		if !safeScriptName.MatchString(req.AppName) {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(RunnerResponse{Error: "invalid application identifier"})
+			return
+		}
+
+		meta := extractAppRuntimeMetaLocal(req.AppName)
+		outBytes, _ := json.Marshal(meta)
+		_ = json.NewEncoder(w).Encode(RunnerResponse{
+			Success: true,
+			Output:  string(outBytes),
+		})
+	})
+
 	return mux
 }
 
