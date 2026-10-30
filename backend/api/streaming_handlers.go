@@ -144,7 +144,7 @@ func UpdateStreamingServer(c *gin.Context) {
 	status, _ := services.TestJellyfinConnection(ctx, resolvedURL, resolvedKey)
 	if status != nil && status.Status == "connected" {
 		go func() {
-			syncCtx, syncCancel := context.WithTimeout(context.Background(), 20*time.Second)
+			syncCtx, syncCancel := context.WithTimeout(context.Background(), 60*time.Second)
 			defer syncCancel()
 			_, _ = services.SyncJellyfinWatchHistory(syncCtx)
 		}()
@@ -215,7 +215,7 @@ func TestStreamingServer(c *gin.Context) {
 
 // SyncStreamingServerHistory imports played items and watch statistics from Jellyfin.
 func SyncStreamingServerHistory(c *gin.Context) {
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 60*time.Second)
 	defer cancel()
 
 	imported, err := services.SyncJellyfinWatchHistory(ctx)

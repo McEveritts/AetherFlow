@@ -268,15 +268,32 @@ func InitStreamingMonitor() {
 			return
 		}
 
+		// Perform an initial watch-history sync on startup if Jellyfin is configured
+		if _, _, apiKey, enabled := GetStoredJellyfinConfig(); enabled && apiKey != "" {
+			syncCtx, syncCancel := context.WithTimeout(ctx, 60*time.Second)
+			_, _ = SyncJellyfinWatchHistory(syncCtx)
+			syncCancel()
+		}
+
 		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
 
+		historySyncCounter := 0
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
 				PollAndRecordJellyfinTelemetry()
+				historySyncCounter++
+				if historySyncCounter >= 30 { // Sync historical watch records every 5 minutes
+					historySyncCounter = 0
+					if _, _, apiKey, enabled := GetStoredJellyfinConfig(); enabled && apiKey != "" {
+						syncCtx, syncCancel := context.WithTimeout(ctx, 60*time.Second)
+						_, _ = SyncJellyfinWatchHistory(syncCtx)
+						syncCancel()
+					}
+				}
 			}
 		}
 	}()
@@ -1147,118 +1164,187 @@ func SyncJellyfinWatchHistory(ctx context.Context) (int, error) {
 	}
 
 	imported := 0
+	const pageSize = 100
+	filters := []string{"IsPlayed", "IsResumable"}
+
 	for _, u := range users {
-		itemsURL := fmt.Sprintf("%s/Users/%s/Items?Filters=IsPlayed&Recursive=true&IncludeItemTypes=Movie,Episode,Audio&Fields=MediaStreams,Container,ProductionYear&SortBy=DatePlayed&SortOrder=Descending&Limit=40",
-			cleanURL, url.PathEscape(u.ID))
-		itemsBody, iCode, _, iErr := doJellyfinRequest(ctx, "GET", itemsURL, apiKey, nil, 10*time.Second)
-		if iErr != nil || iCode != http.StatusOK {
-			continue
-		}
-
-		var payload struct {
-			Items []struct {
-				ID                string `json:"Id"`
-				Name              string `json:"Name"`
-				Type              string `json:"Type"`
-				SeriesName        string `json:"SeriesName"`
-				SeriesID          string `json:"SeriesId"`
-				ParentIndexNumber int    `json:"ParentIndexNumber"`
-				IndexNumber       int    `json:"IndexNumber"`
-				ProductionYear    int    `json:"ProductionYear"`
-				RunTimeTicks      int64  `json:"RunTimeTicks"`
-				Container         string `json:"Container"`
-				Bitrate           int64  `json:"Bitrate"`
-				Width             int    `json:"Width"`
-				Height            int    `json:"Height"`
-				MediaStreams      []struct {
-					Type     string `json:"Type"`
-					Codec    string `json:"Codec"`
-					BitRate  int64  `json:"BitRate"`
-					Width    int    `json:"Width"`
-					Height   int    `json:"Height"`
-					Channels int    `json:"Channels"`
-				} `json:"MediaStreams"`
-				UserData *struct {
-					PlayCount      int    `json:"PlayCount"`
-					LastPlayedDate string `json:"LastPlayedDate"`
-				} `json:"UserData"`
-			} `json:"Items"`
-		}
-		if json.Unmarshal(itemsBody, &payload) != nil {
-			continue
-		}
-
-		for _, item := range payload.Items {
-			durSecs := int(item.RunTimeTicks / jellyfinTicksPerSecond)
-			if durSecs <= 0 {
-				durSecs = 2700
-			}
-			vCodec := "HEVC"
-			aCodec := "EAC3"
-			aCh := 6
-			w, h := item.Width, item.Height
-			var streamBitrate int64
-			for _, ms := range item.MediaStreams {
-				if ms.Type == "Video" {
-					if ms.Codec != "" {
-						vCodec = strings.ToUpper(ms.Codec)
-					}
-					if ms.Width > 0 {
-						w = ms.Width
-					}
-					if ms.Height > 0 {
-						h = ms.Height
-					}
-					streamBitrate += ms.BitRate
-				} else if ms.Type == "Audio" {
-					if ms.Codec != "" {
-						aCodec = strings.ToUpper(ms.Codec)
-					}
-					if ms.Channels > 0 {
-						aCh = ms.Channels
-					}
-					streamBitrate += ms.BitRate
+		for _, filter := range filters {
+			startIndex := 0
+			for {
+				itemsURL := fmt.Sprintf("%s/Users/%s/Items?Filters=%s&Recursive=true&IncludeItemTypes=Movie,Episode,Audio&Fields=MediaStreams,Container,ProductionYear&SortBy=DatePlayed&SortOrder=Descending&Limit=%d&StartIndex=%d",
+					cleanURL, url.PathEscape(u.ID), filter, pageSize, startIndex)
+				itemsBody, iCode, _, iErr := doJellyfinRequest(ctx, "GET", itemsURL, apiKey, nil, 15*time.Second)
+				if iErr != nil || iCode != http.StatusOK {
+					break
 				}
-			}
-			bitrate := item.Bitrate
-			if bitrate <= 0 {
-				bitrate = streamBitrate
-			}
-			if bitrate <= 0 {
-				bitrate = 8_000_000
-			}
-			dataUsed := int64(durSecs) * (bitrate / 8)
-			playedAt := time.Now().UTC().Format("2006-01-02 15:04:05")
-			if item.UserData != nil && item.UserData.LastPlayedDate != "" {
-				if parsedTime, pErr := time.Parse(time.RFC3339, item.UserData.LastPlayedDate); pErr == nil {
-					playedAt = parsedTime.UTC().Format("2006-01-02 15:04:05")
-				}
-			}
 
-			sessionKey := fmt.Sprintf("jellyfin:sync:%s:%s", u.ID, item.ID)
-			res, execErr := db.DB.Exec(`
-				INSERT OR IGNORE INTO streaming_history (
-					session_key, provider, server_name, user_id, user_name,
-					client_name, device_name, ip_address,
-					item_id, item_name, item_type, series_name, series_id,
-					season_number, episode_number, production_year,
-					play_method, container, video_codec, video_resolution,
-					audio_codec, audio_channels, bitrate_bps,
-					duration_secs, watched_secs, data_used_bytes, completion_pct,
-					started_at, last_seen_at, ended_at, is_active
-				) VALUES (?, 'jellyfin', ?, ?, ?, 'Jellyfin Client', 'Smart TV / Web', '192.168.1.10', ?, ?, ?, ?, ?, ?, ?, ?, 'DirectPlay', ?, ?, ?, ?, ?, ?, ?, ?, ?, 100.0, ?, ?, ?, 0)
-			`,
-				sessionKey, serverName, u.ID, u.Name,
-				item.ID, item.Name, normalizeMediaType(item.Type), item.SeriesName, item.SeriesID,
-				item.ParentIndexNumber, item.IndexNumber, item.ProductionYear,
-				strings.ToUpper(item.Container), vCodec, formatResolutionLabel(w, h),
-				aCodec, aCh, bitrate,
-				durSecs, durSecs, dataUsed,
-				playedAt, playedAt, playedAt,
-			)
-			if execErr == nil {
-				if aff, _ := res.RowsAffected(); aff > 0 {
-					imported++
+				var payload struct {
+					TotalRecordCount int `json:"TotalRecordCount"`
+					Items            []struct {
+						ID                string `json:"Id"`
+						Name              string `json:"Name"`
+						Type              string `json:"Type"`
+						SeriesName        string `json:"SeriesName"`
+						SeriesID          string `json:"SeriesId"`
+						ParentIndexNumber int    `json:"ParentIndexNumber"`
+						IndexNumber       int    `json:"IndexNumber"`
+						ProductionYear    int    `json:"ProductionYear"`
+						RunTimeTicks      int64  `json:"RunTimeTicks"`
+						Container         string `json:"Container"`
+						Bitrate           int64  `json:"Bitrate"`
+						Width             int    `json:"Width"`
+						Height            int    `json:"Height"`
+						MediaStreams      []struct {
+							Type     string `json:"Type"`
+							Codec    string `json:"Codec"`
+							BitRate  int64  `json:"BitRate"`
+							Width    int    `json:"Width"`
+							Height   int    `json:"Height"`
+							Channels int    `json:"Channels"`
+						} `json:"MediaStreams"`
+						UserData *struct {
+							Played                bool    `json:"Played"`
+							PlayCount             int     `json:"PlayCount"`
+							PlaybackPositionTicks int64   `json:"PlaybackPositionTicks"`
+							PlayedPercentage      float64 `json:"PlayedPercentage"`
+							LastPlayedDate        string  `json:"LastPlayedDate"`
+						} `json:"UserData"`
+					} `json:"Items"`
+				}
+				if json.Unmarshal(itemsBody, &payload) != nil || len(payload.Items) == 0 {
+					break
+				}
+
+				for _, item := range payload.Items {
+					durSecs := int(item.RunTimeTicks / jellyfinTicksPerSecond)
+					if durSecs <= 0 {
+						durSecs = 2700
+					}
+					vCodec := "HEVC"
+					aCodec := "EAC3"
+					aCh := 6
+					w, h := item.Width, item.Height
+					var streamBitrate int64
+					for _, ms := range item.MediaStreams {
+						if ms.Type == "Video" {
+							if ms.Codec != "" {
+								vCodec = strings.ToUpper(ms.Codec)
+							}
+							if ms.Width > 0 {
+								w = ms.Width
+							}
+							if ms.Height > 0 {
+								h = ms.Height
+							}
+							streamBitrate += ms.BitRate
+						} else if ms.Type == "Audio" {
+							if ms.Codec != "" {
+								aCodec = strings.ToUpper(ms.Codec)
+							}
+							if ms.Channels > 0 {
+								aCh = ms.Channels
+							}
+							streamBitrate += ms.BitRate
+						}
+					}
+					bitrate := item.Bitrate
+					if bitrate <= 0 {
+						bitrate = streamBitrate
+					}
+					if bitrate <= 0 {
+						bitrate = 8_000_000
+					}
+
+					watchedSecs := durSecs
+					completionPct := 100.0
+					if item.UserData != nil && !item.UserData.Played {
+						if item.UserData.PlaybackPositionTicks > 0 {
+							posSecs := int(item.UserData.PlaybackPositionTicks / jellyfinTicksPerSecond)
+							if posSecs > 0 && posSecs < durSecs {
+								watchedSecs = posSecs
+								completionPct = math.Round((float64(posSecs)/float64(durSecs))*1000) / 10
+							}
+						} else if item.UserData.PlayedPercentage > 0 && item.UserData.PlayedPercentage < 100 {
+							completionPct = math.Round(item.UserData.PlayedPercentage*10) / 10
+							watchedSecs = int(math.Round(float64(durSecs) * (completionPct / 100.0)))
+						}
+					}
+					if watchedSecs <= 0 {
+						watchedSecs = 60
+					}
+
+					dataUsed := int64(watchedSecs) * (bitrate / 8)
+					playedAt := time.Now().UTC().Format("2006-01-02 15:04:05")
+					hasPlayedDate := 0
+					if item.UserData != nil && item.UserData.LastPlayedDate != "" {
+						if parsedTime, pErr := time.Parse(time.RFC3339Nano, item.UserData.LastPlayedDate); pErr == nil {
+							playedAt = parsedTime.UTC().Format("2006-01-02 15:04:05")
+							hasPlayedDate = 1
+						} else if parsedTime, pErr := time.Parse(time.RFC3339, item.UserData.LastPlayedDate); pErr == nil {
+							playedAt = parsedTime.UTC().Format("2006-01-02 15:04:05")
+							hasPlayedDate = 1
+						}
+					}
+
+					sessionKey := fmt.Sprintf("jellyfin:sync:%s:%s", u.ID, item.ID)
+					res, execErr := db.DB.Exec(`
+						INSERT INTO streaming_history (
+							session_key, provider, server_name, user_id, user_name,
+							client_name, device_name, ip_address,
+							item_id, item_name, item_type, series_name, series_id,
+							season_number, episode_number, production_year,
+							play_method, container, video_codec, video_resolution,
+							audio_codec, audio_channels, bitrate_bps,
+							duration_secs, watched_secs, data_used_bytes, completion_pct,
+							started_at, last_seen_at, ended_at, is_active
+						) VALUES (?, 'jellyfin', ?, ?, ?, 'Jellyfin Client', 'Smart TV / Web', '192.168.1.10', ?, ?, ?, ?, ?, ?, ?, ?, 'DirectPlay', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+						ON CONFLICT(session_key) DO UPDATE SET
+							server_name = excluded.server_name,
+							user_name = excluded.user_name,
+							item_name = excluded.item_name,
+							item_type = excluded.item_type,
+							series_name = excluded.series_name,
+							series_id = excluded.series_id,
+							season_number = excluded.season_number,
+							episode_number = excluded.episode_number,
+							production_year = excluded.production_year,
+							container = excluded.container,
+							video_codec = excluded.video_codec,
+							video_resolution = excluded.video_resolution,
+							audio_codec = excluded.audio_codec,
+							audio_channels = excluded.audio_channels,
+							bitrate_bps = excluded.bitrate_bps,
+							duration_secs = excluded.duration_secs,
+							watched_secs = excluded.watched_secs,
+							data_used_bytes = excluded.data_used_bytes,
+							completion_pct = excluded.completion_pct,
+							started_at = CASE WHEN ? = 1 THEN excluded.started_at ELSE streaming_history.started_at END,
+							last_seen_at = CASE WHEN ? = 1 THEN excluded.last_seen_at ELSE streaming_history.last_seen_at END,
+							ended_at = CASE WHEN ? = 1 THEN excluded.ended_at ELSE streaming_history.ended_at END
+						WHERE streaming_history.watched_secs != excluded.watched_secs
+						   OR streaming_history.completion_pct != excluded.completion_pct
+						   OR (? = 1 AND streaming_history.last_seen_at != excluded.last_seen_at)
+						   OR streaming_history.item_name != excluded.item_name
+					`,
+						sessionKey, serverName, u.ID, u.Name,
+						item.ID, item.Name, normalizeMediaType(item.Type), item.SeriesName, item.SeriesID,
+						item.ParentIndexNumber, item.IndexNumber, item.ProductionYear,
+						strings.ToUpper(item.Container), vCodec, formatResolutionLabel(w, h),
+						aCodec, aCh, bitrate,
+						durSecs, watchedSecs, dataUsed, completionPct,
+						playedAt, playedAt, playedAt,
+						hasPlayedDate, hasPlayedDate, hasPlayedDate, hasPlayedDate,
+					)
+					if execErr == nil {
+						if aff, _ := res.RowsAffected(); aff > 0 {
+							imported++
+						}
+					}
+				}
+
+				startIndex += len(payload.Items)
+				if startIndex >= payload.TotalRecordCount || len(payload.Items) < pageSize {
+					break
 				}
 			}
 		}
@@ -1745,7 +1831,7 @@ func queryStreamingAnalytics(windowDays int, playMethodFilter, mediaTypeFilter s
 		FROM streaming_history
 		WHERE %s
 		ORDER BY last_seen_at DESC, id DESC
-		LIMIT 50
+		LIMIT 500
 	`, whereSQL), args...)
 	if err == nil {
 		for hRows.Next() {

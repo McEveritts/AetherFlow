@@ -1217,84 +1217,86 @@ export default function StreamingTab() {
             {/* ========================================================================= */}
             {/* 5. ANALYTICS FILTER TOOLBAR & CHARTS (PLAY STATS & DATA USAGE)            */}
             {/* ========================================================================= */}
-            {(activeView === 'dashboard' || activeView === 'analytics') && (
-                <>
-                    {/* Filter Bar */}
-                    <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-3.5 flex flex-wrap items-center justify-between gap-3">
-                        <div className="flex flex-wrap items-center gap-2">
-                            <span className="text-xs font-bold text-slate-400 uppercase tracking-wider px-2">
-                                Analytics Filters:
-                            </span>
-                            {/* Play Method Filter */}
-                            <div className="flex items-center gap-1 bg-black/40 p-1 rounded-xl border border-white/10">
-                                {[
-                                    { id: 'all', label: 'All Methods' },
-                                    { id: 'DirectPlay', label: 'Direct Play' },
-                                    { id: 'DirectStream', label: 'Direct Stream' },
-                                    { id: 'Transcode', label: 'Transcode' },
-                                ].map((m) => (
-                                    <button
-                                        key={m.id}
-                                        type="button"
-                                        onClick={() => setPlayMethodFilter(m.id)}
-                                        className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-all ${
-                                            playMethodFilter === m.id
-                                                ? 'bg-indigo-500/25 text-indigo-300 border border-indigo-500/30'
-                                                : 'text-slate-400 hover:text-slate-200'
-                                        }`}
-                                    >
-                                        {m.label}
-                                    </button>
-                                ))}
-                            </div>
-
-                            {/* Media Type Filter */}
-                            <div className="flex items-center gap-1 bg-black/40 p-1 rounded-xl border border-white/10">
-                                {[
-                                    { id: 'all', label: 'All Media' },
-                                    { id: 'Movie', label: 'Movies' },
-                                    { id: 'Episode', label: 'Episodes' },
-                                    { id: 'Audio', label: 'Audio' },
-                                ].map((mt) => (
-                                    <button
-                                        key={mt.id}
-                                        type="button"
-                                        onClick={() => setMediaTypeFilter(mt.id)}
-                                        className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-all ${
-                                            mediaTypeFilter === mt.id
-                                                ? 'bg-purple-500/25 text-purple-300 border border-purple-500/30'
-                                                : 'text-slate-400 hover:text-slate-200'
-                                        }`}
-                                    >
-                                        {mt.label}
-                                    </button>
-                                ))}
-                            </div>
-                        </div>
-
-                        {/* Time Window Selector */}
+            {(activeView === 'dashboard' || activeView === 'analytics' || activeView === 'history') && (
+                <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-3.5 flex flex-wrap items-center justify-between gap-3">
+                    <div className="flex flex-wrap items-center gap-2">
+                        <span className="text-xs font-bold text-slate-400 uppercase tracking-wider px-2">
+                            Analytics Filters:
+                        </span>
+                        {/* Play Method Filter */}
                         <div className="flex items-center gap-1 bg-black/40 p-1 rounded-xl border border-white/10">
                             {[
-                                { days: 7, label: '7 Days' },
-                                { days: 30, label: '30 Days' },
-                                { days: 90, label: '90 Days' },
-                                { days: 0, label: 'All Time' },
-                            ].map((w) => (
+                                { id: 'all', label: 'All Methods' },
+                                { id: 'DirectPlay', label: 'Direct Play' },
+                                { id: 'DirectStream', label: 'Direct Stream' },
+                                { id: 'Transcode', label: 'Transcode' },
+                            ].map((m) => (
                                 <button
-                                    key={w.days}
+                                    key={m.id}
                                     type="button"
-                                    onClick={() => setWindowDays(w.days)}
-                                    className={`px-3 py-1 rounded-lg text-xs font-bold transition-all ${
-                                        windowDays === w.days
-                                            ? 'bg-indigo-600 text-white shadow'
+                                    onClick={() => setPlayMethodFilter(m.id)}
+                                    className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-all ${
+                                        playMethodFilter === m.id
+                                            ? 'bg-indigo-500/25 text-indigo-300 border border-indigo-500/30'
                                             : 'text-slate-400 hover:text-slate-200'
                                     }`}
                                 >
-                                    {w.label}
+                                    {m.label}
+                                </button>
+                            ))}
+                        </div>
+
+                        {/* Media Type Filter */}
+                        <div className="flex items-center gap-1 bg-black/40 p-1 rounded-xl border border-white/10">
+                            {[
+                                { id: 'all', label: 'All Media' },
+                                { id: 'Movie', label: 'Movies' },
+                                { id: 'Episode', label: 'Episodes' },
+                                { id: 'Audio', label: 'Audio' },
+                            ].map((mt) => (
+                                <button
+                                    key={mt.id}
+                                    type="button"
+                                    onClick={() => setMediaTypeFilter(mt.id)}
+                                    className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-all ${
+                                        mediaTypeFilter === mt.id
+                                            ? 'bg-purple-500/25 text-purple-300 border border-purple-500/30'
+                                            : 'text-slate-400 hover:text-slate-200'
+                                    }`}
+                                >
+                                    {mt.label}
                                 </button>
                             ))}
                         </div>
                     </div>
+
+                    {/* Time Window Selector */}
+                    <div className="flex items-center gap-1 bg-black/40 p-1 rounded-xl border border-white/10">
+                        {[
+                            { days: 7, label: '7 Days' },
+                            { days: 30, label: '30 Days' },
+                            { days: 90, label: '90 Days' },
+                            { days: 0, label: 'All Time' },
+                        ].map((w) => (
+                            <button
+                                key={w.days}
+                                type="button"
+                                onClick={() => setWindowDays(w.days)}
+                                className={`px-3 py-1 rounded-lg text-xs font-bold transition-all ${
+                                    windowDays === w.days
+                                        ? 'bg-indigo-600 text-white shadow'
+                                        : 'text-slate-400 hover:text-slate-200'
+                                }`}
+                            >
+                                {w.label}
+                            </button>
+                        ))}
+                    </div>
+                </div>
+            )}
+
+            {(activeView === 'dashboard' || activeView === 'analytics') && (
+                <>
 
                     {/* Time-Series Charts Row: Bandwidth/Data Usage & Play Statistics */}
                     <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
