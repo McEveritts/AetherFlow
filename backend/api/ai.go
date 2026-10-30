@@ -34,20 +34,15 @@ var allowedAIModels = map[string]bool{
 	"gemini-1.5-pro":        true,
 	"gemini-1.5-flash":      true,
 	// OpenAI
-	"gpt-4o":       true,
-	"gpt-4o-mini":  true,
-	"gpt-4-turbo":  true,
-	"gpt-5.4":      true,
-	"gpt-5.4-mini": true,
+	"gpt-6-astra":   true,
+	"gpt-6.1-sol":   true,
+	"gpt-6.1-terra": true,
+	"gpt-6-luna":    true,
 	// Anthropic
-	"claude-opus":         true,
-	"claude-opus-4.5":     true,
-	"claude-opus-4.6":     true,
-	"claude-sonnet-4.5":   true,
-	"claude-sonnet-4.6":   true,
-	"claude-4-6-sonnet":   true,
-	"claude-4-6-haiku":    true,
-	"claude-4-5-opus":     true,
+	"claude-fable-5-1":  true,
+	"claude-opus-5-5":   true,
+	"claude-sonnet-5-5": true,
+	"claude-haiku-5-5":  true,
 	// Local AI (OpenAI-compatible endpoints)
 	"lm-studio":       true,
 	"ollama":           true,
@@ -325,9 +320,9 @@ func TestAiConnection(c *gin.Context) {
 	testModel := "gemini-4-argon"
 	switch providerType {
 	case "openai":
-		testModel = "gpt-4o"
+		testModel = "gpt-6.1-sol"
 	case "anthropic":
-		testModel = "claude-sonnet-4.5"
+		testModel = "claude-sonnet-5-5"
 	case "localai":
 		testModel = "local-test"
 	}

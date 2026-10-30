@@ -26,14 +26,10 @@ type AnthropicProvider struct {
 
 // anthropicModelMapping translates frontend model IDs to Anthropic API identifiers.
 var anthropicModelMapping = map[string]string{
-	"claude-opus":       "claude-opus-4-20260401",
-	"claude-opus-4.5":   "claude-opus-4-5-20260401",
-	"claude-opus-4.6":   "claude-opus-4-6-20260401",
-	"claude-sonnet-4.5": "claude-sonnet-4-5-20260401",
-	"claude-sonnet-4.6": "claude-sonnet-4-6-20260401",
-	"claude-4-6-sonnet": "claude-sonnet-4-6-20260401",
-	"claude-4-6-haiku":  "claude-haiku-4-6-20260401",
-	"claude-4-5-opus":   "claude-opus-4-5-20260401",
+	"claude-fable-5-1":  "claude-fable-5-1",
+	"claude-opus-5-5":   "claude-opus-5-5",
+	"claude-sonnet-5-5": "claude-sonnet-5-5",
+	"claude-haiku-5-5":  "claude-haiku-5-5",
 }
 
 type anthropicMessage struct {

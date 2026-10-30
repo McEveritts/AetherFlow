@@ -181,9 +181,9 @@ Dynamically tests whichever provider the admin selects. Accepts unsaved keys for
 ```
 
 The endpoint automatically selects the appropriate test model per provider:
-- `gemini` → `gemini-2.0-flash`
-- `openai` → `gpt-4o`
-- `anthropic` → `claude-sonnet-4.5`
+- `gemini` → `gemini-4-argon`
+- `openai` → `gpt-6.1-sol`
+- `anthropic` → `claude-sonnet-5-5`
 - `localai` → uses the provided endpoint directly
 
 > [!TIP]

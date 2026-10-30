@@ -36,7 +36,7 @@ const PROVIDER_CARDS: {
     {
         id: 'openai',
         label: 'OpenAI',
-        subtitle: 'GPT 5.4 & GPT 4o Series',
+        subtitle: 'GPT-6 & GPT-6.1 Series',
         accent: 'text-emerald-400',
         activeBorder: 'border-emerald-500/40',
         activeBg: 'bg-emerald-500/10',
@@ -44,7 +44,7 @@ const PROVIDER_CARDS: {
     {
         id: 'anthropic',
         label: 'Anthropic Claude',
-        subtitle: 'Claude Opus & Sonnet 4.6',
+        subtitle: 'Claude Fable 5.1 & 5.5 Series',
         accent: 'text-orange-400',
         activeBorder: 'border-orange-500/40',
         activeBg: 'bg-orange-500/10',
@@ -714,7 +714,7 @@ export default function SettingsTab() {
                                                         <label className="text-sm font-semibold text-slate-200 flex items-center gap-2">
                                                             <Key size={15} className="text-emerald-400" /> OpenAI API Key
                                                         </label>
-                                                        <p className="text-xs text-slate-500 mt-0.5">Connect to OpenAI for GPT 5.4 and GPT-4o model families.</p>
+                                                        <p className="text-xs text-slate-500 mt-0.5">Connect to OpenAI for GPT-6 and GPT-6.1 model families.</p>
                                                     </div>
                                                     <span className={`text-xs font-bold uppercase tracking-wider px-2.5 py-0.5 rounded-full border ${openaiApiKey ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30' : 'bg-slate-800 text-slate-400 border-white/10'}`}>
                                                         {openaiApiKey ? 'Key Configured' : 'Not Configured'}
@@ -759,7 +759,7 @@ export default function SettingsTab() {
                                                         <label className="text-sm font-semibold text-slate-200 flex items-center gap-2">
                                                             <Key size={15} className="text-orange-400" /> Anthropic API Key
                                                         </label>
-                                                        <p className="text-xs text-slate-500 mt-0.5">Connect to Anthropic for Claude Opus and Sonnet models.</p>
+                                                        <p className="text-xs text-slate-500 mt-0.5">Connect to Anthropic for Claude Fable 5.1, Opus 5.5, Sonnet 5.5, and Haiku 5.5 models.</p>
                                                     </div>
                                                     <span className={`text-xs font-bold uppercase tracking-wider px-2.5 py-0.5 rounded-full border ${anthropicApiKey ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30' : 'bg-slate-800 text-slate-400 border-white/10'}`}>
                                                         {anthropicApiKey ? 'Key Configured' : 'Not Configured'}

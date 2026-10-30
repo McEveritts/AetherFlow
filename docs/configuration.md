@@ -56,13 +56,13 @@ Configuration for the integrated multi-provider management assistant. Settings h
 | Variable | Description |
 | :--- | :--- |
 | `GEMINI_API_KEY` | Your Google AI Studio API key. |
-| `ANTHROPIC_API_KEY` | (Optional) For Claude-based support. |
-| `OPENAI_API_KEY` | (Optional) For GPT-4 based support. |
+| `ANTHROPIC_API_KEY` | (Optional) For Claude 5.1 / 5.5 based support. |
+| `OPENAI_API_KEY` | (Optional) For GPT-6 / GPT-6.1 based support. |
 | `LM_STUDIO_ENDPOINT` | (Optional) Override for local LM Studio API. Defaults to `http://localhost:1234`. |
 | `OLLAMA_ENDPOINT` | (Optional) Override for local Ollama API. Defaults to `http://localhost:11434`. |
 
 > [!TIP]
-> **FlowAI Support Mode** performs best when provided with a high-bandwidth model like Gemini 2.0 Flash or Claude 3.5 Sonnet. Advanced users can use **LocalAI** via LM Studio or Ollama for full data privacy.
+> **FlowAI Support Mode** performs best when provided with a high-bandwidth frontier model like Gemini 4 Argon, GPT-6.1 Sol, or Claude Sonnet 5.5. Advanced users can use **LocalAI** via LM Studio or Ollama for full data privacy.
 
 ---
 

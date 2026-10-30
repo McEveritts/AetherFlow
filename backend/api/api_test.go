@@ -68,26 +68,25 @@ func TestAllowedAIModels(t *testing.T) {
 		{"gemini-1.5-pro", true},
 		{"gemini-1.5-flash", true},
 		// OpenAI models
-		{"gpt-4o", true},
-		{"gpt-4o-mini", true},
-		{"gpt-4-turbo", true},
-		{"gpt-5.4", true},
-		{"gpt-5.4-mini", true},
+		{"gpt-6-astra", true},
+		{"gpt-6.1-sol", true},
+		{"gpt-6.1-terra", true},
+		{"gpt-6-luna", true},
 		// Anthropic models
-		{"claude-opus", true},
-		{"claude-opus-4.5", true},
-		{"claude-opus-4.6", true},
-		{"claude-sonnet-4.5", true},
-		{"claude-sonnet-4.6", true},
-		{"claude-4-6-sonnet", true},
-		{"claude-4-6-haiku", true},
-		{"claude-4-5-opus", true},
+		{"claude-fable-5-1", true},
+		{"claude-opus-5-5", true},
+		{"claude-sonnet-5-5", true},
+		{"claude-haiku-5-5", true},
 		// Local AI
 		{"lm-studio", true},
 		{"ollama", true},
 		{"anthropic-local", true},
-		// Invalid / attack payloads
+		// Outdated / invalid / attack payloads
 		{"gpt-4", false},
+		{"gpt-4o", false},
+		{"gpt-5.4", false},
+		{"claude-opus-4.6", false},
+		{"claude-sonnet-4.5", false},
 		{"gemini-pro", false},
 		{"'; DROP TABLE users;--", false},
 		{"", false},
@@ -111,14 +110,14 @@ func TestResolveProvider(t *testing.T) {
 	}{
 		// Explicit hint takes precedence
 		{"openai", "gemini-2.0-flash", "openai"},
-		{"anthropic", "gpt-4o", "anthropic"},
+		{"anthropic", "gpt-6.1-sol", "anthropic"},
 		// Auto-detect from model prefix
 		{"", "gemini-2.5-pro", "gemini"},
 		{"", "gemini-3.1-pro-preview", "gemini"},
-		{"", "gpt-4o", "openai"},
-		{"", "gpt-5.4-mini", "openai"},
-		{"", "claude-opus-4.6", "anthropic"},
-		{"", "claude-4-6-haiku", "anthropic"},
+		{"", "gpt-6-astra", "openai"},
+		{"", "gpt-6.1-sol", "openai"},
+		{"", "claude-fable-5-1", "anthropic"},
+		{"", "claude-opus-5-5", "anthropic"},
 		// Local AI detection
 		{"", "lm-studio", "localai"},
 		{"", "ollama", "localai"},
@@ -155,13 +154,13 @@ func TestBuildProviderConfig(t *testing.T) {
 	}
 
 	// OpenAI config
-	cfg = buildProviderConfig(ps, "openai", "gpt-4o")
+	cfg = buildProviderConfig(ps, "openai", "gpt-6.1-sol")
 	if cfg.APIKey != "openai-test-key" {
 		t.Errorf("OpenAI config APIKey = %q, want %q", cfg.APIKey, "openai-test-key")
 	}
 
 	// Anthropic config with custom endpoint
-	cfg = buildProviderConfig(ps, "anthropic", "claude-opus")
+	cfg = buildProviderConfig(ps, "anthropic", "claude-opus-5-5")
 	if cfg.APIKey != "anthropic-test-key" {
 		t.Errorf("Anthropic config APIKey = %q, want %q", cfg.APIKey, "anthropic-test-key")
 	}

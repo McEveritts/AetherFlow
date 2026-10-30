@@ -16,7 +16,7 @@ import (
 type ProviderConfig struct {
 	APIKey   string // Decrypted API key (Gemini, OpenAI, Anthropic)
 	Endpoint string // Custom base URL override (for local AI or proxies)
-	Model    string // Model identifier to use (e.g., "gemini-2.0-flash", "gpt-4o")
+	Model    string // Model identifier to use (e.g., "gemini-4-argon", "gpt-6.1-sol", "claude-sonnet-5-5")
 }
 
 // Message represents a single turn in a chat conversation.
