@@ -24,10 +24,22 @@ func TestRemoteDesktopMarketplaceIntegration(t *testing.T) {
 	if alias == nil || alias.AppName != "kasmvnc" {
 		t.Fatalf("KasmVNC service alias = %+v", alias)
 	}
-	t.Setenv("AETHERFLOW_OCCUPIED_PORTS", "6081")
+	t.Setenv("AETHERFLOW_OCCUPIED_PORTS", "6081,6900")
 	port, reassigned, err := ResolveDynamicAppPort("kasmvnc", true)
 	if err != nil || !reassigned || port == 6081 || port <= 0 {
 		t.Fatalf("KasmVNC fallback port = %d, reassigned=%v, err=%v", port, reassigned, err)
+	}
+	mcvnc := GetBlueprint("mcvnc")
+	if mcvnc == nil || mcvnc.ServiceName != "af-mcvnc" || mcvnc.DefaultPort != 6900 || mcvnc.WebPath != "/" {
+		t.Fatalf("unexpected McVNC blueprint: %+v", mcvnc)
+	}
+	mcvncAlias := GetBlueprint("af-mcvnc")
+	if mcvncAlias == nil || mcvncAlias.AppName != "mcvnc" {
+		t.Fatalf("McVNC service alias = %+v", mcvncAlias)
+	}
+	port, reassigned, err = ResolveDynamicAppPort("mcvnc", true)
+	if err != nil || !reassigned || port == 6900 || port <= 0 {
+		t.Fatalf("McVNC fallback port = %d, reassigned=%v, err=%v", port, reassigned, err)
 	}
 	xrdp := GetBlueprint("xrdp")
 	if xrdp == nil || xrdp.DefaultPort != 0 || xrdp.WebPath != "" || xrdp.HealthCheckPath != "" {
@@ -44,7 +56,7 @@ func TestRemoteDesktopMarketplaceIntegration(t *testing.T) {
 		}
 	}
 	automation := loadPackageAutomation()
-	if automation["kasmvnc"].UpdateRepo != "kasmtech/KasmVNC" || automation["xrdp"].UpdatePackage != "xrdp" {
+	if automation["kasmvnc"].UpdateRepo != "kasmtech/KasmVNC" || automation["mcvnc"].UpdateRepo != "McEveritts/McVNC" || automation["xrdp"].UpdatePackage != "xrdp" {
 		t.Fatal("remote desktop update tracking is incomplete")
 	}
 }

@@ -15,8 +15,8 @@ func TestCatalog55Packages(t *testing.T) {
 		t.Fatalf("loadPackagesCatalog() error: %v", err)
 	}
 
-	if len(pkgs) != 71 {
-		t.Fatalf("expected 71 packages in packages.json, got %d", len(pkgs))
+	if len(pkgs) != 72 {
+		t.Fatalf("expected 72 packages in packages.json, got %d", len(pkgs))
 	}
 
 	for _, p := range pkgs {
@@ -92,8 +92,8 @@ func TestAutomation55CoverageAndTracking(t *testing.T) {
 	t.Setenv("AETHERFLOW_PACKAGE_AUTOMATION_CONFIG", filepath.Join("..", "config", "package_automation.json"))
 
 	automation := loadPackageAutomation()
-	if len(automation) != 71 {
-		t.Fatalf("expected exactly 71 automation entries, got %d", len(automation))
+	if len(automation) != 72 {
+		t.Fatalf("expected exactly 72 automation entries, got %d", len(automation))
 	}
 
 	if _, ok := automation["portainer"]; ok {
