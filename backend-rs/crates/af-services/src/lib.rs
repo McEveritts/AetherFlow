@@ -1,3 +1,7 @@
+pub mod cluster_daemon;
+pub mod mutators;
+pub mod workers;
+
 use af_models::{Package, PackageAutomation};
 use chrono::Utc;
 use once_cell::sync::Lazy;

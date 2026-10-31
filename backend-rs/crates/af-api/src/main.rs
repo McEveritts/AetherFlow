@@ -1,9 +1,12 @@
 pub mod auth;
 pub mod embed;
 pub mod intelligence;
+pub mod middlewares;
+pub mod notifications_ext;
 pub mod oidc;
 pub mod routes;
 pub mod storage;
+pub mod streaming_ext;
 pub mod ws;
 
 use std::env;
@@ -127,10 +130,24 @@ async fn main() -> anyhow::Result<()> {
     // Background 1 Hz WebSocket telemetry loop
     ws::start_metrics_broadcast_loop();
 
+    // Background Subsystems: Metrics Recorder, Auto-Heal, Smart Backup, App Update Watcher,
+    // Cluster Master/Worker Runtime, Notification Rule Engine, and Jellyfin Streaming Poller
+    af_services::workers::start_metrics_recorder();
+    af_services::workers::start_heal_worker(10);
+    af_services::workers::start_smart_backup_scheduler();
+    af_services::workers::start_app_update_watcher();
+    af_services::cluster_daemon::start_cluster_runtime();
+    notifications_ext::start_notification_engine();
+    streaming_ext::start_streaming_monitor();
+
     let port = env::var("PORT").unwrap_or_else(|_| "8080".to_string());
     let bind_addr = format!("0.0.0.0:{}", port);
 
-    let app = routes::build_router().layer(build_cors_layer());
+    let app = routes::build_router()
+        .layer(build_cors_layer())
+        .layer(axum::middleware::from_fn(
+            middlewares::app_subdomain_proxy_middleware,
+        ));
 
     tracing::info!(
         addr = %bind_addr,

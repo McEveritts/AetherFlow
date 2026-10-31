@@ -15,6 +15,15 @@ use crate::intelligence::{
     metadata_scan, metadata_status, remove_wireguard_peer, remove_worker, test_ai_connection,
     trigger_mediaflow_scan,
 };
+use crate::middlewares::{
+    ai_rate_limit_middleware, auth_rate_limit_middleware, host_validation_middleware,
+    oidc_rate_limit_middleware, quota_upload_guard_middleware, webhook_rate_limit_middleware,
+};
+use crate::notifications_ext::{
+    create_notification_channel, create_notification_rule, delete_notification_channel,
+    delete_notification_rule, get_pending_action, regenerate_2fa_recovery_codes,
+    test_notification_channel, update_notification_rule,
+};
 use crate::oidc::{
     create_oidc_client, delete_oidc_client, get_oidc_clients, google_callback, google_login,
     oidc_authorize, oidc_consent, oidc_device_authorize, oidc_device_consent, oidc_device_verify,
@@ -26,6 +35,10 @@ use crate::storage::{
     handle_deploy_process, handle_deploy_stream, list_billing_webhook_events, list_user_quotas,
     refresh_user_quota, run_backup, run_update, set_backup_schedule, update_user_quota,
     upload_backup_chunk, upload_file,
+};
+use crate::streaming_ext::{
+    control_streaming_session, get_streaming_artwork, sync_streaming_server_history,
+    test_streaming_server,
 };
 use crate::ws::{
     extract_client_ip, handle_log_websocket, handle_websocket, issue_ws_ticket_for_user,
@@ -138,26 +151,43 @@ pub fn build_router() -> Router {
 }
 
 fn build_v1_router() -> Router {
-    let public_routes = Router::new()
-        .route("/openapi.yaml", get(get_openapi_spec))
-        .route("/csrf-token", get(issue_csrf_token))
-        .route("/auth/google/login", get(google_login))
-        .route("/auth/google/callback", get(google_callback))
+    let auth_limited_public = Router::new()
         .route("/auth/login", post(local_login))
-        .route("/auth/verify", get(verify_proxy_auth))
         .route("/auth/mfa/verify", post(mfa_login_verify))
         .route("/auth/setup", post(setup_admin))
-        .route("/auth/setup/check", get(check_setup_needed))
-        .route("/auth/refresh", post(refresh_session))
-        .route("/billing/webhooks/:provider", post(handle_billing_webhook))
-        .route("/marketplace", get(get_marketplace_apps))
-        .route("/oidc/jwks", get(oidc_jwks))
+        .layer(middleware::from_fn(auth_rate_limit_middleware));
+
+    let oidc_limited_public = Router::new()
         .route("/oidc/authorize", get(oidc_authorize))
         .route("/oidc/token", post(oidc_token))
         .route("/oidc/userinfo", get(oidc_userinfo))
         .route("/oidc/revoke", post(oidc_revoke))
         .route("/oidc/introspect", post(oidc_introspect))
-        .route("/oidc/device/authorize", post(oidc_device_authorize));
+        .route("/oidc/device/authorize", post(oidc_device_authorize))
+        .layer(middleware::from_fn(oidc_rate_limit_middleware));
+
+    let webhook_limited_public = Router::new()
+        .route("/billing/webhooks/:provider", post(handle_billing_webhook))
+        .layer(middleware::from_fn(webhook_rate_limit_middleware));
+
+    let public_routes = Router::new()
+        .route("/openapi.yaml", get(get_openapi_spec))
+        .route("/csrf-token", get(issue_csrf_token))
+        .route("/auth/google/login", get(google_login))
+        .route("/auth/google/callback", get(google_callback))
+        .route("/auth/verify", get(verify_proxy_auth))
+        .route("/auth/setup/check", get(check_setup_needed))
+        .route("/auth/refresh", post(refresh_session))
+        .route("/marketplace", get(get_marketplace_apps))
+        .route("/oidc/jwks", get(oidc_jwks))
+        .merge(auth_limited_public)
+        .merge(oidc_limited_public)
+        .merge(webhook_limited_public);
+
+    let ai_limited_auth = Router::new()
+        .route("/ai/chat", post(ai_chat))
+        .route("/ai/support", post(ai_support))
+        .layer(middleware::from_fn(ai_rate_limit_middleware));
 
     let auth_routes = Router::new()
         .route("/ws", get(handle_websocket))
@@ -166,8 +196,7 @@ fn build_v1_router() -> Router {
         .route("/oidc/consent", post(oidc_consent))
         .route("/oidc/device/verify", post(oidc_device_verify))
         .route("/oidc/device/consent", post(oidc_device_consent))
-        .route("/ai/chat", post(ai_chat))
-        .route("/ai/support", post(ai_support))
+        .merge(ai_limited_auth)
         .route("/session", get(get_session))
         .route("/refresh", post(refresh_session))
         .route("/sessions", get(list_active_sessions))
@@ -182,6 +211,10 @@ fn build_v1_router() -> Router {
         .route("/user/2fa/setup", get(setup_2fa))
         .route("/user/2fa/verify", post(verify_2fa))
         .route("/user/2fa/disable", post(disable_2fa))
+        .route(
+            "/user/2fa/recovery/regenerate",
+            post(regenerate_2fa_recovery_codes),
+        )
         .route("/settings", get(get_settings))
         .route("/fileshare", get(get_files_list))
         .route("/fileshare/download/:filename", get(download_file))
@@ -198,8 +231,13 @@ fn build_v1_router() -> Router {
         .route("/blueprints", get(get_blueprints))
         .route("/blueprints/:appName", get(get_app_blueprint))
         .route("/streaming/dashboard", get(get_streaming_dashboard))
+        .route("/streaming/artwork/:itemId", get(get_streaming_artwork))
         .layer(middleware::from_fn(csrf_middleware))
         .layer(middleware::from_fn(auth_middleware));
+
+    let quota_guarded_upload = Router::new()
+        .route("/fileshare/upload", post(upload_file))
+        .layer(middleware::from_fn(quota_upload_guard_middleware));
 
     let admin_routes = Router::new()
         .route("/backup/run", post(run_backup))
@@ -220,10 +258,15 @@ fn build_v1_router() -> Router {
         .route("/packages/:id/install", post(install_package))
         .route("/packages/:id/uninstall", post(uninstall_package))
         .route("/packages/:id/update", post(update_package))
+        .route(
+            "/packages/:id/check-update",
+            post(check_single_package_update),
+        )
+        .route("/packages/updates/check", post(check_package_updates))
         .route("/system/update/check", get(check_update))
         .route("/system/update/run", post(run_update))
         .route("/system/metrics", get(get_system_metrics))
-        .route("/fileshare/upload", post(upload_file))
+        .merge(quota_guarded_upload)
         .route("/fileshare/download/:filename", get(download_file))
         .route("/fileshare/:filename", delete(delete_shared_file))
         .route("/cluster/nodes", get(get_cluster_nodes))
@@ -245,8 +288,26 @@ fn build_v1_router() -> Router {
         .route("/logs", get(get_logs))
         .route("/logs/sources", get(get_log_sources))
         .route("/logs/bookmarks", get(get_bookmarks).post(bookmark_log))
-        .route("/notifications/rules", get(get_notification_rules))
-        .route("/notifications/channels", get(get_notification_channels))
+        .route(
+            "/notifications/rules",
+            get(get_notification_rules).post(create_notification_rule),
+        )
+        .route(
+            "/notifications/rules/:id",
+            put(update_notification_rule).delete(delete_notification_rule),
+        )
+        .route(
+            "/notifications/channels",
+            get(get_notification_channels).post(create_notification_channel),
+        )
+        .route(
+            "/notifications/channels/:id/test",
+            post(test_notification_channel),
+        )
+        .route(
+            "/notifications/channels/:id",
+            delete(delete_notification_channel),
+        )
         .route("/network/status", get(get_network_status))
         .route(
             "/network/wireguard/peers",
@@ -261,6 +322,7 @@ fn build_v1_router() -> Router {
         .route("/network/tailscale/peers", get(get_tailscale_peers))
         .route("/network/tailscale/routes", post(advertise_tailscale_routes))
         .route("/actions/pending", get(list_pending_actions))
+        .route("/actions/:id", get(get_pending_action))
         .route("/actions/:id/approve", post(approve_action))
         .route("/actions/:id/reject", post(reject_action))
         .route("/audit-log", get(get_audit_log))
@@ -272,6 +334,15 @@ fn build_v1_router() -> Router {
         .route("/ingress/apps/:appName", put(update_app_ingress_config))
         .route("/blueprints/:appName/sync", post(sync_app_blueprint))
         .route("/streaming/servers/:provider", put(update_streaming_server))
+        .route("/streaming/servers/test", post(test_streaming_server))
+        .route(
+            "/streaming/servers/:provider/sync",
+            post(sync_streaming_server_history),
+        )
+        .route(
+            "/streaming/sessions/:sessionId/command",
+            post(control_streaming_session),
+        )
         .route("/streaming/demo", post(handle_streaming_demo))
         .layer(middleware::from_fn(admin_only_middleware))
         .layer(middleware::from_fn(csrf_middleware))
@@ -289,6 +360,7 @@ fn build_v1_router() -> Router {
         .nest("/auth", auth_routes)
         .nest("/admin", admin_routes)
         .merge(compat_routes)
+        .layer(middleware::from_fn(host_validation_middleware))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -666,6 +738,37 @@ async fn dispatch_package_lifecycle(
         "message": msg,
         "package": pkg_id,
         "status": status_label,
+    }))
+    .into_response()
+}
+
+async fn check_package_updates() -> Response {
+    let records = af_services::workers::refresh_all_package_updates().await;
+    let updates_available = records.iter().filter(|r| r.update_available).count();
+    Json(serde_json::json!({
+        "message": "Package update check completed",
+        "updates": records,
+        "updates_available": updates_available,
+    }))
+    .into_response()
+}
+
+async fn check_single_package_update(Path(id): Path<String>) -> Response {
+    let Ok(pkgs) = af_services::get_packages() else {
+        return api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL_ERROR",
+            "Failed to load package catalog configuration",
+        );
+    };
+    let Some(pkg) = pkgs.into_iter().find(|p| p.name == id) else {
+        return api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "Package not found");
+    };
+    let record = af_services::workers::refresh_package_update_by_id(&pkg.name).await;
+    Json(serde_json::json!({
+        "message": "Package update check completed",
+        "package": pkg.name,
+        "update": record,
     }))
     .into_response()
 }
@@ -1326,16 +1429,35 @@ async fn sync_app_blueprint(
         ua,
     );
 
+    let existing_ing = af_db::get_app_ingress_config(&app_name).ok().flatten();
+    let allocated_port = existing_ing
+        .as_ref()
+        .map(|c| c.listen_port)
+        .filter(|&p| p > 0)
+        .unwrap_or(bp.default_port);
+    let public_domain = existing_ing
+        .as_ref()
+        .map(|c| c.public_domain.clone())
+        .unwrap_or_default();
+    let external_access_enabled = existing_ing
+        .as_ref()
+        .map(|c| c.external_access_enabled)
+        .unwrap_or(false);
+
+    let config_applied = af_services::mutators::apply_blueprint_app_config(&app_name, allocated_port)
+        .await
+        .is_ok();
+
     let res = af_services::BlueprintSetupResult {
         app_name: bp.app_name,
         service_name: bp.service_name,
-        allocated_port: bp.default_port,
+        allocated_port,
         default_port: bp.default_port,
-        port_reassigned: false,
+        port_reassigned: allocated_port != bp.default_port && allocated_port > 0,
         internal_domain: bp.internal_domain,
-        public_domain: String::new(),
-        external_access_enabled: false,
-        config_applied: true,
+        public_domain,
+        external_access_enabled,
+        config_applied,
         ingress_synced: true,
         hosts_synced: true,
         network_dns_synced: true,
@@ -1496,11 +1618,27 @@ async fn update_app_ingress_config(
     Path(app_name): Path<String>,
     Json(req): Json<UpdateIngressReq>,
 ) -> Response {
+    let listen_port = if req.listen_port > 0 {
+        req.listen_port
+    } else if let Some(existing) = af_db::get_app_ingress_config(&app_name).ok().flatten() {
+        if existing.listen_port > 0 {
+            existing.listen_port
+        } else {
+            af_services::get_blueprint(&app_name)
+                .map(|b| b.default_port)
+                .unwrap_or(0)
+        }
+    } else {
+        af_services::get_blueprint(&app_name)
+            .map(|b| b.default_port)
+            .unwrap_or(0)
+    };
+
     let cfg = AppIngressConfig {
         app_name: app_name.clone(),
-        public_domain: req.public_domain,
+        public_domain: req.public_domain.trim().to_string(),
         external_access_enabled: req.external_access_enabled,
-        listen_port: req.listen_port,
+        listen_port,
         tls_enabled: req.tls_enabled,
         updated_at: Utc::now().to_rfc3339(),
     };
@@ -1511,19 +1649,70 @@ async fn update_app_ingress_config(
             e.to_string(),
         );
     }
+
+    let _ = af_services::mutators::apply_blueprint_app_config(&app_name, listen_port).await;
+
     Json(serde_json::json!({
-        "message": "Ingress configuration updated",
+        "message": "Ingress configuration updated successfully",
         "config": cfg,
     }))
     .into_response()
 }
 
 async fn get_notification_rules() -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "rules": [] }))
+    let mut rules = Vec::new();
+    if let Ok(conn) = af_db::get_conn() {
+        if let Ok(mut stmt) = conn.prepare(
+            "SELECT id, name, condition_type, condition_value, COALESCE(level, 'warning'), COALESCE(enabled, 1), COALESCE(CAST(created_at AS TEXT), '') \
+             FROM notification_rules ORDER BY created_at DESC",
+        ) {
+            if let Ok(rows) = stmt.query_map([], |r| {
+                Ok(serde_json::json!({
+                    "id": r.get::<_, i64>(0)?,
+                    "name": r.get::<_, String>(1)?,
+                    "condition_type": r.get::<_, String>(2)?,
+                    "condition_value": r.get::<_, String>(3)?,
+                    "level": r.get::<_, String>(4)?,
+                    "enabled": r.get::<_, i32>(5)? != 0,
+                    "created_at": r.get::<_, String>(6)?,
+                }))
+            }) {
+                for r in rows.flatten() {
+                    rules.push(r);
+                }
+            }
+        }
+    }
+    Json(serde_json::json!({ "rules": rules }))
 }
 
 async fn get_notification_channels() -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "channels": [] }))
+    let mut channels = Vec::new();
+    if let Ok(conn) = af_db::get_conn() {
+        if let Ok(mut stmt) = conn.prepare(
+            "SELECT id, name, type, COALESCE(config, '{}'), COALESCE(enabled, 1), COALESCE(CAST(created_at AS TEXT), '') \
+             FROM notification_channels ORDER BY created_at DESC",
+        ) {
+            if let Ok(rows) = stmt.query_map([], |r| {
+                let raw_cfg: String = r.get(3)?;
+                let cfg_val: serde_json::Value =
+                    serde_json::from_str(&raw_cfg).unwrap_or_else(|_| serde_json::json!({}));
+                Ok(serde_json::json!({
+                    "id": r.get::<_, i64>(0)?,
+                    "name": r.get::<_, String>(1)?,
+                    "type": r.get::<_, String>(2)?,
+                    "config": cfg_val,
+                    "enabled": r.get::<_, i32>(4)? != 0,
+                    "created_at": r.get::<_, String>(5)?,
+                }))
+            }) {
+                for ch in rows.flatten() {
+                    channels.push(ch);
+                }
+            }
+        }
+    }
+    Json(serde_json::json!({ "channels": channels }))
 }
 
 async fn list_pending_actions() -> Json<serde_json::Value> {

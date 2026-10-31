@@ -1369,7 +1369,7 @@ mod tests {
 
     #[test]
     fn test_aes_gcm_roundtrip_and_format() {
-        env::set_var("AES_MASTER_KEY", "0123456789abcdef0123456789abcdef");
+        env::set_var("AES_MASTER_KEY", &"a".repeat(32));
         init_aes_key().unwrap();
         assert!(is_encryption_enabled());
 

@@ -57,7 +57,7 @@ thiserror = "2.0"
 anyhow = "1.0"
 dotenvy = "0.15"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream", "multipart"] }
-rust-embed = { version = "8.5", features = ["IncludeExclude", "interpolate-folder-path"] }
+rust-embed = { version = "8.5", features = ["include-exclude", "interpolate-folder-path"] }
 mime_guess = "2.0"
 sysinfo = "0.33"
 libloading = "0.8"

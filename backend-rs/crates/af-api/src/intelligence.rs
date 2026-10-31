@@ -1656,6 +1656,7 @@ pub async fn remove_worker(Path(node_id): Path<String>) -> Response {
     if affected == 0 {
         return api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "Node not found");
     }
+    af_services::cluster_daemon::remove_cached_worker_metrics(&node_id);
     Json(serde_json::json!({
         "message": "Node removed successfully",
         "node_id": node_id,
@@ -1664,6 +1665,9 @@ pub async fn remove_worker(Path(node_id): Path<String>) -> Response {
 }
 
 pub async fn get_worker_metrics(Path(node_id): Path<String>) -> Response {
+    if let Some(cached) = af_services::cluster_daemon::get_cached_worker_metrics(&node_id) {
+        return Json(cached).into_response();
+    }
     let Ok(conn) = af_db::get_conn() else {
         return api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
