@@ -12,58 +12,59 @@ Before starting, ensure your system meets the following requirements:
 
 ---
 
-## 1. Automatic Installation
+## 1. Bootstrap Installation
 
-Run the following command to bootstrap the AetherFlow environment, including the Go backend, Next.js frontend, and all necessary systemd units.
+Clone the repository onto a clean **Debian 12/13 (Bookworm/Trixie)** or **Ubuntu 22.04/24.04 LTS** server and run the bootstrap installer:
 
 ```bash
-# Sourcing the installer
-curl -sSL https://install.aetherflow.io | sudo bash
+apt-get update && apt-get -y upgrade
+apt-get -y install git curl
+git clone https://github.com/McEveritts/AetherFlow.git /opt/AetherFlow
+cd /opt/AetherFlow/setup
+sudo bash AetherFlow-Setup
+```
+
+For non-interactive / automated provisioning:
+
+```bash
+sudo bash /opt/AetherFlow/setup/AetherFlow-Setup \
+  --unattended \
+  --username admin \
+  --domain node.example.com
 ```
 
 > [!NOTE]
-> The installer will automatically perform hardware discovery and configure optimal threading for the Go backend based on your CPU core count.
+> The installer automatically configures the unprivileged `aetherflow-api.service` control plane, the `aetherflow-runner.service` privileged socket helper, Apache2 reverse proxy ingress, and `/etc/aetherflow/aetherflow.env` secrets.
 
 ---
 
-## 2. Initial Configuration
+## 2. Environment Configuration
 
-Once the installation completes, you must configure your environment to enable administrative access and security features.
-
-### Set your Admin Email
-Edit the `.env` file located in the root directory (typically `/opt/AetherFlow/.env`):
+Runtime secrets and environment variables are stored in `/etc/aetherflow/aetherflow.env` (mode `0600`):
 
 ```bash
-# Path to environment file
-sudo nano /opt/AetherFlow/.env
+# Inspect or customize environment settings
+sudo nano /etc/aetherflow/aetherflow.env
 ```
 
-Find the following line and change it to your primary email address:
-```env
-ADMIN_EMAIL=your-email@gmail.com
-```
-
-### Configure Security Keys
-Generate a master encryption key for your database secrets:
+`AetherFlow-Setup` automatically generates `JWT_SECRET` and `AES_MASTER_KEY` during bootstrap. If rotating `AES_MASTER_KEY` manually, generate a 32-byte key:
 
 ```bash
-# Generate a random 32-byte key
-openssl rand -base64 32
+openssl rand -hex 32
 ```
-Copy this value and paste it into the `AES_MASTER_KEY` field in your `.env`.
 
 ---
 
-## 3. Launching the Dashboard
+## 3. Verifying the Control Plane
 
-Restart the AetherFlow services to apply your configuration:
+Restart or check the AetherFlow systemd units:
 
 ```bash
-sudo systemctl restart aetherflow-api aetherflow-frontend
+sudo systemctl status aetherflow-runner aetherflow-api
 ```
 
-Now, navigate to your server's IP or domain in your browser:
-`https://your-server-ip:3000` (Default Port)
+Navigate to your server's domain or IP in your browser:
+`https://your-server-domain` (via Apache2 TLS proxy) or `http://your-server-ip:8080`
 
 ---
 

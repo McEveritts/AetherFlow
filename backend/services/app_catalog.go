@@ -144,7 +144,7 @@ var blueprintRegistry = map[string]AppBlueprint{
 		HealthCheckPath:   "/ping",
 		MutatorType:       "sqlite",
 		ConfigFilePath:    "/var/lib/radarr/config.xml",
-		BinarySourceURL:   "https://hub.aetherflow.io/bin/radarr/latest.tar.gz",
+		BinarySourceURL:   "https://radarr.servarr.com/v1/update/master/updatefile?os=linux&runtime=netcore&arch=x64",
 		AppDataPath:       "/var/lib/radarr/radarr.db",
 		DefaultConfigs: map[string]string{
 			"BindAddress":            "*",
@@ -292,7 +292,7 @@ var blueprintRegistry = map[string]AppBlueprint{
 		PortConfigKey:     `WebUI\Port`,
 		MutatorType:       "ini",
 		ConfigFilePath:    "/var/lib/qbittorrent/.config/qBittorrent/qBittorrent.conf",
-		BinarySourceURL:   "https://hub.aetherflow.io/bin/qbittorrent/latest.tar.gz",
+		BinarySourceURL:   "https://github.com/qbittorrent/qBittorrent/releases/latest",
 		AppDataPath:       "/var/lib/qbittorrent/.config/qBittorrent/qBittorrent.conf",
 		DefaultConfigs: map[string]string{
 			`WebUI\Port`:                  "8180",
@@ -310,7 +310,7 @@ var blueprintRegistry = map[string]AppBlueprint{
 		PortConfigKey:     `WebUI\Port`,
 		MutatorType:       "ini",
 		ConfigFilePath:    "/var/lib/qbittorrent/.config/qBittorrent/qBittorrent.conf",
-		BinarySourceURL:   "https://hub.aetherflow.io/bin/qbittorrent/latest.tar.gz",
+		BinarySourceURL:   "https://github.com/qbittorrent/qBittorrent/releases/latest",
 		AppDataPath:       "/var/lib/qbittorrent/.config/qBittorrent/qBittorrent.conf",
 	},
 	"deluge":              {AppName: "deluge", ServiceName: "deluged", Category: "Downloaders", DefaultPort: 8112},

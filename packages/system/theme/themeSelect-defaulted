@@ -7,9 +7,9 @@
 # This script is retained for backward compatibility but is a no-op.
 #
 # Author             :   McEveritts
-# URL                :   https://AetherFlow.io
+# URL                :   https://github.com/McEveritts/AetherFlow
 #
-# AetherFlow Copyright (C) 2017 AetherFlow.io
+# AetherFlow Copyright (C) 2026 McEveritts
 # Licensed under GNU General Public License v3.0 GPL-3
 
 source /opt/AetherFlow/packages/common.sh

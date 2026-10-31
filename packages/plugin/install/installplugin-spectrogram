@@ -1,16 +1,16 @@
 #!/bin/bash
 #
-# [Quick Box :: Install spectrogram plugin]
+# [AetherFlow :: Install spectrogram plugin]
 #
 # GITHUB REPOS
-# GitHub _ plugins   :   https://github.com/McEveritts/MediaNexus/tree/master/rtplugins
+# GitHub _ plugins   :   https://github.com/McEveritts/AetherFlow
 # LOCAL REPOS
 # Local _ packages   :   /etc/AetherFlow/packages
 # Local _ plugins    :   /etc/AetherFlow/rtplugins
 # Author             :   McEveritts
-# URL                :   https://AetherFlow.io
+# URL                :   https://github.com/McEveritts/AetherFlow
 #
-# AetherFlow Copyright (C) 2018 AetherFlow.io
+# AetherFlow Copyright (C) 2026 McEveritts
 # Licensed under GNU General Public License v3.0 GPL-3 (in short)
 #
 #   You may copy, distribute and modify the software as long as you track

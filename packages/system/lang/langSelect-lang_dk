@@ -6,7 +6,7 @@
 # AetherFlow now uses Next.js frontend with browser-native i18n.
 # This script sets the system locale only.
 #
-# Author: McEveritts | URL: https://AetherFlow.io
+# Author: McEveritts | URL: https://github.com/McEveritts/AetherFlow
 # Licensed under GNU General Public License v3.0 GPL-3
 
 source /opt/AetherFlow/packages/common.sh

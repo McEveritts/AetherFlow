@@ -4,9 +4,9 @@
 #
 # GitHub:   https://github.com/McEveritts/AetherFlow
 # Author:   McEveritts
-# URL:      https://aetherflow.io
+# URL:      https://github.com/McEveritts/AetherFlow
 #
-# AetherFlow Copyright (C) 2017-2022 AetherFlow.io
+# AetherFlow Copyright (C) 2026 McEveritts
 # Licensed under GNU General Public License v3.0 GPL-3 (in short)
 #
 #   You may copy, distribute and modify the software as long as you track
@@ -689,10 +689,6 @@ _run_step "makedirs" "Making ${username} directory structure" _makedirs
 # NOTE: ruTorrent user config removed
 _run_step "installftpd" "Installing vsftpd" _installftpd
 _run_step "ftpdconfig" "Setting up vsftpd" _ftpdconfig
-# NOTE: _quickstats removed — legacy PHP dashboard sunset
-# NOTE: shellinabox web console removed from install path — it's optional
-# and kept breaking deploys. Install separately if needed.
-# _run_step_fg "quickconsole" "Setting up web console" _quickconsole
 _run_step "boot" "Configuring AetherFlow services to start on boot" _boot
 _run_step "firewall" "Configuring firewall (UFW)" _setup_firewall
 _run_step "harden_perms" "Hardening file permissions" _harden_permissions

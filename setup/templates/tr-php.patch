@@ -2,7 +2,7 @@
 +++ b/custom.menu.php	2017-09-22 14:53:23.400056545 +0200
 @@ -38,8 +38,16 @@
  // INSERT YOUR CUSTOM EXTERNAL or INTERNAL LINKS HERE! //
- $aetherflowURL = "https://aetherflow.io/donate/";
+ $aetherflowURL = "https://github.com/McEveritts/AetherFlow";
  
 +$TransmissionWebControl = "http://" . $_SERVER['HTTP_HOST'] . ":9091/transmission/web/";
 +//OtakuNekoP add Transmission Support 20170225

@@ -1,53 +1,66 @@
 # Security Policy
 
-The following security policy covers the AetherFlow CE (Community Edition) as 
-seen here within this GitHub repository. For reporting any suspected vulnerabilities
-within AetherFlow Pro, please create a private listing within our AetherFlow Labs ([here](https://lab.aetherflow.io/AetherFlow/Pro/-/issues)).
+This document outlines the security policy, supported release channels, architecture boundaries, and vulnerability disclosure process for **AetherFlow** ([`McEveritts/AetherFlow`](https://github.com/McEveritts/AetherFlow)).
 
-## Supported Versions
+---
 
-The AetherFlow Community Edition is under limited development and support. 
-Meaning, it is a community aimed project. As such, any future developments are 
-on hold as we focus on our AetherFlow Pro project. We do however take reports
-of security issues seriously and will work to have these patched upstream
-in a timely manner. As such, any security reports and subsequent patches are
-posted upstream on a rolling commit basis covering latest versions as they are
-released within our master branch.
+## Supported Versions & Release Channels
+
+AetherFlow is maintained as a single unified open-source platform with two active release tracks managed by the built-in Updater and [`deploy/release-manager.sh`](./deploy/release-manager.sh):
+
+| Version / Track | Branch / Source | Supported | Notes |
+| :--- | :--- | :---: | :--- |
+| **`3.2.x` (`stable`)** | `master` / GitHub Releases | ✅ | Production release track with SHA-256 verified artifacts and atomic rollback |
+| **`3.2.x` (`nightly`)** | `nightly` / Pre-Releases | ✅ | Rolling pre-release channel for early validation |
+| **`3.1.x`** | Historical Tags | ⚠️ | Security fixes land in `3.2.x`; upgrade recommended |
+| **`< 3.1.0`** | Legacy | ❌ | Unsupported legacy architecture; upgrade required |
+
+---
+
+## Security Architecture & In-Scope Components
+
+When evaluating or reporting a security issue, the following components and trust boundaries are in scope (see [`docs/security.md`](./docs/security.md) and [`docs/threat_model.md`](./docs/threat_model.md) for full details):
+
+1. **Unprivileged Control Plane (`aetherflow-api.service`)**:
+   - Single-binary Go (Gin) API and embedded Next.js (Obsidian V2) SPA running as unprivileged user `aetherflow` (`ProtectSystem=strict`, `ProtectHome=yes`, `PrivateTmp=yes`, `NoNewPrivileges=yes`, `RestrictSUIDSGID=yes`).
+   - Binds to `127.0.0.1:8080` behind the Apache2 reverse proxy and Subdomain Gateway.
+2. **Privileged Runner Boundary (`aetherflow-runner.service`)**:
+   - Root helper daemon listening exclusively on `/run/aetherflow/runner.sock` (`0660 root:aetherflow`).
+   - Enforces strict regex and enum allowlists for `systemctl` unit lifecycle calls, Marketplace package scripts, quota changes, and atomic `release-manager.sh` upgrades.
+3. **Authentication, Sessions & Perimeter SSO**:
+   - TOTP 2FA (`backend/api/totp.go`) with hashed recovery codes, 15-minute JWT access tokens backed by a Redis JTI revocation list, CSRF token enforcement on state-mutating routes, and `HostValidationMiddleware` (`ALLOWED_HOSTS`).
+   - `AppSubdomainProxyMiddleware` and `/api/v1/public/auth/verify` strip untrusted client identity headers before injecting verified `X-Aetherflow-User` headers.
+4. **Data & Secret Isolation**:
+   - SQLite WAL database stored in `/var/lib/aetherflow/aetherflow.sqlite` (`0700`) and environment secrets in `/etc/aetherflow/aetherflow.env` (`0600`).
+   - All AI provider API keys, OIDC credentials, and webhook secrets are encrypted at rest with **AES-256-GCM** (`AES_MASTER_KEY`).
+5. **Human-Gated FlowAI**:
+   - AI output is treated as untrusted; any state-mutating remediation proposed by FlowAI is queued in `pending_actions` (Action Approval Inbox) and requires explicit administrator authorization before execution.
 
 ---
 
 ## Reporting a Vulnerability
 
-Security is of the highest importance and all security vulnerabilities or suspected 
-security vulnerabilities should be reported to AetherFlow.IO privately, to minimize attacks 
-against current users of AetherFlow before they are fixed. Vulnerabilities will be 
-investigated and patched on the next patch (or minor) release as soon as possible. 
-This information could be kept entirely internal to the project.
+**Do not open public GitHub issues or pull requests for suspected security vulnerabilities.**
 
-If you know of a publicly disclosed security vulnerability for AetherFlow CE, 
-please IMMEDIATELY contact sec@aetherflow.io to inform the AetherFlow.IO Team.
+Please report vulnerabilities privately through **[GitHub Security Advisories (Private Vulnerability Reporting)](https://github.com/McEveritts/AetherFlow/security/advisories/new)** on this repository.
 
-*IMPORTANT: Do not file public issues on GitHub for security vulnerabilities*
+### What to Include in Your Report
 
-Please report (suspected) security vulnerabilities to sec@aetherflow.io. 
-You will receive a response from us within 48 hours. If the issue is confirmed, 
-we will release a patch as soon as possible depending on complexity but 
-historically within a few days.
+To help us triage and reproduce the issue quickly, please include:
 
----
+- **Affected Component**: Control plane API (`backend/`), privileged runner (`aetherflow-runner`), frontend (`frontend/`), Apache2 Subdomain Gateway, or a specific Marketplace installer (`packages/`).
+- **Version & Environment**: AetherFlow version/commit (e.g., `v3.2.5`), release channel (`stable` or `nightly`), and host OS (`Debian 12/13` or `Ubuntu 22.04/24.04`).
+- **Reproduction Steps**: Clear, step-by-step instructions or a minimal proof-of-concept request/payload demonstrating the vulnerability.
+- **Security Impact**: What security boundary is crossed (e.g., authentication bypass, IDOR, privilege escalation across `runner.sock`, command/SQL injection, SSRF, or secret exposure) and the relevant CWE if known.
 
-## Proposed Email Content
+### Disclosure & Remediation Process
 
-Provide a descriptive subject line and in the body of the email include the following information:
-
-* Basic identity information, such as your name and your affiliation or company.
-* Detailed steps to reproduce the vulnerability.
-* Description of the effects of the vulnerability on AetherFlow and the related hardware and software configurations, so that the AetherFlow Team can reproduce it.
-* How the vulnerability affects AetherFlow usage and an estimation of the attack surface, if there is one.
-* List other projects or dependencies that were used in conjunction with AetherFlow to produce the vulnerability.
+1. **Acknowledgment**: Reports submitted via GitHub Security Advisories are reviewed promptly.
+2. **Validation & Patching**: Confirmed vulnerabilities are patched on `master` / `nightly`, verified against CI security gates (`gitleaks`, `govulncheck`, `gosec`, `staticcheck`, `go test -race`, and the 4-tier E2E suite), and published in the next patch release with `SHA256SUMS`.
+3. **Coordinated Disclosure**: Once a fix is released, the advisory is published with credit to the reporter (unless anonymity is requested).
 
 ---
 
 ## Preferred Languages
 
-We prefer all communications to be in English.
+We prefer all security communications to be in English.

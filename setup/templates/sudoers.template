@@ -17,7 +17,7 @@ Defaults  env_keep -="HOME"
 
 # Cmnd alias specification
 Cmnd_Alias   CLEANMEM = /usr/local/bin/AetherFlow/system/clean_mem, /proc/sys/vm/drop_caches
-Cmnd_Alias   SYSCMNDS = /usr/local/bin/AetherFlow/system/clean_log, /usr/local/bin/AetherFlow/system/set_interface, /usr/local/bin/AetherFlow/system/setdisk, /usr/local/bin/AetherFlow/system/showspace, /usr/local/bin/AetherFlow/system/updateAetherFlow, /usr/local/bin/AetherFlow/system/lang/langSelect-*, /usr/local/bin/AetherFlow/system/theme/themeSelect-*, /usr/local/bin/AetherFlow/system/install_ffmpeg, /usr/local/bin/AetherFlow/system/quickVPN, /usr/local/bin/AetherFlow/system/box
+Cmnd_Alias   SYSCMNDS = /usr/local/bin/AetherFlow/system/clean_log, /usr/local/bin/AetherFlow/system/set_interface, /usr/local/bin/AetherFlow/system/setdisk, /usr/local/bin/AetherFlow/system/showspace, /usr/local/bin/AetherFlow/system/updateAetherFlow, /usr/local/bin/AetherFlow/system/lang/langSelect-*, /usr/local/bin/AetherFlow/system/theme/themeSelect-*, /usr/local/bin/AetherFlow/system/install_ffmpeg, /usr/local/bin/AetherFlow/system/quickVPN, /usr/local/bin/AetherFlow/system/af
 Cmnd_Alias   PLUGINCMNDS = /usr/local/bin/AetherFlow/plugin/install/installplugin-*, /usr/local/bin/AetherFlow/plugin/remove/removeplugin-*
 Cmnd_Alias   PACKAGECMNDS = /usr/local/bin/AetherFlow/package/install/installpackage-*, /usr/local/bin/AetherFlow/package/remove/removepackage-*
 Cmnd_Alias   GENERALCMNDS = /usr/bin/ifstat, /usr/bin/vnstat, /usr/sbin/repquota, /usr/bin/reload, /etc/init.d/apache2 restart, /usr/bin/pkill, /usr/bin/killall, /bin/systemctl

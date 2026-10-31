@@ -2,22 +2,22 @@
 
 AetherFlow is a modern control plane for self-hosted infrastructure.
 
-It began as the next evolution of **QuickBox**, then grew into something broader: a unified **Mission Control** for cloud and local systems, specializing in **seedboxes**, **home servers**, and automation-heavy infrastructure workflows.
+AetherFlow is a sovereign, bare-metal control plane for self-hosted infrastructure: a unified **Mission Control** for cloud and local systems, specializing in **media servers**, **seedboxes**, **home servers**, and automation-heavy infrastructure workflows.
 
 Rather than treating the server as a loose collection of scripts and panels, AetherFlow treats it as a managed platform: one place to operate services, observe the system, automate tasks, and safely delegate actions through an AI-assisted interface.
 
 > [!NOTE]
-> AetherFlow v3.2.5 reflects a major architectural modernization. The platform is moving away from legacy PHP patterns and toward a high-concurrency stack built around Go, Next.js, and systemd-native orchestration.
+> AetherFlow v3.2.5 is built around a compiled single-binary **Go** control plane (`aetherflow-api`), an embedded **Next.js 16 (Obsidian V2)** static frontend, a privileged UNIX socket runner (`aetherflow-runner`), and native **systemd** service orchestration.
 
 ---
 
-## Evolution: QuickBox to AetherFlow
+## Architectural Foundation
 
-QuickBox established the foundation for practical server bootstrapping. AetherFlow carries that lineage forward with a complete architectural reset:
+AetherFlow is engineered for bare-metal performance and strict privilege separation:
 
-- **Performance**: Moving from PHP and Apache/Nginx-PHP-FPM to a compiled **Go** backend and a **Next.js** frontend.
-- **Orchestration**: Transitioning from ad-hoc process management (PM2) to native **systemd** service units.
-- **State**: real-time metrics and service status delivered via high-frequency WebSockets ("Hyperspeed").
+- **Single-Binary Control Plane**: The compiled **Go (Gin)** backend embeds the **Next.js (Obsidian V2)** static export directly (`CGO_ENABLED=0`), eliminating separate Node.js runtime daemons.
+- **Zero-Sudo Socket Boundary**: Privileged root operations (`systemctl`, Marketplace installers, atomic upgrades) are isolated behind `/run/aetherflow/runner.sock` (`aetherflow-runner.service`) with strict allowlists.
+- **Real-Time Telemetry**: Frame-0 hardware and service telemetry delivered via full-duplex WebSockets ("Hyperspeed").
 
 ### Design Philosophy
 

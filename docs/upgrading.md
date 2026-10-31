@@ -1,6 +1,6 @@
 # Upgrading Guide
 
-This guide covers the migration paths for AetherFlow, with a specific focus on the transition from legacy QuickBox setups and the major architectural shift to `systemd` in the v3.1.x line.
+This guide covers the release channels, atomic upgrade pipeline (`deploy/release-manager.sh`), and rollback procedures for AetherFlow.
 
 ## Upgrade Channels
 
@@ -8,10 +8,10 @@ AetherFlow maintains two primary release tracks:
 
 | Channel | Source | Stability | Use Case |
 | :--- | :--- | :--- | :--- |
-| **Stable** | GitHub Releases | High | Production servers, standard users. |
-| **Beta** | Git Tags | Medium | Early access to new Marketplace apps and UI features. |
+| **Stable (`stable`)** | `master` / GitHub Releases | High | Production servers, SHA-256 verified release bundles. |
+| **Nightly (`nightly`)** | `nightly` / Pre-Releases | Medium | Early access to new Marketplace apps, UI refinements, and runtime updates. |
 
-To switch channels, visit the **System Settings** tab in your dashboard and select the desired `Updater Track`.
+To switch channels, visit **Settings → System Updates** in your dashboard and select the desired release channel (`stable` or `nightly`).
 
 ---
 

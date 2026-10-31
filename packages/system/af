@@ -8,11 +8,11 @@ set -euo pipefail
 # GITHUB REPOS
 # GitHub _ packages  :   https://github.com/McEveritts/AetherFlow
 # LOCAL REPOS
-# Local _ packages   :   ~/AetherFlow/packages
-# Author             :   AetherFlow.IO | liara
-# URL                :   https://plaza.AetherFlow.io
+# Local _ packages   :   /opt/AetherFlow/packages
+# Author             :   McEveritts
+# URL                :   https://github.com/McEveritts/AetherFlow
 #
-# AetherFlow Copyright (C) 2017 AetherFlow.io
+# AetherFlow Copyright (C) 2026 McEveritts
 # Licensed under GNU General Public License v3.0 GPL-3 (in short)
 #
 #   You may copy, distribute and modify the software as long as you track
@@ -27,7 +27,7 @@ function _intro() {
 }
 
 function _function() {
-  function=$(whiptail --title "QBPM" --menu "Choose an option:" --ok-button "Continue" --nocancel 12 50 3 \
+  function=$(whiptail --title "AetherFlow Package Manager" --menu "Choose an option:" --ok-button "Continue" --nocancel 12 50 3 \
                Install "packages" \
                Remove "packages" \
                Exit "" 3>&1 1>&2 2>&3)
@@ -122,7 +122,7 @@ function _clr() {
   done
 }
 
-function _updateqb() {
+function _updateaf() {
   echo -e "Updating AetherFlow local repository"
   if [[ ! -f /install/.developer.lock ]]; then
     if [[ -d /opt/AetherFlow ]]; then
@@ -225,12 +225,12 @@ if [[ ! "${1}" =~ ("install"|"list"|"remove"|"update"|"upgrade") ]]; then
   exit 0
 fi
 if [[ $1 == update ]]; then
-  _updateqb
+  _updateaf
   exit 0
 fi
 if [[ $1 == upgrade ]]; then
     # Update AetherFlow local repository before upgrade
-  _updateqb
+  _updateaf
   echo "Upgrading AetherFlow ... This may take a moment"
   if [[ ! -f /install/.developer.lock ]]; then
     if [[ -d /opt/AetherFlow ]]; then
