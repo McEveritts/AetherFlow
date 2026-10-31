@@ -25,25 +25,6 @@ function _ftpdconfig() {
 	echo "" >/etc/vsftpd.chroot_list
 }
 
-# The following function makes necessary changes to Network and TZ settings needed for
-# the proper functionality of the AetherFlow Dashboard.
-# NOTE: _quickstats function removed — legacy PHP dashboard sunset
-
-# initializing console info
-# NOTE: shellinabox / web console removed from installer path.
-#       If needed, install separately via: apt-get install shellinabox
-# shellcheck disable=2312
-function _quickconsole() {
-	PUBLICIP=$(ip route get 8.8.8.8 | awk 'NR==1 {print $7}')
-	cat >/etc/profile<<EOF
-echo " Welcome Back !"
-echo "    * Dashboard:  https://${PUBLICIP}"
-echo "    * Support:    https://plaza.AetherFlow.io"
-echo "    * Donate:     https://AetherFlow.io/donate"
-echo ""
-EOF
-}
-
 # seedbox boot for first user
 function _boot() {
 	# Use safe overlay for AetherFlow systemd unit files — preserves user modifications

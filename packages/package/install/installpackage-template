@@ -11,7 +11,7 @@
 # ║    5. OS AGNOSTICISM — No codename branches, no apt-key, arch-aware fetches  ║
 # ║                                                                              ║
 # ║  Author : McEveritts                                                         ║
-# ║  URL    : https://AetherFlow.io                                              ║
+# ║  URL    : https://github.com/McEveritts/AetherFlow                           ║
 # ║  License: GPL-3.0                                                            ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
@@ -21,8 +21,8 @@
 # `set -e`  : Exit immediately if any command returns non-zero.
 # `set -o pipefail` : Propagate failures through pipes (e.g., curl | grep failing
 #                     won't be masked by a successful `head -1`).
-# Together these ensure that silent failures — the #1 killer of the old QuickBox
-# scripts — are impossible. If a download fails, the script dies loudly.
+# Together these ensure that silent failures in shell pipelines
+# are impossible. If a download fails, the script dies loudly.
 set -e
 set -o pipefail
 
@@ -64,7 +64,7 @@ die()  { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [${APP_NAME}] [FATAL] $1" | tee -a
 # PHASE 5: IDEMPOTENCY CHECK
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # If the lock file already exists, this app was previously installed.
-# Old QuickBox scripts would blindly re-run, leaving duplicate system users,
+# Unchecked installer scripts would blindly re-run, leaving duplicate system users,
 # orphaned systemd units, and corrupt config files.
 #
 # This guard ensures:
@@ -110,7 +110,7 @@ log "Detected architecture: ${ARCH} → mapped to ${APP_ARCH}"
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # PHASE 4: STRICT JSON PARSING — DOWNLOAD URL RESOLUTION
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# The old QuickBox approach:
+# Naive shell parsing approach:
 #   wget $( curl -s .../releases | grep linux.tar.gz | grep browser_download_url | head -1 | cut -d \" -f 4 )
 #
 # This was catastrophically fragile because:
@@ -188,7 +188,7 @@ rm -f "${APP_NAME}.tar.gz"
 # PHASE 7: DAEMON USER MAPPING (Isolated Service Identity)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # WHY ISOLATED USERS MATTER:
-#   Old QuickBox scripts ran everything as $AETHERFLOW_USER (the SSH login user, often root).
+#   Legacy scripts ran everything as $AETHERFLOW_USER (the SSH login user, often root).
 #   This meant:
 #     - A vulnerability in Jackett could read Radarr's API keys
 #     - A malicious torrent in Transmission could overwrite Sonarr's database
@@ -241,7 +241,7 @@ log "Creating systemd service..."
 cat > "/etc/systemd/system/${APP_NAME}.service" <<EOF
 [Unit]
 Description=${APP_LABEL} Daemon (AetherFlow Managed)
-Documentation=https://aetherflow.io/docs/${APP_NAME}
+Documentation=https://github.com/McEveritts/AetherFlow
 After=network-online.target
 Wants=network-online.target
 

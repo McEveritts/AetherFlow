@@ -278,7 +278,7 @@ func TestUserProfile_PasswordAndAvatar(t *testing.T) {
 
 	// 5. Avatar update - valid -> 200
 	{
-		payload := `{"avatar":"https://aetherflow.io/new-avatar.png"}`
+		payload := `{"avatar":"https://example.com/new-avatar.png"}`
 		w := httptest.NewRecorder()
 		req, _ := http.NewRequest("PUT", "/profile/avatar", bytes.NewBufferString(payload))
 		req.Header.Set("Content-Type", "application/json")
@@ -289,7 +289,7 @@ func TestUserProfile_PasswordAndAvatar(t *testing.T) {
 
 		var updatedAvatar string
 		_ = db.DB.QueryRow("SELECT avatar_url FROM users WHERE id = ?", 202).Scan(&updatedAvatar)
-		if updatedAvatar != "https://aetherflow.io/new-avatar.png" {
+		if updatedAvatar != "https://example.com/new-avatar.png" {
 			t.Fatalf("avatar_url not updated in DB: %s", updatedAvatar)
 		}
 	}

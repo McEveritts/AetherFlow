@@ -32,7 +32,7 @@ Wants=network-online.target
 # ─── IDENTITY ────────────────────────────────────────────────────────────────
 # Phase 7: Daemon User Mapping
 #
-# BEFORE (QuickBox era):
+# BEFORE (legacy shared-user model):
 #   User=${username}          ← Shared global SSH user
 #   Group=${username}         ← Same shared group
 #   WorkingDirectory=/opt/${username}/AppName
@@ -134,7 +134,7 @@ ProtectSystem=full
 # │ Makes /home, /root, and /run/user COMPLETELY INACCESSIBLE.                │
 # │                                                                            │
 # │ WHY THIS MATTERS:                                                          │
-# │ Old QuickBox scripts stored configs in /home/$USER/.config/AppName/.       │
+# │ Legacy scripts stored configs in /home/$USER/.config/AppName/.             │
 # │ We migrated all data to /var/lib/appname/ specifically so we could         │
 # │ enable this directive. Without it, a compromised Jackett process could     │
 # │ read SSH keys from /home/user/.ssh/ or API tokens from other apps'         │

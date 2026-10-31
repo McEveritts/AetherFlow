@@ -2,14 +2,14 @@
 source /opt/AetherFlow/packages/common.sh
 set -euo pipefail
 #
-# [Quick Box :: EcoSystem Update Script]
+# [AetherFlow :: Ecosystem Update Script]
 #
 # AetherFlow:   https://github.com/McEveritts/AetherFlow
-# Local   :   /etc/AetherFlow/packages
-# Author  :   AetherFlow.io
-# URL     :   https://AetherFlow.io
+# Local   :   /opt/AetherFlow/packages
+# Author  :   McEveritts
+# URL     :   https://github.com/McEveritts/AetherFlow
 #
-# AetherFlow Copyright (C) 2017 AetherFlow.io
+# AetherFlow Copyright (C) 2026 McEveritts
 # Licensed under GNU General Public License v3.0 GPL-3 (in short)
 #
 #   You may copy, distribute and modify the software as long as you track
@@ -24,7 +24,7 @@ function _string() { perl -le 'print map {(a..z,A..Z,0..9)[rand 62] } 0..pop' 15
 function _oscheck() {
   if [[ ! -f /bin/systemd ]]; then
     echo "Oh drats! Your system does not support systemd" | tee -a ${OUTTO}
-    echo "As of AetherFlow 2.4.0, systemd is now required"  | tee -a ${OUTTO}
+    echo "AetherFlow requires systemd"  | tee -a ${OUTTO}
     echo 'Exiting...'  | tee -a ${OUTTO}
     exit 1
   fi
@@ -277,25 +277,6 @@ function _updateappsproxy() {
   bash /usr/local/bin/AetherFlow/system/revproxy.sh
 }
 
-# NOTE: shellinabox / web console removed from update path.
-#       If needed, install separately via: apt-get install shellinabox
-function _quickconsole() {
-  if [[ ! -f /install/.webconsole.lock ]]; then
-    PUBLICIP=$(ip route get 8.8.8.8 | awk 'NR==1 {print $NF}')
-
-cat >/etc/profile<<EOF
-echo ""
-echo "Welcome Back !"
-echo "  * Dashboard:  https://${PUBLICIP}"
-echo "  * Support:    https://plaza.AetherFlow.io"
-echo ""
-echo ""
-EOF
-
-    touch /install/.webconsole.lock
-  fi
-}
-
 # adjust permissions function (modernized — no rutorrent paths)
 function _perms() {
   chmod +x /etc/cron.d/set_interface 2>/dev/null || true
@@ -436,8 +417,6 @@ echo "Updating the AetherFlow Sudoers template ... " >>"${OUTTO}" 2>&1;_updatesu
 _updateznc
 #_updateplex
 _updateappsproxy
-# NOTE: shellinabox removed from update path — install separately if needed
-# _quickconsole
 #echo "Updating ${A1}'s .startup cronfile... " >>"${OUTTO}" 2>&1;_updatecronfile;echo
 echo "Adjusting permissions ... " >>"${OUTTO}" 2>&1;_perms;echo
 _fin

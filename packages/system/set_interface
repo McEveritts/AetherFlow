@@ -1,15 +1,15 @@
 #!/bin/bash
 #
-# [Quick Network Interface Input]
+# [AetherFlow :: Network Interface Configuration]
 #
 # NOTE: Legacy rutorrent references removed.
 # This script now updates interface settings for AetherFlow only.
 #
-# GitHub:   https://github.com/AetherFlow/AetherFlow
-# Author:   AetherFlow.IO
-# URL:      https://AetherFlow.io
+# GitHub:   https://github.com/McEveritts/AetherFlow
+# Author:   McEveritts
+# URL:      https://github.com/McEveritts/AetherFlow
 #
-# AetherFlow Copyright (C) 2017 AetherFlow.io
+# AetherFlow Copyright (C) 2026 McEveritts
 # Licensed under GNU General Public License v3.0 GPL-3
 
 source /opt/AetherFlow/packages/common.sh

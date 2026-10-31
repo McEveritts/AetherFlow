@@ -407,16 +407,12 @@ alias du='du -kh'    # Makes a more readable output.
 alias df='df -kTh'
 
 # -> Navigates to set AetherFlow trees.
-alias Qsetup='cd ~/AetherFlow/setup'
-alias Qpackages='cd ~/AetherFlow/packages'
-# alias Qrutorrent removed - rutorrent sunset
-# alias Qdashboard removed - dashboard sunset
-# alias Qrtplugins removed - rtplugins sunset
+alias afsetup='cd /opt/AetherFlow/setup'
+alias afpackages='cd /opt/AetherFlow/packages'
 
 # -> Navigates to set AetherFlow directories.
-# alias rutorrent removed - rutorrent sunset
-alias dashboard='cd /srv/aetherflow'
-alias syscommands='cd /usr/local/bin/aetherflow'
+alias dashboard='cd /opt/AetherFlow'
+alias syscommands='cd /usr/local/bin/AetherFlow'
 
 # -> Performs some quick adjustments for certain conditions.
 # Legacy php widgets and aliases removed
@@ -1938,7 +1934,7 @@ function setup-pyLoad() {
     sed -i 's/"Path Prefix" = /"Path Prefix" = \/pyload/g' /home/${username}/.pyload/pyload.conf
     systemctl start pyload@${username}.service
   else
-    echo "pyLoad is not installed. You can install by typing: box install pyload"
+    echo "pyLoad is not installed. You can install by typing: af install pyload"
   fi
 }
 
@@ -1953,7 +1949,7 @@ function upgradepyLoad() {
     chown -R ${username}:${username} /home/${username}/.pyload
     echo ${OK}
   else
-    echo "pyLoad is not installed. You can install by typing: box install pyload"
+    echo "pyLoad is not installed. You can install by typing: af install pyload"
   fi
 }
 

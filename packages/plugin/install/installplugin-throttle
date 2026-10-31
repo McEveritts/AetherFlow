@@ -1,17 +1,17 @@
 #!/bin/bash
 #
-# [Quick Box :: Install throttle plugin]
+# [AetherFlow :: Install throttle plugin]
 #
 # GITHUB REPOS
-# GitHub _ packages  :   https://github.com/AetherFlow/AetherFlow_packages
-# GitHub _ plugins   :   https://github.com/AetherFlow/AetherFlow_rutorrent-plugins
+# GitHub _ packages  :   https://github.com/McEveritts/AetherFlow
+# GitHub _ plugins   :   https://github.com/McEveritts/AetherFlow
 # LOCAL REPOS
 # Local _ packages   :   /etc/AetherFlow/packages
 # Local _ plugins    :   /etc/AetherFlow/rtplugins
 # Author             :   McEveritts
-# URL                :   https://AetherFlow.io
+# URL                :   https://github.com/McEveritts/AetherFlow
 #
-# AetherFlow Copyright (C) 2017 AetherFlow.io
+# AetherFlow Copyright (C) 2026 McEveritts
 # Licensed under GNU General Public License v3.0 GPL-3 (in short)
 #
 #   You may copy, distribute and modify the software as long as you track
