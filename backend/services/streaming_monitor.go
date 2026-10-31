@@ -1063,10 +1063,16 @@ func FetchJellyfinLiveSessions(ctx context.Context, serverName, serverURL, apiKe
 			TranscodeReasons:     transcodeReasons,
 			TranscodeProgressPct: transcodePct,
 			TranscodeFps:         transcodeFps,
-			BitrateBps:           activeBitrate,
-			BandwidthMbps:        bwMbps,
-			SessionDataBytes:     sessionBytes,
-			StartedAt:            s.LastActivityDate,
+			BitrateBps:            activeBitrate,
+			BandwidthMbps:         bwMbps,
+			SessionDataBytes:      sessionBytes,
+			StartedAt:             s.LastActivityDate,
+			PlaySessionID:         playSessionID,
+			MediaSourceID:         mediaSourceID,
+			SupportsMediaControl:  supportsMediaCtrl,
+			SupportsRemoteControl: supportsRemoteCtrl,
+			CanSendMessage:        canSendMsg,
+			SupportedCommands:     supportedCmds,
 		})
 	}
 
@@ -1413,11 +1419,12 @@ func SyncJellyfinWatchHistory(ctx context.Context) (int, error) {
 
 // SendJellyfinSessionCommand executes pause, resume, stop, or message on an active session.
 func SendJellyfinSessionCommand(ctx context.Context, sessionID, command, header, messageText string) error {
-	if strings.HasPrefix(sessionID, "demo-") {
+	cleanID := strings.TrimSpace(sessionID)
+	if strings.HasPrefix(cleanID, "demo-") {
 		streamingMu.Lock()
 		defer streamingMu.Unlock()
 		for i := range demoSessionsCache {
-			if demoSessionsCache[i].SessionID == sessionID {
+			if demoSessionsCache[i].SessionID == cleanID {
 				switch command {
 				case "pause":
 					demoSessionsCache[i].State = "paused"
@@ -1443,26 +1450,69 @@ func SendJellyfinSessionCommand(ctx context.Context, sessionID, command, header,
 		return err
 	}
 
-	escapedID := url.PathEscape(strings.TrimSpace(sessionID))
+	// Inspect live /Sessions to check remote-control capabilities and active transcode state.
+	var targetSession *jellyfinSessionRaw
+	if sessBody, sessCode, _, sessErr := doJellyfinRequest(ctx, "GET", cleanURL+"/Sessions", apiKey, nil, 4*time.Second); sessErr == nil && sessCode >= 200 && sessCode < 300 {
+		var rawSessions []jellyfinSessionRaw
+		if json.Unmarshal(sessBody, &rawSessions) == nil {
+			for i := range rawSessions {
+				if rawSessions[i].ID == cleanID {
+					targetSession = &rawSessions[i]
+					break
+				}
+			}
+		}
+	}
+
+	supportsMediaCtrl := true
+	canSendMsg := true
+	hasActiveTranscode := false
+	deviceID := ""
+	playSessionID := ""
+	if targetSession != nil {
+		supportsMediaCtrl, _, canSendMsg, _ = resolveJellyfinSessionCapabilities(*targetSession)
+		deviceID = strings.TrimSpace(targetSession.DeviceID)
+		if targetSession.PlayState != nil {
+			playSessionID = strings.TrimSpace(targetSession.PlayState.PlaySessionID)
+		}
+		hasActiveTranscode = targetSession.TranscodingInfo != nil ||
+			playSessionID != "" ||
+			(targetSession.PlayState != nil && strings.EqualFold(targetSession.PlayState.PlayMethod, "Transcode"))
+	}
+
+	escapedID := url.PathEscape(cleanID)
 	var endpoint string
 	var bodyReader io.Reader
 
 	switch command {
 	case "pause":
+		if targetSession != nil && !supportsMediaCtrl {
+			return fmt.Errorf("client %q (%s) does not have an active remote-control WebSocket connection (SupportsMediaControl=false); ensure WebSocket proxying (/socket) is enabled", targetSession.Client, targetSession.DeviceName)
+		}
 		endpoint = fmt.Sprintf("%s/Sessions/%s/Playing/Pause", cleanURL, escapedID)
 	case "resume":
+		if targetSession != nil && !supportsMediaCtrl {
+			return fmt.Errorf("client %q (%s) does not have an active remote-control WebSocket connection (SupportsMediaControl=false); ensure WebSocket proxying (/socket) is enabled", targetSession.Client, targetSession.DeviceName)
+		}
 		endpoint = fmt.Sprintf("%s/Sessions/%s/Playing/Unpause", cleanURL, escapedID)
 	case "stop":
 		endpoint = fmt.Sprintf("%s/Sessions/%s/Playing/Stop", cleanURL, escapedID)
 	case "message":
+		if targetSession != nil && !supportsMediaCtrl {
+			return fmt.Errorf("client %q (%s) does not have an active remote-control WebSocket connection (SupportsMediaControl=false)", targetSession.Client, targetSession.DeviceName)
+		}
+		if targetSession != nil && !canSendMsg {
+			return fmt.Errorf("client %q (%s) does not support on-screen messages (DisplayMessage not in SupportedCommands)", targetSession.Client, targetSession.DeviceName)
+		}
 		endpoint = fmt.Sprintf("%s/Sessions/%s/Message", cleanURL, escapedID)
 		if strings.TrimSpace(header) == "" {
 			header = "AetherFlow Administrator"
 		}
+		// Omit TimeoutMs so jellyfin-web invokes alert({ title: Header, text: Text })
+		// rather than toast(), which discards Header and hides after 3.3s.
 		payload, _ := json.Marshal(map[string]interface{}{
-			"Header":    header,
-			"Text":      messageText,
-			"TimeoutMs": 8000,
+			"Header": header,
+			"Text":   messageText,
 		})
 		bodyReader = bytes.NewReader(payload)
 	default:
@@ -1476,6 +1526,18 @@ func SendJellyfinSessionCommand(ctx context.Context, sessionID, command, header,
 	if code < 200 || code >= 300 {
 		return fmt.Errorf("Jellyfin command %q returned HTTP %d", command, code)
 	}
+
+	if command == "stop" {
+		// Also terminate server-side active FFmpeg encodings when a deviceId is available.
+		if deviceID != "" && (hasActiveTranscode || playSessionID != "") {
+			encQuery := fmt.Sprintf("deviceId=%s&playSessionId=%s", url.QueryEscape(deviceID), url.QueryEscape(playSessionID))
+			_, _, _, _ = doJellyfinRequest(ctx, "DELETE", fmt.Sprintf("%s/Videos/ActiveEncodings?%s", cleanURL, encQuery), apiKey, nil, 4*time.Second)
+		}
+		if targetSession != nil && !supportsMediaCtrl && !hasActiveTranscode {
+			return fmt.Errorf("client %q (%s) has no active remote-control WebSocket (SupportsMediaControl=false) and is Direct Playing; cannot remotely stop client playback", targetSession.Client, targetSession.DeviceName)
+		}
+	}
+
 	return nil
 }
 
@@ -1996,10 +2058,13 @@ func SeedStreamingDemoData() error {
 			SubtitleCodec:    "PGS",
 			SubtitleLanguage: "ENG",
 			TranscodeReasons: []string{},
-			BitrateBps:       42_500_000,
-			BandwidthMbps:    42.5,
-			SessionDataBytes: 31_025_000_000,
-			StartedAt:        time.Now().UTC().Add(-97 * time.Minute).Format(time.RFC3339),
+			BitrateBps:            42_500_000,
+			BandwidthMbps:         42.5,
+			SessionDataBytes:      31_025_000_000,
+			StartedAt:             time.Now().UTC().Add(-97 * time.Minute).Format(time.RFC3339),
+			SupportsMediaControl:  true,
+			SupportsRemoteControl: true,
+			CanSendMessage:        true,
 		},
 		{
 			SessionID:            "demo-session-2",
@@ -2047,6 +2112,9 @@ func SeedStreamingDemoData() error {
 			BandwidthMbps:        12.4,
 			SessionDataBytes:     2_604_000_000,
 			StartedAt:            time.Now().UTC().Add(-28 * time.Minute).Format(time.RFC3339),
+			SupportsMediaControl:  true,
+			SupportsRemoteControl: true,
+			CanSendMessage:        true,
 		},
 		{
 			SessionID:        "demo-session-3",
@@ -2088,10 +2156,13 @@ func SeedStreamingDemoData() error {
 			SubtitleCodec:    "SRT",
 			SubtitleLanguage: "ENG",
 			TranscodeReasons: []string{"AudioCodecNotSupported"},
-			BitrateBps:       18_200_000,
-			BandwidthMbps:    18.2,
-			SessionDataBytes: 5_664_750_000,
-			StartedAt:        time.Now().UTC().Add(-42 * time.Minute).Format(time.RFC3339),
+			BitrateBps:            18_200_000,
+			BandwidthMbps:         18.2,
+			SessionDataBytes:      5_664_750_000,
+			StartedAt:             time.Now().UTC().Add(-42 * time.Minute).Format(time.RFC3339),
+			SupportsMediaControl:  true,
+			SupportsRemoteControl: true,
+			CanSendMessage:        true,
 		},
 	}
 	streamingMu.Unlock()

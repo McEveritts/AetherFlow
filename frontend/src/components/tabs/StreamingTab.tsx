@@ -127,6 +127,12 @@ export interface ActiveStreamSession {
     bandwidthMbps: number;
     sessionDataBytes: number;
     startedAt: string;
+    playSessionId?: string;
+    mediaSourceId?: string;
+    supportsMediaControl?: boolean;
+    supportsRemoteControl?: boolean;
+    canSendMessage?: boolean;
+    supportedCommands?: string[];
 }
 
 export interface StreamingLiveSummary {
@@ -505,9 +511,42 @@ export default function StreamingTab() {
             });
             if (!res.ok) {
                 const body = await res.json().catch(() => ({}));
-                throw new Error(body.message || `Failed to ${command} session`);
+                throw new Error(body.message || body.error || `Failed to ${command} session`);
             }
-            await mutate();
+            // Optimistically update the local SWR cache while the Jellyfin client processes
+            // the WebSocket command and posts back /Sessions/Playing/Progress or /Stopped.
+            await mutate(
+                (current) => {
+                    if (!current) return current;
+                    const updatedSessions =
+                        command === 'stop'
+                            ? current.activeSessions.filter((s) => s.sessionId !== sessionId)
+                            : current.activeSessions.map((s) => {
+                                  if (s.sessionId !== sessionId) return s;
+                                  const nextState: 'playing' | 'paused' = command === 'pause' ? 'paused' : 'playing';
+                                  const nextBw =
+                                      nextState === 'paused'
+                                          ? 0
+                                          : Math.round((s.bitrateBps / 1_000_000) * 100) / 100;
+                                  return { ...s, state: nextState, bandwidthMbps: nextBw };
+                              });
+                    return {
+                        ...current,
+                        activeSessions: updatedSessions,
+                        liveSummary: {
+                            ...current.liveSummary,
+                            activeStreams: updatedSessions.length,
+                        },
+                    };
+                },
+                { revalidate: false }
+            );
+            setTimeout(() => {
+                void mutate();
+            }, 800);
+            setTimeout(() => {
+                void mutate();
+            }, 2000);
             addToast(`Sent ${command} command to stream session.`, 'success');
         } catch (err: unknown) {
             addToast(err instanceof Error ? err.message : `Command ${command} failed`, 'error');
@@ -529,7 +568,8 @@ export default function StreamingTab() {
                 }),
             });
             if (!res.ok) {
-                throw new Error('Failed to send message to client');
+                const body = await res.json().catch(() => ({}));
+                throw new Error(body.message || body.error || 'Failed to send message to client');
             }
             addToast(`Message delivered to ${messageSession.userName} (${messageSession.deviceName})`, 'success');
             setMessageSession(null);
@@ -1162,8 +1202,8 @@ export default function StreamingTab() {
                                                             <button
                                                                 type="button"
                                                                 onClick={() => handleSessionCommand(sess.sessionId, 'pause')}
-                                                                className="px-2.5 py-1 rounded-lg bg-white/[0.05] hover:bg-white/[0.1] border border-white/10 text-xs font-semibold text-slate-200 flex items-center gap-1 transition-all"
-                                                                title="Pause Playback"
+                                                                className={`px-2.5 py-1 rounded-lg bg-white/[0.05] hover:bg-white/[0.1] border border-white/10 text-xs font-semibold text-slate-200 flex items-center gap-1 transition-all ${sess.supportsMediaControl === false ? 'opacity-50' : ''}`}
+                                                                title={sess.supportsMediaControl === false ? 'Client has no active remote-control WebSocket (SupportsMediaControl=false)' : 'Pause Playback'}
                                                             >
                                                                 <Pause size={12} />
                                                                 <span>Pause</span>
@@ -1172,8 +1212,8 @@ export default function StreamingTab() {
                                                             <button
                                                                 type="button"
                                                                 onClick={() => handleSessionCommand(sess.sessionId, 'resume')}
-                                                                className="px-2.5 py-1 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-xs font-semibold text-emerald-300 flex items-center gap-1 transition-all"
-                                                                title="Resume Playback"
+                                                                className={`px-2.5 py-1 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-xs font-semibold text-emerald-300 flex items-center gap-1 transition-all ${sess.supportsMediaControl === false ? 'opacity-50' : ''}`}
+                                                                title={sess.supportsMediaControl === false ? 'Client has no active remote-control WebSocket (SupportsMediaControl=false)' : 'Resume Playback'}
                                                             >
                                                                 <Play size={12} />
                                                                 <span>Resume</span>
@@ -1197,8 +1237,8 @@ export default function StreamingTab() {
                                                             setMessageSession(sess);
                                                             setMessageBody('');
                                                         }}
-                                                        className="px-2.5 py-1 rounded-lg bg-indigo-500/15 hover:bg-indigo-500/25 border border-indigo-500/30 text-xs font-semibold text-indigo-300 flex items-center gap-1 transition-all"
-                                                        title="Send On-Screen Message to Viewer"
+                                                        className={`px-2.5 py-1 rounded-lg bg-indigo-500/15 hover:bg-indigo-500/25 border border-indigo-500/30 text-xs font-semibold text-indigo-300 flex items-center gap-1 transition-all ${sess.canSendMessage === false ? 'opacity-50' : ''}`}
+                                                        title={sess.canSendMessage === false ? 'Client does not advertise DisplayMessage remote-control capability' : 'Send On-Screen Message to Viewer'}
                                                     >
                                                         <MessageSquare size={12} />
                                                         <span>Message</span>

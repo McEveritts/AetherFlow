@@ -4,6 +4,10 @@
         ProxyPreserveHost On
         RewriteEngine On
         RewriteCond %{HTTP_HOST} \.aether\.local(:[0-9]+)?$ [NC]
+        RewriteCond %{HTTP:Upgrade} websocket [NC]
+        RewriteCond %{HTTP:Connection} upgrade [NC]
+        RewriteRule ^/?(.*)$ ws://127.0.0.1:8080/$1 [P,L]
+        RewriteCond %{HTTP_HOST} \.aether\.local(:[0-9]+)?$ [NC]
         RewriteRule ^/?(.*)$ http://127.0.0.1:8080/$1 [P,L]
         RewriteCond %{REQUEST_URI} !^/\.well-known/acme-challenge/
         RewriteRule ^/?(.*)$ https://%{HTTP_HOST}/$1 [R=301,L]
@@ -50,7 +54,7 @@
 
         ProxyRequests Off
         ProxyPreserveHost On
-        ProxyTimeout 60
+        ProxyTimeout 300
         RequestHeader set X-Forwarded-Proto "https"
         RequestHeader set X-Forwarded-Port "443"
 
@@ -67,6 +71,6 @@
         ProxyPass /_next/ http://127.0.0.1:8080/_next/ retry=0 timeout=60 keepalive=On
         ProxyPassReverse /_next/ http://127.0.0.1:8080/_next/
 
-        ProxyPass / http://127.0.0.1:8080/ retry=0 timeout=60 keepalive=On
+        ProxyPass / http://127.0.0.1:8080/ retry=0 timeout=60 keepalive=On upgrade=websocket
         ProxyPassReverse / http://127.0.0.1:8080/
 </VirtualHost>
