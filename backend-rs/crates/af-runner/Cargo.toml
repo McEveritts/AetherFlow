@@ -1,0 +1,21 @@
+[package]
+name = "af-runner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+af-models.workspace = true
+tokio.workspace = true
+axum.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+http-body-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+regex.workspace = true
+once_cell.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+async-stream.workspace = true
+futures.workspace = true

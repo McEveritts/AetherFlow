@@ -33,6 +33,8 @@ backend/dist/
 backend/aetherflow-api
 backend/tmp_test_bin
 backend/test-build.exe
+backend-rs/target/
+backend-rs/aetherflow-api
 
 # Embedded frontend staging (keep placeholder for go:embed)
 backend/web/dist/*

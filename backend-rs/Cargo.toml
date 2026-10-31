@@ -1,0 +1,80 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/af-models",
+    "crates/af-db",
+    "crates/af-hardware",
+    "crates/af-runner",
+    "crates/af-services",
+    "crates/af-api",
+]
+
+[workspace.package]
+version = "4.0.0-rc1"
+edition = "2021"
+license = "Apache-2.0"
+authors = ["AetherFlow Contributors"]
+repository = "https://github.com/McEveritts/AetherFlow"
+
+[workspace.dependencies]
+af-models = { path = "crates/af-models" }
+af-db = { path = "crates/af-db" }
+af-hardware = { path = "crates/af-hardware" }
+af-runner = { path = "crates/af-runner" }
+af-services = { path = "crates/af-services" }
+
+tokio = { version = "1.43", features = ["full"] }
+axum = { version = "0.7", features = ["ws", "multipart", "macros"] }
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["cors", "fs", "limit", "trace", "set-header"] }
+hyper = { version = "1.5", features = ["full"] }
+hyper-util = { version = "0.1", features = ["tokio", "server-auto", "client-legacy"] }
+http-body-util = "0.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+rusqlite = { version = "0.32", features = ["bundled", "chrono"] }
+r2d2 = "0.8"
+r2d2_sqlite = "0.25"
+aes-gcm = "0.10"
+rand = "0.8"
+base64 = "0.22"
+hex = "0.4"
+sha1 = "0.10"
+sha2 = "0.10"
+hmac = "0.12"
+bcrypt = "0.16"
+jsonwebtoken = "9.3"
+totp-lite = "2.0"
+data-encoding = "2.6"
+url = "2.5"
+urlencoding = "2.1"
+regex = "1.11"
+once_cell = "1.20"
+chrono = { version = "0.4", features = ["serde"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+thiserror = "2.0"
+anyhow = "1.0"
+dotenvy = "0.15"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream", "multipart"] }
+rust-embed = { version = "8.5", features = ["IncludeExclude", "interpolate-folder-path"] }
+mime_guess = "2.0"
+sysinfo = "0.33"
+libloading = "0.8"
+libc = "0.2"
+futures = "0.3"
+tokio-stream = { version = "0.1", features = ["sync"] }
+async-stream = "0.3"
+uuid = { version = "1.11", features = ["v4"] }
+tar = "0.4"
+flate2 = "1.0"
+prost = "0.13"
+tonic = { version = "0.12", features = ["tls"] }
+rsa = { version = "0.9", features = ["pem"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"

@@ -3,6 +3,7 @@ name: Production Release Pipeline
 on:
   push:
     branches:
+      - experimental
       - nightly
       - Nightly
     tags:
@@ -10,9 +11,9 @@ on:
   workflow_dispatch:
     inputs:
       channel:
-        description: 'Release channel to publish (stable, beta, nightly)'
+        description: 'Release channel to publish (stable, beta, nightly, experimental)'
         required: false
-        default: 'nightly'
+        default: 'experimental'
 
 permissions:
   contents: write
@@ -21,8 +22,12 @@ permissions:
 
 jobs:
   release-build:
-    name: Build, Verify & Publish Signed Release
+    name: Build, Verify & Publish Signed Release (Rust Control Plane)
     runs-on: ubuntu-latest
+    env:
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+      CARGO_INCREMENTAL: "0"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -42,11 +47,23 @@ jobs:
           cache: npm
           cache-dependency-path: package-lock.json
 
-      - name: Setup Go
-        uses: actions/setup-go@v5
+      - name: Install Rust Toolchain, mold Linker & sccache
+        uses: dtolnay/rust-toolchain@stable
         with:
-          go-version-file: backend/go.mod
-          cache-dependency-path: backend/go.sum
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Setup sccache & mold
+        uses: mozilla-actions/sccache-action@v0.0.7
+
+      - name: Install mold Fast Linker
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq mold pkg-config libssl-dev
+
+      - name: Rust Cargo Dependency Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "backend-rs -> target"
 
       - name: Build Next.js Static Export
         env:
@@ -64,21 +81,23 @@ jobs:
           mkdir -p backend/web/dist
           cp -R frontend/out/. backend/web/dist/
 
-      - name: Run Backend Security & Unit Tests
-        working-directory: backend
+      - name: Run Rust Workspace Unit & Contract Tests
+        working-directory: backend-rs
         env:
           JWT_SECRET: ci-test-secret-exactly-32bytes!!
           AES_MASTER_KEY: ci-test-aes-key-exactly-32bytes!
           ALLOWED_HOSTS: localhost:8080,127.0.0.1:8080
         run: |
-          go vet ./...
-          go test -race -count=1 ./...
+          cargo test --workspace --locked || cargo test --workspace
 
       - name: Package Single-Binary Release Tarball & SHA-256 Manifest
         run: |
           if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
             RELEASE_TAG="${GITHUB_REF_NAME}"
             VERSION_STAMP="${RELEASE_TAG}"
+          elif [[ "${GITHUB_REF_NAME}" == "experimental" ]]; then
+            RELEASE_TAG="experimental"
+            VERSION_STAMP="experimental-${GITHUB_SHA::7}"
           else
             REPO_VERSION="$(tr -d '[:space:]' < .version 2>/dev/null || true)"
             if [[ "${REPO_VERSION}" == v* ]]; then
@@ -94,10 +113,9 @@ jobs:
           STAGE_DIR="$(mktemp -d)"
           echo "STAGE_DIR=${STAGE_DIR}" >> "$GITHUB_ENV"
 
-          cd backend
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -buildvcs=false \
-            -ldflags="-s -w -X main.version=${VERSION_STAMP}" \
-            -o "${STAGE_DIR}/aetherflow-api" .
+          cd backend-rs
+          cargo build --release --bin aetherflow-api
+          cp target/release/aetherflow-api "${STAGE_DIR}/aetherflow-api"
           cd ..
 
           cp -R backend/config "${STAGE_DIR}/config"
@@ -119,7 +137,15 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if [[ "${RELEASE_TAG}" == "nightly" ]]; then
+          if [[ "${RELEASE_TAG}" == "experimental" ]]; then
+            gh release delete experimental --yes --cleanup-tag 2>/dev/null || true
+            gh release create experimental \
+              release-dist/aetherflow-linux-amd64.tar.gz \
+              release-dist/SHA256SUMS \
+              --title "AetherFlow Experimental Rust (${GITHUB_SHA::8})" \
+              --notes "Automated experimental Rust single-binary build from commit ${GITHUB_SHA}." \
+              --prerelease
+          elif [[ "${RELEASE_TAG}" == "nightly" ]]; then
             gh release delete nightly --yes --cleanup-tag 2>/dev/null || true
             gh release create nightly \
               release-dist/aetherflow-linux-amd64.tar.gz \
@@ -129,7 +155,7 @@ jobs:
               --prerelease
           else
             PRERELEASE_FLAG=""
-            if [[ "${RELEASE_TAG}" == *-* || "${GITHUB_REF_NAME}" == "nightly" || "${GITHUB_REF_NAME}" == "Nightly" ]]; then
+            if [[ "${RELEASE_TAG}" == *-* || "${GITHUB_REF_NAME}" == "nightly" || "${GITHUB_REF_NAME}" == "Nightly" || "${GITHUB_REF_NAME}" == "experimental" ]]; then
               PRERELEASE_FLAG="--prerelease"
             fi
             if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then

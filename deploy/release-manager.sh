@@ -50,7 +50,7 @@ while [[ $# -gt 0 ]]; do
             CHANNEL="${2:-stable}"
             shift 2
             ;;
-        stable|nightly)
+        stable|nightly|experimental)
             CHANNEL="$1"
             shift
             ;;
@@ -245,6 +245,8 @@ build_from_source() {
     local target_branch="${GIT_BRANCH}"
     if [[ "${CHANNEL}" == "nightly" ]]; then
         target_branch="nightly"
+    elif [[ "${CHANNEL}" == "experimental" ]]; then
+        target_branch="experimental"
     fi
     log_info "Building single-binary release from source (${GIT_REMOTE}/${target_branch})..."
     cd "${REPO_DIR}" || log_fatal "Repository directory not found: ${REPO_DIR}"
@@ -263,8 +265,8 @@ build_from_source() {
 
     rsync -a --exclude='.git' --exclude='node_modules' --exclude='.next' --exclude='*.sqlite' \
         "${REPO_DIR}/" "${RELEASE_DIR}/" >> "${LOG_FILE}" 2>&1
-    if [[ "${CHANNEL}" == "nightly" && ! -s "${RELEASE_DIR}/.version" ]]; then
-        echo "nightly-${source_sha}" > "${RELEASE_DIR}/.version"
+    if [[ ( "${CHANNEL}" == "nightly" || "${CHANNEL}" == "experimental" ) && ! -s "${RELEASE_DIR}/.version" ]]; then
+        echo "${CHANNEL}-${source_sha}" > "${RELEASE_DIR}/.version"
     fi
 
     log_info "Building Next.js static export (NEXT_STATIC_EXPORT=1)..."
@@ -274,19 +276,26 @@ build_from_source() {
     npm ci --no-fund --no-audit >> "${LOG_FILE}" 2>&1
     npm run build >> "${LOG_FILE}" 2>&1
 
-    log_info "Embedding frontend static bundle into Go binary (backend/web/dist)..."
+    log_info "Embedding frontend static bundle into backend/web/dist..."
     rm -rf "${RELEASE_DIR}/backend/web/dist"
     mkdir -p "${RELEASE_DIR}/backend/web/dist"
     cp -R "${RELEASE_DIR}/frontend/out/." "${RELEASE_DIR}/backend/web/dist/"
 
-    log_info "Compiling single-binary AetherFlow control plane..."
-    cd "${RELEASE_DIR}/backend" || log_fatal "Backend directory missing."
-    export GOOS=linux GOARCH=amd64 CGO_ENABLED=0
-    "${GO_BIN}" build -trimpath -buildvcs=false -o "${RELEASE_DIR}/aetherflow-api" . >> "${LOG_FILE}" 2>&1
+    if [[ -d "${RELEASE_DIR}/backend-rs" ]] && command -v cargo &>/dev/null; then
+        log_info "Compiling single-binary AetherFlow Rust control plane (backend-rs)..."
+        cd "${RELEASE_DIR}/backend-rs" || log_fatal "Rust backend directory missing."
+        cargo build --release --bin aetherflow-api >> "${LOG_FILE}" 2>&1
+        cp -f "target/release/aetherflow-api" "${RELEASE_DIR}/aetherflow-api"
+    else
+        log_info "Compiling single-binary AetherFlow Go control plane..."
+        cd "${RELEASE_DIR}/backend" || log_fatal "Backend directory missing."
+        export GOOS=linux GOARCH=amd64 CGO_ENABLED=0
+        "${GO_BIN}" build -trimpath -buildvcs=false -o "${RELEASE_DIR}/aetherflow-api" . >> "${LOG_FILE}" 2>&1
+    fi
     chmod +x "${RELEASE_DIR}/aetherflow-api"
 
     # Retain only runtime essentials (binary, config, packages, deploy, .version)
-    rm -rf "${RELEASE_DIR}/frontend" "${RELEASE_DIR}/backend/web/dist"
+    rm -rf "${RELEASE_DIR}/frontend" "${RELEASE_DIR}/backend/web/dist" "${RELEASE_DIR}/backend-rs/target"
 }
 
 release_scaffold() {

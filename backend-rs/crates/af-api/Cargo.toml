@@ -1,0 +1,53 @@
+[package]
+name = "af-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "aetherflow-api"
+path = "src/main.rs"
+
+[dependencies]
+af-models.workspace = true
+af-db.workspace = true
+af-hardware.workspace = true
+af-runner.workspace = true
+af-services.workspace = true
+
+tokio.workspace = true
+axum.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+http-body-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rusqlite.workspace = true
+bcrypt.workspace = true
+jsonwebtoken.workspace = true
+totp-lite.workspace = true
+data-encoding.workspace = true
+sha2.workspace = true
+hmac.workspace = true
+hex.workspace = true
+base64.workspace = true
+rand.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+once_cell.workspace = true
+regex.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+dotenvy.workspace = true
+reqwest.workspace = true
+rust-embed.workspace = true
+mime_guess.workspace = true
+futures.workspace = true
+tokio-stream.workspace = true
+async-stream.workspace = true
+url.workspace = true
+urlencoding.workspace = true
+anyhow.workspace = true
+rsa.workspace = true
