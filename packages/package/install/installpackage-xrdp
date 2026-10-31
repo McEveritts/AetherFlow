@@ -1,0 +1,36 @@
+#!/bin/bash
+set -euo pipefail
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    source /opt/AetherFlow/packages/common.sh
+else
+    source "${SELF_DIR}/../../common.sh"
+fi
+
+require_root
+export LOGFILE="/var/log/aetherflow/install-xrdp.log"
+trap 'print_error "XRDP installation failed; see ${LOGFILE}."' ERR
+report_progress 15 "Installing XRDP, Xorg backend, and XFCE desktop..."
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -qq >> "$LOGFILE" 2>&1
+apt-get install --no-remove -y -qq xrdp xorgxrdp xfce4 xfce4-terminal dbus-x11 ssl-cert >> "$LOGFILE" 2>&1
+
+report_progress 60 "Configuring XRDP desktop sessions and TLS certificate access..."
+usermod -a -G ssl-cert xrdp
+backup_file_once /etc/xrdp/startwm.sh
+cat > /etc/xrdp/startwm.sh <<'EOF'
+#!/bin/sh
+unset SESSION_MANAGER
+unset DBUS_SESSION_BUS_ADDRESS
+exec dbus-run-session -- startxfce4
+EOF
+chmod 755 /etc/xrdp/startwm.sh
+
+report_progress 85 "Starting XRDP and its session manager..."
+systemctl daemon-reload
+systemctl enable xrdp-sesman.service xrdp.service >> "$LOGFILE" 2>&1
+systemctl restart xrdp-sesman.service xrdp.service >> "$LOGFILE" 2>&1
+systemctl is-active --quiet xrdp-sesman.service xrdp.service
+write_lock xrdp
+report_progress 100 "XRDP installed. Connect using an RDP client on TCP 3389 (or your existing configured port) with an existing Linux account. Restrict access with a firewall or VPN."

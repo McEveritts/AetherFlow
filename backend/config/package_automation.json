@@ -2059,6 +2059,46 @@
       "unmanic.service"
     ]
   },
+  "kasmvnc": {
+    "update_source": "github",
+    "update_repo": "kasmtech/KasmVNC",
+    "version_command": [
+      "dpkg-query",
+      "-W",
+      "-f=${Version}",
+      "kasmvncserver"
+    ],
+    "sandbox_profile": "privileged",
+    "sandbox_rw_paths": [
+      "/var/lib/kasmvnc",
+      "/etc/kasmvnc",
+      "/tmp"
+    ],
+    "sandbox_service_units": [
+      "af-kasmvnc.service"
+    ]
+  },
+  "xrdp": {
+    "update_source": "apt",
+    "update_package": "xrdp",
+    "version_command": [
+      "dpkg-query",
+      "-W",
+      "-f=${Version}",
+      "xrdp"
+    ],
+    "sandbox_profile": "privileged",
+    "sandbox_rw_paths": [
+      "/etc/xrdp",
+      "/var/lib/xrdp",
+      "/run/xrdp",
+      "/tmp"
+    ],
+    "sandbox_service_units": [
+      "xrdp.service",
+      "xrdp-sesman.service"
+    ]
+  },
   "x2go": {
     "update_source": "apt",
     "update_package": "x2goserver",

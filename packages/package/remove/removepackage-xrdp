@@ -1,0 +1,28 @@
+#!/bin/bash
+set -euo pipefail
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    source /opt/AetherFlow/packages/common.sh
+else
+    source "${SELF_DIR}/../../common.sh"
+fi
+
+require_root
+export LOGFILE="/var/log/aetherflow/remove-xrdp.log"
+trap 'print_error "XRDP removal failed; see ${LOGFILE}."' ERR
+report_progress 20 "Stopping XRDP and its session manager..."
+for unit in xrdp.service xrdp-sesman.service; do
+    systemctl stop "$unit" >> "$LOGFILE" 2>&1 || true
+    systemctl disable "$unit" >> "$LOGFILE" 2>&1 || true
+done
+rollback_file /etc/xrdp/startwm.sh
+report_progress 60 "Removing XRDP; preserving Linux users and shared desktop dependencies..."
+DEBIAN_FRONTEND=noninteractive apt-get remove -y xrdp xorgxrdp >> "$LOGFILE" 2>&1
+if [[ "${DELETE_DATA:-false}" == "true" ]]; then
+    DEBIAN_FRONTEND=noninteractive apt-get purge -y xrdp xorgxrdp >> "$LOGFILE" 2>&1
+    rm -rf /etc/xrdp /var/lib/xrdp
+fi
+systemctl daemon-reload
+remove_lock xrdp
+report_progress 100 "XRDP removed. Linux accounts and home directories were preserved."

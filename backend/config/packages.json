@@ -656,6 +656,17 @@
         "web_path": "/vnc.html"
     },
     {
+        "name": "kasmvnc",
+        "label": "KasmVNC",
+        "description": "Browser-based XFCE desktop with authenticated KasmVNC streaming through the AetherFlow gateway.",
+        "lock_file": "/install/.kasmvnc.lock",
+        "category": "Utilities",
+        "service_type": "systemd",
+        "service_name": "af-kasmvnc",
+        "default_port": 6081,
+        "web_path": "/"
+    },
+    {
         "name": "pyload",
         "label": "pyLoad",
         "description": "Lightweight, extensible download manager for one-click hosters, containers, and HTTP/FTP links.",
@@ -708,6 +719,16 @@
         "service_name": "unmanic",
         "default_port": 8888,
         "web_path": "/"
+    },
+    {
+        "name": "xrdp",
+        "label": "XRDP",
+        "description": "Remote Linux desktop over RDP on TCP 3389 with XFCE sessions. Connect with an RDP client and an existing Linux account.",
+        "lock_file": "/install/.xrdp.lock",
+        "category": "Utilities",
+        "service_type": "systemd",
+        "service_name": "xrdp",
+        "default_port": 0
     },
     {
         "name": "x2go",

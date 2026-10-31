@@ -43,7 +43,7 @@ type AppBlueprint struct {
 	Dependencies      []string          `json:"dependencies,omitempty"`
 }
 
-// blueprintRegistry holds baseline definitions for all 69 catalog apps, while
+// blueprintRegistry holds baseline definitions for catalog apps, while
 // GetBlueprint dynamically overlays config/packages.json as the single source of truth.
 var blueprintRegistry = map[string]AppBlueprint{
 	"plex": {
@@ -673,6 +673,15 @@ var blueprintRegistry = map[string]AppBlueprint{
 		HealthCheckPath: "/vnc.html",
 		AppDataPath:     "/var/lib/novnc",
 	},
+	"kasmvnc": {
+		AppName:         "kasmvnc",
+		ServiceName:     "af-kasmvnc",
+		Category:        "Utilities",
+		DefaultPort:     6081,
+		WebPath:         "/",
+		HealthCheckPath: "/",
+		AppDataPath:     "/var/lib/kasmvnc",
+	},
 	"pyload": {
 		AppName:         "pyload",
 		ServiceName:     "pyload",
@@ -726,6 +735,13 @@ var blueprintRegistry = map[string]AppBlueprint{
 		WebPath:         "/",
 		HealthCheckPath: "/",
 		AppDataPath:     "/var/lib/unmanic",
+	},
+	"xrdp": {
+		AppName:     "xrdp",
+		ServiceName: "xrdp",
+		Category:    "Utilities",
+		DefaultPort: 0,
+		AppDataPath: "/var/lib/xrdp",
 	},
 	"x2go": {
 		AppName:     "x2go",
