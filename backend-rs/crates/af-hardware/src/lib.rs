@@ -463,7 +463,7 @@ pub fn get_system_metrics_core() -> SystemMetrics {
     let swap_used = sanitize_f64((state.sys.used_swap() as f64) / (1024.0 * 1024.0 * 1024.0));
 
     // 3. Disk Partitions
-    state.disks.refresh_list();
+    state.disks.refresh(true);
     let (disk_partitions, total_disk, used_disk, free_disk) = collect_disk_partitions(&state.disks);
 
     // 3b. Disk I/O
@@ -486,7 +486,7 @@ pub fn get_system_metrics_core() -> SystemMetrics {
     state.last_disk_check = Some(now);
 
     // 4. Network & Active Connections
-    state.networks.refresh();
+    state.networks.refresh(true);
     let (total_rx, total_tx) = read_net_totals(&state.networks);
     let (down_speed, up_speed) = if let Some(last_net) = state.last_net_check {
         let duration = now.duration_since(last_net).as_secs_f64().max(0.01);
