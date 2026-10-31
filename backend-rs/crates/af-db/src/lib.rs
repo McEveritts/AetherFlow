@@ -1275,6 +1275,90 @@ pub fn mark_action_failed(action_id: i64, execution_log: &str) {
     }
 }
 
+pub fn list_audit_entries(
+    limit: i64,
+    offset: i64,
+    action: &str,
+    username: &str,
+) -> anyhow::Result<(Vec<AuditEntry>, i64)> {
+    query_audit_log(limit, offset, action, username)
+}
+
+pub fn list_pending_actions(mut limit: i64, offset: i64) -> anyhow::Result<Vec<PendingAction>> {
+    if limit <= 0 || limit > 200 {
+        limit = 50;
+    }
+    let conn = get_conn()?;
+    let mut stmt = conn.prepare(
+        "SELECT id, COALESCE(classification, 'warn'), COALESCE(source, ''), COALESCE(action, ''), COALESCE(reason, ''), COALESCE(status, 'pending'), COALESCE(CAST(created_at AS TEXT), ''), resolved_at, resolved_by, execution_log \
+         FROM pending_actions ORDER BY created_at DESC LIMIT ?1 OFFSET ?2",
+    )?;
+    let rows = stmt.query_map(params![limit, offset.max(0)], |r| {
+        Ok(PendingAction {
+            id: r.get(0)?,
+            classification: r.get(1)?,
+            source: r.get(2)?,
+            action: r.get(3)?,
+            reason: r.get(4)?,
+            status: r.get(5)?,
+            created_at: r.get(6)?,
+            resolved_at: r.get(7).ok().flatten(),
+            resolved_by: r.get(8).ok().flatten(),
+            execution_log: r.get(9).ok().flatten(),
+        })
+    })?;
+    let mut actions = Vec::new();
+    for r in rows {
+        actions.push(r?);
+    }
+    Ok(actions)
+}
+
+pub fn get_pending_action_by_id(action_id: i64) -> anyhow::Result<Option<PendingAction>> {
+    let conn = get_conn()?;
+    let mut stmt = conn.prepare(
+        "SELECT id, COALESCE(classification, 'warn'), COALESCE(source, ''), COALESCE(action, ''), COALESCE(reason, ''), COALESCE(status, 'pending'), COALESCE(CAST(created_at AS TEXT), ''), resolved_at, resolved_by, execution_log \
+         FROM pending_actions WHERE id = ?1",
+    )?;
+    let res = stmt.query_row(params![action_id], |r| {
+        Ok(PendingAction {
+            id: r.get(0)?,
+            classification: r.get(1)?,
+            source: r.get(2)?,
+            action: r.get(3)?,
+            reason: r.get(4)?,
+            status: r.get(5)?,
+            created_at: r.get(6)?,
+            resolved_at: r.get(7).ok().flatten(),
+            resolved_by: r.get(8).ok().flatten(),
+            execution_log: r.get(9).ok().flatten(),
+        })
+    });
+    match res {
+        Ok(action) => Ok(Some(action)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+pub fn resolve_action(
+    action_id: i64,
+    new_status: &str,
+    resolved_by: &str,
+) -> anyhow::Result<PendingAction> {
+    let conn = get_conn()?;
+    let now = Utc::now().to_rfc3339();
+    let changed = conn.execute(
+        "UPDATE pending_actions SET status = ?1, resolved_at = ?2, resolved_by = ?3 WHERE id = ?4 AND status = 'pending'",
+        params![new_status, now, resolved_by, action_id],
+    )?;
+    if changed == 0 {
+        anyhow::bail!("Action not found or already resolved");
+    }
+    get_pending_action_by_id(action_id)?
+        .ok_or_else(|| anyhow::anyhow!("Action disappeared after resolve"))
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Session Revocation, 2FA Pending & MFA Challenge Store (`backend/db/redis.go`)
 // ─────────────────────────────────────────────────────────────────────────────

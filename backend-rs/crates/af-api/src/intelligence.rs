@@ -10,7 +10,6 @@ use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::env;
-use std::fs;
 use std::path::{Path as StdPath, PathBuf};
 use std::process::{Command, Stdio};
 use std::io::Write;

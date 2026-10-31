@@ -5,7 +5,7 @@ use axum::response::{IntoResponse, Json, Response};
 use rust_embed::RustEmbed;
 use std::env;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 #[derive(RustEmbed)]
 #[folder = "../../../backend/web/dist"]

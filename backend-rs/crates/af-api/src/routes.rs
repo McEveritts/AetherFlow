@@ -1634,15 +1634,17 @@ async fn update_app_ingress_config(
             .unwrap_or(0)
     };
 
+    let now = Utc::now();
     let cfg = AppIngressConfig {
         app_name: app_name.clone(),
         public_domain: req.public_domain.trim().to_string(),
         external_access_enabled: req.external_access_enabled,
         listen_port,
         tls_enabled: req.tls_enabled,
-        updated_at: Utc::now().to_rfc3339(),
+        created_at: now,
+        updated_at: now,
     };
-    if let Err(e) = af_db::upsert_app_ingress_config(&cfg) {
+    if let Err(e) = af_db::set_app_ingress_config(&cfg) {
         return api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "INTERNAL_ERROR",
