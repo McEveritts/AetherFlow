@@ -667,6 +667,17 @@
         "web_path": "/"
     },
     {
+        "name": "mcvnc",
+        "label": "McVNC",
+        "description": "Headless GPU remote desktop in Rust with zero-copy EGL/GLES2 GBM dma-buf, embedded Wayland compositor, VA-API H.264/JPEG, and NVENC.",
+        "lock_file": "/install/.mcvnc.lock",
+        "category": "Utilities",
+        "service_type": "systemd",
+        "service_name": "af-mcvnc",
+        "default_port": 6900,
+        "web_path": "/"
+    },
+    {
         "name": "pyload",
         "label": "pyLoad",
         "description": "Lightweight, extensible download manager for one-click hosters, containers, and HTTP/FTP links.",

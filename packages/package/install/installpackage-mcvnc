@@ -1,0 +1,141 @@
+#!/bin/bash
+set -euo pipefail
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    source /opt/AetherFlow/packages/common.sh
+else
+    source "${SELF_DIR}/../../common.sh"
+fi
+
+require_root
+export LOGFILE="/var/log/aetherflow/install-mcvnc.log"
+APP_PORT="${AF_APP_PORT:-6900}"
+RENDER_DEVICE="${AF_MCVNC_DEVICE:-/dev/dri/renderD128}"
+DATA_DIR="/var/lib/mcvnc"
+CONFIG_DIR="/etc/mcvnc"
+TMP_DIR=""
+trap '[[ -z "$TMP_DIR" ]] || rm -rf "$TMP_DIR"' EXIT
+trap 'print_error "McVNC installation failed; see ${LOGFILE}."' ERR
+
+if [[ ! "$APP_PORT" =~ ^[0-9]{4,5}$ ]] || (( 10#$APP_PORT < 1024 || 10#$APP_PORT > 65535 )); then
+    print_error "Invalid McVNC port: ${APP_PORT}"
+    exit 1
+fi
+
+source /etc/os-release
+ARCH="$(dpkg --print-architecture)"
+if [[ ! "${ID:-}" =~ ^(debian|ubuntu)$ || ! "$ARCH" =~ ^(amd64|arm64)$ ]]; then
+    print_error "McVNC requires Debian or Ubuntu on amd64 or arm64."
+    exit 1
+fi
+
+report_progress 15 "Installing McVNC GPU/Wayland build and runtime prerequisites..."
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -qq >> "$LOGFILE" 2>&1
+apt-get install --no-remove -y -qq \
+    curl ca-certificates git jq pkg-config clang libclang-dev \
+    libva-dev libdrm-dev libgbm-dev libegl-dev libgles-dev \
+    libwayland-dev wayland-protocols libxkbcommon-dev libffmpeg-nvenc-dev \
+    libva2 libgbm1 libegl1 libgles2 libwayland-server0 libxkbcommon0 >> "$LOGFILE" 2>&1
+
+if [[ -f "${HOME:-/root}/.cargo/env" ]]; then
+    # shellcheck disable=SC1091
+    source "${HOME:-/root}/.cargo/env"
+fi
+if ! command -v cargo >/dev/null 2>&1; then
+    apt-get install --no-remove -y -qq cargo rustc >> "$LOGFILE" 2>&1
+fi
+
+report_progress 35 "Resolving latest McVNC release tag..."
+TMP_DIR="$(mktemp -d /tmp/af-mcvnc-XXXXXX)"
+chmod 755 "$TMP_DIR"
+curl -fsSL https://api.github.com/repos/McEveritts/McVNC/tags -o "${TMP_DIR}/tags.json"
+TAG="$(jq -er '.[0].name' "${TMP_DIR}/tags.json")" || {
+    print_error "Unable to resolve a McVNC release tag from McEveritts/McVNC."
+    exit 1
+}
+if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    print_error "Invalid McVNC tag format: ${TAG}"
+    exit 1
+fi
+VERSION="${TAG#v}"
+
+report_progress 55 "Cloning and compiling McVNC ${VERSION}..."
+git clone --depth 1 --branch "$TAG" https://github.com/McEveritts/McVNC.git "${TMP_DIR}/src" >> "$LOGFILE" 2>&1
+cargo build --release --manifest-path "${TMP_DIR}/src/Cargo.toml" >> "$LOGFILE" 2>&1
+install -m 755 "${TMP_DIR}/src/target/release/mcvnc" /usr/local/bin/mcvnc
+
+if ! id -u af-mcvnc >/dev/null 2>&1; then
+    useradd --system --user-group --create-home --home-dir "$DATA_DIR" --shell /usr/sbin/nologin af-mcvnc
+fi
+for grp in video render; do
+    if getent group "$grp" >/dev/null 2>&1; then
+        usermod -a -G "$grp" af-mcvnc
+    fi
+done
+install -d -m 700 -o af-mcvnc -g af-mcvnc "$DATA_DIR"
+install -d -m 700 -o af-mcvnc -g af-mcvnc "${DATA_DIR}/.local/share/mcvnc"
+install -d -m 700 -o af-mcvnc -g af-mcvnc "${DATA_DIR}/runtime"
+install -d -m 755 "$CONFIG_DIR"
+printf '%s\n' "$VERSION" > "${DATA_DIR}/.af-version"
+chown af-mcvnc:af-mcvnc "${DATA_DIR}/.af-version"
+
+report_progress 75 "Configuring McVNC headless Wayland compositor and loopback dashboard..."
+cat > "${CONFIG_DIR}/mcvnc.env" <<EOF
+MCVNC_BIND=127.0.0.1:${APP_PORT}
+MCVNC_DEVICE=${RENDER_DEVICE}
+MCVNC_PRESET=1080p
+MCVNC_FPS=60
+MCVNC_QP=24
+EOF
+chmod 644 "${CONFIG_DIR}/mcvnc.env"
+
+cat > /etc/systemd/system/af-mcvnc.service <<EOF
+[Unit]
+Description=AetherFlow McVNC Headless GPU Remote Desktop
+After=network.target
+
+[Service]
+Type=simple
+User=af-mcvnc
+Group=af-mcvnc
+SupplementaryGroups=video render
+WorkingDirectory=${DATA_DIR}
+Environment=HOME=${DATA_DIR}
+Environment=XDG_DATA_HOME=${DATA_DIR}/.local/share
+Environment=XDG_RUNTIME_DIR=${DATA_DIR}/runtime
+Environment=WAYLAND_DISPLAY=wayland-mcvnc-0
+EnvironmentFile=-${CONFIG_DIR}/mcvnc.env
+ExecStart=/usr/local/bin/mcvnc play --bind 127.0.0.1:${APP_PORT} --device ${RENDER_DEVICE} --preset 1080p --fps 60 --qp 24
+Restart=on-failure
+RestartSec=5
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+report_progress 90 "Starting McVNC..."
+systemctl daemon-reload
+systemctl enable af-mcvnc.service >> "$LOGFILE" 2>&1
+systemctl restart af-mcvnc.service >> "$LOGFILE" 2>&1
+systemctl is-active --quiet af-mcvnc.service
+READY=false
+for attempt in {1..30}; do
+    if ! systemctl is-active --quiet af-mcvnc.service; then
+        break
+    fi
+    HTTP_STATUS="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:${APP_PORT}/" || true)"
+    if [[ "$HTTP_STATUS" == "200" || "$HTTP_STATUS" == "401" ]]; then
+        READY=true
+        break
+    fi
+    sleep 1
+done
+if [[ "$READY" != "true" ]]; then
+    print_error "McVNC did not become ready on loopback port ${APP_PORT}; inspect journalctl -u af-mcvnc and verify DRM render node ${RENDER_DEVICE}."
+    exit 1
+fi
+write_lock mcvnc
+report_progress 100 "McVNC ${VERSION} installed. Access the dashboard through the AetherFlow gateway on loopback port ${APP_PORT}."
