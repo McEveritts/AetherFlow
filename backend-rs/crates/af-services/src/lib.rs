@@ -3,7 +3,7 @@ pub mod mutators;
 pub mod workers;
 
 use af_models::{Package, PackageAutomation};
-use chrono::Utc;
+use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use rusqlite::params;
@@ -12,7 +12,9 @@ use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command as StdCommand;
 use std::sync::{Mutex, RwLock};
+use std::time::{Duration, Instant};
 use tokio::process::Command;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -256,9 +258,47 @@ pub struct BlueprintSetupResult {
     pub network_dns_synced: bool,
 }
 
+fn default_blueprint_mutator_meta(app_name: &str) -> (&'static str, String, &'static str) {
+    let clean = app_name.trim().to_lowercase();
+    match clean.as_str() {
+        "sonarr" | "radarr" | "lidarr" | "readarr" | "prowlarr" | "listenarr" => (
+            "xml",
+            format!("/var/lib/{}/config.xml", clean),
+            "Port",
+        ),
+        "jellyfin" => ("xml", "/etc/jellyfin/network.xml".to_string(), "InternalHttpPort"),
+        "emby" => ("xml", "/var/lib/emby/config/system.xml".to_string(), "HttpServerPortNumber"),
+        "qbittorrent" => (
+            "ini",
+            "/var/lib/qbittorrent/.config/qBittorrent/qBittorrent.conf".to_string(),
+            r"WebUI\Port",
+        ),
+        "sabnzbd" => ("ini", "/var/lib/sabnzbd/sabnzbd.ini".to_string(), "port"),
+        "tautulli" => ("ini", "/var/lib/tautulli/config.ini".to_string(), "http_port"),
+        "transmission" => (
+            "json",
+            "/etc/transmission-daemon/settings.json".to_string(),
+            "rpc-port",
+        ),
+        "overseerr" | "jellyseerr" => (
+            "json",
+            format!("/var/lib/{}/config/settings.json", clean),
+            "main.port",
+        ),
+        "jackett" => (
+            "json",
+            "/var/lib/jackett/Jackett/ServerConfig.json".to_string(),
+            "Port",
+        ),
+        "pihole" => ("pihole", "/etc/pihole/pihole.toml".to_string(), "port"),
+        _ => ("", String::new(), "port"),
+    }
+}
+
 pub fn get_blueprint(app_name: &str) -> Option<AppBlueprint> {
     let pkgs = get_package_catalog().ok()?;
     let p = pkgs.into_iter().find(|x| x.name == app_name)?;
+    let (mutator_type, config_file_path, port_config_key) = default_blueprint_mutator_meta(&p.name);
     Some(AppBlueprint {
         app_name: p.name.clone(),
         service_name: if p.service_name.is_empty() {
@@ -270,11 +310,11 @@ pub fn get_blueprint(app_name: &str) -> Option<AppBlueprint> {
         default_port: p.default_port,
         fallback_port_range: [17000, 19999],
         port_env_var: "AF_APP_PORT".to_string(),
-        port_config_key: "port".to_string(),
+        port_config_key: port_config_key.to_string(),
         web_path: p.web_path,
         health_check_path: "/".to_string(),
-        mutator_type: String::new(),
-        config_file_path: String::new(),
+        mutator_type: mutator_type.to_string(),
+        config_file_path,
         internal_domain: format!("{}.aether.local", p.name),
         is_network_app: matches!(p.name.as_str(), "pihole" | "wireguard" | "tailscale"),
         dependencies: Vec::new(),
@@ -305,6 +345,11 @@ pub fn get_all_blueprints() -> Vec<BlueprintStatusView> {
                 public_domain = ing.public_domain.clone();
                 external_access = ing.external_access_enabled;
                 tls_enabled = ing.tls_enabled;
+            } else {
+                let runtime_meta = mutators::get_app_runtime_meta(&bp.app_name);
+                if runtime_meta.configured_port > 0 {
+                    active_port = runtime_meta.configured_port;
+                }
             }
             if public_domain.is_empty() && !base_domain.is_empty() && active_port > 0 {
                 public_domain = format_app_public_domain(&bp.app_name, &base_domain);
@@ -345,6 +390,13 @@ pub fn format_app_public_domain(app_name: &str, base_domain: &str) -> String {
     format!("{}.{}", clean_app.trim_matches('-'), norm)
 }
 
+pub(crate) fn resolve_app_internal_domain(app_name: &str) -> String {
+    get_blueprint(app_name)
+        .map(|blueprint| blueprint.internal_domain.trim().to_lowercase())
+        .filter(|domain| !domain.is_empty())
+        .unwrap_or_else(|| format!("{}.aether.local", app_name.trim().to_lowercase()))
+}
+
 pub fn resolve_app_target_for_host(host_header: &str) -> Option<(String, i32)> {
     let host = host_header
         .split(':')
@@ -364,7 +416,14 @@ pub fn resolve_app_target_for_host(host_header: &str) -> Option<(String, i32)> {
                 .flatten()
                 .map(|c| c.listen_port)
                 .filter(|&p| p > 0)
-                .unwrap_or(bp.default_port);
+                .unwrap_or_else(|| {
+                    let meta = mutators::get_app_runtime_meta(app_prefix);
+                    if meta.configured_port > 0 {
+                        meta.configured_port
+                    } else {
+                        bp.default_port
+                    }
+                });
             if port > 0 {
                 return Some((app_prefix.to_string(), port));
             }
@@ -408,20 +467,418 @@ pub fn resolve_app_target_for_host(host_header: &str) -> Option<(String, i32)> {
 // Service Manager (`service_manager.go` & `systemctl.go`)
 // ─────────────────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+fn is_zero_i32(v: &i32) -> bool {
+    *v == 0
+}
+
+fn is_false(v: &bool) -> bool {
+    !*v
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ServiceStatusItem {
+    #[serde(skip_serializing_if = "String::is_empty", default)]
+    pub id: String,
     pub status: String,
     pub uptime: String,
     pub version: String,
     pub managed_by: String,
     pub process: String,
+    #[serde(skip_serializing_if = "is_zero_i32", default)]
+    pub default_port: i32,
+    #[serde(skip_serializing_if = "is_zero_i32", default)]
+    pub active_port: i32,
+    #[serde(skip_serializing_if = "String::is_empty", default)]
+    pub api_key: String,
+    #[serde(skip_serializing_if = "String::is_empty", default)]
+    pub internal_domain: String,
+    #[serde(skip_serializing_if = "String::is_empty", default)]
+    pub public_domain: String,
+    #[serde(skip_serializing_if = "is_false", default)]
+    pub external_access_enabled: bool,
+    #[serde(skip_serializing_if = "is_false", default)]
+    pub tls_enabled: bool,
+    #[serde(skip_serializing_if = "String::is_empty", default)]
+    pub web_path: String,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub units: Vec<String>,
+    #[serde(skip_serializing_if = "String::is_empty", default)]
+    pub installed_version: String,
+    #[serde(skip_serializing_if = "String::is_empty", default)]
+    pub latest_version: String,
+    #[serde(skip_serializing_if = "is_false", default)]
+    pub update_available: bool,
+    #[serde(skip_serializing_if = "String::is_empty", default)]
+    pub update_checked_at: String,
+    #[serde(skip_serializing_if = "String::is_empty", default)]
+    pub update_url: String,
+    #[serde(skip_serializing_if = "String::is_empty", default)]
+    pub update_error: String,
+    #[serde(skip_serializing_if = "String::is_empty", default)]
+    pub job_status: String,
+    #[serde(skip_serializing_if = "is_zero_i32", default)]
+    pub progress: i32,
+    #[serde(skip_serializing_if = "String::is_empty", default)]
+    pub log_line: String,
+    #[serde(skip_serializing_if = "String::is_empty", default)]
+    pub started_at: String,
+}
+
+static SERVICE_INFO_CACHE: Lazy<RwLock<HashMap<String, ((String, String, String), Instant)>>> =
+    Lazy::new(|| RwLock::new(HashMap::new()));
+
+static PM2_SERVICES_CACHE: Lazy<RwLock<(HashMap<String, (String, String)>, Option<Instant>)>> =
+    Lazy::new(|| RwLock::new((HashMap::new(), None)));
+
+pub fn clear_service_status_cache() {
+    if let Ok(mut g) = SERVICE_INFO_CACHE.write() {
+        g.clear();
+    }
+    if let Ok(mut g) = PM2_SERVICES_CACHE.write() {
+        g.0.clear();
+        g.1 = None;
+    }
+}
+
+/// Resolves a logical package or service name into its concrete systemd unit names (`systemctl.go`).
+pub fn resolve_service_units(target: &str) -> Vec<String> {
+    let clean = target
+        .trim()
+        .trim_end_matches(".service")
+        .to_string();
+    if clean.is_empty() {
+        return Vec::new();
+    }
+    let lower = clean.to_lowercase();
+    match lower.as_str() {
+        "deluge" | "deluged" => vec!["deluged".to_string(), "deluge-web".to_string()],
+        "mcvnc" | "kasmvnc" => vec!["aetherflow-VNC".to_string()],
+        "plex" | "plexmediaserver" => vec!["plexmediaserver".to_string()],
+        "emby" | "emby-server" => vec!["emby-server".to_string()],
+        "pihole" | "pihole-ftl" => vec!["pihole-FTL".to_string()],
+        "transmission" | "transmission-daemon" => vec!["transmission-daemon".to_string()],
+        "qbittorrent" | "qbittorrent-nox" => {
+            // Check if a templated unit like qbittorrent-nox@<user>.service exists on disk
+            for dir in ["/etc/systemd/system/multi-user.target.wants", "/etc/systemd/system"] {
+                if let Ok(entries) = fs::read_dir(dir) {
+                    for entry in entries.flatten() {
+                        let fname = entry.file_name().to_string_lossy().to_string();
+                        if fname.starts_with("qbittorrent-nox@") && fname.ends_with(".service") {
+                            return vec![fname.trim_end_matches(".service").to_string()];
+                        }
+                    }
+                }
+            }
+            vec!["qbittorrent-nox".to_string()]
+        }
+        "paperless" | "paperless-ngx" | "paperless-webserver" => {
+            vec!["paperless-webserver".to_string()]
+        }
+        "wireguard" => vec!["wg-quick@wg0".to_string()],
+        "tailscale" => vec!["tailscaled".to_string()],
+        "mysql" | "mariadb" => vec!["mariadb".to_string()],
+        "nfs" | "nfs-server" | "nfs-kernel-server" => vec!["nfs-kernel-server".to_string()],
+        "samba" | "smbd" => vec!["smbd".to_string()],
+        _ => vec![clean],
+    }
+}
+
+pub fn format_uptime_duration(dur: chrono::Duration) -> String {
+    let total_secs = dur.num_seconds();
+    if total_secs < 0 {
+        return "Active".to_string();
+    }
+    let days = total_secs / 86_400;
+    let hours = (total_secs % 86_400) / 3_600;
+    let mins = (total_secs % 3_600) / 60;
+    if days > 0 {
+        format!("{}d {}h", days, hours)
+    } else if hours > 0 {
+        format!("{}h {}m", hours, mins)
+    } else if mins > 0 {
+        format!("{}m", mins)
+    } else {
+        "Just started".to_string()
+    }
+}
+
+/// Formats systemd's `ActiveEnterTimestamp` string into a concise human-readable uptime (`service_manager.go`).
+pub fn format_uptime(enter_timestamp: &str) -> String {
+    let raw = enter_timestamp.trim();
+    if raw.is_empty() || raw.eq_ignore_ascii_case("n/a") {
+        return "Active".to_string();
+    }
+    if let Ok(dt) = DateTime::parse_from_rfc3339(raw) {
+        return format_uptime_duration(Utc::now().signed_duration_since(dt.with_timezone(&Utc)));
+    }
+    if let Ok(dt) = DateTime::parse_from_rfc2822(raw) {
+        return format_uptime_duration(Utc::now().signed_duration_since(dt.with_timezone(&Utc)));
+    }
+
+    // systemd format: "Mon 2026-03-30 12:34:56 UTC" or "2026-03-30 12:34:56 UTC"
+    let tokens: Vec<&str> = raw.split_whitespace().collect();
+    let date_time_pair = if tokens.len() >= 3 && tokens[0].chars().all(|c| c.is_ascii_alphabetic()) {
+        Some(format!("{} {}", tokens[1], tokens[2]))
+    } else if tokens.len() >= 2 {
+        Some(format!("{} {}", tokens[0], tokens[1]))
+    } else {
+        None
+    };
+
+    if let Some(pair) = date_time_pair {
+        for fmt in ["%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M:%S%.f"] {
+            if let Ok(naive) = NaiveDateTime::parse_from_str(&pair, fmt) {
+                let dt_utc = Utc.from_utc_datetime(&naive);
+                return format_uptime_duration(Utc::now().signed_duration_since(dt_utc));
+            }
+        }
+    }
+
+    "Active".to_string()
+}
+
+/// Queries `systemctl show <unit> --property=ActiveState,SubState,ActiveEnterTimestamp`
+/// with a short in-memory cache and graceful fallback on non-systemd platforms (`service_manager.go`).
+pub fn get_service_info(service_name: &str) -> (String, String, String) {
+    let units = resolve_service_units(service_name);
+    let primary_unit = units
+        .first()
+        .cloned()
+        .unwrap_or_else(|| service_name.to_string());
+    if units.is_empty() {
+        return ("stopped".to_string(), "-".to_string(), primary_unit);
+    }
+
+    let cache_key = units.join("+");
+    let now = Instant::now();
+    if let Ok(guard) = SERVICE_INFO_CACHE.read() {
+        if let Some((cached, expires_at)) = guard.get(&cache_key) {
+            if now < *expires_at {
+                return cached.clone();
+            }
+        }
+    }
+
+    let mut systemctl_available = false;
+    let mut any_running = false;
+    let mut any_restarting = false;
+    let mut best_uptime = "-".to_string();
+
+    #[cfg(target_os = "linux")]
+    for unit in &units {
+        if let Ok(out) = StdCommand::new("systemctl")
+            .args([
+                "show",
+                unit,
+                "--property=ActiveState,SubState,ActiveEnterTimestamp",
+            ])
+            .output()
+        {
+            if out.status.success() {
+                systemctl_available = true;
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                let mut active_state = String::new();
+                let mut sub_state = String::new();
+                let mut enter_ts = String::new();
+                for line in stdout.lines() {
+                    if let Some((k, v)) = line.split_once('=') {
+                        match k.trim() {
+                            "ActiveState" => active_state = v.trim().to_lowercase(),
+                            "SubState" => sub_state = v.trim().to_lowercase(),
+                            "ActiveEnterTimestamp" => enter_ts = v.trim().to_string(),
+                            _ => {}
+                        }
+                    }
+                }
+                if active_state == "active"
+                    || matches!(sub_state.as_str(), "running" | "exited" | "listening")
+                {
+                    any_running = true;
+                    if best_uptime == "-" {
+                        best_uptime = format_uptime(&enter_ts);
+                    }
+                } else if matches!(
+                    active_state.as_str(),
+                    "activating" | "deactivating" | "reloading"
+                ) {
+                    any_restarting = true;
+                }
+            }
+        }
+    }
+
+    let result = if systemctl_available {
+        if any_running {
+            ("running".to_string(), best_uptime, primary_unit)
+        } else if any_restarting {
+            ("restarting".to_string(), "Transitioning".to_string(), primary_unit)
+        } else {
+            ("stopped".to_string(), "-".to_string(), primary_unit)
+        }
+    } else {
+        // Non-systemd environment (container, dev, or test): default installed services to running
+        ("running".to_string(), "Active".to_string(), primary_unit)
+    };
+
+    if let Ok(mut guard) = SERVICE_INFO_CACHE.write() {
+        guard.insert(cache_key, (result.clone(), now + Duration::from_secs(3)));
+    }
+    result
+}
+
+pub fn get_pm2_services() -> HashMap<String, (String, String)> {
+    let now = Instant::now();
+    if let Ok(guard) = PM2_SERVICES_CACHE.read() {
+        if let Some(exp) = guard.1 {
+            if now < exp {
+                return guard.0.clone();
+            }
+        }
+    }
+
+    let mut map = HashMap::new();
+    #[cfg(target_os = "linux")]
+    if let Ok(out) = StdCommand::new("pm2").arg("jlist").output() {
+        if out.status.success() {
+            if let Ok(arr) = serde_json::from_slice::<Vec<serde_json::Value>>(&out.stdout) {
+                for item in arr {
+                    let Some(name) = item.get("name").and_then(|v| v.as_str()) else {
+                        continue;
+                    };
+                    let pm2_env = item.get("pm2_env");
+                    let raw_status = pm2_env
+                        .and_then(|e| e.get("status"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("stopped");
+                    let status = match raw_status {
+                        "online" => "running",
+                        "launching" | "stopping" | "waiting restart" => "restarting",
+                        _ => "stopped",
+                    };
+                    let uptime = if status == "running" {
+                        if let Some(ms) = pm2_env
+                            .and_then(|e| e.get("pm_uptime"))
+                            .and_then(|v| v.as_i64())
+                        {
+                            let now_ms = Utc::now().timestamp_millis();
+                            if ms > 0 && now_ms >= ms {
+                                format_uptime_duration(chrono::Duration::milliseconds(now_ms - ms))
+                            } else {
+                                "Active".to_string()
+                            }
+                        } else {
+                            "Active".to_string()
+                        }
+                    } else {
+                        "-".to_string()
+                    };
+                    map.insert(name.to_string(), (status.to_string(), uptime));
+                }
+            }
+        }
+    }
+
+    if let Ok(mut guard) = PM2_SERVICES_CACHE.write() {
+        *guard = (map.clone(), Some(now + Duration::from_secs(3)));
+    }
+    map
+}
+
+pub fn get_pm2_service_info(service_name: &str) -> (String, String) {
+    let map = get_pm2_services();
+    if let Some(info) = map.get(service_name) {
+        return info.clone();
+    }
+    for (k, v) in map {
+        if k.eq_ignore_ascii_case(service_name) {
+            return v;
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        return ("running".to_string(), "Active".to_string());
+    }
+    #[cfg(target_os = "linux")]
+    {
+        ("stopped".to_string(), "-".to_string())
+    }
 }
 
 pub fn get_active_services() -> HashMap<String, ServiceStatusItem> {
     let mut map = HashMap::new();
+
+    // 1. Core Systemd Services (`service_manager.go`: AetherFlow API, AetherFlow Frontend, Apache2 Web Server)
+    let (_api_st, api_up, _api_unit) = get_service_info("aetherflow-api");
+    map.insert(
+        "AetherFlow API".to_string(),
+        ServiceStatusItem {
+            id: "aetherflow-api".to_string(),
+            status: "running".to_string(),
+            uptime: if api_up == "-" {
+                "Active".to_string()
+            } else {
+                api_up
+            },
+            version: "v3.2.6".to_string(),
+            managed_by: "systemd".to_string(),
+            process: "aetherflow-api".to_string(),
+            units: vec!["aetherflow-api".to_string()],
+            ..Default::default()
+        },
+    );
+
+    let (fe_st, fe_up, _fe_unit) = get_service_info("aetherflow-frontend");
+    let (fe_status, fe_uptime, fe_managed_by) = if fe_st == "running" {
+        (fe_st, fe_up, "systemd".to_string())
+    } else {
+        (
+            "running".to_string(),
+            "Integrated".to_string(),
+            "embedded".to_string(),
+        )
+    };
+    map.insert(
+        "AetherFlow Frontend".to_string(),
+        ServiceStatusItem {
+            id: "aetherflow-frontend".to_string(),
+            status: fe_status,
+            uptime: fe_uptime,
+            version: "v3.2.6".to_string(),
+            managed_by: fe_managed_by,
+            process: "aetherflow-frontend".to_string(),
+            units: vec!["aetherflow-frontend".to_string()],
+            ..Default::default()
+        },
+    );
+
+    let (apache_st, apache_up, _apache_unit) = get_service_info("apache2");
+    map.insert(
+        "Apache2 Web Server".to_string(),
+        ServiceStatusItem {
+            id: "apache2".to_string(),
+            status: apache_st,
+            uptime: apache_up,
+            version: "system".to_string(),
+            managed_by: "systemd".to_string(),
+            process: "apache2".to_string(),
+            units: vec!["apache2".to_string()],
+            ..Default::default()
+        },
+    );
+
+    // 2. Installed & Active-Job Packages
+    let ingress_map: HashMap<String, af_models::AppIngressConfig> =
+        af_db::get_all_app_ingress_configs()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|c| (c.app_name.clone(), c))
+            .collect();
+    let base_domain = resolve_base_domain();
     let pkgs = get_packages().unwrap_or_default();
+
     for p in pkgs {
-        if p.status != "installed" {
+        let active_job = get_package_job_info(&p.name);
+        if p.status != "installed" && active_job.is_none() {
             continue;
         }
         let svc_name = if p.service_name.is_empty() {
@@ -434,18 +891,98 @@ pub fn get_active_services() -> HashMap<String, ServiceStatusItem> {
         } else {
             "systemd"
         };
+
+        let units = if managed_by == "systemd" {
+            resolve_service_units(&svc_name)
+        } else {
+            vec![svc_name.clone()]
+        };
+
+        let (mut svc_status, mut svc_uptime, primary_proc) = if managed_by == "pm2" {
+            let (st, up) = get_pm2_service_info(&svc_name);
+            (st, up, svc_name.clone())
+        } else {
+            get_service_info(&svc_name)
+        };
+
+        let mut job_status = String::new();
+        let mut progress = 0;
+        let mut log_line = String::new();
+        let mut started_at = String::new();
+        if let Some(job) = active_job {
+            job_status = job.status.clone();
+            progress = job.progress;
+            log_line = job.last_line;
+            started_at = job.started_at;
+            if p.status != "installed" {
+                svc_status = job.status;
+                svc_uptime = "In progress".to_string();
+            }
+        }
+
+        let runtime_meta = mutators::get_app_runtime_meta(&p.name);
+        let ing = ingress_map.get(&p.name);
+        let mut active_port = ing
+            .map(|c| c.listen_port)
+            .filter(|&port| port > 0)
+            .unwrap_or(0);
+        if active_port <= 0 && runtime_meta.configured_port > 0 {
+            active_port = runtime_meta.configured_port;
+        }
+        if active_port <= 0 && p.default_port > 0 {
+            active_port = p.default_port;
+        }
+
+        let internal_domain = resolve_app_internal_domain(&p.name);
+
+        let mut public_domain = ing
+            .map(|c| c.public_domain.clone())
+            .unwrap_or_default();
+        if public_domain.is_empty() && !base_domain.is_empty() && active_port > 0 {
+            public_domain = format_app_public_domain(&p.name, &base_domain);
+        }
+
+        let external_access_enabled = ing.map(|c| c.external_access_enabled).unwrap_or(false);
+        let tls_enabled = ing.map(|c| c.tls_enabled).unwrap_or(false);
+
+        let version = if !p.installed_version.is_empty() {
+            p.installed_version.clone()
+        } else {
+            "latest".to_string()
+        };
+
         map.insert(
             p.Label_or_name(),
             ServiceStatusItem {
-                status: "running".to_string(),
-                uptime: "Active".to_string(),
-                version: if p.installed_version.is_empty() {
-                    "latest".to_string()
-                } else {
-                    p.installed_version
-                },
+                id: p.name.clone(),
+                status: svc_status,
+                uptime: svc_uptime,
+                version,
                 managed_by: managed_by.to_string(),
-                process: svc_name,
+                process: if primary_proc.is_empty() {
+                    svc_name
+                } else {
+                    primary_proc
+                },
+                default_port: p.default_port,
+                active_port,
+                api_key: runtime_meta.api_key,
+                internal_domain,
+                public_domain,
+                external_access_enabled,
+                tls_enabled,
+                web_path: p.web_path.clone(),
+                units,
+                installed_version: p.installed_version,
+                latest_version: p.latest_version,
+                update_available: p.update_available,
+                update_checked_at: p.update_checked_at,
+                update_url: p.update_url,
+                update_error: p.update_error,
+                job_status,
+                progress,
+                log_line,
+                started_at,
             },
         );
     }
@@ -466,39 +1003,125 @@ impl PackageExt for Package {
     }
 }
 
-pub async fn control_service(service_name: &str, action: &str) -> anyhow::Result<()> {
+#[cfg(unix)]
+fn dispatch_runner_systemctl_unix(action: &str, unit: &str) -> Option<Result<(), String>> {
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+
+    let sock_path = af_runner::runner_socket_path();
+    if !Path::new(&sock_path).exists() {
+        return None;
+    }
+    let mut stream = UnixStream::connect(&sock_path).ok()?;
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(15)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
+
+    let body = serde_json::to_string(&af_models::SystemctlRequest {
+        action: action.to_string(),
+        service: unit.to_string(),
+    })
+    .ok()?;
+    let req = format!(
+        "POST /v1/systemctl HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    stream.write_all(req.as_bytes()).ok()?;
+
+    let mut resp = String::new();
+    stream.read_to_string(&mut resp).ok()?;
+    let (headers, json_body) = resp.split_once("\r\n\r\n")?;
+    if headers.starts_with("HTTP/1.1 200") || headers.starts_with("HTTP/1.0 200") {
+        Some(Ok(()))
+    } else {
+        Some(Err(json_body.trim().to_string()))
+    }
+}
+
+pub async fn control_service_with_manager(
+    service_name: &str,
+    action: &str,
+    managed_by: &str,
+) -> anyhow::Result<()> {
     let valid_name = Regex::new(r"^[a-zA-Z0-9][a-zA-Z0-9@._-]{0,63}$").unwrap();
     if !valid_name.is_match(service_name) {
         anyhow::bail!("invalid service name: {}", service_name);
     }
-    if !matches!(action, "start" | "stop" | "restart" | "status") {
+    if !matches!(action, "start" | "stop" | "restart" | "reload" | "status") {
         anyhow::bail!("disallowed action: {}", action);
     }
 
-    let out = Command::new("sudo")
-        .args(["-n", "systemctl", action, "--", service_name])
-        .output()
-        .await;
-    match out {
-        Ok(o) if o.status.success() => Ok(()),
-        _ => {
-            // Try direct systemctl if running as root
-            let direct = Command::new("systemctl")
-                .args([action, "--", service_name])
-                .output()
-                .await?;
-            if direct.status.success() {
-                Ok(())
-            } else {
-                anyhow::bail!(
-                    "systemctl {} {} failed: {}",
-                    action,
-                    service_name,
-                    String::from_utf8_lossy(&direct.stderr)
-                )
+    if managed_by.eq_ignore_ascii_case("pm2") {
+        let out = Command::new("pm2")
+            .args([action, service_name])
+            .output()
+            .await?;
+        clear_service_status_cache();
+        if out.status.success() {
+            return Ok(());
+        }
+        anyhow::bail!(
+            "pm2 {} {} failed: {}",
+            action,
+            service_name,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    let units = resolve_service_units(service_name);
+    for unit in units {
+        if !valid_name.is_match(&unit) {
+            anyhow::bail!("invalid resolved unit name: {}", unit);
+        }
+
+        #[cfg(unix)]
+        if let Some(Ok(())) = dispatch_runner_systemctl_unix(action, &unit) {
+            continue;
+        }
+
+        let out = Command::new("sudo")
+            .args(["-n", "systemctl", action, "--", &unit])
+            .output()
+            .await;
+        match out {
+            Ok(o) if o.status.success() => continue,
+            _ => {
+                let direct = Command::new("systemctl")
+                    .args([action, "--", &unit])
+                    .output()
+                    .await?;
+                if !direct.status.success() {
+                    clear_service_status_cache();
+                    anyhow::bail!(
+                        "systemctl {} {} failed: {}",
+                        action,
+                        unit,
+                        String::from_utf8_lossy(&direct.stderr)
+                    );
+                }
             }
         }
     }
+
+    clear_service_status_cache();
+    Ok(())
+}
+
+pub async fn control_service(service_name: &str, action: &str) -> anyhow::Result<()> {
+    let managed_by = get_package_catalog()
+        .unwrap_or_default()
+        .into_iter()
+        .find(|p| p.name.eq_ignore_ascii_case(service_name) || p.service_name.eq_ignore_ascii_case(service_name))
+        .map(|p| {
+            if p.service_type == "pm2" {
+                "pm2".to_string()
+            } else {
+                "systemd".to_string()
+            }
+        })
+        .unwrap_or_else(|| "systemd".to_string());
+
+    control_service_with_manager(service_name, action, &managed_by).await
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -657,8 +1280,12 @@ pub fn set_streaming_demo_mode(enabled: bool) {
     }
 }
 
+pub fn is_streaming_demo_mode() -> bool {
+    DEMO_STREAMING_MODE.lock().map(|guard| *guard).unwrap_or(false)
+}
+
 pub fn get_streaming_dashboard(window_days: i32, is_admin: bool) -> StreamingDashboardResponse {
-    let demo_mode = DEMO_STREAMING_MODE.lock().map(|g| *g).unwrap_or(false);
+    let demo_mode = is_streaming_demo_mode();
     let mut jellyfin_server = StreamingServerStatus {
         provider: "jellyfin".to_string(),
         name: "Jellyfin".to_string(),
@@ -869,6 +1496,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_streaming_demo_mode_predicate() {
+        let previous = is_streaming_demo_mode();
+        set_streaming_demo_mode(true);
+        assert!(is_streaming_demo_mode());
+        set_streaming_demo_mode(false);
+        assert!(!is_streaming_demo_mode());
+        set_streaming_demo_mode(previous);
+    }
+
+    #[test]
+    fn test_internal_domains_are_derived_from_blueprints() {
+        let blueprint = get_blueprint("jellyfin").unwrap();
+        assert_eq!(resolve_app_internal_domain("jellyfin"), blueprint.internal_domain);
+        assert_eq!(
+            resolve_app_internal_domain("unknown-audit-app"),
+            "unknown-audit-app.aether.local"
+        );
+    }
+
+    #[test]
     fn test_embedded_package_catalog_loads_all_apps() {
         let catalog = get_package_catalog().unwrap();
         assert!(catalog.len() >= 69);
@@ -883,5 +1530,21 @@ mod tests {
         assert!(validate_server_url("http://127.0.0.1:8096").is_ok());
         assert!(validate_server_url("http://169.254.169.254/latest/meta-data").is_err());
         assert!(validate_server_url("http://metadata.google.internal").is_err());
+    }
+
+    #[test]
+    fn test_resolve_service_units_and_format_uptime() {
+        assert_eq!(
+            resolve_service_units("deluge"),
+            vec!["deluged".to_string(), "deluge-web".to_string()]
+        );
+        assert_eq!(
+            resolve_service_units("plex"),
+            vec!["plexmediaserver".to_string()]
+        );
+        assert_eq!(
+            format_uptime_duration(chrono::Duration::seconds(90_060)),
+            "1d 1h"
+        );
     }
 }

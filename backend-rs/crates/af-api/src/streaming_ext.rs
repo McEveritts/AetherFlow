@@ -2,7 +2,7 @@ use crate::auth::{api_error, AuthUser};
 use crate::ws::extract_client_ip;
 use af_services::{ActiveStreamSession, StreamingLibraryCounts, StreamingServerStatus};
 use axum::body::Body;
-use axum::extract::{Extension, Path};
+use axum::extract::{Extension, Path, Query, Request};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
 use chrono::{DateTime, Utc};
@@ -945,7 +945,8 @@ pub async fn sync_jellyfin_watch_history() -> anyhow::Result<usize> {
                 }
 
                 let batch_len = payload.items.len();
-                if let Ok(conn) = af_db::get_conn() {
+                if let Ok(mut conn) = af_db::get_conn() {
+                    if let Ok(tx) = conn.transaction() {
                     for item in payload.items {
                         let mut dur_secs = item.run_time_ticks / JELLYFIN_TICKS_PER_SECOND;
                         if dur_secs <= 0 {
@@ -1034,7 +1035,7 @@ pub async fn sync_jellyfin_watch_history() -> anyhow::Result<usize> {
                         }
 
                         let session_key = format!("jellyfin:sync:{}:{}", u.id, item.id);
-                        let res = conn.execute(
+                        let res = tx.execute(
                             r#"
                             INSERT INTO streaming_history (
                                 session_key, provider, server_name, user_id, user_name,
@@ -1115,6 +1116,8 @@ pub async fn sync_jellyfin_watch_history() -> anyhow::Result<usize> {
                                 imported += 1;
                             }
                         }
+                    }
+                    let _ = tx.commit();
                     }
                 }
 
@@ -1859,4 +1862,1050 @@ pub fn start_streaming_monitor() {
         }
     });
     tracing::info!(interval = "15s", "streaming telemetry monitor started");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 6. Demo Mode Seeder & Full Streaming Dashboard (`GetStreamingDashboard`)
+// ─────────────────────────────────────────────────────────────────────────────
+
+pub fn is_demo_mode_active() -> bool {
+    if af_services::is_streaming_demo_mode() {
+        return true;
+    }
+    env::var("AETHERFLOW_DEMO_MODE")
+        .ok()
+        .map(|v| matches!(v.trim().to_lowercase().as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false)
+}
+
+pub fn get_synthetic_demo_sessions() -> Vec<ActiveStreamSession> {
+    let started = (Utc::now() - chrono::Duration::minutes(24)).to_rfc3339();
+    vec![
+        ActiveStreamSession {
+            session_id: "demo-sess-01".to_string(),
+            provider: "jellyfin".to_string(),
+            server_name: "AetherFlow Media Vault".to_string(),
+            user_id: "usr-01".to_string(),
+            user_name: "alex".to_string(),
+            client_name: "Jellyfin Media Player".to_string(),
+            device_name: "Living Room Apple TV 4K".to_string(),
+            device_id: "appletv-4k-lr".to_string(),
+            app_version: "1.11.1".to_string(),
+            ip_address: "192.168.1.42".to_string(),
+            is_lan: true,
+            item_id: "item-dune-2".to_string(),
+            item_name: "Dune: Part Two".to_string(),
+            item_type: "Movie".to_string(),
+            series_name: String::new(),
+            series_id: String::new(),
+            season_number: 0,
+            episode_number: 0,
+            production_year: 2024,
+            has_artwork: false,
+            artwork_item_id: String::new(),
+            state: "playing".to_string(),
+            position_secs: 4620,
+            duration_secs: 9960,
+            progress_pct: 46.4,
+            play_method: "DirectPlay".to_string(),
+            container: "MKV".to_string(),
+            video_codec: "HEVC".to_string(),
+            video_resolution: "4K".to_string(),
+            video_range: "HDR10 / Dolby Vision".to_string(),
+            is_video_direct: true,
+            audio_codec: "TRUEHD".to_string(),
+            audio_channels: 8,
+            audio_layout: "7.1 Atmos".to_string(),
+            is_audio_direct: true,
+            hw_accel: String::new(),
+            transcode_reasons: Vec::new(),
+            bitrate_bps: 28_400_000,
+            bandwidth_mbps: 28.4,
+            session_data_bytes: 16_401_000_000,
+            started_at: started.clone(),
+            play_session_id: String::new(),
+            supports_media_control: true,
+            supports_remote_control: true,
+            can_send_message: true,
+        },
+        ActiveStreamSession {
+            session_id: "demo-sess-02".to_string(),
+            provider: "jellyfin".to_string(),
+            server_name: "AetherFlow Media Vault".to_string(),
+            user_id: "usr-02".to_string(),
+            user_name: "maya".to_string(),
+            client_name: "Swiftfin iOS".to_string(),
+            device_name: "iPhone 16 Pro".to_string(),
+            device_id: "iphone16-maya".to_string(),
+            app_version: "1.3.0".to_string(),
+            ip_address: "172.56.21.89".to_string(),
+            is_lan: false,
+            item_id: "item-sev-s02e04".to_string(),
+            item_name: "Woe's Hollow".to_string(),
+            item_type: "Episode".to_string(),
+            series_name: "Severance".to_string(),
+            series_id: "ser-severance".to_string(),
+            season_number: 2,
+            episode_number: 4,
+            production_year: 2025,
+            has_artwork: false,
+            artwork_item_id: String::new(),
+            state: "playing".to_string(),
+            position_secs: 1890,
+            duration_secs: 3120,
+            progress_pct: 60.6,
+            play_method: "Transcode".to_string(),
+            container: "TS".to_string(),
+            video_codec: "H264".to_string(),
+            video_resolution: "1080p".to_string(),
+            video_range: "SDR".to_string(),
+            is_video_direct: false,
+            audio_codec: "AAC".to_string(),
+            audio_channels: 2,
+            audio_layout: "Stereo".to_string(),
+            is_audio_direct: false,
+            hw_accel: "NVENC".to_string(),
+            transcode_reasons: vec![
+                "ContainerBitrateExceedsLimit".to_string(),
+                "VideoRangeNotSupported".to_string(),
+            ],
+            bitrate_bps: 8_200_000,
+            bandwidth_mbps: 8.2,
+            session_data_bytes: 1_937_250_000,
+            started_at: started.clone(),
+            play_session_id: String::new(),
+            supports_media_control: true,
+            supports_remote_control: true,
+            can_send_message: true,
+        },
+        ActiveStreamSession {
+            session_id: "demo-sess-03".to_string(),
+            provider: "jellyfin".to_string(),
+            server_name: "AetherFlow Media Vault".to_string(),
+            user_id: "usr-03".to_string(),
+            user_name: "liam".to_string(),
+            client_name: "Jellyfin Web".to_string(),
+            device_name: "Firefox 135 (Linux)".to_string(),
+            device_id: "ff-linux-liam".to_string(),
+            app_version: "10.10.6".to_string(),
+            ip_address: "192.168.1.118".to_string(),
+            is_lan: true,
+            item_id: "item-br2049".to_string(),
+            item_name: "Blade Runner 2049".to_string(),
+            item_type: "Movie".to_string(),
+            series_name: String::new(),
+            series_id: String::new(),
+            season_number: 0,
+            episode_number: 0,
+            production_year: 2017,
+            has_artwork: false,
+            artwork_item_id: String::new(),
+            state: "paused".to_string(),
+            position_secs: 6410,
+            duration_secs: 9840,
+            progress_pct: 65.1,
+            play_method: "DirectStream".to_string(),
+            container: "MP4".to_string(),
+            video_codec: "HEVC".to_string(),
+            video_resolution: "4K".to_string(),
+            video_range: "HDR10".to_string(),
+            is_video_direct: true,
+            audio_codec: "AAC".to_string(),
+            audio_channels: 6,
+            audio_layout: "5.1".to_string(),
+            is_audio_direct: false,
+            hw_accel: String::new(),
+            transcode_reasons: vec!["AudioCodecNotSupported".to_string()],
+            bitrate_bps: 18_600_000,
+            bandwidth_mbps: 0.0,
+            session_data_bytes: 14_903_250_000,
+            started_at: started,
+            play_session_id: String::new(),
+            supports_media_control: true,
+            supports_remote_control: true,
+            can_send_message: true,
+        },
+    ]
+}
+
+pub fn seed_streaming_demo_data() -> anyhow::Result<usize> {
+    af_services::set_streaming_demo_mode(true);
+    let conn = af_db::get_conn()?;
+
+    struct DemoEntry {
+        key: &'static str,
+        user_id: &'static str,
+        user_name: &'static str,
+        client_name: &'static str,
+        device_name: &'static str,
+        ip: &'static str,
+        item_id: &'static str,
+        item_name: &'static str,
+        item_type: &'static str,
+        series_name: &'static str,
+        season: i32,
+        episode: i32,
+        year: i32,
+        method: &'static str,
+        v_codec: &'static str,
+        v_res: &'static str,
+        a_codec: &'static str,
+        a_ch: i32,
+        hw: &'static str,
+        bitrate: i64,
+        dur: i64,
+        watched: i64,
+        pct: f64,
+        hours_ago: i64,
+    }
+
+    let entries = [
+        DemoEntry { key: "demo:hist:01", user_id: "usr-01", user_name: "alex", client_name: "Jellyfin Media Player", device_name: "Apple TV 4K", ip: "192.168.1.42", item_id: "it-01", item_name: "Oppenheimer", item_type: "Movie", series_name: "", season: 0, episode: 0, year: 2023, method: "DirectPlay", v_codec: "HEVC", v_res: "4K", a_codec: "TRUEHD", a_ch: 8, hw: "", bitrate: 31_000_000, dur: 10800, watched: 10650, pct: 98.6, hours_ago: 3 },
+        DemoEntry { key: "demo:hist:02", user_id: "usr-02", user_name: "maya", client_name: "Swiftfin iOS", device_name: "iPhone 16 Pro", ip: "172.56.21.89", item_id: "it-02", item_name: "Hello, Ms. Cobel", item_type: "Episode", series_name: "Severance", season: 2, episode: 1, year: 2025, method: "Transcode", v_codec: "H264", v_res: "1080p", a_codec: "AAC", a_ch: 2, hw: "NVENC", bitrate: 8_500_000, dur: 3300, watched: 3250, pct: 98.5, hours_ago: 6 },
+        DemoEntry { key: "demo:hist:03", user_id: "usr-03", user_name: "liam", client_name: "Jellyfin Web", device_name: "Firefox 135", ip: "192.168.1.118", item_id: "it-03", item_name: "The Batman", item_type: "Movie", series_name: "", season: 0, episode: 0, year: 2022, method: "DirectStream", v_codec: "HEVC", v_res: "4K", a_codec: "AAC", a_ch: 6, hw: "", bitrate: 22_000_000, dur: 10560, watched: 10200, pct: 96.6, hours_ago: 12 },
+        DemoEntry { key: "demo:hist:04", user_id: "usr-04", user_name: "sophia", client_name: "Jellyfin Android TV", device_name: "NVIDIA Shield Pro", ip: "192.168.1.55", item_id: "it-04", item_name: "Interstellar", item_type: "Movie", series_name: "", season: 0, episode: 0, year: 2014, method: "DirectPlay", v_codec: "HEVC", v_res: "4K", a_codec: "DTS", a_ch: 6, hw: "", bitrate: 29_500_000, dur: 10140, watched: 10100, pct: 99.6, hours_ago: 19 },
+        DemoEntry { key: "demo:hist:05", user_id: "usr-01", user_name: "alex", client_name: "Jellyfin Media Player", device_name: "Apple TV 4K", ip: "192.168.1.42", item_id: "it-05", item_name: "Goodbye, Mrs. Selvig", item_type: "Episode", series_name: "Severance", season: 2, episode: 2, year: 2025, method: "DirectPlay", v_codec: "HEVC", v_res: "4K", a_codec: "EAC3", a_ch: 6, hw: "", bitrate: 15_200_000, dur: 2940, watched: 2900, pct: 98.6, hours_ago: 27 },
+        DemoEntry { key: "demo:hist:06", user_id: "usr-02", user_name: "maya", client_name: "Swiftfin iOS", device_name: "iPad Pro M4", ip: "192.168.1.73", item_id: "it-06", item_name: "Who Is Alive?", item_type: "Episode", series_name: "Severance", season: 2, episode: 3, year: 2025, method: "DirectPlay", v_codec: "HEVC", v_res: "4K", a_codec: "EAC3", a_ch: 6, hw: "", bitrate: 14_800_000, dur: 3180, watched: 3140, pct: 98.7, hours_ago: 36 },
+        DemoEntry { key: "demo:hist:07", user_id: "usr-05", user_name: "noah", client_name: "Jellyfin Roku", device_name: "Roku Ultra", ip: "192.168.1.90", item_id: "it-07", item_name: "Civil War", item_type: "Movie", series_name: "", season: 0, episode: 0, year: 2024, method: "Transcode", v_codec: "H264", v_res: "1080p", a_codec: "AAC", a_ch: 2, hw: "NVENC", bitrate: 9_800_000, dur: 6540, watched: 6400, pct: 97.9, hours_ago: 48 },
+        DemoEntry { key: "demo:hist:08", user_id: "usr-04", user_name: "sophia", client_name: "Finamp", device_name: "Pixel 9 Pro", ip: "192.168.1.56", item_id: "it-08", item_name: "Random Access Memories (Track 1)", item_type: "Audio", series_name: "Daft Punk", season: 0, episode: 1, year: 2013, method: "DirectPlay", v_codec: "NONE", v_res: "Audio", a_codec: "FLAC", a_ch: 2, hw: "", bitrate: 1_411_000, dur: 275, watched: 275, pct: 100.0, hours_ago: 52 },
+        DemoEntry { key: "demo:hist:09", user_id: "usr-03", user_name: "liam", client_name: "Jellyfin Web", device_name: "MacBook Pro", ip: "192.168.1.119", item_id: "it-09", item_name: "Arrival", item_type: "Movie", series_name: "", season: 0, episode: 0, year: 2016, method: "DirectPlay", v_codec: "HEVC", v_res: "1080p", a_codec: "EAC3", a_ch: 6, hw: "", bitrate: 11_200_000, dur: 6960, watched: 6890, pct: 99.0, hours_ago: 74 },
+        DemoEntry { key: "demo:hist:10", user_id: "usr-01", user_name: "alex", client_name: "Jellyfin Media Player", device_name: "Apple TV 4K", ip: "192.168.1.42", item_id: "it-10", item_name: "Dune: Part One", item_type: "Movie", series_name: "", season: 0, episode: 0, year: 2021, method: "DirectPlay", v_codec: "HEVC", v_res: "4K", a_codec: "TRUEHD", a_ch: 8, hw: "", bitrate: 27_600_000, dur: 9300, watched: 9240, pct: 99.4, hours_ago: 96 },
+    ];
+
+    let now = Utc::now();
+    for e in &entries {
+        let start_ts = (now - chrono::Duration::hours(e.hours_ago) - chrono::Duration::seconds(e.watched))
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
+        let end_ts = (now - chrono::Duration::hours(e.hours_ago))
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
+        let data_bytes = e.watched * (e.bitrate / 8);
+
+        let _ = conn.execute(
+            r#"
+            INSERT INTO streaming_history (
+                session_key, provider, server_name, user_id, user_name,
+                client_name, device_name, device_id, ip_address,
+                item_id, item_name, item_type, series_name,
+                season_number, episode_number, production_year,
+                play_method, container, video_codec, video_resolution,
+                audio_codec, audio_channels, hw_accel,
+                bitrate_bps, duration_secs, watched_secs, data_used_bytes, completion_pct,
+                started_at, last_seen_at, ended_at, is_active
+            ) VALUES (
+                ?1, 'demo', 'AetherFlow Media Vault', ?2, ?3,
+                ?4, ?5, ?6, ?7,
+                ?8, ?9, ?10, ?11,
+                ?12, ?13, ?14,
+                ?15, 'MKV', ?16, ?17,
+                ?18, ?19, ?20,
+                ?21, ?22, ?23, ?24, ?25,
+                ?26, ?27, ?27, 0
+            )
+            ON CONFLICT(session_key) DO UPDATE SET
+                watched_secs = excluded.watched_secs,
+                data_used_bytes = excluded.data_used_bytes,
+                completion_pct = excluded.completion_pct
+            "#,
+            params![
+                e.key,
+                e.user_id,
+                e.user_name,
+                e.client_name,
+                e.device_name,
+                e.device_name,
+                e.ip,
+                e.item_id,
+                e.item_name,
+                e.item_type,
+                e.series_name,
+                e.season,
+                e.episode,
+                e.year,
+                e.method,
+                e.v_codec,
+                e.v_res,
+                e.a_codec,
+                e.a_ch,
+                e.hw,
+                e.bitrate,
+                e.dur,
+                e.watched,
+                data_bytes,
+                e.pct,
+                start_ts,
+                end_ts,
+            ],
+        );
+    }
+
+    let _ = conn.execute(
+        "DELETE FROM streaming_bandwidth_samples WHERE provider = 'demo'",
+        [],
+    );
+    for i in (0..=48).rev() {
+        let ts = (now - chrono::Duration::minutes(i * 30))
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
+        let active = ((i % 4) + 1) as i32;
+        let dp = ((active + 1) / 2).max(1);
+        let ds = if active >= 3 { 1 } else { 0 };
+        let tc = (active - dp - ds).max(0);
+        let bitrate = (dp as i64 * 18_500_000) + (ds as i64 * 14_000_000) + (tc as i64 * 8_200_000);
+        let bytes_delta = (bitrate / 8) * 1800;
+        let _ = conn.execute(
+            r#"
+            INSERT INTO streaming_bandwidth_samples (
+                timestamp, provider, active_streams, direct_play_count, direct_stream_count, transcode_count, total_bitrate_bps, bytes_delta
+            ) VALUES (?1, 'demo', ?2, ?3, ?4, ?5, ?6, ?7)
+            "#,
+            params![ts, active, dp, ds, tc, bitrate, bytes_delta],
+        );
+    }
+
+    Ok(entries.len())
+}
+
+pub fn clear_streaming_demo_data() -> anyhow::Result<()> {
+    af_services::set_streaming_demo_mode(false);
+    let conn = af_db::get_conn()?;
+    let _ = conn.execute(
+        "DELETE FROM streaming_history WHERE provider = 'demo' OR session_key LIKE 'demo:%'",
+        [],
+    );
+    let _ = conn.execute(
+        "DELETE FROM streaming_bandwidth_samples WHERE provider = 'demo'",
+        [],
+    );
+    Ok(())
+}
+
+pub fn parse_window_days(raw: &str) -> (i32, &'static str) {
+    match raw.trim().to_lowercase().as_str() {
+        "1" | "24h" | "1d" => (1, "24h"),
+        "7" | "7d" => (7, "7d"),
+        "30" | "30d" => (30, "30d"),
+        "90" | "90d" => (90, "90d"),
+        "365" | "365d" | "1y" => (365, "365d"),
+        "0" | "all" => (0, "all"),
+        _ => (30, "30d"),
+    }
+}
+
+pub async fn build_streaming_dashboard(window_raw: &str, is_admin: bool) -> serde_json::Value {
+    let (window_days, window_label) = parse_window_days(window_raw);
+    let (jf_name, jf_url, jf_key, jf_enabled) = get_stored_jellyfin_config();
+
+    let masked_key = if !is_admin {
+        String::new()
+    } else if jf_key.len() > 4 {
+        let tail: String = jf_key
+            .chars()
+            .rev()
+            .take(4)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        format!("****{}", tail)
+    } else if !jf_key.is_empty() {
+        "****".to_string()
+    } else {
+        String::new()
+    };
+
+    let mut jf_status = StreamingServerStatus {
+        provider: "jellyfin".to_string(),
+        name: jf_name.clone(),
+        url: jf_url.clone(),
+        api_key_masked: masked_key,
+        configured: !jf_key.is_empty(),
+        enabled: jf_enabled,
+        status: "unconfigured".to_string(),
+        support_stage: "active".to_string(),
+        server_id: String::new(),
+        version: String::new(),
+        operating_system: String::new(),
+        library_counts: StreamingLibraryCounts::default(),
+        last_connected_at: String::new(),
+        error_message: String::new(),
+    };
+
+    let mut live_sessions: Vec<ActiveStreamSession> = Vec::new();
+    let mut use_demo = is_demo_mode_active();
+
+    if jf_enabled && !jf_key.is_empty() {
+        use_demo = false;
+        match test_jellyfin_connection(&jf_url, &jf_key).await {
+            Ok(st) => {
+                jf_status = st;
+                jf_status.name = jf_name.clone();
+                jf_status.enabled = jf_enabled;
+                if !is_admin {
+                    jf_status.api_key_masked.clear();
+                }
+                if jf_status.status == "connected" {
+                    if let Ok(sessions) = fetch_jellyfin_live_sessions(&jf_name, &jf_url, &jf_key).await {
+                        live_sessions = sessions;
+                        record_live_sessions_snapshot("jellyfin", &live_sessions, 0);
+                    }
+                }
+            }
+            Err(e) => {
+                jf_status.status = "offline".to_string();
+                jf_status.error_message = e.to_string();
+            }
+        }
+    } else if use_demo {
+        if let Ok(conn) = af_db::get_conn() {
+            let demo_count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM streaming_history WHERE provider = 'demo'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap_or(0);
+            drop(conn);
+            if demo_count == 0 {
+                let _ = seed_streaming_demo_data();
+            }
+        }
+        live_sessions = get_synthetic_demo_sessions();
+        jf_status.status = "demo".to_string();
+        jf_status.configured = true;
+        jf_status.name = "AetherFlow Media Vault (Demo)".to_string();
+        jf_status.version = "10.10.6".to_string();
+        jf_status.operating_system = "Linux 6.8 (Ubuntu 24.04 LTS)".to_string();
+        jf_status.library_counts = StreamingLibraryCounts {
+            movies: 1420,
+            series: 318,
+            episodes: 14890,
+            audio: 26400,
+        };
+    }
+
+    if !is_admin {
+        for s in &mut live_sessions {
+            s.ip_address.clear();
+        }
+    }
+
+    let servers = vec![
+        jf_status,
+        StreamingServerStatus {
+            provider: "plex".to_string(),
+            name: "Plex Media Server".to_string(),
+            url: "http://127.0.0.1:32400".to_string(),
+            api_key_masked: String::new(),
+            configured: false,
+            enabled: false,
+            status: "planned".to_string(),
+            support_stage: "planned".to_string(),
+            server_id: String::new(),
+            version: String::new(),
+            operating_system: String::new(),
+            library_counts: StreamingLibraryCounts::default(),
+            last_connected_at: String::new(),
+            error_message: String::new(),
+        },
+        StreamingServerStatus {
+            provider: "emby".to_string(),
+            name: "Emby Server".to_string(),
+            url: "http://127.0.0.1:8096".to_string(),
+            api_key_masked: String::new(),
+            configured: false,
+            enabled: false,
+            status: "planned".to_string(),
+            support_stage: "planned".to_string(),
+            server_id: String::new(),
+            version: String::new(),
+            operating_system: String::new(),
+            library_counts: StreamingLibraryCounts::default(),
+            last_connected_at: String::new(),
+            error_message: String::new(),
+        },
+    ];
+
+    // Live summary calculations
+    let active_streams = live_sessions.len() as i32;
+    let mut direct_play_count = 0i32;
+    let mut direct_stream_count = 0i32;
+    let mut transcode_count = 0i32;
+    let mut hw_transcode_count = 0i32;
+    let mut paused_count = 0i32;
+    let mut total_bitrate_bps = 0i64;
+    let mut active_session_bytes = 0i64;
+    let mut lan_streams = 0i32;
+    let mut wan_streams = 0i32;
+    let mut lan_bitrate_bps = 0i64;
+    let mut wan_bitrate_bps = 0i64;
+
+    for s in &live_sessions {
+        match s.play_method.as_str() {
+            "Transcode" => {
+                transcode_count += 1;
+                if !s.hw_accel.is_empty() && !s.hw_accel.eq_ignore_ascii_case("none") {
+                    hw_transcode_count += 1;
+                }
+            }
+            "DirectStream" => direct_stream_count += 1,
+            _ => direct_play_count += 1,
+        }
+        if s.state == "paused" {
+            paused_count += 1;
+        } else {
+            total_bitrate_bps += s.bitrate_bps;
+            if s.is_lan {
+                lan_bitrate_bps += s.bitrate_bps;
+            } else {
+                wan_bitrate_bps += s.bitrate_bps;
+            }
+        }
+        active_session_bytes += s.session_data_bytes;
+        if s.is_lan {
+            lan_streams += 1;
+        } else {
+            wan_streams += 1;
+        }
+    }
+
+    let total_bandwidth_mbps = ((total_bitrate_bps as f64 / 1_000_000.0) * 100.0).round() / 100.0;
+    let lan_bandwidth_mbps = ((lan_bitrate_bps as f64 / 1_000_000.0) * 100.0).round() / 100.0;
+    let wan_bandwidth_mbps = ((wan_bitrate_bps as f64 / 1_000_000.0) * 100.0).round() / 100.0;
+
+    // Historical Analytics from SQLite
+    let mut total_plays = 0i32;
+    let mut total_watched_secs = 0i64;
+    let mut total_data_bytes = 0i64;
+    let mut unique_users = 0i32;
+    let mut unique_titles = 0i32;
+    let mut avg_completion_pct = 0.0f64;
+    let mut peak_concurrent = active_streams;
+    let mut peak_bandwidth_mbps = total_bandwidth_mbps;
+
+    let mut st_direct_play = 0i32;
+    let mut st_direct_stream = 0i32;
+    let mut st_transcode = 0i32;
+
+    let mut media_type_breakdown: Vec<serde_json::Value> = Vec::new();
+    let mut resolution_breakdown: Vec<serde_json::Value> = Vec::new();
+    let mut codec_breakdown: Vec<serde_json::Value> = Vec::new();
+    let mut time_series: Vec<serde_json::Value> = Vec::new();
+    let mut top_users: Vec<serde_json::Value> = Vec::new();
+    let mut top_titles: Vec<serde_json::Value> = Vec::new();
+    let mut top_clients: Vec<serde_json::Value> = Vec::new();
+    let mut recent_history: Vec<serde_json::Value> = Vec::new();
+
+    if let Ok(conn) = af_db::get_conn() {
+        let mut where_clauses: Vec<String> = Vec::new();
+        if !use_demo {
+            where_clauses.push("provider != 'demo'".to_string());
+        }
+        if window_days > 0 {
+            where_clauses.push(format!(
+                "started_at >= datetime('now', '-{} days')",
+                window_days
+            ));
+        }
+        let where_sql = if where_clauses.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {}", where_clauses.join(" AND "))
+        };
+
+        // 1. Totals & Aggregates
+        let agg_sql = format!(
+            r#"
+            SELECT
+                COUNT(*),
+                COALESCE(SUM(watched_secs), 0),
+                COALESCE(SUM(data_used_bytes), 0),
+                COUNT(DISTINCT CASE WHEN user_name != '' THEN user_name ELSE user_id END),
+                COUNT(DISTINCT CASE WHEN series_name != '' THEN series_name ELSE item_name END),
+                COALESCE(AVG(completion_pct), 0),
+                COALESCE(SUM(CASE WHEN play_method = 'DirectPlay' THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN play_method = 'DirectStream' THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN play_method = 'Transcode' THEN 1 ELSE 0 END), 0)
+            FROM streaming_history
+            {}
+            "#,
+            where_sql
+        );
+        if let Ok(row) = conn.query_row(&agg_sql, [], |r| {
+            Ok((
+                r.get::<_, i32>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, i32>(3)?,
+                r.get::<_, i32>(4)?,
+                r.get::<_, f64>(5)?,
+                r.get::<_, i32>(6)?,
+                r.get::<_, i32>(7)?,
+                r.get::<_, i32>(8)?,
+            ))
+        }) {
+            total_plays = row.0;
+            total_watched_secs = row.1;
+            total_data_bytes = row.2;
+            unique_users = row.3;
+            unique_titles = row.4;
+            avg_completion_pct = (row.5 * 10.0).round() / 10.0;
+            st_direct_play = row.6;
+            st_direct_stream = row.7;
+            st_transcode = row.8;
+        }
+
+        // 2. Peak concurrency & bandwidth from streaming_bandwidth_samples
+        let mut bw_clauses: Vec<String> = Vec::new();
+        if !use_demo {
+            bw_clauses.push("provider != 'demo'".to_string());
+        }
+        if window_days > 0 {
+            bw_clauses.push(format!(
+                "timestamp >= datetime('now', '-{} days')",
+                window_days
+            ));
+        }
+        let bw_where = if bw_clauses.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {}", bw_clauses.join(" AND "))
+        };
+        let peak_sql = format!(
+            "SELECT COALESCE(MAX(active_streams), 0), COALESCE(MAX(total_bitrate_bps), 0) FROM streaming_bandwidth_samples {}",
+            bw_where
+        );
+        if let Ok((p_streams, p_bitrate)) = conn.query_row(&peak_sql, [], |r| {
+            Ok((r.get::<_, i32>(0)?, r.get::<_, i64>(1)?))
+        }) {
+            if p_streams > peak_concurrent {
+                peak_concurrent = p_streams;
+            }
+            let p_mbps = ((p_bitrate as f64 / 1_000_000.0) * 100.0).round() / 100.0;
+            if p_mbps > peak_bandwidth_mbps {
+                peak_bandwidth_mbps = p_mbps;
+            }
+        }
+
+        // 3. Breakdown helper
+        let query_breakdown = |col_expr: &str| -> Vec<serde_json::Value> {
+            let mut out = Vec::new();
+            let q = format!(
+                "SELECT {col} AS label, COUNT(*) AS cnt FROM streaming_history {where_sql} GROUP BY label ORDER BY cnt DESC LIMIT 8",
+                col = col_expr,
+                where_sql = where_sql
+            );
+            if let Ok(mut stmt) = conn.prepare(&q) {
+                if let Ok(rows) = stmt.query_map([], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, i32>(1)?))
+                }) {
+                    for (label, count) in rows.flatten() {
+                        let pct = if total_plays > 0 {
+                            ((count as f64 / total_plays as f64) * 1000.0).round() / 10.0
+                        } else {
+                            0.0
+                        };
+                        out.push(serde_json::json!({
+                            "label": label,
+                            "count": count,
+                            "percentage": pct,
+                        }));
+                    }
+                }
+            }
+            out
+        };
+
+        media_type_breakdown = query_breakdown("CASE WHEN item_type = '' THEN 'Movie' ELSE item_type END");
+        resolution_breakdown = query_breakdown("CASE WHEN video_resolution = '' THEN '1080p' ELSE video_resolution END");
+        codec_breakdown = query_breakdown("CASE WHEN video_codec = '' THEN 'H264' ELSE video_codec END");
+        top_clients = query_breakdown("CASE WHEN client_name = '' THEN 'Jellyfin Web' ELSE client_name END");
+
+        // 4. Time series
+        let bucket_expr = if window_days == 1 {
+            "strftime('%Y-%m-%d %H:00', started_at)"
+        } else {
+            "strftime('%Y-%m-%d', started_at)"
+        };
+        let ts_sql = format!(
+            r#"
+            SELECT
+                {bucket} AS bucket,
+                COUNT(*),
+                COALESCE(SUM(CASE WHEN play_method = 'DirectPlay' THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN play_method = 'DirectStream' THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN play_method = 'Transcode' THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(watched_secs), 0),
+                COALESCE(SUM(data_used_bytes), 0),
+                COALESCE(MAX(bitrate_bps), 0)
+            FROM streaming_history
+            {where_sql}
+            GROUP BY bucket
+            ORDER BY bucket ASC
+            LIMIT 90
+            "#,
+            bucket = bucket_expr,
+            where_sql = where_sql
+        );
+        if let Ok(mut stmt) = conn.prepare(&ts_sql) {
+            if let Ok(rows) = stmt.query_map([], |r| {
+                let max_br: i64 = r.get(7)?;
+                let watched_s: i64 = r.get(5)?;
+                Ok(serde_json::json!({
+                    "bucket": r.get::<_, String>(0)?,
+                    "plays": r.get::<_, i32>(1)?,
+                    "directPlays": r.get::<_, i32>(2)?,
+                    "direct_plays": r.get::<_, i32>(2)?,
+                    "directStreams": r.get::<_, i32>(3)?,
+                    "direct_streams": r.get::<_, i32>(3)?,
+                    "transcodes": r.get::<_, i32>(4)?,
+                    "watchedSecs": watched_s,
+                    "watched_secs": watched_s,
+                    "watchedMins": watched_s / 60,
+                    "dataBytes": r.get::<_, i64>(6)?,
+                    "data_bytes": r.get::<_, i64>(6)?,
+                    "avgMbps": ((max_br as f64 / 1_000_000.0) * 100.0).round() / 100.0,
+                    "avg_mbps": ((max_br as f64 / 1_000_000.0) * 100.0).round() / 100.0,
+                }))
+            }) {
+                for item in rows.flatten() {
+                    time_series.push(item);
+                }
+            }
+        }
+
+        // 5. Top Users
+        let users_sql = format!(
+            r#"
+            SELECT
+                user_id,
+                CASE WHEN user_name = '' THEN 'Unknown User' ELSE user_name END AS uname,
+                COUNT(*) AS plays,
+                COALESCE(SUM(watched_secs), 0) AS wsecs,
+                COALESCE(SUM(data_used_bytes), 0) AS dbytes,
+                COALESCE(SUM(CASE WHEN play_method = 'DirectPlay' THEN 1 ELSE 0 END), 0) AS dp,
+                COALESCE(SUM(CASE WHEN play_method = 'Transcode' THEN 1 ELSE 0 END), 0) AS tc,
+                COALESCE(MAX(last_seen_at), '') AS last_seen,
+                COALESCE(MAX(device_name), '') AS last_dev
+            FROM streaming_history
+            {}
+            GROUP BY uname
+            ORDER BY wsecs DESC, plays DESC
+            LIMIT 10
+            "#,
+            where_sql
+        );
+        if let Ok(mut stmt) = conn.prepare(&users_sql) {
+            if let Ok(rows) = stmt.query_map([], |r| {
+                let wsecs: i64 = r.get(3)?;
+                Ok(serde_json::json!({
+                    "userId": r.get::<_, String>(0)?,
+                    "user_id": r.get::<_, String>(0)?,
+                    "userName": r.get::<_, String>(1)?,
+                    "user_name": r.get::<_, String>(1)?,
+                    "playCount": r.get::<_, i32>(2)?,
+                    "play_count": r.get::<_, i32>(2)?,
+                    "watchedSecs": wsecs,
+                    "watched_secs": wsecs,
+                    "watchedHours": ((wsecs as f64 / 3600.0) * 10.0).round() / 10.0,
+                    "watched_hours": ((wsecs as f64 / 3600.0) * 10.0).round() / 10.0,
+                    "dataBytes": r.get::<_, i64>(4)?,
+                    "data_bytes": r.get::<_, i64>(4)?,
+                    "directPlays": r.get::<_, i32>(5)?,
+                    "direct_plays": r.get::<_, i32>(5)?,
+                    "transcodes": r.get::<_, i32>(6)?,
+                    "lastPlayedAt": r.get::<_, String>(7)?,
+                    "last_played_at": r.get::<_, String>(7)?,
+                    "lastDevice": r.get::<_, String>(8)?,
+                    "last_device": r.get::<_, String>(8)?,
+                }))
+            }) {
+                for item in rows.flatten() {
+                    top_users.push(item);
+                }
+            }
+        }
+
+        // 6. Top Titles
+        let titles_sql = format!(
+            r#"
+            SELECT
+                MAX(item_id),
+                item_name,
+                CASE WHEN item_type = '' THEN 'Movie' ELSE item_type END,
+                series_name,
+                MAX(production_year),
+                COUNT(*) AS plays,
+                COUNT(DISTINCT CASE WHEN user_name != '' THEN user_name ELSE user_id END) AS uviewers,
+                COALESCE(SUM(watched_secs), 0) AS wsecs,
+                COALESCE(SUM(data_used_bytes), 0) AS dbytes
+            FROM streaming_history
+            {}
+            GROUP BY item_name, series_name
+            ORDER BY plays DESC, wsecs DESC
+            LIMIT 10
+            "#,
+            where_sql
+        );
+        if let Ok(mut stmt) = conn.prepare(&titles_sql) {
+            if let Ok(rows) = stmt.query_map([], |r| {
+                let wsecs: i64 = r.get(7)?;
+                Ok(serde_json::json!({
+                    "itemId": r.get::<_, String>(0)?,
+                    "item_id": r.get::<_, String>(0)?,
+                    "title": r.get::<_, String>(1)?,
+                    "itemType": r.get::<_, String>(2)?,
+                    "item_type": r.get::<_, String>(2)?,
+                    "seriesName": r.get::<_, String>(3)?,
+                    "series_name": r.get::<_, String>(3)?,
+                    "year": r.get::<_, i32>(4)?,
+                    "playCount": r.get::<_, i32>(5)?,
+                    "play_count": r.get::<_, i32>(5)?,
+                    "uniqueViewers": r.get::<_, i32>(6)?,
+                    "unique_viewers": r.get::<_, i32>(6)?,
+                    "watchedSecs": wsecs,
+                    "watched_secs": wsecs,
+                    "watchedHours": ((wsecs as f64 / 3600.0) * 10.0).round() / 10.0,
+                    "watched_hours": ((wsecs as f64 / 3600.0) * 10.0).round() / 10.0,
+                    "dataBytes": r.get::<_, i64>(8)?,
+                    "data_bytes": r.get::<_, i64>(8)?,
+                }))
+            }) {
+                for item in rows.flatten() {
+                    top_titles.push(item);
+                }
+            }
+        }
+
+        // 7. Recent History
+        let hist_sql = format!(
+            r#"
+            SELECT
+                id, provider, server_name, user_name, client_name, device_name, ip_address,
+                item_id, item_name, item_type, series_name, season_number, episode_number, production_year,
+                play_method, container, video_codec, video_resolution, audio_codec, audio_channels, hw_accel,
+                bitrate_bps, duration_secs, watched_secs, data_used_bytes, completion_pct,
+                COALESCE(CAST(started_at AS TEXT), ''),
+                COALESCE(CAST(ended_at AS TEXT), ''),
+                is_active
+            FROM streaming_history
+            {}
+            ORDER BY last_seen_at DESC
+            LIMIT 35
+            "#,
+            where_sql
+        );
+        if let Ok(mut stmt) = conn.prepare(&hist_sql) {
+            if let Ok(rows) = stmt.query_map([], |r| {
+                let raw_ip: String = r.get(6)?;
+                let ip_out = if is_admin { raw_ip } else { String::new() };
+                let is_act: i32 = r.get(28)?;
+                Ok(serde_json::json!({
+                    "id": r.get::<_, i64>(0)?,
+                    "provider": r.get::<_, String>(1)?,
+                    "serverName": r.get::<_, String>(2)?,
+                    "server_name": r.get::<_, String>(2)?,
+                    "userName": r.get::<_, String>(3)?,
+                    "user_name": r.get::<_, String>(3)?,
+                    "clientName": r.get::<_, String>(4)?,
+                    "client_name": r.get::<_, String>(4)?,
+                    "deviceName": r.get::<_, String>(5)?,
+                    "device_name": r.get::<_, String>(5)?,
+                    "ipAddress": ip_out,
+                    "ip_address": ip_out,
+                    "itemId": r.get::<_, String>(7)?,
+                    "item_id": r.get::<_, String>(7)?,
+                    "itemName": r.get::<_, String>(8)?,
+                    "item_name": r.get::<_, String>(8)?,
+                    "itemType": r.get::<_, String>(9)?,
+                    "item_type": r.get::<_, String>(9)?,
+                    "seriesName": r.get::<_, String>(10)?,
+                    "series_name": r.get::<_, String>(10)?,
+                    "seasonNumber": r.get::<_, i32>(11)?,
+                    "season_number": r.get::<_, i32>(11)?,
+                    "episodeNumber": r.get::<_, i32>(12)?,
+                    "episode_number": r.get::<_, i32>(12)?,
+                    "productionYear": r.get::<_, i32>(13)?,
+                    "production_year": r.get::<_, i32>(13)?,
+                    "playMethod": r.get::<_, String>(14)?,
+                    "play_method": r.get::<_, String>(14)?,
+                    "container": r.get::<_, String>(15)?,
+                    "videoCodec": r.get::<_, String>(16)?,
+                    "video_codec": r.get::<_, String>(16)?,
+                    "videoResolution": r.get::<_, String>(17)?,
+                    "video_resolution": r.get::<_, String>(17)?,
+                    "audioCodec": r.get::<_, String>(18)?,
+                    "audio_codec": r.get::<_, String>(18)?,
+                    "audioChannels": r.get::<_, i32>(19)?,
+                    "audio_channels": r.get::<_, i32>(19)?,
+                    "hwAccel": r.get::<_, String>(20)?,
+                    "hw_accel": r.get::<_, String>(20)?,
+                    "bitrateBps": r.get::<_, i64>(21)?,
+                    "bitrate_bps": r.get::<_, i64>(21)?,
+                    "durationSecs": r.get::<_, i64>(22)?,
+                    "duration_secs": r.get::<_, i64>(22)?,
+                    "watchedSecs": r.get::<_, i64>(23)?,
+                    "watched_secs": r.get::<_, i64>(23)?,
+                    "dataUsedBytes": r.get::<_, i64>(24)?,
+                    "data_used_bytes": r.get::<_, i64>(24)?,
+                    "completionPct": ((r.get::<_, f64>(25)? * 10.0).round() / 10.0),
+                    "completion_pct": ((r.get::<_, f64>(25)? * 10.0).round() / 10.0),
+                    "startedAt": r.get::<_, String>(26)?,
+                    "started_at": r.get::<_, String>(26)?,
+                    "endedAt": r.get::<_, String>(27)?,
+                    "ended_at": r.get::<_, String>(27)?,
+                    "isActive": is_act == 1,
+                    "is_active": is_act == 1,
+                }))
+            }) {
+                for item in rows.flatten() {
+                    recent_history.push(item);
+                }
+            }
+        }
+    }
+
+    let total_watched_hours = ((total_watched_secs as f64 / 3600.0) * 10.0).round() / 10.0;
+    let st_total = st_direct_play + st_direct_stream + st_transcode;
+    let (dp_pct, ds_pct, tc_pct) = if st_total > 0 {
+        (
+            ((st_direct_play as f64 / st_total as f64) * 1000.0).round() / 10.0,
+            ((st_direct_stream as f64 / st_total as f64) * 1000.0).round() / 10.0,
+            ((st_transcode as f64 / st_total as f64) * 1000.0).round() / 10.0,
+        )
+    } else {
+        (0.0, 0.0, 0.0)
+    };
+
+    let stream_types = serde_json::json!({
+        "directPlay": st_direct_play,
+        "direct_play": st_direct_play,
+        "directStream": st_direct_stream,
+        "direct_stream": st_direct_stream,
+        "transcode": st_transcode,
+        "directPlayPct": dp_pct,
+        "direct_play_pct": dp_pct,
+        "directStreamPct": ds_pct,
+        "direct_stream_pct": ds_pct,
+        "transcodePct": tc_pct,
+        "transcode_pct": tc_pct,
+    });
+
+    let live_summary = serde_json::json!({
+        "activeStreams": active_streams,
+        "active_streams": active_streams,
+        "directPlayCount": direct_play_count,
+        "direct_play_count": direct_play_count,
+        "directStreamCount": direct_stream_count,
+        "direct_stream_count": direct_stream_count,
+        "transcodeCount": transcode_count,
+        "transcode_count": transcode_count,
+        "hwTranscodeCount": hw_transcode_count,
+        "hw_transcode_count": hw_transcode_count,
+        "pausedCount": paused_count,
+        "paused_count": paused_count,
+        "totalBitrateBps": total_bitrate_bps,
+        "total_bitrate_bps": total_bitrate_bps,
+        "totalBandwidthMbps": total_bandwidth_mbps,
+        "total_bandwidth_mbps": total_bandwidth_mbps,
+        "lanBandwidthMbps": lan_bandwidth_mbps,
+        "lan_bandwidth_mbps": lan_bandwidth_mbps,
+        "wanBandwidthMbps": wan_bandwidth_mbps,
+        "wan_bandwidth_mbps": wan_bandwidth_mbps,
+        "activeSessionBytes": active_session_bytes,
+        "active_session_bytes": active_session_bytes,
+        "lanStreams": lan_streams,
+        "lan_streams": lan_streams,
+        "wanStreams": wan_streams,
+        "wan_streams": wan_streams,
+        "isDemoMode": use_demo,
+        "is_demo_mode": use_demo,
+    });
+
+    let analytics = serde_json::json!({
+        "window": window_label,
+        "windowDays": window_days,
+        "window_days": window_days,
+        "totalPlays": total_plays,
+        "total_plays": total_plays,
+        "totalWatchedSecs": total_watched_secs,
+        "total_watched_secs": total_watched_secs,
+        "total_watch_seconds": total_watched_secs,
+        "totalWatchedHours": total_watched_hours,
+        "total_watched_hours": total_watched_hours,
+        "totalDataBytes": total_data_bytes,
+        "total_data_bytes": total_data_bytes,
+        "uniqueUsers": unique_users,
+        "unique_users": unique_users,
+        "uniqueTitles": unique_titles,
+        "unique_titles": unique_titles,
+        "avgCompletionPct": avg_completion_pct,
+        "avg_completion_pct": avg_completion_pct,
+        "peakConcurrent": peak_concurrent,
+        "peak_concurrent": peak_concurrent,
+        "peakBandwidthMbps": peak_bandwidth_mbps,
+        "peak_bandwidth_mbps": peak_bandwidth_mbps,
+        "transcodeRatioPct": tc_pct,
+        "transcode_ratio_pct": tc_pct,
+        "streamTypes": stream_types,
+        "stream_types": stream_types,
+        "directPlayBreakdown": stream_types,
+        "direct_play_breakdown": stream_types,
+        "mediaTypeBreakdown": media_type_breakdown,
+        "media_type_breakdown": media_type_breakdown,
+        "resolutionBreakdown": resolution_breakdown,
+        "resolution_breakdown": resolution_breakdown,
+        "codecBreakdown": codec_breakdown,
+        "codec_breakdown": codec_breakdown,
+        "timeSeries": time_series,
+        "time_series": time_series,
+        "hourlyActivity": time_series,
+        "hourly_activity": time_series,
+        "dailyVolume": time_series,
+        "daily_volume": time_series,
+        "bandwidthTimeline": time_series,
+        "bandwidth_timeline": time_series,
+        "topUsers": top_users,
+        "top_users": top_users,
+        "topTitles": top_titles,
+        "top_titles": top_titles,
+        "topClients": top_clients,
+        "top_clients": top_clients,
+        "recentHistory": recent_history,
+        "recent_history": recent_history,
+    });
+
+    let generated_at = Utc::now().to_rfc3339();
+    serde_json::json!({
+        "servers": servers,
+        "liveSessions": live_sessions,
+        "live_sessions": live_sessions,
+        "liveSummary": live_summary,
+        "live_summary": live_summary,
+        "analytics": analytics,
+        "window": window_label,
+        "windowDays": window_days,
+        "window_days": window_days,
+        "generatedAt": generated_at,
+        "generated_at": generated_at,
+    })
+}
+
+pub async fn get_streaming_dashboard_handler(
+    Query(q): Query<HashMap<String, String>>,
+    req: Request,
+) -> Response {
+    let window = q
+        .get("window")
+        .or_else(|| q.get("days"))
+        .map(|s| s.as_str())
+        .unwrap_or("30");
+    let is_admin = req
+        .extensions()
+        .get::<AuthUser>()
+        .map(|u| u.role == "admin")
+        .unwrap_or(false);
+    let payload = build_streaming_dashboard(window, is_admin).await;
+    Json(payload).into_response()
 }

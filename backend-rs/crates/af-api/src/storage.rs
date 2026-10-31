@@ -24,6 +24,56 @@ use tokio::sync::broadcast;
 
 type HmacSha256 = Hmac<Sha256>;
 
+#[cfg(test)]
+mod audit_tests {
+    use super::*;
+
+    #[test]
+    fn deployment_ingress_uses_canonical_schema_and_private_defaults() {
+        let config = deployment_ingress_config("jellyfin", 18096, None);
+        assert_eq!(config.app_name, "jellyfin");
+        assert_eq!(config.listen_port, 18096);
+        assert!(config.public_domain.is_empty());
+        assert!(!config.external_access_enabled);
+        assert!(!config.tls_enabled);
+        let serialized = serde_json::to_value(config).unwrap();
+        for obsolete in ["port", "domain", "bind_ip"] {
+            assert!(serialized.get(obsolete).is_none());
+        }
+    }
+
+    #[test]
+    fn deployment_ingress_preserves_existing_exposure_and_creation_time() {
+        let created_at = Utc::now() - Duration::days(1);
+        let existing = af_models::AppIngressConfig {
+            app_name: "jellyfin".to_string(),
+            public_domain: "media.example.test".to_string(),
+            listen_port: 8096,
+            external_access_enabled: true,
+            tls_enabled: true,
+            created_at,
+            updated_at: created_at,
+        };
+        let config = deployment_ingress_config("jellyfin", 18096, Some(existing));
+        assert_eq!(config.listen_port, 18096);
+        assert_eq!(config.public_domain, "media.example.test");
+        assert!(config.external_access_enabled && config.tls_enabled);
+        assert_eq!(config.created_at, created_at);
+        assert!(config.updated_at > created_at);
+    }
+
+    #[test]
+    fn backup_filename_and_path_reject_traversal() {
+        let base = env::temp_dir();
+        assert!(is_valid_backup_filename("aetherflow_2026-10-31.sqlite"));
+        assert!(!is_valid_backup_filename("../backup.sqlite"));
+        for name in ["../backup.sqlite", "nested/backup.sqlite", "", ".", ".."] {
+            assert!(safe_backup_path(&base, name).is_err());
+        }
+        assert_eq!(safe_backup_path(&base, "backup.sqlite").unwrap(), base.join("backup.sqlite"));
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // 1. Backups, Chunked Upload/Download, Retention & Smart Schedule (`backup.go`)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -179,8 +229,10 @@ pub fn perform_system_backup() -> anyhow::Result<BackupFile> {
     let backup_file = safe_backup_path(&backup_dir, &filename)?;
     let safe_sql_path = backup_file.to_string_lossy().replace('\'', "''");
 
-    let conn = af_db::get_conn()?;
-    conn.execute_batch(&format!("VACUUM INTO '{}';", safe_sql_path))?;
+    {
+        let conn = af_db::get_conn()?;
+        conn.execute_batch(&format!("VACUUM INTO '{}';", safe_sql_path))?;
+    }
 
     let meta = fs::metadata(&backup_file)?;
     let checksum = compute_file_sha256(&backup_file)?;
@@ -189,7 +241,7 @@ pub fn perform_system_backup() -> anyhow::Result<BackupFile> {
         format!("{}\n", checksum),
     );
 
-    std::thread::spawn(prune_old_backups);
+    prune_old_backups();
 
     Ok(BackupFile {
         filename,
@@ -200,8 +252,8 @@ pub fn perform_system_backup() -> anyhow::Result<BackupFile> {
 }
 
 pub async fn run_backup() -> Response {
-    match perform_system_backup() {
-        Ok(bf) => Json(serde_json::json!({
+    match tokio::task::spawn_blocking(perform_system_backup).await {
+        Ok(Ok(bf)) => Json(serde_json::json!({
             "message": "Backup completed successfully",
             "filename": bf.filename,
             "size": bf.size,
@@ -209,6 +261,11 @@ pub async fn run_backup() -> Response {
             "timestamp": bf.timestamp,
         }))
         .into_response(),
+        Ok(Err(e)) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL_ERROR",
+            e.to_string(),
+        ),
         Err(e) => api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "INTERNAL_ERROR",
@@ -292,9 +349,17 @@ pub async fn download_backup(
             |r| r.get(0),
         )
         .unwrap_or_default();
+    drop(conn);
 
-    if password_hash.is_empty() || !bcrypt::verify(reauth_password, &password_hash).unwrap_or(false)
-    {
+    let password_for_verify = reauth_password.to_string();
+    let hash_for_verify = password_hash.clone();
+    let verified = tokio::task::spawn_blocking(move || {
+        !hash_for_verify.is_empty()
+            && bcrypt::verify(&password_for_verify, &hash_for_verify).unwrap_or(false)
+    })
+    .await
+    .unwrap_or(false);
+    if !verified {
         return api_error(
             StatusCode::FORBIDDEN,
             "FORBIDDEN",
@@ -929,6 +994,16 @@ pub async fn upload_file(
         }
 
         let dst = upload_dir.join(&safe_name);
+        if chunk_idx > 0 {
+            let existing_len = fs::metadata(&dst).map(|m| m.len() as usize).unwrap_or(0);
+            if existing_len.saturating_add(data.len()) > MAX_UPLOAD_SIZE {
+                return api_error(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "PAYLOAD_TOO_LARGE",
+                    "File exceeds maximum allowed size of 50 MB",
+                );
+            }
+        }
         let mut opts = OpenOptions::new();
         opts.create(true).write(true);
         if chunk_idx > 0 {
@@ -1298,6 +1373,7 @@ pub async fn update_user_quota(
         ],
     );
 
+    drop(conn);
     match query_user_quota_record(user_id) {
         Ok(rec) => Json(serde_json::json!({
             "message": "Quota updated successfully",
@@ -1386,6 +1462,107 @@ fn verify_billing_webhook(provider: &str, headers: &HeaderMap, body: &[u8]) -> a
     anyhow::bail!("missing or invalid {} webhook signature", provider)
 }
 
+fn extract_json_str(payload: &serde_json::Value, pointers: &[&str]) -> String {
+    for ptr in pointers {
+        let val = if ptr.starts_with('/') {
+            payload.pointer(ptr)
+        } else {
+            payload.get(*ptr)
+        };
+        if let Some(v) = val {
+            if let Some(s) = v.as_str() {
+                let t = s.trim();
+                if !t.is_empty() {
+                    return t.to_string();
+                }
+            } else if let Some(n) = v.as_i64() {
+                return n.to_string();
+            } else if let Some(n) = v.as_u64() {
+                return n.to_string();
+            }
+        }
+    }
+    String::new()
+}
+
+fn resolve_webhook_quota_bytes(payload: &serde_json::Value, plan: &str) -> i64 {
+    for ptr in [
+        "quota_bytes",
+        "disk_bytes",
+        "/service/quota_bytes",
+        "/service/disk_bytes",
+    ] {
+        let val = if ptr.starts_with('/') {
+            payload.pointer(ptr)
+        } else {
+            payload.get(ptr)
+        };
+        if let Some(v) = val {
+            if let Some(n) = v.as_i64() {
+                if n > 0 {
+                    return n;
+                }
+            } else if let Some(s) = v.as_str() {
+                if let Ok(n) = s.trim().parse::<i64>() {
+                    if n > 0 {
+                        return n;
+                    }
+                }
+            }
+        }
+    }
+
+    for ptr in [
+        "quota",
+        "diskspace",
+        "/service/quota",
+        "/service/diskspace",
+        "/configoptions/diskspace",
+    ] {
+        let val = if ptr.starts_with('/') {
+            payload.pointer(ptr)
+        } else {
+            payload.get(ptr)
+        };
+        if let Some(v) = val {
+            if let Some(s) = v.as_str() {
+                if let Ok(parsed) = parse_human_size(s) {
+                    if parsed > 0 {
+                        return parsed;
+                    }
+                }
+            } else if let Some(n) = v.as_i64() {
+                if n > 0 {
+                    return if n < 1024 * 1024 {
+                        n * 1024 * 1024
+                    } else {
+                        n
+                    };
+                }
+            }
+        }
+    }
+
+    if !plan.trim().is_empty() {
+        if let Ok(raw_map) = env::var("BILLING_QUOTA_PLAN_MAP") {
+            let want = plan.trim().to_lowercase();
+            for pair in raw_map.split([',', ';']) {
+                if let Some((k, v)) = pair.split_once(['=', ':']) {
+                    if k.trim().to_lowercase() == want {
+                        if let Ok(parsed) = parse_human_size(v.trim()) {
+                            if parsed > 0 {
+                                return parsed;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    0
+}
+
 pub async fn handle_billing_webhook(
     Path(provider): Path<String>,
     req: Request,
@@ -1421,50 +1598,174 @@ pub async fn handle_billing_webhook(
         return api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", "Invalid JSON body");
     };
 
-    let event_id = payload
-        .get("event_id")
-        .or_else(|| payload.get("id"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| {
+    let event_id = {
+        let raw = extract_json_str(
+            &payload,
+            &["event_id", "id", "webhook_id", "transaction_id"],
+        );
+        if raw.is_empty() {
             let mut h = Sha256::new();
             h.update(&body);
             hex::encode(&h.finalize()[..16])
-        });
-    let event_type = payload
-        .get("event_type")
-        .or_else(|| payload.get("event"))
-        .or_else(|| payload.get("action"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown");
-    let username = payload
-        .get("username")
-        .or_else(|| payload.pointer("/user/username"))
-        .or_else(|| payload.pointer("/service/username"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let quota_bytes = payload
-        .get("quota_bytes")
-        .and_then(|v| v.as_i64())
-        .or_else(|| {
-            payload
-                .get("quota")
-                .and_then(|v| v.as_str())
-                .and_then(|s| parse_human_size(s).ok())
-        })
-        .unwrap_or(0);
+        } else {
+            raw
+        }
+    };
+
+    let event_type = {
+        let raw = extract_json_str(&payload, &["event_type", "event", "type", "action", "name"]);
+        if raw.is_empty() {
+            "unknown".to_string()
+        } else {
+            raw
+        }
+    };
+    let event_type_lower = event_type.to_lowercase();
+
+    let mut username = extract_json_str(
+        &payload,
+        &[
+            "username",
+            "/user/username",
+            "/service/username",
+            "/client/username",
+            "/metadata/username",
+            "/custom_fields/username",
+        ],
+    );
+    let email = extract_json_str(
+        &payload,
+        &[
+            "email",
+            "/user/email",
+            "/client/email",
+            "/service/email",
+        ],
+    );
+    let external_id = extract_json_str(
+        &payload,
+        &[
+            "service_id",
+            "/service/id",
+            "invoice_id",
+            "client_id",
+            "/client/id",
+        ],
+    );
+    let plan = extract_json_str(
+        &payload,
+        &[
+            "plan",
+            "plan_name",
+            "/product/name",
+            "product_name",
+            "/service/package",
+            "/configoptions/diskspace_plan",
+        ],
+    );
+
+    let quota_bytes = resolve_webhook_quota_bytes(&payload, &plan);
+    let payload_str = String::from_utf8_lossy(&body).to_string();
+
+    let is_suspend_or_terminate = event_type_lower.contains("suspend")
+        || event_type_lower.contains("cancel")
+        || event_type_lower.contains("terminate");
+
+    let mut applied = false;
+    let mut updated_quota_record: Option<UserQuotaRecord> = None;
+
+    if let Ok(conn) = af_db::get_conn() {
+        let mut target_user: Option<(i64, String)> = None;
+        if !username.is_empty() {
+            target_user = conn
+                .query_row(
+                    "SELECT id, username FROM users WHERE LOWER(username) = LOWER(?1) LIMIT 1",
+                    params![username],
+                    |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)),
+                )
+                .ok();
+        }
+        if target_user.is_none() && !email.is_empty() {
+            target_user = conn
+                .query_row(
+                    "SELECT id, username FROM users WHERE LOWER(email) = LOWER(?1) LIMIT 1",
+                    params![email],
+                    |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)),
+                )
+                .ok();
+        }
+
+        if let Some((uid, db_uname)) = target_user {
+            username = db_uname.clone();
+            let target_status = if is_suspend_or_terminate {
+                "suspended"
+            } else {
+                "active"
+            };
+
+            let (existing_quota, existing_used): (i64, i64) = conn
+                .query_row(
+                    "SELECT COALESCE(quota_bytes, 0), COALESCE(used_bytes, 0) FROM user_quotas WHERE user_id = ?1",
+                    params![uid],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap_or((0, 0));
+
+            let effective_quota_bytes = if quota_bytes > 0 {
+                quota_bytes
+            } else {
+                existing_quota
+            };
+
+            let _ = conn.execute(
+                "INSERT INTO user_quotas (user_id, username, quota_bytes, used_bytes, status, source, billing_provider, billing_external_id, updated_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, 'billing_webhook', ?6, ?7, CURRENT_TIMESTAMP) \
+                 ON CONFLICT(user_id) DO UPDATE SET \
+                    username = excluded.username, \
+                    quota_bytes = excluded.quota_bytes, \
+                    status = excluded.status, \
+                    source = 'billing_webhook', \
+                    billing_provider = excluded.billing_provider, \
+                    billing_external_id = CASE WHEN excluded.billing_external_id != '' THEN excluded.billing_external_id ELSE user_quotas.billing_external_id END, \
+                    updated_at = CURRENT_TIMESTAMP",
+                params![
+                    uid,
+                    db_uname,
+                    effective_quota_bytes,
+                    existing_used,
+                    target_status,
+                    prov,
+                    external_id,
+                ],
+            );
+
+            applied = is_suspend_or_terminate || quota_bytes > 0;
+            drop(conn);
+            updated_quota_record = query_user_quota_record(uid).ok();
+        } else {
+            applied = quota_bytes > 0;
+        }
+    }
 
     if let Ok(conn) = af_db::get_conn() {
         let _ = conn.execute(
-            "INSERT OR IGNORE INTO billing_webhook_events (provider, event_id, event_type, username, quota_bytes, status, payload) \
-             VALUES (?1, ?2, ?3, ?4, ?5, 'processed', ?6)",
+            "INSERT INTO billing_webhook_events (provider, event_id, event_type, username, quota_bytes, status, payload, error, processed_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, 'processed', ?6, '', CURRENT_TIMESTAMP) \
+             ON CONFLICT(provider, event_id) DO UPDATE SET \
+                event_type = excluded.event_type, \
+                username = excluded.username, \
+                quota_bytes = excluded.quota_bytes, \
+                status = excluded.status, \
+                payload = excluded.payload, \
+                error = '', \
+                processed_at = CURRENT_TIMESTAMP",
             params![
                 prov,
                 event_id,
                 event_type,
                 username,
                 quota_bytes,
-                String::from_utf8_lossy(&body).to_string()
+                payload_str
             ],
         );
     }
@@ -1474,8 +1775,12 @@ pub async fn handle_billing_webhook(
         "event_id": event_id,
         "event_type": event_type,
         "username": username,
+        "email": email,
+        "external_id": external_id,
+        "plan": plan,
         "quota_bytes": quota_bytes,
-        "applied": quota_bytes > 0,
+        "applied": applied,
+        "quota": updated_quota_record,
         "status": "processed",
         "message": "Billing webhook processed",
     }))
@@ -1528,6 +1833,8 @@ pub async fn list_billing_webhook_events(Query(q): Query<HashMap<String, String>
 // ─────────────────────────────────────────────────────────────────────────────
 
 static DEPLOY_STREAMS: Lazy<Mutex<HashMap<String, broadcast::Sender<String>>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+pub static SSE_DEPLOY_TX: Lazy<Mutex<HashMap<String, broadcast::Sender<String>>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
 fn get_local_version() -> String {
@@ -1680,11 +1987,24 @@ pub async fn run_update(req: Request) -> Response {
         })
         .unwrap_or_else(|| "stable".to_string());
 
+    let Some(script) = af_runner::resolve_release_manager_script() else {
+        return api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "SERVICE_UNAVAILABLE",
+            "Release manager script not found",
+        );
+    };
     let ch_clone = channel.clone();
-    tokio::spawn(async move {
-        let _ = Command::new("/bin/bash")
-            .args(["../deploy/release-manager.sh", "deploy", "--channel", &ch_clone])
-            .status();
+    tokio::task::spawn_blocking(move || {
+        match Command::new("/bin/bash")
+            .arg(script)
+            .args(["deploy", "--channel", &ch_clone])
+            .status()
+        {
+            Ok(status) if status.success() => {}
+            Ok(status) => tracing::error!(%status, "System update failed"),
+            Err(error) => tracing::error!(%error, "Failed to launch system update"),
+        }
     });
 
     if let Some(u) = actor {
@@ -1706,6 +2026,39 @@ pub async fn run_update(req: Request) -> Response {
     .into_response()
 }
 
+fn allocate_or_verify_deploy_port(app_name: &str, default_port: i32) -> i32 {
+    if let Ok(Some(existing)) = af_db::get_app_ingress_config(app_name) {
+        if (1..=65535).contains(&existing.listen_port) {
+            return existing.listen_port;
+        }
+    }
+    if (1..=65535).contains(&default_port) {
+        if std::net::TcpListener::bind(("127.0.0.1", default_port as u16)).is_ok() {
+            return default_port;
+        }
+    }
+    for candidate in 17000..=19999 {
+        if std::net::TcpListener::bind(("127.0.0.1", candidate)).is_ok() {
+            return candidate as i32;
+        }
+    }
+    8080
+}
+
+fn deployment_ingress_config(
+    app_name: &str,
+    listen_port: i32,
+    existing: Option<af_models::AppIngressConfig>,
+) -> af_models::AppIngressConfig {
+    let mut config = existing.unwrap_or_else(|| af_models::AppIngressConfig {
+        app_name: app_name.to_string(),
+        ..Default::default()
+    });
+    config.listen_port = listen_port;
+    config.updated_at = Utc::now();
+    config
+}
+
 pub async fn handle_deploy_process(Path(app_name): Path<String>) -> Response {
     if app_name.is_empty() {
         return (
@@ -1724,20 +2077,97 @@ pub async fn handle_deploy_process(Path(app_name): Path<String>) -> Response {
             .into_response();
     };
 
-    let (tx, _) = broadcast::channel(32);
+    let (tx, _) = broadcast::channel(64);
     if let Ok(mut map) = DEPLOY_STREAMS.lock() {
         map.insert(bp.app_name.clone(), tx.clone());
     }
+    if let Ok(mut map) = SSE_DEPLOY_TX.lock() {
+        map.insert(bp.app_name.clone(), tx.clone());
+    }
 
-    let app_clone = bp.app_name.clone();
+    let bp_clone = bp.clone();
     tokio::spawn(async move {
-        let _ = tx.send("[STEP 0] Deployment sequence queued asynchronously.".to_string());
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        let _ = tx.send("[SUCCESS] Atomic deployment verified and live.".to_string());
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        if let Ok(mut map) = DEPLOY_STREAMS.lock() {
-            map.remove(&app_clone);
+        let send_step = |msg: String| {
+            let _ = tx.send(msg);
+        };
+
+        send_step("[STEP 0] Deployment sequence queued asynchronously.".to_string());
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+
+        // Step 1: Validate and synchronize local DNS for internal_domain
+        send_step(format!(
+            "[STEP 1] Validating and synchronizing local DNS for {}...",
+            bp_clone.internal_domain
+        ));
+        if !bp_clone.internal_domain.trim().is_empty() {
+            if let Err(err) = af_services::mutators::sync_local_dns_domains(&[
+                bp_clone.internal_domain.clone(),
+            ])
+            .await
+            {
+                send_step(format!(
+                    "[ROLLBACK] Local DNS synchronization failed for {}: {}",
+                    bp_clone.internal_domain, err
+                ));
+                cleanup_deploy_channel(&bp_clone.app_name).await;
+                return;
+            }
         }
+
+        // Step 2: Allocate/verify port and apply blueprint app config
+        let target_port =
+            allocate_or_verify_deploy_port(&bp_clone.app_name, bp_clone.default_port);
+        send_step(format!(
+            "[STEP 2] Applying blueprint configuration for {} on port {}...",
+            bp_clone.app_name, target_port
+        ));
+        if let Err(err) =
+            af_services::mutators::apply_blueprint_app_config(&bp_clone.app_name, target_port).await
+        {
+            send_step(format!(
+                "[ROLLBACK] Blueprint configuration mutation failed: {}",
+                err
+            ));
+            cleanup_deploy_channel(&bp_clone.app_name).await;
+            return;
+        }
+
+        // Step 3: Persist AppIngressConfig in SQLite
+        send_step(format!(
+            "[STEP 3] Persisting ingress routing configuration ({} -> 127.0.0.1:{})...",
+            bp_clone.internal_domain, target_port
+        ));
+        let ingress_cfg = match af_db::get_app_ingress_config(&bp_clone.app_name) {
+            Ok(existing) => deployment_ingress_config(&bp_clone.app_name, target_port, existing),
+            Err(err) => {
+                send_step(format!("[ROLLBACK] Failed to read ingress configuration: {}", err));
+                cleanup_deploy_channel(&bp_clone.app_name).await;
+                return;
+            }
+        };
+        if let Err(err) = af_db::set_app_ingress_config(&ingress_cfg) {
+            send_step(format!(
+                "[ROLLBACK] Failed to persist ingress configuration: {}",
+                err
+            ));
+            cleanup_deploy_channel(&bp_clone.app_name).await;
+            return;
+        }
+
+        // Step 4: Restart the managed service
+        let service_unit = if bp_clone.service_name.trim().is_empty() {
+            bp_clone.app_name.clone()
+        } else {
+            bp_clone.service_name.clone()
+        };
+        send_step(format!(
+            "[STEP 4] Restarting managed service {}...",
+            service_unit
+        ));
+        let _ = af_services::control_service(&service_unit, "restart").await;
+
+        send_step("[SUCCESS] Atomic deployment verified and live.".to_string());
+        cleanup_deploy_channel(&bp_clone.app_name).await;
     });
 
     (
@@ -1749,6 +2179,16 @@ pub async fn handle_deploy_process(Path(app_name): Path<String>) -> Response {
         })),
     )
         .into_response()
+}
+
+async fn cleanup_deploy_channel(app_name: &str) {
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    if let Ok(mut map) = DEPLOY_STREAMS.lock() {
+        map.remove(app_name);
+    }
+    if let Ok(mut map) = SSE_DEPLOY_TX.lock() {
+        map.remove(app_name);
+    }
 }
 
 pub async fn handle_deploy_stream(Query(q): Query<HashMap<String, String>>) -> Response {

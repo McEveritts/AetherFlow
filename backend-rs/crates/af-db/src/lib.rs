@@ -488,6 +488,12 @@ pub fn init_db() -> anyhow::Result<()> {
             description TEXT NOT NULL,
             applied_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
+
+        CREATE TABLE IF NOT EXISTS system_config (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
         "#,
     )?;
 
@@ -1316,6 +1322,13 @@ pub fn list_pending_actions(mut limit: i64, offset: i64) -> anyhow::Result<Vec<P
 
 pub fn get_pending_action_by_id(action_id: i64) -> anyhow::Result<Option<PendingAction>> {
     let conn = get_conn()?;
+    get_pending_action_by_id_with_connection(&conn, action_id)
+}
+
+fn get_pending_action_by_id_with_connection(
+    conn: &Connection,
+    action_id: i64,
+) -> anyhow::Result<Option<PendingAction>> {
     let mut stmt = conn.prepare(
         "SELECT id, COALESCE(classification, 'warn'), COALESCE(source, ''), COALESCE(action, ''), COALESCE(reason, ''), COALESCE(status, 'pending'), COALESCE(CAST(created_at AS TEXT), ''), resolved_at, resolved_by, execution_log \
          FROM pending_actions WHERE id = ?1",
@@ -1355,7 +1368,7 @@ pub fn resolve_action(
     if changed == 0 {
         anyhow::bail!("Action not found or already resolved");
     }
-    get_pending_action_by_id(action_id)?
+    get_pending_action_by_id_with_connection(&conn, action_id)?
         .ok_or_else(|| anyhow::anyhow!("Action disappeared after resolve"))
 }
 
@@ -1370,17 +1383,49 @@ static PENDING_2FA_CACHE: Lazy<Mutex<HashMap<i64, (String, Instant)>>> =
 static MFA_CHALLENGE_CACHE: Lazy<Mutex<HashMap<String, (i64, Instant)>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
+fn ensure_revoked_tokens_table(conn: &Connection) -> bool {
+    static READY: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    if READY.get().is_some() {
+        return true;
+    }
+    if conn
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS revoked_tokens (jti TEXT PRIMARY KEY, expires_at TEXT NOT NULL);",
+        )
+        .is_ok()
+    {
+        let _ = READY.set(());
+        return true;
+    }
+    false
+}
+
 pub fn revoke_token(jti: &str, ttl: Duration) {
     if jti.is_empty() {
         return;
     }
-    let exp = Instant::now() + ttl.max(Duration::from_secs(60));
+    // Refresh still accepts a token for 7200s after exp, and exp itself is 900s.
+    let ttl = ttl.max(Duration::from_secs(8100));
+    let exp = Instant::now() + ttl;
     if let Ok(mut map) = TOKEN_BLACKLIST.lock() {
         map.retain(|_, v| *v > Instant::now());
         map.insert(jti.to_string(), exp);
     }
     if let Ok(conn) = get_conn() {
+        if !ensure_revoked_tokens_table(&conn) {
+            let _ = conn.execute("DELETE FROM active_sessions WHERE jti = ?1", params![jti]);
+            return;
+        }
+        let exp_rfc3339 = (Utc::now() + chrono::Duration::seconds(ttl.as_secs() as i64)).to_rfc3339();
+        let _ = conn.execute(
+            "INSERT OR REPLACE INTO revoked_tokens (jti, expires_at) VALUES (?1, ?2)",
+            params![jti, exp_rfc3339],
+        );
         let _ = conn.execute("DELETE FROM active_sessions WHERE jti = ?1", params![jti]);
+        let _ = conn.execute(
+            "DELETE FROM revoked_tokens WHERE expires_at < ?1",
+            params![Utc::now().to_rfc3339()],
+        );
     }
 }
 
@@ -1397,7 +1442,31 @@ pub fn is_token_revoked(jti: &str) -> bool {
             }
         }
     }
-    false
+    let Ok(conn) = get_conn() else {
+        return false;
+    };
+    if !ensure_revoked_tokens_table(&conn) {
+        return false;
+    }
+    let Ok(exp_rfc3339) = conn.query_row(
+        "SELECT expires_at FROM revoked_tokens WHERE jti = ?1",
+        params![jti],
+        |r| r.get::<_, String>(0),
+    ) else {
+        return false;
+    };
+    match DateTime::parse_from_rfc3339(&exp_rfc3339) {
+        Ok(exp) if exp.with_timezone(&Utc) > Utc::now() => {
+            if let Ok(mut map) = TOKEN_BLACKLIST.lock() {
+                map.insert(jti.to_string(), Instant::now() + Duration::from_secs(60));
+            }
+            true
+        }
+        _ => {
+            let _ = conn.execute("DELETE FROM revoked_tokens WHERE jti = ?1", params![jti]);
+            false
+        }
+    }
 }
 
 pub fn store_2fa_pending(user_id: i64, secret: &str, ttl: Duration) {
@@ -1469,5 +1538,22 @@ mod tests {
         init_db().unwrap();
         let health = db_health_check().unwrap();
         assert_eq!(health["status"], "healthy");
+
+        for new_status in ["approved", "rejected"] {
+            let action_id = {
+                let conn = get_conn().unwrap();
+                conn.execute(
+                    "INSERT INTO pending_actions (source, action, reason) VALUES ('audit', 'test', 'connection regression')",
+                    [],
+                )
+                .unwrap();
+                conn.last_insert_rowid()
+            };
+            let action = resolve_action(action_id, new_status, "audit-admin").unwrap();
+            assert_eq!(action.status, new_status);
+            assert_eq!(action.resolved_by.as_deref(), Some("audit-admin"));
+            assert!(action.resolved_at.is_some());
+            assert!(resolve_action(action_id, new_status, "audit-admin").is_err());
+        }
     }
 }

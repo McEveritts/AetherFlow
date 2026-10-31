@@ -37,6 +37,7 @@ static METRICS_RECORDER_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// percentages, disk read/write MB/s, and network rx/tx MB/s, inserts a row into
 /// `metrics_history`, and prunes rows older than 7 days every hour.
 pub fn start_metrics_recorder() {
+    start_mediaflow_poller();
     if METRICS_RECORDER_ACTIVE.swap(true, Ordering::SeqCst) {
         return;
     }
@@ -80,6 +81,10 @@ fn ensure_metrics_history_columns() {
         return;
     };
 
+    ensure_metrics_history_columns_with_connection(&conn);
+}
+
+fn ensure_metrics_history_columns_with_connection(conn: &rusqlite::Connection) {
     let alter_stmts = [
         "ALTER TABLE metrics_history ADD COLUMN cpu_usage REAL DEFAULT 0;",
         "ALTER TABLE metrics_history ADD COLUMN memory_pct REAL DEFAULT 0;",
@@ -180,8 +185,6 @@ fn record_metrics_snapshot(
     let Ok(conn) = af_db::get_conn() else {
         return;
     };
-
-    ensure_metrics_history_columns();
 
     let res = conn.execute(
         "INSERT INTO metrics_history (
@@ -610,7 +613,7 @@ pub fn start_smart_backup_scheduler() {
 
         loop {
             ticker.tick().await;
-            check_and_run_smart_backup();
+            let _ = tokio::task::spawn_blocking(check_and_run_smart_backup).await;
         }
     });
 }
@@ -1390,9 +1393,211 @@ fn persist_and_cache_package_update(record: &PackageUpdateRecord) -> bool {
     !prev_update_available && record.update_available
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 5. MediaFlow Worker Poller (`backend/services/mediaflow.go`)
+// ─────────────────────────────────────────────────────────────────────────────
+
+static MEDIAFLOW_POLLER_ACTIVE: AtomicBool = AtomicBool::new(false);
+static MEDIAFLOW_PROCESSING: AtomicBool = AtomicBool::new(false);
+
+/// Spawns the background MediaFlow worker poller (10-second interval) that picks up
+/// `APPROVED` items in `mediaflow_queue`, transitions them to `PROCESSING`, invokes
+/// `ffmpeg` with hardware transcode flags from [`af_hardware::get_gpu_transcode_flags()`],
+/// and updates the row to `COMPLETED` or `FAILED`.
+pub fn start_mediaflow_poller() {
+    if MEDIAFLOW_POLLER_ACTIVE.swap(true, Ordering::SeqCst) {
+        return;
+    }
+
+    tokio::spawn(async move {
+        tracing::info!(
+            interval_secs = 10,
+            "mediaflow autonomous transcode poller initialized"
+        );
+
+        let mut ticker = tokio::time::interval(Duration::from_secs(10));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+        loop {
+            ticker.tick().await;
+            let _ = process_next_mediaflow_job().await;
+        }
+    });
+}
+
+/// Processes a single `APPROVED` job from `mediaflow_queue` if one exists and no job
+/// is currently running. Returns `true` if a job was picked up and processed.
+pub async fn process_next_mediaflow_job() -> bool {
+    if MEDIAFLOW_PROCESSING.swap(true, Ordering::SeqCst) {
+        return false;
+    }
+
+    struct ProcessingGuard;
+    impl Drop for ProcessingGuard {
+        fn drop(&mut self) {
+            MEDIAFLOW_PROCESSING.store(false, Ordering::SeqCst);
+        }
+    }
+    let _guard = ProcessingGuard;
+
+    let job_opt: Option<(i64, String)> = {
+        let Ok(conn) = af_db::get_conn() else {
+            return false;
+        };
+        let Ok(row) = conn.query_row(
+            "SELECT id, file_path FROM mediaflow_queue WHERE status = 'APPROVED' ORDER BY created_at ASC, id ASC LIMIT 1",
+            [],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)),
+        ) else {
+            return false;
+        };
+        let _ = conn.execute(
+            "UPDATE mediaflow_queue SET status = 'PROCESSING', updated_at = CURRENT_TIMESTAMP WHERE id = ?1",
+            params![row.0],
+        );
+        Some(row)
+    };
+
+    let Some((job_id, file_path)) = job_opt else {
+        return false;
+    };
+
+    let src_path = Path::new(&file_path);
+    if !src_path.exists() {
+        record_mediaflow_failure(job_id, "Source file does not exist");
+        return true;
+    }
+
+    let flags = af_hardware::get_gpu_transcode_flags();
+    let parent_dir = src_path.parent().unwrap_or_else(|| Path::new("."));
+    let stem = src_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("output");
+    let out_path = parent_dir.join(format!("{}_hevc.mkv", stem));
+
+    let mut args: Vec<String> = vec!["-y".to_string()];
+    if !flags.hw_accel.is_empty() && flags.hw_accel != "none" {
+        args.push("-hwaccel".to_string());
+        args.push(flags.hw_accel.clone());
+        if !flags.hw_accel_device.is_empty() {
+            args.push("-hwaccel_device".to_string());
+            args.push(flags.hw_accel_device.clone());
+        }
+        if !flags.output_format.is_empty() {
+            args.push("-hwaccel_output_format".to_string());
+            args.push(flags.output_format.clone());
+        }
+    }
+
+    let video_codec = if flags.video_codec.trim().is_empty() {
+        "libx265"
+    } else {
+        flags.video_codec.trim()
+    };
+
+    args.extend([
+        "-i".to_string(),
+        file_path.clone(),
+        "-c:v".to_string(),
+        video_codec.to_string(),
+        "-b:v".to_string(),
+        "5M".to_string(),
+        "-c:a".to_string(),
+        "copy".to_string(),
+        out_path.to_string_lossy().to_string(),
+    ]);
+
+    tracing::info!(
+        job_id = job_id,
+        file_path = %file_path,
+        codec = %video_codec,
+        "mediaflow: starting transcode job"
+    );
+
+    match Command::new("ffmpeg").args(&args).output().await {
+        Ok(output) if output.status.success() => {
+            let new_size = fs::metadata(&out_path)
+                .map(|m| m.len() as i64)
+                .unwrap_or(0);
+
+            let trash_dir = parent_dir.join(".mediaflow_trash");
+            let _ = fs::create_dir_all(&trash_dir);
+            if let Some(fname) = src_path.file_name() {
+                let _ = fs::rename(src_path, trash_dir.join(fname));
+            }
+
+            let out_str = out_path.to_string_lossy().to_string();
+            if let Ok(conn) = af_db::get_conn() {
+                let _ = conn.execute(
+                    "UPDATE mediaflow_queue SET status = 'COMPLETED', file_path = ?1, new_codec = 'hevc', new_size = ?2, updated_at = CURRENT_TIMESTAMP WHERE id = ?3",
+                    params![out_str, new_size, job_id],
+                );
+            }
+            tracing::info!(
+                job_id = job_id,
+                output = %out_str,
+                new_size = new_size,
+                "mediaflow: transcode completed"
+            );
+        }
+        Ok(output) => {
+            let _ = fs::remove_file(&out_path);
+            let combined = format!(
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let err_log = tail_error_log(&combined, 1000);
+            record_mediaflow_failure(
+                job_id,
+                &format!("FFmpeg error ({}): {}", output.status, err_log),
+            );
+        }
+        Err(err) => {
+            let _ = fs::remove_file(&out_path);
+            record_mediaflow_failure(job_id, &format!("FFmpeg execution error: {}", err));
+        }
+    }
+
+    true
+}
+
+fn tail_error_log(text: &str, max_len: usize) -> String {
+    let trimmed = text.trim();
+    if trimmed.len() <= max_len {
+        return trimmed.to_string();
+    }
+    trimmed[trimmed.len() - max_len..].to_string()
+}
+
+fn record_mediaflow_failure(job_id: i64, reason: &str) {
+    tracing::error!(job_id = job_id, error = %reason, "mediaflow: transcode job failed");
+    if let Ok(conn) = af_db::get_conn() {
+        let _ = conn.execute(
+            "UPDATE mediaflow_queue SET status = 'FAILED', error_log = ?1, updated_at = CURRENT_TIMESTAMP WHERE id = ?2",
+            params![reason, job_id],
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_metrics_columns_use_the_supplied_connection() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE metrics_history (timestamp TEXT);")
+            .unwrap();
+        ensure_metrics_history_columns_with_connection(&conn);
+        ensure_metrics_history_columns_with_connection(&conn);
+        conn.execute(
+            "INSERT INTO metrics_history (timestamp, cpu_usage, memory_pct, swap_pct, disk_read_mb, disk_write_mb, net_rx_mb, net_tx_mb) VALUES ('audit', 1, 2, 3, 4, 5, 6, 7)",
+            [],
+        )
+        .unwrap();
+    }
 
     #[test]
     fn test_version_extraction_and_comparison() {

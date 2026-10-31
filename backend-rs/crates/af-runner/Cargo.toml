@@ -20,3 +20,4 @@ tracing.workspace = true
 anyhow.workspace = true
 async-stream.workspace = true
 futures.workspace = true
+rusqlite.workspace = true

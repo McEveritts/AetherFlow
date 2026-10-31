@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 pub mod auth;
 pub mod embed;
 pub mod intelligence;
@@ -105,9 +107,10 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     // Privileged Root Socket Runner Mode (`aetherflow-api runner` / `--runner`)
-    let args: Vec<String> = env::args().collect();
-    if args.len() > 1 && (args[1] == "runner" || args[1] == "--runner") {
-        return af_runner::run_privileged_daemon().await;
+    if let Some(first_arg) = std::env::args().nth(1) {
+        if first_arg == "runner" || first_arg == "--runner" {
+            return af_runner::run_privileged_daemon().await;
+        }
     }
 
     // Initialize SQLite WAL Database & AES-256-GCM Secret Encryption
@@ -136,9 +139,13 @@ async fn main() -> anyhow::Result<()> {
     af_services::workers::start_heal_worker(10);
     af_services::workers::start_smart_backup_scheduler();
     af_services::workers::start_app_update_watcher();
+    af_services::workers::start_mediaflow_poller();
     af_services::cluster_daemon::start_cluster_runtime();
     notifications_ext::start_notification_engine();
     streaming_ext::start_streaming_monitor();
+    tokio::spawn(async move {
+        af_services::mutators::provision_all_installed_app_subdomains().await;
+    });
 
     let port = env::var("PORT").unwrap_or_else(|_| "8080".to_string());
     let bind_addr = format!("0.0.0.0:{}", port);
@@ -151,18 +158,21 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!(
         addr = %bind_addr,
-        version = "4.0.0-rc1",
+        version = "4.0.0",
         runtime = "rust",
         "AetherFlow Rust backend starting"
     );
 
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-            tracing::info!("shutdown signal received, draining connections");
-        })
-        .await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(async {
+        let _ = tokio::signal::ctrl_c().await;
+        tracing::info!("shutdown signal received, draining connections");
+    })
+    .await?;
 
     Ok(())
 }

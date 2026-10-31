@@ -37,11 +37,13 @@ use crate::storage::{
     upload_backup_chunk, upload_file,
 };
 use crate::streaming_ext::{
-    control_streaming_session, get_streaming_artwork, sync_streaming_server_history,
+    clear_streaming_demo_data, control_streaming_session, get_streaming_artwork,
+    get_streaming_dashboard_handler, seed_streaming_demo_data, sync_streaming_server_history,
     test_streaming_server,
 };
 use crate::ws::{
-    extract_client_ip, handle_log_websocket, handle_websocket, issue_ws_ticket_for_user,
+    broadcast_ws_message, extract_client_ip, handle_log_websocket, handle_websocket,
+    issue_ws_ticket_for_user,
 };
 use af_models::{AppIngressConfig, MarketplaceApp, User};
 use axum::extract::{Extension, Path, Query, Request};
@@ -350,9 +352,14 @@ fn build_v1_router() -> Router {
 
     let compat_routes = Router::new()
         .route("/deploy/stream", get(handle_deploy_stream))
+        .route("/fs", get(browse_directories))
+        .layer(middleware::from_fn(auth_middleware));
+
+    let ingress_compat_routes = Router::new()
         .route("/ingress/configs", get(get_ingress_configs))
         .route("/ingress/apps/:appName", put(update_app_ingress_config))
-        .route("/fs", get(browse_directories))
+        .layer(middleware::from_fn(admin_only_middleware))
+        .layer(middleware::from_fn(csrf_middleware))
         .layer(middleware::from_fn(auth_middleware));
 
     Router::new()
@@ -360,6 +367,7 @@ fn build_v1_router() -> Router {
         .nest("/auth", auth_routes)
         .nest("/admin", admin_routes)
         .merge(compat_routes)
+        .merge(ingress_compat_routes)
         .layer(middleware::from_fn(host_validation_middleware))
 }
 
@@ -379,7 +387,7 @@ async fn health_check() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "status": status,
         "uptime": format!("{:.1}s", START_TIME.elapsed().as_secs_f64()),
-        "version": "4.0.0-rc1",
+        "version": "4.0.0",
         "database": db_status,
         "db_latency_ms": latency_ms,
     }))
@@ -444,7 +452,7 @@ async fn prometheus_metrics() -> Response {
          aetherflow_system_disk_percent {:.2}\n\
          # HELP aetherflow_build_info Build metadata\n\
          # TYPE aetherflow_build_info gauge\n\
-         aetherflow_build_info{{runtime=\"rust\",version=\"4.0.0-rc1\",os=\"{}\",arch=\"{}\"}} 1\n",
+         aetherflow_build_info{{runtime=\"rust\",version=\"4.0.0\",os=\"{}\",arch=\"{}\"}} 1\n",
         START_TIME.elapsed().as_secs_f64(),
         m.cpu_usage,
         mem_total_gb * 1073741824.0,
@@ -510,19 +518,27 @@ async fn control_service_handler(
             "Invalid action. Allowed: start, stop, restart",
         );
     }
-    let target = if req.process.is_empty() {
+    let target = if req.process.trim().is_empty() {
         name.clone()
     } else {
-        req.process.clone()
+        req.process.trim().to_string()
     };
 
-    if let Err(e) = af_services::control_service(&target, &req.action).await {
+    let result = if req.managed_by.trim().is_empty() {
+        af_services::control_service(&target, &req.action).await
+    } else {
+        af_services::control_service_with_manager(&target, &req.action, req.managed_by.trim()).await
+    };
+
+    if let Err(e) = result {
         return api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "INTERNAL_ERROR",
             format!("Failed to {} service: {}", req.action, e),
         );
     }
+
+    af_services::mutators::clear_app_runtime_meta_cache();
 
     let ip = extract_client_ip(&headers);
     let ua = headers
@@ -660,6 +676,62 @@ async fn update_package(
     dispatch_package_lifecycle(id, "update", "updating", auth_user, headers).await
 }
 
+fn allocate_or_resolve_app_port(app_name: &str, default_port: i32) -> i32 {
+    if let Ok(Some(existing)) = af_db::get_app_ingress_config(app_name) {
+        if existing.listen_port > 0 {
+            return existing.listen_port;
+        }
+    }
+    let bp = af_services::get_blueprint(app_name);
+    let candidate = bp.as_ref().map(|b| b.default_port).unwrap_or(default_port);
+    if candidate <= 0 {
+        return 0;
+    }
+    if std::net::TcpListener::bind(("127.0.0.1", candidate as u16)).is_ok() {
+        return candidate;
+    }
+    let range = bp
+        .as_ref()
+        .map(|b| b.fallback_port_range)
+        .unwrap_or([17000, 19999]);
+    let start = range[0].max(1024);
+    let end = range[1].max(start);
+    for port in start..=end {
+        if std::net::TcpListener::bind(("127.0.0.1", port as u16)).is_ok() {
+            return port;
+        }
+    }
+    candidate
+}
+
+fn emit_package_progress(
+    pkg_id: &str,
+    action: &str,
+    status: &str,
+    progress: i32,
+    line: &str,
+    started_at: &str,
+) {
+    let info = af_services::PackageJobInfo {
+        package_id: pkg_id.to_string(),
+        action: action.to_string(),
+        status: status.to_string(),
+        progress,
+        last_line: line.to_string(),
+        started_at: started_at.to_string(),
+    };
+    af_services::set_package_job_info(info);
+    broadcast_ws_message(&serde_json::json!({
+        "type": "package:progress",
+        "package_id": pkg_id,
+        "action": action,
+        "status": status,
+        "progress": progress,
+        "line": line,
+        "started_at": started_at,
+    }));
+}
+
 async fn dispatch_package_lifecycle(
     pkg_id: String,
     action: &'static str,
@@ -689,19 +761,27 @@ async fn dispatch_package_lifecycle(
         );
     }
 
+    if action == "update" && pkg.status != "installed" {
+        return api_error(
+            StatusCode::CONFLICT,
+            "CONFLICT",
+            "Package must be installed before it can be updated",
+        );
+    }
+
     let script_prefix = if action == "remove" {
         "removepackage-"
     } else {
         "installpackage-"
     };
     let script_name = format!("{}{}", script_prefix, pkg.name);
-    if af_runner::resolve_package_script_path(action, &script_name).is_none() {
+    let Some(script_path) = af_runner::resolve_package_script_path(action, &script_name) else {
         return api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "INTERNAL_ERROR",
             "Provisioning script is missing or unreadable on the server",
         );
-    }
+    };
 
     let ip = extract_client_ip(&headers);
     let ua = headers
@@ -719,13 +799,243 @@ async fn dispatch_package_lifecycle(
         ua,
     );
 
-    af_services::set_package_job_info(af_services::PackageJobInfo {
-        package_id: pkg.name.clone(),
-        action: action.to_string(),
-        status: status_label.to_string(),
-        progress: 5,
-        last_line: format!("Starting {} for {}...", action, pkg.label),
-        started_at: Utc::now().to_rfc3339(),
+    let started_at = Utc::now().to_rfc3339();
+    emit_package_progress(
+        &pkg.name,
+        action,
+        status_label,
+        5,
+        &format!("Starting {} for {}...", action, pkg.label),
+        &started_at,
+    );
+
+    let clean_id = pkg.name.clone();
+    let pkg_label = pkg.label.clone();
+    let pkg_default_port = pkg.default_port;
+    let pkg_lock_file = pkg.lock_file.clone();
+
+    tokio::spawn(async move {
+        let allocated_port = if action == "install" || action == "update" {
+            allocate_or_resolve_app_port(&clean_id, pkg_default_port)
+        } else {
+            pkg_default_port
+        };
+
+        emit_package_progress(
+            &clean_id,
+            action,
+            status_label,
+            10,
+            &format!("Preparing environment for {}...", pkg_label),
+            &started_at,
+        );
+
+        let mut stopped_units: Vec<String> = Vec::new();
+        if action == "update" {
+            let units = af_services::resolve_service_units(&clean_id);
+            for u in units {
+                let (st, _, _) = af_services::get_service_info(&u);
+                if st == "running" {
+                    let _ = af_services::control_service_with_manager(&u, "stop", "systemd").await;
+                    stopped_units.push(u);
+                }
+            }
+        }
+
+        emit_package_progress(
+            &clean_id,
+            action,
+            status_label,
+            25,
+            &format!("Executing {} script for {}...", action, pkg_label),
+            &started_at,
+        );
+
+        let fs_root_override = env::var("AETHERFLOW_FS_ROOT")
+            .ok()
+            .filter(|s| !s.trim().is_empty());
+        let can_run_bash = cfg!(unix)
+            && fs_root_override.is_none()
+            && std::path::Path::new("/bin/bash").exists();
+
+        let execution_result = if can_run_bash && af_runner::is_runner_available() {
+            af_runner::dispatch_package_stream(
+                action,
+                &clean_id,
+                &script_name,
+                allocated_port,
+                |line| {
+                    emit_package_progress(
+                        &clean_id, action, status_label, 60, &line, &started_at,
+                    );
+                },
+            )
+            .await
+        } else if can_run_bash {
+            let mut cmd = tokio::process::Command::new("/bin/bash");
+            cmd.arg(&script_path).kill_on_drop(true);
+            if allocated_port > 0 {
+                cmd.env("AETHERFLOW_APP_PORT", allocated_port.to_string());
+                cmd.env("AF_APP_PORT", allocated_port.to_string());
+            }
+            match cmd.output().await {
+                Ok(out) => {
+                    let combined = format!(
+                        "{}\n{}",
+                        String::from_utf8_lossy(&out.stdout),
+                        String::from_utf8_lossy(&out.stderr)
+                    );
+                    for raw_line in combined.lines() {
+                        let trimmed = raw_line.trim();
+                        if !trimmed.is_empty() {
+                            emit_package_progress(
+                                &clean_id,
+                                action,
+                                status_label,
+                                60,
+                                trimmed,
+                                &started_at,
+                            );
+                        }
+                    }
+                    if out.status.success() {
+                        Ok(())
+                    } else {
+                        Err(anyhow::anyhow!("Package script failed: {}", out.status))
+                    }
+                }
+                Err(error) => Err(anyhow::anyhow!("Failed to execute package script: {}", error)),
+            }
+        } else {
+            emit_package_progress(
+                &clean_id,
+                action,
+                status_label,
+                60,
+                &format!("Applying package state changes for {}...", pkg_label),
+                &started_at,
+            );
+            if !pkg_lock_file.is_empty() {
+                let lock_path = if let Some(ref root) = fs_root_override {
+                    std::path::Path::new(root.trim())
+                        .join(pkg_lock_file.trim_start_matches(['/', '\\']))
+                } else {
+                    PathBuf::from(&pkg_lock_file)
+                };
+                if action == "remove" {
+                    let _ = fs::remove_file(&lock_path);
+                } else if fs_root_override.is_some() {
+                    if let Some(parent) = lock_path.parent() {
+                        let _ = fs::create_dir_all(parent);
+                    }
+                    let _ = fs::write(&lock_path, b"installed\n");
+                }
+            }
+            Ok(())
+        };
+
+        if let Err(error) = execution_result {
+            for unit in &stopped_units {
+                let _ = af_services::control_service_with_manager(unit, "start", "systemd").await;
+            }
+            af_services::clear_service_status_cache();
+            af_services::mutators::clear_app_runtime_meta_cache();
+            emit_package_progress(
+                &clean_id,
+                action,
+                "failed",
+                60,
+                &error.to_string(),
+                &started_at,
+            );
+            af_services::clear_package_job_info(&clean_id);
+            return;
+        }
+
+        emit_package_progress(
+            &clean_id,
+            action,
+            status_label,
+            85,
+            &format!("Synchronizing blueprint & ingress for {}...", pkg_label),
+            &started_at,
+        );
+
+        if action == "install" || action == "update" {
+            let _ = af_services::mutators::apply_blueprint_app_config(&clean_id, allocated_port).await;
+
+            if allocated_port > 0 {
+                let base_domain = af_services::resolve_base_domain();
+                let existing = af_db::get_app_ingress_config(&clean_id).ok().flatten();
+                let public_domain = existing
+                    .as_ref()
+                    .map(|c| c.public_domain.clone())
+                    .filter(|d| !d.is_empty())
+                    .unwrap_or_else(|| {
+                        if base_domain.is_empty() {
+                            String::new()
+                        } else {
+                            af_services::format_app_public_domain(&clean_id, &base_domain)
+                        }
+                    });
+                let external_access = existing
+                    .as_ref()
+                    .map(|c| c.external_access_enabled)
+                    .unwrap_or(!public_domain.is_empty());
+                let tls_enabled = existing
+                    .as_ref()
+                    .map(|c| c.tls_enabled)
+                    .unwrap_or(!public_domain.is_empty());
+                let now = Utc::now();
+                let cfg = AppIngressConfig {
+                    app_name: clean_id.clone(),
+                    public_domain,
+                    external_access_enabled: external_access,
+                    listen_port: allocated_port,
+                    tls_enabled,
+                    created_at: existing.as_ref().map(|c| c.created_at).unwrap_or(now),
+                    updated_at: now,
+                };
+                let _ = af_db::set_app_ingress_config(&cfg);
+            }
+
+            let (master_user, master_pass, _) = af_services::mutators::load_master_credentials();
+            if !master_user.is_empty() && !master_pass.is_empty() {
+                af_services::mutators::sync_master_credentials_to_installed_apps(
+                    &master_user,
+                    &master_pass,
+                );
+            }
+
+            if action == "update" {
+                for u in stopped_units {
+                    let _ = af_services::control_service_with_manager(&u, "start", "systemd").await;
+                }
+                let _ = af_services::workers::refresh_package_update_by_id(&clean_id).await;
+            }
+        } else if action == "remove" {
+            let _ = af_db::delete_app_ingress_config(&clean_id);
+            if let Ok(conn) = af_db::get_conn() {
+                let _ = conn.execute(
+                    "DELETE FROM app_updates WHERE package_name = ?1",
+                    params![clean_id],
+                );
+            }
+            let _ = af_services::mutators::sync_network_dns_providers().await;
+        }
+
+        af_services::clear_service_status_cache();
+        af_services::mutators::clear_app_runtime_meta_cache();
+
+        emit_package_progress(
+            &clean_id,
+            action,
+            "completed",
+            100,
+            &format!("Completed {} for {}", action, pkg_label),
+            &started_at,
+        );
+        af_services::clear_package_job_info(&clean_id);
     });
 
     let msg = match action {
@@ -830,10 +1140,7 @@ async fn get_settings() -> Response {
          COALESCE(anthropic_api_key, ''), COALESCE(anthropic_endpoint, '') FROM settings WHERE id = 1",
         [],
         |r| {
-            let mut base_domain: String = r.get(7)?;
-            if base_domain.is_empty() {
-                base_domain = af_services::resolve_base_domain();
-            }
+            let base_domain: String = r.get(7)?;
             let gemini_raw: String = r.get(8)?;
             let openai_raw: String = r.get(9)?;
             let anthropic_raw: String = r.get(12)?;
@@ -856,13 +1163,21 @@ async fn get_settings() -> Response {
         },
     );
 
+    drop(conn);
     match row {
-        Ok(payload) => Json(payload).into_response(),
+        Ok(mut payload) => {
+            if payload.base_domain.is_empty() {
+                payload.base_domain = af_services::resolve_base_domain();
+            }
+            Json(payload).into_response()
+        }
         Err(_) => Json(SettingsPayload::default()).into_response(),
     }
 }
 
 async fn update_settings(Json(mut req): Json<SettingsPayload>) -> Response {
+    let prev_base_domain = af_db::get_base_domain();
+
     let Ok(conn) = af_db::get_conn() else {
         return api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -937,7 +1252,72 @@ async fn update_settings(Json(mut req): Json<SettingsPayload>) -> Response {
         }
     }
 
+    drop(conn);
     af_db::invalidate_ingress_cache();
+
+    if !norm_domain.is_empty() && norm_domain != prev_base_domain {
+        let now = Utc::now();
+        let old_suffix = if prev_base_domain.is_empty() {
+            String::new()
+        } else {
+            format!(".{}", prev_base_domain)
+        };
+
+        let mut handled_apps = std::collections::HashSet::new();
+        for mut cfg in af_db::get_all_app_ingress_configs().unwrap_or_default() {
+            handled_apps.insert(cfg.app_name.clone());
+            let should_auto_update = cfg.public_domain.trim().is_empty()
+                || (!old_suffix.is_empty() && cfg.public_domain.ends_with(&old_suffix));
+            if should_auto_update {
+                if cfg.listen_port <= 0 {
+                    cfg.listen_port = af_services::get_blueprint(&cfg.app_name)
+                        .map(|b| b.default_port)
+                        .unwrap_or(0);
+                }
+                if cfg.listen_port > 0 {
+                    cfg.public_domain =
+                        af_services::format_app_public_domain(&cfg.app_name, &norm_domain);
+                    cfg.external_access_enabled = true;
+                    cfg.tls_enabled = true;
+                    cfg.updated_at = now;
+                    let _ = af_db::set_app_ingress_config(&cfg);
+                    let _ = af_services::mutators::apply_blueprint_app_config(
+                        &cfg.app_name,
+                        cfg.listen_port,
+                    )
+                    .await;
+                }
+            }
+        }
+
+        if let Ok(pkgs) = af_services::get_packages() {
+            for p in pkgs {
+                if p.status == "installed" && p.default_port > 0 && !handled_apps.contains(&p.name)
+                {
+                    let pub_dom = af_services::format_app_public_domain(&p.name, &norm_domain);
+                    let cfg = AppIngressConfig {
+                        app_name: p.name.clone(),
+                        public_domain: pub_dom,
+                        external_access_enabled: true,
+                        listen_port: p.default_port,
+                        tls_enabled: true,
+                        created_at: now,
+                        updated_at: now,
+                    };
+                    let _ = af_db::set_app_ingress_config(&cfg);
+                    let _ = af_services::mutators::apply_blueprint_app_config(
+                        &p.name,
+                        p.default_port,
+                    )
+                    .await;
+                }
+            }
+        }
+
+        let _ = af_services::mutators::sync_network_dns_providers().await;
+        af_services::mutators::trigger_apache_cert_sync().await;
+    }
+
     req.gemini_api_key.clear();
     req.openai_api_key.clear();
     req.anthropic_api_key.clear();
@@ -1010,25 +1390,67 @@ async fn update_password(
     ) else {
         return api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "User not found");
     };
+    drop(conn);
 
-    if !bcrypt::verify(&req.current_password, &existing_hash).unwrap_or(false) {
-        return api_error(
-            StatusCode::UNAUTHORIZED,
-            "UNAUTHORIZED",
-            "Current password is incorrect",
-        );
-    }
-    let Ok(new_hash) = bcrypt::hash(&req.new_password, bcrypt::DEFAULT_COST) else {
+    let current_password = req.current_password.clone();
+    let new_password = req.new_password.clone();
+    let hash_for_verify = existing_hash.clone();
+    let hashed = tokio::task::spawn_blocking(move || -> Result<String, &'static str> {
+        if !bcrypt::verify(&current_password, &hash_for_verify).unwrap_or(false) {
+            return Err("bad");
+        }
+        bcrypt::hash(&new_password, bcrypt::DEFAULT_COST).map_err(|_| "hash")
+    })
+    .await;
+    let new_hash = match hashed {
+        Ok(Ok(hash)) => hash,
+        Ok(Err("bad")) => {
+            return api_error(
+                StatusCode::UNAUTHORIZED,
+                "UNAUTHORIZED",
+                "Current password is incorrect",
+            );
+        }
+        _ => {
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL_ERROR",
+                "Failed to hash password",
+            );
+        }
+    };
+    let Ok(conn) = af_db::get_conn() else {
         return api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "INTERNAL_ERROR",
-            "Failed to hash password",
+            "Database error",
         );
     };
-    let _ = conn.execute(
-        "UPDATE users SET password_hash = ?1 WHERE id = ?2",
-        params![new_hash, auth_user.user_id],
-    );
+    let changed = conn
+        .execute(
+            "UPDATE users SET password_hash = ?1 WHERE id = ?2",
+            params![new_hash, auth_user.user_id],
+        )
+        .unwrap_or(0);
+    drop(conn);
+    if changed == 0 {
+        return api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL_ERROR",
+            "Failed to update password",
+        );
+    }
+
+    if auth_user.role == "admin" {
+        let _ = af_services::mutators::save_master_credentials(
+            &auth_user.username,
+            &req.new_password,
+        );
+        af_services::mutators::sync_master_credentials_to_installed_apps(
+            &auth_user.username,
+            &req.new_password,
+        );
+    }
 
     let ip = extract_client_ip(&headers);
     let ua = headers
@@ -1175,11 +1597,13 @@ async fn update_user_role(
             |r| r.get(0),
         )
         .unwrap_or(1);
-    let current_role: String = conn
-        .query_row("SELECT role FROM users WHERE id = ?1", params![id], |r| {
-            r.get(0)
-        })
-        .unwrap_or_default();
+    let Ok(current_role) = conn.query_row(
+        "SELECT role FROM users WHERE id = ?1",
+        params![id],
+        |r| r.get::<_, String>(0),
+    ) else {
+        return api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "User not found");
+    };
 
     if current_role == "admin" && req.role != "admin" && admin_count <= 1 {
         return api_error(
@@ -1193,6 +1617,7 @@ async fn update_user_role(
         "UPDATE users SET role = ?1 WHERE id = ?2",
         params![req.role, id],
     );
+    drop(conn);
     let ip = extract_client_ip(&headers);
     let ua = headers
         .get(header::USER_AGENT)
@@ -1245,6 +1670,7 @@ async fn delete_user(
         );
     }
     let _ = conn.execute("DELETE FROM users WHERE id = ?1", params![id]);
+    drop(conn);
     let ip = extract_client_ip(&headers);
     let ua = headers
         .get(header::USER_AGENT)
@@ -1273,19 +1699,98 @@ struct FsQuery {
     path: String,
 }
 
+fn get_allowed_fs_roots() -> Vec<PathBuf> {
+    let mut raw_roots: Vec<PathBuf> = Vec::new();
+    let has_env_override = if let Ok(env_roots) = env::var("AF_ALLOWED_FS_ROOTS") {
+        for part in env_roots.split(',') {
+            let trimmed = part.trim();
+            if !trimmed.is_empty() {
+                raw_roots.push(PathBuf::from(trimmed));
+            }
+        }
+        !raw_roots.is_empty()
+    } else {
+        false
+    };
+
+    if !has_env_override {
+        for def in [
+            "/mnt",
+            "/media",
+            "/home",
+            "/opt/AetherFlow",
+            "/var/lib/aetherflow",
+        ] {
+            raw_roots.push(PathBuf::from(def));
+        }
+        raw_roots.push(env::temp_dir());
+    }
+
+    if let Ok(cwd) = env::current_dir() {
+        raw_roots.push(cwd);
+    }
+
+    let mut resolved = Vec::with_capacity(raw_roots.len());
+    for root in raw_roots {
+        if let Ok(canon) = fs::canonicalize(&root) {
+            resolved.push(canon);
+        } else {
+            resolved.push(root);
+        }
+    }
+    resolved
+}
+
+fn is_fs_path_allowed(target: &std::path::Path, allowed_roots: &[PathBuf]) -> bool {
+    for root in allowed_roots {
+        if target == root || target.starts_with(root) {
+            return true;
+        }
+    }
+    false
+}
+
 async fn browse_directories(Query(q): Query<FsQuery>) -> Response {
-    if q.path.trim().is_empty() {
+    let raw_path = q.path.trim();
+    if raw_path.is_empty() {
         return api_error(
             StatusCode::BAD_REQUEST,
             "VALIDATION_ERROR",
             "Path query parameter is required",
         );
     }
-    let p = PathBuf::from(&q.path);
-    if !p.exists() {
+    let p = PathBuf::from(raw_path);
+    if !p.exists() && fs::symlink_metadata(&p).is_err() {
         return api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "Directory not found");
     }
-    if !p.is_dir() {
+
+    let resolved_path = match fs::canonicalize(&p) {
+        Ok(rp) => rp,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "Directory not found");
+        }
+        Err(_) => {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "INVALID_PATH",
+                "Could not resolve directory path",
+            );
+        }
+    };
+
+    let allowed_roots = get_allowed_fs_roots();
+    if !is_fs_path_allowed(&resolved_path, &allowed_roots) {
+        return api_error(
+            StatusCode::FORBIDDEN,
+            "FORBIDDEN",
+            "Access denied: path is outside allowed sandbox",
+        );
+    }
+
+    let Ok(dir_meta) = fs::metadata(&resolved_path) else {
+        return api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "Directory not found");
+    };
+    if !dir_meta.is_dir() {
         return api_error(
             StatusCode::BAD_REQUEST,
             "NOT_A_DIRECTORY",
@@ -1293,35 +1798,74 @@ async fn browse_directories(Query(q): Query<FsQuery>) -> Response {
         );
     }
 
+    let Ok(read_dir) = fs::read_dir(&resolved_path) else {
+        return api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL_ERROR",
+            "Failed to read directory",
+        );
+    };
+
     let mut directories = Vec::new();
     let mut entries = Vec::new();
-    if let Ok(read_dir) = fs::read_dir(&p) {
-        for entry in read_dir.flatten() {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let full = entry.path().to_string_lossy().into_owned();
-            let meta = entry.metadata().ok();
-            let is_dir = meta.as_ref().map(|m| m.is_dir()).unwrap_or(false);
-            let size = meta.as_ref().map(|m| m.len() as i64).unwrap_or(0);
-            if is_dir {
-                directories.push(name.clone());
+    for entry in read_dir.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let entry_path = entry.path();
+        let full = entry_path.to_string_lossy().into_owned();
+
+        let sym_meta = fs::symlink_metadata(&entry_path).ok();
+        let size = sym_meta.as_ref().map(|m| m.len() as i64).unwrap_or(0);
+        let mod_time = sym_meta
+            .as_ref()
+            .and_then(|m| m.modified().ok())
+            .map(|t| chrono::DateTime::<Utc>::from(t).to_rfc3339())
+            .unwrap_or_else(|| Utc::now().to_rfc3339());
+
+        let mut is_dir = sym_meta.as_ref().map(|m| m.is_dir()).unwrap_or(false);
+        if !is_dir
+            && sym_meta
+                .as_ref()
+                .map(|m| m.file_type().is_symlink())
+                .unwrap_or(false)
+        {
+            if let Ok(target_meta) = fs::metadata(&entry_path) {
+                if target_meta.is_dir() {
+                    if let Ok(canon_target) = fs::canonicalize(&entry_path) {
+                        if is_fs_path_allowed(&canon_target, &allowed_roots) {
+                            is_dir = true;
+                        }
+                    }
+                }
             }
-            entries.push(serde_json::json!({
-                "name": name,
-                "path": full,
-                "is_dir": is_dir,
-                "size": size,
-                "mod_time": Utc::now().to_rfc3339(),
-            }));
         }
+
+        if is_dir {
+            directories.push(name.clone());
+        }
+        entries.push(serde_json::json!({
+            "name": name,
+            "path": full,
+            "is_dir": is_dir,
+            "size": size,
+            "mod_time": mod_time,
+        }));
     }
+
     directories.sort();
-    let parent = p
+    entries.sort_by(|a, b| {
+        let na = a.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        let nb = b.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        na.cmp(nb)
+    });
+
+    let parent = resolved_path
         .parent()
+        .filter(|par| *par != resolved_path && is_fs_path_allowed(par, &allowed_roots))
         .map(|par| par.to_string_lossy().into_owned())
         .unwrap_or_default();
 
     Json(serde_json::json!({
-        "current_path": q.path,
+        "current_path": resolved_path.to_string_lossy().into_owned(),
         "parent_path": parent,
         "directories": directories,
         "entries": entries,
@@ -1361,16 +1905,21 @@ async fn mark_notification_read(
     Path(id): Path<i64>,
     Extension(auth_user): Extension<AuthUser>,
 ) -> Response {
-    if let Ok(conn) = af_db::get_conn() {
-        let updated = conn
-            .execute(
-                "UPDATE notifications SET read = 1 WHERE id = ?1 AND (user_id = ?2 OR user_id IS NULL)",
-                params![id, auth_user.user_id],
-            )
-            .unwrap_or(0);
-        if updated == 0 {
-            return api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "Notification not found");
-        }
+    let Ok(conn) = af_db::get_conn() else {
+        return api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL_ERROR",
+            "Database unavailable",
+        );
+    };
+    let updated = conn
+        .execute(
+            "UPDATE notifications SET read = 1 WHERE id = ?1 AND (user_id = ?2 OR user_id IS NULL)",
+            params![id, auth_user.user_id],
+        )
+        .unwrap_or(0);
+    if updated == 0 {
+        return api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "Notification not found");
     }
     Json(serde_json::json!({ "message": "Notification marked as read" })).into_response()
 }
@@ -1470,22 +2019,11 @@ async fn sync_app_blueprint(
     .into_response()
 }
 
-#[derive(Deserialize)]
-struct StreamingQuery {
-    #[serde(default = "default_window")]
-    window: i32,
-}
-
-fn default_window() -> i32 {
-    30
-}
-
 async fn get_streaming_dashboard(
-    Extension(auth_user): Extension<AuthUser>,
-    Query(q): Query<StreamingQuery>,
-) -> Json<af_services::StreamingDashboardResponse> {
-    let is_admin = auth_user.role == "admin";
-    Json(af_services::get_streaming_dashboard(q.window, is_admin))
+    Query(q): Query<HashMap<String, String>>,
+    req: Request,
+) -> Response {
+    get_streaming_dashboard_handler(Query(q), req).await
 }
 
 #[derive(Deserialize)]
@@ -1528,13 +2066,13 @@ async fn update_streaming_server(
         af_db::encrypt_key(&req.api_key).unwrap_or(req.api_key)
     };
 
-    if let Ok(conn) = af_db::get_conn() {
+    let saved = if let Ok(conn) = af_db::get_conn() {
         let name = if req.name.trim().is_empty() {
             "Jellyfin".to_string()
         } else {
             req.name.trim().to_string()
         };
-        let _ = conn.execute(
+        conn.execute(
             r#"
             INSERT INTO streaming_servers (provider, name, url, api_key, enabled, updated_at)
             VALUES ('jellyfin', ?1, ?2, ?3, ?4, CURRENT_TIMESTAMP)
@@ -1546,6 +2084,15 @@ async fn update_streaming_server(
                 updated_at = CURRENT_TIMESTAMP
             "#,
             params![name, clean_url, enc_key, req.enabled],
+        ).is_ok()
+    } else {
+        false
+    };
+    if !saved {
+        return api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL_ERROR",
+            "Failed to save Jellyfin server configuration",
         );
     }
 
@@ -1565,8 +2112,8 @@ async fn update_streaming_server(
         ua,
     );
 
-    let dash = af_services::get_streaming_dashboard(30, true);
-    let server = dash.servers.into_iter().next();
+    let dash = crate::streaming_ext::build_streaming_dashboard("30d", true).await;
+    let server = dash.get("servers").and_then(|servers| servers.get(0)).cloned();
     Json(serde_json::json!({
         "message": "Jellyfin server configuration saved",
         "server": server,
@@ -1580,19 +2127,62 @@ struct DemoReq {
     action: String,
 }
 
-async fn handle_streaming_demo(Json(req): Json<DemoReq>) -> Json<serde_json::Value> {
-    if req.action == "clear" {
-        af_services::set_streaming_demo_mode(false);
+async fn handle_streaming_demo(
+    Extension(auth_user): Extension<AuthUser>,
+    headers: HeaderMap,
+    Json(req): Json<DemoReq>,
+) -> Response {
+    let ip = extract_client_ip(&headers);
+    let ua = headers
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    if req.action.eq_ignore_ascii_case("clear") || req.action.eq_ignore_ascii_case("disable") {
+        let _ = clear_streaming_demo_data();
+        af_db::record_audit(
+            auth_user.user_id,
+            &auth_user.username,
+            "streaming_demo_clear",
+            "streaming_demo",
+            "jellyfin",
+            "cleared",
+            &ip,
+            ua,
+        );
         Json(serde_json::json!({
             "message": "Demo telemetry cleared",
             "demoMode": false,
         }))
+        .into_response()
     } else {
-        af_services::set_streaming_demo_mode(true);
+        let history_seeded = match seed_streaming_demo_data() {
+            Ok(count) => count,
+            Err(error) => {
+                return api_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "INTERNAL_ERROR",
+                    error.to_string(),
+                );
+            }
+        };
+        af_db::record_audit(
+            auth_user.user_id,
+            &auth_user.username,
+            "streaming_demo_seed",
+            "streaming_demo",
+            "jellyfin",
+            "seeded",
+            &ip,
+            ua,
+        );
         Json(serde_json::json!({
             "message": "Demo streaming telemetry loaded",
             "demoMode": true,
+            "historySeeded": history_seeded,
+            "predictionsSeeded": 0,
         }))
+        .into_response()
     }
 }
 
@@ -1618,30 +2208,61 @@ async fn update_app_ingress_config(
     Path(app_name): Path<String>,
     Json(req): Json<UpdateIngressReq>,
 ) -> Response {
+    let clean_app = app_name.trim().to_lowercase();
+    if clean_app.is_empty() {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "VALIDATION_ERROR",
+            "App name is required",
+        );
+    }
+    if req.listen_port < 0 || req.listen_port > 65535 {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "VALIDATION_ERROR",
+            "listenPort must be between 0 and 65535",
+        );
+    }
+
+    let clean_public_domain = if req.public_domain.trim().is_empty() {
+        String::new()
+    } else {
+        let norm = af_db::normalize_base_domain(&req.public_domain);
+        if norm.is_empty() {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "INVALID_DOMAIN",
+                "Invalid publicDomain",
+            );
+        }
+        norm
+    };
+
+    let existing = af_db::get_app_ingress_config(&clean_app).ok().flatten();
     let listen_port = if req.listen_port > 0 {
         req.listen_port
-    } else if let Some(existing) = af_db::get_app_ingress_config(&app_name).ok().flatten() {
-        if existing.listen_port > 0 {
-            existing.listen_port
+    } else if let Some(ref ex) = existing {
+        if ex.listen_port > 0 {
+            ex.listen_port
         } else {
-            af_services::get_blueprint(&app_name)
+            af_services::get_blueprint(&clean_app)
                 .map(|b| b.default_port)
                 .unwrap_or(0)
         }
     } else {
-        af_services::get_blueprint(&app_name)
+        af_services::get_blueprint(&clean_app)
             .map(|b| b.default_port)
             .unwrap_or(0)
     };
 
     let now = Utc::now();
     let cfg = AppIngressConfig {
-        app_name: app_name.clone(),
-        public_domain: req.public_domain.trim().to_string(),
+        app_name: clean_app.clone(),
+        public_domain: clean_public_domain.clone(),
         external_access_enabled: req.external_access_enabled,
         listen_port,
         tls_enabled: req.tls_enabled,
-        created_at: now,
+        created_at: existing.as_ref().map(|c| c.created_at).unwrap_or(now),
         updated_at: now,
     };
     if let Err(e) = af_db::set_app_ingress_config(&cfg) {
@@ -1651,8 +2272,20 @@ async fn update_app_ingress_config(
             e.to_string(),
         );
     }
+    af_db::invalidate_ingress_cache();
 
-    let _ = af_services::mutators::apply_blueprint_app_config(&app_name, listen_port).await;
+    let _ = af_services::mutators::apply_blueprint_app_config(&clean_app, listen_port).await;
+
+    let internal_domain = af_services::get_blueprint(&clean_app)
+        .map(|bp| bp.internal_domain)
+        .filter(|d| !d.is_empty())
+        .unwrap_or_else(|| format!("{}.aether.local", clean_app));
+    let mut dns_domains = vec![internal_domain];
+    if !clean_public_domain.is_empty() && !dns_domains.contains(&clean_public_domain) {
+        dns_domains.push(clean_public_domain);
+    }
+    let _ = af_services::mutators::sync_local_dns_domains(&dns_domains).await;
+    let _ = af_services::mutators::sync_network_dns_providers().await;
 
     Json(serde_json::json!({
         "message": "Ingress configuration updated successfully",
@@ -1717,15 +2350,89 @@ async fn get_notification_channels() -> Json<serde_json::Value> {
     Json(serde_json::json!({ "channels": channels }))
 }
 
-async fn list_pending_actions() -> Json<serde_json::Value> {
-    let actions = af_db::list_pending_actions(50, 0).unwrap_or_default();
-    let total = actions.len();
+async fn list_pending_actions(Query(q): Query<HashMap<String, String>>) -> Response {
+    let status_filter = q
+        .get("status")
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("pending");
+
+    if !matches!(
+        status_filter,
+        "pending" | "approved" | "rejected" | "executed" | "failed" | "all"
+    ) {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "BAD_REQUEST",
+            "Invalid status filter. Use: pending, approved, rejected, executed, failed, all",
+        );
+    }
+
+    let limit = q
+        .get("limit")
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|&l| l > 0)
+        .unwrap_or(100)
+        .min(500);
+    let offset = q
+        .get("offset")
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(0);
+
+    let all_actions = af_db::list_pending_actions(500, 0).unwrap_or_default();
+    let filtered: Vec<_> = if status_filter == "all" {
+        all_actions
+    } else {
+        all_actions
+            .into_iter()
+            .filter(|a| a.status == status_filter)
+            .collect()
+    };
+    let total = filtered.len();
+    let actions: Vec<_> = filtered.into_iter().skip(offset).take(limit).collect();
+    let count = actions.len();
     Json(serde_json::json!({
         "actions": actions,
+        "filter": status_filter,
+        "count": count,
         "total": total,
-        "limit": 50,
-        "offset": 0,
+        "limit": limit,
+        "offset": offset,
     }))
+    .into_response()
+}
+
+fn parse_action_gate_service_command(raw_action: &str) -> Option<(String, String)> {
+    let trimmed = raw_action.trim();
+    for (prefix, act) in [
+        ("restart_service:", "restart"),
+        ("start_service:", "start"),
+        ("stop_service:", "stop"),
+        ("service_restart:", "restart"),
+        ("service_start:", "start"),
+        ("service_stop:", "stop"),
+        ("restart:", "restart"),
+        ("start:", "start"),
+        ("stop:", "stop"),
+    ] {
+        if let Some(rest) = trimmed.strip_prefix(prefix) {
+            let svc = rest.trim();
+            if !svc.is_empty() {
+                return Some((svc.to_string(), act.to_string()));
+            }
+        }
+    }
+    let parts: Vec<&str> = trimmed.split_whitespace().collect();
+    if parts.len() == 2 && matches!(parts[0], "restart" | "start" | "stop") {
+        return Some((parts[1].to_string(), parts[0].to_string()));
+    }
+    if parts.len() == 3
+        && parts[0] == "systemctl"
+        && matches!(parts[1], "restart" | "start" | "stop")
+    {
+        return Some((parts[2].to_string(), parts[1].to_string()));
+    }
+    None
 }
 
 async fn approve_action(
@@ -1733,13 +2440,55 @@ async fn approve_action(
     Extension(auth_user): Extension<AuthUser>,
     headers: HeaderMap,
 ) -> Response {
-    let Ok(action) = af_db::resolve_action(id, "approved", &auth_user.username) else {
+    match af_db::get_pending_action_by_id(id) {
+        Ok(Some(existing)) => {
+            if existing.status != "pending" {
+                return api_error(
+                    StatusCode::CONFLICT,
+                    "CONFLICT",
+                    format!("Action already resolved: {}", existing.status),
+                );
+            }
+        }
+        Ok(None) => {
+            return api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "Action not found");
+        }
+        Err(_) => {
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL_ERROR",
+                "Failed to query action",
+            );
+        }
+    }
+
+    let Ok(mut action) = af_db::resolve_action(id, "approved", &auth_user.username) else {
         return api_error(
             StatusCode::NOT_FOUND,
             "NOT_FOUND",
             "Action not found or already resolved",
         );
     };
+
+    if let Some((svc_name, svc_act)) = parse_action_gate_service_command(&action.action) {
+        match af_services::control_service(&svc_name, &svc_act).await {
+            Ok(()) => {
+                let log_msg = format!(
+                    "Service '{}' {} executed successfully by {}",
+                    svc_name, svc_act, auth_user.username
+                );
+                af_db::mark_action_executed(id, &log_msg);
+            }
+            Err(e) => {
+                let err_msg = format!("Failed to {} service '{}': {}", svc_act, svc_name, e);
+                af_db::mark_action_failed(id, &err_msg);
+            }
+        }
+        if let Ok(Some(updated)) = af_db::get_pending_action_by_id(id) {
+            action = updated;
+        }
+    }
+
     let ip = extract_client_ip(&headers);
     let ua = headers
         .get(header::USER_AGENT)
@@ -1756,7 +2505,8 @@ async fn approve_action(
         ua,
     );
     Json(serde_json::json!({
-        "message": "Action approved",
+        "status": "approved",
+        "message": "Action approved. The originating subsystem will execute it.",
         "action": action,
     }))
     .into_response()
@@ -1790,6 +2540,7 @@ async fn reject_action(
         ua,
     );
     Json(serde_json::json!({
+        "status": "rejected",
         "message": "Action rejected",
         "action": action,
     }))

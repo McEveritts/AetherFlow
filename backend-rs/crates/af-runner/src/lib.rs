@@ -1,6 +1,7 @@
 use af_models::{
-    AppMetaRunnerRequest, HostsRunnerRequest, NetworkRunnerRequest, PackageRunnerRequest,
-    QuotaRunnerRequest, RunnerResponse, SandboxRunnerRequest, SelfUpdateRequest, SystemctlRequest,
+    AppMetaRunnerRequest, HostsRunnerRequest, NetworkRunnerRequest, Package, PackageAutomation,
+    PackageRunnerRequest, QuotaRunnerRequest, RunnerResponse, SandboxRunnerRequest,
+    SelfUpdateRequest, SystemctlRequest,
 };
 use axum::body::Body;
 use axum::http::{HeaderValue, StatusCode};
@@ -9,26 +10,39 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use once_cell::sync::Lazy;
 use regex::Regex;
-use std::collections::HashSet;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::Mutex;
 
 pub const DEFAULT_RUNNER_SOCKET_PATH: &str = "/run/aetherflow/runner.sock";
 
+const EMBEDDED_PACKAGES_JSON: &str = include_str!("../../../../backend/config/packages.json");
+const EMBEDDED_AUTOMATION_JSON: &str =
+    include_str!("../../../../backend/config/package_automation.json");
+
 static PACKAGE_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
-static SAFE_SCRIPT_NAME: Lazy<Regex> =
+pub static SAFE_SCRIPT_NAME: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$").unwrap());
-static SAFE_SERVICE_NAME: Lazy<Regex> =
+pub static SAFE_PKG_ID: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$").unwrap());
+pub static SAFE_SERVICE_NAME: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^[a-zA-Z0-9][a-zA-Z0-9@._-]{0,63}$").unwrap());
-static SAFE_USERNAME_REGEX: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^[a-zA-Z0-9_.-]{1,64}$").unwrap());
-static SAFE_QUOTA_SIZE_REGEX: Lazy<Regex> =
+pub static SAFE_USERNAME: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"^[a-z_][a-z0-9_-]{0,31}$").unwrap());
+pub static SAFE_USERNAME_REGEX: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"^(?:[a-z_][a-z0-9_-]{0,31}|[a-zA-Z0-9_.-]{1,64})$").unwrap());
+pub static SAFE_QUOTA_SIZE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"^(?:[0-9]+[KMGTPkmgtp]?[Bb]?|[0-9]+(?:\.[0-9]+)?\s*[KMGTPEkmgtpe]?[Bb]?|0)$").unwrap());
+pub static SAFE_QUOTA_SIZE_REGEX: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^(?:[0-9]+(?:\.[0-9]+)?\s*[KMGTPEkmgtpe]?[Bb]?|0)$").unwrap());
 static SAFE_BASE64_KEY_REGEX: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^[a-zA-Z0-9+/=]{40,48}$").unwrap());
@@ -44,7 +58,7 @@ static ALLOWED_NETWORK_ACTIONS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
     ["wg_show", "wg_add_peer", "wg_remove_peer", "tailscale_set_routes"].into()
 });
 
-pub fn runner_socket_path() -> String {
+pub fn resolve_runner_socket_path() -> String {
     if let Ok(p) = env::var("AETHERFLOW_RUNNER_SOCK") {
         let trimmed = p.trim();
         if !trimmed.is_empty() {
@@ -54,10 +68,30 @@ pub fn runner_socket_path() -> String {
     DEFAULT_RUNNER_SOCKET_PATH.to_string()
 }
 
-pub fn is_runner_available() -> bool {
-    let p = runner_socket_path();
-    Path::new(&p).exists()
+pub fn runner_socket_path() -> String {
+    resolve_runner_socket_path()
 }
+
+pub fn is_runner_available() -> bool {
+    let p = resolve_runner_socket_path();
+    let path = Path::new(&p);
+    if !path.exists() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileTypeExt;
+        if let Ok(meta) = fs::metadata(path) {
+            return meta.file_type().is_socket() || meta.is_file();
+        }
+        false
+    }
+    #[cfg(not(unix))]
+    {
+        path.exists()
+    }
+}
+
 
 pub fn resolve_package_script_path(action: &str, script_name: &str) -> Option<PathBuf> {
     if !SAFE_SCRIPT_NAME.is_match(script_name) {
@@ -206,6 +240,52 @@ async fn handle_systemctl(
     }
 }
 
+fn package_command_stream(
+    mut cmd: Command,
+) -> impl futures::Stream<Item = Result<String, std::io::Error>> + Send {
+    async_stream::stream! {
+        let _lock = PACKAGE_MUTEX.lock().await;
+        cmd.kill_on_drop(true)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        match cmd.spawn() {
+            Ok(mut child) => {
+                let mut stdout = BufReader::new(child.stdout.take().unwrap()).lines();
+                let mut stderr = BufReader::new(child.stderr.take().unwrap()).lines();
+                let mut stdout_open = true;
+                let mut stderr_open = true;
+                while stdout_open || stderr_open {
+                    let (is_stdout, result) = tokio::select! {
+                        result = stdout.next_line(), if stdout_open => (true, result),
+                        result = stderr.next_line(), if stderr_open => (false, result),
+                    };
+                    match result {
+                        Ok(Some(line)) => yield Ok(format!("{}\n", line)),
+                        Ok(None) if is_stdout => stdout_open = false,
+                        Ok(None) => stderr_open = false,
+                        Err(error) => {
+                            yield Ok(format!("__RUNNER_EXIT_ERROR__:{}\n", error));
+                            return;
+                        }
+                    }
+                }
+                match child.wait().await {
+                    Ok(status) if !status.success() => {
+                        yield Ok(format!("__RUNNER_EXIT_ERROR__:exit status {}\n", status));
+                    }
+                    Err(error) => {
+                        yield Ok(format!("__RUNNER_EXIT_ERROR__:{}\n", error));
+                    }
+                    _ => {}
+                }
+            }
+            Err(error) => {
+                yield Ok(format!("__RUNNER_EXIT_ERROR__:{}\n", error));
+            }
+        }
+    }
+}
+
 async fn handle_package(Json(req): Json<PackageRunnerRequest>) -> Response {
     if !matches!(req.action.as_str(), "install" | "remove" | "update") {
         return (StatusCode::BAD_REQUEST, "disallowed package action").into_response();
@@ -225,43 +305,15 @@ async fn handle_package(Json(req): Json<PackageRunnerRequest>) -> Response {
         return (StatusCode::NOT_FOUND, "package script not found").into_response();
     };
 
-    let app_port = req.app_port;
-    let stream = async_stream::stream! {
-        let _lock = PACKAGE_MUTEX.lock().await;
-        let mut cmd = Command::new("bash");
-        cmd.arg(&script_path)
-            .env("DEBIAN_FRONTEND", "noninteractive")
-            .env("DPKG_LOCK_TIMEOUT", "120")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-
-        if (1024..=65535).contains(&app_port) {
-            cmd.env("AF_APP_PORT", app_port.to_string());
-        }
-
-        match cmd.spawn() {
-            Ok(mut child) => {
-                if let Some(stdout) = child.stdout.take() {
-                    let mut reader = BufReader::new(stdout).lines();
-                    while let Ok(Some(line)) = reader.next_line().await {
-                        yield Ok::<_, std::io::Error>(format!("{}\n", line));
-                    }
-                }
-                match child.wait().await {
-                    Ok(status) if !status.success() => {
-                        yield Ok(format!("__RUNNER_EXIT_ERROR__:exit status {}\n", status));
-                    }
-                    Err(e) => {
-                        yield Ok(format!("__RUNNER_EXIT_ERROR__:{}\n", e));
-                    }
-                    _ => {}
-                }
-            }
-            Err(e) => {
-                yield Ok(format!("__RUNNER_EXIT_ERROR__:{}\n", e));
-            }
-        }
-    };
+    let mut cmd = Command::new("bash");
+    cmd.arg(&script_path)
+        .env("DEBIAN_FRONTEND", "noninteractive")
+        .env("DPKG_LOCK_TIMEOUT", "120");
+    if (1024..=65535).contains(&req.app_port) {
+        cmd.env("AF_APP_PORT", req.app_port.to_string());
+        cmd.env("AETHERFLOW_APP_PORT", req.app_port.to_string());
+    }
+    let stream = package_command_stream(cmd);
 
     let mut resp = Response::new(Body::from_stream(stream));
     resp.headers_mut().insert(
@@ -338,15 +390,353 @@ async fn handle_self_update(
     )
 }
 
+pub fn resolve_sandbox_script_path() -> Option<PathBuf> {
+    if let Ok(explicit) = env::var("AETHERFLOW_SANDBOX_SCRIPT") {
+        let trimmed = explicit.trim();
+        if !trimmed.is_empty() {
+            let p = PathBuf::from(trimmed);
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+    }
+
+    let mut candidates = vec![
+        PathBuf::from("/usr/local/bin/af-systemd-sandbox"),
+        PathBuf::from("/usr/local/bin/AetherFlow/system/af-systemd-sandbox"),
+        PathBuf::from("deploy/security/af-systemd-sandbox"),
+        PathBuf::from("../deploy/security/af-systemd-sandbox"),
+        PathBuf::from("packages/system/af-systemd-sandbox"),
+        PathBuf::from("../packages/system/af-systemd-sandbox"),
+        PathBuf::from("/opt/AetherFlow/current/packages/system/af-systemd-sandbox"),
+        PathBuf::from("/opt/AetherFlow/packages/system/af-systemd-sandbox"),
+    ];
+    if let Ok(exe) = env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            candidates.push(exe_dir.join("deploy/security/af-systemd-sandbox"));
+            candidates.push(exe_dir.join("../deploy/security/af-systemd-sandbox"));
+            candidates.push(exe_dir.join("packages/system/af-systemd-sandbox"));
+            candidates.push(exe_dir.join("../packages/system/af-systemd-sandbox"));
+        }
+    }
+    candidates.into_iter().find(|c| c.is_file())
+}
+
+fn load_runner_config_or_embedded(env_var: &str, filename: &str, embedded: &str) -> String {
+    if let Ok(explicit) = env::var(env_var) {
+        let trimmed = explicit.trim();
+        if !trimmed.is_empty() {
+            if let Ok(s) = fs::read_to_string(trimmed) {
+                return s;
+            }
+        }
+    }
+    let mut candidates = vec![
+        PathBuf::from("config").join(filename),
+        PathBuf::from("backend/config").join(filename),
+        PathBuf::from("../backend/config").join(filename),
+        PathBuf::from("/opt/AetherFlow/current/config").join(filename),
+        PathBuf::from("/opt/AetherFlow/backend/config").join(filename),
+    ];
+    if let Ok(exe) = env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            candidates.insert(0, exe_dir.join("config").join(filename));
+        }
+    }
+    for c in candidates {
+        if let Ok(s) = fs::read_to_string(&c) {
+            return s;
+        }
+    }
+    embedded.to_string()
+}
+
+pub fn get_runner_package_definition(pkg_id: &str) -> Option<Package> {
+    let raw_pkgs = load_runner_config_or_embedded(
+        "AETHERFLOW_PACKAGES_CONFIG",
+        "packages.json",
+        EMBEDDED_PACKAGES_JSON,
+    );
+    let raw_auto = load_runner_config_or_embedded(
+        "AETHERFLOW_PACKAGE_AUTOMATION_CONFIG",
+        "package_automation.json",
+        EMBEDDED_AUTOMATION_JSON,
+    );
+
+    let mut pkgs: Vec<Package> = serde_json::from_str(&raw_pkgs).ok()?;
+    let auto_map: HashMap<String, PackageAutomation> =
+        serde_json::from_str(&raw_auto).unwrap_or_default();
+
+    for p in &mut pkgs {
+        if let Some(auto) = auto_map.get(&p.name) {
+            p.update_source = auto.update_source.clone();
+            p.update_repo = auto.update_repo.clone();
+            p.update_repo_url = auto.update_repo_url.clone();
+            p.update_package = auto.update_package.clone();
+            p.version_command = auto.version_command.clone();
+            p.version_regex = auto.version_regex.clone();
+            p.sandbox_profile = auto.sandbox_profile.clone();
+            p.sandbox_read_write = auto.sandbox_read_write.clone();
+            p.sandbox_service_ids = auto.sandbox_service_ids.clone();
+        }
+    }
+
+    pkgs.into_iter().find(|p| p.name == pkg_id)
+}
+
+fn normalize_systemd_unit(unit: &str) -> String {
+    let trimmed = unit.trim();
+    if trimmed.ends_with(".service") || trimmed.ends_with(".timer") || trimmed.ends_with(".socket")
+    {
+        trimmed.to_string()
+    } else {
+        format!("{}.service", trimmed)
+    }
+}
+
+fn is_exempt_sandbox_unit(unit: &str) -> bool {
+    matches!(
+        unit,
+        "aetherflow-api.service"
+            | "aetherflow-runner.service"
+            | "fail2ban.service"
+            | "pihole-FTL.service"
+            | "netdata.service"
+            | "node_exporter.service"
+            | "apache2.service"
+            | "mariadb.service"
+            | "mysql.service"
+    ) || unit.starts_with("wg-quick@")
+        || unit.starts_with("wireguard")
+        || unit.starts_with("mergerfs")
+        || unit.starts_with("rclone-vfs")
+        || unit.starts_with("scrutiny-collector")
+        || unit.starts_with("x2goserver")
+        || unit.starts_with("novnc-xvnc")
+}
+
+pub fn render_systemd_sandbox_dropin(
+    profile: &str,
+    unit: &str,
+    rw_paths: &[String],
+) -> String {
+    let norm_unit = normalize_systemd_unit(unit);
+    let private_devices = if norm_unit.starts_with("jellyfin")
+        || norm_unit.starts_with("plex")
+        || norm_unit.starts_with("emby")
+        || norm_unit.starts_with("tdarr")
+        || norm_unit.starts_with("threadfin")
+        || norm_unit.starts_with("scrutiny")
+        || norm_unit.starts_with("dispatcharr")
+        || norm_unit.starts_with("unmanic")
+    {
+        "no"
+    } else {
+        "yes"
+    };
+    let restrict_namespaces = if norm_unit.starts_with("flaresolverr") {
+        "no"
+    } else {
+        "yes"
+    };
+
+    let mut lines = vec![
+        "[Service]".to_string(),
+        "NoNewPrivileges=yes".to_string(),
+        "PrivateTmp=yes".to_string(),
+        format!("PrivateDevices={}", private_devices),
+        "ProtectSystem=strict".to_string(),
+        "ProtectHome=read-only".to_string(),
+        "ProtectClock=yes".to_string(),
+        "ProtectControlGroups=yes".to_string(),
+        "ProtectKernelLogs=yes".to_string(),
+        "ProtectKernelModules=yes".to_string(),
+        "ProtectKernelTunables=yes".to_string(),
+        "ProtectProc=invisible".to_string(),
+        "ProcSubset=pid".to_string(),
+        "LockPersonality=yes".to_string(),
+        format!("RestrictNamespaces={}", restrict_namespaces),
+        "RestrictRealtime=yes".to_string(),
+        "RestrictSUIDSGID=yes".to_string(),
+        "SystemCallArchitectures=native".to_string(),
+        "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK".to_string(),
+        "CapabilityBoundingSet=".to_string(),
+        "AmbientCapabilities=".to_string(),
+        "UMask=0077".to_string(),
+    ];
+
+    if !matches!(profile, "node" | "mono" | "dotnet" | "java" | "python") {
+        lines.push("MemoryDenyWriteExecute=yes".to_string());
+    }
+
+    if !rw_paths.is_empty() {
+        let mut expanded = Vec::with_capacity(rw_paths.len());
+        for raw in rw_paths {
+            let clean = raw
+                .trim_start_matches('-')
+                .replace("{{SERVICE_USER}}", "root")
+                .replace("{{SERVICE_HOME}}", "/root")
+                .replace("{{MASTER_USER}}", "root");
+            let prefixed = if raw.starts_with('-') || !Path::new(&clean).exists() {
+                format!("-{}", clean)
+            } else {
+                clean
+            };
+            if prefixed.contains(char::is_whitespace) {
+                expanded.push(format!("\"{}\"", prefixed));
+            } else {
+                expanded.push(prefixed);
+            }
+        }
+        lines.push(format!("ReadWritePaths={}", expanded.join(" ")));
+    }
+
+    format!("{}\n", lines.join("\n"))
+}
+
+pub async fn apply_package_sandbox_local(pkg_id: &str) -> anyhow::Result<String> {
+    if !SAFE_PKG_ID.is_match(pkg_id) {
+        anyhow::bail!("invalid package identifier");
+    }
+
+    let pkg = get_runner_package_definition(pkg_id).unwrap_or_else(|| Package {
+        name: pkg_id.to_string(),
+        service_type: "systemd".to_string(),
+        service_name: pkg_id.to_string(),
+        sandbox_profile: "native".to_string(),
+        sandbox_read_write: vec![format!("/var/lib/{}", pkg_id)],
+        sandbox_service_ids: vec![format!("{}.service", pkg_id)],
+        ..Default::default()
+    });
+
+    if !pkg.service_type.is_empty() && pkg.service_type != "systemd" {
+        return Ok("sandbox skipped (non-systemd service)".to_string());
+    }
+    if pkg.sandbox_profile.is_empty() {
+        return Ok("sandbox skipped (no profile configured)".to_string());
+    }
+    if pkg.sandbox_read_write.is_empty()
+        && pkg.sandbox_profile != "privileged"
+        && pkg.sandbox_profile != "none"
+    {
+        return Ok("sandbox skipped (no read-write paths)".to_string());
+    }
+
+    let mut units = pkg.sandbox_service_ids.clone();
+    if units.is_empty() && !pkg.service_name.is_empty() {
+        units.push(pkg.service_name.clone());
+    }
+    if units.is_empty() {
+        units.push(pkg_id.to_string());
+    }
+
+    let dry_run = env::var("AETHERFLOW_SANDBOX_DRY_RUN")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+
+    let systemd_root_override = env::var("AETHERFLOW_SYSTEMD_ROOT")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    // 1. If systemd root override is set (or on Linux when writing drop-ins directly), write drop-in files
+    if let Some(ref sys_root) = systemd_root_override {
+        for raw_unit in &units {
+            let norm_unit = normalize_systemd_unit(raw_unit);
+            let dropin_dir = Path::new(sys_root).join(format!("{}.d", norm_unit));
+            let dropin_aether = dropin_dir.join("aetherflow-sandbox.conf");
+            let dropin_10 = dropin_dir.join("10-aetherflow-sandbox.conf");
+            if pkg.sandbox_profile == "privileged"
+                || pkg.sandbox_profile == "none"
+                || is_exempt_sandbox_unit(&norm_unit)
+            {
+                let _ = fs::remove_file(&dropin_aether);
+                let _ = fs::remove_file(&dropin_10);
+                continue;
+            }
+            fs::create_dir_all(&dropin_dir)?;
+            let content = render_systemd_sandbox_dropin(
+                &pkg.sandbox_profile,
+                &norm_unit,
+                &pkg.sandbox_read_write,
+            );
+            fs::write(&dropin_aether, &content)?;
+            fs::write(&dropin_10, &content)?;
+        }
+        return Ok("sandbox applied".to_string());
+    }
+
+    if dry_run || !cfg!(target_os = "linux") {
+        return Ok("sandbox applied".to_string());
+    }
+
+    // 2. On Linux, prefer executing `af-systemd-sandbox` script if available
+    if let Some(script_path) = resolve_sandbox_script_path() {
+        let mut args = vec![
+            script_path.to_string_lossy().to_string(),
+            "apply".to_string(),
+            "--profile".to_string(),
+            pkg.sandbox_profile.clone(),
+        ];
+        for rw in &pkg.sandbox_read_write {
+            args.push("--rw".to_string());
+            args.push(rw.clone());
+        }
+        for u in &units {
+            args.push(u.clone());
+        }
+
+        if let Ok(out) = Command::new("bash").args(&args).output().await {
+            if out.status.success() {
+                return Ok("sandbox applied".to_string());
+            }
+        }
+    }
+
+    // 3. Direct drop-in fallback in /etc/systemd/system/<unit>.service.d/aetherflow-sandbox.conf
+    let sys_dir = Path::new("/etc/systemd/system");
+    if sys_dir.exists() {
+        for raw_unit in &units {
+            let norm_unit = normalize_systemd_unit(raw_unit);
+            let dropin_dir = sys_dir.join(format!("{}.d", norm_unit));
+            let dropin_aether = dropin_dir.join("aetherflow-sandbox.conf");
+            let dropin_10 = dropin_dir.join("10-aetherflow-sandbox.conf");
+            if pkg.sandbox_profile == "privileged"
+                || pkg.sandbox_profile == "none"
+                || is_exempt_sandbox_unit(&norm_unit)
+            {
+                let _ = fs::remove_file(&dropin_aether);
+                let _ = fs::remove_file(&dropin_10);
+                continue;
+            }
+            if fs::create_dir_all(&dropin_dir).is_ok() {
+                let content = render_systemd_sandbox_dropin(
+                    &pkg.sandbox_profile,
+                    &norm_unit,
+                    &pkg.sandbox_read_write,
+                );
+                let _ = fs::write(&dropin_aether, &content);
+                let _ = fs::write(&dropin_10, &content);
+            }
+        }
+        let _ = Command::new("systemctl")
+            .arg("daemon-reload")
+            .output()
+            .await;
+    }
+
+    Ok("sandbox applied".to_string())
+}
+
 async fn handle_sandbox(
     Json(req): Json<SandboxRunnerRequest>,
 ) -> (StatusCode, Json<RunnerResponse>) {
-    let pkg = if !req.package.is_empty() {
-        req.package
+    let pkg = if !req.package.trim().is_empty() {
+        req.package.trim().to_string()
     } else {
-        req.package_id
+        req.package_id.trim().to_string()
     };
-    if !SAFE_SCRIPT_NAME.is_match(&pkg) {
+    if !SAFE_PKG_ID.is_match(&pkg) {
         return (
             StatusCode::BAD_REQUEST,
             Json(RunnerResponse {
@@ -356,14 +746,29 @@ async fn handle_sandbox(
             }),
         );
     }
-    (
-        StatusCode::OK,
-        Json(RunnerResponse {
-            success: true,
-            output: "sandbox applied".to_string(),
-            error: String::new(),
-        }),
-    )
+
+    match apply_package_sandbox_local(&pkg).await {
+        Ok(out) => (
+            StatusCode::OK,
+            Json(RunnerResponse {
+                success: true,
+                output: if out.is_empty() {
+                    "sandbox applied".to_string()
+                } else {
+                    out
+                },
+                error: String::new(),
+            }),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(RunnerResponse {
+                success: false,
+                output: String::new(),
+                error: e.to_string(),
+            }),
+        ),
+    }
 }
 
 async fn handle_hosts(
@@ -582,10 +987,164 @@ pub async fn execute_network_action_local(req: &NetworkRunnerRequest) -> anyhow:
     }
 }
 
+pub fn resolve_setdisk_script_path() -> Option<PathBuf> {
+    if let Ok(explicit) = env::var("AF_SETDISK_PATH") {
+        let trimmed = explicit.trim();
+        if !trimmed.is_empty() {
+            let p = PathBuf::from(trimmed);
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+    }
+
+    let mut candidates = vec![
+        PathBuf::from("/usr/local/bin/AetherFlow/system/setdisk"),
+        PathBuf::from("packages/system/setdisk"),
+        PathBuf::from("../packages/system/setdisk"),
+        PathBuf::from("/opt/AetherFlow/current/packages/system/setdisk"),
+        PathBuf::from("/opt/AetherFlow/packages/system/setdisk"),
+    ];
+    if let Ok(exe) = env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            candidates.push(exe_dir.join("packages/system/setdisk"));
+            candidates.push(exe_dir.join("../packages/system/setdisk"));
+        }
+    }
+    candidates.into_iter().find(|c| c.is_file())
+}
+
+pub fn parse_quota_size_to_1k_blocks(size_raw: &str) -> Option<(u64, u64)> {
+    let trimmed = size_raw.trim().to_uppercase();
+    if trimmed == "0" {
+        return Some((0, 0));
+    }
+    let re = Regex::new(r"^([0-9]+(?:\.[0-9]+)?)\s*([KMGTPE]?)[B]?$").ok()?;
+    let caps = re.captures(&trimmed)?;
+    let num: f64 = caps.get(1)?.as_str().parse().ok()?;
+    let unit = caps.get(2).map(|m| m.as_str()).unwrap_or("");
+    let bytes: u64 = match unit {
+        "" => num as u64,
+        "K" => (num * 1024.0) as u64,
+        "M" => (num * 1024.0 * 1024.0) as u64,
+        "G" => (num * 1024.0 * 1024.0 * 1024.0) as u64,
+        "T" => (num * 1024.0 * 1024.0 * 1024.0 * 1024.0) as u64,
+        "P" => (num * 1024.0 * 1024.0 * 1024.0 * 1024.0 * 1024.0) as u64,
+        "E" => (num * 1024.0 * 1024.0 * 1024.0 * 1024.0 * 1024.0 * 1024.0) as u64,
+        _ => return None,
+    };
+    let blocks_1k = bytes.div_ceil(1024);
+    Some((blocks_1k, bytes))
+}
+
+pub async fn execute_set_quota_local(username: &str, size: &str) -> anyhow::Result<String> {
+    if !SAFE_USERNAME.is_match(username) && !SAFE_USERNAME_REGEX.is_match(username) {
+        anyhow::bail!("invalid username format");
+    }
+    if !SAFE_QUOTA_SIZE.is_match(size) && !SAFE_QUOTA_SIZE_REGEX.is_match(size) {
+        anyhow::bail!("invalid size format");
+    }
+
+    let dry_run = env::var("AETHERFLOW_QUOTA_DRY_RUN")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if dry_run || !cfg!(target_os = "linux") {
+        let (_, quota_bytes) = parse_quota_size_to_1k_blocks(size).unwrap_or((0, 0));
+        return Ok(json!({
+            "username": username,
+            "quota": size.trim().to_uppercase(),
+            "quota_bytes": quota_bytes,
+            "status": "applied"
+        })
+        .to_string());
+    }
+
+    let bin_setdisk = Path::new("/usr/local/bin/AetherFlow/system/setdisk");
+    if bin_setdisk.is_file() {
+        let out = Command::new("bash")
+            .arg(bin_setdisk)
+            .arg("--username")
+            .arg(username)
+            .arg("--size")
+            .arg(size)
+            .arg("--json")
+            .output()
+            .await;
+        if let Ok(o) = out {
+            let combined = format!(
+                "{}{}",
+                String::from_utf8_lossy(&o.stdout),
+                String::from_utf8_lossy(&o.stderr)
+            );
+            if o.status.success() {
+                return Ok(combined.trim().to_string());
+            }
+            // Also try positional invocation `<username> <size>` if script variant expects positional args
+            if let Ok(o2) = Command::new(bin_setdisk)
+                .arg(username)
+                .arg(size)
+                .output()
+                .await
+            {
+                if o2.status.success() {
+                    return Ok(String::from_utf8_lossy(&o2.stdout).trim().to_string());
+                }
+            }
+            anyhow::bail!("setdisk failed: {}", combined.trim());
+        }
+    }
+
+    if let Some(script_path) = resolve_setdisk_script_path() {
+        let out = Command::new("bash")
+            .arg(&script_path)
+            .arg("--username")
+            .arg(username)
+            .arg("--size")
+            .arg(size)
+            .arg("--json")
+            .output()
+            .await?;
+        let combined = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        if out.status.success() {
+            return Ok(combined.trim().to_string());
+        }
+    }
+
+    let (blocks_1k, quota_bytes) = parse_quota_size_to_1k_blocks(size)
+        .ok_or_else(|| anyhow::anyhow!("invalid quota size: {:?}", size))?;
+    let block_str = blocks_1k.to_string();
+    let out = Command::new("setquota")
+        .args(["-u", username, &block_str, &block_str, "0", "0", "-a"])
+        .output()
+        .await?;
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    if !out.status.success() {
+        anyhow::bail!("setquota failed: {}", combined.trim());
+    }
+
+    Ok(json!({
+        "username": username,
+        "quota": size.trim().to_uppercase(),
+        "quota_bytes": quota_bytes,
+        "status": "applied"
+    })
+    .to_string())
+}
+
 async fn handle_quota(
     Json(req): Json<QuotaRunnerRequest>,
 ) -> (StatusCode, Json<RunnerResponse>) {
-    if !SAFE_USERNAME_REGEX.is_match(&req.username) {
+    if (!SAFE_USERNAME.is_match(&req.username) && !SAFE_USERNAME_REGEX.is_match(&req.username))
+        || req.username.contains("..")
+    {
         return (
             StatusCode::BAD_REQUEST,
             Json(RunnerResponse {
@@ -595,7 +1154,7 @@ async fn handle_quota(
             }),
         );
     }
-    if !SAFE_QUOTA_SIZE_REGEX.is_match(&req.size) {
+    if !SAFE_QUOTA_SIZE.is_match(&req.size) && !SAFE_QUOTA_SIZE_REGEX.is_match(&req.size) {
         return (
             StatusCode::BAD_REQUEST,
             Json(RunnerResponse {
@@ -606,14 +1165,1215 @@ async fn handle_quota(
         );
     }
 
-    (
-        StatusCode::OK,
-        Json(RunnerResponse {
-            success: true,
-            output: format!("Quota set for {} to {}", req.username, req.size),
-            error: String::new(),
-        }),
-    )
+    match execute_set_quota_local(&req.username, &req.size).await {
+        Ok(out) => (
+            StatusCode::OK,
+            Json(RunnerResponse {
+                success: true,
+                output: out,
+                error: String::new(),
+            }),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(RunnerResponse {
+                success: false,
+                output: String::new(),
+                error: e.to_string(),
+            }),
+        ),
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Privileged Application Runtime Metadata Extraction (`app_credentials.go`)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AppRuntimeMeta {
+    #[serde(default)]
+    pub api_key: String,
+    #[serde(default)]
+    pub configured_port: i32,
+}
+
+static PLEX_TOKEN_ATTR_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r#"(?i)\bPlexOnlineToken\s*=\s*"([^"]+)""#).unwrap());
+static PHP_ORGANIZR_KEY_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r#"(?i)['"]organizrAPI['"]\s*=>\s*['"]([^'"]+)['"]"#).unwrap());
+
+pub fn normalize_runner_app_name(app_name: &str) -> String {
+    let clean = app_name
+        .trim()
+        .to_lowercase()
+        .trim_end_matches(".service")
+        .to_string();
+    match clean.as_str() {
+        "plexmediaserver" => "plex".to_string(),
+        "emby-server" => "emby".to_string(),
+        "pihole-ftl" => "pihole".to_string(),
+        "transmission-daemon" => "transmission".to_string(),
+        "deluged" | "deluge-web" => "deluge".to_string(),
+        "paperless-webserver" | "paperless" => "paperless-ngx".to_string(),
+        "qbittorrent-nox" => "qbittorrent".to_string(),
+        "calibreweb" => "calibre-web".to_string(),
+        "grafana-server" => "grafana".to_string(),
+        "uptimekuma" => "uptime-kuma".to_string(),
+        _ => clean,
+    }
+}
+
+fn resolve_runner_fs_path(raw_path: &str) -> PathBuf {
+    let trimmed = raw_path.trim();
+    if trimmed.is_empty() {
+        return PathBuf::new();
+    }
+    for env_key in ["AETHERFLOW_CONFIG_ROOT", "AETHERFLOW_FS_ROOT"] {
+        if let Ok(root) = env::var(env_key) {
+            let root_trim = root.trim();
+            if !root_trim.is_empty() {
+                let rel = trimmed.trim_start_matches(['/', '\\']);
+                return Path::new(root_trim).join(rel);
+            }
+        }
+    }
+    PathBuf::from(trimmed)
+}
+
+fn read_runner_config_text(raw_path: &str) -> Option<String> {
+    let resolved = resolve_runner_fs_path(raw_path);
+    let meta = fs::metadata(&resolved).ok()?;
+    if !meta.is_file() || meta.len() == 0 || meta.len() > 2 * 1024 * 1024 {
+        return None;
+    }
+    fs::read_to_string(&resolved).ok()
+}
+
+fn parse_valid_runner_port(raw: &str) -> i32 {
+    let clean = raw.trim().trim_matches(['"', '\'']);
+    if clean.is_empty() {
+        return 0;
+    }
+    match clean.parse::<i32>() {
+        Ok(p) if (1..=65535).contains(&p) => p,
+        _ => 0,
+    }
+}
+
+fn parse_pihole_runner_port(raw: &str) -> i32 {
+    for part in raw.split(',') {
+        let tok = part
+            .trim()
+            .trim_matches(['"', '\''])
+            .trim_end_matches(['o', 'O', 's', 'S']);
+        let p = parse_valid_runner_port(tok);
+        if p > 0 {
+            return p;
+        }
+    }
+    0
+}
+
+fn parse_host_port_or_port(raw: &str) -> i32 {
+    let clean = raw.trim().trim_matches(['"', '\'']);
+    if clean.is_empty() {
+        return 0;
+    }
+    if let Some((_, port_str)) = clean.rsplit_once(':') {
+        let p = parse_valid_runner_port(port_str);
+        if p > 0 {
+            return p;
+        }
+    }
+    parse_valid_runner_port(clean)
+}
+
+fn extract_runner_xml_tag(content: &str, tag: &str) -> String {
+    if content.is_empty() || tag.is_empty() {
+        return String::new();
+    }
+    let pattern = format!(
+        r"(?is)<{0}>\s*([^<]*?)\s*</{0}>",
+        regex::escape(tag)
+    );
+    let Ok(re) = Regex::new(&pattern) else {
+        return String::new();
+    };
+    if let Some(caps) = re.captures(content) {
+        if let Some(m) = caps.get(1) {
+            return m.as_str().trim().to_string();
+        }
+    }
+    String::new()
+}
+
+fn extract_runner_ini_value(content: &str, keys: &[&str]) -> String {
+    if content.is_empty() || keys.is_empty() {
+        return String::new();
+    }
+    for want_key in keys {
+        let want_lower = want_key.trim().to_lowercase();
+        for line in content.lines() {
+            let mut trimmed = line.trim();
+            if trimmed.is_empty()
+                || trimmed.starts_with('#')
+                || trimmed.starts_with(';')
+                || trimmed.starts_with("//")
+                || trimmed.starts_with('[')
+            {
+                continue;
+            }
+            if let Some(rest) = trimmed.strip_prefix("export ") {
+                trimmed = rest.trim();
+            }
+            let Some(idx) = trimmed.find(['=', ':']) else {
+                continue;
+            };
+            if idx == 0 {
+                continue;
+            }
+            let k = trimmed[..idx].trim().to_lowercase();
+            if k != want_lower {
+                continue;
+            }
+            let mut val = trimmed[idx + 1..].trim();
+            if !val.starts_with('"') && !val.starts_with('\'') {
+                if let Some(hash_idx) = val.find(" #") {
+                    val = val[..hash_idx].trim();
+                }
+            }
+            let val = val.trim_matches(['"', '\'']).trim();
+            if !val.is_empty() {
+                return val.to_string();
+            }
+        }
+    }
+    String::new()
+}
+
+fn extract_runner_yaml_key_in_section(content: &str, section: &str, key: &str) -> String {
+    if content.is_empty() || key.is_empty() {
+        return String::new();
+    }
+    let want_section = section.trim().to_lowercase();
+    let want_key = key.trim().to_lowercase();
+    let mut in_section = want_section.is_empty();
+
+    for raw_line in content.lines() {
+        let trimmed = raw_line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let is_indented = raw_line.starts_with(' ') || raw_line.starts_with('\t');
+        if !is_indented && trimmed.ends_with(':') {
+            let sec_name = trimmed.trim_end_matches(':').trim().to_lowercase();
+            if !want_section.is_empty() {
+                in_section = sec_name == want_section;
+            }
+            continue;
+        }
+        if !in_section {
+            continue;
+        }
+        let Some(idx) = trimmed.find(':') else {
+            continue;
+        };
+        if idx == 0 {
+            continue;
+        }
+        let k = trimmed[..idx].trim().to_lowercase();
+        if k != want_key {
+            continue;
+        }
+        let mut val = trimmed[idx + 1..].trim();
+        if !val.starts_with('"') && !val.starts_with('\'') {
+            if let Some(hash_idx) = val.find(" #") {
+                val = val[..hash_idx].trim();
+            }
+        }
+        let val = val.trim_matches(['"', '\'']).trim();
+        if !val.is_empty() && val != "null" && val != "~" {
+            return val.to_string();
+        }
+    }
+    String::new()
+}
+
+fn json_value_to_port(v: &Value) -> i32 {
+    match v {
+        Value::Number(n) => n
+            .as_i64()
+            .and_then(|i| i32::try_from(i).ok())
+            .filter(|&p| (1..=65535).contains(&p))
+            .unwrap_or(0),
+        Value::String(s) => parse_valid_runner_port(s),
+        _ => 0,
+    }
+}
+
+fn extract_runner_json_key_and_port(content: &str) -> (String, i32) {
+    let mut parsed_obj: Option<serde_json::Map<String, Value>> = None;
+    if let Ok(Value::Object(map)) = serde_json::from_str::<Value>(content) {
+        parsed_obj = Some(map);
+    } else {
+        // Support concatenated JSON objects like Deluge web.conf
+        let mut stream = serde_json::Deserializer::from_str(content).into_iter::<Value>();
+        if let Some(Ok(Value::Object(first))) = stream.next() {
+            if let Some(Ok(Value::Object(second))) = stream.next() {
+                parsed_obj = Some(second);
+            } else {
+                parsed_obj = Some(first);
+            }
+        }
+    }
+
+    let Some(raw) = parsed_obj else {
+        return (String::new(), 0);
+    };
+
+    let mut api_key = String::new();
+    for k in ["APIKey", "ApiKey", "apiKey", "api_key", "apikey", "token"] {
+        if let Some(Value::String(s)) = raw.get(k) {
+            let trimmed = s.trim();
+            if !trimmed.is_empty() {
+                api_key = trimmed.to_string();
+                break;
+            }
+        }
+    }
+
+    let mut port = 0;
+    for k in ["Port", "port", "rpc-port", "http_port"] {
+        if let Some(v) = raw.get(k) {
+            let p = json_value_to_port(v);
+            if p > 0 {
+                port = p;
+                break;
+            }
+        }
+    }
+
+    if let Some(Value::Object(main_obj)) = raw.get("main") {
+        if api_key.is_empty() {
+            for k in ["apiKey", "APIKey", "api_key"] {
+                if let Some(Value::String(s)) = main_obj.get(k) {
+                    let trimmed = s.trim();
+                    if !trimmed.is_empty() {
+                        api_key = trimmed.to_string();
+                        break;
+                    }
+                }
+            }
+        }
+        if port <= 0 {
+            for k in ["port", "Port"] {
+                if let Some(v) = main_obj.get(k) {
+                    let p = json_value_to_port(v);
+                    if p > 0 {
+                        port = p;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    (api_key, port)
+}
+
+fn query_runner_sqlite_single_string(raw_path: &str, queries: &[&str]) -> String {
+    let resolved = resolve_runner_fs_path(raw_path);
+    let Ok(meta) = fs::metadata(&resolved) else {
+        return String::new();
+    };
+    if !meta.is_file() || meta.len() == 0 {
+        return String::new();
+    }
+    let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let Ok(conn) = rusqlite::Connection::open_with_flags(&resolved, flags) else {
+        return String::new();
+    };
+    let _ = conn.busy_timeout(Duration::from_millis(1000));
+
+    for q in queries {
+        if let Ok(val) = conn.query_row(q, [], |row| row.get::<_, Option<String>>(0)) {
+            if let Some(s) = val {
+                let trimmed = s.trim();
+                if !trimmed.is_empty() {
+                    return trimmed.to_string();
+                }
+            }
+        }
+    }
+    String::new()
+}
+
+pub fn extract_app_runtime_meta_local(app_name: &str) -> AppRuntimeMeta {
+    let canonical = normalize_runner_app_name(app_name);
+    let mut meta = AppRuntimeMeta::default();
+
+    match canonical.as_str() {
+        "sonarr" | "radarr" | "lidarr" | "readarr" | "prowlarr" | "whisparr" | "listenarr" => {
+            let candidates = [
+                format!("/var/lib/{}/config.xml", canonical),
+                format!("/var/lib/{}/config/config.xml", canonical),
+            ];
+            for raw_path in &candidates {
+                let Some(content) = read_runner_config_text(raw_path) else {
+                    continue;
+                };
+                if meta.api_key.is_empty() {
+                    meta.api_key = extract_runner_xml_tag(&content, "ApiKey");
+                }
+                if meta.configured_port <= 0 {
+                    meta.configured_port =
+                        parse_valid_runner_port(&extract_runner_xml_tag(&content, "Port"));
+                }
+                if !meta.api_key.is_empty() && meta.configured_port > 0 {
+                    break;
+                }
+            }
+        }
+
+        "bazarr" => {
+            let yaml_paths = [
+                "/var/lib/bazarr/config/config.yaml",
+                "/var/lib/bazarr/config.yaml",
+                "/opt/bazarr/data/config/config.yaml",
+            ];
+            for raw_path in &yaml_paths {
+                let Some(content) = read_runner_config_text(raw_path) else {
+                    continue;
+                };
+                if meta.api_key.is_empty() {
+                    meta.api_key = extract_runner_yaml_key_in_section(&content, "auth", "apikey");
+                    if meta.api_key.is_empty() {
+                        meta.api_key = extract_runner_yaml_key_in_section(&content, "", "apikey");
+                    }
+                }
+                if meta.configured_port <= 0 {
+                    meta.configured_port = parse_valid_runner_port(
+                        &extract_runner_yaml_key_in_section(&content, "general", "port"),
+                    );
+                }
+            }
+            let ini_paths = [
+                "/var/lib/bazarr/config/config.ini",
+                "/var/lib/bazarr/config.ini",
+                "/opt/bazarr/data/config/config.ini",
+            ];
+            for raw_path in &ini_paths {
+                let Some(content) = read_runner_config_text(raw_path) else {
+                    continue;
+                };
+                if meta.api_key.is_empty() {
+                    meta.api_key = extract_runner_ini_value(&content, &["apikey", "api_key"]);
+                }
+                if meta.configured_port <= 0 {
+                    meta.configured_port =
+                        parse_valid_runner_port(&extract_runner_ini_value(&content, &["port"]));
+                }
+            }
+        }
+
+        "sabnzbd" => {
+            let candidates = [
+                "/var/lib/sabnzbd/sabnzbd.ini",
+                "/var/lib/sabnzbd/.sabnzbd/sabnzbd.ini",
+                "/etc/sabnzbd/sabnzbd.ini",
+            ];
+            for raw_path in &candidates {
+                let Some(content) = read_runner_config_text(raw_path) else {
+                    continue;
+                };
+                if meta.api_key.is_empty() {
+                    meta.api_key = extract_runner_ini_value(&content, &["api_key", "nzb_key"]);
+                }
+                if meta.configured_port <= 0 {
+                    meta.configured_port =
+                        parse_valid_runner_port(&extract_runner_ini_value(&content, &["port"]));
+                }
+            }
+        }
+
+        "tautulli" => {
+            let candidates = [
+                "/var/lib/tautulli/config.ini",
+                "/opt/Tautulli/config.ini",
+                "/etc/tautulli/config.ini",
+            ];
+            for raw_path in &candidates {
+                let Some(content) = read_runner_config_text(raw_path) else {
+                    continue;
+                };
+                if meta.api_key.is_empty() {
+                    meta.api_key = extract_runner_ini_value(&content, &["api_key"]);
+                }
+                if meta.configured_port <= 0 {
+                    meta.configured_port = parse_valid_runner_port(&extract_runner_ini_value(
+                        &content,
+                        &["http_port", "port"],
+                    ));
+                }
+            }
+        }
+
+        "jackett" => {
+            let candidates = [
+                "/var/lib/jackett/Jackett/ServerConfig.json",
+                "/var/lib/jackett/ServerConfig.json",
+                "/var/lib/jackett/.config/Jackett/ServerConfig.json",
+            ];
+            for raw_path in &candidates {
+                let Some(content) = read_runner_config_text(raw_path) else {
+                    continue;
+                };
+                let (key, port) = extract_runner_json_key_and_port(&content);
+                if meta.api_key.is_empty() && !key.is_empty() {
+                    meta.api_key = key;
+                }
+                if meta.configured_port <= 0 && port > 0 {
+                    meta.configured_port = port;
+                }
+            }
+        }
+
+        "overseerr" | "jellyseerr" => {
+            let candidates = [
+                format!("/var/lib/{}/settings.json", canonical),
+                format!("/var/lib/{}/config/settings.json", canonical),
+                format!("/opt/{}/config/settings.json", canonical),
+            ];
+            for raw_path in &candidates {
+                let Some(content) = read_runner_config_text(raw_path) else {
+                    continue;
+                };
+                let (key, port) = extract_runner_json_key_and_port(&content);
+                if meta.api_key.is_empty() && !key.is_empty() {
+                    meta.api_key = key;
+                }
+                if meta.configured_port <= 0 && port > 0 {
+                    meta.configured_port = port;
+                }
+            }
+            let env_paths = [
+                format!("/etc/{}/{}.conf", canonical, canonical),
+                format!("/etc/default/{}", canonical),
+            ];
+            for raw_path in &env_paths {
+                if let Some(content) = read_runner_config_text(raw_path) {
+                    if meta.configured_port <= 0 {
+                        meta.configured_port = parse_valid_runner_port(&extract_runner_ini_value(
+                            &content,
+                            &["PORT", "port"],
+                        ));
+                    }
+                }
+            }
+        }
+
+        "syncthing" => {
+            let candidates = [
+                "/var/lib/syncthing/config.xml",
+                "/var/lib/syncthing/.local/state/syncthing/config.xml",
+                "/var/lib/syncthing/.config/syncthing/config.xml",
+            ];
+            for raw_path in &candidates {
+                let Some(content) = read_runner_config_text(raw_path) else {
+                    continue;
+                };
+                if meta.api_key.is_empty() {
+                    meta.api_key = extract_runner_xml_tag(&content, "apikey");
+                }
+                if meta.configured_port <= 0 {
+                    let addr = extract_runner_xml_tag(&content, "address");
+                    meta.configured_port = parse_host_port_or_port(&addr);
+                }
+            }
+        }
+
+        "plex" => {
+            let candidates = [
+                "/var/lib/plexmediaserver/Library/Application Support/Plex Media Server/Preferences.xml",
+                "/var/lib/plex/Plex Media Server/Preferences.xml",
+            ];
+            for raw_path in &candidates {
+                let Some(content) = read_runner_config_text(raw_path) else {
+                    continue;
+                };
+                if let Some(caps) = PLEX_TOKEN_ATTR_RE.captures(&content) {
+                    if let Some(m) = caps.get(1) {
+                        meta.api_key = m.as_str().trim().to_string();
+                        break;
+                    }
+                }
+            }
+        }
+
+        "jellyfin" => {
+            if let Ok(env_key) = env::var("JELLYFIN_API_KEY") {
+                if !env_key.trim().is_empty() {
+                    meta.api_key = env_key.trim().to_string();
+                }
+            }
+            if meta.api_key.is_empty() {
+                let db_paths = [
+                    "/var/lib/jellyfin/data/jellyfin.db",
+                    "/var/lib/jellyfin/jellyfin.db",
+                ];
+                for raw_path in &db_paths {
+                    let token = query_runner_sqlite_single_string(
+                        raw_path,
+                        &[
+                            "SELECT AccessToken FROM ApiKeys WHERE AccessToken IS NOT NULL AND AccessToken != '' LIMIT 1",
+                            "SELECT AccessToken FROM Devices WHERE AccessToken IS NOT NULL AND AccessToken != '' ORDER BY DateLastActivity DESC LIMIT 1",
+                        ],
+                    );
+                    if !token.is_empty() {
+                        meta.api_key = token;
+                        break;
+                    }
+                }
+            }
+            let net_paths = [
+                "/etc/jellyfin/network.xml",
+                "/var/lib/jellyfin/config/network.xml",
+            ];
+            for raw_path in &net_paths {
+                if let Some(content) = read_runner_config_text(raw_path) {
+                    let mut port = parse_valid_runner_port(&extract_runner_xml_tag(
+                        &content,
+                        "InternalHttpPort",
+                    ));
+                    if port <= 0 {
+                        port = parse_valid_runner_port(&extract_runner_xml_tag(
+                            &content,
+                            "HttpServerPortNumber",
+                        ));
+                    }
+                    if port > 0 {
+                        meta.configured_port = port;
+                        break;
+                    }
+                }
+            }
+        }
+
+        "emby" => {
+            if let Ok(env_key) = env::var("EMBY_API_KEY") {
+                if !env_key.trim().is_empty() {
+                    meta.api_key = env_key.trim().to_string();
+                }
+            }
+            if meta.api_key.is_empty() {
+                let db_paths = [
+                    "/var/lib/emby/data/authentication.db",
+                    "/var/lib/emby/data/users.db",
+                ];
+                for raw_path in &db_paths {
+                    let token = query_runner_sqlite_single_string(
+                        raw_path,
+                        &[
+                            "SELECT AccessToken FROM Tokens WHERE AccessToken IS NOT NULL AND AccessToken != '' LIMIT 1",
+                            "SELECT AccessToken FROM ApiKeys WHERE AccessToken IS NOT NULL AND AccessToken != '' LIMIT 1",
+                        ],
+                    );
+                    if !token.is_empty() {
+                        meta.api_key = token;
+                        break;
+                    }
+                }
+            }
+            let sys_paths = ["/var/lib/emby/config/system.xml", "/etc/emby/system.xml"];
+            for raw_path in &sys_paths {
+                if let Some(content) = read_runner_config_text(raw_path) {
+                    let mut port = parse_valid_runner_port(&extract_runner_xml_tag(
+                        &content,
+                        "HttpServerPortNumber",
+                    ));
+                    if port <= 0 {
+                        port = parse_valid_runner_port(&extract_runner_xml_tag(
+                            &content,
+                            "PublicPort",
+                        ));
+                    }
+                    if port > 0 {
+                        meta.configured_port = port;
+                        break;
+                    }
+                }
+            }
+        }
+
+        "ombi" => {
+            let db_paths = [
+                "/var/lib/ombi/OmbiSettings.db",
+                "/etc/Ombi/OmbiSettings.db",
+                "/opt/Ombi/OmbiSettings.db",
+            ];
+            for raw_path in &db_paths {
+                let raw_json = query_runner_sqlite_single_string(
+                    raw_path,
+                    &["SELECT Content FROM GlobalSettings WHERE SettingsName = 'OmbiSettings' LIMIT 1"],
+                );
+                if !raw_json.is_empty() {
+                    let (key, port) = extract_runner_json_key_and_port(&raw_json);
+                    if !key.is_empty() {
+                        meta.api_key = key;
+                    }
+                    if port > 0 && meta.configured_port <= 0 {
+                        meta.configured_port = port;
+                    }
+                    if !meta.api_key.is_empty() {
+                        break;
+                    }
+                }
+            }
+        }
+
+        "autobrr" | "qui" => {
+            let toml_paths = [
+                format!("/var/lib/{}/config.toml", canonical),
+                format!("/var/lib/{}/.config/{}/config.toml", canonical, canonical),
+            ];
+            for raw_path in &toml_paths {
+                if let Some(content) = read_runner_config_text(raw_path) {
+                    if meta.configured_port <= 0 {
+                        meta.configured_port =
+                            parse_valid_runner_port(&extract_runner_ini_value(&content, &["port"]));
+                    }
+                    if meta.api_key.is_empty() {
+                        meta.api_key =
+                            extract_runner_ini_value(&content, &["api_key", "apikey"]);
+                    }
+                }
+            }
+            let db_paths = [
+                format!("/var/lib/{}/{}.db", canonical, canonical),
+                format!(
+                    "/var/lib/{}/.config/{}/{}.db",
+                    canonical, canonical, canonical
+                ),
+            ];
+            for raw_path in &db_paths {
+                let key = query_runner_sqlite_single_string(
+                    raw_path,
+                    &["SELECT key FROM api_key WHERE key IS NOT NULL AND key != '' LIMIT 1"],
+                );
+                if !key.is_empty() {
+                    meta.api_key = key;
+                    break;
+                }
+            }
+        }
+
+        "kavita" => {
+            let json_paths = [
+                "/var/lib/kavita/config/appsettings.json",
+                "/opt/Kavita/config/appsettings.json",
+            ];
+            for raw_path in &json_paths {
+                if let Some(content) = read_runner_config_text(raw_path) {
+                    let (_, port) = extract_runner_json_key_and_port(&content);
+                    if port > 0 {
+                        meta.configured_port = port;
+                        break;
+                    }
+                }
+            }
+            let db_paths = [
+                "/var/lib/kavita/config/kavita.db",
+                "/opt/Kavita/config/kavita.db",
+            ];
+            for raw_path in &db_paths {
+                let key = query_runner_sqlite_single_string(
+                    raw_path,
+                    &["SELECT ApiKey FROM AspNetUsers WHERE ApiKey IS NOT NULL AND ApiKey != '' LIMIT 1"],
+                );
+                if !key.is_empty() {
+                    meta.api_key = key;
+                    break;
+                }
+            }
+        }
+
+        "audiobookshelf" => {
+            let env_paths = [
+                "/etc/default/audiobookshelf",
+                "/var/lib/audiobookshelf/config/.env",
+            ];
+            for raw_path in &env_paths {
+                if let Some(content) = read_runner_config_text(raw_path) {
+                    if meta.configured_port <= 0 {
+                        meta.configured_port = parse_valid_runner_port(&extract_runner_ini_value(
+                            &content,
+                            &["PORT", "port"],
+                        ));
+                    }
+                }
+            }
+            let db_paths = [
+                "/var/lib/audiobookshelf/config/absdatabase.sqlite",
+                "/var/lib/audiobookshelf/absdatabase.sqlite",
+            ];
+            for raw_path in &db_paths {
+                let key = query_runner_sqlite_single_string(
+                    raw_path,
+                    &[
+                        "SELECT apiKey FROM apiKeys WHERE apiKey IS NOT NULL AND apiKey != '' LIMIT 1",
+                        "SELECT token FROM users WHERE token IS NOT NULL AND token != '' LIMIT 1",
+                    ],
+                );
+                if !key.is_empty() {
+                    meta.api_key = key;
+                    break;
+                }
+            }
+        }
+
+        "notifiarr" => {
+            let candidates = [
+                "/etc/notifiarr/notifiarr.conf",
+                "/var/lib/notifiarr/notifiarr.conf",
+            ];
+            for raw_path in &candidates {
+                let Some(content) = read_runner_config_text(raw_path) else {
+                    continue;
+                };
+                let key = extract_runner_ini_value(&content, &["api_key"]);
+                if !key.is_empty()
+                    && key != "00000000-0000-0000-0000-000000000000"
+                    && !key.eq_ignore_ascii_case("api-key-from-notifiarr.com")
+                {
+                    meta.api_key = key;
+                }
+                let bind_addr = extract_runner_ini_value(&content, &["bind_addr"]);
+                if !bind_addr.is_empty() {
+                    meta.configured_port = parse_host_port_or_port(&bind_addr);
+                }
+            }
+        }
+
+        "vaultwarden" => {
+            let token_paths = [
+                "/opt/AetherFlow/logs/vaultwarden_admin_token.txt",
+                "/etc/vaultwarden/admin_token.txt",
+            ];
+            for raw_path in &token_paths {
+                if let Some(content) = read_runner_config_text(raw_path) {
+                    if let Some(first_line) = content.lines().next() {
+                        let trimmed = first_line.trim();
+                        if !trimmed.is_empty() {
+                            meta.api_key = trimmed.to_string();
+                            break;
+                        }
+                    }
+                }
+            }
+            let env_paths = [
+                "/etc/vaultwarden/vaultwarden.env",
+                "/var/lib/vaultwarden/.env",
+            ];
+            for raw_path in &env_paths {
+                let Some(content) = read_runner_config_text(raw_path) else {
+                    continue;
+                };
+                if meta.api_key.is_empty() {
+                    let token = extract_runner_ini_value(&content, &["ADMIN_TOKEN"]);
+                    if !token.is_empty() {
+                        meta.api_key = token;
+                    }
+                }
+                if meta.configured_port <= 0 {
+                    meta.configured_port = parse_valid_runner_port(&extract_runner_ini_value(
+                        &content,
+                        &["ROCKET_PORT", "PORT"],
+                    ));
+                }
+            }
+        }
+
+        "organizr" => {
+            let php_paths = [
+                "/var/www/organizr/api/config/config.php",
+                "/var/lib/organizr/www/api/config/config.php",
+            ];
+            for raw_path in &php_paths {
+                let Some(content) = read_runner_config_text(raw_path) else {
+                    continue;
+                };
+                if let Some(caps) = PHP_ORGANIZR_KEY_RE.captures(&content) {
+                    if let Some(m) = caps.get(1) {
+                        meta.api_key = m.as_str().trim().to_string();
+                        break;
+                    }
+                }
+            }
+        }
+
+        "pihole" => {
+            if let Some(content) = read_runner_config_text("/etc/pihole/setupVars.conf") {
+                meta.api_key = extract_runner_ini_value(&content, &["WEBPASSWORD"]);
+            }
+            if let Some(content) = read_runner_config_text("/etc/pihole/pihole.toml") {
+                let port_val =
+                    extract_runner_ini_value(&content, &["port", "webserver.port"]);
+                if !port_val.is_empty() {
+                    meta.configured_port = parse_pihole_runner_port(&port_val);
+                }
+            }
+        }
+
+        "paperless-ngx" => {
+            let conf_paths = [
+                "/etc/paperless.conf",
+                "/opt/paperless/paperless.conf",
+                "/var/lib/paperless/paperless.conf",
+            ];
+            for raw_path in &conf_paths {
+                if let Some(content) = read_runner_config_text(raw_path) {
+                    if meta.configured_port <= 0 {
+                        meta.configured_port = parse_valid_runner_port(&extract_runner_ini_value(
+                            &content,
+                            &["PAPERLESS_PORT", "PORT"],
+                        ));
+                    }
+                }
+            }
+            let db_paths = [
+                "/var/lib/paperless/db.sqlite3",
+                "/opt/paperless/data/db.sqlite3",
+            ];
+            for raw_path in &db_paths {
+                let key = query_runner_sqlite_single_string(
+                    raw_path,
+                    &["SELECT key FROM authtoken_token WHERE key IS NOT NULL AND key != '' LIMIT 1"],
+                );
+                if !key.is_empty() {
+                    meta.api_key = key;
+                    break;
+                }
+            }
+        }
+
+        "requestrr" => {
+            let candidates = [
+                "/var/lib/requestrr/settings.json",
+                "/opt/requestrr/Settings/settings.json",
+            ];
+            for raw_path in &candidates {
+                if let Some(content) = read_runner_config_text(raw_path) {
+                    let (key, port) = extract_runner_json_key_and_port(&content);
+                    if meta.api_key.is_empty() && !key.is_empty() {
+                        meta.api_key = key;
+                    }
+                    if meta.configured_port <= 0 && port > 0 {
+                        meta.configured_port = port;
+                    }
+                }
+            }
+        }
+
+        "seedcross" => {
+            let candidates = [
+                "/var/lib/seedcross/.env",
+                "/opt/seedcross/.env",
+                "/etc/seedcross/seedcross.env",
+            ];
+            for raw_path in &candidates {
+                if let Some(content) = read_runner_config_text(raw_path) {
+                    if meta.api_key.is_empty() {
+                        meta.api_key = extract_runner_ini_value(
+                            &content,
+                            &["API_KEY", "SEEDCROSS_API_KEY", "AUTH_TOKEN"],
+                        );
+                    }
+                    if meta.configured_port <= 0 {
+                        meta.configured_port = parse_valid_runner_port(&extract_runner_ini_value(
+                            &content,
+                            &["PORT", "SEEDCROSS_PORT"],
+                        ));
+                    }
+                }
+            }
+        }
+
+        "qbittorrent" => {
+            let candidates = [
+                "/var/lib/qbittorrent/.config/qBittorrent/qBittorrent.conf",
+                "/var/lib/qbittorrent/.config/qBittorrent/config/qBittorrent.conf",
+            ];
+            for raw_path in &candidates {
+                if let Some(content) = read_runner_config_text(raw_path) {
+                    let port = parse_valid_runner_port(&extract_runner_ini_value(
+                        &content,
+                        &[r"WebUI\Port", "Port"],
+                    ));
+                    if port > 0 {
+                        meta.configured_port = port;
+                        break;
+                    }
+                }
+            }
+        }
+
+        "deluge" => {
+            if let Some(content) =
+                read_runner_config_text("/var/lib/deluge/.config/deluge/web.conf")
+            {
+                let (_, port) = extract_runner_json_key_and_port(&content);
+                if port > 0 {
+                    meta.configured_port = port;
+                }
+            }
+        }
+
+        "transmission" => {
+            let candidates = [
+                "/etc/transmission-daemon/settings.json",
+                "/var/lib/transmission-daemon/info/settings.json",
+            ];
+            for raw_path in &candidates {
+                if let Some(content) = read_runner_config_text(raw_path) {
+                    let (_, port) = extract_runner_json_key_and_port(&content);
+                    if port > 0 {
+                        meta.configured_port = port;
+                        break;
+                    }
+                }
+            }
+        }
+
+        "nzbget" => {
+            let candidates = [
+                "/var/lib/nzbget/nzbget.conf",
+                "/etc/nzbget.conf",
+                "/opt/nzbget/nzbget.conf",
+            ];
+            for raw_path in &candidates {
+                if let Some(content) = read_runner_config_text(raw_path) {
+                    let port = parse_valid_runner_port(&extract_runner_ini_value(
+                        &content,
+                        &["ControlPort"],
+                    ));
+                    if port > 0 {
+                        meta.configured_port = port;
+                        break;
+                    }
+                }
+            }
+        }
+
+        "gitea" => {
+            let candidates = ["/etc/gitea/app.ini", "/var/lib/gitea/custom/conf/app.ini"];
+            for raw_path in &candidates {
+                if let Some(content) = read_runner_config_text(raw_path) {
+                    let port = parse_valid_runner_port(&extract_runner_ini_value(
+                        &content,
+                        &["HTTP_PORT"],
+                    ));
+                    if port > 0 {
+                        meta.configured_port = port;
+                        break;
+                    }
+                }
+            }
+        }
+
+        "znc" => {
+            let candidates = [
+                "/var/lib/znc/configs/znc.conf",
+                "/var/lib/znc/.znc/configs/znc.conf",
+            ];
+            for raw_path in &candidates {
+                if let Some(content) = read_runner_config_text(raw_path) {
+                    let port =
+                        parse_valid_runner_port(&extract_runner_ini_value(&content, &["Port"]));
+                    if port > 0 {
+                        meta.configured_port = port;
+                        break;
+                    }
+                }
+            }
+        }
+
+        "thelounge" => {
+            let candidates = [
+                "/var/lib/thelounge/config.js",
+                "/etc/thelounge/config.js",
+            ];
+            for raw_path in &candidates {
+                if let Some(content) = read_runner_config_text(raw_path) {
+                    let port = parse_valid_runner_port(
+                        &extract_runner_ini_value(&content, &["port"])
+                            .trim_end_matches(',')
+                            .to_string(),
+                    );
+                    if port > 0 {
+                        meta.configured_port = port;
+                        break;
+                    }
+                }
+            }
+        }
+
+        "filebrowser" => {
+            let candidates = [
+                "/etc/filebrowser/config.json",
+                "/var/lib/filebrowser/filebrowser.json",
+                "/var/lib/filebrowser/.filebrowser.json",
+            ];
+            for raw_path in &candidates {
+                if let Some(content) = read_runner_config_text(raw_path) {
+                    let (_, port) = extract_runner_json_key_and_port(&content);
+                    if port > 0 {
+                        meta.configured_port = port;
+                        break;
+                    }
+                }
+            }
+        }
+
+        "navidrome" => {
+            let candidates = [
+                "/var/lib/navidrome/navidrome.toml",
+                "/etc/navidrome/navidrome.toml",
+            ];
+            for raw_path in &candidates {
+                if let Some(content) = read_runner_config_text(raw_path) {
+                    let port =
+                        parse_valid_runner_port(&extract_runner_ini_value(&content, &["Port", "port"]));
+                    if port > 0 {
+                        meta.configured_port = port;
+                        break;
+                    }
+                }
+            }
+        }
+
+        "komga" => {
+            let candidates = [
+                "/var/lib/komga/application.yml",
+                "/etc/komga/application.yml",
+                "/etc/default/komga",
+            ];
+            for raw_path in &candidates {
+                if let Some(content) = read_runner_config_text(raw_path) {
+                    let mut port = parse_valid_runner_port(
+                        &extract_runner_yaml_key_in_section(&content, "server", "port"),
+                    );
+                    if port <= 0 {
+                        port = parse_valid_runner_port(&extract_runner_ini_value(
+                            &content,
+                            &["SERVER_PORT", "PORT", "port"],
+                        ));
+                    }
+                    if port > 0 {
+                        meta.configured_port = port;
+                        break;
+                    }
+                }
+            }
+        }
+
+        "calibre-web" => {
+            let db_paths = [
+                "/var/lib/calibre-web/app.db",
+                "/opt/calibre-web/app.db",
+            ];
+            for raw_path in &db_paths {
+                let port_str = query_runner_sqlite_single_string(
+                    raw_path,
+                    &["SELECT CAST(config_port AS TEXT) FROM settings LIMIT 1"],
+                );
+                let port = parse_valid_runner_port(&port_str);
+                if port > 0 {
+                    meta.configured_port = port;
+                    break;
+                }
+            }
+        }
+
+        "grafana" => {
+            let candidates = ["/etc/grafana/grafana.ini", "/var/lib/grafana/grafana.ini"];
+            for raw_path in &candidates {
+                if let Some(content) = read_runner_config_text(raw_path) {
+                    let port = parse_valid_runner_port(&extract_runner_ini_value(
+                        &content,
+                        &["http_port", "port"],
+                    ));
+                    if port > 0 {
+                        meta.configured_port = port;
+                        break;
+                    }
+                }
+            }
+        }
+
+        "prometheus" => {
+            let candidates = ["/etc/default/prometheus", "/etc/prometheus/prometheus.yml"];
+            for raw_path in &candidates {
+                if let Some(content) = read_runner_config_text(raw_path) {
+                    let port = parse_valid_runner_port(&extract_runner_ini_value(
+                        &content,
+                        &["PORT", "port"],
+                    ));
+                    if port > 0 {
+                        meta.configured_port = port;
+                        break;
+                    }
+                }
+            }
+        }
+
+        "uptime-kuma" => {
+            let candidates = [
+                "/var/lib/uptime-kuma/.env",
+                "/opt/uptime-kuma/.env",
+                "/etc/default/uptime-kuma",
+            ];
+            for raw_path in &candidates {
+                if let Some(content) = read_runner_config_text(raw_path) {
+                    let port = parse_valid_runner_port(&extract_runner_ini_value(
+                        &content,
+                        &["UPTIME_KUMA_PORT", "PORT", "port"],
+                    ));
+                    if port > 0 {
+                        meta.configured_port = port;
+                        break;
+                    }
+                }
+            }
+        }
+
+        "immich" => {
+            let candidates = [
+                "/var/lib/immich/.env",
+                "/opt/immich/.env",
+                "/etc/immich/immich.env",
+            ];
+            for raw_path in &candidates {
+                if let Some(content) = read_runner_config_text(raw_path) {
+                    if meta.api_key.is_empty() {
+                        meta.api_key = extract_runner_ini_value(
+                            &content,
+                            &["IMMICH_API_KEY", "API_KEY"],
+                        );
+                    }
+                    if meta.configured_port <= 0 {
+                        meta.configured_port = parse_valid_runner_port(&extract_runner_ini_value(
+                            &content,
+                            &["IMMICH_PORT", "SERVER_PORT", "PORT"],
+                        ));
+                    }
+                }
+            }
+        }
+
+        _ => {}
+    }
+
+    meta
 }
 
 async fn handle_app_meta(
@@ -629,18 +2389,292 @@ async fn handle_app_meta(
             }),
         );
     }
-    let meta = serde_json::json!({
-        "app_name": req.app_name,
-        "status": "discovered"
-    });
+    let meta = extract_app_runtime_meta_local(&req.app_name);
+    let output = serde_json::to_string(&json!({
+        "api_key": meta.api_key,
+        "configured_port": meta.configured_port,
+    }))
+    .unwrap_or_else(|_| "{\"api_key\":\"\",\"configured_port\":0}".to_string());
+
     (
         StatusCode::OK,
         Json(RunnerResponse {
             success: true,
-            output: meta.to_string(),
+            output,
             error: String::new(),
         }),
     )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// UNIX Domain Socket Client Dispatchers (`backend/services/privileged_runner.go`)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(unix)]
+async fn post_runner_json<T: Serialize + ?Sized>(
+    endpoint: &str,
+    payload: &T,
+    timeout: Duration,
+) -> anyhow::Result<RunnerResponse> {
+    use http_body_util::{BodyExt, Full};
+    use hyper::body::Bytes;
+    use hyper_util::rt::TokioIo;
+
+    let sock_path = resolve_runner_socket_path();
+    let body_bytes = serde_json::to_vec(payload)?;
+
+    let fut = async {
+        let stream = tokio::net::UnixStream::connect(&sock_path).await?;
+        let io = TokioIo::new(stream);
+        let (mut sender, conn) = hyper::client::conn::http1::handshake(io).await?;
+        tokio::spawn(async move {
+            let _ = conn.await;
+        });
+
+        let req = hyper::Request::builder()
+            .method(hyper::Method::POST)
+            .uri(format!("http://unix{}", endpoint))
+            .header("Host", "unix")
+            .header("Content-Type", "application/json")
+            .body(Full::new(Bytes::from(body_bytes)))?;
+
+        let resp = sender.send_request(req).await?;
+        let collected = resp.into_body().collect().await?.to_bytes();
+        let decoded: RunnerResponse = serde_json::from_slice(&collected)?;
+        Ok::<RunnerResponse, anyhow::Error>(decoded)
+    };
+
+    tokio::time::timeout(timeout, fut)
+        .await
+        .map_err(|_| anyhow::anyhow!("runner socket request timed out ({})", endpoint))?
+}
+
+#[cfg(not(unix))]
+async fn post_runner_json<T: Serialize + ?Sized>(
+    endpoint: &str,
+    _payload: &T,
+    _timeout: Duration,
+) -> anyhow::Result<RunnerResponse> {
+    anyhow::bail!(
+        "UNIX domain socket runner client is only supported on Unix hosts ({})",
+        endpoint
+    )
+}
+
+pub async fn dispatch_systemctl(service_name: &str, action: &str) -> anyhow::Result<()> {
+    let req = SystemctlRequest {
+        service: service_name.to_string(),
+        action: action.to_string(),
+    };
+    let result = post_runner_json("/v1/systemctl", &req, Duration::from_secs(30)).await?;
+    if !result.success {
+        anyhow::bail!("runner systemctl error: {} ({})", result.error, result.output);
+    }
+    Ok(())
+}
+
+fn consume_package_output<F>(body_text: &str, mut on_line: F) -> anyhow::Result<()>
+where
+    F: FnMut(String),
+{
+    let mut exit_error = None;
+    for raw_line in body_text.lines() {
+        let line = raw_line.trim();
+        if let Some(message) = line.strip_prefix("__RUNNER_EXIT_ERROR__:") {
+            exit_error = Some(if message.trim().is_empty() {
+                "runner reported package execution failure".to_string()
+            } else {
+                message.to_string()
+            });
+        } else if !line.is_empty() {
+            on_line(line.to_string());
+        }
+    }
+    if let Some(error) = exit_error {
+        anyhow::bail!("{}", error);
+    }
+    Ok(())
+}
+
+pub async fn dispatch_package_action<F>(
+    action: &str,
+    pkg_id: &str,
+    script_name: &str,
+    app_port: i32,
+    mut on_line: F,
+) -> anyhow::Result<()>
+where
+    F: FnMut(String),
+{
+    #[cfg(unix)]
+    {
+        use http_body_util::{BodyExt, Full};
+        use hyper::body::Bytes;
+        use hyper_util::rt::TokioIo;
+
+        let sock_path = resolve_runner_socket_path();
+        let req_payload = PackageRunnerRequest {
+            action: action.to_string(),
+            package_id: pkg_id.to_string(),
+            script_name: script_name.to_string(),
+            app_port,
+        };
+        let body_bytes = serde_json::to_vec(&req_payload)?;
+
+        let fut = async {
+            let stream = tokio::net::UnixStream::connect(&sock_path).await?;
+            let io = TokioIo::new(stream);
+            let (mut sender, conn) = hyper::client::conn::http1::handshake(io).await?;
+            tokio::spawn(async move {
+                let _ = conn.await;
+            });
+
+            let req = hyper::Request::builder()
+                .method(hyper::Method::POST)
+                .uri("http://unix/v1/package")
+                .header("Host", "unix")
+                .header("Content-Type", "application/json")
+                .body(Full::new(Bytes::from(body_bytes)))?;
+
+            let resp = sender.send_request(req).await?;
+            let status = resp.status();
+            let collected = resp.into_body().collect().await?.to_bytes();
+            let body_text = String::from_utf8_lossy(&collected);
+
+            if status != StatusCode::OK {
+                anyhow::bail!(
+                    "runner rejected package action (HTTP {}): {}",
+                    status.as_u16(),
+                    body_text.trim()
+                );
+            }
+
+            consume_package_output(&body_text, &mut on_line)
+        };
+
+        tokio::time::timeout(Duration::from_secs(30 * 60), fut)
+            .await
+            .map_err(|_| anyhow::anyhow!("runner socket package request timed out"))?
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (action, pkg_id, script_name, app_port, &mut on_line);
+        anyhow::bail!("UNIX domain socket runner client is only supported on Unix hosts")
+    }
+}
+
+pub async fn dispatch_package_stream<F>(
+    action: &str,
+    pkg_id: &str,
+    script_name: &str,
+    app_port: i32,
+    on_line: F,
+) -> anyhow::Result<()>
+where
+    F: FnMut(String),
+{
+    dispatch_package_action(action, pkg_id, script_name, app_port, on_line).await
+}
+
+pub async fn dispatch_self_update(command: &str, channel: &str) -> anyhow::Result<()> {
+    let req = SelfUpdateRequest {
+        command: command.to_string(),
+        channel: channel.to_string(),
+    };
+    let result = post_runner_json("/v1/self-update", &req, Duration::from_secs(15)).await?;
+    if !result.success {
+        anyhow::bail!("runner self-update error: {}", result.error);
+    }
+    Ok(())
+}
+
+pub async fn dispatch_sandbox_apply(pkg_id: &str) -> anyhow::Result<()> {
+    let req = SandboxRunnerRequest {
+        package: pkg_id.to_string(),
+        package_id: pkg_id.to_string(),
+    };
+    let result = post_runner_json("/v1/sandbox", &req, Duration::from_secs(30)).await?;
+    if !result.success {
+        anyhow::bail!("runner sandbox error: {}", result.error);
+    }
+    Ok(())
+}
+
+pub async fn dispatch_sandbox(pkg_id: &str) -> anyhow::Result<()> {
+    dispatch_sandbox_apply(pkg_id).await
+}
+
+pub async fn dispatch_hosts_update(domains: &[String]) -> anyhow::Result<()> {
+    let req = HostsRunnerRequest {
+        action: "update".to_string(),
+        domains: domains.to_vec(),
+        ..Default::default()
+    };
+    let result = post_runner_json("/v1/hosts", &req, Duration::from_secs(15)).await?;
+    if !result.success {
+        anyhow::bail!("runner hosts error: {}", result.error);
+    }
+    Ok(())
+}
+
+pub async fn dispatch_hosts_remove(domains: &[String]) -> anyhow::Result<()> {
+    let req = HostsRunnerRequest {
+        action: "remove".to_string(),
+        domains: domains.to_vec(),
+        ..Default::default()
+    };
+    let result = post_runner_json("/v1/hosts", &req, Duration::from_secs(15)).await?;
+    if !result.success {
+        anyhow::bail!("runner hosts remove error: {}", result.error);
+    }
+    Ok(())
+}
+
+pub async fn dispatch_network_control(
+    req: &NetworkRunnerRequest,
+) -> anyhow::Result<RunnerResponse> {
+    let result = post_runner_json("/v1/network", req, Duration::from_secs(30)).await?;
+    if !result.success {
+        anyhow::bail!("runner network error: {} ({})", result.error, result.output);
+    }
+    Ok(result)
+}
+
+pub async fn dispatch_network_action(
+    req: &NetworkRunnerRequest,
+) -> anyhow::Result<RunnerResponse> {
+    dispatch_network_control(req).await
+}
+
+pub async fn dispatch_quota_set(username: &str, size: &str) -> anyhow::Result<()> {
+    let req = QuotaRunnerRequest {
+        username: username.to_string(),
+        size: size.to_string(),
+    };
+    let result = post_runner_json("/v1/quota", &req, Duration::from_secs(30)).await?;
+    if !result.success {
+        anyhow::bail!("runner quota error: {} ({})", result.error, result.output);
+    }
+    Ok(())
+}
+
+pub async fn dispatch_set_quota(username: &str, size: &str) -> anyhow::Result<()> {
+    dispatch_quota_set(username, size).await
+}
+
+pub async fn dispatch_app_meta(app_name: &str) -> anyhow::Result<AppRuntimeMeta> {
+    let req = AppMetaRunnerRequest {
+        app_name: app_name.to_string(),
+    };
+    let result = post_runner_json("/v1/app-meta", &req, Duration::from_secs(3)).await?;
+    if !result.success {
+        anyhow::bail!("runner app-meta error: {}", result.error);
+    }
+    if result.output.trim().is_empty() {
+        return Ok(AppRuntimeMeta::default());
+    }
+    let meta: AppRuntimeMeta = serde_json::from_str(&result.output)?;
+    Ok(meta)
 }
 
 /// Runs the Privileged Root Daemon (`aetherflow-api runner` / `--runner`) over `/run/aetherflow/runner.sock`.
@@ -702,11 +2736,127 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_package_output_propagates_failure_markers() {
+        let mut lines = Vec::new();
+        let result = consume_package_output(
+            "installing\n__RUNNER_EXIT_ERROR__:exit status 7\nlast log\n",
+            |line| lines.push(line),
+        );
+        assert!(result.unwrap_err().to_string().contains("exit status 7"));
+        assert_eq!(lines, vec!["installing", "last log"]);
+        assert!(consume_package_output("__RUNNER_EXIT_ERROR__:\n", |_| {}).is_err());
+    }
+
+    #[test]
+    fn test_package_output_accepts_success_logs() {
+        let mut lines = Vec::new();
+        consume_package_output("\nready\n\ncomplete\n", |line| lines.push(line)).unwrap();
+        assert_eq!(lines, vec!["ready", "complete"]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_package_stream_drains_stderr_and_reports_nonzero_exit() {
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg("-c").arg(
+            "counter=0; while [ $counter -lt 16384 ]; do printf 'stderr diagnostic line\\n' >&2; counter=$((counter + 1)); done; printf 'stdout done\\n'; exit 7",
+        );
+        let body = Body::from_stream(package_command_stream(cmd));
+        let bytes = tokio::time::timeout(
+            Duration::from_secs(10),
+            axum::body::to_bytes(body, 1024 * 1024),
+        )
+        .await
+        .expect("package output deadlocked")
+        .unwrap();
+        let output = String::from_utf8(bytes.to_vec()).unwrap();
+        assert_eq!(output.matches("stderr diagnostic line").count(), 16384);
+        assert!(output.contains("stdout done"));
+        assert!(output.contains("__RUNNER_EXIT_ERROR__:"));
+        assert!(consume_package_output(&output, |_| {}).is_err());
+    }
+
+    #[tokio::test]
+    async fn test_package_stream_reports_spawn_failure() {
+        let cmd = Command::new("/aetherflow-missing-package-executable");
+        let body = Body::from_stream(package_command_stream(cmd));
+        let bytes = axum::body::to_bytes(body, 4096).await.unwrap();
+        let output = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(consume_package_output(&output, |_| {}).is_err());
+    }
+
+    #[test]
     fn test_regex_allowlists() {
         assert!(SAFE_SCRIPT_NAME.is_match("installpackage-jellyfin"));
         assert!(!SAFE_SCRIPT_NAME.is_match("../etc/passwd"));
+        assert!(SAFE_PKG_ID.is_match("sonarr"));
+        assert!(!SAFE_PKG_ID.is_match("../sonarr"));
+        assert!(SAFE_USERNAME.is_match("alice_01"));
+        assert!(!SAFE_USERNAME.is_match("1invalid;rm"));
+        assert!(SAFE_QUOTA_SIZE.is_match("500G"));
+        assert!(SAFE_QUOTA_SIZE.is_match("500GB"));
+        assert!(SAFE_QUOTA_SIZE.is_match("1073741824"));
         assert!(SAFE_QUOTA_SIZE_REGEX.is_match("500G"));
         assert!(SAFE_QUOTA_SIZE_REGEX.is_match("0"));
         assert!(!SAFE_QUOTA_SIZE_REGEX.is_match("500G; rm -rf /"));
+    }
+
+    #[test]
+    fn test_render_systemd_sandbox_dropin() {
+        let dropin = render_systemd_sandbox_dropin(
+            "dotnet",
+            "sonarr",
+            &["/var/lib/sonarr".to_string(), "-/mnt".to_string()],
+        );
+        assert!(dropin.contains("NoNewPrivileges=yes"));
+        assert!(dropin.contains("PrivateTmp=yes"));
+        assert!(dropin.contains("ProtectSystem=strict"));
+        assert!(!dropin.contains("MemoryDenyWriteExecute=yes"));
+        assert!(dropin.contains("ReadWritePaths="));
+
+        let native_dropin = render_systemd_sandbox_dropin("native", "plexmediaserver", &[]);
+        assert!(native_dropin.contains("PrivateDevices=no"));
+        assert!(native_dropin.contains("MemoryDenyWriteExecute=yes"));
+    }
+
+    #[tokio::test]
+    async fn test_handle_sandbox_and_quota_graceful_fallback() {
+        let (code, Json(resp)) = handle_sandbox(Json(SandboxRunnerRequest {
+            package: "sonarr".to_string(),
+            package_id: String::new(),
+        }))
+        .await;
+        assert_eq!(code, StatusCode::OK);
+        assert!(resp.success);
+
+        let (bad_code, Json(bad_resp)) = handle_sandbox(Json(SandboxRunnerRequest {
+            package: "../evil".to_string(),
+            package_id: String::new(),
+        }))
+        .await;
+        assert_eq!(bad_code, StatusCode::BAD_REQUEST);
+        assert!(!bad_resp.success);
+
+        env::set_var("AETHERFLOW_QUOTA_DRY_RUN", "1");
+        let (q_code, Json(q_resp)) = handle_quota(Json(QuotaRunnerRequest {
+            username: "mediauser".to_string(),
+            size: "500G".to_string(),
+        }))
+        .await;
+        assert_eq!(q_code, StatusCode::OK);
+        assert!(q_resp.success);
+        assert!(q_resp.output.contains("mediauser"));
+    }
+
+    #[tokio::test]
+    async fn test_handle_app_meta_wire_format() {
+        let (code, Json(resp)) = handle_app_meta(Json(AppMetaRunnerRequest {
+            app_name: "sonarr".to_string(),
+        }))
+        .await;
+        assert_eq!(code, StatusCode::OK);
+        assert!(resp.success);
+        let decoded: AppRuntimeMeta = serde_json::from_str(&resp.output).unwrap();
+        assert!(decoded.configured_port >= 0);
     }
 }

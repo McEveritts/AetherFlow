@@ -1,3 +1,18 @@
+## CHANGELOG v4.0.0 - Rust Backend Cutover (`backend-rs`) & 90-Point Multi-Model McSurgeon Remediation
+_Direct comparison against `v3.2.5` (`v3.2.5...v4.0.0`), delivering the full 6-crate Rust backend workspace (`backend-rs`) and two-stage McSurgeon audit remediation (41 first-round findings + 49 four-model ensemble findings across Grok 4.7, Gemini 4 Argon, GPT-6.1 Terra, and Gemini 3.8 Flash)._
+
+---
+
+### Release Highlights (since `v3.2.5`)
+* **Six-Crate Rust Backend Cutover (`backend-rs` v4.0.0)**: Completed the native Rust control plane and privileged runner across `af-models`, `af-db`, `af-hardware`, `af-runner`, `af-services`, and `af-api` (Axum 0.7 + Tokio + `r2d2_sqlite` + `rust-embed`), replacing the legacy Go backend while maintaining 100% REST, WebSocket, OIDC, Subdomain Gateway, and `/run/aetherflow/runner.sock` wire compatibility.
+* **SQLite `max_size(1)` Deadlock Elimination**: Refactored `af-db` and `af-api` (`auth.rs`, `oidc.rs`, `routes.rs`, `intelligence.rs`, `storage.rs`) to introduce `OnConn` connection-sharing helpers (`insert_audit_log_on_conn`, `create_session_for_user_with_conn`, `validate_token_for_claims_on_conn`) and explicit connection drops prior to nested pool calls, eliminating self-deadlocks across single-connection SQLite pools.
+* **Subdomain GatewayStreaming & Auth Hardening**: Upgraded `app_subdomain_proxy_middleware` (`middlewares.rs`) to enforce JWT revocation (`is_token_revoked`) and client fingerprint checks on SSO pass-through (`TERRA-02`), replaced full-response body buffering with zero-copy `axum::body::Body::from_stream` streaming (`TERRA-03`), and bound refresh token lifetimes (`TERRA-01`).
+* **Cluster Daemon & Enrollment Security**: Required authenticated `X-Cluster-PSK` headers on `GET /cluster/v1/metrics` (`FLASH-01`), enforced `StatusCode::BAD_REQUEST` on missing `node_id` (`GROK-15`), replaced silent status coercion with strict allowlist validation (`GROK-07`), and preserved worker telemetry fields across partial heartbeats (`GROK-14`).
+* **MediaFlow, Storage & Webhook SSRF Hardening**: Added cumulative `MAX_UPLOAD_SIZE` enforcement across chunked uploads (`ARGON-04`), canonical path-traversal guards in `fileshare_delete` (`GROK-04`), pinned DNS resolution with redirect/proxy disabling for outbound webhooks (`SEC-06`), and atomic `ENRICHER_STATE` scan-lock cleanup (`ARGON-09`).
+* **Tokio Async Executor Non-Blocking Guarantees**: Offloaded synchronous filesystem, `systemctl`, `sqlite3 .backup`, and SHA-256 hashing operations in `routes.rs`, `intelligence.rs`, and `af-services` onto `tokio::task::spawn_blocking` (`FLASH-03..07`, `TERRA-04`).
+
+---
+
 ## CHANGELOG v3.2.5 - App Update Engine, Nightly Release Pipeline, Open-Canvas Telemetry & Ingress Consolidation
 _Direct comparison against `v3.2.1` (`v3.2.1...v3.2.5`), consolidating in-place Marketplace/Service updates, Nightly release channel orchestration, Open-Canvas UI & LibreSpeed V2, and runtime hardening._
 

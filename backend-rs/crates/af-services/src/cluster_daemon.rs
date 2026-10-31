@@ -183,14 +183,17 @@ pub fn pop_worker_command(node_id: &str) -> Option<PendingWorkerCommand> {
 /// Performs a constant-time byte slice equality check to prevent timing side-channels.
 #[inline]
 pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
+    let mut ha = Sha256::new();
+    ha.update(a);
+    let da = ha.finalize();
+    let mut hb = Sha256::new();
+    hb.update(b);
+    let db = hb.finalize();
     let mut diff = 0u8;
-    for (&x, &y) in a.iter().zip(b.iter()) {
+    for (&x, &y) in da.iter().zip(db.iter()) {
         diff |= x ^ y;
     }
-    diff == 0
+    diff == 0 && a.len() == b.len()
 }
 
 fn hash_psk_sha256(psk: &str) -> String {
@@ -209,11 +212,8 @@ pub fn verify_cluster_psk(node_id: &str, candidate_psk: &str) -> Result<(), &'st
 
     if let Ok(master_psk) = env::var("CLUSTER_PSK") {
         let master_trimmed = master_psk.trim();
-        if !master_trimmed.is_empty() {
-            if constant_time_eq(candidate.as_bytes(), master_trimmed.as_bytes()) {
-                return Ok(());
-            }
-            return Err("invalid cluster PSK");
+        if !master_trimmed.is_empty() && constant_time_eq(candidate.as_bytes(), master_trimmed.as_bytes()) {
+            return Ok(());
         }
     }
 
@@ -225,25 +225,26 @@ pub fn verify_cluster_psk(node_id: &str, candidate_psk: &str) -> Result<(), &'st
                 params![node_id],
                 |r| r.get::<_, String>(0),
             ) {
-                if !stored_hash.is_empty() {
-                    let candidate_hash = hash_psk_sha256(candidate);
-                    if constant_time_eq(candidate_hash.as_bytes(), stored_hash.as_bytes())
-                        || constant_time_eq(candidate.as_bytes(), stored_hash.as_bytes())
-                    {
-                        return Ok(());
-                    }
-                    return Err("invalid cluster PSK for enrolled node");
-                }
+                return verify_enrolled_cluster_psk(candidate, &stored_hash);
             }
         }
     }
 
-    // Match Go's `server.go`: require >= 32 chars when no explicit master `CLUSTER_PSK` override is set
-    if candidate.len() < 32 {
-        return Err("psk must be at least 32 characters for adequate security");
-    }
+    Err("cluster PSK is not configured and node is not enrolled")
+}
 
-    Ok(())
+fn verify_enrolled_cluster_psk(candidate: &str, stored_hash: &str) -> Result<(), &'static str> {
+    if candidate.is_empty() || stored_hash.is_empty() {
+        return Err("cluster PSK is not configured and node is not enrolled");
+    }
+    let candidate_hash = hash_psk_sha256(candidate);
+    if constant_time_eq(candidate_hash.as_bytes(), stored_hash.as_bytes())
+        || (!stored_hash.starts_with("sha256:")
+            && constant_time_eq(candidate.as_bytes(), stored_hash.as_bytes()))
+    {
+        return Ok(());
+    }
+    Err("invalid cluster PSK for enrolled node")
 }
 
 /// Ensures `cluster_nodes` has `last_seen`, `cpu_usage`, `ram_usage`, and `disk_usage` columns
@@ -392,7 +393,7 @@ pub fn register_worker_node(req: &RegisterWorkerRequest) -> anyhow::Result<Regis
     }
 
     let version = if req.version.trim().is_empty() {
-        "4.0.0-rc1"
+        "4.0.0"
     } else {
         req.version.trim()
     };
@@ -443,11 +444,8 @@ pub fn process_worker_heartbeat(
         anyhow::bail!("node_id is required");
     };
 
-    // If PSK was supplied on the heartbeat or required by master config, verify it in constant time
-    if !req.psk.trim().is_empty() || env::var("CLUSTER_PSK").map(|v| !v.trim().is_empty()).unwrap_or(false) {
-        if let Err(msg) = verify_cluster_psk(&node_id, &req.psk) {
-            anyhow::bail!("{}", msg);
-        }
+    if let Err(msg) = verify_cluster_psk(&node_id, &req.psk) {
+        anyhow::bail!("{}", msg);
     }
 
     let (cpu_usage, ram_usage, disk_usage) = extract_usage_Rollups(req);
@@ -459,7 +457,6 @@ pub fn process_worker_heartbeat(
         now.timestamp()
     };
 
-    ensure_cluster_schema();
     if let Ok(conn) = af_db::get_conn() {
         let updated = conn
             .execute(
@@ -757,6 +754,20 @@ fn route_cluster_http_request(
                         .map(|(_, v)| v.into_owned())
                 })
                 .unwrap_or_default();
+            if node_id.is_empty() {
+                return (
+                    400,
+                    "Bad Request",
+                    serde_json::json!({ "error": "node_id is required" }),
+                );
+            }
+            if let Err(msg) = verify_cluster_psk(&node_id, header_psk) {
+                return (
+                    401,
+                    "Unauthorized",
+                    serde_json::json!({ "error": msg, "node_id": node_id }),
+                );
+            }
             if let Some(metrics) = get_cached_worker_metrics(&node_id) {
                 (200, "OK", metrics)
             } else {
@@ -976,7 +987,7 @@ async fn run_worker_registration_and_heartbeat_loop(master_addr: String, psk: St
         hostname: hostname.clone(),
         address: worker_address.clone(),
         psk: psk.clone(),
-        version: "4.0.0-rc1".to_string(),
+        version: "4.0.0".to_string(),
         system_info: Some(sys_info),
     };
 
@@ -1189,6 +1200,29 @@ pub fn start_cluster_runtime() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_heartbeat_requires_psk_before_mutating_state() {
+        let request = WorkerHeartbeatRequest {
+            node_id: "node-audit-missing-psk".to_string(),
+            ..Default::default()
+        };
+        let error = process_worker_heartbeat(&request).unwrap_err();
+        assert_eq!(error.to_string(), "psk is required");
+        assert!(get_cached_worker_metrics(&request.node_id).is_none());
+    }
+
+    #[test]
+    fn test_enrolled_psk_requires_a_trusted_matching_secret() {
+        let candidate = "audit-secret-with-at-least-32-characters";
+        assert!(verify_enrolled_cluster_psk(candidate, "").is_err());
+        assert!(verify_enrolled_cluster_psk("", "").is_err());
+        assert!(verify_enrolled_cluster_psk(candidate, &hash_psk_sha256("other-secret")).is_err());
+        assert!(verify_enrolled_cluster_psk(candidate, &hash_psk_sha256(candidate)).is_ok());
+        let stored_hash = hash_psk_sha256(candidate);
+        assert!(verify_enrolled_cluster_psk(&stored_hash, &stored_hash).is_err());
+        assert!(verify_enrolled_cluster_psk(candidate, candidate).is_ok());
+    }
 
     #[test]
     fn test_constant_time_eq() {

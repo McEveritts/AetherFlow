@@ -223,7 +223,106 @@ async fn handle_ws_socket(socket: WebSocket) {
     }
 }
 
-pub async fn handle_log_websocket(ws: WebSocketUpgrade) -> Response {
+#[derive(Deserialize, Default, Clone)]
+struct WsLogFilter {
+    #[serde(default)]
+    source: String,
+    #[serde(default)]
+    unit: String,
+    #[serde(default)]
+    priority: String,
+    #[serde(default)]
+    keyword: String,
+}
+
+fn parse_live_log_line(line: &str, default_source: &str) -> serde_json::Value {
+    let trimmed = line.trim();
+    // Format from `journalctl -o short-iso`: `<ISO-timestamp> <host> <unit>[pid]: <message>`
+    let mut parts = trimmed.splitn(3, ' ');
+    let first = parts.next().unwrap_or("");
+    let (timestamp, host, remainder) = if first.len() >= 19 && first.contains('T') {
+        let host = parts.next().unwrap_or("localhost");
+        let rest = parts.next().unwrap_or(trimmed);
+        (first.to_string(), host.to_string(), rest)
+    } else {
+        (chrono::Utc::now().to_rfc3339(), "localhost".to_string(), trimmed)
+    };
+
+    let (unit, message) = if let Some((prefix, msg)) = remainder.split_once(": ") {
+        let clean_unit = prefix.split('[').next().unwrap_or(prefix).trim();
+        (clean_unit.to_string(), msg.to_string())
+    } else {
+        ("system".to_string(), remainder.to_string())
+    };
+
+    let lower = message.to_lowercase();
+    let priority = if lower.contains("error") || lower.contains("fatal") || lower.contains("failed") {
+        "err"
+    } else if lower.contains("warn") {
+        "warning"
+    } else {
+        "info"
+    };
+
+    serde_json::json!({
+        "timestamp": timestamp,
+        "source": default_source,
+        "unit": unit,
+        "priority": priority,
+        "message": message,
+        "hostname": host,
+    })
+}
+
+fn log_entry_matches_filter(entry: &serde_json::Value, filter: &WsLogFilter) -> bool {
+    if !filter.source.is_empty() {
+        let src = entry.get("source").and_then(|v| v.as_str()).unwrap_or("");
+        if !src.eq_ignore_ascii_case(filter.source.trim()) {
+            return false;
+        }
+    }
+    if !filter.unit.is_empty() {
+        let unit = entry
+            .get("unit")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .trim_end_matches(".service");
+        let f_unit = filter.unit.trim().trim_end_matches(".service");
+        if !unit.eq_ignore_ascii_case(f_unit) {
+            return false;
+        }
+    }
+    if !filter.priority.is_empty() {
+        let prio = entry.get("priority").and_then(|v| v.as_str()).unwrap_or("");
+        if !prio.eq_ignore_ascii_case(filter.priority.trim()) {
+            return false;
+        }
+    }
+    if !filter.keyword.is_empty() {
+        let msg = entry
+            .get("message")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_lowercase();
+        if !msg.contains(&filter.keyword.trim().to_lowercase()) {
+            return false;
+        }
+    }
+    true
+}
+
+pub async fn handle_log_websocket(
+    axum::Extension(user): axum::Extension<crate::auth::AuthUser>,
+    ws: WebSocketUpgrade,
+) -> Response {
+    if user.role != "admin" {
+        return crate::auth::api_error(
+            StatusCode::FORBIDDEN,
+            "FORBIDDEN",
+            "Admin access required",
+        );
+    }
     ws.on_upgrade(|mut socket| async move {
         let welcome = serde_json::json!({
             "type": "LOG_ENTRY",
@@ -236,13 +335,115 @@ pub async fn handle_log_websocket(ws: WebSocketUpgrade) -> Response {
             }
         });
         if let Ok(txt) = serde_json::to_string(&welcome) {
-            let _ = socket.send(Message::Text(txt.into())).await;
-        }
-        while let Some(Ok(msg)) = socket.recv().await {
-            if matches!(msg, Message::Close(_)) {
-                break;
+            if socket.send(Message::Text(txt.into())).await.is_err() {
+                return;
             }
         }
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<serde_json::Value>(128);
+        let reader_task = tokio::spawn(async move {
+            use std::process::Stdio;
+            use tokio::io::{AsyncBufReadExt, BufReader};
+            use tokio::process::Command;
+
+            // Try journalctl first on Linux, then fall back to tailing system/deploy log files
+            let mut spawned: Option<(tokio::process::Child, &'static str)> = None;
+            if cfg!(target_os = "linux") {
+                if let Ok(child) = Command::new("journalctl")
+                    .args(["-f", "-n", "50", "--no-pager", "-o", "short-iso"])
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null())
+                    .kill_on_drop(true)
+                    .spawn()
+                {
+                    spawned = Some((child, "journald"));
+                }
+            }
+
+            if spawned.is_none() {
+                let fallback_files = [
+                    ("/var/log/aetherflow-deploy.log", "deploy"),
+                    ("/var/log/syslog", "syslog"),
+                    ("/var/log/messages", "syslog"),
+                ];
+                for (path, source_name) in fallback_files {
+                    if std::path::Path::new(path).exists() {
+                        if let Ok(child) = Command::new("tail")
+                            .args(["-f", "-n", "50", path])
+                            .stdout(Stdio::piped())
+                            .stderr(Stdio::null())
+                            .kill_on_drop(true)
+                            .spawn()
+                        {
+                            spawned = Some((child, source_name));
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if let Some((mut child, source_name)) = spawned {
+                if let Some(stdout) = child.stdout.take() {
+                    let mut lines = BufReader::new(stdout).lines();
+                    while let Ok(Some(line)) = lines.next_line().await {
+                        if line.trim().is_empty() {
+                            continue;
+                        }
+                        let entry = parse_live_log_line(&line, source_name);
+                        if tx.send(entry).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+                let _ = child.kill().await;
+            } else {
+                // Keep channel alive if no external log source binary is available
+                std::future::pending::<()>().await;
+            }
+        });
+
+        let mut filter = WsLogFilter::default();
+        let mut ping_interval = tokio::time::interval(Duration::from_secs(54));
+        ping_interval.tick().await;
+
+        loop {
+            tokio::select! {
+                msg_opt = socket.recv() => {
+                    match msg_opt {
+                        Some(Ok(Message::Text(text))) => {
+                            if let Ok(new_filter) = serde_json::from_str::<WsLogFilter>(&text) {
+                                filter = new_filter;
+                            }
+                        }
+                        Some(Ok(Message::Close(_))) | Some(Err(_)) | None => {
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+                Some(entry) = rx.recv() => {
+                    if !log_entry_matches_filter(&entry, &filter) {
+                        continue;
+                    }
+                    let payload = serde_json::json!({
+                        "type": "LOG_ENTRY",
+                        "data": entry,
+                    });
+                    if let Ok(txt) = serde_json::to_string(&payload) {
+                        if socket.send(Message::Text(txt.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+                _ = ping_interval.tick() => {
+                    if socket.send(Message::Ping(Vec::new().into())).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+
+        reader_task.abort();
     })
 }
 

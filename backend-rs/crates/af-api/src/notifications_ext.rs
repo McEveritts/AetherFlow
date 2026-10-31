@@ -1,4 +1,4 @@
-use crate::auth::{api_error, AuthUser};
+use crate::auth::{api_error, generate_recovery_codes, store_recovery_codes, AuthUser};
 use crate::ws::{broadcast_ws_message, extract_client_ip};
 use af_db::PendingAction;
 use axum::extract::{Extension, Path};
@@ -7,7 +7,6 @@ use axum::response::{IntoResponse, Json, Response};
 use chrono::Utc;
 use data_encoding::BASE32_NOPAD;
 use once_cell::sync::Lazy;
-use rand::RngCore;
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -102,26 +101,6 @@ fn verify_totp_code_local(secret_b32: &str, code: &str) -> bool {
     false
 }
 
-fn generate_8_recovery_codes() -> Vec<String> {
-    const CHARSET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-    let mut codes = Vec::with_capacity(8);
-    for _ in 0..8 {
-        let mut raw = [0u8; 8];
-        rand::rngs::OsRng.fill_bytes(&mut raw);
-        let chars: Vec<char> = raw
-            .iter()
-            .map(|&b| CHARSET[(b as usize) % CHARSET.len()] as char)
-            .collect();
-        let code = format!(
-            "{}-{}",
-            chars[0..4].iter().collect::<String>(),
-            chars[4..8].iter().collect::<String>()
-        );
-        codes.push(code);
-    }
-    codes
-}
-
 pub async fn regenerate_2fa_recovery_codes(
     Extension(user): Extension<AuthUser>,
     headers: HeaderMap,
@@ -135,111 +114,55 @@ pub async fn regenerate_2fa_recovery_codes(
         );
     }
 
-    let Ok(conn) = af_db::get_conn() else {
-        return api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            "Failed to query user",
+    tokio::task::spawn_blocking(move || {
+        let Ok(conn) = af_db::get_conn() else {
+            return api_error(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", "Database unavailable");
+        };
+        let row = conn.query_row(
+            "SELECT COALESCE(totp_secret, ''), COALESCE(totp_enabled, 0), COALESCE(password_hash, '') FROM users WHERE id = ?1",
+            params![user.user_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?, row.get::<_, String>(2)?)),
         );
-    };
-
-    let row = conn.query_row(
-        "SELECT COALESCE(totp_secret, ''), COALESCE(totp_enabled, 0), COALESCE(password_hash, '') FROM users WHERE id = ?1",
-        params![user.user_id],
-        |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, bool>(1)?,
-                r.get::<_, String>(2)?,
-            ))
-        },
-    );
-
-    let Ok((encrypted_secret, totp_enabled, password_hash)) = row else {
-        return api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            "Failed to query user",
-        );
-    };
-
-    if !totp_enabled {
-        return api_error(
-            StatusCode::BAD_REQUEST,
-            "VALIDATION_ERROR",
-            "Two-factor authentication is not enabled",
-        );
-    }
-
-    let mut verified = false;
-    if !req.code.trim().is_empty() {
+        drop(conn);
+        let Ok((encrypted_secret, totp_enabled, password_hash)) = row else {
+            return api_error(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", "Failed to query user");
+        };
+        if !totp_enabled {
+            return api_error(StatusCode::BAD_REQUEST, "VALIDATION_ERROR", "Two-factor authentication is not enabled");
+        }
         let secret = af_db::decrypt_key(&encrypted_secret).unwrap_or(encrypted_secret);
-        if verify_totp_code_local(&secret, &req.code) {
-            verified = true;
+        let verified = (!secret.is_empty() && !req.code.trim().is_empty() && verify_totp_code_local(&secret, &req.code))
+            || (!req.password.is_empty() && !password_hash.is_empty()
+                && crate::auth::verify_password(&req.password, &password_hash));
+        if !verified {
+            return api_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED", "Invalid verification code or password");
         }
-    }
-    if !verified && !req.password.is_empty() && !password_hash.is_empty() {
-        if bcrypt::verify(&req.password, &password_hash).unwrap_or(false) {
-            verified = true;
+        let codes = generate_recovery_codes();
+        let result = (|| -> anyhow::Result<()> {
+            let conn = af_db::get_conn()?;
+            let transaction = conn.unchecked_transaction()?;
+            let current: (String, bool, String) = transaction.query_row(
+                "SELECT COALESCE(totp_secret, ''), COALESCE(totp_enabled, 0), COALESCE(password_hash, '') FROM users WHERE id = ?1",
+                params![user.user_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+            let current_secret = af_db::decrypt_key(&current.0).unwrap_or(current.0);
+            anyhow::ensure!(current.1 && current_secret == secret && current.2 == password_hash, "Credentials changed");
+            store_recovery_codes(&transaction, user.user_id, &codes)?;
+            transaction.commit()?;
+            Ok(())
+        })();
+        if result.is_err() {
+            return api_error(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", "Failed to regenerate recovery codes");
         }
-    }
-
-    if !verified {
-        return api_error(
-            StatusCode::UNAUTHORIZED,
-            "UNAUTHORIZED",
-            "Invalid verification code",
-        );
-    }
-
-    let codes = generate_8_recovery_codes();
-
-    // Persist in `recovery_codes` table (matching `backend/api/totp.go`)
-    let _ = conn.execute(
-        "DELETE FROM recovery_codes WHERE user_id = ?1",
-        params![user.user_id],
-    );
-    for code in &codes {
-        if let Ok(hash) = bcrypt::hash(code, bcrypt::DEFAULT_COST) {
-            let _ = conn.execute(
-                "INSERT INTO recovery_codes (user_id, code_hash) VALUES (?1, ?2)",
-                params![user.user_id, hash],
-            );
-        }
-    }
-
-    // Also store JSON array in `totp_recovery_codes` column on `users` (ensuring column exists)
-    if let Ok(codes_json) = serde_json::to_string(&codes) {
-        let _ = conn.execute_batch(
-            "ALTER TABLE users ADD COLUMN totp_recovery_codes TEXT DEFAULT '[]';",
-        );
-        let _ = conn.execute(
-            "UPDATE users SET totp_recovery_codes = ?1 WHERE id = ?2",
-            params![codes_json, user.user_id],
-        );
-    }
-
-    let ip = extract_client_ip(&headers);
-    let ua = headers
-        .get(header::USER_AGENT)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    af_db::record_audit(
-        user.user_id,
-        &user.username,
-        "2fa_recovery_regenerate",
-        "user",
-        "",
-        "",
-        &ip,
-        ua,
-    );
-
-    Json(serde_json::json!({
-        "message": "Recovery codes regenerated",
-        "recovery_codes": codes,
-    }))
-    .into_response()
+        let ip = extract_client_ip(&headers);
+        let ua = headers.get(header::USER_AGENT).and_then(|value| value.to_str().ok()).unwrap_or("");
+        af_db::record_audit(user.user_id, &user.username, "2fa_recovery_regenerate", "user", "", "", &ip, ua);
+        Json(serde_json::json!({
+            "message": "Recovery codes regenerated",
+            "recovery_codes": codes,
+        })).into_response()
+    }).await.unwrap_or_else(|_| api_error(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", "Verification failed"))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -424,18 +347,15 @@ pub async fn delete_notification_rule(Path(id): Path<i64>) -> Response {
         );
     };
 
-    if conn
-        .execute("DELETE FROM notification_rules WHERE id = ?1", params![id])
-        .is_err()
-    {
-        return api_error(
+    match conn.execute("DELETE FROM notification_rules WHERE id = ?1", params![id]) {
+        Ok(0) => api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "Rule not found"),
+        Ok(_) => Json(serde_json::json!({ "message": "Rule deleted" })).into_response(),
+        Err(_) => api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "INTERNAL_ERROR",
             "Failed to delete rule",
-        );
+        ),
     }
-
-    Json(serde_json::json!({ "message": "Rule deleted" })).into_response()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -584,12 +504,65 @@ pub async fn delete_notification_channel(Path(id): Path<i64>) -> Response {
 static RULE_COOLDOWNS: Lazy<Mutex<HashMap<i64, Instant>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
-static HTTP_CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
-    reqwest::Client::builder()
+fn is_public_webhook_ip(address: std::net::IpAddr) -> bool {
+    match address {
+        std::net::IpAddr::V4(address) => {
+            let [first, second, third, fourth] = address.octets();
+            !(first == 0 || first == 10 || first == 127 || first >= 224
+                || (first == 100 && (64..=127).contains(&second))
+                || (first == 169 && second == 254)
+                || (first == 172 && (16..=31).contains(&second))
+                || (first == 192 && (second == 168 || (second == 0 && (third == 0 || third == 2))
+                    || (second == 88 && third == 99)))
+                || (first == 198 && (second == 18 || second == 19 || (second == 51 && third == 100)))
+                || (first == 203 && second == 0 && third == 113)
+                || [first, second, third, fourth] == [168, 63, 129, 16])
+        }
+        std::net::IpAddr::V6(address) => {
+            let segments = address.segments();
+            (segments[0] & 0xe000) == 0x2000
+                && !(segments[0] == 0x2001 && (segments[1] < 0x0200 || segments[1] == 0x0db8))
+                && segments[0] != 0x2002
+                && !(segments[0] == 0x3fff && segments[1] < 0x1000)
+        }
+    }
+}
+
+fn parse_webhook_url(target: &str) -> anyhow::Result<url::Url> {
+    let url = url::Url::parse(target)?;
+    anyhow::ensure!(matches!(url.scheme(), "http" | "https"), "Webhook must use HTTP or HTTPS");
+    anyhow::ensure!(url.username().is_empty() && url.password().is_none(), "Webhook credentials in URL are not allowed");
+    anyhow::ensure!(url.host().is_some() && url.port_or_known_default().is_some(), "Invalid webhook host or port");
+    match url.host() {
+        Some(url::Host::Ipv4(address)) => anyhow::ensure!(is_public_webhook_ip(address.into()), "Webhook target must be public"),
+        Some(url::Host::Ipv6(address)) => anyhow::ensure!(is_public_webhook_ip(address.into()), "Webhook target must be public"),
+        _ => {}
+    }
+    Ok(url)
+}
+
+async fn webhook_client(target: &str) -> anyhow::Result<(reqwest::Client, url::Url)> {
+    let url = parse_webhook_url(target)?;
+    let port = url.port_or_known_default().ok_or_else(|| anyhow::anyhow!("Invalid webhook port"))?;
+    let (host, addresses) = match url.host().ok_or_else(|| anyhow::anyhow!("Missing webhook host"))? {
+        url::Host::Domain(host) => {
+            let addresses: Vec<std::net::SocketAddr> = tokio::time::timeout(
+                Duration::from_secs(5), tokio::net::lookup_host((host, port)),
+            ).await??.collect();
+            (host.to_owned(), addresses)
+        }
+        url::Host::Ipv4(address) => (address.to_string(), vec![std::net::SocketAddr::new(address.into(), port)]),
+        url::Host::Ipv6(address) => (address.to_string(), vec![std::net::SocketAddr::new(address.into(), port)]),
+    };
+    anyhow::ensure!(!addresses.is_empty() && addresses.iter().all(|address| is_public_webhook_ip(address.ip())), "Webhook DNS must resolve only to public addresses");
+    let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new())
-});
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .resolve_to_addrs(&host, &addresses)
+        .build()?;
+    Ok((client, url))
+}
 
 const RULE_COOLDOWN_DURATION: Duration = Duration::from_secs(15 * 60);
 
@@ -811,7 +784,15 @@ pub async fn dispatch_to_channel(
         }
     };
 
-    match HTTP_CLIENT.post(&target_url).json(&payload).send().await {
+    let (client, target) = match webhook_client(&target_url).await {
+        Ok(target) => target,
+        Err(_) => {
+            let message = "Webhook target rejected or DNS resolution failed";
+            record_delivery_log(channel.id, &channel.channel_type, notification_id, "failed", 0, message);
+            anyhow::bail!(message);
+        }
+    };
+    match client.post(target).json(&payload).send().await {
         Ok(resp) if resp.status().is_success() => {
             record_delivery_log(
                 channel.id,
@@ -1039,4 +1020,42 @@ pub fn start_notification_engine() {
             evaluate_active_rules_once().await;
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn webhook_rejects_nonpublic_and_embedded_addresses() {
+        for address in [
+            "0.0.0.0", "10.0.0.1", "100.64.0.1", "127.0.0.1", "169.254.169.254",
+            "172.16.0.1", "192.168.1.1", "192.0.2.1", "198.18.0.1", "224.0.0.1",
+            "168.63.129.16", "::", "::1", "::ffff:127.0.0.1", "fc00::1", "fe80::1",
+            "ff02::1", "64:ff9b::7f00:1", "2001:db8::1", "2002:7f00:1::", "3fff::1",
+        ] {
+            assert!(!is_public_webhook_ip(address.parse().unwrap()), "{address}");
+        }
+        for address in ["8.8.8.8", "1.1.1.1", "2606:4700:4700::1111"] {
+            assert!(is_public_webhook_ip(address.parse().unwrap()), "{address}");
+        }
+    }
+
+    #[tokio::test]
+    async fn webhook_dns_rejects_localhost_before_dispatch() {
+        assert!(webhook_client("http://localhost/hook").await.is_err());
+    }
+
+    #[test]
+    fn webhook_url_validation_blocks_alternate_literal_encodings() {
+        for target in [
+            "file:///etc/passwd", "ftp://example.com", "http://127.0.0.1/",
+            "http://2130706433/", "http://0x7f000001/", "http://[::1]/",
+            "http://[::ffff:127.0.0.1]/", "https://user:password@example.com/",
+        ] {
+            assert!(parse_webhook_url(target).is_err(), "{target}");
+        }
+        assert!(parse_webhook_url("https://example.com/hook").is_ok());
+        assert!(parse_webhook_url("https://8.8.8.8/hook").is_ok());
+    }
 }

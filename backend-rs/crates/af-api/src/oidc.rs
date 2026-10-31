@@ -347,6 +347,22 @@ pub async fn oidc_authorize(
         return Redirect::temporary(&format!("/login?return_to={}", return_to)).into_response();
     };
 
+    drop(conn);
+    let user_agent = req
+        .headers()
+        .get(header::USER_AGENT)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    if af_db::is_token_revoked(&claims.jti)
+        || !crate::auth::matches_client_fingerprint(
+            &claims.cfp,
+            &extract_client_ip(req.headers()),
+            user_agent,
+        )
+    {
+        let return_to = urlencoding::encode(full_uri);
+        return Redirect::temporary(&format!("/login?return_to={}", return_to)).into_response();
+    }
     let validated_scope = validate_oidc_scopes(&q.scope);
     if has_existing_consent(claims.user_id, &q.client_id, &validated_scope) {
         let Ok(code) = generate_and_store_auth_code(
@@ -427,6 +443,32 @@ pub async fn oidc_consent(req: Request) -> Response {
     };
 
     if !payload.approved {
+        let Ok(conn) = af_db::get_conn() else {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "server_error" })),
+            )
+                .into_response();
+        };
+        let Ok(stored_uris) = conn.query_row(
+            "SELECT redirect_uris FROM oidc_clients WHERE id = ?1",
+            params![payload.client_id],
+            |r| r.get::<_, String>(0),
+        ) else {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "invalid_client_or_redirect_uri" })),
+            )
+                .into_response();
+        };
+        if !is_allowed_redirect_uri(&payload.redirect_uri, &stored_uris) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "invalid_client_or_redirect_uri" })),
+            )
+                .into_response();
+        }
+        drop(conn);
         let sep = if payload.redirect_uri.contains('?') { "&" } else { "?" };
         let mut redirect_url = format!(
             "{}{}error=access_denied&error_description=User+denied+access",
@@ -478,6 +520,7 @@ pub async fn oidc_consent(req: Request) -> Response {
             .into_response();
     }
 
+    drop(conn);
     let scope = validate_oidc_scopes(&payload.scope);
     let Ok(code) = generate_and_store_auth_code(
         &payload.client_id,
@@ -539,7 +582,7 @@ fn verify_client_credentials(client_id: &str, client_secret: &str) -> bool {
     let mut hasher = Sha256::new();
     hasher.update(client_secret.as_bytes());
     let computed = hex::encode(hasher.finalize());
-    computed == stored_hash
+    af_services::cluster_daemon::constant_time_eq(computed.as_bytes(), stored_hash.as_bytes())
 }
 
 fn verify_pkce(verifier: &str, challenge: &str, method: &str) -> bool {
@@ -813,6 +856,7 @@ pub async fn oidc_token(
                     .into_response();
             }
 
+            drop(conn);
             issue_oidc_tokens(&headers, &client_id, user_id, &scope)
         }
         "refresh_token" => {
@@ -898,6 +942,7 @@ pub async fn oidc_token(
                     .into_response();
             }
 
+            drop(conn);
             issue_oidc_tokens(&headers, &client_id, user_id, &scope)
         }
         "urn:ietf:params:oauth:grant-type:device_code" => {
@@ -976,6 +1021,7 @@ pub async fn oidc_token(
                         "DELETE FROM oidc_device_codes WHERE device_code = ?1",
                         params![device_code],
                     );
+                    drop(conn);
                     issue_oidc_tokens(&headers, &client_id, uid, &scope)
                 }
                 _ => (
@@ -1313,10 +1359,17 @@ pub async fn oidc_device_verify(Json(req): Json<serde_json::Value>) -> Response 
             .into_response();
     };
 
-    let Ok((status, scope, client_id)) = conn.query_row(
-        "SELECT status, scope, client_id FROM oidc_device_codes WHERE user_code = ?1",
+    let Ok((status, scope, client_id, expires_at)) = conn.query_row(
+        "SELECT status, scope, client_id, expires_at FROM oidc_device_codes WHERE user_code = ?1",
         params![user_code],
-        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)),
+        |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+            ))
+        },
     ) else {
         return (
             StatusCode::BAD_REQUEST,
@@ -1325,6 +1378,16 @@ pub async fn oidc_device_verify(Json(req): Json<serde_json::Value>) -> Response 
             .into_response();
     };
 
+    let expired = DateTime::parse_from_rfc3339(&expires_at)
+        .map(|dt| Utc::now() > dt.with_timezone(&Utc))
+        .unwrap_or(true);
+    if expired {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "expired_token" })),
+        )
+            .into_response();
+    }
     if status != "pending" {
         return (
             StatusCode::BAD_REQUEST,
@@ -1399,8 +1462,8 @@ pub async fn oidc_device_consent(req: Request) -> Response {
 
     let affected = conn
         .execute(
-            "UPDATE oidc_device_codes SET status = ?1, user_id = ?2 WHERE user_code = ?3 AND status = 'pending'",
-            params![status, user.user_id, user_code],
+            "UPDATE oidc_device_codes SET status = ?1, user_id = ?2 WHERE user_code = ?3 AND status = 'pending' AND expires_at > ?4",
+            params![status, user.user_id, user_code, Utc::now().to_rfc3339()],
         )
         .unwrap_or(0);
     if affected == 0 {
@@ -1516,6 +1579,7 @@ pub async fn create_oidc_client(req: Request) -> Response {
         );
     }
 
+    drop(conn);
     if let Some(u) = actor {
         af_db::record_audit(
             u.user_id,
@@ -1586,6 +1650,7 @@ pub async fn delete_oidc_client(
         params![client_id],
     );
 
+    drop(conn);
     if let Some(u) = actor {
         af_db::record_audit(
             u.user_id,
@@ -1802,6 +1867,7 @@ pub async fn google_callback(
         params![user_id, ip, ua],
     );
 
+    drop(conn);
     let Ok((token, _)) = create_standard_jwt(user_id, &headers) else {
         return Redirect::temporary(&format!("{}/login?error=jwt_failed", base_url))
             .into_response();

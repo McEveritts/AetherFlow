@@ -189,6 +189,19 @@ fn is_private_or_loopback_ip(raw_ip: &str) -> bool {
 fn resolve_authenticated_username(headers: &axum::http::HeaderMap) -> Option<String> {
     let token = resolve_raw_token(headers)?;
     let claims = decode_session_claims(&token, false).ok()?;
+    let user_agent = headers
+        .get(header::USER_AGENT)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    if af_db::is_token_revoked(&claims.jti)
+        || !crate::auth::matches_client_fingerprint(
+            &claims.cfp,
+            &extract_client_ip(headers),
+            user_agent,
+        )
+    {
+        return None;
+    }
     let conn = af_db::get_conn().ok()?;
     conn.query_row(
         "SELECT username FROM users WHERE id = ?1",
@@ -281,27 +294,218 @@ pub async fn app_subdomain_proxy_middleware(req: Request, next: Next) -> Respons
         return next.run(req).await;
     }
 
-    // Pass through WebSocket upgrade requests if any
-    let is_ws_upgrade = req
+    let upgrade_header = req
         .headers()
         .get(header::UPGRADE)
         .and_then(|v| v.to_str().ok())
-        .map(|s| s.eq_ignore_ascii_case("websocket"))
-        .unwrap_or(false);
-    if is_ws_upgrade {
-        return next.run(req).await;
-    }
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    let is_ws_upgrade = !upgrade_header.is_empty()
+        && (upgrade_header.eq_ignore_ascii_case("websocket")
+            || req
+                .headers()
+                .get(header::CONNECTION)
+                .and_then(|v| v.to_str().ok())
+                .map(|c| c.to_ascii_lowercase().contains("upgrade"))
+                .unwrap_or(false));
 
     let method_str = req.method().as_str().to_string();
     let path_and_query = req
         .uri()
         .path_and_query()
         .map(|pq| pq.as_str())
-        .unwrap_or("/");
+        .unwrap_or("/")
+        .to_string();
     let target_url = format!("http://127.0.0.1:{}{}", target_port, path_and_query);
 
     let authenticated_user = resolve_authenticated_username(req.headers());
     let incoming_headers = req.headers().clone();
+
+    if is_ws_upgrade {
+        let tcp_stream = match tokio::net::TcpStream::connect(("127.0.0.1", target_port as u16)).await {
+            Ok(stream) => stream,
+            Err(err) => {
+                tracing::warn!(
+                    app = %app_name,
+                    host = %raw_host,
+                    port = target_port,
+                    error = %err,
+                    "subdomain reverse proxy websocket upstream connect error"
+                );
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(serde_json::json!({
+                        "error": "bad_gateway",
+                        "message": format!("Upstream service {} on port {} is unavailable.", app_name, target_port),
+                    })),
+                )
+                    .into_response();
+            }
+        };
+
+        let io = hyper_util::rt::TokioIo::new(tcp_stream);
+        let (mut sender, conn) = match hyper::client::conn::http1::handshake(io).await {
+            Ok(pair) => pair,
+            Err(err) => {
+                tracing::warn!(
+                    app = %app_name,
+                    host = %raw_host,
+                    port = target_port,
+                    error = %err,
+                    "subdomain reverse proxy websocket handshake error"
+                );
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(serde_json::json!({
+                        "error": "bad_gateway",
+                        "message": format!("Upstream service {} on port {} is unavailable.", app_name, target_port),
+                    })),
+                )
+                    .into_response();
+            }
+        };
+
+        tokio::spawn(async move {
+            if let Err(err) = conn.with_upgrades().await {
+                tracing::debug!(error = %err, "upstream websocket connection ended");
+            }
+        });
+
+        let mut req_builder = hyper::Request::builder()
+            .method(req.method().clone())
+            .uri(&path_and_query);
+
+        if let Some(hdrs) = req_builder.headers_mut() {
+            for (k, v) in incoming_headers.iter() {
+                let name_str = k.as_str();
+                if is_hop_by_hop_header(name_str) || name_str.eq_ignore_ascii_case("x-aetherflow-user") {
+                    continue;
+                }
+                hdrs.append(k.clone(), v.clone());
+            }
+            if !raw_host.is_empty() {
+                if let Ok(hv) = HeaderValue::from_str(&raw_host) {
+                    hdrs.insert(header::HOST, hv.clone());
+                    if !incoming_headers.contains_key("X-Forwarded-Host") {
+                        hdrs.insert(HeaderName::from_static("x-forwarded-host"), hv);
+                    }
+                }
+            }
+            if !incoming_headers.contains_key("X-Forwarded-Proto") {
+                hdrs.insert(
+                    HeaderName::from_static("x-forwarded-proto"),
+                    HeaderValue::from_static("http"),
+                );
+            }
+            if let Ok(up_hv) = HeaderValue::from_str(&upgrade_header) {
+                hdrs.insert(header::UPGRADE, up_hv);
+            }
+            hdrs.insert(header::CONNECTION, HeaderValue::from_static("Upgrade"));
+
+            for ws_hdr in [
+                "sec-websocket-key",
+                "sec-websocket-version",
+                "sec-websocket-protocol",
+                "sec-websocket-extensions",
+            ] {
+                if let Some(val) = incoming_headers.get(ws_hdr) {
+                    if let Ok(hn) = HeaderName::from_bytes(ws_hdr.as_bytes()) {
+                        hdrs.insert(hn, val.clone());
+                    }
+                }
+            }
+
+            hdrs.remove("x-aetherflow-user");
+            if let Some(ref user) = authenticated_user {
+                if let Ok(user_hv) = HeaderValue::from_str(user) {
+                    hdrs.insert(HeaderName::from_static("x-aetherflow-user"), user_hv);
+                }
+            }
+        }
+
+        let Ok(upstream_ws_req) = req_builder.body(http_body_util::Empty::<axum::body::Bytes>::new()) else {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({
+                    "error": "bad_gateway",
+                    "message": format!("Upstream service {} on port {} is unavailable.", app_name, target_port),
+                })),
+            )
+                .into_response();
+        };
+
+        let mut upstream_resp = match sender.send_request(upstream_ws_req).await {
+            Ok(resp) => resp,
+            Err(err) => {
+                tracing::warn!(
+                    app = %app_name,
+                    host = %raw_host,
+                    port = target_port,
+                    error = %err,
+                    "subdomain reverse proxy websocket upstream response error"
+                );
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(serde_json::json!({
+                        "error": "bad_gateway",
+                        "message": format!("Upstream service {} on port {} is unavailable.", app_name, target_port),
+                    })),
+                )
+                    .into_response();
+            }
+        };
+
+        if upstream_resp.status() == StatusCode::SWITCHING_PROTOCOLS {
+            let resp_headers_clone = upstream_resp.headers().clone();
+            let client_upgrade = hyper::upgrade::on(req);
+            let upstream_upgrade = hyper::upgrade::on(&mut upstream_resp);
+
+            tokio::spawn(async move {
+                match tokio::try_join!(client_upgrade, upstream_upgrade) {
+                    Ok((client_upgraded, upstream_upgraded)) => {
+                        let mut client_io = hyper_util::rt::TokioIo::new(client_upgraded);
+                        let mut upstream_io = hyper_util::rt::TokioIo::new(upstream_upgraded);
+                        let _ = tokio::io::copy_bidirectional(&mut client_io, &mut upstream_io).await;
+                    }
+                    Err(err) => {
+                        tracing::debug!(error = %err, "subdomain websocket upgrade tunnel closed");
+                    }
+                }
+            });
+
+            let mut response = Response::new(Body::empty());
+            *response.status_mut() = StatusCode::SWITCHING_PROTOCOLS;
+            let out_headers = response.headers_mut();
+            for (k, v) in resp_headers_clone.iter() {
+                out_headers.append(k.clone(), v.clone());
+            }
+            if !out_headers.contains_key(header::UPGRADE) {
+                if let Ok(up_hv) = HeaderValue::from_str(&upgrade_header) {
+                    out_headers.insert(header::UPGRADE, up_hv);
+                }
+            }
+            if !out_headers.contains_key(header::CONNECTION) {
+                out_headers.insert(header::CONNECTION, HeaderValue::from_static("Upgrade"));
+            }
+            return response;
+        } else {
+            let status = upstream_resp.status();
+            let resp_headers_clone = upstream_resp.headers().clone();
+            let body_bytes = http_body_util::BodyExt::collect(upstream_resp.into_body())
+                .await
+                .map(|c| c.to_bytes())
+                .unwrap_or_default();
+            let mut response = Response::new(Body::from(body_bytes));
+            *response.status_mut() = status;
+            let out_headers = response.headers_mut();
+            for (k, v) in resp_headers_clone.iter() {
+                if !is_hop_by_hop_header(k.as_str()) {
+                    out_headers.append(k.clone(), v.clone());
+                }
+            }
+            return response;
+        }
+    }
 
     let Ok(body_bytes) = axum::body::to_bytes(req.into_body(), 64 * 1024 * 1024).await else {
         return (
@@ -353,9 +557,8 @@ pub async fn app_subdomain_proxy_middleware(req: Request, next: Next) -> Respons
             let status = StatusCode::from_u16(upstream_resp.status().as_u16())
                 .unwrap_or(StatusCode::BAD_GATEWAY);
             let upstream_headers = upstream_resp.headers().clone();
-            let resp_bytes = upstream_resp.bytes().await.unwrap_or_default();
-
-            let mut response = Response::new(Body::from(resp_bytes));
+            let stream = upstream_resp.bytes_stream();
+            let mut response = Response::new(Body::from_stream(stream));
             *response.status_mut() = status;
 
             let resp_headers = response.headers_mut();
@@ -543,11 +746,28 @@ fn rate_limited_response() -> Response {
     resp
 }
 
+fn extract_request_ip(req: &Request) -> String {
+    if let Some(ConnectInfo(peer_addr)) = req.extensions().get::<ConnectInfo<SocketAddr>>() {
+        let trust_proxy = peer_addr.ip().is_loopback()
+            || env::var("TRUST_PROXY_HEADERS")
+                .map(|v| v.trim().eq_ignore_ascii_case("true") || v.trim() == "1")
+                .unwrap_or(false);
+        if trust_proxy
+            && (req.headers().contains_key("X-Forwarded-For")
+                || req.headers().contains_key("X-Real-IP"))
+        {
+            return extract_client_ip(req.headers());
+        }
+        return peer_addr.ip().to_string();
+    }
+    extract_client_ip(req.headers())
+}
+
 pub async fn auth_rate_limit_middleware(req: Request, next: Next) -> Response {
     if rate_limit_disabled() {
         return next.run(req).await;
     }
-    let ip = extract_client_ip(req.headers());
+    let ip = extract_request_ip(&req);
     if !AUTH_RATE_LIMITER.allow(&ip) {
         return rate_limited_response();
     }
@@ -558,7 +778,7 @@ pub async fn oidc_rate_limit_middleware(req: Request, next: Next) -> Response {
     if rate_limit_disabled() {
         return next.run(req).await;
     }
-    let ip = extract_client_ip(req.headers());
+    let ip = extract_request_ip(&req);
     if !OIDC_RATE_LIMITER.allow(&ip) {
         return rate_limited_response();
     }
@@ -569,7 +789,7 @@ pub async fn webhook_rate_limit_middleware(req: Request, next: Next) -> Response
     if rate_limit_disabled() {
         return next.run(req).await;
     }
-    let ip = extract_client_ip(req.headers());
+    let ip = extract_request_ip(&req);
     if !WEBHOOK_RATE_LIMITER.allow(&ip) {
         return rate_limited_response();
     }
@@ -580,7 +800,7 @@ pub async fn ai_rate_limit_middleware(req: Request, next: Next) -> Response {
     if rate_limit_disabled() {
         return next.run(req).await;
     }
-    let ip = extract_client_ip(req.headers());
+    let ip = extract_request_ip(&req);
     if !AI_RATE_LIMITER.allow(&ip) {
         return rate_limited_response();
     }
