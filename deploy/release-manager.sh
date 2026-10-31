@@ -601,7 +601,13 @@ state_snapshot() {
                 return 1
             fi
             log_info "[DRY-RUN] Copying live database with sqlite3 --readonly .backup from ${RESOLVED_DB_PATH} (source: ${RESOLVED_DB_SOURCE}) into ${copy}"
-            sqlite_online_backup "${RESOLVED_DB_PATH}" "${copy}"
+            # state_snapshot runs under `||`, so errexit is off. A failed copy must
+            # not fall through into the placeholder database.
+            if ! sqlite_online_backup "${RESOLVED_DB_PATH}" "${copy}"; then
+                rm -f "${copy}" "${copy}-wal" "${copy}-shm"
+                log_error "[DRY-RUN] Failed to copy live database from ${RESOLVED_DB_PATH} (source: ${RESOLVED_DB_SOURCE})."
+                return 1
+            fi
         fi
         # Never create or snapshot the live path itself during a dry-run.
         snapshot_db="${copy}"

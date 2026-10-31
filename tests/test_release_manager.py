@@ -329,6 +329,22 @@ class ReleaseManagerTests(unittest.TestCase):
         self.assertFalse(self.current.exists())
         self.assertFalse((self.dry / "current").exists())
 
+    def test_failed_live_copy_does_not_become_a_placeholder(self):
+        live_db = self.root / "live" / "from-env.sqlite"
+        self.write_db(live_db, "env")
+        self.env_file.write_text(f"DB_PATH={live_db}\n")
+        self.write_executable(
+            self.mock / "sqlite3",
+            "#!/usr/bin/python3\nimport sys\nsys.stderr.write('backup refused\\n')\nsys.exit(1)\n",
+        )
+        result = self.run_manager("deploy", "--dry-run", "--offline")
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Failed to copy live database", result.stdout)
+        self.assertNotIn("Created placeholder database", result.stdout)
+        self.assertNotIn("DRY-RUN SUCCESSFUL", result.stdout)
+        self.assertFalse((self.dry / "current").exists())
+        self.assertEqual(self.marker(live_db), "env")
+
     def test_offline_dry_run_simulates_artifact(self):
         missing = self.root / "live" / "missing.sqlite"
         self.env_file.write_text(f"DB_PATH={missing}\n")
