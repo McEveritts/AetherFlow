@@ -43,7 +43,7 @@ def url_of(args):
 
 url = url_of(arguments)
 if "api.github.com" in url:
-    print('[{"tag_name":"v4.0.0","draft":false,"prerelease":false,"target_commitish":"master"}]')
+    print(os.environ.get("TEST_RELEASES_JSON", '[{"tag_name":"v4.0.0","draft":false,"prerelease":false,"target_commitish":"master"}]'))
     sys.exit(0)
 if url.endswith("/aetherflow-linux-amd64.tar.gz"):
     target = Path(arguments[arguments.index("-o") + 1])
@@ -444,6 +444,24 @@ class ReleaseManagerTests(unittest.TestCase):
         self.assertEqual(self.marker(live_db), "env")
         self.assertTrue(list(live_db.parent.glob(live_db.name + ".corrupted.*")))
         self.assertIn("systemctl stop aetherflow-api.service aetherflow-runner.service", self.commands.read_text())
+
+
+
+    def test_experimental_channel_resolves_prerelease_tag(self):
+        live_db = self.root / "live" / "from-env.sqlite"
+        self.write_db(live_db, "env")
+        self.env_file.write_text(f"DB_PATH={live_db}\n")
+        releases_json = (
+            '[{"tag_name":"experimental","draft":false,"prerelease":true,"target_commitish":"experimental"},'
+            '{"tag_name":"v3.2.6","draft":false,"prerelease":false,"target_commitish":"master"}]'
+        )
+        result = self.run_manager(
+            "deploy", "--channel", "experimental", "--dry-run",
+            TEST_RELEASES_JSON=releases_json,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Resolved release tag experimental for channel experimental.", result.stdout)
+        self.assertIn("releases/download/experimental/aetherflow-linux-amd64.tar.gz", self.commands.read_text())
 
 
 if __name__ == "__main__":

@@ -31,7 +31,7 @@ Hosts that still keep the database at `/opt/AetherFlow/backend/data/aetherflow.s
 Before the atomic symlink swap, the deploy takes a WAL-safe `sqlite3 --readonly .backup` of the resolved database and stops if `PRAGMA integrity_check` is not `ok`. The source is opened read-only so the backup does not checkpoint a live WAL.
 
 ```bash
-sudo bash /opt/AetherFlow/deploy/release-manager.sh deploy --channel stable
+sudo bash /opt/AetherFlow/deploy/release-manager.sh deploy --channel experimental
 sudo bash /opt/AetherFlow/deploy/release-manager.sh rollback
 ```
 

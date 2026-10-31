@@ -133,13 +133,20 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           if [[ "${RELEASE_TAG}" == "experimental" ]]; then
-            gh release delete experimental --yes --cleanup-tag 2>/dev/null || true
-            gh release create experimental \
-              release-dist/aetherflow-linux-amd64.tar.gz \
-              release-dist/SHA256SUMS \
-              --title "AetherFlow Experimental Rust (${GITHUB_SHA::8})" \
-              --notes "Automated experimental Rust single-binary build from commit ${GITHUB_SHA}." \
-              --prerelease
+            if gh release view experimental >/dev/null 2>&1; then
+              gh release upload experimental \
+                release-dist/aetherflow-linux-amd64.tar.gz \
+                release-dist/SHA256SUMS \
+                --clobber
+            else
+              gh release create experimental \
+                release-dist/aetherflow-linux-amd64.tar.gz \
+                release-dist/SHA256SUMS \
+                --target experimental \
+                --title "AetherFlow v4.0.0 Experimental (${GITHUB_SHA::8})" \
+                --notes "Experimental Rust single-binary build from commit ${GITHUB_SHA}." \
+                --prerelease
+            fi
           elif [[ "${RELEASE_TAG}" == "nightly" ]]; then
             gh release delete nightly --yes --cleanup-tag 2>/dev/null || true
             gh release create nightly \

@@ -342,6 +342,32 @@ resolve_release_tag() {
     local releases_json
     releases_json="$(curl -sfL --max-time 15 "${api_url}" 2>/dev/null)" || true
 
+    if [[ "${channel}" == "experimental" ]]; then
+        if [[ -n "${releases_json}" ]] && command -v python3 &>/dev/null; then
+            local exp_tag=""
+            exp_tag="$(printf '%s' "${releases_json}" | python3 -c '
+import json, sys
+try:
+    for r in json.load(sys.stdin):
+        if r.get("draft"):
+            continue
+        tag = (r.get("tag_name") or "").strip()
+        target = (r.get("target_commitish") or "").strip().lower()
+        if tag and (tag.lower() == "experimental" or target == "experimental" or "experimental" in tag.lower()):
+            print(tag)
+            break
+except Exception:
+    pass
+' 2>/dev/null)"
+            if [[ -n "${exp_tag}" ]]; then
+                echo "${exp_tag}"
+                return 0
+            fi
+        fi
+        echo "experimental"
+        return 0
+    fi
+
     if [[ "${channel}" == "nightly" ]]; then
         if [[ -n "${releases_json}" ]] && command -v python3 &>/dev/null; then
             local nightly_tag=""
@@ -353,7 +379,7 @@ try:
             continue
         tag = (r.get("tag_name") or "").strip()
         target = (r.get("target_commitish") or "").strip().lower()
-        if tag and tag.lower() != "nightly" and (target == "nightly" or r.get("prerelease") or "nightly" in tag.lower()):
+        if tag and tag.lower() not in ("nightly", "experimental") and target != "experimental" and "experimental" not in tag.lower() and (target == "nightly" or r.get("prerelease") or "nightly" in tag.lower()):
             print(tag)
             break
 except Exception:
@@ -982,7 +1008,7 @@ case "${COMMAND}" in
         migrate_systemd
         ;;
     *)
-        echo "Usage: $0 {deploy|rollback|cleanup|migrate-systemd} [--channel stable|nightly] [--from-source] [--dry-run] [--offline]"
+        echo "Usage: $0 {deploy|rollback|cleanup|migrate-systemd} [--channel stable|nightly|experimental] [--from-source] [--dry-run] [--offline]"
         exit 4
         ;;
 esac
