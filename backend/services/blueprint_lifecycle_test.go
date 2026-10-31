@@ -290,8 +290,8 @@ func TestMasterCredentialsSyncIntoAppBlueprint(t *testing.T) {
 
 	SaveMasterCredentials("testadmin", "TestPass!12345")
 	u, p, h := LoadMasterCredentials()
-	if u != "testadmin" || p != "TestPass!12345" || h != "fe91d11c881eb35d6e10029755b06794" {
-		t.Fatalf("LoadMasterCredentials() = (%q, %q, %q), want (testadmin, TestPass!12345, fe91d11c881eb35d6e10029755b06794)", u, p, h)
+	if u != "testadmin" || p != "TestPass!12345" || h != "fec73e72ef76d5a09b50ae9575c42723" {
+		t.Fatalf("LoadMasterCredentials() = (%q, %q, %q), want (testadmin, TestPass!12345, fec73e72ef76d5a09b50ae9575c42723)", u, p, h)
 	}
 
 	bp := GetBlueprint("qbittorrent")
