@@ -85,6 +85,7 @@ type PackageRunnerRequest struct {
 	Action     string `json:"action"`
 	PackageID  string `json:"package_id"`
 	ScriptName string `json:"script_name"`
+	AppPort    int    `json:"app_port,omitempty"`
 }
 
 // SelfUpdateRequest represents an atomic release manager request.
@@ -156,11 +157,12 @@ func DispatchSystemctl(serviceName, action string) error {
 
 // DispatchPackageStream executes a package installer via the root UNIX socket and
 // invokes onLine for each output line in real time.
-func DispatchPackageStream(action, pkgID, scriptName string, onLine func(string)) error {
+func DispatchPackageStream(action, pkgID, scriptName string, appPort int, onLine func(string)) error {
 	payload, _ := json.Marshal(PackageRunnerRequest{
 		Action:     action,
 		PackageID:  pkgID,
 		ScriptName: scriptName,
+		AppPort:    appPort,
 	})
 	client := newRunnerHTTPClient(30 * time.Minute)
 	resp, err := client.Post("http://unix/v1/package", "application/json", bytes.NewReader(payload))
@@ -406,6 +408,10 @@ func NewRunnerMux() *http.ServeMux {
 			http.Error(w, "invalid script or package identifier", http.StatusBadRequest)
 			return
 		}
+		if req.AppPort != 0 && (req.AppPort < 1024 || req.AppPort > 65535) {
+			http.Error(w, "invalid application port", http.StatusBadRequest)
+			return
+		}
 
 		scriptPath := ResolvePackageScriptPath(req.Action, req.ScriptName)
 		if scriptPath == "" {
@@ -421,7 +427,7 @@ func NewRunnerMux() *http.ServeMux {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		flusher, _ := w.(http.Flusher)
 
-		cmd := buildHardenedPackageCommand(scriptPath, false)
+		cmd := buildHardenedPackageCommand(scriptPath, false, req.AppPort)
 		stdout, err := cmd.StdoutPipe()
 		if err != nil {
 			_, _ = fmt.Fprintf(w, "__RUNNER_EXIT_ERROR__:%v\n", err)
@@ -660,6 +666,36 @@ func NewRunnerMux() *http.ServeMux {
 		_ = json.NewEncoder(w).Encode(RunnerResponse{Success: true, Output: out})
 	})
 
+	mux.HandleFunc("/v1/app-meta", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method != http.MethodPost {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			_ = json.NewEncoder(w).Encode(RunnerResponse{Error: "method not allowed"})
+			return
+		}
+
+		r.Body = http.MaxBytesReader(w, r.Body, 4096)
+		var req AppMetaRunnerRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(RunnerResponse{Error: "invalid JSON"})
+			return
+		}
+
+		if !safeScriptName.MatchString(req.AppName) {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(RunnerResponse{Error: "invalid application identifier"})
+			return
+		}
+
+		meta := extractAppRuntimeMetaLocal(req.AppName)
+		outBytes, _ := json.Marshal(meta)
+		_ = json.NewEncoder(w).Encode(RunnerResponse{
+			Success: true,
+			Output:  string(outBytes),
+		})
+	})
+
 	return mux
 }
 
@@ -741,14 +777,22 @@ func ResolveReleaseManagerScript() string {
 
 // buildHardenedPackageCommand wraps a package installer script with non-interactive
 // APT flags and a 120-second dpkg lock timeout to prevent apt lock failures.
-func buildHardenedPackageCommand(scriptPath string, useSudo bool) *exec.Cmd {
+func buildHardenedPackageCommand(scriptPath string, useSudo bool, appPort int) *exec.Cmd {
 	var cmd *exec.Cmd
 	if useSudo {
 		cmd = exec.Command("sudo", "-E", "-n", "bash", scriptPath) // #nosec G204 -- scriptPath resolved from verified package dir
 	} else {
 		cmd = exec.Command("bash", scriptPath) // #nosec G204 -- scriptPath resolved from verified package dir
 	}
-	cmd.Env = append(os.Environ(),
+	for _, entry := range os.Environ() {
+		if !strings.HasPrefix(entry, "AF_APP_PORT=") {
+			cmd.Env = append(cmd.Env, entry)
+		}
+	}
+	if appPort >= 1024 && appPort <= 65535 {
+		cmd.Env = append(cmd.Env, fmt.Sprintf("AF_APP_PORT=%d", appPort))
+	}
+	cmd.Env = append(cmd.Env,
 		"DEBIAN_FRONTEND=noninteractive",
 		"DPKG_LOCK_TIMEOUT=120",
 	)

@@ -1,0 +1,23 @@
+#!/bin/bash
+set -euo pipefail
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    source /opt/AetherFlow/packages/common.sh
+else
+    source "${SELF_DIR}/../../common.sh"
+fi
+
+require_root
+export LOGFILE="/var/log/aetherflow/remove-kasmvnc.log"
+trap 'print_error "KasmVNC removal failed; see ${LOGFILE}."' ERR
+report_progress 20 "Stopping KasmVNC..."
+purge_systemd_unit af-kasmvnc.service
+systemctl daemon-reload
+report_progress 60 "Removing KasmVNC; keeping shared desktop dependencies..."
+DEBIAN_FRONTEND=noninteractive apt-get remove -y kasmvncserver >> "$LOGFILE" 2>&1
+if [[ "${DELETE_DATA:-false}" == "true" ]]; then
+    rm -rf /var/lib/kasmvnc /etc/kasmvnc
+fi
+remove_lock kasmvnc
+report_progress 100 "KasmVNC removed."

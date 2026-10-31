@@ -131,7 +131,7 @@ func UpdateAppIngressConfig(c *gin.Context) {
 }
 
 // AppSubdomainProxyMiddleware intercepts incoming HTTP and WebSocket requests whose Host
-// header matches an installed application's public subdomain (e.g., qbittorrent.mcflow.stream)
+// header matches an installed application's public subdomain (e.g., qbittorrent.example.com)
 // or internal domain (<app>.aether.local) and reverse-proxies them directly to 127.0.0.1:<port>.
 // This allows Apache2-fronted deployments to transparently route all application subdomains
 // through the single AetherFlow gateway port.
@@ -195,6 +195,7 @@ func AppSubdomainProxyMiddleware() gin.HandlerFunc {
 		proxy.FlushInterval = -1
 		origDirector := proxy.Director
 		incomingHost := c.Request.Host
+		upgradeHeader := strings.TrimSpace(c.GetHeader("Upgrade"))
 		authenticatedUser := ""
 		if _, claims, err := resolveSessionToken(c); err == nil && db.DB != nil {
 			if userIDFloat, ok := claims["user_id"].(float64); ok {
@@ -204,6 +205,10 @@ func AppSubdomainProxyMiddleware() gin.HandlerFunc {
 		proxy.Director = func(req *http.Request) {
 			origDirector(req)
 			req.Host = incomingHost
+			if upgradeHeader != "" {
+				req.Header.Set("Upgrade", upgradeHeader)
+				req.Header.Set("Connection", "Upgrade")
+			}
 			req.Header.Del("X-Aetherflow-User")
 			if authenticatedUser != "" {
 				req.Header.Set("X-Aetherflow-User", authenticatedUser)

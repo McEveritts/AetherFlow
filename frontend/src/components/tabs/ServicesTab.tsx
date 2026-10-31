@@ -1,6 +1,6 @@
 'use client';
 
-import { RefreshCw, Box, Settings, Globe, RotateCcw, Square, Play, Server, Cpu, X, Network, ArrowUpCircle, ExternalLink } from 'lucide-react';
+import { RefreshCw, Box, Settings, Globe, RotateCcw, Square, Play, Server, Cpu, X, Network, ArrowUpCircle, ExternalLink, Key, Eye, EyeOff, Copy, Check } from 'lucide-react';
 import { useState, useEffect, useRef } from 'react';
 import useSWR, { useSWRConfig } from 'swr';
 import { useToast } from '@/contexts/ToastContext';
@@ -102,6 +102,7 @@ interface ServiceInfo {
     id?: string;
     default_port?: number;
     active_port?: number;
+    api_key?: string;
     internal_domain?: string;
     public_domain?: string;
     external_access_enabled?: boolean;
@@ -121,6 +122,8 @@ export default function ServicesTab() {
     const [checkingSingleService, setCheckingSingleService] = useState<string | null>(null);
     const [logsModalService, setLogsModalService] = useState<string | null>(null);
     const [ingressModalApp, setIngressModalApp] = useState<string | null>(null);
+    const [revealedKeys, setRevealedKeys] = useState<Set<string>>(new Set());
+    const [copiedKeyService, setCopiedKeyService] = useState<string | null>(null);
     const canControlServices = user?.role === 'admin';
     const { setActiveTab } = useSystemStore();
 
@@ -358,6 +361,60 @@ export default function ServicesTab() {
         return ver.startsWith('v') || ver.startsWith('V') ? ver : `v${ver}`;
     };
 
+    const resolveServicePort = (name: string, data: ServiceInfo): { port: number | null; defaultPort: number | null; reassigned: boolean } => {
+        const activePort = typeof data.active_port === 'number' && data.active_port > 0 ? data.active_port : null;
+        const defaultPort = typeof data.default_port === 'number' && data.default_port > 0 ? data.default_port : null;
+        if (activePort != null) {
+            return {
+                port: activePort,
+                defaultPort,
+                reassigned: defaultPort != null && activePort !== defaultPort,
+            };
+        }
+        if (defaultPort != null) {
+            return { port: defaultPort, defaultPort, reassigned: false };
+        }
+        const process = data.process || name;
+        const fallback = (data.id ? SERVICE_WEB_PORTS[data.id] : undefined) ?? SERVICE_WEB_PORTS[process];
+        if (typeof fallback === 'number' && fallback > 0) {
+            return { port: fallback, defaultPort: fallback, reassigned: false };
+        }
+        return { port: null, defaultPort: null, reassigned: false };
+    };
+
+    const toggleRevealKey = (serviceKey: string) => {
+        setRevealedKeys((prev) => {
+            const next = new Set(prev);
+            if (next.has(serviceKey)) {
+                next.delete(serviceKey);
+            } else {
+                next.add(serviceKey);
+            }
+            return next;
+        });
+    };
+
+    const handleCopyApiKey = async (name: string, apiKey: string) => {
+        try {
+            await navigator.clipboard.writeText(apiKey);
+            setCopiedKeyService(name);
+            addToast(`Copied ${name} API key to clipboard.`, 'success');
+            setTimeout(() => {
+                setCopiedKeyService((curr) => (curr === name ? null : curr));
+            }, 2000);
+        } catch {
+            addToast('Unable to copy API key to clipboard.', 'error');
+        }
+    };
+
+    const formatMaskedApiKey = (apiKey: string) => {
+        const trimmed = apiKey.trim();
+        if (trimmed.length <= 6) {
+            return '••••••••';
+        }
+        return `${'•'.repeat(12)}${trimmed.slice(-4)}`;
+    };
+
     const handleOpenWebUI = (name: string, data: ServiceInfo) => {
         const pathSuffix = data.web_path ? (data.web_path.startsWith('/') ? data.web_path : `/${data.web_path}`) : '';
         if (data.external_access_enabled && data.public_domain) {
@@ -499,48 +556,114 @@ export default function ServicesTab() {
                     </div>
                 </div>
 
-                <div className="grid grid-cols-2 gap-4 mb-6">
-                    <div className={`bg-slate-900/50 rounded-xl p-3 border ${hasUpdate ? 'border-amber-500/20 bg-amber-500/[0.03]' : 'border-white/[0.02]'}`}>
-                        <div className="flex items-center justify-between">
-                            <span className="text-xs uppercase font-bold text-slate-500 tracking-wider">Version</span>
-                            {!isCore && data.id && canControlServices && (
-                                <button
-                                    onClick={() => handleCheckSingleUpdate(name, data)}
-                                    disabled={isBusy || isCheckingThis}
-                                    title="Check for updates"
-                                    className="text-slate-500 hover:text-slate-300 transition-colors disabled:opacity-40"
-                                >
-                                    <RefreshCw size={11} className={isCheckingThis ? 'animate-spin text-indigo-400' : ''} />
-                                </button>
+                {(() => {
+                    const { port: effectivePort, defaultPort, reassigned } = resolveServicePort(name, data);
+                    const apiKey = data.api_key?.trim() || '';
+                    const isKeyRevealed = revealedKeys.has(name);
+                    const isKeyCopied = copiedKeyService === name;
+
+                    return (
+                        <div className="mb-6 space-y-3">
+                            <div className="grid grid-cols-3 gap-3">
+                                <div className={`bg-slate-900/50 rounded-xl p-3 border ${hasUpdate ? 'border-amber-500/20 bg-amber-500/[0.03]' : 'border-white/[0.02]'}`}>
+                                    <div className="flex items-center justify-between">
+                                        <span className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">Version</span>
+                                        {!isCore && data.id && canControlServices && (
+                                            <button
+                                                onClick={() => handleCheckSingleUpdate(name, data)}
+                                                disabled={isBusy || isCheckingThis}
+                                                title="Check for updates"
+                                                className="text-slate-500 hover:text-slate-300 transition-colors disabled:opacity-40"
+                                            >
+                                                <RefreshCw size={11} className={isCheckingThis ? 'animate-spin text-indigo-400' : ''} />
+                                            </button>
+                                        )}
+                                    </div>
+                                    <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
+                                        <span className="text-sm font-medium text-slate-300 truncate">{formatVersion(installedVer)}</span>
+                                        {hasUpdate && latestVer && (
+                                            data.update_url && /^https?:\/\//i.test(data.update_url) ? (
+                                                <a
+                                                    href={data.update_url}
+                                                    target="_blank"
+                                                    rel="noopener noreferrer"
+                                                    className="inline-flex items-center gap-0.5 text-xs font-bold text-amber-400 hover:text-amber-300 transition-colors"
+                                                    title="View release notes"
+                                                >
+                                                    → {formatVersion(latestVer)}
+                                                    <ExternalLink size={10} />
+                                                </a>
+                                            ) : (
+                                                <span className="text-xs font-bold text-amber-400">
+                                                    → {formatVersion(latestVer)}
+                                                </span>
+                                            )
+                                        )}
+                                    </div>
+                                </div>
+                                <div className="bg-slate-900/50 rounded-xl p-3 border border-white/[0.02]">
+                                    <span className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">Port</span>
+                                    <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
+                                        {effectivePort != null ? (
+                                            <>
+                                                <span className="text-sm font-mono font-medium text-slate-200">:{effectivePort}</span>
+                                                {reassigned && defaultPort && (
+                                                    <span
+                                                        className="text-[10px] px-1.5 py-0.5 rounded bg-indigo-500/10 text-indigo-300 border border-indigo-500/20 font-mono"
+                                                        title={`Dynamically reassigned from default port ${defaultPort}`}
+                                                    >
+                                                        def :{defaultPort}
+                                                    </span>
+                                                )}
+                                            </>
+                                        ) : (
+                                            <span className="text-xs font-medium text-slate-500">Headless</span>
+                                        )}
+                                    </div>
+                                </div>
+                                <div className="bg-slate-900/50 rounded-xl p-3 border border-white/[0.02]">
+                                    <span className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">Uptime</span>
+                                    <p className="text-sm font-medium text-slate-300 mt-0.5 truncate" title={data.uptime || '-'}>{data.uptime || '-'}</p>
+                                </div>
+                            </div>
+
+                            {apiKey && (
+                                <div className="bg-slate-900/50 rounded-xl px-3 py-2.5 border border-white/[0.04] flex items-center justify-between gap-2">
+                                    <div className="flex items-center gap-2 min-w-0 flex-1">
+                                        <Key size={13} className="text-indigo-400 shrink-0" />
+                                        <span className="text-[10px] uppercase font-bold text-slate-500 tracking-wider shrink-0">API Key</span>
+                                        <code
+                                            className="text-xs font-mono text-slate-300 truncate select-all bg-slate-950/60 px-2 py-0.5 rounded border border-white/5"
+                                            title={isKeyRevealed ? apiKey : 'Click eye icon to reveal API key'}
+                                        >
+                                            {isKeyRevealed ? apiKey : formatMaskedApiKey(apiKey)}
+                                        </code>
+                                    </div>
+                                    <div className="flex items-center gap-1 shrink-0">
+                                        <button
+                                            type="button"
+                                            onClick={() => toggleRevealKey(name)}
+                                            title={isKeyRevealed ? 'Hide API key' : 'Reveal API key'}
+                                            aria-label={isKeyRevealed ? `Hide ${name} API key` : `Reveal ${name} API key`}
+                                            className="p-1.5 text-slate-400 hover:text-slate-200 hover:bg-white/5 rounded-md transition-colors"
+                                        >
+                                            {isKeyRevealed ? <EyeOff size={13} /> : <Eye size={13} />}
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={() => handleCopyApiKey(name, apiKey)}
+                                            title="Copy API key"
+                                            aria-label={`Copy ${name} API key`}
+                                            className="p-1.5 text-slate-400 hover:text-indigo-400 hover:bg-white/5 rounded-md transition-colors"
+                                        >
+                                            {isKeyCopied ? <Check size={13} className="text-emerald-400" /> : <Copy size={13} />}
+                                        </button>
+                                    </div>
+                                </div>
                             )}
                         </div>
-                        <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
-                            <span className="text-sm font-medium text-slate-300">{formatVersion(installedVer)}</span>
-                            {hasUpdate && latestVer && (
-                                data.update_url && /^https?:\/\//i.test(data.update_url) ? (
-                                    <a
-                                        href={data.update_url}
-                                        target="_blank"
-                                        rel="noopener noreferrer"
-                                        className="inline-flex items-center gap-0.5 text-xs font-bold text-amber-400 hover:text-amber-300 transition-colors"
-                                        title="View release notes"
-                                    >
-                                        → {formatVersion(latestVer)}
-                                        <ExternalLink size={10} />
-                                    </a>
-                                ) : (
-                                    <span className="text-xs font-bold text-amber-400">
-                                        → {formatVersion(latestVer)}
-                                    </span>
-                                )
-                            )}
-                        </div>
-                    </div>
-                    <div className="bg-slate-900/50 rounded-xl p-3 border border-white/[0.02]">
-                        <span className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">Uptime</span>
-                        <p className="text-sm font-medium text-slate-300 mt-0.5">{data.uptime || '-'}</p>
-                    </div>
-                </div>
+                    );
+                })()}
 
                 {hasUpdate && data.id && (
                     <RequireClaim>

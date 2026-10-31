@@ -204,7 +204,7 @@ func RunPackageAction(action, pkgId, scriptName, lockFile string) {
 	}
 
 	if IsRunnerAvailable() {
-		if err := DispatchPackageStream(action, pkgId, scriptName, updateProgress); err != nil {
+		if err := DispatchPackageStream(action, pkgId, scriptName, allocatedPort, updateProgress); err != nil {
 			slog.Error("runner package script exited with error", "action", action, "script", scriptName, "error", err)
 			job.Status = "failed"
 			job.LastLine = "Error: " + err.Error()
@@ -217,11 +217,11 @@ func RunPackageAction(action, pkgId, scriptName, lockFile string) {
 		packageMutex.Lock()
 		defer packageMutex.Unlock()
 
-		cmd := buildHardenedPackageCommand(scriptPath, true)
+		cmd := buildHardenedPackageCommand(scriptPath, true, allocatedPort)
 		stdout, err := cmd.StdoutPipe()
 		if err != nil {
 			slog.Error("failed to create stdout pipe; running synchronous fallback", "action", action, "script", scriptName, "error", err)
-			output, runErr := buildHardenedPackageCommand(scriptPath, true).CombinedOutput()
+			output, runErr := buildHardenedPackageCommand(scriptPath, true, allocatedPort).CombinedOutput()
 			job.LogLines = len(strings.Split(string(output), "\n"))
 			if runErr != nil {
 				job.Status = "failed"

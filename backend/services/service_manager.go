@@ -4,6 +4,7 @@ import (
 	"aetherflow/db"
 	"aetherflow/models"
 	"log/slog"
+	"os"
 	"strings"
 	"time"
 
@@ -22,6 +23,11 @@ var systemdCoreServices = map[string]string{
 func GetActiveServices() map[string]interface{} {
 	servicesList := make(map[string]interface{})
 
+	apiPort := parseValidPort(os.Getenv("PORT"))
+	if apiPort <= 0 {
+		apiPort = 8080
+	}
+
 	// 2. Core Systemd Services
 	for displayName, systemdName := range systemdCoreServices {
 		status, uptime, version := GetServiceInfo(systemdName)
@@ -35,13 +41,35 @@ func GetActiveServices() map[string]interface{} {
 				managedBy = "embedded"
 			}
 		}
+
+		defaultPort := 0
+		activePort := 0
+		switch systemdName {
+		case "aetherflow-api":
+			defaultPort = 8080
+			activePort = apiPort
+		case "aetherflow-frontend":
+			if managedBy == "embedded" {
+				defaultPort = 8080
+				activePort = apiPort
+			} else {
+				defaultPort = 3000
+				activePort = 3000
+			}
+		case "apache2":
+			defaultPort = 443
+			activePort = 443
+		}
+
 		servicesList[displayName] = gin.H{
-			"status":     status,
-			"uptime":     uptime,
-			"version":    version,
-			"managed_by": managedBy,
-			"process":    systemdName,
-			"id":         systemdName,
+			"status":       status,
+			"uptime":       uptime,
+			"version":      version,
+			"managed_by":   managedBy,
+			"process":      systemdName,
+			"id":           systemdName,
+			"default_port": defaultPort,
+			"active_port":  activePort,
 		}
 	}
 
@@ -91,7 +119,11 @@ func GetActiveServices() map[string]interface{} {
 			}
 		}
 
+		meta := GetAppRuntimeMeta(pkg.Name)
 		activePort := pkg.DefaultPort
+		if meta.ConfiguredPort > 0 {
+			activePort = meta.ConfiguredPort
+		}
 		internalDomain := ""
 		if bp := GetBlueprint(pkg.Name); bp != nil {
 			internalDomain = bp.InternalDomain
@@ -121,6 +153,7 @@ func GetActiveServices() map[string]interface{} {
 			"id":                      pkg.Name,
 			"default_port":            pkg.DefaultPort,
 			"active_port":             activePort,
+			"api_key":                 meta.APIKey,
 			"internal_domain":         internalDomain,
 			"public_domain":           publicDomain,
 			"external_access_enabled": externalAccess,

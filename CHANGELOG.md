@@ -1,3 +1,15 @@
+## CHANGELOG v3.2.6 - Stable Nightly Promotion, Remote Desktops & Streaming Reliability
+_Promotes the nightly changes since `v3.2.5` to the stable channel._
+
+### Release Highlights (since `v3.2.5`)
+* **Remote Desktop Applications**: Added bare-metal KasmVNC and XRDP packages with install/remove lifecycles, service wiring, icons, and regression coverage.
+* **Safe Jellyseerr-to-Seerr Upgrades**: Added staged builds and rollback support for in-place migration to Seerr, with installer regression tests.
+* **Streaming Reliability**: Improved Jellyfin remote-control capability enforcement, active encoding termination on stop, WebSocket tunnels, and paginated watch-history synchronization with periodic automatic sync.
+* **Service Visibility & MediaFlow Controls**: Added application ports and API keys to service cards and a decline action for pending transcode approvals.
+* **Security & Project Metadata**: Parameterized sandbox paths, removed environment-specific literals, and refreshed security policy, project metadata, and license attribution.
+
+---
+
 ## CHANGELOG v3.2.5 - App Update Engine, Nightly Release Pipeline, Open-Canvas Telemetry & Ingress Consolidation
 _Direct comparison against `v3.2.1` (`v3.2.1...v3.2.5`), consolidating in-place Marketplace/Service updates, Nightly release channel orchestration, Open-Canvas UI & LibreSpeed V2, and runtime hardening._
 

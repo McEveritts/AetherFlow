@@ -89,6 +89,18 @@ export default function MediaFlowTab() {
         }
     };
 
+    const handleDecline = async (id: number) => {
+        try {
+            await apiFetch(`/api/v1/admin/mediaflow/decline/${id}`, {
+                method: 'POST'
+            });
+            mutate();
+            addToast('Transcode job declined.', 'info');
+        } catch {
+            addToast('Failed to decline transcode job.', 'error');
+        }
+    };
+
     const triggerScan = async () => {
         setIsScanning(true);
         try {
@@ -388,13 +400,22 @@ export default function MediaFlowTab() {
                                                 </td>
                                                 <td className="py-3 px-3 text-right">
                                                     {item.status === 'PENDING_APPROVAL' && (
-                                                        <button
-                                                            onClick={() => handleApprove(item.id)}
-                                                            className="obs-touch-target-standard obs-gpu-120hz-interactive bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-500/40 text-emerald-300 px-3 py-1 rounded-lg text-xs font-bold transition-all inline-flex items-center gap-1.5"
-                                                        >
-                                                            <Play size={12} />
-                                                            <span>Authorize</span>
-                                                        </button>
+                                                        <div className="inline-flex items-center justify-end gap-2">
+                                                            <button
+                                                                onClick={() => handleApprove(item.id)}
+                                                                className="obs-touch-target-standard obs-gpu-120hz-interactive bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-500/40 text-emerald-300 px-3 py-1 rounded-lg text-xs font-bold transition-all inline-flex items-center gap-1.5"
+                                                            >
+                                                                <Play size={12} />
+                                                                <span>Authorize</span>
+                                                            </button>
+                                                            <button
+                                                                onClick={() => handleDecline(item.id)}
+                                                                className="obs-touch-target-standard obs-gpu-120hz-interactive bg-red-500/15 hover:bg-red-500/25 border border-red-500/30 text-red-300 px-3 py-1 rounded-lg text-xs font-bold transition-all inline-flex items-center gap-1.5"
+                                                            >
+                                                                <XCircle size={12} />
+                                                                <span>Decline</span>
+                                                            </button>
+                                                        </div>
                                                     )}
                                                 </td>
                                             </tr>

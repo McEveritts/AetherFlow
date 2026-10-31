@@ -17,7 +17,11 @@ func TestStreamingDashboard_JellyfinIntegrationAndAnalytics(t *testing.T) {
 	InitAESKey()
 
 	var pausedCalled bool
+	var unpausedCalled bool
+	var stopCalled bool
+	var activeEncodingDeletedDeviceID string
 	var messageReceived string
+	var messageHasTimeout bool
 
 	// Spin up a mock Jellyfin server
 	mockJellyfin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -139,12 +143,26 @@ func TestStreamingDashboard_JellyfinIntegrationAndAnalytics(t *testing.T) {
 		case "/Sessions/sess-live-1/Playing/Pause":
 			pausedCalled = true
 			w.WriteHeader(http.StatusNoContent)
+		case "/Sessions/sess-live-1/Playing/Unpause":
+			unpausedCalled = true
+			w.WriteHeader(http.StatusNoContent)
+		case "/Sessions/sess-live-1/Playing/Stop":
+			stopCalled = true
+			w.WriteHeader(http.StatusNoContent)
+		case "/Videos/ActiveEncodings":
+			if r.Method == http.MethodDelete {
+				activeEncodingDeletedDeviceID = r.URL.Query().Get("deviceId")
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			w.WriteHeader(http.StatusMethodNotAllowed)
 		case "/Sessions/sess-live-1/Message":
 			var body map[string]interface{}
 			_ = json.NewDecoder(r.Body).Decode(&body)
 			if txt, ok := body["Text"].(string); ok {
 				messageReceived = txt
 			}
+			_, messageHasTimeout = body["TimeoutMs"]
 			w.WriteHeader(http.StatusNoContent)
 		default:
 			w.WriteHeader(http.StatusNotFound)
@@ -257,7 +275,7 @@ func TestStreamingDashboard_JellyfinIntegrationAndAnalytics(t *testing.T) {
 		}
 	}
 
-	// 5. Test Remote Session Control (Pause & Message)
+	// 5. Test Remote Session Control (Pause, Resume, Message, and Stop with ActiveEncodings termination)
 	{
 		w := httptest.NewRecorder()
 		req, _ := http.NewRequest("POST", "/admin/streaming/sessions/sess-live-1/command", bytes.NewBufferString(`{"command":"pause"}`))
@@ -267,12 +285,28 @@ func TestStreamingDashboard_JellyfinIntegrationAndAnalytics(t *testing.T) {
 			t.Fatalf("expected pause command to succeed, code=%d pausedCalled=%v", w.Code, pausedCalled)
 		}
 
+		wResume := httptest.NewRecorder()
+		reqResume, _ := http.NewRequest("POST", "/admin/streaming/sessions/sess-live-1/command", bytes.NewBufferString(`{"command":"resume"}`))
+		reqResume.Header.Set("Content-Type", "application/json")
+		r.ServeHTTP(wResume, reqResume)
+		if wResume.Code != http.StatusOK || !unpausedCalled {
+			t.Fatalf("expected resume command to succeed, code=%d unpausedCalled=%v", wResume.Code, unpausedCalled)
+		}
+
 		w2 := httptest.NewRecorder()
 		req2, _ := http.NewRequest("POST", "/admin/streaming/sessions/sess-live-1/command", bytes.NewBufferString(`{"command":"message","message":"Server maintenance in 10m"}`))
 		req2.Header.Set("Content-Type", "application/json")
 		r.ServeHTTP(w2, req2)
-		if w2.Code != http.StatusOK || messageReceived != "Server maintenance in 10m" {
-			t.Fatalf("expected message command to succeed, code=%d msg=%q", w2.Code, messageReceived)
+		if w2.Code != http.StatusOK || messageReceived != "Server maintenance in 10m" || messageHasTimeout {
+			t.Fatalf("expected message command to succeed without TimeoutMs, code=%d msg=%q hasTimeout=%v", w2.Code, messageReceived, messageHasTimeout)
+		}
+
+		wStop := httptest.NewRecorder()
+		reqStop, _ := http.NewRequest("POST", "/admin/streaming/sessions/sess-live-1/command", bytes.NewBufferString(`{"command":"stop"}`))
+		reqStop.Header.Set("Content-Type", "application/json")
+		r.ServeHTTP(wStop, reqStop)
+		if wStop.Code != http.StatusOK || !stopCalled || activeEncodingDeletedDeviceID != "dev-atv" {
+			t.Fatalf("expected stop command to succeed and terminate active encoding, code=%d stopCalled=%v deletedDevice=%q", wStop.Code, stopCalled, activeEncodingDeletedDeviceID)
 		}
 	}
 }

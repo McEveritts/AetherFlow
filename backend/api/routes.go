@@ -316,6 +316,7 @@ func registerV1Routes(apiGroup *gin.RouterGroup) {
 		adminGroup.GET("/mediaflow/queue", GetMediaFlowQueue)
 		adminGroup.POST("/mediaflow/scan", TriggerScan)
 		adminGroup.POST("/mediaflow/approve/:id", ApproveItem)
+		adminGroup.POST("/mediaflow/decline/:id", DeclineItem)
 
 		// Ingress Configurations (Persistent Ingress Routing)
 		// Requires admin context (Phase 8)

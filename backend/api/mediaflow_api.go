@@ -34,6 +34,7 @@ func GetMediaFlowQueue(c *gin.Context) {
 		       COALESCE(new_codec, ''), COALESCE(new_size, 0),
 		       COALESCE(error_log, ''), COALESCE(created_at, '')
 		FROM mediaflow_queue
+		WHERE status != 'DECLINED'
 		ORDER BY created_at DESC LIMIT 100
 	`)
 	if err != nil {
@@ -98,4 +99,23 @@ func ApproveItem(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "Transcode queued. MediaFlow Engine assumes control."})
+}
+
+// DeclineItem flips status to DECLINED removing the item from the active approval queue
+func DeclineItem(c *gin.Context) {
+	id := c.Param("id")
+
+	result, err := db.DB.Exec("UPDATE mediaflow_queue SET status = 'DECLINED', updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'PENDING_APPROVAL'", id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to decline"})
+		return
+	}
+
+	affected, _ := result.RowsAffected()
+	if affected == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Item not found or already processed"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Transcode job declined."})
 }

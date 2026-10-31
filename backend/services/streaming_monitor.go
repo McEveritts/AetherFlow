@@ -99,10 +99,16 @@ type ActiveStreamSession struct {
 	TranscodeReasons     []string `json:"transcodeReasons"`
 	TranscodeProgressPct float64  `json:"transcodeProgressPct,omitempty"`
 	TranscodeFps         float64  `json:"transcodeFps,omitempty"`
-	BitrateBps           int64    `json:"bitrateBps"`
-	BandwidthMbps        float64  `json:"bandwidthMbps"`
-	SessionDataBytes     int64    `json:"sessionDataBytes"`
-	StartedAt            string   `json:"startedAt"`
+	BitrateBps            int64    `json:"bitrateBps"`
+	BandwidthMbps         float64  `json:"bandwidthMbps"`
+	SessionDataBytes      int64    `json:"sessionDataBytes"`
+	StartedAt             string   `json:"startedAt"`
+	PlaySessionID         string   `json:"playSessionId,omitempty"`
+	MediaSourceID         string   `json:"mediaSourceId,omitempty"`
+	SupportsMediaControl  bool     `json:"supportsMediaControl"`
+	SupportsRemoteControl bool     `json:"supportsRemoteControl"`
+	CanSendMessage        bool     `json:"canSendMessage"`
+	SupportedCommands     []string `json:"supportedCommands,omitempty"`
 }
 
 // StreamingLiveSummary aggregates real-time session and bandwidth metrics.
@@ -268,15 +274,32 @@ func InitStreamingMonitor() {
 			return
 		}
 
+		// Perform an initial watch-history sync on startup if Jellyfin is configured
+		if _, _, apiKey, enabled := GetStoredJellyfinConfig(); enabled && apiKey != "" {
+			syncCtx, syncCancel := context.WithTimeout(ctx, 60*time.Second)
+			_, _ = SyncJellyfinWatchHistory(syncCtx)
+			syncCancel()
+		}
+
 		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
 
+		historySyncCounter := 0
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
 				PollAndRecordJellyfinTelemetry()
+				historySyncCounter++
+				if historySyncCounter >= 30 { // Sync historical watch records every 5 minutes
+					historySyncCounter = 0
+					if _, _, apiKey, enabled := GetStoredJellyfinConfig(); enabled && apiKey != "" {
+						syncCtx, syncCancel := context.WithTimeout(ctx, 60*time.Second)
+						_, _ = SyncJellyfinWatchHistory(syncCtx)
+						syncCancel()
+					}
+				}
 			}
 		}
 	}()
@@ -296,7 +319,10 @@ func resolveDefaultJellyfinURL() string {
 			return fmt.Sprintf("http://127.0.0.1:%d", cfg.ListenPort)
 		}
 	}
-	return "https://jellyfin.mcflow.stream"
+	if baseDom := ResolveBaseDomain(); baseDom != "" {
+		return fmt.Sprintf("https://jellyfin.%s", baseDom)
+	}
+	return "http://127.0.0.1:8096"
 }
 
 // GetStoredJellyfinConfig loads the Jellyfin server configuration from SQLite (or env fallback).
@@ -590,20 +616,30 @@ func TestJellyfinConnection(ctx context.Context, serverURL, apiKey string) (*Str
 
 // jellyfinSessionRaw mirrors Jellyfin's /Sessions payload.
 type jellyfinSessionRaw struct {
-	ID                 string `json:"Id"`
-	UserID             string `json:"UserId"`
-	UserName           string `json:"UserName"`
-	Client             string `json:"Client"`
-	DeviceName         string `json:"DeviceName"`
-	DeviceID           string `json:"DeviceId"`
-	ApplicationVersion string `json:"ApplicationVersion"`
-	RemoteEndPoint     string `json:"RemoteEndPoint"`
-	LastActivityDate   string `json:"LastActivityDate"`
-	PlayState          *struct {
+	ID                    string   `json:"Id"`
+	UserID                string   `json:"UserId"`
+	UserName              string   `json:"UserName"`
+	Client                string   `json:"Client"`
+	DeviceName            string   `json:"DeviceName"`
+	DeviceID              string   `json:"DeviceId"`
+	ApplicationVersion    string   `json:"ApplicationVersion"`
+	RemoteEndPoint        string   `json:"RemoteEndPoint"`
+	LastActivityDate      string   `json:"LastActivityDate"`
+	SupportsMediaControl  *bool    `json:"SupportsMediaControl"`
+	SupportsRemoteControl *bool    `json:"SupportsRemoteControl"`
+	SupportedCommands     []string `json:"SupportedCommands"`
+	Capabilities          *struct {
+		SupportsMediaControl *bool    `json:"SupportsMediaControl"`
+		SupportedCommands    []string `json:"SupportedCommands"`
+	} `json:"Capabilities"`
+	PlayState *struct {
 		PositionTicks       int64  `json:"PositionTicks"`
 		IsPaused            bool   `json:"IsPaused"`
 		IsMuted             bool   `json:"IsMuted"`
 		PlayMethod          string `json:"PlayMethod"`
+		PlaySessionID       string `json:"PlaySessionId"`
+		MediaSourceID       string `json:"MediaSourceId"`
+		LiveStreamID        string `json:"LiveStreamId"`
 		AudioStreamIndex    *int   `json:"AudioStreamIndex"`
 		SubtitleStreamIndex *int   `json:"SubtitleStreamIndex"`
 	} `json:"PlayState"`
@@ -742,6 +778,40 @@ func normalizeMediaType(rawType string) string {
 	}
 }
 
+func resolveJellyfinSessionCapabilities(s jellyfinSessionRaw) (supportsMediaControl bool, supportsRemoteControl bool, canSendMessage bool, supportedCommands []string) {
+	supportsMediaControl = true
+	if s.SupportsMediaControl != nil {
+		supportsMediaControl = *s.SupportsMediaControl
+	} else if s.Capabilities != nil && s.Capabilities.SupportsMediaControl != nil {
+		supportsMediaControl = *s.Capabilities.SupportsMediaControl
+	}
+
+	supportsRemoteControl = supportsMediaControl
+	if s.SupportsRemoteControl != nil {
+		supportsRemoteControl = *s.SupportsRemoteControl
+	}
+
+	if len(s.SupportedCommands) > 0 {
+		supportedCommands = append(supportedCommands, s.SupportedCommands...)
+	} else if s.Capabilities != nil && len(s.Capabilities.SupportedCommands) > 0 {
+		supportedCommands = append(supportedCommands, s.Capabilities.SupportedCommands...)
+	}
+
+	if len(supportedCommands) > 0 {
+		hasDisplayMessage := false
+		for _, cmd := range supportedCommands {
+			if strings.EqualFold(strings.TrimSpace(cmd), "DisplayMessage") {
+				hasDisplayMessage = true
+				break
+			}
+		}
+		canSendMessage = supportsMediaControl && hasDisplayMessage
+	} else {
+		canSendMessage = supportsMediaControl
+	}
+	return
+}
+
 // FetchJellyfinLiveSessions retrieves active playback sessions from Jellyfin.
 func FetchJellyfinLiveSessions(ctx context.Context, serverName, serverURL, apiKey string) ([]ActiveStreamSession, error) {
 	if apiKey == "" {
@@ -775,13 +845,18 @@ func FetchJellyfinLiveSessions(ctx context.Context, serverName, serverURL, apiKe
 		posSecs := 0
 		isPaused := false
 		playMethod := "DirectPlay"
+		playSessionID := ""
+		mediaSourceID := ""
 		if s.PlayState != nil {
 			posSecs = int(s.PlayState.PositionTicks / jellyfinTicksPerSecond)
 			isPaused = s.PlayState.IsPaused
 			if s.PlayState.PlayMethod != "" {
 				playMethod = s.PlayState.PlayMethod
 			}
+			playSessionID = strings.TrimSpace(s.PlayState.PlaySessionID)
+			mediaSourceID = strings.TrimSpace(s.PlayState.MediaSourceID)
 		}
+		supportsMediaCtrl, supportsRemoteCtrl, canSendMsg, supportedCmds := resolveJellyfinSessionCapabilities(s)
 
 		durSecs := int(item.RunTimeTicks / jellyfinTicksPerSecond)
 		progressPct := 0.0
@@ -988,10 +1063,16 @@ func FetchJellyfinLiveSessions(ctx context.Context, serverName, serverURL, apiKe
 			TranscodeReasons:     transcodeReasons,
 			TranscodeProgressPct: transcodePct,
 			TranscodeFps:         transcodeFps,
-			BitrateBps:           activeBitrate,
-			BandwidthMbps:        bwMbps,
-			SessionDataBytes:     sessionBytes,
-			StartedAt:            s.LastActivityDate,
+			BitrateBps:            activeBitrate,
+			BandwidthMbps:         bwMbps,
+			SessionDataBytes:      sessionBytes,
+			StartedAt:             s.LastActivityDate,
+			PlaySessionID:         playSessionID,
+			MediaSourceID:         mediaSourceID,
+			SupportsMediaControl:  supportsMediaCtrl,
+			SupportsRemoteControl: supportsRemoteCtrl,
+			CanSendMessage:        canSendMsg,
+			SupportedCommands:     supportedCmds,
 		})
 	}
 
@@ -1147,118 +1228,187 @@ func SyncJellyfinWatchHistory(ctx context.Context) (int, error) {
 	}
 
 	imported := 0
+	const pageSize = 100
+	filters := []string{"IsPlayed", "IsResumable"}
+
 	for _, u := range users {
-		itemsURL := fmt.Sprintf("%s/Users/%s/Items?Filters=IsPlayed&Recursive=true&IncludeItemTypes=Movie,Episode,Audio&Fields=MediaStreams,Container,ProductionYear&SortBy=DatePlayed&SortOrder=Descending&Limit=40",
-			cleanURL, url.PathEscape(u.ID))
-		itemsBody, iCode, _, iErr := doJellyfinRequest(ctx, "GET", itemsURL, apiKey, nil, 10*time.Second)
-		if iErr != nil || iCode != http.StatusOK {
-			continue
-		}
-
-		var payload struct {
-			Items []struct {
-				ID                string `json:"Id"`
-				Name              string `json:"Name"`
-				Type              string `json:"Type"`
-				SeriesName        string `json:"SeriesName"`
-				SeriesID          string `json:"SeriesId"`
-				ParentIndexNumber int    `json:"ParentIndexNumber"`
-				IndexNumber       int    `json:"IndexNumber"`
-				ProductionYear    int    `json:"ProductionYear"`
-				RunTimeTicks      int64  `json:"RunTimeTicks"`
-				Container         string `json:"Container"`
-				Bitrate           int64  `json:"Bitrate"`
-				Width             int    `json:"Width"`
-				Height            int    `json:"Height"`
-				MediaStreams      []struct {
-					Type     string `json:"Type"`
-					Codec    string `json:"Codec"`
-					BitRate  int64  `json:"BitRate"`
-					Width    int    `json:"Width"`
-					Height   int    `json:"Height"`
-					Channels int    `json:"Channels"`
-				} `json:"MediaStreams"`
-				UserData *struct {
-					PlayCount      int    `json:"PlayCount"`
-					LastPlayedDate string `json:"LastPlayedDate"`
-				} `json:"UserData"`
-			} `json:"Items"`
-		}
-		if json.Unmarshal(itemsBody, &payload) != nil {
-			continue
-		}
-
-		for _, item := range payload.Items {
-			durSecs := int(item.RunTimeTicks / jellyfinTicksPerSecond)
-			if durSecs <= 0 {
-				durSecs = 2700
-			}
-			vCodec := "HEVC"
-			aCodec := "EAC3"
-			aCh := 6
-			w, h := item.Width, item.Height
-			var streamBitrate int64
-			for _, ms := range item.MediaStreams {
-				if ms.Type == "Video" {
-					if ms.Codec != "" {
-						vCodec = strings.ToUpper(ms.Codec)
-					}
-					if ms.Width > 0 {
-						w = ms.Width
-					}
-					if ms.Height > 0 {
-						h = ms.Height
-					}
-					streamBitrate += ms.BitRate
-				} else if ms.Type == "Audio" {
-					if ms.Codec != "" {
-						aCodec = strings.ToUpper(ms.Codec)
-					}
-					if ms.Channels > 0 {
-						aCh = ms.Channels
-					}
-					streamBitrate += ms.BitRate
+		for _, filter := range filters {
+			startIndex := 0
+			for {
+				itemsURL := fmt.Sprintf("%s/Users/%s/Items?Filters=%s&Recursive=true&IncludeItemTypes=Movie,Episode,Audio&Fields=MediaStreams,Container,ProductionYear&SortBy=DatePlayed&SortOrder=Descending&Limit=%d&StartIndex=%d",
+					cleanURL, url.PathEscape(u.ID), filter, pageSize, startIndex)
+				itemsBody, iCode, _, iErr := doJellyfinRequest(ctx, "GET", itemsURL, apiKey, nil, 15*time.Second)
+				if iErr != nil || iCode != http.StatusOK {
+					break
 				}
-			}
-			bitrate := item.Bitrate
-			if bitrate <= 0 {
-				bitrate = streamBitrate
-			}
-			if bitrate <= 0 {
-				bitrate = 8_000_000
-			}
-			dataUsed := int64(durSecs) * (bitrate / 8)
-			playedAt := time.Now().UTC().Format("2006-01-02 15:04:05")
-			if item.UserData != nil && item.UserData.LastPlayedDate != "" {
-				if parsedTime, pErr := time.Parse(time.RFC3339, item.UserData.LastPlayedDate); pErr == nil {
-					playedAt = parsedTime.UTC().Format("2006-01-02 15:04:05")
-				}
-			}
 
-			sessionKey := fmt.Sprintf("jellyfin:sync:%s:%s", u.ID, item.ID)
-			res, execErr := db.DB.Exec(`
-				INSERT OR IGNORE INTO streaming_history (
-					session_key, provider, server_name, user_id, user_name,
-					client_name, device_name, ip_address,
-					item_id, item_name, item_type, series_name, series_id,
-					season_number, episode_number, production_year,
-					play_method, container, video_codec, video_resolution,
-					audio_codec, audio_channels, bitrate_bps,
-					duration_secs, watched_secs, data_used_bytes, completion_pct,
-					started_at, last_seen_at, ended_at, is_active
-				) VALUES (?, 'jellyfin', ?, ?, ?, 'Jellyfin Client', 'Smart TV / Web', '192.168.1.10', ?, ?, ?, ?, ?, ?, ?, ?, 'DirectPlay', ?, ?, ?, ?, ?, ?, ?, ?, ?, 100.0, ?, ?, ?, 0)
-			`,
-				sessionKey, serverName, u.ID, u.Name,
-				item.ID, item.Name, normalizeMediaType(item.Type), item.SeriesName, item.SeriesID,
-				item.ParentIndexNumber, item.IndexNumber, item.ProductionYear,
-				strings.ToUpper(item.Container), vCodec, formatResolutionLabel(w, h),
-				aCodec, aCh, bitrate,
-				durSecs, durSecs, dataUsed,
-				playedAt, playedAt, playedAt,
-			)
-			if execErr == nil {
-				if aff, _ := res.RowsAffected(); aff > 0 {
-					imported++
+				var payload struct {
+					TotalRecordCount int `json:"TotalRecordCount"`
+					Items            []struct {
+						ID                string `json:"Id"`
+						Name              string `json:"Name"`
+						Type              string `json:"Type"`
+						SeriesName        string `json:"SeriesName"`
+						SeriesID          string `json:"SeriesId"`
+						ParentIndexNumber int    `json:"ParentIndexNumber"`
+						IndexNumber       int    `json:"IndexNumber"`
+						ProductionYear    int    `json:"ProductionYear"`
+						RunTimeTicks      int64  `json:"RunTimeTicks"`
+						Container         string `json:"Container"`
+						Bitrate           int64  `json:"Bitrate"`
+						Width             int    `json:"Width"`
+						Height            int    `json:"Height"`
+						MediaStreams      []struct {
+							Type     string `json:"Type"`
+							Codec    string `json:"Codec"`
+							BitRate  int64  `json:"BitRate"`
+							Width    int    `json:"Width"`
+							Height   int    `json:"Height"`
+							Channels int    `json:"Channels"`
+						} `json:"MediaStreams"`
+						UserData *struct {
+							Played                bool    `json:"Played"`
+							PlayCount             int     `json:"PlayCount"`
+							PlaybackPositionTicks int64   `json:"PlaybackPositionTicks"`
+							PlayedPercentage      float64 `json:"PlayedPercentage"`
+							LastPlayedDate        string  `json:"LastPlayedDate"`
+						} `json:"UserData"`
+					} `json:"Items"`
+				}
+				if json.Unmarshal(itemsBody, &payload) != nil || len(payload.Items) == 0 {
+					break
+				}
+
+				for _, item := range payload.Items {
+					durSecs := int(item.RunTimeTicks / jellyfinTicksPerSecond)
+					if durSecs <= 0 {
+						durSecs = 2700
+					}
+					vCodec := "HEVC"
+					aCodec := "EAC3"
+					aCh := 6
+					w, h := item.Width, item.Height
+					var streamBitrate int64
+					for _, ms := range item.MediaStreams {
+						if ms.Type == "Video" {
+							if ms.Codec != "" {
+								vCodec = strings.ToUpper(ms.Codec)
+							}
+							if ms.Width > 0 {
+								w = ms.Width
+							}
+							if ms.Height > 0 {
+								h = ms.Height
+							}
+							streamBitrate += ms.BitRate
+						} else if ms.Type == "Audio" {
+							if ms.Codec != "" {
+								aCodec = strings.ToUpper(ms.Codec)
+							}
+							if ms.Channels > 0 {
+								aCh = ms.Channels
+							}
+							streamBitrate += ms.BitRate
+						}
+					}
+					bitrate := item.Bitrate
+					if bitrate <= 0 {
+						bitrate = streamBitrate
+					}
+					if bitrate <= 0 {
+						bitrate = 8_000_000
+					}
+
+					watchedSecs := durSecs
+					completionPct := 100.0
+					if item.UserData != nil && !item.UserData.Played {
+						if item.UserData.PlaybackPositionTicks > 0 {
+							posSecs := int(item.UserData.PlaybackPositionTicks / jellyfinTicksPerSecond)
+							if posSecs > 0 && posSecs < durSecs {
+								watchedSecs = posSecs
+								completionPct = math.Round((float64(posSecs)/float64(durSecs))*1000) / 10
+							}
+						} else if item.UserData.PlayedPercentage > 0 && item.UserData.PlayedPercentage < 100 {
+							completionPct = math.Round(item.UserData.PlayedPercentage*10) / 10
+							watchedSecs = int(math.Round(float64(durSecs) * (completionPct / 100.0)))
+						}
+					}
+					if watchedSecs <= 0 {
+						watchedSecs = 60
+					}
+
+					dataUsed := int64(watchedSecs) * (bitrate / 8)
+					playedAt := time.Now().UTC().Format("2006-01-02 15:04:05")
+					hasPlayedDate := 0
+					if item.UserData != nil && item.UserData.LastPlayedDate != "" {
+						if parsedTime, pErr := time.Parse(time.RFC3339Nano, item.UserData.LastPlayedDate); pErr == nil {
+							playedAt = parsedTime.UTC().Format("2006-01-02 15:04:05")
+							hasPlayedDate = 1
+						} else if parsedTime, pErr := time.Parse(time.RFC3339, item.UserData.LastPlayedDate); pErr == nil {
+							playedAt = parsedTime.UTC().Format("2006-01-02 15:04:05")
+							hasPlayedDate = 1
+						}
+					}
+
+					sessionKey := fmt.Sprintf("jellyfin:sync:%s:%s", u.ID, item.ID)
+					res, execErr := db.DB.Exec(`
+						INSERT INTO streaming_history (
+							session_key, provider, server_name, user_id, user_name,
+							client_name, device_name, ip_address,
+							item_id, item_name, item_type, series_name, series_id,
+							season_number, episode_number, production_year,
+							play_method, container, video_codec, video_resolution,
+							audio_codec, audio_channels, bitrate_bps,
+							duration_secs, watched_secs, data_used_bytes, completion_pct,
+							started_at, last_seen_at, ended_at, is_active
+						) VALUES (?, 'jellyfin', ?, ?, ?, 'Jellyfin Client', 'Smart TV / Web', '192.168.1.10', ?, ?, ?, ?, ?, ?, ?, ?, 'DirectPlay', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+						ON CONFLICT(session_key) DO UPDATE SET
+							server_name = excluded.server_name,
+							user_name = excluded.user_name,
+							item_name = excluded.item_name,
+							item_type = excluded.item_type,
+							series_name = excluded.series_name,
+							series_id = excluded.series_id,
+							season_number = excluded.season_number,
+							episode_number = excluded.episode_number,
+							production_year = excluded.production_year,
+							container = excluded.container,
+							video_codec = excluded.video_codec,
+							video_resolution = excluded.video_resolution,
+							audio_codec = excluded.audio_codec,
+							audio_channels = excluded.audio_channels,
+							bitrate_bps = excluded.bitrate_bps,
+							duration_secs = excluded.duration_secs,
+							watched_secs = excluded.watched_secs,
+							data_used_bytes = excluded.data_used_bytes,
+							completion_pct = excluded.completion_pct,
+							started_at = CASE WHEN ? = 1 THEN excluded.started_at ELSE streaming_history.started_at END,
+							last_seen_at = CASE WHEN ? = 1 THEN excluded.last_seen_at ELSE streaming_history.last_seen_at END,
+							ended_at = CASE WHEN ? = 1 THEN excluded.ended_at ELSE streaming_history.ended_at END
+						WHERE streaming_history.watched_secs != excluded.watched_secs
+						   OR streaming_history.completion_pct != excluded.completion_pct
+						   OR (? = 1 AND streaming_history.last_seen_at != excluded.last_seen_at)
+						   OR streaming_history.item_name != excluded.item_name
+					`,
+						sessionKey, serverName, u.ID, u.Name,
+						item.ID, item.Name, normalizeMediaType(item.Type), item.SeriesName, item.SeriesID,
+						item.ParentIndexNumber, item.IndexNumber, item.ProductionYear,
+						strings.ToUpper(item.Container), vCodec, formatResolutionLabel(w, h),
+						aCodec, aCh, bitrate,
+						durSecs, watchedSecs, dataUsed, completionPct,
+						playedAt, playedAt, playedAt,
+						hasPlayedDate, hasPlayedDate, hasPlayedDate, hasPlayedDate,
+					)
+					if execErr == nil {
+						if aff, _ := res.RowsAffected(); aff > 0 {
+							imported++
+						}
+					}
+				}
+
+				startIndex += len(payload.Items)
+				if startIndex >= payload.TotalRecordCount || len(payload.Items) < pageSize {
+					break
 				}
 			}
 		}
@@ -1269,11 +1419,12 @@ func SyncJellyfinWatchHistory(ctx context.Context) (int, error) {
 
 // SendJellyfinSessionCommand executes pause, resume, stop, or message on an active session.
 func SendJellyfinSessionCommand(ctx context.Context, sessionID, command, header, messageText string) error {
-	if strings.HasPrefix(sessionID, "demo-") {
+	cleanID := strings.TrimSpace(sessionID)
+	if strings.HasPrefix(cleanID, "demo-") {
 		streamingMu.Lock()
 		defer streamingMu.Unlock()
 		for i := range demoSessionsCache {
-			if demoSessionsCache[i].SessionID == sessionID {
+			if demoSessionsCache[i].SessionID == cleanID {
 				switch command {
 				case "pause":
 					demoSessionsCache[i].State = "paused"
@@ -1299,26 +1450,69 @@ func SendJellyfinSessionCommand(ctx context.Context, sessionID, command, header,
 		return err
 	}
 
-	escapedID := url.PathEscape(strings.TrimSpace(sessionID))
+	// Inspect live /Sessions to check remote-control capabilities and active transcode state.
+	var targetSession *jellyfinSessionRaw
+	if sessBody, sessCode, _, sessErr := doJellyfinRequest(ctx, "GET", cleanURL+"/Sessions", apiKey, nil, 4*time.Second); sessErr == nil && sessCode >= 200 && sessCode < 300 {
+		var rawSessions []jellyfinSessionRaw
+		if json.Unmarshal(sessBody, &rawSessions) == nil {
+			for i := range rawSessions {
+				if rawSessions[i].ID == cleanID {
+					targetSession = &rawSessions[i]
+					break
+				}
+			}
+		}
+	}
+
+	supportsMediaCtrl := true
+	canSendMsg := true
+	hasActiveTranscode := false
+	deviceID := ""
+	playSessionID := ""
+	if targetSession != nil {
+		supportsMediaCtrl, _, canSendMsg, _ = resolveJellyfinSessionCapabilities(*targetSession)
+		deviceID = strings.TrimSpace(targetSession.DeviceID)
+		if targetSession.PlayState != nil {
+			playSessionID = strings.TrimSpace(targetSession.PlayState.PlaySessionID)
+		}
+		hasActiveTranscode = targetSession.TranscodingInfo != nil ||
+			playSessionID != "" ||
+			(targetSession.PlayState != nil && strings.EqualFold(targetSession.PlayState.PlayMethod, "Transcode"))
+	}
+
+	escapedID := url.PathEscape(cleanID)
 	var endpoint string
 	var bodyReader io.Reader
 
 	switch command {
 	case "pause":
+		if targetSession != nil && !supportsMediaCtrl {
+			return fmt.Errorf("client %q (%s) does not have an active remote-control WebSocket connection (SupportsMediaControl=false); ensure WebSocket proxying (/socket) is enabled", targetSession.Client, targetSession.DeviceName)
+		}
 		endpoint = fmt.Sprintf("%s/Sessions/%s/Playing/Pause", cleanURL, escapedID)
 	case "resume":
+		if targetSession != nil && !supportsMediaCtrl {
+			return fmt.Errorf("client %q (%s) does not have an active remote-control WebSocket connection (SupportsMediaControl=false); ensure WebSocket proxying (/socket) is enabled", targetSession.Client, targetSession.DeviceName)
+		}
 		endpoint = fmt.Sprintf("%s/Sessions/%s/Playing/Unpause", cleanURL, escapedID)
 	case "stop":
 		endpoint = fmt.Sprintf("%s/Sessions/%s/Playing/Stop", cleanURL, escapedID)
 	case "message":
+		if targetSession != nil && !supportsMediaCtrl {
+			return fmt.Errorf("client %q (%s) does not have an active remote-control WebSocket connection (SupportsMediaControl=false)", targetSession.Client, targetSession.DeviceName)
+		}
+		if targetSession != nil && !canSendMsg {
+			return fmt.Errorf("client %q (%s) does not support on-screen messages (DisplayMessage not in SupportedCommands)", targetSession.Client, targetSession.DeviceName)
+		}
 		endpoint = fmt.Sprintf("%s/Sessions/%s/Message", cleanURL, escapedID)
 		if strings.TrimSpace(header) == "" {
 			header = "AetherFlow Administrator"
 		}
+		// Omit TimeoutMs so jellyfin-web invokes alert({ title: Header, text: Text })
+		// rather than toast(), which discards Header and hides after 3.3s.
 		payload, _ := json.Marshal(map[string]interface{}{
-			"Header":    header,
-			"Text":      messageText,
-			"TimeoutMs": 8000,
+			"Header": header,
+			"Text":   messageText,
 		})
 		bodyReader = bytes.NewReader(payload)
 	default:
@@ -1332,6 +1526,18 @@ func SendJellyfinSessionCommand(ctx context.Context, sessionID, command, header,
 	if code < 200 || code >= 300 {
 		return fmt.Errorf("Jellyfin command %q returned HTTP %d", command, code)
 	}
+
+	if command == "stop" {
+		// Also terminate server-side active FFmpeg encodings when a deviceId is available.
+		if deviceID != "" && (hasActiveTranscode || playSessionID != "") {
+			encQuery := fmt.Sprintf("deviceId=%s&playSessionId=%s", url.QueryEscape(deviceID), url.QueryEscape(playSessionID))
+			_, _, _, _ = doJellyfinRequest(ctx, "DELETE", fmt.Sprintf("%s/Videos/ActiveEncodings?%s", cleanURL, encQuery), apiKey, nil, 4*time.Second)
+		}
+		if targetSession != nil && !supportsMediaCtrl && !hasActiveTranscode {
+			return fmt.Errorf("client %q (%s) has no active remote-control WebSocket (SupportsMediaControl=false) and is Direct Playing; cannot remotely stop client playback", targetSession.Client, targetSession.DeviceName)
+		}
+	}
+
 	return nil
 }
 
@@ -1745,7 +1951,7 @@ func queryStreamingAnalytics(windowDays int, playMethodFilter, mediaTypeFilter s
 		FROM streaming_history
 		WHERE %s
 		ORDER BY last_seen_at DESC, id DESC
-		LIMIT 50
+		LIMIT 500
 	`, whereSQL), args...)
 	if err == nil {
 		for hRows.Next() {
@@ -1852,10 +2058,13 @@ func SeedStreamingDemoData() error {
 			SubtitleCodec:    "PGS",
 			SubtitleLanguage: "ENG",
 			TranscodeReasons: []string{},
-			BitrateBps:       42_500_000,
-			BandwidthMbps:    42.5,
-			SessionDataBytes: 31_025_000_000,
-			StartedAt:        time.Now().UTC().Add(-97 * time.Minute).Format(time.RFC3339),
+			BitrateBps:            42_500_000,
+			BandwidthMbps:         42.5,
+			SessionDataBytes:      31_025_000_000,
+			StartedAt:             time.Now().UTC().Add(-97 * time.Minute).Format(time.RFC3339),
+			SupportsMediaControl:  true,
+			SupportsRemoteControl: true,
+			CanSendMessage:        true,
 		},
 		{
 			SessionID:            "demo-session-2",
@@ -1903,6 +2112,9 @@ func SeedStreamingDemoData() error {
 			BandwidthMbps:        12.4,
 			SessionDataBytes:     2_604_000_000,
 			StartedAt:            time.Now().UTC().Add(-28 * time.Minute).Format(time.RFC3339),
+			SupportsMediaControl:  true,
+			SupportsRemoteControl: true,
+			CanSendMessage:        true,
 		},
 		{
 			SessionID:        "demo-session-3",
@@ -1944,10 +2156,13 @@ func SeedStreamingDemoData() error {
 			SubtitleCodec:    "SRT",
 			SubtitleLanguage: "ENG",
 			TranscodeReasons: []string{"AudioCodecNotSupported"},
-			BitrateBps:       18_200_000,
-			BandwidthMbps:    18.2,
-			SessionDataBytes: 5_664_750_000,
-			StartedAt:        time.Now().UTC().Add(-42 * time.Minute).Format(time.RFC3339),
+			BitrateBps:            18_200_000,
+			BandwidthMbps:         18.2,
+			SessionDataBytes:      5_664_750_000,
+			StartedAt:             time.Now().UTC().Add(-42 * time.Minute).Format(time.RFC3339),
+			SupportsMediaControl:  true,
+			SupportsRemoteControl: true,
+			CanSendMessage:        true,
 		},
 	}
 	streamingMu.Unlock()

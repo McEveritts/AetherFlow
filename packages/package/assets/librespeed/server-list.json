@@ -7,6 +7,6 @@
     "pingURL": "backend/empty.php",
     "getIpURL": "backend/getIP.php",
     "sponsorName": "AetherFlow Obsidian V2",
-    "sponsorURL": "https://mcflow.stream"
+    "sponsorURL": "/"
   }
 ]
