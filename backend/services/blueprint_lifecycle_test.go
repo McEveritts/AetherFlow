@@ -288,10 +288,10 @@ func TestMasterCredentialsSyncIntoAppBlueprint(t *testing.T) {
 	t.Setenv("AETHERFLOW_MASTER_CREDS_FILE", credsFile)
 	t.Setenv("AETHERFLOW_HOSTS_FILE", filepath.Join(tmpRoot, "hosts"))
 
-	SaveMasterCredentials("betheenvy", "Sxw%?43KaUt3pu")
+	SaveMasterCredentials("testadmin", "TestPass!12345")
 	u, p, h := LoadMasterCredentials()
-	if u != "betheenvy" || p != "Sxw%?43KaUt3pu" || h != "483347885649d308bb8358e79828114a" {
-		t.Fatalf("LoadMasterCredentials() = (%q, %q, %q), want (betheenvy, Sxw%%?43KaUt3pu, 483347885649d308bb8358e79828114a)", u, p, h)
+	if u != "testadmin" || p != "TestPass!12345" || h != "fe91d11c881eb35d6e10029755b06794" {
+		t.Fatalf("LoadMasterCredentials() = (%q, %q, %q), want (testadmin, TestPass!12345, fe91d11c881eb35d6e10029755b06794)", u, p, h)
 	}
 
 	bp := GetBlueprint("qbittorrent")
@@ -304,7 +304,7 @@ func TestMasterCredentialsSyncIntoAppBlueprint(t *testing.T) {
 		t.Fatalf("failed reading qBittorrent.conf: %v", err)
 	}
 	content := string(raw)
-	if !strings.Contains(content, `WebUI\Username=betheenvy`) || !strings.Contains(content, `WebUI\Password_PBKDF2="@ByteArray(`) {
+	if !strings.Contains(content, `WebUI\Username=testadmin`) || !strings.Contains(content, `WebUI\Password_PBKDF2="@ByteArray(`) {
 		t.Errorf("qBittorrent.conf missing master credentials:\n%s", content)
 	}
 

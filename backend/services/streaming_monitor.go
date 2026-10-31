@@ -99,10 +99,16 @@ type ActiveStreamSession struct {
 	TranscodeReasons     []string `json:"transcodeReasons"`
 	TranscodeProgressPct float64  `json:"transcodeProgressPct,omitempty"`
 	TranscodeFps         float64  `json:"transcodeFps,omitempty"`
-	BitrateBps           int64    `json:"bitrateBps"`
-	BandwidthMbps        float64  `json:"bandwidthMbps"`
-	SessionDataBytes     int64    `json:"sessionDataBytes"`
-	StartedAt            string   `json:"startedAt"`
+	BitrateBps            int64    `json:"bitrateBps"`
+	BandwidthMbps         float64  `json:"bandwidthMbps"`
+	SessionDataBytes      int64    `json:"sessionDataBytes"`
+	StartedAt             string   `json:"startedAt"`
+	PlaySessionID         string   `json:"playSessionId,omitempty"`
+	MediaSourceID         string   `json:"mediaSourceId,omitempty"`
+	SupportsMediaControl  bool     `json:"supportsMediaControl"`
+	SupportsRemoteControl bool     `json:"supportsRemoteControl"`
+	CanSendMessage        bool     `json:"canSendMessage"`
+	SupportedCommands     []string `json:"supportedCommands,omitempty"`
 }
 
 // StreamingLiveSummary aggregates real-time session and bandwidth metrics.
@@ -313,7 +319,10 @@ func resolveDefaultJellyfinURL() string {
 			return fmt.Sprintf("http://127.0.0.1:%d", cfg.ListenPort)
 		}
 	}
-	return "https://jellyfin.mcflow.stream"
+	if baseDom := ResolveBaseDomain(); baseDom != "" {
+		return fmt.Sprintf("https://jellyfin.%s", baseDom)
+	}
+	return "http://127.0.0.1:8096"
 }
 
 // GetStoredJellyfinConfig loads the Jellyfin server configuration from SQLite (or env fallback).
@@ -607,20 +616,30 @@ func TestJellyfinConnection(ctx context.Context, serverURL, apiKey string) (*Str
 
 // jellyfinSessionRaw mirrors Jellyfin's /Sessions payload.
 type jellyfinSessionRaw struct {
-	ID                 string `json:"Id"`
-	UserID             string `json:"UserId"`
-	UserName           string `json:"UserName"`
-	Client             string `json:"Client"`
-	DeviceName         string `json:"DeviceName"`
-	DeviceID           string `json:"DeviceId"`
-	ApplicationVersion string `json:"ApplicationVersion"`
-	RemoteEndPoint     string `json:"RemoteEndPoint"`
-	LastActivityDate   string `json:"LastActivityDate"`
-	PlayState          *struct {
+	ID                    string   `json:"Id"`
+	UserID                string   `json:"UserId"`
+	UserName              string   `json:"UserName"`
+	Client                string   `json:"Client"`
+	DeviceName            string   `json:"DeviceName"`
+	DeviceID              string   `json:"DeviceId"`
+	ApplicationVersion    string   `json:"ApplicationVersion"`
+	RemoteEndPoint        string   `json:"RemoteEndPoint"`
+	LastActivityDate      string   `json:"LastActivityDate"`
+	SupportsMediaControl  *bool    `json:"SupportsMediaControl"`
+	SupportsRemoteControl *bool    `json:"SupportsRemoteControl"`
+	SupportedCommands     []string `json:"SupportedCommands"`
+	Capabilities          *struct {
+		SupportsMediaControl *bool    `json:"SupportsMediaControl"`
+		SupportedCommands    []string `json:"SupportedCommands"`
+	} `json:"Capabilities"`
+	PlayState *struct {
 		PositionTicks       int64  `json:"PositionTicks"`
 		IsPaused            bool   `json:"IsPaused"`
 		IsMuted             bool   `json:"IsMuted"`
 		PlayMethod          string `json:"PlayMethod"`
+		PlaySessionID       string `json:"PlaySessionId"`
+		MediaSourceID       string `json:"MediaSourceId"`
+		LiveStreamID        string `json:"LiveStreamId"`
 		AudioStreamIndex    *int   `json:"AudioStreamIndex"`
 		SubtitleStreamIndex *int   `json:"SubtitleStreamIndex"`
 	} `json:"PlayState"`
@@ -759,6 +778,40 @@ func normalizeMediaType(rawType string) string {
 	}
 }
 
+func resolveJellyfinSessionCapabilities(s jellyfinSessionRaw) (supportsMediaControl bool, supportsRemoteControl bool, canSendMessage bool, supportedCommands []string) {
+	supportsMediaControl = true
+	if s.SupportsMediaControl != nil {
+		supportsMediaControl = *s.SupportsMediaControl
+	} else if s.Capabilities != nil && s.Capabilities.SupportsMediaControl != nil {
+		supportsMediaControl = *s.Capabilities.SupportsMediaControl
+	}
+
+	supportsRemoteControl = supportsMediaControl
+	if s.SupportsRemoteControl != nil {
+		supportsRemoteControl = *s.SupportsRemoteControl
+	}
+
+	if len(s.SupportedCommands) > 0 {
+		supportedCommands = append(supportedCommands, s.SupportedCommands...)
+	} else if s.Capabilities != nil && len(s.Capabilities.SupportedCommands) > 0 {
+		supportedCommands = append(supportedCommands, s.Capabilities.SupportedCommands...)
+	}
+
+	if len(supportedCommands) > 0 {
+		hasDisplayMessage := false
+		for _, cmd := range supportedCommands {
+			if strings.EqualFold(strings.TrimSpace(cmd), "DisplayMessage") {
+				hasDisplayMessage = true
+				break
+			}
+		}
+		canSendMessage = supportsMediaControl && hasDisplayMessage
+	} else {
+		canSendMessage = supportsMediaControl
+	}
+	return
+}
+
 // FetchJellyfinLiveSessions retrieves active playback sessions from Jellyfin.
 func FetchJellyfinLiveSessions(ctx context.Context, serverName, serverURL, apiKey string) ([]ActiveStreamSession, error) {
 	if apiKey == "" {
@@ -792,13 +845,18 @@ func FetchJellyfinLiveSessions(ctx context.Context, serverName, serverURL, apiKe
 		posSecs := 0
 		isPaused := false
 		playMethod := "DirectPlay"
+		playSessionID := ""
+		mediaSourceID := ""
 		if s.PlayState != nil {
 			posSecs = int(s.PlayState.PositionTicks / jellyfinTicksPerSecond)
 			isPaused = s.PlayState.IsPaused
 			if s.PlayState.PlayMethod != "" {
 				playMethod = s.PlayState.PlayMethod
 			}
+			playSessionID = strings.TrimSpace(s.PlayState.PlaySessionID)
+			mediaSourceID = strings.TrimSpace(s.PlayState.MediaSourceID)
 		}
+		supportsMediaCtrl, supportsRemoteCtrl, canSendMsg, supportedCmds := resolveJellyfinSessionCapabilities(s)
 
 		durSecs := int(item.RunTimeTicks / jellyfinTicksPerSecond)
 		progressPct := 0.0

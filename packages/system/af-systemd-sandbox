@@ -65,10 +65,29 @@ service_home_for_user() {
     printf '/home/%s\n' "${service_user}"
 }
 
+resolve_master_user() {
+    local creds_file u=""
+    for creds_file in "/etc/aetherflow/.master.creds" "/root/.master.creds"; do
+        if [[ -f "${creds_file}" ]]; then
+            u="$(sed -n '1s/^username=//p' "${creds_file}" 2>/dev/null | tr -d '\r\n' || true)"
+            if [[ -z "${u}" ]]; then
+                u="$(sed -n '1p' "${creds_file}" 2>/dev/null | cut -d: -f1 | tr -d '\r\n' || true)"
+            fi
+            if [[ -n "${u}" ]]; then
+                printf '%s\n' "${u}"
+                return
+            fi
+        fi
+    done
+    printf '%s\n' "${service_user:-root}"
+}
+
 expand_rw_path() {
     local raw_path="$1"
     local service_user="$2"
     local service_home="$3"
+    local master_user
+    master_user="$(resolve_master_user)"
     local optional_prefix=""
     if [[ "${raw_path}" == -* ]]; then
         optional_prefix="-"
@@ -77,6 +96,7 @@ expand_rw_path() {
     local expanded="${raw_path}"
     expanded="${expanded//\{\{SERVICE_USER\}\}/${service_user}}"
     expanded="${expanded//\{\{SERVICE_HOME\}\}/${service_home}}"
+    expanded="${expanded//\{\{MASTER_USER\}\}/${master_user}}"
     # Always prefix with '-' if optional or if directory does not currently exist on disk
     # so systemd never fails with 226/NAMESPACE on optional/missing directories.
     local result=""

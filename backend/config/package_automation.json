@@ -13,14 +13,14 @@
       "-/mnt/unionfs",
       "-/home/hdd",
       "-/home/ramdisk",
-      "-/home/betheenvy/Google",
-      "-/home/betheenvy/.google_root",
-      "-/home/betheenvy/Google/Media/Movies",
-      "-/home/betheenvy/Google/Media/TV",
-      "-/home/betheenvy/Google/Media/Music",
-      "-/home/betheenvy/Google/Media/Music Import",
-      "-/home/betheenvy/Google/Media/UFC",
-      "-/home/betheenvy/Google/Media/UFC-FightNight"
+      "-/home/{{MASTER_USER}}/Google",
+      "-/home/{{MASTER_USER}}/.google_root",
+      "-/home/{{MASTER_USER}}/Google/Media/Movies",
+      "-/home/{{MASTER_USER}}/Google/Media/TV",
+      "-/home/{{MASTER_USER}}/Google/Media/Music",
+      "-/home/{{MASTER_USER}}/Google/Media/Music Import",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC-FightNight"
     ],
     "sandbox_service_units": [
       "plexmediaserver.service"
@@ -42,14 +42,14 @@
       "-/mnt/unionfs",
       "-/home/hdd",
       "-/home/ramdisk",
-      "-/home/betheenvy/Google",
-      "-/home/betheenvy/.google_root",
-      "-/home/betheenvy/Google/Media/Movies",
-      "-/home/betheenvy/Google/Media/TV",
-      "-/home/betheenvy/Google/Media/Music",
-      "-/home/betheenvy/Google/Media/Music Import",
-      "-/home/betheenvy/Google/Media/UFC",
-      "-/home/betheenvy/Google/Media/UFC-FightNight"
+      "-/home/{{MASTER_USER}}/Google",
+      "-/home/{{MASTER_USER}}/.google_root",
+      "-/home/{{MASTER_USER}}/Google/Media/Movies",
+      "-/home/{{MASTER_USER}}/Google/Media/TV",
+      "-/home/{{MASTER_USER}}/Google/Media/Music",
+      "-/home/{{MASTER_USER}}/Google/Media/Music Import",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC-FightNight"
     ],
     "sandbox_service_units": [
       "jellyfin.service"
@@ -74,14 +74,14 @@
       "-/mnt/unionfs",
       "-/home/hdd",
       "-/home/ramdisk",
-      "-/home/betheenvy/Google",
-      "-/home/betheenvy/.google_root",
-      "-/home/betheenvy/Google/Media/Movies",
-      "-/home/betheenvy/Google/Media/TV",
-      "-/home/betheenvy/Google/Media/Music",
-      "-/home/betheenvy/Google/Media/Music Import",
-      "-/home/betheenvy/Google/Media/UFC",
-      "-/home/betheenvy/Google/Media/UFC-FightNight"
+      "-/home/{{MASTER_USER}}/Google",
+      "-/home/{{MASTER_USER}}/.google_root",
+      "-/home/{{MASTER_USER}}/Google/Media/Movies",
+      "-/home/{{MASTER_USER}}/Google/Media/TV",
+      "-/home/{{MASTER_USER}}/Google/Media/Music",
+      "-/home/{{MASTER_USER}}/Google/Media/Music Import",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC-FightNight"
     ],
     "sandbox_service_units": [
       "emby-server.service"
@@ -107,14 +107,14 @@
       "-/mnt/unionfs",
       "-/home/hdd",
       "-/home/ramdisk",
-      "-/home/betheenvy/Google",
-      "-/home/betheenvy/.google_root",
-      "-/home/betheenvy/Google/Media/Movies",
-      "-/home/betheenvy/Google/Media/TV",
-      "-/home/betheenvy/Google/Media/Music",
-      "-/home/betheenvy/Google/Media/Music Import",
-      "-/home/betheenvy/Google/Media/UFC",
-      "-/home/betheenvy/Google/Media/UFC-FightNight"
+      "-/home/{{MASTER_USER}}/Google",
+      "-/home/{{MASTER_USER}}/.google_root",
+      "-/home/{{MASTER_USER}}/Google/Media/Movies",
+      "-/home/{{MASTER_USER}}/Google/Media/TV",
+      "-/home/{{MASTER_USER}}/Google/Media/Music",
+      "-/home/{{MASTER_USER}}/Google/Media/Music Import",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC-FightNight"
     ],
     "sandbox_service_units": [
       "sonarr.service"
@@ -140,14 +140,14 @@
       "-/mnt/unionfs",
       "-/home/hdd",
       "-/home/ramdisk",
-      "-/home/betheenvy/Google",
-      "-/home/betheenvy/.google_root",
-      "-/home/betheenvy/Google/Media/Movies",
-      "-/home/betheenvy/Google/Media/TV",
-      "-/home/betheenvy/Google/Media/Music",
-      "-/home/betheenvy/Google/Media/Music Import",
-      "-/home/betheenvy/Google/Media/UFC",
-      "-/home/betheenvy/Google/Media/UFC-FightNight"
+      "-/home/{{MASTER_USER}}/Google",
+      "-/home/{{MASTER_USER}}/.google_root",
+      "-/home/{{MASTER_USER}}/Google/Media/Movies",
+      "-/home/{{MASTER_USER}}/Google/Media/TV",
+      "-/home/{{MASTER_USER}}/Google/Media/Music",
+      "-/home/{{MASTER_USER}}/Google/Media/Music Import",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC-FightNight"
     ],
     "sandbox_service_units": [
       "radarr.service"
@@ -173,14 +173,14 @@
       "-/mnt/unionfs",
       "-/home/hdd",
       "-/home/ramdisk",
-      "-/home/betheenvy/Google",
-      "-/home/betheenvy/.google_root",
-      "-/home/betheenvy/Google/Media/Movies",
-      "-/home/betheenvy/Google/Media/TV",
-      "-/home/betheenvy/Google/Media/Music",
-      "-/home/betheenvy/Google/Media/Music Import",
-      "-/home/betheenvy/Google/Media/UFC",
-      "-/home/betheenvy/Google/Media/UFC-FightNight"
+      "-/home/{{MASTER_USER}}/Google",
+      "-/home/{{MASTER_USER}}/.google_root",
+      "-/home/{{MASTER_USER}}/Google/Media/Movies",
+      "-/home/{{MASTER_USER}}/Google/Media/TV",
+      "-/home/{{MASTER_USER}}/Google/Media/Music",
+      "-/home/{{MASTER_USER}}/Google/Media/Music Import",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC-FightNight"
     ],
     "sandbox_service_units": [
       "lidarr.service"
@@ -206,14 +206,14 @@
       "-/mnt/unionfs",
       "-/home/hdd",
       "-/home/ramdisk",
-      "-/home/betheenvy/Google",
-      "-/home/betheenvy/.google_root",
-      "-/home/betheenvy/Google/Media/Movies",
-      "-/home/betheenvy/Google/Media/TV",
-      "-/home/betheenvy/Google/Media/Music",
-      "-/home/betheenvy/Google/Media/Music Import",
-      "-/home/betheenvy/Google/Media/UFC",
-      "-/home/betheenvy/Google/Media/UFC-FightNight"
+      "-/home/{{MASTER_USER}}/Google",
+      "-/home/{{MASTER_USER}}/.google_root",
+      "-/home/{{MASTER_USER}}/Google/Media/Movies",
+      "-/home/{{MASTER_USER}}/Google/Media/TV",
+      "-/home/{{MASTER_USER}}/Google/Media/Music",
+      "-/home/{{MASTER_USER}}/Google/Media/Music Import",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC-FightNight"
     ],
     "sandbox_service_units": [
       "readarr.service"
@@ -235,14 +235,14 @@
       "-/mnt/unionfs",
       "-/home/hdd",
       "-/home/ramdisk",
-      "-/home/betheenvy/Google",
-      "-/home/betheenvy/.google_root",
-      "-/home/betheenvy/Google/Media/Movies",
-      "-/home/betheenvy/Google/Media/TV",
-      "-/home/betheenvy/Google/Media/Music",
-      "-/home/betheenvy/Google/Media/Music Import",
-      "-/home/betheenvy/Google/Media/UFC",
-      "-/home/betheenvy/Google/Media/UFC-FightNight"
+      "-/home/{{MASTER_USER}}/Google",
+      "-/home/{{MASTER_USER}}/.google_root",
+      "-/home/{{MASTER_USER}}/Google/Media/Movies",
+      "-/home/{{MASTER_USER}}/Google/Media/TV",
+      "-/home/{{MASTER_USER}}/Google/Media/Music",
+      "-/home/{{MASTER_USER}}/Google/Media/Music Import",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC-FightNight"
     ],
     "sandbox_service_units": [
       "prowlarr.service"
@@ -268,14 +268,14 @@
       "-/mnt/unionfs",
       "-/home/hdd",
       "-/home/ramdisk",
-      "-/home/betheenvy/Google",
-      "-/home/betheenvy/.google_root",
-      "-/home/betheenvy/Google/Media/Movies",
-      "-/home/betheenvy/Google/Media/TV",
-      "-/home/betheenvy/Google/Media/Music",
-      "-/home/betheenvy/Google/Media/Music Import",
-      "-/home/betheenvy/Google/Media/UFC",
-      "-/home/betheenvy/Google/Media/UFC-FightNight"
+      "-/home/{{MASTER_USER}}/Google",
+      "-/home/{{MASTER_USER}}/.google_root",
+      "-/home/{{MASTER_USER}}/Google/Media/Movies",
+      "-/home/{{MASTER_USER}}/Google/Media/TV",
+      "-/home/{{MASTER_USER}}/Google/Media/Music",
+      "-/home/{{MASTER_USER}}/Google/Media/Music Import",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC-FightNight"
     ],
     "sandbox_service_units": [
       "bazarr.service"
@@ -298,14 +298,14 @@
       "-/mnt/unionfs",
       "-/home/hdd",
       "-/home/ramdisk",
-      "-/home/betheenvy/Google",
-      "-/home/betheenvy/.google_root",
-      "-/home/betheenvy/Google/Media/Movies",
-      "-/home/betheenvy/Google/Media/TV",
-      "-/home/betheenvy/Google/Media/Music",
-      "-/home/betheenvy/Google/Media/Music Import",
-      "-/home/betheenvy/Google/Media/UFC",
-      "-/home/betheenvy/Google/Media/UFC-FightNight"
+      "-/home/{{MASTER_USER}}/Google",
+      "-/home/{{MASTER_USER}}/.google_root",
+      "-/home/{{MASTER_USER}}/Google/Media/Movies",
+      "-/home/{{MASTER_USER}}/Google/Media/TV",
+      "-/home/{{MASTER_USER}}/Google/Media/Music",
+      "-/home/{{MASTER_USER}}/Google/Media/Music Import",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC-FightNight"
     ],
     "sandbox_service_units": [
       "overseerr.service"
@@ -328,14 +328,14 @@
       "-/mnt/unionfs",
       "-/home/hdd",
       "-/home/ramdisk",
-      "-/home/betheenvy/Google",
-      "-/home/betheenvy/.google_root",
-      "-/home/betheenvy/Google/Media/Movies",
-      "-/home/betheenvy/Google/Media/TV",
-      "-/home/betheenvy/Google/Media/Music",
-      "-/home/betheenvy/Google/Media/Music Import",
-      "-/home/betheenvy/Google/Media/UFC",
-      "-/home/betheenvy/Google/Media/UFC-FightNight"
+      "-/home/{{MASTER_USER}}/Google",
+      "-/home/{{MASTER_USER}}/.google_root",
+      "-/home/{{MASTER_USER}}/Google/Media/Movies",
+      "-/home/{{MASTER_USER}}/Google/Media/TV",
+      "-/home/{{MASTER_USER}}/Google/Media/Music",
+      "-/home/{{MASTER_USER}}/Google/Media/Music Import",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC-FightNight"
     ],
     "sandbox_service_units": [
       "ombi.service"
@@ -358,14 +358,14 @@
       "-/mnt/unionfs",
       "-/home/hdd",
       "-/home/ramdisk",
-      "-/home/betheenvy/Google",
-      "-/home/betheenvy/.google_root",
-      "-/home/betheenvy/Google/Media/Movies",
-      "-/home/betheenvy/Google/Media/TV",
-      "-/home/betheenvy/Google/Media/Music",
-      "-/home/betheenvy/Google/Media/Music Import",
-      "-/home/betheenvy/Google/Media/UFC",
-      "-/home/betheenvy/Google/Media/UFC-FightNight"
+      "-/home/{{MASTER_USER}}/Google",
+      "-/home/{{MASTER_USER}}/.google_root",
+      "-/home/{{MASTER_USER}}/Google/Media/Movies",
+      "-/home/{{MASTER_USER}}/Google/Media/TV",
+      "-/home/{{MASTER_USER}}/Google/Media/Music",
+      "-/home/{{MASTER_USER}}/Google/Media/Music Import",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC-FightNight"
     ],
     "sandbox_service_units": [
       "tautulli.service"
@@ -386,14 +386,14 @@
       "-/mnt/unionfs",
       "-/home/hdd",
       "-/home/ramdisk",
-      "-/home/betheenvy/Google",
-      "-/home/betheenvy/.google_root",
-      "-/home/betheenvy/Google/Media/Movies",
-      "-/home/betheenvy/Google/Media/TV",
-      "-/home/betheenvy/Google/Media/Music",
-      "-/home/betheenvy/Google/Media/Music Import",
-      "-/home/betheenvy/Google/Media/UFC",
-      "-/home/betheenvy/Google/Media/UFC-FightNight"
+      "-/home/{{MASTER_USER}}/Google",
+      "-/home/{{MASTER_USER}}/.google_root",
+      "-/home/{{MASTER_USER}}/Google/Media/Movies",
+      "-/home/{{MASTER_USER}}/Google/Media/TV",
+      "-/home/{{MASTER_USER}}/Google/Media/Music",
+      "-/home/{{MASTER_USER}}/Google/Media/Music Import",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC-FightNight"
     ],
     "sandbox_service_units": [
       "jackett.service"
@@ -415,14 +415,14 @@
       "-/mnt/unionfs",
       "-/home/hdd",
       "-/home/ramdisk",
-      "-/home/betheenvy/Google",
-      "-/home/betheenvy/.google_root",
-      "-/home/betheenvy/Google/Media/Movies",
-      "-/home/betheenvy/Google/Media/TV",
-      "-/home/betheenvy/Google/Media/Music",
-      "-/home/betheenvy/Google/Media/Music Import",
-      "-/home/betheenvy/Google/Media/UFC",
-      "-/home/betheenvy/Google/Media/UFC-FightNight"
+      "-/home/{{MASTER_USER}}/Google",
+      "-/home/{{MASTER_USER}}/.google_root",
+      "-/home/{{MASTER_USER}}/Google/Media/Movies",
+      "-/home/{{MASTER_USER}}/Google/Media/TV",
+      "-/home/{{MASTER_USER}}/Google/Media/Music",
+      "-/home/{{MASTER_USER}}/Google/Media/Music Import",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC-FightNight"
     ],
     "sandbox_service_units": [
       "flaresolverr.service"
@@ -447,14 +447,14 @@
       "-/mnt/unionfs",
       "-/home/hdd",
       "-/home/ramdisk",
-      "-/home/betheenvy/Google",
-      "-/home/betheenvy/.google_root",
-      "-/home/betheenvy/Google/Media/Movies",
-      "-/home/betheenvy/Google/Media/TV",
-      "-/home/betheenvy/Google/Media/Music",
-      "-/home/betheenvy/Google/Media/Music Import",
-      "-/home/betheenvy/Google/Media/UFC",
-      "-/home/betheenvy/Google/Media/UFC-FightNight"
+      "-/home/{{MASTER_USER}}/Google",
+      "-/home/{{MASTER_USER}}/.google_root",
+      "-/home/{{MASTER_USER}}/Google/Media/Movies",
+      "-/home/{{MASTER_USER}}/Google/Media/TV",
+      "-/home/{{MASTER_USER}}/Google/Media/Music",
+      "-/home/{{MASTER_USER}}/Google/Media/Music Import",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC-FightNight"
     ],
     "sandbox_service_units": [
       "navidrome.service"
@@ -479,14 +479,14 @@
       "-/mnt/unionfs",
       "-/home/hdd",
       "-/home/ramdisk",
-      "-/home/betheenvy/Google",
-      "-/home/betheenvy/.google_root",
-      "-/home/betheenvy/Google/Media/Movies",
-      "-/home/betheenvy/Google/Media/TV",
-      "-/home/betheenvy/Google/Media/Music",
-      "-/home/betheenvy/Google/Media/Music Import",
-      "-/home/betheenvy/Google/Media/UFC",
-      "-/home/betheenvy/Google/Media/UFC-FightNight"
+      "-/home/{{MASTER_USER}}/Google",
+      "-/home/{{MASTER_USER}}/.google_root",
+      "-/home/{{MASTER_USER}}/Google/Media/Movies",
+      "-/home/{{MASTER_USER}}/Google/Media/TV",
+      "-/home/{{MASTER_USER}}/Google/Media/Music",
+      "-/home/{{MASTER_USER}}/Google/Media/Music Import",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC-FightNight"
     ],
     "sandbox_service_units": [
       "threadfin.service"
@@ -506,14 +506,14 @@
       "-/mnt/unionfs",
       "-/home/hdd",
       "-/home/ramdisk",
-      "-/home/betheenvy/Google",
-      "-/home/betheenvy/.google_root",
-      "-/home/betheenvy/Google/Media/Movies",
-      "-/home/betheenvy/Google/Media/TV",
-      "-/home/betheenvy/Google/Media/Music",
-      "-/home/betheenvy/Google/Media/Music Import",
-      "-/home/betheenvy/Google/Media/UFC",
-      "-/home/betheenvy/Google/Media/UFC-FightNight"
+      "-/home/{{MASTER_USER}}/Google",
+      "-/home/{{MASTER_USER}}/.google_root",
+      "-/home/{{MASTER_USER}}/Google/Media/Movies",
+      "-/home/{{MASTER_USER}}/Google/Media/TV",
+      "-/home/{{MASTER_USER}}/Google/Media/Music",
+      "-/home/{{MASTER_USER}}/Google/Media/Music Import",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC-FightNight"
     ],
     "sandbox_service_units": [
       "qbittorrent.service"
@@ -534,14 +534,14 @@
       "-/mnt/unionfs",
       "-/home/hdd",
       "-/home/ramdisk",
-      "-/home/betheenvy/Google",
-      "-/home/betheenvy/.google_root",
-      "-/home/betheenvy/Google/Media/Movies",
-      "-/home/betheenvy/Google/Media/TV",
-      "-/home/betheenvy/Google/Media/Music",
-      "-/home/betheenvy/Google/Media/Music Import",
-      "-/home/betheenvy/Google/Media/UFC",
-      "-/home/betheenvy/Google/Media/UFC-FightNight"
+      "-/home/{{MASTER_USER}}/Google",
+      "-/home/{{MASTER_USER}}/.google_root",
+      "-/home/{{MASTER_USER}}/Google/Media/Movies",
+      "-/home/{{MASTER_USER}}/Google/Media/TV",
+      "-/home/{{MASTER_USER}}/Google/Media/Music",
+      "-/home/{{MASTER_USER}}/Google/Media/Music Import",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC-FightNight"
     ],
     "sandbox_service_units": [
       "deluged.service",
@@ -563,14 +563,14 @@
       "-/mnt/unionfs",
       "-/home/hdd",
       "-/home/ramdisk",
-      "-/home/betheenvy/Google",
-      "-/home/betheenvy/.google_root",
-      "-/home/betheenvy/Google/Media/Movies",
-      "-/home/betheenvy/Google/Media/TV",
-      "-/home/betheenvy/Google/Media/Music",
-      "-/home/betheenvy/Google/Media/Music Import",
-      "-/home/betheenvy/Google/Media/UFC",
-      "-/home/betheenvy/Google/Media/UFC-FightNight"
+      "-/home/{{MASTER_USER}}/Google",
+      "-/home/{{MASTER_USER}}/.google_root",
+      "-/home/{{MASTER_USER}}/Google/Media/Movies",
+      "-/home/{{MASTER_USER}}/Google/Media/TV",
+      "-/home/{{MASTER_USER}}/Google/Media/Music",
+      "-/home/{{MASTER_USER}}/Google/Media/Music Import",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC-FightNight"
     ],
     "sandbox_service_units": [
       "transmission-daemon.service"
@@ -596,14 +596,14 @@
       "-/mnt/unionfs",
       "-/home/hdd",
       "-/home/ramdisk",
-      "-/home/betheenvy/Google",
-      "-/home/betheenvy/.google_root",
-      "-/home/betheenvy/Google/Media/Movies",
-      "-/home/betheenvy/Google/Media/TV",
-      "-/home/betheenvy/Google/Media/Music",
-      "-/home/betheenvy/Google/Media/Music Import",
-      "-/home/betheenvy/Google/Media/UFC",
-      "-/home/betheenvy/Google/Media/UFC-FightNight"
+      "-/home/{{MASTER_USER}}/Google",
+      "-/home/{{MASTER_USER}}/.google_root",
+      "-/home/{{MASTER_USER}}/Google/Media/Movies",
+      "-/home/{{MASTER_USER}}/Google/Media/TV",
+      "-/home/{{MASTER_USER}}/Google/Media/Music",
+      "-/home/{{MASTER_USER}}/Google/Media/Music Import",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC-FightNight"
     ],
     "sandbox_service_units": [
       "sabnzbd.service"
@@ -628,14 +628,14 @@
       "-/mnt/unionfs",
       "-/home/hdd",
       "-/home/ramdisk",
-      "-/home/betheenvy/Google",
-      "-/home/betheenvy/.google_root",
-      "-/home/betheenvy/Google/Media/Movies",
-      "-/home/betheenvy/Google/Media/TV",
-      "-/home/betheenvy/Google/Media/Music",
-      "-/home/betheenvy/Google/Media/Music Import",
-      "-/home/betheenvy/Google/Media/UFC",
-      "-/home/betheenvy/Google/Media/UFC-FightNight"
+      "-/home/{{MASTER_USER}}/Google",
+      "-/home/{{MASTER_USER}}/.google_root",
+      "-/home/{{MASTER_USER}}/Google/Media/Movies",
+      "-/home/{{MASTER_USER}}/Google/Media/TV",
+      "-/home/{{MASTER_USER}}/Google/Media/Music",
+      "-/home/{{MASTER_USER}}/Google/Media/Music Import",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC-FightNight"
     ],
     "sandbox_service_units": [
       "nzbget.service"
@@ -660,14 +660,14 @@
       "-/mnt/unionfs",
       "-/home/hdd",
       "-/home/ramdisk",
-      "-/home/betheenvy/Google",
-      "-/home/betheenvy/.google_root",
-      "-/home/betheenvy/Google/Media/Movies",
-      "-/home/betheenvy/Google/Media/TV",
-      "-/home/betheenvy/Google/Media/Music",
-      "-/home/betheenvy/Google/Media/Music Import",
-      "-/home/betheenvy/Google/Media/UFC",
-      "-/home/betheenvy/Google/Media/UFC-FightNight"
+      "-/home/{{MASTER_USER}}/Google",
+      "-/home/{{MASTER_USER}}/.google_root",
+      "-/home/{{MASTER_USER}}/Google/Media/Movies",
+      "-/home/{{MASTER_USER}}/Google/Media/TV",
+      "-/home/{{MASTER_USER}}/Google/Media/Music",
+      "-/home/{{MASTER_USER}}/Google/Media/Music Import",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC-FightNight"
     ],
     "sandbox_service_units": [
       "flood.service"
@@ -691,14 +691,14 @@
       "-/mnt/unionfs",
       "-/home/hdd",
       "-/home/ramdisk",
-      "-/home/betheenvy/Google",
-      "-/home/betheenvy/.google_root",
-      "-/home/betheenvy/Google/Media/Movies",
-      "-/home/betheenvy/Google/Media/TV",
-      "-/home/betheenvy/Google/Media/Music",
-      "-/home/betheenvy/Google/Media/Music Import",
-      "-/home/betheenvy/Google/Media/UFC",
-      "-/home/betheenvy/Google/Media/UFC-FightNight"
+      "-/home/{{MASTER_USER}}/Google",
+      "-/home/{{MASTER_USER}}/.google_root",
+      "-/home/{{MASTER_USER}}/Google/Media/Movies",
+      "-/home/{{MASTER_USER}}/Google/Media/TV",
+      "-/home/{{MASTER_USER}}/Google/Media/Music",
+      "-/home/{{MASTER_USER}}/Google/Media/Music Import",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC-FightNight"
     ],
     "sandbox_service_units": [
       "autobrr.service"
@@ -723,14 +723,14 @@
       "-/mnt/unionfs",
       "-/home/hdd",
       "-/home/ramdisk",
-      "-/home/betheenvy/Google",
-      "-/home/betheenvy/.google_root",
-      "-/home/betheenvy/Google/Media/Movies",
-      "-/home/betheenvy/Google/Media/TV",
-      "-/home/betheenvy/Google/Media/Music",
-      "-/home/betheenvy/Google/Media/Music Import",
-      "-/home/betheenvy/Google/Media/UFC",
-      "-/home/betheenvy/Google/Media/UFC-FightNight"
+      "-/home/{{MASTER_USER}}/Google",
+      "-/home/{{MASTER_USER}}/.google_root",
+      "-/home/{{MASTER_USER}}/Google/Media/Movies",
+      "-/home/{{MASTER_USER}}/Google/Media/TV",
+      "-/home/{{MASTER_USER}}/Google/Media/Music",
+      "-/home/{{MASTER_USER}}/Google/Media/Music Import",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC-FightNight"
     ],
     "sandbox_service_units": [
       "qui.service"
@@ -755,14 +755,14 @@
       "-/mnt/unionfs",
       "-/home/hdd",
       "-/home/ramdisk",
-      "-/home/betheenvy/Google",
-      "-/home/betheenvy/.google_root",
-      "-/home/betheenvy/Google/Media/Movies",
-      "-/home/betheenvy/Google/Media/TV",
-      "-/home/betheenvy/Google/Media/Music",
-      "-/home/betheenvy/Google/Media/Music Import",
-      "-/home/betheenvy/Google/Media/UFC",
-      "-/home/betheenvy/Google/Media/UFC-FightNight"
+      "-/home/{{MASTER_USER}}/Google",
+      "-/home/{{MASTER_USER}}/.google_root",
+      "-/home/{{MASTER_USER}}/Google/Media/Movies",
+      "-/home/{{MASTER_USER}}/Google/Media/TV",
+      "-/home/{{MASTER_USER}}/Google/Media/Music",
+      "-/home/{{MASTER_USER}}/Google/Media/Music Import",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC-FightNight"
     ],
     "sandbox_service_units": [
       "apache2.service"
@@ -782,14 +782,14 @@
       "-/mnt/unionfs",
       "-/home/hdd",
       "-/home/ramdisk",
-      "-/home/betheenvy/Google",
-      "-/home/betheenvy/.google_root",
-      "-/home/betheenvy/Google/Media/Movies",
-      "-/home/betheenvy/Google/Media/TV",
-      "-/home/betheenvy/Google/Media/Music",
-      "-/home/betheenvy/Google/Media/Music Import",
-      "-/home/betheenvy/Google/Media/UFC",
-      "-/home/betheenvy/Google/Media/UFC-FightNight"
+      "-/home/{{MASTER_USER}}/Google",
+      "-/home/{{MASTER_USER}}/.google_root",
+      "-/home/{{MASTER_USER}}/Google/Media/Movies",
+      "-/home/{{MASTER_USER}}/Google/Media/TV",
+      "-/home/{{MASTER_USER}}/Google/Media/Music",
+      "-/home/{{MASTER_USER}}/Google/Media/Music Import",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC-FightNight"
     ],
     "sandbox_service_units": [
       "syncthing.service"
@@ -813,14 +813,14 @@
       "-/mnt/unionfs",
       "-/home/hdd",
       "-/home/ramdisk",
-      "-/home/betheenvy/Google",
-      "-/home/betheenvy/.google_root",
-      "-/home/betheenvy/Google/Media/Movies",
-      "-/home/betheenvy/Google/Media/TV",
-      "-/home/betheenvy/Google/Media/Music",
-      "-/home/betheenvy/Google/Media/Music Import",
-      "-/home/betheenvy/Google/Media/UFC",
-      "-/home/betheenvy/Google/Media/UFC-FightNight"
+      "-/home/{{MASTER_USER}}/Google",
+      "-/home/{{MASTER_USER}}/.google_root",
+      "-/home/{{MASTER_USER}}/Google/Media/Movies",
+      "-/home/{{MASTER_USER}}/Google/Media/TV",
+      "-/home/{{MASTER_USER}}/Google/Media/Music",
+      "-/home/{{MASTER_USER}}/Google/Media/Music Import",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC-FightNight"
     ],
     "sandbox_service_units": [
       "filebrowser.service"
@@ -834,14 +834,14 @@
       "/etc/wireguard",
       "-/home/hdd",
       "-/home/ramdisk",
-      "-/home/betheenvy/Google",
-      "-/home/betheenvy/.google_root",
-      "-/home/betheenvy/Google/Media/Movies",
-      "-/home/betheenvy/Google/Media/TV",
-      "-/home/betheenvy/Google/Media/Music",
-      "-/home/betheenvy/Google/Media/Music Import",
-      "-/home/betheenvy/Google/Media/UFC",
-      "-/home/betheenvy/Google/Media/UFC-FightNight"
+      "-/home/{{MASTER_USER}}/Google",
+      "-/home/{{MASTER_USER}}/.google_root",
+      "-/home/{{MASTER_USER}}/Google/Media/Movies",
+      "-/home/{{MASTER_USER}}/Google/Media/TV",
+      "-/home/{{MASTER_USER}}/Google/Media/Music",
+      "-/home/{{MASTER_USER}}/Google/Media/Music Import",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC-FightNight"
     ],
     "sandbox_service_units": [
       "wg-quick@wg0.service"
@@ -861,14 +861,14 @@
       "/var/log/pihole",
       "-/home/hdd",
       "-/home/ramdisk",
-      "-/home/betheenvy/Google",
-      "-/home/betheenvy/.google_root",
-      "-/home/betheenvy/Google/Media/Movies",
-      "-/home/betheenvy/Google/Media/TV",
-      "-/home/betheenvy/Google/Media/Music",
-      "-/home/betheenvy/Google/Media/Music Import",
-      "-/home/betheenvy/Google/Media/UFC",
-      "-/home/betheenvy/Google/Media/UFC-FightNight"
+      "-/home/{{MASTER_USER}}/Google",
+      "-/home/{{MASTER_USER}}/.google_root",
+      "-/home/{{MASTER_USER}}/Google/Media/Movies",
+      "-/home/{{MASTER_USER}}/Google/Media/TV",
+      "-/home/{{MASTER_USER}}/Google/Media/Music",
+      "-/home/{{MASTER_USER}}/Google/Media/Music Import",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC-FightNight"
     ],
     "sandbox_service_units": [
       "pihole-FTL.service"
@@ -884,14 +884,14 @@
       "/etc/fail2ban",
       "-/home/hdd",
       "-/home/ramdisk",
-      "-/home/betheenvy/Google",
-      "-/home/betheenvy/.google_root",
-      "-/home/betheenvy/Google/Media/Movies",
-      "-/home/betheenvy/Google/Media/TV",
-      "-/home/betheenvy/Google/Media/Music",
-      "-/home/betheenvy/Google/Media/Music Import",
-      "-/home/betheenvy/Google/Media/UFC",
-      "-/home/betheenvy/Google/Media/UFC-FightNight"
+      "-/home/{{MASTER_USER}}/Google",
+      "-/home/{{MASTER_USER}}/.google_root",
+      "-/home/{{MASTER_USER}}/Google/Media/Movies",
+      "-/home/{{MASTER_USER}}/Google/Media/TV",
+      "-/home/{{MASTER_USER}}/Google/Media/Music",
+      "-/home/{{MASTER_USER}}/Google/Media/Music Import",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC-FightNight"
     ],
     "sandbox_service_units": [
       "fail2ban.service"
@@ -913,14 +913,14 @@
       "{{SERVICE_HOME}}",
       "-/home/hdd",
       "-/home/ramdisk",
-      "-/home/betheenvy/Google",
-      "-/home/betheenvy/.google_root",
-      "-/home/betheenvy/Google/Media/Movies",
-      "-/home/betheenvy/Google/Media/TV",
-      "-/home/betheenvy/Google/Media/Music",
-      "-/home/betheenvy/Google/Media/Music Import",
-      "-/home/betheenvy/Google/Media/UFC",
-      "-/home/betheenvy/Google/Media/UFC-FightNight"
+      "-/home/{{MASTER_USER}}/Google",
+      "-/home/{{MASTER_USER}}/.google_root",
+      "-/home/{{MASTER_USER}}/Google/Media/Movies",
+      "-/home/{{MASTER_USER}}/Google/Media/TV",
+      "-/home/{{MASTER_USER}}/Google/Media/Music",
+      "-/home/{{MASTER_USER}}/Google/Media/Music Import",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC-FightNight"
     ],
     "sandbox_service_units": [
       "vaultwarden.service"
@@ -936,14 +936,14 @@
       "/etc/grafana",
       "-/home/hdd",
       "-/home/ramdisk",
-      "-/home/betheenvy/Google",
-      "-/home/betheenvy/.google_root",
-      "-/home/betheenvy/Google/Media/Movies",
-      "-/home/betheenvy/Google/Media/TV",
-      "-/home/betheenvy/Google/Media/Music",
-      "-/home/betheenvy/Google/Media/Music Import",
-      "-/home/betheenvy/Google/Media/UFC",
-      "-/home/betheenvy/Google/Media/UFC-FightNight"
+      "-/home/{{MASTER_USER}}/Google",
+      "-/home/{{MASTER_USER}}/.google_root",
+      "-/home/{{MASTER_USER}}/Google/Media/Movies",
+      "-/home/{{MASTER_USER}}/Google/Media/TV",
+      "-/home/{{MASTER_USER}}/Google/Media/Music",
+      "-/home/{{MASTER_USER}}/Google/Media/Music Import",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC-FightNight"
     ],
     "sandbox_service_units": [
       "grafana-server.service"
@@ -963,14 +963,14 @@
       "{{SERVICE_HOME}}",
       "-/home/hdd",
       "-/home/ramdisk",
-      "-/home/betheenvy/Google",
-      "-/home/betheenvy/.google_root",
-      "-/home/betheenvy/Google/Media/Movies",
-      "-/home/betheenvy/Google/Media/TV",
-      "-/home/betheenvy/Google/Media/Music",
-      "-/home/betheenvy/Google/Media/Music Import",
-      "-/home/betheenvy/Google/Media/UFC",
-      "-/home/betheenvy/Google/Media/UFC-FightNight"
+      "-/home/{{MASTER_USER}}/Google",
+      "-/home/{{MASTER_USER}}/.google_root",
+      "-/home/{{MASTER_USER}}/Google/Media/Movies",
+      "-/home/{{MASTER_USER}}/Google/Media/TV",
+      "-/home/{{MASTER_USER}}/Google/Media/Music",
+      "-/home/{{MASTER_USER}}/Google/Media/Music Import",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC-FightNight"
     ],
     "sandbox_service_units": [
       "prometheus.service",
@@ -993,14 +993,14 @@
       "/etc/netdata",
       "-/home/hdd",
       "-/home/ramdisk",
-      "-/home/betheenvy/Google",
-      "-/home/betheenvy/.google_root",
-      "-/home/betheenvy/Google/Media/Movies",
-      "-/home/betheenvy/Google/Media/TV",
-      "-/home/betheenvy/Google/Media/Music",
-      "-/home/betheenvy/Google/Media/Music Import",
-      "-/home/betheenvy/Google/Media/UFC",
-      "-/home/betheenvy/Google/Media/UFC-FightNight"
+      "-/home/{{MASTER_USER}}/Google",
+      "-/home/{{MASTER_USER}}/.google_root",
+      "-/home/{{MASTER_USER}}/Google/Media/Movies",
+      "-/home/{{MASTER_USER}}/Google/Media/TV",
+      "-/home/{{MASTER_USER}}/Google/Media/Music",
+      "-/home/{{MASTER_USER}}/Google/Media/Music Import",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC-FightNight"
     ],
     "sandbox_service_units": [
       "netdata.service"
@@ -1021,14 +1021,14 @@
       "{{SERVICE_HOME}}",
       "-/home/hdd",
       "-/home/ramdisk",
-      "-/home/betheenvy/Google",
-      "-/home/betheenvy/.google_root",
-      "-/home/betheenvy/Google/Media/Movies",
-      "-/home/betheenvy/Google/Media/TV",
-      "-/home/betheenvy/Google/Media/Music",
-      "-/home/betheenvy/Google/Media/Music Import",
-      "-/home/betheenvy/Google/Media/UFC",
-      "-/home/betheenvy/Google/Media/UFC-FightNight"
+      "-/home/{{MASTER_USER}}/Google",
+      "-/home/{{MASTER_USER}}/.google_root",
+      "-/home/{{MASTER_USER}}/Google/Media/Movies",
+      "-/home/{{MASTER_USER}}/Google/Media/TV",
+      "-/home/{{MASTER_USER}}/Google/Media/Music",
+      "-/home/{{MASTER_USER}}/Google/Media/Music Import",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC-FightNight"
     ],
     "sandbox_service_units": [
       "uptime-kuma.service"
@@ -1048,14 +1048,14 @@
       "{{SERVICE_HOME}}",
       "-/home/hdd",
       "-/home/ramdisk",
-      "-/home/betheenvy/Google",
-      "-/home/betheenvy/.google_root",
-      "-/home/betheenvy/Google/Media/Movies",
-      "-/home/betheenvy/Google/Media/TV",
-      "-/home/betheenvy/Google/Media/Music",
-      "-/home/betheenvy/Google/Media/Music Import",
-      "-/home/betheenvy/Google/Media/UFC",
-      "-/home/betheenvy/Google/Media/UFC-FightNight"
+      "-/home/{{MASTER_USER}}/Google",
+      "-/home/{{MASTER_USER}}/.google_root",
+      "-/home/{{MASTER_USER}}/Google/Media/Movies",
+      "-/home/{{MASTER_USER}}/Google/Media/TV",
+      "-/home/{{MASTER_USER}}/Google/Media/Music",
+      "-/home/{{MASTER_USER}}/Google/Media/Music Import",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC-FightNight"
     ],
     "sandbox_service_units": [
       "home-assistant@homeassistant.service"
@@ -1081,14 +1081,14 @@
       "-/mnt/unionfs",
       "-/home/hdd",
       "-/home/ramdisk",
-      "-/home/betheenvy/Google",
-      "-/home/betheenvy/.google_root",
-      "-/home/betheenvy/Google/Media/Movies",
-      "-/home/betheenvy/Google/Media/TV",
-      "-/home/betheenvy/Google/Media/Music",
-      "-/home/betheenvy/Google/Media/Music Import",
-      "-/home/betheenvy/Google/Media/UFC",
-      "-/home/betheenvy/Google/Media/UFC-FightNight"
+      "-/home/{{MASTER_USER}}/Google",
+      "-/home/{{MASTER_USER}}/.google_root",
+      "-/home/{{MASTER_USER}}/Google/Media/Movies",
+      "-/home/{{MASTER_USER}}/Google/Media/TV",
+      "-/home/{{MASTER_USER}}/Google/Media/Music",
+      "-/home/{{MASTER_USER}}/Google/Media/Music Import",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC-FightNight"
     ],
     "sandbox_service_units": [
       "jellyseerr.service"
@@ -1107,14 +1107,14 @@
       "/opt/AdGuardHome",
       "-/home/hdd",
       "-/home/ramdisk",
-      "-/home/betheenvy/Google",
-      "-/home/betheenvy/.google_root",
-      "-/home/betheenvy/Google/Media/Movies",
-      "-/home/betheenvy/Google/Media/TV",
-      "-/home/betheenvy/Google/Media/Music",
-      "-/home/betheenvy/Google/Media/Music Import",
-      "-/home/betheenvy/Google/Media/UFC",
-      "-/home/betheenvy/Google/Media/UFC-FightNight"
+      "-/home/{{MASTER_USER}}/Google",
+      "-/home/{{MASTER_USER}}/.google_root",
+      "-/home/{{MASTER_USER}}/Google/Media/Movies",
+      "-/home/{{MASTER_USER}}/Google/Media/TV",
+      "-/home/{{MASTER_USER}}/Google/Media/Music",
+      "-/home/{{MASTER_USER}}/Google/Media/Music Import",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC-FightNight"
     ],
     "sandbox_service_units": [
       "adguardhome.service"
@@ -1140,14 +1140,14 @@
       "-/mnt/unionfs",
       "-/home/hdd",
       "-/home/ramdisk",
-      "-/home/betheenvy/Google",
-      "-/home/betheenvy/.google_root",
-      "-/home/betheenvy/Google/Media/Movies",
-      "-/home/betheenvy/Google/Media/TV",
-      "-/home/betheenvy/Google/Media/Music",
-      "-/home/betheenvy/Google/Media/Music Import",
-      "-/home/betheenvy/Google/Media/UFC",
-      "-/home/betheenvy/Google/Media/UFC-FightNight"
+      "-/home/{{MASTER_USER}}/Google",
+      "-/home/{{MASTER_USER}}/.google_root",
+      "-/home/{{MASTER_USER}}/Google/Media/Movies",
+      "-/home/{{MASTER_USER}}/Google/Media/TV",
+      "-/home/{{MASTER_USER}}/Google/Media/Music",
+      "-/home/{{MASTER_USER}}/Google/Media/Music Import",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC-FightNight"
     ],
     "sandbox_service_units": [
       "rtorrent.service"
@@ -1174,14 +1174,14 @@
       "-/mnt/unionfs",
       "-/home/hdd",
       "-/home/ramdisk",
-      "-/home/betheenvy/Google",
-      "-/home/betheenvy/.google_root",
-      "-/home/betheenvy/Google/Media/Movies",
-      "-/home/betheenvy/Google/Media/TV",
-      "-/home/betheenvy/Google/Media/Music",
-      "-/home/betheenvy/Google/Media/Music Import",
-      "-/home/betheenvy/Google/Media/UFC",
-      "-/home/betheenvy/Google/Media/UFC-FightNight"
+      "-/home/{{MASTER_USER}}/Google",
+      "-/home/{{MASTER_USER}}/.google_root",
+      "-/home/{{MASTER_USER}}/Google/Media/Movies",
+      "-/home/{{MASTER_USER}}/Google/Media/TV",
+      "-/home/{{MASTER_USER}}/Google/Media/Music",
+      "-/home/{{MASTER_USER}}/Google/Media/Music Import",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC-FightNight"
     ],
     "sandbox_service_units": [
       "apache2.service"
@@ -1204,14 +1204,14 @@
       "-/mnt/unionfs",
       "-/home/hdd",
       "-/home/ramdisk",
-      "-/home/betheenvy/Google",
-      "-/home/betheenvy/.google_root",
-      "-/home/betheenvy/Google/Media/Movies",
-      "-/home/betheenvy/Google/Media/TV",
-      "-/home/betheenvy/Google/Media/Music",
-      "-/home/betheenvy/Google/Media/Music Import",
-      "-/home/betheenvy/Google/Media/UFC",
-      "-/home/betheenvy/Google/Media/UFC-FightNight"
+      "-/home/{{MASTER_USER}}/Google",
+      "-/home/{{MASTER_USER}}/.google_root",
+      "-/home/{{MASTER_USER}}/Google/Media/Movies",
+      "-/home/{{MASTER_USER}}/Google/Media/TV",
+      "-/home/{{MASTER_USER}}/Google/Media/Music",
+      "-/home/{{MASTER_USER}}/Google/Media/Music Import",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC-FightNight"
     ],
     "sandbox_service_units": [
       "rclone.service",
@@ -1233,14 +1233,14 @@
       "-/mnt/unionfs",
       "-/home/hdd",
       "-/home/ramdisk",
-      "-/home/betheenvy/Google",
-      "-/home/betheenvy/.google_root",
-      "-/home/betheenvy/Google/Media/Movies",
-      "-/home/betheenvy/Google/Media/TV",
-      "-/home/betheenvy/Google/Media/Music",
-      "-/home/betheenvy/Google/Media/Music Import",
-      "-/home/betheenvy/Google/Media/UFC",
-      "-/home/betheenvy/Google/Media/UFC-FightNight"
+      "-/home/{{MASTER_USER}}/Google",
+      "-/home/{{MASTER_USER}}/.google_root",
+      "-/home/{{MASTER_USER}}/Google/Media/Movies",
+      "-/home/{{MASTER_USER}}/Google/Media/TV",
+      "-/home/{{MASTER_USER}}/Google/Media/Music",
+      "-/home/{{MASTER_USER}}/Google/Media/Music Import",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC-FightNight"
     ],
     "sandbox_service_units": [
       "mergerfs.service"
@@ -1265,14 +1265,14 @@
       "-/mnt/unionfs",
       "-/home/hdd",
       "-/home/ramdisk",
-      "-/home/betheenvy/Google",
-      "-/home/betheenvy/.google_root",
-      "-/home/betheenvy/Google/Media/Movies",
-      "-/home/betheenvy/Google/Media/TV",
-      "-/home/betheenvy/Google/Media/Music",
-      "-/home/betheenvy/Google/Media/Music Import",
-      "-/home/betheenvy/Google/Media/UFC",
-      "-/home/betheenvy/Google/Media/UFC-FightNight"
+      "-/home/{{MASTER_USER}}/Google",
+      "-/home/{{MASTER_USER}}/.google_root",
+      "-/home/{{MASTER_USER}}/Google/Media/Movies",
+      "-/home/{{MASTER_USER}}/Google/Media/TV",
+      "-/home/{{MASTER_USER}}/Google/Media/Music",
+      "-/home/{{MASTER_USER}}/Google/Media/Music Import",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC-FightNight"
     ],
     "sandbox_service_units": [
       "cloudplow.service"
@@ -1297,14 +1297,14 @@
       "-/mnt/unionfs",
       "-/home/hdd",
       "-/home/ramdisk",
-      "-/home/betheenvy/Google",
-      "-/home/betheenvy/.google_root",
-      "-/home/betheenvy/Google/Media/Movies",
-      "-/home/betheenvy/Google/Media/TV",
-      "-/home/betheenvy/Google/Media/Music",
-      "-/home/betheenvy/Google/Media/Music Import",
-      "-/home/betheenvy/Google/Media/UFC",
-      "-/home/betheenvy/Google/Media/UFC-FightNight"
+      "-/home/{{MASTER_USER}}/Google",
+      "-/home/{{MASTER_USER}}/.google_root",
+      "-/home/{{MASTER_USER}}/Google/Media/Movies",
+      "-/home/{{MASTER_USER}}/Google/Media/TV",
+      "-/home/{{MASTER_USER}}/Google/Media/Music",
+      "-/home/{{MASTER_USER}}/Google/Media/Music Import",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC-FightNight"
     ],
     "sandbox_service_units": [
       "unpackerr.service"
@@ -1329,14 +1329,14 @@
       "-/mnt/unionfs",
       "-/home/hdd",
       "-/home/ramdisk",
-      "-/home/betheenvy/Google",
-      "-/home/betheenvy/.google_root",
-      "-/home/betheenvy/Google/Media/Movies",
-      "-/home/betheenvy/Google/Media/TV",
-      "-/home/betheenvy/Google/Media/Music",
-      "-/home/betheenvy/Google/Media/Music Import",
-      "-/home/betheenvy/Google/Media/UFC",
-      "-/home/betheenvy/Google/Media/UFC-FightNight"
+      "-/home/{{MASTER_USER}}/Google",
+      "-/home/{{MASTER_USER}}/.google_root",
+      "-/home/{{MASTER_USER}}/Google/Media/Movies",
+      "-/home/{{MASTER_USER}}/Google/Media/TV",
+      "-/home/{{MASTER_USER}}/Google/Media/Music",
+      "-/home/{{MASTER_USER}}/Google/Media/Music Import",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC-FightNight"
     ],
     "sandbox_service_units": [
       "autoscan.service"
@@ -1358,14 +1358,14 @@
       "-/mnt/unionfs",
       "-/home/hdd",
       "-/home/ramdisk",
-      "-/home/betheenvy/Google",
-      "-/home/betheenvy/.google_root",
-      "-/home/betheenvy/Google/Media/Movies",
-      "-/home/betheenvy/Google/Media/TV",
-      "-/home/betheenvy/Google/Media/Music",
-      "-/home/betheenvy/Google/Media/Music Import",
-      "-/home/betheenvy/Google/Media/UFC",
-      "-/home/betheenvy/Google/Media/UFC-FightNight"
+      "-/home/{{MASTER_USER}}/Google",
+      "-/home/{{MASTER_USER}}/.google_root",
+      "-/home/{{MASTER_USER}}/Google/Media/Movies",
+      "-/home/{{MASTER_USER}}/Google/Media/TV",
+      "-/home/{{MASTER_USER}}/Google/Media/Music",
+      "-/home/{{MASTER_USER}}/Google/Media/Music Import",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC-FightNight"
     ],
     "sandbox_service_units": [
       "recyclarr.service",
@@ -1393,14 +1393,14 @@
       "-/mnt/unionfs",
       "-/home/hdd",
       "-/home/ramdisk",
-      "-/home/betheenvy/Google",
-      "-/home/betheenvy/.google_root",
-      "-/home/betheenvy/Google/Media/Movies",
-      "-/home/betheenvy/Google/Media/TV",
-      "-/home/betheenvy/Google/Media/Music",
-      "-/home/betheenvy/Google/Media/Music Import",
-      "-/home/betheenvy/Google/Media/UFC",
-      "-/home/betheenvy/Google/Media/UFC-FightNight"
+      "-/home/{{MASTER_USER}}/Google",
+      "-/home/{{MASTER_USER}}/.google_root",
+      "-/home/{{MASTER_USER}}/Google/Media/Movies",
+      "-/home/{{MASTER_USER}}/Google/Media/TV",
+      "-/home/{{MASTER_USER}}/Google/Media/Music",
+      "-/home/{{MASTER_USER}}/Google/Media/Music Import",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC-FightNight"
     ],
     "sandbox_service_units": [
       "audiobookshelf.service"
@@ -1426,14 +1426,14 @@
       "-/mnt/unionfs",
       "-/home/hdd",
       "-/home/ramdisk",
-      "-/home/betheenvy/Google",
-      "-/home/betheenvy/.google_root",
-      "-/home/betheenvy/Google/Media/Movies",
-      "-/home/betheenvy/Google/Media/TV",
-      "-/home/betheenvy/Google/Media/Music",
-      "-/home/betheenvy/Google/Media/Music Import",
-      "-/home/betheenvy/Google/Media/UFC",
-      "-/home/betheenvy/Google/Media/UFC-FightNight"
+      "-/home/{{MASTER_USER}}/Google",
+      "-/home/{{MASTER_USER}}/.google_root",
+      "-/home/{{MASTER_USER}}/Google/Media/Movies",
+      "-/home/{{MASTER_USER}}/Google/Media/TV",
+      "-/home/{{MASTER_USER}}/Google/Media/Music",
+      "-/home/{{MASTER_USER}}/Google/Media/Music Import",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC-FightNight"
     ],
     "sandbox_service_units": [
       "kavita.service"
@@ -1461,14 +1461,14 @@
       "-/mnt/unionfs",
       "-/home/hdd",
       "-/home/ramdisk",
-      "-/home/betheenvy/Google",
-      "-/home/betheenvy/.google_root",
-      "-/home/betheenvy/Google/Media/Movies",
-      "-/home/betheenvy/Google/Media/TV",
-      "-/home/betheenvy/Google/Media/Music",
-      "-/home/betheenvy/Google/Media/Music Import",
-      "-/home/betheenvy/Google/Media/UFC",
-      "-/home/betheenvy/Google/Media/UFC-FightNight"
+      "-/home/{{MASTER_USER}}/Google",
+      "-/home/{{MASTER_USER}}/.google_root",
+      "-/home/{{MASTER_USER}}/Google/Media/Movies",
+      "-/home/{{MASTER_USER}}/Google/Media/TV",
+      "-/home/{{MASTER_USER}}/Google/Media/Music",
+      "-/home/{{MASTER_USER}}/Google/Media/Music Import",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC-FightNight"
     ],
     "sandbox_service_units": [
       "calibreweb.service"
@@ -1488,14 +1488,14 @@
       "{{SERVICE_HOME}}",
       "-/home/hdd",
       "-/home/ramdisk",
-      "-/home/betheenvy/Google",
-      "-/home/betheenvy/.google_root",
-      "-/home/betheenvy/Google/Media/Movies",
-      "-/home/betheenvy/Google/Media/TV",
-      "-/home/betheenvy/Google/Media/Music",
-      "-/home/betheenvy/Google/Media/Music Import",
-      "-/home/betheenvy/Google/Media/UFC",
-      "-/home/betheenvy/Google/Media/UFC-FightNight"
+      "-/home/{{MASTER_USER}}/Google",
+      "-/home/{{MASTER_USER}}/.google_root",
+      "-/home/{{MASTER_USER}}/Google/Media/Movies",
+      "-/home/{{MASTER_USER}}/Google/Media/TV",
+      "-/home/{{MASTER_USER}}/Google/Media/Music",
+      "-/home/{{MASTER_USER}}/Google/Media/Music Import",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC-FightNight"
     ],
     "sandbox_service_units": [
       "librespeed.service"
@@ -1515,14 +1515,14 @@
       "{{SERVICE_HOME}}",
       "-/home/hdd",
       "-/home/ramdisk",
-      "-/home/betheenvy/Google",
-      "-/home/betheenvy/.google_root",
-      "-/home/betheenvy/Google/Media/Movies",
-      "-/home/betheenvy/Google/Media/TV",
-      "-/home/betheenvy/Google/Media/Music",
-      "-/home/betheenvy/Google/Media/Music Import",
-      "-/home/betheenvy/Google/Media/UFC",
-      "-/home/betheenvy/Google/Media/UFC-FightNight"
+      "-/home/{{MASTER_USER}}/Google",
+      "-/home/{{MASTER_USER}}/.google_root",
+      "-/home/{{MASTER_USER}}/Google/Media/Movies",
+      "-/home/{{MASTER_USER}}/Google/Media/TV",
+      "-/home/{{MASTER_USER}}/Google/Media/Music",
+      "-/home/{{MASTER_USER}}/Google/Media/Music Import",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC-FightNight"
     ],
     "sandbox_service_units": [
       "thelounge.service"
@@ -1542,14 +1542,14 @@
       "{{SERVICE_HOME}}",
       "-/home/hdd",
       "-/home/ramdisk",
-      "-/home/betheenvy/Google",
-      "-/home/betheenvy/.google_root",
-      "-/home/betheenvy/Google/Media/Movies",
-      "-/home/betheenvy/Google/Media/TV",
-      "-/home/betheenvy/Google/Media/Music",
-      "-/home/betheenvy/Google/Media/Music Import",
-      "-/home/betheenvy/Google/Media/UFC",
-      "-/home/betheenvy/Google/Media/UFC-FightNight"
+      "-/home/{{MASTER_USER}}/Google",
+      "-/home/{{MASTER_USER}}/.google_root",
+      "-/home/{{MASTER_USER}}/Google/Media/Movies",
+      "-/home/{{MASTER_USER}}/Google/Media/TV",
+      "-/home/{{MASTER_USER}}/Google/Media/Music",
+      "-/home/{{MASTER_USER}}/Google/Media/Music Import",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC-FightNight"
     ],
     "sandbox_service_units": [
       "znc.service"
@@ -1569,14 +1569,14 @@
       "/var/lib/scrutiny",
       "-/home/hdd",
       "-/home/ramdisk",
-      "-/home/betheenvy/Google",
-      "-/home/betheenvy/.google_root",
-      "-/home/betheenvy/Google/Media/Movies",
-      "-/home/betheenvy/Google/Media/TV",
-      "-/home/betheenvy/Google/Media/Music",
-      "-/home/betheenvy/Google/Media/Music Import",
-      "-/home/betheenvy/Google/Media/UFC",
-      "-/home/betheenvy/Google/Media/UFC-FightNight"
+      "-/home/{{MASTER_USER}}/Google",
+      "-/home/{{MASTER_USER}}/.google_root",
+      "-/home/{{MASTER_USER}}/Google/Media/Movies",
+      "-/home/{{MASTER_USER}}/Google/Media/TV",
+      "-/home/{{MASTER_USER}}/Google/Media/Music",
+      "-/home/{{MASTER_USER}}/Google/Media/Music Import",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC-FightNight"
     ],
     "sandbox_service_units": [
       "scrutiny.service",
@@ -1603,14 +1603,14 @@
       "/tmp",
       "-/home/hdd",
       "-/home/ramdisk",
-      "-/home/betheenvy/Google",
-      "-/home/betheenvy/.google_root",
-      "-/home/betheenvy/Google/Media/Movies",
-      "-/home/betheenvy/Google/Media/TV",
-      "-/home/betheenvy/Google/Media/Music",
-      "-/home/betheenvy/Google/Media/Music Import",
-      "-/home/betheenvy/Google/Media/UFC",
-      "-/home/betheenvy/Google/Media/UFC-FightNight"
+      "-/home/{{MASTER_USER}}/Google",
+      "-/home/{{MASTER_USER}}/.google_root",
+      "-/home/{{MASTER_USER}}/Google/Media/Movies",
+      "-/home/{{MASTER_USER}}/Google/Media/TV",
+      "-/home/{{MASTER_USER}}/Google/Media/Music",
+      "-/home/{{MASTER_USER}}/Google/Media/Music Import",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC-FightNight"
     ],
     "sandbox_service_units": [
       "paperless-webserver.service",
@@ -1633,14 +1633,14 @@
       "{{SERVICE_HOME}}",
       "-/home/hdd",
       "-/home/ramdisk",
-      "-/home/betheenvy/Google",
-      "-/home/betheenvy/.google_root",
-      "-/home/betheenvy/Google/Media/Movies",
-      "-/home/betheenvy/Google/Media/TV",
-      "-/home/betheenvy/Google/Media/Music",
-      "-/home/betheenvy/Google/Media/Music Import",
-      "-/home/betheenvy/Google/Media/UFC",
-      "-/home/betheenvy/Google/Media/UFC-FightNight"
+      "-/home/{{MASTER_USER}}/Google",
+      "-/home/{{MASTER_USER}}/.google_root",
+      "-/home/{{MASTER_USER}}/Google/Media/Movies",
+      "-/home/{{MASTER_USER}}/Google/Media/TV",
+      "-/home/{{MASTER_USER}}/Google/Media/Music",
+      "-/home/{{MASTER_USER}}/Google/Media/Music Import",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC-FightNight"
     ],
     "sandbox_service_units": [
       "n8n.service"
@@ -1660,14 +1660,14 @@
       "{{SERVICE_HOME}}",
       "-/home/hdd",
       "-/home/ramdisk",
-      "-/home/betheenvy/Google",
-      "-/home/betheenvy/.google_root",
-      "-/home/betheenvy/Google/Media/Movies",
-      "-/home/betheenvy/Google/Media/TV",
-      "-/home/betheenvy/Google/Media/Music",
-      "-/home/betheenvy/Google/Media/Music Import",
-      "-/home/betheenvy/Google/Media/UFC",
-      "-/home/betheenvy/Google/Media/UFC-FightNight"
+      "-/home/{{MASTER_USER}}/Google",
+      "-/home/{{MASTER_USER}}/.google_root",
+      "-/home/{{MASTER_USER}}/Google/Media/Movies",
+      "-/home/{{MASTER_USER}}/Google/Media/TV",
+      "-/home/{{MASTER_USER}}/Google/Media/Music",
+      "-/home/{{MASTER_USER}}/Google/Media/Music Import",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC-FightNight"
     ],
     "sandbox_service_units": [
       "gitea.service"
@@ -1687,14 +1687,14 @@
       "/var/www/organizr",
       "-/home/hdd",
       "-/home/ramdisk",
-      "-/home/betheenvy/Google",
-      "-/home/betheenvy/.google_root",
-      "-/home/betheenvy/Google/Media/Movies",
-      "-/home/betheenvy/Google/Media/TV",
-      "-/home/betheenvy/Google/Media/Music",
-      "-/home/betheenvy/Google/Media/Music Import",
-      "-/home/betheenvy/Google/Media/UFC",
-      "-/home/betheenvy/Google/Media/UFC-FightNight"
+      "-/home/{{MASTER_USER}}/Google",
+      "-/home/{{MASTER_USER}}/.google_root",
+      "-/home/{{MASTER_USER}}/Google/Media/Movies",
+      "-/home/{{MASTER_USER}}/Google/Media/TV",
+      "-/home/{{MASTER_USER}}/Google/Media/Music",
+      "-/home/{{MASTER_USER}}/Google/Media/Music Import",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC-FightNight"
     ],
     "sandbox_service_units": [
       "apache2.service"
@@ -1722,14 +1722,14 @@
       "/tmp",
       "-/home/hdd",
       "-/home/ramdisk",
-      "-/home/betheenvy/Google",
-      "-/home/betheenvy/.google_root",
-      "-/home/betheenvy/Google/Media/Movies",
-      "-/home/betheenvy/Google/Media/TV",
-      "-/home/betheenvy/Google/Media/Music",
-      "-/home/betheenvy/Google/Media/Music Import",
-      "-/home/betheenvy/Google/Media/UFC",
-      "-/home/betheenvy/Google/Media/UFC-FightNight"
+      "-/home/{{MASTER_USER}}/Google",
+      "-/home/{{MASTER_USER}}/.google_root",
+      "-/home/{{MASTER_USER}}/Google/Media/Movies",
+      "-/home/{{MASTER_USER}}/Google/Media/TV",
+      "-/home/{{MASTER_USER}}/Google/Media/Music",
+      "-/home/{{MASTER_USER}}/Google/Media/Music Import",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC-FightNight"
     ],
     "sandbox_service_units": [
       "dispatcharr.service",
@@ -1758,14 +1758,14 @@
       "/tmp",
       "-/home/hdd",
       "-/home/ramdisk",
-      "-/home/betheenvy/Google",
-      "-/home/betheenvy/.google_root",
-      "-/home/betheenvy/Google/Media/Movies",
-      "-/home/betheenvy/Google/Media/TV",
-      "-/home/betheenvy/Google/Media/Music",
-      "-/home/betheenvy/Google/Media/Music Import",
-      "-/home/betheenvy/Google/Media/UFC",
-      "-/home/betheenvy/Google/Media/UFC-FightNight"
+      "-/home/{{MASTER_USER}}/Google",
+      "-/home/{{MASTER_USER}}/.google_root",
+      "-/home/{{MASTER_USER}}/Google/Media/Movies",
+      "-/home/{{MASTER_USER}}/Google/Media/TV",
+      "-/home/{{MASTER_USER}}/Google/Media/Music",
+      "-/home/{{MASTER_USER}}/Google/Media/Music Import",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC-FightNight"
     ],
     "sandbox_service_units": [
       "duplicati.service"
@@ -1793,14 +1793,14 @@
       "/tmp",
       "-/home/hdd",
       "-/home/ramdisk",
-      "-/home/betheenvy/Google",
-      "-/home/betheenvy/.google_root",
-      "-/home/betheenvy/Google/Media/Movies",
-      "-/home/betheenvy/Google/Media/TV",
-      "-/home/betheenvy/Google/Media/Music",
-      "-/home/betheenvy/Google/Media/Music Import",
-      "-/home/betheenvy/Google/Media/UFC",
-      "-/home/betheenvy/Google/Media/UFC-FightNight"
+      "-/home/{{MASTER_USER}}/Google",
+      "-/home/{{MASTER_USER}}/.google_root",
+      "-/home/{{MASTER_USER}}/Google/Media/Movies",
+      "-/home/{{MASTER_USER}}/Google/Media/TV",
+      "-/home/{{MASTER_USER}}/Google/Media/Music",
+      "-/home/{{MASTER_USER}}/Google/Media/Music Import",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC-FightNight"
     ],
     "sandbox_service_units": [
       "filebot.service"
@@ -1827,14 +1827,14 @@
       "-/mnt/unionfs",
       "-/home/hdd",
       "-/home/ramdisk",
-      "-/home/betheenvy/Google",
-      "-/home/betheenvy/.google_root",
-      "-/home/betheenvy/Google/Media/Movies",
-      "-/home/betheenvy/Google/Media/TV",
-      "-/home/betheenvy/Google/Media/Music",
-      "-/home/betheenvy/Google/Media/Music Import",
-      "-/home/betheenvy/Google/Media/UFC",
-      "-/home/betheenvy/Google/Media/UFC-FightNight"
+      "-/home/{{MASTER_USER}}/Google",
+      "-/home/{{MASTER_USER}}/.google_root",
+      "-/home/{{MASTER_USER}}/Google/Media/Movies",
+      "-/home/{{MASTER_USER}}/Google/Media/TV",
+      "-/home/{{MASTER_USER}}/Google/Media/Music",
+      "-/home/{{MASTER_USER}}/Google/Media/Music Import",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC-FightNight"
     ],
     "sandbox_service_units": [
       "listenarr.service"
@@ -1856,14 +1856,14 @@
       "{{SERVICE_HOME}}",
       "-/home/hdd",
       "-/home/ramdisk",
-      "-/home/betheenvy/Google",
-      "-/home/betheenvy/.google_root",
-      "-/home/betheenvy/Google/Media/Movies",
-      "-/home/betheenvy/Google/Media/TV",
-      "-/home/betheenvy/Google/Media/Music",
-      "-/home/betheenvy/Google/Media/Music Import",
-      "-/home/betheenvy/Google/Media/UFC",
-      "-/home/betheenvy/Google/Media/UFC-FightNight"
+      "-/home/{{MASTER_USER}}/Google",
+      "-/home/{{MASTER_USER}}/.google_root",
+      "-/home/{{MASTER_USER}}/Google/Media/Movies",
+      "-/home/{{MASTER_USER}}/Google/Media/TV",
+      "-/home/{{MASTER_USER}}/Google/Media/Music",
+      "-/home/{{MASTER_USER}}/Google/Media/Music Import",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC-FightNight"
     ],
     "sandbox_service_units": [
       "notifiarr.service"
@@ -1885,14 +1885,14 @@
       "/tmp",
       "-/home/hdd",
       "-/home/ramdisk",
-      "-/home/betheenvy/Google",
-      "-/home/betheenvy/.google_root",
-      "-/home/betheenvy/Google/Media/Movies",
-      "-/home/betheenvy/Google/Media/TV",
-      "-/home/betheenvy/Google/Media/Music",
-      "-/home/betheenvy/Google/Media/Music Import",
-      "-/home/betheenvy/Google/Media/UFC",
-      "-/home/betheenvy/Google/Media/UFC-FightNight"
+      "-/home/{{MASTER_USER}}/Google",
+      "-/home/{{MASTER_USER}}/.google_root",
+      "-/home/{{MASTER_USER}}/Google/Media/Movies",
+      "-/home/{{MASTER_USER}}/Google/Media/TV",
+      "-/home/{{MASTER_USER}}/Google/Media/Music",
+      "-/home/{{MASTER_USER}}/Google/Media/Music Import",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC-FightNight"
     ],
     "sandbox_service_units": [
       "novnc.service",
@@ -1921,14 +1921,14 @@
       "/tmp",
       "-/home/hdd",
       "-/home/ramdisk",
-      "-/home/betheenvy/Google",
-      "-/home/betheenvy/.google_root",
-      "-/home/betheenvy/Google/Media/Movies",
-      "-/home/betheenvy/Google/Media/TV",
-      "-/home/betheenvy/Google/Media/Music",
-      "-/home/betheenvy/Google/Media/Music Import",
-      "-/home/betheenvy/Google/Media/UFC",
-      "-/home/betheenvy/Google/Media/UFC-FightNight"
+      "-/home/{{MASTER_USER}}/Google",
+      "-/home/{{MASTER_USER}}/.google_root",
+      "-/home/{{MASTER_USER}}/Google/Media/Movies",
+      "-/home/{{MASTER_USER}}/Google/Media/TV",
+      "-/home/{{MASTER_USER}}/Google/Media/Music",
+      "-/home/{{MASTER_USER}}/Google/Media/Music Import",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC-FightNight"
     ],
     "sandbox_service_units": [
       "pyload.service"
@@ -1949,14 +1949,14 @@
       "{{SERVICE_HOME}}",
       "-/home/hdd",
       "-/home/ramdisk",
-      "-/home/betheenvy/Google",
-      "-/home/betheenvy/.google_root",
-      "-/home/betheenvy/Google/Media/Movies",
-      "-/home/betheenvy/Google/Media/TV",
-      "-/home/betheenvy/Google/Media/Music",
-      "-/home/betheenvy/Google/Media/Music Import",
-      "-/home/betheenvy/Google/Media/UFC",
-      "-/home/betheenvy/Google/Media/UFC-FightNight"
+      "-/home/{{MASTER_USER}}/Google",
+      "-/home/{{MASTER_USER}}/.google_root",
+      "-/home/{{MASTER_USER}}/Google/Media/Movies",
+      "-/home/{{MASTER_USER}}/Google/Media/TV",
+      "-/home/{{MASTER_USER}}/Google/Media/Music",
+      "-/home/{{MASTER_USER}}/Google/Media/Music Import",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC-FightNight"
     ],
     "sandbox_service_units": [
       "quasselcore.service"
@@ -1978,14 +1978,14 @@
       "-/mnt/unionfs",
       "-/home/hdd",
       "-/home/ramdisk",
-      "-/home/betheenvy/Google",
-      "-/home/betheenvy/.google_root",
-      "-/home/betheenvy/Google/Media/Movies",
-      "-/home/betheenvy/Google/Media/TV",
-      "-/home/betheenvy/Google/Media/Music",
-      "-/home/betheenvy/Google/Media/Music Import",
-      "-/home/betheenvy/Google/Media/UFC",
-      "-/home/betheenvy/Google/Media/UFC-FightNight"
+      "-/home/{{MASTER_USER}}/Google",
+      "-/home/{{MASTER_USER}}/.google_root",
+      "-/home/{{MASTER_USER}}/Google/Media/Movies",
+      "-/home/{{MASTER_USER}}/Google/Media/TV",
+      "-/home/{{MASTER_USER}}/Google/Media/Music",
+      "-/home/{{MASTER_USER}}/Google/Media/Music Import",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC-FightNight"
     ],
     "sandbox_service_units": [
       "requestrr.service"
@@ -2012,14 +2012,14 @@
       "-/mnt/unionfs",
       "-/home/hdd",
       "-/home/ramdisk",
-      "-/home/betheenvy/Google",
-      "-/home/betheenvy/.google_root",
-      "-/home/betheenvy/Google/Media/Movies",
-      "-/home/betheenvy/Google/Media/TV",
-      "-/home/betheenvy/Google/Media/Music",
-      "-/home/betheenvy/Google/Media/Music Import",
-      "-/home/betheenvy/Google/Media/UFC",
-      "-/home/betheenvy/Google/Media/UFC-FightNight"
+      "-/home/{{MASTER_USER}}/Google",
+      "-/home/{{MASTER_USER}}/.google_root",
+      "-/home/{{MASTER_USER}}/Google/Media/Movies",
+      "-/home/{{MASTER_USER}}/Google/Media/TV",
+      "-/home/{{MASTER_USER}}/Google/Media/Music",
+      "-/home/{{MASTER_USER}}/Google/Media/Music Import",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC-FightNight"
     ],
     "sandbox_service_units": [
       "seedcross.service"
@@ -2046,14 +2046,14 @@
       "/tmp",
       "-/home/hdd",
       "-/home/ramdisk",
-      "-/home/betheenvy/Google",
-      "-/home/betheenvy/.google_root",
-      "-/home/betheenvy/Google/Media/Movies",
-      "-/home/betheenvy/Google/Media/TV",
-      "-/home/betheenvy/Google/Media/Music",
-      "-/home/betheenvy/Google/Media/Music Import",
-      "-/home/betheenvy/Google/Media/UFC",
-      "-/home/betheenvy/Google/Media/UFC-FightNight"
+      "-/home/{{MASTER_USER}}/Google",
+      "-/home/{{MASTER_USER}}/.google_root",
+      "-/home/{{MASTER_USER}}/Google/Media/Movies",
+      "-/home/{{MASTER_USER}}/Google/Media/TV",
+      "-/home/{{MASTER_USER}}/Google/Media/Music",
+      "-/home/{{MASTER_USER}}/Google/Media/Music Import",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC-FightNight"
     ],
     "sandbox_service_units": [
       "unmanic.service"
@@ -2074,14 +2074,14 @@
       "/tmp",
       "-/home/hdd",
       "-/home/ramdisk",
-      "-/home/betheenvy/Google",
-      "-/home/betheenvy/.google_root",
-      "-/home/betheenvy/Google/Media/Movies",
-      "-/home/betheenvy/Google/Media/TV",
-      "-/home/betheenvy/Google/Media/Music",
-      "-/home/betheenvy/Google/Media/Music Import",
-      "-/home/betheenvy/Google/Media/UFC",
-      "-/home/betheenvy/Google/Media/UFC-FightNight"
+      "-/home/{{MASTER_USER}}/Google",
+      "-/home/{{MASTER_USER}}/.google_root",
+      "-/home/{{MASTER_USER}}/Google/Media/Movies",
+      "-/home/{{MASTER_USER}}/Google/Media/TV",
+      "-/home/{{MASTER_USER}}/Google/Media/Music",
+      "-/home/{{MASTER_USER}}/Google/Media/Music Import",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC",
+      "-/home/{{MASTER_USER}}/Google/Media/UFC-FightNight"
     ],
     "sandbox_service_units": [
       "x2goserver.service"
