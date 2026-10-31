@@ -670,10 +670,12 @@ pub async fn run_privileged_daemon() -> anyhow::Result<()> {
                 let io = TokioIo::new(stream);
                 let tower_service = app.clone();
                 tokio::spawn(async move {
-                    let hyper_service = hyper::service::service_fn(move |request: axum::extract::Request| {
-                        let mut svc = tower_service.clone();
-                        async move { svc.call(request).await }
-                    });
+                    let hyper_service = hyper::service::service_fn(
+                        move |request: hyper::Request<hyper::body::Incoming>| {
+                            let mut svc = tower_service.clone();
+                            async move { svc.call(request.map(axum::body::Body::new)).await }
+                        },
+                    );
                     let _ = Builder::new(TokioExecutor::new())
                         .serve_connection(io, hyper_service)
                         .await;
