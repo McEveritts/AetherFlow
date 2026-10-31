@@ -874,6 +874,7 @@ mod tests {
         assert!(catalog.len() >= 69);
         assert!(catalog.iter().any(|p| p.name == "jellyfin"));
         assert!(catalog.iter().any(|p| p.name == "kasmvnc"));
+        assert!(catalog.iter().any(|p| p.name == "mcvnc"));
         assert!(catalog.iter().any(|p| p.name == "xrdp"));
     }
 

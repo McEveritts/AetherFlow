@@ -682,6 +682,15 @@ var blueprintRegistry = map[string]AppBlueprint{
 		HealthCheckPath: "/",
 		AppDataPath:     "/var/lib/kasmvnc",
 	},
+	"mcvnc": {
+		AppName:         "mcvnc",
+		ServiceName:     "af-mcvnc",
+		Category:        "Utilities",
+		DefaultPort:     6900,
+		WebPath:         "/",
+		HealthCheckPath: "/",
+		AppDataPath:     "/var/lib/mcvnc",
+	},
 	"pyload": {
 		AppName:         "pyload",
 		ServiceName:     "pyload",

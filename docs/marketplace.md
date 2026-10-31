@@ -24,7 +24,7 @@ AetherFlow manages a wide range of services across multiple categories.
 - **Observability**: Netdata, Grafana, Prometheus, Uptime Kuma, Scrutiny.
 - **File & Backup Management**: Nextcloud, FileBrowser, Syncthing, Duplicati, Rclone, MergerFS, Cloudplow, Paperless-ngx.
 - **Security & Network**: Vaultwarden, Fail2Ban, WireGuard, Pi-hole, AdGuard Home, The Lounge, ZNC, Quassel.
-- **Core & Remote Desktop**: Gitea, Home Assistant, n8n, Organizr, noVNC, KasmVNC, XRDP, X2Go.
+- **Core & Remote Desktop**: Gitea, Home Assistant, n8n, Organizr, noVNC, KasmVNC, McVNC, XRDP, X2Go.
 
 > [!NOTE]
 > The availability of certain applications depends on your host OS and architecture. AetherFlow performs a compatibility check before allowing an installation.
@@ -36,6 +36,7 @@ AetherFlow manages a wide range of services across multiple categories.
 ### Remote Desktop Access
 - **KasmVNC** installs an XFCE desktop under the dedicated `af-kasmvnc` service account. Open it through the AetherFlow gateway with username `admin`; retrieve its generated password with `sudo cat /etc/kasmvnc/aetherflow-password`. The backend listens only on `127.0.0.1:6081` (or AetherFlow's allocated fallback port), with TLS terminated at the gateway. Use HTTPS for remote access; do not expose the unencrypted backend port. Without a gateway, use an SSH tunnel to the loopback port. Display `:20` is reserved for this desktop. Existing KasmVNC credentials survive reinstall/update.
 - KasmVNC uses upstream Debian/Ubuntu `.deb` releases on `amd64` and `arm64`, verifies the release asset's SHA-256 digest, and fails when no matching OS release asset exists. APT is not allowed to remove conflicting packages automatically (including other VNC servers); resolve any conflict explicitly before installing.
+- **McVNC** (`McEveritts/McVNC`) compiles and runs the Rust headless GPU remote desktop under the `af-mcvnc` service account (`video` and `render` groups) with zero-copy EGL/GLES2 GBM `dma-buf` compositing, an embedded Wayland compositor (`WAYLAND_DISPLAY=wayland-mcvnc-0`), VA-API `EncSlice` H.264 / `EncPicture` JPEG on Intel & AMD, and NVENC on NVIDIA. The dashboard listens on `127.0.0.1:6900` (or AetherFlow's allocated fallback port) and stores fleet pairing state in `/var/lib/mcvnc/.local/share/mcvnc/fleet.json`.
 - **XRDP** uses the distribution's `xrdp` and `xrdp-sesman` services with `xorgxrdp` and XFCE. Connect using an RDP client to TCP **3389**, or your existing custom port, with an existing non-root Linux account and its Linux password, not the AetherFlow web login. XRDP has no browser interface, HTTP gateway route, or automatic HTTP port allocation. Restrict RDP access to a trusted network or VPN; the installer does not open firewall ports or change Linux account passwords.
 - Removal preserves desktop data/configuration unless `DELETE_DATA=true` is supplied. XRDP removal restores the original session startup script; neither package removes shared XFCE dependencies or Linux users/home directories.
 

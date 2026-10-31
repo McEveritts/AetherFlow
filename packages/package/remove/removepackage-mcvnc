@@ -1,0 +1,23 @@
+#!/bin/bash
+set -euo pipefail
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    source /opt/AetherFlow/packages/common.sh
+else
+    source "${SELF_DIR}/../../common.sh"
+fi
+
+require_root
+export LOGFILE="/var/log/aetherflow/remove-mcvnc.log"
+trap 'print_error "McVNC removal failed; see ${LOGFILE}."' ERR
+report_progress 20 "Stopping McVNC..."
+purge_systemd_unit af-mcvnc.service
+systemctl daemon-reload
+report_progress 60 "Removing McVNC binary; keeping shared GPU and Wayland libraries..."
+rm -f /usr/local/bin/mcvnc
+if [[ "${DELETE_DATA:-false}" == "true" ]]; then
+    rm -rf /var/lib/mcvnc /etc/mcvnc
+fi
+remove_lock mcvnc
+report_progress 100 "McVNC removed."

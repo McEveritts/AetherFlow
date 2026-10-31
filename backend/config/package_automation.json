@@ -2078,6 +2078,24 @@
       "af-kasmvnc.service"
     ]
   },
+  "mcvnc": {
+    "update_source": "git_tags",
+    "update_repo": "McEveritts/McVNC",
+    "update_repo_url": "https://github.com/McEveritts/McVNC.git",
+    "version_command": [
+      "/usr/local/bin/mcvnc",
+      "--version"
+    ],
+    "sandbox_profile": "privileged",
+    "sandbox_rw_paths": [
+      "/var/lib/mcvnc",
+      "/etc/mcvnc",
+      "/tmp"
+    ],
+    "sandbox_service_units": [
+      "af-mcvnc.service"
+    ]
+  },
   "xrdp": {
     "update_source": "apt",
     "update_package": "xrdp",
