@@ -28,14 +28,14 @@ v4.0.0 replaces the Go control plane with the Rust (Axum + Tokio) `aetherflow-ap
 
 Hosts that still keep the database at `/opt/AetherFlow/backend/data/aetherflow.sqlite` resolve that path from the env file or the unit. It wins over an unused `/var/lib/aetherflow` copy. The manager does not copy a legacy database into `/var/lib/aetherflow` when the resolved path is somewhere else.
 
-Before the atomic symlink swap, the deploy takes a WAL-safe `sqlite3 .backup` of the resolved database and stops if `PRAGMA integrity_check` is not `ok`.
+Before the atomic symlink swap, the deploy takes a WAL-safe `sqlite3 --readonly .backup` of the resolved database and stops if `PRAGMA integrity_check` is not `ok`. The source is opened read-only so the backup does not checkpoint a live WAL.
 
 ```bash
 sudo bash /opt/AetherFlow/deploy/release-manager.sh deploy --channel stable
 sudo bash /opt/AetherFlow/deploy/release-manager.sh rollback
 ```
 
-`rollback` points `current` back at the previous release, restores that release's snapshot only when the live database fails its integrity check, and restarts the existing units. Run the updated `deploy/release-manager.sh` from the git tree for this upgrade. The copy inside an already-published release tarball does not contain the database-path fix until a later release is cut; the deploy stages the script that is actually executing into the new release directory.
+If the readiness probe fails, `current` goes back to the previous release and, when the live database fails `PRAGMA integrity_check`, the pre-swap backup from that attempt is restored onto the resolved path. The API and runner are stopped first, and only that path's `-wal` and `-shm` files are removed. A later manual `rollback` uses the previous release's own snapshot under the same integrity rule, then restarts the existing units. Run the updated `deploy/release-manager.sh` from the git tree for this upgrade. The copy inside an already-published release tarball does not contain the database-path fix until a later release is cut; the deploy stages the script that is actually executing into the new release directory.
 
 ---
 

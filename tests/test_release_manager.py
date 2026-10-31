@@ -54,6 +54,12 @@ if url.endswith("/SHA256SUMS"):
     shutil.copyfile(root / "SHA256SUMS", target)
     sys.exit(0)
 if url.endswith("/health/ready"):
+    corrupt = os.environ.get("TEST_CORRUPT_DB", "")
+    if corrupt:
+        target = Path(corrupt)
+        target.write_bytes(b"not a database")
+        Path(corrupt + "-wal").write_text("wal")
+        Path(corrupt + "-shm").write_text("shm")
     body = os.environ.get("TEST_HEALTH_BODY", '{"database":"ok","redis":"disabled","status":"ready","uptime":"0.0s"}')
     code = os.environ.get("TEST_HEALTH_CODE", "200")
     sys.stdout.write(body)
@@ -85,9 +91,9 @@ import re
 import sys
 
 arguments = sys.argv[1:]
-joined = " ".join(arguments)
-if len(arguments) >= 2 and arguments[1].startswith(".backup") and ".bak" in arguments[1]:
-    match = re.search(r"'([^']+)'", arguments[1])
+backup_arg = next((arg for arg in arguments if arg.startswith(".backup")), "")
+if backup_arg and ".bak" in backup_arg:
+    match = re.search(r"'([^']+)'", backup_arg)
     if not match:
         sys.exit(1)
     dest = Path(match.group(1))
@@ -394,6 +400,34 @@ class ReleaseManagerTests(unittest.TestCase):
         self.assertEqual(self.current.resolve(), previous.resolve())
         self.assertEqual((self.units / "aetherflow-api.service").read_text(), "LIVE-UNIT\n")
         self.assertEqual(self.marker(live_db), "env")
+
+    def test_failed_probe_restores_preswap_snapshot_of_resolved_db(self):
+        live_db = self.root / "live" / "from-env.sqlite"
+        self.write_db(live_db, "env")
+        self.env_file.write_text(f"DB_PATH={live_db}\n")
+        self.prepare_live_units()
+        previous = self.releases / "100"
+        previous.mkdir()
+        (previous / "aetherflow-api").write_text("previous")
+        self.current.symlink_to(previous)
+        result = self.run_manager(
+            "deploy", "--channel", "stable",
+            TEST_HEALTH_CODE="503",
+            TEST_HEALTH_BODY='{"status":"not_ready","database":"unreachable","redis":"disabled","uptime":"1.0s"}',
+            TEST_CORRUPT_DB=str(live_db),
+        )
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("ROLLBACK COMPLETE", result.stdout)
+        self.assertEqual(self.current.resolve(), previous.resolve())
+        snapshots = list(self.releases.glob("*/data-snapshot/aetherflow.sqlite.bak"))
+        self.assertEqual(len(snapshots), 1)
+        self.assertNotIn("/100/data-snapshot/", result.stdout.replace("\\", "/"))
+        self.assertIn(f"Database recovery snapshot release: {snapshots[0].parents[1]}", result.stdout)
+        self.assertFalse(Path(str(live_db) + "-wal").exists())
+        self.assertFalse(Path(str(live_db) + "-shm").exists())
+        self.assertEqual(self.marker(live_db), "env")
+        self.assertTrue(list(live_db.parent.glob(live_db.name + ".corrupted.*")))
+        self.assertIn("systemctl stop aetherflow-api.service aetherflow-runner.service", self.commands.read_text())
 
 
 if __name__ == "__main__":

@@ -257,7 +257,9 @@ sqlite_online_backup() {
     dest_dir="$(dirname "${dest}")"
     mkdir -p "${dest_dir}"
     escaped="${dest//\'/\'\'}"
-    sqlite3 "${src}" ".backup '${escaped}'"
+    # --readonly: .backup reads the source and writes only dest. Opening a hot
+    # WAL read-write would checkpoint it, which a dry-run must not do.
+    sqlite3 --readonly "${src}" ".backup '${escaped}'"
 }
 
 sqlite_integrity() {
@@ -598,7 +600,7 @@ state_snapshot() {
                 log_error "sqlite3 is required to copy the live database without a raw cp of a WAL file."
                 return 1
             fi
-            log_info "[DRY-RUN] Copying live database with sqlite3 .backup from ${RESOLVED_DB_PATH} (source: ${RESOLVED_DB_SOURCE}) into ${copy}"
+            log_info "[DRY-RUN] Copying live database with sqlite3 --readonly .backup from ${RESOLVED_DB_PATH} (source: ${RESOLVED_DB_SOURCE}) into ${copy}"
             sqlite_online_backup "${RESOLVED_DB_PATH}" "${copy}"
         fi
         # Never create or snapshot the live path itself during a dry-run.
@@ -855,6 +857,10 @@ state_restore() {
 }
 
 rollback() {
+    # $1, when set, is the release whose data-snapshot was taken before the
+    # swap that just failed. That backup is the live database. A manual
+    # rollback has no argument and uses the previous release's snapshot.
+    local snapshot_release="${1:-}"
     log_error "=== STAGE 4: ROLLBACK INITIATED ==="
     local prev_file="${RELEASES_DIR}/.previous_release"
     if [[ ! -f "${prev_file}" ]]; then
@@ -872,9 +878,15 @@ rollback() {
     mv -Tf "${tmp_link}" "${CURRENT_LINK}"
     log_info "Symlink reverted: ${CURRENT_LINK} -> ${previous_target}"
 
+    if [[ -z "${snapshot_release}" ]]; then
+        snapshot_release="${previous_target}"
+    fi
+    log_info "Database recovery snapshot release: ${snapshot_release}"
+
     # Both the Rust and Go control planes are the aetherflow-api binary and
     # both honor `aetherflow-api runner`, so the installed units stay valid.
-    state_restore "${previous_target}"
+    # Restore failure must not skip the restart of the reverted symlink.
+    state_restore "${snapshot_release}" || log_error "Database restore failed; continuing with the reverted symlink."
 
     if [[ "${DRY_RUN}" == false ]]; then
         restart_systemd_units
@@ -944,7 +956,7 @@ case "${COMMAND}" in
         state_snapshot || exit 1
         symlink_swap
         if ! health_probe; then
-            rollback
+            rollback "${RELEASE_DIR}"
             exit 2
         fi
         cleanup_old_releases

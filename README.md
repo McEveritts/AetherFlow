@@ -165,7 +165,7 @@ python3 tests/check_shell_hygiene.py
 # Run Rust control plane unit tests
 cd backend-rs && cargo test --workspace --locked
 
-# Build the production single-binary bundle (Next.js static export + Go binary)
+# Local helper still compiles the Go backend. Published v4 releases use the Rust control plane.
 bash scripts/build_gold.sh
 ```
 
