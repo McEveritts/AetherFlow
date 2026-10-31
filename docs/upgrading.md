@@ -15,6 +15,30 @@ To switch channels, visit **Settings → System Updates** in your dashboard and 
 
 ---
 
+## Upgrading from v3.2.x
+
+v4.0.0 replaces the Go control plane with the Rust (Axum + Tokio) `aetherflow-api` binary. The frontend, HTTP API, `/run/aetherflow/runner.sock` runner socket, and the installed `aetherflow-api` / `aetherflow-runner` systemd units are unchanged. A rollback to v3.2.x uses the same `aetherflow-api` binary name and the same `runner` subcommand.
+
+`deploy/release-manager.sh` resolves the live SQLite file in this order:
+
+1. `AF_DB_PATH`, when it is set in the deploy environment
+2. `DB_PATH`, then `AETHERFLOW_DB_PATH`, parsed from `/etc/aetherflow/aetherflow.env` (the file is not sourced)
+3. `DB_PATH`, then `AETHERFLOW_DB_PATH`, from `systemctl show -p Environment aetherflow-api`
+4. `/var/lib/aetherflow/aetherflow.sqlite`
+
+Hosts that still keep the database at `/opt/AetherFlow/backend/data/aetherflow.sqlite` resolve that path from the env file or the unit. It wins over an unused `/var/lib/aetherflow` copy. The manager does not copy a legacy database into `/var/lib/aetherflow` when the resolved path is somewhere else.
+
+Before the atomic symlink swap, the deploy takes a WAL-safe `sqlite3 .backup` of the resolved database and stops if `PRAGMA integrity_check` is not `ok`.
+
+```bash
+sudo bash /opt/AetherFlow/deploy/release-manager.sh deploy --channel stable
+sudo bash /opt/AetherFlow/deploy/release-manager.sh rollback
+```
+
+`rollback` points `current` back at the previous release, restores that release's snapshot only when the live database fails its integrity check, and restarts the existing units. Run the updated `deploy/release-manager.sh` from the git tree for this upgrade. The copy inside an already-published release tarball does not contain the database-path fix until a later release is cut; the deploy stages the script that is actually executing into the new release directory.
+
+---
+
 ## Migration: v3.0.x to v3.1.x
 
 The v3.1.x release represents a turning point in platform stability and performance.

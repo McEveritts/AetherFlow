@@ -1,9 +1,9 @@
 <div align="center">
 
-![AetherFlow Banner](./docs/assets/banner.svg?v=3.2.5)
+![AetherFlow Banner](./docs/assets/banner.svg?v=4.0.0)
 
 [![Latest Release](https://img.shields.io/github/v/release/McEveritts/AetherFlow?style=flat-square&logo=github&label=Release&color=6366f1)](https://github.com/McEveritts/AetherFlow/releases/latest)
-[![Go Version](https://img.shields.io/badge/Control_Plane-Go_1.26-00ADD8?style=flat-square&logo=go&logoColor=white)](./backend)
+[![Rust](https://img.shields.io/badge/Control_Plane-Rust_%28Axum_%2B_Tokio%29-DEA584?style=flat-square&logo=rust&logoColor=white)](./backend-rs)
 [![Frontend](https://img.shields.io/badge/Interface-Next.js_16_%28Obsidian_V2%29-000000?style=flat-square&logo=next.js&logoColor=white)](./frontend)
 [![OS Support](https://img.shields.io/badge/Target_OS-Debian_12%2F13_%7C_Ubuntu_22.04%2F24.04-A81D33?style=flat-square&logo=debian&logoColor=white)](./setup)
 [![Catalog](https://img.shields.io/badge/Bare--Metal_Catalog-69_Apps-9333ea?style=flat-square)](./packages)
@@ -21,9 +21,9 @@
 
 ![AetherFlow Overview Dashboard](./docs/assets/dashboard.png)
 
-### Why AetherFlow v3.2.5?
+### Why AetherFlow v4.0.0?
 
-- **Single-Binary Control Plane (`aetherflow-api`)** — The entire **Next.js (Obsidian V2)** static frontend is embedded directly inside the compiled **Go (Gin)** binary (`CGO_ENABLED=0`), eliminating separate Node.js runtime daemons and port-proxy sprawl.
+- **Single-Binary Control Plane (`aetherflow-api`)** — The entire **Next.js (Obsidian V2)** static frontend is embedded directly inside the compiled **Rust (Axum + Tokio)** binary, eliminating separate Node.js runtime daemons and port-proxy sprawl.
 - **Zero-Sudo Privileged Socket Boundary (`aetherflow-runner`)** — The API server runs as an unprivileged `aetherflow` user under `ProtectSystem=strict` and `NoNewPrivileges=yes`. Root-level package installations, `systemctl` transitions, quota updates, and atomic rollbacks are isolated behind `/run/aetherflow/runner.sock` with strict allowlists.
 - **Whatbox-Style Automatic Subdomain Ingress** — Configure a server `baseDomain` once, and installing any web-capable Marketplace application automatically provisions `<app>.<baseDomain>` (e.g., `jellyfin.example.com`, `sonarr.example.com`) through **Apache2** and the built-in **AetherFlow Subdomain Gateway**, with automated Let's Encrypt SAN expansion via **`af-certbot-sync`** and `.aether.local` LAN split-horizon routing.
 - **Frame-0 Real-Time Telemetry (`Hyperspeed`)** — Immediate frame-0 WebSocket state hydration, non-blocking kernel `cpu.Times` delta sampling, per-PID CPU tracking, SMART drive health, and GPU hardware discovery (AMD VAAPI / Intel QSV).
@@ -53,7 +53,7 @@
 ```mermaid
 flowchart LR
     Operator["Operator Browser<br/>(Obsidian V2 SPA)"] -->|HTTPS / WSS| Ingress["Apache2 Ingress<br/>Auto-Subdomain TLS"]
-    Ingress -->|127.0.0.1:8080| API["aetherflow-api<br/>(Single-Binary Go + Embedded SPA)<br/>User=aetherflow • ProtectSystem=strict"]
+    Ingress -->|127.0.0.1:8080| API["aetherflow-api<br/>(Single-Binary Rust + Embedded SPA)<br/>User=aetherflow • ProtectSystem=strict"]
 
     subgraph State["Persistence & Cache"]
         SQLite[("SQLite (WAL)<br/>AES-256-GCM Secrets")]
@@ -129,6 +129,8 @@ sudo bash /opt/AetherFlow/setup/AetherFlow-Setup \
 sudo bash /opt/AetherFlow/setup/AetherFlow-Setup --repair
 ```
 
+Upgrading an existing v3.2.x node: [Upgrading from v3.2.x](./docs/upgrading.md#upgrading-from-v32x). The frontend, API, runner socket, and installed systemd units stay in place.
+
 ---
 
 ## 📚 Documentation
@@ -160,8 +162,8 @@ python3 tests/run_e2e.py --mode contract
 # Verify shell hygiene across all 260+ installer and lifecycle scripts
 python3 tests/check_shell_hygiene.py
 
-# Run Go control plane unit tests
-cd backend && go test ./... -count=1
+# Run Rust control plane unit tests
+cd backend-rs && cargo test --workspace --locked
 
 # Build the production single-binary bundle (Next.js static export + Go binary)
 bash scripts/build_gold.sh
