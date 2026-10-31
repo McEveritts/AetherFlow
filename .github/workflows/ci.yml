@@ -24,6 +24,19 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  jellyseerr-installer:
+    name: Jellyseerr / Seerr Installer Regression Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check Installer Syntax
+        run: bash -n packages/package/install/installpackage-jellyseerr
+
+      - name: Test Upgrade and Rollback
+        run: python3 -m unittest discover -s tests -p 'test_jellyseerr_installer.py' -v
+
   frontend:
     name: Frontend (Next.js Static Export & Tests)
     runs-on: ubuntu-latest

@@ -1063,7 +1063,7 @@
   },
   "jellyseerr": {
     "update_source": "github",
-    "update_repo": "Fallenbagel/jellyseerr",
+    "update_repo": "seerr-team/seerr",
     "version_command": [
       "bash",
       "-lc",

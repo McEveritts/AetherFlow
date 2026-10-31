@@ -1,84 +1,154 @@
 #!/bin/bash
-# AetherFlow Package Installer: Jellyseerr
+# AetherFlow Package Installer: Jellyseerr / Seerr
 # Port: 5055
 
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
-    # shellcheck source=/dev/null
     source /opt/AetherFlow/packages/common.sh
 else
-    # shellcheck source=/dev/null
     source "${SELF_DIR}/../../common.sh"
 fi
 
 PACKAGE_NAME="jellyseerr"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
-mkdir -p "$(dirname "$LOGFILE")" /install
-
 require_root
-log_info "Starting installation for ${PACKAGE_NAME}..."
-report_progress 10 "Installing system and Node.js prerequisites for Jellyseerr..."
+mkdir -p "$(dirname "$LOGFILE")" /install /run/lock
+exec 9>/run/lock/aetherflow-jellyseerr.lock
+flock -n 9 || { log_error "Another Jellyseerr/Seerr installation is running."; exit 1; }
 
+BUILD_DIR=""
+BACKUP_DIR=""
+WAS_ACTIVE=0
+SERVICE_STOPPED=0
+APP_MOVED=0
+APP_ACTIVATED=0
+UNIT_WRITTEN=0
+DATA_SAVED=0
+SUCCESS=0
+
+cleanup() {
+    local status=$?
+    trap - EXIT
+    set +e
+    if [[ "$SUCCESS" -ne 1 && "$SERVICE_STOPPED" -eq 1 ]]; then
+        log_error "Seerr upgrade failed; restoring the previous installation from ${BACKUP_DIR}."
+        systemctl stop jellyseerr >> "$LOGFILE" 2>&1
+        if [[ "$APP_ACTIVATED" -eq 1 ]]; then
+            mv /opt/jellyseerr "$BACKUP_DIR/failed-app"
+        fi
+        if [[ "$APP_MOVED" -eq 1 ]]; then
+            mv "$BACKUP_DIR/app" /opt/jellyseerr
+        fi
+        if [[ "$DATA_SAVED" -eq 1 && "$APP_ACTIVATED" -eq 1 ]]; then
+            rm -rf /var/lib/jellyseerr
+            mkdir -p /var/lib/jellyseerr
+            tar -xzf "$BACKUP_DIR/data.tar.gz" -C /var/lib/jellyseerr
+            chown -R jellyseerr:jellyseerr /var/lib/jellyseerr
+        fi
+        if [[ "$UNIT_WRITTEN" -eq 1 ]]; then
+            if [[ -f "$BACKUP_DIR/jellyseerr.service" ]]; then
+                cp -a "$BACKUP_DIR/jellyseerr.service" /etc/systemd/system/jellyseerr.service
+            else
+                rm -f /etc/systemd/system/jellyseerr.service
+            fi
+            systemctl daemon-reload >> "$LOGFILE" 2>&1
+        fi
+        if [[ "$WAS_ACTIVE" -eq 1 ]]; then
+            systemctl start jellyseerr >> "$LOGFILE" 2>&1 || log_error "Rollback service restart failed; see ${LOGFILE}."
+        fi
+    fi
+    if [[ -n "$BUILD_DIR" && -d "$BUILD_DIR" ]]; then
+        rm -rf "$BUILD_DIR"
+    fi
+    exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+log_info "Starting installation for ${PACKAGE_NAME} (Seerr)..."
+report_progress 10 "Installing Seerr build prerequisites..."
 DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl git gnupg ca-certificates build-essential python3 python3-setuptools >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl git ca-certificates build-essential python3 python3-setuptools xz-utils >> "$LOGFILE" 2>&1
 
-ensure_node 20
-PNPM_MAJOR=0
-if command_exists pnpm; then
-    PNPM_MAJOR="$(pnpm -v 2>/dev/null | cut -d. -f1 || echo 0)"
+LATEST_TAG="$(github_latest_tag "seerr-team/seerr" "" false)"
+if [[ ! "$LATEST_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    log_error "Unable to resolve a stable Seerr release."
+    exit 1
 fi
-if [[ "${PNPM_MAJOR:-0}" -ne 9 ]]; then
-    npm install -g pnpm@9 >> "$LOGFILE" 2>&1
-    sync_node_global_bins
+
+report_progress 30 "Fetching Seerr ${LATEST_TAG} into a staging directory..."
+BUILD_DIR="$(mktemp -d /opt/.jellyseerr-build.XXXXXX)"
+git clone --depth 1 --branch "$LATEST_TAG" https://github.com/seerr-team/seerr.git "$BUILD_DIR" >> "$LOGFILE" 2>&1
+cd "$BUILD_DIR"
+
+case "$(uname -m)" in
+    x86_64) NODE_ARCH=x64 ;;
+    aarch64|arm64) NODE_ARCH=arm64 ;;
+    *) log_error "Unsupported Node.js architecture: $(uname -m)"; exit 1 ;;
+esac
+curl --fail --silent --show-error --location https://nodejs.org/dist/latest-v22.x/SHASUMS256.txt -o node-shasums.txt
+NODE_ARCHIVE="$(awk -v suffix="-linux-${NODE_ARCH}.tar.xz" 'index($2, suffix) && substr($2, length($2)-length(suffix)+1) == suffix {print $2}' node-shasums.txt)"
+if [[ ! "$NODE_ARCHIVE" =~ ^node-v22\.[0-9]+\.[0-9]+-linux-(x64|arm64)\.tar\.xz$ ]]; then
+    log_error "Unable to resolve the private Node.js 22 runtime."
+    exit 1
 fi
-if ! command_exists yarn; then
-    npm install -g yarn >> "$LOGFILE" 2>&1 || true
-    sync_node_global_bins
+curl --fail --silent --show-error --location "https://nodejs.org/dist/latest-v22.x/${NODE_ARCHIVE}" -o "$NODE_ARCHIVE"
+grep -F "  ${NODE_ARCHIVE}" node-shasums.txt | sha256sum --check --status
+mkdir .runtime
+tar -xJf "$NODE_ARCHIVE" --strip-components=1 -C .runtime
+rm -f "$NODE_ARCHIVE" node-shasums.txt
+export PATH="$BUILD_DIR/.runtime/bin:$PATH"
+node -e 'const [major, minor] = process.versions.node.split(".").map(Number); if (major !== 22 || minor < 19) process.exit(1)'
+PNPM_PACKAGE="$(node -p 'require("./package.json").packageManager')"
+if [[ ! "$PNPM_PACKAGE" =~ ^pnpm@10\.[0-9]+\.[0-9]+$ ]]; then
+    log_error "Unsupported Seerr package manager: ${PNPM_PACKAGE}"
+    exit 1
 fi
+npm install --prefix "$BUILD_DIR/.aetherflow-tools" --no-audit --no-fund --ignore-scripts "$PNPM_PACKAGE" >> "$LOGFILE" 2>&1
+export PATH="$BUILD_DIR/.aetherflow-tools/node_modules/.bin:$PATH"
+
+report_progress 55 "Building Seerr ${LATEST_TAG} while the installed service stays online..."
+export CYPRESS_INSTALL_BINARY=0 NEXT_TELEMETRY_DISABLED=1
+pnpm install --frozen-lockfile --prod=false >> "$LOGFILE" 2>&1
+pnpm build >> "$LOGFILE" 2>&1
+test -s dist/index.js
 
 if ! id -u jellyseerr >/dev/null 2>&1; then
     useradd --system --user-group --create-home --home-dir /var/lib/jellyseerr --shell /usr/sbin/nologin jellyseerr
 fi
+mkdir -p /var/lib/jellyseerr
+chown -R jellyseerr:jellyseerr "$BUILD_DIR" /var/lib/jellyseerr
+chmod 755 "$BUILD_DIR"
 
-mkdir -p /var/lib/jellyseerr /opt/jellyseerr
-
-report_progress 30 "Fetching Jellyseerr source repository..."
-rm -rf /opt/jellyseerr
-git clone https://github.com/Fallenbagel/jellyseerr.git /opt/jellyseerr >> "$LOGFILE" 2>&1
+report_progress 80 "Backing up Jellyseerr state and activating Seerr ${LATEST_TAG}..."
+BACKUP_DIR="$(mktemp -d /var/backups/aetherflow-jellyseerr.XXXXXX)"
+chmod 700 "$BACKUP_DIR"
+if [[ -f /etc/systemd/system/jellyseerr.service ]]; then
+    cp -a /etc/systemd/system/jellyseerr.service "$BACKUP_DIR/jellyseerr.service"
+fi
+if systemctl is-active --quiet jellyseerr; then
+    WAS_ACTIVE=1
+fi
+SERVICE_STOPPED=1
+systemctl stop jellyseerr >> "$LOGFILE" 2>&1
+tar -czf "$BACKUP_DIR/data.tar.gz" -C /var/lib/jellyseerr .
+DATA_SAVED=1
+if [[ -d /opt/jellyseerr ]]; then
+    mv /opt/jellyseerr "$BACKUP_DIR/app"
+    APP_MOVED=1
+fi
+mv "$BUILD_DIR" /opt/jellyseerr
+APP_ACTIVATED=1
+BUILD_DIR=""
 cd /opt/jellyseerr
-LATEST_TAG="$(git tag -l 'v2.*' --sort=-v:refname | grep -E '^v2\.[0-9]+\.[0-9]+$' | head -n1 || true)"
-if [[ -z "$LATEST_TAG" ]]; then
-    LATEST_TAG="$(git tag -l 'v*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n1 || true)"
-fi
-if [[ -n "$LATEST_TAG" ]]; then
-    git checkout "$LATEST_TAG" >> "$LOGFILE" 2>&1 || true
-    printf '%s\n' "${LATEST_TAG#v}" > /opt/jellyseerr/.af-version
-fi
 
-if [[ -f /opt/jellyseerr/.npmrc ]]; then
-    sed -i 's/engine-strict=true/engine-strict=false/g' /opt/jellyseerr/.npmrc || true
-fi
-
-report_progress 55 "Installing Jellyseerr dependencies and compiling production build..."
-export CYPRESS_INSTALL_BINARY=0
-if [[ -f /opt/jellyseerr/pnpm-lock.yaml ]]; then
-    pnpm install --frozen-lockfile --config.engine-strict=false >> "$LOGFILE" 2>&1 || pnpm install --no-frozen-lockfile --config.engine-strict=false >> "$LOGFILE" 2>&1
-    pnpm build >> "$LOGFILE" 2>&1
-else
-    yarn install --ignore-engines --frozen-lockfile --network-timeout 1000000 >> "$LOGFILE" 2>&1 || yarn install --ignore-engines --network-timeout 1000000 >> "$LOGFILE" 2>&1
-    yarn build >> "$LOGFILE" 2>&1
-fi
-
-chown -R jellyseerr:jellyseerr /opt/jellyseerr /var/lib/jellyseerr
-
-NODE_BIN="$(command -v node || echo /usr/bin/node)"
-
-report_progress 85 "Configuring and starting jellyseerr.service on port 5055..."
+UNIT_WRITTEN=1
 cat <<EOF > /etc/systemd/system/jellyseerr.service
 [Unit]
-Description=Jellyseerr Service
+Description=Seerr Service (Jellyseerr compatible)
 Wants=network-online.target
 After=network-online.target
 
@@ -92,15 +162,33 @@ Environment=CONFIG_DIRECTORY=/var/lib/jellyseerr
 Type=simple
 Restart=on-failure
 RestartSec=5
-ExecStart=${NODE_BIN} dist/index.js
+ExecStart=/opt/jellyseerr/.runtime/bin/node dist/index.js
 
 [Install]
 WantedBy=multi-user.target
 EOF
-
 systemctl daemon-reload >> "$LOGFILE" 2>&1
-systemctl enable --now jellyseerr >> "$LOGFILE" 2>&1
+systemctl restart jellyseerr >> "$LOGFILE" 2>&1
 
+report_progress 90 "Verifying the running Seerr version..."
+HEALTHY=0
+for attempt in {1..30}; do
+    if curl --fail --silent --show-error --max-time 5 http://127.0.0.1:5055/api/v1/status 2>> "$LOGFILE" \
+        | python3 -c 'import json,sys; data=json.load(sys.stdin); sys.exit(0 if data.get("version", "").removeprefix("v") == sys.argv[1] else 1)' "${LATEST_TAG#v}" 2>> "$LOGFILE"; then
+        HEALTHY=1
+        break
+    fi
+    sleep 2
+done
+if [[ "$HEALTHY" -ne 1 ]]; then
+    log_error "Seerr did not report the expected version ${LATEST_TAG}; rolling back."
+    exit 1
+fi
+
+printf '%s\n' "${LATEST_TAG#v}" > /opt/jellyseerr/.af-version
+chown jellyseerr:jellyseerr /opt/jellyseerr/.af-version
+systemctl enable jellyseerr >> "$LOGFILE" 2>&1
 write_lock "${PACKAGE_NAME}"
-report_progress 100 "Jellyseerr installed on port 5055."
-log_info "${PACKAGE_NAME} installed successfully"
+SUCCESS=1
+log_info "Seerr ${LATEST_TAG} verified. Previous application and state retained in ${BACKUP_DIR}."
+report_progress 100 "Seerr ${LATEST_TAG} installed and verified on port 5055."
