@@ -4413,7 +4413,7 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                         .unwrap_or(true)
                 {
                     let pem_payload = format!(
-                        "-----BEGIN PRIVATE KEY-----\nMIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQC7\n-----END PRIVATE KEY-----\n-----BEGIN CERTIFICATE-----\nsubject={}\ndays={}\n-----END CERTIFICATE-----\n",
+                        "# AETHERFLOW-MOCK-TLS-KEY (isolated test sentinel - not a real key)\nsubject={}\ndays={}\n",
                         subject, days
                     );
                     write_file_atomic_with_mode_bounded(

@@ -26,8 +26,8 @@ func TestAdversarial_BlueprintResolutionEdgeCases(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadPackagesCatalog failed: %v", err)
 	}
-	if len(pkgs) != 72 {
-		t.Fatalf("expected exactly 72 packages, got %d", len(pkgs))
+	if len(pkgs) != 73 {
+		t.Fatalf("expected exactly 73 packages, got %d", len(pkgs))
 	}
 
 	// 1. Every package name in packages.json must resolve to a valid blueprint
@@ -216,6 +216,7 @@ func TestAdversarial_PortUniquenessAndCollisions(t *testing.T) {
 
 	knownHeadless := []string{
 		"wireguard",
+		"tailscale",
 		"fail2ban",
 		"rtorrent",
 		"mergerfs",
@@ -635,7 +636,7 @@ func TestAdversarial_ConcurrencyStress(t *testing.T) {
 				target2 := targets[rng.Intn(len(targets))]
 				_ = MatchesUnitFilter(target, target2)
 			}
-		}(int64(g * 1000 + 42))
+		}(int64(g*1000 + 42))
 	}
 
 	wg.Wait()
