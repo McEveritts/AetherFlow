@@ -4,12 +4,12 @@
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
-    # shellcheck source=/dev/null
-    source /opt/AetherFlow/packages/common.sh
-else
+if [[ -f "${SELF_DIR}/../../common.sh" ]]; then
     # shellcheck source=/dev/null
     source "${SELF_DIR}/../../common.sh"
+else
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
 fi
 
 PACKAGE_NAME="uptimekuma"
@@ -23,10 +23,12 @@ report_progress 25 "Stopping and removing uptime-kuma.service..."
 purge_systemd_unit "uptime-kuma"
 
 report_progress 65 "Removing Uptime Kuma directory and user account..."
-rm -rf /opt/uptime-kuma
+if [[ "${DELETE_DATA:-false}" == true ]]; then
+    rm -rf /opt/uptime-kuma
+fi
 purge_system_user "uptimekuma"
 systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
 
 remove_lock "${PACKAGE_NAME}"
-report_progress 100 "Uptime Kuma completely removed."
+report_progress 100 "Uptime Kuma removed; application data retained unless DELETE_DATA=true."
 log_info "${PACKAGE_NAME} removed successfully"

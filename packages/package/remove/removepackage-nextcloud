@@ -4,12 +4,12 @@
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
-    # shellcheck source=/dev/null
-    source /opt/AetherFlow/packages/common.sh
-else
+if [[ -f "${SELF_DIR}/../../common.sh" ]]; then
     # shellcheck source=/dev/null
     source "${SELF_DIR}/../../common.sh"
+else
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
 fi
 
 PACKAGE_NAME="nextcloud"
@@ -29,7 +29,7 @@ rm -f /etc/systemd/system/apache2.service.d/10-aetherflow-sandbox.conf
 rmdir /etc/systemd/system/apache2.service.d 2>/dev/null || true
 
 report_progress 50 "Dropping Nextcloud database and user..."
-if command_exists mysql; then
+if [[ "${DELETE_DATA:-false}" == true ]] && command_exists mysql; then
     mysql -u root <<'EOF' >> "$LOGFILE" 2>&1 || true
 DROP DATABASE IF EXISTS nextcloud;
 DROP USER IF EXISTS 'nextclouduser'@'localhost';
@@ -38,11 +38,15 @@ EOF
 fi
 
 report_progress 80 "Removing Nextcloud webroot, data directory, and credentials file..."
-rm -rf /var/www/nextcloud /var/www/html/nextcloud /var/lib/nextcloud
-rm -f /opt/AetherFlow/logs/nextcloud_credentials.txt
+if [[ "${DELETE_DATA:-false}" == true ]]; then
+    rm -rf /var/www/nextcloud /var/www/html/nextcloud /var/lib/nextcloud
+fi
+if [[ "${DELETE_DATA:-false}" == true ]]; then
+    rm -f /opt/AetherFlow/logs/nextcloud_credentials.txt
+fi
 systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
 systemctl reload apache2 >> "$LOGFILE" 2>&1 || true
 
 remove_lock "${PACKAGE_NAME}"
-report_progress 100 "Nextcloud completely removed."
+report_progress 100 "Nextcloud removed; application data retained unless DELETE_DATA=true."
 log_info "${PACKAGE_NAME} removed successfully"

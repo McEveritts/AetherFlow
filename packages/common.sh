@@ -56,6 +56,117 @@ command_exists() {
     command -v "$1" >/dev/null 2>&1
 }
 
+# Stage on the destination filesystem so replacement uses rename(), including
+# when /tmp lives on a different mount. Never truncate an executing inode.
+install_binary_atomic() {
+    local source="$1" destination="$2" staged
+    if [[ ! -s "$source" ]]; then
+        print_error "Downloaded binary is empty: $source"
+        return 1
+    fi
+    mkdir -p "$(dirname "$destination")"
+    staged="$(mktemp "${destination}.af-new.XXXXXX")"
+    if ! install -m 0755 "$source" "$staged" || ! mv -fT "$staged" "$destination"; then
+        rm -f "$staged"
+        return 1
+    fi
+}
+
+# Change one listen setting without rebuilding the user's application config.
+# Supported formats use only Python's standard library on the Debian host.
+set_config_value() {
+    python3 - "$@" <<'PYEOF'
+import json, pathlib, re, sys, xml.etree.ElementTree as ET
+filename, kind, key, value, *options = sys.argv[1:]
+path = pathlib.Path(filename)
+path.parent.mkdir(parents=True, exist_ok=True)
+text = path.read_text() if path.exists() else ''
+section = options[0] if options else ''
+if kind == 'xml':
+    root = ET.fromstring(text) if text.strip() else ET.Element(section or 'Config')
+    node = root.find(key)
+    if node is None:
+        node = ET.SubElement(root, key)
+    node.text = value
+    text = ET.tostring(root, encoding='unicode') + '\n'
+elif kind == 'json':
+    data = json.loads(text) if text.strip() else {}
+    parent = data
+    parts = key.split('.')
+    for part in parts[:-1]:
+        parent = parent.setdefault(part, {})
+    parent[parts[-1]] = int(value) if value.isdecimal() else value
+    text = json.dumps(data, indent=2) + '\n'
+else:
+    if kind == 'yaml':
+        header = re.compile(r'(?m)^' + re.escape(section) + r':\s*(?:#.*)?$') if section else None
+        pattern = re.compile(r'(?m)^' + ('  ' if section else '') + re.escape(key) + r'\s*:.*$')
+        setting = ('  ' if section else '') + key + ': ' + value + '\n'
+        next_section = re.compile(r'(?m)^\S[^\n]*:')
+    elif kind == 'ini':
+        header = re.compile(r'(?m)^\[' + re.escape(section) + r'\]\s*$') if section else None
+        pattern = re.compile(r'(?im)^\s*' + re.escape(key) + r'\s*=.*$')
+        setting = key + ' = ' + value + '\n'
+        next_section = re.compile(r'(?m)^\[')
+    elif kind == 'js':
+        header = None
+        pattern = re.compile(r'(?m)^\s*' + re.escape(key) + r'\s*:\s*\d+\s*,?\s*$')
+        setting = '    ' + key + ': ' + value + ',\n'
+        next_section = None
+        if not pattern.search(text):
+            raise ValueError('Cannot locate existing JavaScript port setting')
+    else:
+        raise ValueError('Unsupported config format: ' + kind)
+    start, end = 0, len(text)
+    if header:
+        match = header.search(text)
+        if match is None:
+            text += ('\n' if text and not text.endswith('\n') else '') + (section + ':\n' if kind == 'yaml' else '[' + section + ']\n')
+            start = end = len(text)
+        else:
+            start = match.end() + 1
+            following = next_section.search(text, start)
+            end = following.start() if following else len(text)
+    block = text[start:end]
+    if pattern.search(block):
+        block = pattern.sub(lambda _: setting.rstrip('\n'), block)
+    else:
+        block = block.rstrip('\n') + ('\n' if block else '') + setting
+    text = text[:start] + block + text[end:]
+path.write_text(text)
+PYEOF
+}
+
+# Activate prepared application code while retaining persistent paths and a
+# private copy of the previous installation for recovery after migrations.
+replace_app_tree() {
+    local staged="$1" destination="$2" relative backup
+    shift 2
+    for relative in "$@"; do
+        if [[ "$relative" == /* || "$relative" == *..* ]]; then
+            print_error "Invalid application data path: $relative"
+            return 1
+        fi
+        if [[ -e "$destination/$relative" || -L "$destination/$relative" ]]; then
+            mkdir -p "$(dirname "$staged/$relative")"
+            rm -rf -- "$staged/$relative"
+            cp -a -- "$destination/$relative" "$staged/$relative"
+        fi
+    done
+    if [[ -e "$destination" ]]; then
+        backup="$(mktemp -d "${destination}.af-backup.XXXXXX")"
+        chmod 700 "$backup"
+        mv -T "$destination" "$backup/app"
+        if ! mv -T "$staged" "$destination"; then
+            mv -T "$backup/app" "$destination"
+            return 1
+        fi
+        log_info "Previous application files retained in $backup/app"
+    else
+        mv -T "$staged" "$destination"
+    fi
+}
+
 lock_path() {
     local package_name="$1"
     printf '%s/.%s.lock\n' "$LOCK_DIR" "$package_name"
@@ -251,6 +362,10 @@ purge_systemd_unit() {
 
 purge_system_user() {
     local username="$1"
+    if [[ "${DELETE_DATA:-false}" != true ]]; then
+        log_info "Retaining ${username} account and home directory with application data"
+        return 0
+    fi
     if [[ -n "$username" && "$username" != "root" && "$username" != "www-data" ]]; then
         userdel -r "$username" >/dev/null 2>&1 || userdel "$username" >/dev/null 2>&1 || true
         groupdel "$username" >/dev/null 2>&1 || true

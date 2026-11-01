@@ -4,12 +4,12 @@
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
-    # shellcheck source=/dev/null
-    source /opt/AetherFlow/packages/common.sh
-else
+if [[ -f "${SELF_DIR}/../../common.sh" ]]; then
     # shellcheck source=/dev/null
     source "${SELF_DIR}/../../common.sh"
+else
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
 fi
 
 PACKAGE_NAME="lidarr"
@@ -23,10 +23,13 @@ report_progress 25 "Stopping and removing lidarr.service..."
 purge_systemd_unit "lidarr"
 
 report_progress 65 "Removing Lidarr binaries, state directories, and user account..."
-rm -rf /opt/Lidarr /var/lib/lidarr
+rm -rf /opt/Lidarr
+if [[ "${DELETE_DATA:-false}" == true ]]; then
+    rm -rf /var/lib/lidarr
+fi
 purge_system_user "lidarr"
 systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
 
 remove_lock "${PACKAGE_NAME}"
-report_progress 100 "Lidarr completely removed."
+report_progress 100 "Lidarr removed; application data retained unless DELETE_DATA=true."
 log_info "${PACKAGE_NAME} removed successfully"

@@ -2000,13 +2000,10 @@ static BUILTIN_DECLARATIVE_RECIPES: Lazy<HashMap<String, DeclarativePackageRecip
             build_xrdp_recipe(),
             build_novnc_recipe(),
             build_x2go_recipe(),
-            build_scrutiny_recipe(),
             build_prometheus_recipe(),
             build_netdata_recipe(),
             build_mergerfs_recipe(),
             build_rclone_recipe(),
-            build_clamav_recipe(),
-            build_mosquitto_recipe(),
             build_syncthing_recipe(),
         ] {
             recipe
@@ -2075,6 +2072,15 @@ fn build_fail2ban_recipe() -> DeclarativePackageRecipe {
             ],
             progress_pct: 40,
             description: "Installing fail2ban and python3-systemd backend...".to_string(),
+        },
+        DeclarativeStep::CaptureDpkgVersion {
+            package: "fail2ban".to_string(),
+            fallback_version: "unknown".to_string(),
+            version_file_path: None,
+            owner: None,
+            group: None,
+            progress_pct: 45,
+            description: "Recording the installed Debian package version...".to_string(),
         },
         DeclarativeStep::ProbeSshPort {
             progress_pct: 55,
@@ -2148,7 +2154,7 @@ fn build_fail2ban_recipe() -> DeclarativePackageRecipe {
                     "/var/lib/fail2ban".to_string(),
                     "/run/fail2ban".to_string(),
                 ],
-                only_if_delete_data: false,
+                only_if_delete_data: true,
                 progress_pct: 85,
                 description: "Removing Fail2ban configuration and state directories...".to_string(),
             },
@@ -2272,7 +2278,7 @@ fn build_quassel_recipe() -> DeclarativePackageRecipe {
             },
             DeclarativeStep::RemovePaths {
                 paths: vec!["/etc/default/quasselcore".to_string()],
-                only_if_delete_data: false,
+                only_if_delete_data: true,
                 progress_pct: 75,
                 description: "Removing /etc/default/quasselcore...".to_string(),
             },
@@ -2579,6 +2585,15 @@ fn build_xrdp_recipe() -> DeclarativePackageRecipe {
             progress_pct: 50,
             description: "Installing xrdp, dbus-x11, and XFCE4 session packages...".to_string(),
         },
+        DeclarativeStep::CaptureDpkgVersion {
+            package: "xrdp".to_string(),
+            fallback_version: "unknown".to_string(),
+            version_file_path: None,
+            owner: None,
+            group: None,
+            progress_pct: 45,
+            description: "Recording the installed Debian package version...".to_string(),
+        },
         DeclarativeStep::EnsureDirectories {
             paths: vec!["/etc/xrdp".to_string()],
             mode: 0o755,
@@ -2647,7 +2662,7 @@ fn build_xrdp_recipe() -> DeclarativePackageRecipe {
                     "/var/log/xrdp.log".to_string(),
                     "/var/log/xrdp-sesman.log".to_string(),
                 ],
-                only_if_delete_data: false,
+                only_if_delete_data: true,
                 progress_pct: 85,
                 description: "Removing XRDP configuration and logs...".to_string(),
             },
@@ -2678,6 +2693,15 @@ fn build_novnc_recipe() -> DeclarativePackageRecipe {
             ],
             progress_pct: 50,
             description: "Installing novnc, websockify, tigervnc-standalone-server, and dbus-x11...".to_string(),
+        },
+        DeclarativeStep::CaptureDpkgVersion {
+            package: "novnc".to_string(),
+            fallback_version: "unknown".to_string(),
+            version_file_path: None,
+            owner: None,
+            group: None,
+            progress_pct: 45,
+            description: "Recording the installed Debian package version...".to_string(),
         },
         DeclarativeStep::EnsureDirectories {
             paths: vec!["/var/lib/novnc".to_string()],
@@ -2774,6 +2798,15 @@ fn build_x2go_recipe() -> DeclarativePackageRecipe {
             progress_pct: 55,
             description: "Installing x2goserver and x2goserver-xsession...".to_string(),
         },
+        DeclarativeStep::CaptureDpkgVersion {
+            package: "x2goserver".to_string(),
+            fallback_version: "unknown".to_string(),
+            version_file_path: None,
+            owner: None,
+            group: None,
+            progress_pct: 45,
+            description: "Recording the installed Debian package version...".to_string(),
+        },
         DeclarativeStep::EnsureDirectories {
             paths: vec!["/etc/x2go".to_string(), "/var/lib/x2go".to_string()],
             mode: 0o755,
@@ -2846,117 +2879,6 @@ fn build_x2go_recipe() -> DeclarativePackageRecipe {
     }
 }
 
-fn build_scrutiny_recipe() -> DeclarativePackageRecipe {
-    let install_steps = vec![
-        DeclarativeStep::AptUpdate {
-            progress_pct: 15,
-            description: "Updating APT package indexes for Scrutiny...".to_string(),
-        },
-        DeclarativeStep::AptInstall {
-            packages: vec![
-                "smartmontools".to_string(),
-                "ca-certificates".to_string(),
-                "curl".to_string(),
-            ],
-            progress_pct: 35,
-            description: "Installing smartmontools and dependencies...".to_string(),
-        },
-        DeclarativeStep::EnsureSystemUser {
-            username: "scrutiny".to_string(),
-            home_dir: "/opt/scrutiny".to_string(),
-            create_home: true,
-            progress_pct: 45,
-            description: "Creating dedicated scrutiny system user...".to_string(),
-        },
-        DeclarativeStep::EnsureDirectories {
-            paths: vec![
-                "/opt/scrutiny".to_string(),
-                "/opt/scrutiny/bin".to_string(),
-                "/opt/scrutiny/web".to_string(),
-                "/opt/scrutiny/config".to_string(),
-                "/etc/scrutiny".to_string(),
-            ],
-            mode: 0o755,
-            owner: Some("scrutiny".to_string()),
-            group: Some("scrutiny".to_string()),
-            progress_pct: 60,
-            description: "Preparing /opt/scrutiny and /etc/scrutiny directories...".to_string(),
-        },
-        DeclarativeStep::WriteTemplateFile {
-            path: "/etc/scrutiny/scrutiny.yaml".to_string(),
-            content_template: "version: 1\nweb:\n  listen:\n    port: {{APP_PORT}}\n    host: 127.0.0.1\n    database:\n      location: /opt/scrutiny/config/scrutiny.db\n".to_string(),
-            mode: 0o644,
-            overwrite: true,
-            owner: Some("scrutiny".to_string()),
-            group: Some("scrutiny".to_string()),
-            progress_pct: 72,
-            description: "Writing /etc/scrutiny/scrutiny.yaml configuration...".to_string(),
-        },
-        DeclarativeStep::WriteSystemdUnit {
-            unit_name: "scrutiny.service".to_string(),
-            content_template: "[Unit]\nDescription=Scrutiny S.M.A.R.T. Web Dashboard & Monitoring\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nUser=scrutiny\nGroup=scrutiny\nWorkingDirectory=/opt/scrutiny\nExecStart=/opt/scrutiny/bin/scrutiny-web-linux-{{ARCH}} start --config /etc/scrutiny/scrutiny.yaml\nRestart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=multi-user.target\n".to_string(),
-            progress_pct: 82,
-            description: "Writing scrutiny.service systemd unit...".to_string(),
-        },
-        DeclarativeStep::Systemctl {
-            unit: None,
-            operation: SystemctlOp::DaemonReload,
-            ignore_errors: false,
-            progress_pct: 88,
-            description: "Reloading systemd manager configuration...".to_string(),
-        },
-        DeclarativeStep::Systemctl {
-            unit: Some("scrutiny.service".to_string()),
-            operation: SystemctlOp::EnableNow,
-            ignore_errors: false,
-            progress_pct: 92,
-            description: "Enabling and starting scrutiny.service...".to_string(),
-        },
-        DeclarativeStep::Systemctl {
-            unit: Some("scrutiny.service".to_string()),
-            operation: SystemctlOp::Restart,
-            ignore_errors: false,
-            progress_pct: 96,
-            description: "Restarting scrutiny.service...".to_string(),
-        },
-    ];
-    DeclarativePackageRecipe {
-        package_id: "scrutiny".to_string(),
-        label: "Scrutiny".to_string(),
-        default_port: 8098,
-        service_name: "scrutiny".to_string(),
-        lock_file: "/install/.scrutiny.lock".to_string(),
-        apply_systemd_sandbox: true,
-        update_steps: install_steps.clone(),
-        install_steps,
-        remove_steps: vec![
-            DeclarativeStep::PurgeSystemdUnit {
-                unit_name: "scrutiny.service".to_string(),
-                progress_pct: 25,
-                description: "Stopping and removing scrutiny.service...".to_string(),
-            },
-            DeclarativeStep::RemovePaths {
-                paths: vec!["/opt/scrutiny".to_string(), "/etc/scrutiny".to_string()],
-                only_if_delete_data: false,
-                progress_pct: 65,
-                description: "Removing /opt/scrutiny and /etc/scrutiny...".to_string(),
-            },
-            DeclarativeStep::PurgeSystemUser {
-                username: "scrutiny".to_string(),
-                progress_pct: 85,
-                description: "Removing scrutiny system user...".to_string(),
-            },
-            DeclarativeStep::Systemctl {
-                unit: None,
-                operation: SystemctlOp::DaemonReload,
-                ignore_errors: true,
-                progress_pct: 95,
-                description: "Reloading systemd daemon after Scrutiny removal...".to_string(),
-            },
-        ],
-    }
-}
-
 fn build_prometheus_recipe() -> DeclarativePackageRecipe {
     let install_steps = vec![
         DeclarativeStep::AptUpdate {
@@ -2967,6 +2889,15 @@ fn build_prometheus_recipe() -> DeclarativePackageRecipe {
             packages: vec!["prometheus".to_string()],
             progress_pct: 45,
             description: "Installing prometheus APT package...".to_string(),
+        },
+        DeclarativeStep::CaptureDpkgVersion {
+            package: "prometheus".to_string(),
+            fallback_version: "unknown".to_string(),
+            version_file_path: None,
+            owner: None,
+            group: None,
+            progress_pct: 45,
+            description: "Recording the installed Debian package version...".to_string(),
         },
         DeclarativeStep::EnsureDirectories {
             paths: vec![
@@ -3048,7 +2979,7 @@ fn build_prometheus_recipe() -> DeclarativePackageRecipe {
                     "/etc/prometheus".to_string(),
                     "/etc/default/prometheus".to_string(),
                 ],
-                only_if_delete_data: false,
+                only_if_delete_data: true,
                 progress_pct: 75,
                 description: "Removing Prometheus configuration files...".to_string(),
             },
@@ -3079,6 +3010,15 @@ fn build_netdata_recipe() -> DeclarativePackageRecipe {
             packages: vec!["netdata".to_string()],
             progress_pct: 45,
             description: "Installing netdata APT package...".to_string(),
+        },
+        DeclarativeStep::CaptureDpkgVersion {
+            package: "netdata".to_string(),
+            fallback_version: "unknown".to_string(),
+            version_file_path: None,
+            owner: None,
+            group: None,
+            progress_pct: 45,
+            description: "Recording the installed Debian package version...".to_string(),
         },
         DeclarativeStep::EnsureDirectories {
             paths: vec![
@@ -3147,7 +3087,7 @@ fn build_netdata_recipe() -> DeclarativePackageRecipe {
             },
             DeclarativeStep::RemovePaths {
                 paths: vec!["/etc/netdata".to_string()],
-                only_if_delete_data: false,
+                only_if_delete_data: true,
                 progress_pct: 75,
                 description: "Removing /etc/netdata configuration...".to_string(),
             },
@@ -3181,6 +3121,15 @@ fn build_mergerfs_recipe() -> DeclarativePackageRecipe {
             packages: vec!["mergerfs".to_string(), "fuse3".to_string()],
             progress_pct: 45,
             description: "Installing mergerfs and fuse3...".to_string(),
+        },
+        DeclarativeStep::CaptureDpkgVersion {
+            package: "mergerfs".to_string(),
+            fallback_version: "unknown".to_string(),
+            version_file_path: None,
+            owner: None,
+            group: None,
+            progress_pct: 45,
+            description: "Recording the installed Debian package version...".to_string(),
         },
         DeclarativeStep::EnsureDirectories {
             paths: vec![
@@ -3251,7 +3200,7 @@ fn build_mergerfs_recipe() -> DeclarativePackageRecipe {
             },
             DeclarativeStep::RemovePaths {
                 paths: vec!["/etc/mergerfs".to_string()],
-                only_if_delete_data: false,
+                only_if_delete_data: true,
                 progress_pct: 78,
                 description: "Removing /etc/mergerfs configuration...".to_string(),
             },
@@ -3282,6 +3231,15 @@ fn build_rclone_recipe() -> DeclarativePackageRecipe {
             packages: vec!["rclone".to_string(), "fuse3".to_string()],
             progress_pct: 40,
             description: "Installing rclone and fuse3...".to_string(),
+        },
+        DeclarativeStep::CaptureDpkgVersion {
+            package: "rclone".to_string(),
+            fallback_version: "unknown".to_string(),
+            version_file_path: None,
+            owner: None,
+            group: None,
+            progress_pct: 45,
+            description: "Recording the installed Debian package version...".to_string(),
         },
         DeclarativeStep::EnsureSystemUser {
             username: "rclone".to_string(),
@@ -3383,218 +3341,6 @@ fn build_rclone_recipe() -> DeclarativePackageRecipe {
     }
 }
 
-fn build_clamav_recipe() -> DeclarativePackageRecipe {
-    let install_steps = vec![
-        DeclarativeStep::AptUpdate {
-            progress_pct: 15,
-            description: "Updating APT package indexes for ClamAV...".to_string(),
-        },
-        DeclarativeStep::AptInstall {
-            packages: vec![
-                "clamav".to_string(),
-                "clamav-daemon".to_string(),
-                "clamav-freshclam".to_string(),
-            ],
-            progress_pct: 50,
-            description: "Installing clamav, clamav-daemon, and clamav-freshclam...".to_string(),
-        },
-        DeclarativeStep::EnsureDirectories {
-            paths: vec![
-                "/var/lib/clamav".to_string(),
-                "/etc/clamav".to_string(),
-            ],
-            mode: 0o755,
-            owner: None,
-            group: None,
-            progress_pct: 68,
-            description: "Ensuring /var/lib/clamav and /etc/clamav directories...".to_string(),
-        },
-        DeclarativeStep::Systemctl {
-            unit: None,
-            operation: SystemctlOp::DaemonReload,
-            ignore_errors: false,
-            progress_pct: 80,
-            description: "Reloading systemd manager configuration...".to_string(),
-        },
-        DeclarativeStep::Systemctl {
-            unit: Some("clamav-freshclam.service".to_string()),
-            operation: SystemctlOp::EnableNow,
-            ignore_errors: true,
-            progress_pct: 88,
-            description: "Enabling and starting clamav-freshclam.service...".to_string(),
-        },
-        DeclarativeStep::Systemctl {
-            unit: Some("clamav-daemon.service".to_string()),
-            operation: SystemctlOp::EnableNow,
-            ignore_errors: false,
-            progress_pct: 94,
-            description: "Enabling and starting clamav-daemon.service...".to_string(),
-        },
-        DeclarativeStep::Systemctl {
-            unit: Some("clamav-daemon.service".to_string()),
-            operation: SystemctlOp::Restart,
-            ignore_errors: false,
-            progress_pct: 97,
-            description: "Restarting clamav-daemon.service...".to_string(),
-        },
-    ];
-    DeclarativePackageRecipe {
-        package_id: "clamav".to_string(),
-        label: "ClamAV".to_string(),
-        default_port: 0,
-        service_name: "clamav-daemon".to_string(),
-        lock_file: "/install/.clamav.lock".to_string(),
-        apply_systemd_sandbox: true,
-        update_steps: install_steps.clone(),
-        install_steps,
-        remove_steps: vec![
-            DeclarativeStep::PurgeSystemdUnit {
-                unit_name: "clamav-daemon.service".to_string(),
-                progress_pct: 20,
-                description: "Stopping and disabling clamav-daemon.service...".to_string(),
-            },
-            DeclarativeStep::PurgeSystemdUnit {
-                unit_name: "clamav-freshclam.service".to_string(),
-                progress_pct: 35,
-                description: "Stopping and disabling clamav-freshclam.service...".to_string(),
-            },
-            DeclarativeStep::AptPurge {
-                packages: vec![
-                    "clamav".to_string(),
-                    "clamav-daemon".to_string(),
-                    "clamav-freshclam".to_string(),
-                ],
-                autoremove: true,
-                ignore_errors: true,
-                progress_pct: 65,
-                description: "Purging ClamAV APT packages...".to_string(),
-            },
-            DeclarativeStep::RemovePaths {
-                paths: vec!["/var/lib/clamav".to_string(), "/etc/clamav".to_string()],
-                only_if_delete_data: true,
-                progress_pct: 85,
-                description: "Removing /var/lib/clamav state directory (when DELETE_DATA=true)...".to_string(),
-            },
-            DeclarativeStep::Systemctl {
-                unit: None,
-                operation: SystemctlOp::DaemonReload,
-                ignore_errors: true,
-                progress_pct: 95,
-                description: "Reloading systemd daemon after ClamAV removal...".to_string(),
-            },
-        ],
-    }
-}
-
-fn build_mosquitto_recipe() -> DeclarativePackageRecipe {
-    let install_steps = vec![
-        DeclarativeStep::AptUpdate {
-            progress_pct: 15,
-            description: "Updating APT package indexes for Mosquitto...".to_string(),
-        },
-        DeclarativeStep::AptInstall {
-            packages: vec![
-                "mosquitto".to_string(),
-                "mosquitto-clients".to_string(),
-            ],
-            progress_pct: 45,
-            description: "Installing mosquitto and mosquitto-clients...".to_string(),
-        },
-        DeclarativeStep::EnsureDirectories {
-            paths: vec![
-                "/etc/mosquitto".to_string(),
-                "/etc/mosquitto/conf.d".to_string(),
-                "/var/lib/mosquitto".to_string(),
-            ],
-            mode: 0o755,
-            owner: None,
-            group: None,
-            progress_pct: 62,
-            description: "Ensuring /etc/mosquitto and /var/lib/mosquitto directories...".to_string(),
-        },
-        DeclarativeStep::WriteTemplateFile {
-            path: "/etc/mosquitto/conf.d/aetherflow.conf".to_string(),
-            content_template: "listener 1883 127.0.0.1\nallow_anonymous false\npersistence true\npersistence_location /var/lib/mosquitto/\n".to_string(),
-            mode: 0o644,
-            overwrite: true,
-            owner: None,
-            group: None,
-            progress_pct: 75,
-            description: "Writing /etc/mosquitto/conf.d/aetherflow.conf...".to_string(),
-        },
-        DeclarativeStep::Systemctl {
-            unit: None,
-            operation: SystemctlOp::DaemonReload,
-            ignore_errors: false,
-            progress_pct: 84,
-            description: "Reloading systemd manager configuration...".to_string(),
-        },
-        DeclarativeStep::Systemctl {
-            unit: Some("mosquitto.service".to_string()),
-            operation: SystemctlOp::EnableNow,
-            ignore_errors: false,
-            progress_pct: 92,
-            description: "Enabling and starting mosquitto.service...".to_string(),
-        },
-        DeclarativeStep::Systemctl {
-            unit: Some("mosquitto.service".to_string()),
-            operation: SystemctlOp::Restart,
-            ignore_errors: false,
-            progress_pct: 96,
-            description: "Restarting mosquitto.service...".to_string(),
-        },
-    ];
-    DeclarativePackageRecipe {
-        package_id: "mosquitto".to_string(),
-        label: "Mosquitto".to_string(),
-        default_port: 1883,
-        service_name: "mosquitto".to_string(),
-        lock_file: "/install/.mosquitto.lock".to_string(),
-        apply_systemd_sandbox: true,
-        update_steps: install_steps.clone(),
-        install_steps,
-        remove_steps: vec![
-            DeclarativeStep::PurgeSystemdUnit {
-                unit_name: "mosquitto.service".to_string(),
-                progress_pct: 25,
-                description: "Stopping and disabling mosquitto.service...".to_string(),
-            },
-            DeclarativeStep::AptPurge {
-                packages: vec![
-                    "mosquitto".to_string(),
-                    "mosquitto-clients".to_string(),
-                ],
-                autoremove: true,
-                ignore_errors: true,
-                progress_pct: 60,
-                description: "Purging mosquitto APT packages...".to_string(),
-            },
-            DeclarativeStep::RemovePaths {
-                paths: vec!["/etc/mosquitto/conf.d/aetherflow.conf".to_string()],
-                only_if_delete_data: false,
-                progress_pct: 75,
-                description: "Removing Mosquitto AetherFlow drop-in config...".to_string(),
-            },
-            DeclarativeStep::RemovePaths {
-                paths: vec![
-                    "/var/lib/mosquitto".to_string(),
-                    "/etc/mosquitto".to_string(),
-                ],
-                only_if_delete_data: true,
-                progress_pct: 88,
-                description: "Removing Mosquitto persistence data (when DELETE_DATA=true)...".to_string(),
-            },
-            DeclarativeStep::Systemctl {
-                unit: None,
-                operation: SystemctlOp::DaemonReload,
-                ignore_errors: true,
-                progress_pct: 95,
-                description: "Reloading systemd daemon after Mosquitto removal...".to_string(),
-            },
-        ],
-    }
-}
-
 fn build_syncthing_recipe() -> DeclarativePackageRecipe {
     let install_steps = vec![
         DeclarativeStep::AptUpdate {
@@ -3609,6 +3355,15 @@ fn build_syncthing_recipe() -> DeclarativePackageRecipe {
             ],
             progress_pct: 40,
             description: "Installing syncthing APT package...".to_string(),
+        },
+        DeclarativeStep::CaptureDpkgVersion {
+            package: "syncthing".to_string(),
+            fallback_version: "unknown".to_string(),
+            version_file_path: None,
+            owner: None,
+            group: None,
+            progress_pct: 45,
+            description: "Recording the installed Debian package version...".to_string(),
         },
         DeclarativeStep::EnsureSystemUser {
             username: "syncthing".to_string(),
@@ -3776,8 +3531,8 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
         vars.insert("APP_LABEL".to_string(), recipe.label.clone());
         vars.insert("APP_PORT".to_string(), effective_port.to_string());
         vars.insert("SSH_PORT".to_string(), "ssh".to_string());
-        vars.insert("VERSION".to_string(), "1.0.0".to_string());
-        vars.insert("TAG".to_string(), "v1.0.0".to_string());
+        vars.insert("VERSION".to_string(), "unknown".to_string());
+        vars.insert("TAG".to_string(), "unknown".to_string());
         vars.insert("ARCH".to_string(), self.env_cfg.effective_arch());
 
         self.emit_event(
@@ -4162,10 +3917,11 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                 ignore_errors,
                 ..
             } => {
+                let operation = if self.env_cfg.delete_data { "purge" } else { "remove" };
                 let mut args = vec![
                     "-o".to_string(),
                     "DPkg::Lock::Timeout=120".to_string(),
-                    "purge".to_string(),
+                    operation.to_string(),
                     "-y".to_string(),
                     "-qq".to_string(),
                 ];
@@ -4198,7 +3954,7 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                         .run_command("apt-get", &ar_args, &apt_env, cancel)
                         .await;
                 }
-                Ok(format!("purged APT packages: {}", packages.join(", ")))
+                Ok(format!("{} APT packages: {}", operation, packages.join(", ")))
             }
 
             DeclarativeStep::EnsureSystemUser {
@@ -4256,6 +4012,9 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
             }
 
             DeclarativeStep::PurgeSystemUser { username, .. } => {
+                if !self.env_cfg.delete_data {
+                    return Ok(format!("retained system user {} with application data", username));
+                }
                 let _ = self
                     .runner
                     .run_command("userdel", &[username.clone()], &[], cancel)
@@ -5456,6 +5215,7 @@ pub fn execute_package_request_stream(
         let mut cmd = Command::new("bash");
         cmd.arg(&script_path)
             .env("DEBIAN_FRONTEND", "noninteractive")
+            .env("AF_PACKAGE_ACTION", req.action.as_str())
             .env("DPKG_LOCK_TIMEOUT", "120")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -5535,6 +5295,33 @@ mod tests {
     use flate2::write::GzEncoder;
     use flate2::Compression;
     use std::sync::atomic::AtomicUsize;
+
+    #[test]
+    fn test_registry_contains_catalog_packages_and_defers_incomplete_recipes() {
+        for id in list_declarative_recipe_ids() {
+            assert!(
+                crate::get_runner_package_definition(&id).is_some(),
+                "{}",
+                id
+            );
+            let recipe = get_declarative_recipe(&id).unwrap();
+            assert!(
+                recipe.install_steps.iter().any(|step| matches!(
+                    step,
+                    DeclarativeStep::CaptureDpkgVersion { .. }
+                        | DeclarativeStep::ResolveGitHubReleaseTag { .. }
+                )),
+                "{} must capture an installed version",
+                id
+            );
+        }
+        for id in ["scrutiny", "clamav", "mosquitto"] {
+            assert_eq!(
+                select_package_engine_with_flags(id, true, false),
+                PackageEngineMode::LegacyBashFallback
+            );
+        }
+    }
 
     #[test]
     fn test_atomic_writes_and_journal_backups_are_exclusive() {
@@ -5698,16 +5485,13 @@ mod tests {
         // must pass strict security validation and have full install, update, and remove steps.
         let ids = list_declarative_recipe_ids();
         let expected_ids = vec![
-            "clamav".to_string(),
             "fail2ban".to_string(),
             "mergerfs".to_string(),
-            "mosquitto".to_string(),
             "netdata".to_string(),
             "novnc".to_string(),
             "prometheus".to_string(),
             "quassel".to_string(),
             "rclone".to_string(),
-            "scrutiny".to_string(),
             "syncthing".to_string(),
             "threadfin".to_string(),
             "x2go".to_string(),
@@ -6130,7 +5914,11 @@ mod tests {
         // Seed custom SSH port in isolated /etc/ssh/sshd_config
         let sshd_cfg = root.join("etc/ssh/sshd_config");
         fs::create_dir_all(sshd_cfg.parent().unwrap()).unwrap();
-        fs::write(&sshd_cfg, "# OpenSSH config\nPort 2222\nPermitRootLogin no\n").unwrap();
+        fs::write(
+            &sshd_cfg,
+            "# OpenSSH config\nPort 2222\nPermitRootLogin no\n",
+        )
+        .unwrap();
 
         let mock = MockCommandRunner::default();
         let executor = DeclarativePackageExecutor::with_runner(env_cfg.clone(), mock.clone());
@@ -6196,7 +5984,30 @@ mod tests {
 
         assert!(!remove_outcome.lock_present);
         assert!(!root.join("install/.fail2ban.lock").exists());
+        assert!(root.join("etc/fail2ban/jail.local").is_file());
+        assert_eq!(outcome.resolved_version.as_deref(), Some("0.14.2"));
+        assert!(mock
+            .recorded_commands()
+            .iter()
+            .any(|command| command.program == "apt-get"
+                && command.args.iter().any(|arg| arg == "remove")));
+
+        let mut purge_env = env_cfg;
+        purge_env.delete_data = true;
+        let purge_executor = DeclarativePackageExecutor::with_runner(purge_env, mock.clone());
+        purge_executor
+            .execute_recipe(
+                &recipe,
+                PackageAction::Remove,
+                CancellationToken::new(),
+                |_| {},
+            )
+            .await
+            .expect("explicit purge should remove application data");
         assert!(!root.join("etc/fail2ban").exists());
+        assert!(mock.recorded_commands().iter().any(
+            |command| command.program == "apt-get" && command.args.iter().any(|arg| arg == "purge")
+        ));
 
         let _ = fs::remove_dir_all(&root);
     }

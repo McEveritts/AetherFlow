@@ -5,15 +5,17 @@
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
-    # shellcheck source=/dev/null
-    source /opt/AetherFlow/packages/common.sh
-else
+if [[ -f "${SELF_DIR}/../../common.sh" ]]; then
     # shellcheck source=/dev/null
     source "${SELF_DIR}/../../common.sh"
+else
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
 fi
 
 PACKAGE_NAME="transmission"
+APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-9091}}"
+export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
 mkdir -p "$(dirname "$LOGFILE")" /install
 
@@ -33,29 +35,20 @@ if ! id -u debian-transmission >/dev/null 2>&1; then
     useradd --system --user-group --no-create-home --home-dir /var/lib/transmission-daemon --shell /usr/sbin/nologin debian-transmission
 fi
 
-report_progress 45 "Configuring Transmission daemon on port 9091..."
+report_progress 45 "Configuring Transmission daemon on port ${APP_PORT}..."
 mkdir -p /var/lib/transmission-daemon/.config/transmission-daemon /var/lib/transmission-daemon/downloads /etc/transmission-daemon
 
-python3 - "${MASTER_USER}" "${MASTER_PASS}" > /var/lib/transmission-daemon/.config/transmission-daemon/settings.json <<'PYEOF'
-import sys, json
-user, pw = sys.argv[1], sys.argv[2]
-cfg = {
-    "download-dir": "/var/lib/transmission-daemon/downloads",
-    "incomplete-dir": "/var/lib/transmission-daemon/downloads",
-    "incomplete-dir-enabled": False,
-    "rpc-authentication-required": True,
-    "rpc-username": user,
-    "rpc-password": pw,
-    "rpc-bind-address": "0.0.0.0",
-    "rpc-enabled": True,
-    "rpc-host-whitelist-enabled": False,
-    "rpc-port": 9091,
-    "rpc-url": "/transmission/",
-    "rpc-whitelist": "127.0.0.1,::1,*.*.*.*",
-    "rpc-whitelist-enabled": False,
-    "umask": 2
-}
-print(json.dumps(cfg, indent=4))
+python3 - "${MASTER_USER}" "${MASTER_PASS}" <<'PYEOF'
+import os
+import sys, json, pathlib
+user, pw = (sys.argv[1], sys.argv[2])
+cfg = {'download-dir': '/var/lib/transmission-daemon/downloads', 'incomplete-dir': '/var/lib/transmission-daemon/downloads', 'incomplete-dir-enabled': False, 'rpc-authentication-required': True, 'rpc-username': user, 'rpc-password': pw, 'rpc-bind-address': '0.0.0.0', 'rpc-enabled': True, 'rpc-host-whitelist-enabled': False, 'rpc-port': int(os.environ['AF_APP_PORT']), 'rpc-url': '/transmission/', 'rpc-whitelist': '127.0.0.1,::1,*.*.*.*', 'rpc-whitelist-enabled': False, 'umask': 2}
+path = pathlib.Path('/var/lib/transmission-daemon/.config/transmission-daemon/settings.json')
+if path.exists():
+    existing = json.loads(path.read_text())
+    existing.update({key: value for key, value in cfg.items() if key.startswith('rpc-')})
+    cfg = existing
+path.write_text(json.dumps(cfg, indent=4))
 PYEOF
 cp -f /var/lib/transmission-daemon/.config/transmission-daemon/settings.json /etc/transmission-daemon/settings.json
 
@@ -103,5 +96,5 @@ systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now transmission-daemon >> "$LOGFILE" 2>&1
 
 write_lock "${PACKAGE_NAME}"
-report_progress 100 "Transmission installed on port 9091."
+report_progress 100 "Transmission installed on port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"

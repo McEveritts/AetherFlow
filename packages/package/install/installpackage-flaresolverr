@@ -5,15 +5,17 @@
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
-    # shellcheck source=/dev/null
-    source /opt/AetherFlow/packages/common.sh
-else
+if [[ -f "${SELF_DIR}/../../common.sh" ]]; then
     # shellcheck source=/dev/null
     source "${SELF_DIR}/../../common.sh"
+else
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
 fi
 
 PACKAGE_NAME="flaresolverr"
+APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-8191}}"
+export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
 mkdir -p "$(dirname "$LOGFILE")" /install
 
@@ -75,7 +77,7 @@ chown -R flaresolverr:flaresolverr /opt/flaresolverr /var/lib/flaresolverr
 
 CHROME_BIN="$(command -v chromium || command -v chromium-browser || echo /usr/bin/chromium)"
 
-report_progress 85 "Configuring and starting flaresolverr.service on port 8191..."
+report_progress 85 "Configuring and starting flaresolverr.service on port ${APP_PORT}..."
 cat <<EOF > /etc/systemd/system/flaresolverr.service
 [Unit]
 Description=FlareSolverr Proxy Daemon
@@ -86,7 +88,7 @@ User=flaresolverr
 Group=flaresolverr
 WorkingDirectory=/opt/flaresolverr
 Environment=HOST=0.0.0.0
-Environment=PORT=8191
+Environment=PORT=${APP_PORT}
 Environment=LOG_LEVEL=info
 Environment=HEADLESS=true
 Environment=CHROME_EXE=${CHROME_BIN}
@@ -104,5 +106,5 @@ systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now flaresolverr >> "$LOGFILE" 2>&1
 
 write_lock "${PACKAGE_NAME}"
-report_progress 100 "FlareSolverr installed on port 8191."
+report_progress 100 "FlareSolverr installed on port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"

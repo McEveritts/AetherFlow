@@ -5,19 +5,25 @@
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
-    # shellcheck source=/dev/null
-    source /opt/AetherFlow/packages/common.sh
-else
+if [[ -f "${SELF_DIR}/../../common.sh" ]]; then
     # shellcheck source=/dev/null
     source "${SELF_DIR}/../../common.sh"
+else
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
 fi
 
 PACKAGE_NAME="plex"
+APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-32400}}"
+export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
 mkdir -p "$(dirname "$LOGFILE")" /install
 
 require_root
+if [[ "$APP_PORT" != 32400 ]]; then
+    print_error "plex requires port 32400; refusing an unsupported port override"
+    exit 1
+fi
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 10 "Installing prerequisites for Plex Media Server..."
 
@@ -39,5 +45,5 @@ systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now plexmediaserver >> "$LOGFILE" 2>&1
 
 write_lock "${PACKAGE_NAME}"
-report_progress 100 "Plex Media Server installed on port 32400."
+report_progress 100 "Plex Media Server installed on port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"

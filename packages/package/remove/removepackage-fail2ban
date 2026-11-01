@@ -4,12 +4,12 @@
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
-    # shellcheck source=/dev/null
-    source /opt/AetherFlow/packages/common.sh
-else
+if [[ -f "${SELF_DIR}/../../common.sh" ]]; then
     # shellcheck source=/dev/null
     source "${SELF_DIR}/../../common.sh"
+else
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
 fi
 
 PACKAGE_NAME="fail2ban"
@@ -17,19 +17,24 @@ export LOGFILE="/var/log/aetherflow/remove-${PACKAGE_NAME}.log"
 mkdir -p "$(dirname "$LOGFILE")"
 
 require_root
+APT_REMOVE_ACTION=remove
+if [[ "${DELETE_DATA:-false}" == true ]]; then APT_REMOVE_ACTION=purge; fi
 log_info "Starting removal for ${PACKAGE_NAME}..."
 report_progress 20 "Stopping and disabling fail2ban.service..."
 
 purge_systemd_unit "fail2ban"
 
 report_progress 55 "Purging fail2ban APT package..."
-DEBIAN_FRONTEND=noninteractive apt-get purge -y -qq fail2ban >> "$LOGFILE" 2>&1 || true
+DEBIAN_FRONTEND=noninteractive apt-get "$APT_REMOVE_ACTION" -y -qq fail2ban >> "$LOGFILE" 2>&1 || true
 DEBIAN_FRONTEND=noninteractive apt-get autoremove -y -qq >> "$LOGFILE" 2>&1 || true
 
 report_progress 85 "Removing Fail2ban configuration and state directories..."
-rm -rf /etc/fail2ban /var/lib/fail2ban /var/run/fail2ban
+rm -rf /var/run/fail2ban
+if [[ "${DELETE_DATA:-false}" == true ]]; then
+    rm -rf /etc/fail2ban /var/lib/fail2ban
+fi
 systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
 
 remove_lock "${PACKAGE_NAME}"
-report_progress 100 "Fail2ban completely removed."
+report_progress 100 "Fail2ban removed; application data retained unless DELETE_DATA=true."
 log_info "${PACKAGE_NAME} removed successfully"

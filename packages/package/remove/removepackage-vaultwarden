@@ -4,12 +4,12 @@
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
-    # shellcheck source=/dev/null
-    source /opt/AetherFlow/packages/common.sh
-else
+if [[ -f "${SELF_DIR}/../../common.sh" ]]; then
     # shellcheck source=/dev/null
     source "${SELF_DIR}/../../common.sh"
+else
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
 fi
 
 PACKAGE_NAME="vaultwarden"
@@ -23,11 +23,15 @@ report_progress 25 "Stopping and removing vaultwarden.service..."
 purge_systemd_unit "vaultwarden"
 
 report_progress 65 "Removing Vaultwarden binaries, database, config, and user account..."
-rm -rf /opt/vaultwarden /var/lib/vaultwarden /etc/vaultwarden
-rm -f /opt/AetherFlow/logs/vaultwarden_admin_token.txt
+if [[ "${DELETE_DATA:-false}" == true ]]; then
+    rm -rf /opt/vaultwarden /var/lib/vaultwarden /etc/vaultwarden
+fi
+if [[ "${DELETE_DATA:-false}" == true ]]; then
+    rm -f /opt/AetherFlow/logs/vaultwarden_admin_token.txt
+fi
 purge_system_user "vaultwarden"
 systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
 
 remove_lock "${PACKAGE_NAME}"
-report_progress 100 "Vaultwarden completely removed."
+report_progress 100 "Vaultwarden removed; application data retained unless DELETE_DATA=true."
 log_info "${PACKAGE_NAME} removed successfully"

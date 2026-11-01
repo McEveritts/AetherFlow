@@ -5,15 +5,17 @@
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
-    # shellcheck source=/dev/null
-    source /opt/AetherFlow/packages/common.sh
-else
+if [[ -f "${SELF_DIR}/../../common.sh" ]]; then
     # shellcheck source=/dev/null
     source "${SELF_DIR}/../../common.sh"
+else
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
 fi
 
 PACKAGE_NAME="prowlarr"
+APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-9696}}"
+export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
 mkdir -p "$(dirname "$LOGFILE")" /install
 
@@ -51,6 +53,8 @@ rm -f "$TMP_TAR"
 if [[ -n "$PROWLARR_VERSION" ]]; then
     printf '%s\n' "${PROWLARR_VERSION#v}" > /opt/Prowlarr/.af-version
 fi
+set_config_value "/var/lib/prowlarr/config.xml" xml "Port" "$APP_PORT" "Config"
+
 chown -R prowlarr:prowlarr /opt/Prowlarr /var/lib/prowlarr
 
 report_progress 85 "Configuring and starting prowlarr.service..."
@@ -74,10 +78,12 @@ PrivateTmp=true
 WantedBy=multi-user.target
 EOF
 
+
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now prowlarr >> "$LOGFILE" 2>&1
-seed_servarr_master_user "prowlarr" 9696 "v1"
+systemctl restart prowlarr >> "$LOGFILE" 2>&1
+seed_servarr_master_user "prowlarr" ${APP_PORT} "v1"
 
 write_lock "${PACKAGE_NAME}"
-report_progress 100 "Prowlarr installed on port 9696."
+report_progress 100 "Prowlarr installed on port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"

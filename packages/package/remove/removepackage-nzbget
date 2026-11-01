@@ -4,12 +4,12 @@
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
-    # shellcheck source=/dev/null
-    source /opt/AetherFlow/packages/common.sh
-else
+if [[ -f "${SELF_DIR}/../../common.sh" ]]; then
     # shellcheck source=/dev/null
     source "${SELF_DIR}/../../common.sh"
+else
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
 fi
 
 PACKAGE_NAME="nzbget"
@@ -23,10 +23,13 @@ report_progress 25 "Stopping and removing nzbget.service..."
 purge_systemd_unit "nzbget"
 
 report_progress 65 "Removing NZBGet binaries, state directories, and user account..."
-rm -rf /opt/nzbget /var/lib/nzbget /usr/local/share/nzbget /usr/local/bin/nzbget /etc/nzbget.conf
+rm -rf /usr/local/share/nzbget /usr/local/bin/nzbget
+if [[ "${DELETE_DATA:-false}" == true ]]; then
+    rm -rf /opt/nzbget /var/lib/nzbget /etc/nzbget.conf
+fi
 purge_system_user "nzbget"
 systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
 
 remove_lock "${PACKAGE_NAME}"
-report_progress 100 "NZBGet completely removed."
+report_progress 100 "NZBGet removed; application data retained unless DELETE_DATA=true."
 log_info "${PACKAGE_NAME} removed successfully"

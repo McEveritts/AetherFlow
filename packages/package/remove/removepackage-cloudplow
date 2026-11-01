@@ -4,12 +4,12 @@
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
-    # shellcheck source=/dev/null
-    source /opt/AetherFlow/packages/common.sh
-else
+if [[ -f "${SELF_DIR}/../../common.sh" ]]; then
     # shellcheck source=/dev/null
     source "${SELF_DIR}/../../common.sh"
+else
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
 fi
 
 PACKAGE_NAME="cloudplow"
@@ -23,9 +23,12 @@ report_progress 25 "Stopping and removing cloudplow.service..."
 purge_systemd_unit "cloudplow"
 
 report_progress 65 "Removing Cloudplow virtualenv, configurations, and logs..."
-rm -rf /opt/cloudplow /var/log/cloudplow
+rm -rf /var/log/cloudplow
+if [[ "${DELETE_DATA:-false}" == true ]]; then
+    rm -rf /opt/cloudplow
+fi
 systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
 
 remove_lock "${PACKAGE_NAME}"
-report_progress 100 "Cloudplow completely removed."
+report_progress 100 "Cloudplow removed; application data retained unless DELETE_DATA=true."
 log_info "${PACKAGE_NAME} removed successfully"

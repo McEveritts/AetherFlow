@@ -5,19 +5,37 @@
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
-    # shellcheck source=/dev/null
-    source /opt/AetherFlow/packages/common.sh
-else
+if [[ -f "${SELF_DIR}/../../common.sh" ]]; then
     # shellcheck source=/dev/null
     source "${SELF_DIR}/../../common.sh"
+else
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
 fi
 
 PACKAGE_NAME="calibreweb"
+APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-8083}}"
+export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
 mkdir -p "$(dirname "$LOGFILE")" /install
 
 require_root
+if [[ "$APP_PORT" != 8083 ]]; then
+    # Existing installations may have changed the port in Calibre-Web's DB.
+    if ! python3 - /var/lib/calibre-web/app.db "$APP_PORT" <<'PYEOF'
+import pathlib, sqlite3, sys
+path = pathlib.Path(sys.argv[1])
+if not path.is_file():
+    sys.exit(1)
+with sqlite3.connect(path.as_uri() + '?mode=ro', uri=True) as connection:
+    row = connection.execute('SELECT config_port FROM settings LIMIT 1').fetchone()
+sys.exit(0 if row and str(row[0]) == sys.argv[2] else 1)
+PYEOF
+    then
+        print_error "Calibre-Web's requested port does not match its stored configuration"
+        exit 1
+    fi
+fi
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 10 "Installing Python and e-book parsing prerequisites..."
 
@@ -53,7 +71,7 @@ fi
 
 chown -R calibreweb:calibreweb /opt/calibre-web /var/lib/calibre-web /var/lib/calibre-library
 
-report_progress 85 "Configuring and starting calibreweb.service on port 8083..."
+report_progress 85 "Configuring and starting calibreweb.service on port ${APP_PORT}..."
 cat <<'EOF' > /etc/systemd/system/calibreweb.service
 [Unit]
 Description=Calibre-Web E-book Reader
@@ -76,5 +94,5 @@ systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now calibreweb >> "$LOGFILE" 2>&1
 
 write_lock "${PACKAGE_NAME}"
-report_progress 100 "Calibre-Web installed on port 8083."
+report_progress 100 "Calibre-Web installed on port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"

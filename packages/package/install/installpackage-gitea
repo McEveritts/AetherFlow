@@ -5,15 +5,16 @@
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
-    # shellcheck source=/dev/null
-    source /opt/AetherFlow/packages/common.sh
-else
+if [[ -f "${SELF_DIR}/../../common.sh" ]]; then
     # shellcheck source=/dev/null
     source "${SELF_DIR}/../../common.sh"
+else
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
 fi
 
 PACKAGE_NAME="gitea"
+APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-3002}}"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
 mkdir -p "$(dirname "$LOGFILE")" /install
 
@@ -22,7 +23,7 @@ log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 15 "Installing Git and SQLite dependencies for Gitea..."
 
 DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git curl sqlite3 ca-certificates >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git curl sqlite3 python3 ca-certificates >> "$LOGFILE" 2>&1
 
 if ! id -u gitea >/dev/null 2>&1; then
     useradd --system --user-group --create-home --home-dir /var/lib/gitea --shell /bin/bash gitea
@@ -43,11 +44,18 @@ GITEA_VERSION="$(github_latest_tag "go-gitea/gitea" "1.22.3")"
 GITEA_URL="https://github.com/go-gitea/gitea/releases/download/v${GITEA_VERSION}/gitea-${GITEA_VERSION}-${GITEA_ARCH}"
 
 report_progress 65 "Downloading Gitea ${GITEA_VERSION} binary..."
-curl -fsSL "$GITEA_URL" -o /usr/local/bin/gitea >> "$LOGFILE" 2>&1
-chmod +x /usr/local/bin/gitea
+TMP_BIN="$(mktemp /tmp/gitea-XXXXXX)"
+trap 'rm -f "$TMP_BIN"' EXIT
+curl -fsSL "$GITEA_URL" -o "$TMP_BIN" >> "$LOGFILE" 2>&1
+if [[ "$(od -An -tx1 -N4 "$TMP_BIN" | tr -d ' \n')" != "7f454c46" ]]; then
+    print_error "Gitea download is not an ELF binary"
+    exit 1
+fi
+systemctl stop gitea >> "$LOGFILE" 2>&1 || true
+install_binary_atomic "$TMP_BIN" /usr/local/bin/gitea
 
 if [[ ! -f /etc/gitea/app.ini ]]; then
-    cat <<'EOF' > /etc/gitea/app.ini
+    cat <<EOF > /etc/gitea/app.ini
 APP_NAME = Gitea: Git with a cup of tea
 RUN_USER = gitea
 RUN_MODE = prod
@@ -55,9 +63,9 @@ WORK_PATH = /var/lib/gitea
 
 [server]
 HTTP_ADDR = 0.0.0.0
-HTTP_PORT = 3002
+HTTP_PORT = ${APP_PORT}
 DOMAIN = localhost
-ROOT_URL = http://localhost:3002/
+ROOT_URL = http://localhost:${APP_PORT}/
 
 [database]
 DB_TYPE = sqlite3
@@ -71,16 +79,35 @@ ROOT_PATH = /var/lib/gitea/log
 [security]
 INSTALL_LOCK = true
 EOF
-else
-    sed -i 's/^HTTP_PORT\s*=.*/HTTP_PORT = 3002/' /etc/gitea/app.ini || true
 fi
+python3 - /etc/gitea/app.ini "$APP_PORT" <<'PYEOF'
+import pathlib, re, sys
+path = pathlib.Path(sys.argv[1])
+text = path.read_text()
+header = re.search(r'(?im)^\[server\][ \t]*$', text)
+if header is None:
+    text = text.rstrip() + '\n\n[server]\nHTTP_PORT = ' + sys.argv[2] + '\n'
+else:
+    start = header.end()
+    following = re.search(r'(?m)^\[', text[start:])
+    end = start + following.start() if following else len(text)
+    block = text[start:end]
+    pattern = r'(?im)^[ \t]*HTTP_PORT[ \t]*=.*$'
+    setting = 'HTTP_PORT = ' + sys.argv[2]
+    if re.search(pattern, block):
+        block = re.sub(pattern, lambda _: setting, block)
+    else:
+        block = '\n' + setting + '\n' + block.lstrip('\n')
+    text = text[:start] + block + text[end:]
+path.write_text(text)
+PYEOF
 
 chown -R gitea:gitea /var/lib/gitea
 chown -R root:gitea /etc/gitea
 chmod 770 /etc/gitea
 chmod 660 /etc/gitea/app.ini
 
-sudo -u gitea HOME=/var/lib/gitea GITEA_WORK_DIR=/var/lib/gitea /usr/local/bin/gitea migrate --config /etc/gitea/app.ini >> "$LOGFILE" 2>&1 || true
+sudo -u gitea HOME=/var/lib/gitea GITEA_WORK_DIR=/var/lib/gitea /usr/local/bin/gitea migrate --config /etc/gitea/app.ini >> "$LOGFILE" 2>&1
 sudo -u gitea HOME=/var/lib/gitea GITEA_WORK_DIR=/var/lib/gitea /usr/local/bin/gitea admin user create \
     --config /etc/gitea/app.ini \
     --username "${MASTER_USER}" \
@@ -89,7 +116,7 @@ sudo -u gitea HOME=/var/lib/gitea GITEA_WORK_DIR=/var/lib/gitea /usr/local/bin/g
     --admin \
     --must-change-password=false >> "$LOGFILE" 2>&1 || true
 
-report_progress 85 "Configuring and starting gitea.service on port 3002..."
+report_progress 85 "Configuring and starting gitea.service on port ${APP_PORT}..."
 cat <<'EOF' > /etc/systemd/system/gitea.service
 [Unit]
 Description=Gitea (Git with a cup of tea)
@@ -102,7 +129,7 @@ Type=simple
 User=gitea
 Group=gitea
 WorkingDirectory=/var/lib/gitea/
-ExecStart=/usr/local/bin/gitea web --config /etc/gitea/app.ini --port 3002
+ExecStart=/usr/local/bin/gitea web --config /etc/gitea/app.ini
 Restart=always
 Environment=USER=gitea HOME=/var/lib/gitea GITEA_WORK_DIR=/var/lib/gitea
 
@@ -112,7 +139,9 @@ EOF
 
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now gitea >> "$LOGFILE" 2>&1
+systemctl restart gitea >> "$LOGFILE" 2>&1
+printf '%s\n' "${GITEA_VERSION#v}" > /var/lib/gitea/.af-version
 
 write_lock "${PACKAGE_NAME}"
-report_progress 100 "Gitea installed on port 3002."
+report_progress 100 "Gitea installed on port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"

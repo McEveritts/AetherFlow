@@ -4,12 +4,12 @@
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
-    # shellcheck source=/dev/null
-    source /opt/AetherFlow/packages/common.sh
-else
+if [[ -f "${SELF_DIR}/../../common.sh" ]]; then
     # shellcheck source=/dev/null
     source "${SELF_DIR}/../../common.sh"
+else
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
 fi
 
 PACKAGE_NAME="overseerr"
@@ -23,10 +23,12 @@ report_progress 25 "Stopping and removing overseerr.service..."
 purge_systemd_unit "overseerr"
 
 report_progress 65 "Removing Overseerr files, config directory, and user account..."
-rm -rf /opt/overseerr /var/lib/overseerr
+if [[ "${DELETE_DATA:-false}" == true ]]; then
+    rm -rf /opt/overseerr /var/lib/overseerr
+fi
 purge_system_user "overseerr"
 systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
 
 remove_lock "${PACKAGE_NAME}"
-report_progress 100 "Overseerr completely removed."
+report_progress 100 "Overseerr removed; application data retained unless DELETE_DATA=true."
 log_info "${PACKAGE_NAME} removed successfully"

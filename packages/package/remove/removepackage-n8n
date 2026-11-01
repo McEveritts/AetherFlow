@@ -4,12 +4,12 @@
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
-    # shellcheck source=/dev/null
-    source /opt/AetherFlow/packages/common.sh
-else
+if [[ -f "${SELF_DIR}/../../common.sh" ]]; then
     # shellcheck source=/dev/null
     source "${SELF_DIR}/../../common.sh"
+else
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
 fi
 
 PACKAGE_NAME="n8n"
@@ -25,10 +25,13 @@ purge_systemd_unit "n8n"
 report_progress 65 "Uninstalling npm package and removing state directories..."
 npm uninstall -g n8n >> "$LOGFILE" 2>&1 || true
 rm -f /usr/bin/n8n /usr/local/bin/n8n
-rm -rf /var/lib/n8n /opt/n8n
+rm -rf /opt/n8n
+if [[ "${DELETE_DATA:-false}" == true ]]; then
+    rm -rf /var/lib/n8n
+fi
 purge_system_user "n8n"
 systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
 
 remove_lock "${PACKAGE_NAME}"
-report_progress 100 "n8n completely removed."
+report_progress 100 "n8n removed; application data retained unless DELETE_DATA=true."
 log_info "${PACKAGE_NAME} removed successfully"

@@ -5,15 +5,17 @@
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
-    # shellcheck source=/dev/null
-    source /opt/AetherFlow/packages/common.sh
-else
+if [[ -f "${SELF_DIR}/../../common.sh" ]]; then
     # shellcheck source=/dev/null
     source "${SELF_DIR}/../../common.sh"
+else
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
 fi
 
 PACKAGE_NAME="prometheus"
+APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-9090}}"
+export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
 mkdir -p "$(dirname "$LOGFILE")" /install
 
@@ -45,14 +47,17 @@ report_progress 30 "Downloading latest Prometheus (${PROM_ARCH})..."
 PROM_VERSION="$(github_latest_tag "prometheus/prometheus" "2.53.1")"
 PROM_URL="https://github.com/prometheus/prometheus/releases/download/v${PROM_VERSION}/prometheus-${PROM_VERSION}.${PROM_ARCH}.tar.gz"
 
-TMP_TAR=$(mktemp /tmp/prometheus-XXXXXX.tar.gz)
+TMP_DIR="$(mktemp -d /tmp/prometheus-extract-XXXXXX)"
+trap 'rm -rf "$TMP_DIR"' EXIT
+TMP_TAR="$TMP_DIR/prometheus.tar.gz"
 curl -fsSL "$PROM_URL" -o "$TMP_TAR" >> "$LOGFILE" 2>&1
-tar -xzf "$TMP_TAR" -C /tmp >> "$LOGFILE" 2>&1
+tar -xzf "$TMP_TAR" -C "$TMP_DIR" >> "$LOGFILE" 2>&1
 rm -f "$TMP_TAR"
 
-PROM_EXTRACTED="/tmp/prometheus-${PROM_VERSION}.${PROM_ARCH}"
-cp "${PROM_EXTRACTED}/prometheus" /usr/local/bin/
-cp "${PROM_EXTRACTED}/promtool" /usr/local/bin/
+PROM_EXTRACTED="$TMP_DIR/prometheus-${PROM_VERSION}.${PROM_ARCH}"
+systemctl stop prometheus node_exporter >> "$LOGFILE" 2>&1 || true
+install_binary_atomic "${PROM_EXTRACTED}/prometheus" /usr/local/bin/prometheus
+install_binary_atomic "${PROM_EXTRACTED}/promtool" /usr/local/bin/promtool
 if [[ -d "${PROM_EXTRACTED}/consoles" ]]; then
     cp -r "${PROM_EXTRACTED}/consoles" /etc/prometheus/
 fi
@@ -66,16 +71,17 @@ report_progress 60 "Downloading and installing Node Exporter..."
 NE_VERSION="$(github_latest_tag "prometheus/node_exporter" "1.8.2")"
 NE_URL="https://github.com/prometheus/node_exporter/releases/download/v${NE_VERSION}/node_exporter-${NE_VERSION}.${PROM_ARCH}.tar.gz"
 
-TMP_NE=$(mktemp /tmp/node_exporter-XXXXXX.tar.gz)
+TMP_NE="$TMP_DIR/node_exporter.tar.gz"
 curl -fsSL "$NE_URL" -o "$TMP_NE" >> "$LOGFILE" 2>&1
-tar -xzf "$TMP_NE" -C /tmp >> "$LOGFILE" 2>&1
+tar -xzf "$TMP_NE" -C "$TMP_DIR" >> "$LOGFILE" 2>&1
 rm -f "$TMP_NE"
 
-cp "/tmp/node_exporter-${NE_VERSION}.${PROM_ARCH}/node_exporter" /usr/local/bin/
-rm -rf "/tmp/node_exporter-${NE_VERSION}.${PROM_ARCH}"
+install_binary_atomic "$TMP_DIR/node_exporter-${NE_VERSION}.${PROM_ARCH}/node_exporter" /usr/local/bin/node_exporter
+rm -rf "$TMP_DIR/node_exporter-${NE_VERSION}.${PROM_ARCH}"
 chmod +x /usr/local/bin/node_exporter
 
-cat <<'EOF' > /etc/prometheus/prometheus.yml
+if [[ ! -f /etc/prometheus/prometheus.yml ]]; then
+sed "s/@AF_APP_PORT@/${APP_PORT}/g" <<'EOF' > /etc/prometheus/prometheus.yml
 global:
   scrape_interval: 15s
   evaluation_interval: 15s
@@ -83,19 +89,20 @@ global:
 scrape_configs:
   - job_name: 'prometheus'
     static_configs:
-      - targets: ['localhost:9090']
+      - targets: ['localhost:@AF_APP_PORT@']
 
   - job_name: 'node_exporter'
     static_configs:
       - targets: ['localhost:9100']
 EOF
+fi
 
 chown -R prometheus:prometheus /etc/prometheus /var/lib/prometheus
 chown prometheus:prometheus /usr/local/bin/prometheus /usr/local/bin/promtool
 chown node_exporter:node_exporter /usr/local/bin/node_exporter
 
 report_progress 85 "Configuring and starting prometheus.service and node_exporter.service..."
-cat <<'EOF' > /etc/systemd/system/prometheus.service
+sed "s/@AF_APP_PORT@/${APP_PORT}/g" <<'EOF' > /etc/systemd/system/prometheus.service
 [Unit]
 Description=Prometheus Monitoring Time-Series Database
 Wants=network-online.target
@@ -108,7 +115,7 @@ Type=simple
 ExecStart=/usr/local/bin/prometheus \
     --config.file /etc/prometheus/prometheus.yml \
     --storage.tsdb.path /var/lib/prometheus/ \
-    --web.listen-address=0.0.0.0:9090
+    --web.listen-address=0.0.0.0:@AF_APP_PORT@
 Restart=on-failure
 RestartSec=5
 
@@ -136,8 +143,10 @@ EOF
 
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now node_exporter >> "$LOGFILE" 2>&1
+systemctl restart node_exporter >> "$LOGFILE" 2>&1
 systemctl enable --now prometheus >> "$LOGFILE" 2>&1
+systemctl restart prometheus >> "$LOGFILE" 2>&1
 
 write_lock "${PACKAGE_NAME}"
-report_progress 100 "Prometheus installed on port 9090 (with Node Exporter on port 9100)."
+report_progress 100 "Prometheus installed on port ${APP_PORT} (with Node Exporter on port 9100)."
 log_info "${PACKAGE_NAME} installed successfully"

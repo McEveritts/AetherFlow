@@ -4,12 +4,12 @@
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
-    # shellcheck source=/dev/null
-    source /opt/AetherFlow/packages/common.sh
-else
+if [[ -f "${SELF_DIR}/../../common.sh" ]]; then
     # shellcheck source=/dev/null
     source "${SELF_DIR}/../../common.sh"
+else
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
 fi
 
 PACKAGE_NAME="plex"
@@ -17,21 +17,26 @@ export LOGFILE="/var/log/aetherflow/remove-${PACKAGE_NAME}.log"
 mkdir -p "$(dirname "$LOGFILE")"
 
 require_root
+APT_REMOVE_ACTION=remove
+if [[ "${DELETE_DATA:-false}" == true ]]; then APT_REMOVE_ACTION=purge; fi
 log_info "Starting removal for ${PACKAGE_NAME}..."
 report_progress 20 "Stopping and disabling plexmediaserver service..."
 
 purge_systemd_unit "plexmediaserver"
 
 report_progress 50 "Purging plexmediaserver APT package and repositories..."
-DEBIAN_FRONTEND=noninteractive apt-get purge -y -qq plexmediaserver >> "$LOGFILE" 2>&1 || true
+DEBIAN_FRONTEND=noninteractive apt-get "$APT_REMOVE_ACTION" -y -qq plexmediaserver >> "$LOGFILE" 2>&1 || true
 DEBIAN_FRONTEND=noninteractive apt-get autoremove -y -qq >> "$LOGFILE" 2>&1 || true
 rm -f /etc/apt/sources.list.d/plexmediaserver.list /etc/apt/keyrings/plex.gpg
 
 report_progress 80 "Removing Plex data, caches, and user account..."
-rm -rf /var/lib/plexmediaserver /usr/lib/plexmediaserver /etc/default/plexmediaserver
+rm -rf /usr/lib/plexmediaserver
+if [[ "${DELETE_DATA:-false}" == true ]]; then
+    rm -rf /var/lib/plexmediaserver /etc/default/plexmediaserver
+fi
 purge_system_user "plex"
 systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
 
 remove_lock "${PACKAGE_NAME}"
-report_progress 100 "Plex Media Server completely removed."
+report_progress 100 "Plex Media Server removed; application data retained unless DELETE_DATA=true."
 log_info "${PACKAGE_NAME} removed successfully"

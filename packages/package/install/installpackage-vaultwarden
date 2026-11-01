@@ -5,15 +5,17 @@
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
-    # shellcheck source=/dev/null
-    source /opt/AetherFlow/packages/common.sh
-else
+if [[ -f "${SELF_DIR}/../../common.sh" ]]; then
     # shellcheck source=/dev/null
     source "${SELF_DIR}/../../common.sh"
+else
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
 fi
 
 PACKAGE_NAME="vaultwarden"
+APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-8343}}"
+export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
 mkdir -p "$(dirname "$LOGFILE")" /install /opt/AetherFlow/logs
 
@@ -85,14 +87,14 @@ rm -rf "$TMP_EXTRACT"
 
 printf '%s\n' "${VW_VERSION#v}" > /opt/vaultwarden/.af-version
 
-report_progress 75 "Configuring Vaultwarden environment on port 8343..."
+report_progress 75 "Configuring Vaultwarden environment on port ${APP_PORT}..."
 ADMIN_TOKEN="${MASTER_PASS}"
 cat <<EOF > /etc/vaultwarden/vaultwarden.env
 DATA_FOLDER=/var/lib/vaultwarden/data
 WEB_VAULT_FOLDER=/opt/vaultwarden/web-vault
 WEB_VAULT_ENABLED=true
 ROCKET_ADDRESS=0.0.0.0
-ROCKET_PORT=8343
+ROCKET_PORT=${APP_PORT}
 SIGNUPS_ALLOWED=true
 INVITATIONS_ALLOWED=true
 SHOW_PASSWORD_HINT=false
@@ -106,7 +108,7 @@ chown -R vaultwarden:vaultwarden /opt/vaultwarden /var/lib/vaultwarden
 chown root:vaultwarden /etc/vaultwarden/vaultwarden.env
 chmod 640 /etc/vaultwarden/vaultwarden.env
 
-report_progress 90 "Configuring and starting vaultwarden.service on port 8343..."
+report_progress 90 "Configuring and starting vaultwarden.service on port ${APP_PORT}..."
 cat <<'EOF' > /etc/systemd/system/vaultwarden.service
 [Unit]
 Description=Vaultwarden Server (Bitwarden compatible)
@@ -138,5 +140,5 @@ systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now vaultwarden >> "$LOGFILE" 2>&1
 
 write_lock "${PACKAGE_NAME}"
-report_progress 100 "Vaultwarden installed on port 8343."
+report_progress 100 "Vaultwarden installed on port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"

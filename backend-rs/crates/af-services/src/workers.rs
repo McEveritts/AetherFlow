@@ -352,21 +352,15 @@ fn collect_monitored_systemd_units() -> Vec<(String, String)> {
                 continue;
             }
 
-            let unit = if pkg.service_name.trim().is_empty() {
-                pkg.name.clone()
-            } else {
-                pkg.service_name.trim().to_string()
-            };
-            if unit.is_empty() || unit.contains('@') {
-                continue;
-            }
-            if seen.insert(unit.clone()) {
-                let label = if pkg.label.trim().is_empty() {
-                    pkg.name.clone()
-                } else {
-                    pkg.label.clone()
-                };
-                units.push((unit, label));
+            for unit in crate::resolve_service_units(&pkg.name) {
+                if seen.insert(unit.clone()) {
+                    let label = if pkg.label.trim().is_empty() {
+                        pkg.name.clone()
+                    } else {
+                        pkg.label.clone()
+                    };
+                    units.push((unit, label));
+                }
             }
         }
     }
@@ -386,17 +380,21 @@ async fn check_systemd_unit_healthy(unit: &str) -> Option<bool> {
     .ok()?
     .ok()?;
 
-    let status_text = String::from_utf8_lossy(&output.stdout).trim().to_lowercase();
+    let status_text = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .to_lowercase();
     match status_text.as_str() {
         "active" | "activating" | "reloading" => Some(true),
         "deactivating" => None,
         "failed" | "inactive" => {
-            // Verify unit actually exists on the system before treating "inactive" as crashed
-            if status_text == "inactive" {
+            // Inactive oneshot jobs are healthy between timer/mount invocations.
+            // Query unit metadata for failed jobs too, rather than restarting a
+            // scheduled collector outside its timer's schedule.
+            {
                 if let Ok(Ok(load_out)) = tokio::time::timeout(
                     Duration::from_secs(5),
                     Command::new("systemctl")
-                        .args(["show", "-p", "LoadState", "--value", unit])
+                        .args(["show", "-p", "LoadState", "-p", "Type", unit])
                         .output(),
                 )
                 .await
@@ -404,9 +402,11 @@ async fn check_systemd_unit_healthy(unit: &str) -> Option<bool> {
                     let load_state = String::from_utf8_lossy(&load_out.stdout)
                         .trim()
                         .to_lowercase();
-                    if load_state == "not-found" || load_state.is_empty() {
+                    if !load_out.status.success() || !unit_metadata_allows_recovery(&load_state) {
                         return None;
                     }
+                } else {
+                    return None;
                 }
             }
             Some(false)
@@ -415,11 +415,30 @@ async fn check_systemd_unit_healthy(unit: &str) -> Option<bool> {
     }
 }
 
+fn unit_metadata_allows_recovery(metadata: &str) -> bool {
+    metadata
+        .lines()
+        .any(|line| line.trim() == "loadstate=loaded")
+        && !metadata.lines().any(|line| line.trim() == "type=oneshot")
+}
+
 async fn perform_heal_check() {
     let units = collect_monitored_systemd_units();
     let now = Instant::now();
 
     for (unit, display_name) in units {
+        let Ok(_lifecycle_guard) = crate::PACKAGE_LIFECYCLE_MUTEX.try_lock() else {
+            if let Ok(mut states) = HEAL_STATES.lock() {
+                states.clear();
+            }
+            return;
+        };
+        if crate::has_active_package_jobs() || af_runner::is_package_execution_active(&unit) {
+            if let Ok(mut states) = HEAL_STATES.lock() {
+                states.clear();
+            }
+            return;
+        }
         let Some(is_healthy) = check_systemd_unit_healthy(&unit).await else {
             continue;
         };
@@ -502,8 +521,13 @@ async fn perform_heal_check() {
             "af-heal: attempting automatic service restart"
         );
 
-        match crate::control_service(&unit, "restart").await {
-            Ok(()) => {
+        match af_runner::dispatch_heal_restart(&unit).await {
+            Ok(false) => {
+                if let Ok(mut states) = HEAL_STATES.lock() {
+                    states.remove(&unit);
+                }
+            }
+            Ok(true) => {
                 tracing::info!(
                     unit = %unit,
                     service = %display_name,
@@ -1581,6 +1605,21 @@ fn record_mediaflow_failure(job_id: i64, reason: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_health_recovery_excludes_scheduled_oneshot_jobs() {
+        assert!(!unit_metadata_allows_recovery(
+            "loadstate=loaded\ntype=oneshot\n"
+        ));
+        assert!(!unit_metadata_allows_recovery(
+            "loadstate=not-found\ntype=simple\n"
+        ));
+        assert!(!unit_metadata_allows_recovery(""));
+        assert!(unit_metadata_allows_recovery(
+            "type=simple\nloadstate=loaded\n"
+        ));
+        assert!(unit_metadata_allows_recovery("loadstate=loaded\n")); // timers
+    }
 
     #[test]
     fn test_metrics_columns_use_the_supplied_connection() {

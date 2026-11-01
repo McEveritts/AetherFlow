@@ -5,15 +5,17 @@
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
-    # shellcheck source=/dev/null
-    source /opt/AetherFlow/packages/common.sh
-else
+if [[ -f "${SELF_DIR}/../../common.sh" ]]; then
     # shellcheck source=/dev/null
     source "${SELF_DIR}/../../common.sh"
+else
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
 fi
 
 PACKAGE_NAME="n8n"
+APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-5678}}"
+export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
 mkdir -p "$(dirname "$LOGFILE")" /install
 
@@ -51,7 +53,7 @@ chown -R n8n:n8n /var/lib/n8n /opt/n8n
 NODE_PATH="$(command -v node || echo /usr/bin/node)"
 N8N_BIN="$(command -v n8n || echo /usr/local/bin/n8n)"
 
-report_progress 85 "Configuring and starting n8n.service on port 5678..."
+report_progress 85 "Configuring and starting n8n.service on port ${APP_PORT}..."
 cat <<EOF > /etc/systemd/system/n8n.service
 [Unit]
 Description=n8n - Workflow Automation Tool
@@ -61,7 +63,7 @@ After=network.target
 Type=simple
 User=n8n
 Group=n8n
-Environment=N8N_PORT=5678
+Environment=N8N_PORT=${APP_PORT}
 Environment=N8N_LISTEN_ADDRESS=0.0.0.0
 Environment=N8N_USER_FOLDER=/var/lib/n8n
 Environment=N8N_PROXY_HOPS=1
@@ -79,5 +81,5 @@ systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now n8n >> "$LOGFILE" 2>&1
 
 write_lock "${PACKAGE_NAME}"
-report_progress 100 "n8n installed on port 5678."
+report_progress 100 "n8n installed on port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"

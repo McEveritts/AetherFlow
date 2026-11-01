@@ -4,12 +4,12 @@
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
-    # shellcheck source=/dev/null
-    source /opt/AetherFlow/packages/common.sh
-else
+if [[ -f "${SELF_DIR}/../../common.sh" ]]; then
     # shellcheck source=/dev/null
     source "${SELF_DIR}/../../common.sh"
+else
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
 fi
 
 PACKAGE_NAME="filebrowser"
@@ -23,11 +23,16 @@ report_progress 25 "Stopping and removing filebrowser.service..."
 purge_systemd_unit "filebrowser"
 
 report_progress 65 "Removing File Browser binary, database, and user account..."
-rm -f /usr/local/bin/filebrowser /opt/AetherFlow/logs/filebrowser_credentials.txt
-rm -rf /opt/filebrowser
+rm -f /usr/local/bin/filebrowser
+if [[ "${DELETE_DATA:-false}" == true ]]; then
+    rm -f /opt/AetherFlow/logs/filebrowser_credentials.txt
+fi
+if [[ "${DELETE_DATA:-false}" == true ]]; then
+    rm -rf /opt/filebrowser
+fi
 purge_system_user "filebrowser"
 systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
 
 remove_lock "${PACKAGE_NAME}"
-report_progress 100 "File Browser completely removed."
+report_progress 100 "File Browser removed; application data retained unless DELETE_DATA=true."
 log_info "${PACKAGE_NAME} removed successfully"

@@ -5,15 +5,17 @@
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
-    # shellcheck source=/dev/null
-    source /opt/AetherFlow/packages/common.sh
-else
+if [[ -f "${SELF_DIR}/../../common.sh" ]]; then
     # shellcheck source=/dev/null
     source "${SELF_DIR}/../../common.sh"
+else
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
 fi
 
 PACKAGE_NAME="audiobookshelf"
+APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-13378}}"
+export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
 mkdir -p "$(dirname "$LOGFILE")" /install
 
@@ -62,8 +64,8 @@ printf '%s\n' "${ABS_VERSION#v}" > /opt/audiobookshelf/.af-version
 
 chown -R audiobookshelf:audiobookshelf /var/lib/audiobookshelf /var/cache/audiobookshelf /etc/audiobookshelf /opt/audiobookshelf
 
-report_progress 85 "Configuring audiobookshelf.service environment on port 13378..."
-cat <<'EOF' > /etc/systemd/system/audiobookshelf.service
+report_progress 85 "Configuring audiobookshelf.service environment on port ${APP_PORT}..."
+sed "s/@AF_APP_PORT@/${APP_PORT}/g" <<'EOF' > /etc/systemd/system/audiobookshelf.service
 [Unit]
 Description=Audiobookshelf Server
 After=network.target
@@ -72,7 +74,7 @@ After=network.target
 Type=simple
 User=audiobookshelf
 Group=audiobookshelf
-Environment=PORT=13378
+Environment=PORT=@AF_APP_PORT@
 Environment=HOST=0.0.0.0
 Environment=CONFIG_PATH=/var/lib/audiobookshelf
 Environment=METADATA_PATH=/var/cache/audiobookshelf
@@ -87,26 +89,22 @@ EOF
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now audiobookshelf >> "$LOGFILE" 2>&1
 python3 - "${MASTER_USER}" "${MASTER_PASS}" >> "$LOGFILE" 2>&1 <<'PYEOF' || true
+import os
 import sys, time, json, urllib.request
-user, pw = sys.argv[1], sys.argv[2]
+user, pw = (sys.argv[1], sys.argv[2])
 for _ in range(30):
     try:
-        with urllib.request.urlopen("http://127.0.0.1:13378/status", timeout=3) as r:
-            st = json.loads(r.read().decode("utf-8"))
-            if st.get("isInit") is True:
+        with urllib.request.urlopen('http://127.0.0.1:13378/status'.replace('13378', os.environ['AF_APP_PORT']), timeout=3) as r:
+            st = json.loads(r.read().decode('utf-8'))
+            if st.get('isInit') is True:
                 sys.exit(0)
             break
     except Exception:
         time.sleep(1)
-req = urllib.request.Request(
-    "http://127.0.0.1:13378/init",
-    data=json.dumps({"newRoot": {"username": user, "password": pw}}).encode("utf-8"),
-    headers={"Content-Type": "application/json"},
-    method="POST"
-)
+req = urllib.request.Request('http://127.0.0.1:13378/init'.replace('13378', os.environ['AF_APP_PORT']), data=json.dumps({'newRoot': {'username': user, 'password': pw}}).encode('utf-8'), headers={'Content-Type': 'application/json'}, method='POST')
 urllib.request.urlopen(req, timeout=10).read()
 PYEOF
 
 write_lock "${PACKAGE_NAME}"
-report_progress 100 "Audiobookshelf installed on port 13378."
+report_progress 100 "Audiobookshelf installed on port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"

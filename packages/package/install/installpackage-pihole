@@ -5,15 +5,17 @@
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
-    # shellcheck source=/dev/null
-    source /opt/AetherFlow/packages/common.sh
-else
+if [[ -f "${SELF_DIR}/../../common.sh" ]]; then
     # shellcheck source=/dev/null
     source "${SELF_DIR}/../../common.sh"
+else
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
 fi
 
 PACKAGE_NAME="pihole"
+APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-8089}}"
+export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
 mkdir -p "$(dirname "$LOGFILE")" /install
 
@@ -65,15 +67,15 @@ if command_exists pihole; then
     pihole setpassword "${MASTER_PASS}" >> "$LOGFILE" 2>&1 || pihole -a -p "${MASTER_PASS}" >> "$LOGFILE" 2>&1 || true
 fi
 
-report_progress 85 "Configuring Pi-hole Web Admin interface on port 8089..."
+report_progress 85 "Configuring Pi-hole Web Admin interface on port ${APP_PORT}..."
 # Support both Pi-hole v6 (embedded pihole-FTL webserver) and v5 (lighttpd)
 if command_exists pihole-FTL && [[ -f /etc/pihole/pihole.toml ]]; then
-    pihole-FTL --config webserver.port "8089o" >> "$LOGFILE" 2>&1 || sed -i 's/port = "80o,.*/port = "8089o"/g' /etc/pihole/pihole.toml || true
+    pihole-FTL --config webserver.port "${APP_PORT}o" >> "$LOGFILE" 2>&1 || sed -i 's/port = "80o,.*/port = "'"${APP_PORT}"'o"/g' /etc/pihole/pihole.toml || true
 fi
 if [[ -d /etc/lighttpd ]]; then
-    echo 'server.port := 8089' > /etc/lighttpd/external.conf
+    echo 'server.port := '"${APP_PORT}"'' > /etc/lighttpd/external.conf
     if [[ -d /etc/lighttpd/conf-enabled ]]; then
-        echo 'server.port := 8089' > /etc/lighttpd/conf-enabled/99-pihole-port.conf
+        echo 'server.port := '"${APP_PORT}"'' > /etc/lighttpd/conf-enabled/99-pihole-port.conf
     fi
     systemctl restart lighttpd >> "$LOGFILE" 2>&1 || true
 fi
@@ -83,5 +85,5 @@ systemctl enable --now pihole-FTL >> "$LOGFILE" 2>&1
 systemctl restart pihole-FTL >> "$LOGFILE" 2>&1 || true
 
 write_lock "${PACKAGE_NAME}"
-report_progress 100 "Pi-hole installed on Web port 8089 (/admin) and DNS port 53."
+report_progress 100 "Pi-hole installed on Web port ${APP_PORT} (/admin) and DNS port 53."
 log_info "${PACKAGE_NAME} installed successfully"

@@ -4,12 +4,12 @@
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
-    # shellcheck source=/dev/null
-    source /opt/AetherFlow/packages/common.sh
-else
+if [[ -f "${SELF_DIR}/../../common.sh" ]]; then
     # shellcheck source=/dev/null
     source "${SELF_DIR}/../../common.sh"
+else
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
 fi
 
 PACKAGE_NAME="emby"
@@ -17,20 +17,24 @@ export LOGFILE="/var/log/aetherflow/remove-${PACKAGE_NAME}.log"
 mkdir -p "$(dirname "$LOGFILE")"
 
 require_root
+APT_REMOVE_ACTION=remove
+if [[ "${DELETE_DATA:-false}" == true ]]; then APT_REMOVE_ACTION=purge; fi
 log_info "Starting removal for ${PACKAGE_NAME}..."
 report_progress 20 "Stopping and disabling emby-server service..."
 
 purge_systemd_unit "emby-server"
 
 report_progress 50 "Purging emby-server package..."
-DEBIAN_FRONTEND=noninteractive apt-get purge -y -qq emby-server >> "$LOGFILE" 2>&1 || dpkg --purge emby-server >> "$LOGFILE" 2>&1 || true
+DEBIAN_FRONTEND=noninteractive apt-get "$APT_REMOVE_ACTION" -y -qq emby-server >> "$LOGFILE" 2>&1 || dpkg "--$APT_REMOVE_ACTION" emby-server >> "$LOGFILE" 2>&1 || true
 DEBIAN_FRONTEND=noninteractive apt-get autoremove -y -qq >> "$LOGFILE" 2>&1 || true
 
 report_progress 80 "Removing Emby binaries, data directories, and user account..."
-rm -rf /opt/emby-server /var/lib/emby /var/lib/emby-server /etc/emby-server.conf
+if [[ "${DELETE_DATA:-false}" == true ]]; then
+    rm -rf /opt/emby-server /var/lib/emby /var/lib/emby-server /etc/emby-server.conf
+fi
 purge_system_user "emby"
 systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
 
 remove_lock "${PACKAGE_NAME}"
-report_progress 100 "Emby Server completely removed."
+report_progress 100 "Emby Server removed; application data retained unless DELETE_DATA=true."
 log_info "${PACKAGE_NAME} removed successfully"

@@ -55,7 +55,7 @@ static SAFE_ENDPOINT_REGEX: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^[a-zA-Z0-9_.:-]+$").unwrap());
 
 static ALLOWED_SERVICE_ACTIONS: Lazy<HashSet<&'static str>> =
-    Lazy::new(|| ["start", "stop", "restart", "reload", "enable", "disable", "status"].into());
+    Lazy::new(|| ["start", "stop", "restart", "reload", "enable", "disable", "status", "heal"].into());
 static ALLOWED_NETWORK_ACTIONS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
     ["wg_show", "wg_add_peer", "wg_remove_peer", "tailscale_set_routes"].into()
 });
@@ -185,9 +185,7 @@ async fn handle_health() -> Json<RunnerResponse> {
     })
 }
 
-async fn handle_systemctl(
-    Json(req): Json<SystemctlRequest>,
-) -> (StatusCode, Json<RunnerResponse>) {
+async fn handle_systemctl(Json(req): Json<SystemctlRequest>) -> (StatusCode, Json<RunnerResponse>) {
     if !ALLOWED_SERVICE_ACTIONS.contains(req.action.as_str()) {
         return (
             StatusCode::BAD_REQUEST,
@@ -209,10 +207,61 @@ async fn handle_systemctl(
         );
     }
 
+    // Automatic recovery shares both locks with privileged package execution.
+    // The persistent flock file's existence alone never means a job is active.
+    let _heal_mutex;
+    let _heal_flock;
+    let action = if req.action == "heal" {
+        _heal_mutex = match PACKAGE_MUTEX.try_lock() {
+            Ok(guard) => Some(guard),
+            Err(_) => {
+                return (
+                    StatusCode::OK,
+                    Json(RunnerResponse {
+                        success: true,
+                        output: "skipped".into(),
+                        error: String::new(),
+                    }),
+                )
+            }
+        };
+        _heal_flock = match package_executor::CrossProcessLockGuard::try_acquire(
+            &PackageExecutionEnv::default(),
+            "af-heal",
+        ) {
+            Ok(guard) => Some(guard),
+            Err(PackageExecutorError::LockConflict(_)) => {
+                return (
+                    StatusCode::OK,
+                    Json(RunnerResponse {
+                        success: true,
+                        output: "skipped".into(),
+                        error: String::new(),
+                    }),
+                )
+            }
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(RunnerResponse {
+                        success: false,
+                        output: String::new(),
+                        error: error.to_string(),
+                    }),
+                )
+            }
+        };
+        "restart"
+    } else {
+        _heal_mutex = None;
+        _heal_flock = None;
+        req.action.as_str()
+    };
+
     match tokio::time::timeout(
         Duration::from_secs(45),
         Command::new("systemctl")
-            .arg(&req.action)
+            .arg(action)
             .arg("--")
             .arg(&req.service)
             .output(),
@@ -2511,6 +2560,27 @@ async fn post_runner_json<T: Serialize + ?Sized>(
     )
 }
 
+pub async fn dispatch_heal_restart(service_name: &str) -> anyhow::Result<bool> {
+    let req = SystemctlRequest {
+        service: service_name.to_string(),
+        action: "heal".to_string(),
+    };
+    let result = if is_runner_available() {
+        post_runner_json("/v1/systemctl", &req, Duration::from_secs(45)).await?
+    } else {
+        let (_, Json(result)) = handle_systemctl(Json(req)).await;
+        result
+    };
+    if !result.success {
+        anyhow::bail!(
+            "runner recovery error: {} ({})",
+            result.error,
+            result.output
+        );
+    }
+    Ok(result.output != "skipped")
+}
+
 pub async fn dispatch_systemctl(service_name: &str, action: &str) -> anyhow::Result<()> {
     let req = SystemctlRequest {
         service: service_name.to_string(),
@@ -2928,6 +2998,19 @@ pub async fn run_privileged_daemon() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn test_heal_restart_skips_active_package_operation() {
+        let _operation = PACKAGE_MUTEX.lock().await;
+        let (status, Json(response)) = handle_systemctl(Json(SystemctlRequest {
+            service: "gitea".into(),
+            action: "heal".into(),
+        }))
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(response.success);
+        assert_eq!(response.output, "skipped");
+    }
 
     #[test]
     fn test_package_output_propagates_failure_markers() {

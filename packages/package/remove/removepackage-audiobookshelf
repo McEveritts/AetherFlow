@@ -4,12 +4,12 @@
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
-    # shellcheck source=/dev/null
-    source /opt/AetherFlow/packages/common.sh
-else
+if [[ -f "${SELF_DIR}/../../common.sh" ]]; then
     # shellcheck source=/dev/null
     source "${SELF_DIR}/../../common.sh"
+else
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
 fi
 
 PACKAGE_NAME="audiobookshelf"
@@ -24,10 +24,13 @@ purge_systemd_unit "audiobookshelf"
 
 report_progress 65 "Removing Audiobookshelf package, state directories, and user account..."
 DEBIAN_FRONTEND=noninteractive dpkg -r audiobookshelf >> "$LOGFILE" 2>&1 || true
-rm -rf /opt/audiobookshelf /var/lib/audiobookshelf /var/cache/audiobookshelf /etc/audiobookshelf /etc/apt/sources.list.d/audiobookshelf.list /usr/share/keyrings/audiobookshelf-keyring.gpg
+rm -rf /var/cache/audiobookshelf /usr/share/keyrings/audiobookshelf-keyring.gpg
+if [[ "${DELETE_DATA:-false}" == true ]]; then
+    rm -rf /opt/audiobookshelf /var/lib/audiobookshelf /etc/audiobookshelf /etc/apt/sources.list.d/audiobookshelf.list
+fi
 purge_system_user "audiobookshelf"
 systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
 
 remove_lock "${PACKAGE_NAME}"
-report_progress 100 "Audiobookshelf completely removed."
+report_progress 100 "Audiobookshelf removed; application data retained unless DELETE_DATA=true."
 log_info "${PACKAGE_NAME} removed successfully"

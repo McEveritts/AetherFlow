@@ -5,15 +5,17 @@
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
-    # shellcheck source=/dev/null
-    source /opt/AetherFlow/packages/common.sh
-else
+if [[ -f "${SELF_DIR}/../../common.sh" ]]; then
     # shellcheck source=/dev/null
     source "${SELF_DIR}/../../common.sh"
+else
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
 fi
 
 PACKAGE_NAME="autobrr"
+APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-7474}}"
+export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
 mkdir -p "$(dirname "$LOGFILE")" /install
 
@@ -45,7 +47,12 @@ AB_URL="https://github.com/autobrr/autobrr/releases/download/v${AB_VERSION}/auto
 report_progress 65 "Downloading and installing Autobrr ${AB_VERSION}..."
 TMP_TAR=$(mktemp /tmp/autobrr-XXXXXX.tar.gz)
 curl -fsSL "$AB_URL" -o "$TMP_TAR" >> "$LOGFILE" 2>&1
-tar -xzf "$TMP_TAR" -C /usr/local/bin autobrr autobrrctl >> "$LOGFILE" 2>&1
+TMP_DIR="$(mktemp -d /tmp/autobrr-extract-XXXXXX)"
+trap 'rm -rf "$TMP_DIR"; rm -f "$TMP_TAR"' EXIT
+tar -xzf "$TMP_TAR" -C "$TMP_DIR" autobrr autobrrctl >> "$LOGFILE" 2>&1
+systemctl stop autobrr >> "$LOGFILE" 2>&1 || true
+install_binary_atomic "$TMP_DIR/autobrr" /usr/local/bin/autobrr
+install_binary_atomic "$TMP_DIR/autobrrctl" /usr/local/bin/autobrrctl
 rm -f "$TMP_TAR"
 chmod +x /usr/local/bin/autobrr /usr/local/bin/autobrrctl
 printf '%s\n' "${AB_VERSION#v}" > /var/lib/autobrr/.af-version
@@ -54,7 +61,7 @@ if [[ ! -f /var/lib/autobrr/config.toml ]]; then
     SESSION_SECRET="$(openssl rand -hex 16)"
     cat <<EOF > /var/lib/autobrr/config.toml
 host = "0.0.0.0"
-port = 7474
+port = ${APP_PORT}
 logLevel = "INFO"
 sessionSecret = "${SESSION_SECRET}"
 EOF
@@ -65,9 +72,11 @@ printf '%s\n' "${MASTER_PASS}" | /usr/local/bin/autobrrctl --config=/var/lib/aut
     || printf '%s\n' "${MASTER_PASS}" | /usr/local/bin/autobrrctl --config=/var/lib/autobrr change-password "${MASTER_USER}" >> "$LOGFILE" 2>&1 \
     || true
 
+set_config_value "/var/lib/autobrr/config.toml" ini "port" "$APP_PORT" ""
+
 chown -R autobrr:autobrr /var/lib/autobrr
 
-report_progress 85 "Configuring and starting autobrr.service on port 7474..."
+report_progress 85 "Configuring and starting autobrr.service on port ${APP_PORT}..."
 cat <<'EOF' > /etc/systemd/system/autobrr.service
 [Unit]
 Description=autobrr service
@@ -85,9 +94,11 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 
+
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now autobrr >> "$LOGFILE" 2>&1
+systemctl restart autobrr >> "$LOGFILE" 2>&1
 
 write_lock "${PACKAGE_NAME}"
-report_progress 100 "Autobrr installed on port 7474."
+report_progress 100 "Autobrr installed on port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"

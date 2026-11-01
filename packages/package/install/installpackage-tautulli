@@ -5,15 +5,17 @@
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
-    # shellcheck source=/dev/null
-    source /opt/AetherFlow/packages/common.sh
-else
+if [[ -f "${SELF_DIR}/../../common.sh" ]]; then
     # shellcheck source=/dev/null
     source "${SELF_DIR}/../../common.sh"
+else
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
 fi
 
 PACKAGE_NAME="tautulli"
+APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-8181}}"
+export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
 mkdir -p "$(dirname "$LOGFILE")" /install
 
@@ -40,7 +42,7 @@ fi
 if [[ ! -f /var/lib/tautulli/config.ini ]]; then
     cat <<EOF > /var/lib/tautulli/config.ini
 [General]
-http_port = 8181
+http_port = ${APP_PORT}
 http_host = 0.0.0.0
 http_username = ${MASTER_USER}
 http_password = ${MASTER_PASS}
@@ -50,15 +52,15 @@ EOF
 fi
 chown -R tautulli:tautulli /opt/Tautulli /var/lib/tautulli
 
-report_progress 80 "Configuring and starting tautulli.service on port 8181..."
-cat <<'EOF' > /etc/systemd/system/tautulli.service
+report_progress 80 "Configuring and starting tautulli.service on port ${APP_PORT}..."
+sed "s/@AF_APP_PORT@/${APP_PORT}/g" <<'EOF' > /etc/systemd/system/tautulli.service
 [Unit]
 Description=Tautulli - Stats for Plex Media Server usage
 Wants=network-online.target
 After=network-online.target
 
 [Service]
-ExecStart=/usr/bin/python3 /opt/Tautulli/Tautulli.py --config /var/lib/tautulli/config.ini --datadir /var/lib/tautulli --quiet --nolaunch --port 8181
+ExecStart=/usr/bin/python3 /opt/Tautulli/Tautulli.py --config /var/lib/tautulli/config.ini --datadir /var/lib/tautulli --quiet --nolaunch --port @AF_APP_PORT@
 GuessMainPID=no
 Type=simple
 User=tautulli
@@ -76,5 +78,5 @@ systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now tautulli >> "$LOGFILE" 2>&1
 
 write_lock "${PACKAGE_NAME}"
-report_progress 100 "Tautulli installed on port 8181."
+report_progress 100 "Tautulli installed on port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"

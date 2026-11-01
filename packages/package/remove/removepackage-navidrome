@@ -4,12 +4,12 @@
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
-    # shellcheck source=/dev/null
-    source /opt/AetherFlow/packages/common.sh
-else
+if [[ -f "${SELF_DIR}/../../common.sh" ]]; then
     # shellcheck source=/dev/null
     source "${SELF_DIR}/../../common.sh"
+else
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
 fi
 
 PACKAGE_NAME="navidrome"
@@ -23,10 +23,13 @@ report_progress 25 "Stopping and removing navidrome.service..."
 purge_systemd_unit "navidrome"
 
 report_progress 65 "Removing Navidrome binaries, data directories, and user account..."
-rm -rf /opt/navidrome /var/lib/navidrome
+rm -rf /opt/navidrome
+if [[ "${DELETE_DATA:-false}" == true ]]; then
+    rm -rf /var/lib/navidrome
+fi
 purge_system_user "navidrome"
 systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
 
 remove_lock "${PACKAGE_NAME}"
-report_progress 100 "Navidrome completely removed."
+report_progress 100 "Navidrome removed; application data retained unless DELETE_DATA=true."
 log_info "${PACKAGE_NAME} removed successfully"

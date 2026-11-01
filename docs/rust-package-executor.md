@@ -125,7 +125,7 @@ The following stable public types and functions are exported from `af_runner` (a
 
 ## 5. Recipe Migration Status vs Legacy Bash Fallback
 
-Fifteen Marketplace applications whose install/update/remove lifecycles and security boundaries have been audited for 1:1 parity are registered in `BUILTIN_DECLARATIVE_RECIPES`:
+Twelve Marketplace applications are registered in `BUILTIN_DECLARATIVE_RECIPES`. Registration is restricted to catalog packages with executable install, update, and remove steps:
 
 ### 5.1 Migrated to Native Declarative Rust (`PackageEngineMode::DeclarativeRust` when `AETHERFLOW_ENABLE_RUST_PACKAGES=1`)
 | Package ID | Archetype | Key Operations |
@@ -137,18 +137,17 @@ Fifteen Marketplace applications whose install/update/remove lifecycles and secu
 | `xrdp` | APT + Desktop Session + Systemd | Installs `xrdp`, `xfce4`, `xfce4-goodies`, `dbus-x11`, configures `/etc/xrdp/startwm.sh`, and manages `xrdp.service`. |
 | `novnc` | APT + Websockify Systemd | Installs `novnc`, `python3-websockify`, `tigervnc-standalone-server`, `xfce4`, and manages `novnc.service` on `127.0.0.1:6080`. |
 | `x2go` | APT + SSH Remote Desktop | Installs `x2goserver`, `x2goserver-xsession`, `xfce4`, `xfce4-goodies`, captures dpkg version, and manages `x2goserver.service`. |
-| `scrutiny` | APT + Smartmontools Collector | Installs `smartmontools`, `ca-certificates`, creates `scrutiny` user and `/opt/scrutiny` / `/var/lib/scrutiny`, writes collector config, and manages `scrutiny.service`. |
 | `prometheus` | APT + Metrics Server | Installs `prometheus`, `prometheus-node-exporter`, writes `/etc/prometheus/prometheus.yml` (`127.0.0.1:9090`), and manages `prometheus.service`. |
 | `netdata` | APT + Local Telemetry Daemon | Installs `netdata`, writes `/etc/netdata/netdata.conf` bound to `127.0.0.1:19999`, and manages `netdata.service`. |
 | `mergerfs` | APT Union Filesystem | Installs `mergerfs` and `fuse3`, creates `/var/lib/aetherflow/mergerfs`, and records installed dpkg version. |
 | `rclone` | APT + Rclone Web RCD | Installs `rclone` and `fuse3`, creates `rclone` user and `/var/lib/rclone`, and manages `rclone-web.service` (`127.0.0.1:5572`). |
-| `clamav` | APT Antivirus Daemon | Installs `clamav` and `clamav-daemon`, creates `/var/lib/clamav` and `/var/log/clamav`, and manages `clamav-freshclam.service` + `clamav-daemon.service`. |
-| `mosquitto` | APT MQTT Broker | Installs `mosquitto` and `mosquitto-clients`, writes `/etc/mosquitto/conf.d/aetherflow.conf` (`127.0.0.1:1883`), and manages `mosquitto.service`. |
 | `syncthing` | APT Continuous File Sync | Installs `syncthing`, creates `syncthing` user and `/var/lib/syncthing`, and manages `syncthing@syncthing.service`. |
 
 ### 5.2 Remaining Marketplace Packages (`PackageEngineMode::LegacyBashFallback`)
-- The remaining 58 Marketplace packages (such as complex multi-container-equivalent database/PHP/Node/Python installers like `immich`, `nextcloud`, `authentik`, `plex`, `jellyfin`, `wireguard`, `tailscale`, and `*arr` suites with first-boot SQLite API key extraction) continue to execute their hardened scripts in `packages/package/{install,remove,update}/*` under the shared advisory lock and process-group cancellation supervisor.
+- Other catalog packages continue to execute their native systemd Bash installers under the shared advisory lock and process-group cancellation supervisor. This includes Scrutiny: its previous Rust recipe omitted binary and web asset downloads and therefore no longer registers as executable. ClamAV and Mosquitto are outside the Marketplace catalog and are not registered.
 
 ## Validation and Safety Boundary
 
 On November 1, 2026, `cargo test --workspace` passed all 131 tests in an isolated Linux checkout, including 29 `af-runner` tests covering all 15 built-in declarative recipes, `GenerateSelfSignedTlsCert`, `CaptureDpkgVersion`, persistent advisory lock inode/content preservation, queued cancellation, process-group cancellation, bounded command output, live progress streaming, ancestor-symlink rejection, and exclusive atomic writes/rollback backups.
+
+The Marketplace lifecycle repair also captures the installed Debian version for every APT-backed recipe, uses `unknown` until a version is resolved, and preserves configuration and system accounts on removal unless `DELETE_DATA=true`. Automatic health recovery uses the same process mutex and persistent flock as privileged package execution. See [Marketplace repair validation](marketplace-repair.md).

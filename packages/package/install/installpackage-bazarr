@@ -5,15 +5,17 @@
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
-    # shellcheck source=/dev/null
-    source /opt/AetherFlow/packages/common.sh
-else
+if [[ -f "${SELF_DIR}/../../common.sh" ]]; then
     # shellcheck source=/dev/null
     source "${SELF_DIR}/../../common.sh"
+else
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
 fi
 
 PACKAGE_NAME="bazarr"
+APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-6767}}"
+export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
 mkdir -p "$(dirname "$LOGFILE")" /install
 
@@ -57,9 +59,15 @@ auth:
   password: ${MASTER_HA1}
 general:
   ip: 0.0.0.0
-  port: 6767
+  port: ${APP_PORT}
 EOF
 fi
+if [[ -f /var/lib/bazarr/config/config.ini ]]; then
+    set_config_value /var/lib/bazarr/config/config.ini ini port "$APP_PORT" general
+else
+    set_config_value "/var/lib/bazarr/config/config.yaml" yaml "port" "$APP_PORT" "general"
+fi
+
 chown -R bazarr:bazarr /opt/bazarr /var/lib/bazarr
 
 report_progress 85 "Configuring and starting bazarr.service..."
@@ -85,9 +93,11 @@ SyslogIdentifier=bazarr
 WantedBy=multi-user.target
 EOF
 
+
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now bazarr >> "$LOGFILE" 2>&1
+systemctl restart bazarr >> "$LOGFILE" 2>&1
 
 write_lock "${PACKAGE_NAME}"
-report_progress 100 "Bazarr installed on port 6767."
+report_progress 100 "Bazarr installed on port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"

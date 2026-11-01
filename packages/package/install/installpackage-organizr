@@ -5,15 +5,17 @@
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
-    # shellcheck source=/dev/null
-    source /opt/AetherFlow/packages/common.sh
-else
+if [[ -f "${SELF_DIR}/../../common.sh" ]]; then
     # shellcheck source=/dev/null
     source "${SELF_DIR}/../../common.sh"
+else
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
 fi
 
 PACKAGE_NAME="organizr"
+APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-8086}}"
+export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
 mkdir -p "$(dirname "$LOGFILE")" /install
 
@@ -27,8 +29,11 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
     php php-cli php-fpm php-sqlite3 php-curl php-zip php-xml php-mbstring php-gd >> "$LOGFILE" 2>&1
 
 report_progress 45 "Cloning Organizr v2 repository..."
-rm -rf /var/www/organizr
-git clone --depth 1 -b v2-master https://github.com/causefx/Organizr.git /var/www/organizr >> "$LOGFILE" 2>&1
+BUILD_DIR="$(mktemp -d /var/www/.organizr-build.XXXXXX)"
+trap '[[ -z "$BUILD_DIR" ]] || rm -rf "$BUILD_DIR"' EXIT
+git clone --depth 1 -b v2-master https://github.com/causefx/Organizr.git "$BUILD_DIR" >> "$LOGFILE" 2>&1
+replace_app_tree "$BUILD_DIR" /var/www/organizr api/config api/db
+BUILD_DIR=""
 ORG_VER="$(grep -oE '[0-9]+\.[0-9]+\.[0-9]+' /var/www/organizr/api/config/default.php 2>/dev/null | head -n1 || true)"
 if [[ -n "$ORG_VER" ]]; then
     printf '%s\n' "$ORG_VER" > /var/www/organizr/.af-version
@@ -36,12 +41,12 @@ fi
 chown -R www-data:www-data /var/www/organizr
 chmod -R 775 /var/www/organizr
 
-report_progress 80 "Configuring Apache VirtualHost on port 8086..."
-if ! grep -q "^Listen 8086$" /etc/apache2/ports.conf 2>/dev/null; then
-    echo "Listen 8086" >> /etc/apache2/ports.conf
+report_progress 80 "Configuring Apache VirtualHost on port ${APP_PORT}..."
+if ! grep -q "^Listen ${APP_PORT}$" /etc/apache2/ports.conf 2>/dev/null; then
+    echo "Listen ${APP_PORT}" >> /etc/apache2/ports.conf
 fi
 
-cat <<'EOF' > /etc/apache2/sites-available/organizr.conf
+sed "s/@AF_APP_PORT@/${APP_PORT}/g" <<'EOF' > /etc/apache2/sites-available/organizr.conf
 Alias /organizr "/var/www/organizr"
 
 <Directory /var/www/organizr>
@@ -51,7 +56,7 @@ Alias /organizr "/var/www/organizr"
     DirectoryIndex index.php index.html
 </Directory>
 
-<VirtualHost *:8086>
+<VirtualHost *:@AF_APP_PORT@>
     DocumentRoot /var/www/organizr
     <Directory /var/www/organizr>
         Options FollowSymLinks
@@ -68,5 +73,5 @@ systemctl enable --now apache2 >> "$LOGFILE" 2>&1
 systemctl reload apache2 >> "$LOGFILE" 2>&1 || systemctl restart apache2 >> "$LOGFILE" 2>&1
 
 write_lock "${PACKAGE_NAME}"
-report_progress 100 "Organizr installed on port 8086."
+report_progress 100 "Organizr installed on port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"

@@ -5,15 +5,17 @@
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
-    # shellcheck source=/dev/null
-    source /opt/AetherFlow/packages/common.sh
-else
+if [[ -f "${SELF_DIR}/../../common.sh" ]]; then
     # shellcheck source=/dev/null
     source "${SELF_DIR}/../../common.sh"
+else
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
 fi
 
 PACKAGE_NAME="readarr"
+APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-8787}}"
+export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
 mkdir -p "$(dirname "$LOGFILE")" /install
 
@@ -51,6 +53,8 @@ rm -f "$TMP_TAR"
 if [[ -n "$READARR_VERSION" ]]; then
     printf '%s\n' "${READARR_VERSION#v}" > /opt/Readarr/.af-version
 fi
+set_config_value "/var/lib/readarr/config.xml" xml "Port" "$APP_PORT" "Config"
+
 chown -R readarr:readarr /opt/Readarr /var/lib/readarr
 
 report_progress 85 "Configuring and starting readarr.service..."
@@ -74,10 +78,12 @@ PrivateTmp=true
 WantedBy=multi-user.target
 EOF
 
+
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now readarr >> "$LOGFILE" 2>&1
-seed_servarr_master_user "readarr" 8787 "v1"
+systemctl restart readarr >> "$LOGFILE" 2>&1
+seed_servarr_master_user "readarr" ${APP_PORT} "v1"
 
 write_lock "${PACKAGE_NAME}"
-report_progress 100 "Readarr installed on port 8787."
+report_progress 100 "Readarr installed on port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"

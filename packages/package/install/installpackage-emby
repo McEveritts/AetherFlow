@@ -5,15 +5,17 @@
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
-    # shellcheck source=/dev/null
-    source /opt/AetherFlow/packages/common.sh
-else
+if [[ -f "${SELF_DIR}/../../common.sh" ]]; then
     # shellcheck source=/dev/null
     source "${SELF_DIR}/../../common.sh"
+else
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
 fi
 
 PACKAGE_NAME="emby"
+APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-8097}}"
+export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
 mkdir -p "$(dirname "$LOGFILE")" /install
 
@@ -47,25 +49,25 @@ mkdir -p /opt/emby-server /var/lib/emby/config
 printf '%s\n' "${EMBY_VERSION#v}" > /opt/emby-server/.af-version
 
 if [[ -f /var/lib/emby/config/system.xml ]]; then
-    sed -i 's|<HttpServerPortNumber>.*</HttpServerPortNumber>|<HttpServerPortNumber>8097</HttpServerPortNumber>|g' /var/lib/emby/config/system.xml
-    sed -i 's|<PublicPort>.*</PublicPort>|<PublicPort>8097</PublicPort>|g' /var/lib/emby/config/system.xml
+    sed -i 's|<HttpServerPortNumber>.*</HttpServerPortNumber>|<HttpServerPortNumber>'"${APP_PORT}"'</HttpServerPortNumber>|g' /var/lib/emby/config/system.xml
+    sed -i 's|<PublicPort>.*</PublicPort>|<PublicPort>'"${APP_PORT}"'</PublicPort>|g' /var/lib/emby/config/system.xml
 else
-    cat <<'EOF' > /var/lib/emby/config/system.xml
+    sed "s/@AF_APP_PORT@/${APP_PORT}/g" <<'EOF' > /var/lib/emby/config/system.xml
 <?xml version="1.0"?>
 <ServerConfiguration xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
-  <HttpServerPortNumber>8097</HttpServerPortNumber>
-  <PublicPort>8097</PublicPort>
+  <HttpServerPortNumber>@AF_APP_PORT@</HttpServerPortNumber>
+  <PublicPort>@AF_APP_PORT@</PublicPort>
 </ServerConfiguration>
 EOF
 fi
 chown -R emby:emby /var/lib/emby 2>/dev/null || true
 
-report_progress 90 "Starting and enabling emby-server service on port 8097..."
+report_progress 90 "Starting and enabling emby-server service on port ${APP_PORT}..."
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now emby-server >> "$LOGFILE" 2>&1
 systemctl restart emby-server >> "$LOGFILE" 2>&1 || true
-seed_jellyfin_master_user 8097
+seed_jellyfin_master_user ${APP_PORT}
 
 write_lock "${PACKAGE_NAME}"
-report_progress 100 "Emby Server installed on port 8097."
+report_progress 100 "Emby Server installed on port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"

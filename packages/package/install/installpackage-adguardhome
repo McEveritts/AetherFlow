@@ -5,15 +5,17 @@
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
-    # shellcheck source=/dev/null
-    source /opt/AetherFlow/packages/common.sh
-else
+if [[ -f "${SELF_DIR}/../../common.sh" ]]; then
     # shellcheck source=/dev/null
     source "${SELF_DIR}/../../common.sh"
+else
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
 fi
 
 PACKAGE_NAME="adguardhome"
+APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-3080}}"
+export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
 mkdir -p "$(dirname "$LOGFILE")" /install
 
@@ -70,14 +72,14 @@ if [[ ! -f /opt/AdGuardHome/AdGuardHome.yaml ]]; then
     AGH_BCRYPT="$(htpasswd -nbB "${MASTER_USER}" "${MASTER_PASS}" 2>/dev/null | cut -d: -f2- || true)"
     cat <<EOF > /opt/AdGuardHome/AdGuardHome.yaml
 bind_host: 0.0.0.0
-bind_port: 3080
+bind_port: ${APP_PORT}
 auth_attempts: 5
 block_auth_min: 15
 http:
   pprof:
     port: 0
     enabled: false
-  address: 0.0.0.0:3080
+  address: 0.0.0.0:${APP_PORT}
   session_ttl: 720h
 users:
   - name: ${MASTER_USER}
@@ -94,7 +96,7 @@ fi
 
 chown -R adguardhome:adguardhome /opt/AdGuardHome
 
-report_progress 85 "Configuring and starting adguardhome.service on port 3080..."
+report_progress 85 "Configuring and starting adguardhome.service on port ${APP_PORT}..."
 cat <<'EOF' > /etc/systemd/system/adguardhome.service
 [Unit]
 Description=AdGuard Home: Network-level HTTP & DNS Blocker
@@ -122,5 +124,5 @@ systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now adguardhome >> "$LOGFILE" 2>&1
 
 write_lock "${PACKAGE_NAME}"
-report_progress 100 "AdGuard Home installed on port 3080."
+report_progress 100 "AdGuard Home installed on port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"

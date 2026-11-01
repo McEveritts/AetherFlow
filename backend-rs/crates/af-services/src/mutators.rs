@@ -1078,6 +1078,7 @@ pub fn normalize_app_key_name(app_name: &str) -> String {
         "deluged" | "deluge-web" => "deluge".to_string(),
         "paperless-webserver" | "paperless" => "paperless-ngx".to_string(),
         "qbittorrent-nox" => "qbittorrent".to_string(),
+        "calibreweb" => "calibre-web".to_string(),
         _ => clean,
     }
 }
@@ -1922,6 +1923,7 @@ pub fn get_app_runtime_meta(app_name: &str) -> AppRuntimeMeta {
             }
         }
         "plex" => {
+            meta.configured_port = 32400;
             for raw in [
                 "/var/lib/plexmediaserver/Library/Application Support/Plex Media Server/Preferences.xml",
                 "/var/lib/plex/Plex Media Server/Preferences.xml",
@@ -2478,6 +2480,11 @@ fn native_app_spec(canonical_app: &str, bp_config_path: &str) -> NativeAppSpec {
     }
 
     match canonical_app {
+        "gitea" => NativeAppSpec {
+            mutator_type: "ini",
+            config_paths: vec!["/etc/gitea/app.ini".to_string()],
+            sqlite_db_path: None,
+        },
         "sonarr" | "radarr" | "lidarr" | "readarr" | "prowlarr" | "listenarr" => {
             for candidate in [
                 format!("/var/lib/{}/config.xml", canonical_app),
@@ -2700,6 +2707,11 @@ pub async fn apply_blueprint_app_config(
 
         let port_str = effective_port.to_string();
         match canonical.as_str() {
+            "gitea" => {
+                if effective_port > 0 && mutate_ini_key(&resolved, "server", "HTTP_PORT", &port_str)? {
+                    mutated_files.push(resolved.to_string_lossy().to_string());
+                }
+            }
             "sonarr" | "radarr" | "lidarr" | "readarr" | "prowlarr" | "listenarr" => {
                 let mut file_changed = false;
                 if effective_port > 0 {

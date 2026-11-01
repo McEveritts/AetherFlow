@@ -4,12 +4,12 @@
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
-    # shellcheck source=/dev/null
-    source /opt/AetherFlow/packages/common.sh
-else
+if [[ -f "${SELF_DIR}/../../common.sh" ]]; then
     # shellcheck source=/dev/null
     source "${SELF_DIR}/../../common.sh"
+else
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
 fi
 
 PACKAGE_NAME="grafana"
@@ -17,21 +17,26 @@ export LOGFILE="/var/log/aetherflow/remove-${PACKAGE_NAME}.log"
 mkdir -p "$(dirname "$LOGFILE")"
 
 require_root
+APT_REMOVE_ACTION=remove
+if [[ "${DELETE_DATA:-false}" == true ]]; then APT_REMOVE_ACTION=purge; fi
 log_info "Starting removal for ${PACKAGE_NAME}..."
 report_progress 20 "Stopping and disabling grafana-server.service..."
 
 purge_systemd_unit "grafana-server"
 
 report_progress 50 "Purging Grafana APT package and repository..."
-DEBIAN_FRONTEND=noninteractive apt-get purge -y -qq grafana >> "$LOGFILE" 2>&1 || true
+DEBIAN_FRONTEND=noninteractive apt-get "$APT_REMOVE_ACTION" -y -qq grafana >> "$LOGFILE" 2>&1 || true
 DEBIAN_FRONTEND=noninteractive apt-get autoremove -y -qq >> "$LOGFILE" 2>&1 || true
 rm -f /etc/apt/sources.list.d/grafana.list /etc/apt/keyrings/grafana.gpg
 
 report_progress 80 "Removing Grafana state, logs, configuration, and user account..."
-rm -rf /var/lib/grafana /var/log/grafana /etc/grafana /usr/share/grafana
+rm -rf /var/log/grafana /usr/share/grafana
+if [[ "${DELETE_DATA:-false}" == true ]]; then
+    rm -rf /var/lib/grafana /etc/grafana
+fi
 purge_system_user "grafana"
 systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
 
 remove_lock "${PACKAGE_NAME}"
-report_progress 100 "Grafana completely removed."
+report_progress 100 "Grafana removed; application data retained unless DELETE_DATA=true."
 log_info "${PACKAGE_NAME} removed successfully"

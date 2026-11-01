@@ -5,15 +5,17 @@
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
-    # shellcheck source=/dev/null
-    source /opt/AetherFlow/packages/common.sh
-else
+if [[ -f "${SELF_DIR}/../../common.sh" ]]; then
     # shellcheck source=/dev/null
     source "${SELF_DIR}/../../common.sh"
+else
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
 fi
 
 PACKAGE_NAME="ombi"
+APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-5000}}"
+export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
 mkdir -p "$(dirname "$LOGFILE")" /install
 
@@ -52,8 +54,8 @@ printf '%s\n' "${OMBI_VERSION#v}" > /opt/Ombi/.af-version
 
 chown -R ombi:ombi /opt/Ombi /etc/Ombi /var/lib/ombi
 
-report_progress 85 "Configuring and starting ombi.service on port 5000..."
-cat <<'EOF' > /etc/systemd/system/ombi.service
+report_progress 85 "Configuring and starting ombi.service on port ${APP_PORT}..."
+sed "s/@AF_APP_PORT@/${APP_PORT}/g" <<'EOF' > /etc/systemd/system/ombi.service
 [Unit]
 Description=Ombi - PMS Requests System
 After=network-online.target
@@ -62,7 +64,7 @@ After=network-online.target
 User=ombi
 Group=ombi
 WorkingDirectory=/opt/Ombi
-ExecStart=/opt/Ombi/Ombi --storage /etc/Ombi --host http://*:5000
+ExecStart=/opt/Ombi/Ombi --storage /etc/Ombi --host http://*:@AF_APP_PORT@
 Type=simple
 TimeoutStopSec=30
 Restart=on-failure
@@ -75,24 +77,20 @@ EOF
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now ombi >> "$LOGFILE" 2>&1
 python3 - "${MASTER_USER}" "${MASTER_PASS}" >> "$LOGFILE" 2>&1 <<'PYEOF' || true
+import os
 import sys, time, json, urllib.request
-user, pw = sys.argv[1], sys.argv[2]
+user, pw = (sys.argv[1], sys.argv[2])
 for _ in range(30):
     try:
-        with urllib.request.urlopen("http://127.0.0.1:5000/api/v1/Status", timeout=3) as r:
+        with urllib.request.urlopen('http://127.0.0.1:5000/api/v1/Status'.replace('5000', os.environ['AF_APP_PORT']), timeout=3) as r:
             if r.status == 200:
                 break
     except Exception:
         time.sleep(1)
-req = urllib.request.Request(
-    "http://127.0.0.1:5000/api/v1/Identity/Wizard",
-    data=json.dumps({"username": user, "password": pw, "usePlexAdminAccount": False}).encode("utf-8"),
-    headers={"Content-Type": "application/json"},
-    method="POST"
-)
+req = urllib.request.Request('http://127.0.0.1:5000/api/v1/Identity/Wizard'.replace('5000', os.environ['AF_APP_PORT']), data=json.dumps({'username': user, 'password': pw, 'usePlexAdminAccount': False}).encode('utf-8'), headers={'Content-Type': 'application/json'}, method='POST')
 urllib.request.urlopen(req, timeout=10).read()
 PYEOF
 
 write_lock "${PACKAGE_NAME}"
-report_progress 100 "Ombi installed on port 5000."
+report_progress 100 "Ombi installed on port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"

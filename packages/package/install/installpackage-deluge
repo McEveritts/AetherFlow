@@ -5,15 +5,17 @@
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
-    # shellcheck source=/dev/null
-    source /opt/AetherFlow/packages/common.sh
-else
+if [[ -f "${SELF_DIR}/../../common.sh" ]]; then
     # shellcheck source=/dev/null
     source "${SELF_DIR}/../../common.sh"
+else
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
 fi
 
 PACKAGE_NAME="deluge"
+APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-8112}}"
+export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
 mkdir -p "$(dirname "$LOGFILE")" /install
 
@@ -28,27 +30,29 @@ if ! id -u deluge >/dev/null 2>&1; then
     useradd --system --user-group --no-create-home --home-dir /var/lib/deluge --shell /usr/sbin/nologin deluge
 fi
 
-report_progress 55 "Configuring Deluge daemon and WebUI on port 8112..."
+report_progress 55 "Configuring Deluge daemon and WebUI on port ${APP_PORT}..."
 systemctl stop deluge-web deluged >> "$LOGFILE" 2>&1 || true
 mkdir -p /var/lib/deluge/.config/deluge /var/log/deluge /var/lib/deluge/Downloads
 if ! grep -q "^${MASTER_USER}:" /var/lib/deluge/.config/deluge/auth 2>/dev/null; then
     printf '%s:%s:10\n' "${MASTER_USER}" "${MASTER_PASS}" >> /var/lib/deluge/.config/deluge/auth
 fi
 python3 - "${MASTER_PASS}" <<'PYEOF'
-import sys, os, hashlib, json
+import os
+import sys, os, hashlib, json, pathlib
 pw = sys.argv[1]
 salt = hashlib.sha1(os.urandom(32)).hexdigest()
-sha1 = hashlib.sha1((salt + pw).encode("utf-8")).hexdigest()
-web_conf = "/var/lib/deluge/.config/deluge/web.conf"
-header = {"file": 1, "format": 1}
-body = {
-    "port": 8112,
-    "pwd_salt": salt,
-    "pwd_sha1": sha1,
-    "first_login": False,
-    "default_daemon": "127.0.0.1:58846"
-}
-with open(web_conf, "w", encoding="utf-8") as f:
+sha1 = hashlib.sha1((salt + pw).encode('utf-8')).hexdigest()
+web_conf = '/var/lib/deluge/.config/deluge/web.conf'
+header = {'file': 1, 'format': 1}
+body = {}
+if pathlib.Path(web_conf).exists():
+    raw = pathlib.Path(web_conf).read_text()
+    decoder = json.JSONDecoder()
+    while raw.strip():
+        body, offset = decoder.raw_decode(raw.lstrip())
+        raw = raw.lstrip()[offset:]
+body.update({'port': int(os.environ['AF_APP_PORT']), 'pwd_salt': salt, 'pwd_sha1': sha1, 'first_login': False, 'default_daemon': body.get('default_daemon', '127.0.0.1:58846')})
+with open(web_conf, 'w', encoding='utf-8') as f:
     f.write(json.dumps(header, indent=4) + json.dumps(body, indent=4))
 PYEOF
 chown -R deluge:deluge /var/lib/deluge /var/log/deluge
@@ -72,7 +76,7 @@ TimeoutStopSec=300
 WantedBy=multi-user.target
 EOF
 
-cat <<'EOF' > /etc/systemd/system/deluge-web.service
+sed "s/@AF_APP_PORT@/${APP_PORT}/g" <<'EOF' > /etc/systemd/system/deluge-web.service
 [Unit]
 Description=Deluge Bittorrent Client Web Interface
 After=network-online.target deluged.service
@@ -83,7 +87,7 @@ Type=simple
 User=deluge
 Group=deluge
 UMask=027
-ExecStart=/usr/bin/deluge-web -d -c /var/lib/deluge/.config/deluge -l /var/log/deluge/web.log -L info -p 8112
+ExecStart=/usr/bin/deluge-web -d -c /var/lib/deluge/.config/deluge -l /var/log/deluge/web.log -L info -p @AF_APP_PORT@
 Restart=on-failure
 
 [Install]
@@ -96,5 +100,5 @@ systemctl enable --now deluged >> "$LOGFILE" 2>&1
 systemctl enable --now deluge-web >> "$LOGFILE" 2>&1
 
 write_lock "${PACKAGE_NAME}"
-report_progress 100 "Deluge installed on port 8112."
+report_progress 100 "Deluge installed on port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"

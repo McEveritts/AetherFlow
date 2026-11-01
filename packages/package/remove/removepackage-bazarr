@@ -4,12 +4,12 @@
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
-    # shellcheck source=/dev/null
-    source /opt/AetherFlow/packages/common.sh
-else
+if [[ -f "${SELF_DIR}/../../common.sh" ]]; then
     # shellcheck source=/dev/null
     source "${SELF_DIR}/../../common.sh"
+else
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
 fi
 
 PACKAGE_NAME="bazarr"
@@ -23,10 +23,13 @@ report_progress 25 "Stopping and removing bazarr.service..."
 purge_systemd_unit "bazarr"
 
 report_progress 65 "Removing Bazarr files, state directories, and user account..."
-rm -rf /opt/bazarr /var/lib/bazarr
+rm -rf /opt/bazarr
+if [[ "${DELETE_DATA:-false}" == true ]]; then
+    rm -rf /var/lib/bazarr
+fi
 purge_system_user "bazarr"
 systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
 
 remove_lock "${PACKAGE_NAME}"
-report_progress 100 "Bazarr completely removed."
+report_progress 100 "Bazarr removed; application data retained unless DELETE_DATA=true."
 log_info "${PACKAGE_NAME} removed successfully"

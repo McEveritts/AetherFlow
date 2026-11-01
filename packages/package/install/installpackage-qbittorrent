@@ -5,15 +5,17 @@
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
-    # shellcheck source=/dev/null
-    source /opt/AetherFlow/packages/common.sh
-else
+if [[ -f "${SELF_DIR}/../../common.sh" ]]; then
     # shellcheck source=/dev/null
     source "${SELF_DIR}/../../common.sh"
+else
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
 fi
 
 PACKAGE_NAME="qbittorrent"
+APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-8180}}"
+export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
 mkdir -p "$(dirname "$LOGFILE")" /install
 
@@ -28,17 +30,18 @@ if ! id -u qbittorrent >/dev/null 2>&1; then
     useradd --system --user-group --create-home --home-dir /var/lib/qbittorrent --shell /usr/sbin/nologin qbittorrent
 fi
 
-report_progress 55 "Configuring qBittorrent WebUI on port 8180..."
+report_progress 55 "Configuring qBittorrent WebUI on port ${APP_PORT}..."
 systemctl stop qbittorrent >> "$LOGFILE" 2>&1 || true
 mkdir -p /var/lib/qbittorrent/.config/qBittorrent/config /var/lib/qbittorrent/Downloads
 
 QBT_PBKDF2="$(generate_qbittorrent_pbkdf2 "${MASTER_PASS}")"
+if [[ ! -s /var/lib/qbittorrent/.config/qBittorrent/qBittorrent.conf ]]; then
 cat <<EOF > /var/lib/qbittorrent/.config/qBittorrent/qBittorrent.conf
 [LegalNotice]
 Accepted=true
 
 [Preferences]
-WebUI\Port=8180
+WebUI\Port=${APP_PORT}
 WebUI\Address=*
 WebUI\ServerDomains=*
 WebUI\CSRFProtection=false
@@ -48,13 +51,16 @@ WebUI\Password_PBKDF2="${QBT_PBKDF2}"
 WebUI\Password_ha1=@ByteArray(${MASTER_HA1})
 Downloads\SavePath=/var/lib/qbittorrent/Downloads/
 EOF
+fi
 
 cp -f /var/lib/qbittorrent/.config/qBittorrent/qBittorrent.conf /var/lib/qbittorrent/.config/qBittorrent/config/qBittorrent.conf
 
+set_config_value "/var/lib/qbittorrent/.config/qBittorrent/qBittorrent.conf" ini "WebUI\Port" "$APP_PORT" "Preferences"
+
 chown -R qbittorrent:qbittorrent /var/lib/qbittorrent
 
-report_progress 85 "Configuring and starting qbittorrent.service on port 8180..."
-cat <<'EOF' > /etc/systemd/system/qbittorrent.service
+report_progress 85 "Configuring and starting qbittorrent.service on port ${APP_PORT}..."
+sed "s/@AF_APP_PORT@/${APP_PORT}/g" <<'EOF' > /etc/systemd/system/qbittorrent.service
 [Unit]
 Description=qBittorrent-nox Daemon
 After=network-online.target
@@ -66,7 +72,7 @@ User=qbittorrent
 Group=qbittorrent
 UMask=007
 Environment=HOME=/var/lib/qbittorrent
-ExecStart=/usr/bin/qbittorrent-nox --webui-port=8180
+ExecStart=/usr/bin/qbittorrent-nox --webui-port=@AF_APP_PORT@
 Restart=on-failure
 TimeoutStopSec=300
 NoNewPrivileges=true
@@ -76,9 +82,11 @@ PrivateTmp=true
 WantedBy=multi-user.target
 EOF
 
+
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now qbittorrent >> "$LOGFILE" 2>&1
+systemctl restart qbittorrent >> "$LOGFILE" 2>&1
 
 write_lock "${PACKAGE_NAME}"
-report_progress 100 "qBittorrent installed on port 8180."
+report_progress 100 "qBittorrent installed on port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"

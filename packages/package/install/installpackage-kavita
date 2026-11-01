@@ -5,15 +5,17 @@
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
-    # shellcheck source=/dev/null
-    source /opt/AetherFlow/packages/common.sh
-else
+if [[ -f "${SELF_DIR}/../../common.sh" ]]; then
     # shellcheck source=/dev/null
     source "${SELF_DIR}/../../common.sh"
+else
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
 fi
 
 PACKAGE_NAME="kavita"
+APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-5002}}"
+export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
 mkdir -p "$(dirname "$LOGFILE")" /install
 
@@ -45,22 +47,27 @@ KAV_URL="https://github.com/Kareadita/Kavita/releases/download/v${KAV_VERSION}/k
 report_progress 60 "Downloading and extracting Kavita ${KAV_VERSION}..."
 TMP_TAR=$(mktemp /tmp/kavita-XXXXXX.tar.gz)
 curl -fsSL "$KAV_URL" -o "$TMP_TAR" >> "$LOGFILE" 2>&1
-rm -rf /opt/Kavita/*
-tar -xzf "$TMP_TAR" -C /opt/Kavita --strip-components=1 2>/dev/null || tar -xzf "$TMP_TAR" -C /opt >> "$LOGFILE" 2>&1
+BUILD_DIR="$(mktemp -d /opt/.kavita-build.XXXXXX)"
+trap '[[ -z "$BUILD_DIR" ]] || rm -rf "$BUILD_DIR"; rm -f "$TMP_TAR"' EXIT
+tar -xzf "$TMP_TAR" -C "$BUILD_DIR" --strip-components=1 >> "$LOGFILE" 2>&1
+[[ -s "$BUILD_DIR/Kavita" ]]
+systemctl stop kavita >> "$LOGFILE" 2>&1 || true
+replace_app_tree "$BUILD_DIR" /opt/Kavita config
+BUILD_DIR=""
 rm -f "$TMP_TAR"
 chmod +x /opt/Kavita/Kavita
 printf '%s\n' "${KAV_VERSION#v}" > /opt/Kavita/.af-version
 
 for kav_cfg in /opt/Kavita/appsettings.json /opt/Kavita/config/appsettings.json; do
     if [[ -f "$kav_cfg" ]]; then
-        sed -i 's/"Port": [0-9]*/"Port": 5002/' "$kav_cfg" 2>/dev/null || true
+        sed -i 's/"Port": [0-9]*/"Port": '"${APP_PORT}"'/' "$kav_cfg" 2>/dev/null || true
     fi
 done
 
 chown -R kavita:kavita /opt/Kavita /var/lib/kavita
 
-report_progress 85 "Configuring and starting kavita.service on port 5002..."
-cat <<'EOF' > /etc/systemd/system/kavita.service
+report_progress 85 "Configuring and starting kavita.service on port ${APP_PORT}..."
+sed "s/@AF_APP_PORT@/${APP_PORT}/g" <<'EOF' > /etc/systemd/system/kavita.service
 [Unit]
 Description=Kavita Dedicated Comic and Manga Server
 After=network.target
@@ -70,7 +77,7 @@ User=kavita
 Group=kavita
 Type=simple
 WorkingDirectory=/opt/Kavita
-Environment=ASPNETCORE_URLS=http://0.0.0.0:5002
+Environment=ASPNETCORE_URLS=http://0.0.0.0:@AF_APP_PORT@
 ExecStart=/opt/Kavita/Kavita
 Restart=on-failure
 RestartSec=10
@@ -82,24 +89,26 @@ EOF
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now kavita >> "$LOGFILE" 2>&1
 python3 - "${MASTER_USER}" "${MASTER_PASS}" >> "$LOGFILE" 2>&1 <<'PYEOF' || true
+import os
 import sys, time, json, urllib.request
-user, pw = sys.argv[1], sys.argv[2]
-for _ in range(30):
+user, pw = (sys.argv[1], sys.argv[2])
+for _ in range(120):
     try:
-        with urllib.request.urlopen("http://127.0.0.1:5002/api/health", timeout=3) as r:
+        with urllib.request.urlopen('http://127.0.0.1:5002/api/health'.replace('5002', os.environ['AF_APP_PORT']), timeout=3) as r:
             if r.status == 200:
                 break
     except Exception:
         time.sleep(1)
-req = urllib.request.Request(
-    "http://127.0.0.1:5002/api/account/register",
-    data=json.dumps({"username": user, "email": f"{user}@aether.local", "password": pw}).encode("utf-8"),
-    headers={"Content-Type": "application/json"},
-    method="POST"
-)
-urllib.request.urlopen(req, timeout=10).read()
+else:
+    print('Kavita is still starting; configure the administrator after startup.', file=sys.stderr)
+    sys.exit(0)
+req = urllib.request.Request('http://127.0.0.1:5002/api/account/register'.replace('5002', os.environ['AF_APP_PORT']), data=json.dumps({'username': user, 'email': f'{user}@aether.local', 'password': pw}).encode('utf-8'), headers={'Content-Type': 'application/json'}, method='POST')
+try:
+    urllib.request.urlopen(req, timeout=10).read()
+except Exception as error:
+    print(f'Kavita administrator registration: {error}', file=sys.stderr)
 PYEOF
 
 write_lock "${PACKAGE_NAME}"
-report_progress 100 "Kavita installed on port 5002."
+report_progress 100 "Kavita installed on port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"

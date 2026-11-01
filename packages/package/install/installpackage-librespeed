@@ -5,15 +5,17 @@
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
-    # shellcheck source=/dev/null
-    source /opt/AetherFlow/packages/common.sh
-else
+if [[ -f "${SELF_DIR}/../../common.sh" ]]; then
     # shellcheck source=/dev/null
     source "${SELF_DIR}/../../common.sh"
+else
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
 fi
 
 PACKAGE_NAME="librespeed"
+APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-8988}}"
+export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
 mkdir -p "$(dirname "$LOGFILE")" /install
 
@@ -93,7 +95,7 @@ LS_STATS_PASS="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$
 cat <<EOF > /opt/librespeed/settings.toml
 # LibreSpeed speedtest-go configuration
 bind_address="0.0.0.0"
-listen_port=8988
+listen_port=${APP_PORT}
 url_base=""
 proxyprotocol_port=0
 server_lat=0
@@ -117,7 +119,7 @@ chown -R librespeed:librespeed /opt/librespeed
 chmod 755 /opt/librespeed
 chmod 640 /opt/librespeed/settings.toml
 
-report_progress 85 "Configuring and starting librespeed.service on port 8988..."
+report_progress 85 "Configuring and starting librespeed.service on port ${APP_PORT}..."
 cat <<'EOF' > /etc/systemd/system/librespeed.service
 [Unit]
 Description=LibreSpeed Speedtest Daemon (speedtest-go)
@@ -140,5 +142,5 @@ systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now librespeed >> "$LOGFILE" 2>&1
 
 write_lock "${PACKAGE_NAME}"
-report_progress 100 "LibreSpeed installed on port 8988."
+report_progress 100 "LibreSpeed installed on port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"

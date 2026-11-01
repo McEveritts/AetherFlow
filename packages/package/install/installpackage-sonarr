@@ -5,15 +5,17 @@
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
-    # shellcheck source=/dev/null
-    source /opt/AetherFlow/packages/common.sh
-else
+if [[ -f "${SELF_DIR}/../../common.sh" ]]; then
     # shellcheck source=/dev/null
     source "${SELF_DIR}/../../common.sh"
+else
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
 fi
 
 PACKAGE_NAME="sonarr"
+APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-8989}}"
+export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
 mkdir -p "$(dirname "$LOGFILE")" /install
 
@@ -49,6 +51,8 @@ rm -f "$TMP_TAR"
 if [[ -n "$SONARR_VERSION" ]]; then
     printf '%s\n' "${SONARR_VERSION#v}" > /opt/Sonarr/.af-version
 fi
+set_config_value "/var/lib/sonarr/config.xml" xml "Port" "$APP_PORT" "Config"
+
 chown -R sonarr:sonarr /opt/Sonarr /var/lib/sonarr
 
 report_progress 85 "Configuring and starting sonarr.service..."
@@ -72,10 +76,12 @@ PrivateTmp=true
 WantedBy=multi-user.target
 EOF
 
+
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now sonarr >> "$LOGFILE" 2>&1
-seed_servarr_master_user "sonarr" 8989 "v3"
+systemctl restart sonarr >> "$LOGFILE" 2>&1
+seed_servarr_master_user "sonarr" ${APP_PORT} "v3"
 
 write_lock "${PACKAGE_NAME}"
-report_progress 100 "Sonarr installed on port 8989."
+report_progress 100 "Sonarr installed on port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"

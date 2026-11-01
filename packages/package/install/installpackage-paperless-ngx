@@ -5,15 +5,17 @@
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
-    # shellcheck source=/dev/null
-    source /opt/AetherFlow/packages/common.sh
-else
+if [[ -f "${SELF_DIR}/../../common.sh" ]]; then
     # shellcheck source=/dev/null
     source "${SELF_DIR}/../../common.sh"
+else
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
 fi
 
 PACKAGE_NAME="paperless-ngx"
+APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-8010}}"
+export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
 mkdir -p "$(dirname "$LOGFILE")" /install
 
@@ -67,8 +69,8 @@ fi
 report_progress 80 "Generating /etc/paperless.conf and initializing database..."
 SECRET_KEY="$(openssl rand -hex 32)"
 BASE_DOMAIN="$(get_base_domain || true)"
-PAPERLESS_URL_VAL="http://localhost:8010"
-PAPERLESS_CSRF_ORIGINS="http://localhost:8010,http://127.0.0.1:8010,http://paperless-ngx.aether.local"
+PAPERLESS_URL_VAL="http://localhost:${APP_PORT}"
+PAPERLESS_CSRF_ORIGINS="http://localhost:${APP_PORT},http://127.0.0.1:${APP_PORT},http://paperless-ngx.aether.local"
 if [[ -n "$BASE_DOMAIN" ]]; then
     PAPERLESS_URL_VAL="https://paperless-ngx.${BASE_DOMAIN}"
     PAPERLESS_CSRF_ORIGINS="https://paperless-ngx.${BASE_DOMAIN},${PAPERLESS_CSRF_ORIGINS}"
@@ -85,7 +87,7 @@ PAPERLESS_ALLOWED_HOSTS=*
 PAPERLESS_CSRF_TRUSTED_ORIGINS=${PAPERLESS_CSRF_ORIGINS}
 PAPERLESS_USE_X_FORWARD_HOST=true
 PAPERLESS_PROXY_SSL_HEADER=["HTTP_X_FORWARDED_PROTO", "https"]
-PAPERLESS_PORT=8010
+PAPERLESS_PORT=${APP_PORT}
 PAPERLESS_BIND_ADDR=0.0.0.0
 PAPERLESS_ADMIN_USER=${MASTER_USER}
 PAPERLESS_ADMIN_PASSWORD=${MASTER_PASS}
@@ -110,7 +112,7 @@ fi
 chown -R paperless:paperless /opt/paperless /var/lib/paperless
 
 report_progress 90 "Configuring multi-unit companion services (webserver, worker, scheduler)..."
-cat <<'EOF' > /etc/systemd/system/paperless-webserver.service
+sed "s/@AF_APP_PORT@/${APP_PORT}/g" <<'EOF' > /etc/systemd/system/paperless-webserver.service
 [Unit]
 Description=Paperless-ngx Web Server
 After=network.target redis-server.service
@@ -122,7 +124,7 @@ Group=paperless
 Type=simple
 WorkingDirectory=/opt/paperless/src
 EnvironmentFile=-/etc/paperless.conf
-ExecStart=/opt/paperless/.venv/bin/gunicorn -b 0.0.0.0:8010 -w 2 --threads 4 paperless.wsgi
+ExecStart=/opt/paperless/.venv/bin/gunicorn -b 0.0.0.0:@AF_APP_PORT@ -w 2 --threads 4 paperless.wsgi
 Restart=on-failure
 RestartSec=10
 
@@ -176,5 +178,5 @@ systemctl enable --now paperless-worker >> "$LOGFILE" 2>&1
 systemctl enable --now paperless-scheduler >> "$LOGFILE" 2>&1
 
 write_lock "${PACKAGE_NAME}"
-report_progress 100 "Paperless-ngx installed on port 8010 (multi-unit companion stack active)."
+report_progress 100 "Paperless-ngx installed on port ${APP_PORT} (multi-unit companion stack active)."
 log_info "${PACKAGE_NAME} installed successfully"

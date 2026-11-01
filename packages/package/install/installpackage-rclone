@@ -5,15 +5,17 @@
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
-    # shellcheck source=/dev/null
-    source /opt/AetherFlow/packages/common.sh
-else
+if [[ -f "${SELF_DIR}/../../common.sh" ]]; then
     # shellcheck source=/dev/null
     source "${SELF_DIR}/../../common.sh"
+else
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
 fi
 
 PACKAGE_NAME="rclone"
+APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-5572}}"
+export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
 mkdir -p "$(dirname "$LOGFILE")" /install
 
@@ -45,7 +47,12 @@ TMP_DIR=$(mktemp -d /tmp/rclone-extract-XXXXXX)
 RCLONE_URL="https://downloads.rclone.org/rclone-current-linux-${RCLONE_ARCH}.zip"
 curl -fsSL "$RCLONE_URL" -o "$TMP_ZIP" >> "$LOGFILE" 2>&1
 unzip -qo "$TMP_ZIP" -d "$TMP_DIR" >> "$LOGFILE" 2>&1
-find "$TMP_DIR" -type f -name rclone -exec cp {} /usr/bin/rclone \;
+trap 'rm -rf "$TMP_DIR"; rm -f "$TMP_ZIP"' EXIT
+RCLONE_BINARY="$(find "$TMP_DIR" -type f -name rclone -print -quit)"
+VFS_WAS_ACTIVE=0
+if systemctl is-active --quiet rclone-vfs; then VFS_WAS_ACTIVE=1; fi
+systemctl stop rclone rclone-vfs >> "$LOGFILE" 2>&1 || true
+install_binary_atomic "$RCLONE_BINARY" /usr/bin/rclone
 chmod 755 /usr/bin/rclone
 rm -rf "$TMP_ZIP" "$TMP_DIR"
 
@@ -66,8 +73,8 @@ PYEOF
 chmod 600 /etc/rclone/rclone.conf /etc/rclone/rclone.env
 chown -R rclone:rclone /etc/rclone /var/lib/rclone
 
-report_progress 70 "Scaffolding rclone.service (GUI on 5572) and companion rclone-vfs.service..."
-cat <<'EOF' > /etc/systemd/system/rclone.service
+report_progress 70 "Scaffolding rclone.service (GUI on ${APP_PORT}) and companion rclone-vfs.service..."
+sed "s/@AF_APP_PORT@/${APP_PORT}/g" <<'EOF' > /etc/systemd/system/rclone.service
 [Unit]
 Description=Rclone Remote Control GUI Daemon
 After=network-online.target
@@ -78,7 +85,7 @@ Type=simple
 User=rclone
 Group=rclone
 EnvironmentFile=/etc/rclone/rclone.env
-ExecStart=/usr/bin/rclone rcd --rc-web-gui --rc-addr=0.0.0.0:5572 --config=/etc/rclone/rclone.conf --cache-dir=/var/lib/rclone/cache
+ExecStart=/usr/bin/rclone rcd --rc-web-gui --rc-addr=0.0.0.0:@AF_APP_PORT@ --config=/etc/rclone/rclone.conf --cache-dir=/var/lib/rclone/cache
 Restart=on-failure
 RestartSec=5
 
@@ -107,8 +114,12 @@ EOF
 
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now rclone >> "$LOGFILE" 2>&1
+systemctl restart rclone >> "$LOGFILE" 2>&1
 systemctl enable rclone-vfs >> "$LOGFILE" 2>&1 || true
+if [[ "$VFS_WAS_ACTIVE" == 1 ]]; then
+    systemctl start rclone-vfs >> "$LOGFILE" 2>&1
+fi
 
 write_lock "${PACKAGE_NAME}"
-report_progress 100 "Rclone installed on port 5572 (rcd web GUI & rclone-vfs companion ready)."
+report_progress 100 "Rclone installed on port ${APP_PORT} (rcd web GUI & rclone-vfs companion ready)."
 log_info "${PACKAGE_NAME} installed successfully"

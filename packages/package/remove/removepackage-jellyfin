@@ -4,12 +4,12 @@
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
-    # shellcheck source=/dev/null
-    source /opt/AetherFlow/packages/common.sh
-else
+if [[ -f "${SELF_DIR}/../../common.sh" ]]; then
     # shellcheck source=/dev/null
     source "${SELF_DIR}/../../common.sh"
+else
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
 fi
 
 PACKAGE_NAME="jellyfin"
@@ -17,21 +17,26 @@ export LOGFILE="/var/log/aetherflow/remove-${PACKAGE_NAME}.log"
 mkdir -p "$(dirname "$LOGFILE")"
 
 require_root
+APT_REMOVE_ACTION=remove
+if [[ "${DELETE_DATA:-false}" == true ]]; then APT_REMOVE_ACTION=purge; fi
 log_info "Starting removal for ${PACKAGE_NAME}..."
 report_progress 20 "Stopping and disabling jellyfin service..."
 
 purge_systemd_unit "jellyfin"
 
 report_progress 50 "Purging jellyfin APT packages and repository..."
-DEBIAN_FRONTEND=noninteractive apt-get purge -y -qq "jellyfin*" >> "$LOGFILE" 2>&1 || true
+DEBIAN_FRONTEND=noninteractive apt-get "$APT_REMOVE_ACTION" -y -qq "jellyfin*" >> "$LOGFILE" 2>&1 || true
 DEBIAN_FRONTEND=noninteractive apt-get autoremove -y -qq >> "$LOGFILE" 2>&1 || true
 rm -f /etc/apt/sources.list.d/jellyfin.list /etc/apt/sources.list.d/jellyfin.sources /etc/apt/keyrings/jellyfin.gpg
 
 report_progress 80 "Removing Jellyfin state, caches, logs, and user account..."
-rm -rf /var/lib/jellyfin /var/cache/jellyfin /var/log/jellyfin /etc/jellyfin /usr/share/jellyfin
+rm -rf /var/cache/jellyfin /var/log/jellyfin /usr/share/jellyfin
+if [[ "${DELETE_DATA:-false}" == true ]]; then
+    rm -rf /var/lib/jellyfin /etc/jellyfin
+fi
 purge_system_user "jellyfin"
 systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
 
 remove_lock "${PACKAGE_NAME}"
-report_progress 100 "Jellyfin completely removed."
+report_progress 100 "Jellyfin removed; application data retained unless DELETE_DATA=true."
 log_info "${PACKAGE_NAME} removed successfully"

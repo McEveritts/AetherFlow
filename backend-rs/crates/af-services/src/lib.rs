@@ -40,6 +40,24 @@ pub struct PackageJobInfo {
 static ACTIVE_PACKAGE_JOBS: Lazy<RwLock<HashMap<String, PackageJobInfo>>> =
     Lazy::new(|| RwLock::new(HashMap::new()));
 
+// Health recovery must finish before a lifecycle job intentionally stops services.
+pub static PACKAGE_LIFECYCLE_MUTEX: Lazy<tokio::sync::Mutex<()>> =
+    Lazy::new(|| tokio::sync::Mutex::new(()));
+
+pub fn has_active_package_jobs() -> bool {
+    ACTIVE_PACKAGE_JOBS
+        .read()
+        .map(|jobs| {
+            jobs.values().any(|job| {
+                matches!(
+                    job.status.as_str(),
+                    "installing" | "updating" | "uninstalling"
+                )
+            })
+        })
+        .unwrap_or(true)
+}
+
 pub fn get_package_job_info(pkg_id: &str) -> Option<PackageJobInfo> {
     ACTIVE_PACKAGE_JOBS.read().ok()?.get(pkg_id).cloned()
 }
@@ -48,6 +66,22 @@ pub fn set_package_job_info(info: PackageJobInfo) {
     if let Ok(mut guard) = ACTIVE_PACKAGE_JOBS.write() {
         guard.insert(info.package_id.clone(), info);
     }
+}
+
+pub fn try_start_package_job(info: PackageJobInfo) -> bool {
+    let Ok(mut jobs) = ACTIVE_PACKAGE_JOBS.write() else {
+        return false;
+    };
+    if jobs.get(&info.package_id).is_some_and(|job| {
+        matches!(
+            job.status.as_str(),
+            "installing" | "updating" | "uninstalling"
+        )
+    }) {
+        return false;
+    }
+    jobs.insert(info.package_id.clone(), info);
+    true
 }
 
 pub fn clear_package_job_info(pkg_id: &str) {
@@ -278,6 +312,7 @@ fn default_blueprint_mutator_meta(app_name: &str) -> (&'static str, String, &'st
         ),
         "sabnzbd" => ("ini", "/var/lib/sabnzbd/sabnzbd.ini".to_string(), "port"),
         "tautulli" => ("ini", "/var/lib/tautulli/config.ini".to_string(), "http_port"),
+        "gitea" => ("ini", "/etc/gitea/app.ini".to_string(), "HTTP_PORT"),
         "transmission" => (
             "json",
             "/etc/transmission-daemon/settings.json".to_string(),
@@ -553,24 +588,49 @@ pub fn clear_service_status_cache() {
 
 /// Resolves a logical package or service name into its concrete systemd unit names (`systemctl.go`).
 pub fn resolve_service_units(target: &str) -> Vec<String> {
-    let clean = target
-        .trim()
-        .trim_end_matches(".service")
-        .to_string();
+    let clean = target.trim().trim_end_matches(".service").to_string();
     if clean.is_empty() {
         return Vec::new();
     }
     let lower = clean.to_lowercase();
+    if let Ok(catalog) = get_package_catalog() {
+        if let Some(pkg) = catalog.iter().find(|p| {
+            p.name.eq_ignore_ascii_case(&lower)
+                || p.service_name
+                    .trim_end_matches(".service")
+                    .eq_ignore_ascii_case(&lower)
+                || p.sandbox_service_ids
+                    .iter()
+                    .any(|u| u.trim_end_matches(".service").eq_ignore_ascii_case(&lower))
+        }) {
+            let mut units = vec![if pkg.service_name.is_empty() {
+                pkg.name.clone()
+            } else {
+                pkg.service_name.clone()
+            }];
+            units.extend(pkg.sandbox_service_ids.iter().cloned());
+            let mut seen = std::collections::HashSet::new();
+            return units
+                .into_iter()
+                .map(|u| u.trim_end_matches(".service").to_string())
+                .filter(|u| !u.is_empty() && seen.insert(u.clone()))
+                .collect();
+        }
+    }
     match lower.as_str() {
         "deluge" | "deluged" => vec!["deluged".to_string(), "deluge-web".to_string()],
-        "mcvnc" | "kasmvnc" => vec!["aetherflow-VNC".to_string()],
+        "mcvnc" => vec!["af-mcvnc".to_string()],
+        "kasmvnc" => vec!["af-kasmvnc".to_string()],
         "plex" | "plexmediaserver" => vec!["plexmediaserver".to_string()],
         "emby" | "emby-server" => vec!["emby-server".to_string()],
         "pihole" | "pihole-ftl" => vec!["pihole-FTL".to_string()],
         "transmission" | "transmission-daemon" => vec!["transmission-daemon".to_string()],
         "qbittorrent" | "qbittorrent-nox" => {
             // Check if a templated unit like qbittorrent-nox@<user>.service exists on disk
-            for dir in ["/etc/systemd/system/multi-user.target.wants", "/etc/systemd/system"] {
+            for dir in [
+                "/etc/systemd/system/multi-user.target.wants",
+                "/etc/systemd/system",
+            ] {
                 if let Ok(entries) = fs::read_dir(dir) {
                     for entry in entries.flatten() {
                         let fname = entry.file_name().to_string_lossy().to_string();
@@ -580,7 +640,7 @@ pub fn resolve_service_units(target: &str) -> Vec<String> {
                     }
                 }
             }
-            vec!["qbittorrent-nox".to_string()]
+            vec!["qbittorrent".to_string()]
         }
         "paperless" | "paperless-ngx" | "paperless-webserver" => {
             vec!["paperless-webserver".to_string()]
@@ -651,7 +711,15 @@ pub fn format_uptime(enter_timestamp: &str) -> String {
 /// Queries `systemctl show <unit> --property=ActiveState,SubState,ActiveEnterTimestamp`
 /// with a short in-memory cache and graceful fallback on non-systemd platforms (`service_manager.go`).
 pub fn get_service_info(service_name: &str) -> (String, String, String) {
-    let units = resolve_service_units(service_name);
+    get_systemd_units_info(resolve_service_units(service_name), service_name)
+}
+
+/// Query a concrete unit without expanding it into all companion units.
+pub fn get_systemd_unit_info(unit: &str) -> (String, String, String) {
+    get_systemd_units_info(vec![unit.to_string()], unit)
+}
+
+fn get_systemd_units_info(units: Vec<String>, service_name: &str) -> (String, String, String) {
     let primary_unit = units
         .first()
         .cloned()
@@ -722,7 +790,11 @@ pub fn get_service_info(service_name: &str) -> (String, String, String) {
         if any_running {
             ("running".to_string(), best_uptime, primary_unit)
         } else if any_restarting {
-            ("restarting".to_string(), "Transitioning".to_string(), primary_unit)
+            (
+                "restarting".to_string(),
+                "Transitioning".to_string(),
+                primary_unit,
+            )
         } else {
             ("stopped".to_string(), "-".to_string(), primary_unit)
         }
@@ -1137,7 +1209,11 @@ pub async fn control_service_with_manager(
         );
     }
 
-    let units = resolve_service_units(service_name);
+    let units = if managed_by == "systemd-unit" {
+        vec![service_name.to_string()]
+    } else {
+        resolve_service_units(service_name)
+    };
     for unit in units {
         if !valid_name.is_match(&unit) {
             anyhow::bail!("invalid resolved unit name: {}", unit);
@@ -1696,6 +1772,46 @@ pub fn list_notifications(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_marketplace_service_units_include_companions_and_exact_names() {
+        for (package, expected) in [
+            ("mcvnc", vec!["af-mcvnc"]),
+            ("kasmvnc", vec!["af-kasmvnc"]),
+            ("qbittorrent", vec!["qbittorrent"]),
+            ("prometheus", vec!["prometheus", "node_exporter"]),
+            ("recyclarr", vec!["recyclarr", "recyclarr.timer"]),
+            ("rclone", vec!["rclone", "rclone-vfs"]),
+        ] {
+            assert_eq!(resolve_service_units(package), expected, "{}", package);
+        }
+        for (package, companion) in [
+            ("scrutiny", "scrutiny-collector.timer"),
+            ("paperless-ngx", "paperless-worker"),
+            ("dispatcharr", "dispatcharr-celerybeat"),
+        ] {
+            let units = resolve_service_units(package);
+            assert!(units.iter().any(|unit| unit == companion));
+            assert_eq!(resolve_service_units(companion), units);
+        }
+    }
+
+    #[test]
+    fn test_duplicate_lifecycle_job_is_rejected_atomically() {
+        let job = PackageJobInfo {
+            package_id: "test-marketplace-duplicate".into(),
+            action: "update".into(),
+            status: "updating".into(),
+            progress: 0,
+            last_line: String::new(),
+            started_at: String::new(),
+        };
+        assert!(try_start_package_job(job.clone()));
+        assert!(!try_start_package_job(job.clone()));
+        clear_package_job_info(&job.package_id);
+        assert!(try_start_package_job(job.clone()));
+        clear_package_job_info(&job.package_id);
+    }
 
     #[test]
     fn test_streaming_demo_mode_predicate() {

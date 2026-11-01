@@ -5,15 +5,17 @@
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
-    # shellcheck source=/dev/null
-    source /opt/AetherFlow/packages/common.sh
-else
+if [[ -f "${SELF_DIR}/../../common.sh" ]]; then
     # shellcheck source=/dev/null
     source "${SELF_DIR}/../../common.sh"
+else
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
 fi
 
 PACKAGE_NAME="homeassistant"
+APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-8123}}"
+export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
 mkdir -p "$(dirname "$LOGFILE")" /install
 
@@ -44,6 +46,8 @@ http:
     - ::1
 EOF
 fi
+set_config_value "/home/homeassistant/.homeassistant/configuration.yaml" yaml "server_port" "$APP_PORT" "http"
+
 chown -R homeassistant:homeassistant /srv/homeassistant /home/homeassistant
 
 report_progress 45 "Creating Home Assistant Python virtual environment..."
@@ -54,7 +58,7 @@ pip install --upgrade pip wheel setuptools
 pip install homeassistant
 EOF
 
-report_progress 85 "Configuring and starting home-assistant@homeassistant.service on port 8123..."
+report_progress 85 "Configuring and starting home-assistant@homeassistant.service on port ${APP_PORT}..."
 cat <<'EOF' > /etc/systemd/system/home-assistant@homeassistant.service
 [Unit]
 Description=Home Assistant
@@ -73,9 +77,11 @@ RestartSec=5s
 WantedBy=multi-user.target
 EOF
 
+
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now home-assistant@homeassistant >> "$LOGFILE" 2>&1
+systemctl restart home-assistant@homeassistant >> "$LOGFILE" 2>&1
 
 write_lock "${PACKAGE_NAME}"
-report_progress 100 "Home Assistant installed on port 8123."
+report_progress 100 "Home Assistant installed on port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"

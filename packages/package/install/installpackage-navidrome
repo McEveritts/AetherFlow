@@ -5,15 +5,17 @@
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
-    # shellcheck source=/dev/null
-    source /opt/AetherFlow/packages/common.sh
-else
+if [[ -f "${SELF_DIR}/../../common.sh" ]]; then
     # shellcheck source=/dev/null
     source "${SELF_DIR}/../../common.sh"
+else
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
 fi
 
 PACKAGE_NAME="navidrome"
+APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-4533}}"
+export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
 mkdir -p "$(dirname "$LOGFILE")" /install
 
@@ -50,17 +52,21 @@ rm -f "$TMP_TAR"
 chmod +x /opt/navidrome/navidrome
 printf '%s\n' "${ND_VERSION#v}" > /opt/navidrome/.af-version
 
-cat <<'EOF' > /var/lib/navidrome/navidrome.toml
+if [[ ! -s /var/lib/navidrome/navidrome.toml ]]; then
+sed "s/@AF_APP_PORT@/${APP_PORT}/g" <<'EOF' > /var/lib/navidrome/navidrome.toml
 MusicFolder = "/var/lib/navidrome/music"
 DataFolder = "/var/lib/navidrome"
 Address = "0.0.0.0"
-Port = 4533
+Port = @AF_APP_PORT@
 LogLevel = "info"
 EOF
+fi
+
+set_config_value "/var/lib/navidrome/navidrome.toml" ini "Port" "$APP_PORT" ""
 
 chown -R navidrome:navidrome /opt/navidrome /var/lib/navidrome
 
-report_progress 85 "Configuring and starting navidrome.service on port 4533..."
+report_progress 85 "Configuring and starting navidrome.service on port ${APP_PORT}..."
 cat <<'EOF' > /etc/systemd/system/navidrome.service
 [Unit]
 Description=Navidrome Music Server and Streamer
@@ -81,27 +87,25 @@ Restart=on-failure
 WantedBy=multi-user.target
 EOF
 
+
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now navidrome >> "$LOGFILE" 2>&1
+systemctl restart navidrome >> "$LOGFILE" 2>&1
 MASTER_USER="${MASTER_USER}" MASTER_PASS="${MASTER_PASS}" python3 - >> "$LOGFILE" 2>&1 <<'PYEOF' || true
+import os
 import os, time, json, urllib.request
-user, pw = os.environ.get("MASTER_USER", ""), os.environ.get("MASTER_PASS", "")
+user, pw = (os.environ.get('MASTER_USER', ''), os.environ.get('MASTER_PASS', ''))
 for _ in range(30):
     try:
-        with urllib.request.urlopen("http://127.0.0.1:4533/ping", timeout=3) as r:
+        with urllib.request.urlopen('http://127.0.0.1:4533/ping'.replace('4533', os.environ['AF_APP_PORT']), timeout=3) as r:
             if r.status == 200:
                 break
     except Exception:
         time.sleep(1)
-req = urllib.request.Request(
-    "http://127.0.0.1:4533/auth/createAdmin",
-    data=json.dumps({"username": user, "password": pw, "name": user}).encode("utf-8"),
-    headers={"Content-Type": "application/json"},
-    method="POST"
-)
+req = urllib.request.Request('http://127.0.0.1:4533/auth/createAdmin'.replace('4533', os.environ['AF_APP_PORT']), data=json.dumps({'username': user, 'password': pw, 'name': user}).encode('utf-8'), headers={'Content-Type': 'application/json'}, method='POST')
 urllib.request.urlopen(req, timeout=10).read()
 PYEOF
 
 write_lock "${PACKAGE_NAME}"
-report_progress 100 "Navidrome installed on port 4533."
+report_progress 100 "Navidrome installed on port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"

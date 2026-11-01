@@ -375,8 +375,9 @@
     "update_source": "github",
     "update_repo": "Jackett/Jackett",
     "version_command": [
-      "/opt/Jackett/jackett",
-      "--version"
+      "bash",
+      "-lc",
+      "if [ -s /opt/Jackett/.af-version ]; then cat /opt/Jackett/.af-version; else /opt/Jackett/jackett --version; fi"
     ],
     "sandbox_profile": "dotnet",
     "sandbox_rw_paths": [
@@ -432,8 +433,9 @@
     "update_source": "github",
     "update_repo": "navidrome/navidrome",
     "version_command": [
-      "/opt/navidrome/navidrome",
-      "--version"
+      "bash",
+      "-lc",
+      "if [ -s /opt/navidrome/.af-version ]; then cat /opt/navidrome/.af-version; else /opt/navidrome/navidrome --version; fi"
     ],
     "sandbox_profile": "go",
     "sandbox_rw_paths": [
@@ -613,8 +615,9 @@
     "update_source": "github",
     "update_repo": "nzbgetcom/nzbget",
     "version_command": [
-      "/opt/nzbget/nzbget",
-      "-v"
+      "bash",
+      "-lc",
+      "if [ -s /opt/nzbget/.af-version ]; then cat /opt/nzbget/.af-version; else /opt/nzbget/nzbget -v; fi"
     ],
     "sandbox_profile": "native",
     "sandbox_rw_paths": [
@@ -677,8 +680,9 @@
     "update_source": "github",
     "update_repo": "autobrr/autobrr",
     "version_command": [
-      "/usr/local/bin/autobrr",
-      "--version"
+      "bash",
+      "-lc",
+      "if [ -s /var/lib/autobrr/.af-version ]; then cat /var/lib/autobrr/.af-version; else /usr/local/bin/autobrr version; fi"
     ],
     "sandbox_profile": "go",
     "sandbox_rw_paths": [
@@ -799,8 +803,9 @@
     "update_source": "github",
     "update_repo": "filebrowser/filebrowser",
     "version_command": [
-      "/usr/local/bin/filebrowser",
-      "version"
+      "bash",
+      "-lc",
+      "if [ -s /opt/filebrowser/.af-version ]; then cat /opt/filebrowser/.af-version; else /usr/local/bin/filebrowser version; fi"
     ],
     "sandbox_profile": "go",
     "sandbox_rw_paths": [
@@ -1210,8 +1215,9 @@
     "update_source": "github",
     "update_repo": "rclone/rclone",
     "version_command": [
-      "/usr/bin/rclone",
-      "version"
+      "bash",
+      "-lc",
+      "if [ -s /var/lib/rclone/.af-version ]; then cat /var/lib/rclone/.af-version; else /usr/bin/rclone version; fi"
     ],
     "sandbox_profile": "go",
     "sandbox_rw_paths": [
@@ -1243,7 +1249,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "mergerfs -v 2>/dev/null | head -n1 || dpkg-query -W -f='${Version}' mergerfs 2>/dev/null"
+      "if [ -s /var/lib/mergerfs/.af-version ]; then cat /var/lib/mergerfs/.af-version; else bash -lc 'mergerfs -v 2>/dev/null | head -n1 || dpkg-query -W -f='\"'\"'${Version}'\"'\"' mergerfs 2>/dev/null'; fi"
     ],
     "sandbox_profile": "privileged",
     "sandbox_rw_paths": [
@@ -1553,7 +1559,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "znc --version 2>/dev/null | head -n1 || dpkg-query -W -f='${Version}' znc 2>/dev/null"
+      "if [ -s /var/lib/znc/.af-version ]; then cat /var/lib/znc/.af-version; else bash -lc 'znc --version 2>/dev/null | head -n1 || dpkg-query -W -f='\"'\"'${Version}'\"'\"' znc 2>/dev/null'; fi"
     ],
     "sandbox_profile": "native",
     "sandbox_rw_paths": [
@@ -1669,8 +1675,9 @@
     "update_source": "github",
     "update_repo": "go-gitea/gitea",
     "version_command": [
-      "/usr/local/bin/gitea",
-      "--version"
+      "bash",
+      "-lc",
+      "if [ -s /var/lib/gitea/.af-version ]; then cat /var/lib/gitea/.af-version; else /usr/local/bin/gitea --version; fi"
     ],
     "sandbox_profile": "go",
     "sandbox_rw_paths": [
@@ -1959,7 +1966,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "quasselcore --version 2>/dev/null | head -n1 || dpkg-query -W -f='${Version}' quassel-core 2>/dev/null"
+      "if [ -s /var/lib/quassel/.af-version ]; then cat /var/lib/quassel/.af-version; else bash -lc 'quasselcore --version 2>/dev/null | head -n1 || dpkg-query -W -f='\"'\"'${Version}'\"'\"' quassel-core 2>/dev/null'; fi"
     ],
     "sandbox_profile": "native",
     "sandbox_rw_paths": [
@@ -2120,8 +2127,9 @@
     "update_repo": "McEveritts/McVNC",
     "update_repo_url": "https://github.com/McEveritts/McVNC.git",
     "version_command": [
-      "/usr/local/bin/mcvnc",
-      "--version"
+      "bash",
+      "-lc",
+      "if [ -s /var/lib/mcvnc/.af-version ]; then cat /var/lib/mcvnc/.af-version; else /usr/local/bin/mcvnc --version; fi"
     ],
     "sandbox_profile": "privileged",
     "sandbox_rw_paths": [
@@ -2160,7 +2168,7 @@
     "version_command": [
       "bash",
       "-lc",
-      "x2goversion 2>/dev/null | head -n1 || dpkg-query -W -f='${Version}' x2goserver 2>/dev/null"
+      "if [ -s /var/lib/x2go/.af-version ]; then cat /var/lib/x2go/.af-version; else bash -lc 'x2goversion 2>/dev/null | head -n1 || dpkg-query -W -f='\"'\"'${Version}'\"'\"' x2goserver 2>/dev/null'; fi"
     ],
     "sandbox_profile": "privileged",
     "sandbox_rw_paths": [

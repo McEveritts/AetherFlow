@@ -4,12 +4,12 @@
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
-    # shellcheck source=/dev/null
-    source /opt/AetherFlow/packages/common.sh
-else
+if [[ -f "${SELF_DIR}/../../common.sh" ]]; then
     # shellcheck source=/dev/null
     source "${SELF_DIR}/../../common.sh"
+else
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
 fi
 
 PACKAGE_NAME="prowlarr"
@@ -23,10 +23,13 @@ report_progress 25 "Stopping and removing prowlarr.service..."
 purge_systemd_unit "prowlarr"
 
 report_progress 65 "Removing Prowlarr binaries, state directories, and user account..."
-rm -rf /opt/Prowlarr /var/lib/prowlarr
+rm -rf /opt/Prowlarr
+if [[ "${DELETE_DATA:-false}" == true ]]; then
+    rm -rf /var/lib/prowlarr
+fi
 purge_system_user "prowlarr"
 systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
 
 remove_lock "${PACKAGE_NAME}"
-report_progress 100 "Prowlarr completely removed."
+report_progress 100 "Prowlarr removed; application data retained unless DELETE_DATA=true."
 log_info "${PACKAGE_NAME} removed successfully"

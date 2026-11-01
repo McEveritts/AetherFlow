@@ -5,15 +5,17 @@
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
-    # shellcheck source=/dev/null
-    source /opt/AetherFlow/packages/common.sh
-else
+if [[ -f "${SELF_DIR}/../../common.sh" ]]; then
     # shellcheck source=/dev/null
     source "${SELF_DIR}/../../common.sh"
+else
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
 fi
 
 PACKAGE_NAME="filebrowser"
+APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-8095}}"
+export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
 mkdir -p "$(dirname "$LOGFILE")" /install /opt/AetherFlow/logs
 
@@ -42,32 +44,40 @@ FB_URL="https://github.com/filebrowser/filebrowser/releases/download/${FB_VERSIO
 
 TMP_TAR=$(mktemp /tmp/filebrowser-XXXXXX.tar.gz)
 curl -fsSL "$FB_URL" -o "$TMP_TAR" >> "$LOGFILE" 2>&1
-tar --no-same-owner -xzf "$TMP_TAR" -C /usr/local/bin filebrowser >> "$LOGFILE" 2>&1
+TMP_DIR="$(mktemp -d /tmp/filebrowser-extract-XXXXXX)"
+trap 'rm -rf "$TMP_DIR"; rm -f "$TMP_TAR"' EXIT
+tar --no-same-owner -xzf "$TMP_TAR" -C "$TMP_DIR" filebrowser >> "$LOGFILE" 2>&1
+systemctl stop filebrowser >> "$LOGFILE" 2>&1 || true
+install_binary_atomic "$TMP_DIR/filebrowser" /usr/local/bin/filebrowser
 rm -f "$TMP_TAR"
 chmod +x /usr/local/bin/filebrowser
 
-report_progress 70 "Initializing File Browser database on port 8095..."
+report_progress 70 "Initializing File Browser database on port ${APP_PORT}..."
 mkdir -p /opt/filebrowser /srv
 printf '%s\n' "${FB_VERSION#v}" > /opt/filebrowser/.af-version
 
-# Remove any existing DB so config init is idempotent on reinstall
-rm -f /opt/filebrowser/filebrowser.db
-/usr/local/bin/filebrowser config init --database /opt/filebrowser/filebrowser.db >> "$LOGFILE" 2>&1
-/usr/local/bin/filebrowser config set --address 0.0.0.0 --port 8095 --root /srv --minimum-password-length 1 --database /opt/filebrowser/filebrowser.db >> "$LOGFILE" 2>&1 || \
-    /usr/local/bin/filebrowser config set --address 0.0.0.0 --port 8095 --root /srv --database /opt/filebrowser/filebrowser.db >> "$LOGFILE" 2>&1
+FB_NEW_DATABASE=0
+if [[ ! -s /opt/filebrowser/filebrowser.db ]]; then
+    /usr/local/bin/filebrowser config init --database /opt/filebrowser/filebrowser.db >> "$LOGFILE" 2>&1
+    FB_NEW_DATABASE=1
+fi
+/usr/local/bin/filebrowser config set --address 0.0.0.0 --port ${APP_PORT} --root /srv --minimum-password-length 1 --database /opt/filebrowser/filebrowser.db >> "$LOGFILE" 2>&1 || \
+    /usr/local/bin/filebrowser config set --address 0.0.0.0 --port ${APP_PORT} --root /srv --database /opt/filebrowser/filebrowser.db >> "$LOGFILE" 2>&1
 
 FB_USER="${MASTER_USER}"
 FB_PASS="${MASTER_PASS}"
+if [[ "$FB_NEW_DATABASE" == 1 ]]; then
 if ! /usr/local/bin/filebrowser users add "$FB_USER" "$FB_PASS" --perm.admin --database /opt/filebrowser/filebrowser.db >> "$LOGFILE" 2>&1; then
     FB_PASS="$(openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | head -c 16)aA1!"
     /usr/local/bin/filebrowser users add "$FB_USER" "$FB_PASS" --perm.admin --database /opt/filebrowser/filebrowser.db >> "$LOGFILE" 2>&1
 fi
 printf 'FileBrowser Admin User: %s\nFileBrowser Admin Password: %s\n' "${FB_USER}" "${FB_PASS}" > /opt/AetherFlow/logs/filebrowser_credentials.txt
 chmod 600 /opt/AetherFlow/logs/filebrowser_credentials.txt
+fi
 
 chown -R filebrowser:filebrowser /opt/filebrowser
 
-report_progress 85 "Configuring and starting filebrowser.service on port 8095..."
+report_progress 85 "Configuring and starting filebrowser.service on port ${APP_PORT}..."
 cat <<'EOF' > /etc/systemd/system/filebrowser.service
 [Unit]
 Description=File Browser Web File Manager
@@ -86,7 +96,8 @@ EOF
 
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now filebrowser >> "$LOGFILE" 2>&1
+systemctl restart filebrowser >> "$LOGFILE" 2>&1
 
 write_lock "${PACKAGE_NAME}"
-report_progress 100 "File Browser installed on port 8095."
+report_progress 100 "File Browser installed on port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"

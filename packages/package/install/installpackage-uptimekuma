@@ -5,15 +5,17 @@
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
-    # shellcheck source=/dev/null
-    source /opt/AetherFlow/packages/common.sh
-else
+if [[ -f "${SELF_DIR}/../../common.sh" ]]; then
     # shellcheck source=/dev/null
     source "${SELF_DIR}/../../common.sh"
+else
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
 fi
 
 PACKAGE_NAME="uptimekuma"
+APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-3004}}"
+export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
 mkdir -p "$(dirname "$LOGFILE")" /install
 
@@ -30,23 +32,29 @@ if ! id -u uptimekuma >/dev/null 2>&1; then
     useradd --system --user-group --no-create-home --home-dir /opt/uptime-kuma --shell /usr/sbin/nologin uptimekuma
 fi
 
-report_progress 40 "Cloning Uptime Kuma repository..."
-rm -rf /opt/uptime-kuma
-git clone https://github.com/louislam/uptime-kuma.git /opt/uptime-kuma >> "$LOGFILE" 2>&1
+report_progress 40 "Preparing Uptime Kuma update while preserving monitors and history..."
+BUILD_DIR="$(mktemp -d /opt/.uptime-kuma-build.XXXXXX)"
+trap '[[ -z "$BUILD_DIR" ]] || rm -rf "$BUILD_DIR"' EXIT
+git clone https://github.com/louislam/uptime-kuma.git "$BUILD_DIR" >> "$LOGFILE" 2>&1
 
 report_progress 65 "Building Uptime Kuma production bundle..."
-cd /opt/uptime-kuma
+cd "$BUILD_DIR"
 npm run setup >> "$LOGFILE" 2>&1
 
 UK_VERSION="$(git describe --tags "$(git rev-list --tags --max-count=1)" 2>/dev/null || true)"
 if [[ -n "$UK_VERSION" ]]; then
-    printf '%s\n' "${UK_VERSION#v}" > /opt/uptime-kuma/.af-version
+    printf '%s\n' "${UK_VERSION#v}" > "$BUILD_DIR/.af-version"
 fi
+
+systemctl stop uptime-kuma >> "$LOGFILE" 2>&1 || true
+replace_app_tree "$BUILD_DIR" /opt/uptime-kuma data .env
+BUILD_DIR=""
+cd /opt/uptime-kuma
 
 chown -R uptimekuma:uptimekuma /opt/uptime-kuma
 NODE_BIN="$(command -v node || echo /usr/bin/node)"
 
-report_progress 85 "Configuring and starting uptime-kuma.service on port 3004..."
+report_progress 85 "Configuring and starting uptime-kuma.service on port ${APP_PORT}..."
 cat <<EOF > /etc/systemd/system/uptime-kuma.service
 [Unit]
 Description=Uptime Kuma - A fancy self-hosted monitoring tool
@@ -57,9 +65,9 @@ Type=simple
 User=uptimekuma
 Group=uptimekuma
 WorkingDirectory=/opt/uptime-kuma
-Environment=UPTIME_KUMA_PORT=3004
-Environment=PORT=3004
-ExecStart=${NODE_BIN} server/server.js --port=3004
+Environment=UPTIME_KUMA_PORT=${APP_PORT}
+Environment=PORT=${APP_PORT}
+ExecStart=${NODE_BIN} server/server.js --port=${APP_PORT}
 Restart=on-failure
 RestartSec=5
 
@@ -71,5 +79,5 @@ systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now uptime-kuma >> "$LOGFILE" 2>&1
 
 write_lock "${PACKAGE_NAME}"
-report_progress 100 "Uptime Kuma installed on port 3004."
+report_progress 100 "Uptime Kuma installed on port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"

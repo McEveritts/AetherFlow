@@ -5,15 +5,17 @@
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
-    # shellcheck source=/dev/null
-    source /opt/AetherFlow/packages/common.sh
-else
+if [[ -f "${SELF_DIR}/../../common.sh" ]]; then
     # shellcheck source=/dev/null
     source "${SELF_DIR}/../../common.sh"
+else
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
 fi
 
 PACKAGE_NAME="overseerr"
+APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-5056}}"
+export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
 mkdir -p "$(dirname "$LOGFILE")" /install
 
@@ -55,7 +57,7 @@ chown -R overseerr:overseerr /opt/overseerr /var/lib/overseerr
 
 NODE_BIN="$(command -v node || echo /usr/bin/node)"
 
-report_progress 85 "Configuring and starting overseerr.service on port 5056..."
+report_progress 85 "Configuring and starting overseerr.service on port ${APP_PORT}..."
 cat <<EOF > /etc/systemd/system/overseerr.service
 [Unit]
 Description=Overseerr Service
@@ -67,7 +69,7 @@ User=overseerr
 Group=overseerr
 WorkingDirectory=/opt/overseerr
 Environment=NODE_ENV=production
-Environment=PORT=5056
+Environment=PORT=${APP_PORT}
 Environment=CONFIG_DIRECTORY=/var/lib/overseerr
 Type=simple
 Restart=on-failure
@@ -82,5 +84,5 @@ systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now overseerr >> "$LOGFILE" 2>&1
 
 write_lock "${PACKAGE_NAME}"
-report_progress 100 "Overseerr installed on port 5056."
+report_progress 100 "Overseerr installed on port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"

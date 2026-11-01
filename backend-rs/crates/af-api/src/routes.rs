@@ -1,3 +1,4 @@
+use futures::StreamExt;
 use crate::auth::{
     admin_only_middleware, api_error, auth_middleware, check_setup_needed, csrf_middleware,
     disable_2fa, get_session, issue_csrf_token, list_active_sessions, local_login, logout,
@@ -703,6 +704,10 @@ fn allocate_or_resolve_app_port(app_name: &str, default_port: i32) -> i32 {
     if std::net::TcpListener::bind(("127.0.0.1", candidate as u16)).is_ok() {
         return candidate;
     }
+    // These applications do not expose a configurable native listen port.
+    if matches!(app_name, "plex" | "calibreweb") {
+        return 0;
+    }
     let range = bp
         .as_ref()
         .map(|b| b.fallback_port_range)
@@ -714,7 +719,7 @@ fn allocate_or_resolve_app_port(app_name: &str, default_port: i32) -> i32 {
             return port;
         }
     }
-    candidate
+    0
 }
 
 fn emit_package_progress(
@@ -788,7 +793,7 @@ async fn dispatch_package_lifecycle(
         "installpackage-"
     };
     let script_name = format!("{}{}", script_prefix, pkg.name);
-    let Some(script_path) = af_runner::resolve_package_script_path(action, &script_name) else {
+    let Some(_script_path) = af_runner::resolve_package_script_path(action, &script_name) else {
         return api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "INTERNAL_ERROR",
@@ -813,6 +818,20 @@ async fn dispatch_package_lifecycle(
     );
 
     let started_at = Utc::now().to_rfc3339();
+    if !af_services::try_start_package_job(af_services::PackageJobInfo {
+        package_id: pkg.name.clone(),
+        action: action.to_string(),
+        status: status_label.to_string(),
+        progress: 5,
+        last_line: format!("Starting {} for {}...", action, pkg.label),
+        started_at: started_at.clone(),
+    }) {
+        return api_error(
+            StatusCode::CONFLICT,
+            "CONFLICT",
+            "Package is already modifying state",
+        );
+    }
     emit_package_progress(
         &pkg.name,
         action,
@@ -828,10 +847,13 @@ async fn dispatch_package_lifecycle(
     let pkg_lock_file = pkg.lock_file.clone();
 
     tokio::spawn(async move {
-        let allocated_port = if action == "install" || action == "update" {
-            allocate_or_resolve_app_port(&clean_id, pkg_default_port)
+        let _lifecycle_guard = af_services::PACKAGE_LIFECYCLE_MUTEX.lock().await;
+        // Read native configuration before stopping the application. An update
+        // must keep its port even while that port is owned by the old process.
+        let configured_port = if action == "update" {
+            af_services::mutators::get_app_runtime_meta(&clean_id).configured_port
         } else {
-            pkg_default_port
+            0
         };
 
         emit_package_progress(
@@ -844,15 +866,73 @@ async fn dispatch_package_lifecycle(
         );
 
         let mut stopped_units: Vec<String> = Vec::new();
-        if action == "update" {
-            let units = af_services::resolve_service_units(&clean_id);
+        if action == "update"
+            && env::var("AETHERFLOW_FS_ROOT")
+                .unwrap_or_default()
+                .trim()
+                .is_empty()
+        {
+            let mut units = af_services::resolve_service_units(&clean_id);
+            units.sort_by_key(|unit| !unit.ends_with(".timer"));
             for u in units {
-                let (st, _, _) = af_services::get_service_info(&u);
+                let (st, _, _) = af_services::get_systemd_unit_info(&u);
                 if st == "running" {
-                    let _ = af_services::control_service_with_manager(&u, "stop", "systemd").await;
+                    if let Err(error) =
+                        af_services::control_service_with_manager(&u, "stop", "systemd-unit").await
+                    {
+                        for unit in &stopped_units {
+                            let _ = af_services::control_service_with_manager(
+                                unit,
+                                "start",
+                                "systemd-unit",
+                            )
+                            .await;
+                        }
+                        emit_package_progress(
+                            &clean_id,
+                            action,
+                            "failed",
+                            10,
+                            &format!("Could not stop {}: {}", u, error),
+                            &started_at,
+                        );
+                        af_services::clear_package_job_info(&clean_id);
+                        return;
+                    }
                     stopped_units.push(u);
                 }
             }
+        }
+
+        let allocated_port = if action == "update" {
+            let ingress_port = af_db::get_app_ingress_config(&clean_id)
+                .ok()
+                .flatten()
+                .map(|c| c.listen_port)
+                .unwrap_or(0);
+            if configured_port > 0 {
+                configured_port
+            } else if ingress_port > 0 {
+                ingress_port
+            } else {
+                pkg_default_port
+            }
+        } else if action == "install" {
+            allocate_or_resolve_app_port(&clean_id, pkg_default_port)
+        } else {
+            pkg_default_port
+        };
+        if pkg_default_port > 0 && allocated_port <= 0 && action == "install" {
+            emit_package_progress(
+                &clean_id,
+                action,
+                "failed",
+                10,
+                "No supported listen port is available for this application",
+                &started_at,
+            );
+            af_services::clear_package_job_info(&clean_id);
+            return;
         }
 
         emit_package_progress(
@@ -867,9 +947,8 @@ async fn dispatch_package_lifecycle(
         let fs_root_override = env::var("AETHERFLOW_FS_ROOT")
             .ok()
             .filter(|s| !s.trim().is_empty());
-        let can_run_bash = cfg!(unix)
-            && fs_root_override.is_none()
-            && std::path::Path::new("/bin/bash").exists();
+        let can_run_bash =
+            cfg!(unix) && fs_root_override.is_none() && std::path::Path::new("/bin/bash").exists();
 
         let execution_result = if can_run_bash && af_runner::is_runner_available() {
             af_runner::dispatch_package_stream(
@@ -898,48 +977,41 @@ async fn dispatch_package_lifecycle(
             )
             .await
         } else if can_run_bash {
-            let mut cmd = tokio::process::Command::new("/bin/bash");
-            cmd.arg(&script_path).kill_on_drop(true);
-            if allocated_port > 0 {
-                cmd.env("AETHERFLOW_APP_PORT", allocated_port.to_string());
-                cmd.env("AF_APP_PORT", allocated_port.to_string());
-            }
-            match cmd.output().await {
-                Ok(out) => {
-                    let combined = format!(
-                        "{}\n{}",
-                        String::from_utf8_lossy(&out.stdout),
-                        String::from_utf8_lossy(&out.stderr)
-                    );
-                    for raw_line in combined.lines() {
-                        let trimmed = raw_line.trim();
-                        if !trimmed.is_empty() {
-                            let (pct, msg) = af_runner::parse_progress_line(trimmed)
+            let request = af_models::PackageRunnerRequest {
+                action: action.to_string(),
+                package_id: clean_id.clone(),
+                script_name: script_name.clone(),
+                app_port: allocated_port,
+            };
+            let stream = af_runner::execute_package_request_stream(request);
+            tokio::pin!(stream);
+            let mut result = Ok(());
+            while let Some(item) = stream.next().await {
+                match item {
+                    Ok(line) => {
+                        if let Some(error) = line.trim().strip_prefix("__RUNNER_EXIT_ERROR__:") {
+                            result = Err(anyhow::anyhow!("{}", error));
+                        } else {
+                            let (pct, msg) = af_runner::parse_progress_line(&line)
                                 .map(|(p, m)| (p as i32, m))
-                                .unwrap_or_else(|| (60, trimmed.to_string()));
-                            let display_msg = if msg.is_empty() {
-                                trimmed.to_string()
-                            } else {
-                                msg
-                            };
+                                .unwrap_or_else(|| (60, line));
                             emit_package_progress(
                                 &clean_id,
                                 action,
                                 status_label,
                                 pct,
-                                &display_msg,
+                                msg.trim(),
                                 &started_at,
                             );
                         }
                     }
-                    if out.status.success() {
-                        Ok(())
-                    } else {
-                        Err(anyhow::anyhow!("Package script failed: {}", out.status))
+                    Err(error) => {
+                        result = Err(error.into());
+                        break;
                     }
                 }
-                Err(error) => Err(anyhow::anyhow!("Failed to execute package script: {}", error)),
             }
+            result
         } else {
             emit_package_progress(
                 &clean_id,
@@ -970,7 +1042,8 @@ async fn dispatch_package_lifecycle(
 
         if let Err(error) = execution_result {
             for unit in &stopped_units {
-                let _ = af_services::control_service_with_manager(unit, "start", "systemd").await;
+                let _ =
+                    af_services::control_service_with_manager(unit, "start", "systemd-unit").await;
             }
             af_services::clear_service_status_cache();
             af_services::mutators::clear_app_runtime_meta_cache();
@@ -996,7 +1069,8 @@ async fn dispatch_package_lifecycle(
         );
 
         if action == "install" || action == "update" {
-            let _ = af_services::mutators::apply_blueprint_app_config(&clean_id, allocated_port).await;
+            let _ =
+                af_services::mutators::apply_blueprint_app_config(&clean_id, allocated_port).await;
 
             if allocated_port > 0 {
                 let base_domain = af_services::resolve_base_domain();
@@ -1043,7 +1117,8 @@ async fn dispatch_package_lifecycle(
 
             if action == "update" {
                 for u in stopped_units {
-                    let _ = af_services::control_service_with_manager(&u, "start", "systemd").await;
+                    let _ = af_services::control_service_with_manager(&u, "start", "systemd-unit")
+                        .await;
                 }
                 let _ = af_services::workers::refresh_package_update_by_id(&clean_id).await;
             }
@@ -2018,11 +2093,12 @@ async fn sync_app_blueprint(
     );
 
     let existing_ing = af_db::get_app_ingress_config(&app_name).ok().flatten();
+    let configured_port = af_services::mutators::get_app_runtime_meta(&app_name).configured_port;
     let allocated_port = existing_ing
         .as_ref()
         .map(|c| c.listen_port)
         .filter(|&p| p > 0)
-        .unwrap_or_else(|| allocate_or_resolve_app_port(&app_name, bp.default_port));
+        .unwrap_or(if configured_port > 0 { configured_port } else { bp.default_port });
     let base_domain = af_services::resolve_base_domain();
     let public_domain = existing_ing
         .as_ref()

@@ -12,6 +12,8 @@ else
 fi
 
 PACKAGE_NAME="jellyseerr"
+APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-5055}}"
+export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
 require_root
 mkdir -p "$(dirname "$LOGFILE")" /install /run/lock
@@ -157,7 +159,7 @@ User=jellyseerr
 Group=jellyseerr
 WorkingDirectory=/opt/jellyseerr
 Environment=NODE_ENV=production
-Environment=PORT=5055
+Environment=PORT=${APP_PORT}
 Environment=CONFIG_DIRECTORY=/var/lib/jellyseerr
 Type=simple
 Restart=on-failure
@@ -173,8 +175,13 @@ systemctl restart jellyseerr >> "$LOGFILE" 2>&1
 report_progress 90 "Verifying the running Seerr version..."
 HEALTHY=0
 for attempt in {1..30}; do
-    if curl --fail --silent --show-error --max-time 5 http://127.0.0.1:5055/api/v1/status 2>> "$LOGFILE" \
-        | python3 -c 'import json,sys; data=json.load(sys.stdin); sys.exit(0 if data.get("version", "").removeprefix("v") == sys.argv[1] else 1)' "${LATEST_TAG#v}" 2>> "$LOGFILE"; then
+    if STATUS_JSON="$(curl --fail --silent --max-time 5 "http://127.0.0.1:${APP_PORT}/api/v1/status")" \
+        && python3 -c 'import json,sys
+try:
+    data=json.load(sys.stdin)
+    sys.exit(0 if isinstance(data, dict) and data.get("version", "").removeprefix("v") == sys.argv[1] else 1)
+except (ValueError, TypeError, AttributeError):
+    sys.exit(1)' "${LATEST_TAG#v}" <<< "$STATUS_JSON"; then
         HEALTHY=1
         break
     fi
@@ -191,4 +198,4 @@ systemctl enable jellyseerr >> "$LOGFILE" 2>&1
 write_lock "${PACKAGE_NAME}"
 SUCCESS=1
 log_info "Seerr ${LATEST_TAG} verified. Previous application and state retained in ${BACKUP_DIR}."
-report_progress 100 "Seerr ${LATEST_TAG} installed and verified on port 5055."
+report_progress 100 "Seerr ${LATEST_TAG} installed and verified on port ${APP_PORT}."

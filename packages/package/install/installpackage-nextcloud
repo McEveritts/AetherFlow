@@ -5,15 +5,17 @@
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
-    # shellcheck source=/dev/null
-    source /opt/AetherFlow/packages/common.sh
-else
+if [[ -f "${SELF_DIR}/../../common.sh" ]]; then
     # shellcheck source=/dev/null
     source "${SELF_DIR}/../../common.sh"
+else
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
 fi
 
 PACKAGE_NAME="nextcloud"
+APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-8088}}"
+export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
 mkdir -p "$(dirname "$LOGFILE")" /install /opt/AetherFlow/logs
 
@@ -31,30 +33,52 @@ systemctl enable --now mariadb >> "$LOGFILE" 2>&1
 systemctl enable --now apache2 >> "$LOGFILE" 2>&1
 
 report_progress 30 "Provisioning MariaDB database for Nextcloud..."
-DB_PASS="$(openssl rand -hex 16)"
+EXISTING_INSTALL=0
+if [[ -f /var/www/nextcloud/config/config.php ]]; then
+    EXISTING_INSTALL=1
+elif [[ "${AF_PACKAGE_ACTION:-install}" == update ]]; then
+    print_error "Existing Nextcloud configuration is missing; refusing to reinitialize its database"
+    exit 1
+fi
 ADMIN_USER="${MASTER_USER}"
 ADMIN_PASS="${MASTER_PASS}"
 
+if [[ "$EXISTING_INSTALL" == 0 ]]; then
+if [[ "$(mysql -u root -Nse "SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME='nextcloud';")" == nextcloud ]]; then
+    print_error "Nextcloud database already exists without config.php; restore its configuration before installing"
+    exit 1
+fi
+DB_PASS="$(openssl rand -hex 16)"
 mysql -u root <<EOF >> "$LOGFILE" 2>&1
-DROP DATABASE IF EXISTS nextcloud;
 CREATE DATABASE nextcloud CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
 CREATE USER IF NOT EXISTS 'nextclouduser'@'localhost' IDENTIFIED BY '${DB_PASS}';
 ALTER USER 'nextclouduser'@'localhost' IDENTIFIED BY '${DB_PASS}';
 GRANT ALL PRIVILEGES ON nextcloud.* TO 'nextclouduser'@'localhost';
 FLUSH PRIVILEGES;
 EOF
+fi
 
 report_progress 50 "Downloading and extracting latest Nextcloud Server..."
-TMP_ZIP=$(mktemp /tmp/nextcloud-XXXXXX.zip)
+BUILD_DIR="$(mktemp -d /var/www/.nextcloud-build.XXXXXX)"
+TMP_ZIP="$BUILD_DIR/nextcloud.zip"
+trap '[[ -z "$BUILD_DIR" ]] || rm -rf "$BUILD_DIR"' EXIT
 curl -fsSL "https://download.nextcloud.com/server/releases/latest.zip" -o "$TMP_ZIP" >> "$LOGFILE" 2>&1
-rm -rf /var/www/nextcloud /var/lib/nextcloud/data
 mkdir -p /var/www /var/lib/nextcloud/data
-unzip -qo "$TMP_ZIP" -d /var/www >> "$LOGFILE" 2>&1
-rm -f "$TMP_ZIP"
+unzip -qo "$TMP_ZIP" -d "$BUILD_DIR" >> "$LOGFILE" 2>&1
+if [[ "$EXISTING_INSTALL" == 1 ]]; then
+    sudo -u www-data php /var/www/nextcloud/occ maintenance:mode --on >> "$LOGFILE" 2>&1
+fi
+replace_app_tree "$BUILD_DIR/nextcloud" /var/www/nextcloud config custom_apps themes data
+rm -rf "$BUILD_DIR"
+BUILD_DIR=""
 
 chown -R www-data:www-data /var/www/nextcloud /var/lib/nextcloud
 
 report_progress 75 "Running unattended Nextcloud initialization..."
+if [[ "$EXISTING_INSTALL" == 1 ]]; then
+    sudo -u www-data php /var/www/nextcloud/occ upgrade >> "$LOGFILE" 2>&1
+    sudo -u www-data php /var/www/nextcloud/occ maintenance:mode --off >> "$LOGFILE" 2>&1
+else
 sudo -u www-data php /var/www/nextcloud/occ maintenance:install \
     --database "mysql" \
     --database-name "nextcloud" \
@@ -63,6 +87,7 @@ sudo -u www-data php /var/www/nextcloud/occ maintenance:install \
     --admin-user "${ADMIN_USER}" \
     --admin-pass "${ADMIN_PASS}" \
     --data-dir "/var/lib/nextcloud/data" >> "$LOGFILE" 2>&1
+fi
 
 PRIMARY_IP="$(hostname -I 2>/dev/null | awk '{print $1}' || echo 127.0.0.1)"
 BASE_DOMAIN="$(get_base_domain || true)"
@@ -82,6 +107,7 @@ if [[ -n "$NC_VER" ]]; then
     printf '%s\n' "$NC_VER" > /var/www/nextcloud/.af-version
 fi
 
+if [[ "$EXISTING_INSTALL" == 0 ]]; then
 cat <<EOF > /opt/AetherFlow/logs/nextcloud_credentials.txt
 Nextcloud Admin User: ${ADMIN_USER}
 Nextcloud Admin Pass: ${ADMIN_PASS}
@@ -90,13 +116,14 @@ Database User: nextclouduser
 Database Pass: ${DB_PASS}
 EOF
 chmod 600 /opt/AetherFlow/logs/nextcloud_credentials.txt
-
-report_progress 90 "Configuring Apache VirtualHost on port 8088..."
-if ! grep -q "^Listen 8088$" /etc/apache2/ports.conf 2>/dev/null; then
-    echo "Listen 8088" >> /etc/apache2/ports.conf
 fi
 
-cat <<'EOF' > /etc/apache2/sites-available/nextcloud.conf
+report_progress 90 "Configuring Apache VirtualHost on port ${APP_PORT}..."
+if ! grep -q "^Listen ${APP_PORT}$" /etc/apache2/ports.conf 2>/dev/null; then
+    echo "Listen ${APP_PORT}" >> /etc/apache2/ports.conf
+fi
+
+sed "s/@AF_APP_PORT@/${APP_PORT}/g" <<'EOF' > /etc/apache2/sites-available/nextcloud.conf
 Alias /nextcloud "/var/www/nextcloud/"
 
 <Directory /var/www/nextcloud/>
@@ -108,7 +135,7 @@ Alias /nextcloud "/var/www/nextcloud/"
     </IfModule>
 </Directory>
 
-<VirtualHost *:8088>
+<VirtualHost *:@AF_APP_PORT@>
     DocumentRoot /var/www/nextcloud
     <Directory /var/www/nextcloud/>
         Require all granted
@@ -126,5 +153,5 @@ a2ensite nextcloud.conf >> "$LOGFILE" 2>&1
 systemctl reload apache2 >> "$LOGFILE" 2>&1 || systemctl restart apache2 >> "$LOGFILE" 2>&1
 
 write_lock "${PACKAGE_NAME}"
-report_progress 100 "Nextcloud installed on port 8088."
+report_progress 100 "Nextcloud installed on port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"
