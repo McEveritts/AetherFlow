@@ -2199,8 +2199,8 @@ async fn update_streaming_server(
         ua,
     );
 
-    let dash = crate::streaming_ext::build_streaming_dashboard("30d", true).await;
-    let server = dash.get("servers").and_then(|servers| servers.get(0)).cloned();
+    let dash = crate::streaming_ext::build_streaming_dashboard("30", "all", "all", true).await;
+    let server = dash.servers.first().cloned();
     Json(serde_json::json!({
         "message": "Jellyfin server configuration saved",
         "server": server,

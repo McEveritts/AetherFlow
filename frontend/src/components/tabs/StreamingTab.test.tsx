@@ -286,6 +286,39 @@ const mockDashboardData: StreamingDashboardData = {
                 lastSeenAt: new Date().toISOString(),
                 isActive: false,
             },
+            {
+                id: 2,
+                sessionKey: 'hist-2-legacy',
+                provider: 'jellyfin',
+                serverName: 'AetherFlow-Jellyfin',
+                userName: 'sarah_stream',
+                clientName: 'Swiftfin iOS',
+                deviceName: 'iPhone 16 Pro',
+                ipAddress: '198.51.100.42',
+                itemId: 'item-severance',
+                itemName: 'Hello, Ms. Cobel',
+                itemType: 'Episode',
+                seriesName: 'Severance',
+                seasonNumber: 2,
+                episodeNumber: 1,
+                productionYear: 2025,
+                playMethod: 'Transcode',
+                container: 'TS',
+                videoCodec: 'H264',
+                videoResolution: '1080p FHD',
+                audioCodec: 'AAC',
+                audioChannels: 2,
+                hwAccel: 'NVENC',
+                bitrateBps: 8400000,
+                bandwidthMbps: undefined as unknown as number,
+                durationSecs: 3300,
+                watchedSecs: 1650,
+                dataUsedBytes: 1732500000,
+                completionPct: 50.0,
+                startedAt: new Date().toISOString(),
+                lastSeenAt: new Date().toISOString(),
+                isActive: false,
+            },
         ],
     },
     updatedAt: new Date().toISOString(),
@@ -330,6 +363,13 @@ describe('StreamingTab - Jellyfin Play Statistics, Data Usage & Stream Telemetry
         expect(screen.getAllByText(/Severance/i).length).toBeGreaterThan(0);
         expect(screen.getByText(/Transcode · VAAPI/i)).toBeInTheDocument();
         expect(screen.getByText(/Container Bitrate Exceeds Limit/i)).toBeInTheDocument();
+    });
+
+    it('renders watch history rows and safely falls back to bitrateBps when bandwidthMbps is omitted', () => {
+        render(<StreamingTab />);
+        expect(screen.getByText(/Playback & Stream Data Usage Log/i)).toBeInTheDocument();
+        expect(screen.getAllByText('28.4 Mbps').length).toBeGreaterThan(0);
+        expect(screen.getByText('8.4 Mbps')).toBeInTheDocument();
     });
 
     it('opens the Jellyfin connection configuration modal when Configure Server button is clicked', () => {

@@ -277,6 +277,16 @@ function formatBytes(bytes: number, decimals = 2): string {
     return `${parseFloat((bytes / Math.pow(k, i)).toFixed(decimals))} ${sizes[i]}`;
 }
 
+function formatBandwidthMbps(bandwidthMbps?: number, bitrateBps?: number): string {
+    if (typeof bandwidthMbps === 'number' && Number.isFinite(bandwidthMbps)) {
+        return bandwidthMbps.toFixed(1);
+    }
+    if (typeof bitrateBps === 'number' && Number.isFinite(bitrateBps) && bitrateBps > 0) {
+        return (bitrateBps / 1_000_000).toFixed(1);
+    }
+    return '0.0';
+}
+
 function formatDurationClock(secs: number): string {
     if (!secs || secs <= 0) return '0:00';
     const h = Math.floor(secs / 3600);
@@ -890,7 +900,7 @@ export default function StreamingTab() {
                     <div className="mt-2">
                         <div className="flex items-baseline gap-1.5">
                             <span className="text-2xl font-extrabold text-cyan-300 tabular-nums">
-                                {liveSummary.totalBandwidthMbps.toFixed(1)}
+                                {formatBandwidthMbps(liveSummary.totalBandwidthMbps, liveSummary.totalBitrateBps)}
                             </span>
                             <span className="text-xs font-bold text-cyan-400/80">Mbps</span>
                         </div>
@@ -917,7 +927,7 @@ export default function StreamingTab() {
                             </span>
                         </div>
                         <p className="text-xs text-slate-400 mt-1.5">
-                            Peak throughput: <span className="text-slate-200 font-mono">{analytics.peakBandwidthMbps.toFixed(1)} Mbps</span>
+                            Peak throughput: <span className="text-slate-200 font-mono">{formatBandwidthMbps(analytics.peakBandwidthMbps)} Mbps</span>
                         </p>
                     </div>
                 </div>
@@ -993,7 +1003,7 @@ export default function StreamingTab() {
                                 Active Jellyfin Sessions
                             </h3>
                             <span className="text-xs font-mono px-2 py-0.5 rounded-full bg-white/[0.05] text-slate-300 border border-white/10">
-                                {liveSummary.activeStreams} active · {liveSummary.totalBandwidthMbps.toFixed(1)} Mbps total
+                                {liveSummary.activeStreams} active · {formatBandwidthMbps(liveSummary.totalBandwidthMbps, liveSummary.totalBitrateBps)} Mbps total
                             </span>
                         </div>
                         <div className="text-xs text-slate-400 flex items-center gap-3">
@@ -1069,7 +1079,7 @@ export default function StreamingTab() {
                                                             {sess.hwAccel ? ` · ${sess.hwAccel}` : ''}
                                                         </span>
                                                         <span className="text-xs font-mono font-bold text-cyan-300 tabular-nums">
-                                                            {sess.bandwidthMbps.toFixed(1)} Mbps
+                                                            {formatBandwidthMbps(sess.bandwidthMbps, sess.bitrateBps)} Mbps
                                                         </span>
                                                     </div>
 
@@ -1177,7 +1187,7 @@ export default function StreamingTab() {
                                             <div>
                                                 <div className="flex items-center justify-between text-xs font-mono text-slate-400 mb-1">
                                                     <span>{formatDurationClock(sess.positionSecs)}</span>
-                                                    <span className="text-slate-200 font-bold">{sess.progressPct.toFixed(1)}%</span>
+                                                    <span className="text-slate-200 font-bold">{(Number.isFinite(sess.progressPct) ? sess.progressPct : 0).toFixed(1)}%</span>
                                                     <span>{formatDurationClock(sess.durationSecs)}</span>
                                                 </div>
                                                 <div className="h-1.5 w-full rounded-full bg-slate-800 overflow-hidden relative">
@@ -1810,18 +1820,18 @@ export default function StreamingTab() {
                                                 </td>
                                                 <td className="py-3 px-3 font-mono">
                                                     <p className="text-teal-300 font-bold">{formatBytes(h.dataUsedBytes, 2)}</p>
-                                                    <p className="text-xs text-slate-400">{h.bandwidthMbps.toFixed(1)} Mbps</p>
+                                                    <p className="text-xs text-slate-400">{formatBandwidthMbps(h.bandwidthMbps, h.bitrateBps)} Mbps</p>
                                                 </td>
                                                 <td className="py-3 px-3">
                                                     <div className="flex items-center gap-2">
                                                         <div className="w-20 h-1.5 bg-slate-800 rounded-full overflow-hidden">
                                                             <div
                                                                 className="h-full bg-indigo-500 rounded-full"
-                                                                style={{ width: `${Math.min(100, h.completionPct)}%` }}
+                                                                style={{ width: `${Math.min(100, Number.isFinite(h.completionPct) ? h.completionPct : 0)}%` }}
                                                             />
                                                         </div>
                                                         <span className="text-xs font-mono text-slate-300">
-                                                            {Math.round(h.completionPct)}%
+                                                            {Math.round(Number.isFinite(h.completionPct) ? h.completionPct : 0)}%
                                                         </span>
                                                     </div>
                                                     <p className="text-xs text-slate-500 mt-0.5">

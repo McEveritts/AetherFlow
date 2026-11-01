@@ -525,6 +525,141 @@ fn sanitize_archive_entry_path(entry_path: &Path, archive_path: &Path) -> Releas
     Ok(normalized)
 }
 
+/// Resolves a configured staging source path (`release-manager.sh` or `release-manager.conf`),
+/// allowing ONLY the managed `config.current_link` symlink when it points to a direct child
+/// release directory inside `config.releases_dir`.
+///
+/// Any untrusted ancestor symlink, `current_link` pointing outside `releases_dir`, or nested
+/// symlink inside the active release directory is rejected with `ReleaseError::PathValidation`.
+/// If the source file simply does not exist on disk, returns `Ok(None)`.
+pub fn resolve_managed_current_source_path(
+    src: &Path,
+    config: &ReleaseConfig,
+) -> ReleaseResult<Option<PathBuf>> {
+    crate::config::validate_no_parent_traversal(src, "staging source path")?;
+
+    if let Ok(rel) = src.strip_prefix(&config.current_link) {
+        if rel.as_os_str().is_empty() {
+            return Err(ReleaseError::PathValidation {
+                path: src.to_path_buf(),
+                reason: "staging source path must reference a file inside current release"
+                    .to_string(),
+            });
+        }
+        crate::config::validate_no_parent_traversal(rel, "relative staging source path")?;
+
+        let parent = config
+            .current_link
+            .parent()
+            .ok_or_else(|| ReleaseError::PathValidation {
+                path: config.current_link.clone(),
+                reason: "current release link has no parent".to_string(),
+            })?;
+        crate::fs_security::ensure_no_symlink_ancestors(parent)?;
+        crate::fs_security::ensure_no_symlink_ancestors(&config.releases_dir)?;
+
+        let current_meta = match fs::symlink_metadata(&config.current_link) {
+            Ok(meta) => meta,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => {
+                return Err(ReleaseError::io(
+                    format!("inspecting current release link {}", config.current_link.display()),
+                    e,
+                ))
+            }
+        };
+
+        let target_release_dir = if current_meta.file_type().is_symlink() {
+            let link_target = fs::read_link(&config.current_link).map_err(|e| {
+                ReleaseError::io(
+                    format!("reading current release link {}", config.current_link.display()),
+                    e,
+                )
+            })?;
+            crate::config::validate_no_parent_traversal(
+                &link_target,
+                "current release link target",
+            )?;
+            let resolved = if link_target.is_absolute() {
+                link_target
+            } else {
+                parent.join(link_target)
+            };
+            crate::config::validate_no_parent_traversal(&resolved, "resolved current release dir")?;
+            if resolved.parent() != Some(config.releases_dir.as_path()) {
+                return Err(ReleaseError::PathValidation {
+                    path: resolved,
+                    reason: "current release link must target a direct child of releases_dir"
+                        .to_string(),
+                });
+            }
+            crate::fs_security::ensure_no_symlink_ancestors(&resolved)?;
+            let target_meta = match fs::symlink_metadata(&resolved) {
+                Ok(m) => m,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Err(e) => {
+                    return Err(ReleaseError::io(
+                        format!("inspecting resolved current release {}", resolved.display()),
+                        e,
+                    ))
+                }
+            };
+            if target_meta.file_type().is_symlink() || !target_meta.is_dir() {
+                return Err(ReleaseError::PathValidation {
+                    path: resolved,
+                    reason: "resolved current release target is not a real directory".to_string(),
+                });
+            }
+            resolved
+        } else if current_meta.is_dir() {
+            crate::fs_security::ensure_no_symlink_ancestors(&config.current_link)?;
+            config.current_link.clone()
+        } else {
+            return Err(ReleaseError::PathValidation {
+                path: config.current_link.clone(),
+                reason: "current release path is neither a symlink nor a directory".to_string(),
+            });
+        };
+
+        crate::fs_security::ensure_no_symlink_in_relative_chain(&target_release_dir, rel)?;
+        let resolved_src = target_release_dir.join(rel);
+        match fs::symlink_metadata(&resolved_src) {
+            Ok(meta) => {
+                if meta.file_type().is_symlink() || !meta.is_file() {
+                    return Err(ReleaseError::PathValidation {
+                        path: resolved_src,
+                        reason: "staging source entry is not a regular file".to_string(),
+                    });
+                }
+                Ok(Some(resolved_src))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(ReleaseError::io(
+                format!("inspecting staging source file {}", resolved_src.display()),
+                e,
+            )),
+        }
+    } else {
+        crate::fs_security::ensure_no_symlink_ancestors(src)?;
+        match fs::symlink_metadata(src) {
+            Ok(meta) => {
+                if meta.file_type().is_symlink() || !meta.is_file() {
+                    return Err(ReleaseError::PathValidation {
+                        path: src.to_path_buf(),
+                        reason: "staging source entry is not a regular file".to_string(),
+                    });
+                }
+                Ok(Some(src.to_path_buf()))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(ReleaseError::io(
+                format!("inspecting staging source file {}", src.display()),
+                e,
+            )),
+        }
+    }
+}
+
 /// Stages the executing `release-manager.sh` and `release-manager.conf` into `${RELEASE_DIR}/deploy`
 /// when configured, matching `stage_running_release_manager` in `deploy/release-manager.sh`.
 pub fn stage_running_release_manager(
@@ -536,16 +671,20 @@ pub fn stage_running_release_manager(
     crate::fs_security::create_dir_all_no_symlinks(&deploy_dir, 0o755)?;
 
     if let Some(ref script_src) = config.stage_script_path {
-        if script_src.is_file() {
+        if let Some(resolved_src) = resolve_managed_current_source_path(script_src, config)? {
             let dst = deploy_dir.join("release-manager.sh");
-            crate::fs_security::atomic_copy_file_with_mode(script_src, &dst, 0o755, None)?;
+            if resolved_src != dst {
+                crate::fs_security::atomic_copy_file_with_mode(&resolved_src, &dst, 0o755, None)?;
+            }
             set_executable_permission(&dst)?;
         }
     }
     if let Some(ref conf_src) = config.stage_conf_path {
-        if conf_src.is_file() {
+        if let Some(resolved_src) = resolve_managed_current_source_path(conf_src, config)? {
             let dst = deploy_dir.join("release-manager.conf");
-            crate::fs_security::atomic_copy_file_with_mode(conf_src, &dst, 0o644, None)?;
+            if resolved_src != dst {
+                crate::fs_security::atomic_copy_file_with_mode(&resolved_src, &dst, 0o644, None)?;
+            }
         }
     }
     Ok(())
@@ -863,4 +1002,196 @@ fn run_blocking_http_get_bytes(url: &str, timeout: Duration) -> ReleaseResult<Ve
     })
     .join()
     .map_err(|_| ReleaseError::ArtifactVerification("HTTP worker thread panicked".to_string()))?
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::{symlink, PermissionsExt};
+
+    fn create_isolated_root(label: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "af_release_stage_test_{}_{}_{}",
+            label,
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).expect("create isolated test root");
+        root
+    }
+
+    fn base_config(root: &Path) -> ReleaseConfig {
+        let mut cfg = ReleaseConfig::default();
+        cfg.releases_dir = root.join("releases");
+        cfg.current_link = root.join("current");
+        fs::create_dir_all(&cfg.releases_dir).expect("create releases_dir");
+        cfg
+    }
+
+    #[test]
+    fn test_stage_running_release_manager_normal_non_symlink_paths() {
+        let root = create_isolated_root("normal");
+        let mut cfg = base_config(&root);
+
+        let host_deploy = root.join("deploy");
+        fs::create_dir_all(&host_deploy).unwrap();
+        let script_src = host_deploy.join("release-manager.sh");
+        let conf_src = host_deploy.join("release-manager.conf");
+        fs::write(&script_src, b"#!/usr/bin/env bash\necho normal\n").unwrap();
+        fs::write(&conf_src, b"RELEASE_CHANNEL=experimental\n").unwrap();
+
+        cfg.stage_script_path = Some(script_src);
+        cfg.stage_conf_path = Some(conf_src);
+
+        let next_release = cfg.releases_dir.join("v4-next");
+        fs::create_dir_all(&next_release).unwrap();
+
+        stage_running_release_manager(&next_release, &cfg).expect("stage normal paths");
+
+        let staged_script = next_release.join("deploy/release-manager.sh");
+        let staged_conf = next_release.join("deploy/release-manager.conf");
+        assert_eq!(
+            fs::read_to_string(&staged_script).unwrap(),
+            "#!/usr/bin/env bash\necho normal\n"
+        );
+        assert_eq!(
+            fs::read_to_string(&staged_conf).unwrap(),
+            "RELEASE_CHANNEL=experimental\n"
+        );
+        let script_mode = fs::symlink_metadata(&staged_script)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(script_mode & 0o111, 0o111, "staged script must be executable");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_stage_running_release_manager_resolves_managed_current_symlink() {
+        let root = create_isolated_root("managed_symlink");
+        let mut cfg = base_config(&root);
+
+        let active_release = cfg
+            .releases_dir
+            .join("v4-experimental-89017a6-1793518346");
+        let active_deploy = active_release.join("deploy");
+        fs::create_dir_all(&active_deploy).unwrap();
+        fs::write(
+            active_deploy.join("release-manager.sh"),
+            b"#!/usr/bin/env bash\necho from-current\n",
+        )
+        .unwrap();
+        fs::write(
+            active_deploy.join("release-manager.conf"),
+            b"RELEASE_CHANNEL=experimental\n",
+        )
+        .unwrap();
+
+        // Point managed current_link -> active_release
+        symlink(&active_release, &cfg.current_link).unwrap();
+
+        // Configure staging sources through /opt/AetherFlow/current/deploy/...
+        cfg.stage_script_path = Some(cfg.current_link.join("deploy/release-manager.sh"));
+        cfg.stage_conf_path = Some(cfg.current_link.join("deploy/release-manager.conf"));
+
+        let candidate_release = cfg.releases_dir.join("v4-experimental-candidate");
+        fs::create_dir_all(&candidate_release).unwrap();
+
+        stage_running_release_manager(&candidate_release, &cfg)
+            .expect("stage through managed current symlink must succeed");
+
+        let staged_script = candidate_release.join("deploy/release-manager.sh");
+        let staged_conf = candidate_release.join("deploy/release-manager.conf");
+        assert_eq!(
+            fs::read_to_string(&staged_script).unwrap(),
+            "#!/usr/bin/env bash\necho from-current\n"
+        );
+        assert_eq!(
+            fs::read_to_string(&staged_conf).unwrap(),
+            "RELEASE_CHANNEL=experimental\n"
+        );
+        let script_mode = fs::symlink_metadata(&staged_script)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(script_mode & 0o111, 0o111);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_stage_running_release_manager_rejects_outside_root_and_untrusted_symlinks() {
+        let root = create_isolated_root("reject_escapes");
+        let mut cfg = base_config(&root);
+
+        // 1. Malicious current_link pointing outside releases_dir
+        let outside_dir = root.join("outside_escape");
+        fs::create_dir_all(outside_dir.join("deploy")).unwrap();
+        fs::write(
+            outside_dir.join("deploy/release-manager.sh"),
+            b"#!/bin/sh\necho pwned\n",
+        )
+        .unwrap();
+        symlink(&outside_dir, &cfg.current_link).unwrap();
+
+        cfg.stage_script_path = Some(cfg.current_link.join("deploy/release-manager.sh"));
+        let candidate_release = cfg.releases_dir.join("v4-candidate-1");
+        fs::create_dir_all(&candidate_release).unwrap();
+
+        let err = stage_running_release_manager(&candidate_release, &cfg)
+            .expect_err("must reject current_link pointing outside releases_dir");
+        assert!(matches!(err, ReleaseError::PathValidation { .. }));
+
+        // 2. Valid current_link, but nested symlink inside active release deploy/
+        fs::remove_file(&cfg.current_link).unwrap();
+        let active_release = cfg.releases_dir.join("v4-active");
+        fs::create_dir_all(active_release.join("deploy")).unwrap();
+        symlink(
+            outside_dir.join("deploy/release-manager.sh"),
+            active_release.join("deploy/release-manager.sh"),
+        )
+        .unwrap();
+        symlink(&active_release, &cfg.current_link).unwrap();
+
+        let err_nested = stage_running_release_manager(&candidate_release, &cfg)
+            .expect_err("must reject nested symlink inside active release");
+        assert!(matches!(err_nested, ReleaseError::PathValidation { .. }));
+
+        // 3. Untrusted symlink ancestor outside current_link
+        let untrusted_link = root.join("untrusted_deploy_link");
+        symlink(outside_dir.join("deploy"), &untrusted_link).unwrap();
+        cfg.stage_script_path = Some(untrusted_link.join("release-manager.sh"));
+
+        let err_untrusted = stage_running_release_manager(&candidate_release, &cfg)
+            .expect_err("must reject untrusted symlink ancestor");
+        assert!(matches!(err_untrusted, ReleaseError::PathValidation { .. }));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_stage_running_release_manager_missing_source_files_is_noop() {
+        let root = create_isolated_root("missing_noop");
+        let mut cfg = base_config(&root);
+
+        let active_release = cfg.releases_dir.join("v4-active");
+        fs::create_dir_all(&active_release).unwrap();
+        symlink(&active_release, &cfg.current_link).unwrap();
+
+        cfg.stage_script_path = Some(cfg.current_link.join("deploy/release-manager.sh"));
+        cfg.stage_conf_path = Some(root.join("nonexistent/release-manager.conf"));
+
+        let candidate_release = cfg.releases_dir.join("v4-candidate");
+        fs::create_dir_all(&candidate_release).unwrap();
+
+        stage_running_release_manager(&candidate_release, &cfg)
+            .expect("missing optional source files should be a clean no-op");
+        assert!(!candidate_release.join("deploy/release-manager.sh").exists());
+        assert!(!candidate_release.join("deploy/release-manager.conf").exists());
+
+        let _ = fs::remove_dir_all(&root);
+    }
 }

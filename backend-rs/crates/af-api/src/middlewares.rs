@@ -412,7 +412,10 @@ pub async fn app_subdomain_proxy_middleware(req: Request, next: Next) -> Respons
         if let Some(hdrs) = req_builder.headers_mut() {
             for (k, v) in incoming_headers.iter() {
                 let name_str = k.as_str();
-                if is_hop_by_hop_header(name_str) || name_str.eq_ignore_ascii_case("x-aetherflow-user") {
+                if is_hop_by_hop_header(name_str)
+                    || name_str.eq_ignore_ascii_case("host")
+                    || name_str.eq_ignore_ascii_case("x-aetherflow-user")
+                {
                     continue;
                 }
                 hdrs.append(k.clone(), v.clone());
@@ -887,5 +890,282 @@ mod proxy_header_tests {
         assert_eq!(request.headers()["authorization"], "Bearer test-token");
         assert!(!request.headers().contains_key(header::CONNECTION));
         assert!(!request.headers().contains_key("x-aetherflow-user"));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::routing::any;
+    use axum::Router;
+    use chrono::Utc;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    /// Spawns a strict raw HTTP/1.1 mock upstream that behaves like Jellyfin/Kestrel:
+    /// - Rejects any request with `!= 1` `Host:` header lines with `400 Bad Request`
+    /// - Supports WebSocket upgrade (`Upgrade: websocket`) and echoes a frame over the upgraded stream
+    /// - For normal HTTP requests, returns 200 OK with JSON detailing the observed request line,
+    ///   host header count, headers, and body.
+    async fn spawn_strict_kestrel_mock_upstream() -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    let mut temp = [0u8; 4096];
+                    let header_end_pos = loop {
+                        match socket.read(&mut temp).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => {
+                                buf.extend_from_slice(&temp[..n]);
+                                if let Some(pos) =
+                                    buf.windows(4).position(|w| w == b"\r\n\r\n")
+                                {
+                                    break pos;
+                                }
+                            }
+                        }
+                    };
+
+                    let header_bytes = &buf[..header_end_pos];
+                    let header_text = String::from_utf8_lossy(header_bytes).to_string();
+                    let mut lines = header_text.split("\r\n");
+                    let request_line = lines.next().unwrap_or("").to_string();
+
+                    let mut host_headers = Vec::new();
+                    let mut content_length: usize = 0;
+                    let mut is_ws = false;
+                    let mut all_headers: HashMap<String, Vec<String>> = HashMap::new();
+
+                    for line in lines {
+                        if let Some((k, v)) = line.split_once(':') {
+                            let key_trim = k.trim();
+                            let val_trim = v.trim().to_string();
+                            if key_trim.eq_ignore_ascii_case("host") {
+                                host_headers.push(val_trim.clone());
+                            }
+                            if key_trim.eq_ignore_ascii_case("content-length") {
+                                content_length = val_trim.parse::<usize>().unwrap_or(0);
+                            }
+                            if key_trim.eq_ignore_ascii_case("upgrade")
+                                && val_trim.eq_ignore_ascii_case("websocket")
+                            {
+                                is_ws = true;
+                            }
+                            all_headers
+                                .entry(key_trim.to_ascii_lowercase())
+                                .or_default()
+                                .push(val_trim);
+                        }
+                    }
+
+                    // Strict Kestrel check: must have exactly 1 Host header
+                    if host_headers.len() != 1 {
+                        let resp = format!(
+                            "HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\nDuplicate or missing Host header: count={}",
+                            format!("Duplicate or missing Host header: count={}", host_headers.len()).len(),
+                            host_headers.len()
+                        );
+                        let _ = socket.write_all(resp.as_bytes()).await;
+                        return;
+                    }
+
+                    let body_start = header_end_pos + 4;
+                    while buf.len() < body_start + content_length {
+                        match socket.read(&mut temp).await {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => buf.extend_from_slice(&temp[..n]),
+                        }
+                    }
+                    let body_slice = if buf.len() >= body_start + content_length {
+                        &buf[body_start..body_start + content_length]
+                    } else {
+                        &buf[body_start..]
+                    };
+                    let body_str = String::from_utf8_lossy(body_slice).to_string();
+
+                    if is_ws {
+                        let resp = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nX-Upstream-Host-Count: 1\r\n\r\n";
+                        if socket.write_all(resp.as_bytes()).await.is_err() {
+                            return;
+                        }
+                        // Read ping payload over upgraded tunnel and reply
+                        let mut ws_buf = [0u8; 64];
+                        if let Ok(n) = socket.read(&mut ws_buf).await {
+                            if n > 0 {
+                                let reply = format!(
+                                    "ws-ack:{}:{}",
+                                    host_headers[0],
+                                    String::from_utf8_lossy(&ws_buf[..n])
+                                );
+                                let _ = socket.write_all(reply.as_bytes()).await;
+                            }
+                        }
+                        return;
+                    }
+
+                    let payload = serde_json::json!({
+                        "requestLine": request_line,
+                        "hostCount": host_headers.len(),
+                        "host": host_headers[0],
+                        "headers": all_headers,
+                        "body": body_str,
+                    });
+                    let body_json = serde_json::to_string(&payload).unwrap();
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nX-Upstream-App: jellyfin\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body_json.len(),
+                        body_json
+                    );
+                    let _ = socket.write_all(resp.as_bytes()).await;
+                });
+            }
+        });
+
+        port
+    }
+
+    #[tokio::test]
+    async fn test_subdomain_proxy_sends_single_host_header_and_preserves_http_and_ws() {
+        let tmp_dir = std::env::temp_dir().join(format!(
+            "af-proxy-test-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+        let db_file = tmp_dir.join("proxy_test.sqlite");
+        std::env::set_var("DB_PATH", &db_file);
+        af_db::init_db().unwrap();
+
+        let upstream_port = spawn_strict_kestrel_mock_upstream().await;
+        let now = Utc::now();
+        af_db::set_app_ingress_config(&af_models::AppIngressConfig {
+            app_name: "jellyfin".to_string(),
+            public_domain: "jellyfin.example.test".to_string(),
+            external_access_enabled: true,
+            listen_port: upstream_port as i32,
+            tls_enabled: true,
+            created_at: now,
+            updated_at: now,
+        })
+        .unwrap();
+        af_db::invalidate_ingress_cache();
+
+        let app = Router::new()
+            .route("/*path", any(|| async { StatusCode::NOT_FOUND }))
+            .route("/", any(|| async { StatusCode::NOT_FOUND }))
+            .layer(axum::middleware::from_fn(app_subdomain_proxy_middleware));
+
+        let gw_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let gw_port = gw_listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let _ = axum::serve(
+                gw_listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await;
+        });
+
+        let client = reqwest::Client::new();
+
+        // 1. GET request with query params, cookies, Range, and spoofed X-Aetherflow-User
+        let get_resp = client
+            .get(format!(
+                "http://127.0.0.1:{}/System/Info/Public?format=json",
+                gw_port
+            ))
+            .header("Host", "jellyfin.example.test")
+            .header("Cookie", "jellyfin_credentials=abc123")
+            .header("Range", "bytes=0-1023")
+            .header("X-Aetherflow-User", "spoofed-attacker")
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(
+            get_resp.status(),
+            reqwest::StatusCode::OK,
+            "strict upstream must return 200 OK (not 400 Bad Request from duplicate Host)"
+        );
+        assert_eq!(
+            get_resp
+                .headers()
+                .get("x-upstream-app")
+                .and_then(|v| v.to_str().ok()),
+            Some("jellyfin")
+        );
+        let get_json: serde_json::Value = get_resp.json().await.unwrap();
+        assert_eq!(get_json["hostCount"], 1);
+        assert_eq!(get_json["host"], "jellyfin.example.test");
+        assert_eq!(
+            get_json["requestLine"],
+            "GET /System/Info/Public?format=json HTTP/1.1"
+        );
+        assert_eq!(
+            get_json["headers"]["cookie"][0],
+            "jellyfin_credentials=abc123"
+        );
+        assert_eq!(get_json["headers"]["range"][0], "bytes=0-1023");
+        assert!(
+            get_json["headers"].get("x-aetherflow-user").is_none(),
+            "spoofed X-Aetherflow-User header must be stripped on unauthenticated request"
+        );
+        assert_eq!(
+            get_json["headers"]["x-forwarded-host"][0],
+            "jellyfin.example.test"
+        );
+
+        // 2. POST request with JSON body via internal .aether.local domain from loopback
+        let post_resp = client
+            .post(format!(
+                "http://127.0.0.1:{}/Users/AuthenticateByName",
+                gw_port
+            ))
+            .header("Host", "jellyfin.aether.local")
+            .header("Content-Type", "application/json")
+            .body(r#"{"Username":"alice","Pw":"secret"}"#)
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(post_resp.status(), reqwest::StatusCode::OK);
+        let post_json: serde_json::Value = post_resp.json().await.unwrap();
+        assert_eq!(post_json["hostCount"], 1);
+        assert_eq!(post_json["host"], "jellyfin.aether.local");
+        assert_eq!(post_json["body"], r#"{"Username":"alice","Pw":"secret"}"#);
+
+        // 3. WebSocket upgrade tunneling against strict single-Host upstream
+        let mut ws_sock = tokio::net::TcpStream::connect(("127.0.0.1", gw_port))
+            .await
+            .unwrap();
+        let ws_handshake = concat!(
+            "GET /socket?api_key=test HTTP/1.1\r\n",
+            "Host: jellyfin.example.test\r\n",
+            "Upgrade: websocket\r\n",
+            "Connection: Upgrade\r\n",
+            "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n",
+            "Sec-WebSocket-Version: 13\r\n",
+            "\r\n"
+        );
+        ws_sock.write_all(ws_handshake.as_bytes()).await.unwrap();
+
+        let mut resp_buf = [0u8; 1024];
+        let n = ws_sock.read(&mut resp_buf).await.unwrap();
+        let resp_str = String::from_utf8_lossy(&resp_buf[..n]).to_string();
+        assert!(
+            resp_str.starts_with("HTTP/1.1 101 Switching Protocols"),
+            "expected 101 Switching Protocols, got: {}",
+            resp_str
+        );
+
+        ws_sock.write_all(b"ping-jellyfin").await.unwrap();
+        let n2 = ws_sock.read(&mut resp_buf).await.unwrap();
+        let tunnel_reply = String::from_utf8_lossy(&resp_buf[..n2]).to_string();
+        assert_eq!(tunnel_reply, "ws-ack:jellyfin.example.test:ping-jellyfin");
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
     }
 }

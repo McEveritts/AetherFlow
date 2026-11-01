@@ -1243,11 +1243,11 @@ pub struct ActiveStreamSession {
     pub series_name: String,
     #[serde(skip_serializing_if = "String::is_empty", default)]
     pub series_id: String,
-    #[serde(default)]
+    #[serde(skip_serializing_if = "is_zero_i32", default)]
     pub season_number: i32,
-    #[serde(default)]
+    #[serde(skip_serializing_if = "is_zero_i32", default)]
     pub episode_number: i32,
-    #[serde(default)]
+    #[serde(skip_serializing_if = "is_zero_i32", default)]
     pub production_year: i32,
     pub has_artwork: bool,
     #[serde(skip_serializing_if = "String::is_empty", default)]
@@ -1258,27 +1258,53 @@ pub struct ActiveStreamSession {
     pub progress_pct: f64,
     pub play_method: String,
     pub container: String,
+    #[serde(skip_serializing_if = "String::is_empty", default)]
+    pub target_container: String,
     pub video_codec: String,
+    #[serde(skip_serializing_if = "String::is_empty", default)]
+    pub target_video_codec: String,
     pub video_resolution: String,
     pub video_range: String,
+    #[serde(skip_serializing_if = "is_zero_f64", default)]
+    pub video_framerate: f64,
     pub is_video_direct: bool,
     pub audio_codec: String,
+    #[serde(skip_serializing_if = "String::is_empty", default)]
+    pub target_audio_codec: String,
     pub audio_channels: i32,
     pub audio_layout: String,
+    #[serde(skip_serializing_if = "String::is_empty", default)]
+    pub audio_language: String,
     pub is_audio_direct: bool,
+    #[serde(skip_serializing_if = "String::is_empty", default)]
+    pub subtitle_codec: String,
+    #[serde(skip_serializing_if = "String::is_empty", default)]
+    pub subtitle_language: String,
     #[serde(skip_serializing_if = "String::is_empty", default)]
     pub hw_accel: String,
     #[serde(default)]
     pub transcode_reasons: Vec<String>,
+    #[serde(skip_serializing_if = "is_zero_f64", default)]
+    pub transcode_progress_pct: f64,
+    #[serde(skip_serializing_if = "is_zero_f64", default)]
+    pub transcode_fps: f64,
     pub bitrate_bps: i64,
     pub bandwidth_mbps: f64,
     pub session_data_bytes: i64,
     pub started_at: String,
     #[serde(skip_serializing_if = "String::is_empty", default)]
     pub play_session_id: String,
+    #[serde(skip_serializing_if = "String::is_empty", default)]
+    pub media_source_id: String,
     pub supports_media_control: bool,
     pub supports_remote_control: bool,
     pub can_send_message: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub supported_commands: Vec<String>,
+}
+
+fn is_zero_f64(val: &f64) -> bool {
+    *val == 0.0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -1309,6 +1335,108 @@ pub struct StreamTypeDistribution {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
+pub struct BreakdownEntry {
+    pub label: String,
+    pub count: i32,
+    pub pct: f64,
+    pub watch_time_secs: i64,
+    pub data_used_bytes: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamingTimeSeriesPoint {
+    pub date: String,
+    pub plays: i32,
+    pub watch_time_secs: i64,
+    pub data_used_bytes: i64,
+    pub peak_bandwidth_mbps: f64,
+    pub direct_play_count: i32,
+    pub direct_stream_count: i32,
+    pub transcode_count: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamingUserStat {
+    pub user_id: String,
+    pub user_name: String,
+    pub provider: String,
+    pub total_plays: i32,
+    pub total_watch_secs: i64,
+    pub total_data_bytes: i64,
+    pub unique_items: i32,
+    pub direct_play_count: i32,
+    pub transcode_count: i32,
+    pub avg_completion_pct: f64,
+    pub last_device: String,
+    pub last_seen_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamingTitleStat {
+    pub item_id: String,
+    pub item_name: String,
+    pub item_type: String,
+    #[serde(skip_serializing_if = "String::is_empty", default)]
+    pub series_name: String,
+    #[serde(skip_serializing_if = "is_zero_i32", default)]
+    pub production_year: i32,
+    pub provider: String,
+    pub video_resolution: String,
+    pub video_codec: String,
+    pub total_plays: i32,
+    pub unique_viewers: i32,
+    pub total_watch_secs: i64,
+    pub total_data_bytes: i64,
+    pub avg_completion_pct: f64,
+    pub last_watched_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamingHistoryItem {
+    pub id: i64,
+    pub session_key: String,
+    pub provider: String,
+    pub server_name: String,
+    pub user_name: String,
+    pub client_name: String,
+    pub device_name: String,
+    pub ip_address: String,
+    pub item_id: String,
+    pub item_name: String,
+    pub item_type: String,
+    #[serde(skip_serializing_if = "String::is_empty", default)]
+    pub series_name: String,
+    #[serde(skip_serializing_if = "is_zero_i32", default)]
+    pub season_number: i32,
+    #[serde(skip_serializing_if = "is_zero_i32", default)]
+    pub episode_number: i32,
+    #[serde(skip_serializing_if = "is_zero_i32", default)]
+    pub production_year: i32,
+    pub play_method: String,
+    pub container: String,
+    pub video_codec: String,
+    pub video_resolution: String,
+    pub audio_codec: String,
+    pub audio_channels: i32,
+    #[serde(skip_serializing_if = "String::is_empty", default)]
+    pub hw_accel: String,
+    pub bitrate_bps: i64,
+    pub bandwidth_mbps: f64,
+    pub duration_secs: i64,
+    pub watched_secs: i64,
+    pub data_used_bytes: i64,
+    pub completion_pct: f64,
+    pub started_at: String,
+    pub last_seen_at: String,
+    pub is_active: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct StreamingAnalytics {
     pub window_days: i32,
     pub total_plays: i32,
@@ -1319,13 +1447,13 @@ pub struct StreamingAnalytics {
     pub avg_completion_pct: f64,
     pub peak_bandwidth_mbps: f64,
     pub stream_types: StreamTypeDistribution,
-    pub media_type_breakdown: Vec<serde_json::Value>,
-    pub resolution_breakdown: Vec<serde_json::Value>,
-    pub codec_breakdown: Vec<serde_json::Value>,
-    pub time_series: Vec<serde_json::Value>,
-    pub top_users: Vec<serde_json::Value>,
-    pub top_titles: Vec<serde_json::Value>,
-    pub recent_history: Vec<serde_json::Value>,
+    pub media_type_breakdown: Vec<BreakdownEntry>,
+    pub resolution_breakdown: Vec<BreakdownEntry>,
+    pub codec_breakdown: Vec<BreakdownEntry>,
+    pub time_series: Vec<StreamingTimeSeriesPoint>,
+    pub top_users: Vec<StreamingUserStat>,
+    pub top_titles: Vec<StreamingTitleStat>,
+    pub recent_history: Vec<StreamingHistoryItem>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
