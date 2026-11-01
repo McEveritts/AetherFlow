@@ -1,4 +1,4 @@
-const CACHE_NAME = 'aetherflow-cache-v2';
+const CACHE_NAME = 'aetherflow-cache-v3';
 const PRECACHE_URLS = [
   '/manifest.json',
   '/favicon.ico'

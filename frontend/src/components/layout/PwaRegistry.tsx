@@ -2,7 +2,7 @@
 
 import { useEffect } from 'react';
 
-const LEGACY_CACHES = ['aetherflow-cache-v1'];
+const LEGACY_CACHES = ['aetherflow-cache-v1', 'aetherflow-cache-v2'];
 
 export default function PwaRegistry() {
   useEffect(() => {

@@ -43,16 +43,35 @@
   <!-- Top Subtle Highlight Line -->
   <line x1="80" y1="2" x2="1120" y2="2" stroke="#818cf8" stroke-opacity="0.5" stroke-width="1.5"/>
 
-  <!-- AF App Icon Emblem -->
+  <!-- AetherFlow App Icon Emblem -->
   <g transform="translate(68, 66)">
+    <defs>
+      <linearGradient id="afb-flow" x1="10" y1="0" x2="118" y2="0" gradientUnits="userSpaceOnUse">
+        <stop offset="0" stop-color="#ffffff" stop-opacity="0"/>
+        <stop offset="0.3" stop-color="#ffffff" stop-opacity="0.95"/>
+        <stop offset="1" stop-color="#ffffff"/>
+      </linearGradient>
+      <clipPath id="afb-left-half"><rect x="0" y="0" width="64" height="128"/></clipPath>
+      <mask id="afb-cut-peak" maskUnits="userSpaceOnUse" x="0" y="0" width="128" height="128">
+        <rect width="128" height="128" fill="#fff"/>
+        <path d="M12 82 C28 82 32 66 48 66 S72 82 88 78 S108 60 116 58" fill="none" stroke="#000" stroke-width="22" stroke-linecap="round" clip-path="url(#afb-left-half)"/>
+      </mask>
+      <mask id="afb-cut-flow" maskUnits="userSpaceOnUse" x="0" y="0" width="128" height="128">
+        <rect width="128" height="128" fill="#fff"/>
+        <path d="M64 26 L98 100" fill="none" stroke="#000" stroke-width="23"/>
+      </mask>
+    </defs>
     <!-- Ambient Glow -->
     <rect x="-6" y="-6" width="140" height="140" rx="34" fill="url(#logoGrad)" opacity="0.25"/>
     <!-- Icon Body -->
-    <rect x="0" y="0" width="128" height="128" rx="30" fill="url(#logoGrad)" stroke="#a5b4fc" stroke-opacity="0.35" stroke-width="1.5"/>
-    <!-- Interlocked AF Monogram -->
-    <path d="M 24 98 L 48 30 L 66 30 L 79 67 C 79 74 75 78 68 78 L 46 78 L 39 98 Z" fill="#ffffff"/>
-    <path d="M 55 46 L 47 70 L 64 70 L 55 46 Z" fill="url(#logoGrad)"/>
-    <path d="M 44 82 L 66 82 C 78 82 84 74 84 62 L 84 44 C 84 34 90 30 100 30 L 112 30 L 112 44 L 99 44 C 95 44 94 46 94 50 L 94 60 L 109 60 L 109 73 L 94 73 L 94 98 L 79 98 L 79 79 C 74 82 68 83 61 83 L 44 83 Z" fill="#ffffff"/>
+    <rect x="0" y="0" width="128" height="128" rx="28" fill="url(#logoGrad)" stroke="#a5b4fc" stroke-opacity="0.35" stroke-width="1.5"/>
+    <!-- Peak + Flow Mark -->
+    <g transform="translate(12.8 12.8) scale(0.8)">
+      <path d="M30 100 L64 26 L98 100" fill="none" stroke="#ffffff" stroke-width="13" stroke-linecap="round" stroke-linejoin="round" mask="url(#afb-cut-peak)"/>
+      <path d="M12 82 C28 82 32 66 48 66 S72 82 88 78 S108 60 116 58" fill="none" stroke="url(#afb-flow)" stroke-width="10" stroke-linecap="round" mask="url(#afb-cut-flow)"/>
+      <circle cx="116" cy="58" r="11" fill="#ffffff" fill-opacity="0.22"/>
+      <circle cx="116" cy="58" r="6.5" fill="#ffffff"/>
+    </g>
   </g>
 
   <!-- Title & Version Badge -->

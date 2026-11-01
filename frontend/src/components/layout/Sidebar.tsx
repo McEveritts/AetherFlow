@@ -178,7 +178,7 @@ export default function Sidebar() {
                         <div className="flex items-center justify-between pb-4 mb-4 border-b border-white/10">
                             <div className="flex items-center gap-3">
                                 <div className="w-10 h-10 rounded-2xl bg-indigo-500/10 border border-indigo-500/30 flex items-center justify-center shadow-[0_0_20px_rgba(99,102,241,0.4)]">
-                                    <img src="/img/af-logo.png" alt="AetherFlow Logo" className="w-[120%] h-[120%] object-cover" />
+                                    <img src="/img/aetherflow-mark.svg" alt="AetherFlow Logo" className="w-7 h-7" />
                                 </div>
                                 <div>
                                     <h2 className="text-lg font-bold text-white tracking-tight">AetherFlow</h2>
@@ -291,7 +291,7 @@ export default function Sidebar() {
                                     title={isSidebarHovered ? 'Collapse Sidebar' : 'Expand Sidebar'}
                                     className="w-10 h-10 shrink-0 rounded-xl shadow-[0_0_20px_rgba(99,102,241,0.35)] relative overflow-hidden bg-indigo-500/10 border border-indigo-500/30 flex items-center justify-center obs-inline-action obs-gpu-120hz-interactive focus:outline-none focus-visible:outline-none"
                                 >
-                                    <img src="/img/af-logo.png" alt="AetherFlow Logo" className="w-[125%] h-[125%] object-cover" />
+                                    <img src="/img/aetherflow-mark.svg" alt="AetherFlow Logo" className="w-7 h-7" />
                                 </button>
                                 {isSidebarHovered && (
                                     <div className="flex flex-col min-w-0">

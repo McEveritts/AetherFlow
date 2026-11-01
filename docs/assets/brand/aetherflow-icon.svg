@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-labelledby="af-icon-title">
+  <title id="af-icon-title">AetherFlow</title>
+  <defs>
+    <linearGradient id="afi-tile" x1="0" y1="128" x2="128" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1d4ed8"/>
+      <stop offset="0.55" stop-color="#4f46e5"/>
+      <stop offset="1" stop-color="#9333ea"/>
+    </linearGradient>
+    <radialGradient id="afi-glow" cx="30" cy="18" r="90" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.28"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="afi-flow" x1="10" y1="0" x2="118" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0"/>
+      <stop offset="0.3" stop-color="#ffffff" stop-opacity="0.95"/>
+      <stop offset="1" stop-color="#ffffff"/>
+    </linearGradient>
+    <clipPath id="afi-left-half"><rect x="0" y="0" width="64" height="128"/></clipPath>
+    <mask id="afi-cut-peak" maskUnits="userSpaceOnUse" x="0" y="0" width="128" height="128">
+      <rect width="128" height="128" fill="#fff"/>
+      <path d="M12 82 C28 82 32 66 48 66 S72 82 88 78 S108 60 116 58" fill="none" stroke="#000" stroke-width="22" stroke-linecap="round" clip-path="url(#afi-left-half)"/>
+    </mask>
+    <mask id="afi-cut-flow" maskUnits="userSpaceOnUse" x="0" y="0" width="128" height="128">
+      <rect width="128" height="128" fill="#fff"/>
+      <path d="M64 26 L98 100" fill="none" stroke="#000" stroke-width="23"/>
+    </mask>
+  </defs>
+
+  <!-- Tile -->
+  <rect width="128" height="128" rx="28" fill="url(#afi-tile)"/>
+  <rect width="128" height="128" rx="28" fill="url(#afi-glow)"/>
+  <rect x="0.75" y="0.75" width="126.5" height="126.5" rx="27.25" fill="none" stroke="#c7d2fe" stroke-opacity="0.35" stroke-width="1.5"/>
+
+  <!-- Mark (scaled to 80% of tile) -->
+  <g transform="translate(12.8 12.8) scale(0.8)">
+    <path d="M30 100 L64 26 L98 100" fill="none" stroke="#ffffff" stroke-width="13" stroke-linecap="round" stroke-linejoin="round" mask="url(#afi-cut-peak)"/>
+    <path d="M12 82 C28 82 32 66 48 66 S72 82 88 78 S108 60 116 58" fill="none" stroke="url(#afi-flow)" stroke-width="10" stroke-linecap="round" mask="url(#afi-cut-flow)"/>
+    <circle cx="116" cy="58" r="11" fill="#ffffff" fill-opacity="0.22"/>
+    <circle cx="116" cy="58" r="6.5" fill="#ffffff"/>
+  </g>
+</svg>
