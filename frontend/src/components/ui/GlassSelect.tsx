@@ -8,7 +8,7 @@ export interface GlassSelectOption {
     label: string;
     description?: string;
     badge?: string;
-    badgeVariant?: 'emerald' | 'amber' | 'indigo' | 'slate';
+    badgeVariant?: 'emerald' | 'amber' | 'indigo' | 'rose' | 'slate';
     dotColor?: string;
     group?: string;
 }
@@ -25,6 +25,7 @@ const BADGE_STYLES: Record<NonNullable<GlassSelectOption['badgeVariant']>, strin
     emerald: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30',
     amber: 'bg-amber-500/15 text-amber-300 border-amber-500/30',
     indigo: 'bg-indigo-500/15 text-indigo-300 border-indigo-500/30',
+    rose: 'bg-rose-500/15 text-rose-300 border-rose-500/30',
     slate: 'bg-slate-800/90 text-slate-300 border-white/10',
 };
 

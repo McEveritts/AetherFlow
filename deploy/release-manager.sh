@@ -9,7 +9,7 @@
 # readiness probe with automatic rollback + SQLite PRAGMA integrity recovery.
 #
 # Usage:
-#   release-manager.sh deploy [--channel stable|nightly] [--from-source] [--dry-run]
+#   release-manager.sh deploy [--channel stable|nightly|experimental] [--from-source] [--dry-run]
 #   release-manager.sh rollback [--dry-run]
 #   release-manager.sh cleanup [--dry-run]
 #   release-manager.sh migrate-systemd [--dry-run]
@@ -50,7 +50,7 @@ while [[ $# -gt 0 ]]; do
             CHANNEL="${2:-stable}"
             shift 2
             ;;
-        stable|nightly)
+        stable|nightly|experimental)
             CHANNEL="$1"
             shift
             ;;
@@ -145,6 +145,32 @@ resolve_release_tag() {
     local releases_json
     releases_json="$(curl -sfL --max-time 15 "${api_url}" 2>/dev/null)" || true
 
+    if [[ "${channel}" == "experimental" ]]; then
+        if [[ -n "${releases_json}" ]] && command -v python3 &>/dev/null; then
+            local exp_tag=""
+            exp_tag="$(printf '%s' "${releases_json}" | python3 -c '
+import json, sys
+try:
+    for r in json.load(sys.stdin):
+        if r.get("draft"):
+            continue
+        tag = (r.get("tag_name") or "").strip()
+        target = (r.get("target_commitish") or "").strip().lower()
+        if tag and (tag.lower() == "experimental" or target == "experimental" or "experimental" in tag.lower()):
+            print(tag)
+            break
+except Exception:
+    pass
+' 2>/dev/null)"
+            if [[ -n "${exp_tag}" ]]; then
+                echo "${exp_tag}"
+                return 0
+            fi
+        fi
+        echo "experimental"
+        return 0
+    fi
+
     if [[ "${channel}" == "nightly" ]]; then
         if [[ -n "${releases_json}" ]] && command -v python3 &>/dev/null; then
             local nightly_tag=""
@@ -156,7 +182,7 @@ try:
             continue
         tag = (r.get("tag_name") or "").strip()
         target = (r.get("target_commitish") or "").strip().lower()
-        if tag and tag.lower() != "nightly" and (target == "nightly" or r.get("prerelease") or "nightly" in tag.lower()):
+        if tag and tag.lower() not in ("nightly", "experimental") and target != "experimental" and "experimental" not in tag.lower() and (target == "nightly" or r.get("prerelease") or "nightly" in tag.lower()):
             print(tag)
             break
 except Exception:
@@ -183,7 +209,7 @@ try:
             continue
         tag = (r.get("tag_name") or "").strip()
         target = (r.get("target_commitish") or "").strip().lower()
-        if tag and "-" not in tag and target != "nightly":
+        if tag and "-" not in tag and target not in ("nightly", "experimental") and "experimental" not in tag.lower():
             print(tag)
             break
 except Exception:
@@ -245,6 +271,8 @@ build_from_source() {
     local target_branch="${GIT_BRANCH}"
     if [[ "${CHANNEL}" == "nightly" ]]; then
         target_branch="nightly"
+    elif [[ "${CHANNEL}" == "experimental" ]]; then
+        target_branch="experimental"
     fi
     log_info "Building single-binary release from source (${GIT_REMOTE}/${target_branch})..."
     cd "${REPO_DIR}" || log_fatal "Repository directory not found: ${REPO_DIR}"
@@ -263,8 +291,8 @@ build_from_source() {
 
     rsync -a --exclude='.git' --exclude='node_modules' --exclude='.next' --exclude='*.sqlite' \
         "${REPO_DIR}/" "${RELEASE_DIR}/" >> "${LOG_FILE}" 2>&1
-    if [[ "${CHANNEL}" == "nightly" && ! -s "${RELEASE_DIR}/.version" ]]; then
-        echo "nightly-${source_sha}" > "${RELEASE_DIR}/.version"
+    if [[ ( "${CHANNEL}" == "nightly" || "${CHANNEL}" == "experimental" ) && ! -s "${RELEASE_DIR}/.version" ]]; then
+        echo "${CHANNEL}-${source_sha}" > "${RELEASE_DIR}/.version"
     fi
 
     log_info "Building Next.js static export (NEXT_STATIC_EXPORT=1)..."
@@ -279,14 +307,22 @@ build_from_source() {
     mkdir -p "${RELEASE_DIR}/backend/web/dist"
     cp -R "${RELEASE_DIR}/frontend/out/." "${RELEASE_DIR}/backend/web/dist/"
 
-    log_info "Compiling single-binary AetherFlow control plane..."
-    cd "${RELEASE_DIR}/backend" || log_fatal "Backend directory missing."
-    export GOOS=linux GOARCH=amd64 CGO_ENABLED=0
-    "${GO_BIN}" build -trimpath -buildvcs=false -o "${RELEASE_DIR}/aetherflow-api" . >> "${LOG_FILE}" 2>&1
+    # The experimental branch ships the Rust control plane (backend-rs).
+    if [[ -d "${RELEASE_DIR}/backend-rs" ]] && command -v cargo &>/dev/null; then
+        log_info "Compiling single-binary AetherFlow Rust control plane (backend-rs)..."
+        cd "${RELEASE_DIR}/backend-rs" || log_fatal "Rust backend directory missing."
+        cargo build --release --bin aetherflow-api >> "${LOG_FILE}" 2>&1
+        cp -f "target/release/aetherflow-api" "${RELEASE_DIR}/aetherflow-api"
+    else
+        log_info "Compiling single-binary AetherFlow Go control plane..."
+        cd "${RELEASE_DIR}/backend" || log_fatal "Backend directory missing."
+        export GOOS=linux GOARCH=amd64 CGO_ENABLED=0
+        "${GO_BIN}" build -trimpath -buildvcs=false -o "${RELEASE_DIR}/aetherflow-api" . >> "${LOG_FILE}" 2>&1
+    fi
     chmod +x "${RELEASE_DIR}/aetherflow-api"
 
     # Retain only runtime essentials (binary, config, packages, deploy, .version)
-    rm -rf "${RELEASE_DIR}/frontend" "${RELEASE_DIR}/backend/web/dist"
+    rm -rf "${RELEASE_DIR}/frontend" "${RELEASE_DIR}/backend/web/dist" "${RELEASE_DIR}/backend-rs/target"
 }
 
 release_scaffold() {
@@ -584,7 +620,7 @@ case "${COMMAND}" in
         migrate_systemd
         ;;
     *)
-        echo "Usage: $0 {deploy|rollback|cleanup|migrate-systemd} [--channel stable|nightly] [--from-source] [--dry-run]"
+        echo "Usage: $0 {deploy|rollback|cleanup|migrate-systemd} [--channel stable|nightly|experimental] [--from-source] [--dry-run]"
         exit 4
         ;;
 esac
