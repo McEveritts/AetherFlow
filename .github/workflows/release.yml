@@ -92,6 +92,7 @@ jobs:
           echo "RELEASE_TAG=${RELEASE_TAG}" >> "$GITHUB_ENV"
 
           STAGE_DIR="$(mktemp -d)"
+          chmod 0755 "${STAGE_DIR}"
           echo "STAGE_DIR=${STAGE_DIR}" >> "$GITHUB_ENV"
 
           cd backend
@@ -107,7 +108,7 @@ jobs:
           chmod +x "${STAGE_DIR}/aetherflow-api" "${STAGE_DIR}/deploy/release-manager.sh"
 
           mkdir -p release-dist
-          tar -C "${STAGE_DIR}" -czf release-dist/aetherflow-linux-amd64.tar.gz .
+          tar --owner=0 --group=0 --numeric-owner -C "${STAGE_DIR}" -czf release-dist/aetherflow-linux-amd64.tar.gz .
           (cd release-dist && sha256sum aetherflow-linux-amd64.tar.gz > SHA256SUMS)
 
       - name: Attest Build Provenance

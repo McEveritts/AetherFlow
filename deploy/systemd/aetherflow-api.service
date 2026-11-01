@@ -42,8 +42,8 @@ Restart=on-failure
 RestartSec=5s
 
 # ── Zero-Trust Namespace Isolation ───────────────────────────────────────────
-# Safe to enforce strictly because state lives in /var/lib/aetherflow and
-# root host operations are dispatched over /run/aetherflow/runner.sock.
+# Safe to enforce strictly because writable state is limited to the paths below
+# and root host operations go through /run/aetherflow/runner.sock.
 ProtectSystem=strict
 ProtectHome=read-only
 PrivateTmp=yes
@@ -53,7 +53,10 @@ ProtectKernelTunables=yes
 RestrictSUIDSGID=yes
 
 ReadWritePaths=/var/lib/aetherflow /var/log/aetherflow /run/aetherflow
-ReadWritePaths=-/var/lib/openclaw -/home/hdd
+# Legacy v3 databases live in /opt/AetherFlow/backend/data. The '-' skips the
+# path when that directory was never created. release-manager.sh does not
+# replace a unit that is already installed.
+ReadWritePaths=-/opt/AetherFlow/backend/data -/var/lib/openclaw -/home/hdd
 
 # ── Resource Limits ──────────────────────────────────────────────────────────
 LimitNOFILE=65535

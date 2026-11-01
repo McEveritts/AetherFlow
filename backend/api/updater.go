@@ -3,7 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"io"
+	"errors"
 	"log/slog"
 	"net/http"
 	"os"
@@ -152,20 +152,12 @@ func selectReleaseForChannel(releases []GitHubRelease, channel string) (tagName,
 }
 
 func fetchReleasesFromGitHub() ([]GitHubRelease, error) {
-	resp, reqErr := httpClient.Get("https://api.github.com/repos/" + githubRepo + "/releases")
+	bodyBytes, reqErr := fetchGitHubUpdate("/releases")
 	if reqErr != nil {
 		slog.Warn("[updater] releases API request failed", "error", reqErr)
 		return nil, reqErr
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		slog.Info("[updater] releases API returned non-200", "status", resp.StatusCode)
-		return nil, nil
-	}
-
 	var releases []GitHubRelease
-	bodyBytes, _ := io.ReadAll(resp.Body)
 	if jsonErr := json.Unmarshal(bodyBytes, &releases); jsonErr != nil {
 		slog.Error("[updater] failed to parse releases response", "error", jsonErr)
 		return nil, jsonErr
@@ -232,56 +224,58 @@ func experimentalUpdateAvailable(currentVersion, latestVersion string) bool {
 }
 
 // fetchBranchHead resolves the head commit of a branch as "<prefix>-<shortsha>".
-func fetchBranchHead(prefix string, branches []string) (version, message, htmlUrl string) {
+func fetchBranchHead(prefix string, branches []string) (version, message, htmlUrl string, err error) {
 	for _, branch := range branches {
-		resp, reqErr := httpClient.Get("https://api.github.com/repos/" + githubRepo + "/commits/" + branch)
+		bodyBytes, reqErr := fetchGitHubUpdate("/commits/" + branch)
 		if reqErr != nil {
-			slog.Error("[updater] commits API request failed", "branch", branch, "error", reqErr)
-			continue
-		}
-		if resp.StatusCode != 200 {
-			resp.Body.Close()
-			slog.Warn("[updater] commits API returned non-200", "branch", branch, "status", resp.StatusCode)
+			err = reqErr
+			var limited *githubUpdateError
+			if errors.As(reqErr, &limited) && !limited.retryAt.IsZero() {
+				break
+			}
 			continue
 		}
 		var commit GitHubCommit
-		bodyBytes, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
 		if jsonErr := json.Unmarshal(bodyBytes, &commit); jsonErr == nil && commit.Sha != "" {
 			shortSha := commit.Sha
 			if len(shortSha) > 7 {
 				shortSha = shortSha[:7]
 			}
-			return prefix + "-" + shortSha, commit.Commit.Message, commit.HtmlUrl
+			return prefix + "-" + shortSha, commit.Commit.Message, commit.HtmlUrl, nil
 		}
 	}
-	return "", "", ""
+	return "", "", "", err
 }
 
 // CheckUpdate queries the GitHub API to see if a newer release exists based on the Update Channel
 func CheckUpdate(c *gin.Context) {
 	currentVersion := getLocalVersion()
+
 	channel := readUpdateChannel()
 
 	var updateAvailable bool
 	var latestVersion string
 	var message string
 	var htmlUrl string
+	var resolutionErr error
 
 	switch channel {
 	case UpdateChannelExperimental:
 		if tag, releaseBody, url, fetchErr := fetchLatestExperimentalRelease(); fetchErr == nil && tag != "" {
-			latestVersion = tag
-			message = releaseBody
-			htmlUrl = url
+			latestVersion, message, htmlUrl = tag, releaseBody, url
 		} else {
-			latestVersion, message, htmlUrl = fetchBranchHead(UpdateChannelExperimental, []string{"experimental"})
+			resolutionErr = fetchErr
+			var limited *githubUpdateError
+			if errors.As(fetchErr, &limited) && !limited.retryAt.IsZero() {
+				break
+			}
+			latestVersion, message, htmlUrl, resolutionErr = fetchBranchHead(UpdateChannelExperimental, []string{"experimental"})
 		}
 		if latestVersion != "" {
 			updateAvailable = experimentalUpdateAvailable(currentVersion, latestVersion)
 		}
 
-	case UpdateChannelNightly:
+	case "nightly":
 		if tag, releaseBody, url, fetchErr := fetchLatestNightlyRelease(); fetchErr == nil && tag != "" {
 			latestVersion = tag
 			message = releaseBody
@@ -292,30 +286,32 @@ func CheckUpdate(c *gin.Context) {
 				updateAvailable = isNewerVersion(currentVersion, latestVersion)
 			}
 		} else {
+			resolutionErr = fetchErr
+			var limited *githubUpdateError
+			if errors.As(fetchErr, &limited) && !limited.retryAt.IsZero() {
+				break
+			}
 			for _, branch := range []string{"nightly", "Nightly", "master"} {
-				resp, reqErr := httpClient.Get("https://api.github.com/repos/" + githubRepo + "/commits/" + branch)
+				bodyBytes, reqErr := fetchGitHubUpdate("/commits/" + branch)
 				if reqErr != nil {
+					resolutionErr = reqErr
 					slog.Error("[updater] nightly commits API request failed", "branch", branch, "error", reqErr)
-					continue
-				}
-				if resp.StatusCode == 200 {
-					var commit GitHubCommit
-					bodyBytes, _ := io.ReadAll(resp.Body)
-					resp.Body.Close()
-					if jsonErr := json.Unmarshal(bodyBytes, &commit); jsonErr == nil && commit.Sha != "" {
-						shortSha := commit.Sha
-						if len(shortSha) > 7 {
-							shortSha = shortSha[:7]
-						}
-						latestVersion = "nightly-" + shortSha
-						message = commit.Commit.Message
-						htmlUrl = commit.HtmlUrl
-						updateAvailable = (currentVersion != latestVersion)
+					if errors.As(reqErr, &limited) && !limited.retryAt.IsZero() {
 						break
 					}
-				} else {
-					resp.Body.Close()
-					slog.Warn("[updater] nightly commits API returned non-200", "branch", branch, "status", resp.StatusCode)
+					continue
+				}
+				var commit GitHubCommit
+				if jsonErr := json.Unmarshal(bodyBytes, &commit); jsonErr == nil && commit.Sha != "" {
+					shortSha := commit.Sha
+					if len(shortSha) > 7 {
+						shortSha = shortSha[:7]
+					}
+					latestVersion = "nightly-" + shortSha
+					message = commit.Commit.Message
+					htmlUrl = commit.HtmlUrl
+					updateAvailable = (currentVersion != latestVersion)
+					break
 				}
 			}
 		}
@@ -323,6 +319,7 @@ func CheckUpdate(c *gin.Context) {
 	default: // "stable"
 		tag, releaseBody, url, fetchErr := fetchLatestStableRelease()
 		if fetchErr != nil {
+			resolutionErr = fetchErr
 			slog.Error("[updater] stable version resolution failed", "error", fetchErr)
 		} else if tag != "" {
 			latestVersion = tag
@@ -335,12 +332,22 @@ func CheckUpdate(c *gin.Context) {
 	if latestVersion == "" {
 		slog.Warn("[updater] could not resolve latest version",
 			"channel", channel, "currentVersion", currentVersion)
-		c.JSON(http.StatusOK, gin.H{
+		response := gin.H{
 			"updateAvailable": false,
 			"currentVersion":  currentVersion,
 			"latestVersion":   "Unknown (API Error or Rate Limited)",
 			"message":         "Could not fetch latest updates.",
-		})
+		}
+		if resolutionErr != nil {
+			response["message"] = resolutionErr.Error()
+			response["error"] = "update_check_failed"
+			var limited *githubUpdateError
+			if errors.As(resolutionErr, &limited) && !limited.retryAt.IsZero() {
+				response["error"] = "github_rate_limited"
+				response["retryAt"] = limited.retryAt.UTC().Format(time.RFC3339)
+			}
+		}
+		c.JSON(http.StatusOK, response)
 		return
 	}
 
