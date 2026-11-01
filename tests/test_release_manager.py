@@ -134,6 +134,7 @@ class ReleaseManagerTests(unittest.TestCase):
                 os.symlink(source, self.tools / name)
         self.write_executable(self.mock / "curl", CURL_MOCK)
         self.write_executable(self.mock / "systemctl", SYSTEMCTL_MOCK)
+        self.write_executable(self.mock / "chown", "#!/bin/sh\nexit 0\n")
         self.write_artifact()
 
     def write_executable(self, path, source):

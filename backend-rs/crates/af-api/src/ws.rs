@@ -312,8 +312,32 @@ fn log_entry_matches_filter(entry: &serde_json::Value, filter: &WsLogFilter) -> 
     true
 }
 
+fn websocket_origin_matches_host(headers: &HeaderMap) -> bool {
+    let Some(origin) = headers
+        .get(axum::http::header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+    else {
+        // Non-browser clients do not send Origin.
+        return true;
+    };
+    let origin_host = origin
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(origin)
+        .trim_end_matches('/');
+    let request_host = headers
+        .get("X-Forwarded-Host")
+        .or_else(|| headers.get(axum::http::header::HOST))
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(',').next())
+        .map(|v| v.trim())
+        .unwrap_or("");
+    !request_host.is_empty() && origin_host.eq_ignore_ascii_case(request_host)
+}
+
 pub async fn handle_log_websocket(
     axum::Extension(user): axum::Extension<crate::auth::AuthUser>,
+    headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
     if user.role != "admin" {
@@ -321,6 +345,13 @@ pub async fn handle_log_websocket(
             StatusCode::FORBIDDEN,
             "FORBIDDEN",
             "Admin access required",
+        );
+    }
+    if !websocket_origin_matches_host(&headers) {
+        return crate::auth::api_error(
+            StatusCode::FORBIDDEN,
+            "FORBIDDEN",
+            "Cross-origin WebSocket upgrade rejected",
         );
     }
     ws.on_upgrade(|mut socket| async move {
@@ -449,11 +480,14 @@ pub async fn handle_log_websocket(
 
 pub fn extract_client_ip(headers: &HeaderMap) -> String {
     if let Some(xff) = headers.get("X-Forwarded-For").and_then(|v| v.to_str().ok()) {
-        if let Some(first) = xff.split(',').next() {
-            let trimmed = first.trim();
-            if !trimmed.is_empty() {
-                return trimmed.to_string();
-            }
+        // The rightmost entry is the one appended by our trusted reverse proxy; entries to its
+        // left are client-controlled and must never be used for rate limiting or session binding.
+        if let Some(last) = xff
+            .rsplit(',')
+            .map(|hop| hop.trim().trim_matches(['[', ']']))
+            .find(|hop| hop.parse::<std::net::IpAddr>().is_ok())
+        {
+            return last.to_string();
         }
     }
     if let Some(real_ip) = headers.get("X-Real-IP").and_then(|v| v.to_str().ok()) {

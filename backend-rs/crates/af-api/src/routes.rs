@@ -1690,9 +1690,13 @@ async fn delete_user(
             "Cannot delete the last remaining admin.",
         );
     }
+    let _ = conn.execute("DELETE FROM active_sessions WHERE user_id = ?1", params![id]);
+    let _ = conn.execute("DELETE FROM oidc_refresh_tokens WHERE user_id = ?1", params![id]);
+    let _ = conn.execute("DELETE FROM oidc_consents WHERE user_id = ?1", params![id]);
+    let _ = conn.execute("DELETE FROM recovery_codes WHERE user_id = ?1", params![id]);
+    let _ = conn.execute("DELETE FROM user_quotas WHERE user_id = ?1", params![id]);
     let _ = conn.execute("DELETE FROM users WHERE id = ?1", params![id]);
     drop(conn);
-    let ip = extract_client_ip(&headers);
     let ua = headers
         .get(header::USER_AGENT)
         .and_then(|v| v.to_str().ok())
@@ -2004,17 +2008,65 @@ async fn sync_app_blueprint(
         .as_ref()
         .map(|c| c.listen_port)
         .filter(|&p| p > 0)
-        .unwrap_or(bp.default_port);
+        .unwrap_or_else(|| allocate_or_resolve_app_port(&app_name, bp.default_port));
+    let base_domain = af_services::resolve_base_domain();
     let public_domain = existing_ing
         .as_ref()
         .map(|c| c.public_domain.clone())
-        .unwrap_or_default();
+        .filter(|d| !d.is_empty())
+        .unwrap_or_else(|| {
+            if base_domain.is_empty() || allocated_port <= 0 {
+                String::new()
+            } else {
+                af_services::format_app_public_domain(&app_name, &base_domain)
+            }
+        });
     let external_access_enabled = existing_ing
         .as_ref()
         .map(|c| c.external_access_enabled)
-        .unwrap_or(false);
+        .unwrap_or(!public_domain.is_empty());
+    let tls_enabled = existing_ing
+        .as_ref()
+        .map(|c| c.tls_enabled)
+        .unwrap_or(!public_domain.is_empty());
 
     let config_applied = af_services::mutators::apply_blueprint_app_config(&app_name, allocated_port)
+        .await
+        .is_ok();
+
+    let now = Utc::now();
+    let ingress_cfg = AppIngressConfig {
+        app_name: bp.app_name.clone(),
+        public_domain: public_domain.clone(),
+        external_access_enabled,
+        listen_port: allocated_port,
+        tls_enabled,
+        created_at: existing_ing.as_ref().map(|c| c.created_at).unwrap_or(now),
+        updated_at: now,
+    };
+    let ingress_synced = if allocated_port > 0 {
+        let ok = af_db::set_app_ingress_config(&ingress_cfg).is_ok();
+        af_db::invalidate_ingress_cache();
+        ok
+    } else {
+        false
+    };
+
+    let mut dns_domains = Vec::new();
+    if !bp.internal_domain.trim().is_empty() {
+        dns_domains.push(bp.internal_domain.clone());
+    }
+    if !public_domain.is_empty() && !dns_domains.contains(&public_domain) {
+        dns_domains.push(public_domain.clone());
+    }
+    let hosts_synced = if dns_domains.is_empty() {
+        true
+    } else {
+        af_services::mutators::sync_local_dns_domains(&dns_domains)
+            .await
+            .is_ok()
+    };
+    let network_dns_synced = af_services::mutators::sync_network_dns_providers()
         .await
         .is_ok();
 
@@ -2028,9 +2080,9 @@ async fn sync_app_blueprint(
         public_domain,
         external_access_enabled,
         config_applied,
-        ingress_synced: true,
-        hosts_synced: true,
-        network_dns_synced: true,
+        ingress_synced,
+        hosts_synced,
+        network_dns_synced,
     };
 
     Json(serde_json::json!({

@@ -396,30 +396,39 @@ pub fn create_host_archive_backup(
         ));
     }
 
-    let (primary_sidecar_path, _, _) = write_sha256_sidecar(&archive_path)?;
+    let post_activate: HostBackupResult<HostBackupReceipt> = (|| {
+        let (primary_sidecar_path, _, _) = write_sha256_sidecar(&archive_path)?;
 
-    let mut chunk_paths = Vec::new();
-    if let Some(chunk_size) = config.chunk_size_bytes {
-        chunk_paths = split_backup_into_chunks(&archive_path, chunk_size)?;
-        manifest.chunk_count = chunk_paths.len();
-        manifest.chunk_size_bytes = Some(chunk_size);
+        let mut chunk_paths = Vec::new();
+        if let Some(chunk_size) = config.chunk_size_bytes {
+            chunk_paths = split_backup_into_chunks(&archive_path, chunk_size)?;
+            manifest.chunk_count = chunk_paths.len();
+            manifest.chunk_size_bytes = Some(chunk_size);
+        }
+
+        let manifest_filename = format!("{}.manifest.json", archive_filename);
+        let manifest_path = safe_backup_file_path(&config.backup_dir, &manifest_filename)?;
+        let manifest_sidecar_path = manifest.save_atomic(&manifest_path)?;
+
+        Ok(HostBackupReceipt {
+            backup_id: manifest.backup_id.clone(),
+            primary_artifact_path: archive_path.clone(),
+            primary_sidecar_path,
+            manifest_path,
+            manifest_sidecar_path,
+            sqlite_receipt: sqlite_receipt_opt,
+            archive_path: Some(archive_path.clone()),
+            chunk_paths,
+            manifest,
+        })
+    })();
+
+    if post_activate.is_err() {
+        let _ = fs::remove_file(&archive_path);
+        let _ = fs::remove_file(PathBuf::from(format!("{}.sha256", archive_path.display())));
     }
 
-    let manifest_filename = format!("{}.manifest.json", archive_filename);
-    let manifest_path = safe_backup_file_path(&config.backup_dir, &manifest_filename)?;
-    let manifest_sidecar_path = manifest.save_atomic(&manifest_path)?;
-
-    Ok(HostBackupReceipt {
-        backup_id: manifest.backup_id.clone(),
-        primary_artifact_path: archive_path.clone(),
-        primary_sidecar_path,
-        manifest_path,
-        manifest_sidecar_path,
-        sqlite_receipt: sqlite_receipt_opt,
-        archive_path: Some(archive_path),
-        chunk_paths,
-        manifest,
-    })
+    post_activate
 }
 
 fn append_verified_file_to_tar(

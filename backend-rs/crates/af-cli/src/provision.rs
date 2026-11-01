@@ -537,7 +537,12 @@ impl ProvisionStateStore {
         if !self.paths.state_file.exists() {
             return Ok(Vec::new());
         }
-        let (_, current_steps) = self.read_state()?;
+        let (ver, current_steps) = self.read_state()?;
+        if ver != Some(PROVISION_STATE_VERSION) {
+            self.write_completed_steps_atomic(&[])?;
+            self.append_log("[REPAIR] Reset incompatible state version to empty v2 state")?;
+            return Ok(Vec::new());
+        }
         let clear_set: HashSet<&str> = validated.iter().map(|s| s.as_str()).collect();
         let mut removed = Vec::new();
         let mut remaining = Vec::new();
@@ -553,7 +558,6 @@ impl ProvisionStateStore {
             self.append_log(&format!("[REPAIR] Cleared completion state for step '{}'", s))?;
         }
         Ok(removed)
-    }
 
     /// Atomically writes `# STATE_VERSION=2` followed by `steps` to `/install/.aetherflow.state`
     /// using an exclusive `0o600` sibling temporary file.
@@ -719,8 +723,13 @@ impl ProvisionStateStore {
         ensure_no_symlink_ancestors(&self.paths.state_file, "provision state file")?;
         ensure_no_symlink_ancestors(&self.paths.config_file, "provision config file")?;
         let state_exists = self.paths.state_file.exists();
-        let (state_version, completed_steps) = self.read_state()?;
+        let (state_version, raw_completed_steps) = self.read_state()?;
         let version_compatible = state_version == Some(PROVISION_STATE_VERSION);
+        let completed_steps = if version_compatible {
+            raw_completed_steps
+        } else {
+            Vec::new()
+        };
         let done_set: HashSet<&str> = completed_steps.iter().map(|s| s.as_str()).collect();
         let pending_steps: Vec<String> = CANONICAL_ALL_STEPS
             .iter()

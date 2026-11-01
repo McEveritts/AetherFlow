@@ -1348,6 +1348,13 @@ fn execute_backup_command(
                 ));
             }
             let chunks = split_backup_into_chunks(&target, *chunk_size_bytes)?;
+            let manifest_path = PathBuf::from(format!("{}.manifest.json", target.display()));
+            if manifest_path.exists() {
+                let mut manifest = BackupManifest::load_verified(&manifest_path)?;
+                manifest.chunk_count = chunks.len();
+                manifest.chunk_size_bytes = Some(*chunk_size_bytes);
+                manifest.save_atomic(&manifest_path)?;
+            }
             Ok(CliResponseEnvelope::success(
                 "backup",
                 "chunk",

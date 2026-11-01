@@ -356,8 +356,8 @@ try:
         if tag and (tag.lower() == "experimental" or target == "experimental" or "experimental" in tag.lower()):
             print(tag)
             break
-except Exception:
-    pass
+except Exception as exc:
+    raise RuntimeError(f"Unexpected failure: {exc}") from exc
 ' 2>/dev/null)"
             if [[ -n "${exp_tag}" ]]; then
                 echo "${exp_tag}"

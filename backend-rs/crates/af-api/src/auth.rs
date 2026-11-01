@@ -861,7 +861,9 @@ pub async fn refresh_session(headers: HeaderMap) -> Response {
     drop(conn);
 
     if af_db::is_token_revoked(&claims.jti) {
-        if let Some((_, existing_new_token)) = check_rotation_grace(&claims.jti) {
+        if let Some((grace_user_id, existing_new_token)) = check_rotation_grace(&claims.jti)
+            && grace_user_id == id
+        {
             let cookie = build_set_cookie(
                 "aetherflow_session",
                 &existing_new_token,
@@ -889,7 +891,6 @@ pub async fn refresh_session(headers: HeaderMap) -> Response {
         );
     }
 
-    af_db::revoke_token(&claims.jti, Duration::from_secs(900));
     let Ok((new_token, new_claims)) = create_standard_jwt(id, &headers) else {
         return api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -900,7 +901,7 @@ pub async fn refresh_session(headers: HeaderMap) -> Response {
 
     if let Ok(mut grace) = ROTATED_TOKEN_GRACE.lock() {
         grace.insert(
-            claims.jti,
+            claims.jti.clone(),
             RotatedTokenGraceEntry {
                 user_id: id,
                 new_token: new_token.clone(),
@@ -908,6 +909,8 @@ pub async fn refresh_session(headers: HeaderMap) -> Response {
             },
         );
     }
+
+    af_db::revoke_token(&claims.jti, Duration::from_secs(900));
 
     let cookie = build_set_cookie(
         "aetherflow_session",
@@ -990,8 +993,8 @@ pub async fn list_active_sessions(req: Request) -> Response {
         );
     };
     let _ = conn.execute(
-        "DELETE FROM active_sessions WHERE expires_at < CURRENT_TIMESTAMP",
-        [],
+        "DELETE FROM active_sessions WHERE expires_at < ?1",
+        params![Utc::now().to_rfc3339()],
     );
     let mut stmt = match conn.prepare(
         "SELECT jti, ip_address, user_agent, COALESCE(CAST(expires_at AS TEXT), ''), COALESCE(CAST(last_active AS TEXT), '') \
@@ -1071,6 +1074,9 @@ pub async fn revoke_session(
     };
 
     drop(conn);
+    if let Ok(mut map) = ROTATED_TOKEN_GRACE.lock() {
+        map.remove(&full_jti);
+    }
     af_db::revoke_token(&full_jti, Duration::from_secs(900));
     Json(serde_json::json!({ "message": "Session revoked" })).into_response()
 }
@@ -1432,6 +1438,15 @@ pub async fn mfa_login_verify(
         );
     }
 
+    let client_ip = extract_client_ip(&headers);
+    let user_agent = headers
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let _ = conn.execute(
+        "INSERT INTO login_history (user_id, ip_address, user_agent) VALUES (?1, ?2, ?3)",
+        params![id, client_ip, user_agent],
+    );
     drop(conn);
     af_db::delete_mfa_challenge(&req.mfa_token);
     let Ok((token, _)) = create_standard_jwt(id, &headers) else {

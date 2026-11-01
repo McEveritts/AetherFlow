@@ -1237,8 +1237,15 @@ pub async fn oidc_introspect(
             ) {
                 let expired = DateTime::parse_from_rfc3339(&expires_at)
                     .map(|dt| Utc::now() > dt.with_timezone(&Utc))
-                    .unwrap_or(false);
-                if !revoked && !expired {
+                    .unwrap_or(true);
+                let user_exists = conn
+                    .query_row(
+                        "SELECT 1 FROM users WHERE id = ?1",
+                        params![user_id],
+                        |_| Ok(()),
+                    )
+                    .is_ok();
+                if !revoked && !expired && user_exists {
                     return Json(serde_json::json!({
                         "active": true,
                         "sub": user_id.to_string(),
@@ -1839,7 +1846,15 @@ pub async fn google_callback(
             .query_row("SELECT COUNT(*) FROM users", [], |r| r.get(0))
             .unwrap_or(0);
         let admin_email = env::var("ADMIN_EMAIL").unwrap_or_default();
-        let role = if count == 0 || (!admin_email.is_empty() && email == admin_email) {
+        let email_verified = user_info
+            .get("verified_email")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let role = if count == 0
+            || (!admin_email.is_empty()
+                && email_verified
+                && email.eq_ignore_ascii_case(&admin_email))
+        {
             "admin"
         } else {
             "user"

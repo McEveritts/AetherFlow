@@ -547,6 +547,13 @@ pub async fn upload_backup_chunk(
             "total query must be a positive integer",
         );
     };
+    if chunk_index >= total_chunks {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "BAD_REQUEST",
+            "chunk query must be less than total",
+        );
+    }
 
     let backup_dir = get_backup_dir();
     if fs::create_dir_all(&backup_dir).is_err() {
@@ -565,13 +572,6 @@ pub async fn upload_backup_chunk(
         .unwrap_or(&filename)
         .to_string();
     let upload_dir = backup_dir.join(format!(".upload-{}", clean_base));
-    if fs::create_dir_all(&upload_dir).is_err() {
-        return api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            "Failed to prepare upload staging directory",
-        );
-    }
 
     let Ok(bytes) = axum::body::to_bytes(req.into_body(), 64 * 1024 * 1024).await else {
         return api_error(
@@ -588,6 +588,17 @@ pub async fn upload_backup_chunk(
         );
     }
 
+    let _guard = BACKUP_UPLOAD_MU
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if fs::create_dir_all(&upload_dir).is_err() {
+        return api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL_ERROR",
+            "Failed to prepare upload staging directory",
+        );
+    }
+
     let chunk_path = upload_dir.join(format!("{:06}.part", chunk_index));
     if fs::write(&chunk_path, &bytes).is_err() {
         return api_error(
@@ -596,9 +607,6 @@ pub async fn upload_backup_chunk(
             "Failed to create chunk file",
         );
     }
-
-    let _guard = BACKUP_UPLOAD_MU.lock().unwrap();
-    let mut received = 0usize;
     if let Ok(entries) = fs::read_dir(&upload_dir) {
         for e in entries.flatten() {
             if e.file_name().to_string_lossy().ends_with(".part") {
@@ -2059,7 +2067,13 @@ fn deployment_ingress_config(
     config
 }
 
-pub async fn handle_deploy_process(Path(app_name): Path<String>) -> Response {
+pub async fn handle_deploy_process(
+    axum::Extension(auth_user): axum::Extension<AuthUser>,
+    Path(app_name): Path<String>,
+) -> Response {
+    if auth_user.role != "admin" {
+        return api_error(StatusCode::FORBIDDEN, "FORBIDDEN", "Admin access required");
+    }
     if app_name.is_empty() {
         return (
             StatusCode::BAD_REQUEST,

@@ -560,12 +560,23 @@ pub fn inject_arr_download_client_routes(
     drop(stmt);
 
     let count = updates.len();
-    for (id, new_settings) in updates {
-        conn.execute(
-            "UPDATE DownloadClients SET Settings = ?1 WHERE Id = ?2",
-            params![new_settings, id],
-        )
-        .map_err(|e| format!("failed to update DownloadClients Id={}: {}", id, e))?;
+    if count > 0 {
+        let mut conn = conn;
+        let tx = conn
+            .transaction()
+            .map_err(|e| format!("failed to start transaction on *arr DB: {}", e))?;
+        {
+            let mut update_stmt = tx
+                .prepare("UPDATE DownloadClients SET Settings = ?1 WHERE Id = ?2")
+                .map_err(|e| format!("failed to prepare statement: {}", e))?;
+            for (id, new_settings) in updates {
+                update_stmt
+                    .execute(params![new_settings, id])
+                    .map_err(|e| format!("failed to update DownloadClients Id={}: {}", id, e))?;
+            }
+        }
+        tx.commit()
+            .map_err(|e| format!("failed to commit *arr DB updates: {}", e))?;
     }
 
     Ok(count)

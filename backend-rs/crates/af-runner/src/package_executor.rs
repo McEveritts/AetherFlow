@@ -3199,12 +3199,18 @@ fn trigger_certbot_sync_best_effort(pkg_id: &str) {
     if !sync_bin.is_file() {
         return;
     }
-    let _ = std::process::Command::new(sync_bin)
-        .arg(pkg_id)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
+    let pkg = pkg_id.to_string();
+    std::thread::spawn(move || {
+        if let Ok(mut child) = std::process::Command::new(sync_bin)
+            .arg(pkg)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            let _ = child.wait();
+        }
+    });
 }
 
 fn extract_binaries_from_targz(

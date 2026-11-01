@@ -319,14 +319,17 @@ pub fn sweep_stale_cluster_nodes() -> usize {
     }
 
     let mut marked = 0usize;
-    for (id, hostname) in &stale_ids {
-        if let Ok(n) = conn.execute(
+    if !stale_ids.is_empty() {
+        if let Ok(mut update_stmt) = conn.prepare(
             "UPDATE cluster_nodes SET status = 'offline' WHERE id = ?1 AND status != 'offline'",
-            params![id],
         ) {
-            if n > 0 {
-                marked += n;
-                tracing::warn!(node_id = %id, hostname = %hostname, "cluster worker went offline (heartbeat timeout > 60s)");
+            for (id, hostname) in &stale_ids {
+                if let Ok(n) = update_stmt.execute(params![id]) {
+                    if n > 0 {
+                        marked += n;
+                        tracing::warn!(node_id = %id, hostname = %hostname, "cluster worker went offline (heartbeat timeout > 60s)");
+                    }
+                }
             }
         }
     }

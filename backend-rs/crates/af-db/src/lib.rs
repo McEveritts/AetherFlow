@@ -1291,8 +1291,10 @@ pub fn list_audit_entries(
 }
 
 pub fn list_pending_actions(mut limit: i64, offset: i64) -> anyhow::Result<Vec<PendingAction>> {
-    if limit <= 0 || limit > 200 {
+    if limit <= 0 {
         limit = 50;
+    } else if limit > 500 {
+        limit = 500;
     }
     let conn = get_conn()?;
     let mut stmt = conn.prepare(
@@ -1384,20 +1386,10 @@ static MFA_CHALLENGE_CACHE: Lazy<Mutex<HashMap<String, (i64, Instant)>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
 fn ensure_revoked_tokens_table(conn: &Connection) -> bool {
-    static READY: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-    if READY.get().is_some() {
-        return true;
-    }
-    if conn
-        .execute_batch(
-            "CREATE TABLE IF NOT EXISTS revoked_tokens (jti TEXT PRIMARY KEY, expires_at TEXT NOT NULL);",
-        )
-        .is_ok()
-    {
-        let _ = READY.set(());
-        return true;
-    }
-    false
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS revoked_tokens (jti TEXT PRIMARY KEY, expires_at TEXT NOT NULL);",
+    )
+    .is_ok()
 }
 
 pub fn revoke_token(jti: &str, ttl: Duration) {

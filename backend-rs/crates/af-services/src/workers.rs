@@ -1568,7 +1568,11 @@ fn tail_error_log(text: &str, max_len: usize) -> String {
     if trimmed.len() <= max_len {
         return trimmed.to_string();
     }
-    trimmed[trimmed.len() - max_len..].to_string()
+    let mut start = trimmed.len() - max_len;
+    while start < trimmed.len() && !trimmed.is_char_boundary(start) {
+        start += 1;
+    }
+    trimmed[start..].to_string()
 }
 
 fn record_mediaflow_failure(job_id: i64, reason: &str) {
