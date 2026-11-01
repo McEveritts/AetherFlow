@@ -8,6 +8,19 @@ interface StorageWidgetProps {
     density?: 'compact' | 'immersive';
 }
 
+function formatStorageGB(gigabytes: number, decimals = 1): string {
+    const units = ['GB', 'TB', 'PB'];
+    let value = gigabytes;
+    let unitIndex = 0;
+
+    while (value >= 1024 && unitIndex < units.length - 1) {
+        value /= 1024;
+        unitIndex++;
+    }
+
+    return `${value.toFixed(unitIndex > 0 ? 1 : decimals)} ${units[unitIndex]}`;
+}
+
 export default function StorageWidget({ storageData, density = 'compact' }: StorageWidgetProps) {
     const disks = storageData || [];
     const isImmersive = density === 'immersive';
@@ -35,7 +48,7 @@ export default function StorageWidget({ storageData, density = 'compact' }: Stor
                         <div className="min-w-0">
                             <h2 className="text-sm font-bold text-slate-100 tracking-tight leading-none">Storage Pools</h2>
                             <p className="text-[11px] text-slate-500 truncate mt-1">
-                                {totalAllGB.toFixed(0)} GB across {filteredDisks.length} mount{filteredDisks.length !== 1 ? 's' : ''}
+                                {formatStorageGB(totalAllGB, 0)} across {filteredDisks.length} mount{filteredDisks.length !== 1 ? 's' : ''}
                             </p>
                         </div>
                     </div>
@@ -61,8 +74,8 @@ export default function StorageWidget({ storageData, density = 'compact' }: Stor
                 {/* Overall Pool Bar */}
                 <div className="bg-black/30 rounded-xl p-3 border border-white/[0.04] mb-3.5">
                     <div className="flex justify-between text-[10px] text-slate-400 font-bold uppercase tracking-wider mb-1.5">
-                        <span>{usedAllGB.toFixed(1)} GB Used</span>
-                        <span className="text-slate-300 font-mono">{freeAllGB.toFixed(1)} GB Free</span>
+                        <span>{formatStorageGB(usedAllGB)} Used</span>
+                        <span className="text-slate-300 font-mono">{formatStorageGB(freeAllGB)} Free</span>
                     </div>
                     <div className="h-2 w-full bg-slate-800/90 rounded-full overflow-hidden flex">
                         <div
@@ -96,8 +109,8 @@ export default function StorageWidget({ storageData, density = 'compact' }: Stor
                                     />
                                 </div>
                                 <div className="flex justify-between text-[10px] text-slate-500 mt-1 font-mono">
-                                    <span>{d.used_gb.toFixed(1)} GB used</span>
-                                    <span>{d.total_gb.toFixed(0)} GB total</span>
+                                    <span>{formatStorageGB(d.used_gb)} used</span>
+                                    <span>{formatStorageGB(d.total_gb, 0)} total</span>
                                 </div>
                             </div>
                         ))}
