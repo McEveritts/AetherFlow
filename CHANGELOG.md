@@ -1,3 +1,13 @@
+## CHANGELOG v3.2.7 - Dependency Security Sweep, Experimental Update Channel & Brand Kit
+_Direct comparison against `v3.2.6` (`v3.2.6...v3.2.7`), hardening Go and npm dependencies across the repository, introducing the opt-in Experimental release channel, and shipping the refreshed AetherFlow brand and PWA icon set._
+
+### Release Highlights (since `v3.2.6`)
+* **Go & npm Dependency Security Sweep**: Upgraded `google.golang.org/grpc` to `v1.83.1`, `golang.org/x/crypto` to `v0.52.0`, `golang.org/x/net` to `v0.55.0`, `go.opentelemetry.io/otel` to `v1.44.0`, `github.com/gorilla/websocket` to `v1.5.3`, and `github.com/quic-go/quic-go` to `v0.59.1` in `backend/go.mod`, alongside `next` & `eslint-config-next` (`16.4.3`), `next-intl` (`4.14.9`), `zod` (`4.6.7`), `undici` (`8.12.3`), `sharp` (`0.35.5`), `postcss` (`8.5.23`), `nanoid` (`3.3.20`), `js-yaml`, `brace-expansion`, `ws` (`8.22.1`), `source-map-js` (`1.2.2`), `browserslist` (`4.29.5`), `baseline-browser-mapping` (`2.11.34`), `@humanfs/node` (`0.16.8`), and `@babel/core` (`7.29.7`) across `frontend`, `apps/website`, and `package-lock.json`.
+* **Experimental Update Channel & Channel Isolation**: Added an opt-in `experimental` update channel in Settings (`SettingsTab.tsx`), `updater.go`, `privileged_runner.go`, and `deploy/release-manager.sh`, while isolating `stable` and `nightly` channel resolution so `-experimental` pre-releases are never selected outside the Experimental channel.
+* **Refreshed Brand Identity & Maskable PWA Icons**: Added the SVG brand kit under `docs/assets/brand/`, replaced legacy logos in the sidebar, mobile drawer, and login screen, regenerated multi-size `favicon.ico` plus `icon.svg` and `apple-icon.png`, added maskable `icon-192.png` / `icon-512.png` PWA assets, and bumped the service worker cache to `aetherflow-cache-v3`.
+
+---
+
 ## CHANGELOG v3.2.6 - Stable Nightly Promotion, Remote Desktops & Streaming Reliability
 _Promotes the nightly changes since `v3.2.5` to the stable channel._
 
