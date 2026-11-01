@@ -315,12 +315,20 @@ pub fn get_blueprint(app_name: &str) -> Option<AppBlueprint> {
         port_env_var: "AF_APP_PORT".to_string(),
         port_config_key: port_config_key.to_string(),
         web_path: p.web_path,
-        health_check_path: "/".to_string(),
+        health_check_path: if p.name == "palate" {
+            "/login".to_string()
+        } else {
+            "/".to_string()
+        },
         mutator_type: mutator_type.to_string(),
         config_file_path,
         internal_domain: format!("{}.aether.local", p.name),
         is_network_app: matches!(p.name.as_str(), "pihole" | "wireguard" | "tailscale"),
-        dependencies: Vec::new(),
+        dependencies: if p.name == "palate" {
+            vec!["jellyfin".to_string()]
+        } else {
+            Vec::new()
+        },
     })
 }
 
@@ -1712,12 +1720,24 @@ mod tests {
     #[test]
     fn test_embedded_package_catalog_loads_all_apps() {
         let catalog = get_package_catalog().unwrap();
-        assert!(catalog.len() >= 73);
+        assert!(catalog.len() >= 74);
         assert!(catalog.iter().any(|p| p.name == "jellyfin"));
         assert!(catalog.iter().any(|p| p.name == "kasmvnc"));
         assert!(catalog.iter().any(|p| p.name == "mcvnc"));
         assert!(catalog.iter().any(|p| p.name == "xrdp"));
         assert!(catalog.iter().any(|p| p.name == "tailscale"));
+        let palate = catalog
+            .iter()
+            .find(|p| p.name == "palate")
+            .expect("palate catalog entry");
+        assert_eq!(palate.service_name, "af-palate");
+        assert_eq!(palate.default_port, 28014);
+        assert_eq!(palate.update_source, "git_tags");
+        assert_eq!(palate.update_repo, "McEveritts/Palate");
+        assert_eq!(palate.sandbox_profile, "node");
+        let palate_bp = get_blueprint("palate").expect("palate blueprint");
+        assert_eq!(palate_bp.health_check_path, "/login");
+        assert_eq!(palate_bp.dependencies, vec!["jellyfin".to_string()]);
         let ts_bp = get_blueprint("tailscale").expect("tailscale blueprint");
         assert_eq!(ts_bp.service_name, "tailscaled");
         assert!(ts_bp.is_network_app);

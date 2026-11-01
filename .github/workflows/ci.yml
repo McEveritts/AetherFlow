@@ -26,6 +26,21 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  palate-installer:
+    name: Palate Installer Regression Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check Installer and Remover Syntax
+        run: |
+          bash -n packages/package/install/installpackage-palate
+          bash -n packages/package/remove/removepackage-palate
+
+      - name: Test Palate Lifecycle
+        run: python3 -m unittest discover -s tests -p 'test_palate_installer.py' -v
+
   jellyseerr-installer:
     name: Jellyseerr / Seerr Installer Regression Tests
     runs-on: ubuntu-latest

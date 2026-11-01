@@ -25,6 +25,7 @@ AetherFlow manages a wide range of services across multiple categories.
 - **File & Backup Management**: Nextcloud, FileBrowser, Syncthing, Duplicati, Rclone, MergerFS, Cloudplow, Paperless-ngx.
 - **Security & Network**: Vaultwarden, Fail2Ban, WireGuard, Tailscale, Pi-hole, AdGuard Home, The Lounge, ZNC, Quassel.
 - **Core & Remote Desktop**: Gitea, Home Assistant, n8n, Organizr, noVNC, KasmVNC, McVNC, XRDP, X2Go.
+- **Recipes & Nutrition**: Palate, with meal planning, nutrition tracking, and Sage AI.
 
 > [!NOTE]
 > The availability of certain applications depends on your host OS and architecture. AetherFlow performs a compatibility check before allowing an installation.
@@ -32,6 +33,14 @@ AetherFlow manages a wide range of services across multiple categories.
 ---
 
 ## Operating Marketplace Apps
+
+### Palate
+
+- **Palate** ([McEveritts/Palate](https://github.com/McEveritts/Palate)) builds the latest stable release tag with a private, checksum-verified Node.js 22 runtime and runs as `af-palate.service`. It listens on `127.0.0.1:28014`, or AetherFlow's allocated port, behind the AetherFlow gateway.
+- **Login requires Jellyfin.** Install and configure Jellyfin first, or point `JELLYFIN_INTERNAL_URL` in `/etc/palate/palate.env` at an existing server. The default is `http://jellyfin.aether.local`. Set `NEXT_PUBLIC_JELLYFIN_PUBLIC_URL` to the Jellyfin URL users can open, and `NEXTAUTH_URL` to the exact Palate URL they will use. The installer defaults to `https://palate.<base-domain>` when a base domain is configured, otherwise `http://palate.aether.local`. Use HTTPS for camera/PWA features.
+- The installer creates the native PostgreSQL database/role `af_palate`, preserves recipes and nutrition caches in `/var/lib/palate/vault`, and generates separate session, encryption, rate limit, and curation secrets in `/etc/palate/palate.env`. Keep this file with your backups: its encryption secret is needed to read stored API keys. Set a Gemini key in Palate's Settings to use Sage; `GEMINI_API_KEY` and `USDA_API_KEY` in the environment file are optional system integrations.
+- After changing environment settings, rerun the installer to rebuild client-side settings and restart the service. Upgrades back up the database, vault, and environment to `/var/backups/aetherflow-palate.*` before applying Prisma's schema without accepting data loss. Review any rejected schema change before proceeding.
+- Removal preserves the database, vault, secrets, and service account. `DELETE_DATA=true` explicitly removes Palate's database/role and data; the shared PostgreSQL service and existing backups remain installed.
 
 ### Mesh VPN & Subnet Routing
 - **Tailscale** installs the official upstream `tailscale` package and `tailscaled.service` daemon from `pkgs.tailscale.com` (verified via `/etc/apt/keyrings/tailscale-archive-keyring.gpg`) and enables IPv4/IPv6 packet forwarding (`/etc/sysctl.d/99-tailscale.conf`). Authenticate the node with `sudo tailscale up` (or supply `AF_TAILSCALE_AUTHKEY` / `TAILSCALE_AUTHKEY` during installation), then inspect mesh peers and advertise subnet routes directly from the **Network → Tailscale Mesh** tab.

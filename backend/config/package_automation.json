@@ -2097,6 +2097,24 @@
       "af-kasmvnc.service"
     ]
   },
+  "palate": {
+    "update_source": "git_tags",
+    "update_repo": "McEveritts/Palate",
+    "update_repo_url": "https://github.com/McEveritts/Palate.git",
+    "version_command": [
+      "cat",
+      "/opt/palate/.af-version"
+    ],
+    "sandbox_profile": "node",
+    "sandbox_rw_paths": [
+      "/var/lib/palate",
+      "/opt/palate/.next/cache",
+      "/tmp"
+    ],
+    "sandbox_service_units": [
+      "af-palate.service"
+    ]
+  },
   "mcvnc": {
     "update_source": "git_tags",
     "update_repo": "McEveritts/McVNC",

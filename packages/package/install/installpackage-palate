@@ -1,0 +1,255 @@
+#!/bin/bash
+# AetherFlow Package Installer: Palate (native Node.js and PostgreSQL)
+set -euo pipefail
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
+fi
+
+require_root
+export LOGFILE="/var/log/aetherflow/install-palate.log"
+APP_DIR=/opt/palate
+DATA_DIR=/var/lib/palate
+CONFIG_DIR=/etc/palate
+ENV_FILE="${CONFIG_DIR}/palate.env"
+UNIT_FILE=/etc/systemd/system/af-palate.service
+REQUESTED_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-}}"
+BUILD_DIR=""
+BACKUP_DIR=""
+ENV_BACKUP=""
+OLD_APP_MOVED=0
+NEW_APP_MOVED=0
+UNIT_WRITTEN=0
+WAS_ACTIVE=0
+SERVICE_STOPPED=0
+SUCCESS=0
+mkdir -p "$(dirname "$LOGFILE")" /install /run/lock /opt /var/backups
+exec 9>/run/lock/aetherflow-palate.lock
+flock -n 9 || { print_error "Another Palate operation is running."; exit 1; }
+
+cleanup() {
+    local status=$?
+    trap - EXIT
+    set +e
+    if [[ "$SUCCESS" -ne 1 ]]; then
+        print_error "Palate installation failed; see ${LOGFILE}."
+        if [[ -n "$ENV_BACKUP" ]]; then
+            cp -a "$ENV_BACKUP" "$ENV_FILE"
+        fi
+        if [[ "$NEW_APP_MOVED" -eq 1 ]]; then
+            systemctl stop af-palate.service >> "$LOGFILE" 2>&1
+            rm -rf "$APP_DIR"
+        fi
+        if [[ "$OLD_APP_MOVED" -eq 1 ]]; then
+            mv "$BACKUP_DIR/app" "$APP_DIR"
+        fi
+        if [[ "$UNIT_WRITTEN" -eq 1 ]]; then
+            if [[ -f "$BACKUP_DIR/af-palate.service" ]]; then
+                cp -a "$BACKUP_DIR/af-palate.service" "$UNIT_FILE"
+            else
+                systemctl disable af-palate.service >> "$LOGFILE" 2>&1
+                rm -f "$UNIT_FILE"
+            fi
+            systemctl daemon-reload >> "$LOGFILE" 2>&1
+        fi
+        if [[ "$SERVICE_STOPPED" -eq 1 && "$WAS_ACTIVE" -eq 1 ]]; then
+            systemctl start af-palate.service >> "$LOGFILE" 2>&1
+        fi
+        if [[ -n "$BACKUP_DIR" ]]; then
+            print_error "Database and vault backups are in ${BACKUP_DIR}."
+        fi
+    fi
+    [[ -z "$ENV_BACKUP" ]] || rm -f "$ENV_BACKUP"
+    [[ -z "$BUILD_DIR" ]] || rm -rf "$BUILD_DIR"
+    exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+if [[ -f "$ENV_FILE" ]]; then
+    # This administrator-owned file is also consumed by systemd and build commands.
+    # shellcheck source=/dev/null
+    source "$ENV_FILE"
+    ENV_BACKUP="$(mktemp "${CONFIG_DIR}/.palate-env.XXXXXX")"
+    cp -a "$ENV_FILE" "$ENV_BACKUP"
+fi
+APP_PORT="${REQUESTED_PORT:-${PORT:-28014}}"
+if [[ ! "$APP_PORT" =~ ^[0-9]{4,5}$ ]] || (( 10#$APP_PORT < 1024 || 10#$APP_PORT > 65535 )); then
+    print_error "Invalid Palate port: ${APP_PORT}"
+    exit 1
+fi
+
+report_progress 10 "Installing Palate's native build and database prerequisites..."
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -qq >> "$LOGFILE" 2>&1
+apt-get install --no-remove -y -qq curl ca-certificates git build-essential python3 xz-utils openssl postgresql postgresql-client >> "$LOGFILE" 2>&1
+systemctl enable --now postgresql.service >> "$LOGFILE" 2>&1
+
+if ! id -u af-palate >/dev/null 2>&1; then
+    useradd --system --user-group --create-home --home-dir "$DATA_DIR" --shell /usr/sbin/nologin af-palate
+fi
+install -d -m 750 -o af-palate -g af-palate "$DATA_DIR"
+install -d -m 750 -o root -g af-palate "$CONFIG_DIR"
+
+if [[ ! -f "$ENV_FILE" ]]; then
+    DB_PORT="$(runuser -u postgres -- psql -XAt -d postgres -c 'SHOW port')"
+    PALATE_DB_PASSWORD="$(openssl rand -hex 32)"
+    BASE_DOMAIN="$(get_base_domain)"
+    APP_URL="http://palate.aether.local"
+    [[ -z "$BASE_DOMAIN" ]] || APP_URL="https://palate.${BASE_DOMAIN}"
+    umask 077
+    cat > "$ENV_FILE" <<EOF
+NODE_ENV=production
+PORT=${APP_PORT}
+PALATE_DB_PASSWORD=${PALATE_DB_PASSWORD}
+DATABASE_URL=postgresql://af_palate:${PALATE_DB_PASSWORD}@127.0.0.1:${DB_PORT}/af_palate?schema=public
+NEXTAUTH_URL=${APP_URL}
+NEXTAUTH_SECRET=$(openssl rand -hex 32)
+PALATE_ENCRYPTION_SECRET=$(openssl rand -hex 32)
+PALATE_RATE_LIMIT_SECRET=$(openssl rand -hex 32)
+CRON_SECRET=$(openssl rand -hex 32)
+JELLYFIN_LOGIN_ENABLED=true
+JELLYFIN_INTERNAL_URL=http://jellyfin.aether.local
+NEXT_PUBLIC_JELLYFIN_LOGIN_ENABLED=true
+NEXT_PUBLIC_JELLYFIN_PUBLIC_URL=http://jellyfin.aether.local
+EOF
+    umask 022
+fi
+chown root:af-palate "$ENV_FILE"
+chmod 640 "$ENV_FILE"
+# shellcheck source=/dev/null
+source "$ENV_FILE"
+if [[ ! "${PALATE_DB_PASSWORD:-}" =~ ^[a-f0-9]{64}$ ]]; then
+    print_error "The managed database password in ${ENV_FILE} is missing or invalid."
+    exit 1
+fi
+
+# Only update the allocated port; preserve all secrets and administrator settings.
+python3 - "$ENV_FILE" "$APP_PORT" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+lines = [line for line in path.read_text().splitlines() if not line.startswith('PORT=')]
+path.write_text('\n'.join(lines + ['PORT=' + sys.argv[2]]) + '\n')
+PY
+
+report_progress 20 "Preparing Palate's PostgreSQL database..."
+# Passwords travel over stdin, never in process arguments or progress messages.
+runuser -u postgres -- psql -Xq -v ON_ERROR_STOP=1 -d postgres >> "$LOGFILE" 2>&1 <<SQL
+SELECT 'CREATE ROLE af_palate LOGIN' WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'af_palate') \gexec
+ALTER ROLE af_palate PASSWORD '${PALATE_DB_PASSWORD}';
+SELECT 'CREATE DATABASE af_palate OWNER af_palate' WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'af_palate') \gexec
+SQL
+
+report_progress 30 "Fetching the latest stable Palate release..."
+TAG="$(git ls-remote --tags --refs --sort=-v:refname https://github.com/McEveritts/Palate.git | awk -F/ '$NF ~ /^v[0-9]+\.[0-9]+\.[0-9]+$/ && !tag {tag=$NF} END {print tag}')"
+if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    print_error "Unable to resolve a stable Palate release tag."
+    exit 1
+fi
+BUILD_DIR="$(mktemp -d /opt/.palate-build.XXXXXX)"
+git clone --quiet --depth 1 --branch "$TAG" https://github.com/McEveritts/Palate.git "$BUILD_DIR" >> "$LOGFILE" 2>&1
+
+# Use an application-private, checksum-verified Node.js 22 runtime.
+case "$(uname -m)" in
+    x86_64) NODE_ARCH=x64 ;;
+    aarch64|arm64) NODE_ARCH=arm64 ;;
+    *) print_error "Palate supports amd64 and arm64 hosts."; exit 1 ;;
+esac
+curl -fsSL https://nodejs.org/dist/latest-v22.x/SHASUMS256.txt -o "$BUILD_DIR/node-shasums.txt"
+NODE_ARCHIVE="$(awk -v suffix="-linux-${NODE_ARCH}.tar.xz" 'index($2, suffix) && substr($2, length($2)-length(suffix)+1) == suffix {print $2}' "$BUILD_DIR/node-shasums.txt")"
+if [[ ! "$NODE_ARCHIVE" =~ ^node-v22\.[0-9]+\.[0-9]+-linux-(x64|arm64)\.tar\.xz$ ]]; then
+    print_error "Unable to resolve Palate's Node.js 22 runtime."
+    exit 1
+fi
+curl -fsSL "https://nodejs.org/dist/latest-v22.x/${NODE_ARCHIVE}" -o "$BUILD_DIR/$NODE_ARCHIVE"
+(cd "$BUILD_DIR"; awk -v name="$NODE_ARCHIVE" '$2 == name {print}' node-shasums.txt | sha256sum --check --status)
+mkdir "$BUILD_DIR/.runtime"
+tar -xJf "$BUILD_DIR/$NODE_ARCHIVE" --strip-components=1 -C "$BUILD_DIR/.runtime"
+rm -f "$BUILD_DIR/$NODE_ARCHIVE" "$BUILD_DIR/node-shasums.txt"
+"$BUILD_DIR/.runtime/bin/node" -e 'const [major, minor] = process.versions.node.split(".").map(Number); if (major !== 22 || minor < 13) process.exit(1)'
+
+if [[ ! -d "$DATA_DIR/vault" ]]; then
+    cp -a "$BUILD_DIR/vault" "$DATA_DIR/vault"
+fi
+rm -rf "$BUILD_DIR/vault"
+ln -s "$DATA_DIR/vault" "$BUILD_DIR/vault"
+chmod 755 "$BUILD_DIR"
+chown -R af-palate:af-palate "$BUILD_DIR" "$DATA_DIR"
+
+run_app() {
+    runuser -u af-palate -- env "PATH=$BUILD_DIR/.runtime/bin:$PATH" "HOME=$DATA_DIR" NEXT_TELEMETRY_DISABLED=1 \
+        /bin/bash -c 'set -e; set -a; source "$1"; set +a; cd "$2"; shift 2; exec "$@"' -- "$ENV_FILE" "$BUILD_DIR" "$@"
+}
+report_progress 50 "Building Palate ${TAG} as its dedicated service user..."
+run_app npm ci --include=dev --no-audit --no-fund >> "$LOGFILE" 2>&1
+run_app node node_modules/prisma/build/index.js generate >> "$LOGFILE" 2>&1
+run_app npm run build >> "$LOGFILE" 2>&1
+test -s "$BUILD_DIR/.next/BUILD_ID"
+VERSION="$("$BUILD_DIR/.runtime/bin/node" -p "require('${BUILD_DIR}/package.json').version")"
+[[ "$VERSION" == "${TAG#v}" ]] || { print_error "Palate's package version does not match ${TAG}."; exit 1; }
+printf '%s\n' "$VERSION" > "$BUILD_DIR/.af-version"
+
+report_progress 80 "Backing up data and applying Palate's database schema..."
+BACKUP_DIR="$(mktemp -d /var/backups/aetherflow-palate.XXXXXX)"
+chmod 700 "$BACKUP_DIR"
+cp -a "${ENV_BACKUP:-$ENV_FILE}" "$BACKUP_DIR/palate.env"
+if [[ -f "$UNIT_FILE" ]]; then
+    cp -a "$UNIT_FILE" "$BACKUP_DIR/af-palate.service"
+    if systemctl is-active --quiet af-palate.service; then WAS_ACTIVE=1; fi
+    systemctl stop af-palate.service >> "$LOGFILE" 2>&1
+    SERVICE_STOPPED=1
+fi
+runuser -u postgres -- pg_dump --format=custom --dbname=af_palate > "$BACKUP_DIR/database.dump"
+tar -czf "$BACKUP_DIR/vault.tar.gz" -C "$DATA_DIR" vault
+# Refuse destructive schema changes: never pass --accept-data-loss or --force-reset.
+run_app node node_modules/prisma/build/index.js db push >> "$LOGFILE" 2>&1
+
+if [[ -d "$APP_DIR" ]]; then
+    mv "$APP_DIR" "$BACKUP_DIR/app"
+    OLD_APP_MOVED=1
+fi
+mv "$BUILD_DIR" "$APP_DIR"
+BUILD_DIR=""
+NEW_APP_MOVED=1
+UNIT_WRITTEN=1
+cat > "$UNIT_FILE" <<EOF
+[Unit]
+Description=AetherFlow Palate Recipe and Nutrition Planner
+Wants=network-online.target
+After=network-online.target postgresql.service
+Requires=postgresql.service
+
+[Service]
+Type=simple
+User=af-palate
+Group=af-palate
+WorkingDirectory=${APP_DIR}
+EnvironmentFile=${ENV_FILE}
+Environment=HOME=${DATA_DIR}
+Environment=NEXT_TELEMETRY_DISABLED=1
+ExecStart=${APP_DIR}/.runtime/bin/node ${APP_DIR}/node_modules/next/dist/bin/next start --hostname 127.0.0.1 --port \${PORT}
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl daemon-reload >> "$LOGFILE" 2>&1
+systemctl enable af-palate.service >> "$LOGFILE" 2>&1
+systemctl restart af-palate.service >> "$LOGFILE" 2>&1
+report_progress 90 "Checking Palate's login page..."
+curl --fail --silent --show-error --output /dev/null --max-time 5 --retry 20 --retry-connrefused --retry-delay 1 --retry-max-time 60 "http://127.0.0.1:${APP_PORT}/login" >> "$LOGFILE" 2>&1
+systemctl is-active --quiet af-palate.service
+write_lock palate
+SUCCESS=1
+report_progress 100 "Palate ${VERSION} installed on port ${APP_PORT}. Configure Jellyfin and the public URL in ${ENV_FILE}; sign in with a Jellyfin account."

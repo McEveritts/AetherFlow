@@ -17,8 +17,8 @@ func TestCatalogBlueprintsAndAutomationCoverage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadPackagesCatalog() failed: %v", err)
 	}
-	if len(pkgs) != 73 {
-		t.Fatalf("expected 73 catalog packages, got %d", len(pkgs))
+	if len(pkgs) != 74 {
+		t.Fatalf("expected 74 catalog packages, got %d", len(pkgs))
 	}
 
 	automation := loadPackageAutomation()
@@ -94,6 +94,7 @@ func TestCatalogBlueprintsAndAutomationCoverage(t *testing.T) {
 		"overseerr":      5056,
 		"rclone":         5572,
 		"n8n":            5678,
+		"palate":         28014,
 		"znc":            6501,
 		"qui":            7476,
 		"paperless-ngx":  8010,
@@ -178,8 +179,8 @@ func TestCatalogBlueprintsAndAutomationCoverage(t *testing.T) {
 				count++
 			}
 		}
-		if count != 73 {
-			t.Errorf("expected 73 installpackage-* scripts, found %d", count)
+		if count != 74 {
+			t.Errorf("expected 74 installpackage-* scripts, found %d", count)
 		}
 	}
 	removeEntries, err := os.ReadDir(filepath.Join("..", "..", "packages", "package", "remove"))
@@ -190,8 +191,8 @@ func TestCatalogBlueprintsAndAutomationCoverage(t *testing.T) {
 				count++
 			}
 		}
-		if count != 73 {
-			t.Errorf("expected 73 removepackage-* scripts, found %d", count)
+		if count != 74 {
+			t.Errorf("expected 74 removepackage-* scripts, found %d", count)
 		}
 	}
 }

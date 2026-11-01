@@ -579,6 +579,17 @@
         "web_path": "/"
     },
     {
+        "name": "palate",
+        "label": "Palate",
+        "description": "Local-first recipes, meal planning, nutrition tracking, and Sage AI. Sign in with Jellyfin.",
+        "lock_file": "/install/.palate.lock",
+        "category": "Utilities",
+        "service_type": "systemd",
+        "service_name": "af-palate",
+        "default_port": 28014,
+        "web_path": "/"
+    },
+    {
         "name": "gitea",
         "label": "Gitea",
         "description": "Painless self-hosted Git service. Lightweight and fast.",

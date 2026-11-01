@@ -1,0 +1,39 @@
+#!/bin/bash
+# AetherFlow Package Uninstaller: Palate
+set -euo pipefail
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
+fi
+
+require_root
+export LOGFILE="/var/log/aetherflow/remove-palate.log"
+mkdir -p "$(dirname "$LOGFILE")" /run/lock
+exec 9>/run/lock/aetherflow-palate.lock
+flock -n 9 || { print_error "Another Palate operation is running."; exit 1; }
+
+report_progress 20 "Stopping Palate..."
+purge_systemd_unit af-palate
+rm -rf /opt/palate
+
+if [[ "${DELETE_DATA:-false}" == "true" ]]; then
+    report_progress 60 "Deleting Palate's database, vault, and secrets..."
+    # Drop only Palate's database and role; keep the shared PostgreSQL service.
+    runuser -u postgres -- psql -Xq -v ON_ERROR_STOP=1 -d postgres <<'SQL'
+DROP DATABASE IF EXISTS af_palate;
+DROP ROLE IF EXISTS af_palate;
+SQL
+    rm -rf /var/lib/palate /etc/palate
+    purge_system_user af-palate
+else
+    print_info "Preserved /var/lib/palate, /etc/palate, and PostgreSQL database af_palate for reinstall."
+fi
+
+systemctl daemon-reload >> "$LOGFILE" 2>&1
+remove_lock palate
+report_progress 100 "Palate removed. Existing backups remain in /var/backups/aetherflow-palate.*."

@@ -26,8 +26,8 @@ func TestAdversarial_BlueprintResolutionEdgeCases(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadPackagesCatalog failed: %v", err)
 	}
-	if len(pkgs) != 73 {
-		t.Fatalf("expected exactly 73 packages, got %d", len(pkgs))
+	if len(pkgs) != 74 {
+		t.Fatalf("expected exactly 74 packages, got %d", len(pkgs))
 	}
 
 	// 1. Every package name in packages.json must resolve to a valid blueprint
@@ -286,12 +286,12 @@ func TestAdversarial_PortUniquenessAndCollisions(t *testing.T) {
 		t.Errorf("expected exactly %d headless packages, found %d: %v", len(knownHeadless), len(headlessFound), headlessFound)
 	}
 
-	if webFacingCount != 62 {
-		t.Errorf("expected exactly 62 web-facing packages, found %d", webFacingCount)
+	if webFacingCount != 63 {
+		t.Errorf("expected exactly 63 web-facing packages, found %d", webFacingCount)
 	}
 
-	if len(seenPorts) != 62 {
-		t.Errorf("expected exactly 62 unique web ports, got %d", len(seenPorts))
+	if len(seenPorts) != 63 {
+		t.Errorf("expected exactly 63 unique web ports, got %d", len(seenPorts))
 	}
 }
 

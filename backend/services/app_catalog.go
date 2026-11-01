@@ -613,6 +613,16 @@ var blueprintRegistry = map[string]AppBlueprint{
 		HealthCheckPath: "/healthz",
 		AppDataPath:     "/var/lib/n8n",
 	},
+	"palate": {
+		AppName:         "palate",
+		ServiceName:     "af-palate",
+		Category:        "Utilities",
+		DefaultPort:     28014,
+		WebPath:         "/",
+		HealthCheckPath: "/login",
+		AppDataPath:     "/var/lib/palate",
+		Dependencies:    []string{"jellyfin"},
+	},
 	"gitea":                        {AppName: "gitea", ServiceName: "gitea", Category: "DevOps", DefaultPort: 3002},
 	"organizr":                     {AppName: "organizr", ServiceName: "apache2", Category: "Utilities", DefaultPort: 8086, WebPath: "/"},
 	"dispatcharr": {
