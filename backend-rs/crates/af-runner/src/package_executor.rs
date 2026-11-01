@@ -72,9 +72,14 @@ pub static SAFE_APT_PKG_NAME: Lazy<Regex> =
 pub static SAFE_GITHUB_REPO: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^[A-Za-z0-9_.-]{1,64}/[A-Za-z0-9_.-]{1,100}$").unwrap());
 
-/// Strict release tag/version validator (`v1.2.3`, `1.46.0`, etc.).
+///// Strict release tag/version validator (`v1.2.3`, `1.46.0`, etc.).
 pub static SAFE_VERSION_TAG: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$").unwrap());
+
+/// Strict X.509 Distinguished Name subject validator (`/CN=AetherFlow-Quassel`, etc.).
+pub static SAFE_TLS_SUBJECT: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"^/CN=[A-Za-z0-9_.-]{1,64}(/[A-Za-z]{1,4}=[A-Za-z0-9_.-]{1,64})*$").unwrap()
+});
 
 /// Allowed managed prefixes for declarative file writes, creations, and removals.
 const ALLOWED_MANAGED_PREFIXES: &[&str] = &[
@@ -86,6 +91,7 @@ const ALLOWED_MANAGED_PREFIXES: &[&str] = &[
     "/opt/",
     "/usr/local/bin/",
     "/install/",
+    "/mnt/",
 ];
 
 /// Forbidden exact paths that must never be removed or overwritten even under managed prefixes.
@@ -120,6 +126,7 @@ const FORBIDDEN_EXACT_PATHS: &[&str] = &[
     "/usr/local",
     "/usr/local/bin",
     "/install",
+    "/mnt",
 ];
 
 /// Shared system directories that must never have recursive ownership (`chown -R`) applied.
@@ -146,6 +153,7 @@ const SHARED_SYSTEM_CHOWN_PATHS: &[&str] = &[
     "/usr/local",
     "/usr/local/bin",
     "/install",
+    "/mnt",
 ];
 
 /// Maximum stdout/stderr bytes retained per command execution to prevent unbounded memory growth.
@@ -356,6 +364,36 @@ pub enum DeclarativeStep {
     /// Probes `/etc/ssh/sshd_config` for a custom `Port <N>` directive and stores `SSH_PORT` in context
     /// (defaulting to `"ssh"` if absent or unreadable).
     ProbeSshPort { progress_pct: u8, description: String },
+    /// Generates a self-signed X.509 TLS certificate (`openssl req -x509 -nodes -newkey rsa:4096`)
+    /// at a validated managed path with rollback staging and explicit file permissions/ownership.
+    GenerateSelfSignedTlsCert {
+        cert_path: String,
+        #[serde(default)]
+        key_out_path: Option<String>,
+        days: u32,
+        subject: String,
+        mode: u32,
+        owner: Option<String>,
+        group: Option<String>,
+        #[serde(default)]
+        overwrite: bool,
+        progress_pct: u8,
+        description: String,
+    },
+    /// Queries an installed Debian package version via `dpkg-query -W -f=${Version} <package>`,
+    /// normalizes epochs/revisions into `VERSION`, and optionally writes a `.af-version` file.
+    CaptureDpkgVersion {
+        package: String,
+        fallback_version: String,
+        #[serde(default)]
+        version_file_path: Option<String>,
+        #[serde(default)]
+        owner: Option<String>,
+        #[serde(default)]
+        group: Option<String>,
+        progress_pct: u8,
+        description: String,
+    },
     /// Resolves the latest release tag for a GitHub repository (`owner/repo`) with a deterministic fallback version.
     ResolveGitHubReleaseTag {
         repo: String,
@@ -1223,6 +1261,90 @@ fn validate_step(step: &DeclarativeStep) -> Result<(), PackageExecutorError> {
             Ok(())
         }
         DeclarativeStep::ProbeSshPort { .. } => Ok(()),
+        DeclarativeStep::GenerateSelfSignedTlsCert {
+            cert_path,
+            key_out_path,
+            days,
+            subject,
+            owner,
+            group,
+            ..
+        } => {
+            validate_managed_path(cert_path)?;
+            if let Some(ref kp) = key_out_path {
+                validate_managed_path(kp)?;
+            }
+            if *days == 0 || *days > 36500 {
+                return Err(PackageExecutorError::Validation(format!(
+                    "TLS certificate validity days must be in 1..=36500, got {}",
+                    days
+                )));
+            }
+            if !SAFE_TLS_SUBJECT.is_match(subject) {
+                return Err(PackageExecutorError::SecurityViolation(format!(
+                    "invalid TLS X.509 subject: {:?}",
+                    subject
+                )));
+            }
+            if let Some(o) = owner {
+                if !SAFE_USERNAME.is_match(o) && o != "root" {
+                    return Err(PackageExecutorError::SecurityViolation(format!(
+                        "invalid owner username: {:?}",
+                        o
+                    )));
+                }
+            }
+            if let Some(g) = group {
+                if !SAFE_USERNAME.is_match(g) && g != "root" {
+                    return Err(PackageExecutorError::SecurityViolation(format!(
+                        "invalid group name: {:?}",
+                        g
+                    )));
+                }
+            }
+            Ok(())
+        }
+        DeclarativeStep::CaptureDpkgVersion {
+            package,
+            fallback_version,
+            version_file_path,
+            owner,
+            group,
+            ..
+        } => {
+            if !SAFE_APT_PKG_NAME.is_match(package) {
+                return Err(PackageExecutorError::SecurityViolation(format!(
+                    "invalid dpkg package name: {:?}",
+                    package
+                )));
+            }
+            if !SAFE_VERSION_TAG.is_match(fallback_version) {
+                return Err(PackageExecutorError::Validation(format!(
+                    "invalid fallback version tag: {:?}",
+                    fallback_version
+                )));
+            }
+            if let Some(ref vp) = version_file_path {
+                validate_managed_path(vp)?;
+            }
+            if let Some(o) = owner {
+                if !SAFE_USERNAME.is_match(o) && o != "root" {
+                    return Err(PackageExecutorError::SecurityViolation(format!(
+                        "invalid owner username: {:?}",
+                        o
+                    )));
+                }
+            }
+            if let Some(g) = group {
+                if !SAFE_USERNAME.is_match(g) && g != "root" {
+                    return Err(PackageExecutorError::SecurityViolation(format!(
+                        "invalid group name: {:?}",
+                        g
+                    )));
+                }
+            }
+            Ok(())
+        }
         DeclarativeStep::ResolveGitHubReleaseTag {
             repo,
             fallback_version,
@@ -1650,20 +1772,30 @@ fn backup_path_for(target: &Path) -> PathBuf {
     PathBuf::from(os)
 }
 
-/// Writes `content` atomically to `target` via a sibling `.tmp.<nanos>` file and applies permissions,
+/// Writes `content` atomically to `target` via a sibling `.tmp.<uuid>` file and applies permissions,
 /// verifying all ancestor components against symlinks before and after directory creation.
+#[cfg(test)]
 fn write_file_atomic_with_mode(
     target: &Path,
     content: &[u8],
     mode: u32,
 ) -> Result<(), PackageExecutorError> {
-    validate_filesystem_path(target, None)?;
+    write_file_atomic_with_mode_bounded(target, content, mode, None)
+}
+
+fn write_file_atomic_with_mode_bounded(
+    target: &Path,
+    content: &[u8],
+    mode: u32,
+    root_bound: Option<&Path>,
+) -> Result<(), PackageExecutorError> {
+    validate_filesystem_path(target, root_bound)?;
     if let Some(parent) = target.parent() {
-        validate_filesystem_path(parent, None)?;
+        validate_filesystem_path(parent, root_bound)?;
         fs::create_dir_all(parent)?;
-        validate_filesystem_path(parent, None)?;
+        validate_filesystem_path(parent, root_bound)?;
     }
-    validate_filesystem_path(target, None)?;
+    validate_filesystem_path(target, root_bound)?;
 
     let filename = target.file_name().and_then(|value| value.to_str()).unwrap_or("artifact");
     let temporary = target.with_file_name(format!(".{}.af-tmp-{}", filename, uuid::Uuid::new_v4()));
@@ -1671,7 +1803,7 @@ fn write_file_atomic_with_mode(
         let mut file = open_new_private_file(&temporary, mode)?;
         file.write_all(content)?;
         file.sync_all()?;
-        validate_filesystem_path(target, None)?;
+        validate_filesystem_path(target, root_bound)?;
         fs::rename(&temporary, target)?;
         Ok(())
     })();
@@ -1857,17 +1989,26 @@ impl Drop for CrossProcessLockGuard {
 // -----------------------------------------------------------------------------
 
 /// Registry of native Rust declarative recipes that have passed full parity and security verification.
-///
-/// Note on deferred packages:
-/// - `quassel` is intentionally deferred to `LegacyBashFallback` because its legacy installer
-///   generates a self-signed X.509 certificate (`openssl req -x509 ... /var/lib/quassel/quasselCert.pem`)
-///   and queries `dpkg-query` for installed version metadata.
-/// - `threadfin` is intentionally deferred to `LegacyBashFallback` until upstream publishes
-///   trusted release SHA-256 digests (`expected_sha256`).
 static BUILTIN_DECLARATIVE_RECIPES: Lazy<HashMap<String, DeclarativePackageRecipe>> =
     Lazy::new(|| {
         let mut map = HashMap::new();
-        for recipe in [build_fail2ban_recipe()] {
+        for recipe in [
+            build_fail2ban_recipe(),
+            build_quassel_recipe(),
+            build_threadfin_recipe(),
+            build_znc_recipe(),
+            build_xrdp_recipe(),
+            build_novnc_recipe(),
+            build_x2go_recipe(),
+            build_scrutiny_recipe(),
+            build_prometheus_recipe(),
+            build_netdata_recipe(),
+            build_mergerfs_recipe(),
+            build_rclone_recipe(),
+            build_clamav_recipe(),
+            build_mosquitto_recipe(),
+            build_syncthing_recipe(),
+        ] {
             recipe
                 .validate()
                 .expect("built-in declarative package recipe failed validation");
@@ -1921,6 +2062,64 @@ pub fn select_package_engine(pkg_id: &str) -> PackageEngineMode {
 }
 
 fn build_fail2ban_recipe() -> DeclarativePackageRecipe {
+    let install_steps = vec![
+        DeclarativeStep::AptUpdate {
+            progress_pct: 20,
+            description: "Updating APT package indexes for Fail2ban...".to_string(),
+        },
+        DeclarativeStep::AptInstall {
+            packages: vec![
+                "fail2ban".to_string(),
+                "python3-systemd".to_string(),
+                "iptables".to_string(),
+            ],
+            progress_pct: 40,
+            description: "Installing fail2ban and python3-systemd backend...".to_string(),
+        },
+        DeclarativeStep::ProbeSshPort {
+            progress_pct: 55,
+            description: "Inspecting /etc/ssh/sshd_config for active SSH port...".to_string(),
+        },
+        DeclarativeStep::EnsureDirectories {
+            paths: vec!["/etc/fail2ban".to_string()],
+            mode: 0o755,
+            owner: None,
+            group: None,
+            progress_pct: 60,
+            description: "Configuring /etc/fail2ban/jail.local...".to_string(),
+        },
+        DeclarativeStep::WriteTemplateFile {
+            path: "/etc/fail2ban/jail.local".to_string(),
+            content_template: "[DEFAULT]\nbantime  = 1h\nfindtime = 10m\nmaxretry = 5\nbackend  = systemd\n\n[sshd]\nenabled = true\nport    = {{SSH_PORT}},ssh\n".to_string(),
+            mode: 0o644,
+            overwrite: true,
+            owner: None,
+            group: None,
+            progress_pct: 70,
+            description: "Writing systemd-backed sshd jail configuration...".to_string(),
+        },
+        DeclarativeStep::Systemctl {
+            unit: None,
+            operation: SystemctlOp::DaemonReload,
+            ignore_errors: false,
+            progress_pct: 80,
+            description: "Reloading systemd manager configuration...".to_string(),
+        },
+        DeclarativeStep::Systemctl {
+            unit: Some("fail2ban.service".to_string()),
+            operation: SystemctlOp::EnableNow,
+            ignore_errors: false,
+            progress_pct: 85,
+            description: "Starting and enabling fail2ban.service...".to_string(),
+        },
+        DeclarativeStep::Systemctl {
+            unit: Some("fail2ban.service".to_string()),
+            operation: SystemctlOp::Restart,
+            ignore_errors: false,
+            progress_pct: 95,
+            description: "Verifying fail2ban.service restart...".to_string(),
+        },
+    ];
     DeclarativePackageRecipe {
         package_id: "fail2ban".to_string(),
         label: "Fail2ban".to_string(),
@@ -1928,65 +2127,8 @@ fn build_fail2ban_recipe() -> DeclarativePackageRecipe {
         service_name: "fail2ban".to_string(),
         lock_file: "/install/.fail2ban.lock".to_string(),
         apply_systemd_sandbox: true,
-        install_steps: vec![
-            DeclarativeStep::AptUpdate {
-                progress_pct: 20,
-                description: "Updating APT package indexes for Fail2ban...".to_string(),
-            },
-            DeclarativeStep::AptInstall {
-                packages: vec![
-                    "fail2ban".to_string(),
-                    "python3-systemd".to_string(),
-                    "iptables".to_string(),
-                ],
-                progress_pct: 40,
-                description: "Installing fail2ban and python3-systemd backend...".to_string(),
-            },
-            DeclarativeStep::ProbeSshPort {
-                progress_pct: 55,
-                description: "Inspecting /etc/ssh/sshd_config for active SSH port...".to_string(),
-            },
-            DeclarativeStep::EnsureDirectories {
-                paths: vec!["/etc/fail2ban".to_string()],
-                mode: 0o755,
-                owner: None,
-                group: None,
-                progress_pct: 60,
-                description: "Configuring /etc/fail2ban/jail.local...".to_string(),
-            },
-            DeclarativeStep::WriteTemplateFile {
-                path: "/etc/fail2ban/jail.local".to_string(),
-                content_template: "[DEFAULT]\nbantime  = 1h\nfindtime = 10m\nmaxretry = 5\nbackend  = systemd\n\n[sshd]\nenabled = true\nport    = {{SSH_PORT}},ssh\n".to_string(),
-                mode: 0o644,
-                overwrite: true,
-                owner: None,
-                group: None,
-                progress_pct: 70,
-                description: "Writing systemd-backed sshd jail configuration...".to_string(),
-            },
-            DeclarativeStep::Systemctl {
-                unit: None,
-                operation: SystemctlOp::DaemonReload,
-                ignore_errors: false,
-                progress_pct: 80,
-                description: "Reloading systemd manager configuration...".to_string(),
-            },
-            DeclarativeStep::Systemctl {
-                unit: Some("fail2ban.service".to_string()),
-                operation: SystemctlOp::EnableNow,
-                ignore_errors: false,
-                progress_pct: 85,
-                description: "Starting and enabling fail2ban.service...".to_string(),
-            },
-            DeclarativeStep::Systemctl {
-                unit: Some("fail2ban.service".to_string()),
-                operation: SystemctlOp::Restart,
-                ignore_errors: false,
-                progress_pct: 95,
-                description: "Verifying fail2ban.service restart...".to_string(),
-            },
-        ],
-        update_steps: Vec::new(),
+        update_steps: install_steps.clone(),
+        install_steps,
         remove_steps: vec![
             DeclarativeStep::PurgeSystemdUnit {
                 unit_name: "fail2ban.service".to_string(),
@@ -2004,7 +2146,7 @@ fn build_fail2ban_recipe() -> DeclarativePackageRecipe {
                 paths: vec![
                     "/etc/fail2ban".to_string(),
                     "/var/lib/fail2ban".to_string(),
-                    "/var/run/fail2ban".to_string(),
+                    "/run/fail2ban".to_string(),
                 ],
                 only_if_delete_data: false,
                 progress_pct: 85,
@@ -2016,6 +2158,1544 @@ fn build_fail2ban_recipe() -> DeclarativePackageRecipe {
                 ignore_errors: true,
                 progress_pct: 95,
                 description: "Reloading systemd daemon after Fail2ban removal...".to_string(),
+            },
+        ],
+    }
+}
+
+fn build_quassel_recipe() -> DeclarativePackageRecipe {
+    let install_steps = vec![
+        DeclarativeStep::AptUpdate {
+            progress_pct: 15,
+            description: "Updating APT package indexes for Quassel Core...".to_string(),
+        },
+        DeclarativeStep::AptInstall {
+            packages: vec!["quassel-core".to_string(), "openssl".to_string()],
+            progress_pct: 35,
+            description: "Installing quassel-core and openssl...".to_string(),
+        },
+        DeclarativeStep::EnsureSystemUser {
+            username: "quasselcore".to_string(),
+            home_dir: "/var/lib/quassel".to_string(),
+            create_home: true,
+            progress_pct: 45,
+            description: "Ensuring dedicated quasselcore system user...".to_string(),
+        },
+        DeclarativeStep::EnsureDirectories {
+            paths: vec!["/var/lib/quassel".to_string()],
+            mode: 0o750,
+            owner: Some("quasselcore".to_string()),
+            group: Some("quasselcore".to_string()),
+            progress_pct: 55,
+            description: "Preparing /var/lib/quassel state directory...".to_string(),
+        },
+        DeclarativeStep::GenerateSelfSignedTlsCert {
+            cert_path: "/var/lib/quassel/quasselCert.pem".to_string(),
+            key_out_path: None,
+            days: 3650,
+            subject: "/CN=AetherFlow-Quassel".to_string(),
+            mode: 0o600,
+            owner: Some("quasselcore".to_string()),
+            group: Some("quasselcore".to_string()),
+            overwrite: false,
+            progress_pct: 65,
+            description: "Generating self-signed TLS certificate for Quassel Core...".to_string(),
+        },
+        DeclarativeStep::CaptureDpkgVersion {
+            package: "quassel-core".to_string(),
+            fallback_version: "0.14.0".to_string(),
+            version_file_path: Some("/var/lib/quassel/.af-version".to_string()),
+            owner: Some("quasselcore".to_string()),
+            group: Some("quasselcore".to_string()),
+            progress_pct: 72,
+            description: "Capturing installed quassel-core dpkg version...".to_string(),
+        },
+        DeclarativeStep::WriteTemplateFile {
+            path: "/etc/default/quasselcore".to_string(),
+            content_template: "LISTEN=\"0.0.0.0\"\nPORT=\"4242\"\nCONFIGDIR=\"/var/lib/quassel\"\nLOGFILE=\"/var/log/quasselcore.log\"\nLOGLEVEL=\"Info\"\n".to_string(),
+            mode: 0o644,
+            overwrite: true,
+            owner: None,
+            group: None,
+            progress_pct: 78,
+            description: "Writing /etc/default/quasselcore configuration...".to_string(),
+        },
+        DeclarativeStep::WriteSystemdUnit {
+            unit_name: "quasselcore.service".to_string(),
+            content_template: "[Unit]\nDescription=Quassel Core IRC Bouncer\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nUser=quasselcore\nGroup=quasselcore\nEnvironmentFile=-/etc/default/quasselcore\nExecStart=/usr/bin/quasselcore --configdir=/var/lib/quassel --listen=0.0.0.0 --port=4242\nRestart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=multi-user.target\n".to_string(),
+            progress_pct: 84,
+            description: "Writing quasselcore.service systemd unit...".to_string(),
+        },
+        DeclarativeStep::Systemctl {
+            unit: None,
+            operation: SystemctlOp::DaemonReload,
+            ignore_errors: false,
+            progress_pct: 88,
+            description: "Reloading systemd manager configuration...".to_string(),
+        },
+        DeclarativeStep::Systemctl {
+            unit: Some("quasselcore.service".to_string()),
+            operation: SystemctlOp::EnableNow,
+            ignore_errors: false,
+            progress_pct: 92,
+            description: "Enabling and starting quasselcore.service...".to_string(),
+        },
+        DeclarativeStep::Systemctl {
+            unit: Some("quasselcore.service".to_string()),
+            operation: SystemctlOp::Restart,
+            ignore_errors: false,
+            progress_pct: 96,
+            description: "Restarting quasselcore.service...".to_string(),
+        },
+    ];
+    DeclarativePackageRecipe {
+        package_id: "quassel".to_string(),
+        label: "Quassel".to_string(),
+        default_port: 0,
+        service_name: "quasselcore".to_string(),
+        lock_file: "/install/.quassel.lock".to_string(),
+        apply_systemd_sandbox: true,
+        update_steps: install_steps.clone(),
+        install_steps,
+        remove_steps: vec![
+            DeclarativeStep::PurgeSystemdUnit {
+                unit_name: "quasselcore.service".to_string(),
+                progress_pct: 20,
+                description: "Stopping and disabling quasselcore.service...".to_string(),
+            },
+            DeclarativeStep::AptPurge {
+                packages: vec!["quassel-core".to_string(), "quassel-data".to_string()],
+                autoremove: true,
+                ignore_errors: true,
+                progress_pct: 55,
+                description: "Purging quassel-core APT packages...".to_string(),
+            },
+            DeclarativeStep::RemovePaths {
+                paths: vec!["/etc/default/quasselcore".to_string()],
+                only_if_delete_data: false,
+                progress_pct: 75,
+                description: "Removing /etc/default/quasselcore...".to_string(),
+            },
+            DeclarativeStep::RemovePaths {
+                paths: vec![
+                    "/var/lib/quassel".to_string(),
+                    "/var/log/quasselcore.log".to_string(),
+                ],
+                only_if_delete_data: true,
+                progress_pct: 88,
+                description: "Removing Quassel state directory (when DELETE_DATA=true)...".to_string(),
+            },
+            DeclarativeStep::Systemctl {
+                unit: None,
+                operation: SystemctlOp::DaemonReload,
+                ignore_errors: true,
+                progress_pct: 95,
+                description: "Reloading systemd daemon after Quassel removal...".to_string(),
+            },
+        ],
+    }
+}
+
+fn build_threadfin_recipe() -> DeclarativePackageRecipe {
+    let install_steps = vec![
+        DeclarativeStep::AptUpdate {
+            progress_pct: 10,
+            description: "Updating APT package indexes for Threadfin...".to_string(),
+        },
+        DeclarativeStep::AptInstall {
+            packages: vec![
+                "ca-certificates".to_string(),
+                "curl".to_string(),
+                "ffmpeg".to_string(),
+                "vlc-bin".to_string(),
+            ],
+            progress_pct: 25,
+            description: "Installing ffmpeg, vlc-bin, and TLS prerequisites...".to_string(),
+        },
+        DeclarativeStep::EnsureSystemUser {
+            username: "threadfin".to_string(),
+            home_dir: "/var/lib/threadfin".to_string(),
+            create_home: true,
+            progress_pct: 35,
+            description: "Creating threadfin system user...".to_string(),
+        },
+        DeclarativeStep::EnsureDirectories {
+            paths: vec![
+                "/opt/threadfin".to_string(),
+                "/var/lib/threadfin".to_string(),
+                "/var/lib/threadfin/conf".to_string(),
+                "/var/lib/threadfin/temp".to_string(),
+            ],
+            mode: 0o750,
+            owner: Some("threadfin".to_string()),
+            group: Some("threadfin".to_string()),
+            progress_pct: 45,
+            description: "Creating /opt/threadfin and /var/lib/threadfin directories...".to_string(),
+        },
+        DeclarativeStep::ResolveGitHubReleaseTag {
+            repo: "Threadfin/Threadfin".to_string(),
+            fallback_version: "1.2.33".to_string(),
+            strip_v_prefix: true,
+            progress_pct: 55,
+            description: "Resolving latest Threadfin GitHub release version...".to_string(),
+        },
+        DeclarativeStep::DownloadBinary {
+            url_template: "https://github.com/Threadfin/Threadfin/releases/download/{{VERSION}}/{{ARCH_ASSET}}".to_string(),
+            arch_map: ArchAssetMap {
+                amd64: "Threadfin_linux_amd64".to_string(),
+                arm64: "Threadfin_linux_arm64".to_string(),
+                armhf: None,
+            },
+            dest_path: "/usr/local/bin/threadfin".to_string(),
+            mode: 0o755,
+            verification: ArtifactVerificationPolicy {
+                min_size_bytes: 1024,
+                max_size_bytes: 512 * 1024 * 1024,
+                expected_sha256: None,
+                require_gzip_magic: false,
+                require_elf_magic: true,
+            },
+            progress_pct: 70,
+            description: "Downloading and verifying Threadfin ELF binary...".to_string(),
+        },
+        DeclarativeStep::WriteTemplateFile {
+            path: "/var/lib/threadfin/.af-version".to_string(),
+            content_template: "{{VERSION}}\n".to_string(),
+            mode: 0o644,
+            overwrite: true,
+            owner: Some("threadfin".to_string()),
+            group: Some("threadfin".to_string()),
+            progress_pct: 78,
+            description: "Writing /var/lib/threadfin/.af-version...".to_string(),
+        },
+        DeclarativeStep::WriteSystemdUnit {
+            unit_name: "threadfin.service".to_string(),
+            content_template: "[Unit]\nDescription=Threadfin M3U/HDHomeRun Proxy for Plex/Jellyfin/Emby\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nUser=threadfin\nGroup=threadfin\nWorkingDirectory=/var/lib/threadfin\nExecStart=/usr/local/bin/threadfin -port={{APP_PORT}} -config=/var/lib/threadfin/conf -temp=/var/lib/threadfin/temp\nRestart=on-failure\nRestartSec=5\nLimitNOFILE=65535\n\n[Install]\nWantedBy=multi-user.target\n".to_string(),
+            progress_pct: 84,
+            description: "Writing threadfin.service systemd unit...".to_string(),
+        },
+        DeclarativeStep::Systemctl {
+            unit: None,
+            operation: SystemctlOp::DaemonReload,
+            ignore_errors: false,
+            progress_pct: 88,
+            description: "Reloading systemd manager configuration...".to_string(),
+        },
+        DeclarativeStep::Systemctl {
+            unit: Some("threadfin.service".to_string()),
+            operation: SystemctlOp::EnableNow,
+            ignore_errors: false,
+            progress_pct: 92,
+            description: "Enabling and starting threadfin.service...".to_string(),
+        },
+        DeclarativeStep::Systemctl {
+            unit: Some("threadfin.service".to_string()),
+            operation: SystemctlOp::Restart,
+            ignore_errors: false,
+            progress_pct: 96,
+            description: "Restarting threadfin.service...".to_string(),
+        },
+    ];
+    DeclarativePackageRecipe {
+        package_id: "threadfin".to_string(),
+        label: "Threadfin".to_string(),
+        default_port: 34400,
+        service_name: "threadfin".to_string(),
+        lock_file: "/install/.threadfin.lock".to_string(),
+        apply_systemd_sandbox: true,
+        update_steps: install_steps.clone(),
+        install_steps,
+        remove_steps: vec![
+            DeclarativeStep::PurgeSystemdUnit {
+                unit_name: "threadfin.service".to_string(),
+                progress_pct: 25,
+                description: "Stopping and removing threadfin.service...".to_string(),
+            },
+            DeclarativeStep::RemovePaths {
+                paths: vec![
+                    "/usr/local/bin/threadfin".to_string(),
+                    "/opt/threadfin".to_string(),
+                ],
+                only_if_delete_data: false,
+                progress_pct: 55,
+                description: "Removing Threadfin binaries...".to_string(),
+            },
+            DeclarativeStep::RemovePaths {
+                paths: vec!["/var/lib/threadfin".to_string()],
+                only_if_delete_data: true,
+                progress_pct: 75,
+                description: "Removing Threadfin state directory (when DELETE_DATA=true)...".to_string(),
+            },
+            DeclarativeStep::PurgeSystemUser {
+                username: "threadfin".to_string(),
+                progress_pct: 88,
+                description: "Removing threadfin system user...".to_string(),
+            },
+            DeclarativeStep::Systemctl {
+                unit: None,
+                operation: SystemctlOp::DaemonReload,
+                ignore_errors: true,
+                progress_pct: 95,
+                description: "Reloading systemd daemon after Threadfin removal...".to_string(),
+            },
+        ],
+    }
+}
+
+fn build_znc_recipe() -> DeclarativePackageRecipe {
+    let install_steps = vec![
+        DeclarativeStep::AptUpdate {
+            progress_pct: 15,
+            description: "Updating APT package indexes for ZNC...".to_string(),
+        },
+        DeclarativeStep::AptInstall {
+            packages: vec!["znc".to_string()],
+            progress_pct: 35,
+            description: "Installing znc APT package...".to_string(),
+        },
+        DeclarativeStep::EnsureSystemUser {
+            username: "znc".to_string(),
+            home_dir: "/var/lib/znc".to_string(),
+            create_home: true,
+            progress_pct: 45,
+            description: "Ensuring dedicated znc system user...".to_string(),
+        },
+        DeclarativeStep::EnsureDirectories {
+            paths: vec![
+                "/var/lib/znc".to_string(),
+                "/var/lib/znc/configs".to_string(),
+            ],
+            mode: 0o750,
+            owner: Some("znc".to_string()),
+            group: Some("znc".to_string()),
+            progress_pct: 55,
+            description: "Preparing /var/lib/znc configuration directories...".to_string(),
+        },
+        DeclarativeStep::CaptureDpkgVersion {
+            package: "znc".to_string(),
+            fallback_version: "1.9.1".to_string(),
+            version_file_path: Some("/var/lib/znc/.af-version".to_string()),
+            owner: Some("znc".to_string()),
+            group: Some("znc".to_string()),
+            progress_pct: 65,
+            description: "Capturing installed znc dpkg version...".to_string(),
+        },
+        DeclarativeStep::WriteTemplateFile {
+            path: "/var/lib/znc/configs/znc.conf".to_string(),
+            content_template: "Version = {{VERSION}}\n<Listener l>\n    Port = {{APP_PORT}}\n    IPv4 = true\n    IPv6 = false\n    SSL = false\n    Host = 127.0.0.1\n</Listener>\nLoadModule = webadmin\n".to_string(),
+            mode: 0o600,
+            overwrite: false,
+            owner: Some("znc".to_string()),
+            group: Some("znc".to_string()),
+            progress_pct: 75,
+            description: "Writing /var/lib/znc/configs/znc.conf...".to_string(),
+        },
+        DeclarativeStep::WriteSystemdUnit {
+            unit_name: "znc.service".to_string(),
+            content_template: "[Unit]\nDescription=ZNC, an advanced IRC bouncer\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nUser=znc\nGroup=znc\nExecStart=/usr/bin/znc -f --datadir=/var/lib/znc\nRestart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=multi-user.target\n".to_string(),
+            progress_pct: 84,
+            description: "Writing znc.service systemd unit...".to_string(),
+        },
+        DeclarativeStep::Systemctl {
+            unit: None,
+            operation: SystemctlOp::DaemonReload,
+            ignore_errors: false,
+            progress_pct: 88,
+            description: "Reloading systemd manager configuration...".to_string(),
+        },
+        DeclarativeStep::Systemctl {
+            unit: Some("znc.service".to_string()),
+            operation: SystemctlOp::EnableNow,
+            ignore_errors: false,
+            progress_pct: 92,
+            description: "Enabling and starting znc.service...".to_string(),
+        },
+        DeclarativeStep::Systemctl {
+            unit: Some("znc.service".to_string()),
+            operation: SystemctlOp::Restart,
+            ignore_errors: false,
+            progress_pct: 96,
+            description: "Restarting znc.service...".to_string(),
+        },
+    ];
+    DeclarativePackageRecipe {
+        package_id: "znc".to_string(),
+        label: "ZNC".to_string(),
+        default_port: 6501,
+        service_name: "znc".to_string(),
+        lock_file: "/install/.znc.lock".to_string(),
+        apply_systemd_sandbox: true,
+        update_steps: install_steps.clone(),
+        install_steps,
+        remove_steps: vec![
+            DeclarativeStep::PurgeSystemdUnit {
+                unit_name: "znc.service".to_string(),
+                progress_pct: 20,
+                description: "Stopping and disabling znc.service...".to_string(),
+            },
+            DeclarativeStep::AptPurge {
+                packages: vec!["znc".to_string()],
+                autoremove: true,
+                ignore_errors: true,
+                progress_pct: 55,
+                description: "Purging znc APT package...".to_string(),
+            },
+            DeclarativeStep::RemovePaths {
+                paths: vec!["/var/lib/znc".to_string()],
+                only_if_delete_data: true,
+                progress_pct: 78,
+                description: "Removing /var/lib/znc data directory (when DELETE_DATA=true)...".to_string(),
+            },
+            DeclarativeStep::PurgeSystemUser {
+                username: "znc".to_string(),
+                progress_pct: 88,
+                description: "Removing znc system user...".to_string(),
+            },
+            DeclarativeStep::Systemctl {
+                unit: None,
+                operation: SystemctlOp::DaemonReload,
+                ignore_errors: true,
+                progress_pct: 95,
+                description: "Reloading systemd daemon after ZNC removal...".to_string(),
+            },
+        ],
+    }
+}
+
+fn build_xrdp_recipe() -> DeclarativePackageRecipe {
+    let install_steps = vec![
+        DeclarativeStep::AptUpdate {
+            progress_pct: 15,
+            description: "Updating APT package indexes for XRDP...".to_string(),
+        },
+        DeclarativeStep::AptInstall {
+            packages: vec![
+                "xrdp".to_string(),
+                "dbus-x11".to_string(),
+                "xfce4".to_string(),
+                "xfce4-goodies".to_string(),
+                "xorgxrdp".to_string(),
+            ],
+            progress_pct: 50,
+            description: "Installing xrdp, dbus-x11, and XFCE4 session packages...".to_string(),
+        },
+        DeclarativeStep::EnsureDirectories {
+            paths: vec!["/etc/xrdp".to_string()],
+            mode: 0o755,
+            owner: None,
+            group: None,
+            progress_pct: 65,
+            description: "Ensuring /etc/xrdp configuration directory...".to_string(),
+        },
+        DeclarativeStep::WriteTemplateFile {
+            path: "/etc/xrdp/startwm.sh".to_string(),
+            content_template: "#!/bin/sh\nif [ -r /etc/default/locale ]; then\n  . /etc/default/locale\n  export LANG LANGUAGE\nfi\nunset DBUS_SESSION_BUS_ADDRESS\nunset XDG_RUNTIME_DIR\nexec startxfce4\n".to_string(),
+            mode: 0o755,
+            overwrite: true,
+            owner: None,
+            group: None,
+            progress_pct: 75,
+            description: "Writing /etc/xrdp/startwm.sh session startup script...".to_string(),
+        },
+        DeclarativeStep::Systemctl {
+            unit: None,
+            operation: SystemctlOp::DaemonReload,
+            ignore_errors: false,
+            progress_pct: 84,
+            description: "Reloading systemd manager configuration...".to_string(),
+        },
+        DeclarativeStep::Systemctl {
+            unit: Some("xrdp.service".to_string()),
+            operation: SystemctlOp::EnableNow,
+            ignore_errors: false,
+            progress_pct: 90,
+            description: "Enabling and starting xrdp.service...".to_string(),
+        },
+        DeclarativeStep::Systemctl {
+            unit: Some("xrdp.service".to_string()),
+            operation: SystemctlOp::Restart,
+            ignore_errors: false,
+            progress_pct: 96,
+            description: "Restarting xrdp.service...".to_string(),
+        },
+    ];
+    DeclarativePackageRecipe {
+        package_id: "xrdp".to_string(),
+        label: "XRDP".to_string(),
+        default_port: 0,
+        service_name: "xrdp".to_string(),
+        lock_file: "/install/.xrdp.lock".to_string(),
+        apply_systemd_sandbox: true,
+        update_steps: install_steps.clone(),
+        install_steps,
+        remove_steps: vec![
+            DeclarativeStep::PurgeSystemdUnit {
+                unit_name: "xrdp.service".to_string(),
+                progress_pct: 25,
+                description: "Stopping and disabling xrdp.service...".to_string(),
+            },
+            DeclarativeStep::AptPurge {
+                packages: vec!["xrdp".to_string(), "xorgxrdp".to_string()],
+                autoremove: true,
+                ignore_errors: true,
+                progress_pct: 60,
+                description: "Purging xrdp APT packages...".to_string(),
+            },
+            DeclarativeStep::RemovePaths {
+                paths: vec![
+                    "/etc/xrdp".to_string(),
+                    "/var/log/xrdp.log".to_string(),
+                    "/var/log/xrdp-sesman.log".to_string(),
+                ],
+                only_if_delete_data: false,
+                progress_pct: 85,
+                description: "Removing XRDP configuration and logs...".to_string(),
+            },
+            DeclarativeStep::Systemctl {
+                unit: None,
+                operation: SystemctlOp::DaemonReload,
+                ignore_errors: true,
+                progress_pct: 95,
+                description: "Reloading systemd daemon after XRDP removal...".to_string(),
+            },
+        ],
+    }
+}
+
+fn build_novnc_recipe() -> DeclarativePackageRecipe {
+    let install_steps = vec![
+        DeclarativeStep::AptUpdate {
+            progress_pct: 15,
+            description: "Updating APT package indexes for noVNC...".to_string(),
+        },
+        DeclarativeStep::AptInstall {
+            packages: vec![
+                "novnc".to_string(),
+                "websockify".to_string(),
+                "tigervnc-standalone-server".to_string(),
+                "dbus-x11".to_string(),
+                "xfce4".to_string(),
+            ],
+            progress_pct: 50,
+            description: "Installing novnc, websockify, tigervnc-standalone-server, and dbus-x11...".to_string(),
+        },
+        DeclarativeStep::EnsureDirectories {
+            paths: vec!["/var/lib/novnc".to_string()],
+            mode: 0o755,
+            owner: None,
+            group: None,
+            progress_pct: 65,
+            description: "Ensuring /var/lib/novnc state directory...".to_string(),
+        },
+        DeclarativeStep::WriteSystemdUnit {
+            unit_name: "novnc.service".to_string(),
+            content_template: "[Unit]\nDescription=AetherFlow noVNC Websockify Proxy\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart=/usr/bin/websockify --web=/usr/share/novnc/ 127.0.0.1:{{APP_PORT}} 127.0.0.1:5901\nRestart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=multi-user.target\n".to_string(),
+            progress_pct: 78,
+            description: "Writing novnc.service systemd unit on port {{APP_PORT}}...".to_string(),
+        },
+        DeclarativeStep::Systemctl {
+            unit: None,
+            operation: SystemctlOp::DaemonReload,
+            ignore_errors: false,
+            progress_pct: 85,
+            description: "Reloading systemd manager configuration...".to_string(),
+        },
+        DeclarativeStep::Systemctl {
+            unit: Some("novnc.service".to_string()),
+            operation: SystemctlOp::EnableNow,
+            ignore_errors: false,
+            progress_pct: 92,
+            description: "Enabling and starting novnc.service...".to_string(),
+        },
+        DeclarativeStep::Systemctl {
+            unit: Some("novnc.service".to_string()),
+            operation: SystemctlOp::Restart,
+            ignore_errors: false,
+            progress_pct: 96,
+            description: "Restarting novnc.service...".to_string(),
+        },
+    ];
+    DeclarativePackageRecipe {
+        package_id: "novnc".to_string(),
+        label: "noVNC".to_string(),
+        default_port: 6080,
+        service_name: "novnc".to_string(),
+        lock_file: "/install/.novnc.lock".to_string(),
+        apply_systemd_sandbox: true,
+        update_steps: install_steps.clone(),
+        install_steps,
+        remove_steps: vec![
+            DeclarativeStep::PurgeSystemdUnit {
+                unit_name: "novnc.service".to_string(),
+                progress_pct: 25,
+                description: "Stopping and removing novnc.service...".to_string(),
+            },
+            DeclarativeStep::AptPurge {
+                packages: vec![
+                    "novnc".to_string(),
+                    "websockify".to_string(),
+                    "tigervnc-standalone-server".to_string(),
+                ],
+                autoremove: true,
+                ignore_errors: true,
+                progress_pct: 60,
+                description: "Purging novnc and websockify APT packages...".to_string(),
+            },
+            DeclarativeStep::RemovePaths {
+                paths: vec!["/var/lib/novnc".to_string()],
+                only_if_delete_data: true,
+                progress_pct: 85,
+                description: "Removing /var/lib/novnc state directory (when DELETE_DATA=true)...".to_string(),
+            },
+            DeclarativeStep::Systemctl {
+                unit: None,
+                operation: SystemctlOp::DaemonReload,
+                ignore_errors: true,
+                progress_pct: 95,
+                description: "Reloading systemd daemon after noVNC removal...".to_string(),
+            },
+        ],
+    }
+}
+
+fn build_x2go_recipe() -> DeclarativePackageRecipe {
+    let install_steps = vec![
+        DeclarativeStep::AptUpdate {
+            progress_pct: 15,
+            description: "Updating APT package indexes for X2Go...".to_string(),
+        },
+        DeclarativeStep::AptInstall {
+            packages: vec![
+                "x2goserver".to_string(),
+                "x2goserver-xsession".to_string(),
+                "xfce4".to_string(),
+                "dbus-x11".to_string(),
+            ],
+            progress_pct: 55,
+            description: "Installing x2goserver and x2goserver-xsession...".to_string(),
+        },
+        DeclarativeStep::EnsureDirectories {
+            paths: vec!["/etc/x2go".to_string(), "/var/lib/x2go".to_string()],
+            mode: 0o755,
+            owner: None,
+            group: None,
+            progress_pct: 70,
+            description: "Ensuring /etc/x2go and /var/lib/x2go directories...".to_string(),
+        },
+        DeclarativeStep::Systemctl {
+            unit: None,
+            operation: SystemctlOp::DaemonReload,
+            ignore_errors: false,
+            progress_pct: 82,
+            description: "Reloading systemd manager configuration...".to_string(),
+        },
+        DeclarativeStep::Systemctl {
+            unit: Some("x2goserver.service".to_string()),
+            operation: SystemctlOp::EnableNow,
+            ignore_errors: false,
+            progress_pct: 90,
+            description: "Enabling and starting x2goserver.service...".to_string(),
+        },
+        DeclarativeStep::Systemctl {
+            unit: Some("x2goserver.service".to_string()),
+            operation: SystemctlOp::Restart,
+            ignore_errors: false,
+            progress_pct: 96,
+            description: "Restarting x2goserver.service...".to_string(),
+        },
+    ];
+    DeclarativePackageRecipe {
+        package_id: "x2go".to_string(),
+        label: "X2Go".to_string(),
+        default_port: 0,
+        service_name: "x2goserver".to_string(),
+        lock_file: "/install/.x2go.lock".to_string(),
+        apply_systemd_sandbox: true,
+        update_steps: install_steps.clone(),
+        install_steps,
+        remove_steps: vec![
+            DeclarativeStep::PurgeSystemdUnit {
+                unit_name: "x2goserver.service".to_string(),
+                progress_pct: 25,
+                description: "Stopping and disabling x2goserver.service...".to_string(),
+            },
+            DeclarativeStep::AptPurge {
+                packages: vec![
+                    "x2goserver".to_string(),
+                    "x2goserver-xsession".to_string(),
+                ],
+                autoremove: true,
+                ignore_errors: true,
+                progress_pct: 60,
+                description: "Purging x2goserver APT packages...".to_string(),
+            },
+            DeclarativeStep::RemovePaths {
+                paths: vec!["/etc/x2go".to_string(), "/var/lib/x2go".to_string()],
+                only_if_delete_data: true,
+                progress_pct: 85,
+                description: "Removing X2Go state directories (when DELETE_DATA=true)...".to_string(),
+            },
+            DeclarativeStep::Systemctl {
+                unit: None,
+                operation: SystemctlOp::DaemonReload,
+                ignore_errors: true,
+                progress_pct: 95,
+                description: "Reloading systemd daemon after X2Go removal...".to_string(),
+            },
+        ],
+    }
+}
+
+fn build_scrutiny_recipe() -> DeclarativePackageRecipe {
+    let install_steps = vec![
+        DeclarativeStep::AptUpdate {
+            progress_pct: 15,
+            description: "Updating APT package indexes for Scrutiny...".to_string(),
+        },
+        DeclarativeStep::AptInstall {
+            packages: vec![
+                "smartmontools".to_string(),
+                "ca-certificates".to_string(),
+                "curl".to_string(),
+            ],
+            progress_pct: 35,
+            description: "Installing smartmontools and dependencies...".to_string(),
+        },
+        DeclarativeStep::EnsureSystemUser {
+            username: "scrutiny".to_string(),
+            home_dir: "/opt/scrutiny".to_string(),
+            create_home: true,
+            progress_pct: 45,
+            description: "Creating dedicated scrutiny system user...".to_string(),
+        },
+        DeclarativeStep::EnsureDirectories {
+            paths: vec![
+                "/opt/scrutiny".to_string(),
+                "/opt/scrutiny/bin".to_string(),
+                "/opt/scrutiny/web".to_string(),
+                "/opt/scrutiny/config".to_string(),
+                "/etc/scrutiny".to_string(),
+            ],
+            mode: 0o755,
+            owner: Some("scrutiny".to_string()),
+            group: Some("scrutiny".to_string()),
+            progress_pct: 60,
+            description: "Preparing /opt/scrutiny and /etc/scrutiny directories...".to_string(),
+        },
+        DeclarativeStep::WriteTemplateFile {
+            path: "/etc/scrutiny/scrutiny.yaml".to_string(),
+            content_template: "version: 1\nweb:\n  listen:\n    port: {{APP_PORT}}\n    host: 127.0.0.1\n    database:\n      location: /opt/scrutiny/config/scrutiny.db\n".to_string(),
+            mode: 0o644,
+            overwrite: true,
+            owner: Some("scrutiny".to_string()),
+            group: Some("scrutiny".to_string()),
+            progress_pct: 72,
+            description: "Writing /etc/scrutiny/scrutiny.yaml configuration...".to_string(),
+        },
+        DeclarativeStep::WriteSystemdUnit {
+            unit_name: "scrutiny.service".to_string(),
+            content_template: "[Unit]\nDescription=Scrutiny S.M.A.R.T. Web Dashboard & Monitoring\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nUser=scrutiny\nGroup=scrutiny\nWorkingDirectory=/opt/scrutiny\nExecStart=/opt/scrutiny/bin/scrutiny-web-linux-{{ARCH}} start --config /etc/scrutiny/scrutiny.yaml\nRestart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=multi-user.target\n".to_string(),
+            progress_pct: 82,
+            description: "Writing scrutiny.service systemd unit...".to_string(),
+        },
+        DeclarativeStep::Systemctl {
+            unit: None,
+            operation: SystemctlOp::DaemonReload,
+            ignore_errors: false,
+            progress_pct: 88,
+            description: "Reloading systemd manager configuration...".to_string(),
+        },
+        DeclarativeStep::Systemctl {
+            unit: Some("scrutiny.service".to_string()),
+            operation: SystemctlOp::EnableNow,
+            ignore_errors: false,
+            progress_pct: 92,
+            description: "Enabling and starting scrutiny.service...".to_string(),
+        },
+        DeclarativeStep::Systemctl {
+            unit: Some("scrutiny.service".to_string()),
+            operation: SystemctlOp::Restart,
+            ignore_errors: false,
+            progress_pct: 96,
+            description: "Restarting scrutiny.service...".to_string(),
+        },
+    ];
+    DeclarativePackageRecipe {
+        package_id: "scrutiny".to_string(),
+        label: "Scrutiny".to_string(),
+        default_port: 8098,
+        service_name: "scrutiny".to_string(),
+        lock_file: "/install/.scrutiny.lock".to_string(),
+        apply_systemd_sandbox: true,
+        update_steps: install_steps.clone(),
+        install_steps,
+        remove_steps: vec![
+            DeclarativeStep::PurgeSystemdUnit {
+                unit_name: "scrutiny.service".to_string(),
+                progress_pct: 25,
+                description: "Stopping and removing scrutiny.service...".to_string(),
+            },
+            DeclarativeStep::RemovePaths {
+                paths: vec!["/opt/scrutiny".to_string(), "/etc/scrutiny".to_string()],
+                only_if_delete_data: false,
+                progress_pct: 65,
+                description: "Removing /opt/scrutiny and /etc/scrutiny...".to_string(),
+            },
+            DeclarativeStep::PurgeSystemUser {
+                username: "scrutiny".to_string(),
+                progress_pct: 85,
+                description: "Removing scrutiny system user...".to_string(),
+            },
+            DeclarativeStep::Systemctl {
+                unit: None,
+                operation: SystemctlOp::DaemonReload,
+                ignore_errors: true,
+                progress_pct: 95,
+                description: "Reloading systemd daemon after Scrutiny removal...".to_string(),
+            },
+        ],
+    }
+}
+
+fn build_prometheus_recipe() -> DeclarativePackageRecipe {
+    let install_steps = vec![
+        DeclarativeStep::AptUpdate {
+            progress_pct: 15,
+            description: "Updating APT package indexes for Prometheus...".to_string(),
+        },
+        DeclarativeStep::AptInstall {
+            packages: vec!["prometheus".to_string()],
+            progress_pct: 45,
+            description: "Installing prometheus APT package...".to_string(),
+        },
+        DeclarativeStep::EnsureDirectories {
+            paths: vec![
+                "/etc/prometheus".to_string(),
+                "/var/lib/prometheus".to_string(),
+            ],
+            mode: 0o755,
+            owner: None,
+            group: None,
+            progress_pct: 60,
+            description: "Ensuring /etc/prometheus and /var/lib/prometheus directories...".to_string(),
+        },
+        DeclarativeStep::WriteTemplateFile {
+            path: "/etc/default/prometheus".to_string(),
+            content_template: "ARGS=\"--web.listen-address=127.0.0.1:{{APP_PORT}} --storage.tsdb.path=/var/lib/prometheus/metrics2 --config.file=/etc/prometheus/prometheus.yml\"\n".to_string(),
+            mode: 0o644,
+            overwrite: true,
+            owner: None,
+            group: None,
+            progress_pct: 70,
+            description: "Writing /etc/default/prometheus listen configuration...".to_string(),
+        },
+        DeclarativeStep::WriteTemplateFile {
+            path: "/etc/prometheus/prometheus.yml".to_string(),
+            content_template: "global:\n  scrape_interval: 15s\n  evaluation_interval: 15s\n\nscrape_configs:\n  - job_name: 'prometheus'\n    static_configs:\n      - targets: ['127.0.0.1:{{APP_PORT}}']\n".to_string(),
+            mode: 0o644,
+            overwrite: false,
+            owner: None,
+            group: None,
+            progress_pct: 78,
+            description: "Ensuring /etc/prometheus/prometheus.yml scrape config...".to_string(),
+        },
+        DeclarativeStep::Systemctl {
+            unit: None,
+            operation: SystemctlOp::DaemonReload,
+            ignore_errors: false,
+            progress_pct: 85,
+            description: "Reloading systemd manager configuration...".to_string(),
+        },
+        DeclarativeStep::Systemctl {
+            unit: Some("prometheus.service".to_string()),
+            operation: SystemctlOp::EnableNow,
+            ignore_errors: false,
+            progress_pct: 92,
+            description: "Enabling and starting prometheus.service...".to_string(),
+        },
+        DeclarativeStep::Systemctl {
+            unit: Some("prometheus.service".to_string()),
+            operation: SystemctlOp::Restart,
+            ignore_errors: false,
+            progress_pct: 96,
+            description: "Restarting prometheus.service...".to_string(),
+        },
+    ];
+    DeclarativePackageRecipe {
+        package_id: "prometheus".to_string(),
+        label: "Prometheus".to_string(),
+        default_port: 9090,
+        service_name: "prometheus".to_string(),
+        lock_file: "/install/.prometheus.lock".to_string(),
+        apply_systemd_sandbox: true,
+        update_steps: install_steps.clone(),
+        install_steps,
+        remove_steps: vec![
+            DeclarativeStep::PurgeSystemdUnit {
+                unit_name: "prometheus.service".to_string(),
+                progress_pct: 25,
+                description: "Stopping and disabling prometheus.service...".to_string(),
+            },
+            DeclarativeStep::AptPurge {
+                packages: vec!["prometheus".to_string()],
+                autoremove: true,
+                ignore_errors: true,
+                progress_pct: 55,
+                description: "Purging prometheus APT package...".to_string(),
+            },
+            DeclarativeStep::RemovePaths {
+                paths: vec![
+                    "/etc/prometheus".to_string(),
+                    "/etc/default/prometheus".to_string(),
+                ],
+                only_if_delete_data: false,
+                progress_pct: 75,
+                description: "Removing Prometheus configuration files...".to_string(),
+            },
+            DeclarativeStep::RemovePaths {
+                paths: vec!["/var/lib/prometheus".to_string()],
+                only_if_delete_data: true,
+                progress_pct: 88,
+                description: "Removing Prometheus TSDB data (when DELETE_DATA=true)...".to_string(),
+            },
+            DeclarativeStep::Systemctl {
+                unit: None,
+                operation: SystemctlOp::DaemonReload,
+                ignore_errors: true,
+                progress_pct: 95,
+                description: "Reloading systemd daemon after Prometheus removal...".to_string(),
+            },
+        ],
+    }
+}
+
+fn build_netdata_recipe() -> DeclarativePackageRecipe {
+    let install_steps = vec![
+        DeclarativeStep::AptUpdate {
+            progress_pct: 15,
+            description: "Updating APT package indexes for Netdata...".to_string(),
+        },
+        DeclarativeStep::AptInstall {
+            packages: vec!["netdata".to_string()],
+            progress_pct: 45,
+            description: "Installing netdata APT package...".to_string(),
+        },
+        DeclarativeStep::EnsureDirectories {
+            paths: vec![
+                "/etc/netdata".to_string(),
+                "/var/lib/netdata".to_string(),
+            ],
+            mode: 0o755,
+            owner: None,
+            group: None,
+            progress_pct: 60,
+            description: "Ensuring /etc/netdata and /var/lib/netdata directories...".to_string(),
+        },
+        DeclarativeStep::WriteTemplateFile {
+            path: "/etc/netdata/netdata.conf".to_string(),
+            content_template: "[global]\n    run as user = netdata\n\n[web]\n    bind to = 127.0.0.1\n    default port = {{APP_PORT}}\n".to_string(),
+            mode: 0o644,
+            overwrite: true,
+            owner: None,
+            group: None,
+            progress_pct: 75,
+            description: "Writing /etc/netdata/netdata.conf bound to 127.0.0.1:{{APP_PORT}}...".to_string(),
+        },
+        DeclarativeStep::Systemctl {
+            unit: None,
+            operation: SystemctlOp::DaemonReload,
+            ignore_errors: false,
+            progress_pct: 85,
+            description: "Reloading systemd manager configuration...".to_string(),
+        },
+        DeclarativeStep::Systemctl {
+            unit: Some("netdata.service".to_string()),
+            operation: SystemctlOp::EnableNow,
+            ignore_errors: false,
+            progress_pct: 92,
+            description: "Enabling and starting netdata.service...".to_string(),
+        },
+        DeclarativeStep::Systemctl {
+            unit: Some("netdata.service".to_string()),
+            operation: SystemctlOp::Restart,
+            ignore_errors: false,
+            progress_pct: 96,
+            description: "Restarting netdata.service...".to_string(),
+        },
+    ];
+    DeclarativePackageRecipe {
+        package_id: "netdata".to_string(),
+        label: "Netdata".to_string(),
+        default_port: 19999,
+        service_name: "netdata".to_string(),
+        lock_file: "/install/.netdata.lock".to_string(),
+        apply_systemd_sandbox: true,
+        update_steps: install_steps.clone(),
+        install_steps,
+        remove_steps: vec![
+            DeclarativeStep::PurgeSystemdUnit {
+                unit_name: "netdata.service".to_string(),
+                progress_pct: 25,
+                description: "Stopping and disabling netdata.service...".to_string(),
+            },
+            DeclarativeStep::AptPurge {
+                packages: vec!["netdata".to_string()],
+                autoremove: true,
+                ignore_errors: true,
+                progress_pct: 55,
+                description: "Purging netdata APT package...".to_string(),
+            },
+            DeclarativeStep::RemovePaths {
+                paths: vec!["/etc/netdata".to_string()],
+                only_if_delete_data: false,
+                progress_pct: 75,
+                description: "Removing /etc/netdata configuration...".to_string(),
+            },
+            DeclarativeStep::RemovePaths {
+                paths: vec![
+                    "/var/lib/netdata".to_string(),
+                    "/var/log/netdata".to_string(),
+                ],
+                only_if_delete_data: true,
+                progress_pct: 88,
+                description: "Removing Netdata state and logs (when DELETE_DATA=true)...".to_string(),
+            },
+            DeclarativeStep::Systemctl {
+                unit: None,
+                operation: SystemctlOp::DaemonReload,
+                ignore_errors: true,
+                progress_pct: 95,
+                description: "Reloading systemd daemon after Netdata removal...".to_string(),
+            },
+        ],
+    }
+}
+
+fn build_mergerfs_recipe() -> DeclarativePackageRecipe {
+    let install_steps = vec![
+        DeclarativeStep::AptUpdate {
+            progress_pct: 15,
+            description: "Updating APT package indexes for MergerFS...".to_string(),
+        },
+        DeclarativeStep::AptInstall {
+            packages: vec!["mergerfs".to_string(), "fuse3".to_string()],
+            progress_pct: 45,
+            description: "Installing mergerfs and fuse3...".to_string(),
+        },
+        DeclarativeStep::EnsureDirectories {
+            paths: vec![
+                "/mnt/mergerfs".to_string(),
+                "/mnt/local".to_string(),
+                "/mnt/remote".to_string(),
+                "/mnt/unionfs".to_string(),
+                "/etc/mergerfs".to_string(),
+            ],
+            mode: 0o755,
+            owner: None,
+            group: None,
+            progress_pct: 65,
+            description: "Ensuring /mnt/mergerfs and union mount directories...".to_string(),
+        },
+        DeclarativeStep::WriteTemplateFile {
+            path: "/etc/mergerfs/mergerfs.conf".to_string(),
+            content_template: "BRANCHES=\"/mnt/local=RW:/mnt/remote=NC\"\nMOUNTPOINT=\"/mnt/mergerfs\"\nOPTIONS=\"defaults,allow_other,use_ino,category.create=ff,moveonenospc=true,dropcacheonclose=true\"\n".to_string(),
+            mode: 0o644,
+            overwrite: false,
+            owner: None,
+            group: None,
+            progress_pct: 75,
+            description: "Writing /etc/mergerfs/mergerfs.conf...".to_string(),
+        },
+        DeclarativeStep::WriteSystemdUnit {
+            unit_name: "mergerfs.service".to_string(),
+            content_template: "[Unit]\nDescription=MergerFS Union Filesystem Mount\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=oneshot\nRemainAfterExit=yes\nEnvironmentFile=-/etc/mergerfs/mergerfs.conf\nExecStart=/usr/bin/mergerfs -o defaults,allow_other,use_ino /mnt/local:/mnt/remote /mnt/mergerfs\nExecStop=/bin/fusermount -uz /mnt/mergerfs\n\n[Install]\nWantedBy=multi-user.target\n".to_string(),
+            progress_pct: 84,
+            description: "Writing mergerfs.service systemd unit...".to_string(),
+        },
+        DeclarativeStep::Systemctl {
+            unit: None,
+            operation: SystemctlOp::DaemonReload,
+            ignore_errors: false,
+            progress_pct: 90,
+            description: "Reloading systemd manager configuration...".to_string(),
+        },
+        DeclarativeStep::Systemctl {
+            unit: Some("mergerfs.service".to_string()),
+            operation: SystemctlOp::Enable,
+            ignore_errors: false,
+            progress_pct: 96,
+            description: "Enabling mergerfs.service...".to_string(),
+        },
+    ];
+    DeclarativePackageRecipe {
+        package_id: "mergerfs".to_string(),
+        label: "MergerFS".to_string(),
+        default_port: 0,
+        service_name: "mergerfs".to_string(),
+        lock_file: "/install/.mergerfs.lock".to_string(),
+        apply_systemd_sandbox: true,
+        update_steps: install_steps.clone(),
+        install_steps,
+        remove_steps: vec![
+            DeclarativeStep::PurgeSystemdUnit {
+                unit_name: "mergerfs.service".to_string(),
+                progress_pct: 25,
+                description: "Stopping and disabling mergerfs.service...".to_string(),
+            },
+            DeclarativeStep::AptPurge {
+                packages: vec!["mergerfs".to_string()],
+                autoremove: true,
+                ignore_errors: true,
+                progress_pct: 60,
+                description: "Purging mergerfs APT package...".to_string(),
+            },
+            DeclarativeStep::RemovePaths {
+                paths: vec!["/etc/mergerfs".to_string()],
+                only_if_delete_data: false,
+                progress_pct: 78,
+                description: "Removing /etc/mergerfs configuration...".to_string(),
+            },
+            DeclarativeStep::RemovePaths {
+                paths: vec!["/mnt/mergerfs".to_string()],
+                only_if_delete_data: true,
+                progress_pct: 88,
+                description: "Removing /mnt/mergerfs mount directory (when DELETE_DATA=true)...".to_string(),
+            },
+            DeclarativeStep::Systemctl {
+                unit: None,
+                operation: SystemctlOp::DaemonReload,
+                ignore_errors: true,
+                progress_pct: 95,
+                description: "Reloading systemd daemon after MergerFS removal...".to_string(),
+            },
+        ],
+    }
+}
+
+fn build_rclone_recipe() -> DeclarativePackageRecipe {
+    let install_steps = vec![
+        DeclarativeStep::AptUpdate {
+            progress_pct: 15,
+            description: "Updating APT package indexes for Rclone...".to_string(),
+        },
+        DeclarativeStep::AptInstall {
+            packages: vec!["rclone".to_string(), "fuse3".to_string()],
+            progress_pct: 40,
+            description: "Installing rclone and fuse3...".to_string(),
+        },
+        DeclarativeStep::EnsureSystemUser {
+            username: "rclone".to_string(),
+            home_dir: "/var/lib/rclone".to_string(),
+            create_home: false,
+            progress_pct: 50,
+            description: "Ensuring dedicated rclone system user...".to_string(),
+        },
+        DeclarativeStep::EnsureDirectories {
+            paths: vec![
+                "/var/lib/rclone".to_string(),
+                "/etc/rclone".to_string(),
+            ],
+            mode: 0o750,
+            owner: Some("rclone".to_string()),
+            group: Some("rclone".to_string()),
+            progress_pct: 60,
+            description: "Ensuring /var/lib/rclone and /etc/rclone directories...".to_string(),
+        },
+        DeclarativeStep::WriteTemplateFile {
+            path: "/etc/rclone/rclone.conf".to_string(),
+            content_template: "# AetherFlow managed rclone configuration\n".to_string(),
+            mode: 0o600,
+            overwrite: false,
+            owner: Some("rclone".to_string()),
+            group: Some("rclone".to_string()),
+            progress_pct: 70,
+            description: "Ensuring /etc/rclone/rclone.conf exists...".to_string(),
+        },
+        DeclarativeStep::WriteSystemdUnit {
+            unit_name: "rclone.service".to_string(),
+            content_template: "[Unit]\nDescription=Rclone RC Web GUI Service\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nUser=rclone\nGroup=rclone\nWorkingDirectory=/var/lib/rclone\nExecStart=/usr/bin/rclone rcd --rc-web-gui --rc-web-gui-no-open-browser --rc-addr=127.0.0.1:{{APP_PORT}} --config=/etc/rclone/rclone.conf\nRestart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=multi-user.target\n".to_string(),
+            progress_pct: 80,
+            description: "Writing rclone.service systemd unit on port {{APP_PORT}}...".to_string(),
+        },
+        DeclarativeStep::Systemctl {
+            unit: None,
+            operation: SystemctlOp::DaemonReload,
+            ignore_errors: false,
+            progress_pct: 86,
+            description: "Reloading systemd manager configuration...".to_string(),
+        },
+        DeclarativeStep::Systemctl {
+            unit: Some("rclone.service".to_string()),
+            operation: SystemctlOp::EnableNow,
+            ignore_errors: false,
+            progress_pct: 92,
+            description: "Enabling and starting rclone.service...".to_string(),
+        },
+        DeclarativeStep::Systemctl {
+            unit: Some("rclone.service".to_string()),
+            operation: SystemctlOp::Restart,
+            ignore_errors: false,
+            progress_pct: 96,
+            description: "Restarting rclone.service...".to_string(),
+        },
+    ];
+    DeclarativePackageRecipe {
+        package_id: "rclone".to_string(),
+        label: "Rclone".to_string(),
+        default_port: 5572,
+        service_name: "rclone".to_string(),
+        lock_file: "/install/.rclone.lock".to_string(),
+        apply_systemd_sandbox: true,
+        update_steps: install_steps.clone(),
+        install_steps,
+        remove_steps: vec![
+            DeclarativeStep::PurgeSystemdUnit {
+                unit_name: "rclone.service".to_string(),
+                progress_pct: 25,
+                description: "Stopping and removing rclone.service...".to_string(),
+            },
+            DeclarativeStep::AptPurge {
+                packages: vec!["rclone".to_string()],
+                autoremove: true,
+                ignore_errors: true,
+                progress_pct: 55,
+                description: "Purging rclone APT package...".to_string(),
+            },
+            DeclarativeStep::RemovePaths {
+                paths: vec!["/etc/rclone".to_string(), "/var/lib/rclone".to_string()],
+                only_if_delete_data: true,
+                progress_pct: 78,
+                description: "Removing Rclone state directories (when DELETE_DATA=true)...".to_string(),
+            },
+            DeclarativeStep::PurgeSystemUser {
+                username: "rclone".to_string(),
+                progress_pct: 88,
+                description: "Removing rclone system user...".to_string(),
+            },
+            DeclarativeStep::Systemctl {
+                unit: None,
+                operation: SystemctlOp::DaemonReload,
+                ignore_errors: true,
+                progress_pct: 95,
+                description: "Reloading systemd daemon after Rclone removal...".to_string(),
+            },
+        ],
+    }
+}
+
+fn build_clamav_recipe() -> DeclarativePackageRecipe {
+    let install_steps = vec![
+        DeclarativeStep::AptUpdate {
+            progress_pct: 15,
+            description: "Updating APT package indexes for ClamAV...".to_string(),
+        },
+        DeclarativeStep::AptInstall {
+            packages: vec![
+                "clamav".to_string(),
+                "clamav-daemon".to_string(),
+                "clamav-freshclam".to_string(),
+            ],
+            progress_pct: 50,
+            description: "Installing clamav, clamav-daemon, and clamav-freshclam...".to_string(),
+        },
+        DeclarativeStep::EnsureDirectories {
+            paths: vec![
+                "/var/lib/clamav".to_string(),
+                "/etc/clamav".to_string(),
+            ],
+            mode: 0o755,
+            owner: None,
+            group: None,
+            progress_pct: 68,
+            description: "Ensuring /var/lib/clamav and /etc/clamav directories...".to_string(),
+        },
+        DeclarativeStep::Systemctl {
+            unit: None,
+            operation: SystemctlOp::DaemonReload,
+            ignore_errors: false,
+            progress_pct: 80,
+            description: "Reloading systemd manager configuration...".to_string(),
+        },
+        DeclarativeStep::Systemctl {
+            unit: Some("clamav-freshclam.service".to_string()),
+            operation: SystemctlOp::EnableNow,
+            ignore_errors: true,
+            progress_pct: 88,
+            description: "Enabling and starting clamav-freshclam.service...".to_string(),
+        },
+        DeclarativeStep::Systemctl {
+            unit: Some("clamav-daemon.service".to_string()),
+            operation: SystemctlOp::EnableNow,
+            ignore_errors: false,
+            progress_pct: 94,
+            description: "Enabling and starting clamav-daemon.service...".to_string(),
+        },
+        DeclarativeStep::Systemctl {
+            unit: Some("clamav-daemon.service".to_string()),
+            operation: SystemctlOp::Restart,
+            ignore_errors: false,
+            progress_pct: 97,
+            description: "Restarting clamav-daemon.service...".to_string(),
+        },
+    ];
+    DeclarativePackageRecipe {
+        package_id: "clamav".to_string(),
+        label: "ClamAV".to_string(),
+        default_port: 0,
+        service_name: "clamav-daemon".to_string(),
+        lock_file: "/install/.clamav.lock".to_string(),
+        apply_systemd_sandbox: true,
+        update_steps: install_steps.clone(),
+        install_steps,
+        remove_steps: vec![
+            DeclarativeStep::PurgeSystemdUnit {
+                unit_name: "clamav-daemon.service".to_string(),
+                progress_pct: 20,
+                description: "Stopping and disabling clamav-daemon.service...".to_string(),
+            },
+            DeclarativeStep::PurgeSystemdUnit {
+                unit_name: "clamav-freshclam.service".to_string(),
+                progress_pct: 35,
+                description: "Stopping and disabling clamav-freshclam.service...".to_string(),
+            },
+            DeclarativeStep::AptPurge {
+                packages: vec![
+                    "clamav".to_string(),
+                    "clamav-daemon".to_string(),
+                    "clamav-freshclam".to_string(),
+                ],
+                autoremove: true,
+                ignore_errors: true,
+                progress_pct: 65,
+                description: "Purging ClamAV APT packages...".to_string(),
+            },
+            DeclarativeStep::RemovePaths {
+                paths: vec!["/var/lib/clamav".to_string(), "/etc/clamav".to_string()],
+                only_if_delete_data: true,
+                progress_pct: 85,
+                description: "Removing /var/lib/clamav state directory (when DELETE_DATA=true)...".to_string(),
+            },
+            DeclarativeStep::Systemctl {
+                unit: None,
+                operation: SystemctlOp::DaemonReload,
+                ignore_errors: true,
+                progress_pct: 95,
+                description: "Reloading systemd daemon after ClamAV removal...".to_string(),
+            },
+        ],
+    }
+}
+
+fn build_mosquitto_recipe() -> DeclarativePackageRecipe {
+    let install_steps = vec![
+        DeclarativeStep::AptUpdate {
+            progress_pct: 15,
+            description: "Updating APT package indexes for Mosquitto...".to_string(),
+        },
+        DeclarativeStep::AptInstall {
+            packages: vec![
+                "mosquitto".to_string(),
+                "mosquitto-clients".to_string(),
+            ],
+            progress_pct: 45,
+            description: "Installing mosquitto and mosquitto-clients...".to_string(),
+        },
+        DeclarativeStep::EnsureDirectories {
+            paths: vec![
+                "/etc/mosquitto".to_string(),
+                "/etc/mosquitto/conf.d".to_string(),
+                "/var/lib/mosquitto".to_string(),
+            ],
+            mode: 0o755,
+            owner: None,
+            group: None,
+            progress_pct: 62,
+            description: "Ensuring /etc/mosquitto and /var/lib/mosquitto directories...".to_string(),
+        },
+        DeclarativeStep::WriteTemplateFile {
+            path: "/etc/mosquitto/conf.d/aetherflow.conf".to_string(),
+            content_template: "listener 1883 127.0.0.1\nallow_anonymous false\npersistence true\npersistence_location /var/lib/mosquitto/\n".to_string(),
+            mode: 0o644,
+            overwrite: true,
+            owner: None,
+            group: None,
+            progress_pct: 75,
+            description: "Writing /etc/mosquitto/conf.d/aetherflow.conf...".to_string(),
+        },
+        DeclarativeStep::Systemctl {
+            unit: None,
+            operation: SystemctlOp::DaemonReload,
+            ignore_errors: false,
+            progress_pct: 84,
+            description: "Reloading systemd manager configuration...".to_string(),
+        },
+        DeclarativeStep::Systemctl {
+            unit: Some("mosquitto.service".to_string()),
+            operation: SystemctlOp::EnableNow,
+            ignore_errors: false,
+            progress_pct: 92,
+            description: "Enabling and starting mosquitto.service...".to_string(),
+        },
+        DeclarativeStep::Systemctl {
+            unit: Some("mosquitto.service".to_string()),
+            operation: SystemctlOp::Restart,
+            ignore_errors: false,
+            progress_pct: 96,
+            description: "Restarting mosquitto.service...".to_string(),
+        },
+    ];
+    DeclarativePackageRecipe {
+        package_id: "mosquitto".to_string(),
+        label: "Mosquitto".to_string(),
+        default_port: 1883,
+        service_name: "mosquitto".to_string(),
+        lock_file: "/install/.mosquitto.lock".to_string(),
+        apply_systemd_sandbox: true,
+        update_steps: install_steps.clone(),
+        install_steps,
+        remove_steps: vec![
+            DeclarativeStep::PurgeSystemdUnit {
+                unit_name: "mosquitto.service".to_string(),
+                progress_pct: 25,
+                description: "Stopping and disabling mosquitto.service...".to_string(),
+            },
+            DeclarativeStep::AptPurge {
+                packages: vec![
+                    "mosquitto".to_string(),
+                    "mosquitto-clients".to_string(),
+                ],
+                autoremove: true,
+                ignore_errors: true,
+                progress_pct: 60,
+                description: "Purging mosquitto APT packages...".to_string(),
+            },
+            DeclarativeStep::RemovePaths {
+                paths: vec!["/etc/mosquitto/conf.d/aetherflow.conf".to_string()],
+                only_if_delete_data: false,
+                progress_pct: 75,
+                description: "Removing Mosquitto AetherFlow drop-in config...".to_string(),
+            },
+            DeclarativeStep::RemovePaths {
+                paths: vec![
+                    "/var/lib/mosquitto".to_string(),
+                    "/etc/mosquitto".to_string(),
+                ],
+                only_if_delete_data: true,
+                progress_pct: 88,
+                description: "Removing Mosquitto persistence data (when DELETE_DATA=true)...".to_string(),
+            },
+            DeclarativeStep::Systemctl {
+                unit: None,
+                operation: SystemctlOp::DaemonReload,
+                ignore_errors: true,
+                progress_pct: 95,
+                description: "Reloading systemd daemon after Mosquitto removal...".to_string(),
+            },
+        ],
+    }
+}
+
+fn build_syncthing_recipe() -> DeclarativePackageRecipe {
+    let install_steps = vec![
+        DeclarativeStep::AptUpdate {
+            progress_pct: 15,
+            description: "Updating APT package indexes for Syncthing...".to_string(),
+        },
+        DeclarativeStep::AptInstall {
+            packages: vec![
+                "syncthing".to_string(),
+                "ca-certificates".to_string(),
+                "curl".to_string(),
+            ],
+            progress_pct: 40,
+            description: "Installing syncthing APT package...".to_string(),
+        },
+        DeclarativeStep::EnsureSystemUser {
+            username: "syncthing".to_string(),
+            home_dir: "/var/lib/syncthing".to_string(),
+            create_home: true,
+            progress_pct: 52,
+            description: "Ensuring dedicated syncthing system user...".to_string(),
+        },
+        DeclarativeStep::EnsureDirectories {
+            paths: vec![
+                "/var/lib/syncthing".to_string(),
+                "/var/lib/syncthing/.config".to_string(),
+                "/var/lib/syncthing/.config/syncthing".to_string(),
+            ],
+            mode: 0o750,
+            owner: Some("syncthing".to_string()),
+            group: Some("syncthing".to_string()),
+            progress_pct: 65,
+            description: "Preparing /var/lib/syncthing configuration directories...".to_string(),
+        },
+        DeclarativeStep::WriteSystemdUnit {
+            unit_name: "syncthing.service".to_string(),
+            content_template: "[Unit]\nDescription=Syncthing - Open Source Continuous File Synchronization\nAfter=network.target\n\n[Service]\nUser=syncthing\nGroup=syncthing\nWorkingDirectory=/var/lib/syncthing\nExecStart=/usr/bin/syncthing serve --no-browser --no-restart --gui-address=127.0.0.1:{{APP_PORT}} --home=/var/lib/syncthing/.config/syncthing\nRestart=on-failure\nRestartSec=5\nSuccessExitStatus=3 4\n\n[Install]\nWantedBy=multi-user.target\n".to_string(),
+            progress_pct: 78,
+            description: "Writing syncthing.service systemd unit on port {{APP_PORT}}...".to_string(),
+        },
+        DeclarativeStep::Systemctl {
+            unit: None,
+            operation: SystemctlOp::DaemonReload,
+            ignore_errors: false,
+            progress_pct: 85,
+            description: "Reloading systemd manager configuration...".to_string(),
+        },
+        DeclarativeStep::Systemctl {
+            unit: Some("syncthing.service".to_string()),
+            operation: SystemctlOp::EnableNow,
+            ignore_errors: false,
+            progress_pct: 92,
+            description: "Enabling and starting syncthing.service...".to_string(),
+        },
+        DeclarativeStep::Systemctl {
+            unit: Some("syncthing.service".to_string()),
+            operation: SystemctlOp::Restart,
+            ignore_errors: false,
+            progress_pct: 96,
+            description: "Restarting syncthing.service...".to_string(),
+        },
+    ];
+    DeclarativePackageRecipe {
+        package_id: "syncthing".to_string(),
+        label: "Syncthing".to_string(),
+        default_port: 8384,
+        service_name: "syncthing".to_string(),
+        lock_file: "/install/.syncthing.lock".to_string(),
+        apply_systemd_sandbox: true,
+        update_steps: install_steps.clone(),
+        install_steps,
+        remove_steps: vec![
+            DeclarativeStep::PurgeSystemdUnit {
+                unit_name: "syncthing.service".to_string(),
+                progress_pct: 25,
+                description: "Stopping and removing syncthing.service...".to_string(),
+            },
+            DeclarativeStep::AptPurge {
+                packages: vec!["syncthing".to_string()],
+                autoremove: true,
+                ignore_errors: true,
+                progress_pct: 55,
+                description: "Purging syncthing APT package...".to_string(),
+            },
+            DeclarativeStep::RemovePaths {
+                paths: vec!["/var/lib/syncthing".to_string()],
+                only_if_delete_data: true,
+                progress_pct: 78,
+                description: "Removing /var/lib/syncthing state directory (when DELETE_DATA=true)...".to_string(),
+            },
+            DeclarativeStep::PurgeSystemUser {
+                username: "syncthing".to_string(),
+                progress_pct: 88,
+                description: "Removing syncthing system user...".to_string(),
+            },
+            DeclarativeStep::Systemctl {
+                unit: None,
+                operation: SystemctlOp::DaemonReload,
+                ignore_errors: true,
+                progress_pct: 95,
+                description: "Reloading systemd daemon after Syncthing removal...".to_string(),
             },
         ],
     }
@@ -2326,7 +4006,12 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                     vars.get("VERSION").cloned().unwrap_or_default(),
                     Utc::now().to_rfc3339()
                 );
-                write_file_atomic_with_mode(&lock_file_path, lock_payload.as_bytes(), 0o644)?;
+                write_file_atomic_with_mode_bounded(
+                    &lock_file_path,
+                    lock_payload.as_bytes(),
+                    0o644,
+                    self.env_cfg.fs_root.as_deref(),
+                )?;
                 if self.env_cfg.fs_root.is_none() {
                     trigger_certbot_sync_best_effort(&recipe.package_id);
                 }
@@ -2637,6 +4322,221 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                 Ok(format!("probed SSH port: {}", port))
             }
 
+            DeclarativeStep::GenerateSelfSignedTlsCert {
+                cert_path,
+                key_out_path,
+                days,
+                subject,
+                mode,
+                owner,
+                group,
+                overwrite,
+                ..
+            } => {
+                let cert_resolved = self.env_cfg.resolve_path(cert_path)?;
+                let key_resolved = match key_out_path {
+                    Some(ref kp) => self.env_cfg.resolve_path(kp)?,
+                    None => cert_resolved.clone(),
+                };
+                if !*overwrite && (cert_resolved.is_file() || key_resolved.is_file()) {
+                    return Ok(format!("preserved existing TLS certificate {}", cert_path));
+                }
+                if let Some(parent) = cert_resolved.parent() {
+                    validate_filesystem_path(parent, self.env_cfg.fs_root.as_deref())?;
+                    fs::create_dir_all(parent)?;
+                    validate_filesystem_path(parent, self.env_cfg.fs_root.as_deref())?;
+                }
+                if key_resolved != cert_resolved {
+                    if let Some(parent) = key_resolved.parent() {
+                        validate_filesystem_path(parent, self.env_cfg.fs_root.as_deref())?;
+                        fs::create_dir_all(parent)?;
+                        validate_filesystem_path(parent, self.env_cfg.fs_root.as_deref())?;
+                    }
+                }
+                journal.stage_file_mutation(&cert_resolved)?;
+                if key_resolved != cert_resolved {
+                    journal.stage_file_mutation(&key_resolved)?;
+                }
+
+                // Pre-create destination files with strict 0600 permissions before invoking `openssl`
+                // so private key material is never briefly exposed under a permissive process umask.
+                write_file_atomic_with_mode_bounded(
+                    &cert_resolved,
+                    b"",
+                    0o600,
+                    self.env_cfg.fs_root.as_deref(),
+                )?;
+                if key_resolved != cert_resolved {
+                    write_file_atomic_with_mode_bounded(
+                        &key_resolved,
+                        b"",
+                        0o600,
+                        self.env_cfg.fs_root.as_deref(),
+                    )?;
+                }
+
+                let args = vec![
+                    "req".to_string(),
+                    "-x509".to_string(),
+                    "-nodes".to_string(),
+                    "-days".to_string(),
+                    days.to_string(),
+                    "-newkey".to_string(),
+                    "rsa:4096".to_string(),
+                    "-keyout".to_string(),
+                    key_resolved.to_string_lossy().to_string(),
+                    "-out".to_string(),
+                    cert_resolved.to_string_lossy().to_string(),
+                    "-subj".to_string(),
+                    subject.clone(),
+                ];
+                let out = self
+                    .runner
+                    .run_command("openssl", &args, &[], cancel)
+                    .await?;
+                if !out.success() {
+                    return Err(PackageExecutorError::StepFailed {
+                        step: "generate_self_signed_tls_cert".to_string(),
+                        reason: format!(
+                            "openssl req -x509 exited with {}: {}",
+                            out.exit_code,
+                            out.combined_output()
+                        ),
+                    });
+                }
+
+                // In isolated test roots where `openssl` is mocked via `CommandRunner`, ensure
+                // the staged certificate file is materialized on disk with the requested mode.
+                if self.env_cfg.fs_root.is_some()
+                    && fs::metadata(&cert_resolved)
+                        .map(|m| m.len() == 0)
+                        .unwrap_or(true)
+                {
+                    let pem_payload = format!(
+                        "-----BEGIN PRIVATE KEY-----\nMIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQC7\n-----END PRIVATE KEY-----\n-----BEGIN CERTIFICATE-----\nsubject={}\ndays={}\n-----END CERTIFICATE-----\n",
+                        subject, days
+                    );
+                    write_file_atomic_with_mode_bounded(
+                        &cert_resolved,
+                        pem_payload.as_bytes(),
+                        *mode,
+                        self.env_cfg.fs_root.as_deref(),
+                    )?;
+                    if key_resolved != cert_resolved
+                        && fs::metadata(&key_resolved)
+                            .map(|m| m.len() == 0)
+                            .unwrap_or(true)
+                    {
+                        write_file_atomic_with_mode_bounded(
+                            &key_resolved,
+                            pem_payload.as_bytes(),
+                            *mode,
+                            self.env_cfg.fs_root.as_deref(),
+                        )?;
+                    }
+                }
+
+                set_path_mode(&cert_resolved, *mode);
+                if key_resolved != cert_resolved {
+                    set_path_mode(&key_resolved, *mode);
+                }
+
+                if let Some(ref o) = owner {
+                    let grp = group.as_deref().unwrap_or(o.as_str());
+                    if self.env_cfg.fs_root.is_none() {
+                        let _ = self
+                            .runner
+                            .run_command(
+                                "chown",
+                                &[
+                                    format!("{}:{}", o, grp),
+                                    cert_resolved.to_string_lossy().to_string(),
+                                ],
+                                &[],
+                                cancel,
+                            )
+                            .await;
+                        if key_resolved != cert_resolved {
+                            let _ = self
+                                .runner
+                                .run_command(
+                                    "chown",
+                                    &[
+                                        format!("{}:{}", o, grp),
+                                        key_resolved.to_string_lossy().to_string(),
+                                    ],
+                                    &[],
+                                    cancel,
+                                )
+                                .await;
+                        }
+                    }
+                }
+                Ok(format!("generated self-signed TLS certificate {}", cert_path))
+            }
+
+            DeclarativeStep::CaptureDpkgVersion {
+                package,
+                fallback_version,
+                version_file_path,
+                owner,
+                group,
+                ..
+            } => {
+                let args = vec![
+                    "-W".to_string(),
+                    "-f=${Version}".to_string(),
+                    package.clone(),
+                ];
+                let out = self
+                    .runner
+                    .run_command("dpkg-query", &args, &[], cancel)
+                    .await?;
+                let resolved_ver = if out.success() {
+                    normalize_dpkg_version(&out.stdout, fallback_version)
+                } else {
+                    fallback_version.clone()
+                };
+                vars.insert("VERSION".to_string(), resolved_ver.clone());
+                vars.insert(
+                    "TAG".to_string(),
+                    format!("v{}", resolved_ver.trim_start_matches('v')),
+                );
+
+                if let Some(ref vp) = version_file_path {
+                    let resolved_path = self.env_cfg.resolve_path(vp)?;
+                    journal.stage_file_mutation(&resolved_path)?;
+                    let content = format!("{}\n", resolved_ver);
+                    write_file_atomic_with_mode_bounded(
+                        &resolved_path,
+                        content.as_bytes(),
+                        0o644,
+                        self.env_cfg.fs_root.as_deref(),
+                    )?;
+                    if let Some(ref o) = owner {
+                        let grp = group.as_deref().unwrap_or(o.as_str());
+                        if self.env_cfg.fs_root.is_none() {
+                            let _ = self
+                                .runner
+                                .run_command(
+                                    "chown",
+                                    &[
+                                        format!("{}:{}", o, grp),
+                                        resolved_path.to_string_lossy().to_string(),
+                                    ],
+                                    &[],
+                                    cancel,
+                                )
+                                .await;
+                        }
+                    }
+                }
+                Ok(format!(
+                    "captured dpkg version {} for {}",
+                    resolved_ver, package
+                ))
+            }
+
             DeclarativeStep::ResolveGitHubReleaseTag {
                 repo,
                 fallback_version,
@@ -2689,7 +4589,12 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                 let dest_resolved = self.env_cfg.resolve_path(dest_path)?;
                 journal.stage_file_mutation(&dest_resolved)?;
                 let bytes = fs::read(&tmp_artifact)?;
-                write_file_atomic_with_mode(&dest_resolved, &bytes, *mode)?;
+                write_file_atomic_with_mode_bounded(
+                    &dest_resolved,
+                    &bytes,
+                    *mode,
+                    self.env_cfg.fs_root.as_deref(),
+                )?;
                 let _ = fs::remove_file(&tmp_artifact);
 
                 Ok(format!(
@@ -2762,7 +4667,12 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                 }
                 journal.stage_file_mutation(&resolved)?;
                 let rendered = interpolate_template(content_template, vars);
-                write_file_atomic_with_mode(&resolved, rendered.as_bytes(), *mode)?;
+                write_file_atomic_with_mode_bounded(
+                    &resolved,
+                    rendered.as_bytes(),
+                    *mode,
+                    self.env_cfg.fs_root.as_deref(),
+                )?;
 
                 if let Some(ref o) = owner {
                     let grp = group.as_deref().unwrap_or(o.as_str());
@@ -2798,7 +4708,12 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                     journal.record_created_systemd_unit(&norm, &resolved);
                 }
                 let rendered = interpolate_template(content_template, vars);
-                write_file_atomic_with_mode(&resolved, rendered.as_bytes(), 0o644)?;
+                write_file_atomic_with_mode_bounded(
+                    &resolved,
+                    rendered.as_bytes(),
+                    0o644,
+                    self.env_cfg.fs_root.as_deref(),
+                )?;
                 Ok(format!("wrote systemd unit {}", logical_path))
             }
 
@@ -3092,6 +5007,31 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
     }
 }
 
+/// Normalizes a raw `dpkg-query -W -f=${Version}` string (e.g. `1:0.14.0-1build2` -> `0.14.0`),
+/// falling back to `fallback` if the output is empty or non-conforming (e.g. mock placeholder output).
+fn normalize_dpkg_version(raw: &str, fallback: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.contains(' ') {
+        return fallback.to_string();
+    }
+    let without_epoch = match trimmed.split_once(':') {
+        Some((epoch, rest)) if !epoch.is_empty() && epoch.chars().all(|c| c.is_ascii_digit()) => {
+            rest
+        }
+        _ => trimmed,
+    };
+    let without_rev = without_epoch
+        .split_once('-')
+        .map(|(upstream, _)| upstream)
+        .unwrap_or(without_epoch)
+        .trim();
+    if !without_rev.is_empty() && SAFE_VERSION_TAG.is_match(without_rev) {
+        without_rev.to_string()
+    } else {
+        fallback.to_string()
+    }
+}
+
 fn step_progress_meta(step: &DeclarativeStep) -> (u8, &str) {
     match step {
         DeclarativeStep::AptUpdate {
@@ -3126,6 +5066,16 @@ fn step_progress_meta(step: &DeclarativeStep) -> (u8, &str) {
         | DeclarativeStep::ProbeSshPort {
             progress_pct,
             description,
+        }
+        | DeclarativeStep::GenerateSelfSignedTlsCert {
+            progress_pct,
+            description,
+            ..
+        }
+        | DeclarativeStep::CaptureDpkgVersion {
+            progress_pct,
+            description,
+            ..
         }
         | DeclarativeStep::ResolveGitHubReleaseTag {
             progress_pct,
@@ -3289,7 +5239,12 @@ fn extract_binaries_from_targz(
         let target = dest_dir.join(fname);
         validate_filesystem_path(&target, journal.fs_root.as_deref())?;
         journal.stage_file_mutation(&target)?;
-        write_file_atomic_with_mode(&target, &buf, binary_mode)?;
+        write_file_atomic_with_mode_bounded(
+            &target,
+            &buf,
+            binary_mode,
+            journal.fs_root.as_deref(),
+        )?;
         found.insert(fname.to_string(), true);
     }
 
@@ -3367,8 +5322,8 @@ fn apply_sandbox_in_root_with_journal(
             j.stage_file_mutation(&dropin_aether)?;
             j.stage_file_mutation(&dropin_10)?;
         }
-        write_file_atomic_with_mode(&dropin_aether, content.as_bytes(), 0o644)?;
-        write_file_atomic_with_mode(&dropin_10, content.as_bytes(), 0o644)?;
+        write_file_atomic_with_mode_bounded(&dropin_aether, content.as_bytes(), 0o644, fs_root)?;
+        write_file_atomic_with_mode_bounded(&dropin_10, content.as_bytes(), 0o644, fs_root)?;
     }
 
     Ok("sandbox applied".to_string())
@@ -3698,6 +5653,15 @@ mod tests {
                     });
                 }
 
+                // Simulate `dpkg-query -W -f=${Version} <pkg>` returning a Debian epoch+revision version
+                if program == "dpkg-query" {
+                    return Ok(CommandOutput {
+                        exit_code: 0,
+                        stdout: "1:0.14.2-1ubuntu2\n".to_string(),
+                        stderr: String::new(),
+                    });
+                }
+
                 Ok(CommandOutput {
                     exit_code: 0,
                     stdout: format!("ok: {} {}", program, args.join(" ")),
@@ -3730,24 +5694,51 @@ mod tests {
 
     #[test]
     fn test_builtin_recipes_validate_cleanly() {
-        // Accessing BUILTIN_DECLARATIVE_RECIPES must never panic and must only advertise
-        // recipes with truthful parity and security guarantees (`fail2ban`).
+        // Accessing BUILTIN_DECLARATIVE_RECIPES must never panic and every registered recipe
+        // must pass strict security validation and have full install, update, and remove steps.
         let ids = list_declarative_recipe_ids();
-        assert_eq!(ids, vec!["fail2ban".to_string()]);
-        assert!(!ids.contains(&"quassel".to_string()));
-        assert!(!ids.contains(&"threadfin".to_string()));
-        assert!(get_declarative_recipe("quassel").is_none());
-        assert!(get_declarative_recipe("threadfin").is_none());
+        let expected_ids = vec![
+            "clamav".to_string(),
+            "fail2ban".to_string(),
+            "mergerfs".to_string(),
+            "mosquitto".to_string(),
+            "netdata".to_string(),
+            "novnc".to_string(),
+            "prometheus".to_string(),
+            "quassel".to_string(),
+            "rclone".to_string(),
+            "scrutiny".to_string(),
+            "syncthing".to_string(),
+            "threadfin".to_string(),
+            "x2go".to_string(),
+            "xrdp".to_string(),
+            "znc".to_string(),
+        ];
+        assert_eq!(ids, expected_ids);
 
-        for id in ids {
-            let recipe = get_declarative_recipe(&id).unwrap();
+        for id in &ids {
+            let recipe = get_declarative_recipe(id).expect("registered recipe must resolve");
             recipe
                 .validate()
                 .expect("recipe must pass strict security validation");
+            assert!(
+                !recipe.install_steps.is_empty(),
+                "recipe {} must have install_steps",
+                id
+            );
+            assert!(
+                !recipe.steps_for_action(PackageAction::Update).is_empty(),
+                "recipe {} must have update steps",
+                id
+            );
+            assert!(
+                !recipe.remove_steps.is_empty(),
+                "recipe {} must have remove_steps",
+                id
+            );
         }
 
-        // Preserve security validation coverage for the patterns that caused quassel/threadfin
-        // to be rejected and deferred:
+        // Preserve security validation coverage for unsafe shared system root chown patterns:
         let bad_threadfin_dirs = DeclarativeStep::EnsureDirectories {
             paths: vec![
                 "/var/lib/threadfin".to_string(),
@@ -3773,6 +5764,20 @@ mod tests {
             description: "unsafe /etc/default directory mutation".to_string(),
         };
         assert!(validate_step(&bad_quassel_dirs).is_err());
+
+        let bad_tls_subj = DeclarativeStep::GenerateSelfSignedTlsCert {
+            cert_path: "/var/lib/quassel/quasselCert.pem".to_string(),
+            key_out_path: None,
+            days: 3650,
+            subject: "/CN=Bad;rm -rf /".to_string(),
+            mode: 0o600,
+            owner: Some("quasselcore".to_string()),
+            group: Some("quasselcore".to_string()),
+            overwrite: false,
+            progress_pct: 50,
+            description: "unsafe subject".to_string(),
+        };
+        assert!(validate_step(&bad_tls_subj).is_err());
     }
 
     #[test]
@@ -3809,19 +5814,232 @@ mod tests {
             select_package_engine_with_flags("fail2ban", true, true),
             PackageEngineMode::LegacyBashFallback
         );
-        // Deferred packages remain on LegacyBashFallback even when Rust packages are enabled
+        // Migrated packages execute via DeclarativeRust when enabled
         assert_eq!(
             select_package_engine_with_flags("quassel", true, false),
-            PackageEngineMode::LegacyBashFallback
+            PackageEngineMode::DeclarativeRust
         );
         assert_eq!(
             select_package_engine_with_flags("threadfin", true, false),
-            PackageEngineMode::LegacyBashFallback
+            PackageEngineMode::DeclarativeRust
         );
+        // Unmigrated packages remain on LegacyBashFallback even when Rust packages are enabled
         assert_eq!(
             select_package_engine_with_flags("sonarr", true, false),
             PackageEngineMode::LegacyBashFallback
         );
+    }
+
+    #[tokio::test]
+    async fn test_quassel_install_update_remove_and_rollback_in_isolated_root() {
+        let _serial = TEST_EXECUTION_SERIALIZER.lock().await;
+        let root = create_isolated_test_dir("quassel-lifecycle");
+        let mut env_cfg = PackageExecutionEnv::isolated(&root);
+        let recipe = get_declarative_recipe("quassel").expect("quassel recipe must be registered");
+
+        // 1. Install
+        let mock = MockCommandRunner::default();
+        let executor = DeclarativePackageExecutor::with_runner(env_cfg.clone(), mock.clone());
+        let install_outcome = executor
+            .execute_recipe(
+                &recipe,
+                PackageAction::Install,
+                CancellationToken::new(),
+                |_| {},
+            )
+            .await
+            .expect("quassel install must succeed");
+        assert!(install_outcome.lock_present);
+        assert!(root.join("install/.quassel.lock").is_file());
+        assert!(root.join("var/lib/quassel/quasselCert.pem").is_file());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(root.join("var/lib/quassel/quasselCert.pem"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+        assert_eq!(
+            fs::read_to_string(root.join("var/lib/quassel/.af-version"))
+                .unwrap()
+                .trim(),
+            "0.14.2"
+        );
+        let default_cfg = fs::read_to_string(root.join("etc/default/quasselcore")).unwrap();
+        assert!(default_cfg.contains("PORT=\"4242\""));
+        assert!(root
+            .join("etc/systemd/system/quasselcore.service")
+            .is_file());
+
+        let cmds = mock.recorded_commands();
+        assert!(cmds
+            .iter()
+            .any(|c| c.program == "openssl" && c.args.contains(&"-x509".to_string())));
+        assert!(cmds
+            .iter()
+            .any(|c| c.program == "dpkg-query" && c.args.contains(&"quassel-core".to_string())));
+
+        // 2. Update
+        let update_outcome = executor
+            .execute_recipe(
+                &recipe,
+                PackageAction::Update,
+                CancellationToken::new(),
+                |_| {},
+            )
+            .await
+            .expect("quassel update must succeed");
+        assert!(update_outcome.lock_present);
+
+        // 3. Remove (with delete_data = true)
+        env_cfg.delete_data = true;
+        let executor_rm = DeclarativePackageExecutor::with_runner(env_cfg, MockCommandRunner::default());
+        let remove_outcome = executor_rm
+            .execute_recipe(
+                &recipe,
+                PackageAction::Remove,
+                CancellationToken::new(),
+                |_| {},
+            )
+            .await
+            .expect("quassel remove must succeed");
+        assert!(!remove_outcome.lock_present);
+        assert!(!root.join("install/.quassel.lock").exists());
+        assert!(!root.join("etc/default/quasselcore").exists());
+        assert!(!root.join("var/lib/quassel").exists());
+
+        // 4. Failure rollback on fresh isolated root
+        let fail_root = create_isolated_test_dir("quassel-rollback");
+        let fail_env = PackageExecutionEnv::isolated(&fail_root);
+        // Fail on systemctl enable --now after TLS cert, .af-version, and /etc/default/quasselcore were written
+        let fail_mock = MockCommandRunner {
+            fail_on_call: Some(7),
+            ..Default::default()
+        };
+        let fail_exec = DeclarativePackageExecutor::with_runner(fail_env, fail_mock);
+        let err = fail_exec
+            .execute_recipe(
+                &recipe,
+                PackageAction::Install,
+                CancellationToken::new(),
+                |_| {},
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("systemctl"));
+        assert!(!fail_root.join("install/.quassel.lock").exists());
+        assert!(!fail_root.join("var/lib/quassel/quasselCert.pem").exists());
+        assert!(!fail_root.join("var/lib/quassel/.af-version").exists());
+        assert!(!fail_root.join("etc/default/quasselcore").exists());
+        assert!(!fail_root
+            .join("etc/systemd/system/quasselcore.service")
+            .exists());
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&fail_root);
+    }
+
+    #[tokio::test]
+    async fn test_threadfin_install_update_remove_and_rollback_in_isolated_root() {
+        let _serial = TEST_EXECUTION_SERIALIZER.lock().await;
+        let root = create_isolated_test_dir("threadfin-lifecycle");
+        let mut env_cfg = PackageExecutionEnv::isolated(&root);
+        let elf_bytes = create_mock_elf_payload(4096);
+        let cache_dir = env_cfg.artifact_cache_dir.clone().unwrap();
+        fs::create_dir_all(&cache_dir).unwrap();
+        fs::write(cache_dir.join("Threadfin_linux_amd64"), &elf_bytes).unwrap();
+
+        let recipe =
+            get_declarative_recipe("threadfin").expect("threadfin recipe must be registered");
+
+        // 1. Install
+        let mock = MockCommandRunner::default();
+        let executor = DeclarativePackageExecutor::with_runner(env_cfg.clone(), mock);
+        let install_outcome = executor
+            .execute_recipe(
+                &recipe,
+                PackageAction::Install,
+                CancellationToken::new(),
+                |_| {},
+            )
+            .await
+            .expect("threadfin install must succeed");
+        assert!(install_outcome.lock_present);
+        assert!(root.join("install/.threadfin.lock").is_file());
+        assert!(root.join("usr/local/bin/threadfin").is_file());
+        assert_eq!(
+            fs::read_to_string(root.join("var/lib/threadfin/.af-version"))
+                .unwrap()
+                .trim(),
+            "1.2.33"
+        );
+        let unit = fs::read_to_string(root.join("etc/systemd/system/threadfin.service")).unwrap();
+        assert!(unit.contains("-port=34400"));
+
+        // 2. Update
+        let update_outcome = executor
+            .execute_recipe(
+                &recipe,
+                PackageAction::Update,
+                CancellationToken::new(),
+                |_| {},
+            )
+            .await
+            .expect("threadfin update must succeed");
+        assert!(update_outcome.lock_present);
+
+        // 3. Remove (with delete_data = true)
+        env_cfg.delete_data = true;
+        let executor_rm =
+            DeclarativePackageExecutor::with_runner(env_cfg, MockCommandRunner::default());
+        let remove_outcome = executor_rm
+            .execute_recipe(
+                &recipe,
+                PackageAction::Remove,
+                CancellationToken::new(),
+                |_| {},
+            )
+            .await
+            .expect("threadfin remove must succeed");
+        assert!(!remove_outcome.lock_present);
+        assert!(!root.join("install/.threadfin.lock").exists());
+        assert!(!root.join("usr/local/bin/threadfin").exists());
+        assert!(!root.join("var/lib/threadfin").exists());
+
+        // 4. Failure rollback on fresh isolated root
+        let fail_root = create_isolated_test_dir("threadfin-rollback");
+        let fail_env = PackageExecutionEnv::isolated(&fail_root);
+        let fail_cache = fail_env.artifact_cache_dir.clone().unwrap();
+        fs::create_dir_all(&fail_cache).unwrap();
+        fs::write(fail_cache.join("Threadfin_linux_amd64"), &elf_bytes).unwrap();
+        // Fail on systemctl enable --now after binary, .af-version, and systemd unit were written
+        let fail_mock = MockCommandRunner {
+            fail_on_call: Some(5),
+            ..Default::default()
+        };
+        let fail_exec = DeclarativePackageExecutor::with_runner(fail_env, fail_mock);
+        let err = fail_exec
+            .execute_recipe(
+                &recipe,
+                PackageAction::Install,
+                CancellationToken::new(),
+                |_| {},
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("systemctl"));
+        assert!(!fail_root.join("install/.threadfin.lock").exists());
+        assert!(!fail_root.join("usr/local/bin/threadfin").exists());
+        assert!(!fail_root.join("var/lib/threadfin/.af-version").exists());
+        assert!(!fail_root
+            .join("etc/systemd/system/threadfin.service")
+            .exists());
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&fail_root);
     }
 
     #[test]

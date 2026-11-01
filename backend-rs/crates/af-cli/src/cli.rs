@@ -67,6 +67,7 @@ pub enum HelpTopic {
     Release,
     Backup,
     Provision,
+    Maintenance,
 }
 
 /// Typed administrative command AST for the `af` CLI.
@@ -93,6 +94,8 @@ pub enum AfCommand {
     Backup(BackupCliCommand),
     /// Resumable bare-metal provisioning foundation (`STATE_VERSION=2`).
     Provision(ProvisionCliCommand),
+    /// Host maintenance utilities (tune, sentinel, clean-logs, showspace) backed by `af-host`.
+    Maintenance(MaintenanceCliCommand),
 }
 
 impl AfCommand {
@@ -108,6 +111,7 @@ impl AfCommand {
             AfCommand::Release(_) => "release",
             AfCommand::Backup(_) => "backup",
             AfCommand::Provision(_) => "provision",
+            AfCommand::Maintenance(_) => "maintenance",
         }
     }
 
@@ -123,6 +127,7 @@ impl AfCommand {
             AfCommand::Release(cmd) => cmd.action_name(),
             AfCommand::Backup(cmd) => cmd.action_name(),
             AfCommand::Provision(cmd) => cmd.action_name(),
+            AfCommand::Maintenance(cmd) => cmd.action_name(),
         }
     }
 }
@@ -385,6 +390,47 @@ impl BackupCliCommand {
             BackupCliCommand::Chunk { .. } => "chunk",
             BackupCliCommand::Assemble { .. } => "assemble",
             BackupCliCommand::OwnershipRegistry => "ownership",
+        }
+    }
+}
+
+/// Host maintenance subcommands (`af maintenance ...`, `af tune`, `af sentinel`, `af clean-log`, `af showspace`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum MaintenanceCliCommand {
+    /// Apply sysctl network tuning configuration (`af maintenance tune`, `af tune`).
+    Tune {
+        root: Option<PathBuf>,
+        dry_run: bool,
+    },
+    /// Scan authentication log for brute-force password / invalid user anomalies (`af maintenance sentinel`, `af sentinel`).
+    Sentinel {
+        log_path: Option<PathBuf>,
+        threshold: usize,
+    },
+    /// Safely truncate oversized .log files under /var/log or /srv/aetherflow/lock (`af maintenance clean-logs`, `af clean-logs`).
+    CleanLogs {
+        root: Option<PathBuf>,
+        max_size_bytes: Option<u64>,
+        dry_run: bool,
+    },
+    /// Inspect disk space usage across /home/<user> entries (`af maintenance showspace`, `af showspace`).
+    Showspace {
+        root: Option<PathBuf>,
+        user: Option<String>,
+    },
+    /// Display canonical maintenance script ownership registry (`af maintenance ownership`).
+    OwnershipRegistry,
+}
+
+impl MaintenanceCliCommand {
+    pub const fn action_name(&self) -> &'static str {
+        match self {
+            MaintenanceCliCommand::Tune { .. } => "tune",
+            MaintenanceCliCommand::Sentinel { .. } => "sentinel",
+            MaintenanceCliCommand::CleanLogs { .. } => "clean-logs",
+            MaintenanceCliCommand::Showspace { .. } => "showspace",
+            MaintenanceCliCommand::OwnershipRegistry => "ownership",
         }
     }
 }
@@ -787,6 +833,11 @@ where
         "release" | "self-update" => AfCommand::Release(parse_release_subcommand(rest)?),
         "backup" => AfCommand::Backup(parse_backup_subcommand(rest)?),
         "provision" | "setup" => AfCommand::Provision(parse_provision_subcommand(rest)?),
+        "maintenance" => AfCommand::Maintenance(parse_maintenance_subcommand(rest)?),
+        "tune" | "af-tune" => AfCommand::Maintenance(parse_tune_args(rest)?),
+        "sentinel" | "af-sentinel" => AfCommand::Maintenance(parse_sentinel_args(rest)?),
+        "clean-log" | "clean-logs" => AfCommand::Maintenance(parse_clean_log_args(rest)?),
+        "showspace" => AfCommand::Maintenance(parse_showspace_args(rest)?),
 
         unknown => {
             return Err(CliError::Usage(format!(
@@ -808,6 +859,9 @@ fn parse_help_topic(raw: &str) -> HelpTopic {
         "release" | "self-update" | "update" | "upgrade" => HelpTopic::Release,
         "backup" => HelpTopic::Backup,
         "provision" | "setup" => HelpTopic::Provision,
+        "maintenance" | "tune" | "sentinel" | "clean-log" | "clean-logs" | "showspace" => {
+            HelpTopic::Maintenance
+        }
         _ => HelpTopic::General,
     }
 }
@@ -1962,6 +2016,169 @@ fn parse_provision_subcommand(args: &[String]) -> CliResult<ProvisionCliCommand>
     }
 }
 
+fn parse_tune_args(tail: &[String]) -> CliResult<MaintenanceCliCommand> {
+    let mut root: Option<PathBuf> = None;
+    let mut dry_run = false;
+    let mut i = 0usize;
+    while i < tail.len() {
+        match tail[i].as_str() {
+            "--root" => {
+                let val = tail.get(i + 1).ok_or_else(|| {
+                    CliError::Usage("--root requires a directory path".to_string())
+                })?;
+                root = Some(PathBuf::from(val));
+                i += 2;
+            }
+            "--dry-run" | "-n" => {
+                dry_run = true;
+                i += 1;
+            }
+            other => {
+                return Err(CliError::Usage(format!(
+                    "unexpected argument for 'af tune': {}",
+                    other
+                )));
+            }
+        }
+    }
+    Ok(MaintenanceCliCommand::Tune { root, dry_run })
+}
+
+fn parse_sentinel_args(tail: &[String]) -> CliResult<MaintenanceCliCommand> {
+    let mut log_path: Option<PathBuf> = None;
+    let mut threshold = af_host::DEFAULT_SENTINEL_THRESHOLD;
+    let mut i = 0usize;
+    while i < tail.len() {
+        match tail[i].as_str() {
+            "--log-path" | "--file" => {
+                let val = tail.get(i + 1).ok_or_else(|| {
+                    CliError::Usage("--log-path requires a file path".to_string())
+                })?;
+                log_path = Some(PathBuf::from(val));
+                i += 2;
+            }
+            "--threshold" => {
+                let val = tail.get(i + 1).ok_or_else(|| {
+                    CliError::Usage("--threshold requires a number".to_string())
+                })?;
+                threshold = val
+                    .parse::<usize>()
+                    .map_err(|_| CliError::Usage(format!("invalid threshold {:?}", val)))?;
+                i += 2;
+            }
+            arg if !arg.starts_with('-') && log_path.is_none() => {
+                log_path = Some(PathBuf::from(arg));
+                i += 1;
+            }
+            other => {
+                return Err(CliError::Usage(format!(
+                    "unexpected argument for 'af sentinel': {}",
+                    other
+                )));
+            }
+        }
+    }
+    Ok(MaintenanceCliCommand::Sentinel {
+        log_path,
+        threshold,
+    })
+}
+
+fn parse_clean_log_args(tail: &[String]) -> CliResult<MaintenanceCliCommand> {
+    let mut root: Option<PathBuf> = None;
+    let mut max_size_bytes: Option<u64> = None;
+    let mut dry_run = false;
+    let mut i = 0usize;
+    while i < tail.len() {
+        match tail[i].as_str() {
+            "--root" => {
+                let val = tail.get(i + 1).ok_or_else(|| {
+                    CliError::Usage("--root requires a directory path".to_string())
+                })?;
+                root = Some(PathBuf::from(val));
+                i += 2;
+            }
+            "--max-size" | "--size" => {
+                let val = tail.get(i + 1).ok_or_else(|| {
+                    CliError::Usage("--max-size requires a byte size (e.g. 10MB)".to_string())
+                })?;
+                max_size_bytes = Some(parse_byte_size_arg(val)?);
+                i += 2;
+            }
+            "--dry-run" | "-n" => {
+                dry_run = true;
+                i += 1;
+            }
+            other => {
+                return Err(CliError::Usage(format!(
+                    "unexpected argument for 'af clean-logs': {}",
+                    other
+                )));
+            }
+        }
+    }
+    Ok(MaintenanceCliCommand::CleanLogs {
+        root,
+        max_size_bytes,
+        dry_run,
+    })
+}
+
+fn parse_showspace_args(tail: &[String]) -> CliResult<MaintenanceCliCommand> {
+    let mut root: Option<PathBuf> = None;
+    let mut user: Option<String> = None;
+    let mut i = 0usize;
+    while i < tail.len() {
+        match tail[i].as_str() {
+            "--root" => {
+                let val = tail.get(i + 1).ok_or_else(|| {
+                    CliError::Usage("--root requires a directory path".to_string())
+                })?;
+                root = Some(PathBuf::from(val));
+                i += 2;
+            }
+            "--user" => {
+                let val = tail.get(i + 1).ok_or_else(|| {
+                    CliError::Usage("--user requires a username".to_string())
+                })?;
+                user = Some(val.clone());
+                i += 2;
+            }
+            arg if !arg.starts_with('-') && user.is_none() => {
+                user = Some(arg.to_string());
+                i += 1;
+            }
+            other => {
+                return Err(CliError::Usage(format!(
+                    "unexpected argument for 'af showspace': {}",
+                    other
+                )));
+            }
+        }
+    }
+    Ok(MaintenanceCliCommand::Showspace { root, user })
+}
+
+fn parse_maintenance_subcommand(args: &[String]) -> CliResult<MaintenanceCliCommand> {
+    let Some(sub) = args.first().map(|s| s.as_str()) else {
+        return Err(CliError::Usage(
+            "missing maintenance subcommand (expected: tune, sentinel, clean-logs, showspace, ownership)".to_string(),
+        ));
+    };
+    let tail = &args[1..];
+    match sub {
+        "tune" => parse_tune_args(tail),
+        "sentinel" => parse_sentinel_args(tail),
+        "clean-log" | "clean-logs" => parse_clean_log_args(tail),
+        "showspace" => parse_showspace_args(tail),
+        "ownership" | "registry" => Ok(MaintenanceCliCommand::OwnershipRegistry),
+        unknown => Err(CliError::Usage(format!(
+            "unknown maintenance subcommand {:?}. Expected: tune, sentinel, clean-logs, showspace, ownership",
+            unknown
+        ))),
+    }
+}
+
 /// Parses human-friendly byte size strings (`"512"`, `"64K"`, `"50M"`, `"2G"`) into `u64` bytes.
 pub fn parse_byte_size_arg(raw: &str) -> CliResult<u64> {
     let trimmed = raw.trim();
@@ -2032,6 +2249,7 @@ ADMINISTRATIVE DOMAINS:
   release     Atomic release status, deploy, rollback, cleanup & systemd migration (af-release)
   backup      Host backup bundle create/list/verify & non-destructive restore-preflight (af-host)
   provision   Resumable bare-metal provisioning foundation & safe config overlay (STATE_VERSION=2)
+  maintenance Host maintenance utilities: tune, sentinel, clean-logs, showspace (af-host)
   health      Verify connectivity to the privileged runner Unix socket (/v1/health)
 
 NOTE ON UNSUPPORTED INTERACTIVE / DESTRUCTIVE FLOWS:
@@ -2117,6 +2335,27 @@ USAGE:
 Implements persisted resumable step state (/install/.aetherflow.state # STATE_VERSION=2),
 preflight verification, explicit repair semantics, and SHA-256 sidecar config overlays.
 Retains setup/AetherFlow-Setup for interactive shell bootstrap.
+"
+        .to_string(),
+        HelpTopic::Maintenance => "\
+USAGE:
+  af maintenance tune [--root <path>] [--dry-run]
+  af maintenance sentinel [--log-path <path>] [--threshold <n>]
+  af maintenance clean-logs [--root <path>] [--max-size <bytes>] [--dry-run]
+  af maintenance showspace [--root <path>] [--user <user>]
+  af maintenance ownership
+
+SHORTHANDS:
+  af tune [--root <path>] [--dry-run]
+  af sentinel [--log-path <path>] [--threshold <n>]
+  af clean-logs [--root <path>] [--max-size <bytes>] [--dry-run]
+  af showspace [--root <path>] [--user <user>]
+
+Pure-Rust replacements for legacy packages/system/* utilities:
+  tune:      writes /etc/sysctl.d/99-aetherflow-tune.conf with optimized network buffers
+  sentinel:  scans /var/log/auth.log for failed login attempts and identifies offending IPs
+  clean-logs: safely truncates oversized .log files under /var/log or /srv/aetherflow/lock
+  showspace: calculates disk usage for /home/<user> entries with human-readable formatting
 "
         .to_string(),
     }

@@ -365,6 +365,132 @@ pub fn extract_and_validate_release_archive(
     }
 
     stage_running_release_manager(release_dir, config)?;
+    prepare_release_permissions(release_dir)?;
+    Ok(())
+}
+
+/// Normalizes permissions across an extracted or staged release directory before symlink swap,
+/// matching `prepare_release_permissions` in `deploy/release-manager.sh`:
+/// - `0755` on all directories
+/// - `a+r,go-w` (`(mode | 0o444) & !0o022`) on all regular files
+/// - `0755` on `aetherflow-api`, `af` (if present), and `deploy/release-manager.sh` (if present)
+/// - Verifies `.version` is readable and `./aetherflow-api` is executable.
+pub fn prepare_release_permissions(release_dir: &Path) -> ReleaseResult<()> {
+    crate::fs_security::ensure_no_symlink_ancestors(release_dir)?;
+    normalize_release_tree_permissions(release_dir)?;
+
+    let api_bin = release_dir.join("aetherflow-api");
+    crate::fs_security::set_file_mode(&api_bin, 0o755)?;
+
+    let af_bin = release_dir.join("af");
+    if let Ok(meta) = fs::symlink_metadata(&af_bin) {
+        if !meta.file_type().is_symlink() && meta.is_file() {
+            crate::fs_security::set_file_mode(&af_bin, 0o755)?;
+        }
+    }
+
+    let staged_script = release_dir.join("deploy/release-manager.sh");
+    if let Ok(meta) = fs::symlink_metadata(&staged_script) {
+        if !meta.file_type().is_symlink() && meta.is_file() {
+            crate::fs_security::set_file_mode(&staged_script, 0o755)?;
+        }
+    }
+
+    // Verify `.version` is readable and `aetherflow-api` is executable
+    let version_path = release_dir.join(".version");
+    let version_content = fs::read_to_string(&version_path).map_err(|e| {
+        ReleaseError::ArtifactVerification(format!(
+            "Release .version at {} is unreadable: {}",
+            version_path.display(),
+            e
+        ))
+    })?;
+    if version_content.trim().is_empty() {
+        return Err(ReleaseError::ArtifactVerification(format!(
+            "Release .version at {} is empty",
+            version_path.display()
+        )));
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let bin_meta = fs::symlink_metadata(&api_bin).map_err(|e| {
+            ReleaseError::ArtifactVerification(format!(
+                "Release binary at {} is inaccessible: {}",
+                api_bin.display(),
+                e
+            ))
+        })?;
+        if bin_meta.file_type().is_symlink()
+            || !bin_meta.is_file()
+            || (bin_meta.permissions().mode() & 0o111) == 0
+        {
+            return Err(ReleaseError::ArtifactVerification(format!(
+                "Release binary at {} is not executable",
+                api_bin.display()
+            )));
+        }
+        let ver_meta = fs::symlink_metadata(&version_path).map_err(|e| {
+            ReleaseError::ArtifactVerification(format!(
+                "Release .version at {} metadata error: {}",
+                version_path.display(),
+                e
+            ))
+        })?;
+        if (ver_meta.permissions().mode() & 0o444) != 0o444 {
+            return Err(ReleaseError::ArtifactVerification(format!(
+                "Release .version at {} is not world-readable (a+r)",
+                version_path.display()
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn normalize_release_tree_permissions(dir: &Path) -> ReleaseResult<()> {
+    crate::fs_security::set_dir_mode(dir, 0o755)?;
+    let entries = fs::read_dir(dir).map_err(|e| {
+        ReleaseError::io(
+            format!("reading release directory {} for permission normalization", dir.display()),
+            e,
+        )
+    })?;
+
+    for entry_res in entries {
+        let entry = entry_res.map_err(|e| {
+            ReleaseError::io(
+                format!("iterating release directory {}", dir.display()),
+                e,
+            )
+        })?;
+        let path = entry.path();
+        let meta = fs::symlink_metadata(&path).map_err(|e| {
+            ReleaseError::io(format!("stat release entry {}", path.display()), e)
+        })?;
+        if meta.file_type().is_symlink() {
+            return Err(ReleaseError::PathValidation {
+                path,
+                reason: "symlink entry rejected during release permission normalization".to_string(),
+            });
+        }
+        if meta.is_dir() {
+            normalize_release_tree_permissions(&path)?;
+        } else if meta.is_file() {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let current_mode = meta.permissions().mode() & 0o777;
+                let normalized = (current_mode | 0o444) & !0o022;
+                crate::fs_security::set_file_mode(&path, normalized)?;
+            }
+            #[cfg(not(unix))]
+            {
+                crate::fs_security::set_file_mode(&path, 0o644)?;
+            }
+        }
+    }
     Ok(())
 }
 
@@ -449,6 +575,7 @@ pub fn simulate_offline_artifact(
     )?;
 
     stage_running_release_manager(release_dir, config)?;
+    prepare_release_permissions(release_dir)?;
     Ok(version_stamp.to_string())
 }
 
@@ -475,6 +602,65 @@ fn set_executable_permission(path: &Path) -> ReleaseResult<()> {
         let _ = path;
     }
     Ok(())
+}
+
+/// Validates and extracts a `vX.Y.Z` tag from an effective `/releases/latest` redirect URL
+/// (e.g. `https://github.com/McEveritts/AetherFlow/releases/tag/v3.2.7`), matching
+/// `[[ "${latest_url}" == "https://github.com/${GITHUB_REPO}/releases/tag/"* && "${latest_tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]`
+/// in `deploy/release-manager.sh`.
+pub fn parse_stable_tag_from_redirect_url(
+    effective_url: &str,
+    download_base: &str,
+    github_repo: &str,
+) -> ReleaseResult<String> {
+    let trimmed_url = effective_url.trim().trim_end_matches('/');
+    let expected_prefix = format!(
+        "{}/{}/releases/tag/",
+        download_base.trim_end_matches('/'),
+        github_repo.trim_matches('/')
+    );
+    let Some(tag) = trimmed_url.strip_prefix(&expected_prefix) else {
+        return Err(ReleaseError::TagResolution {
+            channel: ReleaseChannel::Stable.to_string(),
+            reason: format!(
+                "latest release redirect URL {:?} did not match expected prefix {:?}",
+                effective_url, expected_prefix
+            ),
+        });
+    };
+    let is_valid_semver = tag.starts_with('v') && {
+        let parts: Vec<&str> = tag[1..].split('.').collect();
+        parts.len() == 3
+            && parts
+                .iter()
+                .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+    };
+    if !is_valid_semver {
+        return Err(ReleaseError::TagResolution {
+            channel: ReleaseChannel::Stable.to_string(),
+            reason: format!(
+                "latest release redirect tag {:?} is not a strict stable vX.Y.Z tag",
+                tag
+            ),
+        });
+    }
+    Ok(tag.to_string())
+}
+
+/// Resolves the latest stable tag (`vX.Y.Z`) by following `https://github.com/<repo>/releases/latest`
+/// when the GitHub `/releases` API fails or is rate-limited.
+pub fn resolve_stable_tag_from_latest_redirect(
+    download_base: &str,
+    github_repo: &str,
+    timeout: Duration,
+) -> ReleaseResult<String> {
+    let latest_url = format!(
+        "{}/{}/releases/latest",
+        download_base.trim_end_matches('/'),
+        github_repo.trim_matches('/')
+    );
+    let effective = run_blocking_http_effective_url(&latest_url, timeout)?;
+    parse_stable_tag_from_redirect_url(&effective, download_base, github_repo)
 }
 
 /// Trait abstracting release tag resolution and artifact fetching so unit/integration tests
@@ -521,7 +707,22 @@ impl ArtifactProvider for GithubHttpArtifactProvider {
         );
 
         let body = run_blocking_http_get_text(&url, Duration::from_secs(15)).unwrap_or_default();
-        select_release_tag_from_json(channel, &body)
+        match select_release_tag_from_json(channel, &body) {
+            Ok(tag) => Ok(tag),
+            Err(api_err) if channel == ReleaseChannel::Stable => {
+                let download_base = self
+                    .download_base_url
+                    .as_deref()
+                    .unwrap_or("https://github.com");
+                resolve_stable_tag_from_latest_redirect(
+                    download_base,
+                    &config.github_repo,
+                    Duration::from_secs(15),
+                )
+                .map_err(|_| api_err)
+            }
+            Err(err) => Err(err),
+        }
     }
 
     fn fetch_release_bundle(
@@ -568,6 +769,57 @@ impl ArtifactProvider for GithubHttpArtifactProvider {
     }
 }
 
+fn resolve_github_auth_token_env() -> Option<String> {
+    for key in ["AF_GITHUB_TOKEN", "GITHUB_TOKEN", "GH_TOKEN"] {
+        if let Ok(val) = std::env::var(key) {
+            let trimmed = val.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn run_blocking_http_effective_url(url: &str, timeout: Duration) -> ReleaseResult<String> {
+    let url_owned = url.to_string();
+    let token_opt = resolve_github_auth_token_env();
+    std::thread::spawn(move || -> ReleaseResult<String> {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| {
+                ReleaseError::ArtifactVerification(format!("tokio runtime init: {}", e))
+            })?;
+        rt.block_on(async move {
+            let client = reqwest::Client::builder()
+                .timeout(timeout)
+                .user_agent("AetherFlow-ReleaseEngine/4.0")
+                .build()
+                .map_err(|e| {
+                    ReleaseError::ArtifactVerification(format!("http client init: {}", e))
+                })?;
+            let mut req = client.get(&url_owned);
+            if let Some(ref tok) = token_opt {
+                req = req.header(reqwest::header::AUTHORIZATION, format!("Bearer {}", tok));
+            }
+            let resp = req.send().await.map_err(|e| {
+                ReleaseError::ArtifactVerification(format!("GET {} failed: {}", url_owned, e))
+            })?;
+            if !resp.status().is_success() {
+                return Err(ReleaseError::ArtifactVerification(format!(
+                    "GET {} returned HTTP {}",
+                    url_owned,
+                    resp.status()
+                )));
+            }
+            Ok(resp.url().as_str().to_string())
+        })
+    })
+    .join()
+    .map_err(|_| ReleaseError::ArtifactVerification("HTTP worker thread panicked".to_string()))?
+}
+
 fn run_blocking_http_get_text(url: &str, timeout: Duration) -> ReleaseResult<String> {
     let bytes = run_blocking_http_get_bytes(url, timeout)?;
     String::from_utf8(bytes).map_err(|e| {
@@ -577,6 +829,7 @@ fn run_blocking_http_get_text(url: &str, timeout: Duration) -> ReleaseResult<Str
 
 fn run_blocking_http_get_bytes(url: &str, timeout: Duration) -> ReleaseResult<Vec<u8>> {
     let url_owned = url.to_string();
+    let token_opt = resolve_github_auth_token_env();
     std::thread::spawn(move || -> ReleaseResult<Vec<u8>> {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -588,7 +841,11 @@ fn run_blocking_http_get_bytes(url: &str, timeout: Duration) -> ReleaseResult<Ve
                 .user_agent("AetherFlow-ReleaseEngine/4.0")
                 .build()
                 .map_err(|e| ReleaseError::ArtifactVerification(format!("http client init: {}", e)))?;
-            let resp = client.get(&url_owned).send().await.map_err(|e| {
+            let mut req = client.get(&url_owned);
+            if let Some(ref tok) = token_opt {
+                req = req.header(reqwest::header::AUTHORIZATION, format!("Bearer {}", tok));
+            }
+            let resp = req.send().await.map_err(|e| {
                 ReleaseError::ArtifactVerification(format!("GET {} failed: {}", url_owned, e))
             })?;
             if !resp.status().is_success() {

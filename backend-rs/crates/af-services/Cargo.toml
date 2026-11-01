@@ -9,6 +9,7 @@ af-models.workspace = true
 af-db.workspace = true
 af-hardware.workspace = true
 af-runner.workspace = true
+af-host = { path = "../af-host" }
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -524,6 +524,43 @@ fn backup_commands_create_verify_list_and_run_non_destructive_restore_preflight_
         CliExitCode::UnsupportedOperation.as_i32()
     );
     assert!(restore_env.message.contains("explicitly unsupported"));
+
+    // 6. Verify `af backup restore archive_name --target-root <target_root>` succeeds with staged restore
+    let staged_dest = tmp.path().join("staged-restored-root");
+    let staged_dest_str = staged_dest.to_string_lossy().to_string();
+    let staged_restore_inv = parse_cli_args([
+        "--json",
+        "--root",
+        &root_str,
+        "backup",
+        "restore",
+        archive_name,
+        "--target-root",
+        &staged_dest_str,
+    ])
+    .unwrap();
+    let staged_restore_env = execute_invocation(&staged_restore_inv, &transport);
+    assert_eq!(
+        staged_restore_env.status, "ok",
+        "staged restore failed: {}",
+        staged_restore_env.message
+    );
+    assert!(staged_dest.exists(), "staged target_root should exist");
+    let restored_db_path = staged_dest.join("var/lib/aetherflow/aetherflow.sqlite");
+    assert!(
+        restored_db_path.exists(),
+        "restored sqlite db should exist in staged root"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let meta = fs::metadata(&restored_db_path).unwrap();
+        assert_eq!(
+            meta.permissions().mode() & 0o777,
+            0o600,
+            "restored sqlite db file should have 0600 private permissions"
+        );
+    }
 }
 
 #[test]
@@ -785,4 +822,311 @@ fn backup_assembly_dry_run_does_not_create_directories() {
     let response = execute_invocation(&invocation, &MockRunnerTransport::default());
     assert_eq!(response.status, "ok", "{}", response.message);
     assert_eq!(fs::read_dir(sandbox.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn maintenance_cli_commands_and_aliases_work_correctly() {
+    let tmp = TempTestDir::new("maint-cli");
+    let root = tmp.path().join("rootfs");
+    fs::create_dir_all(&root).unwrap();
+    let root_str = root.to_string_lossy().to_string();
+    let transport = MockRunnerTransport::default();
+
+    // 1. Test `af maintenance tune` (and shorthand `af tune`)
+    // Dry-run
+    let tune_dry_inv = parse_cli_args(["--json", "--root", &root_str, "maintenance", "tune", "--dry-run"]).unwrap();
+    let resp = execute_invocation(&tune_dry_inv, &transport);
+    assert_eq!(resp.status, "ok");
+    assert!(resp.message.contains("[DRY-RUN]"));
+    assert!(!root.join("etc/sysctl.d/99-aetherflow-tune.conf").exists());
+
+    // Live apply via shorthand `af tune`
+    let tune_live_inv = parse_cli_args(["--json", "--root", &root_str, "tune"]).unwrap();
+    let resp = execute_invocation(&tune_live_inv, &transport);
+    assert_eq!(resp.status, "ok");
+    let conf_path = root.join("etc/sysctl.d/99-aetherflow-tune.conf");
+    assert!(conf_path.is_file());
+    let content = fs::read_to_string(&conf_path).unwrap();
+    assert!(content.contains("net.ipv4.tcp_congestion_control = bbr"));
+    assert!(content.contains("net.core.default_qdisc = fq"));
+
+    // 2. Test `af maintenance sentinel` (and shorthand `af sentinel`)
+    let auth_log = root.join("var/log/auth.log");
+    fs::create_dir_all(auth_log.parent().unwrap()).unwrap();
+    fs::write(
+        &auth_log,
+        b"Oct 25 10:00:00 srv sshd[123]: Failed password for root from 192.168.1.100 port 22 ssh2\n\
+          Oct 25 10:00:01 srv sshd[124]: Failed password for invalid user admin from 192.168.1.100 port 22 ssh2\n\
+          Oct 25 10:00:02 srv sshd[125]: Failed password for test from 10.0.0.1 port 22 ssh2\n",
+    )
+    .unwrap();
+    let auth_str = auth_log.to_string_lossy().to_string();
+
+    let sent_inv = parse_cli_args([
+        "--json",
+        "maintenance",
+        "sentinel",
+        "--log-path",
+        &auth_str,
+        "--threshold",
+        "2",
+    ])
+    .unwrap();
+    let resp = execute_invocation(&sent_inv, &transport);
+    assert_eq!(resp.status, "ok");
+    let data = resp.data.expect("sentinel report data");
+    assert_eq!(data["failed_event_count"], 3);
+    assert_eq!(data["offending_ips"].as_array().unwrap().len(), 1);
+    assert_eq!(data["offending_ips"][0], "192.168.1.100");
+
+    // Shorthand `af sentinel <path> --threshold 2`
+    let sent_short_inv = parse_cli_args([
+        "--json",
+        "sentinel",
+        &auth_str,
+        "--threshold",
+        "2",
+    ])
+    .unwrap();
+    let resp = execute_invocation(&sent_short_inv, &transport);
+    assert_eq!(resp.status, "ok");
+
+    // 3. Test `af maintenance clean-logs` (and shorthand `af clean-logs`)
+    let big_log = root.join("var/log/aetherflow-test.log");
+    let small_log = root.join("var/log/normal.log");
+    fs::write(&big_log, vec![b'A'; 2000]).unwrap();
+    fs::write(&small_log, vec![b'B'; 100]).unwrap();
+
+    // Dry-run clean
+    let clean_dry_inv = parse_cli_args([
+        "--json",
+        "--root",
+        &root_str,
+        "maintenance",
+        "clean-logs",
+        "--max-size",
+        "1KB",
+        "--dry-run",
+    ])
+    .unwrap();
+    let resp = execute_invocation(&clean_dry_inv, &transport);
+    assert_eq!(resp.status, "ok");
+    assert_eq!(fs::metadata(&big_log).unwrap().len(), 2000);
+
+    // Live clean via shorthand `af clean-logs`
+    let clean_live_inv = parse_cli_args([
+        "--json",
+        "--root",
+        &root_str,
+        "clean-logs",
+        "--max-size",
+        "1KB",
+    ])
+    .unwrap();
+    let resp = execute_invocation(&clean_live_inv, &transport);
+    assert_eq!(resp.status, "ok");
+    assert_eq!(fs::metadata(&big_log).unwrap().len(), 0);
+    assert_eq!(fs::metadata(&small_log).unwrap().len(), 100);
+
+    // 4. Test `af maintenance showspace` (and shorthand `af showspace`)
+    let alice_home = root.join("home/alice");
+    let bob_home = root.join("home/bob");
+    fs::create_dir_all(&alice_home).unwrap();
+    fs::create_dir_all(&bob_home).unwrap();
+    fs::write(alice_home.join("data.bin"), vec![0u8; 1024]).unwrap();
+    fs::write(bob_home.join("data.bin"), vec![0u8; 2048]).unwrap();
+
+    let show_inv = parse_cli_args([
+        "--json",
+        "--root",
+        &root_str,
+        "maintenance",
+        "showspace",
+    ])
+    .unwrap();
+    let resp = execute_invocation(&show_inv, &transport);
+    assert_eq!(resp.status, "ok");
+    let entries = resp.data.expect("showspace entries");
+    assert!(entries.as_array().unwrap().len() >= 2);
+
+    // Shorthand with `--user alice`
+    let show_user_inv = parse_cli_args([
+        "--json",
+        "--root",
+        &root_str,
+        "showspace",
+        "--user",
+        "alice",
+    ])
+    .unwrap();
+    let resp = execute_invocation(&show_user_inv, &transport);
+    assert_eq!(resp.status, "ok");
+    let user_entries = resp.data.expect("user entries");
+    assert_eq!(user_entries.as_array().unwrap().len(), 1);
+    assert_eq!(user_entries[0]["user"], "alice");
+
+    // 5. Test `af maintenance ownership`
+    let owner_inv = parse_cli_args(["--json", "maintenance", "ownership"]).unwrap();
+    let resp = execute_invocation(&owner_inv, &transport);
+    assert_eq!(resp.status, "ok");
+    let items = resp.data.expect("ownership items");
+    let arr = items.as_array().unwrap();
+    assert!(arr.iter().any(|e| e["script_path"] == "packages/system/af-tune"));
+    assert!(arr.iter().any(|e| e["script_path"] == "packages/system/af-sentinel.py"));
+    assert!(arr.iter().any(|e| e["script_path"] == "packages/system/clean_log"));
+    assert!(arr.iter().any(|e| e["script_path"] == "packages/system/showspace"));
+}
+
+#[test]
+fn newly_promoted_rust_native_provisioning_steps_execute_safely_in_isolated_root() {
+    let tmp = TempTestDir::new("promoted-provision");
+    let root = tmp.path().join("rootfs");
+    fs::create_dir_all(root.join("etc")).unwrap();
+    fs::write(
+        root.join("etc/os-release"),
+        "ID=ubuntu\nVERSION_ID=\"24.04\"\nPRETTY_NAME=\"Ubuntu 24.04.1 LTS\"\n",
+    )
+    .unwrap();
+
+    // Create a legacy sudoers file to verify apachesudo purges it
+    let sudoers_d = root.join("etc/sudoers.d");
+    fs::create_dir_all(&sudoers_d).unwrap();
+    fs::write(sudoers_d.join("aether-legacy"), b"www-data ALL=(ALL) NOPASSWD: ALL\n").unwrap();
+    assert!(sudoers_d.join("aether-legacy").exists());
+
+    let root_str = root.to_string_lossy().to_string();
+    let transport = MockRunnerTransport::default();
+
+    // 1. Run the promoted Rust-native steps explicitly
+    let steps_to_run = [
+        "bashrc",
+        "hostname",
+        "locale",
+        "skel",
+        "apachesudo",
+        "build_modern",
+        "bbr",
+        "perms",
+    ];
+
+    for step in &steps_to_run {
+        let inv = parse_cli_args([
+            "--json",
+            "--root",
+            &root_str,
+            "provision",
+            "run",
+            step,
+            "--no-root-check",
+        ])
+        .unwrap();
+        let env = execute_invocation(&inv, &transport);
+        assert_eq!(
+            env.status, "ok",
+            "provision step '{}' failed: {}",
+            step, env.message
+        );
+        let data = env.data.unwrap();
+        assert_eq!(
+            data["records"][0]["status"], "completed",
+            "step '{}' record status should be completed",
+            step
+        );
+    }
+
+    // 2. Verify all steps are recorded in `.aetherflow.state`
+    let state_raw = fs::read_to_string(root.join("install/.aetherflow.state")).unwrap();
+    assert!(state_raw.starts_with("# STATE_VERSION=2\n"));
+    for step in &steps_to_run {
+        assert!(
+            state_raw.contains(&format!("{}\n", step)),
+            "state file missing step '{}'",
+            step
+        );
+    }
+
+    // 3. Verify .aetherflow.conf has HOSTNAME_CONFIGURED and SUDOERS_HARDENED
+    let conf_raw = fs::read_to_string(root.join("install/.aetherflow.conf")).unwrap();
+    assert!(conf_raw.contains("HOSTNAME_CONFIGURED=true"));
+    assert!(conf_raw.contains("SUDOERS_HARDENED=true"));
+
+    // 4. Verify bashrc
+    let bashrc_path = root.join("root/.bashrc");
+    assert!(bashrc_path.is_file(), "root/.bashrc must exist");
+    let bashrc_content = fs::read_to_string(&bashrc_path).unwrap();
+    assert!(bashrc_content.contains("/usr/local/bin"));
+
+    // 5. Verify hostname
+    let etc_hostname = root.join("etc/hostname");
+    assert!(etc_hostname.is_file(), "etc/hostname must exist");
+    assert_eq!(fs::read_to_string(&etc_hostname).unwrap().trim(), "localhost");
+
+    // 6. Verify locale
+    let locale_path = root.join("etc/default/locale");
+    assert!(locale_path.is_file(), "etc/default/locale must exist");
+    let locale_content = fs::read_to_string(&locale_path).unwrap();
+    assert!(locale_content.contains("LANG=en_US.UTF-8"));
+    assert!(locale_content.contains("LC_ALL=en_US.UTF-8"));
+
+    // 7. Verify skel
+    assert!(root.join("etc/skel/Media").is_dir());
+    assert!(root.join("etc/skel/torrents/rtorrent").is_dir());
+    assert!(root.join("etc/skel/torrents/deluge").is_dir());
+    assert!(root.join("etc/skel/torrents/qbittorrent").is_dir());
+
+    // 8. Verify apachesudo purged legacy sudoers file
+    assert!(!sudoers_d.join("aether-legacy").exists(), "legacy sudoers file must be purged");
+
+    // 9. Verify build_modern created /etc/aetherflow/aetherflow.env with 0600 mode
+    let env_path = root.join("etc/aetherflow/aetherflow.env");
+    assert!(env_path.is_file(), "aetherflow.env must exist");
+    let env_content = fs::read_to_string(&env_path).unwrap();
+    assert!(env_content.contains("AES_MASTER_KEY="));
+    assert!(env_content.contains("JWT_SECRET="));
+    assert!(env_content.contains("AF_DB_PATH=/var/lib/aetherflow/aetherflow.sqlite"));
+    assert!(env_content.contains("AETHERFLOW_RUNNER_SOCK=/run/aetherflow/runner.sock"));
+
+    // 10. Verify bbr network tuning config exists
+    let sysctl_path = root.join("etc/sysctl.d/99-aetherflow-tune.conf");
+    assert!(sysctl_path.is_file(), "99-aetherflow-tune.conf must exist");
+    let sysctl_content = fs::read_to_string(&sysctl_path).unwrap();
+    assert!(sysctl_content.contains("net.core.default_qdisc = fq"));
+    assert!(sysctl_content.contains("net.ipv4.tcp_congestion_control = bbr"));
+
+    // 11. Verify permissions on Unix
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let bashrc_mode = fs::metadata(&bashrc_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(bashrc_mode, 0o640, "root/.bashrc must have 0640 permissions");
+
+        let locale_mode = fs::metadata(&locale_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(locale_mode, 0o644, "etc/default/locale must have 0644 permissions");
+
+        let env_mode = fs::metadata(&env_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(env_mode, 0o600, "aetherflow.env must have 0600 permissions");
+
+        let var_lib_mode = fs::metadata(root.join("var/lib/aetherflow")).unwrap().permissions().mode() & 0o777;
+        assert_eq!(var_lib_mode, 0o700, "var/lib/aetherflow must have 0700 permissions");
+
+        let skel_media_mode = fs::metadata(root.join("etc/skel/Media")).unwrap().permissions().mode() & 0o777;
+        assert_eq!(skel_media_mode, 0o750, "etc/skel/Media must have 0750 permissions");
+    }
+
+    // 12. Verify re-running build_modern preserves existing .env content
+    let original_env = fs::read_to_string(&env_path).unwrap();
+    let rerun_inv = parse_cli_args([
+        "--json",
+        "--root",
+        &root_str,
+        "provision",
+        "repair",
+        "build_modern",
+        "--no-root-check",
+    ])
+    .unwrap();
+    let rerun_env = execute_invocation(&rerun_inv, &transport);
+    assert_eq!(rerun_env.status, "ok");
+    let preserved_env = fs::read_to_string(&env_path).unwrap();
+    assert_eq!(original_env, preserved_env, "existing aetherflow.env must be preserved across runs");
 }

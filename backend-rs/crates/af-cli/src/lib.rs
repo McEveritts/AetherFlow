@@ -34,9 +34,9 @@ pub use cli::{
     build_package_runner_request, build_quota_runner_request, build_release_engine_options,
     build_sandbox_runner_request, build_self_update_runner_request, parse_byte_size_arg,
     parse_cli_args, render_help_text, resolve_package_lock_name, validate_service_request,
-    AfCommand, BackupCliCommand, BackupCreateKind, GlobalOptions, HelpTopic, PackageCommand,
-    ParsedInvocation, ProvisionCliCommand, QuotaCommand, ReleaseCliCommand, ReleaseDispatchMode,
-    SandboxCommand, ServiceCommand, ALLOWED_SYSTEMCTL_ACTIONS,
+    AfCommand, BackupCliCommand, BackupCreateKind, GlobalOptions, HelpTopic, MaintenanceCliCommand,
+    PackageCommand, ParsedInvocation, ProvisionCliCommand, QuotaCommand, ReleaseCliCommand,
+    ReleaseDispatchMode, SandboxCommand, ServiceCommand, ALLOWED_SYSTEMCTL_ACTIONS,
 };
 pub use client::{
     format_human_progress_line, parse_package_stream_body, parse_package_stream_line,
@@ -54,13 +54,15 @@ pub use provision::{
     CANONICAL_ALL_STEPS, PROVISION_STATE_VERSION, STATE_VERSION_HEADER,
 };
 
-use af_host::{
-    assemble_verified_chunks, create_host_archive_backup, create_sqlite_snapshot_backup,
-    delete_backup_artifacts, execute_destructive_restore, list_backup_inventory,
+pub use af_host::{
+    apply_network_tuning, assemble_verified_chunks, clean_system_logs,
+    compute_sysctl_network_tuning, create_host_archive_backup, create_sqlite_snapshot_backup,
+    delete_backup_artifacts, execute_coordinated_restore, execute_destructive_restore,
+    execute_staged_restore, inspect_home_disk_space, list_backup_inventory,
     maintenance_helper_ownership_registry, plan_restore_from_manifest, preflight_restore_directory,
     preflight_tar_gz_archive, prune_backup_inventory, safe_backup_file_path,
-    split_backup_into_chunks, verify_backup_artifact, BackupManifest, HostBackupConfig,
-    RestorePlan, RestorePreflightOptions,
+    sentinel_scan_auth_log, split_backup_into_chunks, verify_backup_artifact, BackupManifest,
+    HostBackupConfig, RestorePlan, RestorePreflightOptions, RestoreReceipt,
 };
 use af_release::{ReleaseConfig, ReleaseEngine, ReleaseOutcome};
 use af_runner::{
@@ -300,6 +302,134 @@ fn execute_command_inner(
         AfCommand::Release(rel_cmd) => execute_release_command(global, rel_cmd, transport),
         AfCommand::Backup(bak_cmd) => execute_backup_command(global, bak_cmd),
         AfCommand::Provision(prov_cmd) => execute_provision_command(global, prov_cmd),
+        AfCommand::Maintenance(maint_cmd) => execute_maintenance_command(global, maint_cmd),
+    }
+}
+
+fn execute_maintenance_command(
+    global: &GlobalOptions,
+    cmd: &MaintenanceCliCommand,
+) -> CliResult<CliResponseEnvelope> {
+    match cmd {
+        MaintenanceCliCommand::Tune { root, dry_run } => {
+            let effective_root = root
+                .as_deref()
+                .or(global.root.as_deref())
+                .unwrap_or_else(|| Path::new("/"));
+            let is_dry_run = *dry_run || global.dry_run;
+            let report = apply_network_tuning(effective_root, is_dry_run)?;
+            let msg = if is_dry_run {
+                format!(
+                    "[DRY-RUN] Would apply sysctl network tuning to {}",
+                    report.config_path.display()
+                )
+            } else {
+                format!(
+                    "Applied sysctl network tuning configuration to {}",
+                    report.config_path.display()
+                )
+            };
+            Ok(CliResponseEnvelope::success(
+                "maintenance",
+                "tune",
+                msg,
+                Some(json!(report)),
+            ))
+        }
+        MaintenanceCliCommand::Sentinel {
+            log_path,
+            threshold,
+        } => {
+            let path = log_path.clone().unwrap_or_else(|| {
+                if let Some(ref r) = global.root {
+                    r.join("var/log/auth.log")
+                } else {
+                    PathBuf::from("/var/log/auth.log")
+                }
+            });
+            let report = sentinel_scan_auth_log(&path, *threshold)?;
+            let msg = format!(
+                "Sentinel scanned {} lines in {}: {} failed event(s), {} offending IP(s) exceeding threshold {}",
+                report.scanned_lines,
+                report.log_path.display(),
+                report.failed_event_count,
+                report.offending_ips.len(),
+                report.threshold,
+            );
+            Ok(CliResponseEnvelope::success(
+                "maintenance",
+                "sentinel",
+                msg,
+                Some(json!(report)),
+            ))
+        }
+        MaintenanceCliCommand::CleanLogs {
+            root,
+            max_size_bytes,
+            dry_run,
+        } => {
+            let effective_root = root
+                .as_deref()
+                .or(global.root.as_deref())
+                .unwrap_or_else(|| Path::new("/"));
+            let is_dry_run = *dry_run || global.dry_run;
+            let max_size = max_size_bytes.unwrap_or(10 * 1024 * 1024);
+            let report = clean_system_logs(effective_root, max_size, is_dry_run)?;
+            let msg = format!(
+                "Cleaned {} log file(s) across {} directories, freed {} bytes (dry_run={})",
+                report.cleaned_files.len(),
+                report.scanned_directories.len(),
+                report.total_bytes_freed,
+                report.dry_run,
+            );
+            Ok(CliResponseEnvelope::success(
+                "maintenance",
+                "clean-logs",
+                msg,
+                Some(json!(report)),
+            ))
+        }
+        MaintenanceCliCommand::Showspace { root, user } => {
+            let effective_root = root
+                .as_deref()
+                .or(global.root.as_deref())
+                .unwrap_or_else(|| Path::new("/"));
+            let entries = inspect_home_disk_space(effective_root)?;
+            let filtered: Vec<_> = if let Some(ref u) = user {
+                entries.into_iter().filter(|e| &e.user == u).collect()
+            } else {
+                entries
+            };
+            let mut lines = vec![format!("Home disk space usage ({} users):", filtered.len())];
+            for e in &filtered {
+                lines.push(format!("{:>10} {}/ ({})", e.human, e.user, e.home_path.display()));
+            }
+            Ok(CliResponseEnvelope::success(
+                "maintenance",
+                "showspace",
+                lines.join("\n"),
+                Some(json!(filtered)),
+            ))
+        }
+        MaintenanceCliCommand::OwnershipRegistry => {
+            let reg = maintenance_helper_ownership_registry();
+            let mut lines = vec![format!(
+                "AetherFlow Host Maintenance Helper Ownership ({} entries):",
+                reg.len()
+            )];
+            for item in reg {
+                lines.push(format!(
+                    "  {} -> {:?} ({})",
+                    item.script_path, item.owner, item.rust_replacement_or_entry
+                ));
+            }
+            Ok(CliResponseEnvelope::success(
+                "maintenance",
+                "ownership",
+                lines.join("\n"),
+                Some(json!(reg)),
+            ))
+        }
     }
 }
 
@@ -1217,33 +1347,58 @@ fn execute_backup_command(
             backup_dir,
             target_root,
         } => {
-            // Invoke `af_host::execute_destructive_restore` so it deterministically returns
-            // `HostBackupError::DestructiveRestoreUnsupported` (mapped to `CliExitCode::UnsupportedOperation`).
             let cfg = resolve_backup_config(global, backup_dir.as_deref(), None, "v4.0.0");
-            let dummy_manifest = BackupManifest::new("v4.0.0", "aetherflow_placeholder.sqlite")?;
-            let dummy_stage = target_root
-                .clone()
-                .unwrap_or_else(|| cfg.backup_dir.join("restore-stage"));
-            let dummy_plan = RestorePlan {
-                backup_id: dummy_manifest.backup_id,
-                target_root: dummy_stage,
-                overwrite_policy: af_host::OverwritePolicy::RejectExisting,
-                compatibility: af_host::CompatibilityReport {
-                    compatible: true,
-                    manifest_schema_version: 1,
-                    backup_app_version: "v4.0.0".to_string(),
-                    host_app_version: "v4.0.0".to_string(),
-                    entry_count: 0,
-                    has_sqlite_snapshot: false,
-                    warnings: vec![format!("requested artifact: {}", filename)],
-                },
-                items: Vec::new(),
-                total_bytes: 0,
-                sqlite_integrity_verified: false,
-                non_destructive_only: true,
-            };
-            execute_destructive_restore(&dummy_plan)?;
-            unreachable!("execute_destructive_restore always fails closed")
+            match target_root {
+                Some(stage) => {
+                    let artifact_path = safe_backup_file_path(&cfg.backup_dir, filename)?;
+                    let opts = RestorePreflightOptions {
+                        host_app_version: "v4.0.0".to_string(),
+                        max_supported_sqlite_user_version: None,
+                        overwrite_policy: af_host::OverwritePolicy::AllowRegularFilesInStaging,
+                        require_artifact_sidecar: true,
+                    };
+                    let receipt = execute_coordinated_restore(&artifact_path, stage, opts)?;
+                    Ok(CliResponseEnvelope::success(
+                        "backup",
+                        "restore",
+                        format!(
+                            "Verified staged restore completed for '{}' into '{}' ({} files restored, {} bytes, sqlite_verified={})",
+                            filename,
+                            receipt.target_root.display(),
+                            receipt.restored_files.len(),
+                            receipt.total_bytes,
+                            receipt.sqlite_verified
+                        ),
+                        Some(serde_json::to_value(&receipt).unwrap_or(json!({}))),
+                    ))
+                }
+                None => {
+                    // Refuse uncoordinated live / overwrite without staging root
+                    let dummy_manifest =
+                        BackupManifest::new("v4.0.0", "aetherflow_placeholder.sqlite")?;
+                    let dummy_stage = PathBuf::from("/");
+                    let dummy_plan = RestorePlan {
+                        backup_id: dummy_manifest.backup_id,
+                        target_root: dummy_stage,
+                        overwrite_policy: af_host::OverwritePolicy::RejectExisting,
+                        compatibility: af_host::CompatibilityReport {
+                            compatible: true,
+                            manifest_schema_version: 1,
+                            backup_app_version: "v4.0.0".to_string(),
+                            host_app_version: "v4.0.0".to_string(),
+                            entry_count: 0,
+                            has_sqlite_snapshot: false,
+                            warnings: vec![format!("requested artifact: {}", filename)],
+                        },
+                        items: Vec::new(),
+                        total_bytes: 0,
+                        sqlite_integrity_verified: false,
+                        non_destructive_only: true,
+                    };
+                    execute_destructive_restore(&dummy_plan)?;
+                    unreachable!("execute_destructive_restore always fails closed")
+                }
+            }
         }
         BackupCliCommand::Delete {
             filename,
@@ -1350,7 +1505,7 @@ fn execute_backup_command(
             let chunks = split_backup_into_chunks(&target, *chunk_size_bytes)?;
             let manifest_path = PathBuf::from(format!("{}.manifest.json", target.display()));
             if manifest_path.exists() {
-                let mut manifest = BackupManifest::load_verified(&manifest_path)?;
+                let mut manifest = BackupManifest::load_from_path(&manifest_path, true)?;
                 manifest.chunk_count = chunks.len();
                 manifest.chunk_size_bytes = Some(*chunk_size_bytes);
                 manifest.save_atomic(&manifest_path)?;

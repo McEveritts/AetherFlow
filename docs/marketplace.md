@@ -23,7 +23,7 @@ AetherFlow manages a wide range of services across multiple categories.
 ### System & Utilities
 - **Observability**: Netdata, Grafana, Prometheus, Uptime Kuma, Scrutiny.
 - **File & Backup Management**: Nextcloud, FileBrowser, Syncthing, Duplicati, Rclone, MergerFS, Cloudplow, Paperless-ngx.
-- **Security & Network**: Vaultwarden, Fail2Ban, WireGuard, Pi-hole, AdGuard Home, The Lounge, ZNC, Quassel.
+- **Security & Network**: Vaultwarden, Fail2Ban, WireGuard, Tailscale, Pi-hole, AdGuard Home, The Lounge, ZNC, Quassel.
 - **Core & Remote Desktop**: Gitea, Home Assistant, n8n, Organizr, noVNC, KasmVNC, McVNC, XRDP, X2Go.
 
 > [!NOTE]
@@ -32,6 +32,9 @@ AetherFlow manages a wide range of services across multiple categories.
 ---
 
 ## Operating Marketplace Apps
+
+### Mesh VPN & Subnet Routing
+- **Tailscale** installs the official upstream `tailscale` package and `tailscaled.service` daemon from `pkgs.tailscale.com` (verified via `/etc/apt/keyrings/tailscale-archive-keyring.gpg`) and enables IPv4/IPv6 packet forwarding (`/etc/sysctl.d/99-tailscale.conf`). Authenticate the node with `sudo tailscale up` (or supply `AF_TAILSCALE_AUTHKEY` / `TAILSCALE_AUTHKEY` during installation), then inspect mesh peers and advertise subnet routes directly from the **Network → Tailscale Mesh** tab.
 
 ### Remote Desktop Access
 - **KasmVNC** installs an XFCE desktop under the dedicated `af-kasmvnc` service account. Open it through the AetherFlow gateway with username `admin`; retrieve its generated password with `sudo cat /etc/kasmvnc/aetherflow-password`. The backend listens only on `127.0.0.1:6081` (or AetherFlow's allocated fallback port), with TLS terminated at the gateway. Use HTTPS for remote access; do not expose the unencrypted backend port. Without a gateway, use an SSH tunnel to the loopback port. Display `:20` is reserved for this desktop. Existing KasmVNC credentials survive reinstall/update.

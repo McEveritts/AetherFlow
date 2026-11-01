@@ -1,0 +1,45 @@
+#!/bin/bash
+# AetherFlow Package Uninstaller: Tailscale
+
+set -euo pipefail
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
+fi
+
+PACKAGE_NAME="tailscale"
+export LOGFILE="/var/log/aetherflow/remove-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")"
+
+require_root
+log_info "Starting removal for ${PACKAGE_NAME}..."
+report_progress 20 "Disconnecting and stopping tailscaled service..."
+
+if command -v tailscale >/dev/null 2>&1; then
+    tailscale down >> "$LOGFILE" 2>&1 || true
+fi
+
+purge_systemd_unit "tailscaled"
+
+report_progress 55 "Removing Tailscale APT packages and repository..."
+DEBIAN_FRONTEND=noninteractive apt-get remove -y -qq tailscale >> "$LOGFILE" 2>&1 || true
+rm -f /etc/apt/sources.list.d/tailscale.list /etc/apt/keyrings/tailscale-archive-keyring.gpg /etc/sysctl.d/99-tailscale.conf
+
+if [[ "${DELETE_DATA:-false}" == "true" ]]; then
+    report_progress 80 "Purging Tailscale node state and configuration..."
+    DEBIAN_FRONTEND=noninteractive apt-get purge -y -qq tailscale >> "$LOGFILE" 2>&1 || true
+    rm -rf /var/lib/tailscale /etc/default/tailscaled
+fi
+
+DEBIAN_FRONTEND=noninteractive apt-get autoremove -y -qq >> "$LOGFILE" 2>&1 || true
+sysctl --system >> "$LOGFILE" 2>&1 || true
+systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
+
+remove_lock "${PACKAGE_NAME}"
+report_progress 100 "Tailscale removed."
+log_info "${PACKAGE_NAME} removed successfully"

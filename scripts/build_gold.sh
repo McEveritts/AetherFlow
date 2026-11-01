@@ -79,7 +79,7 @@ build_target() {
 
   mkdir -p "${target_dir}"
 
-  echo "==> Building single-binary ${BINARY_NAME} (${RELEASE_CHANNEL}) for linux/${arch} [${rust_target}]"
+  echo "==> Building single-binary ${BINARY_NAME} and af CLI (${RELEASE_CHANNEL}) for linux/${arch} [${rust_target}]"
   (
     cd "${BACKEND_RS_DIR}"
     export AETHERFLOW_VERSION="${VERSION}"
@@ -87,6 +87,7 @@ build_target() {
     export AETHERFLOW_BUILD_DATE="${BUILD_DATE}"
     export AETHERFLOW_RELEASE_CHANNEL="${RELEASE_CHANNEL}"
     cargo build --release --target "${rust_target}" --bin "${CARGO_BIN_NAME}"
+    cargo build --release --target "${rust_target}" --bin af
   )
 
   local cargo_target_dir="${CARGO_TARGET_DIR:-${BACKEND_RS_DIR}/target}"
@@ -94,12 +95,17 @@ build_target() {
     cargo_target_dir="${BACKEND_RS_DIR}/${cargo_target_dir}"
   fi
   compiled_bin="${cargo_target_dir}/${rust_target}/release/${CARGO_BIN_NAME}"
+  local compiled_cli="${cargo_target_dir}/${rust_target}/release/af"
   if [[ ! -f "${compiled_bin}" ]]; then
     echo "error: expected compiled binary '${compiled_bin}' not found" >&2
     exit 1
   fi
 
   cp "${compiled_bin}" "${artifact}"
+  if [[ -f "${compiled_cli}" ]]; then
+    cp "${compiled_cli}" "${target_dir}/af"
+    chmod +x "${target_dir}/af"
+  fi
   cp -R "${BACKEND_DIR}/config" "${target_dir}/config"
   cp -R "${ROOT_DIR}/packages" "${target_dir}/packages"
   cp -R "${ROOT_DIR}/deploy" "${target_dir}/deploy"

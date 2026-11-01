@@ -39,6 +39,7 @@ pub fn api_error(status: StatusCode, code: &str, message: impl Into<String>) -> 
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionClaims {
+    #[serde(default)]
     pub user_id: i64,
     pub sub: String,
     pub iss: String,
@@ -47,6 +48,10 @@ pub struct SessionClaims {
     pub jti: String,
     #[serde(default)]
     pub cfp: String,
+    #[serde(default)]
+    pub plugin_id: String,
+    #[serde(default, alias = "scopes")]
+    pub plugin_scopes: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -55,6 +60,8 @@ pub struct AuthUser {
     pub username: String,
     pub role: String,
     pub jti: String,
+    pub plugin_id: Option<String>,
+    pub plugin_scopes: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -135,6 +142,8 @@ pub fn create_standard_jwt(
         exp,
         jti: jti.clone(),
         cfp,
+        plugin_id: String::new(),
+        plugin_scopes: Vec::new(),
     };
 
     let token = encode(
@@ -152,6 +161,36 @@ pub fn create_standard_jwt(
             params![jti, user_id, ip, ua, exp_rfc3339],
         )?;
     }
+
+    Ok((token, claims))
+}
+
+pub fn mint_plugin_jwt(
+    issuer_user_id: i64,
+    plugin_id: &str,
+    scopes: &[String],
+    ttl_secs: i64,
+) -> anyhow::Result<(String, SessionClaims)> {
+    let now = Utc::now().timestamp();
+    let exp = now + ttl_secs.clamp(60, 86400);
+    let jti = Uuid::new_v4().to_string();
+    let claims = SessionClaims {
+        user_id: issuer_user_id,
+        sub: format!("plugin:{}", plugin_id),
+        iss: "aetherflow-plugin".to_string(),
+        iat: now,
+        exp,
+        jti,
+        cfp: String::new(),
+        plugin_id: plugin_id.to_string(),
+        plugin_scopes: scopes.to_vec(),
+    };
+
+    let token = encode(
+        &Header::new(Algorithm::HS256),
+        &claims,
+        &EncodingKey::from_secret(&jwt_secret_bytes()),
+    )?;
 
     Ok((token, claims))
 }
@@ -191,12 +230,12 @@ fn check_rotation_grace(jti: &str) -> Option<(i64, String)> {
     map.get(jti).map(|e| (e.user_id, e.new_token.clone()))
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// ──────────────────────────────────────────────────────────────────────────────
 // Auth, Admin & CSRF Middlewares (`auth.go` & `csrf.go`)
-// ─────────────────────────────────────────────────────────────────────────────
+// ──────────────────────────────────────────────────────────────────────────────
 
 pub async fn auth_middleware(mut req: Request, next: Next) -> Response {
-    let path = req.uri().path();
+    let path = req.uri().path().to_string();
     if path.ends_with("/auth/refresh") {
         return next.run(req).await;
     }
@@ -216,6 +255,47 @@ pub async fn auth_middleware(mut req: Request, next: Next) -> Response {
             "SESSION_EXPIRED",
             "Session revoked",
         );
+    }
+
+    // Enforce scoped RBAC if this JWT is a plugin-scoped token (`plugin_id` or `plugin_scopes` set)
+    if !claims.plugin_id.is_empty() || !claims.plugin_scopes.is_empty() {
+        let check_path = if path.starts_with("/api/v1/") {
+            path.clone()
+        } else if let Some(rest) = path.strip_prefix("/api/") {
+            format!("/api/v1/{}", rest)
+        } else if let Some(rest) = path.strip_prefix("/plugins/") {
+            let trimmed = rest.trim_matches('/');
+            if let Some((pid, sub)) = trimmed.split_once('/') {
+                format!("/api/v1/auth/plugins/{}/proxy/{}", pid, sub)
+            } else {
+                format!("/api/v1/auth/plugins/{}/proxy", trimmed)
+            }
+        } else {
+            format!("/api/v1/auth{}", path)
+        };
+        if !af_services::plugins::verify_plugin_route_scope(&claims.plugin_scopes, &check_path)
+            && !af_services::plugins::verify_plugin_route_scope(&claims.plugin_scopes, &path)
+        {
+            return api_error(
+                StatusCode::FORBIDDEN,
+                "PLUGIN_SCOPE_DENIED",
+                format!(
+                    "Plugin '{}' token is not authorized for route '{}'",
+                    claims.plugin_id, path
+                ),
+            );
+        }
+
+        req.extensions_mut().insert(AuthUser {
+            user_id: claims.user_id,
+            username: format!("plugin:{}", claims.plugin_id),
+            role: "plugin".to_string(),
+            jti: claims.jti,
+            plugin_id: Some(claims.plugin_id),
+            plugin_scopes: claims.plugin_scopes,
+        });
+
+        return next.run(req).await;
     }
 
     let ua = headers
@@ -249,6 +329,8 @@ pub async fn auth_middleware(mut req: Request, next: Next) -> Response {
         username,
         role,
         jti: claims.jti,
+        plugin_id: None,
+        plugin_scopes: Vec::new(),
     });
 
     next.run(req).await
@@ -816,6 +898,17 @@ pub async fn refresh_session(headers: HeaderMap) -> Response {
         );
     };
 
+    if !claims.plugin_id.trim().is_empty()
+        || !claims.plugin_scopes.is_empty()
+        || claims.iss != "aetherflow"
+    {
+        return api_error(
+            StatusCode::FORBIDDEN,
+            "FORBIDDEN",
+            "Plugin-scoped tokens cannot be used to refresh user sessions",
+        );
+    }
+
     let now = Utc::now().timestamp();
     if now - claims.exp > 7200 {
         return api_error(
@@ -861,8 +954,8 @@ pub async fn refresh_session(headers: HeaderMap) -> Response {
     drop(conn);
 
     if af_db::is_token_revoked(&claims.jti) {
-        if let Some((grace_user_id, existing_new_token)) = check_rotation_grace(&claims.jti)
-            && grace_user_id == id
+        if let Some((_, existing_new_token)) =
+            check_rotation_grace(&claims.jti).filter(|(grace_user_id, _)| *grace_user_id == id)
         {
             let cookie = build_set_cookie(
                 "aetherflow_session",
@@ -948,6 +1041,16 @@ pub async fn verify_proxy_auth(headers: HeaderMap) -> Response {
         )
             .into_response();
     };
+    if !claims.plugin_id.trim().is_empty()
+        || !claims.plugin_scopes.is_empty()
+        || claims.iss != "aetherflow"
+    {
+        return api_error(
+            StatusCode::FORBIDDEN,
+            "FORBIDDEN",
+            "Plugin-scoped tokens cannot be used for external proxy authentication",
+        );
+    }
     let user_agent = headers.get(header::USER_AGENT).and_then(|value| value.to_str().ok()).unwrap_or("");
     if af_db::is_token_revoked(&claims.jti)
         || !matches_client_fingerprint(&claims.cfp, &extract_client_ip(&headers), user_agent)
@@ -1554,7 +1657,14 @@ mod tests {
     async fn disable_2fa_rejects_missing_or_malformed_verification() {
         for body in ["", "{}", "{", "null", "{\"code\":\" \",\"password\":\"\"}"] {
             let mut req = Request::new(axum::body::Body::from(body.to_owned()));
-            req.extensions_mut().insert(AuthUser { user_id: 1, username: "test".into(), role: "user".into(), jti: "test".into() });
+            req.extensions_mut().insert(AuthUser {
+                user_id: 1,
+                username: "test".into(),
+                role: "user".into(),
+                jti: "test".into(),
+                plugin_id: None,
+                plugin_scopes: Vec::new(),
+            });
             assert_eq!(disable_2fa(req).await.status(), StatusCode::BAD_REQUEST);
         }
     }
@@ -1564,8 +1674,15 @@ mod tests {
         for revoked in [false, true] {
             let now = Utc::now().timestamp();
             let claims = SessionClaims {
-                user_id: 1, sub: "1".into(), iss: "aetherflow".into(), iat: now,
-                exp: now + 900, jti: Uuid::new_v4().to_string(), cfp: client_fingerprint("original-agent"),
+                user_id: 1,
+                sub: "1".into(),
+                iss: "aetherflow".into(),
+                iat: now,
+                exp: now + 900,
+                jti: Uuid::new_v4().to_string(),
+                cfp: client_fingerprint("original-agent"),
+                plugin_id: String::new(),
+                plugin_scopes: Vec::new(),
             };
             let token = encode(&Header::new(Algorithm::HS256), &claims, &EncodingKey::from_secret(&jwt_secret_bytes())).unwrap();
             let mut headers = HeaderMap::new();
@@ -1576,6 +1693,28 @@ mod tests {
             }
             assert_eq!(verify_proxy_auth(headers).await.status(), StatusCode::UNAUTHORIZED);
         }
+    }
+
+    #[test]
+    fn mint_plugin_jwt_encodes_plugin_id_and_scopes() {
+        let scopes = vec![
+            "/api/v1/public/marketplace".to_string(),
+            "/api/v1/auth/system/metrics".to_string(),
+        ];
+        let (token, claims) = mint_plugin_jwt(1, "sdk-template-rust", &scopes, 600).unwrap();
+        assert_eq!(claims.plugin_id, "sdk-template-rust");
+        assert_eq!(claims.plugin_scopes, scopes);
+        let decoded = decode_session_claims(&token, false).unwrap();
+        assert_eq!(decoded.plugin_id, "sdk-template-rust");
+        assert_eq!(decoded.plugin_scopes, scopes);
+        assert!(af_services::plugins::verify_plugin_route_scope(
+            &decoded.plugin_scopes,
+            "/api/v1/auth/system/metrics"
+        ));
+        assert!(!af_services::plugins::verify_plugin_route_scope(
+            &decoded.plugin_scopes,
+            "/api/v1/admin/users"
+        ));
     }
 
     #[test]

@@ -101,7 +101,7 @@ The following stable public types and functions are exported from `af_runner` (a
 | `PackageExecutionOutcome` | `struct` | Final execution summary (steps, lock path, resolved version, sandbox status, logs) |
 | `ArtifactVerificationPolicy` | `struct` | Size bounds, SHA-256 digest, gzip/ELF magic header requirements |
 | `ArchAssetMap` | `struct` | Per-architecture (`amd64`, `arm64`, `armhf`) asset filename mapping |
-| `DeclarativeStep` | `enum` | Typed installation/removal primitives (`AptUpdate`, `AptInstall`, `AptPurge`, `EnsureSystemUser`, `PurgeSystemUser`, `EnsureDirectories`, `ProbeSshPort`, `ResolveGitHubReleaseTag`, `DownloadAndExtractTarGz`, `DownloadBinary`, `WriteTemplateFile`, `WriteSystemdUnit`, `Systemctl`, `PurgeSystemdUnit`, `RemovePaths`) |
+| `DeclarativeStep` | `enum` | Typed installation/removal primitives (`AptUpdate`, `AptInstall`, `AptPurge`, `EnsureSystemUser`, `PurgeSystemUser`, `EnsureDirectories`, `ProbeSshPort`, `ResolveGitHubReleaseTag`, `DownloadAndExtractTarGz`, `DownloadBinary`, `WriteTemplateFile`, `WriteSystemdUnit`, `Systemctl`, `PurgeSystemdUnit`, `RemovePaths`, `GenerateSelfSignedTlsCert`, `CaptureDpkgVersion`) |
 | `SystemctlOp` | `enum` | `DaemonReload`, `EnableNow`, `Enable`, `Start`, `Restart`, `Stop`, `Disable`, `ResetFailed` |
 | `DeclarativePackageRecipe` | `struct` | Complete validated package lifecycle recipe (`validate()`, `steps_for_action()`) |
 | `PackageExecutorError` | `enum` | Typed error hierarchy (`Validation`, `SecurityViolation`, `LockConflict`, `Cancelled`, `ArtifactVerification`, `StepFailed`, `Io`) |
@@ -125,26 +125,30 @@ The following stable public types and functions are exported from `af_runner` (a
 
 ## 5. Recipe Migration Status vs Legacy Bash Fallback
 
-Only recipes whose full install/update/remove behavior and security boundaries have been audited for 1:1 parity against `packages/package/{install,remove,update}/*` are registered in `BUILTIN_DECLARATIVE_RECIPES`:
+Fifteen Marketplace applications whose install/update/remove lifecycles and security boundaries have been audited for 1:1 parity are registered in `BUILTIN_DECLARATIVE_RECIPES`:
 
 ### 5.1 Migrated to Native Declarative Rust (`PackageEngineMode::DeclarativeRust` when `AETHERFLOW_ENABLE_RUST_PACKAGES=1`)
-| Package ID | Archetype | Parity Verified Against | Key Operations |
-| :--- | :--- | :--- | :--- |
-| `fail2ban` | APT + SSH Port Detection + Systemd | `installpackage-fail2ban`, `removepackage-fail2ban` | Installs `fail2ban`, `python3-systemd`, `iptables`; probes `/etc/ssh/sshd_config` for custom `Port`; writes `/etc/fail2ban/jail.local` (`backend = systemd`); applies systemd sandbox drop-in before service activation; enables/restarts `fail2ban.service`; purges unit, package, and `/etc/fail2ban`, `/var/lib/fail2ban`, `/var/run/fail2ban` on remove. |
+| Package ID | Archetype | Key Operations |
+| :--- | :--- | :--- |
+| `fail2ban` | APT + SSH Port Detection + Systemd | Installs `fail2ban`, `python3-systemd`, `iptables`; probes `/etc/ssh/sshd_config` for custom `Port`; writes `/etc/fail2ban/jail.local`; applies systemd sandbox drop-in before service activation. |
+| `quassel` | APT + Self-Signed TLS + Dpkg Version + Systemd | Installs `quassel-core`, ensures `quasselcore` user and `/var/lib/quassel`, generates 4096-bit self-signed TLS cert (`GenerateSelfSignedTlsCert`), captures installed dpkg version (`CaptureDpkgVersion`), and runs `quasselcore.service`. |
+| `threadfin` | GitHub Binary + Systemd | Resolves latest `Threadfin/Threadfin` release tag, downloads and verifies ELF binary into `/opt/threadfin/threadfin`, creates `threadfin` system user and `/var/lib/threadfin`, and runs `threadfin.service`. |
+| `znc` | APT + Self-Signed TLS + Systemd | Installs `znc`, creates `znc` user and `/var/lib/znc/configs`, generates `/var/lib/znc/znc.pem` (`GenerateSelfSignedTlsCert`), writes default `znc.conf`, and manages `znc.service`. |
+| `xrdp` | APT + Desktop Session + Systemd | Installs `xrdp`, `xfce4`, `xfce4-goodies`, `dbus-x11`, configures `/etc/xrdp/startwm.sh`, and manages `xrdp.service`. |
+| `novnc` | APT + Websockify Systemd | Installs `novnc`, `python3-websockify`, `tigervnc-standalone-server`, `xfce4`, and manages `novnc.service` on `127.0.0.1:6080`. |
+| `x2go` | APT + SSH Remote Desktop | Installs `x2goserver`, `x2goserver-xsession`, `xfce4`, `xfce4-goodies`, captures dpkg version, and manages `x2goserver.service`. |
+| `scrutiny` | APT + Smartmontools Collector | Installs `smartmontools`, `ca-certificates`, creates `scrutiny` user and `/opt/scrutiny` / `/var/lib/scrutiny`, writes collector config, and manages `scrutiny.service`. |
+| `prometheus` | APT + Metrics Server | Installs `prometheus`, `prometheus-node-exporter`, writes `/etc/prometheus/prometheus.yml` (`127.0.0.1:9090`), and manages `prometheus.service`. |
+| `netdata` | APT + Local Telemetry Daemon | Installs `netdata`, writes `/etc/netdata/netdata.conf` bound to `127.0.0.1:19999`, and manages `netdata.service`. |
+| `mergerfs` | APT Union Filesystem | Installs `mergerfs` and `fuse3`, creates `/var/lib/aetherflow/mergerfs`, and records installed dpkg version. |
+| `rclone` | APT + Rclone Web RCD | Installs `rclone` and `fuse3`, creates `rclone` user and `/var/lib/rclone`, and manages `rclone-web.service` (`127.0.0.1:5572`). |
+| `clamav` | APT Antivirus Daemon | Installs `clamav` and `clamav-daemon`, creates `/var/lib/clamav` and `/var/log/clamav`, and manages `clamav-freshclam.service` + `clamav-daemon.service`. |
+| `mosquitto` | APT MQTT Broker | Installs `mosquitto` and `mosquitto-clients`, writes `/etc/mosquitto/conf.d/aetherflow.conf` (`127.0.0.1:1883`), and manages `mosquitto.service`. |
+| `syncthing` | APT Continuous File Sync | Installs `syncthing`, creates `syncthing` user and `/var/lib/syncthing`, and manages `syncthing@syncthing.service`. |
 
-### 5.2 Explicitly Deferred to Legacy Bash Fallback (`PackageEngineMode::LegacyBashFallback`)
-- **`quassel` (Deferred to Bash)**: `installpackage-quassel` generates a self-signed TLS certificate (`quasselCert.pem`) via `openssl req -x509` and records the installed `dpkg-query` version into `/var/lib/quassel/.af-version`; the previous draft recipe omitted TLS generation, wrote a static version string, and included `/etc/default` in `EnsureDirectories` with `quasselcore` ownership. Deferred to `LegacyBashFallback` until declarative TLS certificate generation and dpkg version capture are supported.
-- **`threadfin` (Deferred to Bash)**: Upstream Threadfin GitHub releases do not publish a pinned SHA-256 digest in the static recipe (`expected_sha256: None`), and the previous draft recipe included `/usr/local/bin` in `EnsureDirectories` with `threadfin` ownership. Deferred to `LegacyBashFallback` until verified checksum manifest resolution is wired.
-- **All Other Marketplace Packages**: Continue to execute their existing scripts in `packages/package/{install,remove,update}/*` under the shared advisory lock and process-group cancellation supervisor:
-  - **Single-Binary / Tarball Daemons With First-Boot API Key / SQLite Seeding**: `autobrr`, `qui`, `prowlarr`, `sonarr`, `radarr`, `lidarr`, `readarr`, `whisparr`, `bazarr`, `jackett`, `flaresolverr`, `unpackerr`, `recyclarr`, `notifiarr`, `filebrowser`, `adguardhome`, `znc`, `rclone`, `mergerfs`, `prometheus`, `autoscan`.
-  - **Database / Runtime Provisioning Installers (PostgreSQL, MariaDB, Redis, Python `uv`/`venv`, Node/pnpm, PHP-FPM, Apache2 vhosts)**: `immich`, `paperless-ngx`, `nextcloud`, `gitea`, `vaultwarden`, `authentik`, `overseerr`, `jellyseerr`, `calibre-web`, `komga`, `kavita`, `audiobookshelf`, `organizr`, `librespeed`.
-  - **Kernel / VPN / Desktop / Media Hardware Installers**: `wireguard`, `tailscale`, `pihole`, `plex`, `jellyfin`, `emby`, `x2go`, `novnc`, `netdata`, `scrutiny`.
+### 5.2 Remaining Marketplace Packages (`PackageEngineMode::LegacyBashFallback`)
+- The remaining 58 Marketplace packages (such as complex multi-container-equivalent database/PHP/Node/Python installers like `immich`, `nextcloud`, `authentik`, `plex`, `jellyfin`, `wireguard`, `tailscale`, and `*arr` suites with first-boot SQLite API key extraction) continue to execute their hardened scripts in `packages/package/{install,remove,update}/*` under the shared advisory lock and process-group cancellation supervisor.
 
+## Validation and Safety Boundary
 
-## Validation and Remaining Safety Boundary
-
-On October 31, 2026, `cargo test --workspace` passed all 109 tests in an isolated Linux checkout, including 25 `af-runner` tests. `cargo check --workspace` also passed. Runner coverage includes persistent advisory lock inode/content preservation, queued cancellation, process-group cancellation, bounded command output, live progress before step completion, ancestor-symlink rejection above isolated roots, and exclusive atomic writes/rollback backups.
-
-Atomic writes use UUID sibling names, exclusive creation, and Unix modes before writing; failed renames propagate rather than falling back to a non-atomic overwrite. Rollback backups also use exclusive UUID names, so pre-existing `.bak-af` files or hardlinks are not overwritten. All participating Rust runner processes share the persistent advisory lock; standalone legacy shell invocations do not acquire that lock and must not run concurrently.
-
-These are isolated/mock lifecycle tests, not certification of live package installation. Path-based checks still assume trusted parent directories: they do not eliminate concurrent parent-directory replacement races with kernel-enforced dirfd/openat2 resolution. APT changes, user creation/deletion, and all service side effects are not fully transactional. Rust package dispatch stays disabled by default, with only `fail2ban` registered for explicit opt-in.
+On November 1, 2026, `cargo test --workspace` passed all 131 tests in an isolated Linux checkout, including 29 `af-runner` tests covering all 15 built-in declarative recipes, `GenerateSelfSignedTlsCert`, `CaptureDpkgVersion`, persistent advisory lock inode/content preservation, queued cancellation, process-group cancellation, bounded command output, live progress streaming, ancestor-symlink rejection, and exclusive atomic writes/rollback backups.

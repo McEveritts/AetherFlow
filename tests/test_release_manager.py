@@ -17,7 +17,7 @@ REAL_TOOLS = (
     "sqlite3", "flock", "mkdir", "date", "cp", "mv", "ln", "rm", "cat", "tee",
     "find", "awk", "grep", "sed", "mktemp", "readlink", "chmod", "chown", "id",
     "head", "cut", "tr", "sha256sum", "tar", "gzip", "python3", "touch", "sleep",
-    "basename", "dirname", "sort", "tail",
+    "basename", "dirname", "sort", "tail", "runuser", "sh",
 )
 
 CURL_MOCK = r'''#!/usr/bin/python3
@@ -43,7 +43,12 @@ def url_of(args):
 
 url = url_of(arguments)
 if "api.github.com" in url:
+    if os.environ.get("TEST_API_RATE_LIMITED") == "1":
+        sys.exit(22)
     print(os.environ.get("TEST_RELEASES_JSON", '[{"tag_name":"v4.0.0","draft":false,"prerelease":false,"target_commitish":"master"}]'))
+    sys.exit(0)
+if url.endswith("/releases/latest"):
+    print(os.environ.get("TEST_LATEST_URL", "https://github.com/McEveritts/AetherFlow/releases/tag/v4.0.0"), end="")
     sys.exit(0)
 if url.endswith("/aetherflow-linux-amd64.tar.gz"):
     target = Path(arguments[arguments.index("-o") + 1])
@@ -80,7 +85,11 @@ arguments = sys.argv[1:]
 with open(root_commands, "a") as output:
     output.write("systemctl " + " ".join(arguments) + "\n")
 if arguments and arguments[0] == "show":
-    print(os.environ.get("TEST_UNIT_ENV", "Environment="))
+    if "User" in arguments:
+        import pwd
+        print(os.environ.get("TEST_SERVICE_USER", pwd.getpwuid(os.getuid()).pw_name))
+    else:
+        print(os.environ.get("TEST_UNIT_ENV", "Environment="))
 sys.exit(0)
 '''
 
@@ -128,8 +137,9 @@ class ReleaseManagerTests(unittest.TestCase):
         self.bash = shutil.which("bash")
         if not self.real_sqlite or not self.bash:
             self.skipTest("sqlite3 and bash are required")
+        search_path = os.environ.get("PATH", "") + ":/usr/sbin:/sbin"
         for name in REAL_TOOLS:
-            source = shutil.which(name)
+            source = shutil.which(name, path=search_path)
             if source:
                 os.symlink(source, self.tools / name)
         self.write_executable(self.mock / "curl", CURL_MOCK)
@@ -165,6 +175,11 @@ class ReleaseManagerTests(unittest.TestCase):
         runner = b"[Service]\nExecStart=/opt/AetherFlow/current/aetherflow-api runner\nFrom=artifact\n"
         buffer = io.BytesIO()
         with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+            directory = tarfile.TarInfo(".")
+            directory.type = tarfile.DIRTYPE
+            directory.mode = 0o700
+            directory.uid = directory.gid = 1001
+            archive.addfile(directory)
             for name, payload, mode in (
                 ("aetherflow-api", binary, 0o755),
                 (".version", version, 0o644),
@@ -174,6 +189,7 @@ class ReleaseManagerTests(unittest.TestCase):
                 info = tarfile.TarInfo(name)
                 info.size = len(payload)
                 info.mode = mode
+                info.uid = info.gid = 1001
                 archive.addfile(info, io.BytesIO(payload))
         data = buffer.getvalue()
         (self.root / "artifact.tar.gz").write_bytes(data)
@@ -397,6 +413,36 @@ class ReleaseManagerTests(unittest.TestCase):
         self.assertTrue(self.current.is_symlink())
         self.assertNotEqual(self.current.resolve(), previous.resolve())
         self.assertEqual(self.marker(self.snapshot()), "env")
+
+    def test_archive_permissions_are_normalized_before_swap(self):
+        self.prepare_live_units()
+        result = self.run_manager("deploy", "--channel", "stable")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        release = self.current.resolve()
+        self.assertEqual(release.stat().st_mode & 0o777, 0o755)
+        self.assertEqual((release / "aetherflow-api").stat().st_mode & 0o777, 0o755)
+        self.assertEqual(release.stat().st_uid, os.getuid())
+        self.assertIn("service access verified", result.stdout)
+        self.assertLess(result.stdout.index("service access verified"), result.stdout.index("Atomic Symlink Swap"))
+
+    @unittest.skipUnless(hasattr(os, "geteuid") and os.geteuid() == 0, "requires root")
+    def test_inaccessible_release_aborts_before_swap(self):
+        self.prepare_live_units()
+        result = self.run_manager("deploy", "--channel", "stable", TEST_SERVICE_USER="nobody")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Refusing symlink swap", result.stdout)
+        self.assertFalse(self.current.exists())
+        self.assertNotIn("systemctl restart", self.commands.read_text())
+
+    def test_stable_tag_falls_back_without_github_api(self):
+        result = self.run_manager("deploy", "--dry-run", TEST_API_RATE_LIMITED="1")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("releases/download/v4.0.0/", self.commands.read_text())
+
+    def test_stable_redirect_must_belong_to_expected_repository(self):
+        result = self.run_manager("deploy", "--dry-run", TEST_API_RATE_LIMITED="1", TEST_LATEST_URL="https://example.com/releases/tag/v9.9.9")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("releases/download/", self.commands.read_text())
 
     def test_not_ready_rolls_back_without_replacing_units(self):
         live_db = self.root / "live" / "from-env.sqlite"

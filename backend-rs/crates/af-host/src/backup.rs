@@ -6,7 +6,7 @@
 //! producing a unified, manifest-backed backup bundle without ever plain-copying a live SQLite DB.
 
 use crate::error::{HostBackupError, HostBackupResult};
-use crate::manifest::{BackupManifest, BackupTargetKind};
+use crate::manifest::{BackupManifest, BackupManifestEntry, BackupTargetKind};
 use crate::restore::verify_tar_gz_against_manifest;
 use crate::snapshot::{
     snapshot_sqlite_database, verify_sqlite_snapshot_integrity, SnapshotOptions,
@@ -185,13 +185,26 @@ pub fn create_sqlite_snapshot_backup(
 
     let mut manifest = BackupManifest::new(&config.app_version, &filename)?;
     manifest.sqlite_snapshot = Some(sqlite_receipt.metadata.clone());
-    manifest.add_file_from_disk(
-        &filename,
-        &snapshot_dest,
-        BackupTargetKind::SqliteSnapshot,
-        Some(db_source.to_string_lossy().into_owned()),
-        true,
-    )?;
+    #[cfg(unix)]
+    let unix_mode = {
+        use std::os::unix::fs::PermissionsExt;
+        fs::symlink_metadata(&snapshot_dest)
+            .ok()
+            .map(|m| m.permissions().mode() & 0o7777)
+    };
+    #[cfg(not(unix))]
+    let unix_mode = None;
+    let entry = BackupManifestEntry {
+        relative_path: filename.clone(),
+        logical_target_path: Some(db_source.to_string_lossy().into_owned()),
+        kind: BackupTargetKind::SqliteSnapshot,
+        sha256: sqlite_receipt.metadata.sha256.clone(),
+        size_bytes: sqlite_receipt.metadata.size_bytes,
+        unix_mode,
+        required: true,
+    };
+    entry.validate()?;
+    manifest.entries.push(entry);
 
     let mut chunk_paths = Vec::new();
     if let Some(chunk_size) = config.chunk_size_bytes {
@@ -1064,24 +1077,31 @@ pub const fn maintenance_helper_ownership_registry() -> &'static [MaintenanceHel
         },
         MaintenanceHelperOwnership {
             script_path: "packages/system/af-tune",
-            owner: MaintenanceOwnerCrate::RetainedSystemScript,
-            rust_replacement_or_entry: "packages/system/af-tune (host sysctl & .rtorrent.rc heuristic tuner)",
+            owner: MaintenanceOwnerCrate::AfHost,
+            rust_replacement_or_entry: "af_host::maintenance::{compute_sysctl_network_tuning, apply_network_tuning} + af maintenance tune",
             destructive_or_privileged: true,
-            rationale: "Mutates kernel sysctl net.core.rmem_max/wmem_max and user .rtorrent.rc; kept as explicit root maintenance script.",
+            rationale: "Pure-Rust sysctl network tuning configuration generator and atomic writer with dry-run support.",
         },
         MaintenanceHelperOwnership {
             script_path: "packages/system/af-sentinel.py",
-            owner: MaintenanceOwnerCrate::RetainedSystemScript,
-            rust_replacement_or_entry: "packages/system/af-sentinel.py (auth.log anomaly scanner)",
+            owner: MaintenanceOwnerCrate::AfHost,
+            rust_replacement_or_entry: "af_host::maintenance::sentinel_scan_auth_log + af maintenance sentinel",
+            destructive_or_privileged: false,
+            rationale: "Scans auth.log for brute-force password failures and invalid users, aggregating offending IP counts.",
+        },
+        MaintenanceHelperOwnership {
+            script_path: "packages/system/clean_log",
+            owner: MaintenanceOwnerCrate::AfHost,
+            rust_replacement_or_entry: "af_host::maintenance::clean_system_logs + af maintenance clean-logs",
             destructive_or_privileged: true,
-            rationale: "Optional standalone log scanner; firewall bans remain external to the unprivileged API.",
+            rationale: "Safely truncates oversized .log files under /var/log and /srv/aetherflow/lock without following symlinks.",
         },
         MaintenanceHelperOwnership {
             script_path: "packages/system/showspace",
-            owner: MaintenanceOwnerCrate::RetainedSystemScript,
-            rust_replacement_or_entry: "af_hardware::get_system_metrics_core + packages/system/showspace CLI",
+            owner: MaintenanceOwnerCrate::AfHost,
+            rust_replacement_or_entry: "af_host::maintenance::inspect_home_disk_space + af maintenance showspace",
             destructive_or_privileged: false,
-            rationale: "Read-only CLI formatter for /home/<user> disk usage; API uses af-hardware / repquota.",
+            rationale: "Pure-Rust directory disk usage calculator and human-formatted report generator for /home/<user> entries.",
         },
     ]
 }

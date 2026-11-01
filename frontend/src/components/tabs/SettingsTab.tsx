@@ -109,7 +109,24 @@ const UPDATE_CHANNEL_OPTIONS: GlassSelectOption[] = [
         badgeVariant: 'amber',
         dotColor: 'bg-amber-400 shadow-[0_0_8px_rgba(251,191,36,0.85)]',
     },
+    {
+        value: 'experimental',
+        label: 'Experimental',
+        description: 'Preview builds from the experimental branch. May break or need manual recovery',
+        badge: 'Experimental',
+        badgeVariant: 'rose',
+        dotColor: 'bg-rose-400 shadow-[0_0_8px_rgba(251,113,133,0.85)]',
+    },
 ];
+
+const UPDATE_CHANNEL_PILL_STYLES: Record<string, string> = {
+    stable: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30',
+    nightly: 'bg-amber-500/15 text-amber-300 border-amber-500/30',
+    experimental: 'bg-rose-500/15 text-rose-300 border-rose-500/30',
+};
+
+const normalizeUpdateChannel = (channel: unknown): string =>
+    channel === 'nightly' || channel === 'experimental' ? channel : 'stable';
 
 export default function SettingsTab() {
     const t = useTranslations('Settings');
@@ -196,7 +213,7 @@ export default function SettingsTab() {
                 if (data.ollamaEndpoint) setOllamaEndpoint(data.ollamaEndpoint);
                 if (data.anthropicEndpoint) setAnthropicEndpoint(data.anthropicEndpoint);
                 if (data.timezone) setTimezone(data.timezone);
-                if (data.updateChannel) setUpdateChannel(data.updateChannel === 'nightly' ? 'nightly' : 'stable');
+                if (data.updateChannel) setUpdateChannel(normalizeUpdateChannel(data.updateChannel));
                 if (data.defaultDashboard) setDefaultDashboard(data.defaultDashboard);
                 if (typeof data.baseDomain === 'string') setBaseDomain(data.baseDomain);
             }
@@ -1022,9 +1039,7 @@ export default function SettingsTab() {
                                             </label>
                                             <span
                                                 className={`text-[11px] font-mono font-bold uppercase tracking-wider px-2.5 py-0.5 rounded-full border ${
-                                                    updateChannel === 'nightly'
-                                                        ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
-                                                        : 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+                                                    UPDATE_CHANNEL_PILL_STYLES[updateChannel] ?? UPDATE_CHANNEL_PILL_STYLES.stable
                                                 }`}
                                             >
                                                 {updateChannel}
@@ -1037,6 +1052,15 @@ export default function SettingsTab() {
                                             options={UPDATE_CHANNEL_OPTIONS}
                                             ariaLabel="Update Channel"
                                         />
+                                        {updateChannel === 'experimental' && (
+                                            <div role="alert" className="flex items-start gap-2 text-xs text-rose-300 bg-rose-500/10 border border-rose-500/20 p-3 rounded-lg">
+                                                <AlertCircle size={14} className="mt-0.5 shrink-0" />
+                                                <span>
+                                                    Experimental builds track the <code className="font-mono">experimental</code> branch and may include breaking changes
+                                                    (such as the v4 Rust control plane). A database snapshot is taken before each deploy so you can roll back.
+                                                </span>
+                                            </div>
+                                        )}
                                     </div>
 
                                     <div className="space-y-4 text-sm text-slate-400">

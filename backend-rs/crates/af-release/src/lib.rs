@@ -31,8 +31,10 @@ pub use admin::{
 };
 pub use artifact::{
     compute_file_sha256, extract_and_validate_release_archive, parse_sha256_manifest,
-    select_release_tag_from_json, simulate_offline_artifact, stage_running_release_manager,
-    verify_artifact_checksum, ArtifactProvider, GitHubReleaseItem, GithubHttpArtifactProvider,
+    parse_stable_tag_from_redirect_url, prepare_release_permissions,
+    resolve_stable_tag_from_latest_redirect, select_release_tag_from_json,
+    simulate_offline_artifact, stage_running_release_manager, verify_artifact_checksum,
+    ArtifactProvider, GitHubReleaseItem, GithubHttpArtifactProvider,
 };
 pub use config::{
     parse_conf_file, parse_conf_str, read_env_file_value, read_env_str_value,
@@ -1234,4 +1236,130 @@ AETHERFLOW_DB_PATH=fallback.sqlite
         assert!(ensure_no_symlink_ancestors(&regular_file.join("child")).is_err());
     }
 
+    #[test]
+    fn test_select_release_tag_from_json_channel_isolation() {
+        let payload = r#"[
+            {"tag_name": "v4.0.0-experimental", "target_commitish": "experimental", "prerelease": true, "draft": false},
+            {"tag_name": "v3.3.0-nightly.1", "target_commitish": "nightly", "prerelease": true, "draft": false},
+            {"tag_name": "v3.2.7", "target_commitish": "master", "prerelease": false, "draft": false}
+        ]"#;
+
+        assert_eq!(
+            select_release_tag_from_json(ReleaseChannel::Stable, payload).unwrap(),
+            "v3.2.7"
+        );
+        // Nightly must ignore v4.0.0-experimental and select v3.3.0-nightly.1
+        assert_eq!(
+            select_release_tag_from_json(ReleaseChannel::Nightly, payload).unwrap(),
+            "v3.3.0-nightly.1"
+        );
+        // Experimental must select v4.0.0-experimental
+        assert_eq!(
+            select_release_tag_from_json(ReleaseChannel::Experimental, payload).unwrap(),
+            "v4.0.0-experimental"
+        );
+    }
+
+    #[test]
+    fn test_parse_stable_tag_from_redirect_url_validation() {
+        assert_eq!(
+            parse_stable_tag_from_redirect_url(
+                "https://github.com/McEveritts/AetherFlow/releases/tag/v3.2.7",
+                "https://github.com",
+                "McEveritts/AetherFlow"
+            )
+            .unwrap(),
+            "v3.2.7"
+        );
+        // Prerelease / hyphenated tags must be rejected by stable redirect parser
+        assert!(
+            parse_stable_tag_from_redirect_url(
+                "https://github.com/McEveritts/AetherFlow/releases/tag/v4.0.0-experimental",
+                "https://github.com",
+                "McEveritts/AetherFlow"
+            )
+            .is_err()
+        );
+        // Unredirected /releases/latest URL must return Err
+        assert!(
+            parse_stable_tag_from_redirect_url(
+                "https://github.com/McEveritts/AetherFlow/releases/latest",
+                "https://github.com",
+                "McEveritts/AetherFlow"
+            )
+            .is_err()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_prepare_release_permissions_normalizes_modes_and_verifies_binaries() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let sb = TempSandbox::new("release-perms");
+        let release_dir = sb.path().join("release");
+        fs::create_dir_all(release_dir.join("config")).unwrap();
+        fs::write(release_dir.join("aetherflow-api"), b"#!/bin/sh\nexit 0\n").unwrap();
+        fs::write(release_dir.join("af"), b"#!/bin/sh\nexit 0\n").unwrap();
+        fs::write(release_dir.join(".version"), b"v4.0.0\n").unwrap();
+        fs::write(release_dir.join("config/app.json"), b"{}").unwrap();
+
+        // Start with restrictive/group-writable permissions to ensure prepare_release_permissions fixes them
+        fs::set_permissions(&release_dir, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(release_dir.join("config"), fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(
+            release_dir.join("aetherflow-api"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        fs::set_permissions(release_dir.join("af"), fs::Permissions::from_mode(0o600)).unwrap();
+        fs::set_permissions(
+            release_dir.join(".version"),
+            fs::Permissions::from_mode(0o666),
+        )
+        .unwrap();
+
+        prepare_release_permissions(&release_dir).unwrap();
+
+        assert_eq!(
+            fs::symlink_metadata(&release_dir)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o755
+        );
+        assert_eq!(
+            fs::symlink_metadata(release_dir.join("config"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o755
+        );
+        assert_eq!(
+            fs::symlink_metadata(release_dir.join("aetherflow-api"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o755
+        );
+        assert_eq!(
+            fs::symlink_metadata(release_dir.join("af"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o755
+        );
+        assert_eq!(
+            fs::symlink_metadata(release_dir.join(".version"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o644
+        );
+    }
 }

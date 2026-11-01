@@ -109,15 +109,16 @@ jobs:
           echo "STAGE_DIR=${STAGE_DIR}" >> "$GITHUB_ENV"
 
           cd backend-rs
-          cargo build --release --bin aetherflow-api
+          cargo build --release --bin aetherflow-api --bin af
           cp target/release/aetherflow-api "${STAGE_DIR}/aetherflow-api"
+          cp target/release/af "${STAGE_DIR}/af"
           cd ..
 
           cp -R backend/config "${STAGE_DIR}/config"
           cp -R packages "${STAGE_DIR}/packages"
           cp -R deploy "${STAGE_DIR}/deploy"
           echo "${VERSION_STAMP}" > "${STAGE_DIR}/.version"
-          chmod +x "${STAGE_DIR}/aetherflow-api" "${STAGE_DIR}/deploy/release-manager.sh"
+          chmod +x "${STAGE_DIR}/aetherflow-api" "${STAGE_DIR}/af" "${STAGE_DIR}/deploy/release-manager.sh"
 
           mkdir -p release-dist
           tar -C "${STAGE_DIR}" -czf release-dist/aetherflow-linux-amd64.tar.gz .

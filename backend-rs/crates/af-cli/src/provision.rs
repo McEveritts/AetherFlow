@@ -14,7 +14,10 @@
 //! - **Never accepts or executes arbitrary privileged commands or raw shell step strings.**
 
 use crate::error::{CliError, CliResult};
-use af_host::{compute_file_sha256, reject_if_symlink, reject_symlink_chain, validate_no_parent_traversal};
+use af_host::{
+    apply_network_tuning, compute_file_sha256, reject_if_symlink, reject_symlink_chain,
+    validate_no_parent_traversal,
+};
 use af_runner::render_systemd_sandbox_dropin;
 use chrono::Utc;
 use once_cell::sync::Lazy;
@@ -262,6 +265,10 @@ pub fn canonical_step_catalog() -> Vec<ProvisionStepDescriptor> {
         .enumerate()
         .map(|(idx, &step_id)| {
             let (tier, summary) = match step_id {
+                "bashrc" => (
+                    ProvisionStepTier::RustNativeFoundation,
+                    "Ensure root/.bashrc exists with mode 0640 and /usr/local/bin PATH configuration",
+                ),
                 "checkroot" => (
                     ProvisionStepTier::RustNativeFoundation,
                     "Verify root/operator execution context and lockfile readiness",
@@ -274,17 +281,45 @@ pub fn canonical_step_catalog() -> Vec<ProvisionStepDescriptor> {
                     ProvisionStepTier::RustNativeFoundation,
                     "Verify Linux OS release compatibility (Ubuntu 20.04+, Debian 11+, Kali)",
                 ),
+                "hostname" => (
+                    ProvisionStepTier::RustNativeFoundation,
+                    "Configure system hostname and record HOSTNAME_CONFIGURED in .aetherflow.conf",
+                ),
+                "locale" => (
+                    ProvisionStepTier::RustNativeFoundation,
+                    "Write etc/default/locale with UTF-8 locale configuration",
+                ),
+                "skel" => (
+                    ProvisionStepTier::RustNativeFoundation,
+                    "Create canonical skeleton user directories under etc/skel",
+                ),
+                "apachesudo" => (
+                    ProvisionStepTier::RustNativeFoundation,
+                    "Purge legacy sudoers drop-ins to enforce least-privilege runner boundary",
+                ),
+                "build_modern" => (
+                    ProvisionStepTier::RustNativeFoundation,
+                    "Ensure /etc/aetherflow/aetherflow.env exists with cryptographic secrets and 0600 permissions",
+                ),
                 "makedirs" => (
                     ProvisionStepTier::RustNativeFoundation,
                     "Create canonical bare-metal FHS directories (/opt/aetherflow, /etc/aetherflow, /var/lib/aetherflow, /var/log/aetherflow)",
+                ),
+                "boot" => (
+                    ProvisionStepTier::RustNativeFoundation,
+                    "Verify and stage systemd service drop-in & unit directory layout (/etc/systemd/system)",
                 ),
                 "harden_perms" => (
                     ProvisionStepTier::RustNativeFoundation,
                     "Enforce 0750/0600 permissions on /install, /etc/aetherflow, /var/lib/aetherflow, and state/secret files",
                 ),
-                "boot" => (
+                "perms" => (
                     ProvisionStepTier::RustNativeFoundation,
-                    "Verify and stage systemd service drop-in & unit directory layout (/etc/systemd/system)",
+                    "Normalize permissions on /etc/aetherflow/aetherflow.env (0600) and /var/lib/aetherflow (0700)",
+                ),
+                "bbr" => (
+                    ProvisionStepTier::RustNativeFoundation,
+                    "Apply BBR congestion control and high-BDP sysctl network tuning",
                 ),
                 _ => (
                     ProvisionStepTier::RetainedShellBootstrap,
@@ -558,6 +593,7 @@ impl ProvisionStateStore {
             self.append_log(&format!("[REPAIR] Cleared completion state for step '{}'", s))?;
         }
         Ok(removed)
+    }
 
     /// Atomically writes `# STATE_VERSION=2` followed by `steps` to `/install/.aetherflow.state`
     /// using an exclusive `0o600` sibling temporary file.
@@ -1474,6 +1510,42 @@ pub fn execute_provision_steps(
     })
 }
 
+fn generate_crypto_secret(len: usize) -> String {
+    const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    // 248 is the largest multiple of 62 <= 256 (62 * 4 = 248); rejection sampling eliminates modulo bias.
+    if let Ok(mut f) = File::open("/dev/urandom") {
+        use std::io::Read;
+        let mut s = String::with_capacity(len);
+        let mut buf = [0u8; 64];
+        while s.len() < len {
+            if f.read_exact(&mut buf).is_err() {
+                break;
+            }
+            for &b in &buf {
+                if b < 248 {
+                    s.push(CHARSET[(b as usize) % CHARSET.len()] as char);
+                    if s.len() == len {
+                        return s;
+                    }
+                }
+            }
+        }
+    }
+    // Fallback if /dev/urandom is unavailable on non-Unix platforms
+    let mut s = String::with_capacity(len);
+    while s.len() < len {
+        for &b in Uuid::new_v4().as_bytes() {
+            if b < 248 {
+                s.push(CHARSET[(b as usize) % CHARSET.len()] as char);
+                if s.len() == len {
+                    break;
+                }
+            }
+        }
+    }
+    s
+}
+
 fn execute_single_rust_step(
     store: &ProvisionStateStore,
     step_id: &str,
@@ -1481,6 +1553,52 @@ fn execute_single_rust_step(
 ) -> CliResult<String> {
     let paths = store.paths();
     match step_id {
+        "bashrc" => {
+            let root_dir = paths.fs_root.join("root");
+            ensure_dir_no_symlinks(&paths.fs_root, &root_dir, 0o700, "root home dir")?;
+            let bashrc_path = root_dir.join(".bashrc");
+            ensure_no_symlink_ancestors(&bashrc_path, "root .bashrc")?;
+            let export_line = "export PATH=\"/usr/local/bin:$PATH\"\n";
+            if !bashrc_path.exists() {
+                write_file_atomic_exclusive(
+                    &bashrc_path,
+                    export_line.as_bytes(),
+                    0o640,
+                    "root .bashrc",
+                )?;
+            } else {
+                reject_if_symlink(&bashrc_path, "root .bashrc")?;
+                let content = fs::read_to_string(&bashrc_path).map_err(|e| {
+                    CliError::io(format!("reading {}", bashrc_path.display()), e)
+                })?;
+                if !content.contains("/usr/local/bin") {
+                    let mut updated = content;
+                    if !updated.ends_with('\n') {
+                        updated.push('\n');
+                    }
+                    updated.push_str(export_line);
+                    write_file_atomic_exclusive(
+                        &bashrc_path,
+                        updated.as_bytes(),
+                        0o640,
+                        "root .bashrc",
+                    )?;
+                } else {
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        fs::set_permissions(&bashrc_path, fs::Permissions::from_mode(0o640))
+                            .map_err(|e| {
+                                CliError::io(
+                                    format!("setting permissions on {}", bashrc_path.display()),
+                                    e,
+                                )
+                            })?;
+                    }
+                }
+            }
+            Ok("ensured root/.bashrc exists with mode 0640 and /usr/local/bin PATH export".to_string())
+        }
         "checkroot" => {
             if require_root && paths.fs_root == Path::new("/") && !is_effective_root_user() {
                 return Err(CliError::PrivilegeRequired(
@@ -1515,6 +1633,130 @@ fn execute_single_rust_step(
                 Ok(info.support_reason)
             } else {
                 Ok("no /etc/os-release in isolated root; skipped kernel/distro rejection".to_string())
+            }
+        }
+        "hostname" => {
+            let config_map = store.read_config_map()?;
+            let hostname_val = config_map
+                .get("hostname_value")
+                .or_else(|| config_map.get("domain"))
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .unwrap_or("localhost")
+                .to_string();
+
+            let etc_dir = paths.fs_root.join("etc");
+            ensure_dir_no_symlinks(&paths.fs_root, &etc_dir, 0o755, "etc dir")?;
+            let etc_hostname = etc_dir.join("hostname");
+            ensure_no_symlink_ancestors(&etc_hostname, "etc hostname")?;
+            write_file_atomic_exclusive(
+                &etc_hostname,
+                format!("{}\n", hostname_val).as_bytes(),
+                0o644,
+                "etc hostname",
+            )?;
+
+            store.save_config_value("HOSTNAME_CONFIGURED", "true")?;
+            Ok(format!(
+                "configured hostname '{}' and recorded HOSTNAME_CONFIGURED=true",
+                hostname_val
+            ))
+        }
+        "locale" => {
+            let etc_default = paths.fs_root.join("etc/default");
+            ensure_dir_no_symlinks(&paths.fs_root, &etc_default, 0o755, "etc default dir")?;
+            let locale_file = etc_default.join("locale");
+            ensure_no_symlink_ancestors(&locale_file, "etc/default/locale")?;
+            let body = b"LANG=en_US.UTF-8\nLC_ALL=en_US.UTF-8\n";
+            write_file_atomic_exclusive(
+                &locale_file,
+                body,
+                0o644,
+                "etc/default/locale",
+            )?;
+            Ok("wrote etc/default/locale with LANG=en_US.UTF-8 and LC_ALL=en_US.UTF-8 (0644)".to_string())
+        }
+        "skel" => {
+            let skel_subdirs = [
+                paths.fs_root.join("etc/skel/Media"),
+                paths.fs_root.join("etc/skel/torrents/rtorrent"),
+                paths.fs_root.join("etc/skel/torrents/deluge"),
+                paths.fs_root.join("etc/skel/torrents/qbittorrent"),
+            ];
+            for dir in &skel_subdirs {
+                ensure_dir_no_symlinks(&paths.fs_root, dir, 0o750, "user skel directory")?;
+            }
+            Ok("created canonical user skeleton directories under etc/skel".to_string())
+        }
+        "apachesudo" => {
+            let sudoers_d = paths.fs_root.join("etc/sudoers.d");
+            ensure_no_symlink_ancestors(&sudoers_d, "etc/sudoers.d")?;
+            if sudoers_d.is_dir() {
+                let entries = fs::read_dir(&sudoers_d).map_err(|e| {
+                    CliError::io(format!("reading directory {}", sudoers_d.display()), e)
+                })?;
+                for entry in entries {
+                    let entry = entry.map_err(|e| {
+                        CliError::io(format!("reading entry in {}", sudoers_d.display()), e)
+                    })?;
+                    let file_name = entry.file_name();
+                    let name_str = file_name.to_string_lossy();
+                    if name_str.starts_with("aether") {
+                        let target = entry.path();
+                        ensure_no_symlink_ancestors(&target, "legacy sudoers file")?;
+                        if target.is_file() || target.is_symlink() {
+                            fs::remove_file(&target).map_err(|e| {
+                                CliError::io(format!("removing legacy sudoers file {}", target.display()), e)
+                            })?;
+                        }
+                    }
+                }
+            }
+            store.save_config_value("SUDOERS_HARDENED", "true")?;
+            Ok("purged legacy /etc/sudoers.d/aether* files and recorded SUDOERS_HARDENED=true".to_string())
+        }
+        "build_modern" => {
+            let env_path = paths.fs_root.join("etc/aetherflow/aetherflow.env");
+            ensure_no_symlink_ancestors(&env_path, "etc/aetherflow/aetherflow.env")?;
+            if env_path.is_file() {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    fs::set_permissions(&env_path, fs::Permissions::from_mode(0o600)).map_err(|e| {
+                        CliError::io(format!("setting permissions on {}", env_path.display()), e)
+                    })?;
+                }
+                Ok("preserved existing /etc/aetherflow/aetherflow.env with 0600 mode".to_string())
+            } else {
+                let etc_af = paths.fs_root.join("etc/aetherflow");
+                ensure_dir_no_symlinks(&paths.fs_root, &etc_af, 0o750, "etc aetherflow dir")?;
+
+                let aes_key = generate_crypto_secret(32);
+                let jwt_secret = generate_crypto_secret(64);
+
+                let env_content = format!(
+                    "AES_MASTER_KEY={aes_key}\n\
+                     JWT_SECRET={jwt_secret}\n\
+                     PORT=8080\n\
+                     BIND_ADDR=0.0.0.0\n\
+                     ALLOWED_HOSTS=localhost,127.0.0.1\n\
+                     ALLOWED_CORS_ORIGIN=http://localhost:8080,http://127.0.0.1:8080\n\
+                     AF_DB_PATH=/var/lib/aetherflow/aetherflow.sqlite\n\
+                     DB_PATH=/var/lib/aetherflow/aetherflow.sqlite\n\
+                     AETHERFLOW_DB_PATH=/var/lib/aetherflow/aetherflow.sqlite\n\
+                     AETHERFLOW_RUNNER_SOCK=/run/aetherflow/runner.sock\n\
+                     PRIVILEGED_RUNNER_ENABLED=true\n\
+                     COOKIE_SECURE=false\n\
+                     GIN_MODE=release\n"
+                );
+
+                write_file_atomic_exclusive(
+                    &env_path,
+                    env_content.as_bytes(),
+                    0o600,
+                    "etc/aetherflow/aetherflow.env",
+                )?;
+                Ok("generated /etc/aetherflow/aetherflow.env with cryptographic keys and 0600 mode".to_string())
             }
         }
         "makedirs" => {
@@ -1603,6 +1845,40 @@ fn execute_single_rust_step(
             let stamp = hex::encode(hasher.finalize());
             store.save_config_value("HARDEN_PERMS_STAMP", &stamp[..16])?;
             Ok("applied directory and state file permission hardening".to_string())
+        }
+        "perms" => {
+            let env_path = paths.fs_root.join("etc/aetherflow/aetherflow.env");
+            if env_path.is_file() {
+                ensure_no_symlink_ancestors(&env_path, "etc/aetherflow/aetherflow.env")?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    fs::set_permissions(&env_path, fs::Permissions::from_mode(0o600)).map_err(|e| {
+                        CliError::io(format!("setting permissions on {}", env_path.display()), e)
+                    })?;
+                }
+            }
+            let var_lib = paths.fs_root.join("var/lib/aetherflow");
+            if var_lib.exists() {
+                ensure_no_symlink_ancestors(&var_lib, "var_lib_aetherflow")?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    fs::set_permissions(&var_lib, fs::Permissions::from_mode(0o700)).map_err(|e| {
+                        CliError::io(format!("setting permissions on {}", var_lib.display()), e)
+                    })?;
+                }
+            } else {
+                ensure_dir_no_symlinks(&paths.fs_root, &var_lib, 0o700, "var_lib_aetherflow")?;
+            }
+            Ok("normalized permissions on /etc/aetherflow/aetherflow.env (0600) and /var/lib/aetherflow (0700)".to_string())
+        }
+        "bbr" => {
+            let tuning_report = apply_network_tuning(&paths.fs_root, false)?;
+            Ok(format!(
+                "applied sysctl network tuning to {}",
+                tuning_report.config_path.display()
+            ))
         }
         other => Err(CliError::Unsupported {
             operation: format!("provision step {}", other),

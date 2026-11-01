@@ -356,8 +356,8 @@ try:
         if tag and (tag.lower() == "experimental" or target == "experimental" or "experimental" in tag.lower()):
             print(tag)
             break
-except Exception as exc:
-    raise RuntimeError(f"Unexpected failure: {exc}") from exc
+except Exception:
+    pass
 ' 2>/dev/null)"
             if [[ -n "${exp_tag}" ]]; then
                 echo "${exp_tag}"
@@ -394,7 +394,14 @@ except Exception:
         return 0
     fi
 
-    [[ -z "${releases_json}" ]] && return 1
+    if [[ -z "${releases_json}" ]]; then
+        local latest_url latest_tag
+        latest_url="$(curl -fsSL --max-time 15 -o /dev/null -w '%{url_effective}' "https://github.com/${GITHUB_REPO}/releases/latest" 2>/dev/null)" || return 1
+        latest_tag="${latest_url##*/}"
+        [[ "${latest_url}" == "https://github.com/${GITHUB_REPO}/releases/tag/"* && "${latest_tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+        printf '%s\n' "${latest_tag}"
+        return 0
+    fi
 
     if command -v python3 &>/dev/null; then
         local stable_tag=""
@@ -466,7 +473,7 @@ pull_prebuilt_artifact() {
 
     log_info "SHA-256 checksum verified. Extracting into ${RELEASE_DIR}..."
     # pull_prebuilt_artifact is called from an if, which disables set -e.
-    if ! tar -xzf "${tmp_dir}/${ARTIFACT_NAME}" -C "${RELEASE_DIR}"; then
+    if ! tar --no-same-owner --no-same-permissions -xzf "${tmp_dir}/${ARTIFACT_NAME}" -C "${RELEASE_DIR}"; then
         log_error "Failed to extract ${ARTIFACT_NAME}."
         rm -rf "${tmp_dir}"
         return 1
@@ -528,8 +535,14 @@ build_from_source() {
     if [[ -d "${RELEASE_DIR}/backend-rs" ]] && command -v cargo &>/dev/null; then
         log_info "Compiling single-binary AetherFlow Rust control plane (backend-rs)..."
         cd "${RELEASE_DIR}/backend-rs" || log_fatal "Rust backend directory missing."
-        cargo build --release --bin aetherflow-api >> "${LOG_FILE}" 2>&1
+        cargo build --release --bin aetherflow-api --bin af >> "${LOG_FILE}" 2>&1
         cp -f "target/release/aetherflow-api" "${RELEASE_DIR}/aetherflow-api"
+        if [[ -f "target/release/af" ]]; then
+            mkdir -p "${RELEASE_DIR}/bin"
+            cp -f "target/release/af" "${RELEASE_DIR}/af"
+            cp -f "target/release/af" "${RELEASE_DIR}/bin/af"
+            chmod 0755 "${RELEASE_DIR}/af" "${RELEASE_DIR}/bin/af"
+        fi
     else
         log_info "Compiling single-binary AetherFlow Go control plane..."
         cd "${RELEASE_DIR}/backend" || log_fatal "Backend directory missing."
@@ -611,6 +624,38 @@ release_scaffold() {
 ###############################################################################
 # STAGE 1.5: State Snapshot (Online SQLite Backup + SHA-256 Manifest)
 ###############################################################################
+prepare_release_permissions() {
+    local service_user service_group
+    service_user="$(systemctl show aetherflow-api.service -p User --value 2>/dev/null || true)"
+    service_user="${service_user:-aetherflow}"
+    if [[ "${DRY_RUN}" == false ]]; then
+        service_group="$(id -gn "${service_user}")" || return 1
+        if [[ "${EUID}" -eq 0 ]]; then
+            chown -R --no-dereference "root:${service_group}" "${RELEASE_DIR}" || return 1
+        fi
+    fi
+    find "${RELEASE_DIR}" -type d -exec chmod 0755 {} + || return 1
+    find "${RELEASE_DIR}" -type f -exec chmod a+r,go-w {} + || return 1
+    chmod 0755 "${RELEASE_DIR}/aetherflow-api" || return 1
+    if [[ -f "${RELEASE_DIR}/af" ]]; then
+        chmod 0755 "${RELEASE_DIR}/af" || return 1
+    fi
+    if [[ "${DRY_RUN}" == false ]]; then
+        if [[ "${EUID}" -eq 0 ]]; then
+            if ! runuser -u "${service_user}" -- sh -c 'cd "$1" && test -r .version && test -x ./aetherflow-api' sh "${RELEASE_DIR}"; then
+                log_error "Release is inaccessible to service user ${service_user}. Refusing symlink swap."
+                return 1
+            fi
+        else
+            if ! sh -c 'cd "$1" && test -r .version && test -x ./aetherflow-api' sh "${RELEASE_DIR}"; then
+                log_error "Release is inaccessible to service user ${service_user}. Refusing symlink swap."
+                return 1
+            fi
+        fi
+    fi
+    log_info "Release permissions normalized and service access verified."
+}
+
 state_snapshot() {
     log_info "=== STAGE 1.5: State Snapshot ==="
     if [[ -z "${RESOLVED_DB_PATH}" ]]; then
@@ -985,6 +1030,7 @@ case "${COMMAND}" in
     deploy)
         ensure_fhs_layout
         release_scaffold
+        prepare_release_permissions || exit 1
         state_snapshot || exit 1
         symlink_swap
         if ! health_probe; then

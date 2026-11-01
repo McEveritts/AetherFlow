@@ -21,6 +21,15 @@
 | `CSRF_ENABLED` | Enable CSRF middleware | `false` |
 | `OIDC_ISSUER` | OIDC issuer URL | Auto-detected from request |
 | `ADMIN_EMAIL` | Email for auto-admin role | None |
+| `AF_GITHUB_TOKEN` | Optional token for GitHub update discovery; falls back to `GITHUB_TOKEN`, then `GH_TOKEN` | Unauthenticated requests |
+
+### Release Update Safety
+
+- CI release archives must use a `0755` staging root and normalized numeric ownership, not the `0700` directory produced by `mktemp -d`.
+- The release manager normalizes extracted directories to `0755`, removes group/other write access from files, and sets root ownership with the service user's group before activation. It verifies service-user access before switching `current`; state snapshots retain their separate restrictive permissions.
+- Stable deployments can resolve GitHub's public latest-release redirect when the REST API is unavailable. The redirect must name the expected repository and a stable version tag.
+- API update checks share a five-minute cache, cache transient failures for one minute, and honor GitHub rate-limit reset and `Retry-After` headers. Rate-limited responses include `error: github_rate_limited` and an RFC3339 `retryAt` value instead of silently reporting no update.
+- Configure optional GitHub credentials through the protected service environment, never source-controlled configuration or command-line arguments. A token is not required for cached public-release checks.
 
 ### Generate Secrets
 

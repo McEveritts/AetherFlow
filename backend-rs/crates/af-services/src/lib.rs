@@ -1,5 +1,6 @@
 pub mod cluster_daemon;
 pub mod mutators;
+pub mod plugins;
 pub mod workers;
 
 use af_models::{Package, PackageAutomation};
@@ -67,6 +68,8 @@ fn load_config_file_or_embedded(env_var: &str, filename: &str, embedded: &str) -
         PathBuf::from("config").join(filename),
         PathBuf::from("backend/config").join(filename),
         PathBuf::from("../backend/config").join(filename),
+        PathBuf::from("../../backend/config").join(filename),
+        PathBuf::from("../../../backend/config").join(filename),
         PathBuf::from("/opt/AetherFlow/current/config").join(filename),
         PathBuf::from("/opt/AetherFlow/backend/config").join(filename),
     ];
@@ -1518,11 +1521,15 @@ mod tests {
     #[test]
     fn test_embedded_package_catalog_loads_all_apps() {
         let catalog = get_package_catalog().unwrap();
-        assert!(catalog.len() >= 69);
+        assert!(catalog.len() >= 73);
         assert!(catalog.iter().any(|p| p.name == "jellyfin"));
         assert!(catalog.iter().any(|p| p.name == "kasmvnc"));
         assert!(catalog.iter().any(|p| p.name == "mcvnc"));
         assert!(catalog.iter().any(|p| p.name == "xrdp"));
+        assert!(catalog.iter().any(|p| p.name == "tailscale"));
+        let ts_bp = get_blueprint("tailscale").expect("tailscale blueprint");
+        assert_eq!(ts_bp.service_name, "tailscaled");
+        assert!(ts_bp.is_network_app);
     }
 
     #[test]

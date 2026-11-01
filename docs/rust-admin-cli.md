@@ -120,13 +120,14 @@ af release migrate-systemd [--config <path>]
 
 - By default, `deploy` and `rollback` dispatch `SelfUpdateRequest` to `/v1/self-update` on `af-runner` (which invokes `deploy/release-manager.sh` in the root runner cgroup). Passing `--local` (or `--root <dir> --dry-run`) invokes `af_release::ReleaseEngine` (`ReleaseConfig::for_root` / `ReleaseConfig::load_from_process_env` and `ReleaseOutcome::{Deploy, Rollback, Cleanup, MigrateSystemd}`) directly.
 
-### 6. Host Backup & Non-Destructive Restore Preflight (`af backup`)
+### 6. Host Backup & Coordinated Staged Restore (`af backup`)
 
 ```bash
 af backup create [--archive | --sqlite-only] [--backup-dir <dir>] [--db-path <file>] [--app-version <ver>] [--chunk-size <size>] [--operator-privileged]
 af backup list [--backup-dir <dir>]
 af backup verify <filename> [--backup-dir <dir>]
 af backup restore-preflight <filename> --target-root <staging_dir> [--backup-dir <dir>] [--host-version <ver>] [--allow-staging-overwrite]
+af backup restore <filename> --staging-root <staging_dir> [--backup-dir <dir>] [--host-version <ver>] [--allow-staging-overwrite] [--operator-privileged]
 af backup delete <filename> [--backup-dir <dir>] [--operator-privileged]
 af backup prune [--backup-dir <dir>] [--max-retained <n>] [--retention-days <days>] [--operator-privileged]
 af backup chunk <filename> <size> [--backup-dir <dir>] [--operator-privileged]
@@ -134,10 +135,28 @@ af backup assemble --output <filename> --sha256 <hex> <chunk1> [chunk2...] [--ba
 af backup ownership
 ```
 
-- **Non-Destructive Restore Preflight Only**: `af backup restore-preflight` validates `.sha256` sidecars, `.manifest.json` schema/semver compatibility, tar entry headers (rejecting `..`, rooted paths, and symlinks/hardlinks), and destination collisions under `--target-root` without writing to disk.
-- **Destructive Live Restore Disabled**: `af backup restore` calls `af_host::execute_destructive_restore`, which always returns `HostBackupError::DestructiveRestoreUnsupported` (exit code `6`).
+- **Non-Destructive Restore Preflight (`restore-preflight`)**: Validates `.sha256` sidecars, `.manifest.json` schema/semver compatibility, tar entry headers (rejecting `..`, rooted paths, and symlinks/hardlinks), and destination collisions under `--target-root` without writing to disk.
+- **Coordinated Staged Restore (`restore --staging-root <dir>`)**: Calls `af_host::execute_staged_restore` to extract verified archive entries into an isolated staging directory (`0700` dirs / `0600` files), re-verifying every extracted file's SHA-256 digest and running `PRAGMA quick_check` on any extracted SQLite snapshot. Calling `af backup restore` without `--staging-root` fails closed with `HostBackupError::DestructiveRestoreUnsupported` (exit code `6`).
 
-### 7. Resumable Bare-Metal Provisioning Foundation (`af provision`)
+### 7. Host Maintenance Utilities (`af maintenance` & Top-Level Aliases)
+
+```bash
+af maintenance tune [--apply]
+af tune [--apply]
+
+af maintenance sentinel [--log-path <path>] [--threshold <n>]
+af sentinel [--log-path <path>] [--threshold <n>]
+
+af maintenance clean-logs [--log-dir <dir>] [--max-age-days <days>]
+af clean-logs [--log-dir <dir>] [--max-age-days <days>]
+
+af maintenance showspace [--home-dir <dir>]
+af showspace [--home-dir <dir>]
+```
+
+- Delegates directly to `af_host::maintenance` (`apply_network_tuning`, `sentinel_scan_auth_log`, `clean_system_logs`, and `inspect_home_disk_space`).
+
+### 8. Resumable Bare-Metal Provisioning Foundation (`af provision`)
 
 ```bash
 af provision preflight [--os-release <path>] [--require-root]
@@ -149,26 +168,20 @@ af provision overlay-config <source> <target> [--force]
 af provision reset --confirm
 ```
 
-- **State File Compatibility & Hardening**: Reads and writes `/install/.aetherflow.state` with header `# STATE_VERSION=2` and `/install/.aetherflow.conf`, matching `setup/modules/06-state.sh`. Verifies all path ancestors against symlinks, writes via exclusive `create_new(true)` temporary files with `0600` private permissions at creation time and `sync_all()` before atomic `rename`, and guards execution with crash-safe PID lockfiles (`/run/aetherflow-setup.lock`).
+- **14 Rust-Native Foundation Steps**: `checkroot`, `logcheck`, `checkkernel`, `makedirs`, `boot`, `harden_perms`, `bashrc`, `hostname`, `locale`, `skel`, `apachesudo`, `build_modern`, `bbr`, and `perms` execute natively in Rust with `# STATE_VERSION=2` persistence, ancestor symlink rejection, and atomic writes.
 - **Safe Config Overlay**: `af provision overlay-config` tracks stock SHA-256 digests in `<target>.aetherflow-sha256` and backs up operator-modified files to `<target>.user-backup.<timestamp>` (`0600`) before applying updates.
 
 ---
 
-## Remaining Unsupported Migrations & Production Boundaries
+## Remaining Intentional Boundaries
 
 1. **Interactive `whiptail` TUI (`af` with no arguments)**:
    Calling `af` without arguments returns `CliExitCode::UnsupportedOperation` (`6`). Interactive dialog menus remain in `packages/system/af` and `setup/AetherFlow-Setup`.
-2. **Full Interactive Shell Installer (`setup/AetherFlow-Setup`)**:
-   33 of the 39 canonical `ALL_STEPS` (interactive prompts, `apt` repo setup, kernel `bbr`, `vsftpd`, `ffmpeg`, `apacheconf`, `fix_cert`, etc.) remain `RetainedShellBootstrap` steps in `setup/modules/*.sh`. `af provision` provides the persisted `# STATE_VERSION=2` state store, preflight checks, safe config overlay, and the 6 core FHS/systemd/permission foundation steps (`checkroot`, `logcheck`, `checkkernel`, `makedirs`, `boot`, `harden_perms`).
-3. **Destructive In-Place Live Restore (`af backup restore`)**:
-   Intentionally unsupported in `af-host` and `af-cli` to prevent corrupting live SQLite WAL state or open service configs. Only non-destructive `af backup restore-preflight` is supported.
-4. **Privileged Runner Socket Route for Host Backups**:
-   `af-runner` does not yet expose a `/v1/backup` socket endpoint; `af backup` executes locally via `af-host` and requires root privileges (`UID == 0`), `--operator-privileged`, or an isolated `--root <dir>` when writing to system paths.
-5. **Default-Off Rust Package Dispatch (`AETHERFLOW_ENABLE_RUST_PACKAGES=1`) & Ongoing Hardening**:
-   Native Rust package execution in `af-runner` is gated off by default unless `AETHERFLOW_ENABLE_RUST_PACKAGES=1` is set, and runtime production release/restore operations remain on Bash until `af-host`, `af-release`, and `af-runner` remediation and Linux verification gates complete.
+2. **Interactive Shell Bootstrap (`setup/AetherFlow-Setup`)**:
+   14 of the 39 canonical `ALL_STEPS` (`checkroot`, `logcheck`, `checkkernel`, `makedirs`, `boot`, `harden_perms`, `bashrc`, `hostname`, `locale`, `skel`, `apachesudo`, `build_modern`, `bbr`, `perms`) execute natively in Rust; the remaining 25 interactive/APT steps (`repos`, `pkgs`, `apacheconf`, `fix_cert`, `vsftpd`, `ffmpeg`, etc.) remain `RetainedShellBootstrap` steps in `setup/modules/*.sh`.
+3. **Uncoordinated Live Root Restore**:
+   `af backup restore` requires `--staging-root <dir>` (`execute_staged_restore`) and refuses uncoordinated live `/` overwrites (`DestructiveRestoreUnsupported`).
 
 ## Isolated Linux Validation
 
-`cargo test -p af-cli` passes all 11 tests. Additional binary smoke checks cover JSON help/status, side-effect-free provision/package dry-runs, live Unix-socket progress arriving before the server finishes its response, and uncontaminated JSON output.
-
-Provisioning uses canonical `/opt/AetherFlow` paths and a persistent advisory `.rust-guard` inode alongside the legacy PID lockfile. The advisory guard serializes Rust stale-PID recovery and is never unlinked; the PID file remains compatible with shell inspection. The legacy shell bootstrap does not honor the new advisory guard, so do not run shell and Rust provisioning concurrently. Full interactive setup and service-account provisioning remain shell-owned; these foundation tests are not a live-host provisioning certification.
+`cargo test -p af-cli` passes all 13 unit tests covering CLI parsing, runner IPC requests, incremental progress streaming, backup/staged-restore commands, maintenance commands (`tune`, `sentinel`, `clean-logs`, `showspace`), and all 14 Rust-native provisioning steps in isolated roots.

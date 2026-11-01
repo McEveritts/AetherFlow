@@ -66,7 +66,9 @@ directory.mkdir(parents=True, exist_ok=True)
         for label, triple in (("amd64", "x86_64-unknown-linux-gnu"),
                               ("arm64", "aarch64-unknown-linux-gnu")):
             artifact = self.root / "output" / ("linux-" + label) / "aetherflow-api"
+            cli_artifact = self.root / "output" / ("linux-" + label) / "af"
             self.assertEqual(artifact.read_text(), triple)
+            self.assertEqual(cli_artifact.read_text(), triple)
             self.assertTrue((self.root / "output" / ("aetherflow-linux-" + label + ".tar.gz")).exists())
         self.assertEqual(len((self.root / "output/SHA256SUMS").read_text().splitlines()), 2)
 

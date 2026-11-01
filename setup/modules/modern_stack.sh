@@ -146,8 +146,31 @@ _build_modern_stack() {
         fi
     fi
 
-    # ── Compile Go Single Binary with Embedded UI Assets ─────────────────
-    if [ -d "/opt/AetherFlow/backend" ]; then
+    # ── Build or Deploy Rust Control Plane (backend-rs) with Go Fallback ────
+    if [[ -f "/opt/AetherFlow/deploy/release-manager.sh" ]] && [[ "${AETHERFLOW_BOOTSTRAP_FROM_RELEASE:-0}" == "1" ]]; then
+        have_backend=true
+        bash /opt/AetherFlow/deploy/release-manager.sh deploy --channel "${AETHERFLOW_RELEASE_CHANNEL:-experimental}" || {
+            echo "Prebuilt release deployment failed." >&2
+            return 1
+        }
+    elif [ -f "/opt/AetherFlow/backend-rs/Cargo.toml" ] && command -v cargo >/dev/null 2>&1; then
+        have_backend=true
+        (
+            cd /opt/AetherFlow/backend-rs || exit 1
+            export PATH="/root/.cargo/bin:/usr/local/nodejs/bin:${PATH}"
+            _af_apt_install gcc build-essential pkg-config libssl-dev || exit 1
+            mkdir -p /opt/AetherFlow/backend/web/dist /var/lib/aetherflow
+            cargo build --release --bin aetherflow-api --bin af || exit 1
+            mkdir -p /opt/AetherFlow/current
+            cp -f target/release/aetherflow-api /opt/AetherFlow/current/aetherflow-api
+            cp -f target/release/af /opt/AetherFlow/current/af
+            chmod 0755 /opt/AetherFlow/current/aetherflow-api /opt/AetherFlow/current/af
+            ln -sfn /opt/AetherFlow/current/af /usr/local/bin/af
+        ) || {
+            echo "Rust backend-rs compilation failed." >&2
+            return 1
+        }
+    elif [ -d "/opt/AetherFlow/backend" ] && [ -f "/opt/AetherFlow/backend/main.go" ]; then
         have_backend=true
         (
             cd /opt/AetherFlow/backend || exit 1
@@ -170,6 +193,10 @@ _build_modern_stack() {
         }
     fi
 
+    if [[ -x "/opt/AetherFlow/current/af" ]]; then
+        ln -sfn /opt/AetherFlow/current/af /usr/local/bin/af
+    fi
+
     # ── Create system user for systemd services ──────────────────────────
     if ! id -u aetherflow >/dev/null 2>&1; then
         useradd --system --no-create-home --shell /usr/sbin/nologin aetherflow || true
@@ -179,8 +206,11 @@ _build_modern_stack() {
     # Enforce Least-Privilege Boundary: Remove legacy sudoers permissions
     rm -f /etc/sudoers.d/aether* 2>/dev/null || true
 
-    # Ensure backend data dir is owned by the service user
-    if [[ "${have_backend}" == "true" ]]; then
+    # Ensure FHS and legacy backend data dirs are owned by the service user
+    mkdir -p /var/lib/aetherflow
+    chmod 0700 /var/lib/aetherflow
+    chown -R aetherflow:aetherflow /var/lib/aetherflow 2>/dev/null || true
+    if [[ "${have_backend}" == "true" ]] && [[ -d "/opt/AetherFlow/backend/data" ]]; then
         chown -R aetherflow:aetherflow /opt/AetherFlow/backend/data 2>/dev/null || true
     fi
 
@@ -250,8 +280,9 @@ BIND_ADDR=0.0.0.0
 ALLOWED_HOSTS=${allowed_hosts}
 ALLOWED_CORS_ORIGIN=${cors_origins}
 AETHERFLOW_BASE_DOMAIN=${saved_domain}
-DB_PATH=/opt/AetherFlow/backend/data/aetherflow.sqlite
-AETHERFLOW_DB_PATH=/opt/AetherFlow/backend/data/aetherflow.sqlite
+AF_DB_PATH=/var/lib/aetherflow/aetherflow.sqlite
+DB_PATH=/var/lib/aetherflow/aetherflow.sqlite
+AETHERFLOW_DB_PATH=/var/lib/aetherflow/aetherflow.sqlite
 AETHERFLOW_RUNNER_SOCK=/run/aetherflow/runner.sock
 PRIVILEGED_RUNNER_ENABLED=true
 COOKIE_SECURE=false

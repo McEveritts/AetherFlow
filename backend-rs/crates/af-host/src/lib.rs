@@ -25,6 +25,7 @@
 
 pub mod backup;
 pub mod error;
+pub mod maintenance;
 pub mod manifest;
 pub mod restore;
 pub mod snapshot;
@@ -38,6 +39,11 @@ pub use backup::{
     DEFAULT_MAX_RETAINED_BACKUPS, DEFAULT_RETENTION_DAYS,
 };
 pub use error::{HostBackupError, HostBackupResult};
+pub use maintenance::{
+    apply_network_tuning, clean_system_logs, compute_sysctl_network_tuning,
+    format_human_space_bytes, inspect_home_disk_space, sentinel_scan_auth_log, CleanLogReport,
+    CleanedLogFile, HomeSpaceEntry, SentinelScanReport, TuningReport, DEFAULT_SENTINEL_THRESHOLD,
+};
 pub use manifest::{
     parse_semver_triplet, BackupManifest, BackupManifestEntry, BackupTargetKind,
     CompatibilityReport, SqliteSnapshotMetadata, BACKUP_MANIFEST_FORMAT,
@@ -45,9 +51,10 @@ pub use manifest::{
     MIN_SUPPORTED_MANIFEST_SCHEMA_VERSION, SUPPORTED_APP_MAJOR_VERSION,
 };
 pub use restore::{
-    execute_destructive_restore, plan_restore_from_manifest, preflight_restore_directory,
-    preflight_tar_gz_archive, OverwritePolicy, PlannedRestoreAction, RestorePlan, RestorePlanItem,
-    RestorePreflightOptions,
+    execute_coordinated_restore, execute_destructive_restore, execute_staged_restore,
+    plan_restore_from_manifest, preflight_restore_directory, preflight_tar_gz_archive,
+    OverwritePolicy, PlannedRestoreAction, RestorePlan, RestorePlanItem, RestorePreflightOptions,
+    RestoreReceipt,
 };
 pub use snapshot::{
     snapshot_sqlite_database, snapshot_sqlite_with_conn, verify_sqlite_snapshot_integrity,
@@ -856,5 +863,197 @@ mod tests {
         }
         let ver = verify_file_with_sidecar(&artifact).unwrap();
         assert!(ver.verified);
+    }
+
+    #[test]
+    fn sentinel_scan_auth_log_aggregates_ipv4_and_ipv6_and_flags_offenders() {
+        let tmp = TempTestDir::new("sentinel-test");
+        let log_path = tmp.path().join("auth.log");
+
+        let log_content = "\
+Nov  1 04:01:00 host sshd[100]: Failed password for invalid user root from 192.168.1.100 port 45123 ssh2
+Nov  1 04:01:02 host sshd[101]: Failed password for invalid user admin from 192.168.1.100 port 45124 ssh2
+Nov  1 04:01:05 host sshd[102]: Failed password for root from 192.168.1.100 port 45125 ssh2
+Nov  1 04:01:10 host sshd[103]: Invalid user test from 2001:db8::1 port 50000
+Nov  1 04:01:12 host sshd[104]: Failed password for test from 2001:db8::1 port 50001
+Nov  1 04:01:15 host sshd[105]: Failed password for test from 2001:db8::1 port 50002
+Nov  1 04:01:20 host sshd[106]: Failed password for operator from 10.0.0.5 port 40000
+Nov  1 04:01:25 host sshd[107]: Accepted publickey for admin from 10.0.0.1 port 38000 ssh2
+";
+        fs::write(&log_path, log_content).unwrap();
+
+        // Threshold = 3: 192.168.1.100 (3) and 2001:db8::1 (3) meet threshold, 10.0.0.5 (1) does not
+        let report = sentinel_scan_auth_log(&log_path, 3).expect("sentinel scan succeeds");
+        assert_eq!(report.scanned_lines, 8);
+        assert_eq!(report.failed_event_count, 7);
+        assert_eq!(report.threshold, 3);
+        assert_eq!(report.ip_counts.get("192.168.1.100"), Some(&3));
+        assert_eq!(report.ip_counts.get("2001:db8::1"), Some(&3));
+        assert_eq!(report.ip_counts.get("10.0.0.5"), Some(&1));
+        assert_eq!(
+            report.offending_ips,
+            vec!["192.168.1.100".to_string(), "2001:db8::1".to_string()]
+        );
+
+        // Threshold = 5: none meet threshold
+        let report5 = sentinel_scan_auth_log(&log_path, 5).unwrap();
+        assert!(report5.offending_ips.is_empty());
+    }
+
+    #[test]
+    fn sysctl_tuning_computes_exact_parameters_and_writes_atomically() {
+        let tmp = TempTestDir::new("sysctl-tune");
+        let root = tmp.path().join("sysctl-root");
+
+        let settings = compute_sysctl_network_tuning();
+        assert_eq!(settings.get("net.core.rmem_max").unwrap(), "67108864");
+        assert_eq!(settings.get("net.core.wmem_max").unwrap(), "67108864");
+        assert_eq!(
+            settings.get("net.ipv4.tcp_rmem").unwrap(),
+            "4096 87380 33554432"
+        );
+        assert_eq!(
+            settings.get("net.ipv4.tcp_wmem").unwrap(),
+            "4096 65536 33554432"
+        );
+        assert_eq!(settings.get("net.core.default_qdisc").unwrap(), "fq");
+        assert_eq!(
+            settings.get("net.ipv4.tcp_congestion_control").unwrap(),
+            "bbr"
+        );
+
+        // Dry-run mode must not create any file on disk
+        let dry_rep = apply_network_tuning(&root, true).expect("dry run succeeds");
+        assert!(dry_rep.dry_run);
+        assert!(!dry_rep.applied);
+        assert!(!dry_rep.config_path.exists());
+
+        // Live mode creates /etc/sysctl.d/99-aetherflow-tune.conf atomically
+        let live_rep = apply_network_tuning(&root, false).expect("live tuning succeeds");
+        assert!(live_rep.applied);
+        assert!(!live_rep.dry_run);
+        assert!(live_rep.config_path.is_file());
+
+        let content = fs::read_to_string(&live_rep.config_path).unwrap();
+        assert!(content.contains("net.core.rmem_max = 67108864"));
+        assert!(content.contains("net.ipv4.tcp_congestion_control = bbr"));
+    }
+
+    #[test]
+    fn clean_system_logs_truncates_oversized_files_safely() {
+        let tmp = TempTestDir::new("clean-log");
+        let root = tmp.path().join("rootfs");
+
+        let var_log = root.join("var/log");
+        let lock_dir = root.join("srv/aetherflow/lock");
+        fs::create_dir_all(&var_log).unwrap();
+        fs::create_dir_all(&lock_dir).unwrap();
+
+        let big_log = var_log.join("daemon.log");
+        let small_log = var_log.join("small.log");
+        let lock_log = lock_dir.join("worker.log");
+
+        fs::write(&big_log, vec![b'a'; 10_000]).unwrap();
+        fs::write(&small_log, vec![b'b'; 500]).unwrap();
+        fs::write(&lock_log, vec![b'c'; 8_000]).unwrap();
+
+        // 1. Dry run with threshold 1000 bytes: identifies big_log and lock_log without modifying disk
+        let dry_rep = clean_system_logs(&root, 1000, true).unwrap();
+        assert!(dry_rep.dry_run);
+        assert_eq!(dry_rep.cleaned_files.len(), 2);
+        assert_eq!(dry_rep.total_bytes_freed, 18_000);
+        assert_eq!(fs::metadata(&big_log).unwrap().len(), 10_000);
+        assert_eq!(fs::metadata(&lock_log).unwrap().len(), 8_000);
+
+        // 2. Live clean: truncates oversized logs to 0 bytes while small_log remains 500 bytes
+        let live_rep = clean_system_logs(&root, 1000, false).unwrap();
+        assert!(!live_rep.dry_run);
+        assert_eq!(live_rep.cleaned_files.len(), 2);
+        assert_eq!(fs::metadata(&big_log).unwrap().len(), 0);
+        assert_eq!(fs::metadata(&lock_log).unwrap().len(), 0);
+        assert_eq!(fs::metadata(&small_log).unwrap().len(), 500);
+    }
+
+    #[test]
+    fn inspect_home_disk_space_calculates_per_user_usage() {
+        let tmp = TempTestDir::new("showspace-test");
+        let root = tmp.path().join("rootfs");
+
+        let user1_dir = root.join("home/alice");
+        let user2_dir = root.join("home/bob/downloads");
+        fs::create_dir_all(&user1_dir).unwrap();
+        fs::create_dir_all(&user2_dir).unwrap();
+
+        fs::write(user1_dir.join("test.txt"), vec![b'x'; 2048]).unwrap();
+        fs::write(user2_dir.join("data.bin"), vec![b'y'; 4096]).unwrap();
+
+        let entries = inspect_home_disk_space(&root).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].user, "alice");
+        assert_eq!(entries[0].bytes, 2048);
+        assert_eq!(entries[0].human, "2.0KB");
+
+        assert_eq!(entries[1].user, "bob");
+        assert_eq!(entries[1].bytes, 4096);
+        assert_eq!(entries[1].human, "4.0KB");
+    }
+
+    #[test]
+    fn execute_coordinated_restore_safely_extracts_verifies_and_cleans_stale_wal() {
+        let tmp = TempTestDir::new("staged-restore");
+        let host_root = tmp.path().join("host");
+        let live_db = host_root.join("var/lib/aetherflow/aetherflow.sqlite");
+        create_sample_wal_database(&live_db);
+
+        let etc_af = host_root.join("etc/AetherFlow");
+        fs::create_dir_all(&etc_af).unwrap();
+        fs::write(etc_af.join("cluster.conf"), b"node_role=replica\n").unwrap();
+
+        let cfg = HostBackupConfig::for_isolated_root(&host_root, "v4.0.0");
+        let receipt =
+            create_host_archive_backup(&cfg, Some("2026-11-01-restore")).expect("create backup");
+
+        let stage_root = tmp.path().join("staging-restore-target");
+        fs::create_dir_all(&stage_root).unwrap();
+
+        // Plant stale -wal and -shm files in the staging target where the database will be restored
+        let stale_wal = stage_root.join("var/lib/aetherflow/aetherflow.sqlite-wal");
+        let stale_shm = stage_root.join("var/lib/aetherflow/aetherflow.sqlite-shm");
+        fs::create_dir_all(stale_wal.parent().unwrap()).unwrap();
+        fs::write(&stale_wal, b"stale-wal-bytes-should-be-purged").unwrap();
+        fs::write(&stale_shm, b"stale-shm-bytes-should-be-purged").unwrap();
+
+        let opts = RestorePreflightOptions {
+            host_app_version: "v4.0.0".to_string(),
+            max_supported_sqlite_user_version: Some(50),
+            overwrite_policy: OverwritePolicy::AllowRegularFilesInStaging,
+            require_artifact_sidecar: true,
+        };
+
+        let restore_receipt =
+            execute_coordinated_restore(&receipt.primary_artifact_path, &stage_root, opts)
+                .expect("coordinated staged restore succeeds");
+
+        assert!(restore_receipt.sqlite_verified);
+        assert_eq!(restore_receipt.backup_id, receipt.manifest.backup_id);
+        assert!(!stale_wal.exists(), "stale -wal file must be removed");
+        assert!(!stale_shm.exists(), "stale -shm file must be removed");
+
+        // Verify restored SQLite database is valid and readable
+        let restored_db = stage_root.join("var/lib/aetherflow/aetherflow.sqlite");
+        assert!(restored_db.is_file());
+        let (uv, _, ic) = verify_sqlite_snapshot_integrity(&restored_db).unwrap();
+        assert_eq!(uv, 42);
+        assert_eq!(ic.to_lowercase(), "ok");
+
+        // System root overwrite must fail closed
+        let bad_opts = RestorePreflightOptions::default();
+        let err_root = execute_coordinated_restore(
+            &receipt.primary_artifact_path,
+            Path::new("/"),
+            bad_opts,
+        )
+        .unwrap_err();
+        assert!(err_root.is_security_rejection());
     }
 }

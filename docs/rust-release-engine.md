@@ -85,13 +85,11 @@ To guarantee zero-downtime safety during migration:
 2. **OS User Ownership (`chown aetherflow:aetherflow`)**:
    - `af-release` enforces `0700` directory permissions on `DATA_DIR` and `data-snapshot/`, and `0600` file permissions **before writing** on SQLite databases, snapshots, manifests, recovery journals, and `.env` files on Unix.
    - During Stage 0 migration and Stage 4 database restore, `af-release` preserves existing `(uid, gid)` metadata from the previous database/secret file or resolves the `aetherflow` service user via `getpwnam_r` (`lchown`) so files created while running as `root` (`af-runner`) remain readable by `User=aetherflow` (`aetherflow-api.service`).
-3. **Parent Workspace Integration Steps**:
-   - `crates/af-release` is registered in `backend-rs/Cargo.toml` with `rusqlite = { workspace = true, features = ["backup"] }`.
-   - In `af-runner/src/lib.rs` (`handle_self_update`), call `af_release::validate_self_update_request(&req)` so the `"experimental"` channel is accepted alongside `"stable"` and `"nightly"`, and either invoke `af_release::execute_self_update_sync` inside `tokio::task::spawn_blocking` or retain `deploy/release-manager.sh` until rollout sign-off.
-
+3. **Parent Workspace & Runner Integration (`af-runner` & `af-api`)**:
+   - `crates/af-release` is registered in `backend-rs/Cargo.toml` and wired into `af-runner/src/lib.rs` (`handle_self_update`), `af-api/src/storage.rs` (`run_update`), and `af-cli` (`af release`).
+   - `handle_self_update` validates incoming requests with `af_release::validate_self_update_request(&req)` (supporting `stable`, `nightly`, and `experimental` channels) and executes `af_release::execute_self_update_sync` inside `tokio::task::spawn_blocking` when `AETHERFLOW_USE_RUST_RELEASE=1` is set (or when `deploy/release-manager.sh` is absent), with automatic fallback to `deploy/release-manager.sh` in its detached cgroup.
+   - `artifact::prepare_release_permissions` normalizes executable permissions (`0755`) on `aetherflow-api`, `af` (`bin/af`), `deploy/release-manager.sh`, `packages/system/*`, and `packages/package/{install,remove,update}/*` after extraction, and `ReqwestArtifactProvider` falls back to `/releases/latest` HTTP redirect location headers when the GitHub JSON API is rate-limited on the `stable` channel.
 
 ## Isolated Linux Validation
 
-`cargo test -p af-release` passes all 15 tests, including release extraction collisions, ancestor symlink rejection, interrupted deployment recovery, checksum-verified database recovery, failed service-stop handling, private permissions, and managed-current-link validation. Atomic file operations preserve existing parent-directory permissions; migrating secret files enforces the requested `0600` mode rather than retaining permissive legacy mode bits. The intentional `current` symlink is resolved only to a direct, symlink-free child of the configured releases directory before reading packaged systemd units.
-
-These tests use temporary filesystem layouts and mocked service lifecycles. They do not constitute a live systemd rollout test, and production self-update remains Bash-backed. Path-based checks still assume trusted parent directories; they are not a kernel-enforced replacement for dirfd-relative no-symlink operations.
+`cargo test -p af-release` passes all 18 unit tests, including release extraction collisions, ancestor symlink rejection, `prepare_release_permissions` normalization, `/releases/latest` redirect tag parsing, interrupted deployment recovery, checksum-verified database recovery, failed service-stop handling, private permissions, and managed-current-link validation.

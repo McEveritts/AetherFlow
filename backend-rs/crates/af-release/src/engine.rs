@@ -540,6 +540,20 @@ where
             }
         };
 
+        if let Err(err) = crate::artifact::prepare_release_permissions(&release_dir) {
+            let _ = fs::remove_dir_all(&release_dir);
+            recovery.phase = ReleasePhase::Failed;
+            recovery.last_error = Some(err.to_string());
+            let _ = recovery.save(&cfg.releases_dir);
+            append_jsonl_log(&cfg.log_file, "ERROR", &err.to_string());
+            return Err(err);
+        }
+        append_jsonl_log(
+            &cfg.log_file,
+            "INFO",
+            "Release permissions normalized and service access verified.",
+        );
+
         // STAGE 1.5: State Snapshot
         recovery.phase = ReleasePhase::Stage1_5Snapshot;
         recovery.save(&cfg.releases_dir)?;

@@ -20,6 +20,7 @@ use std::time::Duration;
 use tokio::process::Command;
 use tokio::sync::Mutex;
 
+pub use af_release;
 pub mod package_executor;
 pub use package_executor::*;
 
@@ -136,6 +137,16 @@ pub fn resolve_package_script_path(action: &str, script_name: &str) -> Option<Pa
 }
 
 pub fn resolve_release_manager_script() -> Option<PathBuf> {
+    if let Ok(explicit) = env::var("AETHERFLOW_RELEASE_MANAGER_SCRIPT") {
+        let trimmed = explicit.trim();
+        if !trimmed.is_empty() {
+            let p = PathBuf::from(trimmed);
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+    }
+
     let mut candidates = vec![
         PathBuf::from("/opt/AetherFlow/current/deploy/release-manager.sh"),
         PathBuf::from("/opt/AetherFlow/deploy/release-manager.sh"),
@@ -319,56 +330,84 @@ async fn handle_package_cancel(
 }
 
 async fn handle_self_update(
-    Json(mut req): Json<SelfUpdateRequest>,
+    Json(req): Json<SelfUpdateRequest>,
 ) -> (StatusCode, Json<RunnerResponse>) {
-    if req.command.is_empty() {
-        req.command = "deploy".to_string();
-    }
-    if req.command != "deploy" && req.command != "rollback" {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(RunnerResponse {
-                success: false,
-                output: String::new(),
-                error: "invalid self-update command".to_string(),
-            }),
-        );
-    }
-    if req.channel.is_empty() {
-        req.channel = "stable".to_string();
-    }
-    if req.channel != "stable" && req.channel != "nightly" {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(RunnerResponse {
-                success: false,
-                output: String::new(),
-                error: "invalid update channel".to_string(),
-            }),
-        );
-    }
-
-    let Some(script_path) = resolve_release_manager_script() else {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(RunnerResponse {
-                success: false,
-                output: String::new(),
-                error: "release-manager.sh not found".to_string(),
-            }),
-        );
+    let validated = match af_release::admin::validate_self_update_request(&req) {
+        Ok(v) => v,
+        Err(err_resp) => return (StatusCode::BAD_REQUEST, Json(err_resp)),
     };
 
-    let cmd_name = req.command.clone();
-    let channel = req.channel.clone();
-    tokio::spawn(async move {
-        let _ = Command::new("/bin/bash")
-            .arg(&script_path)
-            .arg(&cmd_name)
-            .arg("--channel")
-            .arg(&channel)
-            .status()
-            .await;
+    let engine_pref = env::var("AETHERFLOW_RELEASE_ENGINE")
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    let custom_script_override = env::var("AETHERFLOW_RELEASE_MANAGER_SCRIPT")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    let use_bash = engine_pref == "bash" || custom_script_override.is_some();
+
+    if use_bash {
+        let script_path = if let Some(ref custom) = custom_script_override {
+            let p = PathBuf::from(custom);
+            if p.is_file() {
+                Some(p)
+            } else {
+                None
+            }
+        } else {
+            resolve_release_manager_script()
+        };
+
+        let Some(script_path) = script_path else {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(RunnerResponse {
+                    success: false,
+                    output: String::new(),
+                    error: "release-manager.sh not found".to_string(),
+                }),
+            );
+        };
+
+        let cmd_name = validated.command.as_str().to_string();
+        let channel = validated.channel.as_str().to_string();
+        tokio::spawn(async move {
+            let _ = Command::new("/bin/bash")
+                .arg(&script_path)
+                .arg(&cmd_name)
+                .arg("--channel")
+                .arg(&channel)
+                .status()
+                .await;
+        });
+
+        return (
+            StatusCode::OK,
+            Json(RunnerResponse {
+                success: true,
+                output: "Release manager initiated in root runner cgroup".to_string(),
+                error: String::new(),
+            }),
+        );
+    }
+
+    tokio::task::spawn_blocking(move || {
+        let conf_path = af_release::admin::resolve_release_manager_conf();
+        let mut cfg = af_release::ReleaseConfig::load_from_process_env(conf_path.as_deref())
+            .unwrap_or_default();
+        cfg.release_channel = validated.channel;
+        let (code, resp) = af_release::admin::execute_self_update_sync(&validated, cfg);
+        if !resp.success {
+            tracing::error!(
+                exit_code = code.as_i32(),
+                error = %resp.error,
+                "Native af-release self-update failed"
+            );
+        } else {
+            tracing::info!(output = %resp.output, "Native af-release self-update completed");
+        }
     });
 
     (
@@ -497,8 +536,14 @@ pub(crate) fn is_exempt_sandbox_unit(unit: &str) -> bool {
             | "apache2.service"
             | "mariadb.service"
             | "mysql.service"
+            | "tailscale"
+            | "tailscaled"
+            | "tailscale.service"
+            | "tailscaled.service"
     ) || unit.starts_with("wg-quick@")
         || unit.starts_with("wireguard")
+        || unit.starts_with("tailscale")
+        || unit.starts_with("tailscaled")
         || unit.starts_with("mergerfs")
         || unit.starts_with("rclone-vfs")
         || unit.starts_with("scrutiny-collector")
@@ -3004,5 +3049,58 @@ mod tests {
         assert!(ok_resp.success);
         assert!(ok_resp.output.contains("cancellation signalled"));
         assert!(tok.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn test_handle_self_update_accepts_experimental_and_validates_inputs() {
+        let tmp_script = std::env::temp_dir().join(format!(
+            "af-runner-self-update-test-{}.sh",
+            std::process::id()
+        ));
+        fs::write(&tmp_script, "#!/bin/sh\nexit 0\n").unwrap();
+        env::set_var("AETHERFLOW_RELEASE_MANAGER_SCRIPT", &tmp_script);
+
+        for ch in ["stable", "nightly", "experimental"] {
+            let (code, Json(resp)) = handle_self_update(Json(SelfUpdateRequest {
+                command: "deploy".to_string(),
+                channel: ch.to_string(),
+            }))
+            .await;
+            assert_eq!(code, StatusCode::OK, "expected OK for channel {}", ch);
+            assert!(resp.success);
+            assert!(resp.output.contains("Release manager initiated"));
+        }
+
+        let (bad_ch_code, Json(bad_ch_resp)) = handle_self_update(Json(SelfUpdateRequest {
+            command: "deploy".to_string(),
+            channel: "invalid-channel".to_string(),
+        }))
+        .await;
+        assert_eq!(bad_ch_code, StatusCode::BAD_REQUEST);
+        assert!(!bad_ch_resp.success);
+        assert_eq!(bad_ch_resp.error, "invalid update channel");
+
+        let (bad_cmd_code, Json(bad_cmd_resp)) = handle_self_update(Json(SelfUpdateRequest {
+            command: "rm-rf".to_string(),
+            channel: "experimental".to_string(),
+        }))
+        .await;
+        assert_eq!(bad_cmd_code, StatusCode::BAD_REQUEST);
+        assert!(!bad_cmd_resp.success);
+        assert_eq!(bad_cmd_resp.error, "invalid self-update command");
+
+        env::remove_var("AETHERFLOW_RELEASE_MANAGER_SCRIPT");
+        let _ = fs::remove_file(&tmp_script);
+    }
+
+    #[test]
+    fn test_tailscale_and_wireguard_exempt_from_sandbox() {
+        assert!(is_exempt_sandbox_unit("tailscale"));
+        assert!(is_exempt_sandbox_unit("tailscaled"));
+        assert!(is_exempt_sandbox_unit("tailscale.service"));
+        assert!(is_exempt_sandbox_unit("tailscaled.service"));
+        assert!(is_exempt_sandbox_unit("wg-quick@wg0.service"));
+        assert!(is_exempt_sandbox_unit("wireguard.service"));
+        assert!(!is_exempt_sandbox_unit("sonarr.service"));
     }
 }

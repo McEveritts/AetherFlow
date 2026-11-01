@@ -607,6 +607,7 @@ pub async fn upload_backup_chunk(
             "Failed to create chunk file",
         );
     }
+    let mut received = 0usize;
     if let Ok(entries) = fs::read_dir(&upload_dir) {
         for e in entries.flatten() {
             if e.file_name().to_string_lossy().ends_with(".part") {
@@ -1845,8 +1846,410 @@ static DEPLOY_STREAMS: Lazy<Mutex<HashMap<String, broadcast::Sender<String>>>> =
 pub static SSE_DEPLOY_TX: Lazy<Mutex<HashMap<String, broadcast::Sender<String>>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
+const GITHUB_REPO: &str = "McEveritts/AetherFlow";
+const UPDATE_CHANNEL_STABLE: &str = "stable";
+const UPDATE_CHANNEL_NIGHTLY: &str = "nightly";
+const UPDATE_CHANNEL_EXPERIMENTAL: &str = "experimental";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitHubUpdateError {
+    pub status: u16,
+    pub retry_at: Option<DateTime<Utc>>,
+    pub custom_message: Option<String>,
+}
+
+impl GitHubUpdateError {
+    pub fn is_rate_limited(&self) -> bool {
+        self.retry_at.is_some()
+    }
+}
+
+impl std::fmt::Display for GitHubUpdateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(retry_at) = self.retry_at {
+            write!(
+                f,
+                "GitHub API rate limit reached; retry after {}",
+                retry_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+            )
+        } else if let Some(ref msg) = self.custom_message {
+            write!(f, "{}", msg)
+        } else {
+            write!(f, "GitHub update API returned HTTP {}", self.status)
+        }
+    }
+}
+
+impl std::error::Error for GitHubUpdateError {}
+
+#[derive(Debug, Clone)]
+struct GitHubUpdateCacheEntry {
+    body: Option<Vec<u8>>,
+    err: Option<GitHubUpdateError>,
+    expires: DateTime<Utc>,
+}
+
+#[derive(Debug, Default)]
+pub struct GitHubUpdateCache {
+    entries: HashMap<String, GitHubUpdateCacheEntry>,
+    token: String,
+    limited: Option<GitHubUpdateError>,
+}
+
+static UPDATE_GITHUB_CACHE: Lazy<Mutex<GitHubUpdateCache>> =
+    Lazy::new(|| Mutex::new(GitHubUpdateCache::default()));
+
+static UPDATE_HTTP_CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .user_agent("AetherFlow-Updater/4.0")
+        .build()
+        .unwrap_or_default()
+});
+
+pub fn github_update_token() -> String {
+    for key in ["AF_GITHUB_TOKEN", "GITHUB_TOKEN", "GH_TOKEN"] {
+        if let Ok(val) = env::var(key) {
+            let trimmed = val.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
+            }
+        }
+    }
+    String::new()
+}
+
+pub fn compute_rate_limit_retry_at(
+    status: u16,
+    headers: &HeaderMap,
+    now: DateTime<Utc>,
+) -> Option<DateTime<Utc>> {
+    let remaining = headers
+        .get("X-RateLimit-Remaining")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .trim();
+    let retry_after_raw = headers
+        .get("Retry-After")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .trim();
+
+    let is_limited =
+        status == 429 || (status == 403 && (remaining == "0" || !retry_after_raw.is_empty()));
+    if !is_limited {
+        return None;
+    }
+
+    let mut retry_at = now + Duration::minutes(1);
+
+    if let Some(reset_str) = headers
+        .get("X-RateLimit-Reset")
+        .and_then(|v| v.to_str().ok())
+    {
+        if let Ok(reset_epoch) = reset_str.trim().parse::<i64>() {
+            if let Some(reset_dt) = DateTime::<Utc>::from_timestamp(reset_epoch, 0) {
+                if reset_dt > retry_at {
+                    retry_at = reset_dt;
+                }
+            }
+        }
+    }
+
+    if !retry_after_raw.is_empty() {
+        if let Ok(seconds) = retry_after_raw.parse::<i64>() {
+            if seconds > 0 {
+                let candidate = now + Duration::seconds(seconds);
+                if candidate > retry_at {
+                    retry_at = candidate;
+                }
+            }
+        } else if let Ok(parsed_dt) = DateTime::parse_from_rfc2822(retry_after_raw)
+            .or_else(|_| DateTime::parse_from_rfc3339(retry_after_raw))
+        {
+            let candidate = parsed_dt.with_timezone(&Utc);
+            if candidate > retry_at {
+                retry_at = candidate;
+            }
+        }
+    }
+
+    Some(retry_at)
+}
+
+impl GitHubUpdateCache {
+    pub fn reset_if_token_changed(&mut self, token: &str) {
+        if self.token != token {
+            self.entries.clear();
+            self.token = token.to_string();
+            self.limited = None;
+        }
+    }
+
+    pub fn get_cached(
+        &self,
+        url: &str,
+        now: DateTime<Utc>,
+    ) -> Option<Result<Vec<u8>, GitHubUpdateError>> {
+        if let Some(entry) = self.entries.get(url) {
+            if now < entry.expires {
+                if let Some(ref err) = entry.err {
+                    return Some(Err(err.clone()));
+                }
+                if let Some(ref body) = entry.body {
+                    return Some(Ok(body.clone()));
+                }
+            }
+        }
+        if let Some(ref limited) = self.limited {
+            if let Some(retry_at) = limited.retry_at {
+                if now < retry_at {
+                    return Some(Err(limited.clone()));
+                }
+            }
+        }
+        None
+    }
+
+    pub fn record_response(
+        &mut self,
+        url: &str,
+        status: u16,
+        headers: &HeaderMap,
+        body_result: Result<Vec<u8>, String>,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<u8>, GitHubUpdateError> {
+        if status != 200 {
+            let retry_at = compute_rate_limit_retry_at(status, headers, now);
+            let failure = GitHubUpdateError {
+                status,
+                retry_at,
+                custom_message: None,
+            };
+            let expires = retry_at.unwrap_or_else(|| now + Duration::minutes(1));
+            if retry_at.is_some() {
+                self.limited = Some(failure.clone());
+            }
+            self.entries.insert(
+                url.to_string(),
+                GitHubUpdateCacheEntry {
+                    body: None,
+                    err: Some(failure.clone()),
+                    expires,
+                },
+            );
+            return Err(failure);
+        }
+
+        match body_result {
+            Ok(bytes) => {
+                self.entries.insert(
+                    url.to_string(),
+                    GitHubUpdateCacheEntry {
+                        body: Some(bytes.clone()),
+                        err: None,
+                        expires: now + Duration::minutes(5),
+                    },
+                );
+                Ok(bytes)
+            }
+            Err(err_msg) => {
+                let failure = GitHubUpdateError {
+                    status: 0,
+                    retry_at: None,
+                    custom_message: Some(err_msg),
+                };
+                self.entries.insert(
+                    url.to_string(),
+                    GitHubUpdateCacheEntry {
+                        body: None,
+                        err: Some(failure.clone()),
+                        expires: now + Duration::minutes(1),
+                    },
+                );
+                Err(failure)
+            }
+        }
+    }
+
+    pub fn record_transport_error(
+        &mut self,
+        url: &str,
+        message: String,
+        now: DateTime<Utc>,
+    ) -> GitHubUpdateError {
+        let failure = GitHubUpdateError {
+            status: 0,
+            retry_at: None,
+            custom_message: Some(message),
+        };
+        self.entries.insert(
+            url.to_string(),
+            GitHubUpdateCacheEntry {
+                body: None,
+                err: Some(failure.clone()),
+                expires: now + Duration::minutes(1),
+            },
+        );
+        failure
+    }
+}
+
+async fn fetch_github_update_url(
+    cache_mutex: &Mutex<GitHubUpdateCache>,
+    client: &reqwest::Client,
+    url: &str,
+    token: &str,
+    now: DateTime<Utc>,
+) -> Result<Vec<u8>, GitHubUpdateError> {
+    {
+        let mut cache = cache_mutex
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        cache.reset_if_token_changed(token);
+        if let Some(cached) = cache.get_cached(url, now) {
+            return cached;
+        }
+    }
+
+    let mut req_builder = client
+        .get(url)
+        .header(header::ACCEPT, "application/vnd.github+json")
+        .header(header::USER_AGENT, "AetherFlow-Updater/4.0");
+    if !token.is_empty() {
+        req_builder = req_builder.header(header::AUTHORIZATION, format!("Bearer {}", token));
+    }
+
+    match req_builder.send().await {
+        Ok(resp) => {
+            let status = resp.status().as_u16();
+            let headers = resp.headers().clone();
+            let body_result = if status == 200 {
+                match resp.bytes().await {
+                    Ok(b) => {
+                        let max_len = 4 * 1024 * 1024;
+                        if b.len() > max_len {
+                            Ok(b[..max_len].to_vec())
+                        } else {
+                            Ok(b.to_vec())
+                        }
+                    }
+                    Err(e) => Err(e.to_string()),
+                }
+            } else {
+                Ok(Vec::new())
+            };
+            let completed_at = Utc::now();
+            let mut cache = cache_mutex
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            cache.record_response(url, status, &headers, body_result, completed_at)
+        }
+        Err(e) => {
+            let completed_at = Utc::now();
+            let mut cache = cache_mutex
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            Err(cache.record_transport_error(url, e.to_string(), completed_at))
+        }
+    }
+}
+
+async fn fetch_github_update(path: &str) -> Result<Vec<u8>, GitHubUpdateError> {
+    let base = env::var("AF_GITHUB_API_BASE")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "https://api.github.com".to_string());
+    let url = format!(
+        "{}/repos/{}{}",
+        base.trim_end_matches('/'),
+        GITHUB_REPO,
+        path
+    );
+    let token = github_update_token();
+    fetch_github_update_url(&UPDATE_GITHUB_CACHE, &UPDATE_HTTP_CLIENT, &url, &token, Utc::now()).await
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GitHubReleaseAuthor {
+    #[serde(default)]
+    pub login: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GitHubReleasePayload {
+    #[serde(default)]
+    pub tag_name: String,
+    #[serde(default)]
+    pub target_commitish: String,
+    #[serde(default)]
+    pub prerelease: bool,
+    #[serde(default)]
+    pub draft: bool,
+    #[serde(default)]
+    pub body: String,
+    #[serde(default)]
+    pub html_url: String,
+    #[serde(default)]
+    pub author: GitHubReleaseAuthor,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct GitHubCommitDetail {
+    #[serde(default)]
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct GitHubCommitPayload {
+    #[serde(default)]
+    pub sha: String,
+    #[serde(default)]
+    pub html_url: String,
+    #[serde(default)]
+    pub commit: GitHubCommitDetail,
+}
+
+pub fn sanitize_release_body(body: &str) -> String {
+    let without_bom = body.strip_prefix('\u{FEFF}').unwrap_or(body);
+    let normalized_crlf = without_bom.replace("\r\n", "\n");
+    normalized_crlf.replace("Release Notes ? ", "Release Notes — ")
+}
+
+pub fn normalize_update_channel(channel: &str) -> &'static str {
+    match channel.trim().to_ascii_lowercase().as_str() {
+        UPDATE_CHANNEL_NIGHTLY => UPDATE_CHANNEL_NIGHTLY,
+        UPDATE_CHANNEL_EXPERIMENTAL => UPDATE_CHANNEL_EXPERIMENTAL,
+        _ => UPDATE_CHANNEL_STABLE,
+    }
+}
+
+fn read_update_channel() -> &'static str {
+    let raw: String = af_db::get_conn()
+        .ok()
+        .and_then(|conn| {
+            conn.query_row("SELECT update_channel FROM settings WHERE id = 1", [], |r| {
+                r.get(0)
+            })
+            .ok()
+        })
+        .unwrap_or_else(|| UPDATE_CHANNEL_STABLE.to_string());
+    normalize_update_channel(&raw)
+}
+
 fn get_local_version() -> String {
-    let candidates = [".version", "../.version", "/opt/AetherFlow/current/.version"];
+    let mut candidates = vec![
+        PathBuf::from(".version"),
+        PathBuf::from("../.version"),
+        PathBuf::from("/opt/AetherFlow/current/.version"),
+    ];
+    if let Ok(exe) = env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            candidates.insert(0, exe_dir.join("../.version"));
+            candidates.insert(0, exe_dir.join(".version"));
+        }
+    }
     for c in candidates {
         if let Ok(v) = fs::read_to_string(c) {
             let trimmed = v.trim();
@@ -1858,111 +2261,326 @@ fn get_local_version() -> String {
     "v3.0.0".to_string()
 }
 
-fn is_newer_version(local: &str, remote: &str) -> bool {
-    let parse_ver = |v: &str| -> (i32, i32, i32) {
-        let clean = v.trim_start_matches('v').split('-').next().unwrap_or("");
-        let mut parts = clean.split('.').map(|p| p.parse::<i32>().unwrap_or(0));
-        (
-            parts.next().unwrap_or(0),
-            parts.next().unwrap_or(0),
-            parts.next().unwrap_or(0),
-        )
+pub fn is_newer_version(local: &str, remote: &str) -> bool {
+    let parse_ver = |v: &str| -> (i32, i32, i32, i32) {
+        let clean = v.trim().trim_start_matches('v').split('-').next().unwrap_or("");
+        let parts: Vec<&str> = clean.split('.').collect();
+        let major = parts.first().and_then(|p| p.parse::<i32>().ok()).unwrap_or(0);
+        let minor = parts.get(1).and_then(|p| p.parse::<i32>().ok()).unwrap_or(0);
+        let (patch, subpatch) = if let Some(p2) = parts.get(2) {
+            if p2.len() > 1 && p2.starts_with('0') {
+                (0, p2.parse::<i32>().unwrap_or(0))
+            } else {
+                (p2.parse::<i32>().unwrap_or(0), 0)
+            }
+        } else {
+            (0, 0)
+        };
+        (major, minor, patch, subpatch)
     };
     parse_ver(remote) > parse_ver(local)
 }
 
+pub fn experimental_update_available(current_version: &str, latest_version: &str) -> bool {
+    if current_version.trim().eq_ignore_ascii_case(latest_version.trim()) {
+        return false;
+    }
+    if current_version
+        .to_ascii_lowercase()
+        .contains(UPDATE_CHANNEL_EXPERIMENTAL)
+    {
+        return true;
+    }
+    !is_newer_version(latest_version, current_version)
+}
+
+pub fn select_release_for_channel(
+    releases: &[GitHubReleasePayload],
+    channel: &str,
+) -> Option<(String, String, String)> {
+    let norm_channel = normalize_update_channel(channel);
+    for rel in releases {
+        let tag = rel.tag_name.trim();
+        let author = rel.author.login.trim();
+        if rel.draft
+            || tag.is_empty()
+            || (!author.is_empty() && !author.eq_ignore_ascii_case("McEveritts"))
+        {
+            continue;
+        }
+        let target = rel.target_commitish.trim();
+        let tag_lower = tag.to_ascii_lowercase();
+        let is_experimental = tag.eq_ignore_ascii_case("experimental")
+            || target.eq_ignore_ascii_case("experimental")
+            || tag_lower.contains("experimental");
+        let is_nightly_target = target.eq_ignore_ascii_case("nightly")
+            || rel.prerelease
+            || tag_lower.contains("nightly");
+
+        match norm_channel {
+            UPDATE_CHANNEL_EXPERIMENTAL => {
+                if is_experimental {
+                    return Some((
+                        tag.to_string(),
+                        sanitize_release_body(&rel.body),
+                        rel.html_url.clone(),
+                    ));
+                }
+            }
+            UPDATE_CHANNEL_NIGHTLY => {
+                if is_nightly_target && !is_experimental {
+                    return Some((
+                        tag.to_string(),
+                        sanitize_release_body(&rel.body),
+                        rel.html_url.clone(),
+                    ));
+                }
+            }
+            _ => {
+                if !is_nightly_target && !is_experimental && !tag.contains('-') {
+                    return Some((
+                        tag.to_string(),
+                        sanitize_release_body(&rel.body),
+                        rel.html_url.clone(),
+                    ));
+                }
+            }
+        }
+    }
+    None
+}
+
+async fn fetch_releases_from_github() -> Result<Vec<GitHubReleasePayload>, GitHubUpdateError> {
+    let body_bytes = fetch_github_update("/releases").await?;
+    serde_json::from_slice::<Vec<GitHubReleasePayload>>(&body_bytes).map_err(|e| GitHubUpdateError {
+        status: 0,
+        retry_at: None,
+        custom_message: Some(e.to_string()),
+    })
+}
+
+async fn fetch_branch_head(
+    prefix: &str,
+    branches: &[&str],
+) -> Result<(String, String, String), Option<GitHubUpdateError>> {
+    let mut last_err: Option<GitHubUpdateError> = None;
+    for branch in branches {
+        match fetch_github_update(&format!("/commits/{}", branch)).await {
+            Ok(body_bytes) => {
+                if let Ok(commit) = serde_json::from_slice::<GitHubCommitPayload>(&body_bytes) {
+                    let sha = commit.sha.trim();
+                    if !sha.is_empty() {
+                        let short_sha: String = sha.chars().take(7).collect();
+                        return Ok((
+                            format!("{}-{}", prefix, short_sha),
+                            commit.commit.message,
+                            commit.html_url,
+                        ));
+                    }
+                }
+            }
+            Err(req_err) => {
+                let is_limited = req_err.is_rate_limited();
+                last_err = Some(req_err);
+                if is_limited {
+                    break;
+                }
+            }
+        }
+    }
+    Err(last_err)
+}
+
+async fn resolve_stable_release_via_redirect() -> Option<(String, String, String)> {
+    let download_base = env::var("AF_GITHUB_DOWNLOAD_BASE")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "https://github.com".to_string());
+    let latest_url = format!(
+        "{}/{}/releases/latest",
+        download_base.trim_end_matches('/'),
+        GITHUB_REPO
+    );
+    let resp = UPDATE_HTTP_CLIENT
+        .get(&latest_url)
+        .header(header::USER_AGENT, "AetherFlow-Updater/4.0")
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let effective = resp.url().as_str().trim_end_matches('/').to_string();
+    let expected_prefix = format!(
+        "{}/{}/releases/tag/",
+        download_base.trim_end_matches('/'),
+        GITHUB_REPO
+    );
+    let tag = effective.strip_prefix(&expected_prefix)?;
+    let is_valid_semver = tag.starts_with('v') && {
+        let parts: Vec<&str> = tag[1..].split('.').collect();
+        parts.len() == 3
+            && parts
+                .iter()
+                .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+    };
+    if !is_valid_semver {
+        return None;
+    }
+    Some((tag.to_string(), String::new(), effective))
+}
+
 pub async fn check_update() -> Response {
     let current_version = get_local_version();
-    let channel: String = af_db::get_conn()
-        .ok()
-        .and_then(|conn| {
-            conn.query_row("SELECT update_channel FROM settings WHERE id = 1", [], |r| {
-                r.get(0)
-            })
-            .ok()
-        })
-        .unwrap_or_else(|| "stable".to_string());
-
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .user_agent("AetherFlow-Updater/4.0")
-        .build()
-        .unwrap_or_default();
+    let channel = read_update_channel();
 
     let mut latest_version = String::new();
     let mut message = String::new();
     let mut html_url = String::new();
     let mut update_available = false;
+    let mut resolution_err: Option<GitHubUpdateError> = None;
 
-    if let Ok(resp) = client
-        .get("https://api.github.com/repos/McEveritts/AetherFlow/releases")
-        .send()
-        .await
-    {
-        if resp.status().is_success() {
-            if let Ok(releases) = resp.json::<Vec<serde_json::Value>>().await {
-                for rel in releases {
-                    let draft = rel.get("draft").and_then(|v| v.as_bool()).unwrap_or(false);
-                    let tag = rel.get("tag_name").and_then(|v| v.as_str()).unwrap_or("");
-                    if draft || tag.is_empty() {
-                        continue;
+    match channel {
+        UPDATE_CHANNEL_EXPERIMENTAL => {
+            match fetch_releases_from_github().await {
+                Ok(releases) => {
+                    if let Some((tag, body, url)) =
+                        select_release_for_channel(&releases, UPDATE_CHANNEL_EXPERIMENTAL)
+                    {
+                        latest_version = tag;
+                        message = body;
+                        html_url = url;
                     }
-                    let prerelease = rel
-                        .get("prerelease")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false);
-                    let target = rel
-                        .get("target_commitish")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    let is_nightly_or_exp = prerelease
-                        || target.eq_ignore_ascii_case("nightly")
-                        || target.eq_ignore_ascii_case("experimental")
-                        || tag.to_lowercase().contains("nightly")
-                        || tag.to_lowercase().contains("experimental");
+                }
+                Err(err) => {
+                    resolution_err = Some(err);
+                }
+            }
 
-                    if (channel == "nightly" || channel == "experimental") && is_nightly_or_exp {
-                        latest_version = tag.to_string();
-                        message = rel
-                            .get("body")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        html_url = rel
-                            .get("html_url")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        update_available = !current_version.eq_ignore_ascii_case(&latest_version);
-                        break;
-                    } else if channel == "stable" && !is_nightly_or_exp && !tag.contains('-') {
-                        latest_version = tag.to_string();
-                        message = rel
-                            .get("body")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        html_url = rel
-                            .get("html_url")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string();
+            if latest_version.is_empty()
+                && !resolution_err
+                    .as_ref()
+                    .map(|e| e.is_rate_limited())
+                    .unwrap_or(false)
+            {
+                match fetch_branch_head(UPDATE_CHANNEL_EXPERIMENTAL, &["experimental"]).await {
+                    Ok((ver, msg, url)) => {
+                        latest_version = ver;
+                        message = msg;
+                        html_url = url;
+                        resolution_err = None;
+                    }
+                    Err(Some(err)) => {
+                        resolution_err = Some(err);
+                    }
+                    Err(None) => {}
+                }
+            }
+
+            if !latest_version.is_empty() {
+                update_available = experimental_update_available(&current_version, &latest_version);
+            }
+        }
+
+        UPDATE_CHANNEL_NIGHTLY => {
+            match fetch_releases_from_github().await {
+                Ok(releases) => {
+                    if let Some((tag, body, url)) =
+                        select_release_for_channel(&releases, UPDATE_CHANNEL_NIGHTLY)
+                    {
+                        latest_version = tag;
+                        message = body;
+                        html_url = url;
+                        if current_version.to_ascii_lowercase().starts_with("nightly-") {
+                            update_available = !current_version.eq_ignore_ascii_case(&latest_version);
+                        } else {
+                            update_available = is_newer_version(&current_version, &latest_version);
+                        }
+                    }
+                }
+                Err(err) => {
+                    resolution_err = Some(err);
+                }
+            }
+
+            if latest_version.is_empty()
+                && !resolution_err
+                    .as_ref()
+                    .map(|e| e.is_rate_limited())
+                    .unwrap_or(false)
+            {
+                match fetch_branch_head(UPDATE_CHANNEL_NIGHTLY, &["nightly", "Nightly", "master"])
+                    .await
+                {
+                    Ok((ver, msg, url)) => {
+                        latest_version = ver;
+                        message = msg;
+                        html_url = url;
+                        update_available = current_version != latest_version;
+                        resolution_err = None;
+                    }
+                    Err(Some(err)) => {
+                        resolution_err = Some(err);
+                    }
+                    Err(None) => {}
+                }
+            }
+        }
+
+        _ => {
+            match fetch_releases_from_github().await {
+                Ok(releases) => {
+                    if let Some((tag, body, url)) =
+                        select_release_for_channel(&releases, UPDATE_CHANNEL_STABLE)
+                    {
+                        latest_version = tag;
+                        message = body;
+                        html_url = url;
                         update_available = is_newer_version(&current_version, &latest_version);
-                        break;
                     }
+                }
+                Err(err) => {
+                    resolution_err = Some(err);
+                }
+            }
+
+            if latest_version.is_empty()
+                && !resolution_err
+                    .as_ref()
+                    .map(|e| e.is_rate_limited())
+                    .unwrap_or(false)
+            {
+                if let Some((tag, body, url)) = resolve_stable_release_via_redirect().await {
+                    latest_version = tag;
+                    message = body;
+                    html_url = url;
+                    update_available = is_newer_version(&current_version, &latest_version);
+                    resolution_err = None;
                 }
             }
         }
     }
 
     if latest_version.is_empty() {
-        return Json(serde_json::json!({
+        let mut resp_obj = serde_json::json!({
             "updateAvailable": false,
             "currentVersion": current_version,
-            "latestVersion": current_version,
-            "message": "System is up to date.",
-        }))
-        .into_response();
+            "latestVersion": "Unknown (API Error or Rate Limited)",
+            "message": "Could not fetch latest updates.",
+        });
+        if let Some(err) = resolution_err {
+            resp_obj["message"] = serde_json::Value::String(err.to_string());
+            if let Some(retry_at) = err.retry_at {
+                resp_obj["error"] = serde_json::Value::String("github_rate_limited".to_string());
+                resp_obj["retryAt"] = serde_json::Value::String(
+                    retry_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                );
+            } else {
+                resp_obj["error"] = serde_json::Value::String("update_check_failed".to_string());
+            }
+        }
+        return Json(resp_obj).into_response();
     }
 
     Json(serde_json::json!({
@@ -1985,34 +2603,72 @@ pub async fn run_update(req: Request) -> Response {
         .unwrap_or("")
         .to_string();
 
-    let channel: String = af_db::get_conn()
-        .ok()
-        .and_then(|conn| {
-            conn.query_row("SELECT update_channel FROM settings WHERE id = 1", [], |r| {
-                r.get(0)
-            })
-            .ok()
-        })
-        .unwrap_or_else(|| "stable".to_string());
-
-    let Some(script) = af_runner::resolve_release_manager_script() else {
-        return api_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "SERVICE_UNAVAILABLE",
-            "Release manager script not found",
-        );
-    };
+    let channel = read_update_channel().to_string();
     let ch_clone = channel.clone();
-    tokio::task::spawn_blocking(move || {
-        match Command::new("/bin/bash")
-            .arg(script)
-            .args(["deploy", "--channel", &ch_clone])
-            .status()
-        {
-            Ok(status) if status.success() => {}
-            Ok(status) => tracing::error!(%status, "System update failed"),
-            Err(error) => tracing::error!(%error, "Failed to launch system update"),
+
+    tokio::spawn(async move {
+        tracing::info!(channel = %ch_clone, "Initiating atomic Blue/Green update sequence...");
+
+        if af_runner::is_runner_available() {
+            match af_runner::dispatch_self_update("deploy", &ch_clone).await {
+                Ok(()) => {
+                    tracing::info!(channel = %ch_clone, "self-update dispatched to privileged runner");
+                }
+                Err(error) => {
+                    tracing::error!(%error, "failed to dispatch self-update via privileged runner");
+                }
+            }
+            return;
         }
+
+        let engine_pref = env::var("AETHERFLOW_RELEASE_ENGINE")
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase();
+        let custom_script = env::var("AETHERFLOW_RELEASE_MANAGER_SCRIPT")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+
+        if engine_pref == "bash" || custom_script.is_some() {
+            if let Some(script) = af_runner::resolve_release_manager_script() {
+                let _ = tokio::task::spawn_blocking(move || {
+                    match Command::new("/bin/bash")
+                        .arg(script)
+                        .args(["deploy", "--channel", &ch_clone])
+                        .status()
+                    {
+                        Ok(status) if status.success() => {}
+                        Ok(status) => tracing::error!(%status, "System update failed"),
+                        Err(error) => tracing::error!(%error, "Failed to launch system update"),
+                    }
+                })
+                .await;
+                return;
+            }
+        }
+
+        let _ = tokio::task::spawn_blocking(move || {
+            let req_model = af_models::SelfUpdateRequest {
+                command: "deploy".to_string(),
+                channel: ch_clone.clone(),
+            };
+            if let Ok(validated) = af_runner::af_release::validate_self_update_request(&req_model) {
+                let conf_path = af_runner::af_release::resolve_release_manager_conf();
+                let mut cfg = af_runner::af_release::ReleaseConfig::load_from_process_env(conf_path.as_deref())
+                    .unwrap_or_default();
+                cfg.release_channel = validated.channel;
+                let (code, resp) = af_runner::af_release::execute_self_update_sync(&validated, cfg);
+                if !resp.success {
+                    tracing::error!(
+                        exit_code = code.as_i32(),
+                        error = %resp.error,
+                        "Native af-release system update failed"
+                    );
+                }
+            }
+        })
+        .await;
     });
 
     if let Some(u) = actor {
@@ -2246,4 +2902,168 @@ pub async fn handle_deploy_stream(Query(q): Query<HashMap<String, String>>) -> R
     h.insert(header::CONNECTION, HeaderValue::from_static("keep-alive"));
     h.insert("X-Accel-Buffering", HeaderValue::from_static("no"));
     resp
+}
+
+#[cfg(test)]
+mod updater_tests {
+    use super::*;
+
+    fn sample_releases() -> Vec<GitHubReleasePayload> {
+        vec![
+            GitHubReleasePayload {
+                tag_name: "v4.0.0-experimental".to_string(),
+                target_commitish: "experimental".to_string(),
+                prerelease: true,
+                draft: false,
+                body: "\u{FEFF}Release Notes ? Experimental\r\nLine 2".to_string(),
+                html_url: "https://github.com/McEveritts/AetherFlow/releases/tag/v4.0.0-experimental".to_string(),
+                author: GitHubReleaseAuthor {
+                    login: "McEveritts".to_string(),
+                },
+            },
+            GitHubReleasePayload {
+                tag_name: "v3.3.0-nightly.20261101".to_string(),
+                target_commitish: "nightly".to_string(),
+                prerelease: true,
+                draft: false,
+                body: "Nightly build notes".to_string(),
+                html_url: "https://github.com/McEveritts/AetherFlow/releases/tag/v3.3.0-nightly.20261101".to_string(),
+                author: GitHubReleaseAuthor {
+                    login: "McEveritts".to_string(),
+                },
+            },
+            GitHubReleasePayload {
+                tag_name: "v3.2.7".to_string(),
+                target_commitish: "master".to_string(),
+                prerelease: false,
+                draft: false,
+                body: "Stable release notes".to_string(),
+                html_url: "https://github.com/McEveritts/AetherFlow/releases/tag/v3.2.7".to_string(),
+                author: GitHubReleaseAuthor {
+                    login: "McEveritts".to_string(),
+                },
+            },
+        ]
+    }
+
+    #[test]
+    fn test_select_release_for_channel_separates_stable_nightly_and_experimental() {
+        let releases = sample_releases();
+
+        // Stable selects v3.2.7 and ignores prereleases / hyphenated tags
+        let (stable_tag, stable_body, _) =
+            select_release_for_channel(&releases, "stable").expect("stable release");
+        assert_eq!(stable_tag, "v3.2.7");
+        assert_eq!(stable_body, "Stable release notes");
+
+        // Nightly ignores v4.0.0-experimental and selects v3.3.0-nightly.20261101
+        let (nightly_tag, nightly_body, _) =
+            select_release_for_channel(&releases, "nightly").expect("nightly release");
+        assert_eq!(nightly_tag, "v3.3.0-nightly.20261101");
+        assert_eq!(nightly_body, "Nightly build notes");
+
+        // Experimental selects v4.0.0-experimental and sanitizes BOM + CRLF + separator
+        let (exp_tag, exp_body, _) =
+            select_release_for_channel(&releases, "experimental").expect("experimental release");
+        assert_eq!(exp_tag, "v4.0.0-experimental");
+        assert_eq!(exp_body, "Release Notes — Experimental\nLine 2");
+
+        // When only experimental and stable releases exist, nightly returns None (so it falls back to branch head)
+        let without_nightly = vec![releases[0].clone(), releases[2].clone()];
+        assert!(select_release_for_channel(&without_nightly, "nightly").is_none());
+    }
+
+    #[test]
+    fn test_experimental_update_available_semantics() {
+        assert!(!experimental_update_available(
+            "experimental-abc1234",
+            "experimental-abc1234"
+        ));
+        assert!(experimental_update_available(
+            "experimental-abc1234",
+            "experimental-def5678"
+        ));
+        assert!(experimental_update_available(
+            "v3.2.7",
+            "v4.0.0-experimental"
+        ));
+        assert!(!experimental_update_available(
+            "v4.1.0",
+            "v4.0.0-experimental"
+        ));
+    }
+
+    #[test]
+    fn test_github_update_cache_ttl_and_rate_limit_backoff() {
+        let mut cache = GitHubUpdateCache::default();
+        let now = Utc::now();
+        let url_releases = "https://api.github.com/repos/McEveritts/AetherFlow/releases";
+        let url_commits = "https://api.github.com/repos/McEveritts/AetherFlow/commits/experimental";
+
+        cache.reset_if_token_changed("token-a");
+
+        // 1. 200 OK response is cached for 5 minutes
+        let ok_headers = HeaderMap::new();
+        let res = cache.record_response(
+            url_releases,
+            200,
+            &ok_headers,
+            Ok(b"[{\"tag_name\":\"v3.2.7\"}]".to_vec()),
+            now,
+        );
+        assert!(res.is_ok());
+
+        let cached_4m = cache
+            .get_cached(url_releases, now + Duration::minutes(4))
+            .expect("cached at 4m");
+        assert_eq!(cached_4m.unwrap(), b"[{\"tag_name\":\"v3.2.7\"}]".to_vec());
+
+        assert!(
+            cache
+                .get_cached(url_releases, now + Duration::minutes(6))
+                .is_none(),
+            "cache entry must expire after 5 minutes"
+        );
+
+        // 2. Token change clears cache
+        cache.reset_if_token_changed("token-b");
+        assert!(cache.get_cached(url_releases, now).is_none());
+
+        // 3. HTTP 403 with X-RateLimit-Remaining: 0 and X-RateLimit-Reset sets global rate-limit backoff
+        let mut rl_headers = HeaderMap::new();
+        rl_headers.insert("X-RateLimit-Remaining", HeaderValue::from_static("0"));
+        let reset_ts = (now + Duration::minutes(10)).timestamp();
+        rl_headers.insert(
+            "X-RateLimit-Reset",
+            HeaderValue::from_str(&reset_ts.to_string()).unwrap(),
+        );
+
+        let err = cache
+            .record_response(url_releases, 403, &rl_headers, Ok(Vec::new()), now)
+            .unwrap_err();
+        assert!(err.is_rate_limited());
+        assert_eq!(err.retry_at.unwrap().timestamp(), reset_ts);
+        assert!(err
+            .to_string()
+            .starts_with("GitHub API rate limit reached; retry after "));
+
+        // Subsequent requests to ANY GitHub update URL are short-circuited while rate-limited
+        let blocked_other_url = cache
+            .get_cached(url_commits, now + Duration::minutes(2))
+            .expect("rate limit applies across URLs")
+            .unwrap_err();
+        assert!(blocked_other_url.is_rate_limited());
+        assert_eq!(blocked_other_url.retry_at.unwrap().timestamp(), reset_ts);
+
+        // After reset_ts, cache allows requests again
+        assert!(cache
+            .get_cached(url_commits, now + Duration::minutes(11))
+            .is_none());
+
+        // 4. HTTP 429 with Retry-After seconds
+        let mut retry_headers = HeaderMap::new();
+        retry_headers.insert("Retry-After", HeaderValue::from_static("180"));
+        let retry_at_429 = compute_rate_limit_retry_at(429, &retry_headers, now).unwrap();
+        assert_eq!(retry_at_429, now + Duration::seconds(180));
+    }
 }

@@ -13,11 +13,9 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -730,37 +728,31 @@ fn resolve_backups_directory() -> PathBuf {
 
 fn execute_online_sqlite_backup() -> anyhow::Result<PathBuf> {
     let backup_dir = resolve_backups_directory();
-    fs::create_dir_all(&backup_dir)?;
+    let db_path_str = af_db::get_db_path();
+    let db_path = PathBuf::from(&db_path_str);
 
     let ts = Utc::now().format("%Y-%m-%d_%H-%M-%S").to_string();
-    let filename = format!("aetherflow_{}.sqlite", ts);
-    let backup_file = backup_dir.join(&filename);
-    let escaped_path = backup_file.to_string_lossy().replace('\'', "''");
+    let config = af_host::HostBackupConfig {
+        backup_dir,
+        app_version: env!("CARGO_PKG_VERSION").to_string(),
+        sqlite_db_path: Some(db_path),
+        snapshot_options: af_host::SnapshotOptions::default(),
+        config_targets: vec![],
+        chunk_size_bytes: None,
+        max_retained_backups: af_host::DEFAULT_MAX_RETAINED_BACKUPS,
+        retention_days: af_host::DEFAULT_RETENTION_DAYS,
+    };
 
-    {
-        let conn = af_db::get_conn()?;
-        conn.execute_batch(&format!("VACUUM INTO '{}';", escaped_path))?;
-    }
+    let receipt = af_host::create_sqlite_snapshot_backup(&config, Some(&ts))
+        .map_err(|e| anyhow::anyhow!("af_host snapshot backup failed: {}", e))?;
 
-    let checksum = compute_sha256_hex(&backup_file)?;
-    let sidecar_path = PathBuf::from(format!("{}.sha256", backup_file.display()));
-    fs::write(&sidecar_path, format!("{}\n", checksum))?;
+    let _ = af_host::prune_backup_inventory(
+        &config.backup_dir,
+        config.max_retained_backups,
+        config.retention_days,
+    );
 
-    Ok(backup_file)
-}
-
-fn compute_sha256_hex(path: &Path) -> anyhow::Result<String> {
-    let mut file = fs::File::open(path)?;
-    let mut hasher = Sha256::new();
-    let mut buf = [0u8; 64 * 1024];
-    loop {
-        let n = file.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-    }
-    Ok(hex::encode(hasher.finalize()))
+    Ok(receipt.primary_artifact_path)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
