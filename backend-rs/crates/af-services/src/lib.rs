@@ -1007,17 +1007,26 @@ impl PackageExt for Package {
 }
 
 #[cfg(unix)]
-fn dispatch_runner_systemctl_unix(action: &str, unit: &str) -> Option<Result<(), String>> {
-    use std::io::{Read, Write};
-    use std::os::unix::net::UnixStream;
+const RUNNER_SYSTEMCTL_TIMEOUT: Duration = Duration::from_secs(45);
+
+#[cfg(unix)]
+async fn dispatch_runner_systemctl_unix(action: &str, unit: &str) -> Option<Result<(), String>> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::UnixStream;
 
     let sock_path = af_runner::runner_socket_path();
     if !Path::new(&sock_path).exists() {
         return None;
     }
-    let mut stream = UnixStream::connect(&sock_path).ok()?;
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(15)));
-    let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
+    let mut stream = match tokio::time::timeout(
+        Duration::from_secs(5),
+        UnixStream::connect(&sock_path),
+    )
+    .await
+    {
+        Ok(Ok(s)) => s,
+        _ => return None,
+    };
 
     let body = serde_json::to_string(&af_models::SystemctlRequest {
         action: action.to_string(),
@@ -1029,14 +1038,63 @@ fn dispatch_runner_systemctl_unix(action: &str, unit: &str) -> Option<Result<(),
         body.len(),
         body
     );
-    stream.write_all(req.as_bytes()).ok()?;
+    if tokio::time::timeout(Duration::from_secs(5), stream.write_all(req.as_bytes()))
+        .await
+        .ok()
+        .and_then(|r| r.ok())
+        .is_none()
+    {
+        return None;
+    }
 
     let mut resp = String::new();
-    stream.read_to_string(&mut resp).ok()?;
-    let (headers, json_body) = resp.split_once("\r\n\r\n")?;
+    match tokio::time::timeout(RUNNER_SYSTEMCTL_TIMEOUT, stream.read_to_string(&mut resp)).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => {
+            return Some(Err(format!(
+                "runner socket read error for systemctl {} {}: {}",
+                action, unit, e
+            )));
+        }
+        Err(_) => {
+            return Some(Err(format!(
+                "runner socket timed out after {}s waiting for systemctl {} {}",
+                RUNNER_SYSTEMCTL_TIMEOUT.as_secs(),
+                action,
+                unit
+            )));
+        }
+    }
+
+    let Some((headers, json_body)) = resp.split_once("\r\n\r\n") else {
+        return Some(Err(format!(
+            "malformed runner response for systemctl {} {}",
+            action, unit
+        )));
+    };
     if headers.starts_with("HTTP/1.1 200") || headers.starts_with("HTTP/1.0 200") {
+        if let Ok(parsed) = serde_json::from_str::<af_models::RunnerResponse>(json_body.trim()) {
+            if !parsed.success {
+                let detail = if !parsed.output.trim().is_empty() {
+                    format!("{} ({})", parsed.error.trim(), parsed.output.trim())
+                } else {
+                    parsed.error.trim().to_string()
+                };
+                return Some(Err(detail));
+            }
+        }
         Some(Ok(()))
     } else {
+        if let Ok(parsed) = serde_json::from_str::<af_models::RunnerResponse>(json_body.trim()) {
+            let detail = if !parsed.output.trim().is_empty() {
+                format!("{} ({})", parsed.error.trim(), parsed.output.trim())
+            } else if !parsed.error.trim().is_empty() {
+                parsed.error.trim().to_string()
+            } else {
+                json_body.trim().to_string()
+            };
+            return Some(Err(detail));
+        }
         Some(Err(json_body.trim().to_string()))
     }
 }
@@ -1078,8 +1136,13 @@ pub async fn control_service_with_manager(
         }
 
         #[cfg(unix)]
-        if let Some(Ok(())) = dispatch_runner_systemctl_unix(action, &unit) {
-            continue;
+        match dispatch_runner_systemctl_unix(action, &unit).await {
+            Some(Ok(())) => continue,
+            Some(Err(err_msg)) => {
+                clear_service_status_cache();
+                anyhow::bail!("systemctl {} {} failed: {}", action, unit, err_msg);
+            }
+            None => {}
         }
 
         let out = Command::new("sudo")
@@ -1552,6 +1615,54 @@ mod tests {
         assert_eq!(
             format_uptime_duration(chrono::Duration::seconds(90_060)),
             "1d 1h"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_runner_systemctl_propagates_runner_error_without_unprivileged_fallback() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::UnixListener;
+
+        let sock_path = std::env::temp_dir().join(format!(
+            "af-services-runner-test-{}.sock",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&sock_path);
+        let listener = UnixListener::bind(&sock_path).unwrap();
+
+        let prev = std::env::var("AETHERFLOW_RUNNER_SOCK").ok();
+        std::env::set_var("AETHERFLOW_RUNNER_SOCK", &sock_path);
+
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = stream.read(&mut buf).await.unwrap();
+            let body = r#"{"success":false,"output":"Job for jellyfin.service canceled.","error":"exit status: 1"}"#;
+            let resp = format!(
+                "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(resp.as_bytes()).await.unwrap();
+        });
+
+        let err = control_service_with_manager("jellyfin", "restart", "systemd")
+            .await
+            .expect_err("expected runner failure to be returned directly");
+        server.await.unwrap();
+
+        match prev {
+            Some(v) => std::env::set_var("AETHERFLOW_RUNNER_SOCK", v),
+            None => std::env::remove_var("AETHERFLOW_RUNNER_SOCK"),
+        }
+        let _ = std::fs::remove_file(&sock_path);
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Job for jellyfin.service canceled"),
+            "unexpected error message: {}",
+            msg
         );
     }
 }

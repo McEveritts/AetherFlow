@@ -209,14 +209,17 @@ async fn handle_systemctl(
         );
     }
 
-    match Command::new("systemctl")
-        .arg(&req.action)
-        .arg("--")
-        .arg(&req.service)
-        .output()
-        .await
+    match tokio::time::timeout(
+        Duration::from_secs(45),
+        Command::new("systemctl")
+            .arg(&req.action)
+            .arg("--")
+            .arg(&req.service)
+            .output(),
+    )
+    .await
     {
-        Ok(out) => {
+        Ok(Ok(out)) => {
             let combined = format!(
                 "{}{}",
                 String::from_utf8_lossy(&out.stdout),
@@ -242,12 +245,23 @@ async fn handle_systemctl(
                 )
             }
         }
-        Err(e) => (
+        Ok(Err(e)) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(RunnerResponse {
                 success: false,
                 output: String::new(),
                 error: e.to_string(),
+            }),
+        ),
+        Err(_) => (
+            StatusCode::GATEWAY_TIMEOUT,
+            Json(RunnerResponse {
+                success: false,
+                output: String::new(),
+                error: format!(
+                    "systemctl {} {} timed out after 45s",
+                    req.action, req.service
+                ),
             }),
         ),
     }
@@ -2502,7 +2516,7 @@ pub async fn dispatch_systemctl(service_name: &str, action: &str) -> anyhow::Res
         service: service_name.to_string(),
         action: action.to_string(),
     };
-    let result = post_runner_json("/v1/systemctl", &req, Duration::from_secs(30)).await?;
+    let result = post_runner_json("/v1/systemctl", &req, Duration::from_secs(45)).await?;
     if !result.success {
         anyhow::bail!("runner systemctl error: {} ({})", result.error, result.output);
     }

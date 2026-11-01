@@ -138,7 +138,7 @@ func DispatchSystemctl(serviceName, action string) error {
 		Service: serviceName,
 		Action:  action,
 	})
-	client := newRunnerHTTPClient(30 * time.Second)
+	client := newRunnerHTTPClient(45 * time.Second)
 	resp, err := client.Post("http://unix/v1/systemctl", "application/json", bytes.NewReader(payload))
 	if err != nil {
 		return fmt.Errorf("runner socket request failed: %w", err)

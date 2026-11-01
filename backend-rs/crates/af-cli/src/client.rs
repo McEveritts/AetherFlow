@@ -576,7 +576,7 @@ impl RunnerClientTransport for UnixSocketRunnerClient {
     }
 
     fn execute_systemctl(&self, req: &SystemctlRequest) -> CliResult<RunnerResponse> {
-        Self::run_async(self.post_json_async("/v1/systemctl", req, Duration::from_secs(30)))
+        Self::run_async(self.post_json_async("/v1/systemctl", req, Duration::from_secs(45)))
     }
 
     fn execute_quota(&self, req: &QuotaRunnerRequest) -> CliResult<RunnerResponse> {

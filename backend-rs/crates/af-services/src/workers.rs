@@ -389,7 +389,8 @@ async fn check_systemd_unit_healthy(unit: &str) -> Option<bool> {
     let status_text = String::from_utf8_lossy(&output.stdout).trim().to_lowercase();
     match status_text.as_str() {
         "active" | "activating" | "reloading" => Some(true),
-        "failed" | "inactive" | "deactivating" => {
+        "deactivating" => None,
+        "failed" | "inactive" => {
             // Verify unit actually exists on the system before treating "inactive" as crashed
             if status_text == "inactive" {
                 if let Ok(Ok(load_out)) = tokio::time::timeout(
