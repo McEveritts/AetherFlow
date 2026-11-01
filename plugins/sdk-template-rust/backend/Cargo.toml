@@ -1,0 +1,18 @@
+[package]
+name = "aetherflow-plugin-sdk-template"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Standalone Rust companion plugin scaffold for AetherFlow ({{PLUGIN_NAME}} / {{PLUGIN_ID}})"
+publish = false
+
+# Empty workspace table isolates this scaffold from backend-rs/Cargo.toml
+[workspace]
+
+[dependencies]
+axum = { version = "0.7", features = ["json"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+tokio = { version = "1.43", features = ["macros", "rt-multi-thread", "net", "signal", "time"] }

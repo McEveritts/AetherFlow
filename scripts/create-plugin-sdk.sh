@@ -3,7 +3,7 @@
 set -euo pipefail
 
 if [[ "$#" -lt 3 ]]; then
-    echo "Usage: bash scripts/create-plugin-sdk.sh <plugin-id> <plugin-name> <target-dir>"
+    echo "Usage: bash scripts/create-plugin-sdk.sh <plugin-id> <plugin-name> <target-dir> [go|rust]"
     exit 1
 fi
 
@@ -12,7 +12,12 @@ PLUGIN_NAME="$2"
 TARGET_DIR="$3"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-TEMPLATE_DIR="${REPO_ROOT}/plugins/sdk-template"
+SDK="${4:-go}"
+case "${SDK}" in
+    go) TEMPLATE_DIR="${REPO_ROOT}/plugins/sdk-template" ;;
+    rust) TEMPLATE_DIR="${REPO_ROOT}/plugins/sdk-template-rust" ;;
+    *) echo "Unsupported SDK '${SDK}' (expected go or rust)" >&2; exit 1 ;;
+esac
 
 if [[ ! -d "${TEMPLATE_DIR}" ]]; then
     echo "Template directory not found: ${TEMPLATE_DIR}"

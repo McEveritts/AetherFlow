@@ -5,6 +5,9 @@ members = [
     "crates/af-db",
     "crates/af-hardware",
     "crates/af-runner",
+    "crates/af-release",
+    "crates/af-host",
+    "crates/af-cli",
     "crates/af-services",
     "crates/af-api",
 ]
@@ -21,6 +24,9 @@ af-models = { path = "crates/af-models" }
 af-db = { path = "crates/af-db" }
 af-hardware = { path = "crates/af-hardware" }
 af-runner = { path = "crates/af-runner" }
+af-release = { path = "crates/af-release" }
+af-host = { path = "crates/af-host" }
+af-cli = { path = "crates/af-cli" }
 af-services = { path = "crates/af-services" }
 
 tokio = { version = "1.43", features = ["full"] }

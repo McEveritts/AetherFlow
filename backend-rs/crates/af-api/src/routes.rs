@@ -865,8 +865,21 @@ async fn dispatch_package_lifecycle(
                 &script_name,
                 allocated_port,
                 |line| {
+                    let (pct, msg) = af_runner::parse_progress_line(&line)
+                        .map(|(p, m)| (p as i32, m))
+                        .unwrap_or_else(|| (60, line));
+                    let display_msg = if msg.is_empty() {
+                        format!("Running {} for {}...", action, pkg_label)
+                    } else {
+                        msg
+                    };
                     emit_package_progress(
-                        &clean_id, action, status_label, 60, &line, &started_at,
+                        &clean_id,
+                        action,
+                        status_label,
+                        pct,
+                        &display_msg,
+                        &started_at,
                     );
                 },
             )
@@ -888,12 +901,20 @@ async fn dispatch_package_lifecycle(
                     for raw_line in combined.lines() {
                         let trimmed = raw_line.trim();
                         if !trimmed.is_empty() {
+                            let (pct, msg) = af_runner::parse_progress_line(trimmed)
+                                .map(|(p, m)| (p as i32, m))
+                                .unwrap_or_else(|| (60, trimmed.to_string()));
+                            let display_msg = if msg.is_empty() {
+                                trimmed.to_string()
+                            } else {
+                                msg
+                            };
                             emit_package_progress(
                                 &clean_id,
                                 action,
                                 status_label,
-                                60,
-                                trimmed,
+                                pct,
+                                &display_msg,
                                 &started_at,
                             );
                         }

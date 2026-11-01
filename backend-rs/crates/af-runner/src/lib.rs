@@ -16,11 +16,12 @@ use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::Mutex;
+
+pub mod package_executor;
+pub use package_executor::*;
 
 pub const DEFAULT_RUNNER_SOCKET_PATH: &str = "/run/aetherflow/runner.sock";
 
@@ -28,7 +29,7 @@ const EMBEDDED_PACKAGES_JSON: &str = include_str!("../../../../backend/config/pa
 const EMBEDDED_AUTOMATION_JSON: &str =
     include_str!("../../../../backend/config/package_automation.json");
 
-static PACKAGE_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+pub(crate) static PACKAGE_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 pub static SAFE_SCRIPT_NAME: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$").unwrap());
@@ -156,6 +157,7 @@ pub fn build_runner_router() -> Router {
         .route("/v1/health", get(handle_health).post(handle_health))
         .route("/v1/systemctl", post(handle_systemctl))
         .route("/v1/package", post(handle_package))
+        .route("/v1/package/cancel", post(handle_package_cancel))
         .route("/v1/self-update", post(handle_self_update))
         .route("/v1/sandbox", post(handle_sandbox))
         .route("/v1/hosts", post(handle_hosts))
@@ -240,51 +242,6 @@ async fn handle_systemctl(
     }
 }
 
-fn package_command_stream(
-    mut cmd: Command,
-) -> impl futures::Stream<Item = Result<String, std::io::Error>> + Send {
-    async_stream::stream! {
-        let _lock = PACKAGE_MUTEX.lock().await;
-        cmd.kill_on_drop(true)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        match cmd.spawn() {
-            Ok(mut child) => {
-                let mut stdout = BufReader::new(child.stdout.take().unwrap()).lines();
-                let mut stderr = BufReader::new(child.stderr.take().unwrap()).lines();
-                let mut stdout_open = true;
-                let mut stderr_open = true;
-                while stdout_open || stderr_open {
-                    let (is_stdout, result) = tokio::select! {
-                        result = stdout.next_line(), if stdout_open => (true, result),
-                        result = stderr.next_line(), if stderr_open => (false, result),
-                    };
-                    match result {
-                        Ok(Some(line)) => yield Ok(format!("{}\n", line)),
-                        Ok(None) if is_stdout => stdout_open = false,
-                        Ok(None) => stderr_open = false,
-                        Err(error) => {
-                            yield Ok(format!("__RUNNER_EXIT_ERROR__:{}\n", error));
-                            return;
-                        }
-                    }
-                }
-                match child.wait().await {
-                    Ok(status) if !status.success() => {
-                        yield Ok(format!("__RUNNER_EXIT_ERROR__:exit status {}\n", status));
-                    }
-                    Err(error) => {
-                        yield Ok(format!("__RUNNER_EXIT_ERROR__:{}\n", error));
-                    }
-                    _ => {}
-                }
-            }
-            Err(error) => {
-                yield Ok(format!("__RUNNER_EXIT_ERROR__:{}\n", error));
-            }
-        }
-    }
-}
 
 async fn handle_package(Json(req): Json<PackageRunnerRequest>) -> Response {
     if !matches!(req.action.as_str(), "install" | "remove" | "update") {
@@ -301,19 +258,12 @@ async fn handle_package(Json(req): Json<PackageRunnerRequest>) -> Response {
         return (StatusCode::BAD_REQUEST, "invalid application port").into_response();
     }
 
-    let Some(script_path) = resolve_package_script_path(&req.action, &req.script_name) else {
+    if !can_resolve_package_operation(&req.action, &req.package_id, &req.script_name) {
         return (StatusCode::NOT_FOUND, "package script not found").into_response();
-    };
-
-    let mut cmd = Command::new("bash");
-    cmd.arg(&script_path)
-        .env("DEBIAN_FRONTEND", "noninteractive")
-        .env("DPKG_LOCK_TIMEOUT", "120");
-    if (1024..=65535).contains(&req.app_port) {
-        cmd.env("AF_APP_PORT", req.app_port.to_string());
-        cmd.env("AETHERFLOW_APP_PORT", req.app_port.to_string());
     }
-    let stream = package_command_stream(cmd);
+
+    let engine = select_package_engine(&req.package_id);
+    let stream = execute_package_request_stream(req);
 
     let mut resp = Response::new(Body::from_stream(stream));
     resp.headers_mut().insert(
@@ -324,7 +274,48 @@ async fn handle_package(Json(req): Json<PackageRunnerRequest>) -> Response {
         "X-Content-Type-Options",
         HeaderValue::from_static("nosniff"),
     );
+    resp.headers_mut().insert(
+        "X-AetherFlow-Package-Engine",
+        HeaderValue::from_static(match engine {
+            PackageEngineMode::DeclarativeRust => "declarative_rust",
+            PackageEngineMode::LegacyBashFallback => "legacy_bash_fallback",
+        }),
+    );
     resp
+}
+
+async fn handle_package_cancel(
+    Json(req): Json<SandboxRunnerRequest>,
+) -> (StatusCode, Json<RunnerResponse>) {
+    let pkg = if !req.package_id.trim().is_empty() {
+        req.package_id.trim().to_string()
+    } else {
+        req.package.trim().to_string()
+    };
+    if !SAFE_PKG_ID.is_match(&pkg) || pkg.contains("..") {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(RunnerResponse {
+                success: false,
+                output: String::new(),
+                error: "invalid package identifier".to_string(),
+            }),
+        );
+    }
+
+    let signalled = cancel_package_execution(&pkg);
+    (
+        StatusCode::OK,
+        Json(RunnerResponse {
+            success: true,
+            output: if signalled {
+                format!("cancellation signalled for {}", pkg)
+            } else {
+                format!("no active package execution for {}", pkg)
+            },
+            error: String::new(),
+        }),
+    )
 }
 
 async fn handle_self_update(
@@ -494,7 +485,7 @@ fn normalize_systemd_unit(unit: &str) -> String {
     }
 }
 
-fn is_exempt_sandbox_unit(unit: &str) -> bool {
+pub(crate) fn is_exempt_sandbox_unit(unit: &str) -> bool {
     matches!(
         unit,
         "aetherflow-api.service"
@@ -2473,27 +2464,90 @@ pub async fn dispatch_systemctl(service_name: &str, action: &str) -> anyhow::Res
     Ok(())
 }
 
-fn consume_package_output<F>(body_text: &str, mut on_line: F) -> anyhow::Result<()>
-where
-    F: FnMut(String),
-{
-    let mut exit_error = None;
-    for raw_line in body_text.lines() {
+const MAX_PACKAGE_STREAM_LINE_BYTES: usize = 64 * 1024;
+
+#[derive(Default)]
+struct IncrementalPackageLineDecoder {
+    pending: Vec<u8>,
+    discarding_overlong: bool,
+    exit_error: Option<String>,
+}
+
+impl IncrementalPackageLineDecoder {
+    fn handle_line_bytes<F>(&mut self, raw_bytes: &[u8], on_line: &mut F)
+    where
+        F: FnMut(String),
+    {
+        let raw_line = String::from_utf8_lossy(raw_bytes);
         let line = raw_line.trim();
         if let Some(message) = line.strip_prefix("__RUNNER_EXIT_ERROR__:") {
-            exit_error = Some(if message.trim().is_empty() {
+            self.exit_error = Some(if message.trim().is_empty() {
                 "runner reported package execution failure".to_string()
             } else {
-                message.to_string()
+                message.trim().to_string()
             });
         } else if !line.is_empty() {
             on_line(line.to_string());
         }
     }
-    if let Some(error) = exit_error {
-        anyhow::bail!("{}", error);
+
+    fn push_bytes<F>(&mut self, chunk: &[u8], on_line: &mut F)
+    where
+        F: FnMut(String),
+    {
+        let mut rest = chunk;
+        while !rest.is_empty() {
+            if self.discarding_overlong {
+                if let Some(nl_pos) = rest.iter().position(|&b| b == b'\n') {
+                    self.discarding_overlong = false;
+                    let drained = std::mem::take(&mut self.pending);
+                    self.handle_line_bytes(&drained, on_line);
+                    rest = &rest[nl_pos + 1..];
+                } else {
+                    return;
+                }
+            } else if let Some(nl_pos) = rest.iter().position(|&b| b == b'\n') {
+                let to_take = &rest[..nl_pos];
+                let room = MAX_PACKAGE_STREAM_LINE_BYTES.saturating_sub(self.pending.len());
+                self.pending.extend_from_slice(&to_take[..to_take.len().min(room)]);
+                let drained = std::mem::take(&mut self.pending);
+                self.handle_line_bytes(&drained, on_line);
+                rest = &rest[nl_pos + 1..];
+            } else {
+                let room = MAX_PACKAGE_STREAM_LINE_BYTES.saturating_sub(self.pending.len());
+                let take_len = rest.len().min(room);
+                self.pending.extend_from_slice(&rest[..take_len]);
+                if self.pending.len() >= MAX_PACKAGE_STREAM_LINE_BYTES && rest.len() > take_len {
+                    self.discarding_overlong = true;
+                }
+                return;
+            }
+        }
     }
-    Ok(())
+
+    fn finish<F>(mut self, on_line: &mut F) -> anyhow::Result<()>
+    where
+        F: FnMut(String),
+    {
+        if !self.pending.is_empty() {
+            let drained = std::mem::take(&mut self.pending);
+            self.handle_line_bytes(&drained, on_line);
+        }
+        if let Some(error) = self.exit_error {
+            anyhow::bail!("{}", error);
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+fn consume_package_output<F>(body_text: &str, mut on_line: F) -> anyhow::Result<()>
+where
+    F: FnMut(String),
+{
+    let mut decoder = IncrementalPackageLineDecoder::default();
+    decoder.push_bytes(body_text.as_bytes(), &mut on_line);
+    decoder.finish(&mut on_line)
 }
 
 pub async fn dispatch_package_action<F>(
@@ -2538,10 +2592,21 @@ where
 
             let resp = sender.send_request(req).await?;
             let status = resp.status();
-            let collected = resp.into_body().collect().await?.to_bytes();
-            let body_text = String::from_utf8_lossy(&collected);
+            let mut body = resp.into_body();
 
             if status != StatusCode::OK {
+                let mut err_buf = Vec::new();
+                while let Some(frame_res) = body.frame().await {
+                    let frame = frame_res?;
+                    if let Some(data) = frame.data_ref() {
+                        let room = (64 * 1024usize).saturating_sub(err_buf.len());
+                        if room == 0 {
+                            break;
+                        }
+                        err_buf.extend_from_slice(&data[..data.len().min(room)]);
+                    }
+                }
+                let body_text = String::from_utf8_lossy(&err_buf);
                 anyhow::bail!(
                     "runner rejected package action (HTTP {}): {}",
                     status.as_u16(),
@@ -2549,7 +2614,14 @@ where
                 );
             }
 
-            consume_package_output(&body_text, &mut on_line)
+            let mut decoder = IncrementalPackageLineDecoder::default();
+            while let Some(frame_res) = body.frame().await {
+                let frame = frame_res?;
+                if let Some(data) = frame.data_ref() {
+                    decoder.push_bytes(data, &mut on_line);
+                }
+            }
+            decoder.finish(&mut on_line)
         };
 
         tokio::time::timeout(Duration::from_secs(30 * 60), fut)
@@ -2574,6 +2646,69 @@ where
     F: FnMut(String),
 {
     dispatch_package_action(action, pkg_id, script_name, app_port, on_line).await
+}
+
+/// Requests cooperative cancellation of an in-flight package operation (`install`, `update`, or `remove`)
+/// via the runner socket if available, or directly in-process.
+pub async fn dispatch_package_cancel(pkg_id: &str) -> anyhow::Result<bool> {
+    if !SAFE_PKG_ID.is_match(pkg_id) || pkg_id.contains("..") {
+        anyhow::bail!("invalid package identifier");
+    }
+    if cancel_package_execution(pkg_id) {
+        return Ok(true);
+    }
+    if is_runner_available() {
+        let req = SandboxRunnerRequest {
+            package: pkg_id.to_string(),
+            package_id: pkg_id.to_string(),
+        };
+        let result = post_runner_json("/v1/package/cancel", &req, Duration::from_secs(5)).await?;
+        return Ok(result.success && result.output.starts_with("cancellation signalled"));
+    }
+    Ok(false)
+}
+
+/// Executes a package operation locally in-process (for CLI/provisioner or direct root execution),
+/// streaming newline-delimited progress/log lines to `on_line`.
+pub async fn execute_package_local<F>(
+    action: &str,
+    pkg_id: &str,
+    script_name: &str,
+    app_port: i32,
+    mut on_line: F,
+) -> anyhow::Result<()>
+where
+    F: FnMut(String),
+{
+    use futures::StreamExt;
+
+    if !matches!(action, "install" | "remove" | "update") {
+        anyhow::bail!("disallowed package action");
+    }
+    if !SAFE_SCRIPT_NAME.is_match(script_name) || !SAFE_SCRIPT_NAME.is_match(pkg_id) {
+        anyhow::bail!("invalid script or package identifier");
+    }
+    if app_port != 0 && !(1024..=65535).contains(&app_port) {
+        anyhow::bail!("invalid application port");
+    }
+    if !can_resolve_package_operation(action, pkg_id, script_name) {
+        anyhow::bail!("package script not found");
+    }
+
+    let req = PackageRunnerRequest {
+        action: action.to_string(),
+        package_id: pkg_id.to_string(),
+        script_name: script_name.to_string(),
+        app_port,
+    };
+    let stream = execute_package_request_stream(req);
+    futures::pin_mut!(stream);
+    let mut decoder = IncrementalPackageLineDecoder::default();
+    while let Some(chunk_res) = stream.next().await {
+        let chunk = chunk_res?;
+        decoder.push_bytes(chunk.as_bytes(), &mut on_line);
+    }
+    decoder.finish(&mut on_line)
 }
 
 pub async fn dispatch_self_update(command: &str, channel: &str) -> anyhow::Result<()> {
@@ -2754,35 +2889,23 @@ mod tests {
         assert_eq!(lines, vec!["ready", "complete"]);
     }
 
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn test_package_stream_drains_stderr_and_reports_nonzero_exit() {
-        let mut cmd = Command::new("/bin/sh");
-        cmd.arg("-c").arg(
-            "counter=0; while [ $counter -lt 16384 ]; do printf 'stderr diagnostic line\\n' >&2; counter=$((counter + 1)); done; printf 'stdout done\\n'; exit 7",
-        );
-        let body = Body::from_stream(package_command_stream(cmd));
-        let bytes = tokio::time::timeout(
-            Duration::from_secs(10),
-            axum::body::to_bytes(body, 1024 * 1024),
-        )
-        .await
-        .expect("package output deadlocked")
-        .unwrap();
-        let output = String::from_utf8(bytes.to_vec()).unwrap();
-        assert_eq!(output.matches("stderr diagnostic line").count(), 16384);
-        assert!(output.contains("stdout done"));
-        assert!(output.contains("__RUNNER_EXIT_ERROR__:"));
-        assert!(consume_package_output(&output, |_| {}).is_err());
-    }
+    #[test]
+    fn test_incremental_decoder_handles_split_chunks_and_overlong_lines() {
+        let mut lines = Vec::new();
+        let mut decoder = IncrementalPackageLineDecoder::default();
+        decoder.push_bytes(b"[PROGRESS:20] Part ", &mut |l| lines.push(l));
+        assert!(lines.is_empty());
+        decoder.push_bytes(b"one\nSecond ", &mut |l| lines.push(l));
+        assert_eq!(lines, vec!["[PROGRESS:20] Part one"]);
 
-    #[tokio::test]
-    async fn test_package_stream_reports_spawn_failure() {
-        let cmd = Command::new("/aetherflow-missing-package-executable");
-        let body = Body::from_stream(package_command_stream(cmd));
-        let bytes = axum::body::to_bytes(body, 4096).await.unwrap();
-        let output = String::from_utf8(bytes.to_vec()).unwrap();
-        assert!(consume_package_output(&output, |_| {}).is_err());
+        // Feed an overlong line (> MAX_PACKAGE_STREAM_LINE_BYTES) and ensure memory stays bounded
+        let huge = vec![b'x'; MAX_PACKAGE_STREAM_LINE_BYTES + 8192];
+        decoder.push_bytes(&huge, &mut |l| lines.push(l));
+        assert!(decoder.pending.len() <= MAX_PACKAGE_STREAM_LINE_BYTES);
+        decoder.push_bytes(b"\n[PROGRESS:100] Done\n", &mut |l| lines.push(l));
+        decoder.finish(&mut |l| lines.push(l)).unwrap();
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[2], "[PROGRESS:100] Done");
     }
 
     #[test]
@@ -2858,5 +2981,28 @@ mod tests {
         assert!(resp.success);
         let decoded: AppRuntimeMeta = serde_json::from_str(&resp.output).unwrap();
         assert!(decoded.configured_port >= 0);
+    }
+
+    #[tokio::test]
+    async fn test_handle_package_cancel_validation_and_signalling() {
+        let (bad_code, Json(bad_resp)) = handle_package_cancel(Json(SandboxRunnerRequest {
+            package: "../bad".to_string(),
+            package_id: String::new(),
+        }))
+        .await;
+        assert_eq!(bad_code, StatusCode::BAD_REQUEST);
+        assert!(!bad_resp.success);
+
+        let tok = CancellationToken::new();
+        let _guard = register_package_cancellation("cancel-handler-test", tok.clone()).unwrap();
+        let (ok_code, Json(ok_resp)) = handle_package_cancel(Json(SandboxRunnerRequest {
+            package: String::new(),
+            package_id: "cancel-handler-test".to_string(),
+        }))
+        .await;
+        assert_eq!(ok_code, StatusCode::OK);
+        assert!(ok_resp.success);
+        assert!(ok_resp.output.contains("cancellation signalled"));
+        assert!(tok.is_cancelled());
     }
 }

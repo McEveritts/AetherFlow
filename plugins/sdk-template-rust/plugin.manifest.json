@@ -1,0 +1,34 @@
+{
+  "id": "{{PLUGIN_ID}}",
+  "name": "{{PLUGIN_NAME}}",
+  "version": "0.1.0",
+  "sdk": "rust",
+  "contract_version": "v1-staged",
+  "runtime_status": "standalone-companion-only",
+  "description": "Standalone Rust companion plugin scaffold for AetherFlow v4.0.0. Note: host-managed plugin loading, lifecycle hooks, and scoped token RBAC are currently dormant in backend-rs.",
+  "author": "Community Developer",
+  "permissions": [
+    "marketplace:read",
+    "system:metrics:read"
+  ],
+  "api_scopes": [
+    "/api/v1/public/marketplace",
+    "/api/v1/auth/system/metrics"
+  ],
+  "lifecycle_hooks": {
+    "on_start": "backend/hooks/start.sh",
+    "on_stop": "backend/hooks/stop.sh"
+  },
+  "backend": {
+    "language": "rust",
+    "manifest_path": "backend/Cargo.toml",
+    "entry": "backend/src/main.rs",
+    "binary_name": "aetherflow-plugin-{{PLUGIN_ID}}",
+    "health_path": "/healthz",
+    "port_allocation": "dynamic"
+  },
+  "frontend": {
+    "entry": "frontend/src/index.tsx",
+    "slot": "marketplace"
+  }
+}
