@@ -4,14 +4,15 @@ This guide covers the release channels, atomic upgrade pipeline (`deploy/release
 
 ## Upgrade Channels
 
-AetherFlow maintains two primary release tracks:
+AetherFlow maintains two primary release tracks plus an opt-in experimental track:
 
 | Channel | Source | Stability | Use Case |
 | :--- | :--- | :--- | :--- |
 | **Stable (`stable`)** | `master` / GitHub Releases | High | Production servers, SHA-256 verified release bundles. |
 | **Nightly (`nightly`)** | `nightly` / Pre-Releases | Medium | Early access to new Marketplace apps, UI refinements, and runtime updates. |
+| **Experimental (`experimental`)** | `experimental` / `*-experimental` Pre-Releases | Low | Preview of large changes (such as the v4 Rust control plane). Expect breakage; keep backups. |
 
-To switch channels, visit **Settings → System Updates** in your dashboard and select the desired release channel (`stable` or `nightly`).
+To switch channels, visit **Settings → System Updates** in your dashboard and select the desired release channel (`stable`, `nightly`, or `experimental`). From the shell: `deploy/release-manager.sh deploy --channel experimental`.
 
 ---
 

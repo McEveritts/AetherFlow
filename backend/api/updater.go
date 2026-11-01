@@ -88,21 +88,62 @@ func sanitizeReleaseBody(body string) string {
 	return strings.ReplaceAll(cleanBody, "Release Notes ? ", "Release Notes — ")
 }
 
+// Supported update channels. "experimental" tracks the experimental branch
+// (preview builds such as the v4 Rust control plane) and is opt-in only.
+const (
+	UpdateChannelStable       = "stable"
+	UpdateChannelNightly      = "nightly"
+	UpdateChannelExperimental = "experimental"
+)
+
+// NormalizeUpdateChannel maps arbitrary input onto a supported channel,
+// defaulting to stable for unknown or empty values.
+func NormalizeUpdateChannel(channel string) string {
+	switch strings.ToLower(strings.TrimSpace(channel)) {
+	case UpdateChannelNightly:
+		return UpdateChannelNightly
+	case UpdateChannelExperimental:
+		return UpdateChannelExperimental
+	default:
+		return UpdateChannelStable
+	}
+}
+
+// readUpdateChannel loads the configured update channel from settings.
+func readUpdateChannel() string {
+	var channel string
+	if err := db.DB.QueryRow("SELECT update_channel FROM settings WHERE id = 1").Scan(&channel); err != nil {
+		return UpdateChannelStable
+	}
+	return NormalizeUpdateChannel(channel)
+}
+
+func isExperimentalRelease(release GitHubRelease) bool {
+	return strings.EqualFold(release.TargetCommitish, UpdateChannelExperimental) ||
+		strings.Contains(strings.ToLower(release.TagName), UpdateChannelExperimental)
+}
+
 func selectReleaseForChannel(releases []GitHubRelease, channel string) (tagName, body, htmlUrl string) {
 	for _, release := range releases {
 		if release.Draft || !strings.EqualFold(release.Author.Login, "McEveritts") || release.TagName == "" {
 			continue
 		}
+		isExperimental := isExperimentalRelease(release)
 		isNightlyTarget := strings.EqualFold(release.TargetCommitish, "nightly") ||
 			release.Prerelease ||
 			strings.Contains(strings.ToLower(release.TagName), "nightly")
 
-		if channel == "nightly" {
-			if isNightlyTarget && !strings.EqualFold(release.TagName, "nightly") {
+		switch channel {
+		case UpdateChannelExperimental:
+			if isExperimental && !strings.EqualFold(release.TagName, UpdateChannelExperimental) {
 				return release.TagName, sanitizeReleaseBody(release.Body), release.HtmlUrl
 			}
-		} else {
-			if !isNightlyTarget && !strings.Contains(release.TagName, "-") {
+		case UpdateChannelNightly:
+			if isNightlyTarget && !isExperimental && !strings.EqualFold(release.TagName, "nightly") {
+				return release.TagName, sanitizeReleaseBody(release.Body), release.HtmlUrl
+			}
+		default:
+			if !isNightlyTarget && !isExperimental && !strings.Contains(release.TagName, "-") {
 				return release.TagName, sanitizeReleaseBody(release.Body), release.HtmlUrl
 			}
 		}
@@ -162,15 +203,65 @@ func fetchLatestNightlyRelease() (tagName, body, htmlUrl string, err error) {
 	return "", "", "", nil
 }
 
+// fetchLatestExperimentalRelease resolves the latest release published from the experimental branch.
+func fetchLatestExperimentalRelease() (tagName, body, htmlUrl string, err error) {
+	releases, err := fetchReleasesFromGitHub()
+	if err != nil || len(releases) == 0 {
+		return "", "", "", err
+	}
+	tag, cleanBody, url := selectReleaseForChannel(releases, UpdateChannelExperimental)
+	if tag != "" {
+		slog.Info("[updater] resolved latest experimental version via Releases API", "version", tag)
+		return tag, cleanBody, url, nil
+	}
+	return "", "", "", nil
+}
+
+// experimentalUpdateAvailable decides whether the experimental channel offers
+// something different from the running build. Experimental builds are compared
+// by identity; switching over from stable/nightly is offered whenever the
+// experimental release is not older than the running version.
+func experimentalUpdateAvailable(currentVersion, latestVersion string) bool {
+	if strings.EqualFold(currentVersion, latestVersion) {
+		return false
+	}
+	if strings.Contains(strings.ToLower(currentVersion), UpdateChannelExperimental) {
+		return true
+	}
+	return !isNewerVersion(latestVersion, currentVersion)
+}
+
+// fetchBranchHead resolves the head commit of a branch as "<prefix>-<shortsha>".
+func fetchBranchHead(prefix string, branches []string) (version, message, htmlUrl string) {
+	for _, branch := range branches {
+		resp, reqErr := httpClient.Get("https://api.github.com/repos/" + githubRepo + "/commits/" + branch)
+		if reqErr != nil {
+			slog.Error("[updater] commits API request failed", "branch", branch, "error", reqErr)
+			continue
+		}
+		if resp.StatusCode != 200 {
+			resp.Body.Close()
+			slog.Warn("[updater] commits API returned non-200", "branch", branch, "status", resp.StatusCode)
+			continue
+		}
+		var commit GitHubCommit
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if jsonErr := json.Unmarshal(bodyBytes, &commit); jsonErr == nil && commit.Sha != "" {
+			shortSha := commit.Sha
+			if len(shortSha) > 7 {
+				shortSha = shortSha[:7]
+			}
+			return prefix + "-" + shortSha, commit.Commit.Message, commit.HtmlUrl
+		}
+	}
+	return "", "", ""
+}
+
 // CheckUpdate queries the GitHub API to see if a newer release exists based on the Update Channel
 func CheckUpdate(c *gin.Context) {
 	currentVersion := getLocalVersion()
-
-	var channel string
-	err := db.DB.QueryRow("SELECT update_channel FROM settings WHERE id = 1").Scan(&channel)
-	if err != nil || channel != "nightly" {
-		channel = "stable"
-	}
+	channel := readUpdateChannel()
 
 	var updateAvailable bool
 	var latestVersion string
@@ -178,7 +269,19 @@ func CheckUpdate(c *gin.Context) {
 	var htmlUrl string
 
 	switch channel {
-	case "nightly":
+	case UpdateChannelExperimental:
+		if tag, releaseBody, url, fetchErr := fetchLatestExperimentalRelease(); fetchErr == nil && tag != "" {
+			latestVersion = tag
+			message = releaseBody
+			htmlUrl = url
+		} else {
+			latestVersion, message, htmlUrl = fetchBranchHead(UpdateChannelExperimental, []string{"experimental"})
+		}
+		if latestVersion != "" {
+			updateAvailable = experimentalUpdateAvailable(currentVersion, latestVersion)
+		}
+
+	case UpdateChannelNightly:
 		if tag, releaseBody, url, fetchErr := fetchLatestNightlyRelease(); fetchErr == nil && tag != "" {
 			latestVersion = tag
 			message = releaseBody
@@ -293,11 +396,7 @@ func isNewerVersion(local, remote string) bool {
 
 // RunUpdate initiates the background bash script to perform atomic blue/green deployment
 func RunUpdate(c *gin.Context) {
-	var channel string
-	err := db.DB.QueryRow("SELECT update_channel FROM settings WHERE id = 1").Scan(&channel)
-	if err != nil || channel != "nightly" {
-		channel = "stable"
-	}
+	channel := readUpdateChannel()
 
 	// Calculate target (for logging and script mapping)
 	go func(ch string) {

@@ -19,10 +19,18 @@ const CHANNEL_OPTIONS: GlassSelectOption[] = [
         badgeVariant: 'amber',
         dotColor: 'bg-amber-400',
     },
+    {
+        value: 'experimental',
+        label: 'Experimental',
+        description: 'Preview builds from the experimental branch. May break or need manual recovery',
+        badge: 'Experimental',
+        badgeVariant: 'rose',
+        dotColor: 'bg-rose-400',
+    },
 ];
 
 describe('GlassSelect', () => {
-    it('renders selected option with badge and opens listbox with only Stable and Nightly', () => {
+    it('renders selected option with badge and opens listbox with Stable, Nightly, and Experimental', () => {
         const handleChange = jest.fn();
         render(
             <GlassSelect
@@ -42,10 +50,11 @@ describe('GlassSelect', () => {
         expect(trigger).toHaveAttribute('aria-expanded', 'true');
 
         const options = screen.getAllByRole('option');
-        expect(options).toHaveLength(2);
+        expect(options).toHaveLength(3);
         expect(screen.queryByText(/Beta/i)).not.toBeInTheDocument();
         expect(screen.getByText('Nightly')).toBeInTheDocument();
         expect(screen.getByText('Unstable')).toBeInTheDocument();
+        expect(screen.getAllByText('Experimental').length).toBeGreaterThan(0);
 
         fireEvent.click(options[1]);
         expect(handleChange).toHaveBeenCalledWith('nightly');

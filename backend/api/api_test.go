@@ -271,6 +271,13 @@ func TestIsNewerVersion(t *testing.T) {
 func TestSelectReleaseForChannel(t *testing.T) {
 	releases := []GitHubRelease{
 		{
+			TagName:         "v4.0.0-experimental",
+			TargetCommitish: "experimental",
+			Prerelease:      true,
+			Body:            "# AetherFlow v4.0.0 Release Notes ? Experimental",
+			HtmlUrl:         "https://github.com/McEveritts/AetherFlow/releases/tag/v4.0.0-experimental",
+		},
+		{
 			TagName:         "v3.2.5",
 			TargetCommitish: "nightly",
 			Prerelease:      true,
@@ -285,8 +292,17 @@ func TestSelectReleaseForChannel(t *testing.T) {
 			HtmlUrl:         "https://github.com/McEveritts/AetherFlow/releases/tag/v3.2.1",
 		},
 	}
-	releases[0].Author.Login = "McEveritts"
-	releases[1].Author.Login = "McEveritts"
+	for i := range releases {
+		releases[i].Author.Login = "McEveritts"
+	}
+
+	eTag, eBody, _ := selectReleaseForChannel(releases, "experimental")
+	if eTag != "v4.0.0-experimental" {
+		t.Fatalf("selectReleaseForChannel(experimental) tag = %q, want v4.0.0-experimental", eTag)
+	}
+	if eBody != "# AetherFlow v4.0.0 Release Notes — Experimental" {
+		t.Fatalf("selectReleaseForChannel(experimental) body = %q", eBody)
+	}
 
 	nTag, nBody, _ := selectReleaseForChannel(releases, "nightly")
 	if nTag != "v3.2.5" {
@@ -299,6 +315,42 @@ func TestSelectReleaseForChannel(t *testing.T) {
 	sTag, _, _ := selectReleaseForChannel(releases, "stable")
 	if sTag != "v3.2.1" {
 		t.Fatalf("selectReleaseForChannel(stable) tag = %q, want v3.2.1", sTag)
+	}
+}
+
+func TestNormalizeUpdateChannel(t *testing.T) {
+	cases := map[string]string{
+		"":             "stable",
+		"stable":       "stable",
+		"nightly":      "nightly",
+		"Experimental": "experimental",
+		" experimental ": "experimental",
+		"beta":         "stable",
+		"../../etc":    "stable",
+	}
+	for in, want := range cases {
+		if got := NormalizeUpdateChannel(in); got != want {
+			t.Errorf("NormalizeUpdateChannel(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestExperimentalUpdateAvailable(t *testing.T) {
+	cases := []struct {
+		current, latest string
+		want            bool
+	}{
+		{"v3.2.6", "v4.0.0-experimental", true},
+		{"v4.0.0-experimental", "v4.0.0-experimental", false},
+		{"experimental-abc1234", "experimental-def5678", true},
+		{"experimental-abc1234", "experimental-abc1234", false},
+		{"v3.2.6", "v3.2.6-experimental", true},
+		{"v5.0.0", "v4.0.0-experimental", false},
+	}
+	for _, tc := range cases {
+		if got := experimentalUpdateAvailable(tc.current, tc.latest); got != tc.want {
+			t.Errorf("experimentalUpdateAvailable(%q, %q) = %v, want %v", tc.current, tc.latest, got, tc.want)
+		}
 	}
 }
 

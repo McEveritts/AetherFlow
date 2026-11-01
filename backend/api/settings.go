@@ -49,9 +49,7 @@ func GetSettings(c *gin.Context) {
 	} else {
 		s.BaseDomain = db.NormalizeBaseDomain(s.BaseDomain)
 	}
-	if s.UpdateChannel != "nightly" {
-		s.UpdateChannel = "stable"
-	}
+	s.UpdateChannel = NormalizeUpdateChannel(s.UpdateChannel)
 
 	// Decrypt the API keys before masking
 	if s.GeminiApiKey != "" {
@@ -101,9 +99,7 @@ func updateSettings(c *gin.Context) {
 	} else {
 		req.BaseDomain = ""
 	}
-	if req.UpdateChannel != "nightly" {
-		req.UpdateChannel = "stable"
-	}
+	req.UpdateChannel = NormalizeUpdateChannel(req.UpdateChannel)
 
 	// Handle API key encryption individually 
 	var err error
