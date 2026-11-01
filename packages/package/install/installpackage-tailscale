@@ -2,6 +2,7 @@
 # AetherFlow Package Installer: Tailscale Mesh VPN
 
 set -euo pipefail
+umask 077
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ -f "${SELF_DIR}/../../common.sh" ]]; then
@@ -16,6 +17,8 @@ PACKAGE_NAME="tailscale"
 DATA_DIR="/var/lib/tailscale"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
 mkdir -p "$(dirname "$LOGFILE")" /install
+touch "$LOGFILE"
+chmod 600 "$LOGFILE"
 
 require_root
 log_info "Starting installation for ${PACKAGE_NAME}..."
@@ -56,20 +59,32 @@ cat <<'EOF' > /etc/sysctl.d/99-tailscale.conf
 net.ipv4.ip_forward=1
 net.ipv6.conf.all.forwarding=1
 EOF
-sysctl --system >> "$LOGFILE" 2>&1 || true
+sysctl -p /etc/sysctl.d/99-tailscale.conf >> "$LOGFILE" 2>&1
 
 report_progress 90 "Enabling and starting tailscaled.service..."
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable tailscaled.service >> "$LOGFILE" 2>&1
-systemctl restart tailscaled.service >> "$LOGFILE" 2>&1
+systemctl start tailscaled.service >> "$LOGFILE" 2>&1
 systemctl is-active --quiet tailscaled.service
 
 AUTH_KEY="${AF_TAILSCALE_AUTHKEY:-${TAILSCALE_AUTHKEY:-}}"
+unset AF_TAILSCALE_AUTHKEY TAILSCALE_AUTHKEY
 if [[ -n "${AUTH_KEY}" ]]; then
-    log_info "Enrolling Tailscale node with provided auth key..."
-    tailscale up --authkey="${AUTH_KEY}" --accept-routes >> "$LOGFILE" 2>&1 || log_warn "Automatic tailscale up returned non-zero; run 'sudo tailscale up' manually if needed."
+    log_info "Enrolling Tailscale node using the supplied one-time key..."
+    AUTH_DIR="$(mktemp -d /run/aetherflow-tailscale-auth.XXXXXX)"
+    trap 'rm -rf -- "$AUTH_DIR"' EXIT
+    printf '%s' "$AUTH_KEY" > "${AUTH_DIR}/key"
+    chmod 600 "${AUTH_DIR}/key"
+    unset AUTH_KEY
+    # Never put the secret itself in process arguments or installer logs.
+    if ! tailscale login --auth-key="file:${AUTH_DIR}/key" --timeout=30s > "${AUTH_DIR}/output" 2>&1; then
+        log_error "Tailscale enrollment failed. Existing daemon state was preserved; authenticate from Network or retry with a valid key."
+        exit 1
+    fi
+    rm -rf -- "$AUTH_DIR"
+    trap - EXIT
 fi
 
 write_lock "${PACKAGE_NAME}"
-report_progress 100 "Tailscale Mesh VPN installed. Run 'sudo tailscale up' to authenticate this node if not already enrolled."
+report_progress 100 "Tailscale Mesh VPN installed. Open Network > Tailscale Mesh to authenticate this node if not already enrolled."
 log_info "${PACKAGE_NAME} installed successfully"

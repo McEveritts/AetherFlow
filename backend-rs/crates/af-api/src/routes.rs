@@ -6,14 +6,15 @@ use crate::auth::{
     verify_2fa, verify_proxy_auth, AuthUser,
 };
 use crate::embed::spa_fallback_handler;
+use crate::network::{add_wireguard_peer, advertise_tailscale_routes, generate_wireguard_keys, get_network_status, get_tailscale_peers, get_tailscale_status, get_wireguard_peers, remove_wireguard_peer, update_wireguard_peer, network_service, tailscale_connect, tailscale_disconnect, tailscale_logout, tailscale_routes, tailscale_settings, network_diagnostics};
 use crate::intelligence::{
-    add_wireguard_peer, advertise_tailscale_routes, ai_chat, ai_support, analyze_predictions,
+    ai_chat, ai_support, analyze_predictions,
     approve_mediaflow_item, bandwidth_analyze, bandwidth_apply, bookmark_log,
-    decline_mediaflow_item, enroll_worker, generate_wireguard_keys, get_bookmarks,
+    decline_mediaflow_item, enroll_worker, get_bookmarks,
     get_cluster_nodes, get_log_sources, get_logs, get_mediaflow_queue, get_metrics_history,
-    get_network_status, get_predictions, get_system_topology, get_tailscale_peers,
-    get_tailscale_status, get_wireguard_peers, get_worker_metrics, metadata_results,
-    metadata_scan, metadata_status, remove_wireguard_peer, remove_worker, test_ai_connection,
+    get_predictions, get_system_topology,
+    get_worker_metrics, metadata_results,
+    metadata_scan, metadata_status, remove_worker, test_ai_connection,
     trigger_mediaflow_scan,
 };
 use crate::middlewares::{
@@ -329,12 +330,18 @@ fn build_v1_router() -> Router {
         )
         .route(
             "/network/wireguard/peers/:key",
-            delete(remove_wireguard_peer),
+            delete(remove_wireguard_peer).put(update_wireguard_peer),
         )
         .route("/network/wireguard/keygen", post(generate_wireguard_keys))
         .route("/network/tailscale/status", get(get_tailscale_status))
         .route("/network/tailscale/peers", get(get_tailscale_peers))
-        .route("/network/tailscale/routes", post(advertise_tailscale_routes))
+        .route("/network/tailscale/routes", get(tailscale_routes).post(advertise_tailscale_routes))
+        .route("/network/tailscale/connect", post(tailscale_connect))
+        .route("/network/tailscale/disconnect", post(tailscale_disconnect))
+        .route("/network/tailscale/logout", post(tailscale_logout))
+        .route("/network/tailscale/settings", post(tailscale_settings))
+        .route("/network/:provider/service", post(network_service))
+        .route("/network/diagnostics", get(network_diagnostics))
         .route("/actions/pending", get(list_pending_actions))
         .route("/actions/:id", get(get_pending_action))
         .route("/actions/:id/approve", post(approve_action))

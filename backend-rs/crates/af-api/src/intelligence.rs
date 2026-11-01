@@ -11,8 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::env;
 use std::path::{Path as StdPath, PathBuf};
-use std::process::{Command, Stdio};
-use std::io::Write;
+use std::process::Command;
 use std::sync::Mutex;
 
 #[cfg(test)]
@@ -2296,6 +2295,7 @@ pub async fn decline_mediaflow_item(Path(id): Path<String>) -> Response {
 // 3. Network VPN Management (`backend/api/network_handlers.go` & `network.go`)
 // ─────────────────────────────────────────────────────────────────────────────
 
+#[cfg(test)]
 fn parse_wireguard_dump(stdout: &str) -> Option<serde_json::Value> {
     let interface_fields = stdout.lines().find_map(|line| {
         let fields: Vec<&str> = line.split('\t').collect();
@@ -2324,172 +2324,7 @@ fn parse_wireguard_dump(stdout: &str) -> Option<serde_json::Value> {
     }))
 }
 
-fn read_wireguard_status() -> Option<serde_json::Value> {
-    Command::new("wg")
-        .args(["show", "all", "dump"])
-        .output()
-        .ok()
-        .filter(|out| out.status.success())
-        .and_then(|out| parse_wireguard_dump(&String::from_utf8_lossy(&out.stdout)))
-}
-
-fn read_tailscale_status() -> Option<serde_json::Value> {
-    let out = Command::new("tailscale").args(["status", "--json"]).output().ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let raw = serde_json::from_slice::<serde_json::Value>(&out.stdout).ok()?;
-    if !raw.is_object() {
-        return None;
-    }
-    Some(tailscale_status_value(&raw))
-}
-
-pub async fn get_network_status() -> Response {
-    match tokio::task::spawn_blocking(|| {
-        let wg_available = Command::new("wg").arg("--version").output()
-            .is_ok_and(|out| out.status.success());
-        let ts_available = Command::new("tailscale").arg("--version").output()
-            .is_ok_and(|out| out.status.success());
-        let mut status = serde_json::json!({
-            "wireguard_available": wg_available,
-            "tailscale_available": ts_available,
-            "platform": env::consts::OS,
-        });
-        if wg_available {
-            if let Some(wireguard) = read_wireguard_status() {
-                status["wireguard"] = wireguard;
-            }
-        }
-        if ts_available {
-            if let Some(tailscale) = read_tailscale_status() {
-                status["tailscale"] = tailscale;
-            }
-        }
-        status
-    }).await {
-        Ok(status) => Json(status).into_response(),
-        Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", error.to_string()),
-    }
-}
-
-pub async fn get_wireguard_peers() -> Response {
-    match tokio::task::spawn_blocking(read_wireguard_status).await {
-        Ok(status) => {
-            let peers = status.and_then(|status| status.get("peers").cloned())
-                .unwrap_or_else(|| serde_json::json!([]));
-            Json(serde_json::json!({ "peers": peers })).into_response()
-        }
-        Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", error.to_string()),
-    }
-}
-
-pub async fn add_wireguard_peer(Json(req): Json<serde_json::Value>) -> Response {
-    let public_key = req.get("public_key").and_then(|v| v.as_str()).unwrap_or("");
-    let allowed_ips = req
-        .get("allowed_ips")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let endpoint = req.get("endpoint").and_then(|v| v.as_str()).unwrap_or("");
-    if public_key.is_empty() || allowed_ips.is_empty() {
-        return api_error(
-            StatusCode::BAD_REQUEST,
-            "BAD_REQUEST",
-            "public_key and allowed_ips are required",
-        );
-    }
-
-    let mut args = vec!["set", "wg0", "peer", public_key, "allowed-ips", allowed_ips];
-    if !endpoint.is_empty() {
-        args.push("endpoint");
-        args.push(endpoint);
-    }
-    match Command::new("wg").args(&args).output() {
-        Ok(o) if o.status.success() => (
-            StatusCode::CREATED,
-            Json(serde_json::json!({ "message": "Peer added successfully" })),
-        )
-            .into_response(),
-        Ok(o) => api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            format!("wg set failed: {}", String::from_utf8_lossy(&o.stderr)),
-        ),
-        Err(e) => api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            format!("WireGuard error: {}", e),
-        ),
-    }
-}
-
-pub async fn remove_wireguard_peer(Path(key): Path<String>) -> Response {
-    if key.is_empty() {
-        return api_error(
-            StatusCode::BAD_REQUEST,
-            "BAD_REQUEST",
-            "Public key is required",
-        );
-    }
-    match Command::new("wg")
-        .args(["set", "wg0", "peer", &key, "remove"])
-        .output()
-    {
-        Ok(o) if o.status.success() => {
-            Json(serde_json::json!({ "message": "Peer removed successfully" })).into_response()
-        }
-        Ok(o) => api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            format!("wg remove failed: {}", String::from_utf8_lossy(&o.stderr)),
-        ),
-        Err(e) => api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            format!("WireGuard error: {}", e),
-        ),
-    }
-}
-
-pub async fn generate_wireguard_keys() -> Response {
-    let Ok(priv_out) = Command::new("wg").arg("genkey").output() else {
-        return api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            "wg genkey failed",
-        );
-    };
-    let priv_key = String::from_utf8_lossy(&priv_out.stdout).trim().to_string();
-    let Ok(mut child) = Command::new("wg")
-        .arg("pubkey")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-    else {
-        return api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            "wg pubkey failed",
-        );
-    };
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(priv_key.as_bytes());
-    }
-    let Ok(pub_out) = child.wait_with_output() else {
-        return api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            "wg pubkey failed",
-        );
-    };
-    let pub_key = String::from_utf8_lossy(&pub_out.stdout).trim().to_string();
-    Json(serde_json::json!({
-        "private_key": priv_key,
-        "public_key": pub_key,
-    }))
-    .into_response()
-}
-
+#[cfg(test)]
 fn parse_tailscale_peer_obj(fallback_id: &str, p: &serde_json::Value) -> serde_json::Value {
     let id = p
         .get("ID")
@@ -2538,6 +2373,7 @@ fn parse_tailscale_peer_obj(fallback_id: &str, p: &serde_json::Value) -> serde_j
     })
 }
 
+#[cfg(test)]
 fn parse_tailscale_status_json(
     raw: &serde_json::Value,
 ) -> (
@@ -2572,6 +2408,7 @@ fn parse_tailscale_status_json(
     (backend_state, magic_dns, self_peer, peers)
 }
 
+#[cfg(test)]
 fn tailscale_status_value(raw: &serde_json::Value) -> serde_json::Value {
     let (backend_state, magic_dns, self_peer, peers) = parse_tailscale_status_json(raw);
     serde_json::json!({
@@ -2582,127 +2419,7 @@ fn tailscale_status_value(raw: &serde_json::Value) -> serde_json::Value {
     })
 }
 
-pub async fn get_tailscale_status() -> Response {
-    let Ok(out) = Command::new("tailscale").args(["status", "--json"]).output() else {
-        return api_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "SERVICE_UNAVAILABLE",
-            "Tailscale not available on this system",
-        );
-    };
-    if !out.status.success() {
-        return api_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "SERVICE_UNAVAILABLE",
-            "Tailscale not available on this system",
-        );
-    }
-    let Ok(raw) = serde_json::from_slice::<serde_json::Value>(&out.stdout) else {
-        return api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            "Failed to parse tailscale status",
-        );
-    };
-    let (backend_state, magic_dns, self_peer, peers) = parse_tailscale_status_json(&raw);
-    Json(serde_json::json!({
-        "backend_state": backend_state,
-        "self": self_peer,
-        "peers": peers,
-        "magic_dns": magic_dns,
-    }))
-    .into_response()
-}
-
-pub async fn get_tailscale_peers() -> Response {
-    let Ok(out) = Command::new("tailscale").args(["status", "--json"]).output() else {
-        return Json(serde_json::json!({ "peers": [] })).into_response();
-    };
-    if !out.status.success() {
-        return Json(serde_json::json!({ "peers": [] })).into_response();
-    }
-    let Ok(raw) = serde_json::from_slice::<serde_json::Value>(&out.stdout) else {
-        return Json(serde_json::json!({ "peers": [] })).into_response();
-    };
-    let (_, _, _, peers) = parse_tailscale_status_json(&raw);
-    Json(serde_json::json!({ "peers": peers })).into_response()
-}
-
-pub async fn advertise_tailscale_routes(Json(req): Json<serde_json::Value>) -> Response {
-    let routes: Vec<String> = req
-        .get("routes")
-        .and_then(|v| serde_json::from_value(v.clone()).ok())
-        .unwrap_or_default();
-    if routes.is_empty() {
-        return api_error(
-            StatusCode::BAD_REQUEST,
-            "BAD_REQUEST",
-            "routes are required",
-        );
-    }
-    for r in &routes {
-        let trimmed = r.trim();
-        let Some((ip_str, prefix_str)) = trimmed.split_once('/') else {
-            return api_error(
-                StatusCode::BAD_REQUEST,
-                "BAD_REQUEST",
-                format!("Invalid CIDR route: {}", r),
-            );
-        };
-        let Ok(ip) = ip_str.parse::<std::net::IpAddr>() else {
-            return api_error(
-                StatusCode::BAD_REQUEST,
-                "BAD_REQUEST",
-                format!("Invalid IP in CIDR route: {}", r),
-            );
-        };
-        let max_prefix = if ip.is_ipv4() { 32u8 } else { 128u8 };
-        let Ok(prefix) = prefix_str.parse::<u8>() else {
-            return api_error(
-                StatusCode::BAD_REQUEST,
-                "BAD_REQUEST",
-                format!("Invalid prefix in CIDR route: {}", r),
-            );
-        };
-        if prefix > max_prefix {
-            return api_error(
-                StatusCode::BAD_REQUEST,
-                "BAD_REQUEST",
-                format!("Prefix out of range in CIDR route: {}", r),
-            );
-        }
-    }
-    let route_str = routes.join(",");
-    let res = tokio::task::spawn_blocking(move || {
-        Command::new("tailscale")
-            .arg("set")
-            .arg(format!("--advertise-routes={}", route_str))
-            .output()
-    })
-    .await;
-    match res {
-        Ok(Ok(o)) if o.status.success() => Json(serde_json::json!({
-            "message": "Routes advertised successfully",
-            "routes": routes,
-        }))
-        .into_response(),
-        Ok(Ok(o)) => api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            format!("tailscale set failed: {}", String::from_utf8_lossy(&o.stderr).trim()),
-        ),
-        Ok(Err(e)) => api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            format!("Tailscale error: {}", e),
-        ),
-        Err(e) => api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            e.to_string(),
-        ),
-    }
-}
+// VPN host operations are implemented in crate::network and the privileged runner.
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 4. Live System Topology, Log Bookmarks & Cluster Nodes

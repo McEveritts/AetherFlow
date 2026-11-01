@@ -353,6 +353,8 @@ pub struct NetworkRunnerRequest {
     pub routes: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub args: Vec<String>,
+    #[serde(skip_serializing_if = "serde_json::Value::is_null", default)]
+    pub options: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]

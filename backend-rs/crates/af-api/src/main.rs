@@ -5,6 +5,7 @@ pub mod embed;
 pub mod intelligence;
 pub mod middlewares;
 pub mod notifications_ext;
+pub mod network;
 pub mod oidc;
 pub mod routes;
 pub mod storage;

@@ -22,6 +22,7 @@ use tokio::sync::Mutex;
 
 pub use af_release;
 pub mod package_executor;
+pub mod network;
 pub use package_executor::*;
 
 pub const DEFAULT_RUNNER_SOCKET_PATH: &str = "/run/aetherflow/runner.sock";
@@ -46,19 +47,9 @@ pub static SAFE_QUOTA_SIZE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^(?:[0-9]+[KMGTPkmgtp]?[Bb]?|[0-9]+(?:\.[0-9]+)?\s*[KMGTPEkmgtpe]?[Bb]?|0)$").unwrap());
 pub static SAFE_QUOTA_SIZE_REGEX: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^(?:[0-9]+(?:\.[0-9]+)?\s*[KMGTPEkmgtpe]?[Bb]?|0)$").unwrap());
-static SAFE_BASE64_KEY_REGEX: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^[a-zA-Z0-9+/=]{40,48}$").unwrap());
-static SAFE_CIDR_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"^[0-9a-fA-F:./]+$").unwrap());
-static SAFE_ALLOWED_IPS_REGEX: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^[0-9a-fA-F:./,\s]+$").unwrap());
-static SAFE_ENDPOINT_REGEX: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^[a-zA-Z0-9_.:-]+$").unwrap());
 
 static ALLOWED_SERVICE_ACTIONS: Lazy<HashSet<&'static str>> =
     Lazy::new(|| ["start", "stop", "restart", "reload", "enable", "disable", "status", "heal"].into());
-static ALLOWED_NETWORK_ACTIONS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
-    ["wg_show", "wg_add_peer", "wg_remove_peer", "tailscale_set_routes"].into()
-});
 
 pub fn resolve_runner_socket_path() -> String {
     if let Ok(p) = env::var("AETHERFLOW_RUNNER_SOCK") {
@@ -989,7 +980,7 @@ pub fn update_hosts_file_local(domains: &[String], remove: bool) -> anyhow::Resu
 async fn handle_network(
     Json(req): Json<NetworkRunnerRequest>,
 ) -> (StatusCode, Json<RunnerResponse>) {
-    if !ALLOWED_NETWORK_ACTIONS.contains(req.action.as_str()) {
+    if !network::is_allowed_action(&req.action) {
         return (
             StatusCode::BAD_REQUEST,
             Json(RunnerResponse {
@@ -1021,69 +1012,7 @@ async fn handle_network(
 }
 
 pub async fn execute_network_action_local(req: &NetworkRunnerRequest) -> anyhow::Result<String> {
-    match req.action.as_str() {
-        "wg_show" => {
-            let out = Command::new("wg")
-                .args(["show", "all", "dump"])
-                .output()
-                .await?;
-            Ok(String::from_utf8_lossy(&out.stdout).into_owned())
-        }
-        "wg_add_peer" => {
-            if !SAFE_BASE64_KEY_REGEX.is_match(&req.public_key) {
-                anyhow::bail!("invalid public key format");
-            }
-            if !req.allowed_ips.is_empty() && !SAFE_ALLOWED_IPS_REGEX.is_match(&req.allowed_ips) {
-                anyhow::bail!("invalid allowed IPs format");
-            }
-            let mut args = vec![
-                "set".to_string(),
-                "wg0".to_string(),
-                "peer".to_string(),
-                req.public_key.clone(),
-            ];
-            if !req.allowed_ips.is_empty() {
-                args.push("allowed-ips".to_string());
-                args.push(req.allowed_ips.clone());
-            }
-            if !req.endpoint.is_empty() {
-                if !SAFE_ENDPOINT_REGEX.is_match(&req.endpoint) {
-                    anyhow::bail!("invalid endpoint format");
-                }
-                args.push("endpoint".to_string());
-                args.push(req.endpoint.clone());
-            }
-            let out = Command::new("wg").args(&args).output().await?;
-            Ok(String::from_utf8_lossy(&out.stdout).into_owned())
-        }
-        "wg_remove_peer" => {
-            if !SAFE_BASE64_KEY_REGEX.is_match(&req.public_key) {
-                anyhow::bail!("invalid public key format");
-            }
-            let out = Command::new("wg")
-                .args(["set", "wg0", "peer", &req.public_key, "remove"])
-                .output()
-                .await?;
-            Ok(String::from_utf8_lossy(&out.stdout).into_owned())
-        }
-        "tailscale_set_routes" => {
-            if req.routes.is_empty() {
-                anyhow::bail!("no routes specified");
-            }
-            for r in &req.routes {
-                if !SAFE_CIDR_REGEX.is_match(r) {
-                    anyhow::bail!("invalid route CIDR: {:?}", r);
-                }
-            }
-            let route_str = req.routes.join(",");
-            let out = Command::new("tailscale")
-                .args(["set", &format!("--advertise-routes={}", route_str)])
-                .output()
-                .await?;
-            Ok(String::from_utf8_lossy(&out.stdout).into_owned())
-        }
-        other => anyhow::bail!("unsupported network action: {}", other),
-    }
+    network::execute(req).await
 }
 
 pub fn resolve_setdisk_script_path() -> Option<PathBuf> {
@@ -2897,7 +2826,7 @@ pub async fn dispatch_hosts_remove(domains: &[String]) -> anyhow::Result<()> {
 pub async fn dispatch_network_control(
     req: &NetworkRunnerRequest,
 ) -> anyhow::Result<RunnerResponse> {
-    let result = post_runner_json("/v1/network", req, Duration::from_secs(30)).await?;
+    let result = post_runner_json("/v1/network", req, Duration::from_secs(60)).await?;
     if !result.success {
         anyhow::bail!("runner network error: {} ({})", result.error, result.output);
     }

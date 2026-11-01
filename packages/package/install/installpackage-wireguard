@@ -3,6 +3,7 @@
 # Port: 51820/udp
 
 set -euo pipefail
+umask 077
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ -f "${SELF_DIR}/../../common.sh" ]]; then
@@ -16,71 +17,133 @@ fi
 PACKAGE_NAME="wireguard"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
 mkdir -p "$(dirname "$LOGFILE")" /install
+touch "$LOGFILE"
+chmod 600 "$LOGFILE"
 
 require_root
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 15 "Installing WireGuard and networking tools..."
 
 DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq wireguard wireguard-tools qrencode iptables iproute2 curl >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get install --no-remove -y -qq wireguard wireguard-tools qrencode iptables iproute2 curl >> "$LOGFILE" 2>&1
 
-report_progress 45 "Generating WireGuard server and client keys..."
+report_progress 45 "Checking existing WireGuard identity..."
 mkdir -p /etc/wireguard
+if [[ -L /etc/wireguard ]]; then
+    log_error "WireGuard configuration directory must not be a symbolic link."
+    exit 1
+fi
 chmod 700 /etc/wireguard
+if [[ -L /etc/wireguard/.aetherflow-network.lock ]]; then
+    log_error "WireGuard lock file must not be a symbolic link."
+    exit 1
+fi
+exec {WG_LOCK_FD}> /etc/wireguard/.aetherflow-network.lock
+chmod 600 /etc/wireguard/.aetherflow-network.lock
+flock -w 30 "$WG_LOCK_FD"
 
-umask 077
-wg genkey | tee /etc/wireguard/server_private.key | wg pubkey > /etc/wireguard/server_public.key
-wg genkey | tee /etc/wireguard/client_private.key | wg pubkey > /etc/wireguard/client_public.key
+for name in wg0.conf client.conf server_private.key server_public.key client_private.key client_public.key; do
+    if [[ -L "/etc/wireguard/${name}" ]]; then
+        log_error "Refusing symbolic link in WireGuard configuration: ${name}"
+        exit 1
+    fi
+done
 
-SERVER_PRIV="$(cat /etc/wireguard/server_private.key)"
-SERVER_PUB="$(cat /etc/wireguard/server_public.key)"
-CLIENT_PRIV="$(cat /etc/wireguard/client_private.key)"
-CLIENT_PUB="$(cat /etc/wireguard/client_public.key)"
-
-DEFAULT_IFACE="$(ip route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev") {print $(i+1); exit}}' || true)"
-DEFAULT_IFACE="${DEFAULT_IFACE:-eth0}"
-
-report_progress 70 "Writing /etc/wireguard/wg0.conf and enabling IP forwarding..."
-cat <<EOF > /etc/wireguard/wg0.conf
+if [[ -e /etc/wireguard/wg0.conf ]]; then
+    if [[ ! -s /etc/wireguard/wg0.conf || ! -f /etc/wireguard/wg0.conf ]]; then
+        log_error "Existing wg0.conf is invalid; repair it without rotating the VPN identity."
+        exit 1
+    fi
+    log_info "Preserving existing WireGuard configuration and keys."
+else
+    for name in client.conf server_private.key server_public.key client_private.key client_public.key; do
+        if [[ -e "/etc/wireguard/${name}" ]]; then
+            log_error "Incomplete WireGuard installation; preserve and repair existing identity files before retrying."
+            exit 1
+        fi
+    done
+    report_progress 55 "Creating initial WireGuard server and client configuration..."
+    WG_STAGE="$(mktemp -d /etc/wireguard/.aetherflow-install.XXXXXX)"
+    trap 'rm -rf -- "$WG_STAGE"' EXIT
+    wg genkey | tee "${WG_STAGE}/server_private.key" | wg pubkey > "${WG_STAGE}/server_public.key"
+    wg genkey | tee "${WG_STAGE}/client_private.key" | wg pubkey > "${WG_STAGE}/client_public.key"
+    SERVER_PRIV="$(cat "${WG_STAGE}/server_private.key")"
+    SERVER_PUB="$(cat "${WG_STAGE}/server_public.key")"
+    CLIENT_PRIV="$(cat "${WG_STAGE}/client_private.key")"
+    CLIENT_PUB="$(cat "${WG_STAGE}/client_public.key")"
+    if [[ -z "$SERVER_PRIV" || -z "$SERVER_PUB" || -z "$CLIENT_PRIV" || -z "$CLIENT_PUB" ]]; then
+        log_error "WireGuard key generation returned incomplete credentials."
+        exit 1
+    fi
+    DEFAULT_IFACE="$(ip route show default | awk '{for(i=1;i<=NF;i++) if($i=="dev") {print $(i+1); exit}}')"
+    if [[ ! "$DEFAULT_IFACE" =~ ^[a-zA-Z0-9_.:-]{1,15}$ ]]; then
+        log_error "Cannot identify a safe default network interface for VPN forwarding."
+        exit 1
+    fi
+    PUBLIC_IP="$(curl -4 -fsSL --max-time 5 https://ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}')"
+    if [[ ${#PUBLIC_IP} -gt 15 ]] || ! [[ "$PUBLIC_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        log_error "Cannot determine an IPv4 endpoint; no VPN identity was installed."
+        exit 1
+    fi
+    IFS='.' read -r -a IP_OCTETS <<< "$PUBLIC_IP"
+    for octet in "${IP_OCTETS[@]}"; do
+        if (( 10#$octet > 255 )); then
+            log_error "Invalid IPv4 endpoint; no VPN identity was installed."
+            exit 1
+        fi
+    done
+    cat > "${WG_STAGE}/wg0.conf" <<EOF_CONFIG
 [Interface]
 Address = 10.66.66.1/24
 ListenPort = 51820
 PrivateKey = ${SERVER_PRIV}
-PostUp = iptables -A FORWARD -i %i -j ACCEPT; iptables -t nat -A POSTROUTING -o ${DEFAULT_IFACE} -j MASQUERADE
-PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -t nat -D POSTROUTING -o ${DEFAULT_IFACE} -j MASQUERADE
+PostUp = iptables -A FORWARD -i %i -j ACCEPT; iptables -A FORWARD -o %i -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT; iptables -t nat -A POSTROUTING -o ${DEFAULT_IFACE} -j MASQUERADE
+PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -D FORWARD -o %i -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT; iptables -t nat -D POSTROUTING -o ${DEFAULT_IFACE} -j MASQUERADE
 
 [Peer]
 PublicKey = ${CLIENT_PUB}
 AllowedIPs = 10.66.66.2/32
-EOF
-chmod 600 /etc/wireguard/wg0.conf
-
-PUBLIC_IP="$(curl -fsSL --max-time 5 ifconfig.me 2>/dev/null || hostname -I 2>/dev/null | awk '{print $1}' || echo 127.0.0.1)"
-cat <<EOF > /etc/wireguard/client.conf
+EOF_CONFIG
+    cat > "${WG_STAGE}/client.conf" <<EOF_CONFIG
 [Interface]
 PrivateKey = ${CLIENT_PRIV}
-Address = 10.66.66.2/24
-DNS = 1.1.1.1, 8.8.8.8
+Address = 10.66.66.2/32
+DNS = 1.1.1.1, 9.9.9.9
 
 [Peer]
 PublicKey = ${SERVER_PUB}
 Endpoint = ${PUBLIC_IP}:51820
-AllowedIPs = 0.0.0.0/0, ::/0
+AllowedIPs = 0.0.0.0/0
 PersistentKeepalive = 25
-EOF
-chmod 600 /etc/wireguard/client.conf
+EOF_CONFIG
+    chmod 600 "${WG_STAGE}"/*
+    for name in server_private.key server_public.key client_private.key client_public.key client.conf wg0.conf; do
+        mv -- "${WG_STAGE}/${name}" "/etc/wireguard/${name}"
+    done
+    unset SERVER_PRIV CLIENT_PRIV
+fi
 
+for name in wg0.conf client.conf server_private.key server_public.key client_private.key client_public.key; do
+    if [[ -f "/etc/wireguard/${name}" ]]; then chmod 600 "/etc/wireguard/${name}"; fi
+done
+report_progress 75 "Enabling VPN packet forwarding..."
 mkdir -p /etc/sysctl.d
-cat <<'EOF' > /etc/sysctl.d/99-wireguard.conf
+cat > /etc/sysctl.d/99-wireguard.conf <<'EOF_FORWARD'
 net.ipv4.ip_forward=1
-net.ipv6.conf.all.forwarding=1
-EOF
-sysctl --system >> "$LOGFILE" 2>&1 || true
+EOF_FORWARD
+sysctl -p /etc/sysctl.d/99-wireguard.conf >> "$LOGFILE" 2>&1
 
-report_progress 90 "Starting wg-quick@wg0 service..."
+report_progress 90 "Verifying wg-quick@wg0 service and tunnel..."
+# Starting an active unit preserves live connections and administrator settings.
 systemctl daemon-reload >> "$LOGFILE" 2>&1
-systemctl enable wg-quick@wg0 >> "$LOGFILE" 2>&1 || true
-systemctl restart wg-quick@wg0 >> "$LOGFILE" 2>&1 || true
+systemctl enable wg-quick@wg0 >> "$LOGFILE" 2>&1
+systemctl start wg-quick@wg0 >> "$LOGFILE" 2>&1
+systemctl is-active --quiet wg-quick@wg0
+wg show wg0 public-key > /dev/null
+ip -o link show dev wg0 | awk '
+    { split($0, parts, "[<>]"); n=split(parts[2], flags, ",");
+      for (i=1;i<=n;i++) if (flags[i]=="UP") found=1 }
+    END { exit !found }'
 
 write_lock "${PACKAGE_NAME}"
 report_progress 100 "WireGuard VPN installed on UDP port 51820."
