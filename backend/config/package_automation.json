@@ -847,6 +847,25 @@
       "wg-quick@wg0.service"
     ]
   },
+  "tailscale": {
+    "update_source": "apt",
+    "update_package": "tailscale",
+    "version_command": [
+      "bash",
+      "-lc",
+      "tailscale version 2>/dev/null | head -n1 || dpkg-query -W -f='${Version}' tailscale 2>/dev/null"
+    ],
+    "sandbox_profile": "privileged",
+    "sandbox_rw_paths": [
+      "/var/lib/tailscale",
+      "/etc/default/tailscaled",
+      "/run/tailscale",
+      "/tmp"
+    ],
+    "sandbox_service_units": [
+      "tailscaled.service"
+    ]
+  },
   "pihole": {
     "update_source": "github",
     "update_repo": "pi-hole/pi-hole",

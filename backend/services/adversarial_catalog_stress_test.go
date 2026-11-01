@@ -26,8 +26,8 @@ func TestAdversarial_BlueprintResolutionEdgeCases(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadPackagesCatalog failed: %v", err)
 	}
-	if len(pkgs) != 72 {
-		t.Fatalf("expected exactly 72 packages, got %d", len(pkgs))
+	if len(pkgs) != 73 {
+		t.Fatalf("expected exactly 73 packages, got %d", len(pkgs))
 	}
 
 	// 1. Every package name in packages.json must resolve to a valid blueprint
@@ -79,6 +79,7 @@ func TestAdversarial_BlueprintResolutionEdgeCases(t *testing.T) {
 		"rclone-vfs":          "rclone",
 		"grafana-server":      "grafana",
 		"uptime-kuma":         "uptimekuma",
+		"tailscaled":          "tailscale",
 	}
 	for alias, expectedApp := range serviceAliases {
 		t.Run("service_alias_"+alias, func(t *testing.T) {
@@ -120,6 +121,7 @@ func TestAdversarial_BlueprintResolutionEdgeCases(t *testing.T) {
 		{"CLOUDPLOW", "cloudplow"},
 		{"  Qui\t", "qui"},
 		{"  Threadfin\n", "threadfin"},
+		{"  Tailscale\n", "tailscale"},
 	}
 	for _, sv := range stressVariants {
 		t.Run("variant_"+strings.TrimSpace(sv.input), func(t *testing.T) {
@@ -216,6 +218,7 @@ func TestAdversarial_PortUniquenessAndCollisions(t *testing.T) {
 
 	knownHeadless := []string{
 		"wireguard",
+		"tailscale",
 		"fail2ban",
 		"rtorrent",
 		"mergerfs",

@@ -1,0 +1,75 @@
+#!/bin/bash
+# AetherFlow Package Installer: Tailscale Mesh VPN
+
+set -euo pipefail
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f /opt/AetherFlow/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source "${SELF_DIR}/../../common.sh"
+fi
+
+PACKAGE_NAME="tailscale"
+DATA_DIR="/var/lib/tailscale"
+export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")" /install
+
+require_root
+log_info "Starting installation for ${PACKAGE_NAME}..."
+report_progress 15 "Installing prerequisites for Tailscale..."
+
+DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get install --no-remove -y -qq curl gnupg ca-certificates apt-transport-https lsb-release iproute2 iptables >> "$LOGFILE" 2>&1
+
+report_progress 35 "Configuring official Tailscale APT repository..."
+DISTRO_ID="debian"
+CODENAME="bookworm"
+if [[ -f /etc/os-release ]]; then
+    # shellcheck source=/dev/null
+    . /etc/os-release
+    if [[ "${ID:-}" == "ubuntu" ]]; then
+        DISTRO_ID="ubuntu"
+    else
+        DISTRO_ID="debian"
+    fi
+    CODENAME="${VERSION_CODENAME:-$(lsb_release -c -s 2>/dev/null || echo bookworm)}"
+fi
+
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL "https://pkgs.tailscale.com/stable/${DISTRO_ID}/${CODENAME}.noarmor.gpg" -o /etc/apt/keyrings/tailscale-archive-keyring.gpg >> "$LOGFILE" 2>&1
+chmod a+r /etc/apt/keyrings/tailscale-archive-keyring.gpg
+
+cat <<EOF > /etc/apt/sources.list.d/tailscale.list
+deb [signed-by=/etc/apt/keyrings/tailscale-archive-keyring.gpg] https://pkgs.tailscale.com/stable/${DISTRO_ID} ${CODENAME} main
+EOF
+
+report_progress 60 "Installing Tailscale daemon and CLI..."
+DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get install --no-remove -y -qq tailscale >> "$LOGFILE" 2>&1
+
+report_progress 75 "Enabling IPv4 and IPv6 packet forwarding for subnet routing..."
+mkdir -p /etc/sysctl.d "${DATA_DIR}"
+cat <<'EOF' > /etc/sysctl.d/99-tailscale.conf
+net.ipv4.ip_forward=1
+net.ipv6.conf.all.forwarding=1
+EOF
+sysctl --system >> "$LOGFILE" 2>&1 || true
+
+report_progress 90 "Enabling and starting tailscaled.service..."
+systemctl daemon-reload >> "$LOGFILE" 2>&1
+systemctl enable tailscaled.service >> "$LOGFILE" 2>&1
+systemctl restart tailscaled.service >> "$LOGFILE" 2>&1
+systemctl is-active --quiet tailscaled.service
+
+AUTH_KEY="${AF_TAILSCALE_AUTHKEY:-${TAILSCALE_AUTHKEY:-}}"
+if [[ -n "${AUTH_KEY}" ]]; then
+    log_info "Enrolling Tailscale node with provided auth key..."
+    tailscale up --authkey="${AUTH_KEY}" --accept-routes >> "$LOGFILE" 2>&1 || log_warn "Automatic tailscale up returned non-zero; run 'sudo tailscale up' manually if needed."
+fi
+
+write_lock "${PACKAGE_NAME}"
+report_progress 100 "Tailscale Mesh VPN installed. Run 'sudo tailscale up' to authenticate this node if not already enrolled."
+log_info "${PACKAGE_NAME} installed successfully"

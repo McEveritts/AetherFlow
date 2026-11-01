@@ -284,6 +284,16 @@
         "default_port": 0
     },
     {
+        "name": "tailscale",
+        "label": "Tailscale",
+        "description": "Zero-config mesh VPN and subnet router built on WireGuard.",
+        "lock_file": "/install/.tailscale.lock",
+        "category": "Network",
+        "service_type": "systemd",
+        "service_name": "tailscaled",
+        "default_port": 0
+    },
+    {
         "name": "pihole",
         "label": "Pi-hole",
         "description": "Network-wide ad blocking via your own DNS sinkhole.",
