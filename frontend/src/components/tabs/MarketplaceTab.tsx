@@ -155,7 +155,7 @@ export default function MarketplaceTab() {
                                 app.desc.toLowerCase().includes(searchQuery.toLowerCase());
             const matchesCategory = categoryFilter === 'All' || app.category === categoryFilter;
             return matchesSearch && matchesCategory;
-        });
+        }).sort((a, b) => a.name.localeCompare(b.name, 'en', { sensitivity: 'base' }));
     }, [apps, searchQuery, categoryFilter]);
 
     const isAppBusy = (app: App): boolean => {
