@@ -159,6 +159,40 @@ static PROXY_HTTP_CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
         .unwrap_or_else(|_| reqwest::Client::new())
 });
 
+fn forward_proxy_http_headers(
+    mut upstream_req: reqwest::RequestBuilder,
+    incoming_headers: &axum::http::HeaderMap,
+    raw_host: &str,
+) -> reqwest::RequestBuilder {
+    for (k, v) in incoming_headers.iter() {
+        let name_str = k.as_str();
+        // Host is set once below; reqwest's header() appends values.
+        if is_hop_by_hop_header(name_str)
+            || name_str.eq_ignore_ascii_case("host")
+            || name_str.eq_ignore_ascii_case("x-aetherflow-user")
+        {
+            continue;
+        }
+        if let (Ok(rk), Ok(rv)) = (
+            reqwest::header::HeaderName::from_bytes(name_str.as_bytes()),
+            reqwest::header::HeaderValue::from_bytes(v.as_bytes()),
+        ) {
+            upstream_req = upstream_req.header(rk, rv);
+        }
+    }
+
+    if !raw_host.is_empty() {
+        upstream_req = upstream_req.header("Host", raw_host);
+        if !incoming_headers.contains_key("X-Forwarded-Host") {
+            upstream_req = upstream_req.header("X-Forwarded-Host", raw_host);
+        }
+    }
+    if !incoming_headers.contains_key("X-Forwarded-Proto") {
+        upstream_req = upstream_req.header("X-Forwarded-Proto", "http");
+    }
+    upstream_req
+}
+
 fn is_private_or_loopback_ip(raw_ip: &str) -> bool {
     let mut ip_str = raw_ip.trim().to_lowercase();
     if let Some(colon_idx) = ip_str.rfind(':') {
@@ -522,28 +556,7 @@ pub async fn app_subdomain_proxy_middleware(req: Request, next: Next) -> Respons
         .unwrap_or(reqwest::Method::GET);
     let mut upstream_req = PROXY_HTTP_CLIENT.request(reqwest_method, &target_url);
 
-    for (k, v) in incoming_headers.iter() {
-        let name_str = k.as_str();
-        if is_hop_by_hop_header(name_str) || name_str.eq_ignore_ascii_case("x-aetherflow-user") {
-            continue;
-        }
-        if let (Ok(rk), Ok(rv)) = (
-            reqwest::header::HeaderName::from_bytes(name_str.as_bytes()),
-            reqwest::header::HeaderValue::from_bytes(v.as_bytes()),
-        ) {
-            upstream_req = upstream_req.header(rk, rv);
-        }
-    }
-
-    if !raw_host.is_empty() {
-        upstream_req = upstream_req.header("Host", &raw_host);
-        if !incoming_headers.contains_key("X-Forwarded-Host") {
-            upstream_req = upstream_req.header("X-Forwarded-Host", &raw_host);
-        }
-    }
-    if !incoming_headers.contains_key("X-Forwarded-Proto") {
-        upstream_req = upstream_req.header("X-Forwarded-Proto", "http");
-    }
+    upstream_req = forward_proxy_http_headers(upstream_req, &incoming_headers, &raw_host);
     if let Some(user) = authenticated_user {
         upstream_req = upstream_req.header("X-Aetherflow-User", user);
     }
@@ -845,4 +858,34 @@ pub async fn quota_upload_guard_middleware(req: Request, next: Next) -> Response
     }
 
     next.run(req).await
+}
+
+#[cfg(test)]
+mod proxy_header_tests {
+    use super::*;
+
+    #[test]
+    fn forwards_public_host_once_and_filters_untrusted_headers() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("jellyfin.example.com"));
+        headers.insert(header::CONNECTION, HeaderValue::from_static("keep-alive"));
+        headers.insert("x-aetherflow-user", HeaderValue::from_static("spoofed"));
+        headers.insert("x-forwarded-proto", HeaderValue::from_static("https"));
+        headers.insert("authorization", HeaderValue::from_static("Bearer test-token"));
+        let request = forward_proxy_http_headers(
+            reqwest::Client::new().get("http://127.0.0.1:8096/health"),
+            &headers,
+            "jellyfin.example.com",
+        )
+        .build()
+        .unwrap();
+
+        assert_eq!(request.headers().get_all(header::HOST).iter().count(), 1);
+        assert_eq!(request.headers()[header::HOST], "jellyfin.example.com");
+        assert_eq!(request.headers()["x-forwarded-host"], "jellyfin.example.com");
+        assert_eq!(request.headers()["x-forwarded-proto"], "https");
+        assert_eq!(request.headers()["authorization"], "Bearer test-token");
+        assert!(!request.headers().contains_key(header::CONNECTION));
+        assert!(!request.headers().contains_key("x-aetherflow-user"));
+    }
 }
