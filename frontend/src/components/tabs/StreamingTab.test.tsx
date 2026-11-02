@@ -383,6 +383,34 @@ describe('StreamingTab - Jellyfin Play Statistics, Data Usage & Stream Telemetry
         expect(screen.getByText(/Emby · Later/i)).toBeInTheDocument();
     });
 
+    it.each(['Dashboard', 'Play & Data Stats', 'Watch History'])('keeps the paginated archive below the primary sections in %s', (view) => {
+        render(<StreamingTab />);
+        fireEvent.click(screen.getByRole('button', { name: view, exact: true }));
+
+        const explorer = screen.getByText('Canonical Streaming History Explorer').closest('section')!;
+        const filters = screen.getByRole('group', { name: 'Time Window Filter' });
+        expect(filters.compareDocumentPosition(explorer) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+        const primarySections = view === 'Watch History'
+            ? [/Playback & Stream Data Usage Log/i]
+            : [
+                /Stream Data Usage & Bandwidth Over Time/i,
+                /Play Sessions & Watch Time Activity/i,
+                /Play Method Breakdown/i,
+                /Resolution & Bandwidth Share/i,
+                /Source Codec Telemetry/i,
+                /Top Watchers & Data Usage by User/i,
+                /Most Watched Media Titles/i,
+                ...(view === 'Dashboard' ? [/Playback & Stream Data Usage Log/i] : []),
+            ];
+        for (const title of primarySections) {
+            expect(screen.getByText(title).compareDocumentPosition(explorer) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+        }
+        expect(explorer.nextElementSibling).toBeNull();
+        expect(screen.getByRole('button', { name: 'Previous history page', exact: true })).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'Next history page', exact: true })).toBeInTheDocument();
+    });
+
     it('renders real-time bandwidth, data usage, and play statistics KPI cards', () => {
         render(<StreamingTab />);
         expect(screen.getByText(/Active Streams/i)).toBeInTheDocument();

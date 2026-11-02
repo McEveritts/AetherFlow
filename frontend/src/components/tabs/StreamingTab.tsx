@@ -1457,7 +1457,6 @@ export default function StreamingTab() {
                 </div>
             )}
 
-            {(activeView === 'dashboard' || activeView === 'history' || activeView === 'analytics') && <StreamingHistoryExplorer />}
             <p role="note" className="text-sm text-slate-400">
                 Compatibility dashboard charts and the recent loaded preview mix item summaries and legacy records. They are not confirmed playback totals. Use the canonical archive and its connected insights for provenance-aware reporting.
             </p>
@@ -2291,6 +2290,8 @@ export default function StreamingTab() {
                     )}
                 </div>
             )}
+
+            {(activeView === 'dashboard' || activeView === 'history' || activeView === 'analytics') && <StreamingHistoryExplorer />}
 
             {/* ========================================================================= */}
             {/* 7. SERVER CONFIGURATION MODAL (JELLYFIN FIRST, PLEX & EMBY LATER)         */}
