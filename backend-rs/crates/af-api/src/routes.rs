@@ -780,6 +780,198 @@ fn emit_package_progress(
     }));
 }
 
+async fn pre_stop_units_for_package_update_with<ResolveFn, StatusFn, ControlFn, ControlFut>(
+    action: &str,
+    clean_id: &str,
+    fs_root_override: &str,
+    mut resolve_units: ResolveFn,
+    mut query_status: StatusFn,
+    mut control_unit: ControlFn,
+) -> Result<Vec<String>, (String, String)>
+where
+    ResolveFn: FnMut(&str) -> Vec<String>,
+    StatusFn: FnMut(&str) -> String,
+    ControlFn: FnMut(String, &'static str) -> ControlFut,
+    ControlFut: std::future::Future<Output = anyhow::Result<()>>,
+{
+    let mut stopped_units: Vec<String> = Vec::new();
+    if action == "update"
+        && af_services::should_pre_stop_on_update(clean_id)
+        && fs_root_override.trim().is_empty()
+    {
+        let mut units = resolve_units(clean_id);
+        units.sort_by_key(|unit| !unit.ends_with(".timer"));
+        for unit_name in units {
+            if query_status(&unit_name) == "running" {
+                if let Err(error) = control_unit(unit_name.clone(), "stop").await {
+                    for stopped_unit in &stopped_units {
+                        let _ = control_unit(stopped_unit.clone(), "start").await;
+                    }
+                    return Err((unit_name, error.to_string()));
+                }
+                stopped_units.push(unit_name);
+            }
+        }
+    }
+    Ok(stopped_units)
+}
+
+fn load_authoritative_app_ingress_config(
+    app_name: &str,
+) -> anyhow::Result<Option<AppIngressConfig>> {
+    af_db::invalidate_ingress_cache();
+    af_db::get_app_ingress_config(app_name)
+}
+
+fn resolve_existing_update_port_with<LoadIngressFn>(
+    pkg_id: &str,
+    mut load_ingress_config: LoadIngressFn,
+) -> Result<i32, String>
+where
+    LoadIngressFn: FnMut(&str) -> anyhow::Result<Option<AppIngressConfig>>,
+{
+    let mut canonical_app = pkg_id
+        .trim()
+        .to_ascii_lowercase()
+        .trim_end_matches(".service")
+        .to_string();
+    if canonical_app == "af-maintainerr" {
+        canonical_app = "maintainerr".to_string();
+    }
+    if let Some(blueprint) = af_services::get_blueprint(&canonical_app) {
+        if blueprint.default_port <= 0 {
+            return Ok(0);
+        }
+        if !blueprint.app_name.is_empty() {
+            canonical_app = blueprint.app_name;
+        }
+    }
+
+    let existing_config = load_ingress_config(&canonical_app).map_err(|error| {
+        format!(
+            "cannot read existing configured port for {}: {}",
+            canonical_app, error
+        )
+    })?;
+    let Some(existing_config) = existing_config else {
+        return Err(format!(
+            "missing persisted ingress port mapping for {} update",
+            canonical_app
+        ));
+    };
+    if !(1024..=65535).contains(&existing_config.listen_port) {
+        return Err(format!(
+            "invalid persisted listen port {} for {} update",
+            existing_config.listen_port, canonical_app
+        ));
+    }
+    Ok(existing_config.listen_port)
+}
+
+fn resolve_package_lifecycle_port_with<RuntimePortFn, LoadIngressFn, AllocateInstallPortFn>(
+    action: &str,
+    clean_id: &str,
+    pkg_default_port: i32,
+    mut query_runtime_port: RuntimePortFn,
+    mut load_ingress_config: LoadIngressFn,
+    mut allocate_install_port: AllocateInstallPortFn,
+) -> Result<i32, String>
+where
+    RuntimePortFn: FnMut(&str) -> i32,
+    LoadIngressFn: FnMut(&str) -> anyhow::Result<Option<AppIngressConfig>>,
+    AllocateInstallPortFn: FnMut(&str, i32) -> i32,
+{
+    if action == "update" {
+        if !af_services::should_pre_stop_on_update(clean_id) {
+            return resolve_existing_update_port_with(clean_id, load_ingress_config);
+        }
+        // Read native configuration before stopping the application. An update
+        // must keep its port even while that port is owned by the old process.
+        let configured_port = query_runtime_port(clean_id);
+        let ingress_port = load_ingress_config(clean_id)
+            .ok()
+            .flatten()
+            .map(|c| c.listen_port)
+            .unwrap_or(0);
+        let resolved_port = if configured_port > 0 {
+            configured_port
+        } else if ingress_port > 0 {
+            ingress_port
+        } else {
+            pkg_default_port
+        };
+        Ok(resolved_port)
+    } else if action == "install" {
+        let allocated_port = allocate_install_port(clean_id, pkg_default_port);
+        if pkg_default_port > 0 && allocated_port <= 0 {
+            return Err("No supported listen port is available for this application".to_string());
+        }
+        Ok(allocated_port)
+    } else {
+        Ok(pkg_default_port)
+    }
+}
+
+async fn run_package_lifecycle_dispatch_gate_with<
+    RuntimePortFn,
+    LoadIngressFn,
+    AllocateInstallPortFn,
+    ResolveUnitsFn,
+    StatusFn,
+    ControlFn,
+    ControlFut,
+    DispatchFn,
+    DispatchFut,
+>(
+    action: &str,
+    clean_id: &str,
+    pkg_default_port: i32,
+    fs_root_override: &str,
+    query_runtime_port: RuntimePortFn,
+    load_ingress_config: LoadIngressFn,
+    allocate_install_port: AllocateInstallPortFn,
+    resolve_units: ResolveUnitsFn,
+    query_status: StatusFn,
+    control_unit: ControlFn,
+    mut dispatch_package: DispatchFn,
+) -> Result<(i32, Vec<String>, anyhow::Result<()>), String>
+where
+    RuntimePortFn: FnMut(&str) -> i32,
+    LoadIngressFn: FnMut(&str) -> anyhow::Result<Option<AppIngressConfig>>,
+    AllocateInstallPortFn: FnMut(&str, i32) -> i32,
+    ResolveUnitsFn: FnMut(&str) -> Vec<String>,
+    StatusFn: FnMut(&str) -> String,
+    ControlFn: FnMut(String, &'static str) -> ControlFut,
+    ControlFut: std::future::Future<Output = anyhow::Result<()>>,
+    DispatchFn: FnMut(i32) -> DispatchFut,
+    DispatchFut: std::future::Future<Output = anyhow::Result<()>>,
+{
+    let allocated_port = resolve_package_lifecycle_port_with(
+        action,
+        clean_id,
+        pkg_default_port,
+        query_runtime_port,
+        load_ingress_config,
+        allocate_install_port,
+    )?;
+
+    let stopped_units = pre_stop_units_for_package_update_with(
+        action,
+        clean_id,
+        fs_root_override,
+        resolve_units,
+        query_status,
+        control_unit,
+    )
+    .await
+    .map_err(|(failed_unit, error_message)| {
+        format!("Could not stop {}: {}", failed_unit, error_message)
+    })?;
+
+    let execution_result = dispatch_package(allocated_port).await;
+    Ok((allocated_port, stopped_units, execution_result))
+}
+
 async fn dispatch_package_lifecycle(
     pkg_id: String,
     action: &'static str,
@@ -878,14 +1070,6 @@ async fn dispatch_package_lifecycle(
 
     tokio::spawn(async move {
         let _lifecycle_guard = af_services::PACKAGE_LIFECYCLE_MUTEX.lock().await;
-        // Read native configuration before stopping the application. An update
-        // must keep its port even while that port is owned by the old process.
-        let configured_port = if action == "update" {
-            af_services::mutators::get_app_runtime_meta(&clean_id).configured_port
-        } else {
-            0
-        };
-
         emit_package_progress(
             &clean_id,
             action,
@@ -895,185 +1079,169 @@ async fn dispatch_package_lifecycle(
             &started_at,
         );
 
-        let mut stopped_units: Vec<String> = Vec::new();
-        if action == "update"
-            && env::var("AETHERFLOW_FS_ROOT")
-                .unwrap_or_default()
-                .trim()
-                .is_empty()
-        {
-            let mut units = af_services::resolve_service_units(&clean_id);
-            units.sort_by_key(|unit| !unit.ends_with(".timer"));
-            for u in units {
-                let (st, _, _) = af_services::get_systemd_unit_info(&u);
-                if st == "running" {
-                    if let Err(error) =
-                        af_services::control_service_with_manager(&u, "stop", "systemd-unit").await
-                    {
-                        for unit in &stopped_units {
-                            let _ = af_services::control_service_with_manager(
-                                unit,
-                                "start",
-                                "systemd-unit",
-                            )
-                            .await;
-                        }
-                        emit_package_progress(
-                            &clean_id,
-                            action,
-                            "failed",
-                            10,
-                            &format!("Could not stop {}: {}", u, error),
-                            &started_at,
-                        );
-                        af_services::clear_package_job_info(&clean_id);
-                        return;
-                    }
-                    stopped_units.push(u);
-                }
-            }
-        }
-
-        let allocated_port = if action == "update" {
-            let ingress_port = af_db::get_app_ingress_config(&clean_id)
-                .ok()
-                .flatten()
-                .map(|c| c.listen_port)
-                .unwrap_or(0);
-            if configured_port > 0 {
-                configured_port
-            } else if ingress_port > 0 {
-                ingress_port
-            } else {
-                pkg_default_port
-            }
-        } else if action == "install" {
-            allocate_or_resolve_app_port(&clean_id, pkg_default_port)
-        } else {
-            pkg_default_port
-        };
-        if pkg_default_port > 0 && allocated_port <= 0 && action == "install" {
-            emit_package_progress(
-                &clean_id,
-                action,
-                "failed",
-                10,
-                "No supported listen port is available for this application",
-                &started_at,
-            );
-            af_services::clear_package_job_info(&clean_id);
-            return;
-        }
-
-        emit_package_progress(
-            &clean_id,
-            action,
-            status_label,
-            25,
-            &format!("Executing {} script for {}...", action, pkg_label),
-            &started_at,
-        );
-
-        let fs_root_override = env::var("AETHERFLOW_FS_ROOT")
-            .ok()
+        let fs_root_override_raw = env::var("AETHERFLOW_FS_ROOT").unwrap_or_default();
+        let fs_root_override = Option::from(fs_root_override_raw.clone())
             .filter(|s| !s.trim().is_empty());
         let can_run_bash =
             cfg!(unix) && fs_root_override.is_none() && std::path::Path::new("/bin/bash").exists();
 
-        let execution_result = if can_run_bash && af_runner::is_runner_available() {
-            af_runner::dispatch_package_stream(
+        let (allocated_port, stopped_units, execution_result) =
+            match run_package_lifecycle_dispatch_gate_with(
                 action,
                 &clean_id,
-                &script_name,
-                allocated_port,
-                |line| {
-                    let (pct, msg) = af_runner::parse_progress_line(&line)
-                        .map(|(p, m)| (p as i32, m))
-                        .unwrap_or_else(|| (60, line));
-                    let display_msg = if msg.is_empty() {
-                        format!("Running {} for {}...", action, pkg_label)
-                    } else {
-                        msg
-                    };
-                    emit_package_progress(
-                        &clean_id,
-                        action,
-                        status_label,
-                        pct,
-                        &display_msg,
-                        &started_at,
-                    );
+                pkg_default_port,
+                &fs_root_override_raw,
+                |app_id| af_services::mutators::get_app_runtime_meta(app_id).configured_port,
+                load_authoritative_app_ingress_config,
+                allocate_or_resolve_app_port,
+                af_services::resolve_service_units,
+                |unit_name| af_services::get_systemd_unit_info(unit_name).0,
+                |unit_name, control_action| async move {
+                    af_services::control_service_with_manager(
+                        &unit_name,
+                        control_action,
+                        "systemd-unit",
+                    )
+                    .await
                 },
-            )
-            .await
-        } else if can_run_bash {
-            let request = af_models::PackageRunnerRequest {
-                action: action.to_string(),
-                package_id: clean_id.clone(),
-                script_name: script_name.clone(),
-                app_port: allocated_port,
-            };
-            let stream = af_runner::execute_package_request_stream(request);
-            tokio::pin!(stream);
-            let mut result = Ok(());
-            while let Some(item) = stream.next().await {
-                match item {
-                    Ok(line) => {
-                        if let Some(error) = line.trim().strip_prefix("__RUNNER_EXIT_ERROR__:") {
-                            result = Err(anyhow::anyhow!("{}", error));
+                |resolved_port| {
+                    let clean_id = clean_id.clone();
+                    let pkg_label = pkg_label.clone();
+                    let script_name = script_name.clone();
+                    let pkg_lock_file = pkg_lock_file.clone();
+                    let started_at = started_at.clone();
+                    let fs_root_override = fs_root_override.clone();
+                    async move {
+                        emit_package_progress(
+                            &clean_id,
+                            action,
+                            status_label,
+                            25,
+                            &format!("Executing {} script for {}...", action, pkg_label),
+                            &started_at,
+                        );
+
+                        if can_run_bash && af_runner::is_runner_available() {
+                            af_runner::dispatch_package_stream(
+                                action,
+                                &clean_id,
+                                &script_name,
+                                resolved_port,
+                                |line| {
+                                    let (pct, msg) = af_runner::parse_progress_line(&line)
+                                        .map(|(p, m)| (p as i32, m))
+                                        .unwrap_or_else(|| (60, line));
+                                    let display_msg = if msg.is_empty() {
+                                        format!("Running {} for {}...", action, pkg_label)
+                                    } else {
+                                        msg
+                                    };
+                                    emit_package_progress(
+                                        &clean_id,
+                                        action,
+                                        status_label,
+                                        pct,
+                                        &display_msg,
+                                        &started_at,
+                                    );
+                                },
+                            )
+                            .await
+                        } else if can_run_bash {
+                            let request = af_models::PackageRunnerRequest {
+                                action: action.to_string(),
+                                package_id: clean_id.clone(),
+                                script_name: script_name.clone(),
+                                app_port: resolved_port,
+                            };
+                            let stream = af_runner::execute_package_request_stream(request);
+                            tokio::pin!(stream);
+                            let mut result = Ok(());
+                            while let Some(item) = stream.next().await {
+                                match item {
+                                    Ok(line) => {
+                                        if let Some(error) =
+                                            line.trim().strip_prefix("__RUNNER_EXIT_ERROR__:")
+                                        {
+                                            result = Err(anyhow::anyhow!("{}", error));
+                                        } else {
+                                            let (pct, msg) = af_runner::parse_progress_line(&line)
+                                                .map(|(p, m)| (p as i32, m))
+                                                .unwrap_or_else(|| (60, line));
+                                            emit_package_progress(
+                                                &clean_id,
+                                                action,
+                                                status_label,
+                                                pct,
+                                                msg.trim(),
+                                                &started_at,
+                                            );
+                                        }
+                                    }
+                                    Err(error) => {
+                                        result = Err(error.into());
+                                        break;
+                                    }
+                                }
+                            }
+                            result
                         } else {
-                            let (pct, msg) = af_runner::parse_progress_line(&line)
-                                .map(|(p, m)| (p as i32, m))
-                                .unwrap_or_else(|| (60, line));
                             emit_package_progress(
                                 &clean_id,
                                 action,
                                 status_label,
-                                pct,
-                                msg.trim(),
+                                60,
+                                &format!("Applying package state changes for {}...", pkg_label),
                                 &started_at,
                             );
+                            if !pkg_lock_file.is_empty() {
+                                let lock_path = if let Some(ref root) = fs_root_override {
+                                    std::path::Path::new(root.trim())
+                                        .join(pkg_lock_file.trim_start_matches(['/', '\\']))
+                                } else {
+                                    PathBuf::from(&pkg_lock_file)
+                                };
+                                if action == "remove" {
+                                    let _ = fs::remove_file(&lock_path);
+                                } else if fs_root_override.is_some() {
+                                    if let Some(parent) = lock_path.parent() {
+                                        let _ = fs::create_dir_all(parent);
+                                    }
+                                    let _ = fs::write(&lock_path, b"installed\n");
+                                }
+                            }
+                            Ok(())
                         }
                     }
-                    Err(error) => {
-                        result = Err(error.into());
-                        break;
-                    }
+                },
+            )
+            .await
+            {
+                Ok(outcome) => outcome,
+                Err(error_message) => {
+                    emit_package_progress(
+                        &clean_id,
+                        action,
+                        "failed",
+                        10,
+                        &error_message,
+                        &started_at,
+                    );
+                    af_services::clear_package_job_info(&clean_id);
+                    return;
                 }
-            }
-            result
-        } else {
-            emit_package_progress(
-                &clean_id,
-                action,
-                status_label,
-                60,
-                &format!("Applying package state changes for {}...", pkg_label),
-                &started_at,
-            );
-            if !pkg_lock_file.is_empty() {
-                let lock_path = if let Some(ref root) = fs_root_override {
-                    std::path::Path::new(root.trim())
-                        .join(pkg_lock_file.trim_start_matches(['/', '\\']))
-                } else {
-                    PathBuf::from(&pkg_lock_file)
-                };
-                if action == "remove" {
-                    let _ = fs::remove_file(&lock_path);
-                } else if fs_root_override.is_some() {
-                    if let Some(parent) = lock_path.parent() {
-                        let _ = fs::create_dir_all(parent);
-                    }
-                    let _ = fs::write(&lock_path, b"installed\n");
-                }
-            }
-            Ok(())
-        };
+            };
 
         if let Err(error) = execution_result {
-            for unit in &stopped_units {
-                let _ =
-                    af_services::control_service_with_manager(unit, "start", "systemd-unit").await;
+            if af_services::should_pre_stop_on_update(&clean_id) {
+                for unit in &stopped_units {
+                    let _ = af_services::control_service_with_manager(
+                        unit,
+                        "start",
+                        "systemd-unit",
+                    )
+                    .await;
+                }
             }
             af_services::clear_service_status_cache();
             af_services::mutators::clear_app_runtime_meta_cache();
@@ -1146,9 +1314,12 @@ async fn dispatch_package_lifecycle(
             }
 
             if action == "update" {
-                for u in stopped_units {
-                    let _ = af_services::control_service_with_manager(&u, "start", "systemd-unit")
-                        .await;
+                if af_services::should_pre_stop_on_update(&clean_id) {
+                    for u in stopped_units {
+                        let _ =
+                            af_services::control_service_with_manager(&u, "start", "systemd-unit")
+                                .await;
+                    }
                 }
                 let _ = af_services::workers::refresh_package_update_by_id(&clean_id).await;
             }
@@ -3112,3 +3283,369 @@ async fn forward_plugin_proxy_request(
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_dispatch_package_update_pre_stop_skips_maintainerr_and_stops_radarr() {
+        use std::sync::{Arc, Mutex};
+
+        let recorded_control_actions: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let maintainerr_recorder = Arc::clone(&recorded_control_actions);
+
+        let maintainerr_stopped = pre_stop_units_for_package_update_with(
+            "update",
+            "maintainerr",
+            "",
+            af_services::resolve_service_units,
+            |_unit_name| "running".to_string(),
+            move |unit_name, control_action| {
+                let recorder_handle = Arc::clone(&maintainerr_recorder);
+                async move {
+                    recorder_handle
+                        .lock()
+                        .unwrap()
+                        .push(format!("{} {}", control_action, unit_name));
+                    Ok(())
+                }
+            },
+        )
+        .await
+        .expect("maintainerr pre-stop decision should succeed");
+        assert!(
+            maintainerr_stopped.is_empty(),
+            "maintainerr must not be pre-stopped by API update dispatcher"
+        );
+        assert!(
+            recorded_control_actions.lock().unwrap().is_empty(),
+            "control callback must not receive stop for maintainerr"
+        );
+
+        let radarr_recorder = Arc::clone(&recorded_control_actions);
+        let radarr_stopped = pre_stop_units_for_package_update_with(
+            "update",
+            "radarr",
+            "",
+            af_services::resolve_service_units,
+            |_unit_name| "running".to_string(),
+            move |unit_name, control_action| {
+                let recorder_handle = Arc::clone(&radarr_recorder);
+                async move {
+                    recorder_handle
+                        .lock()
+                        .unwrap()
+                        .push(format!("{} {}", control_action, unit_name));
+                    Ok(())
+                }
+            },
+        )
+        .await
+        .expect("radarr pre-stop decision should succeed");
+
+        assert_eq!(radarr_stopped, vec!["radarr".to_string()]);
+        assert_eq!(
+            *recorded_control_actions.lock().unwrap(),
+            vec!["stop radarr".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_package_update_maintainerr_port_preservation_and_fail_closed() {
+        use std::sync::{Arc, Mutex};
+
+        let recorded_control_actions: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let recorded_dispatch_ports: Arc<Mutex<Vec<i32>>> = Arc::new(Mutex::new(Vec::new()));
+        let queried_apps: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+
+        for alias_id in ["maintainerr", "af-maintainerr", "af-maintainerr.service"] {
+            recorded_control_actions.lock().unwrap().clear();
+            recorded_dispatch_ports.lock().unwrap().clear();
+            queried_apps.lock().unwrap().clear();
+
+            let control_recorder = Arc::clone(&recorded_control_actions);
+            let dispatch_recorder = Arc::clone(&recorded_dispatch_ports);
+            let app_recorder = Arc::clone(&queried_apps);
+
+            let (allocated_port, stopped_units, dispatch_res) =
+                run_package_lifecycle_dispatch_gate_with(
+                    "update",
+                    alias_id,
+                    6246,
+                    "",
+                    |_app_id| 0,
+                    move |app_id| {
+                        app_recorder.lock().unwrap().push(app_id.to_string());
+                        Ok(Some(AppIngressConfig {
+                            app_name: app_id.to_string(),
+                            listen_port: 17420,
+                            ..Default::default()
+                        }))
+                    },
+                    |_app_id, _default_port| 6246,
+                    af_services::resolve_service_units,
+                    |_unit_name| "running".to_string(),
+                    move |unit_name, control_action| {
+                        let recorder = Arc::clone(&control_recorder);
+                        async move {
+                            recorder
+                                .lock()
+                                .unwrap()
+                                .push(format!("{} {}", control_action, unit_name));
+                            Ok(())
+                        }
+                    },
+                    move |port| {
+                        let recorder = Arc::clone(&dispatch_recorder);
+                        async move {
+                            recorder.lock().unwrap().push(port);
+                            Ok(())
+                        }
+                    },
+                )
+                .await
+                .expect("maintainerr update with valid non-default port should succeed");
+
+            assert!(dispatch_res.is_ok());
+            assert_eq!(allocated_port, 17420);
+            assert!(stopped_units.is_empty());
+            assert_eq!(
+                *queried_apps.lock().unwrap(),
+                vec!["maintainerr".to_string()]
+            );
+            assert!(
+                recorded_control_actions.lock().unwrap().is_empty(),
+                "maintainerr update must not invoke unit control for {}",
+                alias_id
+            );
+            assert_eq!(*recorded_dispatch_ports.lock().unwrap(), vec![17420]);
+        }
+
+        // Missing ingress row must fail closed before any unit control or package dispatch
+        recorded_control_actions.lock().unwrap().clear();
+        recorded_dispatch_ports.lock().unwrap().clear();
+        let control_recorder = Arc::clone(&recorded_control_actions);
+        let dispatch_recorder = Arc::clone(&recorded_dispatch_ports);
+        let missing_err = run_package_lifecycle_dispatch_gate_with(
+            "update",
+            "maintainerr",
+            6246,
+            "",
+            |_app_id| 0,
+            |_app_id| Ok(None),
+            |_app_id, _default_port| 6246,
+            af_services::resolve_service_units,
+            |_unit_name| "running".to_string(),
+            move |unit_name, control_action| {
+                let recorder = Arc::clone(&control_recorder);
+                async move {
+                    recorder
+                        .lock()
+                        .unwrap()
+                        .push(format!("{} {}", control_action, unit_name));
+                    Ok(())
+                }
+            },
+            move |port| {
+                let recorder = Arc::clone(&dispatch_recorder);
+                async move {
+                    recorder.lock().unwrap().push(port);
+                    Ok(())
+                }
+            },
+        )
+        .await
+        .expect_err("missing ingress mapping must fail closed");
+        assert!(
+            missing_err.contains("missing persisted ingress port mapping for maintainerr update"),
+            "unexpected missing-mapping error: {}",
+            missing_err
+        );
+        assert!(recorded_control_actions.lock().unwrap().is_empty());
+        assert!(recorded_dispatch_ports.lock().unwrap().is_empty());
+
+        // Unreadable DB / query error must fail closed without falling back to 6246
+        recorded_control_actions.lock().unwrap().clear();
+        recorded_dispatch_ports.lock().unwrap().clear();
+        let control_recorder = Arc::clone(&recorded_control_actions);
+        let dispatch_recorder = Arc::clone(&recorded_dispatch_ports);
+        let db_err = run_package_lifecycle_dispatch_gate_with(
+            "update",
+            "maintainerr",
+            6246,
+            "",
+            |_app_id| 0,
+            |_app_id| Err(anyhow::anyhow!("sqlite disk I/O error")),
+            |_app_id, _default_port| 6246,
+            af_services::resolve_service_units,
+            |_unit_name| "running".to_string(),
+            move |unit_name, control_action| {
+                let recorder = Arc::clone(&control_recorder);
+                async move {
+                    recorder
+                        .lock()
+                        .unwrap()
+                        .push(format!("{} {}", control_action, unit_name));
+                    Ok(())
+                }
+            },
+            move |port| {
+                let recorder = Arc::clone(&dispatch_recorder);
+                async move {
+                    recorder.lock().unwrap().push(port);
+                    Ok(())
+                }
+            },
+        )
+        .await
+        .expect_err("unreadable ingress DB must fail closed");
+        assert!(
+            db_err.contains("cannot read existing configured port for maintainerr")
+                && db_err.contains("sqlite disk I/O error"),
+            "unexpected DB error: {}",
+            db_err
+        );
+        assert!(recorded_control_actions.lock().unwrap().is_empty());
+        assert!(recorded_dispatch_ports.lock().unwrap().is_empty());
+
+        // Out-of-range / invalid ports must fail closed with zero control or dispatch calls
+        for invalid_port in [0, -1, 80, 1023, 65536, 70000] {
+            recorded_control_actions.lock().unwrap().clear();
+            recorded_dispatch_ports.lock().unwrap().clear();
+            let control_recorder = Arc::clone(&recorded_control_actions);
+            let dispatch_recorder = Arc::clone(&recorded_dispatch_ports);
+            let port_err = run_package_lifecycle_dispatch_gate_with(
+                "update",
+                "maintainerr",
+                6246,
+                "",
+                |_app_id| 0,
+                move |app_id| {
+                    Ok(Some(AppIngressConfig {
+                        app_name: app_id.to_string(),
+                        listen_port: invalid_port,
+                        ..Default::default()
+                    }))
+                },
+                |_app_id, _default_port| 6246,
+                af_services::resolve_service_units,
+                |_unit_name| "running".to_string(),
+                move |unit_name, control_action| {
+                    let recorder = Arc::clone(&control_recorder);
+                    async move {
+                        recorder
+                            .lock()
+                            .unwrap()
+                            .push(format!("{} {}", control_action, unit_name));
+                        Ok(())
+                    }
+                },
+                move |port| {
+                    let recorder = Arc::clone(&dispatch_recorder);
+                    async move {
+                        recorder.lock().unwrap().push(port);
+                        Ok(())
+                    }
+                },
+            )
+            .await
+            .expect_err("invalid persisted port must fail closed");
+            assert!(
+                port_err.contains(&format!(
+                    "invalid persisted listen port {} for maintainerr update",
+                    invalid_port
+                )),
+                "unexpected error for invalid port {}: {}",
+                invalid_port,
+                port_err
+            );
+            assert!(recorded_control_actions.lock().unwrap().is_empty());
+            assert!(recorded_dispatch_ports.lock().unwrap().is_empty());
+        }
+
+        // Unrelated package update (radarr) preserves fallback to default_port and pre-stops unit
+        recorded_control_actions.lock().unwrap().clear();
+        recorded_dispatch_ports.lock().unwrap().clear();
+        let control_recorder = Arc::clone(&recorded_control_actions);
+        let dispatch_recorder = Arc::clone(&recorded_dispatch_ports);
+        let (radarr_port, radarr_stopped, radarr_res) = run_package_lifecycle_dispatch_gate_with(
+            "update",
+            "radarr",
+            7878,
+            "",
+            |_app_id| 0,
+            |_app_id| Ok(None),
+            |_app_id, _default_port| 7878,
+            af_services::resolve_service_units,
+            |_unit_name| "running".to_string(),
+            move |unit_name, control_action| {
+                let recorder = Arc::clone(&control_recorder);
+                async move {
+                    recorder
+                        .lock()
+                        .unwrap()
+                        .push(format!("{} {}", control_action, unit_name));
+                    Ok(())
+                }
+            },
+            move |port| {
+                let recorder = Arc::clone(&dispatch_recorder);
+                async move {
+                    recorder.lock().unwrap().push(port);
+                    Ok(())
+                }
+            },
+        )
+        .await
+        .expect("radarr update should fall back to default port when unconfigured");
+        assert!(radarr_res.is_ok());
+        assert_eq!(radarr_port, 7878);
+        assert_eq!(radarr_stopped, vec!["radarr".to_string()]);
+        assert_eq!(
+            *recorded_control_actions.lock().unwrap(),
+            vec!["stop radarr".to_string()]
+        );
+        assert_eq!(*recorded_dispatch_ports.lock().unwrap(), vec![7878]);
+
+        // Fresh install of maintainerr preserves install port allocation without pre-existing ingress
+        recorded_control_actions.lock().unwrap().clear();
+        recorded_dispatch_ports.lock().unwrap().clear();
+        let control_recorder = Arc::clone(&recorded_control_actions);
+        let dispatch_recorder = Arc::clone(&recorded_dispatch_ports);
+        let (install_port, install_stopped, install_res) = run_package_lifecycle_dispatch_gate_with(
+            "install",
+            "maintainerr",
+            6246,
+            "",
+            |_app_id| 0,
+            |_app_id| Ok(None),
+            |_app_id, _default_port| 17420,
+            af_services::resolve_service_units,
+            |_unit_name| "running".to_string(),
+            move |unit_name, control_action| {
+                let recorder = Arc::clone(&control_recorder);
+                async move {
+                    recorder
+                        .lock()
+                        .unwrap()
+                        .push(format!("{} {}", control_action, unit_name));
+                    Ok(())
+                }
+            },
+            move |port| {
+                let recorder = Arc::clone(&dispatch_recorder);
+                async move {
+                    recorder.lock().unwrap().push(port);
+                    Ok(())
+                }
+            },
+        )
+        .await
+        .expect("fresh maintainerr install should allocate port");
+        assert!(install_res.is_ok());
+        assert_eq!(install_port, 17420);
+        assert!(install_stopped.is_empty());
+        assert!(recorded_control_actions.lock().unwrap().is_empty());
+        assert_eq!(*recorded_dispatch_ports.lock().unwrap(), vec![17420]);
+    }
+}

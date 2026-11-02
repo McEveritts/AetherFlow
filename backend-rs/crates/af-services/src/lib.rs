@@ -347,11 +347,17 @@ pub fn get_blueprint(app_name: &str) -> Option<AppBlueprint> {
         category: p.category,
         default_port: p.default_port,
         fallback_port_range: [17000, 19999],
-        port_env_var: "AF_APP_PORT".to_string(),
+        port_env_var: if p.name == "maintainerr" {
+            "UI_PORT".to_string()
+        } else {
+            "AF_APP_PORT".to_string()
+        },
         port_config_key: port_config_key.to_string(),
         web_path: p.web_path,
         health_check_path: if p.name == "palate" {
             "/login".to_string()
+        } else if p.name == "maintainerr" {
+            "/api/health/ready".to_string()
         } else {
             "/".to_string()
         },
@@ -584,6 +590,14 @@ pub fn clear_service_status_cache() {
         g.0.clear();
         g.1 = None;
     }
+}
+
+pub fn should_pre_stop_on_update(target: &str) -> bool {
+    let clean = target.trim().trim_end_matches(".service");
+    !matches!(
+        clean.to_ascii_lowercase().as_str(),
+        "maintainerr" | "af-maintainerr"
+    )
 }
 
 /// Resolves a logical package or service name into its concrete systemd unit names (`systemctl.go`).
@@ -1838,7 +1852,7 @@ mod tests {
     #[test]
     fn test_embedded_package_catalog_loads_all_apps() {
         let catalog = get_package_catalog().unwrap();
-        assert!(catalog.len() >= 74);
+        assert!(catalog.len() >= 75);
         assert!(catalog.iter().any(|p| p.name == "jellyfin"));
         assert!(catalog.iter().any(|p| p.name == "kasmvnc"));
         assert!(catalog.iter().any(|p| p.name == "mcvnc"));
@@ -1859,6 +1873,38 @@ mod tests {
         let ts_bp = get_blueprint("tailscale").expect("tailscale blueprint");
         assert_eq!(ts_bp.service_name, "tailscaled");
         assert!(ts_bp.is_network_app);
+    }
+
+    #[test]
+    fn test_maintainerr_catalog_and_blueprint() {
+        let catalog = get_package_catalog().unwrap();
+        let maintainerr = catalog
+            .iter()
+            .find(|package| package.name == "maintainerr")
+            .expect("maintainerr catalog entry");
+        assert_eq!(maintainerr.service_name, "af-maintainerr");
+        assert_eq!(maintainerr.default_port, 6246);
+        assert_eq!(maintainerr.update_source, "github");
+        assert_eq!(maintainerr.update_repo, "Maintainerr/Maintainerr");
+        assert_eq!(maintainerr.sandbox_profile, "node");
+        assert_eq!(
+            maintainerr.version_command,
+            vec!["cat", "/opt/maintainerr/.af-version"]
+        );
+        assert!(maintainerr
+            .sandbox_read_write
+            .iter()
+            .any(|path| path == "/var/lib/maintainerr"));
+        let blueprint = get_blueprint("maintainerr").expect("maintainerr blueprint");
+        assert_eq!(blueprint.port_env_var, "UI_PORT");
+        assert_eq!(blueprint.health_check_path, "/api/health/ready");
+        assert!(blueprint.dependencies.is_empty());
+        assert_eq!(resolve_service_units("maintainerr"), vec!["af-maintainerr"]);
+        assert!(!should_pre_stop_on_update("maintainerr"));
+        assert!(!should_pre_stop_on_update("af-maintainerr"));
+        assert!(!should_pre_stop_on_update("af-maintainerr.service"));
+        assert!(should_pre_stop_on_update("radarr"));
+        assert!(should_pre_stop_on_update("jellyfin"));
     }
 
     #[test]

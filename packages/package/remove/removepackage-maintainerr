@@ -1,0 +1,31 @@
+#!/bin/bash
+
+set -euo pipefail
+
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f "${SELF_DIR}/../../common.sh" ]]; then
+    source "${SELF_DIR}/../../common.sh"
+else
+    source /opt/AetherFlow/packages/common.sh
+fi
+
+PACKAGE_NAME="maintainerr"
+export LOGFILE="/var/log/aetherflow/remove-${PACKAGE_NAME}.log"
+require_root
+mkdir -p "$(dirname "$LOGFILE")" /run/lock
+exec 9>/run/lock/aetherflow-maintainerr.lock
+flock -n 9 || { log_error "Another Maintainerr lifecycle operation is running."; exit 1; }
+
+report_progress 25 "Stopping and removing af-maintainerr.service..."
+purge_systemd_unit "af-maintainerr"
+
+report_progress 65 "Removing the Maintainerr application bundle..."
+rm -rf /opt/maintainerr
+if [[ "${DELETE_DATA:-false}" == true ]]; then
+    rm -rf /var/lib/maintainerr
+    purge_system_user "maintainerr"
+fi
+systemctl daemon-reload >> "$LOGFILE" 2>&1
+remove_lock "$PACKAGE_NAME"
+report_progress 100 "Maintainerr removed; database and settings retained unless DELETE_DATA=true."
+log_info "${PACKAGE_NAME} removed successfully"

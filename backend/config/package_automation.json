@@ -341,6 +341,23 @@
       "ombi.service"
     ]
   },
+  "maintainerr": {
+    "update_source": "github",
+    "update_repo": "Maintainerr/Maintainerr",
+    "version_command": [
+      "cat",
+      "/opt/maintainerr/.af-version"
+    ],
+    "sandbox_profile": "node",
+    "sandbox_rw_paths": [
+      "/var/lib/maintainerr",
+      "/tmp",
+      "-/mnt/unionfs"
+    ],
+    "sandbox_service_units": [
+      "af-maintainerr.service"
+    ]
+  },
   "tautulli": {
     "update_source": "git_tags",
     "update_repo": "Tautulli/Tautulli",

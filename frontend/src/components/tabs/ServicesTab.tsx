@@ -30,6 +30,7 @@ const SERVICE_WEB_PORTS: Record<string, number | string> = {
     'overseerr': 5056,
     'ombi': 5000,
     'tautulli': 8181,
+    'af-maintainerr': 6246,
     'jackett': 9117,
     'flaresolverr': 8191,
     'navidrome': 4533,
@@ -112,7 +113,14 @@ interface ServiceInfo {
 }
 
 
-export default function ServicesTab() {
+interface ServicesTabProps {
+    browserOrigin?: {
+        protocol: string;
+        hostname: string;
+    };
+}
+
+export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
     const { addToast } = useToast();
     const { user } = useAuth();
     const { mutate: globalMutate } = useSWRConfig();
@@ -415,25 +423,81 @@ export default function ServicesTab() {
         return `${'•'.repeat(12)}${trimmed.slice(-4)}`;
     };
 
+    const isMaintainerrService = (name: string, data: ServiceInfo) => {
+        const identifiers = [data.id, data.process, name]
+            .filter((value): value is string => Boolean(value))
+            .map((value) => value.trim().toLowerCase());
+        return identifiers.some(
+            (value) =>
+                value === 'maintainerr' ||
+                value === 'af-maintainerr' ||
+                value === 'af-maintainerr.service'
+        );
+    };
+
+    const isLocalBrowserHost = (hostname: string) => {
+        const normalized = hostname.trim().toLowerCase().replace(/^\[|\]$/g, '');
+        return normalized === 'localhost' || normalized === '127.0.0.1' || normalized === '::1';
+    };
+
+    const resolveBrowserProtocol = () => {
+        if (browserOrigin?.protocol) {
+            return browserOrigin.protocol;
+        }
+        return typeof window !== 'undefined' ? window.location.protocol : 'http:';
+    };
+
+    const resolveBrowserHostname = () => {
+        if (browserOrigin?.hostname !== undefined) {
+            return browserOrigin.hostname;
+        }
+        return typeof window !== 'undefined' ? window.location.hostname || '' : '';
+    };
+
+    const isRemoteLoopbackRestricted = (name: string, data: ServiceInfo) => {
+        if (!isMaintainerrService(name, data)) {
+            return false;
+        }
+        if (data.external_access_enabled && Boolean(data.public_domain?.trim())) {
+            return false;
+        }
+        const hostname = resolveBrowserHostname();
+        if (!hostname) {
+            return false;
+        }
+        return !isLocalBrowserHost(hostname);
+    };
+
     const handleOpenWebUI = (name: string, data: ServiceInfo) => {
         const pathSuffix = data.web_path ? (data.web_path.startsWith('/') ? data.web_path : `/${data.web_path}`) : '';
-        if (data.external_access_enabled && data.public_domain) {
+        const publicDomain = data.public_domain?.trim();
+        if (data.external_access_enabled && publicDomain) {
             const proto = data.tls_enabled === false ? 'http:' : 'https:';
-            window.open(`${proto}//${data.public_domain}${pathSuffix}`, '_blank');
+            window.open(`${proto}//${publicDomain}${pathSuffix}`, '_blank');
             return;
         }
-        const host = window.location.hostname;
+        if (isRemoteLoopbackRestricted(name, data)) {
+            addToast(
+                'Maintainerr binds strictly to 127.0.0.1. Enable External Access with a public domain in Ingress & Deployment to open its Web UI remotely.',
+                'info'
+            );
+            return;
+        }
+        const browserHostname = resolveBrowserHostname();
+        const useMaintainerrLoopback = isMaintainerrService(name, data) && isLocalBrowserHost(browserHostname);
+        const host = useMaintainerrLoopback ? '127.0.0.1' : browserHostname;
+        const protocol = useMaintainerrLoopback ? 'http:' : resolveBrowserProtocol();
         const effectivePort = data.active_port || data.default_port;
         if (effectivePort && effectivePort > 0) {
-            window.open(`${window.location.protocol}//${host}:${effectivePort}${pathSuffix}`, '_blank');
+            window.open(`${protocol}//${host}:${effectivePort}${pathSuffix}`, '_blank');
             return;
         }
         const process = data.process || name;
         const portOrPath = (data.id ? SERVICE_WEB_PORTS[data.id] : undefined) ?? SERVICE_WEB_PORTS[process];
         if (portOrPath != null) {
             const url = typeof portOrPath === 'string'
-                ? portOrPath.startsWith('/') ? `${window.location.protocol}//${host}${portOrPath}` : portOrPath
-                : `${window.location.protocol}//${host}:${portOrPath}`;
+                ? portOrPath.startsWith('/') ? `${protocol}//${host}${portOrPath}` : portOrPath
+                : `${protocol}//${host}:${portOrPath}`;
             window.open(url, '_blank');
         } else {
             addToast('No web UI configured for this service.', 'info');
@@ -461,6 +525,8 @@ export default function ServicesTab() {
         const isBusy = loadingService === name || isUpdating;
         const controlDisabled = isBusy || !canControlServices;
         const webAvailable = hasWebUI(data);
+        const remoteLoopbackBlocked = isRemoteLoopbackRestricted(name, data);
+        const remoteLoopbackMessage = 'Maintainerr binds strictly to 127.0.0.1. Enable External Access with a public domain in Ingress & Deployment to open its Web UI remotely.';
         const hasUpdate = Boolean(!isCore && data.update_available);
         const installedVer = data.installed_version || data.version || '-';
         const latestVer = data.latest_version;
@@ -546,9 +612,9 @@ export default function ServicesTab() {
                         {(isCore || webAvailable) && (
                             <button 
                                 onClick={() => handleOpenSettings(name, data)}
-                                disabled={isBusy}
+                                disabled={isBusy || (!isCore && remoteLoopbackBlocked)}
                                 className="obs-touch-target-standard obs-gpu-120hz-interactive p-2.5 text-slate-500 hover:text-slate-300 hover:bg-white/5 rounded-lg transition-colors disabled:opacity-50 flex items-center justify-center"
-                                title="Settings"
+                                title={!isCore && remoteLoopbackBlocked ? remoteLoopbackMessage : 'Settings'}
                             >
                                 <Settings size={18} />
                             </button>
@@ -685,8 +751,9 @@ export default function ServicesTab() {
                             {webAvailable && (
                                 <button
                                     onClick={() => handleOpenWebUI(name, data)}
+                                    title={remoteLoopbackBlocked ? remoteLoopbackMessage : `Open ${name} Web UI`}
                                     className="obs-touch-target-standard obs-gpu-120hz-interactive flex-1 py-2.5 bg-slate-800/80 hover:bg-slate-700 text-slate-300 text-xs font-semibold rounded-lg transition-colors flex items-center justify-center gap-2 disabled:opacity-50"
-                                    disabled={isBusy}
+                                    disabled={isBusy || remoteLoopbackBlocked}
                                 >
                                     <Globe size={14} /> Web UI
                                 </button>

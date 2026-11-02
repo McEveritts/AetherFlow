@@ -1,7 +1,10 @@
 package services
 
 import (
+	"aetherflow/db"
+	"aetherflow/models"
 	"bufio"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -119,6 +122,109 @@ func parseProgressLine(line string) (int, string, bool) {
 	return pct, cleanMsg, true
 }
 
+func resolveExistingUpdatePort(pkgID string) (int, error) {
+	canonicalApp := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(pkgID)), ".service")
+	blueprint := GetBlueprint(canonicalApp)
+	if blueprint != nil {
+		if blueprint.DefaultPort <= 0 {
+			return 0, nil
+		}
+		if blueprint.AppName != "" {
+			canonicalApp = blueprint.AppName
+		}
+	} else if canonicalApp == "af-maintainerr" {
+		canonicalApp = "maintainerr"
+	}
+
+	if db.DB == nil {
+		return 0, fmt.Errorf("cannot resolve existing configured port for %s: database unavailable", canonicalApp)
+	}
+	db.InvalidateIngressCache()
+	existingConfig, err := db.GetAppIngressConfig(canonicalApp)
+	if err != nil {
+		return 0, fmt.Errorf("cannot read existing configured port for %s: %w", canonicalApp, err)
+	}
+	if existingConfig == nil {
+		return 0, fmt.Errorf("missing persisted ingress port mapping for %s update", canonicalApp)
+	}
+	if existingConfig.ListenPort < 1024 || existingConfig.ListenPort > 65535 {
+		return 0, fmt.Errorf("invalid persisted listen port %d for %s update", existingConfig.ListenPort, canonicalApp)
+	}
+	return existingConfig.ListenPort, nil
+}
+
+func applyPostInstallWithoutCallerRestart(pkgID string, allocatedPort int) (*BlueprintSetupResult, error) {
+	cleanID := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(pkgID)), ".service")
+	blueprint := GetBlueprint(cleanID)
+	if blueprint == nil {
+		return nil, fmt.Errorf("no blueprint registered for %q", pkgID)
+	}
+
+	activePort := allocatedPort
+	if blueprint.DefaultPort > 0 && activePort <= 0 {
+		activePort = blueprint.DefaultPort
+	}
+	reassigned := blueprint.DefaultPort > 0 && activePort != blueprint.DefaultPort
+
+	result := &BlueprintSetupResult{
+		AppName:        blueprint.AppName,
+		ServiceName:    blueprint.ServiceName,
+		AllocatedPort:  activePort,
+		DefaultPort:    blueprint.DefaultPort,
+		PortReassigned: reassigned,
+		InternalDomain: blueprint.InternalDomain,
+	}
+
+	ingressCfg := models.AppIngressConfig{
+		AppName:    blueprint.AppName,
+		ListenPort: activePort,
+	}
+	existing, existingErr := db.GetAppIngressConfig(blueprint.AppName)
+	if existingErr == nil && existing != nil && strings.TrimSpace(existing.PublicDomain) != "" {
+		ingressCfg.PublicDomain = strings.TrimSpace(existing.PublicDomain)
+		ingressCfg.ExternalAccessEnabled = existing.ExternalAccessEnabled
+		ingressCfg.TLSEnabled = existing.TLSEnabled
+	} else if baseDomain := ResolveBaseDomain(); baseDomain != "" && activePort > 0 {
+		ingressCfg.PublicDomain = FormatAppPublicDomain(blueprint.AppName, baseDomain)
+		ingressCfg.ExternalAccessEnabled = true
+		ingressCfg.TLSEnabled = true
+	} else if existingErr == nil && existing != nil {
+		ingressCfg.PublicDomain = existing.PublicDomain
+		ingressCfg.ExternalAccessEnabled = existing.ExternalAccessEnabled
+		ingressCfg.TLSEnabled = existing.TLSEnabled
+	}
+
+	if activePort > 0 || blueprint.IsNetworkApp {
+		if err := db.SetAppIngressConfig(ingressCfg); err != nil {
+			slog.Warn("failed to persist blueprint ingress config", "app", blueprint.AppName, "error", err)
+		} else if activePort > 0 {
+			result.IngressSynced = true
+		}
+	}
+	result.PublicDomain = ingressCfg.PublicDomain
+	result.ExternalAccessEnabled = ingressCfg.ExternalAccessEnabled
+	if ingressCfg.ExternalAccessEnabled && ingressCfg.PublicDomain != "" {
+		TriggerApacheCertSync()
+	}
+
+	if blueprint.InternalDomain != "" {
+		dnsMgr := NewDNSManager()
+		if err := dnsMgr.AppendOrUpdateDomains([]string{blueprint.InternalDomain}); err != nil {
+			slog.Warn("blueprint /etc/hosts registration notice", "app", blueprint.AppName, "warning", err)
+		} else {
+			result.HostsSynced = true
+		}
+	}
+
+	if netSynced, err := SyncNetworkDNSProviders(); err == nil && netSynced {
+		result.NetworkDNSSynced = true
+	}
+
+	ClearAppRuntimeMetaCache()
+
+	return result, nil
+}
+
 // RunPackageAction executes the specified bash script for installing, updating, or removing a package.
 // It streams output line-by-line so we can track progress in real time.
 func RunPackageAction(action, pkgId, scriptName, lockFile string) {
@@ -192,11 +298,26 @@ func RunPackageAction(action, pkgId, scriptName, lockFile string) {
 	}
 
 	allocatedPort := 0
-	if action == "install" || action == "update" {
+	if action == "install" {
 		allocatedPort = PreAllocateAppPort(pkgId)
+	} else if action == "update" {
+		if ShouldPreStopOnUpdate(pkgId) {
+			allocatedPort = PreAllocateAppPort(pkgId)
+		} else {
+			resolvedPort, err := resolveExistingUpdatePort(pkgId)
+			if err != nil {
+				slog.Error("failed to resolve existing port for package update", "action", action, "package", pkgId, "error", err)
+				job.Status = "failed"
+				job.LastLine = "Error: " + err.Error()
+				job.Progress = 100
+				notifyPackageEvent(pkgId, action, job.Status, job.Progress, job.LastLine)
+				return
+			}
+			allocatedPort = resolvedPort
+		}
 	}
 
-	if action == "update" {
+	if action == "update" && ShouldPreStopOnUpdate(pkgId) {
 		updateProgress("[PROGRESS:5] Stopping running service units before binary update...")
 		for _, unit := range ResolveServiceUnits(pkgId) {
 			_ = ControlService(unit, "stop")
@@ -262,10 +383,21 @@ func RunPackageAction(action, pkgId, scriptName, lockFile string) {
 
 	switch action {
 	case "install", "update":
-		if err := ApplyPackageSandbox(pkgId); err != nil {
-			slog.Warn("sandbox hardening warning", "package", pkgId, "error", err)
+		if ShouldApplyCallerSandbox(pkgId) {
+			if err := ApplyPackageSandbox(pkgId); err != nil {
+				slog.Warn("sandbox hardening warning", "package", pkgId, "error", err)
+			}
 		}
-		if bpRes, err := ApplyBlueprintPostInstall(pkgId, allocatedPort); err != nil {
+		var (
+			bpRes *BlueprintSetupResult
+			err   error
+		)
+		if ShouldRestartAfterUpdate(pkgId) {
+			bpRes, err = ApplyBlueprintPostInstall(pkgId, allocatedPort)
+		} else {
+			bpRes, err = applyPostInstallWithoutCallerRestart(pkgId, allocatedPort)
+		}
+		if err != nil {
 			slog.Warn("blueprint post-install setup warning", "package", pkgId, "error", err)
 		} else if bpRes != nil {
 			slog.Info("blueprint post-install applied",
@@ -274,7 +406,7 @@ func RunPackageAction(action, pkgId, scriptName, lockFile string) {
 				"port_reassigned", bpRes.PortReassigned,
 				"internal_domain", bpRes.InternalDomain)
 		}
-		if action == "update" {
+		if action == "update" && ShouldRestartAfterUpdate(pkgId) {
 			for _, unit := range ResolveServiceUnits(pkgId) {
 				_ = ControlService(unit, "restart")
 			}

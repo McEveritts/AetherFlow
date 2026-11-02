@@ -16,7 +16,7 @@ The AetherMarketplace is your portal to extending the capabilities of your infra
 AetherFlow manages a wide range of services across multiple categories.
 
 ### Media & Downloaders
-- **Video & IPTV**: Plex, Jellyfin, Emby, Dispatcharr, Threadfin, Tautulli, Overseerr, Jellyseerr, Requestrr, FileBot, Unmanic.
+- **Video & IPTV**: Plex, Jellyfin, Emby, Dispatcharr, Threadfin, Tautulli, Overseerr, Jellyseerr, Maintainerr, Requestrr, FileBot, Unmanic.
 - **Automation (The Arrs)**: Sonarr, Radarr, Lidarr, Readarr, Listenarr, Bazarr, Prowlarr, Notifiarr.
 - **Downloaders**: qBittorrent, Qui, Autobrr, Flood, SeedCross, pyLoad, Deluge, Transmission, Sabnzbd, NZBGet, rTorrent, ruTorrent.
 
@@ -41,6 +41,14 @@ AetherFlow manages a wide range of services across multiple categories.
 - The installer creates the native PostgreSQL database/role `af_palate`, preserves recipes and nutrition caches in `/var/lib/palate/vault`, and generates separate session, encryption, rate limit, and curation secrets in `/etc/palate/palate.env`. Keep this file with your backups: its encryption secret is needed to read stored API keys. Set a Gemini key in Palate's Settings to use Sage; `GEMINI_API_KEY` and `USDA_API_KEY` in the environment file are optional system integrations.
 - After changing environment settings, rerun the installer to rebuild client-side settings and restart the service. Upgrades back up the database, vault, and environment to `/var/backups/aetherflow-palate.*` before applying Prisma's schema without accepting data loss. Review any rejected schema change before proceeding.
 - Removal preserves the database, vault, secrets, and service account. `DELETE_DATA=true` explicitly removes Palate's database/role and data; the shared PostgreSQL service and existing backups remain installed.
+
+### Maintainerr
+
+- **Maintainerr** ([maintainerr.info](https://maintainerr.info/), [source](https://github.com/Maintainerr/Maintainerr)) finds unwatched or unwanted media using rule-based collections for Plex, Jellyfin, and Emby. Configure your media server and optional Sonarr, Radarr, Seerr, and Tautulli integrations in Maintainerr after installation; AetherFlow does not require or automatically install a particular media server.
+- Builds the latest stable release natively with a private, checksum-verified Node.js 26 runtime and the release's bundled Yarn 4 under a dedicated unprivileged build identity (`af-maintainerr-build`) with an isolated build-local workspace. Runs as the unprivileged `maintainerr` user under `af-maintainerr.service`, on `127.0.0.1:6246` or AetherFlow's allocated port, behind the AetherFlow gateway. No containers or host Node.js replacement are needed.
+- SQLite, integration credentials, rules, logs, and uploaded assets persist in `/var/lib/maintainerr`. Updates build before stopping the service, back up the application, service unit, and data to `/var/backups/aetherflow-maintainerr.*`, and restore the previous installation if activation or database readiness fails. The readiness endpoint is `/api/health/ready`.
+- Uninstall removes the service and application bundle but retains the service account and data by default. `DELETE_DATA=true` explicitly removes the account and `/var/lib/maintainerr`; existing upgrade backups remain available for recovery.
+- **Review cleanup rules carefully:** Maintainerr can delete media through connected services. Installing it does not configure integrations or enable cleanup rules on your behalf.
 
 ### Mesh VPN & Subnet Routing
 - **Tailscale** installs the official upstream `tailscale` package and `tailscaled.service` daemon from `pkgs.tailscale.com` (verified via `/etc/apt/keyrings/tailscale-archive-keyring.gpg`) and enables IPv4/IPv6 packet forwarding (`/etc/sysctl.d/99-tailscale.conf`). Authenticate the node from **Network → Tailscale Mesh → Connect / Login** (or supply `AF_TAILSCALE_AUTHKEY` / `TAILSCALE_AUTHKEY` during installation). The Network page manages mesh peers, subnet routes, exit-node preferences and service diagnostics. See [Network VPN management](network-vpn.md).

@@ -111,6 +111,17 @@
         "default_port": 5000
     },
     {
+        "name": "maintainerr",
+        "label": "Maintainerr",
+        "description": "Find and clean up unwatched media with rule-based collections for Plex, Jellyfin, and Emby.",
+        "lock_file": "/install/.maintainerr.lock",
+        "category": "Media",
+        "service_type": "systemd",
+        "service_name": "af-maintainerr",
+        "default_port": 6246,
+        "web_path": "/"
+    },
+    {
         "name": "tautulli",
         "label": "Tautulli",
         "description": "Monitoring and tracking tool for Plex Media Server usage statistics.",

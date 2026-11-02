@@ -15,8 +15,8 @@ func TestCatalog55Packages(t *testing.T) {
 		t.Fatalf("loadPackagesCatalog() error: %v", err)
 	}
 
-	if len(pkgs) != 74 {
-		t.Fatalf("expected 74 packages in packages.json, got %d", len(pkgs))
+	if len(pkgs) != 75 {
+		t.Fatalf("expected 75 packages in packages.json, got %d", len(pkgs))
 	}
 
 	for _, p := range pkgs {
@@ -92,8 +92,8 @@ func TestAutomation55CoverageAndTracking(t *testing.T) {
 	t.Setenv("AETHERFLOW_PACKAGE_AUTOMATION_CONFIG", filepath.Join("..", "config", "package_automation.json"))
 
 	automation := loadPackageAutomation()
-	if len(automation) != 74 {
-		t.Fatalf("expected exactly 74 automation entries, got %d", len(automation))
+	if len(automation) != 75 {
+		t.Fatalf("expected exactly 75 automation entries, got %d", len(automation))
 	}
 
 	if _, ok := automation["portainer"]; ok {
@@ -117,6 +117,70 @@ func TestAutomation55CoverageAndTracking(t *testing.T) {
 				t.Errorf("package %q (category %q) is missing -/mnt/unionfs in sandbox_rw_paths: %v",
 					p.Name, p.Category, p.SandboxReadWrite)
 			}
+		}
+	}
+}
+
+func TestMaintainerrBlueprintAndAutomation(t *testing.T) {
+	t.Setenv("AETHERFLOW_PACKAGES_CONFIG", filepath.Join("..", "config", "packages.json"))
+	t.Setenv("AETHERFLOW_PACKAGE_AUTOMATION_CONFIG", filepath.Join("..", "config", "package_automation.json"))
+
+	for _, name := range []string{"maintainerr", "af-maintainerr"} {
+		blueprint := GetBlueprint(name)
+		if blueprint == nil {
+			t.Fatalf("GetBlueprint(%q) returned nil", name)
+		}
+		if blueprint.AppName != "maintainerr" || blueprint.ServiceName != "af-maintainerr" {
+			t.Errorf("unexpected Maintainerr identity: %+v", blueprint)
+		}
+		if blueprint.DefaultPort != 6246 || blueprint.PortEnvVar != "UI_PORT" {
+			t.Errorf("unexpected Maintainerr port configuration: %+v", blueprint)
+		}
+		if blueprint.HealthCheckPath != "/api/health/ready" || blueprint.AppDataPath != "/var/lib/maintainerr" {
+			t.Errorf("unexpected Maintainerr runtime paths: %+v", blueprint)
+		}
+		if len(blueprint.Dependencies) != 0 {
+			t.Errorf("Maintainerr must allow an existing external media server, got dependencies: %v", blueprint.Dependencies)
+		}
+	}
+
+	automation, ok := loadPackageAutomation()["maintainerr"]
+	if !ok {
+		t.Fatal("Maintainerr automation metadata is missing")
+	}
+	if automation.UpdateSource != "github" || automation.UpdateRepo != "Maintainerr/Maintainerr" {
+		t.Errorf("unexpected Maintainerr update source: %+v", automation)
+	}
+	if !slices.Equal(automation.VersionCommand, []string{"cat", "/opt/maintainerr/.af-version"}) {
+		t.Errorf("unexpected Maintainerr version command: %v", automation.VersionCommand)
+	}
+	if automation.SandboxProfile != "node" || !slices.Equal(automation.SandboxServiceIDs, []string{"af-maintainerr.service"}) {
+		t.Errorf("unexpected Maintainerr sandbox metadata: %+v", automation)
+	}
+	if !slices.Contains(automation.SandboxReadWrite, "/var/lib/maintainerr") {
+		t.Error("Maintainerr sandbox must permit persistent database writes")
+	}
+
+	for _, id := range []string{"maintainerr", "af-maintainerr", "af-maintainerr.service"} {
+		if ShouldPreStopOnUpdate(id) {
+			t.Errorf("ShouldPreStopOnUpdate(%q) = true, want false for transaction-managed Maintainerr update", id)
+		}
+		if ShouldRestartAfterUpdate(id) {
+			t.Errorf("ShouldRestartAfterUpdate(%q) = true, want false for transaction-managed Maintainerr update", id)
+		}
+		if ShouldApplyCallerSandbox(id) {
+			t.Errorf("ShouldApplyCallerSandbox(%q) = true, want false for transaction-managed Maintainerr sandbox", id)
+		}
+	}
+	for _, id := range []string{"radarr", "sonarr", "jellyfin"} {
+		if !ShouldPreStopOnUpdate(id) {
+			t.Errorf("ShouldPreStopOnUpdate(%q) = false, want true", id)
+		}
+		if !ShouldRestartAfterUpdate(id) {
+			t.Errorf("ShouldRestartAfterUpdate(%q) = false, want true", id)
+		}
+		if !ShouldApplyCallerSandbox(id) {
+			t.Errorf("ShouldApplyCallerSandbox(%q) = false, want true", id)
 		}
 	}
 }

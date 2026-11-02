@@ -251,6 +251,16 @@ var blueprintRegistry = map[string]AppBlueprint{
 		AppDataPath:     "/var/lib/jellyseerr",
 		Dependencies:    []string{"jellyfin", "sonarr", "radarr"},
 	},
+	"maintainerr": {
+		AppName:         "maintainerr",
+		ServiceName:     "af-maintainerr",
+		Category:        "Media",
+		DefaultPort:     6246,
+		PortEnvVar:      "UI_PORT",
+		WebPath:         "/",
+		HealthCheckPath: "/api/health/ready",
+		AppDataPath:     "/var/lib/maintainerr",
+	},
 	"jackett": {
 		AppName:     "jackett",
 		ServiceName: "jackett",
@@ -812,6 +822,9 @@ func GetBlueprint(requestedApp string) *AppBlueprint {
 			pkgName := strings.ToLower(strings.TrimSpace(pkg.Name))
 			svcName := strings.ToLower(strings.TrimSpace(pkg.ServiceName))
 			if pkgName == cleanName || (svcName != "" && svcName == cleanName) {
+				if !found && pkgName != cleanName {
+					return GetBlueprint(pkgName)
+				}
 				if !found {
 					result = AppBlueprint{
 						AppName: pkg.Name,
@@ -884,4 +897,23 @@ func GetAllBlueprints() []AppBlueprint {
 		}
 	}
 	return list
+}
+
+func ShouldPreStopOnUpdate(pkgID string) bool {
+	cleanID := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(pkgID)), ".service")
+	if cleanID == "maintainerr" || cleanID == "af-maintainerr" {
+		return false
+	}
+	if bp := GetBlueprint(cleanID); bp != nil && bp.AppName == "maintainerr" {
+		return false
+	}
+	return true
+}
+
+func ShouldRestartAfterUpdate(pkgID string) bool {
+	return ShouldPreStopOnUpdate(pkgID)
+}
+
+func ShouldApplyCallerSandbox(pkgID string) bool {
+	return ShouldPreStopOnUpdate(pkgID)
 }
