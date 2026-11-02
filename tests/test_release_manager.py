@@ -494,6 +494,24 @@ class ReleaseManagerTests(unittest.TestCase):
 
 
 
+    def test_nightly_channel_resolves_versioned_v4_release(self):
+        live_db = self.root / "live" / "from-env.sqlite"
+        self.write_db(live_db, "env")
+        self.env_file.write_text(f"DB_PATH={live_db}\n")
+        releases_json = (
+            '[{"tag_name":"v4.0.0-experimental","draft":false,"prerelease":true,"target_commitish":"experimental"},'
+            '{"tag_name":"v4.0.0-nightly.124.1","draft":true,"prerelease":true,"target_commitish":"ignored"},'
+            '{"tag_name":"v4.0.0-nightly.123.1","draft":false,"prerelease":true,"target_commitish":"abc1234"},'
+            '{"tag_name":"v3.2.7","draft":false,"prerelease":false,"target_commitish":"master"}]'
+        )
+        result = self.run_manager(
+            "deploy", "--channel", "nightly", "--dry-run",
+            TEST_RELEASES_JSON=releases_json,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Resolved release tag v4.0.0-nightly.123.1 for channel nightly.", result.stdout)
+        self.assertIn("releases/download/v4.0.0-nightly.123.1/aetherflow-linux-amd64.tar.gz", self.commands.read_text())
+
     def test_experimental_channel_resolves_prerelease_tag(self):
         live_db = self.root / "live" / "from-env.sqlite"
         self.write_db(live_db, "env")

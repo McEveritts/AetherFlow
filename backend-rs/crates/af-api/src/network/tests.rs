@@ -149,7 +149,7 @@ async fn call(router: Router, method: &str, uri: &str, body: Value) -> (StatusCo
             Request::builder()
                 .method(method)
                 .uri(uri)
-                .header("Host", "localhost")
+                .header("Host", "localhost:8080")
                 .header("Content-Type", "application/json")
                 .body(if method == "GET" {
                     Body::empty()

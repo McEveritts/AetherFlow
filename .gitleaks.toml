@@ -10,3 +10,40 @@ paths = [
   '''^setup/configs/''',
   '''^tests/''',
 ]
+
+[[rules]]
+id = "generic-api-key"
+
+  [[rules.allowlists]]
+  description = "Allow RFC 6455 sample Sec-WebSocket-Key nonce in af-api middleware unit test"
+  condition = "AND"
+  regexTarget = "line"
+  paths = [
+    '''^backend-rs/crates/af-api/src/middlewares\.rs$''',
+  ]
+  regexes = [
+    '''^\s*"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\\r\\n",\s*$''',
+  ]
+
+  [[rules.allowlists]]
+  description = "Allow synthetic VALID_TOKEN share fixture in share unit tests"
+  condition = "AND"
+  regexTarget = "line"
+  paths = [
+    '''^frontend/src/app/share/page\.test\.tsx$''',
+    '''^frontend/src/lib/mcbrowser-share\.test\.ts$''',
+  ]
+  regexes = [
+    '''^\s*const VALID_TOKEN = 'AbCdEfGhIjKlMnOpQrStUvWxYz0123456789_-abcd';\s*$''',
+  ]
+
+  [[rules.allowlists]]
+  description = "Allow synthetic sessionKey fixture in StreamingTab unit test"
+  condition = "AND"
+  regexTarget = "line"
+  paths = [
+    '''^frontend/src/components/tabs/StreamingTab\.test\.tsx$''',
+  ]
+  regexes = [
+    '''^\s*sessionKey: 'hist-2-legacy',\s*$''',
+  ]

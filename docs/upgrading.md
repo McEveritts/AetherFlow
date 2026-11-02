@@ -4,14 +4,17 @@ This guide covers the release channels, atomic upgrade pipeline (`deploy/release
 
 ## Upgrade Channels
 
-AetherFlow maintains two primary release tracks:
+AetherFlow publishes v4 builds on the nightly track while stable remains on the v3 release line:
 
 | Channel | Source | Stability | Use Case |
 | :--- | :--- | :--- | :--- |
 | **Stable (`stable`)** | `master` / GitHub Releases | High | Production servers, SHA-256 verified release bundles. |
-| **Nightly (`nightly`)** | `nightly` / Pre-Releases | Medium | Early access to new Marketplace apps, UI refinements, and runtime updates. |
+| **Nightly (`nightly`)** | `nightly` / versioned GitHub pre-releases | Experimental | v4 Rust control plane, Marketplace repairs, and frontend updates. |
+| **Experimental (`experimental`)** | `experimental` / historical or manually published pre-releases | Experimental | Compatibility track; new v4 builds are published automatically on nightly. |
 
-To switch channels, visit **Settings → System Updates** in your dashboard and select the desired release channel (`stable` or `nightly`).
+To follow v4, visit **Settings → System Updates** and select `nightly`. Changing the update channel does not deploy an update automatically.
+
+Nightly builds use unique tags such as `v4.0.0-nightly.123.1`, with the workflow run and attempt identifying the build. The packaged `.version` matches that tag, and the tag targets the exact source commit. Nightly builds are pre-releases, never stable/latest releases. Existing `v4.0.0-experimental` tags and downloads remain historical artifacts; their old binaries are not relabeled as new builds.
 
 ---
 
@@ -31,7 +34,7 @@ Hosts that still keep the database at `/opt/AetherFlow/backend/data/aetherflow.s
 Before the atomic symlink swap, the deploy takes a WAL-safe `sqlite3 --readonly .backup` of the resolved database and stops if `PRAGMA integrity_check` is not `ok`. The source is opened read-only so the backup does not checkpoint a live WAL.
 
 ```bash
-sudo bash /opt/AetherFlow/deploy/release-manager.sh deploy --channel experimental
+sudo bash /opt/AetherFlow/deploy/release-manager.sh deploy --channel nightly
 sudo bash /opt/AetherFlow/deploy/release-manager.sh rollback
 ```
 

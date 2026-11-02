@@ -2281,6 +2281,20 @@ pub fn is_newer_version(local: &str, remote: &str) -> bool {
     parse_ver(remote) > parse_ver(local)
 }
 
+pub fn nightly_update_available(current_version: &str, latest_version: &str) -> bool {
+    if latest_version.trim().is_empty()
+        || current_version
+            .trim()
+            .eq_ignore_ascii_case(latest_version.trim())
+    {
+        return false;
+    }
+    if current_version.trim().to_ascii_lowercase().starts_with("nightly-") {
+        return true;
+    }
+    !is_newer_version(latest_version, current_version)
+}
+
 pub fn experimental_update_available(current_version: &str, latest_version: &str) -> bool {
     if current_version.trim().eq_ignore_ascii_case(latest_version.trim()) {
         return false;
@@ -2304,7 +2318,9 @@ pub fn select_release_for_channel(
         let author = rel.author.login.trim();
         if rel.draft
             || tag.is_empty()
-            || (!author.is_empty() && !author.eq_ignore_ascii_case("McEveritts"))
+            || (!author.is_empty()
+                && !author.eq_ignore_ascii_case("McEveritts")
+                && !author.eq_ignore_ascii_case("github-actions[bot]"))
         {
             continue;
         }
@@ -2492,11 +2508,8 @@ pub async fn check_update() -> Response {
                         latest_version = tag;
                         message = body;
                         html_url = url;
-                        if current_version.to_ascii_lowercase().starts_with("nightly-") {
-                            update_available = !current_version.eq_ignore_ascii_case(&latest_version);
-                        } else {
-                            update_available = is_newer_version(&current_version, &latest_version);
-                        }
+                        update_available =
+                            nightly_update_available(&current_version, &latest_version);
                     }
                 }
                 Err(err) => {
@@ -2971,6 +2984,44 @@ mod updater_tests {
         // When only experimental and stable releases exist, nightly returns None (so it falls back to branch head)
         let without_nightly = vec![releases[0].clone(), releases[2].clone()];
         assert!(select_release_for_channel(&without_nightly, "nightly").is_none());
+    }
+
+    #[test]
+    fn test_select_release_for_channel_accepts_automated_nightly() {
+        let mut release = sample_releases()[1].clone();
+        release.tag_name = "v4.0.0-nightly.123.1".to_string();
+        release.target_commitish = "abc1234".to_string();
+        release.author.login = "github-actions[bot]".to_string();
+        let releases = vec![release.clone()];
+        let (tag, _, _) = select_release_for_channel(&releases, "nightly").expect("automated nightly");
+        assert_eq!(tag, "v4.0.0-nightly.123.1");
+        assert!(select_release_for_channel(&releases, "stable").is_none());
+        assert!(select_release_for_channel(&releases, "experimental").is_none());
+
+        release.author.login = "untrusted-author".to_string();
+        assert!(select_release_for_channel(&[release], "nightly").is_none());
+    }
+
+    #[test]
+    fn test_nightly_update_available_semantics() {
+        for (current, latest, expected) in [
+            ("v3.2.7", "v4.0.0-nightly.123.1", true),
+            ("v4.0.0-experimental", "v4.0.0-nightly.123.1", true),
+            ("v4.0.0", "v4.0.0-nightly.123.1", true),
+            ("nightly-abc1234", "v4.0.0-nightly.123.1", true),
+            ("v4.0.0-nightly.122.1", "v4.0.0-nightly.123.1", true),
+            ("v4.0.0-nightly.123.1", "v4.0.0-nightly.123.1", false),
+            (" V4.0.0-NIGHTLY.123.1 ", "v4.0.0-nightly.123.1", false),
+            ("v4.1.0", "v4.0.0-nightly.123.1", false),
+            ("v4.1.0-experimental", "v4.0.0-nightly.123.1", false),
+            ("v4.0.0", "", false),
+        ] {
+            assert_eq!(
+                nightly_update_available(current, latest),
+                expected,
+                "{current} -> {latest}"
+            );
+        }
     }
 
     #[test]

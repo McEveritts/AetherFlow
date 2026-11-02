@@ -3,7 +3,6 @@ name: Production Release Pipeline
 on:
   push:
     branches:
-      - experimental
       - nightly
       - Nightly
     tags:
@@ -11,9 +10,13 @@ on:
   workflow_dispatch:
     inputs:
       channel:
-        description: 'Release channel to publish (stable, beta, nightly, experimental)'
-        required: false
-        default: 'experimental'
+        description: 'Branch channel to publish; run on the matching branch. Version tags publish their exact version.'
+        required: true
+        type: choice
+        default: 'nightly'
+        options:
+          - nightly
+          - experimental
 
 permissions:
   contents: write
@@ -31,6 +34,34 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Resolve Release Identity
+        env:
+          REQUESTED_CHANNEL: ${{ inputs.channel }}
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            RELEASE_TAG="${GITHUB_REF_NAME}"
+          else
+            RELEASE_CHANNEL="${GITHUB_REF_NAME,,}"
+            if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && "${REQUESTED_CHANNEL}" != "${RELEASE_CHANNEL}" ]]; then
+              echo "Run this workflow on the selected ${REQUESTED_CHANNEL} branch." >&2
+              exit 1
+            fi
+            case "${RELEASE_CHANNEL}" in
+              nightly|experimental) ;;
+              *) echo "Unsupported release branch: ${GITHUB_REF_NAME}" >&2; exit 1 ;;
+            esac
+            REPO_VERSION="$(tr -d '[:space:]' < .version)"
+            if [[ ! "${REPO_VERSION}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "Invalid base release version: ${REPO_VERSION}" >&2
+              exit 1
+            fi
+            RELEASE_TAG="${REPO_VERSION}-${RELEASE_CHANNEL}.${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}"
+          fi
+          printf 'RELEASE_TAG=%s\nVERSION_STAMP=%s\n' "${RELEASE_TAG}" "${RELEASE_TAG}" >> "$GITHUB_ENV"
+
+      - name: Test Release Routing
+        run: python3 -m unittest discover -s tests -p 'test_release_workflow.py' -v
 
       - name: Secret Scan (Gitleaks Gate)
         run: |
@@ -87,24 +118,6 @@ jobs:
 
       - name: Package Single-Binary Release Tarball & SHA-256 Manifest
         run: |
-          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            RELEASE_TAG="${GITHUB_REF_NAME}"
-            VERSION_STAMP="${RELEASE_TAG}"
-          elif [[ "${GITHUB_REF_NAME}" == "experimental" ]]; then
-            RELEASE_TAG="experimental"
-            VERSION_STAMP="experimental-${GITHUB_SHA::7}"
-          else
-            REPO_VERSION="$(tr -d '[:space:]' < .version 2>/dev/null || true)"
-            if [[ "${REPO_VERSION}" == v* ]]; then
-              RELEASE_TAG="${REPO_VERSION}"
-              VERSION_STAMP="${REPO_VERSION}"
-            else
-              RELEASE_TAG="nightly"
-              VERSION_STAMP="nightly-${GITHUB_SHA::7}"
-            fi
-          fi
-          echo "RELEASE_TAG=${RELEASE_TAG}" >> "$GITHUB_ENV"
-
           STAGE_DIR="$(mktemp -d)"
           echo "STAGE_DIR=${STAGE_DIR}" >> "$GITHUB_ENV"
 
@@ -133,45 +146,17 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if [[ "${RELEASE_TAG}" == "experimental" ]]; then
-            if gh release view experimental >/dev/null 2>&1; then
-              gh release upload experimental \
-                release-dist/aetherflow-linux-amd64.tar.gz \
-                release-dist/SHA256SUMS \
-                --clobber
-            else
-              gh release create experimental \
-                release-dist/aetherflow-linux-amd64.tar.gz \
-                release-dist/SHA256SUMS \
-                --target experimental \
-                --title "AetherFlow v4.0.0 Experimental (${GITHUB_SHA::8})" \
-                --notes "Experimental Rust single-binary build from commit ${GITHUB_SHA}." \
-                --prerelease
-            fi
-          elif [[ "${RELEASE_TAG}" == "nightly" ]]; then
-            gh release delete nightly --yes --cleanup-tag 2>/dev/null || true
-            gh release create nightly \
-              release-dist/aetherflow-linux-amd64.tar.gz \
-              release-dist/SHA256SUMS \
-              --title "AetherFlow Nightly (${GITHUB_SHA::8})" \
-              --notes "Automated pull-pipeline nightly build from commit ${GITHUB_SHA}." \
+          RELEASE_FLAGS=(--generate-notes)
+          if [[ "${RELEASE_TAG}" == *-* ]]; then
+            RELEASE_FLAGS=(
               --prerelease
-          else
-            PRERELEASE_FLAG=""
-            if [[ "${RELEASE_TAG}" == *-* || "${GITHUB_REF_NAME}" == "nightly" || "${GITHUB_REF_NAME}" == "Nightly" || "${GITHUB_REF_NAME}" == "experimental" ]]; then
-              PRERELEASE_FLAG="--prerelease"
-            fi
-            if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
-              gh release upload "${RELEASE_TAG}" \
-                release-dist/aetherflow-linux-amd64.tar.gz \
-                release-dist/SHA256SUMS \
-                --clobber
-            else
-              gh release create "${RELEASE_TAG}" \
-                release-dist/aetherflow-linux-amd64.tar.gz \
-                release-dist/SHA256SUMS \
-                --title "AetherFlow ${RELEASE_TAG}" \
-                --generate-notes \
-                ${PRERELEASE_FLAG}
-            fi
+              --latest=false
+              --notes "Automated ${RELEASE_TAG} pre-release built from commit ${GITHUB_SHA}."
+            )
           fi
+          gh release create "${RELEASE_TAG}" \
+            release-dist/aetherflow-linux-amd64.tar.gz \
+            release-dist/SHA256SUMS \
+            --target "${GITHUB_SHA}" \
+            --title "AetherFlow ${RELEASE_TAG} (${GITHUB_SHA::8})" \
+            "${RELEASE_FLAGS[@]}"

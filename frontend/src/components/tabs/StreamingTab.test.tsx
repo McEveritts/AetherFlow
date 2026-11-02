@@ -385,7 +385,7 @@ describe('StreamingTab - Jellyfin Play Statistics, Data Usage & Stream Telemetry
 
     it.each(['Dashboard', 'Play & Data Stats', 'Watch History'])('keeps the paginated archive below the primary sections in %s', (view) => {
         render(<StreamingTab />);
-        fireEvent.click(screen.getByRole('button', { name: view, exact: true }));
+        fireEvent.click(screen.getByRole('button', { name: view }));
 
         const explorer = screen.getByText('Canonical Streaming History Explorer').closest('section')!;
         const filters = screen.getByRole('group', { name: 'Time Window Filter' });
@@ -407,8 +407,8 @@ describe('StreamingTab - Jellyfin Play Statistics, Data Usage & Stream Telemetry
             expect(screen.getByText(title).compareDocumentPosition(explorer) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
         }
         expect(explorer.nextElementSibling).toBeNull();
-        expect(screen.getByRole('button', { name: 'Previous history page', exact: true })).toBeInTheDocument();
-        expect(screen.getByRole('button', { name: 'Next history page', exact: true })).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'Previous history page' })).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'Next history page' })).toBeInTheDocument();
     });
 
     it('renders real-time bandwidth, data usage, and play statistics KPI cards', () => {

@@ -22,7 +22,9 @@ export function ExternalAccessCard({ appName }: ExternalAccessCardProps) {
     externalAccessEnabled: Boolean(cleanBaseDomain),
     tlsEnabled: Boolean(cleanBaseDomain),
   };
-  const [draftDomain, setDraftDomain] = useState<string>(config.publicDomain || '');
+  const savedDomain = config.publicDomain || (cleanBaseDomain ? `${appName}.${cleanBaseDomain}` : '');
+  const [domainDraft, setDomainDraft] = useState<{ appName: string; value: string } | null>(null);
+  const draftDomain = domainDraft?.appName === appName ? domainDraft.value : savedDomain;
   const [validationError, setValidationError] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState<boolean>(false);
@@ -31,9 +33,13 @@ export function ExternalAccessCard({ appName }: ExternalAccessCardProps) {
     fetchConfigs();
   }, [fetchConfigs]);
 
-  useEffect(() => {
-    setDraftDomain(config.publicDomain || (cleanBaseDomain ? `${appName}.${cleanBaseDomain}` : ''));
-  }, [config.publicDomain, appName, cleanBaseDomain]);
+  const clearSavedDraft = (publicDomain: string) => {
+    setDomainDraft((currentDraft) => (
+      currentDraft?.appName === appName && currentDraft.value.trim() === publicDomain
+        ? null
+        : currentDraft
+    ));
+  };
 
   const validateDomain = (domain: string, requireNonEmpty: boolean): boolean => {
     const trimmed = domain.trim();
@@ -68,6 +74,7 @@ export function ExternalAccessCard({ appName }: ExternalAccessCardProps) {
         listenPort: config.listenPort,
         tlsEnabled: typeof config.tlsEnabled === 'boolean' ? config.tlsEnabled : Boolean(trimmed),
       });
+      clearSavedDraft(trimmed);
     } catch (error) {
       setSaveError(error instanceof Error ? error.message : 'Failed to save ingress configuration.');
     } finally {
@@ -89,6 +96,7 @@ export function ExternalAccessCard({ appName }: ExternalAccessCardProps) {
         listenPort: config.listenPort,
         tlsEnabled: typeof config.tlsEnabled === 'boolean' ? config.tlsEnabled : Boolean(trimmed),
       });
+      clearSavedDraft(trimmed);
     } catch (error) {
       setSaveError(error instanceof Error ? error.message : 'Failed to save ingress configuration.');
     } finally {
@@ -130,8 +138,9 @@ export function ExternalAccessCard({ appName }: ExternalAccessCardProps) {
             <input
               type="text"
               value={draftDomain}
-              onChange={(e) => {
-                setDraftDomain(e.target.value);
+              onChange={(event) => {
+                const value = event.target.value;
+                setDomainDraft(value === savedDomain && !isSaving ? null : { appName, value });
                 if (validationError) setValidationError(null);
                 if (saveError) setSaveError(null);
               }}
