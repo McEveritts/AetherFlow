@@ -243,6 +243,17 @@ fn build_v1_router() -> Router {
         .route("/blueprints", get(get_blueprints))
         .route("/blueprints/:appName", get(get_app_blueprint))
         .route("/streaming/dashboard", get(get_streaming_dashboard))
+        .route("/streaming/history", get(crate::streaming_history::history_handler))
+        .route("/streaming/history/export", get(crate::streaming_history::history_export_handler))
+        .route("/streaming/patterns", get(crate::streaming_patterns::patterns_handler))
+        .route("/streaming/patterns/activity", get(crate::streaming_patterns::activity_handler))
+        .route("/streaming/patterns/concurrency", get(crate::streaming_patterns::concurrency_handler))
+        .route("/streaming/drilldown", get(crate::streaming_patterns::drilldown_handler))
+        .route("/streaming/drilldown/users", get(crate::streaming_patterns::drilldown_users_handler))
+        .route("/streaming/drilldown/clients", get(crate::streaming_patterns::drilldown_clients_handler))
+        .route("/streaming/drilldown/items", get(crate::streaming_patterns::drilldown_items_handler))
+        .route("/streaming/drilldown/libraries", get(crate::streaming_patterns::drilldown_libraries_handler))
+        .route("/streaming/drilldown/genres", get(crate::streaming_patterns::drilldown_genres_handler))
         .route("/streaming/artwork/:itemId", get(get_streaming_artwork))
         .route("/plugins", get(list_plugins_handler))
         .route("/plugins/:id/proxy", any(proxy_plugin_root_request))
@@ -356,6 +367,16 @@ fn build_v1_router() -> Router {
         .route("/blueprints/:appName/sync", post(sync_app_blueprint))
         .route("/streaming/servers/:provider", put(update_streaming_server))
         .route("/streaming/servers/test", post(test_streaming_server))
+        .route(crate::streaming_portability::EXPORT_ROUTE, get(crate::streaming_portability::export_handler))
+        .route(crate::streaming_portability::PREVIEW_ROUTE, post(crate::streaming_portability::preview_handler))
+        .route(crate::streaming_portability::RESTORE_ROUTE, post(crate::streaming_portability::restore_handler))
+        .route("/streaming/imports/status", get(crate::streaming_import::get_streaming_import_status_handler))
+        .route("/streaming/imports/events", post(crate::streaming_import::import_streaming_events_handler))
+        .route("/streaming/imports/upstream-probe", post(crate::streaming_import::probe_upstream_event_source_handler))
+        .route("/streaming/policies", get(crate::streaming_import::get_streaming_policy_handler).put(crate::streaming_import::update_streaming_policy_handler))
+        .route("/streaming/user-links", get(crate::streaming_import::list_streaming_user_links_handler).put(crate::streaming_import::upsert_streaming_user_link_handler).delete(crate::streaming_import::delete_streaming_user_link_handler))
+        .route("/streaming/reconciliation/preview", post(crate::streaming_import::preview_legacy_reconciliation_handler))
+        .route("/streaming/reconciliation/apply", post(crate::streaming_import::apply_legacy_reconciliation_handler))
         .route(
             "/streaming/servers/:provider/sync",
             post(sync_streaming_server_history),
@@ -1871,7 +1892,17 @@ fn is_fs_path_allowed(target: &std::path::Path, allowed_roots: &[PathBuf]) -> bo
     false
 }
 
-async fn browse_directories(Query(q): Query<FsQuery>) -> Response {
+async fn browse_directories(
+    Extension(auth_user): Extension<AuthUser>,
+    Query(q): Query<FsQuery>,
+) -> Response {
+    if auth_user.role != "admin" {
+        return api_error(
+            StatusCode::FORBIDDEN,
+            "FORBIDDEN",
+            "Host filesystem browsing requires admin access",
+        );
+    }
     let raw_path = q.path.trim();
     if raw_path.is_empty() {
         return api_error(
@@ -2196,75 +2227,110 @@ async fn get_streaming_dashboard(
     get_streaming_dashboard_handler(Query(q), req).await
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
-struct UpdateStreamingServerReq {
+pub(crate) struct UpdateStreamingServerReq {
     #[serde(default)]
-    name: String,
-    url: String,
+    pub name: String,
+    pub url: String,
     #[serde(default)]
-    api_key: String,
+    pub api_key: String,
     #[serde(default = "default_true")]
-    enabled: bool,
+    pub enabled: bool,
 }
 
 fn default_true() -> bool {
     true
 }
 
-async fn update_streaming_server(
+pub(crate) async fn update_streaming_server(
     Path(provider): Path<String>,
     Extension(auth_user): Extension<AuthUser>,
     headers: HeaderMap,
     Json(req): Json<UpdateStreamingServerReq>,
 ) -> Response {
-    if provider != "jellyfin" {
+    let norm_provider = provider.trim().to_ascii_lowercase();
+    if norm_provider != "jellyfin" && norm_provider != crate::streaming_emby::EMBY_PROVIDER_ID {
         return api_error(
             StatusCode::BAD_REQUEST,
             "VALIDATION_ERROR",
-            "Only Jellyfin connection is enabled in this release; Plex and Emby support will arrive in a future update.",
+            "Only Jellyfin and Emby connections are supported in this release; Plex support will arrive in a future update.",
         );
     }
-    let clean_url = match af_services::validate_server_url(&req.url) {
-        Ok(u) => u,
-        Err(e) => return api_error(StatusCode::BAD_REQUEST, "VALIDATION_ERROR", e.to_string()),
-    };
-
-    let enc_key = if req.api_key.is_empty() || req.api_key.starts_with("****") {
-        String::new()
+    let clean_url = if norm_provider == crate::streaming_emby::EMBY_PROVIDER_ID {
+        match crate::streaming_ext::save_emby_server_configuration(
+            &req.name,
+            &req.url,
+            &req.api_key,
+            req.enabled,
+        ) {
+            Ok(u) => u,
+            Err(resp) => return resp,
+        }
     } else {
-        af_db::encrypt_key(&req.api_key).unwrap_or(req.api_key)
-    };
-
-    let saved = if let Ok(conn) = af_db::get_conn() {
-        let name = if req.name.trim().is_empty() {
-            "Jellyfin".to_string()
-        } else {
-            req.name.trim().to_string()
+        let clean_url = match af_services::validate_server_url(&req.url) {
+            Ok(u) => u,
+            Err(e) => return api_error(StatusCode::BAD_REQUEST, "VALIDATION_ERROR", e.to_string()),
         };
-        conn.execute(
-            r#"
-            INSERT INTO streaming_servers (provider, name, url, api_key, enabled, updated_at)
-            VALUES ('jellyfin', ?1, ?2, ?3, ?4, CURRENT_TIMESTAMP)
-            ON CONFLICT(provider) DO UPDATE SET
-                name = excluded.name,
-                url = excluded.url,
-                api_key = CASE WHEN excluded.api_key != '' THEN excluded.api_key ELSE streaming_servers.api_key END,
-                enabled = excluded.enabled,
-                updated_at = CURRENT_TIMESTAMP
-            "#,
-            params![name, clean_url, enc_key, req.enabled],
-        ).is_ok()
-    } else {
-        false
+
+        let trimmed_key = req.api_key.trim();
+        let is_masked = trimmed_key.starts_with("****");
+        let enc_key = if req.api_key.is_empty() || is_masked {
+            String::new()
+        } else {
+            match af_db::encrypt_key(&req.api_key) {
+                Ok(key) => key,
+                Err(_) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "STREAMING_KEY_STORAGE_FAILED", "Failed to encrypt provider credential; configuration was not changed"),
+            }
+        };
+
+        let saved = if let Ok(conn) = af_db::get_conn() {
+            if enc_key.is_empty() {
+                if let Ok(previous_url) = conn.query_row("SELECT url FROM streaming_servers WHERE provider = 'jellyfin'", [], |row| row.get::<_, String>(0)) {
+                    if previous_url.trim_end_matches('/') != clean_url {
+                        return api_error(StatusCode::BAD_REQUEST, "STREAMING_KEY_REQUIRED", "Provide a new API key when changing the provider URL; stored credentials cannot be transferred to another server");
+                    }
+                }
+            }
+            let name = if req.name.trim().is_empty() {
+                "Jellyfin".to_string()
+            } else {
+                req.name.trim().to_string()
+            };
+            conn.execute(
+                r#"
+                INSERT INTO streaming_servers (provider, name, url, api_key, enabled, updated_at)
+                VALUES (?1, ?2, ?3, ?4, ?5, CURRENT_TIMESTAMP)
+                ON CONFLICT(provider) DO UPDATE SET
+                    name = excluded.name,
+                    server_id = CASE WHEN RTRIM(streaming_servers.url, '/') != RTRIM(excluded.url, '/') THEN '' ELSE streaming_servers.server_id END,
+                    server_version = CASE WHEN RTRIM(streaming_servers.url, '/') != RTRIM(excluded.url, '/') THEN '' ELSE streaming_servers.server_version END,
+                    last_connected_at = CASE WHEN RTRIM(streaming_servers.url, '/') != RTRIM(excluded.url, '/') THEN NULL ELSE streaming_servers.last_connected_at END,
+                    url = excluded.url,
+                    api_key = CASE WHEN excluded.api_key != '' THEN excluded.api_key ELSE streaming_servers.api_key END,
+                    enabled = excluded.enabled,
+                    updated_at = CURRENT_TIMESTAMP
+                "#,
+                params![norm_provider, name, clean_url, enc_key, req.enabled],
+            ).is_ok()
+        } else {
+            false
+        };
+        if !saved {
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL_ERROR",
+                "Failed to save Jellyfin server configuration",
+            );
+        }
+        clean_url
     };
-    if !saved {
-        return api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            "Failed to save Jellyfin server configuration",
-        );
-    }
+
+    let provider_label = if norm_provider == crate::streaming_emby::EMBY_PROVIDER_ID {
+        "Emby"
+    } else {
+        "Jellyfin"
+    };
 
     let ip = extract_client_ip(&headers);
     let ua = headers
@@ -2276,16 +2342,19 @@ async fn update_streaming_server(
         &auth_user.username,
         "streaming_server_update",
         "streaming_server",
-        "jellyfin",
+        &norm_provider,
         &clean_url,
         &ip,
         ua,
     );
 
     let dash = crate::streaming_ext::build_streaming_dashboard("30", "all", "all", true).await;
-    let server = dash.servers.first().cloned();
+    let server = dash
+        .servers
+        .into_iter()
+        .find(|s| s.provider.eq_ignore_ascii_case(&norm_provider));
     Json(serde_json::json!({
-        "message": "Jellyfin server configuration saved",
+        "message": format!("{} server configuration saved", provider_label),
         "server": server,
     }))
     .into_response()

@@ -1534,6 +1534,8 @@ pub struct StreamingAnalytics {
     pub media_type_breakdown: Vec<BreakdownEntry>,
     pub resolution_breakdown: Vec<BreakdownEntry>,
     pub codec_breakdown: Vec<BreakdownEntry>,
+    #[serde(default)]
+    pub time_series_granularity: String,
     pub time_series: Vec<StreamingTimeSeriesPoint>,
     pub top_users: Vec<StreamingUserStat>,
     pub top_titles: Vec<StreamingTitleStat>,

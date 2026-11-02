@@ -2,6 +2,7 @@
 
 import React, { useState, useMemo } from 'react';
 import useSWR from 'swr';
+import StreamingHistoryExplorer from '@/components/streaming/StreamingHistoryExplorer';
 import {
     Tv,
     Play,
@@ -27,19 +28,22 @@ import {
     Monitor,
     Wifi,
     Layers,
-    ArrowRight,
     X,
     Send,
     Loader2,
     ShieldCheck,
     Music,
-    Database
+    Database,
+    Download,
+    ChevronLeft,
+    ChevronRight
 } from 'lucide-react';
 import {
     AreaChart,
     Area,
-    BarChart,
     Bar,
+    ComposedChart,
+    Line,
     XAxis,
     YAxis,
     Tooltip,
@@ -51,6 +55,15 @@ import { useToast } from '@/contexts/ToastContext';
 import { useAuth } from '@/contexts/AuthContext';
 import { triggerHaptic } from '@/lib/design';
 import { useSystemStore } from '@/store/useSystemStore';
+import {
+    evaluateSessionCapabilities,
+    recomputeLiveSummaryFromSessions,
+    isHistoricalSyncEntry,
+    normalizePlayMethodKind,
+    downloadStreamingHistoryCsv,
+    parseStreamingTimestamp,
+    formatStreamingBucket,
+} from '@/lib/streaming';
 
 export interface StreamingLibraryCounts {
     movies: number;
@@ -255,6 +268,7 @@ export interface StreamingAnalytics {
     mediaTypeBreakdown: BreakdownEntry[];
     resolutionBreakdown: BreakdownEntry[];
     codecBreakdown: BreakdownEntry[];
+    timeSeriesGranularity?: 'day' | 'month' | 'year';
     timeSeries: StreamingTimeSeriesPoint[];
     topUsers: StreamingUserStat[];
     topTitles: StreamingTitleStat[];
@@ -323,8 +337,9 @@ function formatTranscodeReason(reason: string): string {
         .trim();
 }
 
-function getPlayMethodStyle(method: string) {
-    switch (method) {
+function getPlayMethodStyle(method?: string | null) {
+    const kind = normalizePlayMethodKind(method);
+    switch (kind) {
         case 'Transcode':
             return {
                 label: 'Transcode',
@@ -339,12 +354,19 @@ function getPlayMethodStyle(method: string) {
                 dot: 'bg-sky-400',
                 bar: 'bg-gradient-to-r from-sky-500 to-cyan-400',
             };
-        default:
+        case 'DirectPlay':
             return {
                 label: 'Direct Play',
                 badge: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30',
                 dot: 'bg-emerald-400',
                 bar: 'bg-gradient-to-r from-emerald-500 to-teal-400',
+            };
+        default:
+            return {
+                label: 'Unknown',
+                badge: 'bg-slate-500/15 text-slate-300 border-slate-500/30',
+                dot: 'bg-slate-400',
+                bar: 'bg-gradient-to-r from-slate-500 to-slate-400',
             };
     }
 }
@@ -361,6 +383,8 @@ export default function StreamingTab() {
     const [playMethodFilter, setPlayMethodFilter] = useState<string>('all');
     const [mediaTypeFilter, setMediaTypeFilter] = useState<string>('all');
     const [historySearch, setHistorySearch] = useState<string>('');
+    const [historyPage, setHistoryPage] = useState<number>(1);
+    const [historyPageSize, setHistoryPageSize] = useState<number>(20);
 
     // Server Configuration Drawer state
     const [showConfigModal, setShowConfigModal] = useState<boolean>(false);
@@ -372,6 +396,7 @@ export default function StreamingTab() {
     const [isSyncingHistory, setIsSyncingHistory] = useState<boolean>(false);
     const [isDemoLoading, setIsDemoLoading] = useState<boolean>(false);
     const [testResultMsg, setTestResultMsg] = useState<{ ok: boolean; text: string } | null>(null);
+    const [pendingSessionAction, setPendingSessionAction] = useState<string | null>(null);
 
     // Message modal state for active stream
     const [messageSession, setMessageSession] = useState<ActiveStreamSession | null>(null);
@@ -379,10 +404,13 @@ export default function StreamingTab() {
     const [messageBody, setMessageBody] = useState<string>('');
     const [isSendingMessage, setIsSendingMessage] = useState<boolean>(false);
 
-    const swrKey = `/api/v1/auth/streaming/dashboard?window=${windowDays}&playMethod=${playMethodFilter}&mediaType=${mediaTypeFilter}`;
+    // When 'Unknown' is selected in the UI, fetch all play methods from backend and filter client-side
+    // because historical sync rows may store '' or 'Unknown' in SQLite.
+    const swrKey = `/api/v1/auth/streaming/dashboard?window=${windowDays}&playMethod=${encodeURIComponent(playMethodFilter)}&mediaType=${encodeURIComponent(mediaTypeFilter)}`;
     const { data, error, isLoading, isValidating, mutate } = useSWR<StreamingDashboardData>(swrKey, fetcher, {
         refreshInterval: 5000,
         revalidateOnFocus: true,
+        keepPreviousData: true,
     });
 
     const jellyfinServer = useMemo(() => {
@@ -425,15 +453,20 @@ export default function StreamingTab() {
                     apiKey: apiKeyInput,
                 }),
             });
-            const body = await res.json();
-            if (body.ok) {
-                setTestResultMsg({ ok: true, text: body.message || 'Connected to Jellyfin successfully!' });
-                addToast(body.message || 'Jellyfin connection verified', 'success');
+            const body = await res.json().catch(() => ({}));
+            if (res.ok && body.ok) {
+                const msg = body.message || 'Connected to Jellyfin successfully!';
+                setTestResultMsg({ ok: true, text: msg });
+                addToast(msg, 'success');
             } else {
-                setTestResultMsg({ ok: false, text: body.message || 'Could not authenticate with Jellyfin' });
+                const errText = body.message || body.error || `Could not authenticate with Jellyfin (HTTP ${res.status})`;
+                setTestResultMsg({ ok: false, text: errText });
+                addToast(errText, 'error');
             }
         } catch (err: unknown) {
-            setTestResultMsg({ ok: false, text: err instanceof Error ? err.message : 'Connection test failed' });
+            const errText = err instanceof Error ? err.message : 'Connection test failed';
+            setTestResultMsg({ ok: false, text: errText });
+            addToast(errText, 'error');
         } finally {
             setIsTestingConn(false);
         }
@@ -453,15 +486,27 @@ export default function StreamingTab() {
                     enabled: true,
                 }),
             });
+            const body = await res.json().catch(() => ({}));
             if (!res.ok) {
-                const errData = await res.json().catch(() => ({}));
-                throw new Error(errData.message || 'Failed to save Jellyfin configuration');
+                throw new Error(body.message || body.error || 'Failed to save Jellyfin configuration');
             }
             await mutate();
-            setShowConfigModal(false);
-            addToast('Jellyfin server saved and telemetry linked.', 'success');
+            const srvStatus = body.server?.status;
+            if (srvStatus === 'unreachable') {
+                const errText =
+                    body.server?.errorMessage ||
+                    body.message ||
+                    'Jellyfin configuration saved, but server is currently unreachable.';
+                setTestResultMsg({ ok: false, text: errText });
+                addToast(errText, 'error');
+            } else {
+                setShowConfigModal(false);
+                addToast(body.message || 'Jellyfin server saved and telemetry linked.', 'success');
+            }
         } catch (err: unknown) {
-            addToast(err instanceof Error ? err.message : 'Failed to save Jellyfin configuration', 'error');
+            const errText = err instanceof Error ? err.message : 'Failed to save Jellyfin configuration';
+            setTestResultMsg({ ok: false, text: errText });
+            addToast(errText, 'error');
         } finally {
             setIsSavingConn(false);
         }
@@ -473,9 +518,9 @@ export default function StreamingTab() {
             const res = await apiFetch('/api/v1/admin/streaming/servers/jellyfin/sync', {
                 method: 'POST',
             });
-            const body = await res.json();
+            const body = await res.json().catch(() => ({}));
             if (!res.ok) {
-                throw new Error(body.message || 'History sync failed');
+                throw new Error(body.message || body.error || 'History sync failed');
             }
             await mutate();
             addToast(`Synchronized Jellyfin watch history (${body.imported ?? 0} new records imported).`, 'success');
@@ -494,8 +539,9 @@ export default function StreamingTab() {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ action }),
             });
+            const body = await res.json().catch(() => ({}));
             if (!res.ok) {
-                throw new Error('Failed to toggle demo telemetry');
+                throw new Error(body.message || body.error || 'Failed to toggle demo telemetry');
             }
             await mutate();
             addToast(
@@ -504,15 +550,23 @@ export default function StreamingTab() {
                     : 'Demo telemetry cleared.',
                 'info'
             );
-        } catch {
-            addToast('Failed to update demo telemetry state', 'error');
+        } catch (err: unknown) {
+            addToast(err instanceof Error ? err.message : 'Failed to update demo telemetry state', 'error');
         } finally {
             setIsDemoLoading(false);
         }
     };
 
-    const handleSessionCommand = async (sessionId: string, command: 'pause' | 'resume' | 'stop') => {
+    const handleSessionCommand = async (session: ActiveStreamSession, command: 'pause' | 'resume' | 'stop') => {
+        const capabilities = evaluateSessionCapabilities(session);
+        const cap = capabilities[command];
+        if (!cap.supported) {
+            addToast(cap.reason, 'error');
+            return;
+        }
+        const sessionId = session.sessionId;
         triggerHaptic(8, hapticFeedback);
+        setPendingSessionAction(`${sessionId}:${command}`);
         try {
             const res = await apiFetch(`/api/v1/admin/streaming/sessions/${encodeURIComponent(sessionId)}/command`, {
                 method: 'POST',
@@ -543,29 +597,27 @@ export default function StreamingTab() {
                     return {
                         ...current,
                         activeSessions: updatedSessions,
-                        liveSummary: {
-                            ...current.liveSummary,
-                            activeStreams: updatedSessions.length,
-                        },
+                        liveSummary: recomputeLiveSummaryFromSessions(current.liveSummary, updatedSessions),
                     };
                 },
-                { revalidate: false }
+                { revalidate: true }
             );
-            setTimeout(() => {
-                void mutate();
-            }, 800);
-            setTimeout(() => {
-                void mutate();
-            }, 2000);
             addToast(`Sent ${command} command to stream session.`, 'success');
         } catch (err: unknown) {
             addToast(err instanceof Error ? err.message : `Command ${command} failed`, 'error');
+        } finally {
+            setPendingSessionAction(null);
         }
     };
 
     const handleSendSessionMessage = async (e: React.FormEvent) => {
         e.preventDefault();
         if (!messageSession || !messageBody.trim()) return;
+        const capabilities = evaluateSessionCapabilities(messageSession);
+        if (!capabilities.message.supported) {
+            addToast(capabilities.message.reason, 'error');
+            return;
+        }
         setIsSendingMessage(true);
         try {
             const res = await apiFetch(`/api/v1/admin/streaming/sessions/${encodeURIComponent(messageSession.sessionId)}/command`, {
@@ -631,29 +683,87 @@ export default function StreamingTab() {
         recentHistory: [],
     };
 
+    const loadedHistory = useMemo(() => analytics.recentHistory || [], [analytics.recentHistory]);
     const filteredHistory = useMemo(() => {
-        const list = analytics.recentHistory || [];
         const q = historySearch.trim().toLowerCase();
-        if (!q) return list;
-        return list.filter(
-            (item) =>
-                item.itemName.toLowerCase().includes(q) ||
-                (item.seriesName && item.seriesName.toLowerCase().includes(q)) ||
-                item.userName.toLowerCase().includes(q) ||
-                item.clientName.toLowerCase().includes(q) ||
-                item.deviceName.toLowerCase().includes(q) ||
-                item.videoCodec.toLowerCase().includes(q) ||
-                item.playMethod.toLowerCase().includes(q)
-        );
-    }, [analytics.recentHistory, historySearch]);
+        const pmFilter = playMethodFilter.trim().toLowerCase();
+        const mtFilter = mediaTypeFilter.trim().toLowerCase();
+        return loadedHistory.filter((item) => {
+            if (pmFilter !== '' && pmFilter !== 'all') {
+                const itemPm = normalizePlayMethodKind(item.playMethod).toLowerCase();
+                if (itemPm !== pmFilter) return false;
+            }
+            if (mtFilter !== '' && mtFilter !== 'all') {
+                if ((item.itemType || '').trim().toLowerCase() !== mtFilter) return false;
+            }
+            if (!q) return true;
+            return (
+                (item.itemName || '').toLowerCase().includes(q) ||
+                Boolean(item.seriesName && item.seriesName.toLowerCase().includes(q)) ||
+                (item.userName || '').toLowerCase().includes(q) ||
+                (item.clientName || '').toLowerCase().includes(q) ||
+                (item.deviceName || '').toLowerCase().includes(q) ||
+                (item.videoCodec || '').toLowerCase().includes(q) ||
+                (item.playMethod || '').toLowerCase().includes(q) ||
+                (item.serverName || '').toLowerCase().includes(q)
+            );
+        });
+    }, [loadedHistory, historySearch, playMethodFilter, mediaTypeFilter]);
+
+    const totalHistoryPages = Math.max(1, Math.ceil(filteredHistory.length / historyPageSize));
+    const safeHistoryPage = Math.min(historyPage, totalHistoryPages);
+
+    const paginatedHistory = useMemo(() => {
+        const start = (safeHistoryPage - 1) * historyPageSize;
+        return filteredHistory.slice(start, start + historyPageSize);
+    }, [filteredHistory, safeHistoryPage, historyPageSize]);
+
+    const hasHistoricalSyncImports = useMemo(() => {
+        return loadedHistory.some((h) => isHistoricalSyncEntry(h));
+    }, [loadedHistory]);
+
+    const isHistoryBounded = analytics.totalPlays > loadedHistory.length;
+
+    const unknownPlaysCount = useMemo(() => {
+        const known =
+            (analytics.streamTypes.directPlayCount || 0) +
+            (analytics.streamTypes.directStreamCount || 0) +
+            (analytics.streamTypes.transcodeCount || 0);
+        return Math.max(0, (analytics.totalPlays || 0) - known);
+    }, [analytics.streamTypes, analytics.totalPlays]);
+
+    const unknownPlaysPct = useMemo(() => {
+        if (!analytics.totalPlays || analytics.totalPlays <= 0 || unknownPlaysCount <= 0) return 0;
+        return Math.round((unknownPlaysCount / analytics.totalPlays) * 1000) / 10;
+    }, [analytics.totalPlays, unknownPlaysCount]);
+
+    const handleExportHistoryCsv = () => {
+        if (filteredHistory.length === 0) {
+            addToast('No matching playback history rows to export.', 'error');
+            return;
+        }
+        try {
+            downloadStreamingHistoryCsv(filteredHistory);
+            const scopeNote = isHistoryBounded
+                ? `Exported ${filteredHistory.length} loaded rows (bounded from ${analytics.totalPlays} total records).`
+                : `Exported ${filteredHistory.length} playback history rows to CSV.`;
+            addToast(scopeNote, 'success');
+        } catch (err: unknown) {
+            addToast(err instanceof Error ? err.message : 'Failed to export playback history CSV', 'error');
+        }
+    };
 
     const chartData = useMemo(() => {
         return (analytics.timeSeries || []).map((pt) => ({
             ...pt,
             watchHours: Math.round((pt.watchTimeSecs / 3600) * 100) / 100,
             dataGB: Math.round((pt.dataUsedBytes / (1024 * 1024 * 1024)) * 100) / 100,
+            unknownPlayCount: Math.max(0, pt.plays - pt.directPlayCount - pt.directStreamCount - pt.transcodeCount),
         }));
     }, [analytics.timeSeries]);
+    const bucketLabel = analytics.timeSeriesGranularity === 'month'
+        ? 'Monthly'
+        : analytics.timeSeriesGranularity === 'year' ? 'Yearly' : 'Daily';
 
     return (
         <div className="space-y-6 animate-fade-in relative z-10 w-full min-w-0">
@@ -755,7 +865,7 @@ export default function StreamingTab() {
 
                     {isAdmin && (
                         <>
-                            {jellyfinServer.status === 'connected' && (
+                            {(jellyfinServer.status === 'connected' || jellyfinServer.configured) && (
                                 <button
                                     type="button"
                                     onClick={handleSyncHistory}
@@ -781,7 +891,8 @@ export default function StreamingTab() {
 
                     <button
                         type="button"
-                        onClick={() => mutate()}
+                        onClick={() => void mutate()}
+                        aria-label="Refresh Streaming Telemetry"
                         className="obs-touch-target-standard obs-gpu-120hz-interactive flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-white/[0.04] border border-white/10 text-slate-300 hover:bg-white/[0.08] hover:text-white transition-all"
                         title="Refresh Streaming Telemetry"
                     >
@@ -792,20 +903,65 @@ export default function StreamingTab() {
             </div>
 
             {/* ========================================================================= */}
-            {/* 2. CONNECTION ONBOARDING / DEMO BANNER (WHEN UNCONFIGURED)                */}
+            {/* 1B. TELEMETRY POLLING ERROR / STALE DATA ALERT BANNER                     */}
+            {/* ========================================================================= */}
+            {error && (
+                <div
+                    role="alert"
+                    className="rounded-2xl border border-rose-500/35 bg-rose-950/35 backdrop-blur-xl p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3"
+                >
+                    <div className="flex items-start gap-3">
+                        <AlertCircle size={18} className="text-rose-400 shrink-0 mt-0.5" />
+                        <div>
+                            <h3 className="text-xs font-bold text-rose-200 uppercase tracking-wider">
+                                {data ? 'Streaming Telemetry Refresh Failed — Showing Cached Snapshot' : 'Streaming Telemetry Unavailable'}
+                            </h3>
+                            <p className="text-xs text-rose-300/90 mt-0.5">
+                                {error instanceof Error ? error.message : 'Unable to reach the AetherFlow streaming telemetry endpoint.'}
+                            </p>
+                        </div>
+                    </div>
+                    <button
+                        type="button"
+                        onClick={() => void mutate()}
+                        disabled={isValidating}
+                        className="px-3.5 py-1.5 rounded-xl text-xs font-bold bg-rose-500/20 hover:bg-rose-500/30 border border-rose-500/40 text-rose-200 flex items-center gap-1.5 shrink-0 transition-all disabled:opacity-50"
+                    >
+                        <RefreshCw size={13} className={isValidating ? 'animate-spin' : ''} />
+                        <span>Retry Refresh</span>
+                    </button>
+                </div>
+            )}
+
+            {/* ========================================================================= */}
+            {/* 2. CONNECTION ONBOARDING / UNREACHABLE / DEMO BANNER                      */}
             {/* ========================================================================= */}
             {jellyfinServer.status !== 'connected' && (
-                <div className="rounded-2xl border border-indigo-500/30 bg-gradient-to-r from-indigo-950/40 via-slate-900/60 to-purple-950/30 backdrop-blur-xl p-4 sm:p-5 flex flex-col lg:flex-row items-start lg:items-center justify-between gap-4">
+                <div
+                    className={`rounded-2xl border backdrop-blur-xl p-4 sm:p-5 flex flex-col lg:flex-row items-start lg:items-center justify-between gap-4 ${
+                        jellyfinServer.status === 'unreachable'
+                            ? 'border-rose-500/35 bg-gradient-to-r from-rose-950/40 via-slate-900/60 to-amber-950/25'
+                            : 'border-indigo-500/30 bg-gradient-to-r from-indigo-950/40 via-slate-900/60 to-purple-950/30'
+                    }`}
+                >
                     <div className="flex items-start gap-3.5">
-                        <div className="w-10 h-10 rounded-xl bg-purple-500/20 border border-purple-500/30 flex items-center justify-center text-purple-300 shrink-0 mt-0.5">
-                            <Server size={20} />
+                        <div
+                            className={`w-10 h-10 rounded-xl border flex items-center justify-center shrink-0 mt-0.5 ${
+                                jellyfinServer.status === 'unreachable'
+                                    ? 'bg-rose-500/20 border-rose-500/30 text-rose-300'
+                                    : 'bg-purple-500/20 border-purple-500/30 text-purple-300'
+                            }`}
+                        >
+                            {jellyfinServer.status === 'unreachable' ? <AlertCircle size={20} /> : <Server size={20} />}
                         </div>
                         <div>
                             <div className="flex flex-wrap items-center gap-2">
                                 <h3 className="text-sm font-bold text-white">
-                                    {liveSummary.isDemoMode
-                                        ? 'Demo Telemetry Active — Connect Your Jellyfin Server Anytime'
-                                        : 'Connect Jellyfin to Track Live Streams, Bandwidth & Play Statistics'}
+                                    {jellyfinServer.status === 'unreachable'
+                                        ? `Jellyfin Server Unreachable (${jellyfinServer.name || jellyfinServer.url}) — Showing Stored History`
+                                        : liveSummary.isDemoMode
+                                          ? 'Demo Telemetry Active — Connect Your Jellyfin Server Anytime'
+                                          : 'Connect Jellyfin to Track Live Streams, Bandwidth & Play Statistics'}
                                 </h3>
                                 <span className="text-xs font-mono uppercase px-2 py-0.5 rounded-full bg-purple-500/20 text-purple-300 border border-purple-500/30">
                                     Jellyfin First · Plex & Emby Coming Later
@@ -820,6 +976,17 @@ export default function StreamingTab() {
                     </div>
                     {isAdmin && (
                         <div className="flex flex-wrap items-center gap-2.5 shrink-0">
+                            {jellyfinServer.status === 'unreachable' && (
+                                <button
+                                    type="button"
+                                    onClick={() => void mutate()}
+                                    disabled={isValidating}
+                                    className="obs-touch-target-standard obs-gpu-120hz-interactive px-3.5 py-2 rounded-xl text-xs font-bold bg-rose-500/20 hover:bg-rose-500/30 border border-rose-500/40 text-rose-200 flex items-center gap-1.5 transition-all disabled:opacity-50"
+                                >
+                                    <RefreshCw size={14} className={isValidating ? 'animate-spin' : ''} />
+                                    <span>Retry Connection</span>
+                                </button>
+                            )}
                             <button
                                 type="button"
                                 onClick={openServerConfig}
@@ -905,7 +1072,7 @@ export default function StreamingTab() {
                             <span className="text-xs font-bold text-cyan-400/80">Mbps</span>
                         </div>
                         <p className="text-xs text-slate-400 mt-1.5">
-                            Active session transfer: <span className="text-slate-200 font-mono">{formatBytes(liveSummary.activeSessionBytes, 1)}</span>
+                            Estimated active session transfer: <span className="text-slate-200 font-mono">{formatBytes(liveSummary.activeSessionBytes, 1)}</span>
                         </p>
                     </div>
                 </div>
@@ -925,6 +1092,14 @@ export default function StreamingTab() {
                             <span className="text-2xl font-extrabold text-teal-300 tabular-nums">
                                 {formatBytes(analytics.totalDataUsedBytes, 2)}
                             </span>
+                            {analytics.totalDataUsedBytes > 0 && (
+                                <span
+                                    className="text-xs font-semibold px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30"
+                                    title="Transfer totals are estimates based on bitrate and observed playing time, not measured network traffic. Historical imports do not reconstruct missing transfer bytes."
+                                >
+                                    Estimated
+                                </span>
+                            )}
                         </div>
                         <p className="text-xs text-slate-400 mt-1.5">
                             Peak throughput: <span className="text-slate-200 font-mono">{formatBandwidthMbps(analytics.peakBandwidthMbps)} Mbps</span>
@@ -936,7 +1111,7 @@ export default function StreamingTab() {
                 <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-4 flex flex-col justify-between">
                     <div className="flex items-center justify-between">
                         <span className="text-xs text-slate-400 font-semibold uppercase tracking-wider">
-                            Play Statistics ({windowDays === 0 ? 'All' : `${windowDays}d`})
+                            Legacy Record Statistics ({windowDays === 0 ? 'All' : `${windowDays}d`})
                         </span>
                         <div className="h-9 w-9 rounded-xl bg-purple-500/10 border border-purple-500/20 flex items-center justify-center text-purple-400">
                             <Activity size={18} />
@@ -945,7 +1120,7 @@ export default function StreamingTab() {
                     <div className="mt-2">
                         <div className="flex items-baseline gap-2">
                             <span className="text-2xl font-extrabold text-white tabular-nums">{analytics.totalPlays}</span>
-                            <span className="text-xs text-slate-400">plays · {formatWatchDuration(analytics.totalWatchTimeSecs)}</span>
+                            <span className="text-xs text-slate-400">mixed records · unverified {formatWatchDuration(analytics.totalWatchTimeSecs)}</span>
                         </div>
                         <p className="text-xs text-slate-400 mt-1.5">
                             {analytics.uniqueUsers} viewers · <span className="text-emerald-400 font-semibold">{analytics.avgCompletionPct}%</span> avg completion
@@ -1113,7 +1288,7 @@ export default function StreamingTab() {
                                                                         : 'bg-purple-500/10 text-purple-300 border-purple-500/20'
                                                                 }`}
                                                             >
-                                                                {sess.isLan ? 'LAN' : 'WAN'} · {sess.ipAddress || 'local'}
+                                                                {sess.isLan ? 'LAN' : 'WAN'}{sess.ipAddress ? ` · ${sess.ipAddress}` : ''}
                                                             </span>
                                                         </div>
                                                         <div className="flex items-center justify-between text-slate-400">
@@ -1205,56 +1380,74 @@ export default function StreamingTab() {
                                                 </div>
                                             </div>
 
-                                            {isAdmin && (
-                                                <div className="flex items-center justify-between gap-2 pt-1">
-                                                    <div className="flex items-center gap-1.5">
-                                                        {sess.state === 'playing' ? (
+                                            {isAdmin && (() => {
+                                                const caps = evaluateSessionCapabilities(sess);
+                                                const isPausePending = pendingSessionAction === `${sess.sessionId}:pause`;
+                                                const isResumePending = pendingSessionAction === `${sess.sessionId}:resume`;
+                                                const isStopPending = pendingSessionAction === `${sess.sessionId}:stop`;
+                                                return (
+                                                    <div className="flex items-center justify-between gap-2 pt-1">
+                                                        <div className="flex items-center gap-1.5">
+                                                            {sess.state === 'playing' ? (
+                                                                <button
+                                                                    type="button"
+                                                                    disabled={!caps.pause.supported || isPausePending}
+                                                                    aria-disabled={!caps.pause.supported || isPausePending}
+                                                                    onClick={() => handleSessionCommand(sess, 'pause')}
+                                                                    className="px-2.5 py-1 rounded-lg bg-white/[0.05] hover:bg-white/[0.1] border border-white/10 text-xs font-semibold text-slate-200 flex items-center gap-1 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                                                                    title={caps.pause.reason}
+                                                                >
+                                                                    <Pause size={12} />
+                                                                    <span>Pause</span>
+                                                                </button>
+                                                            ) : (
+                                                                <button
+                                                                    type="button"
+                                                                    disabled={!caps.resume.supported || isResumePending}
+                                                                    aria-disabled={!caps.resume.supported || isResumePending}
+                                                                    onClick={() => handleSessionCommand(sess, 'resume')}
+                                                                    className="px-2.5 py-1 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-xs font-semibold text-emerald-300 flex items-center gap-1 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                                                                    title={caps.resume.reason}
+                                                                >
+                                                                    <Play size={12} />
+                                                                    <span>Resume</span>
+                                                                </button>
+                                                            )}
+
                                                             <button
                                                                 type="button"
-                                                                onClick={() => handleSessionCommand(sess.sessionId, 'pause')}
-                                                                className={`px-2.5 py-1 rounded-lg bg-white/[0.05] hover:bg-white/[0.1] border border-white/10 text-xs font-semibold text-slate-200 flex items-center gap-1 transition-all ${sess.supportsMediaControl === false ? 'opacity-50' : ''}`}
-                                                                title={sess.supportsMediaControl === false ? 'Client has no active remote-control WebSocket (SupportsMediaControl=false)' : 'Pause Playback'}
+                                                                disabled={!caps.stop.supported || isStopPending}
+                                                                aria-disabled={!caps.stop.supported || isStopPending}
+                                                                onClick={() => handleSessionCommand(sess, 'stop')}
+                                                                className="px-2.5 py-1 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/30 text-xs font-semibold text-rose-300 flex items-center gap-1 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                                                                title={caps.stop.reason}
                                                             >
-                                                                <Pause size={12} />
-                                                                <span>Pause</span>
+                                                                <Square size={12} />
+                                                                <span>Stop</span>
                                                             </button>
-                                                        ) : (
-                                                            <button
-                                                                type="button"
-                                                                onClick={() => handleSessionCommand(sess.sessionId, 'resume')}
-                                                                className={`px-2.5 py-1 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-xs font-semibold text-emerald-300 flex items-center gap-1 transition-all ${sess.supportsMediaControl === false ? 'opacity-50' : ''}`}
-                                                                title={sess.supportsMediaControl === false ? 'Client has no active remote-control WebSocket (SupportsMediaControl=false)' : 'Resume Playback'}
-                                                            >
-                                                                <Play size={12} />
-                                                                <span>Resume</span>
-                                                            </button>
-                                                        )}
+                                                        </div>
 
                                                         <button
                                                             type="button"
-                                                            onClick={() => handleSessionCommand(sess.sessionId, 'stop')}
-                                                            className="px-2.5 py-1 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/30 text-xs font-semibold text-rose-300 flex items-center gap-1 transition-all"
-                                                            title="Stop / Terminate Session"
+                                                            disabled={!caps.message.supported}
+                                                            aria-disabled={!caps.message.supported}
+                                                            onClick={() => {
+                                                                if (!caps.message.supported) {
+                                                                    addToast(caps.message.reason, 'error');
+                                                                    return;
+                                                                }
+                                                                setMessageSession(sess);
+                                                                setMessageBody('');
+                                                            }}
+                                                            className="px-2.5 py-1 rounded-lg bg-indigo-500/15 hover:bg-indigo-500/25 border border-indigo-500/30 text-xs font-semibold text-indigo-300 flex items-center gap-1 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                                                            title={caps.message.reason}
                                                         >
-                                                            <Square size={12} />
-                                                            <span>Stop</span>
+                                                            <MessageSquare size={12} />
+                                                            <span>Message</span>
                                                         </button>
                                                     </div>
-
-                                                    <button
-                                                        type="button"
-                                                        onClick={() => {
-                                                            setMessageSession(sess);
-                                                            setMessageBody('');
-                                                        }}
-                                                        className={`px-2.5 py-1 rounded-lg bg-indigo-500/15 hover:bg-indigo-500/25 border border-indigo-500/30 text-xs font-semibold text-indigo-300 flex items-center gap-1 transition-all ${sess.canSendMessage === false ? 'opacity-50' : ''}`}
-                                                        title={sess.canSendMessage === false ? 'Client does not advertise DisplayMessage remote-control capability' : 'Send On-Screen Message to Viewer'}
-                                                    >
-                                                        <MessageSquare size={12} />
-                                                        <span>Message</span>
-                                                    </button>
-                                                </div>
-                                            )}
+                                                );
+                                            })()}
                                         </div>
                                     </article>
                                 );
@@ -1264,9 +1457,10 @@ export default function StreamingTab() {
                 </div>
             )}
 
-            {/* ========================================================================= */}
-            {/* 5. ANALYTICS FILTER TOOLBAR & CHARTS (PLAY STATS & DATA USAGE)            */}
-            {/* ========================================================================= */}
+            {(activeView === 'dashboard' || activeView === 'history' || activeView === 'analytics') && <StreamingHistoryExplorer />}
+            <p role="note" className="text-sm text-slate-400">
+                Compatibility dashboard charts and the recent loaded preview mix item summaries and legacy records. They are not confirmed playback totals. Use the canonical archive and its connected insights for provenance-aware reporting.
+            </p>
             {(activeView === 'dashboard' || activeView === 'analytics' || activeView === 'history') && (
                 <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-3.5 flex flex-wrap items-center justify-between gap-3">
                     <div className="flex flex-wrap items-center gap-2">
@@ -1274,17 +1468,26 @@ export default function StreamingTab() {
                             Analytics Filters:
                         </span>
                         {/* Play Method Filter */}
-                        <div className="flex items-center gap-1 bg-black/40 p-1 rounded-xl border border-white/10">
+                        <div
+                            role="group"
+                            aria-label="Play Method Filter"
+                            className="flex items-center gap-1 bg-black/40 p-1 rounded-xl border border-white/10"
+                        >
                             {[
                                 { id: 'all', label: 'All Methods' },
                                 { id: 'DirectPlay', label: 'Direct Play' },
                                 { id: 'DirectStream', label: 'Direct Stream' },
                                 { id: 'Transcode', label: 'Transcode' },
+                                { id: 'Unknown', label: 'Unknown' },
                             ].map((m) => (
                                 <button
                                     key={m.id}
                                     type="button"
-                                    onClick={() => setPlayMethodFilter(m.id)}
+                                    aria-pressed={playMethodFilter === m.id}
+                                    onClick={() => {
+                                        setPlayMethodFilter(m.id);
+                                        setHistoryPage(1);
+                                    }}
                                     className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-all ${
                                         playMethodFilter === m.id
                                             ? 'bg-indigo-500/25 text-indigo-300 border border-indigo-500/30'
@@ -1297,7 +1500,11 @@ export default function StreamingTab() {
                         </div>
 
                         {/* Media Type Filter */}
-                        <div className="flex items-center gap-1 bg-black/40 p-1 rounded-xl border border-white/10">
+                        <div
+                            role="group"
+                            aria-label="Media Type Filter"
+                            className="flex items-center gap-1 bg-black/40 p-1 rounded-xl border border-white/10"
+                        >
                             {[
                                 { id: 'all', label: 'All Media' },
                                 { id: 'Movie', label: 'Movies' },
@@ -1307,7 +1514,11 @@ export default function StreamingTab() {
                                 <button
                                     key={mt.id}
                                     type="button"
-                                    onClick={() => setMediaTypeFilter(mt.id)}
+                                    aria-pressed={mediaTypeFilter === mt.id}
+                                    onClick={() => {
+                                        setMediaTypeFilter(mt.id);
+                                        setHistoryPage(1);
+                                    }}
                                     className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-all ${
                                         mediaTypeFilter === mt.id
                                             ? 'bg-purple-500/25 text-purple-300 border border-purple-500/30'
@@ -1321,7 +1532,11 @@ export default function StreamingTab() {
                     </div>
 
                     {/* Time Window Selector */}
-                    <div className="flex items-center gap-1 bg-black/40 p-1 rounded-xl border border-white/10">
+                    <div
+                        role="group"
+                        aria-label="Time Window Filter"
+                        className="flex items-center gap-1 bg-black/40 p-1 rounded-xl border border-white/10"
+                    >
                         {[
                             { days: 7, label: '7 Days' },
                             { days: 30, label: '30 Days' },
@@ -1331,7 +1546,11 @@ export default function StreamingTab() {
                             <button
                                 key={w.days}
                                 type="button"
-                                onClick={() => setWindowDays(w.days)}
+                                aria-pressed={windowDays === w.days}
+                                onClick={() => {
+                                    setWindowDays(w.days);
+                                    setHistoryPage(1);
+                                }}
                                 className={`px-3 py-1 rounded-lg text-xs font-bold transition-all ${
                                     windowDays === w.days
                                         ? 'bg-indigo-600 text-white shadow'
@@ -1359,7 +1578,7 @@ export default function StreamingTab() {
                                         Stream Data Usage & Bandwidth Over Time
                                     </h3>
                                     <p className="text-xs text-slate-400 mt-0.5">
-                                        Daily data transferred (GB) and peak stream bandwidth (Mbps)
+                                        {bucketLabel} estimated transfer (GB) and peak playing bitrate (Mbps)
                                     </p>
                                 </div>
                                 <span className="text-xs font-mono font-bold text-teal-300 bg-teal-500/10 px-2.5 py-1 rounded-lg border border-teal-500/20">
@@ -1385,17 +1604,23 @@ export default function StreamingTab() {
                                             dataKey="date"
                                             stroke="rgba(255,255,255,0.2)"
                                             tick={{ fill: 'rgba(255,255,255,0.45)', fontSize: 10 }}
-                                            tickFormatter={(v) => {
-                                                const p = String(v).split('-');
-                                                return p.length === 3 ? `${p[1]}/${p[2]}` : String(v);
-                                            }}
+                                            tickFormatter={(value) => formatStreamingBucket(value, analytics.timeSeriesGranularity)}
                                             minTickGap={20}
                                         />
                                         <YAxis
+                                            yAxisId="gb"
                                             stroke="rgba(255,255,255,0.2)"
                                             tick={{ fill: 'rgba(255,255,255,0.45)', fontSize: 10 }}
                                             tickFormatter={(v) => `${v} GB`}
                                             width={52}
+                                        />
+                                        <YAxis
+                                            yAxisId="mbps"
+                                            orientation="right"
+                                            stroke="rgba(56,189,248,0.25)"
+                                            tick={{ fill: 'rgba(56,189,248,0.65)', fontSize: 10 }}
+                                            tickFormatter={(v) => `${v} Mbps`}
+                                            width={58}
                                         />
                                         <Tooltip
                                             contentStyle={{
@@ -1410,6 +1635,7 @@ export default function StreamingTab() {
                                             }}
                                         />
                                         <Area
+                                            yAxisId="gb"
                                             type="monotone"
                                             name="Data Used"
                                             dataKey="dataGB"
@@ -1417,6 +1643,16 @@ export default function StreamingTab() {
                                             strokeWidth={2}
                                             fillOpacity={1}
                                             fill="url(#streamDataGrad)"
+                                        />
+                                        <Area
+                                            yAxisId="mbps"
+                                            type="monotone"
+                                            name="Peak Bandwidth"
+                                            dataKey="peakBandwidthMbps"
+                                            stroke="#38bdf8"
+                                            strokeWidth={1.75}
+                                            fillOpacity={1}
+                                            fill="url(#streamBwGrad)"
                                         />
                                     </AreaChart>
                                 </ResponsiveContainer>
@@ -1432,7 +1668,7 @@ export default function StreamingTab() {
                                         Play Sessions & Watch Time Activity
                                     </h3>
                                     <p className="text-xs text-slate-400 mt-0.5">
-                                        Daily Direct Play, Direct Stream, and Transcode sessions
+                                        {bucketLabel} sessions by delivery method (including Unknown) and Watch Hours · UTC
                                     </p>
                                 </div>
                                 <span className="text-xs font-mono font-bold text-indigo-300 bg-indigo-500/10 px-2.5 py-1 rounded-lg border border-indigo-500/20">
@@ -1442,23 +1678,29 @@ export default function StreamingTab() {
 
                             <div className="h-[220px] w-full">
                                 <ResponsiveContainer width="100%" height={220}>
-                                    <BarChart data={chartData} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
+                                    <ComposedChart data={chartData} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
                                         <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" vertical={false} />
                                         <XAxis
                                             dataKey="date"
                                             stroke="rgba(255,255,255,0.2)"
                                             tick={{ fill: 'rgba(255,255,255,0.45)', fontSize: 10 }}
-                                            tickFormatter={(v) => {
-                                                const p = String(v).split('-');
-                                                return p.length === 3 ? `${p[1]}/${p[2]}` : String(v);
-                                            }}
+                                            tickFormatter={(value) => formatStreamingBucket(value, analytics.timeSeriesGranularity)}
                                             minTickGap={20}
                                         />
                                         <YAxis
+                                            yAxisId="plays"
                                             stroke="rgba(255,255,255,0.2)"
                                             tick={{ fill: 'rgba(255,255,255,0.45)', fontSize: 10 }}
                                             allowDecimals={false}
                                             width={36}
+                                        />
+                                        <YAxis
+                                            yAxisId="hours"
+                                            orientation="right"
+                                            stroke="rgba(165,180,252,0.25)"
+                                            tick={{ fill: 'rgba(165,180,252,0.7)', fontSize: 10 }}
+                                            tickFormatter={(v) => `${v}h`}
+                                            width={42}
                                         />
                                         <Tooltip
                                             contentStyle={{
@@ -1467,11 +1709,25 @@ export default function StreamingTab() {
                                                 borderRadius: '12px',
                                             }}
                                             labelStyle={{ color: '#94a3b8', fontSize: '11px', marginBottom: '4px' }}
+                                            formatter={(value, name) => {
+                                                if (name === 'Watch Hours') return [`${value} h`, 'Watch Hours'];
+                                                return [value, String(name)];
+                                            }}
                                         />
-                                        <Bar dataKey="directPlayCount" name="Direct Play" stackId="plays" fill="#10b981" radius={[0, 0, 0, 0]} />
-                                        <Bar dataKey="directStreamCount" name="Direct Stream" stackId="plays" fill="#38bdf8" radius={[0, 0, 0, 0]} />
-                                        <Bar dataKey="transcodeCount" name="Transcode" stackId="plays" fill="#f59e0b" radius={[4, 4, 0, 0]} />
-                                    </BarChart>
+                                        <Bar yAxisId="plays" dataKey="directPlayCount" name="Direct Play" stackId="plays" fill="#10b981" radius={[0, 0, 0, 0]} />
+                                        <Bar yAxisId="plays" dataKey="directStreamCount" name="Direct Stream" stackId="plays" fill="#38bdf8" radius={[0, 0, 0, 0]} />
+                                        <Bar yAxisId="plays" dataKey="transcodeCount" name="Transcode" stackId="plays" fill="#f59e0b" radius={[4, 4, 0, 0]} />
+                                        <Bar yAxisId="plays" dataKey="unknownPlayCount" name="Unknown" stackId="plays" fill="#64748b" />
+                                        <Line
+                                            yAxisId="hours"
+                                            type="monotone"
+                                            dataKey="watchHours"
+                                            name="Watch Hours"
+                                            stroke="#a855f7"
+                                            strokeWidth={2}
+                                            dot={false}
+                                        />
+                                    </ComposedChart>
                                 </ResponsiveContainer>
                             </div>
                         </div>
@@ -1507,8 +1763,15 @@ export default function StreamingTab() {
                                         style={{ width: `${analytics.streamTypes.transcodePct}%` }}
                                     />
                                 )}
+                                {unknownPlaysPct > 0 && (
+                                    <div
+                                        className="bg-slate-500 transition-all"
+                                        style={{ width: `${unknownPlaysPct}%` }}
+                                        title={`Unknown: ${unknownPlaysCount} (${unknownPlaysPct}%)`}
+                                    />
+                                )}
                             </div>
-                            <div className="grid grid-cols-3 gap-2 pt-1 text-xs">
+                            <div className={`grid ${unknownPlaysCount > 0 ? 'grid-cols-2 sm:grid-cols-4' : 'grid-cols-3'} gap-2 pt-1 text-xs`}>
                                 <div className="bg-black/30 rounded-xl p-2 border border-white/5">
                                     <span className="text-xs text-emerald-400 font-semibold block">Direct Play</span>
                                     <span className="text-sm font-bold text-white tabular-nums">
@@ -1530,6 +1793,15 @@ export default function StreamingTab() {
                                         <span className="text-xs text-slate-400 font-normal">({analytics.streamTypes.transcodePct}%)</span>
                                     </span>
                                 </div>
+                                {unknownPlaysCount > 0 && (
+                                    <div className="bg-black/30 rounded-xl p-2 border border-white/5" title="Imported from Jellyfin played-items sync where live play method was not recorded">
+                                        <span className="text-xs text-slate-300 font-semibold block">Unknown</span>
+                                        <span className="text-sm font-bold text-white tabular-nums">
+                                            {unknownPlaysCount}{' '}
+                                            <span className="text-xs text-slate-400 font-normal">({unknownPlaysPct}%)</span>
+                                        </span>
+                                    </div>
+                                )}
                             </div>
                         </div>
 
@@ -1727,33 +1999,151 @@ export default function StreamingTab() {
             {/* ========================================================================= */}
             {(activeView === 'dashboard' || activeView === 'history') && (
                 <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-5">
-                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4 pb-3 border-b border-white/[0.06]">
+                    <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 mb-4 pb-3 border-b border-white/[0.06]">
                         <div>
-                            <h3 className="text-sm font-bold text-slate-100 flex items-center gap-2">
-                                <Clock size={16} className="text-indigo-400" />
-                                Playback & Stream Data Usage Log
-                            </h3>
+                            <div className="flex flex-wrap items-center gap-2">
+                                <h3 className="text-sm font-bold text-slate-100 flex items-center gap-2">
+                                    <Clock size={16} className="text-indigo-400" />
+                                    Playback & Stream Data Usage Log — Recent Loaded Preview
+                                </h3>
+                                <span
+                                    data-testid="history-result-count"
+                                    className="text-xs font-mono px-2 py-0.5 rounded-full bg-white/[0.06] border border-white/10 text-slate-300"
+                                >
+                                    {filteredHistory.length === 0
+                                        ? `0 matching of ${loadedHistory.length} loaded`
+                                        : `Showing ${(safeHistoryPage - 1) * historyPageSize + 1}–${Math.min(
+                                              safeHistoryPage * historyPageSize,
+                                              filteredHistory.length
+                                          )} of ${filteredHistory.length} matching`}
+                                    {isHistoryBounded
+                                        ? ` (${loadedHistory.length} loaded of ${analytics.totalPlays} total)`
+                                        : ''}
+                                </span>
+                            </div>
                             <p className="text-xs text-slate-400 mt-0.5">
                                 Detailed per-session audit of play method, codecs, bitrate, data consumed, and completion
                             </p>
                         </div>
-                        <div className="relative w-full sm:w-72">
-                            <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
-                            <input
-                                type="text"
-                                value={historySearch}
-                                onChange={(e) => setHistorySearch(e.target.value)}
-                                placeholder="Search title, user, device, codec..."
-                                className="w-full pl-9 pr-3 py-1.5 rounded-xl bg-black/40 border border-white/10 text-xs text-slate-200 placeholder:text-slate-500 focus:outline-none focus:border-indigo-500/50"
-                            />
+
+                        <div className="flex flex-wrap items-center gap-2">
+                            {/* Inline Play Method Filter (accessible in both Dashboard & History views) */}
+                            <label htmlFor="history-play-method-select" className="sr-only">
+                                Filter history by play method
+                            </label>
+                            <select
+                                id="history-play-method-select"
+                                aria-label="Filter history by play method"
+                                value={playMethodFilter}
+                                onChange={(e) => {
+                                    setPlayMethodFilter(e.target.value);
+                                    setHistoryPage(1);
+                                }}
+                                className="px-2.5 py-1.5 rounded-xl bg-black/40 border border-white/10 text-xs text-slate-200 focus:outline-none focus:border-indigo-500/50"
+                            >
+                                <option value="all">All Play Methods</option>
+                                <option value="DirectPlay">Direct Play</option>
+                                <option value="DirectStream">Direct Stream</option>
+                                <option value="Transcode">Transcode</option>
+                                <option value="Unknown">Unknown (Imported)</option>
+                            </select>
+
+                            {/* Page Size Selector */}
+                            <label htmlFor="history-page-size-select" className="sr-only">
+                                History rows per page
+                            </label>
+                            <select
+                                id="history-page-size-select"
+                                aria-label="History rows per page"
+                                value={historyPageSize}
+                                onChange={(e) => {
+                                    setHistoryPageSize(Number(e.target.value) || 10);
+                                    setHistoryPage(1);
+                                }}
+                                className="px-2.5 py-1.5 rounded-xl bg-black/40 border border-white/10 text-xs text-slate-200 focus:outline-none focus:border-indigo-500/50"
+                            >
+                                <option value={10}>10 / page</option>
+                                <option value={20}>20 / page</option>
+                                <option value={25}>25 / page</option>
+                                <option value={50}>50 / page</option>
+                            </select>
+
+                            {/* Search Input */}
+                            <div className="relative w-full sm:w-64">
+                                <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
+                                <input
+                                    type="text"
+                                    aria-label="Search playback history"
+                                    value={historySearch}
+                                    onChange={(e) => {
+                                        setHistorySearch(e.target.value);
+                                        setHistoryPage(1);
+                                    }}
+                                    placeholder="Search title, user, client, device..."
+                                    className="w-full pl-9 pr-3 py-1.5 rounded-xl bg-black/40 border border-white/10 text-xs text-slate-200 placeholder:text-slate-500 focus:outline-none focus:border-indigo-500/50"
+                                />
+                            </div>
+
+                            {/* Honest CSV Export Button */}
+                            <button
+                                type="button"
+                                onClick={handleExportHistoryCsv}
+                                disabled={filteredHistory.length === 0}
+                                aria-label={
+                                    isHistoryBounded
+                                        ? `Export ${filteredHistory.length} loaded rows to CSV`
+                                        : `Export ${filteredHistory.length} rows to CSV`
+                                }
+                                title={
+                                    isHistoryBounded
+                                        ? `Exports the ${filteredHistory.length} loaded matching rows (${analytics.totalPlays} total records exist in backend window)`
+                                        : `Export ${filteredHistory.length} matching rows to CSV`
+                                }
+                                className="px-3 py-1.5 rounded-xl text-xs font-semibold bg-white/[0.06] hover:bg-white/[0.12] disabled:opacity-40 disabled:cursor-not-allowed border border-white/10 text-slate-200 flex items-center gap-1.5 transition-all"
+                            >
+                                <Download size={13} />
+                                <span>
+                                    {isHistoryBounded
+                                        ? `Export Loaded CSV (${filteredHistory.length})`
+                                        : `Export CSV (${filteredHistory.length})`}
+                                </span>
+                            </button>
                         </div>
                     </div>
+
+                    {/* Bounded History & Historical Import Estimate Disclosures */}
+                    {(isHistoryBounded || hasHistoricalSyncImports) && (
+                        <div className="mb-4 flex flex-col gap-2">
+                            {isHistoryBounded && (
+                                <div
+                                    data-testid="bounded-history-notice"
+                                    className="px-3.5 py-2 rounded-xl border border-amber-500/25 bg-amber-500/10 text-xs text-amber-200 flex items-center justify-between gap-2"
+                                >
+                                    <span>
+                                        Showing the most recent <strong>{loadedHistory.length}</strong> loaded history rows out of{' '}
+                                        <strong>{analytics.totalPlays}</strong> total plays in the selected window. Search and CSV export operate on loaded rows.
+                                    </span>
+                                </div>
+                            )}
+                            {hasHistoricalSyncImports && (
+                                <div
+                                    data-testid="historical-estimate-notice"
+                                    className="px-3.5 py-2 rounded-xl border border-slate-500/30 bg-slate-800/50 text-xs text-slate-300 flex items-center justify-between gap-2"
+                                >
+                                    <span>
+                                        <strong>Historical Import Limitation:</strong> Jellyfin played-item imports are last-played summaries, not complete session logs. Client, delivery method and transfer bytes are unrecorded. Retained legacy byte values and live-poll transfer totals are estimates, not measured network traffic.
+                                    </span>
+                                </div>
+                            )}
+                        </div>
+                    )}
 
                     <div className="overflow-x-auto">
                         <table className="w-full text-left border-collapse text-xs">
                             <thead>
                                 <tr className="border-b border-white/[0.06] text-slate-400 uppercase tracking-wider text-xs">
                                     <th className="py-2.5 px-3 font-semibold">Title</th>
+                                    <th className="py-2.5 px-3 font-semibold">Playback Time (UTC)</th>
                                     <th className="py-2.5 px-3 font-semibold">User</th>
                                     <th className="py-2.5 px-3 font-semibold">Client & Device</th>
                                     <th className="py-2.5 px-3 font-semibold">Stream Pipeline</th>
@@ -1762,22 +2152,24 @@ export default function StreamingTab() {
                                 </tr>
                             </thead>
                             <tbody className="divide-y divide-white/[0.04]">
-                                {error ? (
+                                {error && loadedHistory.length === 0 ? (
                                     <tr>
-                                        <td colSpan={6} className="py-10 text-center text-red-400">
+                                        <td colSpan={7} className="py-10 text-center text-red-400">
                                             Failed to load playback history
                                         </td>
                                     </tr>
                                 ) : filteredHistory.length === 0 ? (
                                     <tr>
-                                        <td colSpan={6} className="py-10 text-center text-slate-500">
+                                        <td colSpan={7} className="py-10 text-center text-slate-500">
                                             No playback history entries match the current filter.
                                         </td>
                                     </tr>
                                 ) : (
-                                    filteredHistory.map((h) => {
+                                    paginatedHistory.map((h) => {
                                         const mStyle = getPlayMethodStyle(h.playMethod);
                                         const epBadge = formatEpisodeBadge(h.seasonNumber, h.episodeNumber);
+                                        const isSyncedEstimate = isHistoricalSyncEntry(h);
+                                        const playbackTime = parseStreamingTimestamp(h.startedAt || h.lastSeenAt);
                                         return (
                                             <tr key={h.id} className="hover:bg-white/[0.02] transition-colors">
                                                 <td className="py-3 px-3">
@@ -1800,11 +2192,16 @@ export default function StreamingTab() {
                                                         </div>
                                                     </div>
                                                 </td>
+                                                <td className="py-3 px-3 whitespace-nowrap text-slate-400">
+                                                    <time dateTime={playbackTime?.toISOString()}>
+                                                        {playbackTime ? `${playbackTime.toISOString().slice(0, 19).replace('T', ' ')} UTC` : 'Unknown date'}
+                                                    </time>
+                                                </td>
                                                 <td className="py-3 px-3 font-semibold text-slate-200">{h.userName}</td>
                                                 <td className="py-3 px-3">
-                                                    <p className="text-slate-200">{h.clientName}</p>
+                                                    <p className="text-slate-200">{h.clientName || (isSyncedEstimate ? 'Historical Import' : 'Unknown Client')}</p>
                                                     <p className="text-xs text-slate-500">
-                                                        {h.deviceName} {h.ipAddress ? `· ${h.ipAddress}` : ''}
+                                                        {h.deviceName || (isSyncedEstimate ? 'Unrecorded device' : 'Unknown device')} {h.ipAddress ? `· ${h.ipAddress}` : ''}
                                                     </p>
                                                 </td>
                                                 <td className="py-3 px-3">
@@ -1814,12 +2211,26 @@ export default function StreamingTab() {
                                                             {h.hwAccel ? ` (${h.hwAccel})` : ''}
                                                         </span>
                                                         <span className="text-xs font-mono bg-white/[0.06] text-slate-300 px-1.5 py-0.5 rounded">
-                                                            {h.videoResolution} · {h.videoCodec} / {h.audioCodec}
+                                                            {[h.videoResolution, [h.videoCodec, h.audioCodec].filter(Boolean).join(' / ')].filter(Boolean).join(' · ') || 'Unrecorded pipeline'}
                                                         </span>
                                                     </div>
                                                 </td>
                                                 <td className="py-3 px-3 font-mono">
-                                                    <p className="text-teal-300 font-bold">{formatBytes(h.dataUsedBytes, 2)}</p>
+                                                    <div className="flex items-center gap-1.5">
+                                                        <p className="text-teal-300 font-bold">
+                                                            {isSyncedEstimate && (!h.dataUsedBytes || h.dataUsedBytes <= 0)
+                                                                ? 'Unrecorded'
+                                                                : formatBytes(h.dataUsedBytes, 2)}
+                                                        </p>
+                                                        {isSyncedEstimate && (
+                                                            <span
+                                                                className="text-xs font-sans font-semibold px-1.5 py-0.2 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30"
+                                                                title="Imported from Jellyfin played-item history; live session bytes and delivery method were not measured"
+                                                            >
+                                                                {h.dataUsedBytes && h.dataUsedBytes > 0 ? 'Est.' : 'Sync'}
+                                                            </span>
+                                                        )}
+                                                    </div>
                                                     <p className="text-xs text-slate-400">{formatBandwidthMbps(h.bandwidthMbps, h.bitrateBps)} Mbps</p>
                                                 </td>
                                                 <td className="py-3 px-3">
@@ -1845,6 +2256,39 @@ export default function StreamingTab() {
                             </tbody>
                         </table>
                     </div>
+
+                    {/* Pagination Footer */}
+                    {filteredHistory.length > 0 && (
+                        <div className="mt-4 pt-3 border-t border-white/[0.06] flex flex-col sm:flex-row items-center justify-between gap-3 text-xs text-slate-400">
+                            <span>
+                                Page <strong className="text-slate-200">{safeHistoryPage}</strong> of{' '}
+                                <strong className="text-slate-200">{totalHistoryPages}</strong> ({filteredHistory.length} matching row
+                                {filteredHistory.length === 1 ? '' : 's'})
+                            </span>
+                            <div className="flex items-center gap-2">
+                                <button
+                                    type="button"
+                                    aria-label="Previous loaded history page"
+                                    disabled={safeHistoryPage <= 1}
+                                    onClick={() => setHistoryPage((p) => Math.max(1, p - 1))}
+                                    className="px-2.5 py-1 rounded-lg bg-white/[0.05] hover:bg-white/[0.1] disabled:opacity-40 disabled:cursor-not-allowed border border-white/10 text-slate-200 flex items-center gap-1"
+                                >
+                                    <ChevronLeft size={13} />
+                                    <span>Previous</span>
+                                </button>
+                                <button
+                                    type="button"
+                                    aria-label="Next loaded history page"
+                                    disabled={safeHistoryPage >= totalHistoryPages}
+                                    onClick={() => setHistoryPage((p) => Math.min(totalHistoryPages, p + 1))}
+                                    className="px-2.5 py-1 rounded-lg bg-white/[0.05] hover:bg-white/[0.1] disabled:opacity-40 disabled:cursor-not-allowed border border-white/10 text-slate-200 flex items-center gap-1"
+                                >
+                                    <span>Next</span>
+                                    <ChevronRight size={13} />
+                                </button>
+                            </div>
+                        </div>
+                    )}
                 </div>
             )}
 
@@ -1915,10 +2359,14 @@ export default function StreamingTab() {
 
                         <form onSubmit={handleSaveConfig} className="space-y-4">
                             <div>
-                                <label className="block text-xs font-bold text-slate-300 uppercase tracking-wider mb-1.5">
+                                <label
+                                    htmlFor="jellyfin-server-name-input"
+                                    className="block text-xs font-bold text-slate-300 uppercase tracking-wider mb-1.5"
+                                >
                                     Server Display Name
                                 </label>
                                 <input
+                                    id="jellyfin-server-name-input"
                                     type="text"
                                     value={serverNameInput}
                                     onChange={(e) => setServerNameInput(e.target.value)}
@@ -1928,10 +2376,14 @@ export default function StreamingTab() {
                             </div>
 
                             <div>
-                                <label className="block text-xs font-bold text-slate-300 uppercase tracking-wider mb-1.5">
+                                <label
+                                    htmlFor="jellyfin-server-url-input"
+                                    className="block text-xs font-bold text-slate-300 uppercase tracking-wider mb-1.5"
+                                >
                                     Jellyfin Server URL
                                 </label>
                                 <input
+                                    id="jellyfin-server-url-input"
                                     type="text"
                                     value={serverUrlInput}
                                     onChange={(e) => setServerUrlInput(e.target.value)}
@@ -1942,10 +2394,14 @@ export default function StreamingTab() {
                             </div>
 
                             <div>
-                                <label className="block text-xs font-bold text-slate-300 uppercase tracking-wider mb-1.5">
+                                <label
+                                    htmlFor="jellyfin-api-key-input"
+                                    className="block text-xs font-bold text-slate-300 uppercase tracking-wider mb-1.5"
+                                >
                                     Jellyfin API Key
                                 </label>
                                 <input
+                                    id="jellyfin-api-key-input"
                                     type="password"
                                     value={apiKeyInput}
                                     onChange={(e) => setApiKeyInput(e.target.value)}
@@ -2008,6 +2464,12 @@ export default function StreamingTab() {
             {/* ========================================================================= */}
             {/* 8. SEND MESSAGE TO JELLYFIN VIEWER MODAL                                  */}
             {/* ========================================================================= */}
+            {!isAdmin && (
+                <p role="note" className="text-sm text-slate-400">
+                    Shared legacy dashboard statistics are withheld for privacy. Your explicitly linked playback records are available in the canonical archive.
+                </p>
+            )}
+
             {messageSession && (
                 <div
                     className="fixed inset-0 z-50 bg-black/75 backdrop-blur-md flex items-center justify-center p-4"
@@ -2025,6 +2487,7 @@ export default function StreamingTab() {
                             </h3>
                             <button
                                 type="button"
+                                aria-label="Close message modal"
                                 onClick={() => setMessageSession(null)}
                                 className="p-1 text-slate-400 hover:text-white"
                             >
@@ -2033,8 +2496,11 @@ export default function StreamingTab() {
                         </div>
 
                         <div>
-                            <label className="block text-xs font-semibold text-slate-400 mb-1">Header</label>
+                            <label htmlFor="session-message-header" className="block text-xs font-semibold text-slate-400 mb-1">
+                                Header
+                            </label>
                             <input
+                                id="session-message-header"
                                 type="text"
                                 value={messageHeader}
                                 onChange={(e) => setMessageHeader(e.target.value)}
@@ -2043,8 +2509,11 @@ export default function StreamingTab() {
                         </div>
 
                         <div>
-                            <label className="block text-xs font-semibold text-slate-400 mb-1">Message</label>
+                            <label htmlFor="session-message-body" className="block text-xs font-semibold text-slate-400 mb-1">
+                                Message
+                            </label>
                             <textarea
+                                id="session-message-body"
                                 rows={3}
                                 value={messageBody}
                                 onChange={(e) => setMessageBody(e.target.value)}

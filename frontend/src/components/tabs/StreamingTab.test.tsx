@@ -325,21 +325,56 @@ const mockDashboardData: StreamingDashboardData = {
 };
 
 // Mock SWR with Jellyfin streaming dashboard fixture
+const mockMutate = jest.fn();
+let currentSwrState: {
+    data: StreamingDashboardData | null;
+    error: Error | null;
+    isLoading: boolean;
+    isValidating?: boolean;
+    mutate: jest.Mock;
+} = {
+    data: mockDashboardData,
+    error: null,
+    isLoading: false,
+    isValidating: false,
+    mutate: mockMutate,
+};
+let lastSwrKey = '';
+
 jest.mock('swr', () => {
     return jest.fn((key: string) => {
         if (key && key.includes('/streaming/dashboard')) {
-            return {
-                data: mockDashboardData,
-                error: null,
-                isLoading: false,
-                mutate: jest.fn(),
-            };
+            lastSwrKey = key;
+            return currentSwrState;
         }
-        return { data: null, error: null, isLoading: false, mutate: jest.fn() };
+        return { data: null, error: null, isLoading: false, mutate: mockMutate };
     });
 });
 
+import {
+    buildStreamingHistoryCsv,
+    escapeStreamingCsvCell,
+    evaluateSessionCapabilities,
+    recomputeLiveSummaryFromSessions,
+    isHistoricalSyncEntry,
+    parseStreamingTimestamp,
+    formatStreamingBucket,
+} from '@/lib/streaming';
+import { waitFor } from '@testing-library/react';
+
 describe('StreamingTab - Jellyfin Play Statistics, Data Usage & Stream Telemetry', () => {
+    beforeEach(() => {
+        jest.clearAllMocks();
+        currentSwrState = {
+            data: JSON.parse(JSON.stringify(mockDashboardData)) as StreamingDashboardData,
+            error: null,
+            isLoading: false,
+            isValidating: false,
+            mutate: mockMutate,
+        };
+        lastSwrKey = '';
+    });
+
     it('renders Jellyfin online status alongside Plex and Emby coming-soon indicators', () => {
         render(<StreamingTab />);
         expect(screen.getByText(/Streaming Dashboard/i)).toBeInTheDocument();
@@ -353,7 +388,7 @@ describe('StreamingTab - Jellyfin Play Statistics, Data Usage & Stream Telemetry
         expect(screen.getByText(/Active Streams/i)).toBeInTheDocument();
         expect(screen.getByText(/Live Bandwidth/i)).toBeInTheDocument();
         expect(screen.getByText(/Data Usage \(30d\)/i)).toBeInTheDocument();
-        expect(screen.getByText(/Play Statistics \(30d\)/i)).toBeInTheDocument();
+        expect(screen.getByText(/Legacy Record Statistics \(30d\)/i)).toBeInTheDocument();
         expect(screen.getByText(/Jellyfin Library/i)).toBeInTheDocument();
     });
 
@@ -378,5 +413,390 @@ describe('StreamingTab - Jellyfin Play Statistics, Data Usage & Stream Telemetry
         fireEvent.click(configBtn);
         expect(screen.getByText(/Media Server Providers/i)).toBeInTheDocument();
         expect(screen.getByRole('button', { name: /Test Connection/i })).toBeInTheDocument();
+        expect(screen.getByLabelText(/Server Display Name/i)).toBeInTheDocument();
+        expect(screen.getByLabelText(/Jellyfin Server URL/i)).toBeInTheDocument();
+        expect(screen.getByLabelText(/Jellyfin API Key/i)).toBeInTheDocument();
+    });
+
+    it('disables unsupported session control buttons when capabilities report false or non-Jellyfin provider', () => {
+        const customData = JSON.parse(JSON.stringify(mockDashboardData)) as StreamingDashboardData;
+        // Session 1: DirectPlay with supportsMediaControl=false, supportsRemoteControl=false, canSendMessage=false
+        customData.activeSessions[0].supportsMediaControl = false;
+        customData.activeSessions[0].supportsRemoteControl = false;
+        customData.activeSessions[0].canSendMessage = false;
+        customData.activeSessions[0].playSessionId = '';
+        // Session 2: Transcode with supportsMediaControl=false -> Pause & Message disabled, but Stop enabled via Transcode fallback
+        customData.activeSessions[1].supportsMediaControl = false;
+        customData.activeSessions[1].supportsRemoteControl = false;
+        customData.activeSessions[1].canSendMessage = false;
+
+        currentSwrState = {
+            ...currentSwrState,
+            data: customData,
+        };
+
+        render(<StreamingTab />);
+
+        const pauseBtns = screen.getAllByRole('button', { name: /^Pause$/i });
+        const stopBtns = screen.getAllByRole('button', { name: /^Stop$/i });
+        const messageBtns = screen.getAllByRole('button', { name: /^Message$/i });
+
+        // Both sessions have supportsMediaControl=false, so Pause and Message must be disabled on both
+        expect(pauseBtns[0]).toBeDisabled();
+        expect(pauseBtns[1]).toBeDisabled();
+        expect(messageBtns[0]).toBeDisabled();
+        expect(messageBtns[1]).toBeDisabled();
+
+        // Session 0 is DirectPlay without media/remote control or playSessionId -> Stop is disabled
+        expect(stopBtns[0]).toBeDisabled();
+        // Session 1 is Transcode -> Stop remains enabled via active transcode termination fallback
+        expect(stopBtns[1]).not.toBeDisabled();
+
+        // Verify non-Jellyfin provider disables all actions
+        const plexCaps = evaluateSessionCapabilities({
+            ...customData.activeSessions[1],
+            provider: 'plex',
+            supportsMediaControl: true,
+        });
+        expect(plexCaps.pause.supported).toBe(false);
+        expect(plexCaps.stop.supported).toBe(false);
+        expect(plexCaps.message.supported).toBe(false);
+    });
+
+    it('optimistically recomputes liveSummary bandwidth and stream counts when stopping a session', async () => {
+        const fetchSpy = jest.spyOn(global, 'fetch').mockImplementation(async (input: RequestInfo | URL) => {
+            const url = String(input);
+            if (url.includes('csrf-token')) {
+                return {
+                    ok: true,
+                    json: async () => ({ token: 'test-csrf-token' }),
+                } as Response;
+            }
+            return {
+                ok: true,
+                json: async () => ({ message: 'Session stopped' }),
+            } as Response;
+        });
+
+        render(<StreamingTab />);
+        const stopBtns = screen.getAllByRole('button', { name: /^Stop$/i });
+        fireEvent.click(stopBtns[0]);
+
+        await waitFor(() => {
+            expect(fetchSpy).toHaveBeenCalledWith(
+                '/api/v1/admin/streaming/sessions/jf-live-1/command',
+                expect.objectContaining({ method: 'POST' })
+            );
+        });
+
+        expect(mockMutate).toHaveBeenCalled();
+        const updaterFn = mockMutate.mock.calls[0][0];
+        if (typeof updaterFn === 'function') {
+            const nextState = updaterFn(mockDashboardData) as StreamingDashboardData;
+            expect(nextState.activeSessions).toHaveLength(1);
+            expect(nextState.liveSummary.activeStreams).toBe(1);
+            expect(nextState.liveSummary.directPlayCount).toBe(0);
+            expect(nextState.liveSummary.transcodeCount).toBe(1);
+            expect(nextState.liveSummary.totalBandwidthMbps).toBe(14.8);
+        }
+
+        fetchSpy.mockRestore();
+    });
+
+    it('surfaces stale/disconnected telemetry alert banner when SWR reports a fetch error without hiding loaded data', () => {
+        currentSwrState = {
+            ...currentSwrState,
+            error: new Error('502 Bad Gateway from upstream proxy'),
+        };
+
+        render(<StreamingTab />);
+        expect(screen.getByRole('alert')).toHaveTextContent(/Streaming telemetry refresh failed/i);
+        expect(screen.getByRole('alert')).toHaveTextContent(/502 Bad Gateway/i);
+        // Loaded history rows remain visible rather than being hidden behind an empty table error row
+        expect(screen.getAllByText(/Dune: Part Two/i).length).toBeGreaterThan(0);
+    });
+
+    it('renders Unknown badge and historical sync limitation notice for imported history rows without claiming Direct Play', () => {
+        const customData = JSON.parse(JSON.stringify(mockDashboardData)) as StreamingDashboardData;
+        customData.analytics.recentHistory.unshift({
+            id: 99,
+            sessionKey: 'jellyfin:sync:u-1:item-interstellar',
+            provider: 'jellyfin',
+            serverName: 'AetherFlow-Jellyfin',
+            userName: 'alex_operator',
+            clientName: '',
+            deviceName: '',
+            ipAddress: '',
+            itemId: 'item-interstellar',
+            itemName: 'Interstellar',
+            itemType: 'Movie',
+            productionYear: 2014,
+            playMethod: '',
+            container: 'MKV',
+            videoCodec: 'HEVC',
+            videoResolution: '4K UHD',
+            audioCodec: 'TRUEHD',
+            audioChannels: 8,
+            bitrateBps: 22000000,
+            bandwidthMbps: 22.0,
+            durationSecs: 10140,
+            watchedSecs: 10140,
+            dataUsedBytes: 0,
+            completionPct: 100,
+            startedAt: new Date().toISOString(),
+            lastSeenAt: new Date().toISOString(),
+            isActive: false,
+        });
+
+        currentSwrState = {
+            ...currentSwrState,
+            data: customData,
+        };
+
+        render(<StreamingTab />);
+
+        // Shows historical estimate notice
+        expect(screen.getByTestId('historical-estimate-notice')).toBeInTheDocument();
+        // Displays Unknown play method badge instead of Direct Play
+        expect(screen.getAllByText('Unknown').length).toBeGreaterThan(0);
+        // Shows Unrecorded and Sync badge for 0-byte historical sync entry
+        expect(screen.getByText('Unrecorded')).toBeInTheDocument();
+        expect(screen.getByText('Sync')).toBeInTheDocument();
+        expect(screen.getByText('Historical Import')).toBeInTheDocument();
+    });
+
+    it('filters watch history by search query and play method, paginates results, and discloses bounded history honestly', () => {
+        const customData = JSON.parse(JSON.stringify(mockDashboardData)) as StreamingDashboardData;
+        customData.analytics.totalPlays = 120; // More total plays in backend window than loaded rows (2)
+        currentSwrState = {
+            ...currentSwrState,
+            data: customData,
+        };
+
+        render(<StreamingTab />);
+
+        // Honest bounded history notice & result count
+        expect(screen.getByTestId('bounded-history-notice')).toHaveTextContent(/Showing the most recent/i);
+        expect(screen.getByTestId('history-result-count')).toHaveTextContent(
+            /Showing 1–2 of 2 matching \(2 loaded of 120 total\)/i
+        );
+        // CSV button says Export Loaded CSV (2), never claiming Export All
+        expect(screen.getByRole('button', { name: /Export 2 loaded rows to CSV/i })).toHaveTextContent(
+            /Export Loaded CSV \(2\)/i
+        );
+
+        // Search by device/client
+        const searchInput = screen.getByRole('textbox', { name: /Search playback history/i });
+        fireEvent.change(searchInput, { target: { value: 'Swiftfin' } });
+
+        expect(screen.getByTestId('history-result-count')).toHaveTextContent(
+            /Showing 1–1 of 1 matching \(2 loaded of 120 total\)/i
+        );
+        expect(screen.getAllByText(/Hello, Ms\. Cobel/i).length).toBeGreaterThan(0);
+
+        // Filter by play method via select
+        fireEvent.change(searchInput, { target: { value: '' } });
+        const pmSelect = screen.getByRole('combobox', { name: /Filter history by play method/i });
+        fireEvent.change(pmSelect, { target: { value: 'DirectPlay' } });
+        expect(lastSwrKey).toContain('playMethod=DirectPlay');
+        expect(screen.getByTestId('history-result-count')).toHaveTextContent(/Showing 1–1 of 1 matching/i);
+    });
+
+    it('updates SWR query key and filters history when period filter changes in Analytics view', () => {
+        render(<StreamingTab />);
+        const analyticsTabBtn = screen.getByRole('button', { name: /Play & Data Stats/i });
+        fireEvent.click(analyticsTabBtn);
+
+        const sevenDaysBtn = screen.getByRole('button', { name: '7 Days' });
+        fireEvent.click(sevenDaysBtn);
+        expect(lastSwrKey).toContain('window=7');
+        expect(sevenDaysBtn).toHaveAttribute('aria-pressed', 'true');
+    });
+
+    it('neutralizes CSV formula injection and properly quotes RFC 4180 special characters on export', () => {
+        expect(escapeStreamingCsvCell('=cmd|\'/C calc\'!A0')).toBe("'=cmd|'/C calc'!A0");
+        expect(escapeStreamingCsvCell('+SUM(A1:A2)')).toBe("'+SUM(A1:A2)");
+        expect(escapeStreamingCsvCell('-2+3')).toBe("'-2+3");
+        expect(escapeStreamingCsvCell('@IMPORTXML()')).toBe("'@IMPORTXML()");
+        expect(escapeStreamingCsvCell('  =HYPERLINK("http://evil")')).toBe('"\'  =HYPERLINK(""http://evil"")"');
+        expect(escapeStreamingCsvCell('Movie, "Director\'s Cut"')).toBe('"Movie, ""Director\'s Cut"""');
+
+        const maliciousHistory = [
+            {
+                ...mockDashboardData.analytics.recentHistory[0],
+                itemName: '=1+1,"evil"',
+                userName: '@admin_user',
+                sessionKey: 'jellyfin:sync:u-1:item-1',
+                playMethod: '',
+            },
+        ];
+        const csv = buildStreamingHistoryCsv(maliciousHistory);
+        expect(csv).toContain('"\'=1+1,""evil"""');
+        expect(csv).toContain("'@admin_user");
+        expect(csv).toContain('Unknown');
+        expect(csv).toContain('Estimated (Legacy Historical Sync)');
+
+        // Verify recomputeLiveSummaryFromSessions helper
+        const recomputed = recomputeLiveSummaryFromSessions(
+            mockDashboardData.liveSummary,
+            mockDashboardData.activeSessions.map((s) => ({ ...s, state: 'paused' as const }))
+        );
+        expect(recomputed.totalBandwidthMbps).toBe(0);
+        expect(recomputed.activeStreams).toBe(2);
+    });
+
+    it('passes the Unknown cohort to the backend without replacing it with all', () => {
+        render(<StreamingTab />);
+        fireEvent.change(screen.getByRole('combobox', { name: /Filter history by play method/i }), {
+            target: { value: 'Unknown' },
+        });
+        expect(lastSwrKey).toContain('playMethod=Unknown');
+        expect(lastSwrKey).not.toContain('playMethod=all');
+    });
+
+    it('honors the backend window boundary and renders UTC timestamps with last-seen fallback', () => {
+        const customData = JSON.parse(JSON.stringify(mockDashboardData)) as StreamingDashboardData;
+        customData.updatedAt = '2026-11-01T12:00:00.950Z';
+        customData.analytics.recentHistory[0].startedAt = '2026-10-02 12:00:00';
+        customData.analytics.recentHistory[1].startedAt = '';
+        customData.analytics.recentHistory[1].lastSeenAt = '2026-10-30 09:00:00';
+        currentSwrState = { ...currentSwrState, data: customData };
+        render(<StreamingTab />);
+        expect(screen.getByText('2026-10-02 12:00:00 UTC')).toHaveAttribute('datetime', '2026-10-02T12:00:00.000Z');
+        expect(screen.getByText('2026-10-30 09:00:00 UTC')).toHaveAttribute('datetime', '2026-10-30T09:00:00.000Z');
+        expect(screen.getByRole('combobox', { name: /History rows per page/i })).toHaveValue('20');
+    });
+
+    it('labels coarse all-time chart buckets and preserves years in ticks', () => {
+        expect(formatStreamingBucket('2024-05-01', 'month')).toBe('2024-05');
+        expect(formatStreamingBucket('2024-01-01', 'year')).toBe('2024');
+        expect(formatStreamingBucket('2024-05-31', 'day')).toBe('2024-05-31');
+        const customData = JSON.parse(JSON.stringify(mockDashboardData)) as StreamingDashboardData;
+        customData.analytics.timeSeriesGranularity = 'month';
+        currentSwrState = { ...currentSwrState, data: customData };
+        render(<StreamingTab />);
+        fireEvent.click(screen.getByRole('button', { name: /Play & Data Stats/i }));
+        expect(screen.getByText(/Monthly estimated transfer/i)).toBeInTheDocument();
+        expect(screen.getByText(/Monthly sessions by delivery method/i)).toBeInTheDocument();
+    });
+
+    it('distinguishes unrecorded historical transfer from live estimates without inventing import provenance', () => {
+        const original = mockDashboardData.analytics.recentHistory[0];
+        const unrecorded = { ...original, sessionKey: 'jellyfin:sync:user:item', playMethod: '', dataUsedBytes: 0 };
+        expect(buildStreamingHistoryCsv([unrecorded])).toContain('Unrecorded (Historical Sync)');
+        const liveUnknown = { ...original, sessionKey: 'jellyfin:session:item', playMethod: 'Unknown' };
+        expect(isHistoricalSyncEntry(liveUnknown)).toBe(false);
+        const csv = buildStreamingHistoryCsv([liveUnknown]);
+        expect(csv).toContain('Estimated (Live Poll)');
+        expect(csv).not.toContain('Measured');
+        expect(parseStreamingTimestamp('2026-11-01 12:00:00')?.toISOString()).toBe('2026-11-01T12:00:00.000Z');
+        expect(parseStreamingTimestamp('2026-11-01T14:00:00+02:00')?.toISOString()).toBe('2026-11-01T12:00:00.000Z');
+        expect(parseStreamingTimestamp('')).toBeNull();
+        expect(parseStreamingTimestamp('invalid date')).toBeNull();
+    });
+
+    it('does not relabel a redacted WAN address as local', () => {
+        const customData = JSON.parse(JSON.stringify(mockDashboardData)) as StreamingDashboardData;
+        customData.activeSessions[1].ipAddress = '';
+        customData.activeSessions[1].isLan = false;
+        currentSwrState = { ...currentSwrState, data: customData };
+        render(<StreamingTab />);
+        expect(screen.getByText('WAN')).toBeInTheDocument();
+        expect(screen.queryByText('WAN · local')).not.toBeInTheDocument();
+    });
+
+    it('paginates watch history across multiple pages and triggers Blob URL CSV download', () => {
+        const customData = JSON.parse(JSON.stringify(mockDashboardData)) as StreamingDashboardData;
+        customData.analytics.recentHistory = Array.from({ length: 12 }, (_, idx) => ({
+            ...mockDashboardData.analytics.recentHistory[0],
+            id: idx + 1,
+            sessionKey: `hist-page-${idx + 1}`,
+            itemName: `Test Title #${idx + 1}`,
+        }));
+        customData.analytics.totalPlays = 12;
+
+        currentSwrState = {
+            ...currentSwrState,
+            data: customData,
+        };
+
+        const createObjectUrlMock = jest.fn(() => 'blob:http://localhost/mock-csv');
+        const revokeObjectUrlMock = jest.fn();
+        Object.defineProperty(URL, 'createObjectURL', {
+            configurable: true,
+            writable: true,
+            value: createObjectUrlMock,
+        });
+        Object.defineProperty(URL, 'revokeObjectURL', {
+            configurable: true,
+            writable: true,
+            value: revokeObjectUrlMock,
+        });
+        const anchorClickSpy = jest
+            .spyOn(HTMLAnchorElement.prototype, 'click')
+            .mockImplementation(() => undefined);
+
+        render(<StreamingTab />);
+
+        // Switch page size to 10 / page so 12 rows span 2 pages
+        const pageSizeSelect = screen.getByRole('combobox', { name: /History rows per page/i });
+        fireEvent.change(pageSizeSelect, { target: { value: '10' } });
+
+        expect(screen.getByTestId('history-result-count')).toHaveTextContent(/Showing 1–10 of 12 matching/i);
+        expect(screen.getByText('Test Title #1')).toBeInTheDocument();
+        expect(screen.queryByText('Test Title #11')).not.toBeInTheDocument();
+
+        // Navigate to Page 2
+        const nextBtn = screen.getByRole('button', { name: /Next loaded history page/i });
+        fireEvent.click(nextBtn);
+
+        expect(screen.getByTestId('history-result-count')).toHaveTextContent(/Showing 11–12 of 12 matching/i);
+        expect(screen.getByText('Test Title #11')).toBeInTheDocument();
+
+        // Trigger CSV export
+        const exportBtn = screen.getByRole('button', { name: /Export 12 rows to CSV/i });
+        fireEvent.click(exportBtn);
+
+        expect(createObjectUrlMock).toHaveBeenCalledTimes(1);
+        expect(anchorClickSpy).toHaveBeenCalledTimes(1);
+        expect(revokeObjectUrlMock).toHaveBeenCalledWith('blob:http://localhost/mock-csv');
+
+        anchorClickSpy.mockRestore();
+    });
+
+    it('keeps config modal open and surfaces error when saving an unreachable Jellyfin server', async () => {
+        const fetchSpy = jest.spyOn(global, 'fetch').mockImplementation(async (input: RequestInfo | URL) => {
+            const url = String(input);
+            if (url.includes('csrf-token')) {
+                return {
+                    ok: true,
+                    json: async () => ({ token: 'test-csrf-token' }),
+                } as Response;
+            }
+            return {
+                ok: true,
+                json: async () => ({
+                    message: 'Saved Jellyfin server, but connection failed',
+                    server: {
+                        status: 'unreachable',
+                        errorMessage: 'Connection refused on port 8096',
+                    },
+                }),
+            } as Response;
+        });
+
+        render(<StreamingTab />);
+        fireEvent.click(screen.getByRole('button', { name: /Configure Server/i }));
+
+        const saveBtn = screen.getByRole('button', { name: /Save & Connect/i });
+        fireEvent.click(saveBtn);
+
+        await waitFor(() => {
+            expect(screen.getByText(/Connection refused on port 8096/i)).toBeInTheDocument();
+        });
+        // Modal remains open so the operator can fix the URL/key
+        expect(screen.getByText(/Media Server Providers/i)).toBeInTheDocument();
+
+        fetchSpy.mockRestore();
     });
 });

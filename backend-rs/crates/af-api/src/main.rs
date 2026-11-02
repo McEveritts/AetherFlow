@@ -10,6 +10,14 @@ pub mod oidc;
 pub mod routes;
 pub mod storage;
 pub mod streaming_ext;
+pub mod streaming_history;
+pub mod streaming_patterns;
+pub mod streaming_emby;
+pub mod streaming_portability;
+pub mod streaming_import;
+pub mod streaming_metadata;
+#[cfg(test)]
+mod streaming_http_tests;
 pub mod ws;
 
 use std::env;

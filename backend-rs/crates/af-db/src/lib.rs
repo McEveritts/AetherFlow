@@ -17,6 +17,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, RwLock};
 use std::time::{Duration, Instant};
 
+pub mod streaming;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // AES-256-GCM Secret Encryption (`backend/api/crypto.go`)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -808,6 +810,8 @@ pub fn init_db() -> anyhow::Result<()> {
             "CREATE INDEX IF NOT EXISTS idx_streaming_bw_timestamp ON streaming_bandwidth_samples(timestamp);",
         ],
     );
+
+    streaming::migrate_history(&conn, &db_path)?;
 
     // Singleton settings row & model normalization
     let _ = conn.execute("INSERT OR IGNORE INTO settings (id) VALUES (1)", []);
