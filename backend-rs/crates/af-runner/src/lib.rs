@@ -486,14 +486,14 @@ pub fn resolve_sandbox_script_path() -> Option<PathBuf> {
     }
 
     let mut candidates = vec![
-        PathBuf::from("/usr/local/bin/af-systemd-sandbox"),
+        PathBuf::from("/opt/AetherFlow/current/packages/system/af-systemd-sandbox"),
         PathBuf::from("/usr/local/bin/AetherFlow/system/af-systemd-sandbox"),
         PathBuf::from("deploy/security/af-systemd-sandbox"),
         PathBuf::from("../deploy/security/af-systemd-sandbox"),
         PathBuf::from("packages/system/af-systemd-sandbox"),
         PathBuf::from("../packages/system/af-systemd-sandbox"),
-        PathBuf::from("/opt/AetherFlow/current/packages/system/af-systemd-sandbox"),
         PathBuf::from("/opt/AetherFlow/packages/system/af-systemd-sandbox"),
+        PathBuf::from("/usr/local/bin/af-systemd-sandbox"),
     ];
     if let Ok(exe) = env::current_exe() {
         if let Some(exe_dir) = exe.parent() {
@@ -579,7 +579,7 @@ fn normalize_systemd_unit(unit: &str) -> String {
 }
 
 pub(crate) fn is_exempt_sandbox_unit(unit: &str) -> bool {
-    matches!(
+    unit.ends_with(".timer") || unit.ends_with(".socket") || matches!(
         unit,
         "aetherflow-api.service"
             | "aetherflow-runner.service"
@@ -603,6 +603,41 @@ pub(crate) fn is_exempt_sandbox_unit(unit: &str) -> bool {
         || unit.starts_with("scrutiny-collector")
         || unit.starts_with("x2goserver")
         || unit.starts_with("novnc-xvnc")
+}
+
+fn sandbox_master_user(credentials: &str) -> Option<String> {
+    if let Ok(value) = serde_json::from_str::<Value>(credentials) {
+        let username = value.get("username")?.as_str()?;
+        return SAFE_USERNAME.is_match(username).then(|| username.to_string());
+    }
+    let first = credentials.lines().next()?.trim();
+    let username = first
+        .strip_prefix("username=")
+        .or_else(|| first.split_once(':').map(|(username, _)| username))?;
+    SAFE_USERNAME.is_match(username).then(|| username.to_string())
+}
+
+fn expand_sandbox_path(
+    raw: &str,
+    service_user: &str,
+    service_home: &str,
+    master_user: &str,
+) -> String {
+    let clean = raw
+        .trim_start_matches('-')
+        .replace("{{SERVICE_USER}}", service_user)
+        .replace("{{SERVICE_HOME}}", service_home)
+        .replace("{{MASTER_USER}}", master_user);
+    let prefixed = if raw.starts_with('-') || !Path::new(&clean).exists() {
+        format!("-{}", clean)
+    } else {
+        clean
+    };
+    if prefixed.contains(char::is_whitespace) {
+        format!("\"{}\"", prefixed)
+    } else {
+        prefixed
+    }
 }
 
 pub fn render_systemd_sandbox_dropin(
@@ -660,23 +695,40 @@ pub fn render_systemd_sandbox_dropin(
     }
 
     if !rw_paths.is_empty() {
+        let needs_identity = rw_paths.iter().any(|raw| raw.contains("{{"));
+        let service_user = if needs_identity && cfg!(target_os = "linux") {
+            std::process::Command::new("systemctl")
+                .args(["show", &norm_unit, "-p", "User", "--value"])
+                .output()
+                .ok()
+                .filter(|output| output.status.success())
+                .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+                .filter(|username| SAFE_USERNAME.is_match(username))
+                .unwrap_or_else(|| "root".to_string())
+        } else {
+            "root".to_string()
+        };
+        let service_home = fs::read_to_string("/etc/passwd")
+            .ok()
+            .and_then(|passwd| {
+                passwd.lines().find_map(|entry| {
+                    let fields: Vec<_> = entry.split(':').collect();
+                    (fields.len() >= 7 && fields[0] == service_user)
+                        .then(|| fields[5].to_string())
+                })
+            })
+            .unwrap_or_else(|| format!("/home/{}", service_user));
+        let master_user = ["/var/lib/aetherflow/.master.creds", "/etc/aetherflow/.master.creds", "/root/.master.creds"]
+            .iter()
+            .find_map(|path| {
+                fs::read_to_string(path)
+                    .ok()
+                    .and_then(|credentials| sandbox_master_user(&credentials))
+            })
+            .unwrap_or_else(|| service_user.clone());
         let mut expanded = Vec::with_capacity(rw_paths.len());
         for raw in rw_paths {
-            let clean = raw
-                .trim_start_matches('-')
-                .replace("{{SERVICE_USER}}", "root")
-                .replace("{{SERVICE_HOME}}", "/root")
-                .replace("{{MASTER_USER}}", "root");
-            let prefixed = if raw.starts_with('-') || !Path::new(&clean).exists() {
-                format!("-{}", clean)
-            } else {
-                clean
-            };
-            if prefixed.contains(char::is_whitespace) {
-                expanded.push(format!("\"{}\"", prefixed));
-            } else {
-                expanded.push(prefixed);
-            }
+            expanded.push(expand_sandbox_path(raw, &service_user, &service_home, &master_user));
         }
         lines.push(format!("ReadWritePaths={}", expanded.join(" ")));
     }
@@ -3011,6 +3063,28 @@ mod tests {
         let native_dropin = render_systemd_sandbox_dropin("native", "plexmediaserver", &[]);
         assert!(native_dropin.contains("PrivateDevices=no"));
         assert!(native_dropin.contains("MemoryDenyWriteExecute=yes"));
+    }
+
+    #[test]
+    fn test_sandbox_master_credentials_formats() {
+        assert_eq!(sandbox_master_user(r#"{"username":"media_owner","password":"secret"}"#), Some("media_owner".into()));
+        assert_eq!(sandbox_master_user("username=media_owner\r\npassword=secret"), Some("media_owner".into()));
+        assert_eq!(sandbox_master_user("media_owner:secret\n"), Some("media_owner".into()));
+        assert_eq!(sandbox_master_user("username=../../etc"), None);
+        assert_eq!(sandbox_master_user("password=secret"), None);
+        assert_eq!(sandbox_master_user(""), None);
+    }
+
+    #[test]
+    fn test_sandbox_paths_use_distinct_service_and_master_identities() {
+        assert_eq!(
+            expand_sandbox_path("-/home/{{MASTER_USER}}/Google/Media/Music Import", "sonarr", "/var/lib/sonarr", "media_owner"),
+            "\"-/home/media_owner/Google/Media/Music Import\""
+        );
+        assert_eq!(
+            expand_sandbox_path("-{{SERVICE_HOME}}/{{SERVICE_USER}}", "sonarr", "/var/lib/sonarr", "media_owner"),
+            "-/var/lib/sonarr/sonarr"
+        );
     }
 
     #[tokio::test]
