@@ -611,6 +611,23 @@ AETHERFLOW_DB_PATH=fallback.sqlite
             .join("aetherflow-runner.service")
             .is_file());
 
+        let completed_state = RecoveryState::load(&cfg.releases_dir).unwrap().unwrap();
+        let legacy_state = legacy_completed_manifest(&completed_state);
+        let legacy_bytes = serde_json::to_vec_pretty(&legacy_state).unwrap();
+        let state_path = RecoveryState::state_file_path(&cfg.releases_dir);
+        fs::write(&state_path, &legacy_bytes).unwrap();
+        let legacy_status = engine.inspect_status().unwrap();
+        let loaded_state = legacy_status.recovery_state.unwrap();
+        assert_eq!(loaded_state.phase, ReleasePhase::Complete);
+        assert_eq!(loaded_state.started_at, completed_state.updated_at);
+        assert_eq!(
+            loaded_state.candidate_release,
+            completed_state.candidate_release
+        );
+        assert_eq!(loaded_state.snapshot_path, completed_state.snapshot_path);
+        assert!(!loaded_state.is_unfinished());
+        assert_eq!(fs::read(&state_path).unwrap(), legacy_bytes);
+
         // Deploy 2 & Deploy 3 to trigger Stage 5 pruning (max_releases = 2)
         let out2 = match engine.execute(&opts).unwrap() {
             ReleaseOutcome::Deploy(r) => r,
@@ -638,6 +655,100 @@ AETHERFLOW_DB_PATH=fallback.sqlite
             status.recovery_state.unwrap().phase,
             ReleasePhase::Complete
         );
+        let canonical_state: serde_json::Value =
+            serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+        assert_eq!(canonical_state["phase"], "complete");
+        assert!(canonical_state["started_at"].as_str().is_some());
+        assert!(canonical_state.get("source").is_none());
+    }
+
+    fn legacy_completed_manifest(state: &RecoveryState) -> serde_json::Value {
+        let mut manifest = serde_json::to_value(state).unwrap();
+        manifest["phase"] = serde_json::json!("completed");
+        manifest.as_object_mut().unwrap().remove("started_at");
+        manifest["source"] = serde_json::json!("manual-deployment");
+        manifest
+    }
+
+    #[test]
+    fn test_regression_completed_phase_alias_serializes_canonically() {
+        let phase: ReleasePhase = serde_json::from_str(r#""completed""#).unwrap();
+        assert_eq!(phase, ReleasePhase::Complete);
+        assert_eq!(serde_json::to_string(&phase).unwrap(), r#""complete""#);
+    }
+
+    #[test]
+    fn test_regression_native_recovery_still_requires_started_at() {
+        let sandbox = TempSandbox::new("missing-recovery-start");
+        for phase in [
+            "stage0_fhs_layout",
+            "stage1_scaffold",
+            "stage1_5_snapshot",
+            "stage2_symlink_swap",
+            "stage3_health_probe",
+            "stage4_rollback",
+            "stage5_cleanup",
+            "stage6_migrate_systemd",
+            "complete",
+            "failed",
+            "unknown",
+        ] {
+            let state = RecoveryState::new(ReleaseCommand::Deploy, ReleaseChannel::Nightly, false);
+            let mut payload = serde_json::to_value(state).unwrap();
+            payload["phase"] = serde_json::json!(phase);
+            payload.as_object_mut().unwrap().remove("started_at");
+            fs::write(
+                RecoveryState::state_file_path(sandbox.path()),
+                serde_json::to_vec(&payload).unwrap(),
+            )
+            .unwrap();
+            assert!(
+                RecoveryState::load(sandbox.path()).is_err(),
+                "phase={phase}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_regression_legacy_completed_manifest_requires_valid_completion_time() {
+        let sandbox = TempSandbox::new("invalid-legacy-completion");
+        let state = RecoveryState::new(ReleaseCommand::Deploy, ReleaseChannel::Experimental, false);
+        for timestamp in [
+            None,
+            Some(serde_json::json!(null)),
+            Some(serde_json::json!(42)),
+            Some(serde_json::json!("not-a-timestamp")),
+        ] {
+            let mut payload = legacy_completed_manifest(&state);
+            if let Some(timestamp) = timestamp {
+                payload["updated_at"] = timestamp;
+            } else {
+                payload.as_object_mut().unwrap().remove("updated_at");
+            }
+            fs::write(
+                RecoveryState::state_file_path(sandbox.path()),
+                serde_json::to_vec(&payload).unwrap(),
+            )
+            .unwrap();
+            assert!(RecoveryState::load(sandbox.path()).is_err());
+        }
+        for (field, value) in [
+            ("command", serde_json::json!("rollback")),
+            ("dry_run", serde_json::json!(true)),
+            ("started_at", serde_json::json!(null)),
+        ] {
+            let mut payload = legacy_completed_manifest(&state);
+            payload[field] = value;
+            fs::write(
+                RecoveryState::state_file_path(sandbox.path()),
+                serde_json::to_vec(&payload).unwrap(),
+            )
+            .unwrap();
+            assert!(
+                RecoveryState::load(sandbox.path()).is_err(),
+                "field={field}"
+            );
+        }
     }
 
     #[test]

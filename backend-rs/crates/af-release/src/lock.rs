@@ -125,6 +125,7 @@ pub enum ReleasePhase {
     Stage4Rollback,
     Stage5Cleanup,
     Stage6MigrateSystemd,
+    #[serde(alias = "completed")]
     Complete,
     Failed,
 }
@@ -224,13 +225,33 @@ impl RecoveryState {
         }
         let raw = fs::read_to_string(&path)
             .map_err(|e| ReleaseError::io(format!("reading {}", path.display()), e))?;
-        let parsed: Self = serde_json::from_str(&raw).map_err(|e| {
-            ReleaseError::Config(format!(
-                "corrupted recovery state file {}: {}",
-                path.display(),
-                e
-            ))
-        })?;
+        let parsed: Self = serde_json::from_str(&raw)
+            .or_else(|original_error| {
+                let mut legacy: serde_json::Value = serde_json::from_str(&raw)?;
+                if legacy["phase"] != "completed"
+                    || legacy["command"] != "deploy"
+                    || legacy["dry_run"] != false
+                    || legacy.get("started_at").is_some()
+                {
+                    return Err(original_error);
+                }
+                let Some(updated_at) = legacy["updated_at"]
+                    .as_str()
+                    .filter(|timestamp| chrono::DateTime::parse_from_rfc3339(timestamp).is_ok())
+                    .map(str::to_owned)
+                else {
+                    return Err(original_error);
+                };
+                legacy["started_at"] = serde_json::Value::String(updated_at);
+                serde_json::from_value(legacy)
+            })
+            .map_err(|error| {
+                ReleaseError::Config(format!(
+                    "corrupted recovery state file {}: {}",
+                    path.display(),
+                    error
+                ))
+            })?;
         Ok(Some(parsed))
     }
 }

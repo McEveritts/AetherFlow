@@ -77,6 +77,17 @@ To guarantee zero-downtime safety during migration:
 
 ---
 
+## Completed Deployment Metadata Compatibility
+
+The recovery reader accepts the legacy terminal phase `completed` as `complete`.
+For completed, non-dry-run `deploy` manifests only, a missing `started_at` is filled
+from a valid RFC 3339 `updated_at`. This is a compatibility timestamp, not a recovered
+original start time. Missing required fields, invalid field types, and unknown
+phases still fail closed; interrupted post-swap deployments require explicit rollback.
+Status inspection never rewrites the journal; the next native release operation
+writes the canonical `complete` phase and full recovery schema. Manual deployment
+tools should not copy `.deployment.json` into `.recovery_state.json`.
+
 ## Documented Parity Gaps & Intentional Boundaries
 
 1. **`--from-source` Fallback Mode (`ReleaseError::Unsupported`)**:
@@ -92,4 +103,4 @@ To guarantee zero-downtime safety during migration:
 
 ## Isolated Linux Validation
 
-`cargo test -p af-release` passes all 18 unit tests, including release extraction collisions, ancestor symlink rejection, `prepare_release_permissions` normalization, `/releases/latest` redirect tag parsing, interrupted deployment recovery, checksum-verified database recovery, failed service-stop handling, private permissions, and managed-current-link validation.
+`cargo test -p af-release` covers release extraction collisions, ancestor symlink rejection, `prepare_release_permissions` normalization, `/releases/latest` redirect tag parsing, interrupted deployment recovery, checksum-verified database recovery, failed service-stop handling, private permissions, managed-current-link validation, and completed-manifest compatibility without relaxing incomplete-journal validation.
