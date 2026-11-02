@@ -16,29 +16,31 @@ fi
 
 require_root
 
+PACKAGE_NAME="novnc"
 APP_NAME="novnc"
+APP_USER="novnc"
 DATA_DIR="/var/lib/novnc"
 CONFIG_DIR="/etc/novnc"
-LOCK_FILE="/install/.novnc.lock"
+export LOGFILE="/var/log/aetherflow/remove-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")"
 
-setup_log "${APP_NAME}-remove"
-log "Removing ${APP_NAME}..."
+log_info "Removing ${APP_NAME}..."
 report_progress 20 "Stopping ${APP_NAME} services..."
 
-stop_disable_service "novnc.service"
-stop_disable_service "novnc-xvnc.service"
-rm -f /etc/systemd/system/novnc.service /etc/systemd/system/novnc-xvnc.service
-systemctl daemon-reload
+purge_systemd_unit "novnc"
+purge_systemd_unit "novnc-xvnc"
+systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
 
 report_progress 60 "Removing ${APP_NAME} packages..."
-apt-get remove -y novnc python3-websockify >> "${LOG_FILE}" 2>&1 || true
-rm -rf "${CONFIG_DIR}"
+DEBIAN_FRONTEND=noninteractive apt-get remove -y novnc python3-websockify >> "$LOGFILE" 2>&1 || true
 
 if [[ "${DELETE_DATA:-false}" == "true" ]]; then
-    log "DELETE_DATA=true: Purging ${DATA_DIR}..."
-    rm -rf "${DATA_DIR}"
+    log_info "DELETE_DATA=true: Purging ${CONFIG_DIR} and ${DATA_DIR}..."
+    rm -rf "${CONFIG_DIR}" "${DATA_DIR}"
 fi
 
-remove_lock "${LOCK_FILE}"
+purge_system_user "${APP_USER}"
+
+remove_lock "${PACKAGE_NAME}"
 report_progress 100 "${APP_NAME} removed"
-log "${APP_NAME} removal complete."
+log_info "${PACKAGE_NAME} removed successfully"

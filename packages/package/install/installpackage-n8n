@@ -26,7 +26,7 @@ report_progress 10 "Setting up Node.js runtime and build prerequisites for n8n..
 DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl ca-certificates build-essential python3 python3-setuptools >> "$LOGFILE" 2>&1
 
-ensure_node 20
+ensure_node 24
 
 if ! id -u n8n >/dev/null 2>&1; then
     useradd --system --user-group --create-home --home-dir /var/lib/n8n --shell /usr/sbin/nologin n8n
@@ -36,11 +36,23 @@ mkdir -p /var/lib/n8n /opt/n8n
 
 report_progress 40 "Installing n8n package globally via npm..."
 NODE_MAJOR="$(node -v 2>/dev/null | sed 's/^v//' | cut -d. -f1 || echo 20)"
-if [[ "${NODE_MAJOR:-20}" -lt 24 ]]; then
-    npm install -g "n8n@^1.0.0" >> "$LOGFILE" 2>&1
-else
-    npm install -g n8n >> "$LOGFILE" 2>&1
+if [[ ! "$NODE_MAJOR" =~ ^[0-9]+$ ]] || (( NODE_MAJOR < 24 )); then
+    print_error "n8n requires Node.js >= 24; refusing to install an incompatible release channel."
+    exit 1
 fi
+TARGET_PKG="n8n"
+TARGET_VER="${AF_PACKAGE_VERSION:-${AETHERFLOW_PACKAGE_VERSION:-${AF_TARGET_VERSION:-}}}"
+if [[ -n "$TARGET_VER" ]]; then
+    TARGET_VER="${TARGET_VER#v}"
+    TARGET_MAJOR="$(printf '%s' "$TARGET_VER" | cut -d. -f1)"
+    if [[ "${NODE_MAJOR:-20}" -lt 24 && "$TARGET_MAJOR" -ge 2 ]]; then
+        print_error "n8n ${TARGET_VER} requires Node.js >= 24; current runtime is Node ${NODE_MAJOR}."
+        exit 1
+    fi
+    TARGET_PKG="n8n@${TARGET_VER}"
+
+fi
+npm install -g "$TARGET_PKG" >> "$LOGFILE" 2>&1
 sync_node_global_bins
 
 N8N_VER="$(n8n --version 2>/dev/null || true)"

@@ -24,7 +24,7 @@ log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 10 "Installing dependencies for Vaultwarden..."
 
 DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl jq tar openssl ca-certificates sqlite3 libsqlite3-0 libpq5 libmariadb3 >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3 curl jq tar openssl ca-certificates sqlite3 libsqlite3-0 libpq5 libmariadb3 >> "$LOGFILE" 2>&1
 
 if ! id -u vaultwarden >/dev/null 2>&1; then
     useradd --system --user-group --no-create-home --home-dir /var/lib/vaultwarden --shell /usr/sbin/nologin vaultwarden
@@ -88,8 +88,22 @@ rm -rf "$TMP_EXTRACT"
 printf '%s\n' "${VW_VERSION#v}" > /opt/vaultwarden/.af-version
 
 report_progress 75 "Configuring Vaultwarden environment on port ${APP_PORT}..."
-ADMIN_TOKEN="${MASTER_PASS}"
-cat <<EOF > /etc/vaultwarden/vaultwarden.env
+if [[ -f /etc/vaultwarden/vaultwarden.env ]]; then
+    python3 - /etc/vaultwarden/vaultwarden.env "$APP_PORT" <<'PYEOF'
+import re, sys
+cfg_path, port = sys.argv[1], sys.argv[2]
+with open(cfg_path, "r", encoding="utf-8") as f:
+    text = f.read()
+if re.search(r"^ROCKET_PORT=", text, re.MULTILINE):
+    text = re.sub(r"^ROCKET_PORT=.*", f"ROCKET_PORT={port}", text, flags=re.MULTILINE)
+else:
+    text += f"\nROCKET_PORT={port}\n"
+with open(cfg_path, "w", encoding="utf-8") as f:
+    f.write(text)
+PYEOF
+else
+    ADMIN_TOKEN="${MASTER_PASS}"
+    cat <<EOF > /etc/vaultwarden/vaultwarden.env
 DATA_FOLDER=/var/lib/vaultwarden/data
 WEB_VAULT_FOLDER=/opt/vaultwarden/web-vault
 WEB_VAULT_ENABLED=true
@@ -100,9 +114,10 @@ INVITATIONS_ALLOWED=true
 SHOW_PASSWORD_HINT=false
 ADMIN_TOKEN=${ADMIN_TOKEN}
 EOF
-chmod 600 /etc/vaultwarden/vaultwarden.env
-echo "Vaultwarden Admin Token: ${ADMIN_TOKEN}" > /opt/AetherFlow/logs/vaultwarden_admin_token.txt
-chmod 600 /opt/AetherFlow/logs/vaultwarden_admin_token.txt
+    chmod 600 /etc/vaultwarden/vaultwarden.env
+    echo "Vaultwarden Admin Token: ${ADMIN_TOKEN}" > /opt/AetherFlow/logs/vaultwarden_admin_token.txt
+    chmod 600 /opt/AetherFlow/logs/vaultwarden_admin_token.txt
+fi
 
 chown -R vaultwarden:vaultwarden /opt/vaultwarden /var/lib/vaultwarden
 chown root:vaultwarden /etc/vaultwarden/vaultwarden.env

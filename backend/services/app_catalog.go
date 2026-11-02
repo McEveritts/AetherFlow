@@ -102,15 +102,15 @@ var blueprintRegistry = map[string]AppBlueprint{
 		AppDataPath:     "/var/lib/emby",
 	},
 	"tautulli": {
-		AppName:         "tautulli",
-		ServiceName:     "tautulli",
-		Category:        "Media",
-		DefaultPort:     8181,
-		PortConfigKey:   "http_port",
-		MutatorType:     "ini",
-		ConfigFilePath:  "/var/lib/tautulli/config.ini",
-		AppDataPath:     "/var/lib/tautulli",
-		Dependencies:    []string{"plex"},
+		AppName:        "tautulli",
+		ServiceName:    "tautulli",
+		Category:       "Media",
+		DefaultPort:    8181,
+		PortConfigKey:  "http_port",
+		MutatorType:    "ini",
+		ConfigFilePath: "/var/lib/tautulli/config.ini",
+		AppDataPath:    "/var/lib/tautulli",
+		Dependencies:   []string{"plex"},
 	},
 	"sonarr": {
 		AppName:           "sonarr",
@@ -305,10 +305,10 @@ var blueprintRegistry = map[string]AppBlueprint{
 		BinarySourceURL:   "https://github.com/qbittorrent/qBittorrent/releases/latest",
 		AppDataPath:       "/var/lib/qbittorrent/.config/qBittorrent/qBittorrent.conf",
 		DefaultConfigs: map[string]string{
-			`WebUI\Port`:                  "8180",
-			`WebUI\Address`:               "*",
-			`WebUI\HostHeaderValidation`:  "false",
-			`WebUI\CSRFProtection`:        "false",
+			`WebUI\Port`:                 "8180",
+			`WebUI\Address`:              "*",
+			`WebUI\HostHeaderValidation`: "false",
+			`WebUI\CSRFProtection`:       "false",
 		},
 	},
 	"qbittorrent-nox": {
@@ -343,9 +343,9 @@ var blueprintRegistry = map[string]AppBlueprint{
 			"host_whitelist": "sabnzbd.aether.local, localhost, 127.0.0.1",
 		},
 	},
-	"nzbget":      {AppName: "nzbget", ServiceName: "nzbget", Category: "Downloaders", DefaultPort: 6789},
-	"flood":       {AppName: "flood", ServiceName: "flood", Category: "Downloaders", DefaultPort: 3001},
-	"autobrr":     {AppName: "autobrr", ServiceName: "autobrr", Category: "Downloaders", DefaultPort: 7474},
+	"nzbget":  {AppName: "nzbget", ServiceName: "nzbget", Category: "Downloaders", DefaultPort: 6789},
+	"flood":   {AppName: "flood", ServiceName: "flood", Category: "Downloaders", DefaultPort: 3001},
+	"autobrr": {AppName: "autobrr", ServiceName: "autobrr", Category: "Downloaders", DefaultPort: 7474},
 	"qui": {
 		AppName:         "qui",
 		ServiceName:     "qui",
@@ -633,8 +633,8 @@ var blueprintRegistry = map[string]AppBlueprint{
 		AppDataPath:     "/var/lib/palate",
 		Dependencies:    []string{"jellyfin"},
 	},
-	"gitea":                        {AppName: "gitea", ServiceName: "gitea", Category: "DevOps", DefaultPort: 3002},
-	"organizr":                     {AppName: "organizr", ServiceName: "apache2", Category: "Utilities", DefaultPort: 8086, WebPath: "/"},
+	"gitea":    {AppName: "gitea", ServiceName: "gitea", Category: "DevOps", DefaultPort: 3002},
+	"organizr": {AppName: "organizr", ServiceName: "apache2", Category: "Utilities", DefaultPort: 8086, WebPath: "/"},
 	"dispatcharr": {
 		AppName:         "dispatcharr",
 		ServiceName:     "dispatcharr",
@@ -901,6 +901,9 @@ func GetAllBlueprints() []AppBlueprint {
 
 func ShouldPreStopOnUpdate(pkgID string) bool {
 	cleanID := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(pkgID)), ".service")
+	if AppControlScope(cleanID) == "shared-vhost" {
+		return false
+	}
 	if cleanID == "maintainerr" || cleanID == "af-maintainerr" {
 		return false
 	}
@@ -916,4 +919,22 @@ func ShouldRestartAfterUpdate(pkgID string) bool {
 
 func ShouldApplyCallerSandbox(pkgID string) bool {
 	return ShouldPreStopOnUpdate(pkgID)
+}
+
+func AppControlScope(pkgID string) string {
+	switch strings.TrimSuffix(strings.ToLower(strings.TrimSpace(pkgID)), ".service") {
+	case "nextcloud", "rutorrent", "organizr":
+		return "shared-vhost"
+	default:
+		return "service"
+	}
+}
+
+func AppBindScope(pkgID string) string {
+	switch strings.TrimSuffix(strings.ToLower(strings.TrimSpace(pkgID)), ".service") {
+	case "maintainerr", "af-maintainerr", "palate", "af-palate", "kasmvnc", "af-kasmvnc", "mcvnc", "af-mcvnc":
+		return "loopback"
+	default:
+		return "network"
+	}
 }

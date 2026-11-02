@@ -34,7 +34,7 @@ report_progress 15 "Installing McVNC GPU/Wayland build and runtime prerequisites
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq >> "$LOGFILE" 2>&1
 apt-get install --no-remove -y -qq \
-    curl ca-certificates git jq pkg-config clang libclang-dev \
+    python3 curl ca-certificates git jq pkg-config clang libclang-dev \
     libva-dev libdrm-dev libgbm-dev libegl-dev libgles-dev \
     libwayland-dev wayland-protocols libxkbcommon-dev libffmpeg-nvenc-dev \
     libva2 libgbm1 libegl1 libgles2 libwayland-server0 libxkbcommon0 >> "$LOGFILE" 2>&1
@@ -82,13 +82,28 @@ printf '%s\n' "$VERSION" > "${DATA_DIR}/.af-version"
 chown af-mcvnc:af-mcvnc "${DATA_DIR}/.af-version"
 
 report_progress 75 "Configuring McVNC headless Wayland compositor and loopback dashboard..."
-cat > "${CONFIG_DIR}/mcvnc.env" <<EOF
+if [[ -f "${CONFIG_DIR}/mcvnc.env" ]]; then
+    python3 - "${CONFIG_DIR}/mcvnc.env" "$APP_PORT" <<'PYEOF'
+import re, sys
+cfg_path, port = sys.argv[1], sys.argv[2]
+with open(cfg_path, "r", encoding="utf-8") as f:
+    text = f.read()
+if re.search(r"^MCVNC_BIND=", text, re.MULTILINE):
+    text = re.sub(r"^MCVNC_BIND=.*", f"MCVNC_BIND=127.0.0.1:{port}", text, flags=re.MULTILINE)
+else:
+    text += f"\nMCVNC_BIND=127.0.0.1:{port}\n"
+with open(cfg_path, "w", encoding="utf-8") as f:
+    f.write(text)
+PYEOF
+else
+    cat > "${CONFIG_DIR}/mcvnc.env" <<EOF
 MCVNC_BIND=127.0.0.1:${APP_PORT}
 MCVNC_DEVICE=${RENDER_DEVICE}
 MCVNC_PRESET=1080p
 MCVNC_FPS=60
 MCVNC_QP=24
 EOF
+fi
 chmod 644 "${CONFIG_DIR}/mcvnc.env"
 
 cat > /etc/systemd/system/af-mcvnc.service <<EOF
@@ -107,7 +122,7 @@ Environment=XDG_DATA_HOME=${DATA_DIR}/.local/share
 Environment=XDG_RUNTIME_DIR=${DATA_DIR}/runtime
 Environment=WAYLAND_DISPLAY=wayland-mcvnc-0
 EnvironmentFile=-${CONFIG_DIR}/mcvnc.env
-ExecStart=/usr/local/bin/mcvnc play --bind 127.0.0.1:${APP_PORT} --device ${RENDER_DEVICE} --preset 1080p --fps 60 --qp 24
+ExecStart=/usr/local/bin/mcvnc play --bind \${MCVNC_BIND} --device \${MCVNC_DEVICE} --preset \${MCVNC_PRESET} --fps \${MCVNC_FPS} --qp \${MCVNC_QP}
 Restart=on-failure
 RestartSec=5
 UMask=0077

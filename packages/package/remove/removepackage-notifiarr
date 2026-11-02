@@ -16,29 +16,32 @@ fi
 
 require_root
 
+PACKAGE_NAME="notifiarr"
 APP_NAME="notifiarr"
+APP_USER="notifiarr"
 CONFIG_DIR="/etc/notifiarr"
 DATA_DIR="/var/lib/notifiarr"
 LOG_DIR="/var/log/notifiarr"
 BIN_PATH="/usr/local/bin/notifiarr"
-LOCK_FILE="/install/.notifiarr.lock"
+export LOGFILE="/var/log/aetherflow/remove-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")"
 
-setup_log "${APP_NAME}-remove"
-log "Removing ${APP_NAME}..."
+log_info "Removing ${APP_NAME}..."
 report_progress 20 "Stopping ${APP_NAME} service..."
 
-stop_disable_service "notifiarr.service"
-rm -f /etc/systemd/system/notifiarr.service
-systemctl daemon-reload
+purge_systemd_unit "notifiarr"
+systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
 
 report_progress 60 "Removing ${APP_NAME} binary..."
 rm -f "${BIN_PATH}" "${CONFIG_DIR}/.af-version"
 
 if [[ "${DELETE_DATA:-false}" == "true" ]]; then
-    log "DELETE_DATA=true: Purging ${CONFIG_DIR}, ${DATA_DIR}, and ${LOG_DIR}..."
+    log_info "DELETE_DATA=true: Purging ${CONFIG_DIR}, ${DATA_DIR}, and ${LOG_DIR}..."
     rm -rf "${CONFIG_DIR}" "${DATA_DIR}" "${LOG_DIR}"
 fi
 
-remove_lock "${LOCK_FILE}"
+purge_system_user "${APP_USER}"
+
+remove_lock "${PACKAGE_NAME}"
 report_progress 100 "${APP_NAME} removed"
-log "${APP_NAME} removal complete."
+log_info "${PACKAGE_NAME} removed successfully"

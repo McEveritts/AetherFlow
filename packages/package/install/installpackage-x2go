@@ -17,31 +17,33 @@ fi
 
 require_root
 
+PACKAGE_NAME="x2go"
 APP_NAME="x2go"
 DATA_DIR="/var/lib/x2go"
-LOCK_FILE="/install/.x2go.lock"
+export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")" /install
 
-setup_log "${APP_NAME}"
-log "Starting ${APP_NAME} (x2goserver + XFCE4) installation..."
+log_info "Starting ${APP_NAME} (x2goserver + XFCE4) installation..."
 report_progress 15 "Preparing ${APP_NAME} installation..."
 
 report_progress 45 "Installing x2goserver, x2goserver-xsession, and XFCE4 desktop environment..."
-apt_update
-apt_install x2goserver x2goserver-xsession xfce4 xfce4-goodies dbus-x11 x11-xserver-utils
+DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+    x2goserver x2goserver-xsession xfce4 xfce4-goodies dbus-x11 x11-xserver-utils >> "$LOGFILE" 2>&1
 
 mkdir -p "${DATA_DIR}"
 report_progress 75 "Initializing X2Go SQLite session database..."
 if command -v x2godbadmin >/dev/null 2>&1; then
-    x2godbadmin --createdb >> "${LOG_FILE}" 2>&1 || true
+    x2godbadmin --createdb >> "$LOGFILE" 2>&1 || true
 fi
 
 INSTALLED_VER="$(dpkg-query -W -f='${Version}' x2goserver 2>/dev/null | cut -d- -f1 | sed 's/^[0-9]*://' || echo '4.1.0')"
 echo "${INSTALLED_VER}" > "${DATA_DIR}/.af-version"
 
 report_progress 90 "Enabling and starting x2goserver.service..."
-systemctl daemon-reload
-systemctl enable --now x2goserver.service >> "${LOG_FILE}" 2>&1
+systemctl daemon-reload >> "$LOGFILE" 2>&1
+systemctl enable --now x2goserver.service >> "$LOGFILE" 2>&1
 
-write_lock "${LOCK_FILE}"
+write_lock "${PACKAGE_NAME}"
 report_progress 100 "${APP_NAME} remote desktop server installed and ready over SSH"
-log "${APP_NAME} installation complete."
+log_info "${PACKAGE_NAME} installation complete."

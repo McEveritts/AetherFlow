@@ -42,8 +42,14 @@ mod audit_tests {
         let roots = vec![root.clone()];
         assert_eq!(validate_mediaflow_directory(&root, &roots).unwrap(), root);
         assert!(validate_mediaflow_directory(&root.join("nested"), &roots).is_ok());
-        for path in [root.join("../library-other"), fixture.0.join("library-other")] {
-            assert_eq!(validate_mediaflow_directory(&path, &roots).unwrap_err().0, StatusCode::FORBIDDEN);
+        for path in [
+            root.join("../library-other"),
+            fixture.0.join("library-other"),
+        ] {
+            assert_eq!(
+                validate_mediaflow_directory(&path, &roots).unwrap_err().0,
+                StatusCode::FORBIDDEN
+            );
         }
         assert_eq!(validate_mediaflow_directory(&root, &[]).unwrap_err().0, StatusCode::FORBIDDEN);
         assert_eq!(validate_mediaflow_directory(&root.join("missing"), &roots).unwrap_err().0, StatusCode::BAD_REQUEST);
@@ -56,7 +62,12 @@ mod audit_tests {
         let fixture = ScanFixture::new();
         let root = fixture.0.join("library");
         std::fs::create_dir(root.join(".mediaflow_trash")).unwrap();
-        for name in ["nested/movie.MKV", "notes.txt", ".hidden.mp4", ".mediaflow_trash/deleted.mp4"] {
+        for name in [
+            "nested/movie.MKV",
+            "notes.txt",
+            ".hidden.mp4",
+            ".mediaflow_trash/deleted.mp4",
+        ] {
             std::fs::write(root.join(name), []).unwrap();
         }
         let mut files = Vec::new();
@@ -699,7 +710,11 @@ pub async fn ai_chat(req: Request) -> Response {
         .unwrap_or("")
         .to_string();
     if message.trim().is_empty() {
-        return api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", "message is required");
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "BAD_REQUEST",
+            "message is required",
+        );
     }
     let model = body
         .get("model")
@@ -748,7 +763,11 @@ pub async fn ai_support(req: Request) -> Response {
         .unwrap_or("")
         .to_string();
     if message.trim().is_empty() {
-        return api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", "message is required");
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "BAD_REQUEST",
+            "message is required",
+        );
     }
     let context_mode = body
         .get("context_mode")
@@ -802,11 +821,7 @@ pub async fn test_ai_connection(
     Json(req): Json<serde_json::Value>,
 ) -> Response {
     if user.role != "admin" {
-        return api_error(
-            StatusCode::FORBIDDEN,
-            "FORBIDDEN",
-            "Admin access required",
-        );
+        return api_error(StatusCode::FORBIDDEN, "FORBIDDEN", "Admin access required");
     }
     let mut ps = resolve_provider_settings();
     let provider_type = req
@@ -1307,7 +1322,11 @@ pub async fn metadata_scan(Json(req): Json<serde_json::Value>) -> Response {
             for (start, chunk) in media_files.chunks(batch_size).enumerate() {
                 let filenames: Vec<String> = chunk
                     .iter()
-                    .filter_map(|p| p.file_name().and_then(|n| n.to_str()).map(|s| s.to_string()))
+                    .filter_map(|p| {
+                        p.file_name()
+                            .and_then(|n| n.to_str())
+                            .map(|s| s.to_string())
+                    })
                     .collect();
                 let prompt = format!(
                     "Parse these media filenames and extract structured metadata. Return a JSON array where each element has: \"filename\", \"title\", \"year\", \"language\" (ISO 639-1), \"quality\" (e.g., 1080p BluRay), \"subtitles\" (array of likely subtitle languages). Only return valid JSON, no markdown.\n\nFilenames:\n{}",
@@ -1616,7 +1635,12 @@ fn compute_linear_slope(values: &[f64]) -> f64 {
     (nf * sum_xy - sum_x * sum_y) / denom
 }
 
-fn classify_metric_trend(slope: f64, avg_val: f64, max_val: f64, crit_threshold: f64) -> &'static str {
+fn classify_metric_trend(
+    slope: f64,
+    avg_val: f64,
+    max_val: f64,
+    crit_threshold: f64,
+) -> &'static str {
     if max_val >= crit_threshold || avg_val >= crit_threshold * 0.95 {
         "critical"
     } else if slope > 0.05 {
@@ -2110,13 +2134,22 @@ fn validate_mediaflow_directory(
     allowed_roots: &[PathBuf],
 ) -> Result<PathBuf, (StatusCode, String)> {
     let resolved = directory.canonicalize().map_err(|_| {
-        (StatusCode::BAD_REQUEST, "Directory does not exist or is not accessible".to_string())
+        (
+            StatusCode::BAD_REQUEST,
+            "Directory does not exist or is not accessible".to_string(),
+        )
     })?;
     if !resolved.is_dir() {
-        return Err((StatusCode::BAD_REQUEST, "Scan path must be a directory".to_string()));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Scan path must be a directory".to_string(),
+        ));
     }
     if !allowed_roots.iter().any(|root| resolved.starts_with(root)) {
-        return Err((StatusCode::FORBIDDEN, "Directory is outside configured library roots".to_string()));
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Directory is outside configured library roots".to_string(),
+        ));
     }
     Ok(resolved)
 }
@@ -2221,7 +2254,13 @@ pub async fn trigger_mediaflow_scan(Json(req): Json<serde_json::Value>) -> Respo
     }).await {
         Ok(Ok(directory)) => directory,
         Ok(Err((status, message))) => return api_error(status, "INVALID_SCAN_PATH", message),
-        Err(error) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", error.to_string()),
+        Err(error) => {
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL_ERROR",
+                error.to_string(),
+            )
+        }
     };
     let response_directory = dir_buf.to_string_lossy().into_owned();
     tokio::task::spawn_blocking(move || {
@@ -2608,7 +2647,7 @@ pub async fn get_logs(Query(q): Query<HashMap<String, String>>) -> Response {
                 raw_entries.push(serde_json::json!({
                     "timestamp": Utc::now().to_rfc3339(),
                     "source": src_name,
-                    "service": if unit.is_empty() { src_name } else { unit.as_str() },
+                    "service": src_name,
                     "level": lvl,
                     "message": trimmed,
                 }));
@@ -2690,55 +2729,7 @@ pub async fn get_logs(Query(q): Query<HashMap<String, String>>) -> Response {
     }
 
     // Apply unit, level, and search filters
-    let unit_lower = unit.to_lowercase();
-    let filtered: Vec<serde_json::Value> = raw_entries
-        .into_iter()
-        .filter(|entry| {
-            if !unit_lower.is_empty() {
-                let svc = entry
-                    .get("service")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_lowercase();
-                let msg = entry
-                    .get("message")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_lowercase();
-                if !svc.contains(&unit_lower) && !msg.contains(&unit_lower) {
-                    return false;
-                }
-            }
-            if !level_filter.is_empty() {
-                let lvl = entry
-                    .get("level")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_uppercase();
-                if !lvl.contains(&level_filter) {
-                    return false;
-                }
-            }
-            if !search.is_empty() {
-                let msg = entry
-                    .get("message")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_lowercase();
-                let svc = entry
-                    .get("service")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_lowercase();
-                if !msg.contains(&search) && !svc.contains(&search) {
-                    return false;
-                }
-            }
-            true
-        })
-        .skip(offset)
-        .take(limit)
-        .collect();
+    let filtered = filter_log_entries(raw_entries, &unit, &level_filter, &search, offset, limit);
 
     let count = filtered.len();
     Json(serde_json::json!({
@@ -2746,6 +2737,76 @@ pub async fn get_logs(Query(q): Query<HashMap<String, String>>) -> Response {
         "count": count,
     }))
     .into_response()
+}
+
+pub(crate) fn filter_log_entries(
+    raw_entries: Vec<serde_json::Value>,
+    unit: &str,
+    level_filter: &str,
+    search: &str,
+    offset: usize,
+    limit: usize,
+) -> Vec<serde_json::Value> {
+    let unit_lower = unit.trim().to_lowercase();
+    let unit_base = unit_lower.trim_end_matches(".service");
+    let level_upper = level_filter.trim().to_uppercase();
+    let search_lower = search.trim().to_lowercase();
+
+    raw_entries
+        .into_iter()
+        .filter(|entry| {
+            if !unit_lower.is_empty() {
+                let entry_source = entry.get("source").and_then(|v| v.as_str()).unwrap_or("");
+                if !entry_source.eq_ignore_ascii_case("journald") {
+                    let svc = entry
+                        .get("service")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_lowercase();
+                    let msg = entry
+                        .get("message")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_lowercase();
+                    let matches_unit = svc.contains(&unit_lower)
+                        || msg.contains(&unit_lower)
+                        || (!unit_base.is_empty()
+                            && (svc.contains(unit_base) || msg.contains(unit_base)));
+                    if !matches_unit {
+                        return false;
+                    }
+                }
+            }
+            if !level_upper.is_empty() {
+                let lvl = entry
+                    .get("level")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_uppercase();
+                if !lvl.contains(&level_upper) {
+                    return false;
+                }
+            }
+            if !search_lower.is_empty() {
+                let msg = entry
+                    .get("message")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_lowercase();
+                let svc = entry
+                    .get("service")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_lowercase();
+                if !msg.contains(&search_lower) && !svc.contains(&search_lower) {
+                    return false;
+                }
+            }
+            true
+        })
+        .skip(offset)
+        .take(limit)
+        .collect()
 }
 
 pub async fn get_log_sources() -> Response {
@@ -2978,4 +3039,53 @@ pub async fn get_worker_metrics(Path(node_id): Path<String>) -> Response {
         "last_heartbeat": last_hb,
     }))
     .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_filter_log_entries_preserves_journald_unit_lines_with_different_syslog_identifier() {
+        let raw = vec![
+            serde_json::json!({
+                "timestamp": "2026-11-02T12:00:00Z",
+                "source": "journald",
+                "service": "node",
+                "level": "INFO",
+                "message": "Server listening on 127.0.0.1:6246",
+            }),
+            serde_json::json!({
+                "timestamp": "2026-11-02T12:00:01Z",
+                "source": "journald",
+                "service": "hass",
+                "level": "ERROR",
+                "message": "Home Assistant core error",
+            }),
+            serde_json::json!({
+                "timestamp": "2026-11-02T12:00:02Z",
+                "source": "file",
+                "service": "nginx-error",
+                "level": "ERROR",
+                "message": "upstream timed out",
+            }),
+            serde_json::json!({
+                "timestamp": "2026-11-02T12:00:03Z",
+                "source": "file",
+                "service": "af-api",
+                "level": "INFO",
+                "message": "af-maintainerr proxy healthy",
+            }),
+        ];
+
+        let filtered = filter_log_entries(raw.clone(), "af-maintainerr.service", "", "", 0, 50);
+        assert_eq!(filtered.len(), 3);
+        assert_eq!(filtered[0]["service"], "node");
+        assert_eq!(filtered[1]["service"], "hass");
+        assert_eq!(filtered[2]["service"], "af-api");
+
+        let error_only = filter_log_entries(raw, "homeassistant.service", "ERROR", "core", 0, 50);
+        assert_eq!(error_only.len(), 1);
+        assert_eq!(error_only[0]["service"], "hass");
+    }
 }

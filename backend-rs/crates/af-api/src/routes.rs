@@ -1,4 +1,3 @@
-use futures::StreamExt;
 use crate::auth::{
     admin_only_middleware, api_error, auth_middleware, check_setup_needed, csrf_middleware,
     disable_2fa, get_session, issue_csrf_token, list_active_sessions, local_login, logout,
@@ -6,7 +5,6 @@ use crate::auth::{
     verify_2fa, verify_proxy_auth, AuthUser,
 };
 use crate::embed::spa_fallback_handler;
-use crate::network::{add_wireguard_peer, advertise_tailscale_routes, generate_wireguard_keys, get_network_status, get_tailscale_peers, get_tailscale_status, get_wireguard_peers, remove_wireguard_peer, update_wireguard_peer, network_service, tailscale_connect, tailscale_disconnect, tailscale_logout, tailscale_routes, tailscale_settings, network_diagnostics};
 use crate::intelligence::{
     ai_chat, ai_support, analyze_predictions,
     approve_mediaflow_item, bandwidth_analyze, bandwidth_apply, bookmark_log,
@@ -20,6 +18,12 @@ use crate::intelligence::{
 use crate::middlewares::{
     ai_rate_limit_middleware, auth_rate_limit_middleware, host_validation_middleware,
     oidc_rate_limit_middleware, quota_upload_guard_middleware, webhook_rate_limit_middleware,
+};
+use crate::network::{
+    add_wireguard_peer, advertise_tailscale_routes, generate_wireguard_keys, get_network_status,
+    get_tailscale_peers, get_tailscale_status, get_wireguard_peers, network_diagnostics,
+    network_service, remove_wireguard_peer, tailscale_connect, tailscale_disconnect,
+    tailscale_logout, tailscale_routes, tailscale_settings, update_wireguard_peer,
 };
 use crate::notifications_ext::{
     create_notification_channel, create_notification_rule, delete_notification_channel,
@@ -56,6 +60,7 @@ use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{any, delete, get, post, put};
 use axum::Router;
 use chrono::Utc;
+use futures::StreamExt;
 use once_cell::sync::Lazy;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
@@ -239,23 +244,59 @@ fn build_v1_router() -> Router {
         .route("/system/hardware", get(get_hardware_info))
         .route("/notifications", get(get_notifications))
         .route("/notifications/:id/read", put(mark_notification_read))
-        .route("/notifications/dismiss-all", post(dismiss_all_notifications))
+        .route(
+            "/notifications/dismiss-all",
+            post(dismiss_all_notifications),
+        )
         .route("/deploy/stream", get(handle_deploy_stream))
         .route("/deploy/:appName", post(handle_deploy_process))
         .route("/blueprints", get(get_blueprints))
         .route("/blueprints/:appName", get(get_app_blueprint))
         .route("/streaming/dashboard", get(get_streaming_dashboard))
-        .route("/streaming/history", get(crate::streaming_history::history_handler))
-        .route("/streaming/history/export", get(crate::streaming_history::history_export_handler))
-        .route("/streaming/patterns", get(crate::streaming_patterns::patterns_handler))
-        .route("/streaming/patterns/activity", get(crate::streaming_patterns::activity_handler))
-        .route("/streaming/patterns/concurrency", get(crate::streaming_patterns::concurrency_handler))
-        .route("/streaming/drilldown", get(crate::streaming_patterns::drilldown_handler))
-        .route("/streaming/drilldown/users", get(crate::streaming_patterns::drilldown_users_handler))
-        .route("/streaming/drilldown/clients", get(crate::streaming_patterns::drilldown_clients_handler))
-        .route("/streaming/drilldown/items", get(crate::streaming_patterns::drilldown_items_handler))
-        .route("/streaming/drilldown/libraries", get(crate::streaming_patterns::drilldown_libraries_handler))
-        .route("/streaming/drilldown/genres", get(crate::streaming_patterns::drilldown_genres_handler))
+        .route(
+            "/streaming/history",
+            get(crate::streaming_history::history_handler),
+        )
+        .route(
+            "/streaming/history/export",
+            get(crate::streaming_history::history_export_handler),
+        )
+        .route(
+            "/streaming/patterns",
+            get(crate::streaming_patterns::patterns_handler),
+        )
+        .route(
+            "/streaming/patterns/activity",
+            get(crate::streaming_patterns::activity_handler),
+        )
+        .route(
+            "/streaming/patterns/concurrency",
+            get(crate::streaming_patterns::concurrency_handler),
+        )
+        .route(
+            "/streaming/drilldown",
+            get(crate::streaming_patterns::drilldown_handler),
+        )
+        .route(
+            "/streaming/drilldown/users",
+            get(crate::streaming_patterns::drilldown_users_handler),
+        )
+        .route(
+            "/streaming/drilldown/clients",
+            get(crate::streaming_patterns::drilldown_clients_handler),
+        )
+        .route(
+            "/streaming/drilldown/items",
+            get(crate::streaming_patterns::drilldown_items_handler),
+        )
+        .route(
+            "/streaming/drilldown/libraries",
+            get(crate::streaming_patterns::drilldown_libraries_handler),
+        )
+        .route(
+            "/streaming/drilldown/genres",
+            get(crate::streaming_patterns::drilldown_genres_handler),
+        )
         .route("/streaming/artwork/:itemId", get(get_streaming_artwork))
         .route("/plugins", get(list_plugins_handler))
         .route("/plugins/:id/proxy", any(proxy_plugin_root_request))
@@ -301,7 +342,10 @@ fn build_v1_router() -> Router {
         .route("/cluster/enroll", post(enroll_worker))
         .route("/cluster/nodes/:id", delete(remove_worker))
         .route("/cluster/nodes/:id/metrics", get(get_worker_metrics))
-        .route("/oidc/clients", get(get_oidc_clients).post(create_oidc_client))
+        .route(
+            "/oidc/clients",
+            get(get_oidc_clients).post(create_oidc_client),
+        )
         .route("/oidc/clients/:id", delete(delete_oidc_client))
         .route("/ai/metadata/scan", post(metadata_scan))
         .route("/ai/metadata/status", get(metadata_status))
@@ -312,7 +356,10 @@ fn build_v1_router() -> Router {
         .route("/ai/predictions/analyze", post(analyze_predictions))
         .route("/ai/predictions/history", get(get_metrics_history))
         .route("/ai/backup/optimal-window", get(get_optimal_backup_window))
-        .route("/ai/backup/schedule", post(set_backup_schedule).put(set_backup_schedule))
+        .route(
+            "/ai/backup/schedule",
+            post(set_backup_schedule).put(set_backup_schedule),
+        )
         .route("/logs", get(get_logs))
         .route("/logs/sources", get(get_log_sources))
         .route("/logs/bookmarks", get(get_bookmarks).post(bookmark_log))
@@ -348,7 +395,10 @@ fn build_v1_router() -> Router {
         .route("/network/wireguard/keygen", post(generate_wireguard_keys))
         .route("/network/tailscale/status", get(get_tailscale_status))
         .route("/network/tailscale/peers", get(get_tailscale_peers))
-        .route("/network/tailscale/routes", get(tailscale_routes).post(advertise_tailscale_routes))
+        .route(
+            "/network/tailscale/routes",
+            get(tailscale_routes).post(advertise_tailscale_routes),
+        )
         .route("/network/tailscale/connect", post(tailscale_connect))
         .route("/network/tailscale/disconnect", post(tailscale_disconnect))
         .route("/network/tailscale/logout", post(tailscale_logout))
@@ -369,16 +419,49 @@ fn build_v1_router() -> Router {
         .route("/blueprints/:appName/sync", post(sync_app_blueprint))
         .route("/streaming/servers/:provider", put(update_streaming_server))
         .route("/streaming/servers/test", post(test_streaming_server))
-        .route(crate::streaming_portability::EXPORT_ROUTE, get(crate::streaming_portability::export_handler))
-        .route(crate::streaming_portability::PREVIEW_ROUTE, post(crate::streaming_portability::preview_handler))
-        .route(crate::streaming_portability::RESTORE_ROUTE, post(crate::streaming_portability::restore_handler))
-        .route("/streaming/imports/status", get(crate::streaming_import::get_streaming_import_status_handler))
-        .route("/streaming/imports/events", post(crate::streaming_import::import_streaming_events_handler))
-        .route("/streaming/imports/upstream-probe", post(crate::streaming_import::probe_upstream_event_source_handler))
-        .route("/streaming/policies", get(crate::streaming_import::get_streaming_policy_handler).put(crate::streaming_import::update_streaming_policy_handler))
-        .route("/streaming/user-links", get(crate::streaming_import::list_streaming_user_links_handler).put(crate::streaming_import::upsert_streaming_user_link_handler).delete(crate::streaming_import::delete_streaming_user_link_handler))
-        .route("/streaming/reconciliation/preview", post(crate::streaming_import::preview_legacy_reconciliation_handler))
-        .route("/streaming/reconciliation/apply", post(crate::streaming_import::apply_legacy_reconciliation_handler))
+        .route(
+            crate::streaming_portability::EXPORT_ROUTE,
+            get(crate::streaming_portability::export_handler),
+        )
+        .route(
+            crate::streaming_portability::PREVIEW_ROUTE,
+            post(crate::streaming_portability::preview_handler),
+        )
+        .route(
+            crate::streaming_portability::RESTORE_ROUTE,
+            post(crate::streaming_portability::restore_handler),
+        )
+        .route(
+            "/streaming/imports/status",
+            get(crate::streaming_import::get_streaming_import_status_handler),
+        )
+        .route(
+            "/streaming/imports/events",
+            post(crate::streaming_import::import_streaming_events_handler),
+        )
+        .route(
+            "/streaming/imports/upstream-probe",
+            post(crate::streaming_import::probe_upstream_event_source_handler),
+        )
+        .route(
+            "/streaming/policies",
+            get(crate::streaming_import::get_streaming_policy_handler)
+                .put(crate::streaming_import::update_streaming_policy_handler),
+        )
+        .route(
+            "/streaming/user-links",
+            get(crate::streaming_import::list_streaming_user_links_handler)
+                .put(crate::streaming_import::upsert_streaming_user_link_handler)
+                .delete(crate::streaming_import::delete_streaming_user_link_handler),
+        )
+        .route(
+            "/streaming/reconciliation/preview",
+            post(crate::streaming_import::preview_legacy_reconciliation_handler),
+        )
+        .route(
+            "/streaming/reconciliation/apply",
+            post(crate::streaming_import::apply_legacy_reconciliation_handler),
+        )
         .route(
             "/streaming/servers/:provider/sync",
             post(sync_streaming_server_history),
@@ -562,16 +645,43 @@ async fn control_service_handler(
             "Invalid action. Allowed: start, stop, restart",
         );
     }
+    let manager = req.managed_by.trim();
+    if manager != "systemd-unit"
+        && af_services::resolve_service_control_scope(&name) == "shared-vhost"
+    {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "SHARED_VHOST_CONTROL_UNSUPPORTED",
+            format!(
+                "{} is hosted as a shared Apache vhost; use the Apache2 Web Server card for daemon-wide controls",
+                name
+            ),
+        );
+    }
+
     let target = if req.process.trim().is_empty() {
         name.clone()
     } else {
         req.process.trim().to_string()
     };
 
-    let result = if req.managed_by.trim().is_empty() {
+    if manager != "systemd-unit"
+        && af_services::resolve_service_control_scope(&target) == "shared-vhost"
+    {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "SHARED_VHOST_CONTROL_UNSUPPORTED",
+            format!(
+                "{} is hosted as a shared Apache vhost; use the Apache2 Web Server card for daemon-wide controls",
+                target
+            ),
+        );
+    }
+
+    let result = if manager.is_empty() {
         af_services::control_service(&target, &req.action).await
     } else {
-        af_services::control_service_with_manager(&target, &req.action, req.managed_by.trim()).await
+        af_services::control_service_with_manager(&target, &req.action, manager).await
     };
 
     if let Err(e) = result {
@@ -632,6 +742,7 @@ async fn get_marketplace_apps() -> Response {
             .unwrap_or_default();
         let mut public_domain = String::new();
         let mut external_access = false;
+        let mut tls_enabled = true;
 
         if let Some(ing) = ingress_map.get(&p.name) {
             if ing.listen_port > 0 {
@@ -639,6 +750,7 @@ async fn get_marketplace_apps() -> Response {
             }
             public_domain = ing.public_domain.clone();
             external_access = ing.external_access_enabled;
+            tls_enabled = ing.tls_enabled;
         }
         if public_domain.is_empty() && !base_domain.is_empty() && active_port > 0 {
             public_domain = af_services::format_app_public_domain(&p.name, &base_domain);
@@ -659,6 +771,7 @@ async fn get_marketplace_apps() -> Response {
             internal_domain,
             public_domain,
             external_access_enabled: external_access,
+            tls_enabled,
             web_path: p.web_path,
             progress: 0,
             started_at: None,
@@ -882,7 +995,9 @@ where
     AllocateInstallPortFn: FnMut(&str, i32) -> i32,
 {
     if action == "update" {
-        if !af_services::should_pre_stop_on_update(clean_id) {
+        if !af_services::should_pre_stop_on_update(clean_id)
+            && af_services::resolve_service_control_scope(clean_id) != "shared-vhost"
+        {
             return resolve_existing_update_port_with(clean_id, load_ingress_config);
         }
         // Read native configuration before stopping the application. An update
@@ -970,6 +1085,97 @@ where
 
     let execution_result = dispatch_package(allocated_port).await;
     Ok((allocated_port, stopped_units, execution_result))
+}
+
+async fn finalize_post_script_lifecycle_with<
+    LoadIngressFn,
+    SaveIngressFn,
+    ControlFn,
+    ControlFut,
+    RefreshUpdateFn,
+    RefreshUpdateFut,
+>(
+    action: &str,
+    clean_id: &str,
+    allocated_port: i32,
+    stopped_units: Vec<String>,
+    base_domain: &str,
+    mut load_ingress: LoadIngressFn,
+    mut save_ingress: SaveIngressFn,
+    mut control_unit: ControlFn,
+    mut refresh_update: RefreshUpdateFn,
+) -> Result<(), String>
+where
+    LoadIngressFn: FnMut(&str) -> anyhow::Result<Option<AppIngressConfig>>,
+    SaveIngressFn: FnMut(&AppIngressConfig) -> anyhow::Result<()>,
+    ControlFn: FnMut(String, &'static str) -> ControlFut,
+    ControlFut: std::future::Future<Output = anyhow::Result<()>>,
+    RefreshUpdateFn: FnMut(String) -> RefreshUpdateFut,
+    RefreshUpdateFut: std::future::Future<Output = ()>,
+{
+    if action != "install" && action != "update" {
+        return Ok(());
+    }
+
+    let mut required_errors: Vec<String> = Vec::new();
+
+    if allocated_port > 0 {
+        match load_ingress(clean_id) {
+            Ok(existing) => {
+                let public_domain = existing
+                    .as_ref()
+                    .map(|c| c.public_domain.clone())
+                    .filter(|d| !d.is_empty())
+                    .unwrap_or_else(|| {
+                        if base_domain.is_empty() {
+                            String::new()
+                        } else {
+                            af_services::format_app_public_domain(clean_id, base_domain)
+                        }
+                    });
+                let external_access = existing
+                    .as_ref()
+                    .map(|c| c.external_access_enabled)
+                    .unwrap_or(!public_domain.is_empty());
+                let tls_enabled = existing
+                    .as_ref()
+                    .map(|c| c.tls_enabled)
+                    .unwrap_or(!public_domain.is_empty());
+                let now = Utc::now();
+                let cfg = AppIngressConfig {
+                    app_name: clean_id.to_string(),
+                    public_domain,
+                    external_access_enabled: external_access,
+                    listen_port: allocated_port,
+                    tls_enabled,
+                    created_at: existing.as_ref().map(|c| c.created_at).unwrap_or(now),
+                    updated_at: now,
+                };
+                if let Err(e) = save_ingress(&cfg) {
+                    required_errors.push(format!("Failed to persist ingress configuration: {}", e));
+                }
+            }
+            Err(error) => {
+                required_errors.push(format!("Failed to load ingress configuration: {}", error))
+            }
+        }
+    }
+
+    if action == "update" && af_services::should_pre_stop_on_update(clean_id) {
+        for u in stopped_units {
+            if let Err(e) = control_unit(u.clone(), "start").await {
+                required_errors.push(format!("Failed to restart stopped unit {}: {}", u, e));
+            }
+        }
+    }
+
+    refresh_update(clean_id.to_string()).await;
+
+    if required_errors.is_empty() {
+        Ok(())
+    } else {
+        Err(required_errors.join("; "))
+    }
 }
 
 async fn dispatch_package_lifecycle(
@@ -1094,7 +1300,7 @@ async fn dispatch_package_lifecycle(
                 |app_id| af_services::mutators::get_app_runtime_meta(app_id).configured_port,
                 load_authoritative_app_ingress_config,
                 allocate_or_resolve_app_port,
-                af_services::resolve_service_units,
+                |app_id| af_services::resolve_controllable_service_units(app_id, "restart"),
                 |unit_name| af_services::get_systemd_unit_info(unit_name).0,
                 |unit_name, control_action| async move {
                     af_services::control_service_with_manager(
@@ -1235,12 +1441,9 @@ async fn dispatch_package_lifecycle(
         if let Err(error) = execution_result {
             if af_services::should_pre_stop_on_update(&clean_id) {
                 for unit in &stopped_units {
-                    let _ = af_services::control_service_with_manager(
-                        unit,
-                        "start",
-                        "systemd-unit",
-                    )
-                    .await;
+                    let _ =
+                        af_services::control_service_with_manager(unit, "start", "systemd-unit")
+                            .await;
                 }
             }
             af_services::clear_service_status_cache();
@@ -1267,42 +1470,15 @@ async fn dispatch_package_lifecycle(
         );
 
         if action == "install" || action == "update" {
-            let _ =
-                af_services::mutators::apply_blueprint_app_config(&clean_id, allocated_port).await;
-
-            if allocated_port > 0 {
-                let base_domain = af_services::resolve_base_domain();
-                let existing = af_db::get_app_ingress_config(&clean_id).ok().flatten();
-                let public_domain = existing
-                    .as_ref()
-                    .map(|c| c.public_domain.clone())
-                    .filter(|d| !d.is_empty())
-                    .unwrap_or_else(|| {
-                        if base_domain.is_empty() {
-                            String::new()
-                        } else {
-                            af_services::format_app_public_domain(&clean_id, &base_domain)
-                        }
-                    });
-                let external_access = existing
-                    .as_ref()
-                    .map(|c| c.external_access_enabled)
-                    .unwrap_or(!public_domain.is_empty());
-                let tls_enabled = existing
-                    .as_ref()
-                    .map(|c| c.tls_enabled)
-                    .unwrap_or(!public_domain.is_empty());
-                let now = Utc::now();
-                let cfg = AppIngressConfig {
-                    app_name: clean_id.clone(),
-                    public_domain,
-                    external_access_enabled: external_access,
-                    listen_port: allocated_port,
-                    tls_enabled,
-                    created_at: existing.as_ref().map(|c| c.created_at).unwrap_or(now),
-                    updated_at: now,
-                };
-                let _ = af_db::set_app_ingress_config(&cfg);
+            if let Err(e) =
+                af_services::mutators::apply_blueprint_app_config(&clean_id, allocated_port).await
+            {
+                tracing::warn!(
+                    package = %clean_id,
+                    port = allocated_port,
+                    error = %e,
+                    "Optional blueprint app config synchronization warning"
+                );
             }
 
             let (master_user, master_pass, _) = af_services::mutators::load_master_credentials();
@@ -1313,15 +1489,34 @@ async fn dispatch_package_lifecycle(
                 );
             }
 
-            if action == "update" {
-                if af_services::should_pre_stop_on_update(&clean_id) {
-                    for u in stopped_units {
-                        let _ =
-                            af_services::control_service_with_manager(&u, "start", "systemd-unit")
-                                .await;
-                    }
-                }
-                let _ = af_services::workers::refresh_package_update_by_id(&clean_id).await;
+            let base_domain = af_services::resolve_base_domain();
+            if let Err(required_err) = finalize_post_script_lifecycle_with(
+                action,
+                &clean_id,
+                allocated_port,
+                stopped_units,
+                &base_domain,
+                |app_id| af_db::get_app_ingress_config(app_id),
+                |cfg| af_db::set_app_ingress_config(cfg),
+                |unit_name, ctrl_action| async move {
+                    af_services::control_service_with_manager(
+                        &unit_name,
+                        ctrl_action,
+                        "systemd-unit",
+                    )
+                    .await
+                },
+                |app_id| async move {
+                    let _ = af_services::workers::refresh_package_update_by_id(&app_id).await;
+                },
+            )
+            .await
+            {
+                af_services::clear_service_status_cache();
+                af_services::mutators::clear_app_runtime_meta_cache();
+                emit_package_progress(&clean_id, action, "failed", 90, &required_err, &started_at);
+                af_services::clear_package_job_info(&clean_id);
+                return;
             }
         } else if action == "remove" {
             let _ = af_db::delete_app_ingress_config(&clean_id);
@@ -1385,12 +1580,34 @@ async fn check_single_package_update(Path(id): Path<String>) -> Response {
         return api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "Package not found");
     };
     let record = af_services::workers::refresh_package_update_by_id(&pkg.name).await;
-    Json(serde_json::json!({
+    Json(build_single_package_update_response(&pkg.name, record)).into_response()
+}
+
+fn build_single_package_update_response(
+    pkg_name: &str,
+    record: Option<af_services::workers::PackageUpdateRecord>,
+) -> serde_json::Value {
+    let update_available = record.as_ref().map(|r| r.update_available).unwrap_or(false);
+    let installed_version = record.as_ref().map(|r| r.installed_version.clone());
+    let latest_version = record.as_ref().map(|r| r.latest_version.clone());
+    let update_url = record.as_ref().map(|r| r.release_url.clone());
+    let checked_at = record.as_ref().map(|r| r.checked_at.clone());
+    let last_error = record
+        .as_ref()
+        .map(|r| r.error.clone())
+        .filter(|e| !e.trim().is_empty());
+    serde_json::json!({
         "message": "Package update check completed",
-        "package": pkg.name,
+        "package": pkg_name,
+        "update_available": update_available,
+        "installed_version": installed_version,
+        "latest_version": latest_version,
+        "update_url": update_url,
+        "checked_at": checked_at,
+        "last_error": last_error,
+        "error": last_error,
         "update": record,
-    }))
-    .into_response()
+    })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1615,11 +1832,9 @@ async fn update_settings(Json(mut req): Json<SettingsPayload>) -> Response {
                         updated_at: now,
                     };
                     let _ = af_db::set_app_ingress_config(&cfg);
-                    let _ = af_services::mutators::apply_blueprint_app_config(
-                        &p.name,
-                        p.default_port,
-                    )
-                    .await;
+                    let _ =
+                        af_services::mutators::apply_blueprint_app_config(&p.name, p.default_port)
+                            .await;
                 }
             }
         }
@@ -1752,10 +1967,8 @@ async fn update_password(
     }
 
     if auth_user.role == "admin" {
-        let _ = af_services::mutators::save_master_credentials(
-            &auth_user.username,
-            &req.new_password,
-        );
+        let _ =
+            af_services::mutators::save_master_credentials(&auth_user.username, &req.new_password);
         af_services::mutators::sync_master_credentials_to_installed_apps(
             &auth_user.username,
             &req.new_password,
@@ -1901,17 +2114,15 @@ async fn update_user_role(
         );
     };
     let admin_count: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM users WHERE role = 'admin'",
-            [],
-            |r| r.get(0),
-        )
+        .query_row("SELECT COUNT(*) FROM users WHERE role = 'admin'", [], |r| {
+            r.get(0)
+        })
         .unwrap_or(1);
-    let Ok(current_role) = conn.query_row(
-        "SELECT role FROM users WHERE id = ?1",
-        params![id],
-        |r| r.get::<_, String>(0),
-    ) else {
+    let Ok(current_role) =
+        conn.query_row("SELECT role FROM users WHERE id = ?1", params![id], |r| {
+            r.get::<_, String>(0)
+        })
+    else {
         return api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "User not found");
     };
 
@@ -2466,13 +2677,23 @@ pub(crate) async fn update_streaming_server(
         } else {
             match af_db::encrypt_key(&req.api_key) {
                 Ok(key) => key,
-                Err(_) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "STREAMING_KEY_STORAGE_FAILED", "Failed to encrypt provider credential; configuration was not changed"),
+                Err(_) => {
+                    return api_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "STREAMING_KEY_STORAGE_FAILED",
+                        "Failed to encrypt provider credential; configuration was not changed",
+                    )
+                }
             }
         };
 
         let saved = if let Ok(conn) = af_db::get_conn() {
             if enc_key.is_empty() {
-                if let Ok(previous_url) = conn.query_row("SELECT url FROM streaming_servers WHERE provider = 'jellyfin'", [], |row| row.get::<_, String>(0)) {
+                if let Ok(previous_url) = conn.query_row(
+                    "SELECT url FROM streaming_servers WHERE provider = 'jellyfin'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                ) {
                     if previous_url.trim_end_matches('/') != clean_url {
                         return api_error(StatusCode::BAD_REQUEST, "STREAMING_KEY_REQUIRED", "Provide a new API key when changing the provider URL; stored credentials cannot be transferred to another server");
                     }
@@ -2620,13 +2841,114 @@ async fn get_ingress_configs() -> Json<serde_json::Value> {
 #[serde(rename_all = "camelCase")]
 struct UpdateIngressReq {
     #[serde(default)]
-    public_domain: String,
+    public_domain: Option<String>,
     #[serde(default)]
-    external_access_enabled: bool,
+    external_access_enabled: Option<bool>,
     #[serde(default)]
-    listen_port: i32,
+    listen_port: Option<i32>,
     #[serde(default)]
-    tls_enabled: bool,
+    tls_enabled: Option<bool>,
+}
+
+fn resolve_patched_ingress_config(
+    clean_app: &str,
+    req: &UpdateIngressReq,
+    existing: Option<&AppIngressConfig>,
+    blueprint_default_port: i32,
+    now: chrono::DateTime<Utc>,
+) -> Result<AppIngressConfig, (StatusCode, &'static str, &'static str)> {
+    let current_effective_port = existing
+        .map(|ex| ex.listen_port)
+        .filter(|&p| p > 0)
+        .unwrap_or(blueprint_default_port);
+
+    if let Some(requested_port) = req.listen_port {
+        if !(0..=65535).contains(&requested_port) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "VALIDATION_ERROR",
+                "listenPort must be between 0 and 65535",
+            ));
+        }
+        if requested_port > 0
+            && current_effective_port > 0
+            && requested_port != current_effective_port
+        {
+            return Err((
+                StatusCode::CONFLICT,
+                "PORT_RECONFIGURATION_UNSUPPORTED",
+                "Changing listenPort via ingress configuration is not supported without native service rebinding and readiness verification",
+            ));
+        }
+        if requested_port > 0 && current_effective_port <= 0 {
+            return Err((
+                StatusCode::CONFLICT,
+                "PORT_RECONFIGURATION_UNSUPPORTED",
+                "This application does not support custom ingress listenPort assignment",
+            ));
+        }
+    }
+
+    let clean_public_domain = match req.public_domain.as_ref() {
+        Some(raw_domain) => {
+            if raw_domain.trim().is_empty() {
+                String::new()
+            } else {
+                let norm = af_db::normalize_base_domain(raw_domain);
+                if norm.is_empty() {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        "INVALID_DOMAIN",
+                        "Invalid publicDomain",
+                    ));
+                }
+                norm
+            }
+        }
+        None => existing
+            .map(|ex| ex.public_domain.clone())
+            .unwrap_or_default(),
+    };
+
+    let listen_port = req
+        .listen_port
+        .filter(|&p| p > 0)
+        .unwrap_or(current_effective_port);
+
+    let external_access_enabled = req
+        .external_access_enabled
+        .or_else(|| existing.map(|ex| ex.external_access_enabled))
+        .unwrap_or(!clean_public_domain.is_empty());
+
+    if !(1..=65535).contains(&listen_port) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "INVALID_PORT",
+            "No valid native listen port is configured for this application",
+        ));
+    }
+    if external_access_enabled && clean_public_domain.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "INVALID_DOMAIN",
+            "A public domain is required to enable external access",
+        ));
+    }
+
+    let tls_enabled = req
+        .tls_enabled
+        .or_else(|| existing.map(|ex| ex.tls_enabled))
+        .unwrap_or(!clean_public_domain.is_empty());
+
+    Ok(AppIngressConfig {
+        app_name: clean_app.to_string(),
+        public_domain: clean_public_domain,
+        external_access_enabled,
+        listen_port,
+        tls_enabled,
+        created_at: existing.map(|c| c.created_at).unwrap_or(now),
+        updated_at: now,
+    })
 }
 
 async fn update_app_ingress_config(
@@ -2641,54 +2963,35 @@ async fn update_app_ingress_config(
             "App name is required",
         );
     }
-    if req.listen_port < 0 || req.listen_port > 65535 {
-        return api_error(
-            StatusCode::BAD_REQUEST,
-            "VALIDATION_ERROR",
-            "listenPort must be between 0 and 65535",
-        );
-    }
-
-    let clean_public_domain = if req.public_domain.trim().is_empty() {
-        String::new()
-    } else {
-        let norm = af_db::normalize_base_domain(&req.public_domain);
-        if norm.is_empty() {
+    let existing = match af_db::get_app_ingress_config(&clean_app) {
+        Ok(config) => config,
+        Err(error) => {
             return api_error(
-                StatusCode::BAD_REQUEST,
-                "INVALID_DOMAIN",
-                "Invalid publicDomain",
-            );
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL_ERROR",
+                error.to_string(),
+            )
         }
-        norm
     };
-
-    let existing = af_db::get_app_ingress_config(&clean_app).ok().flatten();
-    let listen_port = if req.listen_port > 0 {
-        req.listen_port
-    } else if let Some(ref ex) = existing {
-        if ex.listen_port > 0 {
-            ex.listen_port
-        } else {
-            af_services::get_blueprint(&clean_app)
-                .map(|b| b.default_port)
-                .unwrap_or(0)
-        }
+    let runtime_port = af_services::mutators::get_app_runtime_meta(&clean_app).configured_port;
+    let blueprint_default_port = if runtime_port > 0 {
+        runtime_port
     } else {
         af_services::get_blueprint(&clean_app)
-            .map(|b| b.default_port)
+            .map(|blueprint| blueprint.default_port)
             .unwrap_or(0)
     };
 
     let now = Utc::now();
-    let cfg = AppIngressConfig {
-        app_name: clean_app.clone(),
-        public_domain: clean_public_domain.clone(),
-        external_access_enabled: req.external_access_enabled,
-        listen_port,
-        tls_enabled: req.tls_enabled,
-        created_at: existing.as_ref().map(|c| c.created_at).unwrap_or(now),
-        updated_at: now,
+    let cfg = match resolve_patched_ingress_config(
+        &clean_app,
+        &req,
+        existing.as_ref(),
+        blueprint_default_port,
+        now,
+    ) {
+        Ok(cfg) => cfg,
+        Err((status, code, msg)) => return api_error(status, code, msg),
     };
     if let Err(e) = af_db::set_app_ingress_config(&cfg) {
         return api_error(
@@ -2699,15 +3002,13 @@ async fn update_app_ingress_config(
     }
     af_db::invalidate_ingress_cache();
 
-    let _ = af_services::mutators::apply_blueprint_app_config(&clean_app, listen_port).await;
-
     let internal_domain = af_services::get_blueprint(&clean_app)
         .map(|bp| bp.internal_domain)
         .filter(|d| !d.is_empty())
         .unwrap_or_else(|| format!("{}.aether.local", clean_app));
     let mut dns_domains = vec![internal_domain];
-    if !clean_public_domain.is_empty() && !dns_domains.contains(&clean_public_domain) {
-        dns_domains.push(clean_public_domain);
+    if !cfg.public_domain.is_empty() && !dns_domains.contains(&cfg.public_domain) {
+        dns_domains.push(cfg.public_domain.clone());
     }
     let _ = af_services::mutators::sync_local_dns_domains(&dns_domains).await;
     let _ = af_services::mutators::sync_network_dns_providers().await;
@@ -3348,6 +3649,39 @@ mod tests {
             *recorded_control_actions.lock().unwrap(),
             vec!["stop radarr".to_string()]
         );
+
+        recorded_control_actions.lock().unwrap().clear();
+        for shared_app in ["nextcloud", "rutorrent", "organizr"] {
+            let recorder = Arc::clone(&recorded_control_actions);
+            let stopped = pre_stop_units_for_package_update_with(
+                "update",
+                shared_app,
+                "",
+                af_services::resolve_service_units,
+                |_unit_name| "running".to_string(),
+                move |unit_name, control_action| {
+                    let recorder_handle = Arc::clone(&recorder);
+                    async move {
+                        recorder_handle
+                            .lock()
+                            .unwrap()
+                            .push(format!("{} {}", control_action, unit_name));
+                        Ok(())
+                    }
+                },
+            )
+            .await
+            .expect("shared-vhost pre-stop decision should succeed");
+            assert!(
+                stopped.is_empty(),
+                "{} must not pre-stop shared apache2 on update",
+                shared_app
+            );
+        }
+        assert!(
+            recorded_control_actions.lock().unwrap().is_empty(),
+            "shared-vhost updates must not invoke stop on apache2"
+        );
     }
 
     #[tokio::test]
@@ -3647,5 +3981,170 @@ mod tests {
         assert!(install_stopped.is_empty());
         assert!(recorded_control_actions.lock().unwrap().is_empty());
         assert_eq!(*recorded_dispatch_ports.lock().unwrap(), vec![17420]);
+    }
+
+    #[test]
+    fn test_single_package_update_response_flattens_contract_fields() {
+        let rec = af_services::workers::PackageUpdateRecord {
+            package_id: "radarr".to_string(),
+            installed: true,
+            installed_version: "5.14.0".to_string(),
+            latest_version: "5.15.0".to_string(),
+            update_available: true,
+            checked_at: "2026-11-02T12:00:00Z".to_string(),
+            release_url: "https://github.com/Radarr/Radarr/releases/tag/v5.15.0".to_string(),
+            error: "github rate limit warning".to_string(),
+        };
+        let body = build_single_package_update_response("radarr", Some(rec));
+        assert_eq!(body["package"], "radarr");
+        assert_eq!(body["update_available"], true);
+        assert_eq!(body["installed_version"], "5.14.0");
+        assert_eq!(body["latest_version"], "5.15.0");
+        assert_eq!(
+            body["update_url"],
+            "https://github.com/Radarr/Radarr/releases/tag/v5.15.0"
+        );
+        assert_eq!(body["checked_at"], "2026-11-02T12:00:00Z");
+        assert_eq!(body["last_error"], "github rate limit warning");
+        assert_eq!(body["error"], "github rate limit warning");
+        assert_eq!(body["update"]["package_id"], "radarr");
+    }
+
+    #[tokio::test]
+    async fn test_finalize_post_script_lifecycle_required_failures_and_install_refresh() {
+        use std::sync::{Arc, Mutex};
+
+        let refreshed: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let refresh_handle = Arc::clone(&refreshed);
+
+        let ok_res = finalize_post_script_lifecycle_with(
+            "install",
+            "radarr",
+            7878,
+            Vec::new(),
+            "example.com",
+            |_app_id| Ok(None),
+            |_cfg| Ok(()),
+            |_unit, _action| async move { Ok(()) },
+            move |app_id| {
+                let r = Arc::clone(&refresh_handle);
+                async move {
+                    r.lock().unwrap().push(app_id);
+                }
+            },
+        )
+        .await;
+        assert!(ok_res.is_ok());
+        assert_eq!(*refreshed.lock().unwrap(), vec!["radarr".to_string()]);
+
+        let err_ingress = finalize_post_script_lifecycle_with(
+            "install",
+            "radarr",
+            7878,
+            Vec::new(),
+            "example.com",
+            |_app_id| Ok(None),
+            |_cfg| Err(anyhow::anyhow!("sqlite locked")),
+            |_unit, _action| async move { Ok(()) },
+            |_app_id| async move {},
+        )
+        .await
+        .expect_err("ingress persistence failure must fail required post-script stage");
+        assert!(err_ingress.contains("Failed to persist ingress configuration"));
+
+        let restored = Arc::new(Mutex::new(Vec::new()));
+        let restore_handle = Arc::clone(&restored);
+        let err_read = finalize_post_script_lifecycle_with(
+            "update",
+            "radarr",
+            7878,
+            vec!["radarr".to_string()],
+            "example.com",
+            |_app_id| Err(anyhow::anyhow!("sqlite read failed")),
+            |_cfg| panic!("failed read must not overwrite ingress"),
+            move |unit, _action| {
+                restore_handle.lock().unwrap().push(unit);
+                async { Ok(()) }
+            },
+            |_app_id| async {},
+        )
+        .await
+        .expect_err("failed ingress read must fail required synchronization");
+        assert!(err_read.contains("Failed to load ingress configuration"));
+        assert_eq!(*restored.lock().unwrap(), vec!["radarr".to_string()]);
+
+        let err_restart = finalize_post_script_lifecycle_with(
+            "update",
+            "radarr",
+            7878,
+            vec!["radarr".to_string()],
+            "example.com",
+            |_app_id| Ok(None),
+            |_cfg| Ok(()),
+            |unit, _action| async move { Err(anyhow::anyhow!("{} failed to start", unit)) },
+            |_app_id| async move {},
+        )
+        .await
+        .expect_err("stopped unit restart failure must fail required post-script stage");
+        assert!(err_restart.contains("Failed to restart stopped unit radarr"));
+    }
+
+    #[test]
+    fn test_resolve_patched_ingress_config_preserves_omitted_fields_and_rejects_port_change() {
+        let now = Utc::now();
+        let existing = AppIngressConfig {
+            app_name: "radarr".to_string(),
+            public_domain: "radarr.example.com".to_string(),
+            external_access_enabled: true,
+            listen_port: 17878,
+            tls_enabled: true,
+            created_at: now,
+            updated_at: now,
+        };
+
+        let req_patch: UpdateIngressReq = serde_json::from_value(serde_json::json!({
+            "publicDomain": "movies.example.com",
+            "externalAccessEnabled": false
+        }))
+        .unwrap();
+
+        let patched =
+            resolve_patched_ingress_config("radarr", &req_patch, Some(&existing), 7878, now)
+                .expect("omitted listenPort and tlsEnabled should be preserved");
+        assert_eq!(patched.public_domain, "movies.example.com");
+        assert!(!patched.external_access_enabled);
+        assert_eq!(patched.listen_port, 17878);
+        assert!(patched.tls_enabled);
+
+        let req_port_change: UpdateIngressReq = serde_json::from_value(serde_json::json!({
+            "listenPort": 18999
+        }))
+        .unwrap();
+        let err =
+            resolve_patched_ingress_config("radarr", &req_port_change, Some(&existing), 7878, now)
+                .expect_err("changing listenPort via ingress config must fail closed");
+        assert_eq!(err.0, StatusCode::CONFLICT);
+        assert_eq!(err.1, "PORT_RECONFIGURATION_UNSUPPORTED");
+    }
+    #[tokio::test]
+    async fn test_update_prestop_uses_daemon_and_timer_policy_not_jobs_or_unconfigured_mounts() {
+        for (app, expected) in [
+            ("recyclarr", vec!["recyclarr.timer".to_string()]),
+            ("rclone", vec!["rclone".to_string()]),
+        ] {
+            let stopped = pre_stop_units_for_package_update_with(
+                "update",
+                app,
+                "",
+                |app_id| {
+                    af_services::resolve_controllable_service_units_with(app_id, "restart", false)
+                },
+                |_unit| "running".to_string(),
+                |_unit, _action| async { Ok(()) },
+            )
+            .await
+            .unwrap();
+            assert_eq!(stopped, expected);
+        }
     }
 }

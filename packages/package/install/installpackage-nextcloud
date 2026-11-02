@@ -119,9 +119,7 @@ chmod 600 /opt/AetherFlow/logs/nextcloud_credentials.txt
 fi
 
 report_progress 90 "Configuring Apache VirtualHost on port ${APP_PORT}..."
-if ! grep -q "^Listen ${APP_PORT}$" /etc/apache2/ports.conf 2>/dev/null; then
-    echo "Listen ${APP_PORT}" >> /etc/apache2/ports.conf
-fi
+configure_apache_app_listener "$PACKAGE_NAME" "$APP_PORT"
 
 sed "s/@AF_APP_PORT@/${APP_PORT}/g" <<'EOF' > /etc/apache2/sites-available/nextcloud.conf
 Alias /nextcloud "/var/www/nextcloud/"
@@ -150,7 +148,8 @@ EOF
 
 a2enmod rewrite headers env dir mime >> "$LOGFILE" 2>&1
 a2ensite nextcloud.conf >> "$LOGFILE" 2>&1
-systemctl reload apache2 >> "$LOGFILE" 2>&1 || systemctl restart apache2 >> "$LOGFILE" 2>&1
+apache2ctl configtest >> "$LOGFILE" 2>&1
+systemctl reload apache2 >> "$LOGFILE" 2>&1
 
 write_lock "${PACKAGE_NAME}"
 report_progress 100 "Nextcloud installed on port ${APP_PORT}."

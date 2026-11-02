@@ -34,7 +34,11 @@ export interface App {
     internal_domain?: string;
     public_domain?: string;
     external_access_enabled?: boolean;
+    tls_enabled?: boolean;
     web_path?: string;
+    web_scheme?: string;
+    bind_scope?: 'loopback' | 'network' | string;
+    control_scope?: 'shared-vhost' | 'service' | string;
     progress: number;
     started_at?: string;
     log_line?: string;

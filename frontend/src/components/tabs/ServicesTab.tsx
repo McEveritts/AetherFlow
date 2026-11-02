@@ -1,6 +1,6 @@
 'use client';
 
-import { RefreshCw, Box, Settings, Globe, RotateCcw, Square, Play, Server, Cpu, X, Network, ArrowUpCircle, ExternalLink, Key, Eye, EyeOff, Copy, Check } from 'lucide-react';
+import { RefreshCw, Box, Settings, Globe, RotateCcw, Square, Play, Server, Cpu, X, Network, ArrowUpCircle, ExternalLink, Key, Eye, EyeOff, Copy, Check, AlertCircle } from 'lucide-react';
 import { useState, useEffect, useRef } from 'react';
 import useSWR, { useSWRConfig } from 'swr';
 import { useToast } from '@/contexts/ToastContext';
@@ -79,12 +79,25 @@ const SERVICE_WEB_PORTS: Record<string, number | string> = {
     'requestrr': 4545,
     'seedcross': 8019,
     'unmanic': 8888,
+    'palate': 28014,
+    'af-palate': 28014,
+    'kasmvnc': 6081,
+    'af-kasmvnc': 6081,
+    'mcvnc': 6900,
+    'af-mcvnc': 6900,
     'apache2': 443,
     'aetherflow-frontend': '/',
     'aetherflow-api': '/api/v1/admin/services',
 };
 
-interface ServiceInfo {
+export interface ServiceComponentInfo {
+    unit: string;
+    role?: string;
+    status?: string;
+    configured?: boolean;
+}
+
+export interface ServiceInfo {
     status: string;
     version: string;
     installed_version?: string;
@@ -109,9 +122,80 @@ interface ServiceInfo {
     external_access_enabled?: boolean;
     tls_enabled?: boolean;
     web_path?: string;
+    web_scheme?: string;
+    bind_scope?: 'loopback' | 'network' | string;
+    control_scope?: 'shared-vhost' | 'service' | string;
     units?: string[];
+    components?: ServiceComponentInfo[];
 }
 
+interface NormalizedUpdateCheckRecord {
+    updateAvailable: boolean;
+    installedVersion: string;
+    latestVersion: string;
+    updateUrl: string;
+    checkedAt: string;
+    error: string;
+}
+
+const LOOPBACK_IDENTIFIERS = new Set([
+    'maintainerr',
+    'af-maintainerr',
+    'af-maintainerr.service',
+    'palate',
+    'af-palate',
+    'af-palate.service',
+    'kasmvnc',
+    'af-kasmvnc',
+    'af-kasmvnc.service',
+    'mcvnc',
+    'af-mcvnc',
+    'af-mcvnc.service',
+]);
+
+const SHARED_VHOST_APP_IDS = new Set([
+    'nextcloud',
+    'rutorrent',
+    'organizr',
+]);
+
+function normalizeUpdateRecord(raw: unknown): NormalizedUpdateCheckRecord {
+    const top = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+    const nested = (top.update && typeof top.update === 'object' ? top.update : {}) as Record<string, unknown>;
+
+    const pickString = (...vals: unknown[]): string => {
+        for (const v of vals) {
+            if (typeof v === 'string' && v.trim()) {
+                return v.trim();
+            }
+        }
+        return '';
+    };
+
+    const error = pickString(
+        nested.error,
+        nested.last_error,
+        nested.update_error,
+        top.last_error,
+        top.update_error,
+        top.error
+    );
+    const rawAvailable =
+        typeof nested.update_available === 'boolean'
+            ? nested.update_available
+            : typeof top.update_available === 'boolean'
+                ? top.update_available
+                : false;
+
+    return {
+        updateAvailable: !error && rawAvailable,
+        installedVersion: pickString(nested.installed_version, top.installed_version),
+        latestVersion: pickString(nested.latest_version, top.latest_version),
+        updateUrl: pickString(nested.release_url, nested.update_url, top.update_url, top.release_url),
+        checkedAt: pickString(nested.checked_at, nested.update_checked_at, top.checked_at, top.update_checked_at),
+        error,
+    };
+}
 
 interface ServicesTabProps {
     browserOrigin?: {
@@ -129,6 +213,7 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
     const [checkingUpdates, setCheckingUpdates] = useState(false);
     const [checkingSingleService, setCheckingSingleService] = useState<string | null>(null);
     const [logsModalService, setLogsModalService] = useState<string | null>(null);
+    const [logsModalUnits, setLogsModalUnits] = useState<string[] | undefined>(undefined);
     const [ingressModalApp, setIngressModalApp] = useState<string | null>(null);
     const [revealedKeys, setRevealedKeys] = useState<Set<string>>(new Set());
     const [copiedKeyService, setCopiedKeyService] = useState<string | null>(null);
@@ -201,6 +286,28 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                     const payload = await res.json().catch(() => null);
                     await mutate();
                     globalMutate('/api/v1/public/marketplace');
+                    const records = Array.isArray(payload?.updates)
+                        ? (payload.updates as unknown[]).map((item) => normalizeUpdateRecord(item))
+                        : [];
+                    const failedRecords = records.filter((rec) => Boolean(rec.error));
+                    const availableCount =
+                        typeof payload?.updates_available === 'number'
+                            ? payload.updates_available
+                            : records.filter((rec) => rec.updateAvailable).length;
+                    if (failedRecords.length > 0) {
+                        if (availableCount > 0) {
+                            addToast(
+                                `${availableCount} update${availableCount === 1 ? '' : 's'} available; ${failedRecords.length} update check${failedRecords.length === 1 ? '' : 's'} failed.`,
+                                'info'
+                            );
+                        } else {
+                            addToast(
+                                `Update check failed for ${failedRecords.length} application${failedRecords.length === 1 ? '' : 's'}.`,
+                                'error'
+                            );
+                        }
+                        return;
+                    }
                     if (payload && typeof payload.updates_available === 'number') {
                         if (payload.updates_available > 0) {
                             addToast(`${payload.updates_available} application update${payload.updates_available === 1 ? '' : 's'} available.`, 'info');
@@ -235,12 +342,17 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                 throw new Error(d.message || d.error || 'Update check failed.');
             }
             const result = await res.json().catch(() => ({}));
+            const normalized = normalizeUpdateRecord(result);
             await mutate();
             globalMutate('/api/v1/public/marketplace');
-            if (result.update_available) {
-                addToast(`Update available for ${name}: v${(result.latest_version || '').replace(/^v/i, '')}`, 'info');
+            if (normalized.error) {
+                addToast(`Update check failed for ${name}: ${normalized.error}`, 'error');
+            } else if (normalized.updateAvailable) {
+                addToast(`Update available for ${name}: v${(normalized.latestVersion || '').replace(/^v/i, '')}`, 'info');
+            } else if (!normalized.installedVersion && !normalized.latestVersion && !normalized.checkedAt) {
+                addToast(`Update status for ${name} is unknown.`, 'error');
             } else {
-                addToast(`${name} is up to date${result.installed_version ? ` (v${result.installed_version.replace(/^v/i, '')})` : ''}.`, 'success');
+                addToast(`${name} is up to date${normalized.installedVersion ? ` (v${normalized.installedVersion.replace(/^v/i, '')})` : ''}.`, 'success');
             }
         } catch (err: unknown) {
             addToast(err instanceof Error ? err.message : 'Unable to check for updates.', 'error');
@@ -305,6 +417,13 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
             addToast('Authorization constraint: Admin privileges required for daemon control.', 'error');
             return;
         }
+        if (isSharedVhostService(name, data)) {
+            addToast(
+                `${name} runs as a shared Apache VirtualHost. Stopping or restarting it from this card is disabled to avoid interrupting other sites and the gateway.`,
+                'info'
+            );
+            return;
+        }
 
         setLoadingService(name);
 
@@ -318,14 +437,16 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
             );
         }
 
+        const canonicalTarget = (data.id || data.process || name).trim();
+        const processTarget = (data.id || data.process || name).trim();
         try {
-            const res = await apiFetch(`/api/v1/admin/services/${encodeURIComponent(name)}/control`, {
+            const res = await apiFetch(`/api/v1/admin/services/${encodeURIComponent(canonicalTarget)}/control`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     action,
                     managed_by: data.managed_by || 'systemd',
-                    process: data.process || name,
+                    process: processTarget,
                 })
             });
             if (!res.ok) {
@@ -362,7 +483,7 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
     const appServices = allEntries.filter(([, d]) => !isCorePlatformService(d as ServiceInfo));
 
     const runningCount = allEntries.filter(([, d]) => (d as ServiceInfo).status === 'running').length;
-    const updatesAvailableCount = appServices.filter(([, d]) => Boolean((d as ServiceInfo).update_available)).length;
+    const updatesAvailableCount = appServices.filter(([, d]) => Boolean((d as ServiceInfo).update_available && !(d as ServiceInfo).update_error)).length;
 
     const formatVersion = (ver?: string) => {
         if (!ver || ver === '-') return '-';
@@ -423,16 +544,73 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
         return `${'•'.repeat(12)}${trimmed.slice(-4)}`;
     };
 
-    const isMaintainerrService = (name: string, data: ServiceInfo) => {
+    const isLoopbackService = (name: string, data: ServiceInfo) => {
+        const scope = (data.bind_scope || '').trim().toLowerCase();
+        if (scope === 'loopback') return true;
+        if (scope === 'network') return false;
         const identifiers = [data.id, data.process, name]
             .filter((value): value is string => Boolean(value))
             .map((value) => value.trim().toLowerCase());
-        return identifiers.some(
-            (value) =>
-                value === 'maintainerr' ||
-                value === 'af-maintainerr' ||
-                value === 'af-maintainerr.service'
-        );
+        return identifiers.some((value) => LOOPBACK_IDENTIFIERS.has(value));
+    };
+
+    const isSharedVhostService = (name: string, data: ServiceInfo) => {
+        if (isCorePlatformService(data)) return false;
+        const scope = (data.control_scope || '').trim().toLowerCase();
+        if (scope === 'shared-vhost') return true;
+        if (scope === 'service') return false;
+        const id = (data.id || '').trim().toLowerCase();
+        if (SHARED_VHOST_APP_IDS.has(id)) return true;
+        const process = (data.process || '').trim().toLowerCase().replace(/\.service$/i, '');
+        const normalizedName = name.trim().toLowerCase();
+        if (SHARED_VHOST_APP_IDS.has(normalizedName)) return true;
+        return process === 'apache2' && id !== 'apache2';
+    };
+
+    const isExemptComponent = (comp: ServiceComponentInfo) => {
+        const unit = (comp.unit || '').trim().toLowerCase();
+        const role = (comp.role || '').trim().toLowerCase();
+        const status = (comp.status || '').trim().toLowerCase();
+        if (role === 'required' || role === 'timer' || unit.endsWith('.timer')) return false;
+        const optional = role === 'optional' || role === 'optional-mount' || (!role && (unit === 'rclone-vfs' || unit === 'rclone-vfs.service'));
+        if (optional && comp.configured !== true) return true;
+        const oneshot = role === 'oneshot' || role === 'scheduled-job' || (!role && (unit === 'recyclarr' || unit === 'recyclarr.service' || unit === 'scrutiny-collector' || unit === 'scrutiny-collector.service'));
+        if (oneshot) return status === 'stopped' || status === 'inactive' || status === 'completed' || status === 'success';
+        return false;
+    };
+
+    const isComponentHealthy = (comp: ServiceComponentInfo) => {
+        if (isExemptComponent(comp)) return true;
+        const status = (comp.status || '').trim().toLowerCase();
+        return status === 'running' || status === 'active' || status === 'listening' || status === 'exited';
+    };
+
+    const getDegradedSummary = (data: ServiceInfo): { degraded: boolean; unhealthyUnits: string[] } => {
+        const explicitDegraded = (data.status || '').trim().toLowerCase() === 'degraded';
+        const components = Array.isArray(data.components) ? data.components : [];
+        const requiredComponents = components.filter((c) => !isExemptComponent(c));
+        const unhealthyUnits = requiredComponents
+            .filter((c) => !isComponentHealthy(c))
+            .map((c) => c.unit);
+        const healthyCount = requiredComponents.length - unhealthyUnits.length;
+        const hasFailedComponent = requiredComponents.some((component) => ['failed', 'error'].includes((component.status || '').toLowerCase()));
+        const componentDegraded = requiredComponents.length > 0 && unhealthyUnits.length > 0 && (healthyCount > 0 || data.status === 'running' || explicitDegraded || hasFailedComponent);
+        return {
+            degraded: explicitDegraded || componentDegraded,
+            unhealthyUnits,
+        };
+    };
+
+    const resolveServiceLogUnits = (name: string, data: ServiceInfo): string[] => {
+        const fromComponents = Array.isArray(data.components)
+            ? data.components.map((c) => (c.unit || '').trim()).filter(Boolean)
+            : [];
+        const fromUnits = Array.isArray(data.units)
+            ? data.units.map((u) => (u || '').trim()).filter(Boolean)
+            : [];
+        const merged = Array.from(new Set([...fromComponents, ...fromUnits]));
+        if (merged.length > 0) return merged;
+        return [data.process || name];
     };
 
     const isLocalBrowserHost = (hostname: string) => {
@@ -454,8 +632,23 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
         return typeof window !== 'undefined' ? window.location.hostname || '' : '';
     };
 
+    const resolveDirectAppProtocol = (data: ServiceInfo) => {
+        const rawScheme = (data.web_scheme || '').trim().toLowerCase().replace(/:$/, '');
+        if (rawScheme === 'https' || rawScheme === 'http') {
+            return `${rawScheme}:`;
+        }
+        if (isCorePlatformService(data)) {
+            const idOrProc = (data.id || data.process || '').trim().toLowerCase();
+            if (idOrProc === 'apache2') {
+                return 'https:';
+            }
+            return resolveBrowserProtocol();
+        }
+        return 'http:';
+    };
+
     const isRemoteLoopbackRestricted = (name: string, data: ServiceInfo) => {
-        if (!isMaintainerrService(name, data)) {
+        if (!isLoopbackService(name, data)) {
             return false;
         }
         if (data.external_access_enabled && Boolean(data.public_domain?.trim())) {
@@ -468,6 +661,9 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
         return !isLocalBrowserHost(hostname);
     };
 
+    const buildRemoteLoopbackMessage = (name: string) =>
+        `${name} binds strictly to 127.0.0.1. Enable External Access with a public domain in Ingress & Deployment to open its Web UI remotely.`;
+
     const handleOpenWebUI = (name: string, data: ServiceInfo) => {
         const pathSuffix = data.web_path ? (data.web_path.startsWith('/') ? data.web_path : `/${data.web_path}`) : '';
         const publicDomain = data.public_domain?.trim();
@@ -478,15 +674,15 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
         }
         if (isRemoteLoopbackRestricted(name, data)) {
             addToast(
-                'Maintainerr binds strictly to 127.0.0.1. Enable External Access with a public domain in Ingress & Deployment to open its Web UI remotely.',
+                buildRemoteLoopbackMessage(name),
                 'info'
             );
             return;
         }
         const browserHostname = resolveBrowserHostname();
-        const useMaintainerrLoopback = isMaintainerrService(name, data) && isLocalBrowserHost(browserHostname);
-        const host = useMaintainerrLoopback ? '127.0.0.1' : browserHostname;
-        const protocol = useMaintainerrLoopback ? 'http:' : resolveBrowserProtocol();
+        const useLoopbackHost = isLoopbackService(name, data) && isLocalBrowserHost(browserHostname);
+        const host = useLoopbackHost ? '127.0.0.1' : browserHostname;
+        const protocol = resolveDirectAppProtocol(data);
         const effectivePort = data.active_port || data.default_port;
         if (effectivePort && effectivePort > 0) {
             window.open(`${protocol}//${host}:${effectivePort}${pathSuffix}`, '_blank');
@@ -496,7 +692,7 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
         const portOrPath = (data.id ? SERVICE_WEB_PORTS[data.id] : undefined) ?? SERVICE_WEB_PORTS[process];
         if (portOrPath != null) {
             const url = typeof portOrPath === 'string'
-                ? portOrPath.startsWith('/') ? `${protocol}//${host}${portOrPath}` : portOrPath
+                ? portOrPath.startsWith('/') ? `${resolveBrowserProtocol()}//${host}${portOrPath}` : portOrPath
                 : `${protocol}//${host}:${portOrPath}`;
             window.open(url, '_blank');
         } else {
@@ -520,21 +716,27 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
             data.status === 'updating' ||
             data.job_status === 'updating' ||
             (appId ? updatingServices.has(appId) : false);
-        const isRunning = data.status === 'running' && !isUpdating;
+        const { degraded: isDegraded, unhealthyUnits } = getDegradedSummary(data);
+        const isRunning = (data.status === 'running' || isDegraded) && !isUpdating;
         const isError = data.status === 'error';
         const isBusy = loadingService === name || isUpdating;
         const controlDisabled = isBusy || !canControlServices;
+        const sharedVhost = isSharedVhostService(name, data);
+        const sharedVhostMessage = `${name} runs on the shared Apache web server. Per-app stop/restart is disabled to protect other sites and the gateway.`;
+        const daemonControlDisabled = controlDisabled || sharedVhost;
         const webAvailable = hasWebUI(data);
         const remoteLoopbackBlocked = isRemoteLoopbackRestricted(name, data);
-        const remoteLoopbackMessage = 'Maintainerr binds strictly to 127.0.0.1. Enable External Access with a public domain in Ingress & Deployment to open its Web UI remotely.';
-        const hasUpdate = Boolean(!isCore && data.update_available);
+        const remoteLoopbackMessage = buildRemoteLoopbackMessage(name);
+        const hasUpdate = Boolean(!isCore && data.update_available && !data.update_error);
+        const updateError = !isCore && data.update_error ? data.update_error.trim() : '';
         const installedVer = data.installed_version || data.version || '-';
         const latestVer = data.latest_version;
         const isCheckingThis = checkingSingleService === name;
+        const serviceLogUnits = resolveServiceLogUnits(name, data);
 
         return (
-            <div key={name} className={`glass-card relative bg-slate-950/80 border rounded-2xl p-6 transition-all group cursor-default overflow-hidden ${hasUpdate ? 'border-amber-500/30 hover:border-amber-400/60' : 'border-white/10 hover:border-indigo-500/50'}`}>
-                <div className={`absolute top-0 left-0 w-1 h-full ${isUpdating ? 'bg-amber-400 animate-pulse' : (hasUpdate ? 'bg-amber-500/70' : (isRunning ? 'bg-emerald-500/50' : (isError ? 'bg-red-500/50' : 'bg-slate-500/50')))} transition-colors z-20`}></div>
+            <div key={name} className={`glass-card relative bg-slate-950/80 border rounded-2xl p-6 transition-all group cursor-default overflow-hidden ${hasUpdate || isDegraded ? 'border-amber-500/30 hover:border-amber-400/60' : 'border-white/10 hover:border-indigo-500/50'}`}>
+                <div className={`absolute top-0 left-0 w-1 h-full ${isUpdating ? 'bg-amber-400 animate-pulse' : (isDegraded ? 'bg-amber-500' : (hasUpdate ? 'bg-amber-500/70' : (isRunning ? 'bg-emerald-500/50' : (isError ? 'bg-red-500/50' : 'bg-slate-500/50'))))} transition-colors z-20`}></div>
 
                 {isUpdating && (
                     <div className="absolute inset-0 bg-slate-950/90 backdrop-blur-md rounded-2xl z-30 flex items-center justify-center p-6 text-center">
@@ -581,10 +783,28 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                             </div>
                             <div className="flex items-center gap-2 mt-1 flex-wrap">
                                 <span className="relative flex h-2 w-2">
-                                    {isRunning && <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>}
-                                    <span className={`relative inline-flex rounded-full h-2 w-2 ${isUpdating ? 'bg-amber-400' : (isRunning ? 'bg-emerald-500' : (isError ? 'bg-red-500' : 'bg-slate-500'))}`}></span>
+                                    {isRunning && !isDegraded && <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>}
+                                    <span className={`relative inline-flex rounded-full h-2 w-2 ${isUpdating || isDegraded ? 'bg-amber-400' : (isRunning ? 'bg-emerald-500' : (isError ? 'bg-red-500' : 'bg-slate-500'))}`}></span>
                                 </span>
-                                <span className="text-xs font-medium text-slate-400 capitalize">{isUpdating ? 'updating' : data.status}</span>
+                                <span className={`text-xs font-medium capitalize ${isDegraded ? 'text-amber-400' : 'text-slate-400'}`}>
+                                    {isUpdating ? 'updating' : (isDegraded ? 'degraded' : data.status)}
+                                </span>
+                                {isDegraded && unhealthyUnits.length > 0 && (
+                                    <span
+                                        className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30 font-mono"
+                                        title={`Unhealthy required components: ${unhealthyUnits.join(', ')}`}
+                                    >
+                                        {unhealthyUnits.join(', ')} down
+                                    </span>
+                                )}
+                                {sharedVhost && (
+                                    <span
+                                        className="text-[10px] px-1.5 py-0.5 rounded bg-white/5 text-slate-400 border border-white/10 uppercase tracking-wider"
+                                        title={sharedVhostMessage}
+                                    >
+                                        shared vhost
+                                    </span>
+                                )}
                                 {data.managed_by && (
                                     <span className="text-[10px] px-1.5 py-0.5 rounded bg-white/5 text-slate-500 border border-white/5 uppercase tracking-wider">
                                         {data.managed_by}
@@ -664,6 +884,15 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                                                     → {formatVersion(latestVer)}
                                                 </span>
                                             )
+                                        )}
+                                        {!hasUpdate && updateError && (
+                                            <span
+                                                className="inline-flex items-center gap-1 text-[10px] font-semibold text-red-400 bg-red-500/10 border border-red-500/20 px-1.5 py-0.5 rounded"
+                                                title={`Update check failed: ${updateError}`}
+                                            >
+                                                <AlertCircle size={10} />
+                                                Check failed
+                                            </span>
                                         )}
                                     </div>
                                 </div>
@@ -760,7 +989,10 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                             )}
                             <RequireClaim>
                                 <button
-                                    onClick={() => setLogsModalService(data.process || name)}
+                                    onClick={() => {
+                                        setLogsModalUnits(serviceLogUnits);
+                                        setLogsModalService(serviceLogUnits[0] || data.process || name);
+                                    }}
                                     disabled={controlDisabled}
                                     title={canControlServices ? 'View live logs' : 'Admin access required'}
                                     className="obs-touch-target-standard obs-gpu-120hz-interactive p-2.5 bg-slate-800/80 hover:bg-indigo-500/20 hover:text-indigo-400 text-slate-400 rounded-lg transition-colors disabled:opacity-50 flex items-center justify-center"
@@ -769,16 +1001,16 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                                 </button>
                                 <button
                                     onClick={() => handleServiceControl(name, data, 'restart')}
-                                    disabled={controlDisabled}
-                                    title={canControlServices ? 'Restart service' : 'Admin access required'}
+                                    disabled={daemonControlDisabled}
+                                    title={!canControlServices ? 'Admin access required' : (sharedVhost ? sharedVhostMessage : 'Restart service')}
                                     className="obs-touch-target-standard obs-gpu-120hz-interactive p-2.5 bg-slate-800/80 hover:bg-amber-500/20 hover:text-amber-400 text-slate-400 rounded-lg transition-colors disabled:opacity-50 flex items-center justify-center"
                                 >
                                     <RotateCcw size={16} className={isBusy ? 'animate-spin' : ''} />
                                 </button>
                                 <button
                                     onClick={() => handleServiceControl(name, data, 'stop')}
-                                    disabled={controlDisabled}
-                                    title={canControlServices ? 'Stop service' : 'Admin access required'}
+                                    disabled={daemonControlDisabled}
+                                    title={!canControlServices ? 'Admin access required' : (sharedVhost ? sharedVhostMessage : 'Stop service')}
                                     className="obs-touch-target-standard obs-gpu-120hz-interactive p-2.5 bg-slate-800/80 hover:bg-red-500/20 hover:text-red-400 text-slate-400 rounded-lg transition-colors disabled:opacity-50 flex items-center justify-center"
                                 >
                                     <Square size={16} className="fill-current" />
@@ -789,8 +1021,8 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                         <RequireClaim>
                             <button
                                 onClick={() => handleServiceControl(name, data, 'start')}
-                                disabled={controlDisabled}
-                                title={canControlServices ? 'Start service' : 'Admin access required'}
+                                disabled={daemonControlDisabled}
+                                title={!canControlServices ? 'Admin access required' : (sharedVhost ? sharedVhostMessage : 'Start service')}
                                 className="obs-touch-target-standard obs-gpu-120hz-interactive w-full py-2.5 bg-indigo-500/20 hover:bg-indigo-500 text-indigo-300 hover:text-white text-xs font-semibold rounded-lg transition-colors flex items-center justify-center gap-2 border border-indigo-500/30 disabled:opacity-50"
                             >
                                 <Play size={14} className="fill-current" /> {isBusy ? 'Starting...' : 'Start Service'}
@@ -871,7 +1103,11 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
 
             <ServiceLogsModal 
                 serviceName={logsModalService} 
-                onClose={() => setLogsModalService(null)} 
+                units={logsModalUnits}
+                onClose={() => {
+                    setLogsModalService(null);
+                    setLogsModalUnits(undefined);
+                }}
             />
 
             {ingressModalApp && (

@@ -22,18 +22,14 @@ report_progress 25 "Disabling Apache Organizr site..."
 
 a2dissite organizr.conf >> "$LOGFILE" 2>&1 || true
 rm -f /etc/apache2/sites-available/organizr.conf /etc/apache2/sites-enabled/organizr.conf /etc/apache2/conf-available/organizr.conf /etc/apache2/conf-enabled/organizr.conf
-if [[ -f /etc/apache2/ports.conf ]]; then
-    sed -i '/^Listen 8086$/d' /etc/apache2/ports.conf || true
-fi
-rm -f /etc/systemd/system/apache2.service.d/10-aetherflow-sandbox.conf
-rmdir /etc/systemd/system/apache2.service.d 2>/dev/null || true
+remove_apache_app_listener "$PACKAGE_NAME"
 
 report_progress 65 "Removing Organizr webroot and reloading Apache..."
 if [[ "${DELETE_DATA:-false}" == true ]]; then
     rm -rf /var/www/organizr
 fi
-systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
-systemctl reload apache2 >> "$LOGFILE" 2>&1 || true
+apache2ctl configtest >> "$LOGFILE" 2>&1
+systemctl reload apache2 >> "$LOGFILE" 2>&1
 
 remove_lock "${PACKAGE_NAME}"
 report_progress 100 "Organizr removed; application data retained unless DELETE_DATA=true."

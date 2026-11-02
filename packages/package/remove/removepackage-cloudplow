@@ -1,14 +1,11 @@
 #!/bin/bash
-# AetherFlow Package Uninstaller: Cloudplow
 
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ -f "${SELF_DIR}/../../common.sh" ]]; then
-    # shellcheck source=/dev/null
     source "${SELF_DIR}/../../common.sh"
 else
-    # shellcheck source=/dev/null
     source /opt/AetherFlow/packages/common.sh
 fi
 
@@ -23,7 +20,7 @@ report_progress 25 "Stopping and removing cloudplow.service..."
 purge_systemd_unit "cloudplow"
 
 report_progress 65 "Removing Cloudplow virtualenv, configurations, and logs..."
-rm -rf /var/log/cloudplow
+rm -rf /var/log/cloudplow /opt/cloudplow/.venv
 if [[ "${DELETE_DATA:-false}" == true ]]; then
     rm -rf /opt/cloudplow
 fi

@@ -22,11 +22,7 @@ report_progress 20 "Disabling Apache Nextcloud site..."
 
 a2dissite nextcloud.conf >> "$LOGFILE" 2>&1 || true
 rm -f /etc/apache2/sites-available/nextcloud.conf /etc/apache2/sites-enabled/nextcloud.conf /etc/apache2/conf-available/nextcloud.conf /etc/apache2/conf-enabled/nextcloud.conf
-if [[ -f /etc/apache2/ports.conf ]]; then
-    sed -i '/^Listen 8088$/d' /etc/apache2/ports.conf || true
-fi
-rm -f /etc/systemd/system/apache2.service.d/10-aetherflow-sandbox.conf
-rmdir /etc/systemd/system/apache2.service.d 2>/dev/null || true
+remove_apache_app_listener "$PACKAGE_NAME"
 
 report_progress 50 "Dropping Nextcloud database and user..."
 if [[ "${DELETE_DATA:-false}" == true ]] && command_exists mysql; then
@@ -44,8 +40,8 @@ fi
 if [[ "${DELETE_DATA:-false}" == true ]]; then
     rm -f /opt/AetherFlow/logs/nextcloud_credentials.txt
 fi
-systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
-systemctl reload apache2 >> "$LOGFILE" 2>&1 || true
+apache2ctl configtest >> "$LOGFILE" 2>&1
+systemctl reload apache2 >> "$LOGFILE" 2>&1
 
 remove_lock "${PACKAGE_NAME}"
 report_progress 100 "Nextcloud removed; application data retained unless DELETE_DATA=true."

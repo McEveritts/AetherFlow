@@ -42,9 +42,7 @@ chown -R www-data:www-data /var/www/organizr
 chmod -R 775 /var/www/organizr
 
 report_progress 80 "Configuring Apache VirtualHost on port ${APP_PORT}..."
-if ! grep -q "^Listen ${APP_PORT}$" /etc/apache2/ports.conf 2>/dev/null; then
-    echo "Listen ${APP_PORT}" >> /etc/apache2/ports.conf
-fi
+configure_apache_app_listener "$PACKAGE_NAME" "$APP_PORT"
 
 sed "s/@AF_APP_PORT@/${APP_PORT}/g" <<'EOF' > /etc/apache2/sites-available/organizr.conf
 Alias /organizr "/var/www/organizr"
@@ -70,7 +68,8 @@ EOF
 a2enmod rewrite headers env dir mime >> "$LOGFILE" 2>&1
 a2ensite organizr.conf >> "$LOGFILE" 2>&1
 systemctl enable --now apache2 >> "$LOGFILE" 2>&1
-systemctl reload apache2 >> "$LOGFILE" 2>&1 || systemctl restart apache2 >> "$LOGFILE" 2>&1
+apache2ctl configtest >> "$LOGFILE" 2>&1
+systemctl reload apache2 >> "$LOGFILE" 2>&1
 
 write_lock "${PACKAGE_NAME}"
 report_progress 100 "Organizr installed on port ${APP_PORT}."

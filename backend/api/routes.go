@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	_ "aetherflow/docs"
 	"aetherflow/db"
+	_ "aetherflow/docs"
 	"aetherflow/services"
 	"aetherflow/web"
 
@@ -336,7 +336,7 @@ func registerV1Routes(apiGroup *gin.RouterGroup) {
 
 	// Compatibility aliases for frontend and legacy routing (api/ingress)
 	apiGroup.GET("/deploy/stream", AuthMiddleware(), HandleDeployStream)
-	apiGroup.GET("/ingress/configs", AuthMiddleware(), GetIngressConfigs) // api/ingress/configs
+	apiGroup.GET("/ingress/configs", AuthMiddleware(), GetIngressConfigs)            // api/ingress/configs
 	apiGroup.PUT("/ingress/apps/:appName", AuthMiddleware(), UpdateAppIngressConfig) // api/ingress/apps
 	apiGroup.GET("/fs", AuthMiddleware(), BrowseDirectories)
 }
@@ -377,6 +377,11 @@ func controlService(c *gin.Context) {
 		target = serviceName
 	}
 
+	if services.AppControlScope(serviceName) == "shared-vhost" || services.AppControlScope(target) == "shared-vhost" {
+		BadRequest(c, "This application shares Apache; manage its site instead of stopping the shared daemon")
+		return
+	}
+
 	var err error
 	if req.ManagedBy == "pm2" {
 		err = services.ControlPM2Service(target, req.Action)
@@ -415,4 +420,3 @@ func controlService(c *gin.Context) {
 		"action":  req.Action,
 	})
 }
-

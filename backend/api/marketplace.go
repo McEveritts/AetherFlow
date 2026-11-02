@@ -29,10 +29,11 @@ type App struct {
 	InternalDomain        string  `json:"internal_domain,omitempty"`
 	PublicDomain          string  `json:"public_domain,omitempty"`
 	ExternalAccessEnabled bool    `json:"external_access_enabled,omitempty"`
+	TLSEnabled            bool    `json:"tls_enabled"`
 	WebPath               string  `json:"web_path,omitempty"`
-	Progress              int     `json:"progress"`              // 0-100 estimated install progress
-	StartedAt             *string `json:"started_at,omitempty"`  // ISO timestamp when install started
-	LogLine               string  `json:"log_line,omitempty"`    // most recent log line
+	Progress              int     `json:"progress"`             // 0-100 estimated install progress
+	StartedAt             *string `json:"started_at,omitempty"` // ISO timestamp when install started
+	LogLine               string  `json:"log_line,omitempty"`   // most recent log line
 	InstalledVersion      string  `json:"installed_version,omitempty"`
 	LatestVersion         string  `json:"latest_version,omitempty"`
 	UpdateAvailable       bool    `json:"update_available"`
@@ -66,12 +67,14 @@ func GetMarketplaceApps(c *gin.Context) {
 		}
 		var publicDomain string
 		var externalAccess bool
+		tlsEnabled := true
 		if ing, ok := ingressMap[p.Name]; ok {
 			if ing.ListenPort > 0 {
 				activePort = ing.ListenPort
 			}
 			publicDomain = ing.PublicDomain
 			externalAccess = ing.ExternalAccessEnabled
+			tlsEnabled = ing.TLSEnabled
 		}
 		if publicDomain == "" && baseDomain != "" && activePort > 0 {
 			publicDomain = services.FormatAppPublicDomain(p.Name, baseDomain)
@@ -92,6 +95,7 @@ func GetMarketplaceApps(c *gin.Context) {
 			InternalDomain:        internalDomain,
 			PublicDomain:          publicDomain,
 			ExternalAccessEnabled: externalAccess,
+			TLSEnabled:            tlsEnabled,
 			WebPath:               p.WebPath,
 			InstalledVersion:      p.InstalledVersion,
 			LatestVersion:         p.LatestVersion,

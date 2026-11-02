@@ -32,7 +32,7 @@ fi
 report_progress 10 "Installing KasmVNC prerequisites and XFCE desktop..."
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq >> "$LOGFILE" 2>&1
-apt-get install --no-remove -y -qq curl ca-certificates jq openssl ssl-cert xfce4 xfce4-terminal dbus-x11 xauth >> "$LOGFILE" 2>&1
+apt-get install --no-remove -y -qq python3 curl ca-certificates jq openssl ssl-cert xfce4 xfce4-terminal dbus-x11 xauth >> "$LOGFILE" 2>&1
 
 report_progress 30 "Resolving the matching KasmVNC release..."
 TMP_DIR="$(mktemp -d /tmp/af-kasmvnc-XXXXXX)"
@@ -77,7 +77,34 @@ fi
 chmod 600 "${DATA_DIR}/.kasmpasswd"
 chown af-kasmvnc:af-kasmvnc "${DATA_DIR}/.kasmpasswd"
 
-cat > "${DATA_DIR}/.vnc/kasmvnc.yaml" <<EOF
+if [[ -f "${DATA_DIR}/.vnc/kasmvnc.yaml" ]]; then
+    python3 - "${DATA_DIR}/.vnc/kasmvnc.yaml" "$APP_PORT" <<'PYEOF'
+import re, sys
+cfg_path, port = sys.argv[1], sys.argv[2]
+with open(cfg_path, "r", encoding="utf-8") as f:
+    text = f.read()
+lines = text.splitlines(keepends=True)
+network = next((index for index, line in enumerate(lines) if re.match(r"^network:[ \t]*(?:#.*)?$", line.rstrip("\r\n"))), None)
+if network is None:
+    if re.search(r"^network:", text, re.MULTILINE):
+        raise SystemExit("KasmVNC network settings must be a YAML block mapping")
+    text = text.rstrip("\n") + f"\nnetwork:\n  websocket_port: {port}\n"
+else:
+    end = next((index for index in range(network + 1, len(lines)) if re.match(r"^[^ \t#\r\n]", lines[index])), len(lines))
+    setting = next((index for index in range(network + 1, end) if re.match(r"^[ \t]+websocket_port:", lines[index])), None)
+    if setting is None:
+        if not lines[network].endswith("\n"):
+            lines[network] += "\n"
+        lines.insert(network + 1, f"  websocket_port: {port}\n")
+    else:
+        indentation = re.match(r"^[ \t]+", lines[setting]).group()
+        lines[setting] = f"{indentation}websocket_port: {port}\n"
+    text = "".join(lines)
+with open(cfg_path, "w", encoding="utf-8") as f:
+    f.write(text)
+PYEOF
+else
+    cat > "${DATA_DIR}/.vnc/kasmvnc.yaml" <<EOF
 network:
   interface: 127.0.0.1
   websocket_port: ${APP_PORT}
@@ -87,6 +114,7 @@ network:
 command_line:
   prompt: false
 EOF
+fi
 cat > "${DATA_DIR}/.vnc/xstartup" <<'EOF'
 #!/bin/sh
 unset SESSION_MANAGER

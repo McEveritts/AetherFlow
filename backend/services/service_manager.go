@@ -145,6 +145,9 @@ func GetActiveServices() map[string]interface{} {
 		}
 
 		entry := gin.H{
+			"web_scheme":              "http",
+			"bind_scope":              AppBindScope(pkg.Name),
+			"control_scope":           AppControlScope(pkg.Name),
 			"status":                  status,
 			"uptime":                  uptime,
 			"version":                 version,

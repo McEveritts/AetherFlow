@@ -57,9 +57,12 @@ elif command == 'sudo':
 elif command == 'systemctl':
     if args[0] == 'stop':
         (root / 'stopped').touch()
+elif command == 'apache2ctl':
+    if os.environ.get('FAIL_STAGE') == 'apache-config':
+        sys.exit(1)
 elif command == 'openssl':
     print('test-database-password')
-elif command in ('apt-get', 'id', 'chown', 'a2enmod', 'a2ensite', 'useradd', 'userdel', 'groupdel'):
+elif command in ('apt-get', 'id', 'chown', 'a2enmod', 'a2ensite', 'a2dissite', 'apache2ctl', 'useradd', 'userdel', 'groupdel', 'su'):
     pass
 else:
     raise RuntimeError((command, args))
@@ -76,7 +79,7 @@ class MarketplaceLifecycleTests(unittest.TestCase):
                           'etc/apache2/sites-available', 'usr/local/bin', 'srv', 'install'):
             (self.root / directory).mkdir(parents=True)
         for command in ('dpkg', 'curl', 'git', 'npm', 'mysql', 'sudo', 'systemctl',
-                        'openssl', 'apt-get', 'id', 'chown', 'a2enmod', 'a2ensite', 'useradd', 'userdel', 'groupdel'):
+                        'openssl', 'apt-get', 'id', 'chown', 'a2enmod', 'a2ensite', 'a2dissite', 'apache2ctl', 'useradd', 'userdel', 'groupdel', 'su'):
             path = self.root / 'mock-bin' / command
             path.write_text(MOCK)
             path.chmod(0o755)
@@ -119,7 +122,7 @@ purge_systemd_unit() { :; }
         script.write_text(source)
         return subprocess.run(['bash', str(script)], env={
             **os.environ, 'PATH': f"{self.root}/mock-bin:{os.environ['PATH']}",
-            'TEST_ROOT': str(self.root), 'AF_PACKAGE_ACTION': 'update', **environment,
+            'TEST_ROOT': str(self.root), 'AETHERFLOW_APACHE_ROOT': str(self.root / 'etc/apache2'), 'AF_PACKAGE_ACTION': 'update', **environment,
         }, text=True, capture_output=True, timeout=30)
 
     def assert_success(self, result):
@@ -190,6 +193,20 @@ purge_systemd_unit() { :; }
                 self.assertTrue((self.root / f'var/www/{package}/new-code').exists())
                 self.assertIn('*:17701', (self.root / f'etc/apache2/sites-available/{package}.conf').read_text())
 
+    def test_helper_cohort_removal_retains_data_unless_purge_is_explicit(self):
+        for package in ('dispatcharr', 'duplicati', 'novnc'):
+            for purge in (False, True):
+                with self.subTest(package=package, purge=purge):
+                    config = self.file(f'etc/{package}/retained-secret', 'keep-secret')
+                    data = self.file(f'var/lib/{package}/retained-state', 'keep-state')
+                    result = self.run_script(package, 'remove', DELETE_DATA=str(purge).lower())
+                    self.assert_success(result)
+                    self.assertEqual(config.exists(), not purge)
+                    self.assertEqual(data.exists(), not purge)
+                    if not purge:
+                        self.assertEqual(config.read_text(), 'keep-secret')
+                        self.assertEqual(data.read_text(), 'keep-state')
+
     def test_port_configuration_preserves_other_settings(self):
         cases = [
             ('yaml', 'port', 'general', 'general:\n  port: 6767\n  password: keep\nother:\n  port: 1234\n'),
@@ -246,6 +263,34 @@ purge_systemd_unit() { :; }
         self.assert_success(self.run_script('gitea', action='remove', DELETE_DATA='true'))
         self.assertFalse(data.exists())
         self.assertFalse(config.exists())
+
+
+    def test_php_apps_never_restart_shared_apache(self):
+        for app in ('rutorrent', 'organizr'):
+            with self.subTest(app=app):
+                self.assert_success(self.run_script(app, AF_APP_PORT='17899'))
+                commands = (self.root / 'commands').read_text()
+                self.assertNotIn('systemctl restart apache2', commands)
+                self.assertIn('apache2ctl configtest', commands)
+                listener = self.root / f'etc/apache2/conf-available/aetherflow-{app}-listen.conf'
+                self.assertEqual(listener.read_text(), 'Listen 17899\n')
+
+    def test_apache_config_failure_does_not_fallback_to_restart(self):
+        result = self.run_script('organizr', FAIL_STAGE='apache-config')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn('systemctl restart apache2', (self.root / 'commands').read_text())
+        self.assertFalse((self.root / 'install/.organizr.lock').exists())
+
+    def test_apache_removal_preserves_shared_listener_and_hardening(self):
+        for app in ('nextcloud', 'rutorrent', 'organizr'):
+            with self.subTest(app=app):
+                ports = self.file('etc/apache2/ports.conf', 'Listen 80\nListen 8088\nListen 17899\n')
+                sandbox = self.file('etc/systemd/system/apache2.service.d/10-aetherflow-sandbox.conf', 'shared hardening')
+                owned = self.file(f'etc/apache2/conf-available/aetherflow-{app}-listen.conf', 'Listen 17899\n')
+                self.assert_success(self.run_script(app, action='remove'))
+                self.assertEqual(ports.read_text(), 'Listen 80\nListen 8088\nListen 17899\n')
+                self.assertEqual(sandbox.read_text(), 'shared hardening')
+                self.assertFalse(owned.exists())
 
 
 if __name__ == '__main__':

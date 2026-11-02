@@ -342,20 +342,29 @@ export default function MarketplaceTab() {
                                     )}
                                     {app.status === 'installed' && app.public_domain && (
                                         <a
-                                            href={`https://${app.public_domain}${app.web_path ? (app.web_path.startsWith('/') ? app.web_path : `/${app.web_path}`) : ''}`}
+                                            href={`${app.tls_enabled === false ? 'http:' : 'https:'}//${app.public_domain}${app.web_path ? (app.web_path.startsWith('/') ? app.web_path : `/${app.web_path}`) : ''}`}
                                             target="_blank"
                                             rel="noopener noreferrer"
                                             className="inline-flex items-center gap-1.5 text-[10px] bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-300 px-3 py-1 rounded-full border border-indigo-500/20 font-mono transition-colors"
-                                            title={`Open https://${app.public_domain}`}
+                                            title={`Open ${app.tls_enabled === false ? 'http' : 'https'}://${app.public_domain}`}
                                         >
                                             <Globe size={10} className="text-indigo-400" />
                                             {app.public_domain}
                                         </a>
                                     )}
-                                    {app.update_available && (
+                                    {app.update_available && !app.update_error && (
                                         <span className="inline-flex items-center gap-1.5 text-[10px] bg-amber-500/10 text-amber-400 px-3 py-1 rounded-full border border-amber-500/20 font-black uppercase tracking-tighter">
                                             <RefreshCw size={10} className="animate-spin-slow" />
                                             v{app.latest_version || 'Update'}
+                                        </span>
+                                    )}
+                                    {app.update_error && (
+                                        <span
+                                            className="inline-flex items-center gap-1.5 text-[10px] bg-red-500/10 text-red-400 px-3 py-1 rounded-full border border-red-500/20 font-black uppercase tracking-tighter"
+                                            title={`Update check failed: ${app.update_error}`}
+                                        >
+                                            <AlertCircle size={10} />
+                                            Check failed
                                         </span>
                                     )}
                                 </div>
@@ -386,7 +395,7 @@ export default function MarketplaceTab() {
                                                     <Globe size={14} />
                                                 </button>
                                             )}
-                                            {effectiveStatus === 'installed' && app.update_available && (
+                                            {effectiveStatus === 'installed' && app.update_available && !app.update_error && (
                                                 <button
                                                     onClick={() => busy ? null : handleUpdate(app)}
                                                     disabled={busy}

@@ -43,16 +43,52 @@ func UpdateAppIngressConfig(c *gin.Context) {
 		return
 	}
 
-	var req struct {
-		PublicDomain          string `json:"publicDomain"`
-		ExternalAccessEnabled bool   `json:"externalAccessEnabled"`
-		ListenPort            int    `json:"listenPort"`
-		TLSEnabled            bool   `json:"tlsEnabled"`
+	var input struct {
+		PublicDomain          *string `json:"publicDomain"`
+		ExternalAccessEnabled *bool   `json:"externalAccessEnabled"`
+		ListenPort            *int    `json:"listenPort"`
+		TLSEnabled            *bool   `json:"tlsEnabled"`
 	}
 
-	if err := c.ShouldBindJSON(&req); err != nil {
+	if err := c.ShouldBindJSON(&input); err != nil {
 		BadRequest(c, err.Error())
 		return
+	}
+	existing, err := db.GetAppIngressConfig(appName)
+	if err != nil {
+		InternalError(c, "Failed to read existing ingress configuration")
+		return
+	}
+	var req struct {
+		PublicDomain          string
+		ExternalAccessEnabled bool
+		ListenPort            int
+		TLSEnabled            bool
+	}
+	if existing != nil {
+		req.PublicDomain = existing.PublicDomain
+		req.ExternalAccessEnabled = existing.ExternalAccessEnabled
+		req.TLSEnabled = existing.TLSEnabled
+	}
+	if input.PublicDomain != nil {
+		req.PublicDomain = *input.PublicDomain
+	}
+	if input.ExternalAccessEnabled != nil {
+		req.ExternalAccessEnabled = *input.ExternalAccessEnabled
+	}
+	if existing == nil {
+		if input.ExternalAccessEnabled == nil {
+			req.ExternalAccessEnabled = strings.TrimSpace(req.PublicDomain) != ""
+		}
+		if input.TLSEnabled == nil {
+			req.TLSEnabled = strings.TrimSpace(req.PublicDomain) != ""
+		}
+	}
+	if input.ListenPort != nil {
+		req.ListenPort = *input.ListenPort
+	}
+	if input.TLSEnabled != nil {
+		req.TLSEnabled = *input.TLSEnabled
 	}
 
 	// Validate publicDomain format and requirements
@@ -88,6 +124,16 @@ func UpdateAppIngressConfig(c *gin.Context) {
 		}
 	}
 
+	currentPort := 0
+	if existing != nil && existing.ListenPort > 0 {
+		currentPort = existing.ListenPort
+	} else if bp := services.GetBlueprint(appName); bp != nil {
+		currentPort = bp.DefaultPort
+	}
+	if listenPort != currentPort {
+		RespondError(c, http.StatusConflict, "PORT_RECONFIGURATION_UNSUPPORTED", "Native listen-port changes require verified package reconfiguration; the existing mapping was preserved")
+		return
+	}
 	cfg := models.AppIngressConfig{
 		AppName:               appName,
 		PublicDomain:          strings.TrimSpace(req.PublicDomain),
@@ -110,9 +156,6 @@ func UpdateAppIngressConfig(c *gin.Context) {
 	}
 
 	// Sync blueprint native config, networking DNS providers (Pi-hole / dnsmasq), and Apache Let's Encrypt SANs
-	if bp := services.GetBlueprint(appName); bp != nil {
-		_, _, _ = services.ApplyBlueprintAppConfig(bp, listenPort)
-	}
 	_, _ = services.SyncNetworkDNSProviders()
 	if cfg.ExternalAccessEnabled && cfg.PublicDomain != "" {
 		services.TriggerApacheCertSync()
@@ -237,4 +280,3 @@ func AppSubdomainProxyMiddleware() gin.HandlerFunc {
 		c.Abort()
 	}
 }
-

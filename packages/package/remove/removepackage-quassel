@@ -16,27 +16,29 @@ fi
 
 require_root
 
+PACKAGE_NAME="quassel"
 APP_NAME="quassel"
 DATA_DIR="/var/lib/quassel"
 LOG_DIR="/var/log/quassel"
-LOCK_FILE="/install/.quassel.lock"
+export LOGFILE="/var/log/aetherflow/remove-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")"
 
-setup_log "${APP_NAME}-remove"
-log "Removing ${APP_NAME}..."
+log_info "Removing ${APP_NAME}..."
 report_progress 20 "Stopping quasselcore service..."
 
-stop_disable_service "quasselcore.service"
-systemctl daemon-reload
+purge_systemd_unit "quasselcore"
+systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
 
 report_progress 60 "Removing quassel-core package..."
-apt-get remove -y quassel-core >> "${LOG_FILE}" 2>&1 || true
-rm -f "${DATA_DIR}/.af-version"
+DEBIAN_FRONTEND=noninteractive apt-get remove -y quassel-core >> "$LOGFILE" 2>&1 || true
+rm -f "${DATA_DIR}/.af-version" /etc/default/quasselcore
 
 if [[ "${DELETE_DATA:-false}" == "true" ]]; then
-    log "DELETE_DATA=true: Purging ${DATA_DIR} and ${LOG_DIR}..."
+    log_info "DELETE_DATA=true: Purging ${DATA_DIR} and ${LOG_DIR}..."
     rm -rf "${DATA_DIR}" "${LOG_DIR}"
+    purge_system_user "quasselcore"
 fi
 
-remove_lock "${LOCK_FILE}"
+remove_lock "${PACKAGE_NAME}"
 report_progress 100 "${APP_NAME} removed"
-log "${APP_NAME} removal complete."
+log_info "${PACKAGE_NAME} removed successfully"

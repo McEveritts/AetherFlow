@@ -10,27 +10,36 @@ import FlowAiMarkdown from '@/components/ui/FlowAiMarkdown';
 
 interface ServiceLogsModalProps {
     serviceName: string | null;
+    units?: string[];
     onClose: () => void;
 }
 
-export default function ServiceLogsModal({ serviceName, onClose }: ServiceLogsModalProps) {
+export default function ServiceLogsModal({ serviceName, units, onClose }: ServiceLogsModalProps) {
     const bottomRef = useRef<HTMLDivElement>(null);
     const { addToast } = useToast();
     const [isAnalyzing, setIsAnalyzing] = useState(false);
     const [aiAnalysis, setAiAnalysis] = useState<{ rootCause: string, recommendation: string, hasError: boolean, proposedAction?: AIProposedAction } | null>(null);
     const [showRemediationBoundary, setShowRemediationBoundary] = useState(false);
+    const normalizedUnits = Array.from(
+        new Set(
+            (units && units.length > 0 ? units : serviceName ? [serviceName] : [])
+                .map((u) => u.trim())
+                .filter(Boolean)
+        )
+    );
+    const [selectedUnit, setSelectedUnit] = useState<string | null>(null);
+    const activeUnit = selectedUnit && normalizedUnits.includes(selectedUnit)
+        ? selectedUnit
+        : normalizedUnits[0] || serviceName;
 
-    // Using SWR to poll logs every 2 seconds
     const { data: rawData, error, isLoading, mutate } = useSWR<{ logs: { message: string }[] }>(
-        serviceName ? `/api/v1/admin/logs?unit=${encodeURIComponent(serviceName)}` : null,
-        { refreshInterval: 2000, keepPreviousData: true } // Stream-like polling
+        activeUnit ? `/api/v1/admin/logs?unit=${encodeURIComponent(activeUnit)}` : null,
+        { refreshInterval: 2000, keepPreviousData: true }
     );
 
     
-    // Map raw backend format to legacy string array until UI is updated
     const logs = rawData ? { logs: rawData.logs.map(l => l.message) } : null;
 
-    // Auto-scroll to bottom on fresh logs
     useEffect(() => {
         if (logs?.logs && bottomRef.current) {
             bottomRef.current.scrollIntoView({ behavior: 'smooth' });
@@ -45,7 +54,7 @@ export default function ServiceLogsModal({ serviceName, onClose }: ServiceLogsMo
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = `${serviceName}-stream.log`;
+        a.download = `${activeUnit || serviceName}-stream.log`;
         a.click();
         URL.revokeObjectURL(url);
     };
@@ -56,7 +65,7 @@ export default function ServiceLogsModal({ serviceName, onClose }: ServiceLogsMo
         setAiAnalysis(null);
         
         try {
-            const prompt = `Analyze the following terminal output for the service '${serviceName}'. Identify the root cause of any errors and recommend remediation steps. Do not start a conversation, just provide the root cause and recommendation.\n\nLogs:\n${logs.logs.slice(-30).join('\n')}`;
+            const prompt = `Analyze the following terminal output for the service '${activeUnit || serviceName}'. Identify the root cause of any errors and recommend remediation steps. Do not start a conversation, just provide the root cause and recommendation.\n\nLogs:\n${logs.logs.slice(-30).join('\n')}`;
             
             const res = await apiFetch('/api/v1/auth/ai/support', {
                 method: 'POST',
@@ -98,11 +107,34 @@ export default function ServiceLogsModal({ serviceName, onClose }: ServiceLogsMo
             className="max-w-4xl w-full"
         >
             <div className="flex items-center justify-between mb-4 mt-2">
-                <div className="flex items-center gap-3">
+                <div className="flex items-center gap-3 flex-wrap">
                     <span className="flex items-center gap-2 text-xs font-bold text-slate-400 uppercase tracking-widest bg-white/5 border border-white/10 px-3 py-1 rounded-lg">
                         <Terminal size={14} className="text-indigo-400" />
                         Live STDOUT / STDERR
                     </span>
+                    {normalizedUnits.length > 1 && (
+                        <div className="flex items-center gap-1.5 flex-wrap" role="tablist" aria-label="Service components">
+                            {normalizedUnits.map((unit) => {
+                                const isSelected = unit === activeUnit;
+                                return (
+                                    <button
+                                        key={unit}
+                                        type="button"
+                                        role="tab"
+                                        aria-selected={isSelected}
+                                        onClick={() => setSelectedUnit(unit)}
+                                        className={`px-2.5 py-1 rounded-md text-xs font-mono transition-colors border ${
+                                            isSelected
+                                                ? 'bg-indigo-500/20 text-indigo-300 border-indigo-500/40 font-semibold'
+                                                : 'bg-white/5 text-slate-400 border-white/10 hover:text-slate-200 hover:bg-white/10'
+                                        }`}
+                                    >
+                                        {unit}
+                                    </button>
+                                );
+                            })}
+                        </div>
+                    )}
                     {isLoading && <Loader2 size={14} className="animate-spin text-slate-500" />}
                 </div>
                 

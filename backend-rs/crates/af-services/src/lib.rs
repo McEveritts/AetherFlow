@@ -298,20 +298,30 @@ pub struct BlueprintSetupResult {
 fn default_blueprint_mutator_meta(app_name: &str) -> (&'static str, String, &'static str) {
     let clean = app_name.trim().to_lowercase();
     match clean.as_str() {
-        "sonarr" | "radarr" | "lidarr" | "readarr" | "prowlarr" | "listenarr" => (
+        "sonarr" | "radarr" | "lidarr" | "readarr" | "prowlarr" | "listenarr" => {
+            ("xml", format!("/var/lib/{}/config.xml", clean), "Port")
+        }
+        "jellyfin" => (
             "xml",
-            format!("/var/lib/{}/config.xml", clean),
-            "Port",
+            "/etc/jellyfin/network.xml".to_string(),
+            "InternalHttpPort",
         ),
-        "jellyfin" => ("xml", "/etc/jellyfin/network.xml".to_string(), "InternalHttpPort"),
-        "emby" => ("xml", "/var/lib/emby/config/system.xml".to_string(), "HttpServerPortNumber"),
+        "emby" => (
+            "xml",
+            "/var/lib/emby/config/system.xml".to_string(),
+            "HttpServerPortNumber",
+        ),
         "qbittorrent" => (
             "ini",
             "/var/lib/qbittorrent/.config/qBittorrent/qBittorrent.conf".to_string(),
             r"WebUI\Port",
         ),
         "sabnzbd" => ("ini", "/var/lib/sabnzbd/sabnzbd.ini".to_string(), "port"),
-        "tautulli" => ("ini", "/var/lib/tautulli/config.ini".to_string(), "http_port"),
+        "tautulli" => (
+            "ini",
+            "/var/lib/tautulli/config.ini".to_string(),
+            "http_port",
+        ),
         "gitea" => ("ini", "/etc/gitea/app.ini".to_string(), "HTTP_PORT"),
         "transmission" => (
             "json",
@@ -548,10 +558,18 @@ pub struct ServiceStatusItem {
     pub public_domain: String,
     #[serde(skip_serializing_if = "is_false", default)]
     pub external_access_enabled: bool,
-    #[serde(skip_serializing_if = "is_false", default)]
+    #[serde(default)]
     pub tls_enabled: bool,
     #[serde(skip_serializing_if = "String::is_empty", default)]
     pub web_path: String,
+    #[serde(skip_serializing_if = "String::is_empty", default)]
+    pub web_scheme: String,
+    #[serde(skip_serializing_if = "String::is_empty", default)]
+    pub bind_scope: String,
+    #[serde(skip_serializing_if = "String::is_empty", default)]
+    pub control_scope: String,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub components: Vec<ServiceComponentStatus>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub units: Vec<String>,
     #[serde(skip_serializing_if = "String::is_empty", default)]
@@ -576,6 +594,21 @@ pub struct ServiceStatusItem {
     pub started_at: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct ServiceComponentStatus {
+    pub unit: String,
+    pub role: String,
+    pub status: String,
+    pub configured: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceComponentPolicy {
+    pub unit: String,
+    pub role: &'static str,
+    pub configured: bool,
+}
+
 static SERVICE_INFO_CACHE: Lazy<RwLock<HashMap<String, ((String, String, String), Instant)>>> =
     Lazy::new(|| RwLock::new(HashMap::new()));
 
@@ -593,11 +626,231 @@ pub fn clear_service_status_cache() {
 }
 
 pub fn should_pre_stop_on_update(target: &str) -> bool {
-    let clean = target.trim().trim_end_matches(".service");
-    !matches!(
-        clean.to_ascii_lowercase().as_str(),
-        "maintainerr" | "af-maintainerr"
-    )
+    let clean = resolve_canonical_service_id(target);
+    if resolve_service_control_scope(&clean) == "shared-vhost" {
+        return false;
+    }
+    !matches!(clean.as_str(), "maintainerr" | "af-maintainerr")
+}
+
+pub fn resolve_canonical_service_id(target: &str) -> String {
+    let clean = target
+        .trim()
+        .trim_end_matches(".service")
+        .to_ascii_lowercase();
+    match clean.as_str() {
+        "af-maintainerr" => "maintainerr".to_string(),
+        "af-palate" => "palate".to_string(),
+        "af-kasmvnc" => "kasmvnc".to_string(),
+        "af-mcvnc" => "mcvnc".to_string(),
+        "deluged" | "deluge-web" => "deluge".to_string(),
+        "paperless" | "paperless-webserver" | "paperless-worker" | "paperless-scheduler" => {
+            "paperless-ngx".to_string()
+        }
+        "dispatcharr-celery" | "dispatcharr-celerybeat" => "dispatcharr".to_string(),
+        "novnc-xvnc" => "novnc".to_string(),
+        "xrdp-sesman" => "xrdp".to_string(),
+        "node_exporter" => "prometheus".to_string(),
+        "rclone-vfs" => "rclone".to_string(),
+        "scrutiny-collector" | "scrutiny-collector.timer" => "scrutiny".to_string(),
+        "recyclarr.timer" => "recyclarr".to_string(),
+        "apache2 web server" => "apache2".to_string(),
+        "aetherflow api" => "aetherflow-api".to_string(),
+        "aetherflow frontend" => "aetherflow-frontend".to_string(),
+        _ => {
+            if let Ok(catalog) = get_package_catalog() {
+                if let Some(pkg) = catalog.iter().find(|p| {
+                    p.name.eq_ignore_ascii_case(&clean)
+                        || p.label.eq_ignore_ascii_case(target.trim())
+                        || (!p.service_name.is_empty()
+                            && p.service_name != "apache2"
+                            && p.service_name
+                                .trim_end_matches(".service")
+                                .eq_ignore_ascii_case(&clean))
+                }) {
+                    return pkg.name.to_ascii_lowercase();
+                }
+            }
+            clean
+        }
+    }
+}
+
+pub fn resolve_service_web_scheme(target: &str, default_port: i32) -> &'static str {
+    let clean = resolve_canonical_service_id(target);
+    if default_port > 0
+        || matches!(
+            clean.as_str(),
+            "nextcloud" | "rutorrent" | "organizr" | "maintainerr" | "palate" | "kasmvnc" | "mcvnc"
+        )
+    {
+        "http"
+    } else {
+        ""
+    }
+}
+
+pub fn resolve_service_bind_scope(target: &str) -> &'static str {
+    let clean = resolve_canonical_service_id(target);
+    if matches!(
+        clean.as_str(),
+        "maintainerr" | "palate" | "kasmvnc" | "mcvnc"
+    ) {
+        "loopback"
+    } else {
+        "network"
+    }
+}
+
+pub fn resolve_service_control_scope(target: &str) -> &'static str {
+    let clean = resolve_canonical_service_id(target);
+    if matches!(clean.as_str(), "nextcloud" | "rutorrent" | "organizr") {
+        "shared-vhost"
+    } else {
+        "service"
+    }
+}
+
+pub fn is_rclone_vfs_configured() -> bool {
+    let conf_path = mutators::resolve_config_path("/etc/rclone/rclone.conf");
+    let Ok(content) = fs::read_to_string(conf_path) else {
+        return false;
+    };
+    content
+        .lines()
+        .any(|line| line.trim().eq_ignore_ascii_case("[remote]"))
+}
+
+pub fn resolve_service_component_policies(target: &str) -> Vec<ServiceComponentPolicy> {
+    resolve_service_component_policies_with(target, is_rclone_vfs_configured())
+}
+
+pub fn resolve_service_component_policies_with(
+    target: &str,
+    rclone_vfs_configured: bool,
+) -> Vec<ServiceComponentPolicy> {
+    let clean = resolve_canonical_service_id(target);
+    let units = resolve_service_units(&clean);
+    units
+        .into_iter()
+        .map(|unit| {
+            let unit_lower = unit.to_ascii_lowercase();
+            let (role, configured) = if unit_lower.ends_with(".timer") {
+                ("timer", true)
+            } else if matches!(unit_lower.as_str(), "recyclarr" | "scrutiny-collector") {
+                ("oneshot", true)
+            } else if unit_lower == "rclone-vfs" {
+                ("optional", rclone_vfs_configured)
+            } else {
+                ("required", true)
+            };
+            ServiceComponentPolicy {
+                unit,
+                role,
+                configured,
+            }
+        })
+        .collect()
+}
+
+pub fn resolve_controllable_service_units(target: &str, action: &str) -> Vec<String> {
+    resolve_controllable_service_units_with(target, action, is_rclone_vfs_configured())
+}
+
+pub fn resolve_controllable_service_units_with(
+    target: &str,
+    action: &str,
+    rclone_vfs_configured: bool,
+) -> Vec<String> {
+    let policies = resolve_service_component_policies_with(target, rclone_vfs_configured);
+    let mut units: Vec<String> = policies
+        .into_iter()
+        .filter(|p| match p.role {
+            "required" | "timer" => true,
+            "optional" => p.configured || action == "stop",
+            "oneshot" => action == "stop",
+            _ => true,
+        })
+        .map(|p| p.unit)
+        .collect();
+    if action == "stop" {
+        units.sort_by_key(|u| !u.ends_with(".timer"));
+    }
+    units
+}
+
+pub fn aggregate_component_statuses(
+    components: &[ServiceComponentStatus],
+    primary_fallback: &str,
+) -> (String, String) {
+    let primary_unit = components
+        .iter()
+        .find(|c| c.role == "required")
+        .or_else(|| components.iter().find(|c| c.role == "timer"))
+        .or_else(|| components.first())
+        .map(|c| c.unit.clone())
+        .unwrap_or_else(|| primary_fallback.to_string());
+
+    if components.is_empty() {
+        return ("stopped".to_string(), primary_unit);
+    }
+
+    let mut required_or_timer_count = 0usize;
+    let mut active_required_or_timer = 0usize;
+    let mut restarting_required_or_timer = 0usize;
+    let mut inactive_required_or_timer = 0usize;
+    let mut configured_optional_failed = false;
+    let mut oneshot_failed = false;
+
+    for comp in components {
+        match comp.role.as_str() {
+            "required" | "timer" => {
+                required_or_timer_count += 1;
+                match comp.status.as_str() {
+                    "running" => active_required_or_timer += 1,
+                    "restarting" => restarting_required_or_timer += 1,
+                    _ => inactive_required_or_timer += 1,
+                }
+            }
+            "optional" => {
+                if comp.configured && comp.status != "running" {
+                    configured_optional_failed = true;
+                }
+            }
+            "oneshot" => {
+                if comp.status == "failed" {
+                    oneshot_failed = true;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if required_or_timer_count == 0 {
+        let any_run = components.iter().any(|c| c.status == "running");
+        let status = if any_run { "running" } else { "stopped" };
+        return (status.to_string(), primary_unit);
+    }
+
+    let status = if active_required_or_timer == required_or_timer_count {
+        if configured_optional_failed || oneshot_failed {
+            "degraded"
+        } else {
+            "running"
+        }
+    } else if active_required_or_timer > 0 {
+        if restarting_required_or_timer > 0 && inactive_required_or_timer == 0 {
+            "restarting"
+        } else {
+            "degraded"
+        }
+    } else if restarting_required_or_timer > 0 {
+        "restarting"
+    } else {
+        "stopped"
+    };
+
+    (status.to_string(), primary_unit)
 }
 
 /// Resolves a logical package or service name into its concrete systemd unit names (`systemctl.go`).
@@ -725,12 +978,150 @@ pub fn format_uptime(enter_timestamp: &str) -> String {
 /// Queries `systemctl show <unit> --property=ActiveState,SubState,ActiveEnterTimestamp`
 /// with a short in-memory cache and graceful fallback on non-systemd platforms (`service_manager.go`).
 pub fn get_service_info(service_name: &str) -> (String, String, String) {
-    get_systemd_units_info(resolve_service_units(service_name), service_name)
+    let (status, uptime, primary_unit, _components) = get_service_info_detailed(service_name);
+    (status, uptime, primary_unit)
 }
 
 /// Query a concrete unit without expanding it into all companion units.
 pub fn get_systemd_unit_info(unit: &str) -> (String, String, String) {
     get_systemd_units_info(vec![unit.to_string()], unit)
+}
+
+pub fn get_service_info_detailed(
+    service_name: &str,
+) -> (String, String, String, Vec<ServiceComponentStatus>) {
+    let policies = resolve_service_component_policies(service_name);
+    if policies.is_empty() {
+        return (
+            "stopped".to_string(),
+            "-".to_string(),
+            service_name.to_string(),
+            Vec::new(),
+        );
+    }
+
+    let mut components = Vec::with_capacity(policies.len());
+    let mut best_uptime = "-".to_string();
+
+    for policy in &policies {
+        let (unit_status, unit_uptime) =
+            query_single_systemd_unit_status(&policy.unit, policy.role, policy.configured);
+        if matches!(policy.role, "required" | "timer")
+            && unit_status == "running"
+            && best_uptime == "-"
+            && unit_uptime != "-"
+        {
+            best_uptime = unit_uptime;
+        }
+        components.push(ServiceComponentStatus {
+            unit: policy.unit.clone(),
+            role: policy.role.to_string(),
+            status: unit_status,
+            configured: policy.configured,
+        });
+    }
+
+    let (agg_status, primary_unit) = aggregate_component_statuses(&components, service_name);
+    let agg_uptime = match agg_status.as_str() {
+        "running" | "degraded" => {
+            if best_uptime == "-" {
+                "Active".to_string()
+            } else {
+                best_uptime
+            }
+        }
+        "restarting" => "Transitioning".to_string(),
+        _ => "-".to_string(),
+    };
+
+    (agg_status, agg_uptime, primary_unit, components)
+}
+
+pub fn classify_systemd_unit_show_output(stdout: &str, role: &str) -> (String, String) {
+    let mut active_state = String::new();
+    let mut sub_state = String::new();
+    let mut enter_ts = String::new();
+    for line in stdout.lines() {
+        if let Some((k, v)) = line.split_once('=') {
+            match k.trim() {
+                "ActiveState" => active_state = v.trim().to_lowercase(),
+                "SubState" => sub_state = v.trim().to_lowercase(),
+                "ActiveEnterTimestamp" => enter_ts = v.trim().to_string(),
+                _ => {}
+            }
+        }
+    }
+    if active_state == "active"
+        || matches!(
+            sub_state.as_str(),
+            "running" | "exited" | "listening" | "waiting" | "elapsed"
+        )
+    {
+        ("running".to_string(), format_uptime(&enter_ts))
+    } else if matches!(
+        active_state.as_str(),
+        "activating" | "deactivating" | "reloading"
+    ) {
+        ("restarting".to_string(), "Transitioning".to_string())
+    } else if active_state == "failed" || sub_state == "failed" {
+        ("failed".to_string(), "-".to_string())
+    } else if role == "oneshot" && (active_state == "inactive" || sub_state == "dead") {
+        ("idle".to_string(), "-".to_string())
+    } else {
+        ("stopped".to_string(), "-".to_string())
+    }
+}
+
+fn query_single_systemd_unit_status(unit: &str, role: &str, configured: bool) -> (String, String) {
+    let cache_key = format!("unit:{}:{}:{}", unit, role, configured);
+    let now = Instant::now();
+    if let Ok(guard) = SERVICE_INFO_CACHE.read() {
+        if let Some(((st, up, _), expires_at)) = guard.get(&cache_key) {
+            if now < *expires_at {
+                return (st.clone(), up.clone());
+            }
+        }
+    }
+
+    let mut systemctl_available = false;
+    let mut resolved = ("stopped".to_string(), "-".to_string());
+
+    #[cfg(target_os = "linux")]
+    if let Ok(out) = StdCommand::new("systemctl")
+        .args([
+            "show",
+            unit,
+            "--property=ActiveState,SubState,ActiveEnterTimestamp",
+        ])
+        .output()
+    {
+        if out.status.success() {
+            systemctl_available = true;
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            resolved = classify_systemd_unit_show_output(&stdout, role);
+        }
+    }
+
+    if !systemctl_available {
+        resolved = if role == "oneshot" {
+            ("idle".to_string(), "-".to_string())
+        } else if role == "optional" && !configured {
+            ("stopped".to_string(), "-".to_string())
+        } else {
+            ("running".to_string(), "Active".to_string())
+        };
+    }
+
+    if let Ok(mut guard) = SERVICE_INFO_CACHE.write() {
+        guard.insert(
+            cache_key,
+            (
+                (resolved.0.clone(), resolved.1.clone(), unit.to_string()),
+                now + Duration::from_secs(3),
+            ),
+        );
+    }
+    resolved
 }
 
 fn get_systemd_units_info(units: Vec<String>, service_name: &str) -> (String, String, String) {
@@ -919,6 +1310,14 @@ pub fn get_active_services() -> HashMap<String, ServiceStatusItem> {
             version: "v3.2.6".to_string(),
             managed_by: "systemd".to_string(),
             process: "aetherflow-api".to_string(),
+            bind_scope: "network".to_string(),
+            control_scope: "service".to_string(),
+            components: vec![ServiceComponentStatus {
+                unit: "aetherflow-api".to_string(),
+                role: "required".to_string(),
+                status: "running".to_string(),
+                configured: true,
+            }],
             units: vec!["aetherflow-api".to_string()],
             ..Default::default()
         },
@@ -938,11 +1337,19 @@ pub fn get_active_services() -> HashMap<String, ServiceStatusItem> {
         "AetherFlow Frontend".to_string(),
         ServiceStatusItem {
             id: "aetherflow-frontend".to_string(),
-            status: fe_status,
+            status: fe_status.clone(),
             uptime: fe_uptime,
             version: "v3.2.6".to_string(),
             managed_by: fe_managed_by,
             process: "aetherflow-frontend".to_string(),
+            bind_scope: "network".to_string(),
+            control_scope: "service".to_string(),
+            components: vec![ServiceComponentStatus {
+                unit: "aetherflow-frontend".to_string(),
+                role: "required".to_string(),
+                status: fe_status,
+                configured: true,
+            }],
             units: vec!["aetherflow-frontend".to_string()],
             ..Default::default()
         },
@@ -953,11 +1360,19 @@ pub fn get_active_services() -> HashMap<String, ServiceStatusItem> {
         "Apache2 Web Server".to_string(),
         ServiceStatusItem {
             id: "apache2".to_string(),
-            status: apache_st,
+            status: apache_st.clone(),
             uptime: apache_up,
             version: "system".to_string(),
             managed_by: "systemd".to_string(),
             process: "apache2".to_string(),
+            bind_scope: "network".to_string(),
+            control_scope: "service".to_string(),
+            components: vec![ServiceComponentStatus {
+                unit: "apache2".to_string(),
+                role: "required".to_string(),
+                status: apache_st,
+                configured: true,
+            }],
             units: vec!["apache2".to_string()],
             ..Default::default()
         },
@@ -990,16 +1405,26 @@ pub fn get_active_services() -> HashMap<String, ServiceStatusItem> {
         };
 
         let units = if managed_by == "systemd" {
-            resolve_service_units(&svc_name)
+            resolve_service_units(&p.name)
         } else {
             vec![svc_name.clone()]
         };
 
-        let (mut svc_status, mut svc_uptime, primary_proc) = if managed_by == "pm2" {
+        let (mut svc_status, mut svc_uptime, primary_proc, components) = if managed_by == "pm2" {
             let (st, up) = get_pm2_service_info(&svc_name);
-            (st, up, svc_name.clone())
+            (
+                st.clone(),
+                up,
+                svc_name.clone(),
+                vec![ServiceComponentStatus {
+                    unit: svc_name.clone(),
+                    role: "required".to_string(),
+                    status: st,
+                    configured: true,
+                }],
+            )
         } else {
-            get_service_info(&svc_name)
+            get_service_info_detailed(&p.name)
         };
 
         let mut job_status = String::new();
@@ -1039,14 +1464,22 @@ pub fn get_active_services() -> HashMap<String, ServiceStatusItem> {
             public_domain = format_app_public_domain(&p.name, &base_domain);
         }
 
-        let external_access_enabled = ing.map(|c| c.external_access_enabled).unwrap_or(false);
-        let tls_enabled = ing.map(|c| c.tls_enabled).unwrap_or(false);
+        let external_access_enabled = ing
+            .map(|c| c.external_access_enabled)
+            .unwrap_or(!public_domain.is_empty());
+        let tls_enabled = ing
+            .map(|c| c.tls_enabled)
+            .unwrap_or(!public_domain.is_empty());
 
         let version = if !p.installed_version.is_empty() {
             p.installed_version.clone()
         } else {
             "latest".to_string()
         };
+        let web_scheme =
+            resolve_service_web_scheme(&p.name, active_port.max(p.default_port)).to_string();
+        let bind_scope = resolve_service_bind_scope(&p.name).to_string();
+        let control_scope = resolve_service_control_scope(&p.name).to_string();
 
         map.insert(
             p.Label_or_name(),
@@ -1069,6 +1502,10 @@ pub fn get_active_services() -> HashMap<String, ServiceStatusItem> {
                 external_access_enabled,
                 tls_enabled,
                 web_path: p.web_path.clone(),
+                web_scheme,
+                bind_scope,
+                control_scope,
+                components,
                 units,
                 installed_version: p.installed_version,
                 latest_version: p.latest_version,
@@ -1112,15 +1549,11 @@ async fn dispatch_runner_systemctl_unix(action: &str, unit: &str) -> Option<Resu
     if !Path::new(&sock_path).exists() {
         return None;
     }
-    let mut stream = match tokio::time::timeout(
-        Duration::from_secs(5),
-        UnixStream::connect(&sock_path),
-    )
-    .await
-    {
-        Ok(Ok(s)) => s,
-        _ => return None,
-    };
+    let mut stream =
+        match tokio::time::timeout(Duration::from_secs(5), UnixStream::connect(&sock_path)).await {
+            Ok(Ok(s)) => s,
+            _ => return None,
+        };
 
     let body = serde_json::to_string(&af_models::SystemctlRequest {
         action: action.to_string(),
@@ -1226,7 +1659,14 @@ pub async fn control_service_with_manager(
     let units = if managed_by == "systemd-unit" {
         vec![service_name.to_string()]
     } else {
-        resolve_service_units(service_name)
+        let canonical = resolve_canonical_service_id(service_name);
+        if resolve_service_control_scope(&canonical) == "shared-vhost" {
+            anyhow::bail!(
+                "{} is hosted as a shared Apache virtual host; use the Apache2 Web Server card for daemon-wide controls",
+                service_name
+            );
+        }
+        resolve_controllable_service_units(&canonical, action)
     };
     for unit in units {
         if !valid_name.is_match(&unit) {
@@ -1275,7 +1715,10 @@ pub async fn control_service(service_name: &str, action: &str) -> anyhow::Result
     let managed_by = get_package_catalog()
         .unwrap_or_default()
         .into_iter()
-        .find(|p| p.name.eq_ignore_ascii_case(service_name) || p.service_name.eq_ignore_ascii_case(service_name))
+        .find(|p| {
+            p.name.eq_ignore_ascii_case(service_name)
+                || p.service_name.eq_ignore_ascii_case(service_name)
+        })
         .map(|p| {
             if p.service_type == "pm2" {
                 "pm2".to_string()
@@ -1976,5 +2419,159 @@ mod tests {
             "unexpected error message: {}",
             msg
         );
+    }
+
+    #[test]
+    fn test_service_capabilities_and_scopes() {
+        for app in ["maintainerr", "palate", "kasmvnc", "mcvnc"] {
+            assert_eq!(
+                resolve_service_bind_scope(app),
+                "loopback",
+                "expected loopback for {}",
+                app
+            );
+        }
+        assert_eq!(resolve_service_bind_scope("radarr"), "network");
+        assert_eq!(resolve_service_web_scheme("kasmvnc", 6081), "http");
+        assert_eq!(resolve_service_web_scheme("radarr", 7878), "http");
+
+        for app in [
+            "nextcloud",
+            "rutorrent",
+            "organizr",
+            "Nextcloud",
+            "ruTorrent",
+            "Organizr",
+        ] {
+            assert_eq!(resolve_service_control_scope(app), "shared-vhost");
+            assert!(!should_pre_stop_on_update(app));
+        }
+        assert_eq!(resolve_service_control_scope("apache2"), "service");
+        assert_eq!(
+            resolve_service_control_scope("Apache2 Web Server"),
+            "service"
+        );
+        assert!(!should_pre_stop_on_update("maintainerr"));
+        assert!(should_pre_stop_on_update("radarr"));
+    }
+
+    #[test]
+    fn test_component_policies_and_status_aggregation() {
+        let autobrr_unconfigured = resolve_service_component_policies_with("rclone", false);
+        assert_eq!(autobrr_unconfigured.len(), 2);
+        assert_eq!(autobrr_unconfigured[0].unit, "rclone");
+        assert_eq!(autobrr_unconfigured[0].role, "required");
+        assert!(autobrr_unconfigured[0].configured);
+        assert_eq!(autobrr_unconfigured[1].unit, "rclone-vfs");
+        assert_eq!(autobrr_unconfigured[1].role, "optional");
+        assert!(!autobrr_unconfigured[1].configured);
+
+        assert_eq!(
+            resolve_controllable_service_units_with("rclone", "restart", false),
+            vec!["rclone".to_string()]
+        );
+        assert_eq!(
+            resolve_controllable_service_units_with("rclone", "restart", true),
+            vec!["rclone".to_string(), "rclone-vfs".to_string()]
+        );
+
+        let recyclarr_policies = resolve_service_component_policies_with("recyclarr", false);
+        assert_eq!(recyclarr_policies[0].unit, "recyclarr");
+        assert_eq!(recyclarr_policies[0].role, "oneshot");
+        assert_eq!(recyclarr_policies[1].unit, "recyclarr.timer");
+        assert_eq!(recyclarr_policies[1].role, "timer");
+        assert_eq!(
+            resolve_controllable_service_units_with("recyclarr", "start", false),
+            vec!["recyclarr.timer".to_string()]
+        );
+        assert_eq!(
+            resolve_controllable_service_units_with("recyclarr", "stop", false),
+            vec!["recyclarr.timer".to_string(), "recyclarr".to_string()]
+        );
+
+        let autobrr_components = vec![
+            ServiceComponentStatus {
+                unit: "rclone".to_string(),
+                role: "required".to_string(),
+                status: "running".to_string(),
+                configured: true,
+            },
+            ServiceComponentStatus {
+                unit: "rclone-vfs".to_string(),
+                role: "optional".to_string(),
+                status: "stopped".to_string(),
+                configured: false,
+            },
+        ];
+        assert_eq!(
+            aggregate_component_statuses(&autobrr_components, "rclone"),
+            ("running".to_string(), "rclone".to_string())
+        );
+
+        let mut configured_mount_components = autobrr_components.clone();
+        configured_mount_components[1].configured = true;
+        assert_eq!(
+            aggregate_component_statuses(&configured_mount_components, "rclone").0,
+            "degraded"
+        );
+
+        let wire = serde_json::to_value(ServiceStatusItem {
+            tls_enabled: false,
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(wire["tls_enabled"], false);
+
+        let scrutiny_components = vec![
+            ServiceComponentStatus {
+                unit: "scrutiny".to_string(),
+                role: "required".to_string(),
+                status: "running".to_string(),
+                configured: true,
+            },
+            ServiceComponentStatus {
+                unit: "scrutiny-collector.timer".to_string(),
+                role: "timer".to_string(),
+                status: "running".to_string(),
+                configured: true,
+            },
+            ServiceComponentStatus {
+                unit: "scrutiny-collector.service".to_string(),
+                role: "oneshot".to_string(),
+                status: "stopped".to_string(),
+                configured: true,
+            },
+        ];
+        assert_eq!(
+            aggregate_component_statuses(&scrutiny_components, "scrutiny"),
+            ("running".to_string(), "scrutiny".to_string())
+        );
+
+        let failed_oneshot = vec![
+            ServiceComponentStatus {
+                unit: "recyclarr.timer".to_string(),
+                role: "timer".to_string(),
+                status: "running".to_string(),
+                configured: true,
+            },
+            ServiceComponentStatus {
+                unit: "recyclarr.service".to_string(),
+                role: "oneshot".to_string(),
+                status: "failed".to_string(),
+                configured: true,
+            },
+        ];
+        assert_eq!(
+            aggregate_component_statuses(&failed_oneshot, "recyclarr.timer"),
+            ("degraded".to_string(), "recyclarr.timer".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_shared_vhost_service_control_rejected() {
+        let err = control_service_with_manager("Nextcloud", "restart", "systemd")
+            .await
+            .expect_err("shared-vhost service control must be rejected");
+        assert!(err.to_string().contains("shared Apache virtual host"));
     }
 }

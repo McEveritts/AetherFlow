@@ -1,15 +1,11 @@
 #!/bin/bash
-# AetherFlow Package Installer: Tautulli
-# Port: 8181
 
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ -f "${SELF_DIR}/../../common.sh" ]]; then
-    # shellcheck source=/dev/null
     source "${SELF_DIR}/../../common.sh"
 else
-    # shellcheck source=/dev/null
     source /opt/AetherFlow/packages/common.sh
 fi
 
@@ -17,9 +13,61 @@ PACKAGE_NAME="tautulli"
 APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-8181}}"
 export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
-mkdir -p "$(dirname "$LOGFILE")" /install
+mkdir -p "$(dirname "$LOGFILE")" /install /run/lock
+exec 9>/run/lock/aetherflow-tautulli.lock
+flock -n 9 || { log_error "Another Tautulli installation is running."; exit 1; }
 
 require_root
+
+BUILD_DIR=""
+BACKUP_DIR=""
+WAS_RUNNABLE=0
+SERVICE_STOPPED=0
+APP_MOVED=0
+APP_ACTIVATED=0
+UNIT_WRITTEN=0
+SUCCESS=0
+
+if [[ -f /etc/systemd/system/tautulli.service ]] || systemctl is-active --quiet tautulli 2>/dev/null || systemctl is-enabled --quiet tautulli 2>/dev/null; then
+    WAS_RUNNABLE=1
+fi
+
+cleanup() {
+    local status=$?
+    trap - EXIT
+    set +e
+    if [[ "$SUCCESS" -ne 1 ]]; then
+        if [[ "$APP_ACTIVATED" -eq 1 || "$SERVICE_STOPPED" -eq 1 ]]; then
+            systemctl stop tautulli >> "$LOGFILE" 2>&1 || true
+        fi
+        if [[ "$APP_ACTIVATED" -eq 1 ]]; then
+            mv /opt/Tautulli "$BACKUP_DIR/failed-app" 2>/dev/null || rm -rf /opt/Tautulli
+        fi
+        if [[ "$APP_MOVED" -eq 1 ]]; then
+            mv "$BACKUP_DIR/app" /opt/Tautulli 2>/dev/null || true
+        fi
+        if [[ "$UNIT_WRITTEN" -eq 1 ]]; then
+            if [[ -f "$BACKUP_DIR/tautulli.service" ]]; then
+                cp -a "$BACKUP_DIR/tautulli.service" /etc/systemd/system/tautulli.service
+            else
+                systemctl disable tautulli >> "$LOGFILE" 2>&1 || true
+                rm -f /etc/systemd/system/tautulli.service
+            fi
+            systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
+        fi
+        if [[ "$WAS_RUNNABLE" -eq 1 ]]; then
+            systemctl start tautulli >> "$LOGFILE" 2>&1 || true
+        fi
+    fi
+    if [[ -n "$BUILD_DIR" && -d "$BUILD_DIR" ]]; then
+        rm -rf "$BUILD_DIR"
+    fi
+    exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 10 "Installing Python and Git prerequisites for Tautulli..."
 
@@ -30,15 +78,20 @@ if ! id -u tautulli >/dev/null 2>&1; then
     useradd --system --user-group --no-create-home --home-dir /var/lib/tautulli --shell /usr/sbin/nologin tautulli
 fi
 
-mkdir -p /var/lib/tautulli
+mkdir -p /var/lib/tautulli /opt /var/backups
 
-report_progress 40 "Cloning Tautulli repository..."
-rm -rf /opt/Tautulli
-git clone --depth 1 https://github.com/Tautulli/Tautulli.git /opt/Tautulli >> "$LOGFILE" 2>&1
-TAUTULLI_VERSION="$(git -C /opt/Tautulli describe --tags --abbrev=0 2>/dev/null || true)"
+report_progress 40 "Cloning Tautulli repository into staging directory..."
+BUILD_DIR="$(mktemp -d /opt/.tautulli-build.XXXXXX)"
+git clone --depth 1 https://github.com/Tautulli/Tautulli.git "$BUILD_DIR" >> "$LOGFILE" 2>&1
+test -s "$BUILD_DIR/Tautulli.py" || { log_error "Failed to clone Tautulli repository"; exit 1; }
+
+TAUTULLI_VERSION="$(git -C "$BUILD_DIR" describe --tags --abbrev=0 2>/dev/null || true)"
 if [[ -n "$TAUTULLI_VERSION" ]]; then
-    printf '%s\n' "${TAUTULLI_VERSION#v}" > /opt/Tautulli/.af-version
+    printf '%s\n' "${TAUTULLI_VERSION#v}" > "$BUILD_DIR/.af-version"
 fi
+
+chown -R tautulli:tautulli "$BUILD_DIR"
+
 if [[ ! -f /var/lib/tautulli/config.ini ]]; then
     cat <<EOF > /var/lib/tautulli/config.ini
 [General]
@@ -50,7 +103,26 @@ launch_browser = 0
 first_run_complete = 1
 EOF
 fi
-chown -R tautulli:tautulli /opt/Tautulli /var/lib/tautulli
+chown -R tautulli:tautulli /var/lib/tautulli
+
+report_progress 75 "Backing up existing Tautulli installation and activating new build..."
+BACKUP_DIR="$(mktemp -d /var/backups/aetherflow-tautulli.XXXXXX)"
+chmod 700 "$BACKUP_DIR"
+if [[ -f /etc/systemd/system/tautulli.service ]]; then
+    cp -a /etc/systemd/system/tautulli.service "$BACKUP_DIR/tautulli.service"
+fi
+if [[ "$WAS_RUNNABLE" -eq 1 ]]; then
+    systemctl stop tautulli >> "$LOGFILE" 2>&1 || true
+    SERVICE_STOPPED=1
+fi
+if [[ -d /opt/Tautulli ]]; then
+    mv /opt/Tautulli "$BACKUP_DIR/app"
+    APP_MOVED=1
+fi
+mv "$BUILD_DIR" /opt/Tautulli
+APP_ACTIVATED=1
+BUILD_DIR=""
+cd /opt/Tautulli
 
 report_progress 80 "Configuring and starting tautulli.service on port ${APP_PORT}..."
 sed "s/@AF_APP_PORT@/${APP_PORT}/g" <<'EOF' > /etc/systemd/system/tautulli.service
@@ -73,10 +145,25 @@ PrivateTmp=true
 [Install]
 WantedBy=multi-user.target
 EOF
+UNIT_WRITTEN=1
 
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now tautulli >> "$LOGFILE" 2>&1
 
+HEALTHY=0
+for attempt in {1..15}; do
+    if systemctl is-active --quiet tautulli; then
+        HEALTHY=1
+        break
+    fi
+    sleep 1
+done
+if [[ "$HEALTHY" -ne 1 ]]; then
+    log_error "Tautulli service did not become active; rolling back."
+    exit 1
+fi
+
 write_lock "${PACKAGE_NAME}"
+SUCCESS=1
 report_progress 100 "Tautulli installed on port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"

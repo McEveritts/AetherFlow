@@ -1913,8 +1913,8 @@
     ]
   },
   "novnc": {
-    "update_source": "github",
-    "update_repo": "novnc/noVNC",
+    "update_source": "apt",
+    "update_package": "novnc",
     "version_command": [
       "bash",
       "-lc",

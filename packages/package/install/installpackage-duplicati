@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # [AetherFlow Install Script - Duplicati]
-# Installs Duplicati encrypted backup client & web server natively on bare metal.
+# Installs Duplicati 2.x native backup server on bare-metal Debian/Ubuntu.
 #
 set -euo pipefail
 
@@ -17,70 +17,78 @@ fi
 
 require_root
 
+PACKAGE_NAME="duplicati"
 APP_NAME="duplicati"
 APP_USER="duplicati"
 DATA_DIR="/var/lib/duplicati"
 CONFIG_DIR="/etc/duplicati"
-LOCK_FILE="/install/.duplicati.lock"
 SERVICE_FILE="/etc/systemd/system/duplicati.service"
-APP_PORT="${AF_APP_PORT:-8200}"
+APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-8200}}"
+export AF_APP_PORT="$APP_PORT"
+export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")" /install
 
-setup_log "${APP_NAME}"
-log "Starting ${APP_NAME} installation (target port: ${APP_PORT})..."
+log_info "Starting ${APP_NAME} installation (target port: ${APP_PORT})..."
 report_progress 10 "Preparing ${APP_NAME} installation..."
 
-ensure_master_credentials
+load_master_credentials
 ADMIN_PASS="${MASTER_PASS}"
 
-report_progress 20 "Installing system dependencies..."
-apt_update
-apt_install curl wget jq ca-certificates libicu-dev libssl-dev
+report_progress 20 "Installing Mono runtime, SQLite, and network utilities..."
+DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+    curl wget jq ca-certificates apt-transport-https libicu-dev sqlite3 >> "$LOGFILE" 2>&1
 
-ensure_service_user "${APP_USER}" "${DATA_DIR}"
+if ! id -u "${APP_USER}" >/dev/null 2>&1; then
+    useradd --system --user-group --create-home --home-dir "${DATA_DIR}" --shell /usr/sbin/nologin "${APP_USER}" 2>/dev/null || \
+    useradd --system --user-group --home-dir "${DATA_DIR}" --shell /bin/false "${APP_USER}"
+fi
 mkdir -p "${DATA_DIR}" "${CONFIG_DIR}"
+
+report_progress 45 "Resolving latest Duplicati release from GitHub..."
+RELEASES_JSON="$(curl -fsSL https://api.github.com/repos/duplicati/duplicati/releases/latest 2>/dev/null || true)"
+LATEST_TAG="$(echo "${RELEASES_JSON}" | jq -r '.tag_name // empty' || true)"
+if [[ -z "${LATEST_TAG}" ]]; then
+    LATEST_TAG="v2.0.8.1-2.0.8.1_beta_2024-05-07"
+fi
 
 ARCH="$(dpkg --print-architecture)"
 case "${ARCH}" in
-    amd64) DUP_ARCH="x64" ;;
-    arm64) DUP_ARCH="arm64" ;;
-    armhf) DUP_ARCH="arm7" ;;
-    *)
-        log "ERROR: Unsupported architecture: ${ARCH}"
-        exit 1
-        ;;
+    amd64) D_ARCH="linux-x64" ;;
+    arm64) D_ARCH="linux-arm64" ;;
+    armhf) D_ARCH="linux-arm7" ;;
+    *) D_ARCH="all" ;;
 esac
 
-report_progress 40 "Fetching latest ${APP_NAME} release from GitHub..."
-RELEASE_JSON="$(curl -fsSL https://api.github.com/repos/duplicati/duplicati/releases/latest)"
-LATEST_TAG="$(echo "${RELEASE_JSON}" | jq -r '.tag_name // empty')"
-DEB_URL="$(echo "${RELEASE_JSON}" | jq -r --arg arch "linux-${DUP_ARCH}-cli.deb" '.assets[] | select(.name | endswith($arch)) | .browser_download_url' | head -n1)"
-
+DEB_URL="$(echo "${RELEASES_JSON}" | jq -r --arg arch "${D_ARCH}.deb" '.assets[]? | select(.name | endswith($arch)) | .browser_download_url' | head -n1 || true)"
 if [[ -z "${DEB_URL}" ]]; then
-    DEB_URL="$(echo "${RELEASE_JSON}" | jq -r --arg arch "${DUP_ARCH}" '.assets[] | select(.name | test("linux-" + $arch + ".*\\.deb$")) | .browser_download_url' | head -n1)"
+    DEB_URL="$(echo "${RELEASES_JSON}" | jq -r '.assets[]? | select(.name | endswith(".deb")) | .browser_download_url' | head -n1 || true)"
 fi
 
 if [[ -z "${DEB_URL}" ]]; then
-    log "ERROR: Unable to resolve Duplicati .deb download URL for ${DUP_ARCH}"
-    exit 1
+    DEB_URL="https://github.com/duplicati/duplicati/releases/download/${LATEST_TAG}/duplicati_${LATEST_TAG#v}_all.deb"
 fi
 
+report_progress 65 "Downloading Duplicati package (${LATEST_TAG})..."
 TMP_DEB="$(mktemp --suffix=.deb)"
-report_progress 60 "Downloading ${APP_NAME} (${LATEST_TAG})..."
-wget -qO "${TMP_DEB}" "${DEB_URL}" >> "${LOG_FILE}" 2>&1
+wget -qO "${TMP_DEB}" "${DEB_URL}" >> "$LOGFILE" 2>&1 || curl -fsSL -o "${TMP_DEB}" "${DEB_URL}" >> "$LOGFILE" 2>&1
 
-report_progress 75 "Installing ${APP_NAME} package..."
-apt-get install -y "${TMP_DEB}" >> "${LOG_FILE}" 2>&1 || {
-    dpkg -i "${TMP_DEB}" >> "${LOG_FILE}" 2>&1 || true
-    apt-get install -f -y >> "${LOG_FILE}" 2>&1
+report_progress 75 "Installing Duplicati deb package..."
+dpkg -i "${TMP_DEB}" >> "$LOGFILE" 2>&1 || {
+    DEBIAN_FRONTEND=noninteractive apt-get install -f -y >> "$LOGFILE" 2>&1
 }
 rm -f "${TMP_DEB}"
 
 echo "${LATEST_TAG#v}" > "${DATA_DIR}/.af-version"
 
-cat > "${CONFIG_DIR}/duplicati.env" <<EOF
+if [[ ! -f "${CONFIG_DIR}/duplicati.env" ]]; then
+    cat > "${CONFIG_DIR}/duplicati.env" <<EOF
 DUPLICATI_PASS=${ADMIN_PASS}
 DUPLICATI_PORT=${APP_PORT}
 EOF
+else
+    sed -i "s|^DUPLICATI_PORT=.*|DUPLICATI_PORT=${APP_PORT}|" "${CONFIG_DIR}/duplicati.env" || true
+fi
 chmod 600 "${CONFIG_DIR}/duplicati.env"
 chown -R "${APP_USER}:${APP_USER}" "${DATA_DIR}" "${CONFIG_DIR}"
 
@@ -110,9 +118,9 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reload
-systemctl enable --now duplicati.service >> "${LOG_FILE}" 2>&1
+systemctl daemon-reload >> "$LOGFILE" 2>&1
+systemctl enable --now duplicati.service >> "$LOGFILE" 2>&1
 
-write_lock "${LOCK_FILE}"
+write_lock "${PACKAGE_NAME}"
 report_progress 100 "${APP_NAME} installed and running on port ${APP_PORT}"
-log "${APP_NAME} installation complete."
+log_info "${PACKAGE_NAME} installed successfully"

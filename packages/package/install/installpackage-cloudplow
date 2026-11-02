@@ -1,23 +1,77 @@
 #!/bin/bash
-# AetherFlow Package Installer: Cloudplow
-# Port: 0 (Python venv offloader daemon in /opt/cloudplow)
 
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ -f "${SELF_DIR}/../../common.sh" ]]; then
-    # shellcheck source=/dev/null
     source "${SELF_DIR}/../../common.sh"
 else
-    # shellcheck source=/dev/null
     source /opt/AetherFlow/packages/common.sh
 fi
 
 PACKAGE_NAME="cloudplow"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
-mkdir -p "$(dirname "$LOGFILE")" /install
+mkdir -p "$(dirname "$LOGFILE")" /install /run/lock
+exec 9>/run/lock/aetherflow-cloudplow.lock
+flock -n 9 || { log_error "Another Cloudplow lifecycle operation is running."; exit 1; }
 
 require_root
+
+BUILD_DIR=""
+BACKUP_DIR=""
+WAS_RUNNABLE=0
+SERVICE_STOPPED=0
+APP_MOVED=0
+APP_ACTIVATED=0
+VENV_MOVED=0
+VENV_ACTIVATED=0
+UNIT_WRITTEN=0
+SUCCESS=0
+
+if [[ -f /etc/systemd/system/cloudplow.service ]] || systemctl is-active --quiet cloudplow 2>/dev/null || systemctl is-enabled --quiet cloudplow 2>/dev/null; then
+    WAS_RUNNABLE=1
+fi
+
+cleanup() {
+    local status=$?
+    trap - EXIT
+    set +e
+    if [[ "$SUCCESS" -ne 1 ]]; then
+        if [[ "$APP_ACTIVATED" -eq 1 || "$VENV_ACTIVATED" -eq 1 || "$SERVICE_STOPPED" -eq 1 ]]; then
+            systemctl stop cloudplow >> "$LOGFILE" 2>&1 || true
+        fi
+        if [[ "$APP_ACTIVATED" -eq 1 ]]; then
+            mv /opt/cloudplow "$BACKUP_DIR/failed-app" 2>/dev/null || rm -rf /opt/cloudplow
+        elif [[ "$VENV_ACTIVATED" -eq 1 ]]; then
+            rm -rf /opt/cloudplow/.venv
+        fi
+        if [[ "$APP_MOVED" -eq 1 ]]; then
+            mv "$BACKUP_DIR/app" /opt/cloudplow 2>/dev/null || true
+        elif [[ "$VENV_MOVED" -eq 1 ]]; then
+            mv "$BACKUP_DIR/venv" /opt/cloudplow/.venv 2>/dev/null || true
+        fi
+        if [[ "$UNIT_WRITTEN" -eq 1 ]]; then
+            if [[ -f "$BACKUP_DIR/cloudplow.service" ]]; then
+                cp -a "$BACKUP_DIR/cloudplow.service" /etc/systemd/system/cloudplow.service
+            else
+                systemctl disable cloudplow >> "$LOGFILE" 2>&1 || true
+                rm -f /etc/systemd/system/cloudplow.service
+            fi
+            systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
+        fi
+        if [[ "$WAS_RUNNABLE" -eq 1 ]]; then
+            systemctl start cloudplow >> "$LOGFILE" 2>&1 || true
+        fi
+    fi
+    if [[ -n "$BUILD_DIR" && -d "$BUILD_DIR" ]]; then
+        rm -rf "$BUILD_DIR"
+    fi
+    exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 10 "Installing Python build dependencies for Cloudplow..."
 
@@ -25,54 +79,96 @@ DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
     python3 python3-pip python3-venv python3-dev git curl ca-certificates >> "$LOGFILE" 2>&1
 
-report_progress 35 "Cloning Cloudplow repository into /opt/cloudplow..."
-rm -rf /opt/cloudplow
-git clone https://github.com/l3uddz/cloudplow.git /opt/cloudplow >> "$LOGFILE" 2>&1
-cd /opt/cloudplow
-CL_TAG="$(git describe --tags --abbrev=0 2>/dev/null || git rev-parse --short HEAD 2>/dev/null || true)"
-if [[ -n "$CL_TAG" ]]; then
-    printf '%s\n' "$CL_TAG" > /opt/cloudplow/.af-version
-fi
+report_progress 35 "Staging Cloudplow repository..."
+mkdir -p /opt /var/backups
+BUILD_DIR="$(mktemp -d /opt/.cloudplow-build.XXXXXX)"
+git clone https://github.com/l3uddz/cloudplow.git "$BUILD_DIR" >> "$LOGFILE" 2>&1
+test -s "$BUILD_DIR/cloudplow.py" || { log_error "Failed to clone Cloudplow repository"; exit 1; }
 
-report_progress 60 "Creating Python virtualenv and installing dependencies..."
-python3 -m venv /opt/cloudplow/.venv >> "$LOGFILE" 2>&1
-/opt/cloudplow/.venv/bin/pip install --upgrade pip setuptools wheel >> "$LOGFILE" 2>&1
-if [[ -f /opt/cloudplow/requirements.txt ]]; then
-    /opt/cloudplow/.venv/bin/pip install -r /opt/cloudplow/requirements.txt >> "$LOGFILE" 2>&1
+CL_TAG="$(git -C "$BUILD_DIR" describe --tags --abbrev=0 2>/dev/null || git -C "$BUILD_DIR" rev-parse --short HEAD 2>/dev/null || true)"
+if [[ -n "$CL_TAG" ]]; then
+    printf '%s\n' "$CL_TAG" > "$BUILD_DIR/.af-version"
 fi
 
 mkdir -p /var/log/cloudplow /mnt/local /mnt/remote /mnt/unionfs
 
-if [[ ! -f /opt/cloudplow/config.json ]]; then
-    cat <<'EOF' > /opt/cloudplow/config.json
+if [[ -f /opt/cloudplow/config.json ]]; then
+    cp -p /opt/cloudplow/config.json "$BUILD_DIR/config.json"
+else
+    cat <<'EOF' > "$BUILD_DIR/config.json"
 {
   "core": {
     "dry_run": false,
-    "rclone_binary": "/usr/bin/rclone",
-    "rclone_config_path": "/etc/rclone/rclone.conf"
+    "rclone_binary_path": "/usr/bin/rclone",
+    "rclone_config_path": "/root/.config/rclone/rclone.conf"
   },
   "hidden": {},
   "notifications": {},
-  "remotes": {
-    "remote": {
-      "rclone_command": "move",
-      "rclone_sleeps": "true",
-      "sync_remote": "remote:media",
-      "upload_folder": "/mnt/local",
-      "upload_remote": "remote:media"
+  "plex": {
+    "enabled": false,
+    "url": "http://127.0.0.1:32400",
+    "token": "",
+    "poll_interval": 60,
+    "notifications": false,
+    "max_streams_before_throttle": 1,
+    "rclone": {
+      "url": "http://localhost:7949",
+      "throttle_speeds": {
+        "0": "1000M",
+        "1": "50M",
+        "2": "25M",
+        "3": "10M"
+      }
     }
   },
+  "remotes": {},
   "syncer": {},
-  "uploader": {
-    "remote": {
-      "check_interval": 30,
-      "max_size_gb": 50,
-      "size_excludes": []
-    }
-  }
+  "uploader": {}
 }
 EOF
 fi
+
+report_progress 60 "Creating Python virtualenv and installing dependencies..."
+BACKUP_DIR="$(mktemp -d /var/backups/aetherflow-cloudplow.XXXXXX)"
+chmod 700 "$BACKUP_DIR"
+if [[ -f /etc/systemd/system/cloudplow.service ]]; then
+    cp -a /etc/systemd/system/cloudplow.service "$BACKUP_DIR/cloudplow.service"
+fi
+mkdir -p /opt/cloudplow
+if [[ -e /opt/cloudplow/.venv || -L /opt/cloudplow/.venv ]]; then
+    if [[ "$WAS_RUNNABLE" -eq 1 && "$SERVICE_STOPPED" -eq 0 ]]; then
+        systemctl stop cloudplow >> "$LOGFILE" 2>&1 || true
+        SERVICE_STOPPED=1
+    fi
+    mv /opt/cloudplow/.venv "$BACKUP_DIR/venv"
+    VENV_MOVED=1
+fi
+python3 -m venv /opt/cloudplow/.venv >> "$LOGFILE" 2>&1
+VENV_ACTIVATED=1
+/opt/cloudplow/.venv/bin/pip install --upgrade pip setuptools wheel >> "$LOGFILE" 2>&1
+if [[ -f "$BUILD_DIR/requirements.txt" ]]; then
+    /opt/cloudplow/.venv/bin/pip install -r "$BUILD_DIR/requirements.txt" >> "$LOGFILE" 2>&1
+fi
+test -x /opt/cloudplow/.venv/bin/python || { log_error "Failed to verify Cloudplow virtual environment"; exit 1; }
+
+report_progress 75 "Backing up existing Cloudplow installation and activating new build..."
+if [[ "$WAS_RUNNABLE" -eq 1 && "$SERVICE_STOPPED" -eq 0 ]]; then
+    systemctl stop cloudplow >> "$LOGFILE" 2>&1 || true
+    SERVICE_STOPPED=1
+fi
+mv /opt/cloudplow/.venv "$BUILD_DIR/.venv"
+VENV_ACTIVATED=0
+if [[ -d /opt/cloudplow ]]; then
+    mv /opt/cloudplow "$BACKUP_DIR/app"
+    APP_MOVED=1
+    if [[ "$VENV_MOVED" -eq 1 ]]; then
+        mv "$BACKUP_DIR/venv" "$BACKUP_DIR/app/.venv"
+    fi
+fi
+mv "$BUILD_DIR" /opt/cloudplow
+APP_ACTIVATED=1
+BUILD_DIR=""
+cd /opt/cloudplow
 
 report_progress 85 "Configuring and starting cloudplow.service unit..."
 cat <<'EOF' > /etc/systemd/system/cloudplow.service
@@ -93,10 +189,25 @@ RestartSec=30
 [Install]
 WantedBy=multi-user.target
 EOF
+UNIT_WRITTEN=1
 
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now cloudplow >> "$LOGFILE" 2>&1
 
+HEALTHY=0
+for attempt in {1..15}; do
+    if systemctl is-active --quiet cloudplow; then
+        HEALTHY=1
+        break
+    fi
+    sleep 1
+done
+if [[ "$HEALTHY" -ne 1 ]]; then
+    log_error "Cloudplow service did not start successfully; rolling back."
+    exit 1
+fi
+
 write_lock "${PACKAGE_NAME}"
+SUCCESS=1
 report_progress 100 "Cloudplow installed (daemon active in /opt/cloudplow)."
 log_info "${PACKAGE_NAME} installed successfully"

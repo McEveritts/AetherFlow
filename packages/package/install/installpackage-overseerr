@@ -1,15 +1,11 @@
 #!/bin/bash
-# AetherFlow Package Installer: Overseerr
-# Port: 5056
 
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ -f "${SELF_DIR}/../../common.sh" ]]; then
-    # shellcheck source=/dev/null
     source "${SELF_DIR}/../../common.sh"
 else
-    # shellcheck source=/dev/null
     source /opt/AetherFlow/packages/common.sh
 fi
 
@@ -17,45 +13,119 @@ PACKAGE_NAME="overseerr"
 APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-5056}}"
 export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
-mkdir -p "$(dirname "$LOGFILE")" /install
+mkdir -p "$(dirname "$LOGFILE")" /install /run/lock
+exec 9>/run/lock/aetherflow-overseerr.lock
+flock -n 9 || { log_error "Another Overseerr installation is running."; exit 1; }
 
 require_root
+
+BUILD_DIR=""
+BACKUP_DIR=""
+WAS_RUNNABLE=0
+SERVICE_STOPPED=0
+APP_MOVED=0
+APP_ACTIVATED=0
+UNIT_WRITTEN=0
+SUCCESS=0
+
+if [[ -f /etc/systemd/system/overseerr.service ]] || systemctl is-active --quiet overseerr 2>/dev/null || systemctl is-enabled --quiet overseerr 2>/dev/null; then
+    WAS_RUNNABLE=1
+fi
+
+cleanup() {
+    local status=$?
+    trap - EXIT
+    set +e
+    if [[ "$SUCCESS" -ne 1 ]]; then
+        if [[ "$APP_ACTIVATED" -eq 1 || "$SERVICE_STOPPED" -eq 1 ]]; then
+            systemctl stop overseerr >> "$LOGFILE" 2>&1 || true
+        fi
+        if [[ "$APP_ACTIVATED" -eq 1 ]]; then
+            mv /opt/overseerr "$BACKUP_DIR/failed-app" 2>/dev/null || rm -rf /opt/overseerr
+        fi
+        if [[ "$APP_MOVED" -eq 1 ]]; then
+            mv "$BACKUP_DIR/app" /opt/overseerr 2>/dev/null || true
+        fi
+        if [[ "$UNIT_WRITTEN" -eq 1 ]]; then
+            if [[ -f "$BACKUP_DIR/overseerr.service" ]]; then
+                cp -a "$BACKUP_DIR/overseerr.service" /etc/systemd/system/overseerr.service
+            else
+                systemctl disable overseerr >> "$LOGFILE" 2>&1 || true
+                rm -f /etc/systemd/system/overseerr.service
+            fi
+            systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
+        fi
+        if [[ "$WAS_RUNNABLE" -eq 1 ]]; then
+            systemctl start overseerr >> "$LOGFILE" 2>&1 || true
+        fi
+    fi
+    if [[ -n "$BUILD_DIR" && -d "$BUILD_DIR" ]]; then
+        rm -rf "$BUILD_DIR"
+    fi
+    exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 10 "Installing system and Node.js prerequisites for Overseerr..."
 
 DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl git gnupg ca-certificates build-essential python3 python3-setuptools >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+    curl git gnupg ca-certificates build-essential python3 python3-setuptools >> "$LOGFILE" 2>&1
 
 ensure_node 20
+
 if ! command_exists yarn; then
     npm install -g yarn >> "$LOGFILE" 2>&1
     sync_node_global_bins
 fi
 
 if ! id -u overseerr >/dev/null 2>&1; then
-    useradd --system --user-group --create-home --home-dir /var/lib/overseerr --shell /usr/sbin/nologin overseerr
+    useradd --system --user-group --no-create-home --home-dir /var/lib/overseerr --shell /usr/sbin/nologin overseerr
 fi
 
-mkdir -p /var/lib/overseerr
+mkdir -p /var/lib/overseerr /opt /var/backups
 
-report_progress 30 "Cloning Overseerr repository..."
-rm -rf /opt/overseerr
-git clone https://github.com/sct/overseerr.git /opt/overseerr >> "$LOGFILE" 2>&1
-cd /opt/overseerr
+report_progress 30 "Cloning Overseerr repository into staging directory..."
+BUILD_DIR="$(mktemp -d /opt/.overseerr-build.XXXXXX)"
+git clone https://github.com/sct/overseerr.git "$BUILD_DIR" >> "$LOGFILE" 2>&1
+cd "$BUILD_DIR"
 LATEST_TAG="$(git tag -l 'v*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n1 || true)"
 if [[ -n "$LATEST_TAG" ]]; then
     git checkout "$LATEST_TAG" >> "$LOGFILE" 2>&1 || true
-    printf '%s\n' "${LATEST_TAG#v}" > /opt/overseerr/.af-version
+    printf '%s\n' "${LATEST_TAG#v}" > "$BUILD_DIR/.af-version"
 fi
 
 report_progress 55 "Installing Overseerr dependencies and building production bundle..."
 export CYPRESS_INSTALL_BINARY=0
-yarn install --ignore-engines --frozen-lockfile --network-timeout 1000000 >> "$LOGFILE" 2>&1 || yarn install --ignore-engines --network-timeout 1000000 >> "$LOGFILE" 2>&1
-yarn build >> "$LOGFILE" 2>&1
+(cd "$BUILD_DIR" && (yarn install --ignore-engines --frozen-lockfile --network-timeout 1000000 >> "$LOGFILE" 2>&1 || yarn install --ignore-engines --network-timeout 1000000 >> "$LOGFILE" 2>&1))
+(cd "$BUILD_DIR" && yarn build >> "$LOGFILE" 2>&1)
+test -s "$BUILD_DIR/dist/index.js" || { log_error "Failed to verify Overseerr build output"; exit 1; }
 
-chown -R overseerr:overseerr /opt/overseerr /var/lib/overseerr
+chown -R overseerr:overseerr "$BUILD_DIR" /var/lib/overseerr
 
 NODE_BIN="$(command -v node || echo /usr/bin/node)"
+
+report_progress 75 "Backing up existing Overseerr installation and activating new build..."
+BACKUP_DIR="$(mktemp -d /var/backups/aetherflow-overseerr.XXXXXX)"
+chmod 700 "$BACKUP_DIR"
+if [[ -f /etc/systemd/system/overseerr.service ]]; then
+    cp -a /etc/systemd/system/overseerr.service "$BACKUP_DIR/overseerr.service"
+fi
+if [[ "$WAS_RUNNABLE" -eq 1 ]]; then
+    systemctl stop overseerr >> "$LOGFILE" 2>&1 || true
+    SERVICE_STOPPED=1
+fi
+if [[ -d /opt/overseerr ]]; then
+    mv /opt/overseerr "$BACKUP_DIR/app"
+    APP_MOVED=1
+fi
+mv "$BUILD_DIR" /opt/overseerr
+APP_ACTIVATED=1
+BUILD_DIR=""
+cd /opt/overseerr
 
 report_progress 85 "Configuring and starting overseerr.service on port ${APP_PORT}..."
 cat <<EOF > /etc/systemd/system/overseerr.service
@@ -79,10 +149,25 @@ ExecStart=${NODE_BIN} dist/index.js
 [Install]
 WantedBy=multi-user.target
 EOF
+UNIT_WRITTEN=1
 
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now overseerr >> "$LOGFILE" 2>&1
 
+HEALTHY=0
+for attempt in {1..20}; do
+    if systemctl is-active --quiet overseerr; then
+        HEALTHY=1
+        break
+    fi
+    sleep 1
+done
+if [[ "$HEALTHY" -ne 1 ]]; then
+    log_error "Overseerr service did not become active; rolling back."
+    exit 1
+fi
+
 write_lock "${PACKAGE_NAME}"
+SUCCESS=1
 report_progress 100 "Overseerr installed on port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"

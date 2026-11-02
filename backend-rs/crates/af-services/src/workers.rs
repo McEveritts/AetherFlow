@@ -332,6 +332,10 @@ fn resolve_fs_path(path_str: &str) -> PathBuf {
 
 /// Collects the list of critical systemd units (`nginx`, `smbd`, `wsdd`) and
 /// any installed systemd packages whose lockfile exists in `/install/`.
+fn is_component_policy_monitored(policy: &crate::ServiceComponentPolicy) -> bool {
+    matches!(policy.role, "required" | "timer") || (policy.role == "optional" && policy.configured)
+}
+
 fn collect_monitored_systemd_units() -> Vec<(String, String)> {
     let mut units: Vec<(String, String)> = vec![
         ("nginx".to_string(), "Nginx".to_string()),
@@ -352,7 +356,11 @@ fn collect_monitored_systemd_units() -> Vec<(String, String)> {
                 continue;
             }
 
-            for unit in crate::resolve_service_units(&pkg.name) {
+            for policy in crate::resolve_service_component_policies(&pkg.name) {
+                if !is_component_policy_monitored(&policy) {
+                    continue;
+                }
+                let unit = policy.unit;
                 if seen.insert(unit.clone()) {
                     let label = if pkg.label.trim().is_empty() {
                         pkg.name.clone()
@@ -807,9 +815,8 @@ pub static PACKAGE_UPDATE_CACHE: Lazy<Mutex<HashMap<String, PackageUpdateRecord>
 
 static APP_UPDATE_WATCHER_ACTIVE: AtomicBool = AtomicBool::new(false);
 
-static DOTTED_VERSION_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?i)\bv?(\d+\.\d+(?:\.\d+)*(?:[._:+~-][0-9A-Za-z]+)*)\b").unwrap()
-});
+static DOTTED_VERSION_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)\bv?(\d+\.\d+(?:\.\d+)*(?:[._:+~-][0-9A-Za-z]+)*)\b").unwrap());
 static DEFAULT_VERSION_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)\bv?([0-9]+(?:[._:+~-][0-9A-Za-z]+)*)\b").unwrap());
 static NUMERIC_TOKEN_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\d+").unwrap());
@@ -916,7 +923,7 @@ pub async fn refresh_all_package_updates() -> Vec<PackageUpdateRecord> {
     let mut records = Vec::new();
 
     for pkg in pkgs {
-        let is_installed = pkg.status == "installed" || pkg.status == "running";
+        let is_installed = package_is_installed(&pkg);
         if !is_installed || !should_track_package(&pkg) {
             continue;
         }
@@ -1037,22 +1044,50 @@ fn should_track_package(pkg: &Package) -> bool {
     }
 }
 
+fn package_is_installed(pkg: &Package) -> bool {
+    !pkg.lock_file.is_empty() && resolve_fs_path(&pkg.lock_file).exists()
+}
+
 async fn check_single_package(
     client: &reqwest::Client,
     github_api_base: &str,
     pkg: &Package,
 ) -> (PackageUpdateRecord, bool) {
-    let is_installed = pkg.status == "installed" || pkg.status == "running";
+    let is_installed = package_is_installed(&pkg);
 
     let installed_res = detect_installed_version(pkg).await;
     let latest_res = detect_latest_version(client, github_api_base, pkg).await;
 
+    let prev_record = get_package_update_map().get(&pkg.name).cloned();
+    let record = build_package_update_record(
+        &pkg.name,
+        is_installed,
+        installed_res,
+        latest_res,
+        prev_record.as_ref(),
+        Utc::now().to_rfc3339(),
+    );
+
+    let notify = persist_and_cache_package_update(&record);
+    (record, notify)
+}
+
+fn build_package_update_record(
+    pkg_name: &str,
+    is_installed: bool,
+    installed_res: anyhow::Result<String>,
+    latest_res: anyhow::Result<(String, String)>,
+    prev_record: Option<&PackageUpdateRecord>,
+    checked_at: String,
+) -> PackageUpdateRecord {
     let mut err_parts = Vec::new();
     let installed_version = match &installed_res {
         Ok(v) => v.clone(),
         Err(e) => {
             err_parts.push(format!("installed version: {}", e));
-            String::new()
+            prev_record
+                .map(|r| r.installed_version.clone())
+                .unwrap_or_default()
         }
     };
 
@@ -1060,27 +1095,36 @@ async fn check_single_package(
         Ok((v, u)) => (v.clone(), u.clone()),
         Err(e) => {
             err_parts.push(format!("latest version: {}", e));
-            (String::new(), String::new())
+            (
+                prev_record
+                    .map(|r| r.latest_version.clone())
+                    .unwrap_or_default(),
+                prev_record
+                    .map(|r| r.release_url.clone())
+                    .unwrap_or_default(),
+            )
         }
     };
 
-    let update_available = installed_res.is_ok()
-        && latest_res.is_ok()
-        && is_remote_version_newer(&installed_version, &latest_version);
+    let update_available = if installed_res.is_ok() && latest_res.is_ok() {
+        is_installed && is_remote_version_newer(&installed_version, &latest_version)
+    } else {
+        is_installed
+            && prev_record
+                .map(|record| record.update_available)
+                .unwrap_or(false)
+    };
 
-    let record = PackageUpdateRecord {
-        package_id: pkg.name.clone(),
+    PackageUpdateRecord {
+        package_id: pkg_name.to_string(),
         installed: is_installed,
         installed_version,
         latest_version,
         update_available,
-        checked_at: Utc::now().to_rfc3339(),
+        checked_at,
         release_url,
         error: err_parts.join("; "),
-    };
-
-    let notify = persist_and_cache_package_update(&record);
-    (record, notify)
+    }
 }
 
 async fn detect_installed_version(pkg: &Package) -> anyhow::Result<String> {
@@ -1649,5 +1693,77 @@ mod tests {
         assert!((parse_speed_str_to_mb_s("10.5 MB/s") - 10.5).abs() < 1e-6);
         assert!((parse_speed_str_to_mb_s("1024.0 KB/s") - 1.0).abs() < 1e-6);
         assert_eq!(parse_speed_str_to_mb_s("0 B/s"), 0.0);
+    }
+
+    #[test]
+    fn test_installed_state_uses_lock_during_active_lifecycle_job() {
+        let path = std::env::temp_dir().join(format!(
+            "af-package-lock-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        std::fs::write(&path, "installed").unwrap();
+        let pkg = Package {
+            lock_file: path.to_string_lossy().into_owned(),
+            status: "installing".to_string(),
+            ..Default::default()
+        };
+        let installed_during_job = package_is_installed(&pkg);
+        std::fs::remove_file(&path).unwrap();
+        assert!(installed_during_job);
+        assert!(!package_is_installed(&pkg));
+    }
+
+    #[test]
+    fn test_build_package_update_record_preserves_previous_versions_on_failure() {
+        let prev = PackageUpdateRecord {
+            package_id: "radarr".to_string(),
+            installed: true,
+            installed_version: "5.14.0".to_string(),
+            latest_version: "5.15.0".to_string(),
+            update_available: true,
+            checked_at: "2026-11-01T00:00:00Z".to_string(),
+            release_url: "https://github.com/Radarr/Radarr/releases/tag/v5.15.0".to_string(),
+            error: String::new(),
+        };
+
+        let failed = build_package_update_record(
+            "radarr",
+            true,
+            Err(anyhow::anyhow!("binary not found")),
+            Err(anyhow::anyhow!("github rate limit exceeded")),
+            Some(&prev),
+            "2026-11-02T00:00:00Z".to_string(),
+        );
+        assert_eq!(failed.installed_version, "5.14.0");
+        assert_eq!(failed.latest_version, "5.15.0");
+        assert_eq!(
+            failed.release_url,
+            "https://github.com/Radarr/Radarr/releases/tag/v5.15.0"
+        );
+        assert!(failed.update_available);
+        assert!(failed.error.contains("installed version: binary not found"));
+        assert!(failed
+            .error
+            .contains("latest version: github rate limit exceeded"));
+    }
+
+    #[test]
+    fn test_monitored_component_policy_skips_unconfigured_optional_and_oneshots() {
+        let autobrr_unconfigured = crate::resolve_service_component_policies_with("rclone", false);
+        let monitored_units: Vec<String> = autobrr_unconfigured
+            .into_iter()
+            .filter(is_component_policy_monitored)
+            .map(|p| p.unit)
+            .collect();
+        assert_eq!(monitored_units, vec!["rclone".to_string()]);
+
+        let recyclarr_policies = crate::resolve_service_component_policies_with("recyclarr", false);
+        let recyclarr_monitored: Vec<String> = recyclarr_policies
+            .into_iter()
+            .filter(is_component_policy_monitored)
+            .map(|p| p.unit)
+            .collect();
+        assert_eq!(recyclarr_monitored, vec!["recyclarr.timer".to_string()]);
     }
 }

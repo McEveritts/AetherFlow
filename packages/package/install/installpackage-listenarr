@@ -17,25 +17,31 @@ fi
 
 require_root
 
+PACKAGE_NAME="listenarr"
 APP_NAME="listenarr"
 APP_USER="listenarr"
 INSTALL_DIR="/opt/Listenarr"
 DATA_DIR="/var/lib/listenarr"
-LOCK_FILE="/install/.listenarr.lock"
 SERVICE_FILE="/etc/systemd/system/listenarr.service"
-APP_PORT="${AF_APP_PORT:-4546}"
+APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-4546}}"
+export AF_APP_PORT="$APP_PORT"
+export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
+mkdir -p "$(dirname "$LOGFILE")" /install
 
-setup_log "${APP_NAME}"
-log "Starting ${APP_NAME} installation (target port: ${APP_PORT})..."
+log_info "Starting ${APP_NAME} installation (target port: ${APP_PORT})..."
 report_progress 10 "Preparing ${APP_NAME} installation..."
 
-ensure_master_credentials
+load_master_credentials
 
 report_progress 25 "Installing system dependencies..."
-apt_update
-apt_install curl wget jq unzip ca-certificates libicu-dev libssl-dev sqlite3
+DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+    curl wget jq unzip ca-certificates libicu-dev libssl-dev sqlite3 >> "$LOGFILE" 2>&1
 
-ensure_service_user "${APP_USER}" "${DATA_DIR}"
+if ! id -u "${APP_USER}" >/dev/null 2>&1; then
+    useradd --system --user-group --create-home --home-dir "${DATA_DIR}" --shell /usr/sbin/nologin "${APP_USER}" 2>/dev/null || \
+    useradd --system --user-group --home-dir "${DATA_DIR}" --shell /bin/false "${APP_USER}"
+fi
 mkdir -p "${INSTALL_DIR}" "${DATA_DIR}" "${DATA_DIR}/config"
 
 ARCH="$(dpkg --print-architecture)"
@@ -43,28 +49,28 @@ case "${ARCH}" in
     amd64) L_ARCH="linux-x64" ;;
     arm64) L_ARCH="linux-arm64" ;;
     *)
-        log "ERROR: Unsupported architecture for Listenarr: ${ARCH}"
+        log_error "Unsupported architecture for Listenarr: ${ARCH}"
         exit 1
         ;;
 esac
 
 report_progress 45 "Resolving latest ${APP_NAME} release from GitHub..."
-RELEASES_JSON="$(curl -fsSL https://api.github.com/repos/Listenarrs/Listenarr/releases)"
-LATEST_TAG="$(echo "${RELEASES_JSON}" | jq -r '.[0].tag_name // empty')"
-ASSET_URL="$(echo "${RELEASES_JSON}" | jq -r --arg arch "${L_ARCH}.zip" '.[0].assets[] | select(.name | endswith($arch)) | .browser_download_url' | head -n1)"
+RELEASES_JSON="$(curl -fsSL https://api.github.com/repos/Listenarrs/Listenarr/releases 2>/dev/null || true)"
+LATEST_TAG="$(echo "${RELEASES_JSON}" | jq -r '.[0].tag_name // empty' || true)"
+ASSET_URL="$(echo "${RELEASES_JSON}" | jq -r --arg arch "${L_ARCH}.zip" '.[0].assets[]? | select(.name | endswith($arch)) | .browser_download_url' | head -n1 || true)"
 
 if [[ -z "${ASSET_URL}" ]]; then
-    log "ERROR: Failed to locate Listenarr release asset for ${L_ARCH}"
+    log_error "Failed to locate Listenarr release asset for ${L_ARCH}"
     exit 1
 fi
 
 TMP_ZIP="$(mktemp --suffix=.zip)"
 TMP_EXTRACT="$(mktemp -d)"
 report_progress 65 "Downloading ${APP_NAME} (${LATEST_TAG})..."
-wget -qO "${TMP_ZIP}" "${ASSET_URL}" >> "${LOG_FILE}" 2>&1
+wget -qO "${TMP_ZIP}" "${ASSET_URL}" >> "$LOGFILE" 2>&1 || curl -fsSL -o "${TMP_ZIP}" "${ASSET_URL}" >> "$LOGFILE" 2>&1
 
 report_progress 80 "Extracting ${APP_NAME} to ${INSTALL_DIR}..."
-unzip -qo "${TMP_ZIP}" -d "${TMP_EXTRACT}" >> "${LOG_FILE}" 2>&1
+unzip -qo "${TMP_ZIP}" -d "${TMP_EXTRACT}" >> "$LOGFILE" 2>&1
 rm -f "${TMP_ZIP}"
 
 if [[ -f "${TMP_EXTRACT}/Listenarr.Api" ]]; then
@@ -105,9 +111,9 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reload
-systemctl enable --now listenarr.service >> "${LOG_FILE}" 2>&1
+systemctl daemon-reload >> "$LOGFILE" 2>&1
+systemctl enable --now listenarr.service >> "$LOGFILE" 2>&1
 
-write_lock "${LOCK_FILE}"
+write_lock "${PACKAGE_NAME}"
 report_progress 100 "${APP_NAME} installed and running on port ${APP_PORT}"
-log "${APP_NAME} installation complete."
+log_info "${PACKAGE_NAME} installed successfully"

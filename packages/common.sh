@@ -167,6 +167,32 @@ replace_app_tree() {
     fi
 }
 
+configure_apache_app_listener() {
+    local package_name="$1" port="$2" apache_root="${AETHERFLOW_APACHE_ROOT:-/etc/apache2}" config staged
+    [[ "$package_name" =~ ^[a-z0-9][a-z0-9-]*$ && "$port" =~ ^[0-9]+$ ]] || return 1
+    (( port >= 1024 && port <= 65535 )) || return 1
+    config="aetherflow-${package_name}-listen.conf"
+    mkdir -p "$apache_root/conf-available" "$apache_root/conf-enabled"
+    if grep -Eq "^[[:space:]]*Listen[[:space:]]+${port}([[:space:]]|$)" "$apache_root/ports.conf" 2>/dev/null; then
+        rm -f -- "$apache_root/conf-enabled/$config" "$apache_root/conf-available/$config"
+        log_info "Reusing existing shared Apache listener on $port"
+        return 0
+    fi
+    staged="$(mktemp "$apache_root/conf-available/.${config}.XXXXXX")"
+    if ! printf 'Listen %s\n' "$port" > "$staged" || ! chmod 644 "$staged" || ! mv -f -- "$staged" "$apache_root/conf-available/$config"; then
+        rm -f -- "$staged"
+        return 1
+    fi
+    ln -sfn -- "../conf-available/$config" "$apache_root/conf-enabled/$config"
+}
+
+remove_apache_app_listener() {
+    local package_name="$1" apache_root="${AETHERFLOW_APACHE_ROOT:-/etc/apache2}" config
+    [[ "$package_name" =~ ^[a-z0-9][a-z0-9-]*$ ]] || return 1
+    config="aetherflow-${package_name}-listen.conf"
+    rm -f -- "$apache_root/conf-enabled/$config" "$apache_root/conf-available/$config"
+}
+
 lock_path() {
     local package_name="$1"
     printf '%s/.%s.lock\n' "$LOCK_DIR" "$package_name"
@@ -521,4 +547,3 @@ PYEOF
 }
 
 load_master_credentials
-

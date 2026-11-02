@@ -22,16 +22,14 @@ report_progress 25 "Disabling Apache ruTorrent site..."
 
 a2dissite rutorrent.conf >> "$LOGFILE" 2>&1 || true
 rm -f /etc/apache2/sites-available/rutorrent.conf /etc/apache2/sites-enabled/rutorrent.conf
-if [[ -f /etc/apache2/ports.conf ]]; then
-    sed -i '/^Listen 8087$/d' /etc/apache2/ports.conf || true
-fi
+remove_apache_app_listener "$PACKAGE_NAME"
 
 report_progress 65 "Removing ruTorrent web directory and symlinks..."
 if [[ "${DELETE_DATA:-false}" == true ]]; then
     rm -rf /var/www/rutorrent /srv/rutorrent
 fi
-systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
-systemctl reload apache2 >> "$LOGFILE" 2>&1 || true
+apache2ctl configtest >> "$LOGFILE" 2>&1
+systemctl reload apache2 >> "$LOGFILE" 2>&1
 
 remove_lock "${PACKAGE_NAME}"
 report_progress 100 "ruTorrent removed; application data retained unless DELETE_DATA=true."

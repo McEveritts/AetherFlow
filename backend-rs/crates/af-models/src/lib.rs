@@ -270,6 +270,8 @@ pub struct MarketplaceApp {
     pub public_domain: String,
     #[serde(skip_serializing_if = "is_false", default)]
     pub external_access_enabled: bool,
+    #[serde(default)]
+    pub tls_enabled: bool,
     #[serde(skip_serializing_if = "String::is_empty", default)]
     pub web_path: String,
     pub progress: i32,
@@ -433,5 +435,14 @@ mod tests {
         let s = serde_json::to_string(&u).unwrap();
         assert!(!s.contains("secret-google-sub"));
         assert!(s.contains("\"is_oauth\":true"));
+    }
+    #[test]
+    fn test_marketplace_tls_false_is_explicit_on_wire() {
+        let app = MarketplaceApp {
+            tls_enabled: false,
+            ..Default::default()
+        };
+        let value = serde_json::to_value(app).unwrap();
+        assert_eq!(value["tls_enabled"], false);
     }
 }

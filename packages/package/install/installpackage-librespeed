@@ -24,7 +24,7 @@ log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 10 "Installing prerequisites for LibreSpeed..."
 
 DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl tar ca-certificates >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3 curl tar ca-certificates >> "$LOGFILE" 2>&1
 
 if ! id -u librespeed >/dev/null 2>&1; then
     useradd --system --user-group --no-create-home --home-dir /opt/librespeed --shell /usr/sbin/nologin librespeed
@@ -91,9 +91,22 @@ if [[ -d "$OBSIDIAN_ASSET_DIR" ]]; then
 fi
 rm -rf "$TMP_SRC_DIR"
 
-LS_STATS_PASS="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "${MASTER_PASS}")"
-cat <<EOF > /opt/librespeed/settings.toml
-# LibreSpeed speedtest-go configuration
+if [[ -f /opt/librespeed/settings.toml ]]; then
+    python3 - /opt/librespeed/settings.toml "$APP_PORT" <<'PYEOF'
+import re, sys
+cfg_path, port = sys.argv[1], sys.argv[2]
+with open(cfg_path, "r", encoding="utf-8") as f:
+    text = f.read()
+if re.search(r"^listen_port\s*=", text, re.MULTILINE):
+    text = re.sub(r"^listen_port\s*=.*", f"listen_port={port}", text, flags=re.MULTILINE)
+else:
+    text += f"\nlisten_port={port}\n"
+with open(cfg_path, "w", encoding="utf-8") as f:
+    f.write(text)
+PYEOF
+else
+    LS_STATS_PASS="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "${MASTER_PASS}")"
+    cat <<EOF > /opt/librespeed/settings.toml
 bind_address="0.0.0.0"
 listen_port=${APP_PORT}
 url_base=""
@@ -114,6 +127,7 @@ enable_tls=false
 tls_cert_file=""
 tls_key_file=""
 EOF
+fi
 
 chown -R librespeed:librespeed /opt/librespeed
 chmod 755 /opt/librespeed

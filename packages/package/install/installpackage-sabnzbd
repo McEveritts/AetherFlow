@@ -1,15 +1,11 @@
 #!/bin/bash
-# AetherFlow Package Installer: SABnzbd
-# Port: 8085
 
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ -f "${SELF_DIR}/../../common.sh" ]]; then
-    # shellcheck source=/dev/null
     source "${SELF_DIR}/../../common.sh"
 else
-    # shellcheck source=/dev/null
     source /opt/AetherFlow/packages/common.sh
 fi
 
@@ -17,40 +13,115 @@ PACKAGE_NAME="sabnzbd"
 APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-8085}}"
 export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
-mkdir -p "$(dirname "$LOGFILE")" /install
+mkdir -p "$(dirname "$LOGFILE")" /install /run/lock
+exec 9>/run/lock/aetherflow-sabnzbd.lock
+flock -n 9 || { log_error "Another SABnzbd installation is running."; exit 1; }
 
 require_root
+
+BUILD_DIR=""
+BACKUP_DIR=""
+WAS_RUNNABLE=0
+SERVICE_STOPPED=0
+APP_MOVED=0
+APP_ACTIVATED=0
+VENV_MOVED=0
+VENV_ACTIVATED=0
+UNIT_WRITTEN=0
+SUCCESS=0
+
+if [[ -f /etc/systemd/system/sabnzbd.service ]] || systemctl is-active --quiet sabnzbd 2>/dev/null || systemctl is-enabled --quiet sabnzbd 2>/dev/null; then
+    WAS_RUNNABLE=1
+fi
+
+cleanup() {
+    local status=$?
+    trap - EXIT
+    set +e
+    if [[ "$SUCCESS" -ne 1 ]]; then
+        if [[ "$APP_ACTIVATED" -eq 1 || "$VENV_ACTIVATED" -eq 1 || "$SERVICE_STOPPED" -eq 1 ]]; then
+            systemctl stop sabnzbd >> "$LOGFILE" 2>&1 || true
+        fi
+        if [[ "$APP_ACTIVATED" -eq 1 ]]; then
+            mv /opt/SABnzbd "$BACKUP_DIR/failed-app" 2>/dev/null || rm -rf /opt/SABnzbd
+        elif [[ "$VENV_ACTIVATED" -eq 1 ]]; then
+            rm -rf /opt/SABnzbd/.venv
+        fi
+        if [[ "$APP_MOVED" -eq 1 ]]; then
+            mv "$BACKUP_DIR/app" /opt/SABnzbd 2>/dev/null || true
+        elif [[ "$VENV_MOVED" -eq 1 ]]; then
+            mv "$BACKUP_DIR/venv" /opt/SABnzbd/.venv 2>/dev/null || true
+        fi
+        if [[ "$UNIT_WRITTEN" -eq 1 ]]; then
+            if [[ -f "$BACKUP_DIR/sabnzbd.service" ]]; then
+                cp -a "$BACKUP_DIR/sabnzbd.service" /etc/systemd/system/sabnzbd.service
+            else
+                systemctl disable sabnzbd >> "$LOGFILE" 2>&1 || true
+                rm -f /etc/systemd/system/sabnzbd.service
+            fi
+            systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
+        fi
+        if [[ "$WAS_RUNNABLE" -eq 1 ]]; then
+            systemctl start sabnzbd >> "$LOGFILE" 2>&1 || true
+        fi
+    fi
+    if [[ -n "$BUILD_DIR" && -d "$BUILD_DIR" ]]; then
+        rm -rf "$BUILD_DIR"
+    fi
+    exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 log_info "Starting installation for ${PACKAGE_NAME}..."
 report_progress 10 "Installing Python, build, and archive dependencies for SABnzbd..."
 
 DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl python3 python3-pip python3-venv python3-dev build-essential libffi-dev libssl-dev p7zip-full par2 unzip unrar-free ca-certificates >> "$LOGFILE" 2>&1
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq unrar >> "$LOGFILE" 2>&1 || true
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+    curl tar ca-certificates python3 python3-venv python3-pip python3-dev \
+    build-essential libffi-dev libssl-dev p7zip-full par2 unzip >> "$LOGFILE" 2>&1
 
 if ! id -u sabnzbd >/dev/null 2>&1; then
     useradd --system --user-group --no-create-home --home-dir /var/lib/sabnzbd --shell /usr/sbin/nologin sabnzbd
 fi
 
-mkdir -p /opt/SABnzbd /var/lib/sabnzbd
+mkdir -p /var/lib/sabnzbd /opt /var/backups
 
 report_progress 35 "Resolving latest SABnzbd release..."
 SAB_VERSION="$(github_latest_tag "sabnzbd/sabnzbd" "4.3.3")"
 SAB_URL="https://github.com/sabnzbd/sabnzbd/releases/download/${SAB_VERSION}/SABnzbd-${SAB_VERSION}-src.tar.gz"
 
-report_progress 55 "Downloading and extracting SABnzbd ${SAB_VERSION}..."
+report_progress 55 "Downloading and extracting SABnzbd ${SAB_VERSION} into staging directory..."
+BUILD_DIR="$(mktemp -d /opt/.sabnzbd-build.XXXXXX)"
 TMP_TAR=$(mktemp /tmp/sabnzbd-XXXXXX.tar.gz)
 curl -fsSL "$SAB_URL" -o "$TMP_TAR" >> "$LOGFILE" 2>&1
-rm -rf /opt/SABnzbd
-mkdir -p /opt/SABnzbd
-tar -xzf "$TMP_TAR" -C /opt/SABnzbd --strip-components=1 >> "$LOGFILE" 2>&1
+tar -xzf "$TMP_TAR" -C "$BUILD_DIR" --strip-components=1 >> "$LOGFILE" 2>&1
 rm -f "$TMP_TAR"
+test -s "$BUILD_DIR/SABnzbd.py" || { log_error "Failed to verify SABnzbd archive extraction"; exit 1; }
 
-report_progress 75 "Building SABnzbd Python virtualenv..."
+report_progress 70 "Building SABnzbd Python virtualenv..."
+BACKUP_DIR="$(mktemp -d /var/backups/aetherflow-sabnzbd.XXXXXX)"
+chmod 700 "$BACKUP_DIR"
+if [[ -f /etc/systemd/system/sabnzbd.service ]]; then
+    cp -a /etc/systemd/system/sabnzbd.service "$BACKUP_DIR/sabnzbd.service"
+fi
+mkdir -p /opt/SABnzbd
+if [[ -e /opt/SABnzbd/.venv || -L /opt/SABnzbd/.venv ]]; then
+    if [[ "$WAS_RUNNABLE" -eq 1 && "$SERVICE_STOPPED" -eq 0 ]]; then
+        systemctl stop sabnzbd >> "$LOGFILE" 2>&1 || true
+        SERVICE_STOPPED=1
+    fi
+    mv /opt/SABnzbd/.venv "$BACKUP_DIR/venv"
+    VENV_MOVED=1
+fi
 python3 -m venv /opt/SABnzbd/.venv >> "$LOGFILE" 2>&1
+VENV_ACTIVATED=1
 /opt/SABnzbd/.venv/bin/pip install --upgrade pip wheel setuptools >> "$LOGFILE" 2>&1
-/opt/SABnzbd/.venv/bin/pip install -r /opt/SABnzbd/requirements.txt >> "$LOGFILE" 2>&1
+/opt/SABnzbd/.venv/bin/pip install -r "$BUILD_DIR/requirements.txt" >> "$LOGFILE" 2>&1
+test -x /opt/SABnzbd/.venv/bin/python3 || { log_error "Failed to verify SABnzbd virtual environment"; exit 1; }
 
-printf '%s\n' "${SAB_VERSION#v}" > /opt/SABnzbd/.af-version
+printf '%s\n' "${SAB_VERSION#v}" > "$BUILD_DIR/.af-version"
 BASE_DOMAIN="$(get_base_domain || true)"
 SAB_WHITELIST="sabnzbd.aether.local, localhost, 127.0.0.1, $(hostname -f 2>/dev/null || hostname)"
 if [[ -n "$BASE_DOMAIN" ]]; then
@@ -69,7 +140,26 @@ username = ${MASTER_USER}
 password = ${MASTER_PASS}
 EOF
 fi
-chown -R sabnzbd:sabnzbd /opt/SABnzbd /var/lib/sabnzbd
+chown -R sabnzbd:sabnzbd /opt/SABnzbd/.venv "$BUILD_DIR" /var/lib/sabnzbd
+
+report_progress 80 "Backing up existing SABnzbd installation and activating new build..."
+if [[ "$WAS_RUNNABLE" -eq 1 && "$SERVICE_STOPPED" -eq 0 ]]; then
+    systemctl stop sabnzbd >> "$LOGFILE" 2>&1 || true
+    SERVICE_STOPPED=1
+fi
+mv /opt/SABnzbd/.venv "$BUILD_DIR/.venv"
+VENV_ACTIVATED=0
+if [[ -d /opt/SABnzbd ]]; then
+    mv /opt/SABnzbd "$BACKUP_DIR/app"
+    APP_MOVED=1
+    if [[ "$VENV_MOVED" -eq 1 ]]; then
+        mv "$BACKUP_DIR/venv" "$BACKUP_DIR/app/.venv"
+    fi
+fi
+mv "$BUILD_DIR" /opt/SABnzbd
+APP_ACTIVATED=1
+BUILD_DIR=""
+cd /opt/SABnzbd
 
 report_progress 90 "Configuring and starting sabnzbd.service on port ${APP_PORT}..."
 sed "s/@AF_APP_PORT@/${APP_PORT}/g" <<'EOF' > /etc/systemd/system/sabnzbd.service
@@ -92,10 +182,25 @@ PrivateTmp=true
 [Install]
 WantedBy=multi-user.target
 EOF
+UNIT_WRITTEN=1
 
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now sabnzbd >> "$LOGFILE" 2>&1
 
+HEALTHY=0
+for attempt in {1..15}; do
+    if systemctl is-active --quiet sabnzbd; then
+        HEALTHY=1
+        break
+    fi
+    sleep 1
+done
+if [[ "$HEALTHY" -ne 1 ]]; then
+    log_error "SABnzbd service did not become active; rolling back."
+    exit 1
+fi
+
 write_lock "${PACKAGE_NAME}"
+SUCCESS=1
 report_progress 100 "SABnzbd installed on port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"

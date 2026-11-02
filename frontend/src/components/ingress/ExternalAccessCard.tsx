@@ -20,9 +20,11 @@ export function ExternalAccessCard({ appName }: ExternalAccessCardProps) {
   const config = configs[appName] || {
     publicDomain: cleanBaseDomain ? `${appName}.${cleanBaseDomain}` : '',
     externalAccessEnabled: Boolean(cleanBaseDomain),
+    tlsEnabled: Boolean(cleanBaseDomain),
   };
   const [draftDomain, setDraftDomain] = useState<string>(config.publicDomain || '');
   const [validationError, setValidationError] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState<boolean>(false);
 
   useEffect(() => {
@@ -57,12 +59,17 @@ export function ExternalAccessCard({ appName }: ExternalAccessCardProps) {
     if (nextEnabled && !validateDomain(trimmed, true)) {
       return;
     }
+    setSaveError(null);
     setIsSaving(true);
     try {
       await updateConfig(appName, {
         publicDomain: trimmed,
         externalAccessEnabled: nextEnabled,
+        listenPort: config.listenPort,
+        tlsEnabled: typeof config.tlsEnabled === 'boolean' ? config.tlsEnabled : Boolean(trimmed),
       });
+    } catch (error) {
+      setSaveError(error instanceof Error ? error.message : 'Failed to save ingress configuration.');
     } finally {
       setIsSaving(false);
     }
@@ -73,12 +80,17 @@ export function ExternalAccessCard({ appName }: ExternalAccessCardProps) {
     if (!validateDomain(trimmed, config.externalAccessEnabled)) {
       return;
     }
+    setSaveError(null);
     setIsSaving(true);
     try {
       await updateConfig(appName, {
         publicDomain: trimmed,
         externalAccessEnabled: config.externalAccessEnabled,
+        listenPort: config.listenPort,
+        tlsEnabled: typeof config.tlsEnabled === 'boolean' ? config.tlsEnabled : Boolean(trimmed),
       });
+    } catch (error) {
+      setSaveError(error instanceof Error ? error.message : 'Failed to save ingress configuration.');
     } finally {
       setIsSaving(false);
     }
@@ -92,7 +104,6 @@ export function ExternalAccessCard({ appName }: ExternalAccessCardProps) {
           <p className="text-sm text-zinc-400">Route public internet traffic securely to this application.</p>
         </div>
 
-        {/* Toggle Switch Component */}
         <button
           type="button"
           onClick={handleToggle}
@@ -122,6 +133,7 @@ export function ExternalAccessCard({ appName }: ExternalAccessCardProps) {
               onChange={(e) => {
                 setDraftDomain(e.target.value);
                 if (validationError) setValidationError(null);
+                if (saveError) setSaveError(null);
               }}
               onKeyDown={(e) => {
                 if (e.key === 'Enter') {
@@ -145,6 +157,9 @@ export function ExternalAccessCard({ appName }: ExternalAccessCardProps) {
         </div>
         {validationError && (
           <p className="mt-2 text-xs text-red-400">{validationError}</p>
+        )}
+        {!validationError && saveError && (
+          <p role="alert" className="mt-2 text-xs text-red-400">{saveError}</p>
         )}
         <p className="mt-2 text-xs text-zinc-500">
           Auto-SSL generation is handled natively via Let&apos;s Encrypt. Ensure your DNS A-records are pointed strictly to this host IP.
