@@ -24,6 +24,7 @@
 ### Why AetherFlow v4.0.0?
 
 - **Single-Binary Control Plane (`aetherflow-api`)** — The entire **Next.js (Obsidian V2)** static frontend is embedded directly inside the compiled **Rust (Axum + Tokio)** binary, eliminating separate Node.js runtime daemons and port-proxy sprawl.
+- **Native McBrowser** — Built-in left-sidebar file manager with a Rust capability-scoped backend, private per-user storage, uploads, downloads, text preview, and file operations. See [configuration and initial scope](./docs/mcbrowser.md).
 - **Zero-Sudo Privileged Socket Boundary (`aetherflow-runner`)** — The API server runs as an unprivileged `aetherflow` user under `ProtectSystem=strict` and `NoNewPrivileges=yes`. Root-level package installations, `systemctl` transitions, quota updates, and atomic rollbacks are isolated behind `/run/aetherflow/runner.sock` with strict allowlists.
 - **Whatbox-Style Automatic Subdomain Ingress** — Configure a server `baseDomain` once, and installing any web-capable Marketplace application automatically provisions `<app>.<baseDomain>` (e.g., `jellyfin.example.com`, `sonarr.example.com`) through **Apache2** and the built-in **AetherFlow Subdomain Gateway**, with automated Let's Encrypt SAN expansion via **`af-certbot-sync`** and `.aether.local` LAN split-horizon routing.
 - **Frame-0 Real-Time Telemetry (`Hyperspeed`)** — Immediate frame-0 WebSocket state hydration, non-blocking kernel `cpu.Times` delta sampling, per-PID CPU tracking, SMART drive health, and GPU hardware discovery (AMD VAAPI / Intel QSV).

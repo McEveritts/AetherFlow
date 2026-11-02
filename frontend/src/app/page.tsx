@@ -1,5 +1,6 @@
 'use client';
 
+import { useAuth } from '@/contexts/AuthContext';
 import { useSystemStore } from '@/store/useSystemStore';
 import { useShallow } from 'zustand/react/shallow';
 import Sidebar from '@/components/layout/Sidebar';
@@ -15,6 +16,7 @@ const AiChatTab = dynamic(() => import('@/components/tabs/AiChatTab'), { ssr: fa
 const MediaFlowTab = dynamic(() => import('@/components/tabs/MediaFlowTab'), { ssr: false });
 const StreamingTab = dynamic(() => import('@/components/tabs/StreamingTab'), { ssr: false });
 const SettingsTab = dynamic(() => import('@/components/tabs/SettingsTab'), { ssr: false });
+const McBrowserTab = dynamic(() => import('@/components/tabs/McBrowserTab'), { ssr: false });
 const FileshareTab = dynamic(() => import('@/components/tabs/FileshareTab'), { ssr: false });
 const UsersTab = dynamic(() => import('@/components/tabs/UsersTab'), { ssr: false });
 const AuditTab = dynamic(() => import('@/components/tabs/AuditTab'), { ssr: false });
@@ -29,6 +31,7 @@ import { ErrorBoundary } from '@/components/ui/ErrorBoundary';
 import useSWR from 'swr';
 
 export default function Dashboard() {
+  const { user } = useAuth();
   const { activeTab } = useSystemStore(
     useShallow((state) => ({
       activeTab: state.activeTab,
@@ -39,6 +42,10 @@ export default function Dashboard() {
   const { data: settingsData, mutate: mutateSettings } = useSWR('/api/v1/auth/settings');
 
   const renderContent = () => {
+    if (activeTab === 'mcbrowser') {
+      return null;
+    }
+
     if (isLoading) {
       if (activeTab === 'overview') {
         return <OverviewSkeleton />;
@@ -140,6 +147,11 @@ export default function Dashboard() {
 
         {/* Scrollable Content with mobile dock bottom clearance (pb-24) */}
         <div className="px-4 pb-24 md:px-10 md:pb-10 max-w-[1600px] mx-auto min-h-[calc(100vh-8rem)] min-w-0 max-w-full">
+          <div hidden={activeTab !== 'mcbrowser'}>
+            {user && <ErrorBoundary key={`mcbrowser-${user.id}`}>
+              <McBrowserTab isActive={activeTab === 'mcbrowser'} />
+            </ErrorBoundary>}
+          </div>
           <ErrorBoundary key={activeTab}>
             {renderContent()}
           </ErrorBoundary>

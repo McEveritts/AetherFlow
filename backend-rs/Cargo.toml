@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/af-models",
+    "crates/af-files",
     "crates/af-db",
     "crates/af-hardware",
     "crates/af-runner",
@@ -22,6 +23,7 @@ repository = "https://github.com/McEveritts/AetherFlow"
 
 [workspace.dependencies]
 af-models = { path = "crates/af-models" }
+af-files = { path = "crates/af-files" }
 af-db = { path = "crates/af-db" }
 af-hardware = { path = "crates/af-hardware" }
 af-runner = { path = "crates/af-runner" }
@@ -76,6 +78,14 @@ async-stream = "0.3"
 uuid = { version = "1.11", features = ["v4"] }
 tar = "0.4"
 flate2 = "1.0"
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff", "ico"] }
+zip = { version = "9.2.1", default-features = false, features = ["deflate-flate2"] }
+bzip2 = "0.6.1"
+xz2 = "0.1.7"
+lz4_flex = "0.14.0"
+snap = "1.1.1"
+brotli = "8.0.2"
+zstd = { version = "0.13.3", default-features = false }
 prost = "0.13"
 tonic = { version = "0.12", features = ["tls"] }
 rsa = { version = "0.9", features = ["pem"] }

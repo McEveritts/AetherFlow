@@ -17,6 +17,7 @@ export default function PathSelector({ value, onChange, placeholder = "Enter abs
   const [isOpen, setIsOpen] = useState<boolean>(false);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [directories, setDirectories] = useState<string[]>([]);
+  const [browseError, setBrowseError] = useState('');
   
   const dropdownRef = useRef<HTMLDivElement>(null);
   const skipDebounceRef = useRef<boolean>(false);
@@ -36,11 +37,13 @@ export default function PathSelector({ value, onChange, placeholder = "Enter abs
     if (!trimmed) return;
     if (trimmed === '/') {
       setDirectories([]);
+      setBrowseError('');
       setIsLoading(false);
       return;
     }
     
     setIsLoading(true);
+    setBrowseError('');
     try {
       const response = await apiFetch(`/api/v1/auth/fs?path=${encodeURIComponent(trimmed)}`);
       if (response.ok) {
@@ -56,10 +59,14 @@ export default function PathSelector({ value, onChange, placeholder = "Enter abs
           setDirectories([]);
         }
       } else {
-        setDirectories([]); 
+        setDirectories([]);
+        setBrowseError(response.status === 403
+          ? 'Host directory browsing requires an active administrator. Use McBrowser for your files.'
+          : 'Unable to list this directory.');
       }
     } catch {
       setDirectories([]);
+      setBrowseError('Unable to list this directory.');
     } finally {
       setIsLoading(false);
     }
@@ -158,6 +165,8 @@ export default function PathSelector({ value, onChange, placeholder = "Enter abs
               <Loader2 className="animate-spin mr-3 text-indigo-400" size={18} />
               <span className="text-xs font-medium">Scanning directory...</span>
             </div>
+          ) : browseError ? (
+            <p role="alert" className="p-4 text-xs text-amber-300">{browseError}</p>
           ) : (
             <ul className="py-1">
               {!isRoot && value.length > 0 && (

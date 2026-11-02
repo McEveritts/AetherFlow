@@ -361,7 +361,10 @@ pub async fn csrf_middleware(req: Request, next: Next) -> Response {
     }
 
     let method = req.method().clone();
-    if !matches!(method, Method::POST | Method::PUT | Method::DELETE) {
+    if !matches!(
+        method,
+        Method::POST | Method::PUT | Method::PATCH | Method::DELETE
+    ) {
         return next.run(req).await;
     }
 

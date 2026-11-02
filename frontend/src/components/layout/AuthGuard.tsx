@@ -8,14 +8,15 @@ export default function AuthGuard({ children }: { children: React.ReactNode }) {
     const { isAuthenticated, isLoading } = useAuth();
     const router = useRouter();
     const pathname = usePathname();
+    const isPublicRoute = pathname === '/login' || pathname === '/share';
 
     useEffect(() => {
-        if (!isLoading && !isAuthenticated && pathname !== '/login') {
+        if (!isLoading && !isAuthenticated && !isPublicRoute) {
             router.push('/login');
         }
-    }, [isAuthenticated, isLoading, pathname, router]);
+    }, [isAuthenticated, isLoading, isPublicRoute, router]);
 
-    if (isLoading) {
+    if (isLoading && !isPublicRoute) {
         return (
             <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center">
                 <div className="w-12 h-12 border-4 border-indigo-500/20 border-t-indigo-500 rounded-full animate-spin mb-4"></div>
@@ -25,7 +26,7 @@ export default function AuthGuard({ children }: { children: React.ReactNode }) {
     }
 
     // Do not render children until redirect has happened if unauthenticated
-    if (!isAuthenticated && pathname !== '/login') return null;
+    if (!isAuthenticated && !isPublicRoute) return null;
 
     return <>{children}</>;
 }

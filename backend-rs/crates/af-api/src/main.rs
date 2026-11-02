@@ -4,6 +4,9 @@ pub mod auth;
 pub mod embed;
 pub mod intelligence;
 pub mod middlewares;
+pub mod mcbrowser;
+#[cfg(test)]
+mod mcbrowser_integration_tests;
 pub mod notifications_ext;
 pub mod network;
 pub mod oidc;
@@ -42,6 +45,7 @@ fn load_env_files() {
 fn build_cors_layer() -> CorsLayer {
     let allowed_methods = [
         Method::GET,
+        Method::HEAD,
         Method::POST,
         Method::PUT,
         Method::PATCH,
@@ -50,11 +54,20 @@ fn build_cors_layer() -> CorsLayer {
     ];
     let allowed_headers = [
         header::ORIGIN,
+        header::RANGE,
         header::CONTENT_TYPE,
         header::ACCEPT,
         header::AUTHORIZATION,
         HeaderName::from_static("x-api-version"),
         HeaderName::from_static("x-csrf-token"),
+        HeaderName::from_static("tus-resumable"),
+        HeaderName::from_static("upload-length"),
+        HeaderName::from_static("upload-offset"),
+        HeaderName::from_static("upload-metadata"),
+        HeaderName::from_static("upload-conflict"),
+        HeaderName::from_static("x-upload-conflict"),
+        header::CACHE_CONTROL,
+        HeaderName::from_static("x-mcbrowser-share-token"),
         HeaderName::from_static("x-requested-with"),
         HeaderName::from_static("x-aetherflow-signature"),
         HeaderName::from_static("x-whmcs-signature"),
@@ -63,6 +76,22 @@ fn build_cors_layer() -> CorsLayer {
     ];
     let expose_headers = [
         header::CONTENT_LENGTH,
+        header::CONTENT_DISPOSITION,
+        header::CONTENT_RANGE,
+        header::ACCEPT_RANGES,
+        header::LOCATION,
+        HeaderName::from_static("tus-resumable"),
+        HeaderName::from_static("tus-version"),
+        HeaderName::from_static("tus-extension"),
+        HeaderName::from_static("tus-max-size"),
+        HeaderName::from_static("upload-length"),
+        HeaderName::from_static("upload-offset"),
+        HeaderName::from_static("upload-metadata"),
+        HeaderName::from_static("upload-expires"),
+        HeaderName::from_static("upload-status"),
+        HeaderName::from_static("upload-skipped"),
+        HeaderName::from_static("upload-fingerprint"),
+        HeaderName::from_static("upload-path"),
         HeaderName::from_static("x-api-version"),
         HeaderName::from_static("deprecation"),
         header::LINK,

@@ -108,6 +108,60 @@ pub struct WsTicketQuery {
     pub ticket: String,
 }
 
+fn consume_live_ws_ticket(
+    connection: &rusqlite::Connection,
+    ticket: &str,
+) -> Option<WsTicketEntry> {
+    let entry = WS_TICKETS.lock().ok().and_then(|mut map| {
+        map.retain(|_, value| value.expires_at > Instant::now());
+        map.remove(ticket)
+    })?;
+    connection
+        .query_row("SELECT 1 FROM users WHERE id = ?1", [entry.user_id], |_| {
+            Ok(())
+        })
+        .ok()?;
+    Some(entry)
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::{consume_live_ws_ticket, issue_ws_ticket_for_user};
+
+    #[test]
+    fn issued_websocket_tickets_are_single_use_and_reject_deleted_users() {
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE users (id INTEGER PRIMARY KEY); INSERT INTO users VALUES (1), (2);",
+            )
+            .unwrap();
+        let ticket = issue_ws_ticket_for_user(1, "127.0.0.1");
+        assert_eq!(
+            consume_live_ws_ticket(&connection, &ticket)
+                .unwrap()
+                .user_id,
+            1
+        );
+        assert!(consume_live_ws_ticket(&connection, &ticket).is_none());
+        let deleted_ticket = issue_ws_ticket_for_user(1, "127.0.0.1");
+        let live_ticket = issue_ws_ticket_for_user(2, "127.0.0.1");
+        connection
+            .execute("DELETE FROM users WHERE id = 1", [])
+            .unwrap();
+        assert!(consume_live_ws_ticket(&connection, &deleted_ticket).is_none());
+        assert_eq!(
+            consume_live_ws_ticket(&connection, &live_ticket)
+                .unwrap()
+                .user_id,
+            2
+        );
+        connection.execute("DROP TABLE users", []).unwrap();
+        let unavailable_ticket = issue_ws_ticket_for_user(2, "127.0.0.1");
+        assert!(consume_live_ws_ticket(&connection, &unavailable_ticket).is_none());
+    }
+}
+
 pub async fn handle_websocket(
     Query(q): Query<WsTicketQuery>,
     headers: HeaderMap,
@@ -124,10 +178,10 @@ pub async fn handle_websocket(
             .into_response();
     }
 
-    let entry_opt = WS_TICKETS.lock().ok().and_then(|mut map| {
-        map.retain(|_, v| v.expires_at > Instant::now());
-        map.remove(&q.ticket)
-    });
+    let entry_opt = tokio::task::spawn_blocking(move || {
+        let connection = af_db::get_conn().ok()?;
+        consume_live_ws_ticket(&connection, &q.ticket)
+    }).await.ok().flatten();
 
     let Some(entry) = entry_opt else {
         return (
@@ -156,7 +210,6 @@ pub async fn handle_websocket(
             .into_response();
     }
 
-    let _ = entry.user_id;
     ws.on_upgrade(handle_ws_socket)
 }
 

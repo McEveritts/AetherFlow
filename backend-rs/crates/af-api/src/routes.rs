@@ -183,6 +183,7 @@ fn build_v1_router() -> Router {
         .layer(middleware::from_fn(webhook_rate_limit_middleware));
 
     let public_routes = Router::new()
+        .merge(crate::mcbrowser::public_router())
         .route("/openapi.yaml", get(get_openapi_spec))
         .route("/csrf-token", get(issue_csrf_token))
         .route("/auth/google/login", get(google_login))
@@ -202,6 +203,7 @@ fn build_v1_router() -> Router {
         .layer(middleware::from_fn(ai_rate_limit_middleware));
 
     let auth_routes = Router::new()
+        .merge(crate::mcbrowser::router())
         .route("/ws", get(handle_websocket))
         .route("/ws/ticket", get(issue_ws_ticket))
         .route("/ws/logs", get(handle_log_websocket))
@@ -1778,41 +1780,9 @@ async fn delete_user(
     Extension(auth_user): Extension<AuthUser>,
     headers: HeaderMap,
 ) -> Response {
-    let Ok(conn) = af_db::get_conn() else {
-        return api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            "Database error",
-        );
-    };
-    let Ok(role) = conn.query_row(
-        "SELECT role FROM users WHERE id = ?1",
-        params![id],
-        |r| r.get::<_, String>(0),
-    ) else {
-        return api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "User not found");
-    };
-    let admin_count: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM users WHERE role = 'admin'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap_or(1);
-    if role == "admin" && admin_count <= 1 {
-        return api_error(
-            StatusCode::BAD_REQUEST,
-            "BAD_REQUEST",
-            "Cannot delete the last remaining admin.",
-        );
+    if let Err(error) = crate::mcbrowser::lifecycle::delete_account(auth_user.clone(), id).await {
+        return error.into_response();
     }
-    let _ = conn.execute("DELETE FROM active_sessions WHERE user_id = ?1", params![id]);
-    let _ = conn.execute("DELETE FROM oidc_refresh_tokens WHERE user_id = ?1", params![id]);
-    let _ = conn.execute("DELETE FROM oidc_consents WHERE user_id = ?1", params![id]);
-    let _ = conn.execute("DELETE FROM recovery_codes WHERE user_id = ?1", params![id]);
-    let _ = conn.execute("DELETE FROM user_quotas WHERE user_id = ?1", params![id]);
-    let _ = conn.execute("DELETE FROM users WHERE id = ?1", params![id]);
-    drop(conn);
     let ip = extract_client_ip(&headers);
     let ua = headers
         .get(header::USER_AGENT)
@@ -1894,15 +1864,60 @@ fn is_fs_path_allowed(target: &std::path::Path, allowed_roots: &[PathBuf]) -> bo
 
 async fn browse_directories(
     Extension(auth_user): Extension<AuthUser>,
-    Query(q): Query<FsQuery>,
+    Query(query): Query<FsQuery>,
 ) -> Response {
-    if auth_user.role != "admin" {
+    if auth_user.role != "admin" || crate::mcbrowser::validate_mcbrowser_user(&auth_user).is_err() {
         return api_error(
             StatusCode::FORBIDDEN,
             "FORBIDDEN",
             "Host filesystem browsing requires admin access",
         );
     }
+    tokio::task::spawn_blocking(move || {
+        let Ok(connection) = af_db::get_conn() else {
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL_ERROR",
+                "Database unavailable",
+            );
+        };
+        let live_admin = connection.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM users AS account
+                LEFT JOIN user_quotas AS quota ON quota.user_id = account.id
+                WHERE account.id = ?1 AND account.role = 'admin'
+                AND account.username NOT LIKE 'plugin:%'
+                AND LOWER(TRIM(COALESCE(quota.status, ''))) IN ('', 'active')
+            )",
+            [auth_user.user_id],
+            |row| row.get::<_, bool>(0),
+        );
+        drop(connection);
+        match live_admin {
+            Ok(true) => browse_host_directories(query),
+            Ok(false) => api_error(
+                StatusCode::FORBIDDEN,
+                "FORBIDDEN",
+                "Host filesystem browsing requires active admin access",
+            ),
+            Err(_) => api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL_ERROR",
+                "Account authorization unavailable",
+            ),
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL_ERROR",
+            "Filesystem worker failed",
+        )
+    })
+}
+
+fn browse_host_directories(q: FsQuery) -> Response {
     let raw_path = q.path.trim();
     if raw_path.is_empty() {
         return api_error(

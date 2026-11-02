@@ -78,4 +78,19 @@ describe("AuthGuard", () => {
     expect(pushMock).not.toHaveBeenCalled();
     expect(screen.getByText("login-page")).toBeInTheDocument();
   });
+
+  it("renders the exact public share page without waiting for account authentication", () => {
+    pathnameMock = "/share";
+    authStateMock = { isAuthenticated: false, isLoading: true };
+    render(<AuthGuard><div>public-share</div></AuthGuard>);
+    expect(screen.getByText("public-share")).toBeInTheDocument();
+    expect(pushMock).not.toHaveBeenCalled();
+  });
+
+  it("does not grant public access to paths merely starting with share", async () => {
+    pathnameMock = "/share/private";
+    render(<AuthGuard><div>private-share-settings</div></AuthGuard>);
+    await waitFor(() => expect(pushMock).toHaveBeenCalledWith("/login"));
+    expect(screen.queryByText("private-share-settings")).not.toBeInTheDocument();
+  });
 });

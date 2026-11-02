@@ -1157,6 +1157,42 @@ pub async fn oidc_revoke(
     Json(serde_json::json!({})).into_response()
 }
 
+fn access_token_subject_exists(connection: &rusqlite::Connection, subject: &str) -> bool {
+    let Ok(user_id) = subject.parse::<i64>() else {
+        return false;
+    };
+    user_id > 0
+        && connection
+            .query_row("SELECT 1 FROM users WHERE id = ?1", [user_id], |_| Ok(()))
+            .is_ok()
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::access_token_subject_exists;
+
+    #[test]
+    fn access_token_introspection_requires_a_live_subject_and_fails_closed_on_database_errors() {
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE users (id INTEGER PRIMARY KEY); INSERT INTO users VALUES (1), (2);",
+            )
+            .unwrap();
+        assert!(access_token_subject_exists(&connection, "1"));
+        connection
+            .execute("DELETE FROM users WHERE id = 1", [])
+            .unwrap();
+        assert!(!access_token_subject_exists(&connection, "1"));
+        assert!(access_token_subject_exists(&connection, "2"));
+        for invalid in ["", "-1", "0", "not-an-id", "9223372036854775808"] {
+            assert!(!access_token_subject_exists(&connection, invalid));
+        }
+        connection.execute("DROP TABLE users", []).unwrap();
+        assert!(!access_token_subject_exists(&connection, "2"));
+    }
+}
+
 pub async fn oidc_introspect(
     headers: HeaderMap,
     Form(form): Form<HashMap<String, String>>,
@@ -1205,7 +1241,10 @@ pub async fn oidc_introspect(
             let mut validation = Validation::new(Algorithm::RS256);
             validation.validate_aud = false;
             if let Ok(data) = decode::<AccessTokenClaims>(&token_str, &keys.decoding_key, &validation) {
-                if data.claims.aud == client_id {
+                let subject_exists = af_db::get_conn().ok().is_some_and(|connection| {
+                    access_token_subject_exists(&connection, &data.claims.sub)
+                });
+                if data.claims.aud == client_id && subject_exists {
                     return Json(serde_json::json!({
                         "active": true,
                         "sub": data.claims.sub,

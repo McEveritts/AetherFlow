@@ -10,6 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 af-models.workspace = true
+af-files.workspace = true
 af-db.workspace = true
 af-hardware.workspace = true
 af-runner.workspace = true
@@ -53,4 +54,17 @@ async-stream.workspace = true
 url.workspace = true
 urlencoding.workspace = true
 anyhow.workspace = true
+libc.workspace = true
 rsa.workspace = true
+
+flate2.workspace = true
+image.workspace = true
+zip.workspace = true
+bzip2.workspace = true
+xz2.workspace = true
+lz4_flex.workspace = true
+snap.workspace = true
+brotli.workspace = true
+zstd.workspace = true
+sha1.workspace = true
+tar.workspace = true
