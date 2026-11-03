@@ -1,6 +1,6 @@
 export const heroData = {
   h1: "Orchestrating the Next Era of Bare-Metal Infrastructure.",
-  subheadline: "AetherFlow is a high-performance orchestration core and dashboard. Built entirely in pure Go and strictly-typed TypeScript, it rejects legacy bloat in favor of mathematical precision and AI-native operational workflows.",
+  subheadline: "AetherFlow v4.0.0 is a sovereign, single-binary control plane and Obsidian V2 dashboard. Compiled from an 11-crate Rust workspace (Axum + Tokio) with an embedded Next.js 16 SPA, it orchestrates 77 native Linux services, scoped McBrowser file management, and human-gated FlowAI operations directly against systemd.",
   primaryCta: {
     label: "View on GitHub",
     href: "https://github.com/McEveritts/AetherFlow"
@@ -8,76 +8,76 @@ export const heroData = {
 };
 
 export const directives = {
-  title: "Precision engineering. Zero microservice theater.",
-  body: "We did not adopt complexity for the sake of it. AetherFlow is built on a rigid philosophy: infrastructure software should be fast, typed, and verifiable.",
+  title: "Precision engineering. Zero container theater.",
+  body: "We rejected fragile shell panels and heavy container overlays. AetherFlow is built on an uncompromising philosophy: infrastructure software should be compiled, memory-safe, and verifiable.",
   cards: [
     {
-      title: "Bare-Metal First",
-      copy: "We manage bare-metal infrastructure without imposing heavy virtualization runtimes or orchestrator bloat. Direct, efficient execution."
+      title: "100% Bare-Metal & systemd",
+      copy: "Manage 77 native Linux services under granular systemd cgroups and af-systemd-sandbox profiles with zero Docker daemon overhead or bridge latency."
     },
     {
-      title: "Strict Typing",
-      copy: "From our compiled Go interfaces to our Next.js frontend state, strict typing is enforced everywhere. No silent runtime anomalies."
+      title: "11-Crate Rust Control Plane",
+      copy: "From the Axum HTTP/WebSocket API and bundled SQLite WAL engine to NVML GPU FFI and the unified af CLI, strict memory and type safety are enforced everywhere."
     },
     {
       title: "AI-Native, Human-Gated",
-      copy: "AI is not a side feature; it acts as the core diagnostic engine. Models propose mitigations; humans approve them."
+      copy: "FlowAI acts as a multi-provider diagnostic engine across Gemini, Claude, OpenAI, and Ollama. Models propose remediations; administrators authorize them in the Approval Inbox."
     }
   ]
 };
 
 export const architectureData = {
-  title: "An Executable Built for the Edge",
-  body: "Uncompromising technology choices designed for stability. No Rust rewrites. No legacy PHP.",
+  title: "A Single-Binary Executable Built for Sovereign Hosts",
+  body: "Uncompromising systems engineering designed for bare-metal longevity. Zero production Node.js daemons. Zero Docker runtime dependencies.",
   columns: [
     {
-      title: "The Control Plane (Go)",
-      copy: "A robust, highly concurrent Go API. Designed for lightweight execution, connection stability, and pure backend operational control."
+      title: "The Control Plane (11-Crate Rust Workspace)",
+      copy: "Built on Axum and Tokio, aetherflow-api runs unprivileged under ProtectSystem=strict while isolating root lifecycle, WireGuard/Tailscale, and declarative package operations behind the /run/aetherflow/runner.sock UNIX domain socket daemon."
     },
     {
-      title: "The Visualization Layer (TypeScript)",
-      copy: "A premium Next.js Single Page Application utilizing standard-setting frontend tooling: Zustand for state tracking, SWR for hydration, and Framer Motion for spatial transitions. Unified by our shared @aetherflow/ui foundation."
+      title: "The Obsidian V2 Interface & Native McBrowser",
+      copy: "A Next.js 16 static export embedded directly into the Rust binary via rust-embed, featuring Frame-0 WebSocket telemetry, canonical streaming analytics, and Native McBrowser (af-files) for capability-scoped file management and resumable 64 GiB uploads."
     }
   ]
 };
 
 export const aiNativeLoopData = {
-  title: "Intelligence bounded by authorization.",
-  body: "AetherFlow integrates AI directly into the operational feedback loop, shifting it from a chatbot to an active infrastructure agent.",
+  title: "Intelligence bounded by cryptographic authorization.",
+  body: "AetherFlow integrates FlowAI directly into the operational feedback loop, pairing real-time telemetry and McBrowser natural-language search with strict execution gates.",
   bullets: [
     {
-      title: "Deep Diagnostics",
-      copy: "AI assesses logs and telemetry to identify failure patterns."
+      title: "Multi-Provider Telemetry Diagnostics",
+      copy: "FlowAI inspects live CPU/GPU metrics, systemd journals, and storage health using AES-256-GCM encrypted provider credentials."
     },
     {
-      title: "The Approval Inbox",
-      copy: "AI cannot arbitrarily mutate state. Every automated remediation is piped to a global Approval Inbox for explicit operator authorization."
+      title: "The Action Approval Inbox",
+      copy: "AI cannot arbitrarily mutate host state. Every proposed service restart, lock cleanup, or quota change is serialized into pending_actions for explicit administrator approval."
     }
   ]
 };
 
 export const statusMomentumData = {
-  title: "Maturing for Production",
-  body: "AetherFlow is actively hardening its core operational surfaces.",
+  title: "Engineered for Production Resilience",
+  body: "AetherFlow v4.0.0 delivers end-to-end atomic lifecycle management across your entire server.",
   bullets: [
     {
-      title: "Repo Truth Mandate",
-      copy: "If it is not running in the compiler, it does not exist."
+      title: "Atomic Self-Updates & Rollbacks",
+      copy: "Isolated aetherflow-self-update.service deployments verify SHA256SUMS, capture WAL-safe SQLite backups, check executable readiness, and automatically roll back on failure."
     },
     {
-      title: "Unified Tooling",
-      copy: "Focusing on reliable integration between the backend control plane and the strictly-typed UI."
+      title: "Automatic Subdomain TLS Ingress",
+      copy: "Configure a baseDomain once to automatically provision <app>.<baseDomain> Apache2 routes, Let's Encrypt SANs via af-certbot-sync, and .aether.local split-horizon DNS."
     },
     {
-      title: "Current Focus",
-      copy: "Finalizing the human-in-the-loop workflows for AI infrastructure management."
+      title: "Unified Admin CLI (af)",
+      copy: "Operate packages, services, disk quotas, sandbox drop-ins, verified staged backup restores, and 14-step bare-metal provisioning from a single compiled CLI."
     }
   ]
 };
 
 export const ctaData = {
   title: "Command your infrastructure.",
-  body: "Review the architecture, inspect the code, and join the development.",
+  body: "Explore the 11-crate Rust architecture, browse the 77-app bare-metal catalog, and deploy AetherFlow v4.0.0.",
   button: {
     label: "View Repository",
     href: "https://github.com/McEveritts/AetherFlow"

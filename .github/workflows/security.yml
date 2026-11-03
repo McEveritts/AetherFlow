@@ -3,9 +3,9 @@ name: Security Gate
 on:
   workflow_dispatch:
   push:
-    branches: [main, master, development]
+    branches: [main, master, development, nightly, Nightly, experimental]
   pull_request:
-    branches: [main, master, development]
+    branches: [main, master, development, nightly, Nightly, experimental]
 
 permissions:
   contents: read
@@ -25,8 +25,46 @@ jobs:
           curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" | tar -xz -C /usr/local/bin gitleaks
           gitleaks dir . --verbose --redact
 
-  security-checks:
-    name: Backend SAST & Vulnerability Scan
+  rust-security-checks:
+    name: Rust Control Plane Security & Contract Verification
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend-rs
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install System Dependencies & Mold Linker
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq mold clang pkg-config libssl-dev
+
+      - name: Set up Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Rust Cargo Dependency Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "backend-rs -> target"
+
+      - name: Prepare Embedded SPA Placeholder Directory
+        working-directory: .
+        run: mkdir -p backend/web/dist
+
+      - name: Verify Rust Workspace Compilation (cargo check)
+        run: cargo check --workspace --all-targets
+
+      - name: Run Rust Workspace Security & Contract Tests
+        env:
+          JWT_SECRET: ci-test-secret-exactly-32bytes!!
+          AES_MASTER_KEY: ci-test-aes-key-exactly-32bytes!
+          ALLOWED_HOSTS: localhost:8080,127.0.0.1:8080
+        run: cargo test --workspace --locked || cargo test --workspace
+
+  legacy-go-security-checks:
+    name: Legacy Go Compatibility SAST & Tests
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -51,6 +89,10 @@ jobs:
         with:
           go-version-file: backend/go.mod
           cache-dependency-path: backend/go.sum
+
+      - name: Prepare Embedded SPA Placeholder Directory
+        working-directory: .
+        run: mkdir -p backend/web/dist
 
       - name: Install security tools
         run: |

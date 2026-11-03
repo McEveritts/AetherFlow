@@ -1,164 +1,118 @@
-# Troubleshooting
+# Troubleshooting & FAQ
 
-This guide covers the most common ways to diagnose and resolve issues in AetherFlow. Because AetherFlow acts as an orchestrator sitting above your Linux host, troubleshooting often spans multiple layers.
-
-The goal is to help you move from a visible symptom to the root cause quickly and predictably.
+This guide covers diagnosing and resolving common operational issues in **AetherFlow v4.0.0**.
 
 ---
 
 ## Where to Look First
 
-When something breaks, do not guess. Look at the raw output.
+### 1. Systemd Service Journals
+AetherFlow runs as two core `systemd` units (`aetherflow-api.service` and `aetherflow-runner.service`), plus transient `aetherflow-self-update.service` units during upgrades:
 
-### 1. Application Logs
-AetherFlow writes application-specific output to its dedicated log directory:
 ```bash
-/var/log/aetherflow/
-```
-Check `error.log` for backend panics, routing failures, or failed database initialization. For marketplace components, look for `install.log`.
-
-### 2. The `systemd` Journal
-AetherFlow processes are native `systemd` units. To see what the operating system believes is happening, check the journal:
-```bash
-sudo journalctl -u aetherflow-api -n 100 --no-pager
-sudo journalctl -u aetherflow-web -n 100 --no-pager
+sudo systemctl status aetherflow-runner aetherflow-api
+sudo journalctl -u aetherflow-api -u aetherflow-runner -n 100 --no-pager
 ```
 
 > [!TIP]
-> Use `-f` instead of `-n 100` to stream real-time logs across your terminal if reproducing a bug.
+> Pass `-f` to `journalctl` to stream logs in real time while reproducing an issue.
+
+### 2. Application & Package Logs
+Marketplace installation and self-update logs are written to `/var/log/aetherflow/`:
+
+```bash
+ls -la /var/log/aetherflow/
+# Inspect a specific package installation log:
+sudo tail -n 100 /var/log/aetherflow/install-<package>.log
+```
+
+### 3. Release & Recovery State (`af release status`)
+Inspect the active `/opt/AetherFlow/current` symlink, live SQLite database path, and `.recovery_state.json` journal:
+
+```bash
+sudo af release status
+curl -s http://127.0.0.1:8080/health/ready | jq
+```
 
 ---
 
 ## Common Issues
 
-### 1. Dashboard Stuck on "System Offline"
-**Symptom**: The React frontend loads, but the dashboard displays restricted layouts and "System Offline" text.
-**Cause**: The UI has lost its WebSocket / REST connection to the Go backend.
+### 1. Dashboard Displays "System Offline" or WebSocket Reconnect Loops
+**Symptom**: The web UI loads, but telemetry widgets pause or display offline indicators.
+**Cause**: `aetherflow-api.service` is stopped, Apache2 WebSocket proxy modules (`proxy_wstunnel`) are disabled, or the `Host` header is rejected by `ALLOWED_HOSTS`.
 **Resolution**:
-1. Check if the API service is loaded: `systemctl status aetherflow-api`.
-2. Inspect the port: `ss -tulpn | grep 8080`.
-3. Check the browser console. If you see CORS errors or 401s, ensure your `aetherflow_session` cookie is not expired and `AF_DOMAIN` in your `.env` matches the domain you are visiting.
+1. Verify `aetherflow-api` is listening on `127.0.0.1:8080`:
+   ```bash
+   sudo ss -tulpn | grep 8080
+   ```
+2. Check `/etc/aetherflow/aetherflow.env` and verify `ALLOWED_HOSTS` includes the domain or IP you are visiting, then restart:
+   ```bash
+   sudo systemctl restart aetherflow-api
+   ```
 
-### 2. Marketplace "Command Not Found"
-**Symptom**: A marketplace installation fails rapidly, and logs show syntax errors or `command not found`.
-**Cause**: The script failed to source the `common.sh` helper library correctly, which supplies required functions like `print_error` and `require_root`.
+### 2. Service Control or Package Installation Fails with Runner IPC Error
+**Symptom**: Starting/restarting a service or installing an app from the Marketplace returns a runner socket error (`ExitCode = 3` in `af`).
+**Cause**: `aetherflow-runner.service` is stopped or `/run/aetherflow/runner.sock` permissions do not match `0660 root:aetherflow`.
 **Resolution**:
-Ensure the top of the package script uses:
 ```bash
-source "$(dirname "$0")/../../common.sh"
-```
-
-### 3. Permission Errors / Action Pre-flight Fails
-**Symptom**: Installing an app or attempting to restart a service from the UI triggers an immediate "unauthorized" or "permission denied" error.
-**Cause**: The backend process is attempting an action that requires `sudo`, but the user `aetherflow` does not have sufficient NOPASSWD privileges.
-**Resolution**:
-Verify the sudoers drop-in file:
-```bash
-cat /etc/sudoers.d/aetherflow
-# Should contain:
-# aetherflow ALL=(ALL) NOPASSWD: ALL
+sudo systemctl restart aetherflow-runner
+ls -l /run/aetherflow/runner.sock
+# Expected: srw-rw---- 1 root aetherflow ... /run/aetherflow/runner.sock
 ```
 
-### 4. Backend Crash: `AES_MASTER_KEY must be exactly 32 bytes`
-**Symptom**: The `aetherflow-api.service` enters a crash loop immediately on startup. `journalctl` shows the fatal message:
-```
-FATAL: AES_MASTER_KEY must be exactly 32 bytes (AES-256). Got 64 raw bytes.
-```
-**Cause**: The `AES_MASTER_KEY` in your `.env` file is a raw hexadecimal string (64 characters = 64 bytes of ASCII), not a valid key format. The backend's `config.Load` expects either a raw 32-character string **or** a Base64-encoded string that decodes to exactly 32 bytes.
+### 3. Self-Update Blocked by Unfinished Recovery Journal
+**Symptom**: Starting a system update reports that a previous post-swap deployment was interrupted and requires rollback.
+**Cause**: The native `af-release` guard intentionally refuses to overwrite `.previous_release` if an earlier update stopped after swapping `/opt/AetherFlow/current`.
 **Resolution**:
-Generate a correctly formatted key and replace it in your `.env`:
+Run a rollback to restore the previous known-good release and verify database integrity before deploying again:
 ```bash
-# Generate a valid 32-byte Base64-encoded key
+sudo af release rollback --local
+sudo af release status
+```
+
+### 4. `AES_MASTER_KEY` Validation Error on Startup
+**Symptom**: `aetherflow-api.service` fails to start with an invalid `AES_MASTER_KEY` length error.
+**Cause**: `AES_MASTER_KEY` in `/etc/aetherflow/aetherflow.env` must be either a raw 32-byte string or a Base64-encoded 32-byte key (not a 64-character hex string).
+**Resolution**:
+```bash
 openssl rand -base64 32
 ```
-Then replace the value in `/opt/AetherFlow/backend/.env`:
-```
-AES_MASTER_KEY=<your new base64 key>
-```
+Set `AES_MASTER_KEY=<base64-value>` in `/etc/aetherflow/aetherflow.env` and restart `aetherflow-api`.
 
 > [!CAUTION]
-> Rotating your `AES_MASTER_KEY` will make all previously encrypted secrets (API keys, OIDC secrets) unreadable. You must re-enter them via the Settings UI after rotation.
+> Rotating `AES_MASTER_KEY` invalidates previously encrypted secrets (`enc:v1:`) in SQLite. Re-enter AI provider keys in **Settings → FlowAI Engine** after rotating.
 
-### 5. Frontend Crash: `EADDRINUSE: address already in use :::3000`
-**Symptom**: The `aetherflow-frontend.service` enters a rapid restart loop. `journalctl` shows:
-```
-Error: listen EADDRINUSE: address already in use :::3000
-```
-**Cause**: A zombie process (typically a leftover PM2-managed `next-server` instance from a pre-systemd deployment) is still holding port 3000. The new systemd unit cannot bind.
+### 5. `readonly database` or McBrowser Storage Permission Errors
+**Symptom**: Authenticated writes or McBrowser uploads fail with permission or read-only filesystem errors.
+**Cause**: `aetherflow-api.service` runs under `ProtectSystem=strict`. Any custom database path (`AF_DB_PATH`) or custom McBrowser storage root (`AF_MCBROWSER_ROOT`) outside `/var/lib/aetherflow` must be owned by `aetherflow:aetherflow` and listed in the unit's `ReadWritePaths`.
 **Resolution**:
-1. Identify the process holding the port:
-   ```bash
-   sudo ss -tulpn | grep ':3000'
-   ```
-2. Stop both AetherFlow systemd services to prevent restart races:
-   ```bash
-   sudo systemctl stop aetherflow-api aetherflow-frontend
-   ```
-3. Kill the zombie process by PID:
-   ```bash
-   sudo kill -9 <PID>
-   ```
-4. Optionally, purge the legacy PM2 daemon entirely:
-   ```bash
-   pm2 kill 2>/dev/null; pm2 unstartup 2>/dev/null
-   ```
-5. Restart the services:
-   ```bash
-   sudo systemctl start aetherflow-api aetherflow-frontend
-   ```
-
-> [!TIP]
-> Next.js processes spawned via `npm start` ignore `SIGTERM`. If a graceful `kill <PID>` does not release the port, `kill -9` (SIGKILL) is required.
-
-### 6. Backend Panic: `readonly database` on First Write
-**Symptom**: Both services start successfully and the frontend loads. However, the first write operation (e.g., submitting initialization credentials, saving settings) causes the Go backend to panic with `attempt to write a readonly database`.
-**Cause**: The `aetherflow-api.service` unit uses `ProtectSystem=strict`, which mounts the entire filesystem as read-only inside the service namespace. If the `ReadWritePaths` directive does not include the application's data directory, SQLite cannot write — even when POSIX file ownership is correct. This is deceptive because the boot sequence only reads the database; the crash is deferred until the first authenticated write.
-**Resolution**:
-1. Edit the systemd unit file:
-   ```bash
-   sudo systemctl edit --full aetherflow-api.service
-   ```
-2. Ensure `ReadWritePaths` includes the application directory and any release directories used by atomic symlink deployments:
+1. Keep data in the standard `/var/lib/aetherflow` directory (`StateDirectory=aetherflow`), or add custom paths via `sudo systemctl edit aetherflow-api.service`:
    ```ini
    [Service]
-   ProtectSystem=strict
-   ReadWritePaths=/opt/AetherFlow /opt/AetherFlow_releases
+   ReadWritePaths=/var/lib/aetherflow /your/custom/path
    ```
-3. Reload and restart:
+2. Reload and restart:
    ```bash
    sudo systemctl daemon-reload
    sudo systemctl restart aetherflow-api
    ```
-4. Verify `RW` access by checking the journal for successful database operations:
-   ```bash
-   sudo journalctl -u aetherflow-api -n 20 --no-pager | grep -i "sqlite\|database\|migration"
-   ```
 
-> [!IMPORTANT]
-> If you use atomic symlink deployments (`/opt/AetherFlow` → `/opt/AetherFlow_releases/<version>`), both the symlink path **and** the real release directory must be listed in `ReadWritePaths`. The systemd sandbox resolves symlinks before applying filesystem restrictions.
+### 6. APT / `dpkg` Lock Contention During Package Installation
+**Symptom**: A Marketplace installation waits or fails because another package manager process holds `/var/lib/dpkg/lock-frontend`.
+**Cause**: Unattended OS upgrades or a concurrent manual `apt` command is running.
+**Resolution**:
+AetherFlow serializes Marketplace operations behind `/install/.af-package-executor.flock` and waits up to 120 seconds (`DPkg::Lock::Timeout=120`). If an orphaned `apt` process is stuck, inspect with `ps aux | grep apt` and run `sudo dpkg --configure -a` once it finishes.
 
 ---
 
 ## Frequently Asked Questions
 
-**Q: I updated the code via git, but nothing changed. Why?**  
-A: AetherFlow uses compiled assets. If you pulled new Go code, you must `go build` and restart `aetherflow-api.service`. If you pulled React code, you must `npm run build` and restart `aetherflow-web.service`.
+**Q: Why is there no `aetherflow-frontend.service` or `redis-server` required in v4.0.0?**  
+**A:** AetherFlow v4.0.0 embeds the compiled Next.js 16 (Obsidian V2) static export directly inside the `aetherflow-api` Rust binary (`rust-embed`) and persists JWT revocation and session state directly in bundled SQLite WAL (`af-db`). Separate Node.js and Redis daemons are no longer needed.
 
-**Q: I got locked out of 2FA. How do I regain access?**  
-A: AetherFlow stores account data in SQLite. If you are locked out locally, use the CLI recovery tool, or (if strictly necessary) connect to `aetherflow.db` and delete the offending row in the `users` table, then force a re-registration flow.
+**Q: How do I recover if I lose my 2FA authenticator device?**  
+**A:** Sign in using one of the one-time recovery codes generated during 2FA enrollment, or reset TOTP from the host with root access to `/var/lib/aetherflow/aetherflow.sqlite`.
 
-**Q: Why is my root disk filling up quickly?**  
-A: Check two areas: Docker (if you use Portainer/Marketplace containers) via `docker system df`, and `journald` size via `journalctl --disk-usage`. AetherFlow logs rotate automatically, but application data (like Plex metadata) can grow unbounded if unmonitored.
-
-### 7. Frontend Build Failure: Type Mismatch in State Setter
-**Symptom**: The Next.js frontend fails to build during deployment or locally with `next build`. `npm run build` exits with code 1 and logs show a TypeScript error like `Type 'string' is not assignable to type 'SomeSpecificType'`.
-**Cause**: An event handler (like `onChange` on a `<select>`) extracts a value (`e.target.value`) as a generic `string` and attempts to pass it directly to a state setter that expects a strictly typed string literal union (e.g., `AIProviderID`).
-**Resolution**:
-Explicitly cast the generic string to the expected type literal union before passing it to the setter:
-```tsx
-// Incorrect
-const newProvider = e.target.value; 
-
-// Correct
-const newProvider = e.target.value as AIProviderID;
-```
+**Q: Does uninstalling a Marketplace app delete my media or databases?**  
+**A:** No. By default, Marketplace removal stops and removes the `systemd` unit and application binaries while preserving configuration and databases. Data is only purged if you explicitly confirm **Delete Data** (`DELETE_DATA=true`).

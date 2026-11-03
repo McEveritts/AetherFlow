@@ -1,29 +1,36 @@
 # Marketplace Developer Guide
 
-This guide details the conventions and technical requirements for adding new applications to the AetherMarketplace. 
+This guide details the conventions and technical requirements for adding new bare-metal applications to the **AetherMarketplace** (currently **77 native Linux packages**).
 
-## Package Structure
+## Package Execution Architecture (`af-runner`)
 
-Each marketplace application is located in the `/packages` directory, structured by its lifecycle role.
+In AetherFlow v4.0.0, all Marketplace lifecycle operations (`install`, `update`, `remove`) are executed by `aetherflow-runner.service` (`backend-rs/crates/af-runner`) under a process-wide mutex and cross-process advisory file lock (`/install/.af-package-executor.flock`):
+
+1. **Declarative Rust Recipes (`backend-rs/crates/af-runner/src/package_executor.rs`)**:
+   - 15 packages (`fail2ban`, `quassel`, `threadfin`, `znc`, `xrdp`, `novnc`, `x2go`, `scrutiny`, `prometheus`, `netdata`, `mergerfs`, `rclone`, `clamav`, `mosquitto`, `syncthing`) have native declarative Rust recipes (`DeclarativePackageRecipe`) with `lstat` ancestor-symlink validation, pre-start systemd sandboxing, and `RollbackJournal`. See [Rust Package Executor](./rust-package-executor.md).
+2. **Idempotent Bash Lifecycle Scripts (`packages/package/`)**:
+   - Complex multi-component builds (such as `jellyfin`, `plex`, `palate`, `maintainerr`, `dispatcharr`, `mcvnc`, `invidious`, `piped`, and the `*Arr` stack) use structured Bash scripts under `packages/package/{install,remove,update}/` that source `packages/common.sh`.
 
 ```bash
-/packages
-├── common.sh               # Root helper library (Mandatory)
-├── package
-│   ├── install
-│   │   └── installpackage-<appname>  # Entry point for installation
-│   └── remove
-│       └── removepackage-<appname>   # Entry point for removal
+packages/
+├── common.sh                             # Core helper library (Mandatory for Bash scripts)
+├── youtube-common.sh                     # Shared helper for Piped & Invidious
+└── package/
+    ├── install/
+    │   └── installpackage-<app_id>       # Installation & in-place update entry point
+    └── remove/
+        └── removepackage-<app_id>        # Uninstallation entry point
 ```
 
 ---
 
 ## The `common.sh` Library
 
-Every marketplace script **must** source the `common.sh` helper library. This ensures consistent logging, locking, and error handling across the ecosystem.
+Every Bash marketplace script **must** source `packages/common.sh`:
 
 ```bash
-# Sourcing common.sh
+#!/usr/bin/env bash
+set -euo pipefail
 source "$(dirname "$0")/../../common.sh"
 ```
 
@@ -31,62 +38,43 @@ source "$(dirname "$0")/../../common.sh"
 
 | Function | Purpose |
 | :--- | :--- |
-| `require_root` | Exits the script if not run with sudo/root privileges. |
-| `print_info / print_error` | Logs and displays a message with a timestamp. |
-| `write_lock / remove_lock` | Manages an installation lock to prevent race conditions. |
-| `backup_file_once` | Creates a `.bak-af` snapshot before modifying a system file. |
-| `fetch_and_run` | Safely downloads and executes a remote script with checksum validation. |
+| `require_root` | Exits immediately if not running as `root` (`UID 0`). |
+| `report_progress <pct> "<msg>"` | Emits `[PROGRESS:<pct>] <msg>` to update the circular progress ring in the UI and `af` CLI in real time. |
+| `print_info` / `print_error` | Logs timestamped diagnostic messages to `/var/log/aetherflow/install-<app>.log`. |
+| `write_lock <app_id>` | Writes `/install/.<app_id>.lock` upon verified readiness and triggers `af-certbot-sync` for automatic `<app>.<baseDomain>` TLS ingress. |
+| `remove_lock <app_id>` | Removes `/install/.<app_id>.lock` during uninstallation. |
+| `backup_file_once <path>` | Creates a `.bak-af` backup before mutating a host file. |
+| `node_build <cmd...>` | Executes Node.js/npm/yarn builds in a clean environment without polluting service runtime paths. |
 
 ---
 
-## Best Practices for Scripts
+## Mandatory Engineering Standards
 
-### 1. Idempotency is Mandatory
-A script must be safe to run multiple times. If an app is already installed, the `installpackage` script should either skip or perform a safe repair/update. 
+### 1. Idempotency & Safe In-Place Updates
+Scripts must be safe to run repeatedly for both fresh installs and in-place updates (`POST /api/v1/admin/packages/:id/update`):
+- Preserve existing user data, SQLite/PostgreSQL databases, and generated secrets across reinstalls/updates.
+- Stage new builds before stopping the running service, back up the prior installation to `/var/backups/aetherflow-<app>.*`, verify HTTP/systemd readiness before calling `write_lock`, and roll back automatically if activation fails.
 
-**Example Pattern:**
-```bash
-if [[ -f "/usr/bin/some-app" ]]; then
-    print_info "App already detected. Skipping binary download."
-else
-    # Perform installation
-fi
-```
+### 2. Data Retention on Uninstall (`DELETE_DATA`)
+Uninstalling an application (`removepackage-<app_id>`) must stop and remove the `systemd` unit and application binaries while **retaining** user databases and configuration by default. Only purge persistent data when `DELETE_DATA=true` is explicitly set.
 
-### 2. Service Naming Convention
-To ensure the AetherFlow backend can manage your app, you must follow the service prefixing rule:
-- **Service Name**: `af-<app_name>.service`
-- **Location**: `/etc/systemd/system/af-<app_name>.service`
+### 3. Systemd Unit & Sandbox Conventions
+- Name managed units `af-<app_id>.service` (or register the exact unit name in `backend/config/packages.json` and `af-runner` allowlists).
+- Bind web listeners to `127.0.0.1:<allocated_port>` behind the AetherFlow Apache2 Subdomain Gateway rather than exposing unencrypted ports on `0.0.0.0`.
 
-### 3. Sudoers Compliance
-The AetherFlow backend executes scripts via `sudo`. Ensure any commands used in your script are likely to be covered by the `NOPASSWD` rules in `/etc/sudoers.d/aetherflow`.
-
-### 4. Progress Feedback
-The circular progress UI in the dashboard listens for exit codes and standard output. 
-- **Success**: Exit `0`.
-- **Failure**: Exit with a non-zero code and use `print_error` to describe the failure.
-
----
-
-## Creating a New Package
-
-1. **Clone the Template**: Start with `installpackage-template` in `/packages/package/install`.
-2. **Define Variables**: Set unique paths for binary storage and configuration data.
-3. **Use Helpers**:
-   - Call `require_root` at the start.
-   - Wrap the main logic in `write_lock` / `remove_lock`.
-4. **Register with Backend**: Ensure the application metadata (icon, description) is added to the database's `Marketplace` table so it appears in the UI.
-
-> [!IMPORTANT]
-> **Always use absolute paths.** Scripts are executed from the backend directory, so relative paths within a script (like `./config.conf`) will fail. Use `$(dirname "$0")` or absolute `/opt/AetherFlow/` references.
+### 4. Catalog & Automation Registration
+When adding a new package:
+1. Add the package definition to `backend/config/packages.json` (and `backend/config/package_automation.json` if it uses Zero-Touch configuration or Subdomain Gateway wiring).
+2. Place the brand icon in `frontend/public/img/<app_id>.png` (or `.svg`).
+3. Add syntax and lifecycle regression tests under `tests/` and verify with `python3 tests/check_shell_hygiene.py`.
 
 ---
 
 ## Validation Checklist
 
-Before submitting a new package:
-- [ ] Script sources `common.sh`.
-- [ ] Script handles removal of its own systemd units.
-- [ ] Script is safe to run twice (Idempotent).
-- [ ] Error messages are descriptive for the end-user.
-- [ ] Unit names are prefixed with `af-`.
+Before submitting or promoting a package:
+- [ ] `bash -n packages/package/install/installpackage-<app>` and `removepackage-<app>` pass with zero warnings.
+- [ ] `python3 tests/check_shell_hygiene.py` passes.
+- [ ] Emits structured `report_progress` milestones (`0..100`) and writes `/install/.<app>.lock` only after service readiness passes.
+- [ ] Preserves user data on update and default uninstall (`DELETE_DATA!=true`).
+- [ ] Dedicated unit test in `tests/test_*.py` verifies install, update rollback, and remove paths.

@@ -1,20 +1,20 @@
 # Quickstart Guide
 
-Get AetherFlow v3.2.5 running on your infrastructure in under 5 minutes.
+Get AetherFlow v4.0.0 running on your bare-metal infrastructure in under 5 minutes.
 
 ## Prerequisites
 
 Before starting, ensure your system meets the following requirements:
-- **Operating System**: Ubuntu 24.04 LTS (Recommended) or Debian 12.
-- **Privileges**: Sudo/Root access.
-- **Connectivity**: A public IP or domain name (if using OIDC/Google Auth).
-- **Hardening**: Freshly installed OS is preferred to avoid service conflicts.
+- **Operating System**: Debian 12/13 (Bookworm/Trixie) or Ubuntu 22.04/24.04 LTS.
+- **Privileges**: Root or `sudo` access.
+- **Connectivity**: A public IP or domain name (recommended for automatic `<app>.<baseDomain>` TLS ingress and OIDC).
+- **Clean Host**: A freshly installed Linux server is recommended to avoid port or service conflicts.
 
 ---
 
 ## 1. Bootstrap Installation
 
-Clone the repository onto a clean **Debian 12/13 (Bookworm/Trixie)** or **Ubuntu 22.04/24.04 LTS** server and run the bootstrap installer:
+Clone the repository onto a clean **Debian 12/13** or **Ubuntu 22.04/24.04 LTS** server and run the bootstrap installer:
 
 ```bash
 apt-get update && apt-get -y upgrade
@@ -33,8 +33,14 @@ sudo bash /opt/AetherFlow/setup/AetherFlow-Setup \
   --domain node.example.com
 ```
 
+To repair an existing installation while preserving your SQLite database and configuration:
+
+```bash
+sudo bash /opt/AetherFlow/setup/AetherFlow-Setup --repair
+```
+
 > [!NOTE]
-> The installer automatically configures the unprivileged `aetherflow-api.service` control plane, the `aetherflow-runner.service` privileged socket helper, Apache2 reverse proxy ingress, and `/etc/aetherflow/aetherflow.env` secrets.
+> The installer provisions the single-binary Rust control plane (`aetherflow-api.service`), the privileged UNIX socket daemon (`aetherflow-runner.service`), the unified `af` administrative CLI, Apache2 reverse proxy ingress, and `/etc/aetherflow/aetherflow.env` secrets.
 
 ---
 
@@ -47,20 +53,21 @@ Runtime secrets and environment variables are stored in `/etc/aetherflow/aetherf
 sudo nano /etc/aetherflow/aetherflow.env
 ```
 
-`AetherFlow-Setup` automatically generates `JWT_SECRET` and `AES_MASTER_KEY` during bootstrap. If rotating `AES_MASTER_KEY` manually, generate a 32-byte key:
+`AetherFlow-Setup` automatically generates `JWT_SECRET` and `AES_MASTER_KEY` during bootstrap. If generating `AES_MASTER_KEY` manually, produce a 32-byte Base64 key:
 
 ```bash
-openssl rand -hex 32
+openssl rand -base64 32
 ```
 
 ---
 
 ## 3. Verifying the Control Plane
 
-Restart or check the AetherFlow systemd units:
+Check the status of the AetherFlow systemd units or inspect release state via the `af` CLI:
 
 ```bash
 sudo systemctl status aetherflow-runner aetherflow-api
+sudo af release status
 ```
 
 Navigate to your server's domain or IP in your browser:
@@ -70,31 +77,32 @@ Navigate to your server's domain or IP in your browser:
 
 ## 4. First Login & 2FA Setup
 
-1. **Sign In**: Use the "Admin" login path.
-2. **Authorize**: Authenticate via Google (if configured) or your local admin account.
-3. **Register 2FA**: Upon first login, AetherFlow will present a QR code. 
-   - Scan this with an authenticator app (Google Authenticator, Authy, or Bitwarden).
-   - Enter your first 6-digit code to finalize enrollment.
+1. **Sign In**: Log in with the administrator credentials configured during setup (or via Google OAuth2 if configured).
+2. **Configure Base Domain**: In the Onboarding Wizard or **Settings → General**, set your `baseDomain` to enable automatic `<app>.<baseDomain>` subdomain provisioning.
+3. **Register TOTP 2FA**: Scan the presented QR code with an authenticator app (Bitwarden, Authy, Google Authenticator, or 1Password) and enter the 6-digit verification code.
 
 > [!IMPORTANT]
-> **Store your recovery codes.** If you lose access to your TOTP device, you will need these to regain administrative access to the platform.
+> **Store your recovery codes.** If you lose access to your TOTP device, you will need a recovery code to regain administrative access.
 
 ---
 
-## 5. Installing your first App
+## 5. Installing Your First Application
 
-1. Navigate to the **Marketplace** tab.
-2. Select an application (e.g., **qbittorrent-nox**).
-3. Click **Install**.
-4. Monitor the circular progress indicator. Once complete, your app will be active and managed by systemd automatically.
+1. Open the **Marketplace** tab (or use the CLI: `sudo af package install qbittorrent`).
+2. Select any of the **77 bare-metal applications** (e.g., **Jellyfin**, **qBittorrent**, **Qui**, **Sonarr**, **Palate**, or **Tailscale**).
+3. Click **Install** and monitor the live progress ring and streaming logs.
+4. Once complete, the application runs natively under `systemd` and is wired into the Subdomain Gateway automatically.
 
 ---
 
 ## Next Steps
 
-- **Configuration**: Deep-dive into advanced settings in the [Configuration Reference](./configuration.md).
-- **Security**: Learn about service hardening in the [Security Guide](./security.md).
-- **FlowAI**: Start your first AI-assisted diagnostic session in the [FlowAI Documentation](./flowai.md).
+- **Architecture**: Explore the 11-crate Rust workspace in [System Architecture](./architecture.md).
+- **McBrowser**: Manage files and resumable uploads in [Native McBrowser](./mcbrowser.md).
+- **Admin CLI**: Learn the `af` command suite in [Unified Rust Admin CLI](./rust-admin-cli.md).
+- **Configuration**: Deep-dive into environment variables in the [Configuration Reference](./configuration.md).
+- **Security**: Review systemd sandboxing and encryption in the [Security Guide](./security.md).
+- **FlowAI**: Configure multi-provider AI diagnostics in the [FlowAI Documentation](./flowai.md).
 
 > [!TIP]
-> If you encounter any installation errors, check the logs with `journalctl -u aetherflow-api -f` or visit the [Troubleshooting Guide](./troubleshooting.md).
+> If you encounter any installation or service issues, inspect logs with `sudo journalctl -u aetherflow-api -u aetherflow-runner -f` or visit the [Troubleshooting Guide](./troubleshooting.md).

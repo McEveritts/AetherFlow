@@ -13,31 +13,29 @@ FlowAI is AetherFlow's integrated AI operations layer, designed to help operator
 
 ## Architecture Overview
 
-FlowAI uses a provider-agnostic routing layer (`backend/providers/`) to decouple all AI logic from any specific SDK.
+FlowAI uses a provider-agnostic routing layer in the Rust control plane (`backend-rs/crates/af-api/src/intelligence.rs`, with parity in `backend/providers/`) to decouple all AI logic from any specific vendor SDK.
 
 ```
-┌────────────────────────────────────────────────────┐
-│  Frontend (React/Next.js)                          │
-│  AiChatTab.tsx → sends { model, provider, ... }    │
-│  SettingsTab.tsx → shared AI_MODELS from ai-models │
-└──────────────────────┬─────────────────────────────┘
+┌─────────────────────────────────────────────────────┐
+│  Frontend (Next.js 16 / Obsidian V2)                │
+│  AiChatTab.tsx → sends { model, provider, ... }     │
+│  SettingsTab.tsx → shared AI_MODELS from ai-models  │
+└──────────────────────┬──────────────────────────────┘
                        │ POST /api/v1/auth/ai/chat
                        ▼
-┌────────────────────────────────────────────────────┐
-│  API Layer (backend/api/ai.go)                     │
-│  runChatSession()                                  │
-│    1. ResolveProviderSettings() → decrypted keys   │
-│    2. ResolveProvider(hint, model) → provider type │
-│    3. buildProviderConfig() → ProviderConfig       │
-│    4. providers.NewProvider(type, cfg) → AIProvider │
-│    5. provider.Chat(ctx, ...) → Response           │
-└──────────────────────┬─────────────────────────────┘
+┌─────────────────────────────────────────────────────┐
+│  Rust API Layer (af-api::intelligence)              │
+│    1. Decrypt AES-256-GCM keys from SQLite (af-db)  │
+│    2. Resolve provider & model fallback chain       │
+│    3. Inject live telemetry / journald context      │
+│    4. Dispatch request & parse proposed actions     │
+└──────────────────────┬──────────────────────────────┘
                        │
         ┌──────────────┼──────────────┐
         ▼              ▼              ▼
   ┌──────────┐  ┌──────────┐  ┌──────────────┐
   │ Gemini   │  │ OpenAI   │  │ Anthropic    │
-  │ (genai)  │  │ (HTTP)   │  │ (HTTP)       │
+  │ (HTTPS)  │  │ (HTTPS)  │  │ (HTTPS)      │
   └──────────┘  └──────────┘  └──────────────┘
                      │
                 ┌────┴────┐
@@ -45,24 +43,11 @@ FlowAI uses a provider-agnostic routing layer (`backend/providers/`) to decouple
                 └─────────┘
 ```
 
-### The `AIProvider` Interface
-
-All providers implement this Go interface (`backend/providers/provider.go`):
-
-```go
-type AIProvider interface {
-    Chat(ctx context.Context, systemPrompt string, history []Message, message string) (*Response, error)
-    Generate(ctx context.Context, prompt string) (*Response, error)
-    TestConnection(ctx context.Context) error
-    Close() error
-}
-```
-
 ### Provider Routing
 
 The provider is determined by:
 1. **Explicit `provider` field** in the request body (highest priority)
-2. **Model ID prefix auto-detection**: `gemini-*` → Gemini, `gpt-*` → OpenAI, `claude-*` → Anthropic, `lm-studio`/`ollama` → LocalAI
+2. **Model ID prefix auto-detection**: `gemini-*` → Gemini (default `gemini-4-argon` with automatic model fallback chain), `gpt-*` → OpenAI, `claude-*` → Anthropic, `lm-studio`/`ollama` → LocalAI
 3. **Default fallback**: Gemini
 
 ---
@@ -89,10 +74,10 @@ To prevent destructive autonomous actions, FlowAI is constrained by the **Action
 
 ### The Flow
 1. **Proposal**: FlowAI drafts an action (e.g., `systemctl restart af-plex`).
-2. **Detection**: The Go backend detects the action pattern in the AI's response.
-3. **Queue**: The action is placed in the **Approval Inbox** tab in the UI.
+2. **Detection**: The Rust control plane (`af-api::intelligence`) detects the action pattern in the AI's response.
+3. **Queue**: The action is serialized into `pending_actions` and placed in the **Approval Inbox** tab in the UI.
 4. **Human Review**: The administrator reviews the command and its justification.
-5. **Execution**: Only upon clicking **Approve** does the backend run the command.
+5. **Execution**: Only upon clicking **Approve** does `af-api` dispatch the allowlisted request over `/run/aetherflow/runner.sock` and record the resolution in `admin_audit_log`.
 
 > [!WARNING]
 > While FlowAI is designed for safety, never approve an action you do not understand.
@@ -107,27 +92,22 @@ Configure providers in **Settings → FlowAI Engine**:
 
 | Provider | Credential | Endpoint Override | Notes |
 | :--- | :--- | :--- | :--- |
-| **Gemini** | `gemini_api_key` | N/A | Default provider. Also accepts `GEMINI_API_KEY` env var. |
-| **OpenAI** | `openai_api_key` | N/A | Also accepts `OPENAI_API_KEY` env var. |
-| **Anthropic** | `anthropic_api_key` | `anthropic_endpoint` | Custom endpoint for proxied access. Also accepts `ANTHROPIC_API_KEY` env var. |
+| **Gemini** | `gemini_api_key` | N/A | Default provider (`gemini-4-argon`). Also accepts `GEMINI_API_KEY` env var. |
+| **OpenAI** | `openai_api_key` | N/A | Supports GPT-6 / GPT-6.1 models. Also accepts `OPENAI_API_KEY` env var. |
+| **Anthropic** | `anthropic_api_key` | `anthropic_endpoint` | Supports Claude 5.1 / 5.5 models. Also accepts `ANTHROPIC_API_KEY` env var. |
 | **LM Studio** | N/A | `lm_studio_endpoint` | Defaults to `http://localhost:1234`. OpenAI-compatible API. |
 | **Ollama** | N/A | `ollama_endpoint` | Defaults to `http://localhost:11434`. OpenAI-compatible API. |
 | **Anthropic-Local** | N/A | `anthropic_endpoint` | Routes `anthropic-local` model to a custom endpoint. Defaults to `http://localhost:8080`. |
 
 ### Credential Security
 
-- All API keys are **AES-encrypted** at rest in the SQLite `settings` table.
-- Keys are decrypted in-memory only when creating a provider instance.
+- All API keys are **AES-256-GCM encrypted** (`enc:v1:`) at rest in the SQLite `settings` table (`af-db`).
+- Keys are decrypted in-memory only when dispatching a provider request.
 - The Settings API masks keys before sending to the frontend (`****` prefix).
-- Provider constructors receive decrypted keys via **dependency injection** — they never access the database or environment directly.
 
 ### Model Selection
 
-Models are defined in a single source of truth: `frontend/src/lib/ai-models.ts`. This file is imported by both `SettingsTab.tsx` (default model) and `AiChatTab.tsx` (per-chat model picker). Every model listed there must have a corresponding entry in the backend `allowedAIModels` whitelist (`backend/api/ai.go`).
-
-### Background Services
-
-Background services (bandwidth optimizer, resource predictor, metadata enricher, smart backup) use the shared Gemini provider via `services.GenerateWithGemini()`. This function returns a cached, long-lived provider singleton that is automatically recreated if the API key changes.
+Models are defined in `frontend/src/lib/ai-models.ts`, imported by both `SettingsTab.tsx` (default model) and `AiChatTab.tsx` (per-chat model picker), and validated against the backend model allowlist in `af-api::intelligence` (`backend-rs/crates/af-api/src/intelligence.rs`).
 
 ---
 
@@ -136,8 +116,8 @@ Background services (bandwidth optimizer, resource predictor, metadata enricher,
 | Symptom | Cause | Fix |
 | :--- | :--- | :--- |
 | "Model Unreachable" | Missing or invalid API key | Verify key in Settings → FlowAI Engine. Check env vars. |
-| 400 "Invalid AI model" | Model not in backend whitelist | Ensure the model ID matches an entry in `allowedAIModels`. |
-| "AI provider initialization failed" | Provider constructor error | Check that the correct credentials/endpoints are configured. |
+| 400 "Invalid AI model" | Model not in backend allowlist | Ensure the model ID matches an entry in `frontend/src/lib/ai-models.ts` and `af-api::intelligence`. |
+| "AI provider initialization failed" | Provider configuration error | Check that the correct credentials/endpoints are configured. |
 | "Connection error" on local AI | LM Studio or Ollama not running | Start the local server and verify the endpoint URL. |
 | "Context Overload" | Massive service logs | Clear the chat to reset the context window. Try `logs` mode. |
 | "Action Not Detected" | Generic AI suggestion | Ensure the AI specifically names the action to trigger the Gate. |
@@ -168,7 +148,7 @@ Extends the chat request with:
 
 ### `POST /api/v1/admin/settings/test-ai`
 
-Dynamically tests whichever provider the admin selects. Accepts unsaved keys for pre-save validation.
+Dynamically tests whichever provider the admin selects. Accepts unsaved keys for pre-save validation:
 
 ```json
 {
@@ -188,7 +168,6 @@ The endpoint automatically selects the appropriate test model per provider:
 
 > [!TIP]
 > In the Settings UI, each provider section has a dedicated "Test" button that invokes this endpoint with the correct provider type. You can test unsaved keys before committing them.
-```
 
 ### Response
 

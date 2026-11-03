@@ -1,83 +1,102 @@
 # Testing AetherFlow
 
-AetherFlow testing encompasses both the **frontend operator experience** and the **backend control plane**.
-
-This guide covers the core tooling, prerequisites, and standard commands used to validate the platform.
-
-> [!NOTE]
-> Testing should confirm more than “does it compile.” In AetherFlow, a useful test workflow checks UI behavior, backend correctness, and operational paths that matter in real deployments.
+AetherFlow v4.0.0 verification spans four layers: the **11-crate Rust control plane (`backend-rs`)**, the **Next.js 16 (Obsidian V2) frontend (`frontend`)**, the **Python release/marketplace/hygiene regression suites (`tests`)**, and **Playwright E2E browser tests**.
 
 ---
 
 ## Prerequisites
 
-Before running tests, make sure the local environment has the required toolchain installed:
-
-- **Node.js**: Required for Jest and Playwright.
-- **Go**: Required for backend execution (`go test`).
-- **Playwright browsers**: Must be downloaded locally via `npx playwright install`.
-- **Python**: Required to execute the `test_api.py` manual diagnostic script.
+Ensure your development machine has:
+- **Rust Toolchain (`stable`)**: `cargo` and `rustc` (plus `mold`, `clang`, `pkg-config`, and `libssl-dev` on Linux).
+- **Node.js 22+ & npm**: For building the Next.js 16 static export and running Jest/Playwright tests.
+- **Python 3.10+**: For running release-manager, installer, and shell hygiene regression tests.
 
 ---
 
-## Frontend End-to-End Testing (Playwright)
+## 1. Rust Control Plane Workspace Tests (`backend-rs`)
 
-AetherFlow uses **Playwright** for browser-driven testing of critical user flows, such as authentication, dashboard rendering, and marketplace interactions.
+The 11-crate Rust workspace (`af-models`, `af-files`, `af-db`, `af-hardware`, `af-runner`, `af-release`, `af-host`, `af-cli`, `af-services`, `af-api`, `af-streaming-tests`) contains comprehensive unit, security, and contract tests.
 
-### Setup
 ```bash
-npm install
-npx playwright install
+# Ensure the embedded SPA directory exists if frontend has not been built yet
+mkdir -p backend/web/dist
+
+# Run all tests across the 11-crate Rust workspace
+cd backend-rs
+JWT_SECRET="ci-test-secret-exactly-32bytes!!" \
+AES_MASTER_KEY="ci-test-aes-key-exactly-32bytes!" \
+ALLOWED_HOSTS="localhost:8080,127.0.0.1:8080" \
+cargo test --workspace --locked
 ```
 
-### Execution
-Run the standard Playwright suite:
+### Targeting Specific Subsystems
 ```bash
-npx playwright test
-```
+# Test the HTTP/WS API, auth, McBrowser routes, and Subdomain Gateway
+cargo test -p af-api
 
-### What E2E Tests Verify
-- Critical routes load successfully.
-- Navigation does not break under normal workflow conditions.
-- Real-time dashboard components (e.g. Activity graph) mount without crashing.
-- Authentication paths enforce redirect expectations.
+# Test the privileged UNIX socket runner and 15 declarative package recipes
+cargo test -p af-runner
+
+# Test Native McBrowser capability-scoped filesystem operations
+cargo test -p af-files
+
+# Test the atomic release engine, WAL-safe snapshots, and rollback recovery
+cargo test -p af-release
+
+# Test WAL-safe backups, versioned manifests, and staged restores
+cargo test -p af-host
+
+# Test the unified 'af' administrative CLI and 14-step provisioner
+cargo test -p af-cli
+
+# Test canonical streaming playback history, reconciliation, and portability
+cargo test -p af-streaming-tests
+```
 
 ---
 
-## Backend Unit & Integration Testing (Go)
+## 2. Frontend Lint, Unit Tests & Static Export (`frontend`)
 
-The backend is the operational core of AetherFlow. The project uses Go’s built-in testing model.
-
-### Execution
-Run tests across all Go module packages:
 ```bash
-go test ./...
+# Install root workspace dependencies
+npm ci
+
+# Run ESLint, Jest unit tests, and build the Next.js static export
+cd frontend
+npm run lint
+npm run test:ci
+NEXT_STATIC_EXPORT=1 npm run build
 ```
-
-### What Backend Tests Verify
-- Logic within individual REST / WS Route Handlers (`/api/v1/system`, etc.)
-- FlowAI decision gating (verifying that proposed actions are actually intercepted).
-- Struct Marshaling/Unmarshaling and configuration read capabilities.
-- Marketplace manifest resolution logic.
-
-> [!TIP]
-> If a backend change affects auth, orchestration, status reporting, or realtime behavior, ensure you write a test verifying the state transitions under load.
 
 ---
 
-## Manual Diagnostics (`test_api.py`)
+## 3. Release, Marketplace & Shell Hygiene Suites (`tests`)
 
-AetherFlow includes `test_api.py` as a manual diagnostic script for remote and local API verification over SSH/Paramiko.
-
-### Use Cases
-- Bypassing the frontend to test raw WebSocket metrics telemetry.
-- Testing auth flows if encountering CSRF desync issues in the browser.
-- Simulating system resource loading logic without navigating the React UI.
-
-**Usage**:
 ```bash
-python3 test_api.py
+# Verify shell syntax and hygiene across all 260+ installer and lifecycle scripts
+python3 tests/check_shell_hygiene.py
+
+# Run release workflow, release manager, and Rust build tool regression tests
+python3 -m unittest discover -s tests -p 'test_release*.py' -v
+python3 -m unittest discover -s tests -p 'test_rust_build_tools.py' -v
+
+# Run Marketplace package lifecycle & safe update regression tests
+python3 -m unittest discover -s tests -p 'test_marketplace*.py' -v
+python3 -m unittest discover -s tests -p 'test_palate_installer.py' -v
+python3 -m unittest discover -s tests -p 'test_maintainerr_installer.py' -v
+python3 -m unittest discover -s tests -p 'test_jellyseerr_installer.py' -v
+python3 -m unittest discover -s tests -p 'test_youtube_packages.py' -v
+
+# Run the 4-tier E2E contract verification harness
+python3 tests/run_e2e.py --mode contract
 ```
 
-> [!WARNING]
-> `test_api.py` is a diagnostic tool, not a replacement for automated tests. Use it to quickly isolate whether an issue lies in the React state management or the core Go backend.
+---
+
+## 4. Full Production Single-Binary Build (`scripts/build_gold.sh`)
+
+To execute the complete end-to-end production pipeline locally (Next.js static export $\to$ `backend/web/dist` staging $\to$ Rust workspace tests $\to$ `aetherflow-api` + `af` release compilation $\to$ `.tar.gz` + `SHA256SUMS`):
+
+```bash
+bash scripts/build_gold.sh
+```

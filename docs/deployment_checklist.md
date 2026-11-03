@@ -2,34 +2,32 @@
 
 ## Pre-Deployment
 
-### Environment Variables (Required)
+### Environment Variables (`/etc/aetherflow/aetherflow.env`, mode `0600`)
 
+#### Required
 | Variable | Description | Validation |
 | --- | --- | --- |
-| `JWT_SECRET` | JWT signing secret | ≥32 bytes, cryptographically random |
-| `AES_MASTER_KEY` | AES-256 encryption key for API keys at rest | Exactly 32 bytes (raw or base64-encoded) |
-| `ALLOWED_HOSTS` | Comma-separated allowed Host header values | Must include production domain(s) |
-| `GIN_MODE` | Gin framework mode | Set to `release` for production |
+| `JWT_SECRET` | HS256 JWT signing secret | $\ge 32$ bytes, cryptographically random |
+| `AES_MASTER_KEY` | AES-256-GCM encryption key for secrets at rest (`enc:v1:`) | Exactly 32 bytes (raw 32-char or Base64-encoded 32 bytes) |
+| `ALLOWED_HOSTS` | Comma-separated allowed `Host` header values | Must include production domain(s) and LAN/public IP if accessed directly |
 
-### Environment Variables (Recommended)
-
+#### Recommended
 | Variable | Description | Default |
 | --- | --- | --- |
-| `REDIS_PASSWORD` | Redis authentication password | Empty (no auth) |
-| `REDIS_ADDR` | Redis server address | `localhost:6379` |
-| `COOKIE_SECURE` | HTTPS-only cookies | `true` |
-| `CSRF_ENABLED` | Enable CSRF middleware | `false` |
-| `OIDC_ISSUER` | OIDC issuer URL | Auto-detected from request |
-| `ADMIN_EMAIL` | Email for auto-admin role | None |
+| `AF_DB_PATH` | Live SQLite WAL database path | `/var/lib/aetherflow/aetherflow.sqlite` |
+| `AF_MCBROWSER_ROOT` | Dedicated `0700` directory for Native McBrowser storage | `/var/lib/aetherflow/mcbrowser` |
+| `AETHERFLOW_BASE_DOMAIN` | Base domain for automatic `<app>.<baseDomain>` subdomain ingress | Configured in UI / Setup |
+| `COOKIE_SECURE` | HTTPS-only session cookies | `true` |
+| `OIDC_ISSUER` | OIDC issuer URL for downstream SSO | Auto-detected from request |
+| `ADMIN_EMAIL` | Email for automatic admin role on first OAuth login | None |
 | `AF_GITHUB_TOKEN` | Optional token for GitHub update discovery; falls back to `GITHUB_TOKEN`, then `GH_TOKEN` | Unauthenticated requests |
 
-### Release Update Safety
+### Release & Self-Update Safety (`af-release` & `aetherflow-self-update.service`)
 
-- CI release archives must use a `0755` staging root and normalized numeric ownership, not the `0700` directory produced by `mktemp -d`.
-- The release manager normalizes extracted directories to `0755`, removes group/other write access from files, and sets root ownership with the service user's group before activation. It verifies service-user access before switching `current`; state snapshots retain their separate restrictive permissions.
-- Stable deployments can resolve GitHub's public latest-release redirect when the REST API is unavailable. The redirect must name the expected repository and a stable version tag.
-- API update checks share a five-minute cache, cache transient failures for one minute, and honor GitHub rate-limit reset and `Retry-After` headers. Rate-limited responses include `error: github_rate_limited` and an RFC3339 `retryAt` value instead of silently reporting no update.
-- Configure optional GitHub credentials through the protected service environment, never source-controlled configuration or command-line arguments. A token is not required for cached public-release checks.
+- CI release archives and `af-release` normalize extracted directories to `0755`, remove group/other write access from files, set executable bits (`0755`) on `aetherflow-api`, `af`, `deploy/release-manager.sh`, `packages/system/*`, and `packages/package/*`, and verify service-user access before switching `/opt/AetherFlow/current`.
+- Self-updates launch in an independent `aetherflow-self-update.service` systemd unit with an atomic `0600` environment handoff so restarting `aetherflow-runner` and `aetherflow-api` never terminates the in-flight updater.
+- Stable deployments resolve GitHub's public `/releases/latest` redirect when the REST API is rate-limited.
+- API update checks share a 5-minute cache, cache transient failures for 1 minute, and honor `X-RateLimit-Reset` and `Retry-After` headers (`error: github_rate_limited`, `retryAt`).
 
 ### Generate Secrets
 
@@ -37,7 +35,7 @@
 # Generate JWT_SECRET (32 random bytes, hex-encoded)
 openssl rand -hex 32
 
-# Generate AES_MASTER_KEY (32 random bytes, base64-encoded)
+# Generate AES_MASTER_KEY (32 random bytes, Base64-encoded)
 openssl rand -base64 32
 ```
 
@@ -46,70 +44,56 @@ openssl rand -base64 32
 ## Deployment Steps
 
 ### 1. Set Environment Variables
+Ensure all required variables are populated in `/etc/aetherflow/aetherflow.env` with mode `0600` (`chown root:aetherflow` or `aetherflow:aetherflow`).
 
-Ensure all required variables are set in your `.env` or deployment config.
-
-### 2. Redis Connectivity
-
-```bash
-# Verify Redis is reachable
-redis-cli -a $REDIS_PASSWORD -h $REDIS_ADDR ping
-# Expected: PONG
-```
-
-### 3. Database Migration — Encrypted API Keys
-
-The `DecryptKey()` function has a built-in backwards-compatibility fallback:
-- If the stored value is plaintext (not valid base64 or GCM decryption fails), it returns the raw value
-- New keys saved via the Settings UI will be automatically encrypted
-- **No explicit migration script is needed** — the system handles the transition seamlessly
-
-To force-encrypt existing plaintext keys after setting `AES_MASTER_KEY`:
-1. Open the AetherFlow Dashboard → Settings
-2. Clear and re-enter your AI Provider API keys (Gemini, OpenAI, Anthropic)
-3. Click Save — the keys will be stored encrypted
-
-### 4. Build and Deploy
+### 2. Build or Pull Verified Single-Binary Release
 
 ```bash
-cd backend
-GIN_MODE=release go build -o dist/aetherflow-api .
+# Build production single-binary Rust bundle (aetherflow-api + af + SHA256SUMS)
+bash scripts/build_gold.sh
+
+# Or deploy directly via the unified Rust CLI / release manager
+sudo af release deploy --local --channel stable
 ```
 
-### 5. Verify systemd Sandbox Permissions
+### 3. Verify Systemd Sandbox & Socket Permissions
 
-If your `aetherflow-api.service` uses `ProtectSystem=strict` (recommended for production), verify that `ReadWritePaths` includes all directories the backend needs to write to:
+Verify that `aetherflow-api.service` runs under `ProtectSystem=strict` and `aetherflow-runner.service` owns `/run/aetherflow/runner.sock`:
+
 ```bash
-systemctl cat aetherflow-api.service | grep -E "ProtectSystem|ReadWritePaths"
-# Expected:
-# ProtectSystem=strict
-# ReadWritePaths=/opt/AetherFlow /opt/AetherFlow_releases
+systemctl cat aetherflow-api.service | grep -E "ProtectSystem|StateDirectory|NoNewPrivileges"
+ls -l /run/aetherflow/runner.sock
+# Expected: srw-rw---- 1 root aetherflow ... /run/aetherflow/runner.sock
 ```
 
-> [!WARNING]
-> Missing `ReadWritePaths` entries will **not** cause a startup failure. The service will boot normally but panic on the first SQLite write operation (e.g., credential initialization). See [Troubleshooting §6](./troubleshooting.md) for details.
+### 4. Verify Readiness & Running Binary Identity
 
-### 6. Zero-Downtime Strategy
+```bash
+curl -s http://127.0.0.1:8080/health/ready | jq
+sudo af release status
+```
 
-1. Deploy with all env vars set (especially `AES_MASTER_KEY`)
-2. The system will:
-   - Automatically decrypt both plaintext and encrypted API keys
-   - Encrypt any newly saved API keys
-   - Start the Redis JWT blacklist
-   - Enforce host header validation
-3. No database schema migration required
-4. Rolling restart is safe — JWT tokens are stateless except for blacklist checks
+Expected `/health/ready` response:
+```json
+{
+  "database": "ok",
+  "redis": "disabled",
+  "status": "ready",
+  "uptime": "12.4s",
+  "version": "v4.0.0"
+}
+```
 
 ---
 
-## Post-Deployment Verification
+## Post-Deployment Security Verification
 
 ### Authentication & Authorization
 
 ```bash
 # 1. Verify spoofed Host header is rejected
 curl -s -o /dev/null -w "%{http_code}" \
-  -H "Host: evil.com" \
+  -H "Host: evil.example.com" \
   https://your-server/api/v1/public/marketplace
 # Expected: 400
 
@@ -125,7 +109,7 @@ curl -s -o /dev/null -w "%{http_code}" \
 # Expected: 403
 ```
 
-### JWT Lifecycle
+### JWT Session & SQLite Revocation Lifecycle
 
 ```bash
 # 1. Login and inspect JWT
@@ -134,72 +118,38 @@ TOKEN=$(curl -s -X POST \
   -H "Content-Type: application/json" \
   -d '{"username":"admin","password":"..."}' | jq -r '.token')
 
-# 2. Decode JWT and verify claims
-echo $TOKEN | cut -d'.' -f2 | base64 -d | jq .
-# Expected: exp = 15 minutes from now, jti = UUID
-
-# 3. Logout
+# 2. Logout (records JTI in SQLite revoked_tokens)
 curl -X POST \
   -H "Authorization: Bearer $TOKEN" \
   https://your-server/api/v1/auth/auth/logout
 
-# 4. Verify token is blacklisted
+# 3. Verify revoked token is immediately rejected
 curl -s -o /dev/null -w "%{http_code}" \
   -H "Authorization: Bearer $TOKEN" \
   https://your-server/api/v1/auth/settings
-# Expected: 401 (session revoked)
-
-# 5. Verify blacklist in Redis
-redis-cli -a $REDIS_PASSWORD GET "blacklist:$JTI_FROM_STEP_2"
-# Expected: "true"
+# Expected: 401
 ```
 
-### Encryption
+### Encryption at Rest (`enc:v1:`)
 
 ```bash
 # Verify API keys are stored encrypted in SQLite
-sqlite3 /path/to/aetherflow.sqlite \
+sudo sqlite3 /var/lib/aetherflow/aetherflow.sqlite \
   "SELECT gemini_api_key FROM settings WHERE id = 1;"
-# Expected: Base64-encoded ciphertext (NOT plaintext API key)
+# Expected: enc:v1:<nonce>:<ciphertext> (never plaintext)
 ```
-
----
-
-## Security Monitoring
-
-### Log Indicators
-
-Watch for these log messages at startup:
-
-| Message | Meaning | Action |
-| --- | --- | --- |
-| `AES-256-GCM encryption key loaded successfully.` | Encryption active | None |
-| `WARNING: AES_MASTER_KEY not set.` | Encryption disabled | Set key immediately if production |
-| `FATAL: AES_MASTER_KEY is required in production` | Server halted | Set the AES key |
-| `Redis connected successfully.` | Blacklist active | None |
-| `WARNING: Redis is unavailable` | Blacklist degraded | Check Redis connectivity |
-| `WARNING: No billing webhook secret configured` | Webhooks unprotected | Set billing secrets |
-
-### Runtime Security Events
-
-Monitor logs for:
-- `CSRF validation failed:` — Potential CSRF attack attempt
-- `CRITICAL: crypto/rand failure` — System entropy exhaustion (critical)
-- Authentication failures from unusual IPs in `login_history` table
 
 ---
 
 ## Rollback Plan
 
-If issues are encountered:
-1. **AES Key Issues**: Remove `AES_MASTER_KEY` and restart — system degrades to plaintext mode
-2. **Redis Issues**: System automatically fails-open if Redis goes down
-3. **Host Validation Issues**: Remove `ALLOWED_HOSTS` env var — allows all hosts (dev mode)
-4. **CSRF Issues**: Remove `CSRF_ENABLED` env var — disables CSRF middleware
+If an issue is encountered after deployment, execute an atomic rollback to `.previous_release` with WAL-safe database integrity verification:
 
-All security features are designed with safe fallback mechanisms to prevent total lockout.
+```bash
+sudo af release rollback --local
+sudo af release status
+```
 
 ---
 
-*Last updated: 2026-04-02*
-*Document owner: Security Architecture*
+*Last updated: 2026-11-03 (AetherFlow v4.0.0)*

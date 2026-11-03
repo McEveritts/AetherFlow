@@ -1,19 +1,19 @@
 # AetherMarketplace
 
-The AetherMarketplace is your portal to extending the capabilities of your infrastructure. It features a curated collection of 50+ applications tailored for automation, media management, and system optimization.
+The AetherMarketplace is your portal to extending the capabilities of your bare-metal infrastructure. It features a curated catalog of **77 native Linux applications** tailored for media streaming, `*Arr` automation, downloaders, mesh VPNs, observability, remote desktops, and culinary AI.
 
 ## Key Features
 
-- **One-Click Deploy**: Fully automated installation and configuration.
-- **Hyperspeed Feedback**: Real-time installation progress tracked via circular indicators in the UI.
-- **Native Orchestration**: Every app is installed as a native `systemd` service.
-- **Safe Uninstallation**: Robust removal scripts that clean up data and services reliably.
+- **One-Click Deploy & In-Place Updates**: Automated installation, update checking, and configuration backed by 15 native declarative Rust recipes (`af-runner`) and idempotent `common.sh` installers.
+- **Hyperspeed Feedback**: Real-time `[PROGRESS:<pct>]` installation telemetry streamed over WebSockets to circular progress indicators in the UI.
+- **Native Orchestration**: Every app runs as a native `systemd` service (`af-<app>.service`) with optional `af-systemd-sandbox` isolation and automatic `<app>.<baseDomain>` subdomain routing.
+- **Safe Uninstallation & Rollbacks**: Transactional rollback journals and removal scripts that preserve application data by default unless `DELETE_DATA=true` is explicitly requested.
 
 ---
 
-## Managed Application Library
+## Managed Application Library (77 Packages)
 
-AetherFlow manages a wide range of services across multiple categories.
+AetherFlow manages 77 native services across multiple infrastructure domains.
 
 ### Media & Downloaders
 - **Video & IPTV**: Plex, Jellyfin, Emby, Dispatcharr, Threadfin, Tautulli, Overseerr, Jellyseerr, Maintainerr, Requestrr, FileBot, Unmanic.

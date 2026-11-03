@@ -1,3 +1,19 @@
+## CHANGELOG v4.0.0 - 11-Crate Rust Control Plane, 77-App Bare-Metal Catalog, Native McBrowser & Self-Update Engine
+_Promotes the v4.0.0 Rust control plane architecture and `nightly` / `experimental` advancements to the `master` (`stable`) track (`v3.2.7...v4.0.0`)._
+
+---
+
+### Release Highlights (since `v3.2.7`)
+* **Eleven-Crate Single-Binary Rust Control Plane, Runner & Unified Admin CLI (`backend-rs`)**: Replaced the legacy Go runtime with an 11-crate Rust workspace (`af-models`, `af-files`, `af-db`, `af-hardware`, `af-runner`, `af-release`, `af-host`, `af-cli`, `af-services`, `af-api`, `af-streaming-tests`) built on **Axum 0.7** and **Tokio**. Preserves the `aetherflow-api` binary name, `aetherflow-api runner` root UNIX socket daemon (`/run/aetherflow/runner.sock`), embedded Next.js 16 (Obsidian V2) static SPA (`rust-embed`), bundled SQLite WAL persistence (eliminating Redis runtime requirements), and existing JWT/TOTP/AES-256-GCM (`enc:v1:`) credential formats while adding the unified **`af` (`af-cli`)** administrative CLI.
+* **Native McBrowser (`af-files`)**: Integrated a capability-scoped tenant file manager directly into the dashboard sidebar and Rust API (`/var/lib/aetherflow/mcbrowser`, mode `0700`) with resumable chunked uploads up to 64 GiB, ETag-guarded UTF-8 editing (up to 10 MiB) with Ace + Markdown/KaTeX preview, 9-format archive creation/extraction, password-protected public shares, and FlowAI natural-language BFS file search.
+* **77-Application Bare-Metal Catalog & Lifecycle Hardening**: Expanded AetherMarketplace to **77 native Linux packages** across 7 domains—adding **Palate** (Culinary & Nutrition AI), **Maintainerr**, **McVNC** (Rust GPU Remote Desktop), **KasmVNC**, **XRDP**, **Tailscale**, **Piped** *(Experimental)*, and **Invidious** *(Experimental)*—alongside 15 built-in declarative Rust package recipes in `af-runner`, Dispatcharr v0.33.0 Daphne/editable-wheel fixes, and active-release script path resolution.
+* **Isolated Self-Updater (`aetherflow-self-update.service`) & Executable Verification**: Isolated control-plane self-updates into a dedicated `aetherflow-self-update.service` systemd unit with atomic `0600` credential handoffs so restarting `aetherflow-runner` and `aetherflow-api` never kills the updater. Verified running physical binary paths before marking deployments complete and accepted legacy completed deployment journals cleanly.
+* **Canonical Streaming History, Insights & Portability**: Added `/api/v1/auth/streaming/history` and `/export` with rolling/calendar windows, server-identity verification (`/System/Info/Public`), asynchronous library/genre enrichment, 8 MiB JSON portability archives, 128 MiB streaming CSV exports, and backup-verified reconciliation gates.
+* **Native WireGuard & Tailscale Network Control Center**: Added `/api/v1/admin/network/*` and the **Network** UI tab for persistent `wg0` peer management, one-time in-memory client keypair/QR handoff, and Tailscale login, subnet route advertisement, and exit-node controls.
+* **Decoupled Navigation & Frame-0 Telemetry Performance**: Decoupled sidebar navigation layout state from high-frequency WebSocket telemetry updates (`useHistoryStore`, `useMetrics`) to eliminate UI re-render contention.
+
+---
+
 ## CHANGELOG v4.0.0-experimental - Rust Control Plane & Release Manager Fixes
 _Direct comparison against `v3.2.7` (`v3.2.7...v4.0.0-experimental`)._
 

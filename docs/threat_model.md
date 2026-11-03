@@ -2,133 +2,97 @@
 
 ## 1. Overview
 
-This document maps the CWEs identified in the CI/CD security audit to the AetherFlow
-Go/Gin/SQLite/Redis architecture and identifies cascading attack vectors.
-
-**Architecture**: Go 1.25 backend → Gin HTTP framework → SQLite (single-writer WAL mode) → Redis (JWT blacklist)
-
----
-
-## 2. CWE Mapping
-
-### CWE-284: Improper Access Control
-
-| Component | Threat | Mitigation |
-|-----------|--------|------------|
-| Route groups | Endpoints accessible without authentication | Three-tier route hierarchy: `/public`, `/auth` (AuthMiddleware), `/admin` (AuthMiddleware + AdminOnly) |
-| OIDC endpoints | Public by design; abuse potential | Rate limiting on auth endpoints (5 req/min), PKCE enforcement |
-| WebSocket | Unauthenticated connection hijacking | AuthMiddleware gate + origin validation in upgrader |
-
-### CWE-285: Improper Authorization
-
-| Component | Threat | Mitigation |
-|-----------|--------|------------|
-| AdminOnly middleware | Role escalation via JWT payload manipulation | Server-side role fetch from DB on every request (`SELECT role FROM users WHERE id = ?`) — JWT `user_role` is NOT trusted alone |
-| Quota management | Admin-only operations accessible to users | IDOR check: `authedUserID != requestedID && authedRole != "admin"` |
-
-### CWE-613: Insufficient Session Expiration
-
-| Component | Threat | Mitigation |
-|-----------|--------|------------|
-| JWT lifetime | Stolen tokens usable indefinitely | 15-minute expiry (`exp` claim) |
-| Session revocation | Logout token remains valid | Redis blacklist with TTL matching remaining JWT lifespan |
-| Cookie handling | Cookie persists after logout | Cookie deletion on logout (`MaxAge=-1`) |
-
-### CWE-639: Insecure Direct Object Reference (IDOR)
-
-| Component | Threat | Mitigation |
-|-----------|--------|------------|
-| Notifications | User A reads User B's notifications | `WHERE user_id = ?` bound to `c.Get("user_id")` from JWT context |
-| Quota read | User A reads User B's quota | IDOR guard: context user ID must match URL `:id` or be admin |
-| Profile update | User A updates User B's profile | `UpdateProfile` extracts user ID from JWT, not URL params |
-
-### CWE-89: SQL Injection
-
-| Component | Threat | Mitigation |
-|-----------|--------|------------|
-| Parameterized queries | Standard SQLi | All queries use `?` placeholders throughout |
-| VACUUM INTO | Administrative command injection (not parameterizable) | Regex whitelist (`^[a-zA-Z0-9_.-]+\.sqlite$`) + `safeBackupPath()` for path canonicalization |
-| Dynamic UPDATE (notification rules) | Query building with string concatenation | Field names are hardcoded constants; only values use `?` placeholders |
-
-### CWE-78: OS Command Injection
-
-| Component | Threat | Mitigation |
-|-----------|--------|------------|
-| `exec.Command` (systemctl) | Malicious service names | Regex allowlist: `^[a-zA-Z0-9][a-zA-Z0-9@._-]{0,63}$` |
-| `exec.Command` (update script) | Path manipulation | `os.Executable()` → absolute path resolution via `filepath.Clean()` |
-| `exec.Command` (PM2) | Binary path hijacking | `findPM2Binary()` searches known absolute paths first |
+This document maps CWEs and privilege boundaries across the **AetherFlow v4.0.0** architecture:
+- **Control Plane (`af-api`)**: Unprivileged Rust (`Axum` + `Tokio`) HTTP/WebSocket server + embedded Next.js 16 (Obsidian V2) SPA running as `User=aetherflow` under `ProtectSystem=strict` and `NoNewPrivileges=yes`.
+- **Privileged Runner (`af-runner`)**: Root daemon listening exclusively on `/run/aetherflow/runner.sock` (`0660 root:aetherflow`).
+- **Scoped File Manager (`af-files`)**: Native McBrowser tenant storage under `/var/lib/aetherflow/mcbrowser` (`0700`).
+- **Persistence (`af-db` & `af-host`)**: Bundled SQLite (`rusqlite`) in single-writer `WAL` mode with AES-256-GCM (`enc:v1:`) secret encryption and manifest-verified online backups.
 
 ---
 
-## 3. Cascading Attack Vectors
+## 2. CWE Mapping & Mitigations
 
-### Chain 1: JWT Forgery → Universal IDOR
-```
-Weak JWT_SECRET → Forged token with arbitrary user_id
-  → Bypasses ALL IDOR protections (notifications, quotas, profile)
-  → Can escalate to admin by setting role claim (mitigated: role is re-fetched from DB)
-```
-**Mitigation**: JWT_SECRET must be ≥32 bytes, cryptographically random. `log.Fatal()` on missing secret.
+### CWE-284 / CWE-285: Improper Access Control & Authorization
 
-### Chain 2: Redis Failure → Zombie Sessions
-```
-Redis outage → BlacklistCheck returns nil error
-  → Revoked tokens (from logout) remain valid for up to 15 minutes
-  → Session hijacking window extends to full JWT lifetime
-```
-**Mitigation**: Fail-open design. Accept the 15-min window as a tradeoff for availability. Short JWT lifetime limits blast radius.
+| Component | Threat | Mitigation |
+|-----------|--------|------------|
+| Route hierarchy (`af-api`) | Unauthenticated or cross-role access | Three-tier router: `/api/v1/public`, `/api/v1/auth` (JWT + revocation check), `/api/v1/admin` (live DB `role == "admin"` verification). |
+| Plugin proxy (`af-api` / `af-services`) | Plugin token used outside authorized routes | Segment-boundary `api_scopes` verification against `plugin.manifest.json` before proxying or handling requests. |
+| Host filesystem picker (`/api/v1/auth/fs`) | Non-admin user enumerating host directories | Restricted strictly to live-verified `admin` accounts before any path canonicalization or existence checks; ordinary users are confined to `af-files` McBrowser. |
+| Cluster metrics (`/cluster/v1/metrics`) | Unauthorized cluster scraping or spoofing | Enforces `X-Cluster-PSK` authentication and validates heartbeat `node_id` and status fields. |
 
-### Chain 3: Missing AES Key → API Key Exposure
-```
-AES_MASTER_KEY not set → API keys stored in plaintext in SQLite
-  → Database backup download (admin-only) → Attacker obtains .sqlite file
-  → OR: Local File Inclusion (LFI) → Direct database read
-  → Full AI Provider API key compromise → Unauthorized AI usage / billing
-```
-**Mitigation**: Fail-fast in production mode. `log.Fatal()` when `GIN_MODE=release` and key is missing.
+### CWE-22 / CWE-59: Path Traversal & Improper Link Resolution (Symlink Following)
 
-### Chain 4: Host Header Poisoning → OAuth Credential Theft
-```
-Spoofed Host header → getBaseURL() returns attacker domain
-  → OAuth callback redirects to attacker site with authorization code
-  → Attacker exchanges code for access token
-```
-**Mitigation**: `HostValidationMiddleware()` validates `c.Request.Host` against `ALLOWED_HOSTS` whitelist.
+| Component | Threat | Mitigation |
+|-----------|--------|------------|
+| Native McBrowser (`af-files`) | Escaping `/var/lib/aetherflow/mcbrowser/user-<id>` via `..` or symlinks | Component-by-component validation rejecting `..`, NUL bytes, and unapproved symlink traversals; enforces `0700` per-user roots. |
+| Declarative Package Executor (`af-runner`) | Arbitrary file overwrite or `chown -R` on system roots via symlink planting | `validate_filesystem_path` inspects every ancestor component via `lstat` (`symlink_metadata`), rejects symlinks with `SecurityViolation`, and blocks shared system paths (`FORBIDDEN_EXACT_PATHS`, `SHARED_SYSTEM_CHOWN_PATHS`). |
+| Release & Backup Engines (`af-release`, `af-host`) | Malicious archive entries or symlinked staging directories | `ensure_no_symlink_ancestors`, exclusive `0700` UUID staging dirs (`create_new`), rejection of tar symlink/hardlink/device entries, and mandatory `SHA256SUMS` + `.manifest.json` verification before extraction. |
 
----
+### CWE-78: OS Command Injection & Privilege Escalation
 
-## 4. Trust Boundaries
+| Component | Threat | Mitigation |
+|-----------|--------|------------|
+| Privileged Runner (`af-runner`) | Unprivileged API executing arbitrary root commands | Zero shell evaluation in `DeclarativeStep` (direct `execve` argv vectors with `stdin(Stdio::null())` and `process_group(0)`). Strict regex allowlists on unit names (`SAFE_SERVICE_NAME`), package IDs (`SAFE_PKG_ID`), usernames (`SAFE_USERNAME`), and APT packages (`SAFE_APT_PKG_NAME`). |
+| Human-Gated FlowAI (`af-api`) | Prompt injection triggering destructive host commands | LLM output is untrusted; proposed mutations are queued into `pending_actions` (Approval Inbox) and cannot execute without explicit administrator authorization (`POST /api/v1/admin/actions/:id/approve`). |
+| Self-Updater (`af-runner::self_update`) | Command injection or credential leak via updater launch | Request channel/command validated via `af_release::validate_self_update_request`; launched in isolated `aetherflow-self-update.service` with atomic `0600` environment handoff removed immediately after systemd accepts execution. |
 
-```
-[Internet] → [Reverse Proxy (Apache2)] → [Gin HTTP Server (127.0.0.1:8080)]
-                                              ↓
-                                        [AuthMiddleware]
-                                              ↓
-                                        [Handler Logic]
-                                         ↓           ↓
-                                    [SQLite DB]   [Redis Cache]
-                                         ↓
-                                    [os/exec → systemd/PM2]
-```
+### CWE-613 / CWE-384: Session Expiration & Revocation
 
-**Key boundary**: The Gin server binds to `127.0.0.1` only. All internet-facing traffic must pass through a reverse proxy. The `ALLOWED_HOSTS` check validates that the proxy is not forwarding spoofed host headers.
+| Component | Threat | Mitigation |
+|-----------|--------|------------|
+| JWT lifecycle (`af-api`, `af-db`) | Stolen or logged-out tokens remaining usable | 15-minute HS256 access token expiry (`exp`), bounded refresh token lifetimes, and synchronous SQLite `revoked_tokens` + `active_sessions` checks on every HTTP request, Subdomain Gateway SSO check, OIDC introspection, and WebSocket upgrade (zero external Redis failure window). |
+| Account deletion (`af-api`) | Deleted user retaining active session or strand of last admin | Immediate transactional deletion removes sessions/OIDC tokens, verifies token owner existence on upgrade, and enforces last-usable-admin protection. |
+
+### CWE-311 / CWE-89: Cryptographic Storage & SQL Injection
+
+| Component | Threat | Mitigation |
+|-----------|--------|------------|
+| Stored secrets (`af-db`) | Plaintext API keys or OIDC secrets in SQLite backups | Encrypted at rest using **AES-256-GCM** (`enc:v1:<nonce>:<ciphertext>`) keyed by `AES_MASTER_KEY`. |
+| SQLite queries (`af-db`) | SQL injection | Parameterized `rusqlite::params![]` queries throughout; online backups use `rusqlite::backup::Backup` (`SQLITE_OPEN_READ_ONLY`) or validated `VACUUM INTO` inside private `0700` staging directories. |
+
+### CWE-918 / CWE-601: SSRF & Host Header Poisoning
+
+| Component | Threat | Mitigation |
+|-----------|--------|------------|
+| Outbound Webhooks & Streaming Collectors | SSRF against loopback, link-local, or RFC1918 targets | Shared URL validator restricts outbound webhooks and provider probes against private/loopback targets and blocks unsafe redirects. |
+| Host Header Validation (`ALLOWED_HOSTS`) | Host header poisoning in OAuth/OIDC redirects | Middleware validates `Host` against `ALLOWED_HOSTS` and strips untrusted `X-Aetherflow-User` identity headers at the Subdomain Gateway perimeter. |
 
 ---
 
-## 5. Risk Matrix
+## 3. Trust Boundaries
+
+```
+[Internet] ──HTTPS/TLS──> [Apache2 + Subdomain Gateway]
+                                   │
+                            127.0.0.1:8080
+                                   ▼
+             [aetherflow-api.service (Rust / af-api)]
+             (User=aetherflow • ProtectSystem=strict • NoNewPrivileges=yes)
+                  ├──> [/var/lib/aetherflow/aetherflow.sqlite (0600)]
+                  ├──> [/var/lib/aetherflow/mcbrowser/user-<id> (0700)]
+                  └──> [/run/aetherflow/runner.sock (0660 root:aetherflow)]
+                                   │
+                                   ▼
+             [aetherflow-runner.service (Root Daemon / af-runner)]
+                  ├──> [systemd Service Manager]
+                  ├──> [Declarative Rust Recipes / Locked Package Scripts]
+                  └──> [aetherflow-self-update.service (af-release)]
+```
+
+---
+
+## 4. Risk Matrix
 
 | Risk | Likelihood | Impact | Severity | Status |
 |------|-----------|--------|----------|--------|
-| JWT secret compromise | Low | Critical | HIGH | Mitigated (fail-fast on missing secret) |
-| IDOR in notifications | Low | Medium | MEDIUM | Mitigated (context-bound queries) |
-| SQL injection via VACUUM INTO | Low | High | HIGH | Mitigated (regex + path validation) |
-| Command injection via service control | Low | Critical | HIGH | Mitigated (name regex + discrete args) |
-| API key plaintext storage | Medium | High | HIGH | Mitigated (AES-GCM + fail-fast in prod) |
-| CSRF on cookie-based flows | Low | Medium | MEDIUM | Mitigated (Bearer token architecture + opt-in CSRF middleware) |
-| Open redirect via Host header | Low | Medium | MEDIUM | Mitigated (host whitelist middleware) |
-| Redis downtime → zombie sessions | Low | Low | LOW | Accepted (15-min window, fail-open) |
+| Privilege escalation across `runner.sock` | Low | Critical | HIGH | Mitigated (strict struct/regex allowlists + zero arbitrary shell eval + `lstat` guards) |
+| Tenant file escape in McBrowser | Low | High | HIGH | Mitigated (`af-files` capability scoping + symlink/traversal rejection + admin-only `/fs`) |
+| Zombie sessions during cache outage | None | Low | LOW | Eliminated (revocation persisted directly in bundled SQLite WAL; Redis removed) |
+| Broken update killing the updater mid-restart | Low | High | HIGH | Mitigated (isolated `aetherflow-self-update.service` + WAL-safe snapshot + binary path check) |
+| AI prompt injection mutating host state | Medium | High | HIGH | Mitigated (Global Approval Inbox gate + `admin_audit_log`) |
+| API key plaintext exposure in DB | Low | High | HIGH | Mitigated (AES-256-GCM `enc:v1:` envelope encryption) |
 
 ---
 
-*Last updated: 2026-04-02*
-*Document owner: Security Architecture*
+*Last updated: 2026-11-03 (AetherFlow v4.0.0)*

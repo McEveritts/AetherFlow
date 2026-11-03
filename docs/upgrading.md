@@ -1,124 +1,94 @@
 # Upgrading Guide
 
-This guide covers the release channels, atomic upgrade pipeline (`deploy/release-manager.sh`), and rollback procedures for AetherFlow.
+This guide covers the release channels, atomic upgrade pipeline (`af-release`, `aetherflow-self-update.service`, and `deploy/release-manager.sh`), and rollback procedures for **AetherFlow v4.0.0**.
 
 ## Upgrade Channels
 
-AetherFlow publishes v4 builds on the nightly track while stable remains on the v3 release line:
+AetherFlow supports three release channels managed from **Settings → System Updates** or via the unified `af` CLI (`sudo af release deploy --channel <channel>`):
 
 | Channel | Source | Stability | Use Case |
 | :--- | :--- | :--- | :--- |
-| **Stable (`stable`)** | `master` / GitHub Releases | High | Production servers, SHA-256 verified release bundles. |
-| **Nightly (`nightly`)** | `nightly` / versioned GitHub pre-releases | Experimental | v4 Rust control plane, Marketplace repairs, and frontend updates. |
-| **Experimental (`experimental`)** | `experimental` / historical or manually published pre-releases | Experimental | Compatibility track; new v4 builds are published automatically on nightly. |
+| **Stable (`stable`)** | `master` / GitHub Releases | High | Production servers, SHA-256 verified single-binary Rust release bundles (`v4.0.0+`). |
+| **Nightly (`nightly`)** | `nightly` / versioned GitHub pre-releases | Rolling | Rolling v4 Rust control plane updates, new Marketplace apps, and early validation (`v4.0.0-nightly.<run>.<attempt>`). |
+| **Experimental (`experimental`)** | `experimental` / pre-releases | Experimental | Feature staging and compatibility track (`v4.0.0-experimental.<run>.<attempt>`). |
 
-To follow v4, visit **Settings → System Updates** and select `nightly`. Changing the update channel does not deploy an update automatically.
+Changing the update channel in **Settings → System Updates** does not deploy an update automatically until you click **Install Update** or run `af release deploy`.
 
-Nightly builds use unique tags such as `v4.0.0-nightly.123.1`, with the workflow run and attempt identifying the build. The packaged `.version` matches that tag, and the tag targets the exact source commit. Nightly builds are pre-releases, never stable/latest releases. Existing `v4.0.0-experimental` tags and downloads remain historical artifacts; their old binaries are not relabeled as new builds.
+Nightly and Experimental pre-releases use unique immutable tags such as `v4.0.0-nightly.85.1`, with the workflow run and attempt identifying the exact build and commit.
 
 ---
 
-## Upgrading from v3.2.x
+## Self-Update Architecture (`aetherflow-self-update.service`)
 
-v4.0.0 replaces the Go control plane with the Rust (Axum + Tokio) `aetherflow-api` binary. The frontend, HTTP API, `/run/aetherflow/runner.sock` runner socket, and the installed `aetherflow-api` / `aetherflow-runner` systemd units are unchanged. A rollback to v3.2.x uses the same `aetherflow-api` binary name and the same `runner` subcommand.
+When triggered from the Web UI or CLI, the privileged runner (`aetherflow-runner.service`) starts the update inside an independent transient systemd unit (`aetherflow-self-update.service`) rather than running in-process:
 
-`deploy/release-manager.sh` resolves the live SQLite file in this order:
+1. **Caller-Restart Survival**: Because the updater runs in its own systemd unit, restarting `aetherflow-runner.service` and `aetherflow-api.service` during the release cutover never terminates the updater.
+2. **Physical Binary Verification**: At startup, `aetherflow-api` captures its version from its physical executable path, and the release engine verifies both systemd units' actual running executable paths against the candidate release before marking the deployment complete.
+3. **Restart-Surviving Status**: Progress, operation IDs, and recovery journals are exposed through `/api/v1/admin/system/update/status` and `sudo af release status`.
 
-1. `AF_DB_PATH`, when it is set in the deploy environment
-2. `DB_PATH`, then `AETHERFLOW_DB_PATH`, parsed from `/etc/aetherflow/aetherflow.env` (the file is not sourced)
+See [Self-Update Lifecycle](./self-update.md) and [Rust Release Engine (`af-release`)](./rust-release-engine.md) for full details.
+
+---
+
+## Upgrading from v3.2.x to v4.0.0
+
+v4.0.0 replaces the legacy Go control plane with the 11-crate **Rust (`Axum` + `Tokio`)** `aetherflow-api` binary and adds the unified `af` (`af-cli`) binary. The embedded Next.js 16 (Obsidian V2) frontend, HTTP/WebSocket API contract, `/run/aetherflow/runner.sock` socket, SQLite database schema, and installed `aetherflow-api` / `aetherflow-runner` systemd units transition in-place without data loss.
+
+### Live SQLite Database Path Resolution
+Both `af-release` and `deploy/release-manager.sh` resolve the live SQLite database in this exact 4-tier order:
+
+1. `AF_DB_PATH`, when set in the deploy environment
+2. `DB_PATH`, then `AETHERFLOW_DB_PATH`, parsed from `/etc/aetherflow/aetherflow.env` (never sourced as shell code)
 3. `DB_PATH`, then `AETHERFLOW_DB_PATH`, from `systemctl show -p Environment aetherflow-api`
 4. `/var/lib/aetherflow/aetherflow.sqlite`
 
-Hosts that still keep the database at `/opt/AetherFlow/backend/data/aetherflow.sqlite` resolve that path from the env file or the unit. It wins over an unused `/var/lib/aetherflow` copy. The manager does not copy a legacy database into `/var/lib/aetherflow` when the resolved path is somewhere else.
+Before the atomic `/opt/AetherFlow/current` symlink swap, the release engine takes a read-only online SQLite backup (`rusqlite::backup::Backup` / `sqlite3 --readonly .backup`) into `${RELEASE_DIR}/data-snapshot` (`0700`/`0600`) and verifies `PRAGMA integrity_check == "ok"` without checkpointing the live WAL.
 
-Before the atomic symlink swap, the deploy takes a WAL-safe `sqlite3 --readonly .backup` of the resolved database and stops if `PRAGMA integrity_check` is not `ok`. The source is opened read-only so the backup does not checkpoint a live WAL.
+### Running an Upgrade or Rollback via CLI
 
 ```bash
-sudo bash /opt/AetherFlow/deploy/release-manager.sh deploy --channel nightly
-sudo bash /opt/AetherFlow/deploy/release-manager.sh rollback
+# Deploy the latest release on the stable or nightly channel
+sudo af release deploy --local --channel stable
+# (or via the shell release manager)
+sudo bash /opt/AetherFlow/deploy/release-manager.sh deploy --channel stable
+
+# Roll back to the previous known-good release
+sudo af release rollback --local
 ```
 
-If the readiness probe fails, `current` goes back to the previous release and, when the live database fails `PRAGMA integrity_check`, the pre-swap backup from that attempt is restored onto the resolved path. The API and runner are stopped first, and only that path's `-wal` and `-shm` files are removed. A later manual `rollback` uses the previous release's own snapshot under the same integrity rule, then restarts the existing units. Run the updated `deploy/release-manager.sh` from the git tree for this upgrade. The copy inside an already-published release tarball does not contain the database-path fix until a later release is cut; the deploy stages the script that is actually executing into the new release directory.
+If the post-swap `/health/ready` readiness probe fails, `current` automatically reverts to `.previous_release`. If the live database fails `PRAGMA integrity_check`, the verified pre-swap backup is atomically restored after stopping database services.
 
 ---
 
-## Migration: v3.0.x to v3.1.x
+## Building & Deploying from Source
 
-The v3.1.x release represents a turning point in platform stability and performance.
+To compile and package the v4.0.0 single-binary Rust release bundle locally:
 
-### 1. The systemd Migration
-In v3.1.2+, AetherFlow has officially migrated from **PM2** to **systemd** for service management. This change is handled automatically by the updater, but requires a one-time reboot of the dashboard services.
-
-> [!WARNING]
-> **PM2 Zombie Processes**: The automated migration does not guarantee that pre-existing PM2 daemons are fully terminated. If leftover `next-server` or `node` processes continue to hold port 3000, the new systemd units will crash with `EADDRINUSE`. After upgrading, verify no orphaned processes remain:
-> ```bash
-> sudo ss -tulpn | grep ':3000'
-> pm2 kill 2>/dev/null   # Safe to run even if pm2 is not installed
-> ```
-> See [Troubleshooting §5](./troubleshooting.md) for the full resolution procedure.
-
-**Post-Update verification:**
 ```bash
-# Verify the new systemd units are active
-sudo systemctl status aetherflow-api aetherflow-frontend
+# Build Next.js 16 static export, run 11-crate Rust tests, and package aetherflow-api + af
+bash scripts/build_gold.sh
 ```
 
-### 2. Legacy PHP Removal
-Starting with v3.1.0, support for legacy PHP-based dashboard components has been entirely removed.
-- **Action Required**: If you have custom PHP scripts in the webroot, they will no longer function via the AetherFlow proxy. Migrate these to external services or port them to the new Go API.
+Or step-by-step:
 
----
-
-## Technical Migration Steps
-
-If you are performing a manual upgrade:
-
-1. **Backup State**: Copy your SQLite database and `.env` file to a safe location.
-2. **Fetch Source**:
-   ```bash
-   git fetch --all
-   git checkout tags/v3.2.5
-   ```
-3. **Rebuild Backend**:
-   ```bash
-   cd backend
-   go build -o aetherflow-api
-   ```
-4. **Rebuild Frontend**:
-   ```bash
-   cd frontend
-   npm install && npm run build
-   ```
-5. **Update Services**:
-   ```bash
-   sudo systemctl daemon-reload
-   sudo systemctl restart aetherflow-api aetherflow-frontend
-   ```
-
----
-
-## Rollback Procedure
-
-In the event of a catastrophic upgrade failure:
-
-### 1. Database Rollback
-AetherFlow creates a schema snapshot (`aetherflow.sqlite.bak`) before applying migrations. To restore:
 ```bash
-cp /opt/AetherFlow/backend/aetherflow.sqlite.bak /opt/AetherFlow/backend/aetherflow.sqlite
-```
+# 1. Build Frontend Static Export
+npm ci
+cd frontend && NEXT_STATIC_EXPORT=1 npm run build && cd ..
+rm -rf backend/web/dist && mkdir -p backend/web/dist
+cp -R frontend/out/. backend/web/dist/
 
-### 2. Service Rollback
-If the new binaries fail to start, you can revert to the previous Git tag and restart services.
+# 2. Build Rust Control Plane & Admin CLI
+cd backend-rs
+cargo build --release --bin aetherflow-api --bin af
+```
 
 ---
 
 ## FAQ: Upgrading
 
-**Q: Will my installed marketplace apps be deleted during an update?**  
-**A:** No. AetherFlow updates only affect the core dashboard and API. Your marketplace applications (Plex, qBittorrent, etc.) are managed by independent systemd units and will remain untouched.
+**Q: Will my installed Marketplace apps be affected during an AetherFlow update?**  
+**A:** No. AetherFlow updates only swap `/opt/AetherFlow/current` and restart `aetherflow-runner` and `aetherflow-api`. Your 77 Marketplace applications (Plex, Jellyfin, qBittorrent, Arr stack, etc.) run in independent `af-<app>.service` systemd units and continue running uninterrupted.
 
-**Q: Do I need to re-scan my 2FA QR code after updating?**  
-**A:** No. Your TOTP secrets are stored in the persistent database. As long as your `AES_MASTER_KEY` remains the same, your 2FA will continue to work.
-
-> [!WARNING]
-> Always ensure your server has at least **1GB of free disk space** before initiating an update to allow for binary compilation and database backups.
+**Q: Do I need to re-enroll 2FA or re-enter AI API keys after upgrading to v4.0.0?**  
+**A:** No. TOTP secrets, user accounts, and `AES-256-GCM` encrypted credentials in SQLite are 100% compatible between v3.2.x and v4.0.0 as long as `AES_MASTER_KEY` and `JWT_SECRET` in `/etc/aetherflow/aetherflow.env` remain unchanged.
