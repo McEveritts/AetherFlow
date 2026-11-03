@@ -16,6 +16,11 @@ Object.assign(globalThis, {
 
 if (typeof globalThis.fetch === "undefined") {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const zlib = require("zlib");
+  if (typeof zlib.createZstdDecompress !== "function") {
+    zlib.createZstdDecompress = zlib.createGunzip;
+  }
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
   const undici = require("undici");
   globalThis.fetch = undici.fetch as typeof fetch;
   globalThis.Request = undici.Request as typeof Request;

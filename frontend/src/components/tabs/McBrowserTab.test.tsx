@@ -1,6 +1,7 @@
 import React from 'react';
 import { render, screen, fireEvent, waitFor, within, act } from '@testing-library/react';
 import McBrowserTab from '@/components/tabs/McBrowserTab';
+import McBrowserSettingsTab from '@/components/tabs/McBrowserSettingsTab';
 import { NAVIGATION } from '@/components/layout/Sidebar';
 import { useSystemStore } from '@/store/useSystemStore';
 import {
@@ -920,22 +921,26 @@ describe('McBrowserTab Component & Workspace Integration', () => {
         expect(screen.getByRole('alert')).toHaveTextContent('may have completed');
     });
 
-    it('mounts file policy administration only for admins after activation and reloads self-policy changes', async () => {
+    it('moves file policy and audit administration to McBrowserSettingsTab and navigates via McBrowser Settings button', async () => {
         mockAuthState.user = { id: 1, username: 'admin', role: 'admin' };
-        const view = render(<McBrowserTab isActive={false} />);
-        expect(screen.queryByRole('region', { name: 'File policy administration' })).not.toBeInTheDocument();
-        view.rerender(<McBrowserTab isActive />);
+        useSystemStore.setState({ activeTab: 'fileshare', activeSettingsTab: 'preferences' });
+        const view = render(<McBrowserTab isActive />);
         await screen.findByRole('table', { name: /Directory entries/i });
+        expect(screen.queryByRole('region', { name: 'File policy administration' })).not.toBeInTheDocument();
+
+        fireEvent.click(screen.getByRole('button', { name: 'McBrowser Settings' }));
+        expect(useSystemStore.getState().activeTab).toBe('settings');
+        expect(useSystemStore.getState().activeSettingsTab).toBe('mcbrowser');
+        view.unmount();
+
+        const settingsView = render(<McBrowserSettingsTab />);
         expect(screen.getByRole('region', { name: 'File policy administration' })).toBeInTheDocument();
         expect(screen.queryByRole('region', { name: 'Mounted event administration' })).not.toBeInTheDocument();
         fireEvent.click(screen.getByRole('button', { name: 'Audit Events & Internal Queue' }));
         expect(screen.getByRole('region', { name: 'Mounted event administration' })).toBeInTheDocument();
-        await waitFor(() => expect(mockedFetchPolicy).toHaveBeenCalledTimes(1));
-        fireEvent.click(screen.getByRole('button', { name: 'Save own file policy' }));
-        await waitFor(() => expect(mockedFetchPolicy).toHaveBeenCalledTimes(2));
-        await waitFor(() => expect(mockedListEntries).toHaveBeenCalledTimes(2));
+
         mockAuthState.user = { id: 2, username: 'member', role: 'user' };
-        view.rerender(<McBrowserTab isActive />);
+        settingsView.rerender(<McBrowserSettingsTab />);
         expect(screen.queryByRole('region', { name: 'File policy administration' })).not.toBeInTheDocument();
         expect(screen.queryByRole('region', { name: 'Mounted event administration' })).not.toBeInTheDocument();
         expect(screen.queryByRole('button', { name: 'Audit Events & Internal Queue' })).not.toBeInTheDocument();

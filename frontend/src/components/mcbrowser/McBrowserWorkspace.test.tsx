@@ -666,7 +666,7 @@ describe('McBrowserWorkspace Parity Component', () => {
         expect(screen.queryByRole('dialog', { name: /UTF-8 Editor:/i })).not.toBeInTheDocument();
     });
 
-    it('performs recursive server search with type filter and displays truncation status', async () => {
+    it('performs recursive server search with FlowAI natural language pairing, type filter, and truncation status', async () => {
         mockedSearch.mockResolvedValueOnce({
             entries: [
                 {
@@ -678,6 +678,8 @@ describe('McBrowserWorkspace Parity Component', () => {
                 },
             ],
             truncated: true,
+            ai_interpretation: 'FlowAI smart search: matching "deep" · file types [txt]',
+            ai_powered: true,
         });
 
         render(
@@ -690,6 +692,7 @@ describe('McBrowserWorkspace Parity Component', () => {
         );
 
         await screen.findByLabelText('Recursive search query');
+        expect(screen.getByRole('button', { name: 'Toggle FlowAI natural language search' })).toHaveAttribute('aria-pressed', 'true');
         fireEvent.change(screen.getByLabelText('Recursive search query'), {
             target: { value: 'deep' },
         });
@@ -700,12 +703,13 @@ describe('McBrowserWorkspace Parity Component', () => {
 
         await waitFor(() => {
             expect(mockedSearch).toHaveBeenCalledWith(
-                { path: 'configs', q: 'deep', type: 'file' },
+                { path: 'configs', q: 'deep', type: 'file', ai: true },
                 expect.any(AbortSignal)
             );
         });
 
         expect(await screen.findByRole('button', { name: 'deep.txt' })).toBeInTheDocument();
+        expect(screen.getByText(/FlowAI smart search: matching "deep"/i)).toBeInTheDocument();
         expect(screen.getByText(/Results truncated by server limit/i)).toBeInTheDocument();
 
         fireEvent.click(screen.getByRole('button', { name: /Clear Search/i }));

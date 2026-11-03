@@ -32,6 +32,7 @@ import {
     Link2Off,
     FileQuestion,
     SlidersHorizontal,
+    Sparkles,
 } from 'lucide-react';
 import { useToast } from '@/contexts/ToastContext';
 import McBrowserCodeEditor from '@/components/mcbrowser/McBrowserCodeEditor';
@@ -182,6 +183,8 @@ export default function McBrowserWorkspace({
     // Recursive Server Search state
     const [searchQuery, setSearchQuery] = useState<string>('');
     const [searchType, setSearchType] = useState<McBrowserSearchType>('all');
+    const [searchAiMode, setSearchAiMode] = useState<boolean>(true);
+    const [searchAiInterpretation, setSearchAiInterpretation] = useState<string | null>(null);
     const [searchResults, setSearchResults] = useState<McBrowserEntry[] | null>(null);
     const [searchTruncated, setSearchTruncated] = useState<boolean>(false);
     const [searchLoading, setSearchLoading] = useState<boolean>(false);
@@ -268,6 +271,7 @@ export default function McBrowserWorkspace({
         setSelectedPaths([]);
         setSearchResults(null);
         setSearchTruncated(false);
+        setSearchAiInterpretation(null);
         setSearchLoading(false);
         setSearchError(null);
     }
@@ -541,12 +545,18 @@ export default function McBrowserWorkspace({
                     path: currentPath,
                     q: trimmed,
                     type: searchType,
+                    ...(searchAiMode ? { ai: true } : {}),
                 },
                 controller.signal
             );
             if (seq !== searchSeqRef.current) return;
             setSearchResults(Array.isArray(res.entries) ? res.entries : []);
             setSearchTruncated(Boolean(res.truncated));
+            setSearchAiInterpretation(
+                typeof res.ai_interpretation === 'string' && res.ai_interpretation.trim()
+                    ? res.ai_interpretation.trim()
+                    : null
+            );
         } catch (err) {
             if (seq !== searchSeqRef.current) return;
             if (err instanceof Error && err.name === 'AbortError') return;
@@ -566,6 +576,7 @@ export default function McBrowserWorkspace({
         setSearchQuery('');
         setSearchResults(null);
         setSearchTruncated(false);
+        setSearchAiInterpretation(null);
         setSearchError(null);
         setSearchLoading(false);
     };
@@ -1500,10 +1511,17 @@ export default function McBrowserWorkspace({
                 className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 bg-black/30 p-3 rounded-xl border border-white/[0.06]"
             >
                 <div className="relative flex-1">
-                    <Search
-                        size={14}
-                        className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 pointer-events-none"
-                    />
+                    {searchAiMode ? (
+                        <Sparkles
+                            size={14}
+                            className="absolute left-3 top-1/2 -translate-y-1/2 text-indigo-400 pointer-events-none"
+                        />
+                    ) : (
+                        <Search
+                            size={14}
+                            className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 pointer-events-none"
+                        />
+                    )}
                     <input
                         type="search"
                         value={searchQuery}
@@ -1513,7 +1531,11 @@ export default function McBrowserWorkspace({
                         }}
                         disabled={!permissions.read}
                         placeholder={
-                            currentPath
+                            searchAiMode
+                                ? currentPath
+                                    ? `FlowAI natural language search inside ${currentPath} (e.g. "The Pitt", "large mkv episodes")...`
+                                    : 'FlowAI natural language file search across My files (e.g. "The Pitt", "spreadsheets about gas prices")...'
+                                : currentPath
                                 ? `Recursive server search inside ${currentPath}...`
                                 : 'Recursive server search across My files...'
                         }
@@ -1523,7 +1545,23 @@ export default function McBrowserWorkspace({
                     />
                 </div>
 
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
+                    <button
+                        type="button"
+                        onClick={() => setSearchAiMode((prev) => !prev)}
+                        aria-pressed={searchAiMode}
+                        aria-label="Toggle FlowAI natural language search"
+                        title="Pair file search with FlowAI for natural language queries"
+                        className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-xs font-semibold border transition-colors ${
+                            searchAiMode
+                                ? 'bg-indigo-500/20 text-indigo-200 border-indigo-500/40'
+                                : 'bg-black/40 text-slate-400 border-white/10 hover:text-slate-200'
+                        }`}
+                    >
+                        <Sparkles size={13} className={searchAiMode ? 'text-indigo-400' : 'text-slate-500'} />
+                        <span>FlowAI</span>
+                    </button>
+
                     <label htmlFor="mcbrowser-search-type" className="sr-only">
                         Search entry type
                     </label>
@@ -1589,11 +1627,19 @@ export default function McBrowserWorkspace({
                     aria-live="polite"
                     className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 rounded-xl bg-indigo-500/10 border border-indigo-500/30 text-xs text-indigo-200"
                 >
-                    <span>
-                        Showing {searchResults.length} recursive search result
-                        {searchResults.length === 1 ? '' : 's'} for &ldquo;{searchQuery.trim()}&rdquo; (type:{' '}
-                        {searchType}).
-                    </span>
+                    <div className="flex flex-wrap items-center gap-2">
+                        <span>
+                            Showing {searchResults.length} recursive search result
+                            {searchResults.length === 1 ? '' : 's'} for &ldquo;{searchQuery.trim()}&rdquo; (type:{' '}
+                            {searchType}).
+                        </span>
+                        {searchAiInterpretation && (
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-indigo-500/20 border border-indigo-400/30 text-[11px] text-indigo-100">
+                                <Sparkles size={11} className="text-indigo-300" />
+                                <span>{searchAiInterpretation}</span>
+                            </span>
+                        )}
+                    </div>
                     {searchTruncated && (
                         <span className="font-semibold text-amber-300">
                             Results truncated by server limit — refine your query for narrower matches.

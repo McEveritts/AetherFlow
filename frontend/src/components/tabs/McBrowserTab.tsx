@@ -27,12 +27,12 @@ import {
     Info,
     Pause,
     Play,
+    Settings,
 } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
 import { useToast } from '@/contexts/ToastContext';
+import { useSystemStore } from '@/store/useSystemStore';
 import McBrowserWorkspace from '@/components/mcbrowser/McBrowserWorkspace';
-import McBrowserPolicyAdmin from '@/components/mcbrowser/McBrowserPolicyAdmin';
-import McBrowserEventsAdmin from '@/components/mcbrowser/McBrowserEventsAdmin';
 import McBrowserMediaPreview from '@/components/mcbrowser/McBrowserMediaPreview';
 import { classifyMcBrowserMediaCategory } from '@/lib/mcbrowser-media';
 import { McBrowserPolicyResponse, McBrowserPolicyPermissions } from '@/lib/mcbrowser-workspace';
@@ -87,6 +87,8 @@ const DENIED_PERMISSIONS: McBrowserPolicyPermissions = {
 export default function McBrowserTab({ isActive = true }: { isActive?: boolean }) {
     const { user, isAuthenticated } = useAuth();
     const { addToast } = useToast();
+    const setActiveTab = useSystemStore((s) => s.setActiveTab);
+    const setActiveSettingsTab = useSystemStore((s) => s.setActiveSettingsTab);
     const [hasActivated, setHasActivated] = useState<boolean>(Boolean(isActive));
     const [sessionEpoch, setSessionEpoch] = useState<number>(0);
     const [currentPath, setCurrentPath] = useState<string>('');
@@ -114,7 +116,6 @@ export default function McBrowserTab({ isActive = true }: { isActive?: boolean }
     const hasPausedUploads = uploadQueue.some((item) => item.status === 'paused' || item.status === 'pausing');
 
     const [mkdirOpen, setMkdirOpen] = useState<boolean>(false);
-    const [eventsAdminOpen, setEventsAdminOpen] = useState(false);
     const [mkdirName, setMkdirName] = useState<string>('');
     const [mkdirError, setMkdirError] = useState<string | null>(null);
 
@@ -237,7 +238,6 @@ export default function McBrowserTab({ isActive = true }: { isActive?: boolean }
         setLoadError(null);
         setUploadQueue([]);
         setMkdirOpen(false);
-        setEventsAdminOpen(false);
         setRenameTarget(null);
         setDeleteTarget(null);
         setPreviewTarget(null);
@@ -794,6 +794,19 @@ export default function McBrowserTab({ isActive = true }: { isActive?: boolean }
                             className={isRefreshing ? 'animate-spin text-indigo-400' : 'text-slate-400'}
                         />
                         <span>Refresh</span>
+                    </button>
+
+                    <button
+                        type="button"
+                        onClick={() => {
+                            setActiveSettingsTab('mcbrowser');
+                            setActiveTab('settings');
+                        }}
+                        aria-label="McBrowser Settings"
+                        className="obs-touch-target-standard obs-gpu-120hz-interactive flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-semibold bg-white/[0.04] border border-white/10 text-slate-300 hover:bg-white/[0.08] hover:text-white transition-all"
+                    >
+                        <Settings size={15} className="text-indigo-400" />
+                        <span>Settings</span>
                     </button>
                 </div>
             </div>
@@ -1528,35 +1541,6 @@ export default function McBrowserTab({ isActive = true }: { isActive?: boolean }
                     onNavigate={navigateTo}
                     onPolicyChange={handlePolicyChange}
                     onRename={openRenameDialog}
-                />
-            )}
-            {hasActivated && isAuthenticated && user?.role === 'admin' && (
-                <section aria-label="McBrowser audit administration" className="space-y-3">
-                    <button
-                        type="button"
-                        aria-expanded={eventsAdminOpen}
-                        onClick={() => setEventsAdminOpen((open) => !open)}
-                        className="px-3 py-2 rounded-xl border border-indigo-500/30 text-sm text-indigo-200 bg-indigo-500/10"
-                    >
-                        Audit Events &amp; Internal Queue
-                    </button>
-                    {eventsAdminOpen && (
-                        <McBrowserEventsAdmin
-                            key={`mcbrowser-events-${sessionIdentity}-${sessionEpoch}`}
-                            onClose={() => setEventsAdminOpen(false)}
-                        />
-                    )}
-                </section>
-            )}
-            {hasActivated && isAuthenticated && user?.role === 'admin' && (
-                <McBrowserPolicyAdmin
-                    key={`mcbrowser-admin-${sessionIdentity}-${sessionEpoch}`}
-                    initialTargetUserId={user.id}
-                    onPolicySaved={(targetUserId) => {
-                        if (targetUserId === user.id) {
-                            resetSessionWorkspaceState(true);
-                        }
-                    }}
                 />
             )}
             {mediaTarget && (

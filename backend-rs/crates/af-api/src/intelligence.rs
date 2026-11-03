@@ -954,7 +954,7 @@ static MEDIA_EXTENSIONS: &[&str] = &[
     ".sub", ".vtt", ".flac", ".mp3", ".aac", ".ogg", ".opus",
 ];
 
-fn clean_json_fence(raw: &str) -> String {
+pub(crate) fn clean_json_fence(raw: &str) -> String {
     let mut s = raw.trim().to_string();
     if let Some(rest) = s.strip_prefix("```json") {
         s = rest.to_string();
@@ -967,7 +967,7 @@ fn clean_json_fence(raw: &str) -> String {
     s.trim().to_string()
 }
 
-async fn call_configured_ai(
+pub(crate) async fn call_configured_ai(
     ps: &ProviderSettings,
     system_prompt: &str,
     message: &str,

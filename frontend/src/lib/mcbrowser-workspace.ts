@@ -40,6 +40,8 @@ export type McBrowserSortDirection = 'asc' | 'desc';
 export interface McBrowserSearchResponse {
     entries: McBrowserEntry[];
     truncated: boolean;
+    ai_interpretation?: string;
+    ai_powered?: boolean;
 }
 
 export interface McBrowserContentResponse {
@@ -230,6 +232,7 @@ export async function searchMcBrowserEntries(
         path?: string;
         q: string;
         type?: McBrowserSearchType | string;
+        ai?: boolean;
     },
     signal?: AbortSignal
 ): Promise<McBrowserSearchResponse> {
@@ -240,7 +243,8 @@ export async function searchMcBrowserEntries(
     }
     const rawType = (params.type ?? '').trim();
     const searchType = rawType === 'all' ? '' : rawType;
-    const qs = `?path=${encodeURIComponent(normalizedPath)}&q=${encodeURIComponent(trimmedQuery)}&type=${encodeURIComponent(searchType)}`;
+    const aiParam = params.ai ? '&ai=true' : '';
+    const qs = `?path=${encodeURIComponent(normalizedPath)}&q=${encodeURIComponent(trimmedQuery)}&type=${encodeURIComponent(searchType)}${aiParam}`;
     return mcbrowserJsonRequest<McBrowserSearchResponse>(
         `${MCBROWSER_BASE}/search${qs}`,
         { method: 'GET', signal },

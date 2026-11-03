@@ -1,4 +1,4 @@
-import { Settings, Sparkles, DownloadCloud, AlertCircle, Eye, EyeOff, Key, Monitor, Globe, Clock, LayoutDashboard, Radio, HardDriveDownload, Shield, KeyRound, RefreshCw, UserCircle, Bell, Cpu, CheckCircle2, ArrowUpRight, Terminal, Layers, Save } from 'lucide-react';
+import { Settings, Sparkles, DownloadCloud, AlertCircle, Eye, EyeOff, Key, Monitor, Globe, Clock, LayoutDashboard, Radio, HardDriveDownload, Shield, KeyRound, RefreshCw, UserCircle, Bell, Cpu, CheckCircle2, ArrowUpRight, Terminal, Layers, Save, Folder } from 'lucide-react';
 import { AI_MODELS, ALL_MODEL_IDS, resolveProviderForModel } from '@/lib/ai-models';
 import type { AIProviderID } from '@/lib/ai-models';
 import { useState, FormEvent } from 'react';
@@ -13,6 +13,7 @@ const ProfileTab = dynamic(() => import('@/components/tabs/ProfileTab'), { ssr: 
 const DashboardSettingsTab = dynamic(() => import('@/components/tabs/DashboardSettingsTab'), { ssr: false });
 const OIDCClientsTab = dynamic(() => import('@/components/tabs/OIDCClientsTab'), { ssr: false });
 const NotificationsSettingsTab = dynamic(() => import('@/components/tabs/NotificationsSettingsTab'), { ssr: false });
+const McBrowserSettingsTab = dynamic(() => import('@/components/tabs/McBrowserSettingsTab'), { ssr: false });
 import { useToast } from '@/contexts/ToastContext';
 import { useSystemStore } from '@/store/useSystemStore';
 import { useTranslations } from 'next-intl';
@@ -434,6 +435,13 @@ export default function SettingsTab() {
                     className={`obs-touch-target-standard obs-gpu-120hz-interactive px-3.5 py-2 rounded-xl text-xs font-semibold transition-all flex items-center gap-2 border whitespace-nowrap ${activeTab === 'notifications' ? 'border-indigo-500/40 text-indigo-300 bg-indigo-500/15 shadow-sm shadow-indigo-500/10' : 'border-white/5 bg-white/[0.02] text-slate-400 hover:bg-white/[0.06] hover:text-slate-200'}`}
                 >
                     <Bell size={15} /> Notifications
+                </button>
+                <button 
+                    type="button" 
+                    onClick={() => setActiveTab('mcbrowser')}
+                    className={`obs-touch-target-standard obs-gpu-120hz-interactive px-3.5 py-2 rounded-xl text-xs font-semibold transition-all flex items-center gap-2 border whitespace-nowrap ${activeTab === 'mcbrowser' ? 'border-indigo-500/40 text-indigo-300 bg-indigo-500/15 shadow-sm shadow-indigo-500/10' : 'border-white/5 bg-white/[0.02] text-slate-400 hover:bg-white/[0.06] hover:text-slate-200'}`}
+                >
+                    <Folder size={15} /> McBrowser
                 </button>
             </div>
 
@@ -1197,6 +1205,7 @@ export default function SettingsTab() {
                     {activeTab === 'profile' && <ProfileTab />}
                     {activeTab === 'oidc-clients' && <OIDCClientsTab />}
                     {activeTab === 'notifications' && <NotificationsSettingsTab />}
+                    {activeTab === 'mcbrowser' && <McBrowserSettingsTab />}
                 </div>
             )}
         </div>

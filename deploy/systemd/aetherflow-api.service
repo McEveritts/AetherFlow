@@ -11,7 +11,7 @@ RequiresMountsFor=/opt/AetherFlow
 Type=simple
 User=aetherflow
 Group=aetherflow
-SupplementaryGroups=systemd-journal adm
+SupplementaryGroups=systemd-journal adm qbittorrent betheenvy
 WorkingDirectory=/opt/AetherFlow/current
 
 # ── FHS Managed Directories ──────────────────────────────────────────────────
@@ -56,7 +56,8 @@ ReadWritePaths=/var/lib/aetherflow /var/log/aetherflow /run/aetherflow
 # Legacy v3 databases live in /opt/AetherFlow/backend/data. The '-' skips the
 # path when that directory was never created. release-manager.sh does not
 # replace a unit that is already installed.
-ReadWritePaths=-/opt/AetherFlow/backend/data -/var/lib/openclaw -/home/hdd
+ReadWritePaths=-/opt/AetherFlow/backend/data -/var/lib/openclaw -/home/hdd -/home/betheenvy/.google_root -/home/betheenvy/Google -/home/betheenvy/torrents
+BindPaths=-/home/betheenvy/.google_root:/var/lib/aetherflow/mcbrowser/user-1/Google -/home/hdd/torrents:/var/lib/aetherflow/mcbrowser/user-1/Torrents
 
 # ── Resource Limits ──────────────────────────────────────────────────────────
 LimitNOFILE=65535

@@ -487,6 +487,96 @@ impl BrowserFs {
         Ok(results)
     }
 
+    pub fn walk_for_search(
+        &self,
+        path: &str,
+        max_scan_entries: usize,
+    ) -> io::Result<(Vec<Entry>, bool)> {
+        let components = parse_relative_path(path, true)?;
+        let normalized_dir = components.join("/");
+        let start_fd = self.open_dir_components(&components)?;
+
+        const SKIPPED_DEEP_DIRS: &[&str] = &[
+            ".git",
+            "node_modules",
+            ".next",
+            "target",
+            ".cache",
+            "__pycache__",
+            ".venv",
+        ];
+
+        struct SearchDirItem {
+            dir_fd: OwnedFd,
+            dir_path: String,
+            depth: usize,
+        }
+
+        let mut queue = std::collections::VecDeque::new();
+        queue.push_back(SearchDirItem {
+            dir_fd: start_fd,
+            dir_path: normalized_dir,
+            depth: 0,
+        });
+
+        let mut results = Vec::new();
+        let mut truncated = false;
+        let dir_flags = libc::O_RDONLY | libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW;
+
+        while let Some(item) = queue.pop_front() {
+            if results.len() >= max_scan_entries {
+                truncated = true;
+                break;
+            }
+            let remaining = max_scan_entries.saturating_sub(results.len());
+            let (dir_entries, dir_truncated) =
+                match read_dir_entries_truncating(&item.dir_fd, &item.dir_path, remaining) {
+                    Ok(pair) => pair,
+                    Err(err)
+                        if item.depth > 0
+                            && matches!(
+                                err.kind(),
+                                ErrorKind::NotFound
+                                    | ErrorKind::PermissionDenied
+                                    | ErrorKind::InvalidData
+                            ) =>
+                    {
+                        continue;
+                    }
+                    Err(err) => return Err(err),
+                };
+            if dir_truncated {
+                truncated = true;
+            }
+            let parent_raw_fd = item.dir_fd.as_raw_fd();
+            for entry in dir_entries {
+                let is_dir = entry.kind == "directory";
+                let entry_name = entry.name.clone();
+                let entry_path = entry.path.clone();
+                results.push(entry);
+
+                if is_dir {
+                    if item.depth >= 1 && SKIPPED_DEEP_DIRS.contains(&entry_name.as_str()) {
+                        continue;
+                    }
+                    if let Ok(c_name) = CString::new(entry_name.as_str()) {
+                        if let Ok(child_fd) =
+                            openat_no_symlinks(parent_raw_fd, c_name.as_c_str(), dir_flags, 0)
+                        {
+                            queue.push_back(SearchDirItem {
+                                dir_fd: child_fd,
+                                dir_path: entry_path,
+                                depth: item.depth + 1,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok((results, truncated))
+    }
+
     pub fn create_directory(&self, path: &str) -> io::Result<()> {
         let (parent_fd, leaf) = self.resolve_parent_and_leaf(path)?;
         let rc = unsafe { libc::mkdirat(parent_fd.as_raw_fd(), leaf.as_ptr(), 0o755) };
@@ -1601,6 +1691,67 @@ fn read_dir_entries_bounded(
 
     sort_entries(&mut entries);
     Ok(entries)
+}
+
+fn read_dir_entries_truncating(
+    dir_fd: &OwnedFd,
+    normalized_dir: &str,
+    max_entries: usize,
+) -> io::Result<(Vec<Entry>, bool)> {
+    let (guard, dir_raw_fd) = open_dir_stream(dir_fd.as_raw_fd())?;
+    let mut entries = Vec::new();
+    let effective_limit = max_entries.min(MAX_LIST_ENTRIES);
+    let mut truncated = false;
+
+    loop {
+        unsafe {
+            *libc::__errno_location() = 0;
+        }
+        let ent = unsafe { libc::readdir(guard.0) };
+        if ent.is_null() {
+            let errno = unsafe { *libc::__errno_location() };
+            if errno != 0 {
+                return Err(Error::from_raw_os_error(errno));
+            }
+            break;
+        }
+        let c_name = unsafe { CStr::from_ptr((*ent).d_name.as_ptr()) };
+        let name_bytes = c_name.to_bytes();
+        if name_bytes == b"." || name_bytes == b".." {
+            continue;
+        }
+        let Ok(name_str) = std::str::from_utf8(name_bytes) else {
+            continue;
+        };
+        if is_internal_upload_temp(name_str) {
+            continue;
+        }
+        if entries.len() >= effective_limit {
+            truncated = true;
+            break;
+        }
+        let st = match fstatat_nofollow(dir_raw_fd, c_name) {
+            Ok(st) => st,
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    ErrorKind::NotFound | ErrorKind::PermissionDenied
+                ) =>
+            {
+                continue;
+            }
+            Err(err) => return Err(err),
+        };
+        let entry_path = if normalized_dir.is_empty() {
+            name_str.to_string()
+        } else {
+            format!("{normalized_dir}/{name_str}")
+        };
+        entries.push(entry_from_stat(name_str, entry_path, &st));
+    }
+
+    sort_entries(&mut entries);
+    Ok((entries, truncated))
 }
 
 fn open_regular_file_at(dirfd: libc::c_int, leaf: &CStr) -> io::Result<File> {

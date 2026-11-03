@@ -332,6 +332,80 @@ fn search_filtering_supports_query_kind_and_truncation() {
 }
 
 #[test]
+fn flowai_natural_language_search_and_bfs_walk_for_search_tests() {
+    let tmp = TestTempDir::new();
+    let bfs = open_user_browser_fs_at(tmp.path(), 1).unwrap();
+    let conn = setup_quota_db(1, 10_000_000, 0);
+
+    bfs.create_directory_all("Google/Media/TV/The Pitt/Season 1")
+        .unwrap();
+    bfs.create_directory_all("Google/Documents/Finance").unwrap();
+    execute_create_file_conn(
+        &conn,
+        &bfs,
+        "Google/Media/TV/The Pitt/Season 1/The Pitt - S01E01 - 7-00 A.M. WEBDL-2160p.mkv",
+        Some("video"),
+        1,
+    )
+    .unwrap();
+    execute_create_file_conn(
+        &conn,
+        &bfs,
+        "Google/Documents/Finance/The_Other_Report.txt",
+        Some("report"),
+        1,
+    )
+    .unwrap();
+    execute_create_file_conn(
+        &conn,
+        &bfs,
+        "Google/Documents/Finance/Oil_Gas_Prices_2026.xlsx",
+        Some("sheet"),
+        1,
+    )
+    .unwrap();
+
+    let (walked, truncated) = bfs.walk_for_search("", 500).unwrap();
+    assert!(!truncated);
+
+    // 1. Searching "The Pitt" in FlowAI mode matches The Pitt folder & episode, NOT "The_Other_Report.txt"
+    let plan_pitt = build_deterministic_nl_plan("The Pitt");
+    let res_pitt =
+        filter_and_rank_entries_with_flowai(walked.clone(), &plan_pitt, SearchKindFilter::Any, 100);
+    assert_eq!(res_pitt.ai_powered, Some(true));
+    assert!(res_pitt.ai_interpretation.is_some());
+    assert!(res_pitt
+        .entries
+        .iter()
+        .any(|e| e.name == "The Pitt" && e.kind == "directory"));
+    assert!(res_pitt
+        .entries
+        .iter()
+        .any(|e| e.name.contains("S01E01")));
+    assert!(!res_pitt
+        .entries
+        .iter()
+        .any(|e| e.name == "The_Other_Report.txt"));
+
+    // 2. Conversational natural language query: "find episodes of The Pitt in season 1"
+    let plan_nl = build_deterministic_nl_plan("find episodes of The Pitt in season 1");
+    let res_nl =
+        filter_and_rank_entries_with_flowai(walked.clone(), &plan_nl, SearchKindFilter::Any, 100);
+    assert!(res_nl.entries.iter().any(|e| e.name.contains("S01E01")));
+
+    // 3. Natural language file type intent: "excel spreadsheets about gas prices"
+    let plan_sheet = build_deterministic_nl_plan("excel spreadsheets about gas prices");
+    let res_sheet = filter_and_rank_entries_with_flowai(
+        walked,
+        &plan_sheet,
+        SearchKindFilter::Any,
+        100,
+    );
+    assert_eq!(res_sheet.entries.len(), 1);
+    assert_eq!(res_sheet.entries[0].name, "Oil_Gas_Prices_2026.xlsx");
+}
+
+#[test]
 fn create_file_and_content_editor_optimistic_concurrency_and_quota_accounting() {
     let tmp = TestTempDir::new();
     let bfs = open_user_browser_fs_at(tmp.path(), 5).unwrap();

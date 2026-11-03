@@ -24,7 +24,7 @@ interface SystemState {
 
     // UI state (not persisted)
     activeTab: TabId;
-    activeSettingsTab: 'preferences' | 'ai' | 'system' | 'dashboard' | 'backups' | 'security' | 'profile' | 'oidc-clients' | 'notifications';
+    activeSettingsTab: 'preferences' | 'ai' | 'system' | 'dashboard' | 'backups' | 'security' | 'profile' | 'oidc-clients' | 'notifications' | 'mcbrowser';
     isSidebarHovered: boolean;
     isMobileMenuOpen: boolean;
     isCommandPaletteOpen: boolean;
@@ -44,7 +44,7 @@ interface SystemState {
     setDetectedTouchDevice: (isTouch: boolean) => void;
     setHapticFeedback: (enabled: boolean) => void;
     setActiveTab: (tab: TabId) => void;
-    setActiveSettingsTab: (tab: 'preferences' | 'ai' | 'system' | 'dashboard' | 'backups' | 'security' | 'profile' | 'oidc-clients' | 'notifications') => void;
+    setActiveSettingsTab: (tab: 'preferences' | 'ai' | 'system' | 'dashboard' | 'backups' | 'security' | 'profile' | 'oidc-clients' | 'notifications' | 'mcbrowser') => void;
     setIsSidebarHovered: (hovered: boolean) => void;
     setIsMobileMenuOpen: (open: boolean) => void;
     setIsCommandPaletteOpen: (open: boolean) => void;
