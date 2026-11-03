@@ -324,7 +324,10 @@ report_progress 60 "Installing Python virtualenv and backend dependencies..."
 "${PYTHON_BIN}" -m venv "${INSTALL_DIR}/env" >> "$LOGFILE" 2>&1
 "${INSTALL_DIR}/env/bin/pip" install --upgrade pip wheel setuptools daphne gunicorn celery whitenoise >> "$LOGFILE" 2>&1
 if [[ -f "${INSTALL_DIR}/pyproject.toml" ]]; then
-    "${INSTALL_DIR}/env/bin/pip" install --upgrade --no-cache-dir --extra-index-url https://download.pytorch.org/whl/cpu "${INSTALL_DIR}" >> "$LOGFILE" 2>&1
+    # Run manage.py and services from this source tree. A regular wheel install
+    # duplicates namespace apps such as apps.api in site-packages, which Django
+    # rejects as having multiple filesystem locations.
+    "${INSTALL_DIR}/env/bin/pip" install --upgrade --no-cache-dir --extra-index-url https://download.pytorch.org/whl/cpu --editable "${INSTALL_DIR}" >> "$LOGFILE" 2>&1
 elif [[ -f "${INSTALL_DIR}/requirements.txt" ]]; then
     "${INSTALL_DIR}/env/bin/pip" install --upgrade --no-cache-dir --extra-index-url https://download.pytorch.org/whl/cpu -r "${INSTALL_DIR}/requirements.txt" >> "$LOGFILE" 2>&1
 else
