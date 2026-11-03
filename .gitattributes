@@ -24,3 +24,11 @@
 *.woff2 binary
 *.sqlite binary
 *.db binary
+
+# Mark vendored third-party C/C++ sources, legacy Go compatibility tree, and static bundles as vendored for GitHub Linguist
+setup/sources/** linguist-vendored
+backend/** linguist-vendored
+packages/package/assets/librespeed/backend-patches/** linguist-vendored
+plugins/sdk-template/** linguist-vendored
+frontend/public/** linguist-vendored
+

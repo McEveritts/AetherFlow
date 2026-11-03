@@ -1,8 +1,8 @@
 <div align="center">
 
-![AetherFlow Banner](./docs/assets/banner.svg?v=4.0.0)
+![AetherFlow Banner](./docs/assets/banner.svg?v=4.0.2)
 
-[![Latest Release](https://img.shields.io/github/v/release/McEveritts/AetherFlow?style=flat-square&logo=github&label=Release&color=6366f1)](https://github.com/McEveritts/AetherFlow/releases/latest)
+[![Latest Release](https://img.shields.io/github/v/release/McEveritts/AetherFlow?include_prereleases&style=flat-square&logo=github&label=Release&color=6366f1)](https://github.com/McEveritts/AetherFlow/releases)
 [![Rust](https://img.shields.io/badge/Control_Plane-Rust_%28Axum_%2B_Tokio%29-DEA584?style=flat-square&logo=rust&logoColor=white)](./backend-rs)
 [![Admin CLI](https://img.shields.io/badge/Admin_CLI-af_%2811_Crates%29-4f46e5?style=flat-square)](./docs/rust-admin-cli.md)
 [![Frontend](https://img.shields.io/badge/Interface-Next.js_16_%28Obsidian_V2%29-000000?style=flat-square&logo=next.js&logoColor=white)](./frontend)
@@ -10,7 +10,7 @@
 [![Catalog](https://img.shields.io/badge/Bare--Metal_Catalog-77_Apps-9333ea?style=flat-square)](./packages)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-10b981?style=flat-square)](./LICENSE.md)
 
-**[Quickstart](#-quick-installation)** • **[Architecture](#️-system-architecture)** • **[77-App Catalog](#-77-package-bare-metal-catalog)** • **[McBrowser & Streaming](#-native-mcbrowser--streaming-intelligence)** • **[FlowAI](#-human-gated-flowai)** • **[Documentation](#-documentation)** • **[Latest Release](https://github.com/McEveritts/AetherFlow/releases/latest)**
+**[Quickstart](#-quick-installation)** • **[Architecture](#️-system-architecture)** • **[77-App Catalog](#-77-package-bare-metal-catalog)** • **[McBrowser & Streaming](#-native-mcbrowser--streaming-intelligence)** • **[FlowAI](#-human-gated-flowai)** • **[Documentation](#-documentation)** • **[Releases](https://github.com/McEveritts/AetherFlow/releases)**
 
 </div>
 
@@ -20,7 +20,7 @@
 
 **AetherFlow** is a sovereign, bare-metal infrastructure and media-server orchestration platform. Built to replace fragile scripts and heavy container overlays with a compiled, single-binary **Rust** control plane, AetherFlow orchestrates **77 native Linux services**, real-time hardware telemetry, scoped tenant file management (**McBrowser**), canonical streaming analytics, automated subdomain ingress, and human-gated AI operations directly against `systemd`.
 
-![AetherFlow Overview Dashboard](./docs/assets/dashboard.png)
+![AetherFlow Overview Dashboard](./docs/assets/dashboard.png?v=4.0.2)
 
 ### Why AetherFlow v4.0.0?
 
@@ -38,14 +38,14 @@
 
 | **AetherMarketplace (77 Native Apps)** | **FlowAI Infrastructure Assistant** |
 |:---:|:---:|
-| ![AetherMarketplace](./docs/assets/marketplace.png) | ![FlowAI Assistant](./docs/assets/flowai.png) |
+| ![AetherMarketplace](./docs/assets/marketplace.png?v=4.0.2) | ![FlowAI Assistant](./docs/assets/flowai.png?v=4.0.2) |
 | One-click bare-metal provisioning, live SSE/WS install progress, in-place app updates, automatic subdomain wiring, and Zero-Touch Arr API discovery. | Context-aware diagnostics connected to live system metrics, service journals, McBrowser NL search, and the global **Action Approval Inbox**. |
 
 <details>
 <summary><strong>🔌 View Multi-Provider FlowAI Engine Configuration (Gemini, Claude, OpenAI, Ollama, LM Studio)</strong></summary>
 <br>
 
-![FlowAI Engine Settings](./docs/assets/ai-providers.png)
+![FlowAI Engine Settings](./docs/assets/ai-providers.png?v=4.0.2)
 
 </details>
 
