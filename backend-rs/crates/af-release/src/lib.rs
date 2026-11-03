@@ -22,6 +22,7 @@ pub mod error;
 pub mod fs_security;
 pub mod health;
 pub mod lock;
+pub mod runtime;
 pub mod snapshot;
 pub mod symlink;
 
@@ -193,6 +194,7 @@ mod tests {
         calls: Arc<Mutex<Vec<String>>>,
         corrupt_db_on_restart: Option<PathBuf>,
         fail_stop_services: bool,
+        stale_identity: bool,
     }
 
     impl MockLifecycle {
@@ -202,6 +204,16 @@ mod tests {
     }
 
     impl LifecycleController for MockLifecycle {
+        fn verify_running_release(&self, _config: &ReleaseConfig) -> ReleaseResult<()> {
+            if self.stale_identity {
+                return Err(ReleaseError::Systemd {
+                    action: "verify runtime identity".to_string(),
+                    reason: "old executable is still running".to_string(),
+                });
+            }
+            Ok(())
+        }
+
         fn query_unit_environment(&self, unit: &str) -> Option<String> {
             self.calls
                 .lock()
@@ -514,6 +526,42 @@ AETHERFLOW_DB_PATH=fallback.sqlite
         assert!(matches!(nobin_err, ReleaseError::ArtifactVerification(_)));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn healthy_old_runtime_triggers_rollback_instead_of_completion() {
+        let sandbox = TempSandbox::new("stale-runtime");
+        let mut config = ReleaseConfig::for_root(sandbox.path());
+        config.health_interval = Duration::ZERO;
+        seed_valid_sqlite_db(&config.data_dir.join("aetherflow.sqlite"), "preserve-live-data");
+        let previous = config.releases_dir.join("previous");
+        fs::create_dir_all(&previous).unwrap();
+        fs::write(previous.join("aetherflow-api"), b"old").unwrap();
+        fs::write(previous.join(".version"), "v4.0.0-old").unwrap();
+        std::os::unix::fs::symlink(&previous, &config.current_link).unwrap();
+        let archive = sandbox.path().join("release.tar.gz");
+        let (_, manifest) = build_synthetic_release_tarball(&archive, &config.artifact_name, &[
+            ("aetherflow-api", b"new", EntryType::Regular),
+            (".version", b"v4.0.0-new", EntryType::Regular),
+        ]);
+        let provider = MockArtifactProvider {
+            resolved_tag: Ok("v4.0.0-new".to_string()), archive_source: archive, manifest_content: manifest,
+        };
+        let lifecycle = MockLifecycle { stale_identity: true, ..Default::default() };
+        let prober = MockHealthProber::new(vec![Ok(HealthCheckAttempt {
+            http_status: 200, body: r#"{"status":"ready"}"#.to_string(),
+        })]);
+        let engine = ReleaseEngine::new(config.clone(), provider, lifecycle, prober);
+        let result = engine.execute(&ReleaseOptions {
+            command: ReleaseCommand::Deploy, channel: ReleaseChannel::Nightly,
+            dry_run: false, offline: false, from_source: false,
+        });
+        assert!(matches!(result, Err(ReleaseError::RolledBackAfterProbeFailure { .. })));
+        assert_eq!(fs::read_link(&config.current_link).unwrap(), previous);
+        let recovery = RecoveryState::load(&config.releases_dir).unwrap().unwrap();
+        assert_eq!(recovery.phase, ReleasePhase::Complete);
+        assert!(recovery.last_error.unwrap().contains("old executable"));
+    }
+
     #[test]
     fn test_full_deploy_lifecycle_and_housekeeping_pruning() {
         let sb = TempSandbox::new("full-deploy");
@@ -801,6 +849,7 @@ AETHERFLOW_DB_PATH=fallback.sqlite
             calls: Arc::new(Mutex::new(Vec::new())),
             corrupt_db_on_restart: Some(live_db.clone()),
             fail_stop_services: false,
+            stale_identity: false,
         };
         let failing_prober = MockHealthProber::new(vec![
             Ok(HealthCheckAttempt {

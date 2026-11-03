@@ -240,6 +240,7 @@ fn build_v1_router() -> Router {
         .route("/services", get(get_services))
         .route("/packages/:id/progress", get(package_progress))
         .route("/system/update/check", get(check_update))
+        .route("/system/update/status", get(crate::storage::update_status))
         .route("/system/metrics", get(get_system_metrics))
         .route("/system/hardware", get(get_hardware_info))
         .route("/notifications", get(get_notifications))
@@ -536,6 +537,7 @@ async fn health_ready() -> Response {
             "redis": "disabled",
             "uptime": format!("{:.1}s", START_TIME.elapsed().as_secs_f64()),
             "status": ready_state,
+            "version": af_runner::af_release::runtime::runtime_identity().version,
         })),
     )
         .into_response()

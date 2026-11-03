@@ -862,12 +862,14 @@ where
 
     fn stage_3_restart_and_probe(&self, cfg: &ReleaseConfig) -> ReleaseResult<String> {
         self.lifecycle.restart_systemd_units(cfg)?;
-        poll_readiness_probe(
+        let status = poll_readiness_probe(
             &self.health_prober,
             &cfg.health_endpoint,
             cfg.health_retries,
             cfg.health_interval,
-        )
+        )?;
+        self.lifecycle.verify_running_release(cfg)?;
+        Ok(status)
     }
 
     fn run_rollback_locked(
@@ -886,6 +888,14 @@ where
         let mut recovery = existing_recovery.clone().unwrap_or_else(|| {
             RecoveryState::new(ReleaseCommand::Rollback, cfg.release_channel, dry_run)
         });
+        if failed_deploy_release.is_none() {
+            if let Some(operation_id) = std::env::var("AETHERFLOW_UPDATE_OPERATION_ID")
+                .ok()
+                .and_then(|value| uuid::Uuid::parse_str(&value).ok())
+            {
+                recovery.operation_id = operation_id.to_string();
+            }
+        }
         recovery.phase = ReleasePhase::Stage4Rollback;
         recovery.save(&cfg.releases_dir)?;
 

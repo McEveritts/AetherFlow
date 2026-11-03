@@ -154,7 +154,11 @@ impl RecoveryState {
     pub fn new(command: ReleaseCommand, channel: ReleaseChannel, dry_run: bool) -> Self {
         let now = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
         Self {
-            operation_id: uuid::Uuid::new_v4().to_string(),
+            operation_id: std::env::var("AETHERFLOW_UPDATE_OPERATION_ID")
+                .ok()
+                .and_then(|value| uuid::Uuid::parse_str(&value).ok())
+                .unwrap_or_else(uuid::Uuid::new_v4)
+                .to_string(),
             command,
             channel,
             dry_run,

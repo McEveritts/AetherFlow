@@ -116,6 +116,12 @@ jobs:
         run: |
           cargo test --workspace --locked || cargo test --workspace
 
+      - name: Verify Updater Survives Its Caller Restart
+        working-directory: backend-rs
+        run: |
+          test_binary=$(cargo test -p af-runner --lib --no-run --message-format=json | python3 -c 'import json,sys; artifacts=[json.loads(line) for line in sys.stdin if line.startswith("{")]; binaries=[item["executable"] for item in artifacts if item.get("reason")=="compiler-artifact" and item.get("executable") and item["target"]["name"]=="af_runner"]; assert len(binaries)==1; print(binaries[0])')
+          sudo "$test_binary" self_update::tests::updater_survives_caller_restart --ignored --exact --nocapture
+
       - name: Package Single-Binary Release Tarball & SHA-256 Manifest
         run: |
           STAGE_DIR="$(mktemp -d)"

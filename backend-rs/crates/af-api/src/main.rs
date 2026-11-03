@@ -136,6 +136,7 @@ fn build_cors_layer() -> CorsLayer {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     load_env_files();
+    let _ = af_runner::af_release::runtime::runtime_identity();
 
     tracing_subscriber::fmt()
         .with_env_filter(

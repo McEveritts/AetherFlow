@@ -108,4 +108,75 @@ describe("fetcher", () => {
     expect(res.status).toBe(401);
     expect(expiredListener).toHaveBeenCalledTimes(1);
   });
+
+  describe("cancellation during shared authentication requests", () => {
+    beforeEach(() => jest.resetModules());
+
+    it("settles an aborted launch while CSRF is stalled without cancelling another caller", async () => {
+      const { apiFetch: request } = await import("@/lib/fetcher");
+      let completeCSRF!: (response: Response) => void;
+      const csrf = new Promise<Response>(resolve => { completeCSRF = resolve; });
+      const fetchMock = jest.spyOn(global, "fetch").mockImplementation(async input => {
+        if (input === "/api/v1/public/csrf-token") return csrf;
+        return { ok: true, status: 200 } as Response;
+      });
+      const controller = new AbortController();
+      const launch = request("/api/v1/admin/system/update/run", { method: "POST", signal: controller.signal });
+      const other = request("/api/v1/admin/settings", { method: "PUT" });
+      const aborted = expect(launch).rejects.toMatchObject({ name: "AbortError" });
+      controller.abort();
+      await aborted;
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      completeCSRF({ ok: true, json: async () => ({ csrf_token: "fixture" }) } as Response);
+      await expect(other).resolves.toMatchObject({ status: 200 });
+      expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+        "/api/v1/public/csrf-token", "/api/v1/admin/settings",
+      ]);
+    });
+
+    it("settles aborted status polling while refresh is stalled and preserves shared refresh", async () => {
+      const { apiFetch: request } = await import("@/lib/fetcher");
+      let completeRefresh!: (response: Response) => void;
+      let markRefreshStarted!: () => void;
+      const refresh = new Promise<Response>(resolve => { completeRefresh = resolve; });
+      const refreshStarted = new Promise<void>(resolve => { markRefreshStarted = resolve; });
+      let otherCalls = 0;
+      const fetchMock = jest.spyOn(global, "fetch").mockImplementation(async input => {
+        if (input === "/api/v1/auth/refresh") {
+          markRefreshStarted();
+          return refresh;
+        }
+        if (input === "/api/v1/auth/settings") otherCalls += 1;
+        return { ok: otherCalls > 1, status: otherCalls > 1 ? 200 : 401 } as Response;
+      });
+      const expiredListener = jest.fn();
+      window.addEventListener("af:session-expired", expiredListener);
+      try {
+        const controller = new AbortController();
+        const polling = request("/api/v1/auth/system/update/status", { signal: controller.signal });
+        await refreshStarted;
+        const other = request("/api/v1/auth/settings");
+        const aborted = expect(polling).rejects.toMatchObject({ name: "AbortError" });
+        controller.abort();
+        await aborted;
+        completeRefresh({ ok: true, status: 200 } as Response);
+        await expect(other).resolves.toMatchObject({ status: 200 });
+        expect(fetchMock.mock.calls.filter(([url]) => url === "/api/v1/auth/refresh")).toHaveLength(1);
+        expect(fetchMock.mock.calls.filter(([url]) => url === "/api/v1/auth/system/update/status")).toHaveLength(1);
+        expect(expiredListener).not.toHaveBeenCalled();
+      } finally {
+        window.removeEventListener("af:session-expired", expiredListener);
+      }
+    });
+
+    it("does not start an authentication request for an already aborted caller", async () => {
+      const { apiFetch: request } = await import("@/lib/fetcher");
+      const fetchMock = jest.spyOn(global, "fetch");
+      const controller = new AbortController();
+      controller.abort();
+      await expect(request("/api/v1/admin/system/update/run", { method: "POST", signal: controller.signal }))
+        .rejects.toMatchObject({ name: "AbortError" });
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+  });
 });

@@ -140,6 +140,11 @@ jobs:
           ALLOWED_HOSTS: localhost:8080,127.0.0.1:8080
         run: cargo test --workspace
 
+      - name: Verify Updater Survives Its Caller Restart
+        run: |
+          test_binary=$(cargo test -p af-runner --lib --no-run --message-format=json | python3 -c 'import json,sys; artifacts=[json.loads(line) for line in sys.stdin if line.startswith("{")]; binaries=[item["executable"] for item in artifacts if item.get("reason")=="compiler-artifact" and item.get("executable") and item["target"]["name"]=="af_runner"]; assert len(binaries)==1; print(binaries[0])')
+          sudo "$test_binary" self_update::tests::updater_survives_caller_restart --ignored --exact --nocapture
+
       - name: Build Embedded Single-Binary (Rust)
         run: |
           cargo build --release --bin aetherflow-api

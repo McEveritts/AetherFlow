@@ -5,6 +5,25 @@
 let csrfTokenPromise: Promise<string | null> | null = null;
 let refreshTokenPromise: Promise<boolean> | null = null;
 
+function waitForSharedRequest<Value>(pending: Promise<Value>, signal?: AbortSignal | null): Promise<Value> {
+    if (!signal) return pending;
+    return new Promise<Value>((resolve, reject) => {
+        const handleAbort = () => {
+            signal.removeEventListener('abort', handleAbort);
+            reject(signal.reason ?? new DOMException('The operation was aborted.', 'AbortError'));
+        };
+        pending.then(value => {
+            signal.removeEventListener('abort', handleAbort);
+            resolve(value);
+        }, error => {
+            signal.removeEventListener('abort', handleAbort);
+            reject(error);
+        });
+        if (signal.aborted) handleAbort();
+        else signal.addEventListener('abort', handleAbort, { once: true });
+    });
+}
+
 function getRequestMethod(input: RequestInfo | URL, init?: RequestInit): string {
     if (init?.method) {
         return init.method.toUpperCase();
@@ -109,6 +128,8 @@ async function getCSRFToken(): Promise<string | null> {
 }
 
 export async function apiFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+    const signal = init?.signal === undefined && input instanceof Request ? input.signal : init?.signal;
+    signal?.throwIfAborted();
     const headers = new Headers(input instanceof Request ? input.headers : undefined);
     if (init?.headers) {
         new Headers(init.headers).forEach((value, key) => headers.set(key, value));
@@ -127,7 +148,7 @@ export async function apiFetch(input: RequestInfo | URL, init?: RequestInit): Pr
     }
 
     if (shouldAttachCSRF(input, init, headers) && !headers.has('X-CSRF-Token')) {
-        const csrfToken = await getCSRFToken();
+        const csrfToken = await waitForSharedRequest(getCSRFToken(), signal);
         if (csrfToken) {
             headers.set('X-CSRF-Token', csrfToken);
         }
@@ -164,7 +185,7 @@ export async function apiFetch(input: RequestInfo | URL, init?: RequestInit): Pr
                   .finally(() => { refreshTokenPromise = null; });
             }
 
-            const refreshed = await refreshTokenPromise;
+            const refreshed = await waitForSharedRequest(refreshTokenPromise, signal);
 
             // If refresh succeeded, retry the original request
             if (refreshed) {

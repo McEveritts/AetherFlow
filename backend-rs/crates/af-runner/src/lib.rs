@@ -23,6 +23,7 @@ use tokio::sync::Mutex;
 pub use af_release;
 pub mod package_executor;
 pub mod network;
+pub mod self_update;
 pub use package_executor::*;
 
 pub const DEFAULT_RUNNER_SOCKET_PATH: &str = "/run/aetherflow/runner.sock";
@@ -185,6 +186,7 @@ pub fn build_runner_router() -> Router {
         .route("/v1/package", post(handle_package))
         .route("/v1/package/cancel", post(handle_package_cancel))
         .route("/v1/self-update", post(handle_self_update))
+        .route("/v1/self-update/status", get(handle_self_update_status).post(handle_self_update_status))
         .route("/v1/sandbox", post(handle_sandbox))
         .route("/v1/hosts", post(handle_hosts))
         .route("/v1/network", post(handle_network))
@@ -411,92 +413,47 @@ async fn handle_package_cancel(
 async fn handle_self_update(
     Json(req): Json<SelfUpdateRequest>,
 ) -> (StatusCode, Json<RunnerResponse>) {
-    let validated = match af_release::admin::validate_self_update_request(&req) {
-        Ok(v) => v,
-        Err(err_resp) => return (StatusCode::BAD_REQUEST, Json(err_resp)),
-    };
-
-    let engine_pref = env::var("AETHERFLOW_RELEASE_ENGINE")
-        .unwrap_or_default()
-        .trim()
-        .to_ascii_lowercase();
-    let custom_script_override = env::var("AETHERFLOW_RELEASE_MANAGER_SCRIPT")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
-
-    let use_bash = engine_pref == "bash" || custom_script_override.is_some();
-
-    if use_bash {
-        let script_path = if let Some(ref custom) = custom_script_override {
-            let p = PathBuf::from(custom);
-            if p.is_file() {
-                Some(p)
-            } else {
-                None
-            }
-        } else {
-            resolve_release_manager_script()
-        };
-
-        let Some(script_path) = script_path else {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(RunnerResponse {
-                    success: false,
-                    output: String::new(),
-                    error: "release-manager.sh not found".to_string(),
-                }),
-            );
-        };
-
-        let cmd_name = validated.command.as_str().to_string();
-        let channel = validated.channel.as_str().to_string();
-        tokio::spawn(async move {
-            let _ = Command::new("/bin/bash")
-                .arg(&script_path)
-                .arg(&cmd_name)
-                .arg("--channel")
-                .arg(&channel)
-                .status()
-                .await;
-        });
-
-        return (
-            StatusCode::OK,
-            Json(RunnerResponse {
-                success: true,
-                output: "Release manager initiated in root runner cgroup".to_string(),
-                error: String::new(),
-            }),
-        );
-    }
-
     tokio::task::spawn_blocking(move || {
-        let conf_path = af_release::admin::resolve_release_manager_conf();
-        let mut cfg = af_release::ReleaseConfig::load_from_process_env(conf_path.as_deref())
-            .unwrap_or_default();
-        cfg.release_channel = validated.channel;
-        let (code, resp) = af_release::admin::execute_self_update_sync(&validated, cfg);
-        if !resp.success {
-            tracing::error!(
-                exit_code = code.as_i32(),
-                error = %resp.error,
-                "Native af-release self-update failed"
-            );
-        } else {
-            tracing::info!(output = %resp.output, "Native af-release self-update completed");
-        }
-    });
+        handle_self_update_with_launcher(&req, self_update::launch)
+    })
+    .await
+    .unwrap_or_else(|error| update_failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))
+}
 
-    (
-        StatusCode::OK,
-        Json(RunnerResponse {
+fn update_failure(code: StatusCode, error: String) -> (StatusCode, Json<RunnerResponse>) {
+    (code, Json(RunnerResponse { success: false, output: String::new(), error }))
+}
+
+fn handle_self_update_with_launcher(
+    req: &SelfUpdateRequest,
+    launcher: impl FnOnce(&af_release::admin::ValidatedSelfUpdateRequest) -> Result<String, self_update::LaunchError>,
+) -> (StatusCode, Json<RunnerResponse>) {
+    let validated = match af_release::validate_self_update_request(req) {
+        Ok(validated) => validated,
+        Err(error) => return (StatusCode::BAD_REQUEST, Json(error)),
+    };
+    match launcher(&validated) {
+        Ok(operation_id) => (StatusCode::ACCEPTED, Json(RunnerResponse {
             success: true,
-            output: "Release manager initiated in root runner cgroup".to_string(),
+            output: json!({"operationId": operation_id}).to_string(),
             error: String::new(),
-        }),
-    )
+        })),
+        Err(self_update::LaunchError::Busy(error)) => update_failure(StatusCode::CONFLICT, error),
+        Err(self_update::LaunchError::Failed(error)) => update_failure(StatusCode::SERVICE_UNAVAILABLE, error),
+    }
+}
+
+async fn handle_self_update_status() -> (StatusCode, Json<RunnerResponse>) {
+    match tokio::task::spawn_blocking(self_update::status).await {
+        Ok(Ok(status)) => (StatusCode::OK, Json(RunnerResponse {
+            success: true,
+            output: serde_json::to_string(&status).unwrap_or_default(),
+            error: String::new(),
+        })),
+        Ok(Err(self_update::LaunchError::Busy(error) | self_update::LaunchError::Failed(error))) =>
+            update_failure(StatusCode::SERVICE_UNAVAILABLE, error),
+        Err(error) => update_failure(StatusCode::SERVICE_UNAVAILABLE, error.to_string()),
+    }
 }
 
 pub fn resolve_sandbox_script_path() -> Option<PathBuf> {
@@ -2920,16 +2877,29 @@ where
     decoder.finish(&mut on_line)
 }
 
-pub async fn dispatch_self_update(command: &str, channel: &str) -> anyhow::Result<()> {
-    let req = SelfUpdateRequest {
-        command: command.to_string(),
-        channel: channel.to_string(),
-    };
+pub async fn start_self_update(command: &str, channel: &str) -> anyhow::Result<String> {
+    let req = SelfUpdateRequest { command: command.to_string(), channel: channel.to_string() };
     let result = post_runner_json("/v1/self-update", &req, Duration::from_secs(15)).await?;
     if !result.success {
         anyhow::bail!("runner self-update error: {}", result.error);
     }
-    Ok(())
+    let response: Value = serde_json::from_str(&result.output)?;
+    let operation_id = response["operationId"].as_str()
+        .ok_or_else(|| anyhow::anyhow!("updater launch did not acknowledge an operation ID"))?;
+    uuid::Uuid::parse_str(operation_id)?;
+    Ok(operation_id.to_string())
+}
+
+pub async fn dispatch_self_update(command: &str, channel: &str) -> anyhow::Result<()> {
+    start_self_update(command, channel).await.map(|_| ())
+}
+
+pub async fn fetch_self_update_status() -> anyhow::Result<self_update::UpdateStatus> {
+    let result = post_runner_json("/v1/self-update/status", &json!({}), Duration::from_secs(5)).await?;
+    if !result.success {
+        anyhow::bail!("updater status unavailable: {}", result.error);
+    }
+    Ok(serde_json::from_str(&result.output)?)
 }
 
 pub async fn dispatch_sandbox_apply(pkg_id: &str) -> anyhow::Result<()> {
@@ -3342,46 +3312,32 @@ mod tests {
         assert!(tok.is_cancelled());
     }
 
-    #[tokio::test]
-    async fn test_handle_self_update_accepts_experimental_and_validates_inputs() {
-        let tmp_script = std::env::temp_dir().join(format!(
-            "af-runner-self-update-test-{}.sh",
-            std::process::id()
-        ));
-        fs::write(&tmp_script, "#!/bin/sh\nexit 0\n").unwrap();
-        env::set_var("AETHERFLOW_RELEASE_MANAGER_SCRIPT", &tmp_script);
-
-        for ch in ["stable", "nightly", "experimental"] {
-            let (code, Json(resp)) = handle_self_update(Json(SelfUpdateRequest {
-                command: "deploy".to_string(),
-                channel: ch.to_string(),
-            }))
-            .await;
-            assert_eq!(code, StatusCode::OK, "expected OK for channel {}", ch);
-            assert!(resp.success);
-            assert!(resp.output.contains("Release manager initiated"));
+    #[test]
+    fn test_handle_self_update_accepts_experimental_and_validates_inputs() {
+        for channel in ["stable", "nightly", "experimental"] {
+            let request = SelfUpdateRequest { command: "deploy".into(), channel: channel.into() };
+            let (code, Json(response)) = handle_self_update_with_launcher(&request, |_| Ok(uuid::Uuid::new_v4().to_string()));
+            assert_eq!(code, StatusCode::ACCEPTED);
+            assert!(response.success);
+            assert!(serde_json::from_str::<Value>(&response.output).unwrap()["operationId"].is_string());
         }
+        for (command, channel) in [("deploy", "invalid-channel"), ("rm-rf", "nightly")] {
+            let request = SelfUpdateRequest { command: command.into(), channel: channel.into() };
+            let (code, Json(response)) = handle_self_update_with_launcher(&request, |_| panic!("invalid request reached launcher"));
+            assert_eq!(code, StatusCode::BAD_REQUEST);
+            assert!(!response.success);
+        }
+    }
 
-        let (bad_ch_code, Json(bad_ch_resp)) = handle_self_update(Json(SelfUpdateRequest {
-            command: "deploy".to_string(),
-            channel: "invalid-channel".to_string(),
-        }))
-        .await;
-        assert_eq!(bad_ch_code, StatusCode::BAD_REQUEST);
-        assert!(!bad_ch_resp.success);
-        assert_eq!(bad_ch_resp.error, "invalid update channel");
-
-        let (bad_cmd_code, Json(bad_cmd_resp)) = handle_self_update(Json(SelfUpdateRequest {
-            command: "rm-rf".to_string(),
-            channel: "experimental".to_string(),
-        }))
-        .await;
-        assert_eq!(bad_cmd_code, StatusCode::BAD_REQUEST);
-        assert!(!bad_cmd_resp.success);
-        assert_eq!(bad_cmd_resp.error, "invalid self-update command");
-
-        env::remove_var("AETHERFLOW_RELEASE_MANAGER_SCRIPT");
-        let _ = fs::remove_file(&tmp_script);
+    #[test]
+    fn test_self_update_rejects_duplicate_or_failed_launch() {
+        let request = SelfUpdateRequest { command: "deploy".into(), channel: "nightly".into() };
+        let (code, Json(response)) = handle_self_update_with_launcher(&request, |_| Err(self_update::LaunchError::Busy("update_in_progress".into())));
+        assert_eq!(code, StatusCode::CONFLICT);
+        assert!(!response.success);
+        let (code, Json(response)) = handle_self_update_with_launcher(&request, |_| Err(self_update::LaunchError::Failed("systemd unavailable".into())));
+        assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(!response.success);
     }
 
     #[test]

@@ -99,6 +99,10 @@ pub trait LifecycleController: Send + Sync {
     /// and enables + restarts `aetherflow-runner.service` and `aetherflow-api.service`.
     fn restart_systemd_units(&self, config: &ReleaseConfig) -> ReleaseResult<()>;
 
+    fn verify_running_release(&self, _config: &ReleaseConfig) -> ReleaseResult<()> {
+        Ok(())
+    }
+
     /// Stops `aetherflow-api.service` and `aetherflow-runner.service` prior to restoring a corrupted SQLite DB.
     fn stop_database_services(&self, db_path: &Path) -> ReleaseResult<()>;
 
@@ -201,6 +205,26 @@ pub fn parse_endpoint_socket_addr(endpoint: &str) -> Option<std::net::SocketAddr
 pub struct SystemdLifecycleController;
 
 impl LifecycleController for SystemdLifecycleController {
+    fn verify_running_release(&self, config: &ReleaseConfig) -> ReleaseResult<()> {
+        let expected = fs::canonicalize(config.current_link.join("aetherflow-api"))
+            .map_err(|error| ReleaseError::io("resolving candidate executable", error))?;
+        for unit in ["aetherflow-api.service", "aetherflow-runner.service"] {
+            let output = Command::new("systemctl")
+                .args(["show", "--property=MainPID", "--value", unit])
+                .output()
+                .map_err(|error| ReleaseError::io("querying service runtime identity", error))?;
+            let pid = String::from_utf8_lossy(&output.stdout).trim().parse::<u32>().ok();
+            let actual = if output.status.success() {
+                pid.filter(|pid| *pid > 0)
+                    .and_then(|pid| fs::read_link(format!("/proc/{pid}/exe")).ok())
+            } else {
+                None
+            };
+            verify_executable_identity(unit, &expected, actual.as_deref())?;
+        }
+        Ok(())
+    }
+
     fn query_unit_environment(&self, unit: &str) -> Option<String> {
         let out = Command::new("systemctl")
             .args(["show", "-p", "Environment", unit])
@@ -338,6 +362,30 @@ fn run_systemctl(args: &[&str], required: bool) -> ReleaseResult<()> {
                 })
             }
         }
+    }
+}
+
+fn verify_executable_identity(unit: &str, expected: &Path, actual: Option<&Path>) -> ReleaseResult<()> {
+    if actual == Some(expected) {
+        return Ok(());
+    }
+    Err(ReleaseError::Systemd {
+        action: format!("verify runtime identity of {unit}"),
+        reason: format!("expected {}, running {:?}", expected.display(), actual),
+    })
+}
+
+#[cfg(test)]
+mod runtime_identity_tests {
+    use super::*;
+
+    #[test]
+    fn healthy_old_service_is_not_a_successful_deployment() {
+        let expected = Path::new("/opt/AetherFlow/releases/new/aetherflow-api");
+        let old = Path::new("/opt/AetherFlow/releases/old/aetherflow-api");
+        assert!(verify_executable_identity("api", expected, Some(old)).is_err());
+        assert!(verify_executable_identity("runner", expected, None).is_err());
+        assert!(verify_executable_identity("api", expected, Some(expected)).is_ok());
     }
 }
 

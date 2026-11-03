@@ -18,7 +18,6 @@ use std::env;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path as StdPath, PathBuf};
-use std::process::Command;
 use std::sync::Mutex;
 use tokio::sync::broadcast;
 
@@ -2239,26 +2238,7 @@ fn read_update_channel() -> &'static str {
 }
 
 fn get_local_version() -> String {
-    let mut candidates = vec![
-        PathBuf::from("/opt/AetherFlow/current/.version"),
-        PathBuf::from(".version"),
-        PathBuf::from("../.version"),
-    ];
-    if let Ok(exe) = env::current_exe() {
-        if let Some(exe_dir) = exe.parent() {
-            candidates.insert(1, exe_dir.join("../.version"));
-            candidates.insert(1, exe_dir.join(".version"));
-        }
-    }
-    for c in candidates {
-        if let Ok(v) = fs::read_to_string(c) {
-            let trimmed = v.trim();
-            if !trimmed.is_empty() {
-                return trimmed.to_string();
-            }
-        }
-    }
-    "v3.0.0".to_string()
+    af_runner::af_release::runtime::runtime_identity().version.clone()
 }
 
 pub fn is_newer_version(local: &str, remote: &str) -> bool {
@@ -2606,101 +2586,45 @@ pub async fn check_update() -> Response {
     .into_response()
 }
 
+pub async fn update_status() -> Response {
+    match af_runner::fetch_self_update_status().await {
+        Ok(status) => {
+            let mut response = serde_json::to_value(status).unwrap_or_else(|_| serde_json::json!({}));
+            response["currentVersion"] = serde_json::json!(get_local_version());
+            Json(response).into_response()
+        }
+        Err(error) => (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({
+            "error": error.to_string(), "message": "Deployment status could not be verified."
+        }))).into_response(),
+    }
+}
+
 pub async fn run_update(req: Request) -> Response {
     let actor = req.extensions().get::<AuthUser>().cloned();
     let ip = extract_client_ip(req.headers());
-    let ua = req
-        .headers()
-        .get(header::USER_AGENT)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .to_string();
-
+    let ua = req.headers().get(header::USER_AGENT)
+        .and_then(|value| value.to_str().ok()).unwrap_or_default().to_string();
     let channel = read_update_channel().to_string();
-    let ch_clone = channel.clone();
-
-    tokio::spawn(async move {
-        tracing::info!(channel = %ch_clone, "Initiating atomic Blue/Green update sequence...");
-
-        if af_runner::is_runner_available() {
-            match af_runner::dispatch_self_update("deploy", &ch_clone).await {
-                Ok(()) => {
-                    tracing::info!(channel = %ch_clone, "self-update dispatched to privileged runner");
-                }
-                Err(error) => {
-                    tracing::error!(%error, "failed to dispatch self-update via privileged runner");
-                }
-            }
-            return;
-        }
-
-        let engine_pref = env::var("AETHERFLOW_RELEASE_ENGINE")
-            .unwrap_or_default()
-            .trim()
-            .to_ascii_lowercase();
-        let custom_script = env::var("AETHERFLOW_RELEASE_MANAGER_SCRIPT")
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
-
-        if engine_pref == "bash" || custom_script.is_some() {
-            if let Some(script) = af_runner::resolve_release_manager_script() {
-                let _ = tokio::task::spawn_blocking(move || {
-                    match Command::new("/bin/bash")
-                        .arg(script)
-                        .args(["deploy", "--channel", &ch_clone])
-                        .status()
-                    {
-                        Ok(status) if status.success() => {}
-                        Ok(status) => tracing::error!(%status, "System update failed"),
-                        Err(error) => tracing::error!(%error, "Failed to launch system update"),
-                    }
-                })
-                .await;
-                return;
-            }
-        }
-
-        let _ = tokio::task::spawn_blocking(move || {
-            let req_model = af_models::SelfUpdateRequest {
-                command: "deploy".to_string(),
-                channel: ch_clone.clone(),
+    let operation_id = match af_runner::start_self_update("deploy", &channel).await {
+        Ok(operation_id) => operation_id,
+        Err(error) => {
+            let message = error.to_string();
+            let code = if message.contains("update_in_progress:") || message.contains("recovery_required:") {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::SERVICE_UNAVAILABLE
             };
-            if let Ok(validated) = af_runner::af_release::validate_self_update_request(&req_model) {
-                let conf_path = af_runner::af_release::resolve_release_manager_conf();
-                let mut cfg = af_runner::af_release::ReleaseConfig::load_from_process_env(conf_path.as_deref())
-                    .unwrap_or_default();
-                cfg.release_channel = validated.channel;
-                let (code, resp) = af_runner::af_release::execute_self_update_sync(&validated, cfg);
-                if !resp.success {
-                    tracing::error!(
-                        exit_code = code.as_i32(),
-                        error = %resp.error,
-                        "Native af-release system update failed"
-                    );
-                }
-            }
-        })
-        .await;
-    });
-
-    if let Some(u) = actor {
-        af_db::record_audit(
-            u.user_id,
-            &u.username,
-            "system_deployment",
-            "engine",
-            "blue_green",
-            &format!("Channel: {}", channel),
-            &ip,
-            &ua,
-        );
+            return (code, Json(serde_json::json!({"error": message}))).into_response();
+        }
+    };
+    if let Some(user) = actor {
+        af_db::record_audit(user.user_id, &user.username, "system_deployment", "engine", "blue_green",
+            &format!("Channel: {channel}; operation: {operation_id}"), &ip, &ua);
     }
-
-    Json(serde_json::json!({
-        "message": "Atomic deployment initiated. The system will cleanly transition once builds are complete."
-    }))
-    .into_response()
+    (StatusCode::ACCEPTED, Json(serde_json::json!({
+        "message": "Independent updater started. Progress will survive application restarts.",
+        "operationId": operation_id,
+    }))).into_response()
 }
 
 fn allocate_or_verify_deploy_port(app_name: &str, default_port: i32) -> i32 {

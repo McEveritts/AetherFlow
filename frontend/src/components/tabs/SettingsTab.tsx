@@ -1,7 +1,7 @@
 import { Settings, Sparkles, DownloadCloud, AlertCircle, Eye, EyeOff, Key, Monitor, Globe, Clock, LayoutDashboard, Radio, HardDriveDownload, Shield, KeyRound, RefreshCw, UserCircle, Bell, Cpu, CheckCircle2, ArrowUpRight, Terminal, Layers, Save, Folder } from 'lucide-react';
 import { AI_MODELS, ALL_MODEL_IDS, resolveProviderForModel } from '@/lib/ai-models';
 import type { AIProviderID } from '@/lib/ai-models';
-import { useState, FormEvent } from 'react';
+import { useEffect, useRef, useState, FormEvent } from 'react';
 import useSWR from 'swr';
 import dynamic from 'next/dynamic';
 import GlassSelect, { type GlassSelectOption } from '@/components/ui/GlassSelect';
@@ -19,6 +19,10 @@ import { useSystemStore } from '@/store/useSystemStore';
 import { useTranslations } from 'next-intl';
 import { SettingsSkeleton } from '@/components/layout/SkeletonBox';
 import { apiFetch } from '@/lib/fetcher';
+import {
+    getSystemUpdateView, isSystemUpdateLaunchTerminal, UPDATE_STATUS_POLL_MS,
+    type SystemUpdateCheck, type SystemUpdateLaunch, type SystemUpdateStatus, type UpdateSnapshot,
+} from '@/lib/system-update';
 
 const PROVIDER_CARDS: {
     id: AIProviderID;
@@ -129,6 +133,45 @@ const UPDATE_CHANNEL_PILL_STYLES: Record<string, string> = {
 const normalizeUpdateChannel = (channel: unknown): string =>
     channel === 'nightly' || channel === 'experimental' ? channel : 'stable';
 
+const SETTINGS_DEFAULTS = {
+    aiModel: 'gemini-4-argon',
+    systemPrompt: 'You are FlowAI, a highly intelligent infrastructure assistant connected to a local Next.js + Go Nexus environment. Always prioritize safe and performant configurations.',
+    geminiApiKey: '',
+    openaiApiKey: '',
+    anthropicApiKey: '',
+    lmStudioEndpoint: '',
+    ollamaEndpoint: '',
+    anthropicEndpoint: '',
+    timezone: 'UTC',
+    updateChannel: 'stable',
+    defaultDashboard: 'overview',
+    baseDomain: '',
+};
+
+function readSettingsValues(data?: Record<string, string>): typeof SETTINGS_DEFAULTS {
+    const values = { ...SETTINGS_DEFAULTS };
+    for (const key of Object.keys(values) as (keyof typeof values)[]) {
+        if (typeof data?.[key] === 'string') values[key] = data[key];
+    }
+    if (!ALL_MODEL_IDS.includes(values.aiModel)) values.aiModel = SETTINGS_DEFAULTS.aiModel;
+    values.updateChannel = normalizeUpdateChannel(values.updateChannel);
+    return values;
+}
+
+async function fetchUpdateSnapshot<Value>(url: string): Promise<UpdateSnapshot<Value>> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000);
+    try {
+        const response = await apiFetch(url, { signal: controller.signal, cache: 'no-store' });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || data.message || `Update request failed (${response.status})`);
+        if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('Invalid update response');
+        return { ...data, checkedAt: Date.now() };
+    } finally {
+        clearTimeout(timeout);
+    }
+}
+
 export default function SettingsTab() {
     const t = useTranslations('Settings');
     const { addToast } = useToast();
@@ -143,27 +186,40 @@ export default function SettingsTab() {
         setActiveSettingsTab: setActiveTab,
     } = useSystemStore();
     
-    // Config State
-    const [model, setModel] = useState('gemini-4-argon');
-    const [prompt, setPrompt] = useState("You are FlowAI, a highly intelligent infrastructure assistant connected to a local Next.js + Go Nexus environment. Always prioritize safe and performant configurations.");
-    const [apiKey, setApiKey] = useState('');
-    const [openaiApiKey, setOpenaiApiKey] = useState('');
-    const [anthropicApiKey, setAnthropicApiKey] = useState('');
-    const [lmStudioEndpoint, setLmStudioEndpoint] = useState('');
-    const [ollamaEndpoint, setOllamaEndpoint] = useState('');
-    const [anthropicEndpoint, setAnthropicEndpoint] = useState('');
-    const [timezone, setTimezone] = useState('UTC');
-    const [updateChannel, setUpdateChannel] = useState('stable');
-    const [defaultDashboard, setDefaultDashboard] = useState('overview');
-    const [baseDomain, setBaseDomain] = useState('');
+    const { data: settingsData, isLoading, mutate: mutateSettings } = useSWR<Record<string, string>>(
+        '/api/v1/auth/settings'
+    );
+    const [settingsDraft, setSettingsDraft] = useState<Partial<typeof SETTINGS_DEFAULTS>>({});
+    const savedSettings = readSettingsValues(settingsData);
+    const {
+        aiModel: model, systemPrompt: prompt, geminiApiKey: apiKey, openaiApiKey,
+        anthropicApiKey, lmStudioEndpoint, ollamaEndpoint, anthropicEndpoint,
+        timezone, updateChannel, defaultDashboard, baseDomain,
+    } = { ...savedSettings, ...settingsDraft };
+    const setField = (key: keyof typeof SETTINGS_DEFAULTS, value: string) =>
+        setSettingsDraft(current => ({ ...current, [key]: value }));
+    const setModel = (value: string) => setField('aiModel', value);
+    const setPrompt = (value: string) => setField('systemPrompt', value);
+    const setApiKey = (value: string) => setField('geminiApiKey', value);
+    const setOpenaiApiKey = (value: string) => setField('openaiApiKey', value);
+    const setAnthropicApiKey = (value: string) => setField('anthropicApiKey', value);
+    const setLmStudioEndpoint = (value: string) => setField('lmStudioEndpoint', value);
+    const setOllamaEndpoint = (value: string) => setField('ollamaEndpoint', value);
+    const setAnthropicEndpoint = (value: string) => setField('anthropicEndpoint', value);
+    const setTimezone = (value: string) => setField('timezone', value);
+    const setUpdateChannel = (value: string) => setField('updateChannel', value);
+    const setDefaultDashboard = (value: string) => setField('defaultDashboard', value);
+    const setBaseDomain = (value: string) => setField('baseDomain', value);
 
     // UI state
     const [showApiKey, setShowApiKey] = useState(false);
     const [showOpenaiApiKey, setShowOpenaiApiKey] = useState(false);
     const [showAnthropicApiKey, setShowAnthropicApiKey] = useState(false);
     const [isSaving, setIsSaving] = useState(false);
-    const [isUpdating, setIsUpdating] = useState(false);
-    const [updateMessage, setUpdateMessage] = useState('');
+    const [updateLaunch, setUpdateLaunch] = useState<SystemUpdateLaunch | null>(null);
+    const [launchError, setLaunchError] = useState('');
+    const launchRequestInFlight = useRef(false);
+    const [updateNow, setUpdateNow] = useState(Date.now);
     const [isTesting, setIsTesting] = useState(false);
 
     const handleTestConnection = async (providerOverride?: string, extraPayload?: Record<string, string>) => {
@@ -194,32 +250,53 @@ export default function SettingsTab() {
         }
     };
 
-    const { data: updateData, error: updateError, isValidating: isCheckingUpdate, mutate: mutateUpdateData } = useSWR(
-        '/api/v1/auth/system/update/check',
-        { refreshInterval: 60000 }
+    const { data: updateData, error: updateError, isValidating: isCheckingUpdate, mutate: mutateUpdateData } = useSWR<UpdateSnapshot<SystemUpdateCheck>>(
+        settingsData ? ['/api/v1/auth/system/update/check', savedSettings.updateChannel] as const : null,
+        async ([url, channel]: readonly [string, string]) => {
+            const data = await fetchUpdateSnapshot<SystemUpdateCheck>(url);
+            return { ...data, channel: data.channel || channel };
+        },
+        { refreshInterval: 60000, onSuccess: () => setUpdateNow(Date.now()) }
     );
 
-    const { data: settingsData, isLoading, mutate: mutateSettings } = useSWR(
-        '/api/v1/auth/settings',
+    const { data: updateStatus, error: updateStatusError, mutate: mutateUpdateStatus } = useSWR<UpdateSnapshot<SystemUpdateStatus>>(
+        '/api/v1/auth/system/update/status',
+        fetchUpdateSnapshot<SystemUpdateStatus>,
         {
-            onSuccess: (data: Record<string, string>) => {
-                if (data.aiModel) {
-                    setModel(ALL_MODEL_IDS.includes(data.aiModel) ? data.aiModel : 'gemini-4-argon');
-                }
-                if (data.systemPrompt) setPrompt(data.systemPrompt);
-                if (data.geminiApiKey) setApiKey(data.geminiApiKey);
-                if (data.openaiApiKey) setOpenaiApiKey(data.openaiApiKey);
-                if (data.anthropicApiKey) setAnthropicApiKey(data.anthropicApiKey);
-                if (data.lmStudioEndpoint) setLmStudioEndpoint(data.lmStudioEndpoint);
-                if (data.ollamaEndpoint) setOllamaEndpoint(data.ollamaEndpoint);
-                if (data.anthropicEndpoint) setAnthropicEndpoint(data.anthropicEndpoint);
-                if (data.timezone) setTimezone(data.timezone);
-                if (data.updateChannel) setUpdateChannel(normalizeUpdateChannel(data.updateChannel));
-                if (data.defaultDashboard) setDefaultDashboard(data.defaultDashboard);
-                if (typeof data.baseDomain === 'string') setBaseDomain(data.baseDomain);
-            }
+            refreshInterval: UPDATE_STATUS_POLL_MS,
+            dedupingInterval: 1000,
+            refreshWhenHidden: true,
+            refreshWhenOffline: true,
+            revalidateOnFocus: true,
+            revalidateOnReconnect: true,
+            shouldRetryOnError: true,
+            errorRetryCount: Infinity,
+            errorRetryInterval: UPDATE_STATUS_POLL_MS,
+            onSuccess: status => {
+                setUpdateNow(Date.now());
+                setUpdateLaunch(current => isSystemUpdateLaunchTerminal(current, status, Date.now()) ? null : current);
+            },
+            onErrorRetry: (_error, _key, _config, revalidate, { retryCount }) => {
+                setTimeout(() => revalidate({ retryCount }), UPDATE_STATUS_POLL_MS);
+            },
         }
     );
+
+    useEffect(() => {
+        const timer = setInterval(() => setUpdateNow(Date.now()), UPDATE_STATUS_POLL_MS);
+        return () => clearInterval(timer);
+    }, []);
+
+    useEffect(() => {
+        if (updateStatus?.state === 'complete') void mutateUpdateData().catch(() => undefined);
+    }, [updateStatus?.state, updateStatus?.operationId, updateStatus?.currentVersion, mutateUpdateData]);
+
+    const updateViewInput = {
+        status: updateStatus, check: updateData, statusError: updateStatusError, checkError: updateError,
+        launch: updateLaunch, launchError, channel: updateChannel,
+        savedChannel: savedSettings.updateChannel, settingsPending: isSaving, now: updateNow,
+    };
+    const updateView = getSystemUpdateView(updateViewInput);
 
     if (isLoading) return <SettingsSkeleton />;
 
@@ -257,6 +334,7 @@ export default function SettingsTab() {
         e.preventDefault();
         setIsSaving(true);
 
+        const submittedSettings = { ...savedSettings, ...settingsDraft };
         const payload = {
             aiModel: model,
             systemPrompt: prompt,
@@ -277,9 +355,6 @@ export default function SettingsTab() {
             setupCompleted: true
         };
 
-        const prevData = settingsData;
-        mutateSettings({ ...settingsData, ...payload }, false);
-
         try {
             const res = await apiFetch('/api/v1/admin/settings', {
                 method: 'PUT',
@@ -289,14 +364,21 @@ export default function SettingsTab() {
 
             if (res.ok) {
                 addToast('Configuration synced to AetherFlow Engine', 'success');
-                mutateSettings();
+                await mutateSettings().then((data) => {
+                    if (!data) return;
+                    setSettingsDraft(current => {
+                        const next = { ...current };
+                        for (const key of Object.keys(next) as (keyof typeof SETTINGS_DEFAULTS)[]) {
+                            if (next[key] === submittedSettings[key]) delete next[key];
+                        }
+                        return next;
+                    });
+                }, () => undefined);
             } else {
-                mutateSettings(prevData, false);
                 const errData = await res.json().catch(() => ({ message: `HTTP ${res.status}` }));
                 addToast(errData.message || errData.error || `Configuration sync rejected (${res.status})`, 'error');
             }
         } catch (_err) {
-            mutateSettings(prevData, false);
             addToast('API dispatch failure: Configuration flush.', 'error');
         } finally {
             setIsSaving(false);
@@ -304,29 +386,50 @@ export default function SettingsTab() {
     };
 
     const handleRunUpdate = async () => {
-        setIsUpdating(true);
-        setUpdateMessage('Initiating update sequence...');
+        if (launchRequestInFlight.current || !getSystemUpdateView({ ...updateViewInput, now: Date.now() }).canLaunch) return;
+        launchRequestInFlight.current = true;
+        setLaunchError('');
+        setUpdateLaunch({
+            state: 'launching', startedAt: Date.now(), operationId: null,
+            previousOperationId: updateStatus?.operationId ?? null, message: '',
+        });
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 10000);
         try {
             const res = await apiFetch('/api/v1/admin/system/update/run', {
-                method: 'POST'
+                method: 'POST', signal: controller.signal,
             });
-            const data = await res.json();
-            if (res.ok) {
-                setUpdateMessage(data.message || 'Update started.');
+            const data = await res.json().catch(() => null) as {
+                message?: string; error?: string; operationId?: string;
+            } | null;
+            if (res.status === 202) {
+                setUpdateLaunch(current => current && ({
+                    ...current, state: 'accepted', operationId: data?.operationId || null,
+                    message: data?.message || 'Update launcher acknowledged the request.',
+                }));
+            } else if (res.ok) {
+                setUpdateLaunch(current => current && ({
+                    ...current, state: 'uncertain', message: 'The launcher acknowledgement was not confirmed.',
+                }));
             } else {
-                setUpdateMessage(data.error || 'Daemon update sequence rejected.');
-                setIsUpdating(false);
+                setLaunchError(data?.error || data?.message || `Update launcher rejected the request (${res.status}).`);
+                setUpdateLaunch(null);
             }
-        } catch (_err) {
-            setUpdateMessage('API dispatch failure: Daemon update trigger.');
-            setIsUpdating(false);
+        } catch {
+            setUpdateLaunch(current => current && ({
+                ...current, state: 'uncertain',
+                message: 'The update trigger response was lost. Reconnecting without submitting a duplicate request.',
+            }));
+        } finally {
+            clearTimeout(timeout);
+            launchRequestInFlight.current = false;
+            void mutateUpdateStatus().catch(() => undefined);
         }
     };
 
     const handleCheckForUpdates = async () => {
-        if (!mutateUpdateData) return;
         addToast('Checking for updates...', 'success');
-        await mutateUpdateData();
+        await Promise.allSettled([mutateUpdateData(), mutateUpdateStatus()]);
     };
 
     return (
@@ -1018,7 +1121,7 @@ export default function SettingsTab() {
                         {activeTab === 'system' && (
                             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 animate-fade-in w-full">
                                 {/* LEFT CARD: Release Channel & Update Status */}
-                                <div className="glass-panel p-6 rounded-2xl border border-white/[0.06] space-y-6 relative z-20">
+                                <div className="glass-panel p-6 rounded-2xl border border-white/[0.06] space-y-6 relative z-20 min-w-0 max-w-full">
                                     <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/[0.06] pb-4">
                                         <div className="flex items-center gap-3">
                                             <div className="p-2.5 rounded-xl bg-indigo-500/15 text-indigo-400 border border-indigo-500/20">
@@ -1072,27 +1175,32 @@ export default function SettingsTab() {
                                     </div>
 
                                     <div className="space-y-4 text-sm text-slate-400">
-                                        {updateError ? (
-                                            <div className="flex items-center gap-2 text-red-400 bg-red-500/10 border border-red-500/20 p-4 rounded-xl">
-                                                <AlertCircle size={16} /> Could not fetch update status.
-                                            </div>
-                                        ) : !updateData ? (
-                                            <div className="flex items-center gap-2 text-slate-500 p-4 border border-white/5 rounded-xl bg-white/[0.01]">
-                                                <div className="w-4 h-4 border-2 border-slate-500/30 border-t-slate-500 rounded-full animate-spin"></div>
-                                                {t('checkingUpdates')}
-                                            </div>
-                                        ) : (
-                                            <>
                                                 <div className="flex flex-col gap-3 p-4 bg-slate-950/60 rounded-xl border border-white/[0.06]">
                                                     <div className="flex justify-between items-center">
                                                         <span className="text-xs font-semibold text-slate-400">Current Version</span>
-                                                        <span className="font-mono text-xs font-bold text-slate-200 px-2.5 py-1 rounded-lg bg-white/5 border border-white/5">{updateData.currentVersion}</span>
+                                                        <span className="font-mono text-xs font-bold text-slate-200 px-2.5 py-1 rounded-lg bg-white/5 border border-white/5 break-all">{updateStatus?.currentVersion || updateData?.currentVersion || 'Unknown'}</span>
                                                     </div>
                                                     <div className="flex justify-between items-center">
                                                         <span className="text-xs font-semibold text-slate-400">Latest Upstream Version</span>
-                                                        <span className="font-mono text-xs font-bold text-indigo-300 px-2.5 py-1 rounded-lg bg-indigo-500/10 border border-indigo-500/20">{updateData.latestVersion}</span>
+                                                        <span className="font-mono text-xs font-bold text-indigo-300 px-2.5 py-1 rounded-lg bg-indigo-500/10 border border-indigo-500/20 break-all">{updateData?.latestVersion || 'Unknown'}</span>
                                                     </div>
-                                                    {updateData.url && !updateData.latestVersion?.includes('Unknown') && (
+                                                    <div className="flex justify-between items-center gap-3">
+                                                        <span className="text-xs font-semibold text-slate-400">Runner Version</span>
+                                                        <span className="font-mono text-xs text-slate-200 break-all">{updateStatus?.runnerVersion || 'Unknown'}</span>
+                                                    </div>
+                                                    {updateStatus?.selectedVersion && (
+                                                        <div className="flex justify-between items-center gap-3">
+                                                            <span className="text-xs font-semibold text-slate-400">Selected Release</span>
+                                                            <span className="font-mono text-xs text-slate-200 break-all">{updateStatus.selectedVersion}</span>
+                                                        </div>
+                                                    )}
+                                                    {updateStatus?.operationId && (
+                                                        <div className="text-xs text-slate-500 break-all">Operation: {updateStatus.operationId}</div>
+                                                    )}
+                                                    {updateStatus?.phase && (
+                                                        <div className="text-xs text-slate-400 break-words">Last phase: {updateStatus.phase}</div>
+                                                    )}
+                                                    {updateData?.url && !updateData.latestVersion?.includes('Unknown') && (
                                                         <div className="pt-1 border-t border-white/5 flex justify-end">
                                                             <a href={updateData.url} target="_blank" rel="noopener noreferrer" className="text-xs text-indigo-400 hover:text-indigo-300 underline transition-colors">
                                                                 View release details →
@@ -1101,30 +1209,34 @@ export default function SettingsTab() {
                                                     )}
                                                 </div>
 
-                                                {updateData.updateAvailable ? (
+                                                <div
+                                                    role={updateView.kind === 'failed' || updateView.kind === 'interrupted' ? 'alert' : 'status'}
+                                                    aria-live="polite"
+                                                    className={`flex items-start gap-2 p-4 rounded-xl border text-xs font-semibold break-words ${
+                                                        updateView.isLatest
+                                                            ? 'bg-emerald-500/5 border-emerald-500/15 text-emerald-400'
+                                                            : updateView.kind === 'failed' || updateView.kind === 'interrupted'
+                                                            ? 'bg-red-500/10 border-red-500/20 text-red-400'
+                                                            : 'bg-amber-500/5 border-amber-500/20 text-amber-300'
+                                                    }`}
+                                                >
+                                                    {updateView.isLatest ? <CheckCircle2 size={15} className="shrink-0" />
+                                                        : updateView.isBusy ? <RefreshCw size={15} className="shrink-0 animate-spin" />
+                                                        : <AlertCircle size={15} className="shrink-0" />}
+                                                    <span className="min-w-0">{updateView.message}</span>
+                                                </div>
+                                                {(updateData?.updateAvailable === true || updateView.isBusy) && (
                                                     <div className="pt-2">
                                                         <button
                                                             type="button"
                                                             onClick={handleRunUpdate}
-                                                            disabled={isUpdating}
+                                                            disabled={!updateView.canLaunch}
                                                             className="obs-touch-target-standard obs-gpu-120hz-interactive w-full px-4 py-3 bg-blue-600 hover:bg-blue-500 disabled:bg-blue-600/50 disabled:cursor-not-allowed text-white font-bold rounded-xl transition-colors shadow-lg shadow-blue-500/20 text-center"
                                                         >
-                                                            {isUpdating ? 'Updating System...' : `Update to ${updateData.latestVersion}`}
+                                                            {updateView.isBusy ? 'Updating System...' : `Update to ${updateData?.latestVersion || 'release'}`}
                                                         </button>
-                                                        {updateMessage && (
-                                                            <div className={`mt-3 text-xs text-center ${updateMessage.includes('error') || updateMessage.includes('Failed') ? 'text-red-400' : 'text-emerald-400'}`}>
-                                                                {updateMessage}
-                                                            </div>
-                                                        )}
-                                                    </div>
-                                                ) : (
-                                                    <div className="flex items-center justify-center gap-2 p-4 rounded-xl bg-emerald-500/5 border border-emerald-500/15 text-emerald-400 text-xs font-semibold">
-                                                        <CheckCircle2 size={15} />
-                                                        <span>Your system is running the latest release on the {updateChannel} channel.</span>
                                                     </div>
                                                 )}
-                                            </>
-                                        )}
                                     </div>
                                 </div>
 
@@ -1141,7 +1253,7 @@ export default function SettingsTab() {
                                                     <p className="text-xs text-slate-400">Release notes, rollback guarantees, and daemon upgrade lifecycle.</p>
                                                 </div>
                                             </div>
-                                            {updateData && updateData.updateAvailable && (
+                                            {updateView.updateAvailable && (
                                                 <span className="bg-blue-500/20 text-blue-400 text-xs font-bold px-2.5 py-1 rounded-full uppercase tracking-wider animate-pulse border border-blue-500/30">
                                                     {t('updateAvailable')}
                                                 </span>
