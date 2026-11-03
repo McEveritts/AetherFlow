@@ -46,6 +46,22 @@ type AppBlueprint struct {
 // blueprintRegistry holds baseline definitions for catalog apps, while
 // GetBlueprint dynamically overlays config/packages.json as the single source of truth.
 var blueprintRegistry = map[string]AppBlueprint{
+	"piped": {
+		AppName:         "piped",
+		ServiceName:     "af-piped",
+		Category:        "Media",
+		DefaultPort:     8280,
+		HealthCheckPath: "/api/healthcheck",
+		AppDataPath:     "/var/lib/piped",
+	},
+	"invidious": {
+		AppName:         "invidious",
+		ServiceName:     "af-invidious",
+		Category:        "Media",
+		DefaultPort:     8281,
+		HealthCheckPath: "/",
+		AppDataPath:     "/var/lib/invidious",
+	},
 	"plex": {
 		AppName:           "plex",
 		ServiceName:       "plexmediaserver",

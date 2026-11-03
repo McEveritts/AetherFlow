@@ -63,6 +63,17 @@ jobs:
       - name: Test Release Routing
         run: python3 -m unittest discover -s tests -p 'test_release_workflow.py' -v
 
+      - name: Test YouTube Marketplace Packages
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends python3-yaml apache2-bin jq
+          bash -n packages/youtube-common.sh
+          for app in invidious piped; do
+            bash -n "packages/package/install/installpackage-${app}"
+            bash -n "packages/package/remove/removepackage-${app}"
+          done
+          PATH="/usr/sbin:$PATH" /usr/bin/python3 -m unittest discover -s tests -p 'test_youtube_packages.py' -v
+
       - name: Secret Scan (Gitleaks Gate)
         run: |
           GITLEAKS_VERSION="8.24.2"

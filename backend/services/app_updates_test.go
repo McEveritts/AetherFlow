@@ -2,11 +2,13 @@ package services
 
 import (
 	"aetherflow/db"
+	"aetherflow/models"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -26,6 +28,37 @@ func TestExtractVersionAndCompare(t *testing.T) {
 	}
 	if IsRemoteVersionNewer("1.23.0", "1.22.1") {
 		t.Fatal("expected 1.22.1 to not be newer than 1.23.0")
+	}
+}
+
+func TestGitHeadTracking(t *testing.T) {
+	local := strings.Repeat("a", 40)
+	remote := strings.Repeat("b", 40)
+	if got, err := parseGitHead(remote + "\tHEAD\n"); err != nil || got != remote {
+		t.Fatalf("parseGitHead() = %q, %v", got, err)
+	}
+	for _, invalid := range []string{"", "1.2.3", "abc123 HEAD", strings.Repeat("g", 40)} {
+		if _, err := parseGitHead(invalid); err == nil {
+			t.Errorf("expected invalid commit %q to be rejected", invalid)
+		}
+	}
+	if !IsRemoteVersionNewer(local, remote) || IsRemoteVersionNewer(local, local) {
+		t.Fatal("Git updates must compare full commit identity, not numeric version tokens")
+	}
+	path := filepath.Join(t.TempDir(), "head")
+	if err := os.WriteFile(path, []byte(local+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	pkg := models.Package{UpdateSource: "git", UpdateRepoURL: "https://github.com/TeamPiped/Piped.git"}
+	pkg.VersionCommand = []string{"cat", path}
+	if runtime.GOOS == "windows" {
+		pkg.VersionCommand = []string{"cmd", "/c", "type", path}
+	}
+	if got, err := detectInstalledVersion(pkg); err != nil || got != local {
+		t.Fatalf("detectInstalledVersion(git) = %q, %v", got, err)
+	}
+	if !shouldTrackPackage(pkg) {
+		t.Fatal("expected Git HEAD package to be tracked")
 	}
 }
 

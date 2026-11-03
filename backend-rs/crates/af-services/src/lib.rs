@@ -2352,6 +2352,41 @@ mod tests {
     }
 
     #[test]
+    fn test_embedded_youtube_marketplace_contracts() {
+        let catalog: Vec<Package> = serde_json::from_str(EMBEDDED_PACKAGES_JSON).unwrap();
+        let automation: HashMap<String, PackageAutomation> =
+            serde_json::from_str(EMBEDDED_AUTOMATION_JSON).unwrap();
+        for (app, port, units) in [
+            (
+                "piped",
+                8280,
+                vec![
+                    "af-piped.service",
+                    "af-piped-api.service",
+                    "af-piped-proxy.service",
+                ],
+            ),
+            (
+                "invidious",
+                8281,
+                vec!["af-invidious.service", "af-invidious-companion.service"],
+            ),
+        ] {
+            let package = catalog.iter().find(|package| package.name == app).unwrap();
+            assert_eq!(package.default_port, port);
+            assert_eq!(package.category, "Media");
+            assert_eq!(package.service_name, format!("af-{app}"));
+            let tracking = automation.get(app).unwrap();
+            assert_eq!(tracking.update_source, "git");
+            assert_eq!(
+                tracking.version_command,
+                vec!["cat".to_string(), format!("/opt/{app}/.af-version")]
+            );
+            assert_eq!(tracking.sandbox_service_ids, units);
+        }
+    }
+
+    #[test]
     fn test_validate_server_url_blocks_ssrf() {
         assert!(validate_server_url("http://127.0.0.1:8096").is_ok());
         assert!(validate_server_url("http://169.254.169.254/latest/meta-data").is_err());

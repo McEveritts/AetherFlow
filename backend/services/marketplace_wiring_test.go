@@ -17,8 +17,8 @@ func TestCatalogBlueprintsAndAutomationCoverage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadPackagesCatalog() failed: %v", err)
 	}
-	if len(pkgs) != 75 {
-		t.Fatalf("expected 75 catalog packages, got %d", len(pkgs))
+	if len(pkgs) != 77 {
+		t.Fatalf("expected 77 catalog packages, got %d", len(pkgs))
 	}
 
 	automation := loadPackageAutomation()
@@ -127,6 +127,8 @@ func TestCatalogBlueprintsAndAutomationCoverage(t *testing.T) {
 		"pyload":         8000,
 		"requestrr":      4545,
 		"seedcross":      8019,
+		"piped":          8280,
+		"invidious":      8281,
 		"unmanic":        8888,
 	}
 	for app, wantPort := range expectedPorts {
@@ -180,8 +182,8 @@ func TestCatalogBlueprintsAndAutomationCoverage(t *testing.T) {
 				count++
 			}
 		}
-		if count != 75 {
-			t.Errorf("expected 75 installpackage-* scripts, found %d", count)
+		if count != 77 {
+			t.Errorf("expected 77 installpackage-* scripts, found %d", count)
 		}
 	}
 	removeEntries, err := os.ReadDir(filepath.Join("..", "..", "packages", "package", "remove"))
@@ -192,8 +194,8 @@ func TestCatalogBlueprintsAndAutomationCoverage(t *testing.T) {
 				count++
 			}
 		}
-		if count != 75 {
-			t.Errorf("expected 75 removepackage-* scripts, found %d", count)
+		if count != 77 {
+			t.Errorf("expected 77 removepackage-* scripts, found %d", count)
 		}
 	}
 }

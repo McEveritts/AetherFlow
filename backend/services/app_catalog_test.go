@@ -15,8 +15,8 @@ func TestCatalog55Packages(t *testing.T) {
 		t.Fatalf("loadPackagesCatalog() error: %v", err)
 	}
 
-	if len(pkgs) != 75 {
-		t.Fatalf("expected 75 packages in packages.json, got %d", len(pkgs))
+	if len(pkgs) != 77 {
+		t.Fatalf("expected 77 packages in packages.json, got %d", len(pkgs))
 	}
 
 	for _, p := range pkgs {
@@ -87,13 +87,28 @@ func TestBlueprintDependencies(t *testing.T) {
 	}
 }
 
+func TestExperimentalYouTubeCatalog(t *testing.T) {
+	t.Setenv("AETHERFLOW_PACKAGES_CONFIG", filepath.Join("..", "config", "packages.json"))
+	t.Setenv("AETHERFLOW_PACKAGE_AUTOMATION_CONFIG", filepath.Join("..", "config", "package_automation.json"))
+	for app, port := range map[string]int{"piped": 8280, "invidious": 8281} {
+		blueprint := GetBlueprint(app)
+		if blueprint == nil || blueprint.DefaultPort != port || blueprint.ServiceName != "af-"+app {
+			t.Errorf("invalid %s blueprint: %+v", app, blueprint)
+		}
+		units := loadPackageAutomation()[app].SandboxServiceIDs
+		if !slices.Contains(units, "af-"+app+".service") || len(units) < 2 {
+			t.Errorf("%s must manage its companion units: %v", app, units)
+		}
+	}
+}
+
 func TestAutomation55CoverageAndTracking(t *testing.T) {
 	t.Setenv("AETHERFLOW_PACKAGES_CONFIG", filepath.Join("..", "config", "packages.json"))
 	t.Setenv("AETHERFLOW_PACKAGE_AUTOMATION_CONFIG", filepath.Join("..", "config", "package_automation.json"))
 
 	automation := loadPackageAutomation()
-	if len(automation) != 75 {
-		t.Fatalf("expected exactly 75 automation entries, got %d", len(automation))
+	if len(automation) != 77 {
+		t.Fatalf("expected exactly 77 automation entries, got %d", len(automation))
 	}
 
 	if _, ok := automation["portainer"]; ok {

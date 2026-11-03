@@ -1,0 +1,114 @@
+#!/bin/bash
+set -euo pipefail
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SELF_DIR}/../../common.sh"
+source "${SELF_DIR}/../../youtube-common.sh"
+
+youtube_init piped 8280
+report_progress 10 "Preparing experimental native Piped stack..."
+apt-get install --no-remove -y -qq openjdk-21-jdk-headless apache2-bin build-essential pkg-config libssl-dev cargo rustc >> "$LOGFILE" 2>&1
+ensure_node 24
+API_PORT="$(youtube_private_port api)"
+PROXY_PORT="$(youtube_private_port proxy)"
+youtube_database
+PROXY_SECRET="$(youtube_secret proxy-secret)"
+
+report_progress 25 "Building Piped frontend, API and media proxy as the service user..."
+youtube_source TeamPiped/Piped "${INSTALL_DIR}/frontend"
+youtube_source TeamPiped/Piped-Backend "${INSTALL_DIR}/backend"
+youtube_source TeamPiped/Piped-Proxy "${INSTALL_DIR}/proxy"
+BUILD_DIR="$(mktemp -d "${DATA_DIR}/backend-build-XXXXXX")"
+chown "$APP_NAME:$APP_NAME" "$BUILD_DIR"
+trap 'rm -rf "$BUILD_DIR"' EXIT
+runuser -u "$APP_NAME" -- cp -a "${INSTALL_DIR}/backend/." "${BUILD_DIR}/"
+python3 - "${BUILD_DIR}/src/main/java/me/kavin/piped/server/ServerLauncher.java" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+source = path.read_text()
+old = 'new InetSocketAddress(Constants.PORT)'
+new = 'new InetSocketAddress("127.0.0.1", Constants.PORT)'
+if old not in source and new not in source:
+    sys.exit('Piped listener contract changed; refusing to expose the API on all interfaces')
+path.write_text(source.replace(old, new))
+PY
+runuser -u "$APP_NAME" -- env HOME="$DATA_DIR" npm install --prefix "${DATA_DIR}/tools" pnpm@10.11.0 >> "$LOGFILE" 2>&1
+runuser -u "$APP_NAME" -- env HOME="$DATA_DIR" bash -euc 'cd "$1"; "$2" install --frozen-lockfile; VITE_PIPED_API="$3/api" VITE_PIPED_PROXY="$3/proxy" "$2" build' _ "${INSTALL_DIR}/frontend" "${DATA_DIR}/tools/node_modules/.bin/pnpm" "https://${APP_DOMAIN}" >> "$LOGFILE" 2>&1
+runuser -u "$APP_NAME" -- env HOME="$DATA_DIR" bash -euc 'cd "$1"; ./gradlew --no-daemon shadowJar' _ "$BUILD_DIR" >> "$LOGFILE" 2>&1
+runuser -u "$APP_NAME" -- env HOME="$DATA_DIR" cargo build --locked --release --manifest-path "${INSTALL_DIR}/proxy/Cargo.toml" >> "$LOGFILE" 2>&1
+install -m 644 "${BUILD_DIR}/build/libs/piped-1.0-all.jar" "${INSTALL_DIR}/piped.jar"
+
+report_progress 70 "Configuring private Piped API, proxy and Apache frontend..."
+cat > "${CONFIG_DIR}/managed.properties" <<EOF
+PORT:${API_PORT}
+HTTP_WORKERS:2
+PROXY_PART:https://${APP_DOMAIN}/proxy
+PROXY_HASH_SECRET:${PROXY_SECRET}
+API_URL:https://${APP_DOMAIN}/api
+FRONTEND_URL:https://${APP_DOMAIN}
+DISABLE_REGISTRATION:true
+hibernate.connection.url:jdbc:postgresql://127.0.0.1:5432/piped
+hibernate.connection.driver_class:org.postgresql.Driver
+hibernate.dialect:org.hibernate.dialect.PostgreSQLDialect
+hibernate.connection.username:piped
+hibernate.connection.password:${DB_PASSWORD}
+EOF
+python3 - "$CONFIG_DIR" <<'PY'
+import pathlib
+import sys
+
+directory = pathlib.Path(sys.argv[1])
+path = directory / 'config.properties'
+managed = (directory / 'managed.properties').read_text().splitlines()
+keys = {line.split(':', 1)[0] for line in managed}
+existing = path.read_text().splitlines() if path.exists() else []
+preserved = [line for line in existing if line.split(':', 1)[0].split('=', 1)[0].strip() not in keys]
+path.write_text('\n'.join(preserved + managed) + '\n')
+(directory / 'managed.properties').unlink()
+PY
+ln -sfn "${CONFIG_DIR}/config.properties" "${DATA_DIR}/config.properties"
+cat > "${CONFIG_DIR}/runtime.env" <<EOF
+BIND=127.0.0.1:${PROXY_PORT}
+HASH_SECRET=${PROXY_SECRET}
+EOF
+cat > "${CONFIG_DIR}/httpd.conf" <<EOF
+ServerRoot /etc/apache2
+ServerName ${APP_DOMAIN}
+PidFile ${DATA_DIR}/httpd.pid
+DefaultRuntimeDir ${DATA_DIR}
+Listen 127.0.0.1:${APP_PORT}
+LoadModule mpm_event_module /usr/lib/apache2/modules/mod_mpm_event.so
+LoadModule authz_core_module /usr/lib/apache2/modules/mod_authz_core.so
+LoadModule dir_module /usr/lib/apache2/modules/mod_dir.so
+LoadModule mime_module /usr/lib/apache2/modules/mod_mime.so
+LoadModule proxy_module /usr/lib/apache2/modules/mod_proxy.so
+LoadModule proxy_http_module /usr/lib/apache2/modules/mod_proxy_http.so
+TypesConfig /etc/mime.types
+ErrorLog /proc/self/fd/2
+DocumentRoot ${INSTALL_DIR}/frontend/dist
+DirectoryIndex index.html
+ProxyRequests Off
+ProxyPass /api/ http://127.0.0.1:${API_PORT}/
+ProxyPassReverse /api/ http://127.0.0.1:${API_PORT}/
+ProxyPass /proxy/ http://127.0.0.1:${PROXY_PORT}/
+ProxyPassReverse /proxy/ http://127.0.0.1:${PROXY_PORT}/
+<Directory ${INSTALL_DIR}/frontend/dist>
+    Require all granted
+    FallbackResource /index.html
+</Directory>
+EOF
+chown "root:$APP_NAME" "${CONFIG_DIR}/config.properties" "${CONFIG_DIR}/runtime.env" "${CONFIG_DIR}/httpd.conf"
+chmod 640 "${CONFIG_DIR}/config.properties" "${CONFIG_DIR}/runtime.env" "${CONFIG_DIR}/httpd.conf"
+youtube_unit af-piped-api "/usr/bin/java -jar ${INSTALL_DIR}/piped.jar"
+youtube_unit af-piped-proxy "${INSTALL_DIR}/proxy/target/release/piped-proxy"
+youtube_unit af-piped "/usr/sbin/apache2 -f ${CONFIG_DIR}/httpd.conf -DFOREGROUND" "af-piped-api.service af-piped-proxy.service"
+systemctl daemon-reload
+systemctl enable af-piped.service >> "$LOGFILE" 2>&1
+systemctl restart af-piped.service
+youtube_ready "http://127.0.0.1:${APP_PORT}/"
+youtube_ready "http://127.0.0.1:${APP_PORT}/api/healthcheck"
+systemctl is-active --quiet af-piped-api.service af-piped-proxy.service
+runuser -u "$APP_NAME" -- git -C "${INSTALL_DIR}/frontend" rev-parse HEAD > "${INSTALL_DIR}/.af-version"
+write_lock piped
+report_progress 100 "Experimental Piped installed. YouTube playback may require additional upstream anti-bot configuration."

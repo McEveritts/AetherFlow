@@ -503,7 +503,7 @@ fn extract_service_target(message: &str) -> &'static str {
         "prowlarr", "plex", "jellyfin", "emby", "threadfin", "dispatcharr", "transmission",
         "deluge", "jackett", "wireguard", "tailscale", "traefik", "duplicati", "filebot",
         "listenarr", "notifiarr", "novnc", "pyload", "quassel", "requestrr", "seedcross",
-        "unmanic", "x2go",
+        "unmanic", "x2go", "invidious", "piped",
     ] {
         if lower.contains(svc) {
             return svc;

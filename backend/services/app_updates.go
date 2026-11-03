@@ -3,6 +3,7 @@ package services
 import (
 	"aetherflow/db"
 	"aetherflow/models"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -43,6 +44,7 @@ var (
 
 	dottedVersionPattern  = regexp.MustCompile(`(?i)\bv?(\d+\.\d+(?:\.\d+)*(?:[._:+~-][0-9A-Za-z]+)*)\b`)
 	defaultVersionPattern = regexp.MustCompile(`(?i)\bv?([0-9]+(?:[._:+~-][0-9A-Za-z]+)*)\b`)
+	gitCommitPattern      = regexp.MustCompile(`^[a-f0-9]{40}$`)
 	numericVersionPattern = regexp.MustCompile(`\d+`)
 	initialCheckTriggered sync.Map
 )
@@ -287,6 +289,9 @@ func detectInstalledVersion(pkg models.Package) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("version command failed: %w", err)
 		}
+		if pkg.UpdateSource == "git" {
+			return parseGitHead(string(output))
+		}
 
 		version := extractVersion(string(output), pkg.VersionRegex)
 		if version == "" {
@@ -302,7 +307,23 @@ func (w *AppUpdateWatcher) detectLatestVersion(pkg models.Package) (string, stri
 		return detectLatestAptVersion(pkg.UpdatePackage)
 	case "github":
 		return w.detectLatestGitHubRelease(pkg.UpdateRepo)
-	case "git_tags", "git":
+	case "git":
+		repoURL := pkg.UpdateRepoURL
+		if repoURL == "" && pkg.UpdateRepo != "" {
+			repoURL = "https://github.com/" + pkg.UpdateRepo + ".git"
+		}
+		if repoURL == "" {
+			return "", "", fmt.Errorf("missing repository URL")
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		output, err := exec.CommandContext(ctx, "git", "ls-remote", "--exit-code", repoURL, "HEAD").Output()
+		if err != nil {
+			return "", "", fmt.Errorf("git ls-remote HEAD failed: %w", err)
+		}
+		version, err := parseGitHead(string(output))
+		return version, strings.TrimSuffix(repoURL, ".git") + "/commits/HEAD", err
+	case "git_tags":
 		repoURL := pkg.UpdateRepoURL
 		if repoURL == "" && pkg.UpdateRepo != "" {
 			repoURL = "https://github.com/" + pkg.UpdateRepo + ".git"
@@ -461,7 +482,18 @@ func normalizeVersionTokens(raw string) []int {
 	return tokens
 }
 
+func parseGitHead(output string) (string, error) {
+	fields := strings.Fields(output)
+	if len(fields) == 0 || !gitCommitPattern.MatchString(fields[0]) {
+		return "", fmt.Errorf("invalid Git HEAD commit")
+	}
+	return fields[0], nil
+}
+
 func IsRemoteVersionNewer(local, remote string) bool {
+	if gitCommitPattern.MatchString(local) && gitCommitPattern.MatchString(remote) {
+		return local != remote
+	}
 	localTokens := normalizeVersionTokens(local)
 	remoteTokens := normalizeVersionTokens(remote)
 	if len(localTokens) == 0 || len(remoteTokens) == 0 {

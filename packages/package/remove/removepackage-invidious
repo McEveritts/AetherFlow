@@ -1,0 +1,6 @@
+#!/bin/bash
+set -euo pipefail
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SELF_DIR}/../../common.sh"
+source "${SELF_DIR}/../../youtube-common.sh"
+youtube_remove invidious af-invidious-companion

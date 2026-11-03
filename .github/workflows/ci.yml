@@ -64,6 +64,24 @@ jobs:
       - name: Test Upgrade and Rollback
         run: python3 -m unittest discover -s tests -p 'test_jellyseerr_installer.py' -v
 
+  youtube-packages:
+    name: Invidious and Piped Package Regression Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Test YouTube Marketplace Packages
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends python3-yaml apache2-bin jq
+          bash -n packages/youtube-common.sh
+          for app in invidious piped; do
+            bash -n "packages/package/install/installpackage-${app}"
+            bash -n "packages/package/remove/removepackage-${app}"
+          done
+          PATH="/usr/sbin:$PATH" /usr/bin/python3 -m unittest discover -s tests -p 'test_youtube_packages.py' -v
+
   frontend:
     name: Frontend (Next.js Static Export & Tests)
     runs-on: ubuntu-latest

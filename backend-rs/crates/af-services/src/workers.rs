@@ -1151,6 +1151,10 @@ async fn detect_installed_version(pkg: &Package) -> anyhow::Result<String> {
                 );
             }
 
+            if pkg.update_source == "git" {
+                return parse_git_head(&String::from_utf8_lossy(&out.stdout));
+            }
+
             let combined = format!(
                 "{}\n{}",
                 String::from_utf8_lossy(&out.stdout),
@@ -1214,7 +1218,29 @@ async fn detect_latest_version(
             } else {
                 String::new()
             };
-            detect_latest_git_tag(&repo_url, &pkg.update_repo).await
+            if pkg.update_source == "git" {
+                if repo_url.is_empty() {
+                    anyhow::bail!("missing repository URL");
+                }
+                let output = tokio::time::timeout(
+                    Duration::from_secs(20),
+                    Command::new("git")
+                        .args(["ls-remote", "--exit-code", &repo_url, "HEAD"])
+                        .output(),
+                )
+                .await
+                .map_err(|_| anyhow::anyhow!("git ls-remote HEAD timed out"))??;
+                if !output.status.success() {
+                    anyhow::bail!("git ls-remote HEAD failed: {}", output.status);
+                }
+                let head = parse_git_head(&String::from_utf8_lossy(&output.stdout))?;
+                Ok((
+                    head,
+                    format!("{}/commits/HEAD", repo_url.trim_end_matches(".git")),
+                ))
+            } else {
+                detect_latest_git_tag(&repo_url, &pkg.update_repo).await
+            }
         }
         other => anyhow::bail!("unsupported update source {:?}", other),
     }
@@ -1385,8 +1411,26 @@ fn normalize_version_tokens(raw: &str) -> Vec<u64> {
         .collect()
 }
 
+fn parse_git_head(output: &str) -> anyhow::Result<String> {
+    let head = output.split_whitespace().next().unwrap_or_default();
+    if !is_git_commit(head) {
+        anyhow::bail!("invalid Git HEAD commit");
+    }
+    Ok(head.to_string())
+}
+
+fn is_git_commit(value: &str) -> bool {
+    value.len() == 40
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 /// Compares two version strings by numeric segments matching Go's `IsRemoteVersionNewer`.
 pub fn is_remote_version_newer(local: &str, remote: &str) -> bool {
+    if is_git_commit(local) && is_git_commit(remote) {
+        return local != remote;
+    }
     let local_tokens = normalize_version_tokens(local);
     let remote_tokens = normalize_version_tokens(remote);
     if local_tokens.is_empty() || remote_tokens.is_empty() {
@@ -1686,6 +1730,18 @@ mod tests {
         assert!(is_remote_version_newer("10.9.10", "10.9.11"));
         assert!(!is_remote_version_newer("10.9.11", "10.9.11"));
         assert!(!is_remote_version_newer("10.10.0", "10.9.11"));
+    }
+
+    #[test]
+    fn test_git_head_tracking() {
+        let local = "a".repeat(40);
+        let remote = "b".repeat(40);
+        assert_eq!(parse_git_head(&format!("{}\tHEAD\n", remote)).unwrap(), remote);
+        for invalid in ["", "v1.2.3", "abc123 HEAD", &"g".repeat(40)] {
+            assert!(parse_git_head(invalid).is_err());
+        }
+        assert!(is_remote_version_newer(&local, &remote));
+        assert!(!is_remote_version_newer(&local, &local));
     }
 
     #[test]

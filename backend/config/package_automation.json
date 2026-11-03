@@ -2207,5 +2207,40 @@
     "sandbox_service_units": [
       "x2goserver.service"
     ]
+  },
+  "piped": {
+    "update_source": "git",
+    "update_repo_url": "https://github.com/TeamPiped/Piped.git",
+    "version_command": [
+      "cat",
+      "/opt/piped/.af-version"
+    ],
+    "sandbox_profile": "java",
+    "sandbox_rw_paths": [
+      "/var/lib/piped",
+      "-/mnt/unionfs"
+    ],
+    "sandbox_service_units": [
+      "af-piped.service",
+      "af-piped-api.service",
+      "af-piped-proxy.service"
+    ]
+  },
+  "invidious": {
+    "update_source": "git",
+    "update_repo_url": "https://github.com/iv-org/invidious.git",
+    "version_command": [
+      "cat",
+      "/opt/invidious/.af-version"
+    ],
+    "sandbox_profile": "node",
+    "sandbox_rw_paths": [
+      "/var/lib/invidious",
+      "-/mnt/unionfs"
+    ],
+    "sandbox_service_units": [
+      "af-invidious.service",
+      "af-invidious-companion.service"
+    ]
   }
 }

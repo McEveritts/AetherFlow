@@ -1,0 +1,75 @@
+#!/bin/bash
+set -euo pipefail
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SELF_DIR}/../../common.sh"
+source "${SELF_DIR}/../../youtube-common.sh"
+
+youtube_init invidious 8281
+COMPANION_KEY="$(youtube_secret companion-key 8)"
+if [[ ! "$COMPANION_KEY" =~ ^[a-zA-Z0-9]{16}$ ]]; then
+    print_error "Invidious companion key must contain exactly 16 alphanumeric characters. Back up and remove ${CONFIG_DIR}/companion-key before reinstalling to generate a compatible key."
+    exit 1
+fi
+report_progress 10 "Preparing experimental native Invidious and companion..."
+apt-get install --no-remove -y -qq build-essential libssl-dev libxml2-dev libyaml-dev libgmp-dev libreadline-dev librsvg2-bin libsqlite3-dev zlib1g-dev libpcre3-dev libevent-dev fonts-open-sans python3-yaml >> "$LOGFILE" 2>&1
+case "$(uname -m)" in
+    x86_64) ARCH=x86_64 ;;
+    aarch64) ARCH=aarch64 ;;
+    *) print_error "Invidious requires Linux x86_64 or aarch64."; exit 1 ;;
+esac
+TMP_DIR="$(mktemp -d /tmp/af-invidious-XXXXXX)"
+trap 'rm -rf "$TMP_DIR"' EXIT
+CRYSTAL_VERSION=1.22.2
+youtube_asset crystal-lang/crystal "$CRYSTAL_VERSION" "crystal-${CRYSTAL_VERSION}-1-linux-${ARCH}-bundled.tar.gz" "${TMP_DIR}/crystal.tar.gz"
+install -d "${INSTALL_DIR}/crystal"
+tar -xzf "${TMP_DIR}/crystal.tar.gz" --strip-components=1 -C "${INSTALL_DIR}/crystal"
+youtube_asset iv-org/invidious-companion release-master "invidious_companion-${ARCH}-unknown-linux-gnu.tar.gz" "${TMP_DIR}/companion.tar.gz"
+tar -xzf "${TMP_DIR}/companion.tar.gz" -C "$TMP_DIR"
+install -m 755 "${TMP_DIR}/invidious_companion" "${INSTALL_DIR}/invidious_companion"
+
+report_progress 35 "Building Invidious as the service user..."
+youtube_source iv-org/invidious "${INSTALL_DIR}/source"
+runuser -u "$APP_NAME" -- env HOME="$DATA_DIR" PATH="${INSTALL_DIR}/crystal/bin:$PATH" bash -euc 'cd "$1"; make' _ "${INSTALL_DIR}/source" >> "$LOGFILE" 2>&1
+youtube_database
+HMAC_KEY="$(youtube_secret hmac-key)"
+COMPANION_PORT="$(youtube_private_port companion)"
+report_progress 70 "Configuring Invidious and its private playback companion..."
+python3 - "$CONFIG_DIR" "$APP_PORT" "$APP_DOMAIN" "$DB_PASSWORD" "$HMAC_KEY" "$COMPANION_KEY" "$COMPANION_PORT" <<'PY'
+import pathlib
+import sys
+import yaml
+
+directory, port, domain, password, hmac, companion, companion_port = sys.argv[1:]
+path = pathlib.Path(directory) / 'config.yml'
+config = yaml.safe_load(path.read_text()) if path.exists() else {}
+config.update(host_binding='127.0.0.1', port=int(port), domain=domain, https_only=True, external_port=443,
+              db=dict(user='invidious', password=password, host='127.0.0.1', port=5432, dbname='invidious'),
+              hmac_key=hmac, invidious_companion_key=companion,
+              invidious_companion=[dict(private_url=f'http://127.0.0.1:{companion_port}/companion')],
+              check_tables=True, registration_enabled=False)
+path.write_text(yaml.safe_dump(config))
+PY
+cat > "${CONFIG_DIR}/runtime.env" <<EOF
+INVIDIOUS_CONFIG_FILE=${CONFIG_DIR}/config.yml
+EOF
+cat > "${CONFIG_DIR}/companion.env" <<EOF
+SERVER_SECRET_KEY=${COMPANION_KEY}
+HOST=127.0.0.1
+PORT=${COMPANION_PORT}
+CACHE_DIRECTORY=${DATA_DIR}/cache
+EOF
+chown "root:$APP_NAME" "${CONFIG_DIR}/config.yml" "${CONFIG_DIR}/runtime.env" "${CONFIG_DIR}/companion.env"
+chmod 640 "${CONFIG_DIR}/config.yml" "${CONFIG_DIR}/runtime.env" "${CONFIG_DIR}/companion.env"
+runuser -u "$APP_NAME" -- env INVIDIOUS_CONFIG_FILE="${CONFIG_DIR}/config.yml" bash -euc 'cd "$1"; ./invidious --migrate' _ "${INSTALL_DIR}/source" >> "$LOGFILE" 2>&1
+youtube_unit af-invidious-companion "${INSTALL_DIR}/invidious_companion"
+sed -i 's|/runtime.env|/companion.env|' /etc/systemd/system/af-invidious-companion.service
+youtube_unit af-invidious "${INSTALL_DIR}/source/invidious" af-invidious-companion.service
+sed -i "s|WorkingDirectory=${DATA_DIR}|WorkingDirectory=${INSTALL_DIR}/source|" /etc/systemd/system/af-invidious.service
+systemctl daemon-reload
+systemctl enable af-invidious.service >> "$LOGFILE" 2>&1
+systemctl restart af-invidious.service
+youtube_ready "http://127.0.0.1:${APP_PORT}/"
+systemctl is-active --quiet af-invidious-companion.service
+runuser -u "$APP_NAME" -- git -C "${INSTALL_DIR}/source" rev-parse HEAD > "${INSTALL_DIR}/.af-version"
+write_lock invidious
+report_progress 100 "Experimental Invidious installed. YouTube playback depends on upstream anti-bot compatibility."

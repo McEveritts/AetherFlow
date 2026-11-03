@@ -782,5 +782,27 @@
         "service_type": "systemd",
         "service_name": "x2goserver",
         "default_port": 0
+    },
+    {
+        "name": "piped",
+        "label": "Piped",
+        "description": "Experimental privacy-friendly YouTube frontend with a native Java API, Rust media proxy and PostgreSQL. Playback may be affected by YouTube anti-bot changes.",
+        "lock_file": "/install/.piped.lock",
+        "category": "Media",
+        "service_type": "systemd",
+        "service_name": "af-piped",
+        "default_port": 8280,
+        "web_path": "/"
+    },
+    {
+        "name": "invidious",
+        "label": "Invidious",
+        "description": "Experimental privacy-focused YouTube frontend with native PostgreSQL and Invidious companion playback services. Playback may be affected by YouTube anti-bot changes.",
+        "lock_file": "/install/.invidious.lock",
+        "category": "Media",
+        "service_type": "systemd",
+        "service_name": "af-invidious",
+        "default_port": 8281,
+        "web_path": "/"
     }
 ]
