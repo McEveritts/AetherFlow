@@ -2,6 +2,7 @@
 
 import { Wifi, WifiOff, Radio, User, Menu, LogOut, ChevronDown, Bell, Shield, AlertTriangle, Loader2, Database, UploadCloud, Search } from 'lucide-react';
 import { NAVIGATION, BOTTOM_NAVIGATION } from './Sidebar';
+import { useShallow } from 'zustand/react/shallow';
 import { useSystemStore } from '@/store/useSystemStore';
 import { useConnectionStore } from '@/store/useConnectionStore';
 import { useTaskStore } from '@/store/useTaskStore';
@@ -18,9 +19,22 @@ export default function Header() {
         setIsMobileMenuOpen,
         setIsCommandPaletteOpen,
         hapticFeedback,
-    } = useSystemStore();
-    const { connectionState, reconnectAttempt } = useConnectionStore();
-    const { tasks } = useTaskStore();
+    } = useSystemStore(
+        useShallow((state) => ({
+            activeTab: state.activeTab,
+            isMobileMenuOpen: state.isMobileMenuOpen,
+            setIsMobileMenuOpen: state.setIsMobileMenuOpen,
+            setIsCommandPaletteOpen: state.setIsCommandPaletteOpen,
+            hapticFeedback: state.hapticFeedback,
+        }))
+    );
+    const { connectionState, reconnectAttempt } = useConnectionStore(
+        useShallow((state) => ({
+            connectionState: state.connectionState,
+            reconnectAttempt: state.reconnectAttempt,
+        }))
+    );
+    const tasks = useTaskStore((state) => state.tasks);
     const { user, logout } = useAuth();
     const { toasts, toggleDrawer } = useToast();
     const [dropdownOpen, setDropdownOpen] = useState(false);

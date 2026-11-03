@@ -7,9 +7,10 @@ use once_cell::sync::Lazy;
 use rand::RngCore;
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::sync::{Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, oneshot, watch, Notify};
+use tokio::time::MissedTickBehavior;
 
 #[derive(Clone, Debug)]
 struct WsTicketEntry {
@@ -21,62 +22,407 @@ struct WsTicketEntry {
 static WS_TICKETS: Lazy<Mutex<HashMap<String, WsTicketEntry>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
-static WS_BROADCAST_TX: Lazy<broadcast::Sender<String>> = Lazy::new(|| {
-    let (tx, _) = broadcast::channel(256);
-    tx
-});
+const METRICS_INTERVAL: Duration = Duration::from_secs(1);
+const SERVICES_INTERVAL: Duration = Duration::from_secs(15);
 
-static CACHED_METRICS_JSON: Lazy<RwLock<Option<serde_json::Value>>> =
-    Lazy::new(|| RwLock::new(None));
-static CACHED_SERVICES_JSON: Lazy<RwLock<Option<serde_json::Value>>> =
-    Lazy::new(|| RwLock::new(None));
+#[derive(Default)]
+struct ServiceCache {
+    value: Option<serde_json::Value>,
+    in_flight: bool,
+    last_finished: Option<Instant>,
+}
 
-pub fn broadcast_ws_message(payload: &serde_json::Value) {
-    if let Ok(text) = serde_json::to_string(payload) {
-        let _ = WS_BROADCAST_TX.send(text);
+struct Telemetry {
+    broadcast: broadcast::Sender<String>,
+    metrics: watch::Sender<Option<serde_json::Value>>,
+    services: Mutex<ServiceCache>,
+    service_refresh: Notify,
+}
+
+impl Telemetry {
+    fn new() -> Self {
+        let (broadcast, _) = broadcast::channel(256);
+        let (metrics, _) = watch::channel(None);
+        Self {
+            broadcast,
+            metrics,
+            services: Mutex::new(ServiceCache::default()),
+            service_refresh: Notify::new(),
+        }
+    }
+
+    fn metrics_message(&self, metrics: serde_json::Value) -> serde_json::Value {
+        let services = self
+            .services
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .value
+            .clone()
+            .unwrap_or(serde_json::Value::Null);
+        serde_json::json!({
+            "type": "METRICS_UPDATE",
+            "data": {
+                "system": metrics,
+                "services": services,
+            }
+        })
+    }
+
+    fn broadcast_message(&self, payload: &serde_json::Value) {
+        if let Ok(text) = serde_json::to_string(payload) {
+            let _ = self.broadcast.send(text);
+        }
+    }
+
+    fn needs_metrics(&self) -> bool {
+        self.broadcast.receiver_count() > 0 || self.metrics.borrow().is_none()
+    }
+
+    async fn collect_metrics<F>(&self, collector: F)
+    where
+        F: FnOnce() -> serde_json::Value + Send + 'static,
+    {
+        match tokio::task::spawn_blocking(collector).await {
+            Ok(metrics) => {
+                self.metrics.send_replace(Some(metrics.clone()));
+                if self.broadcast.receiver_count() > 0 {
+                    self.broadcast_message(&self.metrics_message(metrics));
+                }
+            }
+            Err(error) => tracing::warn!(%error, "WebSocket metrics collection failed"),
+        }
+    }
+
+    async fn metrics_loop<F>(self: Arc<Self>, collector: F)
+    where
+        F: Fn() -> serde_json::Value + Clone + Send + 'static,
+    {
+        let mut tick = tokio::time::interval(METRICS_INTERVAL);
+        tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        loop {
+            tick.tick().await;
+            if self.needs_metrics() {
+                self.collect_metrics(collector.clone()).await;
+            }
+        }
+    }
+
+    fn try_start_service_refresh<F>(self: &Arc<Self>, collector: F) -> Option<oneshot::Receiver<()>>
+    where
+        F: FnOnce() -> serde_json::Value + Send + 'static,
+    {
+        {
+            let mut services = self
+                .services
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if services.in_flight
+                || services
+                    .last_finished
+                    .is_some_and(|finished| finished.elapsed() < SERVICES_INTERVAL)
+            {
+                return None;
+            }
+            services.in_flight = true;
+        }
+
+        let telemetry = Arc::clone(self);
+        let (finished_sender, finished_receiver) = oneshot::channel();
+        match std::thread::Builder::new()
+            .name("ws-services".to_string())
+            .spawn(move || {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(collector));
+                let failed = result.is_err();
+                {
+                    let mut services = telemetry
+                        .services
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    services.in_flight = false;
+                    services.last_finished = Some(Instant::now());
+                    if let Ok(value) = result {
+                        services.value = Some(value);
+                    }
+                }
+                if failed {
+                    tracing::warn!("WebSocket service collection failed");
+                }
+                let _ = finished_sender.send(());
+            }) {
+            Ok(_) => Some(finished_receiver),
+            Err(error) => {
+                {
+                    let mut services = self
+                        .services
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    services.in_flight = false;
+                    services.last_finished = Some(Instant::now());
+                }
+                tracing::warn!(%error, "Could not start WebSocket service collector");
+                None
+            }
+        }
+    }
+
+    async fn services_loop<F>(self: Arc<Self>, collector: F)
+    where
+        F: Fn() -> serde_json::Value + Clone + Send + 'static,
+    {
+        let mut tick = tokio::time::interval(SERVICES_INTERVAL);
+        tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                _ = tick.tick() => {}
+                _ = self.service_refresh.notified() => {}
+            }
+            if self.broadcast.receiver_count() == 0 {
+                continue;
+            }
+            if let Some(refresh) = self.try_start_service_refresh(collector.clone()) {
+                let _ = refresh.await;
+                tick.reset();
+            }
+        }
+    }
+
+    async fn initial_snapshot(&self) -> serde_json::Value {
+        let mut metrics = self.metrics.subscribe();
+        loop {
+            let cached = metrics.borrow_and_update().clone();
+            if let Some(cached) = cached {
+                return self.metrics_message(cached);
+            }
+            if metrics.changed().await.is_err() {
+                return self.metrics_message(serde_json::Value::Null);
+            }
+        }
     }
 }
 
+static TELEMETRY: Lazy<Arc<Telemetry>> = Lazy::new(|| Arc::new(Telemetry::new()));
+
+pub fn broadcast_ws_message(payload: &serde_json::Value) {
+    TELEMETRY.broadcast_message(payload);
+}
+
 pub fn start_metrics_broadcast_loop() {
-    tokio::spawn(async move {
-        let mut tick = tokio::time::interval(Duration::from_secs(1));
-        let mut svc_counter = 0u32;
-        loop {
-            tick.tick().await;
-            let metrics = af_hardware::get_system_metrics_core();
-            let metrics_val = serde_json::to_value(&metrics).unwrap_or_default();
-            if let Ok(mut guard) = CACHED_METRICS_JSON.write() {
-                *guard = Some(metrics_val.clone());
-            }
+    let telemetry = Arc::clone(&TELEMETRY);
+    tokio::spawn(telemetry.metrics_loop(|| {
+        serde_json::to_value(af_hardware::get_system_metrics_core()).unwrap_or_default()
+    }));
 
-            let services_val = if svc_counter % 15 == 0 {
-                let svcs = af_services::get_active_services();
-                let val = serde_json::to_value(&svcs).unwrap_or_default();
-                if let Ok(mut guard) = CACHED_SERVICES_JSON.write() {
-                    *guard = Some(val.clone());
-                }
-                val
-            } else {
-                CACHED_SERVICES_JSON
-                    .read()
-                    .ok()
-                    .and_then(|g| g.clone())
-                    .unwrap_or_else(|| serde_json::json!({}))
-            };
-            svc_counter = svc_counter.wrapping_add(1);
+    let telemetry = Arc::clone(&TELEMETRY);
+    tokio::spawn(telemetry.services_loop(|| {
+        serde_json::to_value(af_services::get_active_services()).unwrap_or_default()
+    }));
+}
 
-            if WS_BROADCAST_TX.receiver_count() > 0 {
-                let msg = serde_json::json!({
-                    "type": "METRICS_UPDATE",
-                    "data": {
-                        "system": metrics_val,
-                        "services": services_val,
-                    }
-                });
-                broadcast_ws_message(&msg);
+#[cfg(test)]
+mod telemetry_tests {
+    use super::Telemetry;
+    use serde_json::{json, Value};
+    use std::future::Future;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{mpsc, Arc, Mutex};
+    use std::task::Poll;
+    use std::time::Duration;
+    use tokio::sync::{broadcast, oneshot};
+
+    async fn watchdog<F: Future>(future: F) -> F::Output {
+        tokio::time::timeout(Duration::from_secs(10), future)
+            .await
+            .expect("telemetry operation did not make progress")
+    }
+
+    async fn receive_message(receiver: &mut broadcast::Receiver<String>) -> Value {
+        let text = watchdog(receiver.recv()).await.expect("broadcast closed");
+        serde_json::from_str(&text).expect("valid telemetry JSON")
+    }
+
+    #[test]
+    fn stalled_services_do_not_block_metrics_or_initial_snapshot() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .expect("test runtime");
+        runtime.block_on(assert_stalled_services_do_not_block_metrics_or_initial_snapshot());
+    }
+
+    async fn assert_stalled_services_do_not_block_metrics_or_initial_snapshot() {
+        let telemetry = Arc::new(Telemetry::new());
+        let mut receiver = telemetry.broadcast.subscribe();
+        let (started_sender, started_receiver) = oneshot::channel();
+        let (release_sender, release_receiver) = mpsc::channel();
+        let service_value = json!({
+            "Apache2 Web Server": {
+                "id": "apache2",
+                "status": "running",
+                "uptime": "Active",
+                "version": "system",
+                "managed_by": "systemd",
+                "process": "apache2",
+                "units": ["apache2"]
             }
+        });
+        let expected_services = service_value.clone();
+        let refresh = telemetry
+            .try_start_service_refresh(move || {
+                started_sender.send(()).expect("start receiver open");
+                release_receiver.recv().expect("release sender open");
+                service_value
+            })
+            .expect("first scan starts");
+        watchdog(started_receiver).await.expect("scan started");
+
+        for _attempt in 0..32 {
+            assert!(telemetry
+                .try_start_service_refresh(|| panic!("overlapping scan started"))
+                .is_none());
         }
-    });
+
+        let snapshot = telemetry.initial_snapshot();
+        tokio::pin!(snapshot);
+        assert!(matches!(futures::poll!(&mut snapshot), Poll::Pending));
+
+        let metrics = serde_json::to_value(af_models::SystemMetrics::default()).unwrap();
+        let collected_metrics = metrics.clone();
+        let metrics_loop =
+            tokio::spawn(Arc::clone(&telemetry).metrics_loop(move || collected_metrics.clone()));
+        let first_broadcast = receive_message(&mut receiver).await;
+        let first_snapshot = watchdog(snapshot).await;
+        assert_eq!(first_snapshot, first_broadcast);
+        assert_eq!(first_snapshot["type"], "METRICS_UPDATE");
+        assert_eq!(first_snapshot["data"]["system"], metrics);
+        assert!(first_snapshot["data"]["services"].is_null());
+
+        metrics_loop.abort();
+        let _ = metrics_loop.await;
+        let mut receiver = telemetry.broadcast.subscribe();
+        watchdog(telemetry.collect_metrics(|| json!({"cpu_usage": 42.0}))).await;
+        let next_broadcast = receive_message(&mut receiver).await;
+        assert_eq!(next_broadcast["data"]["system"]["cpu_usage"], 42.0);
+        assert!(next_broadcast["data"]["services"].is_null());
+
+        release_sender.send(()).expect("scan still waiting");
+        watchdog(refresh).await.expect("scan task completed");
+        assert!(telemetry
+            .try_start_service_refresh(|| panic!("fresh cache was rescanned"))
+            .is_none());
+        watchdog(telemetry.collect_metrics(|| json!({"cpu_usage": 43.0}))).await;
+        let updated_broadcast = receive_message(&mut receiver).await;
+        assert_eq!(updated_broadcast["data"]["system"]["cpu_usage"], 43.0);
+        assert_eq!(updated_broadcast["data"]["services"], expected_services);
+        assert_eq!(
+            watchdog(telemetry.initial_snapshot()).await["data"]["services"],
+            expected_services
+        );
+    }
+
+    #[test]
+    fn unknown_and_empty_service_caches_have_distinct_payloads() {
+        let telemetry = Telemetry::new();
+        let initial = telemetry.metrics_message(json!({}));
+        assert!(initial["data"]["services"].is_null());
+
+        telemetry.services.lock().unwrap().value = Some(json!({}));
+        let completed = telemetry.metrics_message(json!({}));
+        assert_eq!(completed["data"]["services"], json!({}));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn metrics_warm_once_without_subscribers() {
+        let telemetry = Arc::new(Telemetry::new());
+        assert!(telemetry.needs_metrics());
+        watchdog(telemetry.collect_metrics(|| json!({"cpu_usage": 1.0}))).await;
+        assert!(!telemetry.needs_metrics());
+
+        let receiver = telemetry.broadcast.subscribe();
+        assert!(telemetry.needs_metrics());
+        drop(receiver);
+        assert!(!telemetry.needs_metrics());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn subscriber_demand_starts_and_publishes_service_refresh() {
+        let telemetry = Arc::new(Telemetry::new());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (started_sender, started_receiver) = oneshot::channel();
+        let started_sender = Arc::new(Mutex::new(Some(started_sender)));
+        let (release_sender, release_receiver) = mpsc::channel();
+        let release_receiver = Arc::new(Mutex::new(release_receiver));
+        let collector = {
+            let calls = Arc::clone(&calls);
+            let started_sender = Arc::clone(&started_sender);
+            let release_receiver = Arc::clone(&release_receiver);
+            move || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                if let Some(sender) = started_sender.lock().unwrap().take() {
+                    let _ = sender.send(());
+                }
+                release_receiver.lock().unwrap().recv().unwrap();
+                json!({"apache2": {"status": "running"}})
+            }
+        };
+        let services_loop = tokio::spawn(Arc::clone(&telemetry).services_loop(collector));
+        tokio::task::yield_now().await;
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+        let mut receiver = telemetry.broadcast.subscribe();
+        telemetry.service_refresh.notify_one();
+        watchdog(started_receiver).await.expect("scan started");
+        for _attempt in 0..32 {
+            telemetry.service_refresh.notify_one();
+            assert!(telemetry
+                .try_start_service_refresh(|| panic!("overlapping scan started"))
+                .is_none());
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        let metrics_loop =
+            tokio::spawn(Arc::clone(&telemetry).metrics_loop(|| json!({"cpu_usage": 42.0})));
+        release_sender.send(()).expect("scan still waiting");
+        let expected_services = json!({"apache2": {"status": "running"}});
+        let published = watchdog(async {
+            loop {
+                let message = receive_message(&mut receiver).await;
+                if message["data"]["services"] == expected_services {
+                    break message;
+                }
+            }
+        })
+        .await;
+        assert_eq!(published["type"], "METRICS_UPDATE");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        services_loop.abort();
+        metrics_loop.abort();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn unwinding_service_refresh_preserves_cache_and_releases_single_flight() {
+        let telemetry = Arc::new(Telemetry::new());
+        let refresh = telemetry
+            .try_start_service_refresh(|| json!({"apache2": {"status": "running"}}))
+            .expect("first scan starts");
+        watchdog(refresh).await.expect("first scan completed");
+        {
+            let mut services = telemetry.services.lock().unwrap();
+            services.last_finished = None;
+        }
+
+        let refresh = telemetry
+            .try_start_service_refresh(|| panic!("simulated collector failure"))
+            .expect("retry starts");
+        watchdog(refresh).await.expect("failed scan was observed");
+        let services = telemetry.services.lock().unwrap();
+        assert!(!services.in_flight);
+        assert!(services.last_finished.is_some());
+        assert_eq!(
+            services.value,
+            Some(json!({"apache2": {"status": "running"}}))
+        );
+    }
 }
 
 pub fn issue_ws_ticket_for_user(user_id: i64, client_ip: &str) -> String {
@@ -215,31 +561,10 @@ pub async fn handle_websocket(
 
 async fn handle_ws_socket(socket: WebSocket) {
     let (mut sender, mut receiver) = socket.split();
-    let mut rx = WS_BROADCAST_TX.subscribe();
+    let mut rx = TELEMETRY.broadcast.subscribe();
+    TELEMETRY.service_refresh.notify_one();
 
-    // Immediately push frame 0 METRICS_UPDATE snapshot so the client renders right away
-    let initial_metrics = CACHED_METRICS_JSON
-        .read()
-        .ok()
-        .and_then(|g| g.clone())
-        .unwrap_or_else(|| {
-            serde_json::to_value(af_hardware::get_system_metrics_core()).unwrap_or_default()
-        });
-    let initial_services = CACHED_SERVICES_JSON
-        .read()
-        .ok()
-        .and_then(|g| g.clone())
-        .unwrap_or_else(|| {
-            serde_json::to_value(af_services::get_active_services()).unwrap_or_default()
-        });
-
-    let init_payload = serde_json::json!({
-        "type": "METRICS_UPDATE",
-        "data": {
-            "system": initial_metrics,
-            "services": initial_services,
-        }
-    });
+    let init_payload = TELEMETRY.initial_snapshot().await;
     if let Ok(text) = serde_json::to_string(&init_payload) {
         let _ = sender.send(Message::Text(text.into())).await;
     }

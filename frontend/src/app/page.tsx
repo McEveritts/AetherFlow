@@ -30,6 +30,44 @@ import OnboardingWizard from '@/components/layout/OnboardingWizard';
 import { ErrorBoundary } from '@/components/ui/ErrorBoundary';
 import useSWR from 'swr';
 
+function OverviewTelemetrySection() {
+  const { metrics, hardware, history, isLoading, isError, connectionState } = useMetrics();
+
+  if (isLoading) {
+    return <OverviewSkeleton />;
+  }
+
+  if (isError || !metrics) {
+    const isReconnecting = connectionState === 'RECONNECTING';
+    const isFallback = connectionState === 'FALLBACK';
+
+    return (
+      <div className="flex items-center justify-center h-full min-h-[50vh]">
+        <div className={`${isReconnecting ? 'bg-amber-500/10 border-amber-500/20' : isFallback ? 'bg-blue-500/10 border-blue-500/20' : 'bg-red-500/10 border-red-500/20'} border p-8 rounded-2xl flex flex-col items-center gap-4 text-center max-w-md backdrop-blur-md`}>
+          <div className={`w-12 h-12 ${isReconnecting ? 'bg-amber-500/20' : isFallback ? 'bg-blue-500/20' : 'bg-red-500/20'} rounded-full flex items-center justify-center text-2xl font-bold ${isReconnecting ? 'text-amber-400' : isFallback ? 'text-blue-400' : 'text-red-400'}`}>
+            {isReconnecting ? '⟳' : isFallback ? '◌' : '!'}
+          </div>
+          <h3 className="text-lg font-bold text-slate-200">
+            {isReconnecting ? 'Reconnecting...' : isFallback ? 'Degraded Mode' : 'System Offline'}
+          </h3>
+          <p className="text-sm text-slate-400">
+            {isReconnecting
+              ? 'Lost connection to AetherFlow backend. Attempting to reconnect automatically.'
+              : isFallback
+                ? 'Live connection unavailable. Polling for system data...'
+                : 'Unable to connect to the AetherFlow backend API. Make sure the Go service is running.'}
+          </p>
+          <p className={`text-xs font-mono px-2 py-1 rounded truncate max-w-full ${isReconnecting ? 'text-amber-400/80 bg-amber-500/10' : isFallback ? 'text-blue-400/80 bg-blue-500/10' : 'text-red-400/80 bg-red-500/10'}`}>
+            {isReconnecting ? `Attempt ${connectionState === 'RECONNECTING' ? 'in progress' : 'pending'}` : isFallback ? 'Waiting for data...' : 'Connection refused'}
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  return <OverviewTab metrics={metrics} hardware={hardware} history={history} />;
+}
+
 export default function Dashboard() {
   const { user } = useAuth();
   const { activeTab } = useSystemStore(
@@ -37,7 +75,6 @@ export default function Dashboard() {
       activeTab: state.activeTab,
     }))
   );
-  const { metrics, hardware, history, isLoading, isError, connectionState } = useMetrics();
 
   const { data: settingsData, mutate: mutateSettings } = useSWR('/api/v1/auth/settings');
 
@@ -46,53 +83,9 @@ export default function Dashboard() {
       return null;
     }
 
-    if (isLoading) {
-      if (activeTab === 'overview') {
-        return <OverviewSkeleton />;
-      }
-
-      return (
-        <div className="flex items-center justify-center h-full min-h-[50vh]">
-          <div className="flex flex-col items-center gap-4 text-slate-400">
-            <div className="w-10 h-10 border-4 border-indigo-500/20 border-t-indigo-500 rounded-full animate-spin"></div>
-            <p className="font-medium tracking-wide">Establishing Nexus Link...</p>
-          </div>
-        </div>
-      );
-    }
-
-    if (isError || !metrics) {
-      // Graduated error states instead of a single hard "System Offline" panel
-      const isReconnecting = connectionState === 'RECONNECTING';
-      const isFallback = connectionState === 'FALLBACK';
-
-      return (
-        <div className="flex items-center justify-center h-full min-h-[50vh]">
-          <div className={`${isReconnecting ? 'bg-amber-500/10 border-amber-500/20' : isFallback ? 'bg-blue-500/10 border-blue-500/20' : 'bg-red-500/10 border-red-500/20'} border p-8 rounded-2xl flex flex-col items-center gap-4 text-center max-w-md backdrop-blur-md`}>
-            <div className={`w-12 h-12 ${isReconnecting ? 'bg-amber-500/20' : isFallback ? 'bg-blue-500/20' : 'bg-red-500/20'} rounded-full flex items-center justify-center text-2xl font-bold ${isReconnecting ? 'text-amber-400' : isFallback ? 'text-blue-400' : 'text-red-400'}`}>
-              {isReconnecting ? '⟳' : isFallback ? '◌' : '!'}
-            </div>
-            <h3 className="text-lg font-bold text-slate-200">
-              {isReconnecting ? 'Reconnecting...' : isFallback ? 'Degraded Mode' : 'System Offline'}
-            </h3>
-            <p className="text-sm text-slate-400">
-              {isReconnecting
-                ? 'Lost connection to AetherFlow backend. Attempting to reconnect automatically.'
-                : isFallback
-                  ? 'Live connection unavailable. Polling for system data...'
-                  : 'Unable to connect to the AetherFlow backend API. Make sure the Go service is running.'}
-            </p>
-            <p className={`text-xs font-mono px-2 py-1 rounded truncate max-w-full ${isReconnecting ? 'text-amber-400/80 bg-amber-500/10' : isFallback ? 'text-blue-400/80 bg-blue-500/10' : 'text-red-400/80 bg-red-500/10'}`}>
-              {isReconnecting ? `Attempt ${connectionState === 'RECONNECTING' ? 'in progress' : 'pending'}` : isFallback ? 'Waiting for data...' : 'Connection refused'}
-            </p>
-          </div>
-        </div>
-      );
-    }
-
     switch (activeTab) {
       case 'overview':
-        return <OverviewTab metrics={metrics} hardware={hardware} history={history} />;
+        return <OverviewTelemetrySection />;
       case 'inbox':
         return <InboxTab />;
       case 'services':

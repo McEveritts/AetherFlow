@@ -196,9 +196,6 @@ body::before {
 
   contain: strict;
   isolation: isolate;
-  backface-visibility: hidden;
-  transform: translate3d(0, 0, 0);
-  will-change: transform;
   animation: var(--obs-aurora-animation);
 }
 
@@ -228,8 +225,6 @@ body::after {
   pointer-events: none !important;
   display: var(--obs-grain-display);
   contain: strict;
-  backface-visibility: hidden;
-  transform: translateZ(0);
   background-image:
     radial-gradient(circle at 50% 50%, transparent 55%, rgba(2, 6, 23, 0.72) 100%),
     url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.65' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.032'/%3E%3C/svg%3E");
@@ -252,8 +247,6 @@ body::after {
   border-right: 1px solid var(--obs-chromatic-border-fuchsia);
   border-radius: var(--obs-radius-2xl);
   box-shadow: var(--obs-shadow-card), var(--obs-chromatic-inset-card);
-  backface-visibility: hidden;
-  transform: translate3d(0, 0, 0);
   transition: transform var(--obs-duration-card) var(--obs-ease-spring-120),
               border-color var(--obs-duration-card) var(--obs-ease-out-120),
               box-shadow var(--obs-duration-card) var(--obs-ease-out-120),
@@ -275,8 +268,6 @@ body::after {
   pointer-events: none;
   z-index: 1;
   opacity: 0.28;
-  transform: translateZ(0);
-  will-change: opacity;
   transition: opacity var(--obs-duration-card) var(--obs-ease-out-120);
 }
 
@@ -331,7 +322,6 @@ body::after {
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
-  backface-visibility: hidden;
   transition: transform var(--obs-duration-fast) var(--obs-ease-out-120),
               background-color var(--obs-duration-fast) ease,
               border-color var(--obs-duration-fast) ease,
@@ -359,7 +349,6 @@ body::after {
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
   box-shadow: var(--obs-shadow-button-primary);
-  backface-visibility: hidden;
   transition: transform var(--obs-duration-fast) var(--obs-ease-out-120),
               border-color var(--obs-duration-fast) ease,
               box-shadow var(--obs-duration-fast) ease;
@@ -598,7 +587,6 @@ html {
 
 /* 120Hz GPU-Accelerated Rail & Interactive Primitives */
 .obs-gpu-120hz-rail {
-  will-change: width;
   transition:
     width 180ms var(--obs-ease-out-120),
     box-shadow 180ms var(--obs-ease-out-120),
@@ -607,8 +595,6 @@ html {
 }
 
 .obs-gpu-120hz-interactive {
-  transform: translate3d(0, 0, 0);
-  backface-visibility: hidden;
   transition:
     transform var(--obs-duration-fast) var(--obs-ease-out-120),
     opacity var(--obs-duration-fast) var(--obs-ease-out-120),
@@ -720,29 +706,7 @@ html[data-touch-mode="true"] .glass-card:active {
   transform: translate3d(0, 0, 0) scale3d(0.985, 0.985, 1);
 }
 
-/* High-refresh displays (>=90Hz / 120Hz ProMotion): crisp 8.33ms-frame-aligned motion */
-@media (update: fast) and (prefers-reduced-motion: no-preference) {
-  :root {
-    --obs-duration-fast: 110ms;
-    --obs-duration-card: 160ms;
-  }
-  .glass-card, .glass-button, .glass-button-primary, .obs-tab-pill, .obs-gpu-120hz-interactive {
-    will-change: transform;
-  }
-  .obs-scroller, .prototype-scroller, .obs-touch-pills {
-    scroll-behavior: smooth;
-  }
-}
-
 html[data-high-refresh="true"] {
   --obs-duration-fast: 110ms;
   --obs-duration-card: 150ms;
-}
-
-html[data-high-refresh="true"] .glass-card,
-html[data-high-refresh="true"] .glass-button,
-html[data-high-refresh="true"] .glass-button-primary,
-html[data-high-refresh="true"] .obs-tab-pill,
-html[data-high-refresh="true"] .obs-gpu-120hz-interactive {
-  will-change: transform;
 }

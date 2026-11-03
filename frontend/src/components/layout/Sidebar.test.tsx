@@ -1,5 +1,7 @@
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import React, { Profiler } from "react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import Sidebar from "@/components/layout/Sidebar";
+import Header from "@/components/layout/Header";
 import { useSystemStore } from "@/store/useSystemStore";
 import { useConnectionStore } from "@/store/useConnectionStore";
 
@@ -8,6 +10,14 @@ jest.mock("@/contexts/AuthContext", () => ({
   useAuth: () => ({
     user: { id: 1, username: "admin", role: "admin" },
     logout: jest.fn(),
+  }),
+}));
+
+jest.mock("@/contexts/ToastContext", () => ({
+  useToast: () => ({
+    toasts: [],
+    toggleDrawer: jest.fn(),
+    addToast: jest.fn(),
   }),
 }));
 
@@ -100,5 +110,67 @@ describe("Sidebar - Tri-Mode Navigation Architecture & Touch/120Hz Support", () 
 
     const clusterBtns = screen.getAllByRole("button", { name: /cluster/i });
     expect(clusterBtns.length).toBeGreaterThan(0);
+  });
+
+  it("keeps the desktop in-flow spacer width fixed at 4.5rem while the fixed rail expands on hover", () => {
+    const { container } = render(<Sidebar />);
+
+    const desktopAside = container.querySelector("aside")!;
+    const desktopSpacer = desktopAside.parentElement!;
+
+    expect(desktopSpacer).toHaveClass("md:w-[4.5rem]");
+    expect(desktopSpacer).not.toHaveClass("md:w-64");
+    expect(desktopSpacer).not.toHaveClass("obs-gpu-120hz-rail");
+    expect(desktopAside).toHaveClass("md:w-[4.5rem]");
+
+    fireEvent.mouseEnter(desktopAside);
+
+    expect(useSystemStore.getState().isSidebarHovered).toBe(true);
+    expect(desktopSpacer).toHaveClass("md:w-[4.5rem]");
+    expect(desktopSpacer).not.toHaveClass("md:w-64");
+    expect(desktopAside).toHaveClass("md:w-64");
+
+    fireEvent.mouseLeave(desktopAside);
+
+    expect(useSystemStore.getState().isSidebarHovered).toBe(false);
+    expect(desktopSpacer).toHaveClass("md:w-[4.5rem]");
+    expect(desktopAside).toHaveClass("md:w-[4.5rem]");
+  });
+
+  it("does not re-render Sidebar or Header when lastMessageAt updates, but updates on displayed connection fields", () => {
+    let sidebarCommits = 0;
+    let headerCommits = 0;
+
+    render(
+      <>
+        <Profiler id="sidebar" onRender={() => { sidebarCommits += 1; }}>
+          <Sidebar />
+        </Profiler>
+        <Profiler id="header" onRender={() => { headerCommits += 1; }}>
+          <Header />
+        </Profiler>
+      </>
+    );
+
+    const initialSidebarCommits = sidebarCommits;
+    const initialHeaderCommits = headerCommits;
+
+    act(() => {
+      useConnectionStore.getState().setLastMessageAt(1700000000000);
+      useConnectionStore.getState().setLastMessageAt(1700000001000);
+      useSystemStore.getState().setAuroraOpacity(0.4);
+    });
+
+    expect(sidebarCommits).toBe(initialSidebarCommits);
+    expect(headerCommits).toBe(initialHeaderCommits);
+
+    act(() => {
+      useConnectionStore.getState().setConnectionState("RECONNECTING");
+      useConnectionStore.getState().setReconnectAttempt(2);
+    });
+
+    expect(sidebarCommits).toBeGreaterThan(initialSidebarCommits);
+    expect(headerCommits).toBeGreaterThan(initialHeaderCommits);
+    expect(screen.getByText("Reconnecting (2)")).toBeInTheDocument();
   });
 });

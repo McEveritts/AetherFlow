@@ -2,6 +2,7 @@
 
 import { useRef } from 'react';
 import useSWR from 'swr';
+import { useShallow } from 'zustand/react/shallow';
 import { TabId } from '@/types/dashboard';
 import type { PendingActionsResponse } from '@/types/api';
 import { useAuth } from '@/contexts/AuthContext';
@@ -68,8 +69,18 @@ export default function Sidebar() {
         isMobileMenuOpen,
         setIsMobileMenuOpen,
         hapticFeedback,
-    } = useSystemStore();
-    const { connectionState } = useConnectionStore();
+    } = useSystemStore(
+        useShallow((state) => ({
+            activeTab: state.activeTab,
+            setActiveTab: state.setActiveTab,
+            isSidebarHovered: state.isSidebarHovered,
+            setIsSidebarHovered: state.setIsSidebarHovered,
+            isMobileMenuOpen: state.isMobileMenuOpen,
+            setIsMobileMenuOpen: state.setIsMobileMenuOpen,
+            hapticFeedback: state.hapticFeedback,
+        }))
+    );
+    const connectionState = useConnectionStore((state) => state.connectionState);
     const { data: pendingActionsData } = useSWR<PendingActionsResponse>(
         user?.role === 'admin' ? '/api/v1/admin/actions/pending?status=pending' : null
     );
@@ -262,9 +273,7 @@ export default function Sidebar() {
             {/* Spacer syncs width with rail so expanded sidebar never covers content    */}
             {/* ========================================================================= */}
             <div
-                className={`hidden md:block shrink-0 relative z-50 obs-gpu-120hz-rail ${
-                    isSidebarHovered ? 'md:w-64' : 'md:w-[4.5rem]'
-                }`}
+                className="hidden md:block shrink-0 relative z-50 md:w-[4.5rem]"
             >
                 <aside
                     className={`fixed inset-y-0 left-0 z-50 flex flex-col obs-gpu-120hz-rail ${

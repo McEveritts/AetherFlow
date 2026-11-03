@@ -16,34 +16,46 @@ import { useConnectionStore } from '@/store/useConnectionStore';
 import { useSystemStore } from '@/store/useSystemStore';
 import { useShallow } from 'zustand/react/shallow';
 
+function areNumberArraysEqual(first?: number[], second?: number[]): boolean {
+    if (first === second) return true;
+    const left = first || [];
+    const right = second || [];
+    if (left.length !== right.length) return false;
+    for (let index = 0; index < left.length; index++) {
+        if (left[index] !== right[index]) return false;
+    }
+    return true;
+}
+
 // Memoize dashboard widgets with custom, primitive-level comparators to block render cascades
 const MemoCpuWidget = React.memo(CpuWidget, (prev, next) =>
     prev.cpuData.usage === next.cpuData.usage &&
     prev.cpuData.freq === next.cpuData.freq &&
-    prev.cpuData.cores === next.cpuData.cores &&
-    (prev.cpuData.cores || []).join(',') === (next.cpuData.cores || []).join(',') &&
-    prev.history === next.history &&
+    areNumberArraysEqual(prev.cpuData.cores, next.cpuData.cores) &&
+    prev.history.cpu === next.history.cpu &&
     prev.density === next.density &&
     prev.hardware === next.hardware
 );
 const MemoMemoryWidget = React.memo(MemoryWidget, (prev, next) =>
     prev.memoryData.memory.used === next.memoryData.memory.used &&
     prev.memoryData.swap.used === next.memoryData.swap.used &&
-    prev.history === next.history &&
+    prev.history.memory === next.history.memory &&
     prev.density === next.density &&
     prev.hardware === next.hardware
 );
 const MemoNetworkWidget = React.memo(NetworkWidget, (prev, next) =>
     `${prev.networkData.network.active_connections}-${prev.networkData.network.down}-${prev.networkData.network.up}-${prev.networkData.total?.rx}-${prev.networkData.total?.tx}` ===
     `${next.networkData.network.active_connections}-${next.networkData.network.down}-${next.networkData.network.up}-${next.networkData.total?.rx}-${next.networkData.total?.tx}` &&
-    prev.history === next.history &&
+    prev.history.netDown === next.history.netDown &&
+    prev.history.netUp === next.history.netUp &&
     prev.density === next.density &&
     prev.hardware === next.hardware
 );
 const MemoDiskIOWidget = React.memo(DiskIOWidget, (prev, next) =>
     prev.diskIoData?.read_bytes_sec === next.diskIoData?.read_bytes_sec &&
     prev.diskIoData?.write_bytes_sec === next.diskIoData?.write_bytes_sec &&
-    prev.history === next.history &&
+    prev.history.diskRead === next.history.diskRead &&
+    prev.history.diskWrite === next.history.diskWrite &&
     prev.density === next.density
 );
 const MemoProcessWidget = React.memo(ProcessWidget, (prev, next) => {

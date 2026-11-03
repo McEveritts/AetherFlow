@@ -71,6 +71,22 @@ function formatTooltipValue(
     return [formatted, String(name ?? '')];
 }
 
+function buildChartData(data: number[] | undefined, data2?: number[]): ChartDataPoint[] {
+    if (!data || data.length === 0) {
+        return [
+            { name: 'P0', val1: 0, val2: 0 },
+            { name: 'P1', val1: 0, val2: 0 },
+        ];
+    }
+    const normalized = data.length === 1 ? [data[0], data[0]] : data;
+    const normalized2 = data2 ? (data2.length === 1 ? [data2[0], data2[0]] : data2) : undefined;
+    return normalized.map((value, index) => ({
+        name: `P${index}`,
+        val1: roundTwo(value),
+        val2: normalized2 && normalized2[index] !== undefined ? roundTwo(normalized2[index]) : undefined,
+    }));
+}
+
 interface MemoizedSparklineChartProps {
     chartData: ChartDataPoint[];
     id: string;
@@ -176,28 +192,16 @@ export default function Sparkline({
     const id = useMemo(() => rawId.replace(/:/g, ''), [rawId]);
     const [frozenChartData, setFrozenChartData] = useState<ChartDataPoint[] | null>(null);
 
-    // Convert array of numbers to array of objects for Recharts, capped at 0.XX precision
-    const liveChartData = useMemo<ChartDataPoint[]>(() => {
-        if (!data || data.length === 0) {
-            return [
-                { name: 'P0', val1: 0, val2: 0 },
-                { name: 'P1', val1: 0, val2: 0 },
-            ];
+    const activeChartData = useMemo<ChartDataPoint[]>(() => {
+        if (frozenChartData !== null) {
+            return frozenChartData;
         }
-        const normalized = data.length === 1 ? [data[0], data[0]] : data;
-        const normalized2 = data2 ? (data2.length === 1 ? [data2[0], data2[0]] : data2) : undefined;
-        return normalized.map((val, i) => ({
-            name: `P${i}`,
-            val1: roundTwo(val),
-            val2: normalized2 && normalized2[i] !== undefined ? roundTwo(normalized2[i]) : undefined,
-        }));
-    }, [data, data2]);
-
-    const activeChartData = frozenChartData ?? liveChartData;
+        return buildChartData(data, data2);
+    }, [frozenChartData, data, data2]);
 
     const handleMouseEnter = useCallback(() => {
-        setFrozenChartData((prev) => prev ?? liveChartData);
-    }, [liveChartData]);
+        setFrozenChartData((previous) => previous ?? activeChartData);
+    }, [activeChartData]);
 
     const handleMouseLeave = useCallback(() => {
         setFrozenChartData(null);

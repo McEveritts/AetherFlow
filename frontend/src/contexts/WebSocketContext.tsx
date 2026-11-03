@@ -1,9 +1,11 @@
 'use client';
 
-import React, { createContext, useContext, useEffect, useState, useRef, useCallback } from 'react';
+import React, { createContext, useContext, useEffect, useState, useRef, useCallback, useMemo } from 'react';
 import { usePathname } from 'next/navigation';
+import { useShallow } from 'zustand/react/shallow';
 import { SystemMetrics } from '@/types/dashboard';
 import { useConnectionStore, ConnectionState } from '@/store/useConnectionStore';
+import { useHistoryStore } from '@/store/useHistoryStore';
 import { useToast } from '@/contexts/ToastContext';
 import { useAuth } from '@/contexts/AuthContext';
 import { mutate as globalMutate } from 'swr';
@@ -74,7 +76,16 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
         setReconnectAttempt,
         setLastMessageAt,
         reset: resetConnection,
-    } = useConnectionStore();
+    } = useConnectionStore(
+        useShallow((state) => ({
+            connectionState: state.connectionState,
+            reconnectAttempt: state.reconnectAttempt,
+            setConnectionState: state.setConnectionState,
+            setReconnectAttempt: state.setReconnectAttempt,
+            setLastMessageAt: state.setLastMessageAt,
+            reset: state.reset,
+        }))
+    );
 
     const { addToast } = useToast();
 
@@ -400,10 +411,26 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
         };
     }, []);
 
+    useEffect(() => {
+        if (data.system) {
+            useHistoryStore.getState().pushMetrics(data.system);
+        }
+    }, [data.system]);
+
+    useEffect(() => {
+        if (data.services) {
+            useHistoryStore.getState().syncServices(data.services);
+        }
+    }, [data.services]);
+
     // ── Primary Transport Lifecycle ────────────────────────────
     useEffect(() => {
         if (!isAuthenticated || pathname === '/login') {
             transportGenRef.current += 1;
+            useHistoryStore.getState().resetHistory();
+            setData((previous) => previous.system === null && previous.services === null
+                ? previous
+                : { system: null, services: null });
             if (reconnectTimerRef.current) {
                 clearTimeout(reconnectTimerRef.current);
                 reconnectTimerRef.current = undefined;
@@ -461,8 +488,13 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
         };
     }, [isAuthenticated, pathname, connect, startPolling, stopPolling, clearHeartbeat, setReconnectAttempt]);
 
+    const contextValue = useMemo(
+        () => ({ data, connectionState, reconnectAttempt, manualReconnect }),
+        [data, connectionState, reconnectAttempt, manualReconnect]
+    );
+
     return (
-        <WebSocketContext.Provider value={{ data, connectionState, reconnectAttempt, manualReconnect }}>
+        <WebSocketContext.Provider value={contextValue}>
             {children}
         </WebSocketContext.Provider>
     );
