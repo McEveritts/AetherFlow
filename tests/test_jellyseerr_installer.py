@@ -9,6 +9,8 @@ import tarfile
 import tempfile
 import unittest
 
+from installer_test_helpers import common_functions
+
 
 ROOT = Path(__file__).resolve().parents[1]
 INSTALLER = ROOT / "packages/package/install/installpackage-jellyseerr"
@@ -97,6 +99,8 @@ report_progress() { :; }
 github_latest_tag() { printf '%s\\n' "${TEST_TAG-v3.5.1}"; }
 write_lock() { touch "$TEST_ROOT/completed"; }
 ''')
+        with common.open("a") as output:
+            output.write(common_functions("node_build"))
         for command in ("apt-get", "chown", "id", "sleep", "git", "node", "npm", "pnpm", "curl", "systemctl"):
             executable = self.root / "mock-bin" / command
             executable.write_text(MOCK_COMMAND)

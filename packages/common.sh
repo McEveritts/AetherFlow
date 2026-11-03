@@ -56,6 +56,47 @@ command_exists() {
     command -v "$1" >/dev/null 2>&1
 }
 
+# Keep build dependencies and lifecycle scripts enabled even when the host or
+# calling service has production-only npm settings. In particular, global=true
+# leaks into npm's Git preparation subprocess and skips its local devDependencies.
+# Run in a subshell so application runtime settings and the caller stay intact.
+node_build() (
+    unset npm_config_production NPM_CONFIG_PRODUCTION npm_config_only NPM_CONFIG_ONLY
+    export npm_config_global=false NPM_CONFIG_GLOBAL=false
+    export npm_config_omit= NPM_CONFIG_OMIT=
+    # npm serializes array-valued configuration with double newlines.
+    export npm_config_include=$'dev\n\npeer\n\noptional'
+    export NPM_CONFIG_INCLUDE="$npm_config_include"
+    export npm_config_ignore_scripts=false NPM_CONFIG_IGNORE_SCRIPTS=false
+    export YARN_PRODUCTION=false
+    "$@"
+)
+
+# Install npm applications locally so Git dependencies can prepare with their
+# own complete toolchains. Build before replacing any existing application and
+# expose only the application's executable, rather than global build tools.
+install_npm_app() (
+    set -e
+    umask 022
+    local package="$1" destination="$2" executable="$3" staged="" bin_name
+    bin_name="$(basename "$executable")"
+    mkdir -p "$(dirname "$destination")" "$(dirname "$executable")"
+    staged="$(mktemp -d "${destination}.af-build.XXXXXX")"
+    trap '[[ -z "$staged" ]] || rm -rf -- "$staged"' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    # mktemp creates a private directory; the service user must traverse it.
+    chmod 755 "$staged"
+    node_build npm install --prefix "$staged" --no-audit --no-fund "$package" >> "$LOGFILE" 2>&1 || return $?
+    if [[ ! -x "$staged/node_modules/.bin/$bin_name" ]]; then
+        print_error "npm package $package did not provide executable $bin_name"
+        return 1
+    fi
+    replace_app_tree "$staged" "$destination" || return $?
+    staged=""
+    ln -sfn -- "$destination/node_modules/.bin/$bin_name" "$executable"
+)
+
 # Stage on the destination filesystem so replacement uses rename(), including
 # when /tmp lives on a different mount. Never truncate an executing inode.
 install_binary_atomic() {
@@ -363,6 +404,10 @@ sync_node_global_bins() {
 ensure_node() {
     local want_major="${1:-20}"
     local have_major=0
+    # Native addons and Git prepare scripts need these on already-provisioned
+    # Node hosts too, not just when Node itself is first installed.
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+        ca-certificates git build-essential python3 python3-setuptools pkg-config >> "$LOGFILE" 2>&1
     if command_exists node; then
         have_major=$(node -v 2>/dev/null | sed 's/^v//' | cut -d. -f1 || echo 0)
     fi

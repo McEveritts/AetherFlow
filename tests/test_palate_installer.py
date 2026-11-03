@@ -11,6 +11,8 @@ import tarfile
 import tempfile
 import unittest
 
+from installer_test_helpers import common_functions
+
 
 ROOT = Path(__file__).resolve().parents[1]
 MOCK_COMMAND = r'''#!/usr/bin/python3
@@ -110,6 +112,8 @@ purge_systemd_unit() {
 }
 purge_system_user() { printf 'purge-user %s\n' "$1" >> "$TEST_ROOT/commands"; }
 ''')
+        with common.open("a") as output:
+            output.write(common_functions("node_build"))
         for name in ('apt-get', 'chown', 'id', 'useradd', 'install', 'runuser', 'psql', 'pg_dump', 'git', 'node', 'npm', 'curl', 'systemctl'):
             path = self.root / 'mock-bin' / name
             path.write_text(MOCK_COMMAND)

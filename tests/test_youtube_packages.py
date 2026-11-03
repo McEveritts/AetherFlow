@@ -9,6 +9,8 @@ import tarfile
 import tempfile
 import unittest
 
+from installer_test_helpers import common_functions
+
 
 REPO = Path(__file__).resolve().parents[1]
 APPS = {"piped": 8280, "invidious": 8281}
@@ -118,7 +120,7 @@ class YouTubeLifecycleTest(unittest.TestCase):
         self.root = Path(self.temp.name)
         for directory in ("etc/systemd/system", "var/lib", "var/log/aetherflow", "opt", "install", "tmp"):
             (self.root / directory).mkdir(parents=True)
-        (self.root / "common.sh").write_text(COMMON)
+        (self.root / "common.sh").write_text(COMMON + common_functions("node_build"))
         (self.root / "overrides.sh").write_text(OVERRIDES)
         helper = self.rewrite((REPO / "packages/youtube-common.sh").read_text())
         (self.root / "youtube-common.sh").write_text(helper)

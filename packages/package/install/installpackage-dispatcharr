@@ -341,9 +341,9 @@ fi
 if [[ -d "${INSTALL_DIR}/frontend" && -f "${INSTALL_DIR}/frontend/package.json" ]]; then
     report_progress 75 "Building ${APP_NAME} frontend web bundle..."
     pushd "${INSTALL_DIR}/frontend" >/dev/null
-    npm install --legacy-peer-deps >> "$LOGFILE" 2>&1
+    node_build npm install --legacy-peer-deps >> "$LOGFILE" 2>&1
     rm -rf "${INSTALL_DIR}/frontend/dist"
-    npm run build >> "$LOGFILE" 2>&1
+    node_build npm run build >> "$LOGFILE" 2>&1
     popd >/dev/null
 fi
 

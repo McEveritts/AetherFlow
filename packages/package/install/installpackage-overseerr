@@ -82,11 +82,6 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
 
 ensure_node 20
 
-if ! command_exists yarn; then
-    npm install -g yarn >> "$LOGFILE" 2>&1
-    sync_node_global_bins
-fi
-
 if ! id -u overseerr >/dev/null 2>&1; then
     useradd --system --user-group --no-create-home --home-dir /var/lib/overseerr --shell /usr/sbin/nologin overseerr
 fi
@@ -97,6 +92,10 @@ report_progress 30 "Cloning Overseerr repository into staging directory..."
 BUILD_DIR="$(mktemp -d /opt/.overseerr-build.XXXXXX)"
 git clone https://github.com/sct/overseerr.git "$BUILD_DIR" >> "$LOGFILE" 2>&1
 cd "$BUILD_DIR"
+if ! command_exists yarn; then
+    node_build npm install --prefix "$BUILD_DIR/.aetherflow-tools" --no-audit --no-fund --ignore-scripts yarn@1.22.22 >> "$LOGFILE" 2>&1
+    export PATH="$BUILD_DIR/.aetherflow-tools/node_modules/.bin:$PATH"
+fi
 LATEST_TAG="$(git tag -l 'v*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n1 || true)"
 if [[ -n "$LATEST_TAG" ]]; then
     git checkout "$LATEST_TAG" >> "$LOGFILE" 2>&1 || true
@@ -105,8 +104,8 @@ fi
 
 report_progress 55 "Installing Overseerr dependencies and building production bundle..."
 export CYPRESS_INSTALL_BINARY=0
-(cd "$BUILD_DIR" && (yarn install --ignore-engines --frozen-lockfile --network-timeout 1000000 >> "$LOGFILE" 2>&1 || yarn install --ignore-engines --network-timeout 1000000 >> "$LOGFILE" 2>&1))
-(cd "$BUILD_DIR" && yarn build >> "$LOGFILE" 2>&1)
+(cd "$BUILD_DIR" && (node_build yarn install --production=false --ignore-engines --frozen-lockfile --network-timeout 1000000 >> "$LOGFILE" 2>&1 || node_build yarn install --production=false --ignore-engines --network-timeout 1000000 >> "$LOGFILE" 2>&1))
+(cd "$BUILD_DIR" && node_build yarn build >> "$LOGFILE" 2>&1)
 test -s "$BUILD_DIR/dist/index.js" || { log_error "Failed to verify Overseerr build output"; exit 1; }
 
 chown -R overseerr:overseerr "$BUILD_DIR" /var/lib/overseerr

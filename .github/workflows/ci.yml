@@ -36,6 +36,24 @@ jobs:
       - name: Test Release Routing and Manager
         run: python3 -m unittest discover -s tests -p 'test_release*.py' -v
 
+  node-installers:
+    name: Node Application Installer Regression Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node with the affected npm version
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.12.0
+
+      - name: Test Dependency Preparation and Marketplace Lifecycle
+        run: |
+          python3 -m unittest discover -s tests -p 'test_node_installers.py' -v
+          python3 -m unittest discover -s tests -p 'test_marketplace*.py' -v
+          python3 tests/check_shell_hygiene.py
+
   palate-installer:
     name: Palate Installer Regression Tests
     runs-on: ubuntu-latest

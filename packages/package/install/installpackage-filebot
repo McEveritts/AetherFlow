@@ -82,7 +82,7 @@ rm -f "${TMP_NODE}"
 
 if [[ -f "${NODE_DIR}/server/package.json" ]]; then
     pushd "${NODE_DIR}/server" >/dev/null
-    npm install --omit=dev >> "$LOGFILE" 2>&1
+    node_build npm install --include=dev >> "$LOGFILE" 2>&1
     popd >/dev/null
 fi
 

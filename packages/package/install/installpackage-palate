@@ -91,7 +91,7 @@ fi
 report_progress 10 "Installing Palate's native build and database prerequisites..."
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq >> "$LOGFILE" 2>&1
-apt-get install --no-remove -y -qq curl ca-certificates git build-essential python3 xz-utils openssl postgresql postgresql-client >> "$LOGFILE" 2>&1
+apt-get install --no-remove -y -qq curl ca-certificates git build-essential python3 python3-setuptools pkg-config xz-utils openssl postgresql postgresql-client >> "$LOGFILE" 2>&1
 systemctl enable --now postgresql.service >> "$LOGFILE" 2>&1
 
 if ! id -u af-palate >/dev/null 2>&1; then
@@ -191,9 +191,9 @@ run_app() {
         /bin/bash -c 'set -e; set -a; source "$1"; set +a; cd "$2"; shift 2; exec "$@"' -- "$ENV_FILE" "$BUILD_DIR" "$@"
 }
 report_progress 50 "Building Palate ${TAG} as its dedicated service user..."
-run_app npm ci --include=dev --no-audit --no-fund >> "$LOGFILE" 2>&1
+node_build run_app npm ci --include=dev --no-audit --no-fund >> "$LOGFILE" 2>&1
 run_app node node_modules/prisma/build/index.js generate >> "$LOGFILE" 2>&1
-run_app npm run build >> "$LOGFILE" 2>&1
+node_build run_app npm run build >> "$LOGFILE" 2>&1
 test -s "$BUILD_DIR/.next/BUILD_ID"
 VERSION="$("$BUILD_DIR/.runtime/bin/node" -p "require('${BUILD_DIR}/package.json').version")"
 [[ "$VERSION" == "${TAG#v}" ]] || { print_error "Palate's package version does not match ${TAG}."; exit 1; }

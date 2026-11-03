@@ -29,6 +29,7 @@ report_progress 60 "Uninstalling Flood npm package and removing data directories
 npm uninstall -g @jesec/flood >> "$LOGFILE" 2>&1 || true
 npm uninstall -g flood >> "$LOGFILE" 2>&1 || true
 rm -f /usr/bin/flood /usr/local/bin/flood
+rm -rf /opt/flood
 if [[ "${DELETE_DATA:-false}" == true ]]; then
     rm -rf /var/lib/flood /srv/rutorrent/home/flood /etc/apache2/sites-enabled/flood.conf /etc/apache2/sites-available/flood.conf
 fi

@@ -33,8 +33,8 @@ if old not in source and new not in source:
     sys.exit('Piped listener contract changed; refusing to expose the API on all interfaces')
 path.write_text(source.replace(old, new))
 PY
-runuser -u "$APP_NAME" -- env HOME="$DATA_DIR" npm install --prefix "${DATA_DIR}/tools" pnpm@10.11.0 >> "$LOGFILE" 2>&1
-runuser -u "$APP_NAME" -- env HOME="$DATA_DIR" bash -euc 'cd "$1"; "$2" install --frozen-lockfile; VITE_PIPED_API="$3/api" VITE_PIPED_PROXY="$3/proxy" "$2" build' _ "${INSTALL_DIR}/frontend" "${DATA_DIR}/tools/node_modules/.bin/pnpm" "https://${APP_DOMAIN}" >> "$LOGFILE" 2>&1
+node_build runuser -u "$APP_NAME" -- env HOME="$DATA_DIR" npm install --prefix "${DATA_DIR}/tools" --no-audit --no-fund --ignore-scripts pnpm@10.11.0 >> "$LOGFILE" 2>&1
+node_build runuser -u "$APP_NAME" -- env HOME="$DATA_DIR" bash -euc 'cd "$1"; "$2" install --frozen-lockfile --prod=false; VITE_PIPED_API="$3/api" VITE_PIPED_PROXY="$3/proxy" "$2" build' _ "${INSTALL_DIR}/frontend" "${DATA_DIR}/tools/node_modules/.bin/pnpm" "https://${APP_DOMAIN}" >> "$LOGFILE" 2>&1
 runuser -u "$APP_NAME" -- env HOME="$DATA_DIR" bash -euc 'cd "$1"; ./gradlew --no-daemon shadowJar' _ "$BUILD_DIR" >> "$LOGFILE" 2>&1
 runuser -u "$APP_NAME" -- env HOME="$DATA_DIR" cargo build --locked --release --manifest-path "${INSTALL_DIR}/proxy/Cargo.toml" >> "$LOGFILE" 2>&1
 install -m 644 "${BUILD_DIR}/build/libs/piped-1.0-all.jar" "${INSTALL_DIR}/piped.jar"

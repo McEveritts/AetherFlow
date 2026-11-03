@@ -8,6 +8,8 @@ import subprocess
 import tempfile
 import unittest
 
+from installer_test_helpers import common_functions
+
 ROOT = Path(__file__).resolve().parents[1]
 
 MOCK_SCRIPT = r"""#!/bin/bash
@@ -142,6 +144,12 @@ EOF
             exit 1
         fi
         echo "$*" >> "${root}/npm_installed.log"
+        if [[ "$*" == *--prefix* && "$*" == *n8n* ]]; then
+            while [[ "$1" != --prefix ]]; do shift; done
+            mkdir -p "$2/node_modules/.bin"
+            printf '#!/bin/bash\necho 2.1.0\n' > "$2/node_modules/.bin/n8n"
+            chmod +x "$2/node_modules/.bin/n8n"
+        fi
         exit 0
         ;;
     pip|pip3)
@@ -366,6 +374,7 @@ purge_systemd_unit() { :; }
 command_exists() { command -v "$1" >/dev/null 2>&1; }
 set_config_value() { :; }
 """
+        common_content += common_functions("node_build", "install_npm_app", "replace_app_tree")
         (self.root / "opt/AetherFlow/packages/common.sh").write_text(common_content)
 
     def run_script(self, package, action="install", **environment):
@@ -720,7 +729,11 @@ set_config_value() { :; }
         res3 = self.run_script("n8n", TEST_NODE_VERSION="v24.1.0", AF_TARGET_VERSION="2.1.0")
         self.assertEqual(res3.returncode, 0, res3.stderr)
         npm_log_after = (self.root / "npm_installed.log").read_text()
-        self.assertIn("install -g n8n@2.1.0", npm_log_after)
+        self.assertIn("n8n@2.1.0", npm_log_after)
+        self.assertIn("--prefix", npm_log_after)
+        self.assertNotIn(" -g ", npm_log_after)
+        self.assertEqual((self.root / "usr/local/bin/n8n").resolve(),
+                         self.root / "opt/n8n/node_modules/.bin/n8n")
 
 
 if __name__ == "__main__":

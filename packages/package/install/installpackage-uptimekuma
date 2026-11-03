@@ -42,7 +42,7 @@ git clone https://github.com/louislam/uptime-kuma.git "$BUILD_DIR" >> "$LOGFILE"
 
 report_progress 65 "Building Uptime Kuma production bundle..."
 cd "$BUILD_DIR"
-npm run setup >> "$LOGFILE" 2>&1
+node_build npm run setup >> "$LOGFILE" 2>&1
 
 UK_VERSION="$(git describe --tags "$(git rev-list --tags --max-count=1)" 2>/dev/null || true)"
 if [[ -n "$UK_VERSION" ]]; then

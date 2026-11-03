@@ -58,9 +58,32 @@ existing uninstall request uses the data-preserving default. Mixed application
 and data directories may remain after uninstall so reinstalling can reuse them.
 Native Rust removal follows the same configuration/account retention policy.
 
-The Lounge installs its required `npm-run-all` preparation tool before the
-application. Kavita readiness has a bounded wait and concise registration errors;
-Seerr checks a successful HTTP response before parsing its version JSON.
+Node application installers use the shared `node_build` environment to include
+development, peer, and optional dependencies and enable lifecycle scripts during
+builds. It overrides inherited production-only npm settings without changing
+the caller's environment or the application's runtime mode. Package-manager
+bootstraps explicitly disable their own lifecycle scripts. Maintainerr already
+builds with its private Yarn release in a clean environment and only prunes
+development dependencies after its build succeeds.
+
+The Lounge, Flood, and n8n install into staged local npm trees under `/opt`, then
+publish their command in `/usr/local/bin`. This prevents npm's global mode from
+leaking into Git dependency preparation, which previously skipped
+`irc-framework`'s build dependencies: adding global `npm-run-all` only exposed
+the next missing tool, Babel. Each dependency can now install its own declared
+toolchain. Builds and executable verification finish before replacing existing
+application code, and previous trees remain available in private
+`<application-directory>.af-backup.*` directories. Removal deletes managed code
+while retaining `/var/lib` state unless `DELETE_DATA=true`.
+
+`ensure_node` provisions Git, C/C++ build tools, Python, setuptools, and
+pkg-config even when a suitable Node runtime is already installed. Installers
+with private runtimes declare the same build prerequisites separately. This
+covers shared build tools; application-specific native libraries remain part
+of each installer's dependency list.
+
+Kavita readiness has a bounded wait and concise registration errors; Seerr
+checks a successful HTTP response before parsing its version JSON.
 
 Scripts prefer the helpers shipped alongside the selected release. Config
 loaders already prefer relative/current-release configuration ahead of the
@@ -93,6 +116,15 @@ runtime verification, and recovery.
 Rust regressions cover recovery during package execution, scheduled oneshot
 exclusion, duplicate API jobs, companion unit resolution, catalog/recipe parity,
 actual installed versions, and default retention versus explicit purge.
+
+`tests/test_node_installers.py` uses real npm and local Git/tarball fixtures with
+the registry disabled. It checks Git preparation under inherited global,
+production-only, and disabled-script settings; scoped packages; missing
+executables; failed-build retention; successful upgrades and backup recovery;
+and build prerequisites on hosts where Node is already installed. Catalog
+checks reject new bare package-manager builds or global npm app installs. The
+Node installer CI job runs these checks with the npm version that reproduced
+the original failure.
 
 Validation passed:
 

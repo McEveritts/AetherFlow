@@ -12,6 +12,8 @@ import tempfile
 import threading
 import types
 import unittest
+
+from installer_test_helpers import common_functions
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -481,6 +483,8 @@ log_error() { printf '%s\\n' "$*" >&2; }
 ensure_node() { printf 'node %s\\n' "$1" >> "$TEST_ROOT/commands"; }
 write_lock() { touch "$TEST_ROOT/install/.$1.lock"; }
 ''')
+        with common.open("a") as output:
+            output.write(common_functions("node_build"))
         self.install = self.root / "opt/dispatcharr"
         self.config = self.root / "etc/dispatcharr"
         self.config.mkdir(parents=True)

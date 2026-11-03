@@ -8,6 +8,8 @@ import tomllib
 import unittest
 from pathlib import Path
 
+from installer_test_helpers import common_functions
+
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGES_DIR = ROOT / "packages" / "package"
 INSTALL_DIR = PACKAGES_DIR / "install"
@@ -48,6 +50,12 @@ class MarketplaceHelperContractsTest(unittest.TestCase):
             with self.subTest(script=path.name):
                 source = path.read_text(encoding="utf-8")
                 relative = source.index('source "${SELF_DIR}/../../common.sh"')
+                if 'source /opt/AetherFlow/current/packages/common.sh' not in source:
+                    # A release-relative source with no fallbacks cannot select
+                    # stale helpers from a different installed release.
+                    self.assertIn('\nsource "${SELF_DIR}/../../common.sh"\n', source)
+                    self.assertNotIn('source /opt/AetherFlow/packages/common.sh', source)
+                    continue
                 current = source.index('source /opt/AetherFlow/current/packages/common.sh')
                 legacy = source.index('source /opt/AetherFlow/packages/common.sh')
                 self.assertLess(relative, current)
@@ -76,7 +84,7 @@ class MarketplaceHelperContractsTest(unittest.TestCase):
         for package, commands in (
             ("paperless-ngx", ("manage.py migrate", "manage.py collectstatic --no-input")),
             ("seedcross", ("manage.py migrate --noinput",)),
-            ("filebot", ("npm install --omit=dev",)),
+            ("filebot", ("npm install --include=dev",)),
         ):
             source = (INSTALL_DIR / ("installpackage-" + package)).read_text()
             for command in commands:
@@ -122,13 +130,13 @@ sys.modules["django.contrib.auth"] = auth
                 ("paperless-ngx", "manage.py migrate"),
                 ("paperless-ngx", "manage.py collectstatic --no-input"),
                 ("seedcross", "manage.py migrate --noinput"),
-                ("filebot", "npm install --omit=dev"),
+                ("filebot", "npm install --include=dev"),
             ):
                 with self.subTest(package=package, command=command):
                     source = (INSTALL_DIR / ("installpackage-" + package)).read_text()
                     line = next(line for line in source.splitlines() if command in line)
                     line = line.replace("/opt/paperless/.venv/bin/python", str(failing_python))
-                    result = subprocess.run(["bash", "-euc", "su() { return 17; }; npm() { return 17; };\n" + line + "\nexit 0"],
+                    result = subprocess.run(["bash", "-euc", common_functions("node_build") + "\nsu() { return 17; }; npm() { return 17; };\n" + line + "\nexit 0"],
                                             capture_output=True, text=True,
                                             env={**os.environ, "LOGFILE": str(root / "log"), "INSTALL_DIR": str(root), "APP_USER": "seedcross"})
                     self.assertEqual(result.returncode, 17, result.stderr)

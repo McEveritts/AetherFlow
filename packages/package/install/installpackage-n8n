@@ -37,7 +37,7 @@ fi
 
 mkdir -p /var/lib/n8n /opt/n8n
 
-report_progress 40 "Installing n8n package globally via npm..."
+report_progress 40 "Installing n8n with its complete dependency build toolchain..."
 NODE_MAJOR="$(node -v 2>/dev/null | sed 's/^v//' | cut -d. -f1 || echo 20)"
 if [[ ! "$NODE_MAJOR" =~ ^[0-9]+$ ]] || (( NODE_MAJOR < 24 )); then
     print_error "n8n requires Node.js >= 24; refusing to install an incompatible release channel."
@@ -55,10 +55,9 @@ if [[ -n "$TARGET_VER" ]]; then
     TARGET_PKG="n8n@${TARGET_VER}"
 
 fi
-npm install -g "$TARGET_PKG" >> "$LOGFILE" 2>&1
-sync_node_global_bins
+install_npm_app "$TARGET_PKG" /opt/n8n /usr/local/bin/n8n
 
-N8N_VER="$(n8n --version 2>/dev/null || true)"
+N8N_VER="$(/usr/local/bin/n8n --version 2>/dev/null || true)"
 if [[ -n "$N8N_VER" ]]; then
     printf '%s\n' "${N8N_VER#v}" > /var/lib/n8n/.af-version
 fi
@@ -66,7 +65,7 @@ fi
 chown -R n8n:n8n /var/lib/n8n /opt/n8n
 
 NODE_PATH="$(command -v node || echo /usr/bin/node)"
-N8N_BIN="$(command -v n8n || echo /usr/local/bin/n8n)"
+N8N_BIN=/usr/local/bin/n8n
 
 report_progress 85 "Configuring and starting n8n.service on port ${APP_PORT}..."
 cat <<EOF > /etc/systemd/system/n8n.service

@@ -116,7 +116,7 @@ purge_systemd_unit() { :; }
 
     def run_script(self, package, action='install', **environment):
         source = (ROOT / f'packages/package/{action}/{action}package-{package}').read_text()
-        for prefix in ('/opt/', '/var/', '/etc/', '/usr/local/', '/srv/', '/install', '/data'):
+        for prefix in ('/opt/', '/var/', '/etc/', '/usr/local/', '/usr/bin/', '/srv/', '/install', '/data'):
             source = source.replace(prefix, str(self.root) + prefix)
         script = self.root / 'script'
         script.write_text(source)
@@ -182,6 +182,21 @@ purge_systemd_unit() { :; }
         self.assertEqual(database.read_text(), 'keep')
         self.assertEqual(code.read_text(), 'old code')
         self.assertFalse((self.root / 'install/.uptimekuma.lock').exists())
+
+    def test_npm_app_removal_deletes_managed_code_and_retains_state_by_default(self):
+        for package in ('thelounge', 'flood', 'n8n'):
+            for purge in (False, True):
+                with self.subTest(package=package, purge=purge):
+                    code = self.file(f'opt/{package}/node_modules/package.json', 'managed code')
+                    state = self.file(f'var/lib/{package}/retained-state', 'keep state')
+                    executable = self.file(f'usr/local/bin/{package}', 'managed command')
+                    result = self.run_script(package, 'remove', DELETE_DATA=str(purge).lower())
+                    self.assert_success(result)
+                    self.assertFalse(code.exists())
+                    self.assertFalse(executable.exists())
+                    self.assertEqual(state.exists(), not purge)
+                    if not purge:
+                        self.assertEqual(state.read_text(), 'keep state')
 
     def test_php_application_updates_keep_settings(self):
         for package, relative in [('rutorrent', 'share/settings/torrents.dat'),

@@ -37,12 +37,10 @@ fi
 
 mkdir -p /var/lib/thelounge
 
-report_progress 40 "Installing The Lounge package globally via npm..."
-npm install -g npm-run-all >> "$LOGFILE" 2>&1
-npm install -g thelounge >> "$LOGFILE" 2>&1
-sync_node_global_bins
+report_progress 40 "Installing The Lounge with its complete dependency build toolchain..."
+install_npm_app thelounge /opt/thelounge /usr/local/bin/thelounge
 
-TL_VER="$(thelounge -v 2>/dev/null || true)"
+TL_VER="$(/usr/local/bin/thelounge -v 2>/dev/null || true)"
 if [[ -n "$TL_VER" ]]; then
     printf '%s\n' "${TL_VER#v}" > /var/lib/thelounge/.af-version
 fi
@@ -67,7 +65,7 @@ fi
 chown -R thelounge:thelounge /var/lib/thelounge
 
 NODE_PATH="$(command -v node || echo /usr/bin/node)"
-TL_BIN="$(command -v thelounge || echo /usr/local/bin/thelounge)"
+TL_BIN=/usr/local/bin/thelounge
 
 if [[ ! -f "/var/lib/thelounge/users/${MASTER_USER}.json" ]]; then
     printf '%s\n' "${MASTER_PASS}" | sudo -u thelounge THELOUNGE_HOME=/var/lib/thelounge "${NODE_PATH}" "${TL_BIN}" add "${MASTER_USER}" >> "$LOGFILE" 2>&1 || true

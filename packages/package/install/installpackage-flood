@@ -38,11 +38,10 @@ fi
 mkdir -p /var/lib/flood
 chown -R flood:flood /var/lib/flood
 
-report_progress 55 "Installing @jesec/flood via npm..."
-npm install -g @jesec/flood >> "$LOGFILE" 2>&1
-sync_node_global_bins
+report_progress 55 "Installing @jesec/flood with its complete dependency build toolchain..."
+install_npm_app @jesec/flood /opt/flood /usr/local/bin/flood
 
-FLOOD_BIN="$(command -v flood || echo /usr/local/bin/flood)"
+FLOOD_BIN=/usr/local/bin/flood
 if [[ ! -x /usr/bin/flood && -x "$FLOOD_BIN" ]]; then
     ln -sf "$FLOOD_BIN" /usr/bin/flood
 fi
