@@ -632,11 +632,11 @@ pub fn resolve_plugins_dir() -> PathBuf {
     }
 
     let candidates = [
+        PathBuf::from("/opt/AetherFlow/current/plugins"),
         PathBuf::from("plugins"),
         PathBuf::from("../plugins"),
         PathBuf::from("../../plugins"),
         PathBuf::from("../../../plugins"),
-        PathBuf::from("/opt/AetherFlow/current/plugins"),
         PathBuf::from("/opt/AetherFlow/plugins"),
     ];
     for candidate in candidates {

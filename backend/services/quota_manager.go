@@ -36,49 +36,49 @@ type UserQuotaRecord struct {
 	BillingProvider   string  `json:"billing_provider,omitempty"`
 	BillingExternalID string  `json:"billing_external_id,omitempty"`
 	UpdatedAt         string  `json:"updated_at,omitempty"`
-	
+
 	// Next.js Frontend DTO Harmonization
-	UsedGB            float64 `json:"usedGB"`
-	TotalGB           float64 `json:"totalGB"`
-	Percentage        float64 `json:"percentage"`
+	UsedGB     float64 `json:"usedGB"`
+	TotalGB    float64 `json:"totalGB"`
+	Percentage float64 `json:"percentage"`
 }
 
 type BillingWebhookAudit struct {
-	ID         int    `json:"id"`
-	Provider   string `json:"provider"`
-	EventID    string `json:"event_id"`
-	EventType  string `json:"event_type"`
-	Username   string `json:"username"`
-	QuotaBytes int64  `json:"quota_bytes"`
-	Status     string `json:"status"`
-	Error      string `json:"error,omitempty"`
-	Payload    string `json:"payload,omitempty"`
+	ID          int    `json:"id"`
+	Provider    string `json:"provider"`
+	EventID     string `json:"event_id"`
+	EventType   string `json:"event_type"`
+	Username    string `json:"username"`
+	QuotaBytes  int64  `json:"quota_bytes"`
+	Status      string `json:"status"`
+	Error       string `json:"error,omitempty"`
+	Payload     string `json:"payload,omitempty"`
 	ProcessedAt string `json:"processed_at"`
 }
 
 type BillingWebhookResult struct {
-	Provider     string          `json:"provider"`
-	EventID      string          `json:"event_id"`
-	EventType    string          `json:"event_type"`
-	Username     string          `json:"username"`
-	QuotaBytes   int64           `json:"quota_bytes"`
-	Applied      bool            `json:"applied"`
-	Status       string          `json:"status"`
-	Message      string          `json:"message"`
-	Quota        *UserQuotaRecord `json:"quota,omitempty"`
+	Provider   string           `json:"provider"`
+	EventID    string           `json:"event_id"`
+	EventType  string           `json:"event_type"`
+	Username   string           `json:"username"`
+	QuotaBytes int64            `json:"quota_bytes"`
+	Applied    bool             `json:"applied"`
+	Status     string           `json:"status"`
+	Message    string           `json:"message"`
+	Quota      *UserQuotaRecord `json:"quota,omitempty"`
 }
 
 type billingEvent struct {
-	Provider    string
-	EventID     string
-	EventType   string
-	Username    string
-	Email       string
-	Plan        string
-	ExternalID  string
-	QuotaBytes  int64
-	Raw         map[string]interface{}
-	RawPayload  string
+	Provider   string
+	EventID    string
+	EventType  string
+	Username   string
+	Email      string
+	Plan       string
+	ExternalID string
+	QuotaBytes int64
+	Raw        map[string]interface{}
+	RawPayload string
 }
 
 var humanSizePattern = regexp.MustCompile(`(?i)^\s*([0-9]+(?:\.[0-9]+)?)\s*([kmgtp]?b)\s*$`)
@@ -105,13 +105,15 @@ func resolveSystemScriptPath(envName, fileName string) string {
 	}
 
 	candidates := []string{
+		filepath.Join("/opt", "AetherFlow", "current", "packages", "system", fileName),
+		filepath.Join("/opt", "AetherFlow", "packages", "system", fileName),
+		filepath.Join("/usr", "local", "bin", "AetherFlow", "system", fileName),
 		filepath.Join("packages", "system", fileName),
 		filepath.Join("..", "packages", "system", fileName),
-		filepath.Join("/opt", "AetherFlow", "packages", "system", fileName),
 	}
 
 	for _, candidate := range candidates {
-		if _, err := os.Stat(candidate); err == nil {
+		if info, err := os.Stat(candidate); err == nil && info.Mode().IsRegular() {
 			return candidate
 		}
 	}
@@ -241,7 +243,7 @@ func normalizeQuotaRecord(record UserQuotaRecord) UserQuotaRecord {
 		}
 	}
 	record.UsagePct = quotaUsagePct(record.QuotaBytes, record.UsedBytes)
-	
+
 	// DTO harmonization for Next.js frontend
 	record.UsedGB = float64(record.UsedBytes) / (1024 * 1024 * 1024)
 	record.TotalGB = float64(record.QuotaBytes) / (1024 * 1024 * 1024)

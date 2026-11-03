@@ -1223,14 +1223,22 @@ fn query_sqlite_first_text(db_path: &Path, queries: &[&str]) -> Option<String> {
 
 #[cfg(unix)]
 fn query_runner_app_meta_unix(canonical_app: &str) -> Option<AppRuntimeMeta> {
+    let response = request_runner_unix(
+        "/v1/app-meta",
+        json!({ "app_name": canonical_app }),
+        Duration::from_millis(1500),
+    )?;
+    parse_runner_app_meta(&response)
+}
+
+#[cfg(unix)]
+fn request_runner_unix(route: &str, payload: Value, timeout: Duration) -> Option<String> {
     use std::io::{Read, Write};
     use std::os::unix::net::UnixStream;
 
-    if env::var("AETHERFLOW_CONFIG_ROOT")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .is_some()
-    {
+    if ["AETHERFLOW_CONFIG_ROOT", "AETHERFLOW_FS_ROOT"].iter().any(|key| {
+        env::var(key).ok().is_some_and(|value| !value.trim().is_empty())
+    }) {
         return None;
     }
     let sock_path = af_runner::runner_socket_path();
@@ -1239,12 +1247,13 @@ fn query_runner_app_meta_unix(canonical_app: &str) -> Option<AppRuntimeMeta> {
     }
 
     let mut stream = UnixStream::connect(&sock_path).ok()?;
-    let _ = stream.set_read_timeout(Some(Duration::from_millis(1500)));
-    let _ = stream.set_write_timeout(Some(Duration::from_millis(1500)));
+    let _ = stream.set_read_timeout(Some(timeout));
+    let _ = stream.set_write_timeout(Some(timeout));
 
-    let body = serde_json::to_string(&json!({ "app_name": canonical_app })).ok()?;
+    let body = serde_json::to_string(&payload).ok()?;
     let req = format!(
-        "POST /v1/app-meta HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        "POST {} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        route,
         body.len(),
         body
     );
@@ -1256,7 +1265,7 @@ fn query_runner_app_meta_unix(canonical_app: &str) -> Option<AppRuntimeMeta> {
     if !headers.starts_with("HTTP/1.1 200 ") && !headers.starts_with("HTTP/1.0 200 ") {
         return None;
     }
-    parse_runner_app_meta(json_body)
+    Some(json_body.to_string())
 }
 
 fn parse_runner_app_meta(json_body: &str) -> Option<AppRuntimeMeta> {
@@ -1884,6 +1893,14 @@ pub fn get_app_runtime_meta(app_name: &str) -> AppRuntimeMeta {
                 }
             }
         }
+        "dispatcharr" => {
+            if let Ok(content) = fs::read_to_string(resolve_config_path("/etc/dispatcharr/dispatcharr.env")) {
+                if let Some(port) = extract_ini_value(&content, &["DISPATCHARR_PORT"]) {
+                    meta.configured_port = parse_valid_port(&port);
+                }
+            }
+        }
+
         "paperless-ngx" => {
             for raw in [
                 "/etc/paperless.conf",
@@ -2461,6 +2478,20 @@ pub fn sync_master_credentials_to_installed_apps(username: &str, password: &str)
             let _ = mutate_json_key(&p, "rpc-password", json!(password));
         }
     }
+
+    #[cfg(unix)]
+    if let Some(response) = request_runner_unix(
+        "/v1/dispatcharr-credentials",
+        json!({ "username": username.trim(), "password": password }),
+        Duration::from_secs(25),
+    ) {
+        let success = serde_json::from_str::<Value>(&response)
+            .ok()
+            .and_then(|value| value.get("success").and_then(Value::as_bool));
+        if success != Some(true) {
+            tracing::warn!("Dispatcharr master credential sync failed");
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2480,6 +2511,11 @@ fn native_app_spec(canonical_app: &str, bp_config_path: &str) -> NativeAppSpec {
     }
 
     match canonical_app {
+        "dispatcharr" => NativeAppSpec {
+            mutator_type: "ini",
+            config_paths: vec!["/etc/dispatcharr/dispatcharr.env".to_string()],
+            sqlite_db_path: None,
+        },
         "gitea" => NativeAppSpec {
             mutator_type: "ini",
             config_paths: vec!["/etc/gitea/app.ini".to_string()],
@@ -2673,6 +2709,26 @@ fn mutate_pihole_toml(file_path: &Path, port: i32) -> Result<bool, String> {
     Ok(true)
 }
 
+fn mutate_dispatcharr_port(file_path: &Path, port: i32) -> Result<bool, String> {
+    use std::io::Write;
+    let existing = fs::read_to_string(file_path).map_err(|error| error.to_string())?;
+    let setting = format!("DISPATCHARR_PORT={}", port);
+    let pattern = Regex::new(r"(?m)^\s*DISPATCHARR_PORT\s*=.*$").unwrap();
+    let updated = if pattern.is_match(&existing) {
+        pattern.replace_all(&existing, setting.as_str()).into_owned()
+    } else {
+        format!("{}{}{}\n", existing, if existing.ends_with('\n') || existing.is_empty() { "" } else { "\n" }, setting)
+    };
+    if updated == existing {
+        return Ok(false);
+    }
+    backup_config_file(file_path)?;
+    let mut file = fs::OpenOptions::new().write(true).truncate(true).open(file_path)
+        .map_err(|error| error.to_string())?;
+    file.write_all(updated.as_bytes()).map_err(|error| error.to_string())?;
+    Ok(true)
+}
+
 /// Applies an application's blueprint configuration:
 /// 1. Looks up `crate::get_blueprint(app_name)`.
 /// 2. If the app has a native config file (`config.xml`, `qBittorrent.conf`, `settings.json`, `network.xml`, etc.)
@@ -2707,6 +2763,13 @@ pub async fn apply_blueprint_app_config(
 
         let port_str = effective_port.to_string();
         match canonical.as_str() {
+            "dispatcharr" => {
+                if effective_port > 0
+                    && mutate_dispatcharr_port(&resolved, effective_port)?
+                {
+                    mutated_files.push(resolved.to_string_lossy().to_string());
+                }
+            }
             "gitea" => {
                 if effective_port > 0 && mutate_ini_key(&resolved, "server", "HTTP_PORT", &port_str)? {
                     mutated_files.push(resolved.to_string_lossy().to_string());
@@ -3040,6 +3103,36 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_dispatcharr_blueprint_env_port_preserves_secrets_and_permissions() {
+        let dir = temp_test_dir("dispatcharr");
+        let path = dir.join("dispatcharr.env");
+        let spec = native_app_spec("dispatcharr", "/stale/config");
+        assert_eq!(spec.config_paths, vec!["/etc/dispatcharr/dispatcharr.env"]);
+        for original in ["POSTGRES_PASSWORD=keep\nDISPATCHARR_PORT=9191\n", "POSTGRES_PASSWORD=keep", ""] {
+            fs::write(&path, original).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
+            }
+            assert!(mutate_dispatcharr_port(&path, 19200).unwrap());
+            let text = fs::read_to_string(&path).unwrap();
+            assert_eq!(extract_ini_value(&text, &["DISPATCHARR_PORT"]).as_deref(), Some("19200"));
+            assert!(!text.contains("[Preferences]"));
+            if original.contains("POSTGRES_PASSWORD") {
+                assert!(text.contains("POSTGRES_PASSWORD=keep"));
+            }
+            assert!(!mutate_dispatcharr_port(&path, 19200).unwrap());
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o640);
+            }
+        }
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

@@ -82,6 +82,7 @@ done
 CONFIG_ENV_FILE="${ENV_FILE}"
 CONFIG_DATA_DIR="${DATA_DIR}"
 LEGACY_OPT_ROOT="${LEGACY_OPT_ROOT:-/opt/AetherFlow}"
+LEGACY_BIN_ROOT="${LEGACY_BIN_ROOT:-/usr/local/bin/AetherFlow}"
 DRY_RUN_ROOT="${DRY_RUN_ROOT:-/tmp/aetherflow-dryrun}"
 RESOLVED_DB_PATH=""
 RESOLVED_DB_SOURCE=""
@@ -740,6 +741,20 @@ state_snapshot() {
 ###############################################################################
 # STAGE 2: Atomic Symlink Swap
 ###############################################################################
+sync_legacy_package_paths() {
+    [[ "${DRY_RUN}" == true ]] && return 0
+    [[ -d "${CURRENT_LINK}/packages" ]] || return 0
+    if [[ -d "${LEGACY_OPT_ROOT}/packages" && ! "${CURRENT_LINK}/packages" -ef "${LEGACY_OPT_ROOT}/packages" ]]; then
+        rsync -a --delete --checksum "${CURRENT_LINK}/packages/" "${LEGACY_OPT_ROOT}/packages/"
+    fi
+    if [[ -d "${LEGACY_BIN_ROOT}/package" && -d "${CURRENT_LINK}/packages/package" && ! "${CURRENT_LINK}/packages/package" -ef "${LEGACY_BIN_ROOT}/package" ]]; then
+        rsync -a --delete --checksum "${CURRENT_LINK}/packages/package/" "${LEGACY_BIN_ROOT}/package/"
+    fi
+    if [[ -d "${LEGACY_BIN_ROOT}" && -f "${CURRENT_LINK}/packages/common.sh" && ! "${CURRENT_LINK}/packages/common.sh" -ef "${LEGACY_BIN_ROOT}/common.sh" ]]; then
+        cp -a "${CURRENT_LINK}/packages/common.sh" "${LEGACY_BIN_ROOT}/common.sh"
+    fi
+}
+
 symlink_swap() {
     log_info "=== STAGE 2: Atomic Symlink Swap ==="
 
@@ -753,6 +768,7 @@ symlink_swap() {
     local tmp_link="${CURRENT_LINK}.tmp.${EPOCH}"
     ln -s "${RELEASE_DIR}" "${tmp_link}"
     mv -Tf "${tmp_link}" "${CURRENT_LINK}"
+    sync_legacy_package_paths
 
     log_info "Symlink updated atomically: ${CURRENT_LINK} -> ${RELEASE_DIR}"
 }
@@ -953,6 +969,7 @@ rollback() {
     local tmp_link="${CURRENT_LINK}.rollback.${EPOCH}"
     ln -s "${previous_target}" "${tmp_link}"
     mv -Tf "${tmp_link}" "${CURRENT_LINK}"
+    sync_legacy_package_paths
     log_info "Symlink reverted: ${CURRENT_LINK} -> ${previous_target}"
 
     if [[ -z "${snapshot_release}" ]]; then

@@ -1757,6 +1757,7 @@
       "/var/lib/dispatcharr",
       "/etc/dispatcharr",
       "{{SERVICE_HOME}}",
+      "-/data",
       "-/mnt",
       "-/media",
       "-/srv",

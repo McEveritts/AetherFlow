@@ -1,6 +1,37 @@
 #!/bin/bash
-source /opt/AetherFlow/packages/common.sh
 set -euo pipefail
+for COMMON_SH in /opt/AetherFlow/current/packages/common.sh /opt/AetherFlow/packages/common.sh /usr/local/bin/AetherFlow/common.sh; do
+  if [[ -f "${COMMON_SH}" ]]; then
+    source "${COMMON_SH}"
+    break
+  fi
+done
+if [[ ! -f "${COMMON_SH}" ]]; then
+  printf 'Unable to locate AetherFlow common.sh\n' >&2
+  exit 1
+fi
+
+package_roots=(/opt/AetherFlow/current/packages/package /opt/AetherFlow/packages/package /usr/local/bin/AetherFlow/package)
+package_root() {
+  local root
+  for root in "${package_roots[@]}"; do
+    if [[ -d "${root}/$1" ]]; then
+      printf '%s\n' "${root}/$1"
+      return
+    fi
+  done
+  return 1
+}
+package_script() {
+  local root
+  for root in "${package_roots[@]}"; do
+    if [[ -f "${root}/$1/$1package-$2" ]]; then
+      printf '%s\n' "${root}/$1/$1package-$2"
+      return
+    fi
+  done
+  return 1
+}
 #
 # [AetherFlow :: AetherFlow Package Manager Batch CLI Installer `af`]
 # `af -h` for commands and info
@@ -43,7 +74,7 @@ function _function() {
 
 function _install() {
   installa=()
-  mapfile -t locks < <(find /usr/local/bin/AetherFlow/package/install -type f -printf "%f\n" | cut -d "-" -f 2 | sort -d)
+  mapfile -t locks < <(find "$(package_root install)" -type f -printf "%f\n" | cut -d "-" -f 2 | sort -d)
   for i in "${locks[@]}"; do
     app=${i}
     if [[ $i == autodl ]]; then app=autodlirssi; fi
@@ -59,14 +90,14 @@ function _install() {
   for i in "${packages[@]}"; do
     i="${i//\"/}"
     echo -e "Installing $i "
-    bash "/usr/local/bin/AetherFlow/package/install/installpackage-$i"
+    bash "$(package_script install "$i")"
   done
   _function
 }
 
 function _remove() {
 removea=()
-mapfile -t locks < <(find /usr/local/bin/AetherFlow/package/remove -type f -printf "%f\n" | cut -d "-" -f 2 | sort -d)
+mapfile -t locks < <(find "$(package_root remove)" -type f -printf "%f\n" | cut -d "-" -f 2 | sort -d)
 for i in "${locks[@]}"; do
   app=${i}
   if [[ $i == autodl ]]; then app=autodlirssi; fi
@@ -82,7 +113,7 @@ rm -f "${results_file}"
 for i in "${packages[@]}"; do
   i="${i//\"/}"
   echo -e "Removing $i "
-  bash "/usr/local/bin/AetherFlow/package/remove/removepackage-$i"
+  bash "$(package_script remove "$i")"
 done
 _function
 }
@@ -90,7 +121,7 @@ _function
 function _cli() {
   arg=("$@")
   packages=("${arg[@]:1}")
-  mapfile -t repo < <(find /usr/local/bin/AetherFlow/package/install -type f -printf "%f\n" | cut -d "-" -f 2)
+  mapfile -t repo < <(find "$(package_root install)" -type f -printf "%f\n" | cut -d "-" -f 2)
   for i in "${packages[@]}"; do
     app=${i}
     if [[ $i == autodl ]]; then app=autodlirssi; fi
@@ -99,7 +130,7 @@ function _cli() {
     else
       if printf '%s\n' "${repo[@]}" | grep -Fxq "$i"; then
         echo -e "Installing $i "
-        bash "/usr/local/bin/AetherFlow/package/install/installpackage-$i"
+        bash "$(package_script install "$i")"
       else
         echo -e "Package $i not found"
       fi
@@ -115,7 +146,7 @@ function _clr() {
     if [[ $i == autodl ]]; then app=autodlirssi; fi
     if [[ -f /install/.$app.lock ]]; then
       echo -e "Removing $i "
-      bash "/usr/local/bin/AetherFlow/package/remove/removepackage-$i"
+      bash "$(package_script remove "$i")"
     else
       echo -e "Package $i not installed"
     fi
@@ -192,7 +223,7 @@ function _help() {
 }
 
 function _list() {
-  mapfile -t repo < <(find /usr/local/bin/AetherFlow/package/install -type f -printf "%f\n" | cut -d "-" -f 2 | sort -d)
+  mapfile -t repo < <(find "$(package_root install)" -type f -printf "%f\n" | cut -d "-" -f 2 | sort -d)
   for i in "${repo[@]}"; do
     app=$i
     sgformat="${bold}%-15s${normal}"

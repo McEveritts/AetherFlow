@@ -197,6 +197,10 @@ if [[ "$1" == "-m" && "$2" == "pip" ]]; then
     shift 2
     exec "$TEST_ROOT/mock-bin/pip" "$@"
 fi
+if [[ "${1:-}" == *manage.py && "${2:-}" == "${FAIL_STAGE:-}" ]]; then
+    printf 'injected failure %s\n' "$FAIL_STAGE" >> "$TEST_ROOT/mock_commands.log"
+    exit 1
+fi
 exit 0
 EOF
             chmod +x "${venv_dir}/bin/python"
@@ -574,6 +578,20 @@ set_config_value() { :; }
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(conf.exists())
         self.assertIn("PAPERLESS_SECRET_KEY=", conf.read_text())
+
+    def test_paperless_migration_and_static_failures_restore_previous_runtime(self):
+        app = self.root / "opt/paperless"
+        (app / "src").mkdir(parents=True)
+        (app / "src/manage.py").write_text("old-code")
+        (app / ".af-version").write_text("old-version")
+        (self.root / "service_active_paperless-webserver").touch()
+        for stage in ("migrate", "collectstatic"):
+            with self.subTest(stage=stage):
+                result = self.run_script("paperless-ngx", FAIL_STAGE=stage)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual((app / "src/manage.py").read_text(), "old-code")
+                self.assertEqual((app / ".af-version").read_text(), "old-version")
+                self.assertTrue((self.root / "service_active_paperless-webserver").exists())
 
     def test_vaultwarden_update_preserves_admin_env_and_signup_policy(self):
         env_file = self.root / "etc/vaultwarden/vaultwarden.env"

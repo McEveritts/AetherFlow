@@ -17,11 +17,11 @@ import (
 
 // JobInfo holds detailed progress info for an active install/uninstall job.
 type JobInfo struct {
-	Status    string    `json:"status"`     // "installing" or "uninstalling"
+	Status    string    `json:"status"` // "installing" or "uninstalling"
 	StartedAt time.Time `json:"started_at"`
-	LogLines  int       `json:"log_lines"`  // total lines captured so far
-	LastLine  string    `json:"last_line"`  // most recent meaningful log line
-	Progress  int       `json:"progress"`   // estimated 0-100
+	LogLines  int       `json:"log_lines"` // total lines captured so far
+	LastLine  string    `json:"last_line"` // most recent meaningful log line
+	Progress  int       `json:"progress"`  // estimated 0-100
 }
 
 // PackageEventBroadcaster is an optional callback notified when a package job changes state or progress.
@@ -55,6 +55,28 @@ func notifyPackageEvent(pkgId, action, status string, progress int, lastLine str
 
 // ResolvePackageScriptPath finds the bash script location. Returns empty string if missing.
 func ResolvePackageScriptPath(action, scriptName string) string {
+	return resolvePackageScriptInRoots(action, scriptName, packageScriptRoots())
+}
+
+func packageScriptRoots() []string {
+	roots := []string{
+		"/opt/AetherFlow/current/packages/package",
+		"/opt/AetherFlow/packages/package",
+		"/usr/local/bin/AetherFlow/package",
+		filepath.Join("packages", "package"),
+		filepath.Join("..", "packages", "package"),
+		filepath.Join("..", "..", "packages", "package"),
+	}
+	if exeDir != "" {
+		roots = append(roots,
+			filepath.Join(exeDir, "packages", "package"),
+			filepath.Join(exeDir, "..", "packages", "package"),
+		)
+	}
+	return roots
+}
+
+func resolvePackageScriptInRoots(action, scriptName string, roots []string) string {
 	if (action != "install" && action != "remove" && action != "update") || !safeScriptName.MatchString(scriptName) {
 		return ""
 	}
@@ -71,30 +93,15 @@ func ResolvePackageScriptPath(action, scriptName string) string {
 		}
 	}
 
-	var candidates []string
-	for _, dir := range dirs {
-		for _, sc := range scripts {
-			candidates = append(candidates,
-				filepath.Join("/opt", "AetherFlow", "current", "packages", "package", dir, sc),
-				filepath.Join("/opt", "AetherFlow", "packages", "package", dir, sc),
-			)
-			if exeDir != "" {
-				candidates = append(candidates,
-					filepath.Join(exeDir, "packages", "package", dir, sc),
-					filepath.Join(exeDir, "..", "packages", "package", dir, sc),
-				)
+	// Exhaust update/install fallbacks in the active release before stale roots.
+	for _, root := range roots {
+		for _, dir := range dirs {
+			for _, sc := range scripts {
+				candidate := filepath.Join(root, dir, sc)
+				if info, err := os.Stat(candidate); err == nil && info.Mode().IsRegular() {
+					return candidate
+				}
 			}
-			candidates = append(candidates,
-				filepath.Join("packages", "package", dir, sc),
-				filepath.Join("..", "packages", "package", dir, sc),
-				filepath.Join("..", "..", "packages", "package", dir, sc),
-			)
-		}
-	}
-
-	for _, c := range candidates {
-		if _, err := os.Stat(c); err == nil {
-			return c
 		}
 	}
 	return ""

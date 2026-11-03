@@ -600,6 +600,11 @@ func extractAppRuntimeMetaLocal(appName string) AppRuntimeMeta {
 			}
 		}
 
+	case "dispatcharr":
+		if content, ok := readConfigText("/etc/dispatcharr/dispatcharr.env"); ok {
+			meta.ConfiguredPort = parseValidPort(extractINIValue(content, "DISPATCHARR_PORT"))
+		}
+
 	case "paperless-ngx":
 		confPaths := []string{
 			"/etc/paperless.conf",

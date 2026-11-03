@@ -87,6 +87,32 @@ pub fn is_runner_available() -> bool {
 
 
 pub fn resolve_package_script_path(action: &str, script_name: &str) -> Option<PathBuf> {
+    resolve_package_script_in_roots(action, script_name, &package_script_roots())
+}
+
+fn package_script_roots() -> Vec<PathBuf> {
+    let mut roots = vec![
+        PathBuf::from("/opt/AetherFlow/current/packages/package"),
+        PathBuf::from("/opt/AetherFlow/packages/package"),
+        PathBuf::from("/usr/local/bin/AetherFlow/package"),
+        PathBuf::from("packages/package"),
+        PathBuf::from("../packages/package"),
+        PathBuf::from("../../packages/package"),
+    ];
+    if let Ok(exe) = env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            roots.push(exe_dir.join("packages/package"));
+            roots.push(exe_dir.join("../packages/package"));
+        }
+    }
+    roots
+}
+
+fn resolve_package_script_in_roots(
+    action: &str,
+    script_name: &str,
+    roots: &[PathBuf],
+) -> Option<PathBuf> {
     if !SAFE_SCRIPT_NAME.is_match(script_name) {
         return None;
     }
@@ -97,30 +123,28 @@ pub fn resolve_package_script_path(action: &str, script_name: &str) -> Option<Pa
         _ => return None,
     };
 
-    let mut roots = vec![
-        PathBuf::from("/usr/local/bin/AetherFlow/package"),
-        PathBuf::from("/opt/AetherFlow/current/packages/package"),
-        PathBuf::from("/opt/AetherFlow/packages/package"),
-        PathBuf::from("packages/package"),
-        PathBuf::from("../packages/package"),
-    ];
-    if let Ok(exe) = env::current_exe() {
-        if let Some(exe_dir) = exe.parent() {
-            roots.push(exe_dir.join("packages/package"));
-            roots.push(exe_dir.join("../packages/package"));
+    let mut script_names = vec![script_name.to_string()];
+    if subdir == "update" {
+        if let Some(package) = script_name.strip_prefix("updatepackage-") {
+            script_names.push(format!("installpackage-{package}"));
+        } else if let Some(package) = script_name.strip_prefix("installpackage-") {
+            script_names.insert(0, format!("updatepackage-{package}"));
         }
     }
+    let subdirs: &[&str] = if subdir == "update" {
+        &["update", "install"]
+    } else {
+        &[subdir]
+    };
 
-    for root in &roots {
-        let candidate = root.join(subdir).join(script_name);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-        // Fallback: `update` action can use `install/installpackage-<pkg>` when dedicated update script is absent
-        if subdir == "update" {
-            let install_fallback = root.join("install").join(script_name);
-            if install_fallback.is_file() {
-                return Some(install_fallback);
+    // Finish all fallbacks within a release before consulting stale roots.
+    for root in roots {
+        for dir in subdirs {
+            for name in &script_names {
+                let candidate = root.join(dir).join(name);
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
             }
         }
     }
@@ -166,6 +190,7 @@ pub fn build_runner_router() -> Router {
         .route("/v1/network", post(handle_network))
         .route("/v1/quota", post(handle_quota))
         .route("/v1/app-meta", post(handle_app_meta))
+        .route("/v1/dispatcharr-credentials", post(handle_dispatcharr_credentials))
 }
 
 async fn handle_health() -> Json<RunnerResponse> {
@@ -487,12 +512,12 @@ pub fn resolve_sandbox_script_path() -> Option<PathBuf> {
 
     let mut candidates = vec![
         PathBuf::from("/opt/AetherFlow/current/packages/system/af-systemd-sandbox"),
+        PathBuf::from("/opt/AetherFlow/packages/system/af-systemd-sandbox"),
         PathBuf::from("/usr/local/bin/AetherFlow/system/af-systemd-sandbox"),
         PathBuf::from("deploy/security/af-systemd-sandbox"),
         PathBuf::from("../deploy/security/af-systemd-sandbox"),
         PathBuf::from("packages/system/af-systemd-sandbox"),
         PathBuf::from("../packages/system/af-systemd-sandbox"),
-        PathBuf::from("/opt/AetherFlow/packages/system/af-systemd-sandbox"),
         PathBuf::from("/usr/local/bin/af-systemd-sandbox"),
     ];
     if let Ok(exe) = env::current_exe() {
@@ -516,15 +541,16 @@ fn load_runner_config_or_embedded(env_var: &str, filename: &str, embedded: &str)
         }
     }
     let mut candidates = vec![
+        PathBuf::from("/opt/AetherFlow/current/config").join(filename),
+        PathBuf::from("/opt/AetherFlow/current/backend/config").join(filename),
         PathBuf::from("config").join(filename),
         PathBuf::from("backend/config").join(filename),
         PathBuf::from("../backend/config").join(filename),
-        PathBuf::from("/opt/AetherFlow/current/config").join(filename),
         PathBuf::from("/opt/AetherFlow/backend/config").join(filename),
     ];
     if let Ok(exe) = env::current_exe() {
         if let Some(exe_dir) = exe.parent() {
-            candidates.insert(0, exe_dir.join("config").join(filename));
+            candidates.insert(2, exe_dir.join("config").join(filename));
         }
     }
     for c in candidates {
@@ -1079,11 +1105,11 @@ pub fn resolve_setdisk_script_path() -> Option<PathBuf> {
     }
 
     let mut candidates = vec![
+        PathBuf::from("/opt/AetherFlow/current/packages/system/setdisk"),
+        PathBuf::from("/opt/AetherFlow/packages/system/setdisk"),
         PathBuf::from("/usr/local/bin/AetherFlow/system/setdisk"),
         PathBuf::from("packages/system/setdisk"),
         PathBuf::from("../packages/system/setdisk"),
-        PathBuf::from("/opt/AetherFlow/current/packages/system/setdisk"),
-        PathBuf::from("/opt/AetherFlow/packages/system/setdisk"),
     ];
     if let Ok(exe) = env::current_exe() {
         if let Some(exe_dir) = exe.parent() {
@@ -1139,10 +1165,18 @@ pub async fn execute_set_quota_local(username: &str, size: &str) -> anyhow::Resu
         .to_string());
     }
 
-    let bin_setdisk = Path::new("/usr/local/bin/AetherFlow/system/setdisk");
-    if bin_setdisk.is_file() {
+    let bin_setdisk_opt = resolve_setdisk_script_path().or_else(|| {
+        let fallback = PathBuf::from("/usr/local/bin/AetherFlow/system/setdisk");
+        if fallback.is_file() {
+            Some(fallback)
+        } else {
+            None
+        }
+    });
+
+    if let Some(bin_setdisk) = bin_setdisk_opt {
         let out = Command::new("bash")
-            .arg(bin_setdisk)
+            .arg(&bin_setdisk)
             .arg("--username")
             .arg(username)
             .arg("--size")
@@ -1160,7 +1194,7 @@ pub async fn execute_set_quota_local(username: &str, size: &str) -> anyhow::Resu
                 return Ok(combined.trim().to_string());
             }
             // Also try positional invocation `<username> <size>` if script variant expects positional args
-            if let Ok(o2) = Command::new(bin_setdisk)
+            if let Ok(o2) = Command::new(&bin_setdisk)
                 .arg(username)
                 .arg(size)
                 .output()
@@ -1171,26 +1205,6 @@ pub async fn execute_set_quota_local(username: &str, size: &str) -> anyhow::Resu
                 }
             }
             anyhow::bail!("setdisk failed: {}", combined.trim());
-        }
-    }
-
-    if let Some(script_path) = resolve_setdisk_script_path() {
-        let out = Command::new("bash")
-            .arg(&script_path)
-            .arg("--username")
-            .arg(username)
-            .arg("--size")
-            .arg(size)
-            .arg("--json")
-            .output()
-            .await?;
-        let combined = format!(
-            "{}{}",
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
-        );
-        if out.status.success() {
-            return Ok(combined.trim().to_string());
         }
     }
 
@@ -2104,6 +2118,12 @@ pub fn extract_app_runtime_meta_local(app_name: &str) -> AppRuntimeMeta {
             }
         }
 
+        "dispatcharr" => {
+            if let Some(content) = read_runner_config_text("/etc/dispatcharr/dispatcharr.env") {
+                meta.configured_port = dispatcharr_runtime_port(&content);
+            }
+        }
+
         "paperless-ngx" => {
             let conf_paths = [
                 "/etc/paperless.conf",
@@ -2454,6 +2474,85 @@ pub fn extract_app_runtime_meta_local(app_name: &str) -> AppRuntimeMeta {
     }
 
     meta
+}
+
+fn dispatcharr_runtime_port(content: &str) -> i32 {
+    parse_valid_runner_port(&extract_runner_ini_value(content, &["DISPATCHARR_PORT"]))
+}
+
+const DISPATCHARR_ADMIN_SCRIPT: &str = r#"import os
+from django.contrib.auth import get_user_model
+from django.db import transaction
+
+with transaction.atomic():
+    user, _ = get_user_model().objects.get_or_create(username=os.environ["AF_ADMIN_USER"])
+    user.email = os.environ["AF_ADMIN_EMAIL"]
+    user.user_level = 10
+    user.is_staff = True
+    user.is_superuser = True
+    user.is_active = True
+    user.set_password(os.environ["AF_ADMIN_PASS"])
+    user.save()
+"#;
+
+#[derive(Deserialize)]
+struct DispatcharrCredentialsRequest {
+    username: String,
+    password: String,
+}
+
+fn dispatcharr_credentials_command(username: &str, password: &str) -> Command {
+    let mut command = Command::new("runuser");
+    command
+        .args([
+            "-u", "dispatcharr", "--", "/bin/bash", "-ec",
+            "set -a; source /etc/dispatcharr/dispatcharr.env; set +a; cd /opt/dispatcharr; exec /opt/dispatcharr/env/bin/python manage.py shell",
+        ])
+        .env("AF_ADMIN_USER", username)
+        .env("AF_ADMIN_PASS", password)
+        .env("AF_ADMIN_EMAIL", format!("{}@localhost", username))
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    command
+}
+
+async fn handle_dispatcharr_credentials(
+    Json(req): Json<DispatcharrCredentialsRequest>,
+) -> (StatusCode, Json<RunnerResponse>) {
+    let username = req.username.trim();
+    if username.is_empty() || req.password.is_empty()
+        || username.len() > 256 || req.password.len() > 4096
+        || username.contains('\0') || req.password.contains('\0')
+    {
+        return (StatusCode::BAD_REQUEST, Json(RunnerResponse {
+            success: false,
+            output: String::new(),
+            error: "invalid Dispatcharr credentials".to_string(),
+        }));
+    }
+    if !Path::new("/opt/dispatcharr/manage.py").is_file() {
+        return (StatusCode::OK, Json(RunnerResponse {
+            success: true,
+            output: "Dispatcharr is not installed".to_string(),
+            error: String::new(),
+        }));
+    }
+    let result = tokio::time::timeout(Duration::from_secs(20), async {
+        use tokio::io::AsyncWriteExt;
+        let mut child = dispatcharr_credentials_command(username, &req.password).spawn()?;
+        let mut input = child.stdin.take().ok_or_else(|| std::io::Error::other("missing stdin"))?;
+        input.write_all(DISPATCHARR_ADMIN_SCRIPT.as_bytes()).await?;
+        drop(input);
+        child.wait().await
+    }).await;
+    let success = matches!(result, Ok(Ok(status)) if status.success());
+    (if success { StatusCode::OK } else { StatusCode::INTERNAL_SERVER_ERROR }, Json(RunnerResponse {
+        success,
+        output: String::new(),
+        error: if success { String::new() } else { "Dispatcharr credential sync failed".to_string() },
+    }))
 }
 
 async fn handle_app_meta(
@@ -2980,6 +3079,59 @@ pub async fn run_privileged_daemon() -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn test_package_script_resolution_prefers_current_release() {
+        let defaults = package_script_roots();
+        assert_eq!(defaults[0], PathBuf::from("/opt/AetherFlow/current/packages/package"));
+        assert_eq!(defaults[1], PathBuf::from("/opt/AetherFlow/packages/package"));
+        assert_eq!(defaults[2], PathBuf::from("/usr/local/bin/AetherFlow/package"));
+
+        let scratch = env::temp_dir().join(format!("af-script-paths-{}", uuid::Uuid::new_v4()));
+        let roots: Vec<_> = defaults[..3]
+            .iter()
+            .map(|root| scratch.join(root.strip_prefix("/").unwrap()))
+            .collect();
+        for root in &roots {
+            fs::create_dir_all(root.join("install")).unwrap();
+            fs::create_dir_all(root.join("update")).unwrap();
+            fs::create_dir_all(root.join("remove")).unwrap();
+            fs::write(root.join("install/installpackage-dispatcharr"), "release").unwrap();
+            fs::write(root.join("remove/removepackage-dispatcharr"), "remove").unwrap();
+        }
+        // A stale dedicated updater must not override the current installer.
+        fs::write(roots[1].join("update/updatepackage-dispatcharr"), "stale").unwrap();
+        for name in ["installpackage-dispatcharr", "updatepackage-dispatcharr"] {
+            assert_eq!(
+                resolve_package_script_in_roots("update", name, &roots),
+                Some(roots[0].join("install/installpackage-dispatcharr"))
+            );
+        }
+        for action in ["remove", "uninstall"] {
+            assert_eq!(
+                resolve_package_script_in_roots(action, "removepackage-dispatcharr", &roots),
+                Some(roots[0].join("remove/removepackage-dispatcharr"))
+            );
+        }
+        fs::write(roots[0].join("update/updatepackage-dispatcharr"), "current").unwrap();
+        assert_eq!(
+            resolve_package_script_in_roots("update", "installpackage-dispatcharr", &roots),
+            Some(roots[0].join("update/updatepackage-dispatcharr"))
+        );
+        fs::remove_file(roots[0].join("install/installpackage-dispatcharr")).unwrap();
+        assert_eq!(
+            resolve_package_script_in_roots("install", "installpackage-dispatcharr", &roots),
+            Some(roots[1].join("install/installpackage-dispatcharr"))
+        );
+        fs::remove_file(roots[1].join("install/installpackage-dispatcharr")).unwrap();
+        assert_eq!(
+            resolve_package_script_in_roots("install", "installpackage-dispatcharr", &roots),
+            Some(roots[2].join("install/installpackage-dispatcharr"))
+        );
+        assert!(resolve_package_script_in_roots("install", "../dispatcharr", &roots).is_none());
+        assert!(resolve_package_script_in_roots("invalid", "installpackage-dispatcharr", &roots).is_none());
+        fs::remove_dir_all(scratch).unwrap();
+    }
+
     #[tokio::test]
     async fn test_heal_restart_skips_active_package_operation() {
         let _operation = PACKAGE_MUTEX.lock().await;
@@ -3126,6 +3278,45 @@ mod tests {
         assert!(resp.success);
         let decoded: AppRuntimeMeta = serde_json::from_str(&resp.output).unwrap();
         assert!(decoded.configured_port >= 0);
+    }
+
+    #[test]
+    fn test_dispatcharr_runtime_port_and_package_fallback() {
+        assert_eq!(dispatcharr_runtime_port("DISPATCHARR_PORT=19200\n"), 19200);
+        assert_eq!(dispatcharr_runtime_port("DISPATCHARR_PORT=\"9191\"\n"), 9191);
+        assert_eq!(dispatcharr_runtime_port("DISPATCHARR_PORT=70000\n"), 0);
+        assert_eq!(dispatcharr_runtime_port("POSTGRES_PORT=5432\n"), 0);
+        assert!(package_script_roots().contains(&PathBuf::from("../../packages/package")));
+    }
+
+    #[test]
+    fn test_dispatcharr_credential_sync_drops_privileges_and_preserves_literals() {
+        let username = "user'\"$`\\";
+        let password = "p'\"\\$(touch /tmp/not-executed)\npassword";
+        let command = dispatcharr_credentials_command(username, password);
+        let command = command.as_std();
+        assert_eq!(command.get_program(), "runuser");
+        let args: Vec<_> = command.get_args().map(|arg| arg.to_string_lossy()).collect();
+        assert_eq!(&args[..5], &["-u", "dispatcharr", "--", "/bin/bash", "-ec"]);
+        assert!(args.last().unwrap().contains("source /etc/dispatcharr/dispatcharr.env"));
+        assert!(!args.iter().any(|arg| arg.contains(password) || arg.contains(username)));
+        let variables: HashMap<_, _> = command.get_envs().collect();
+        assert_eq!(variables[std::ffi::OsStr::new("AF_ADMIN_USER")], Some(std::ffi::OsStr::new(username)));
+        assert_eq!(variables[std::ffi::OsStr::new("AF_ADMIN_PASS")], Some(std::ffi::OsStr::new(password)));
+        assert!(DISPATCHARR_ADMIN_SCRIPT.contains("user.user_level = 10"));
+        assert!(DISPATCHARR_ADMIN_SCRIPT.contains("os.environ[\"AF_ADMIN_PASS\"]"));
+    }
+
+    #[tokio::test]
+    async fn test_dispatcharr_sync_rejects_invalid_credentials_before_execution() {
+        for (username, password) in [("", "secret"), ("admin", ""), ("admin\0", "secret")] {
+            let (status, Json(response)) = handle_dispatcharr_credentials(Json(DispatcharrCredentialsRequest {
+                username: username.to_string(),
+                password: password.to_string(),
+            })).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert!(!response.success);
+        }
     }
 
     #[tokio::test]

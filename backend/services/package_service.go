@@ -35,20 +35,23 @@ func resolveConfigPaths(envKey, fileName string) []string {
 	if customPath := os.Getenv(envKey); customPath != "" {
 		return []string{customPath}
 	}
-	paths := []string{}
+	paths := []string{
+		filepath.Join("/opt", "AetherFlow", "current", "config", fileName),
+		filepath.Join("/opt", "AetherFlow", "current", "backend", "config", fileName),
+	}
 
-	// Executable-relative: always works no matter the CWD
+	// The active release wins even when a legacy unit has a stale CWD/binary path.
 	if exeDir != "" {
 		paths = append(paths, filepath.Join(exeDir, "config", fileName))
 	}
 
 	return append(paths, []string{
-		filepath.Join("config", fileName),                                     // CWD is backend/
-		filepath.Join("backend", "config", fileName),                          // CWD is project root
-		filepath.Join("..", "backend", "config", fileName),                    // CWD is a sibling dir
+		filepath.Join("config", fileName),                                    // CWD is backend/
+		filepath.Join("backend", "config", fileName),                         // CWD is project root
+		filepath.Join("..", "backend", "config", fileName),                   // CWD is a sibling dir
 		filepath.Join("/opt", "AetherFlow", "backend", "config", fileName),   // Production
-		filepath.Join("..", "dashboard", "config", fileName),                  // Legacy fallback
-		filepath.Join("dashboard", "config", fileName),                        // Legacy fallback (alt)
+		filepath.Join("..", "dashboard", "config", fileName),                 // Legacy fallback
+		filepath.Join("dashboard", "config", fileName),                       // Legacy fallback (alt)
 		filepath.Join("/opt", "AetherFlow", "dashboard", "config", fileName), // Legacy production fallback
 	}...)
 }
@@ -183,7 +186,7 @@ func GetPackages() ([]models.Package, error) {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			
+
 			pkgId := pkgs[idx].Name
 
 			// 1. Check in-memory Installer Service Queue for active operations

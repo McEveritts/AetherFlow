@@ -6,13 +6,15 @@
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-COMMON_SH="/opt/AetherFlow/packages/common.sh"
-if [[ -f "${COMMON_SH}" ]]; then
-    # shellcheck disable=SC1091
-    source "${COMMON_SH}"
-else
-    # shellcheck disable=SC1091
+if [[ -f "${SELF_DIR}/../../common.sh" ]]; then
+    # shellcheck source=/dev/null
     source "${SELF_DIR}/../../common.sh"
+elif [[ -f /opt/AetherFlow/current/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/current/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
 fi
 
 require_root
@@ -72,16 +74,19 @@ chown -R "${APP_USER}:${APP_USER}" "${INSTALL_DIR}" "${DATA_DIR}"
 report_progress 80 "Initializing ${APP_NAME} database and master account..."
 if [[ -f "${INSTALL_DIR}/manage.py" ]]; then
     su -s /bin/bash "${APP_USER}" -c "cd '${INSTALL_DIR}' && '${INSTALL_DIR}/.venv/bin/python' manage.py makemigrations --noinput" >> "$LOGFILE" 2>&1 || true
-    su -s /bin/bash "${APP_USER}" -c "cd '${INSTALL_DIR}' && '${INSTALL_DIR}/.venv/bin/python' manage.py migrate --noinput" >> "$LOGFILE" 2>&1 || true
-    su -s /bin/bash "${APP_USER}" -c "cd '${INSTALL_DIR}' && '${INSTALL_DIR}/.venv/bin/python' manage.py shell -c \"
+    su -s /bin/bash "${APP_USER}" -c "cd '${INSTALL_DIR}' && '${INSTALL_DIR}/.venv/bin/python' manage.py migrate --noinput" >> "$LOGFILE" 2>&1
+    ADMIN_USER="${ADMIN_USER}" ADMIN_PASS="${ADMIN_PASS}" ADMIN_EMAIL="${ADMIN_EMAIL}" \
+        su -s /bin/bash "${APP_USER}" -c "cd '${INSTALL_DIR}' && '${INSTALL_DIR}/.venv/bin/python' manage.py shell" >> "$LOGFILE" 2>&1 <<'PYEOF'
+import os
 from django.contrib.auth import get_user_model
 User = get_user_model()
-u, _ = User.objects.get_or_create(username='${ADMIN_USER}', defaults={'email': '${ADMIN_EMAIL}', 'is_staff': True, 'is_superuser': True})
+u, _ = User.objects.get_or_create(username=os.environ["ADMIN_USER"])
+u.email = os.environ["ADMIN_EMAIL"]
 u.is_staff = True
 u.is_superuser = True
-u.set_password('${ADMIN_PASS}')
+u.set_password(os.environ["ADMIN_PASS"])
 u.save()
-\"" >> "$LOGFILE" 2>&1 || true
+PYEOF
 fi
 
 cat > "${INSTALL_DIR}/start-seedcross.sh" <<EOF

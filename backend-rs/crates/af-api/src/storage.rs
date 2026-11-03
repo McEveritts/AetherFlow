@@ -2240,14 +2240,14 @@ fn read_update_channel() -> &'static str {
 
 fn get_local_version() -> String {
     let mut candidates = vec![
+        PathBuf::from("/opt/AetherFlow/current/.version"),
         PathBuf::from(".version"),
         PathBuf::from("../.version"),
-        PathBuf::from("/opt/AetherFlow/current/.version"),
     ];
     if let Ok(exe) = env::current_exe() {
         if let Some(exe_dir) = exe.parent() {
-            candidates.insert(0, exe_dir.join("../.version"));
-            candidates.insert(0, exe_dir.join(".version"));
+            candidates.insert(1, exe_dir.join("../.version"));
+            candidates.insert(1, exe_dir.join(".version"));
         }
     }
     for c in candidates {

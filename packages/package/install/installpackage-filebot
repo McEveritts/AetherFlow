@@ -6,13 +6,15 @@
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-COMMON_SH="/opt/AetherFlow/packages/common.sh"
-if [[ -f "${COMMON_SH}" ]]; then
-    # shellcheck disable=SC1091
-    source "${COMMON_SH}"
-else
-    # shellcheck disable=SC1091
+if [[ -f "${SELF_DIR}/../../common.sh" ]]; then
+    # shellcheck source=/dev/null
     source "${SELF_DIR}/../../common.sh"
+elif [[ -f /opt/AetherFlow/current/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/current/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
 fi
 
 require_root
@@ -80,7 +82,7 @@ rm -f "${TMP_NODE}"
 
 if [[ -f "${NODE_DIR}/server/package.json" ]]; then
     pushd "${NODE_DIR}/server" >/dev/null
-    npm install --omit=dev >> "$LOGFILE" 2>&1 || true
+    npm install --omit=dev >> "$LOGFILE" 2>&1
     popd >/dev/null
 fi
 

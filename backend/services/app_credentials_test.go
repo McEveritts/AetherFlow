@@ -22,6 +22,28 @@ func writeTestConfigFile(t *testing.T, root, relPath, content string) {
 	}
 }
 
+func TestDispatcharrRuntimePortFromEnvironment(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("AETHERFLOW_CONFIG_ROOT", root)
+	for _, test := range []struct {
+		value string
+		want  int
+	}{
+		{`"19200"`, 19200},
+		{"9191", 9191},
+		{"70000", 0},
+		{"invalid", 0},
+	} {
+		t.Run(test.value, func(t *testing.T) {
+			writeTestConfigFile(t, root, "/etc/dispatcharr/dispatcharr.env", "DISPATCHARR_PORT="+test.value+"\nPOSTGRES_PASSWORD=private\n")
+			meta := extractAppRuntimeMetaLocal("dispatcharr")
+			if meta.ConfiguredPort != test.want || meta.APIKey != "" {
+				t.Fatalf("unexpected Dispatcharr metadata: %+v", meta)
+			}
+		})
+	}
+}
+
 func TestGetAppRuntimeMeta_XMLAndINIConfigs(t *testing.T) {
 	tmpRoot := t.TempDir()
 	t.Setenv("AETHERFLOW_CONFIG_ROOT", tmpRoot)

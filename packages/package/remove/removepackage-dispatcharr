@@ -5,13 +5,15 @@
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-COMMON_SH="/opt/AetherFlow/packages/common.sh"
-if [[ -f "${COMMON_SH}" ]]; then
-    # shellcheck disable=SC1091
-    source "${COMMON_SH}"
-else
-    # shellcheck disable=SC1091
+if [[ -f "${SELF_DIR}/../../common.sh" ]]; then
+    # shellcheck source=/dev/null
     source "${SELF_DIR}/../../common.sh"
+elif [[ -f /opt/AetherFlow/current/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/current/packages/common.sh
+else
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/packages/common.sh
 fi
 
 require_root
@@ -38,6 +40,16 @@ rm -rf "${INSTALL_DIR}"
 
 if [[ "${DELETE_DATA:-false}" == "true" ]]; then
     log_info "DELETE_DATA=true: Purging ${CONFIG_DIR}, ${DATA_DIR}, and PostgreSQL database..."
+    # Only unlink our compatibility path, and do so before deleting its target.
+    # An unrelated symlink or a real /data directory may belong to other apps.
+    if [[ -L /data && "$(readlink -f /data)" == "${DATA_DIR}" ]]; then
+        rm -f /data
+    elif [[ -d /data && ! -L /data ]]; then
+        for sub in logos recordings uploads m3us epgs plugins backups logs cache; do
+            rm -rf -- "/data/${sub}"
+        done
+        rmdir /data 2>/dev/null || true
+    fi
     rm -rf "${CONFIG_DIR}" "${DATA_DIR}"
     su - postgres -c "psql -c 'DROP DATABASE IF EXISTS dispatcharr;'" >> "$LOGFILE" 2>&1 || true
     su - postgres -c "psql -c 'DROP USER IF EXISTS dispatcharr;'" >> "$LOGFILE" 2>&1 || true

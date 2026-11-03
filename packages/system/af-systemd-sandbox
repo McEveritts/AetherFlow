@@ -3,13 +3,15 @@
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-COMMON_SH="/opt/AetherFlow/packages/common.sh"
-if [[ -f "${COMMON_SH}" ]]; then
-    # shellcheck disable=SC1091
-    source "${COMMON_SH}"
-else
-    # shellcheck disable=SC1091
-    source "${SELF_DIR}/../common.sh"
+for COMMON_SH in "${SELF_DIR}/../common.sh" /opt/AetherFlow/current/packages/common.sh /opt/AetherFlow/packages/common.sh /usr/local/bin/AetherFlow/common.sh; do
+    if [[ -f "${COMMON_SH}" ]]; then
+        source "${COMMON_SH}"
+        break
+    fi
+done
+if [[ ! -f "${COMMON_SH}" ]]; then
+    printf 'Unable to locate AetherFlow common.sh\n' >&2
+    exit 1
 fi
 
 usage() {
@@ -179,7 +181,7 @@ remove_sandbox_dropin() {
     local unit="$1"
     local dropin_dir="/etc/systemd/system/${unit}.d"
     local dropin_file="${dropin_dir}/10-aetherflow-sandbox.conf"
-    rm -f "${dropin_file}"
+    rm -f "${dropin_file}" "${dropin_dir}/aetherflow-sandbox.conf"
     rmdir "${dropin_dir}" >/dev/null 2>&1 || true
     log_info "Removed sandbox drop-in for ${unit}"
 }
@@ -207,6 +209,7 @@ apply_sandbox_dropin() {
     dropin_file="${dropin_dir}/10-aetherflow-sandbox.conf"
 
     mkdir -p "${dropin_dir}"
+    rm -f "${dropin_dir}/aetherflow-sandbox.conf"
 
     {
         echo "[Service]"

@@ -99,17 +99,18 @@ fn load_config_file_or_embedded(env_var: &str, filename: &str, embedded: &str) -
         }
     }
     let mut candidates = vec![
+        PathBuf::from("/opt/AetherFlow/current/config").join(filename),
+        PathBuf::from("/opt/AetherFlow/current/backend/config").join(filename),
         PathBuf::from("config").join(filename),
         PathBuf::from("backend/config").join(filename),
         PathBuf::from("../backend/config").join(filename),
         PathBuf::from("../../backend/config").join(filename),
         PathBuf::from("../../../backend/config").join(filename),
-        PathBuf::from("/opt/AetherFlow/current/config").join(filename),
         PathBuf::from("/opt/AetherFlow/backend/config").join(filename),
     ];
     if let Ok(exe) = env::current_exe() {
         if let Some(exe_dir) = exe.parent() {
-            candidates.insert(0, exe_dir.join("config").join(filename));
+            candidates.insert(2, exe_dir.join("config").join(filename));
         }
     }
     for c in candidates {

@@ -8,6 +8,9 @@ SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ -f "${SELF_DIR}/../../common.sh" ]]; then
     # shellcheck source=/dev/null
     source "${SELF_DIR}/../../common.sh"
+elif [[ -f /opt/AetherFlow/current/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/current/packages/common.sh
 else
     # shellcheck source=/dev/null
     source /opt/AetherFlow/packages/common.sh
@@ -72,7 +75,9 @@ if curl -fsSL "https://github.com/librespeed/speedtest-go/archive/refs/tags/v${L
 fi
 
 OBSIDIAN_ASSET_DIR="${SELF_DIR}/../assets/librespeed"
-if [[ ! -d "$OBSIDIAN_ASSET_DIR" && -d "/opt/AetherFlow/packages/package/assets/librespeed" ]]; then
+if [[ ! -d "$OBSIDIAN_ASSET_DIR" && -d "/opt/AetherFlow/current/packages/package/assets/librespeed" ]]; then
+    OBSIDIAN_ASSET_DIR="/opt/AetherFlow/current/packages/package/assets/librespeed"
+elif [[ ! -d "$OBSIDIAN_ASSET_DIR" && -d "/opt/AetherFlow/packages/package/assets/librespeed" ]]; then
     OBSIDIAN_ASSET_DIR="/opt/AetherFlow/packages/package/assets/librespeed"
 fi
 if [[ -d "$OBSIDIAN_ASSET_DIR" ]]; then

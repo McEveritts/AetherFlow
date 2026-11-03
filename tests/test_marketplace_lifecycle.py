@@ -116,7 +116,7 @@ purge_systemd_unit() { :; }
 
     def run_script(self, package, action='install', **environment):
         source = (ROOT / f'packages/package/{action}/{action}package-{package}').read_text()
-        for prefix in ('/opt/', '/var/', '/etc/', '/usr/local/', '/srv/', '/install'):
+        for prefix in ('/opt/', '/var/', '/etc/', '/usr/local/', '/srv/', '/install', '/data'):
             source = source.replace(prefix, str(self.root) + prefix)
         script = self.root / 'script'
         script.write_text(source)
@@ -206,6 +206,60 @@ purge_systemd_unit() { :; }
                     if not purge:
                         self.assertEqual(config.read_text(), 'keep-secret')
                         self.assertEqual(data.read_text(), 'keep-state')
+
+    def test_dispatcharr_removal_retains_compatibility_link_and_database(self):
+        config = self.file('etc/dispatcharr/db_pass', 'keep-secret')
+        data = self.file('var/lib/dispatcharr/logos/channel.png', 'keep-logo')
+        runtime = self.file('opt/dispatcharr/aetherflow_asgi.py', 'runtime')
+        link = self.root / 'data'
+        link.symlink_to(data.parents[1], target_is_directory=True)
+        self.assert_success(self.run_script('dispatcharr', 'remove'))
+        self.assertEqual(config.read_text(), 'keep-secret')
+        self.assertEqual(data.read_text(), 'keep-logo')
+        self.assertTrue(link.is_symlink())
+        self.assertEqual((link / 'logos/channel.png').read_text(), 'keep-logo')
+        self.assertFalse(runtime.exists())
+        commands = (self.root / 'commands').read_text()
+        self.assertNotIn('DROP DATABASE', commands)
+        self.assertNotIn('DROP USER', commands)
+        self.assertNotIn('userdel', commands)
+
+        self.assert_success(self.run_script('dispatcharr', 'remove', DELETE_DATA='true'))
+        self.assertFalse(config.exists())
+        self.assertFalse(data.exists())
+        self.assertFalse(link.is_symlink())
+        commands = (self.root / 'commands').read_text()
+        self.assertIn('DROP DATABASE IF EXISTS dispatcharr', commands)
+        self.assertIn('DROP USER IF EXISTS dispatcharr', commands)
+
+    def test_dispatcharr_purge_keeps_unrelated_data_paths(self):
+        for symlink in (False, True):
+            with self.subTest(symlink=symlink):
+                link = self.root / 'data'
+                if symlink:
+                    target = self.root / 'shared-data'
+                    link.rename(target)
+                    link.symlink_to(target, target_is_directory=True)
+                retained = self.file('data/shared-file', 'other application')
+                self.assert_success(self.run_script('dispatcharr', 'remove', DELETE_DATA='true'))
+                self.assertEqual(retained.read_text(), 'other application')
+                self.assertEqual(link.is_symlink(), symlink)
+
+    def test_dispatcharr_canonical_data_is_only_deleted_on_explicit_purge(self):
+        logo = self.file('data/logos/channel.png', 'keep-logo')
+        upload = self.file('data/uploads/epgs/guide.xml', 'keep-epg')
+        shared = self.file('data/other-app/state', 'keep-shared')
+        legacy = self.root / 'var/lib/dispatcharr'
+        legacy.mkdir(parents=True)
+        (legacy / 'logos').symlink_to(logo.parent)
+        config = self.file('etc/dispatcharr/dispatcharr.env', 'keep-env')
+        for purge in (False, True):
+            self.assert_success(self.run_script('dispatcharr', 'remove', DELETE_DATA=str(purge).lower()))
+            self.assertEqual(logo.exists(), not purge)
+            self.assertEqual(upload.exists(), not purge)
+            self.assertEqual(legacy.exists(), not purge)
+            self.assertEqual(config.exists(), not purge)
+            self.assertEqual(shared.read_text(), 'keep-shared')
 
     def test_port_configuration_preserves_other_settings(self):
         cases = [

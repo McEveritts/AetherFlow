@@ -11,13 +11,15 @@ import (
 
 func resolveSandboxScriptPath() string {
 	paths := []string{
+		"/opt/AetherFlow/current/packages/system/af-systemd-sandbox",
+		"/opt/AetherFlow/packages/system/af-systemd-sandbox",
 		filepath.Join("/usr", "local", "bin", "AetherFlow", "system", "af-systemd-sandbox"),
 		filepath.Join("packages", "system", "af-systemd-sandbox"),
 		filepath.Join("..", "packages", "system", "af-systemd-sandbox"),
 	}
 
 	for _, candidate := range paths {
-		if _, err := os.Stat(candidate); err == nil {
+		if info, err := os.Stat(candidate); err == nil && info.Mode().IsRegular() {
 			return candidate
 		}
 	}

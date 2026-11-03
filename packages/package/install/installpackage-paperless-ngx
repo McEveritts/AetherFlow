@@ -4,8 +4,13 @@ set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ -f "${SELF_DIR}/../../common.sh" ]]; then
+    # shellcheck source=/dev/null
     source "${SELF_DIR}/../../common.sh"
+elif [[ -f /opt/AetherFlow/current/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/current/packages/common.sh
 else
+    # shellcheck source=/dev/null
     source /opt/AetherFlow/packages/common.sh
 fi
 
@@ -234,9 +239,9 @@ if [[ -f /opt/paperless/src/manage.py ]]; then
     export DJANGO_SUPERUSER_USERNAME="${MASTER_USER}"
     export DJANGO_SUPERUSER_PASSWORD="${MASTER_PASS}"
     export DJANGO_SUPERUSER_EMAIL="${MASTER_USER}@aether.local"
-    /opt/paperless/.venv/bin/python /opt/paperless/src/manage.py migrate >> "$LOGFILE" 2>&1 || true
+    /opt/paperless/.venv/bin/python /opt/paperless/src/manage.py migrate >> "$LOGFILE" 2>&1
     /opt/paperless/.venv/bin/python /opt/paperless/src/manage.py createsuperuser --noinput >> "$LOGFILE" 2>&1 || true
-    /opt/paperless/.venv/bin/python /opt/paperless/src/manage.py collectstatic --no-input >> "$LOGFILE" 2>&1 || true
+    /opt/paperless/.venv/bin/python /opt/paperless/src/manage.py collectstatic --no-input >> "$LOGFILE" 2>&1
 fi
 
 chown -R paperless:paperless /opt/paperless /var/lib/paperless

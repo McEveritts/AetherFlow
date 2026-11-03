@@ -4,8 +4,13 @@ set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ -f "${SELF_DIR}/../../common.sh" ]]; then
+    # shellcheck source=/dev/null
     source "${SELF_DIR}/../../common.sh"
+elif [[ -f /opt/AetherFlow/current/packages/common.sh ]]; then
+    # shellcheck source=/dev/null
+    source /opt/AetherFlow/current/packages/common.sh
 else
+    # shellcheck source=/dev/null
     source /opt/AetherFlow/packages/common.sh
 fi
 
@@ -75,7 +80,7 @@ DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
     python3 python3-dev python3-venv python3-pip bluez libffi-dev libssl-dev \
     libjpeg-dev zlib1g-dev autoconf build-essential libopenjp2-7 libtiff6 \
-    libturbojpeg0-dev tzdata ffmpeg liblapack3 liblapack-dev libatlas-base-dev >> "$LOGFILE" 2>&1 || \
+    libturbojpeg0-dev tzdata ffmpeg liblapack3 liblapack-dev libopenblas-dev >> "$LOGFILE" 2>&1 || \
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
     python3 python3-dev python3-venv python3-pip libffi-dev libssl-dev \
     libjpeg-dev zlib1g-dev autoconf build-essential tzdata ffmpeg >> "$LOGFILE" 2>&1
