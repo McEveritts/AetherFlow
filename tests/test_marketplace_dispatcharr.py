@@ -1,5 +1,6 @@
 """Run Dispatcharr's generated ASGI wrapper and provisioning code without host changes."""
 import asyncio
+import contextlib
 import json
 import os
 import shutil
@@ -8,6 +9,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
 import types
 import unittest
 from unittest.mock import patch
@@ -16,6 +18,60 @@ ROOT = Path(__file__).resolve().parents[1]
 INSTALLER = ROOT / "packages/package/install/installpackage-dispatcharr"
 SOURCE = INSTALLER.read_text(encoding="utf-8")
 WRAPPER = SOURCE.split('cat > "${INSTALL_DIR}/aetherflow_asgi.py" <<\'EOF\'\n', 1)[1].split('\nEOF', 1)[0]
+
+
+class FakeStreamingHttpResponse:
+    """Mirrors the parts of Django's StreamingHttpResponse the wrapper relies on."""
+
+    def __init__(self, content):
+        try:
+            self._iterator = iter(content)
+            self.is_async = False
+        except TypeError:
+            self._iterator = aiter(content)
+            self.is_async = True
+
+    def make_bytes(self, value):
+        return bytes(value)
+
+    @property
+    def streaming_content(self):
+        if self.is_async:
+            async def wrapper():
+                async for part in self._iterator:
+                    yield self.make_bytes(part)
+            return wrapper()
+        return map(self.make_bytes, self._iterator)
+
+
+def fake_dispatcharr_modules(application, runtime_roles=frozenset({"uwsgi", "gunicorn"})):
+    """Return (sys.modules overrides, response class, runtime module) for loading the wrapper."""
+    upstream = types.ModuleType("dispatcharr.asgi")
+    upstream.application = application
+    response_class = type("StreamingHttpResponse", (FakeStreamingHttpResponse,), {})
+    django_http = types.ModuleType("django.http")
+    django_http.StreamingHttpResponse = response_class
+    modules = {
+        "dispatcharr": types.ModuleType("dispatcharr"), "dispatcharr.asgi": upstream,
+        "django": types.ModuleType("django"), "django.http": django_http,
+    }
+    runtime = None
+    if runtime_roles is not None:
+        names = ("apps", "apps.proxy", "apps.proxy.live_proxy", "apps.proxy.live_proxy.runtime")
+        packages = [types.ModuleType(name) for name in names]
+        for parent, child in zip(packages, packages[1:]):
+            setattr(parent, child.__name__.rsplit(".", 1)[1], child)
+        runtime = packages[-1]
+        runtime._RUNTIME_ROLES = runtime_roles
+        modules.update(zip(names, packages))
+    return modules, response_class, runtime
+
+
+def load_wrapper(path, modules, environment=None):
+    namespace = {"__file__": str(path)}
+    with patch.dict(sys.modules, modules), patch.dict(os.environ, environment or {}):
+        exec(compile(WRAPPER, namespace["__file__"], "exec"), namespace)
+    return namespace
 
 
 class DispatcharrStaticTests(unittest.TestCase):
@@ -32,14 +88,11 @@ class DispatcharrStaticTests(unittest.TestCase):
             await send({"type": "http.response.start", "status": 418, "headers": []})
             await send({"type": "http.response.body", "body": b"django"})
 
-        upstream = types.ModuleType("dispatcharr.asgi")
-        upstream.application = django_application
-        self.wrapper = {"__file__": str(self.install / "aetherflow_asgi.py")}
-        with patch.dict(sys.modules, {"dispatcharr": types.ModuleType("dispatcharr"), "dispatcharr.asgi": upstream}), patch.dict(os.environ, {
+        modules, self.response_class, self.runtime = fake_dispatcharr_modules(django_application)
+        self.wrapper = load_wrapper(self.install / "aetherflow_asgi.py", modules, {
             "DATA_DIR": str(self.root / "data"),
             "LOGOS_DIR": str(self.root / "custom-logos"),
-        }):
-            exec(compile(WRAPPER, self.wrapper["__file__"], "exec"), self.wrapper)
+        })
         self.wrapper["DATA_LOGO_DIR"] = self.root / "compat-data/logos"
 
     def file(self, relative, body):
@@ -174,6 +227,102 @@ class DispatcharrStaticTests(unittest.TestCase):
         with patch.object(Path, "open", side_effect=FileNotFoundError):
             messages = self.request("/assets/app.js")
         self.assertEqual([m["status"] for m in messages if m["type"] == "http.response.start"], [418])
+
+
+class DispatcharrLiveStreamTests(unittest.TestCase):
+    """Daphne must deliver Dispatcharr's endless sync TS generators chunk by chunk."""
+
+    def setUp(self):
+        async def django_application(scope, receive, send):
+            raise AssertionError("not used")
+
+        modules, self.response_class, self.runtime = fake_dispatcharr_modules(django_application)
+        self.wrapper = load_wrapper(Path(tempfile.gettempdir()) / "aetherflow_asgi.py", modules)
+
+    def test_endless_sync_generator_is_sent_incrementally_and_closed_on_disconnect(self):
+        produced = []
+        closed = threading.Event()
+
+        def endless():
+            try:
+                while True:
+                    produced.append(1)
+                    yield b"chunk"
+            finally:
+                closed.set()
+
+        async def client():
+            body = self.response_class(endless()).__aiter__()
+            parts = [await body.__anext__() for _ in range(3)]
+            await body.aclose()  # Django's aclosing() on client disconnect
+            return parts
+
+        self.assertEqual(asyncio.run(client()), [b"chunk"] * 3)
+        self.assertTrue(closed.wait(5), "generator cleanup (GeneratorExit) never ran")
+        self.assertLess(len(produced), 10, "response body was drained instead of streamed")
+
+    def test_disconnect_during_blocking_read_closes_generator_after_read_returns(self):
+        reading, release, closed = threading.Event(), threading.Event(), threading.Event()
+
+        def stream():
+            try:
+                yield b"first"
+                reading.set()
+                release.wait(5)
+                yield b"second"
+            finally:
+                closed.set()
+
+        async def client():
+            body = self.response_class(stream()).__aiter__()
+            first = await body.__anext__()
+            blocked = asyncio.ensure_future(body.__anext__())
+            await asyncio.to_thread(reading.wait, 5)
+            blocked.cancel()  # Django cancels the response task on http.disconnect
+            with contextlib.suppress(asyncio.CancelledError):
+                await blocked
+            await body.aclose()
+            return first
+
+        self.assertEqual(asyncio.run(client()), b"first")
+        self.assertFalse(closed.is_set(), "closed a generator that was still executing")
+        release.set()
+        self.assertTrue(closed.wait(5))
+
+    def test_async_streaming_content_passes_through(self):
+        async def parts():
+            yield b"a"
+            yield b"b"
+
+        async def client():
+            return [part async for part in self.response_class(parts())]
+
+        self.assertEqual(asyncio.run(client()), [b"a", b"b"])
+
+    def test_generator_errors_propagate_to_the_handler(self):
+        def broken():
+            yield b"ok"
+            raise RuntimeError("upstream failed")
+
+        async def client():
+            return [part async for part in self.response_class(broken())]
+
+        with self.assertRaisesRegex(RuntimeError, "upstream failed"):
+            asyncio.run(client())
+
+    def test_daphne_runs_live_proxy_runtime_and_is_enabled_before_django_setup(self):
+        self.assertEqual(self.runtime._RUNTIME_ROLES, frozenset({"uwsgi", "gunicorn", "daphne"}))
+        self.assertLess(WRAPPER.index("_RUNTIME_ROLES"), WRAPPER.index("from dispatcharr.asgi import"))
+
+    def test_wrapper_loads_when_dispatcharr_drops_the_runtime_module(self):
+        async def django_application(scope, receive, send):
+            raise AssertionError("not used")
+
+        modules, _, runtime = fake_dispatcharr_modules(django_application, runtime_roles=None)
+        self.assertIsNone(runtime)
+        with self.assertLogs("aetherflow.asgi", "WARNING"):
+            wrapper = load_wrapper(Path(tempfile.gettempdir()) / "aetherflow_asgi.py", modules)
+        self.assertIn("application", wrapper)
 
 
 class DispatcharrProvisioningTests(unittest.TestCase):
@@ -393,6 +542,7 @@ write_lock() { touch "$TEST_ROOT/install/.$1.lock"; }
         self.assertNotIn("chown -R dispatcharr:dispatcharr " + str(self.install) + "\n", commands)
         service = (self.units / "dispatcharr.service").read_text()
         self.assertIn('"$${DISPATCHARR_PORT:-9191}"', service)
+        self.assertIn("TimeoutStopSec=15", service)
         self.assertIn("-Q celery,dvr", (self.units / "dispatcharr-celery.service").read_text())
 
     def test_every_failed_stage_restores_tree_environment_database_and_services(self):

@@ -350,6 +350,8 @@ fi
 # Create custom Daphne ASGI static file & proxy wrapper
 cat > "${INSTALL_DIR}/aetherflow_asgi.py" <<'EOF'
 import asyncio
+import concurrent.futures
+import logging
 import os
 import mimetypes
 from email.utils import formatdate
@@ -364,7 +366,73 @@ mimetypes.add_type("image/svg+xml", ".svg")
 mimetypes.add_type("application/wasm", ".wasm")
 mimetypes.add_type("application/manifest+json", ".webmanifest")
 
+# Daphne is the only HTTP server in this layout, so it owns every live stream.
+# Dispatcharr starts its live-proxy runtime (orphaned-channel cleanup thread and
+# live:events listener) only in uWSGI/gunicorn workers. Without it, a channel
+# left behind by a restarted process stays "active" in Redis with no upstream
+# reader and every client stalls. Must run before django.setup(), because
+# ProxyConfig.ready() decides whether to start the runtime.
+try:
+    import apps.proxy.live_proxy.runtime as _af_live_proxy_runtime
+except ImportError:
+    logging.getLogger("aetherflow.asgi").warning(
+        "Dispatcharr live-proxy runtime module not found; Daphne stays client-only")
+else:
+    if hasattr(_af_live_proxy_runtime, "_RUNTIME_ROLES"):
+        _af_live_proxy_runtime._RUNTIME_ROLES = frozenset(
+            set(_af_live_proxy_runtime._RUNTIME_ROLES) | {"daphne"})
+
 from dispatcharr.asgi import application as django_application
+from django.http import StreamingHttpResponse
+
+# Django's ASGI handler drains *synchronous* StreamingHttpResponse iterators
+# with sync_to_async(list)(...) before sending a single byte. Dispatcharr's live
+# TS proxy is an endless sync generator, so players got no data. Pull and send
+# one chunk at a time on a dedicated pool instead (one busy thread per stream).
+STREAM_POOL = concurrent.futures.ThreadPoolExecutor(
+    max_workers=max(8, int(os.environ.get("AF_STREAM_THREADS", "256"))),
+    thread_name_prefix="af-stream",
+)
+_STREAM_DONE = object()
+
+
+def _close_after(pending, closer):
+    # A generator can't be closed while next() is running in another thread.
+    if pending is not None:
+        try:
+            pending.result()
+        except BaseException:
+            pass
+    if closer is not None:
+        try:
+            closer()
+        except Exception:
+            pass
+
+
+async def _stream_incrementally(self):
+    if self.is_async:
+        async for part in self.streaming_content:
+            yield part
+        return
+    source = self._iterator
+    chunks = map(self.make_bytes, source)
+    pending = None
+    try:
+        while True:
+            pending = STREAM_POOL.submit(next, chunks, _STREAM_DONE)
+            part = await asyncio.wrap_future(pending)
+            pending = None
+            if part is _STREAM_DONE:
+                return
+            yield part
+    finally:
+        # Also runs on client disconnect: closing the generator triggers
+        # Dispatcharr's GeneratorExit cleanup (client and stream release).
+        STREAM_POOL.submit(_close_after, pending, getattr(source, "close", None))
+
+
+StreamingHttpResponse.__aiter__ = _stream_incrementally
 
 INSTALL_DIR = Path(__file__).resolve().parent
 STATIC_DIR = INSTALL_DIR / "static"
@@ -508,6 +576,8 @@ EnvironmentFile=${CONFIG_DIR}/dispatcharr.env
 ExecStart=/bin/sh -ec 'exec ${INSTALL_DIR}/env/bin/daphne -b 0.0.0.0 -p "\$\${DISPATCHARR_PORT:-9191}" aetherflow_asgi:application'
 Restart=on-failure
 RestartSec=5
+# Open live streams keep worker threads busy; don't wait 90s on restart.
+TimeoutStopSec=15
 
 [Install]
 WantedBy=multi-user.target
