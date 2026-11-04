@@ -55,18 +55,21 @@ pub use provision::{
 };
 
 pub use af_host::{
-    apply_network_tuning, assemble_verified_chunks, clean_system_logs,
-    compute_sysctl_network_tuning, create_host_archive_backup, create_sqlite_snapshot_backup,
-    delete_backup_artifacts, execute_coordinated_restore, execute_destructive_restore,
-    execute_staged_restore, inspect_home_disk_space, list_backup_inventory,
-    maintenance_helper_ownership_registry, plan_restore_from_manifest, preflight_restore_directory,
-    preflight_tar_gz_archive, prune_backup_inventory, safe_backup_file_path,
-    sentinel_scan_auth_log, split_backup_into_chunks, verify_backup_artifact, BackupManifest,
-    HostBackupConfig, RestorePlan, RestorePreflightOptions, RestoreReceipt,
+    assemble_verified_chunks, create_host_archive_backup, create_sqlite_snapshot_backup,
+    delete_backup_artifacts, execute_destructive_restore, list_backup_inventory,
+    maintenance_helper_ownership_registry, plan_restore_from_manifest_with_sqlite_overrides,
+    preflight_restore_directory_with_sqlite_overrides_and_trusted_uid,
+    preflight_tar_gz_archive_with_sqlite_overrides_and_trusted_uid, prune_backup_inventory,
+    safe_backup_file_path, split_backup_into_chunks, verify_backup_artifact_with_trusted_uid,
+    BackupManifest, HostBackupConfig, RestorePlan, RestorePreflightOptions,
+    apply_network_tuning, clean_system_logs, compute_sysctl_network_tuning,
+    inspect_home_disk_space, sentinel_scan_auth_log,
 };
+use af_models::SelfUpdateJobStatus;
 use af_release::{ReleaseConfig, ReleaseEngine, ReleaseOutcome};
 use af_runner::{
     get_runner_package_definition, parse_quota_size_to_1k_blocks, render_systemd_sandbox_dropin,
+    write_self_update_job_status_atomic,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -578,7 +581,14 @@ fn execute_package_command(
                     Some(json!({ "receipt": receipt })),
                 ))
             } else {
-                // Legacy `af update` without package argument updates the AetherFlow control plane
+                ensure_runner_release_dispatch_has_no_local_overrides(
+                    global,
+                    None,
+                    None,
+                    None,
+                    None,
+                    "af update",
+                )?;
                 let req = build_self_update_runner_request("deploy", *channel)?;
                 if global.dry_run {
                     return Ok(CliResponseEnvelope::success(
@@ -605,6 +615,14 @@ fn execute_package_command(
             }
         }
         PackageCommand::Upgrade { channel } => {
+            ensure_runner_release_dispatch_has_no_local_overrides(
+                global,
+                None,
+                None,
+                None,
+                None,
+                "af upgrade",
+            )?;
             let req = build_self_update_runner_request("deploy", *channel)?;
             if global.dry_run {
                 return Ok(CliResponseEnvelope::success(
@@ -926,21 +944,155 @@ fn load_release_config(
     explicit_conf: Option<&Path>,
     keep_releases_override: Option<usize>,
 ) -> CliResult<ReleaseConfig> {
-    let mut cfg = if let Some(ref root) = global.root {
-        if explicit_conf.is_some() {
-            ReleaseConfig::load_from_process_env(explicit_conf)?
-        } else {
-            ReleaseConfig::for_root(root)
-        }
-    } else {
-        ReleaseConfig::load_from_process_env(explicit_conf)?
-    };
+    let conf_to_use = explicit_conf
+        .map(Path::to_path_buf)
+        .or_else(|| af_release::resolve_release_manager_conf_for_root(global.root.as_deref()));
+    let mut cfg = ReleaseConfig::load_for_root_from_process_env(
+        global.root.as_deref(),
+        conf_to_use.as_deref(),
+    )?;
 
     if let Some(keep) = keep_releases_override {
         cfg.max_releases = keep;
     }
 
     Ok(cfg)
+}
+
+fn resolve_local_self_update_status_context(
+    explicit_status_file: Option<&Path>,
+    explicit_job_unit: Option<&str>,
+) -> (Option<PathBuf>, String) {
+    let status_file = explicit_status_file
+        .map(Path::to_path_buf)
+        .or_else(|| {
+            std::env::var("AETHERFLOW_SELF_UPDATE_STATUS_FILE")
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .map(PathBuf::from)
+        });
+    let unit_name = explicit_job_unit
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            std::env::var("AETHERFLOW_SELF_UPDATE_JOB_UNIT")
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        })
+        .unwrap_or_default();
+    (status_file, unit_name)
+}
+
+fn execute_local_release_with_status_receipt(
+    global: &GlobalOptions,
+    cmd: &ReleaseCliCommand,
+    config_path: Option<&Path>,
+    keep_releases: Option<usize>,
+    explicit_status_file: Option<&Path>,
+    explicit_job_unit: Option<&str>,
+) -> CliResult<CliResponseEnvelope> {
+    let action_str = cmd.action_name();
+    let (status_file, unit_name) =
+        resolve_local_self_update_status_context(explicit_status_file, explicit_job_unit);
+
+    if let Some(ref path) = status_file {
+        let _ = write_self_update_job_status_atomic(
+            path,
+            &SelfUpdateJobStatus {
+                status: "running".to_string(),
+                completed: false,
+                success: false,
+                job_unit: unit_name.clone(),
+                error: String::new(),
+                exit_code: None,
+            },
+        );
+    }
+
+    let result: CliResult<CliResponseEnvelope> = (|| {
+        let cfg = load_release_config(global, config_path, keep_releases)?;
+        let opts = build_release_engine_options(cmd, global.dry_run)
+            .expect("deploy/rollback always yields ReleaseOptions");
+        let engine = ReleaseEngine::new_production(cfg);
+        let outcome = engine.execute(&opts)?;
+        format_release_outcome(action_str, outcome)
+    })();
+
+    if let Some(ref path) = status_file {
+        match result {
+            Ok(_) => {
+                let _ = write_self_update_job_status_atomic(
+                    path,
+                    &SelfUpdateJobStatus {
+                        status: "succeeded".to_string(),
+                        completed: true,
+                        success: true,
+                        job_unit: unit_name,
+                        error: String::new(),
+                        exit_code: Some(0),
+                    },
+                );
+            }
+            Err(ref err) => {
+                let _ = write_self_update_job_status_atomic(
+                    path,
+                    &SelfUpdateJobStatus {
+                        status: "failed".to_string(),
+                        completed: true,
+                        success: false,
+                        job_unit: unit_name,
+                        error: err.to_string(),
+                        exit_code: Some(err.exit_code().as_i32()),
+                    },
+                );
+            }
+        }
+    }
+
+    result
+}
+
+fn ensure_runner_release_dispatch_has_no_local_overrides(
+    global: &GlobalOptions,
+    config_path: Option<&Path>,
+    keep_releases: Option<usize>,
+    job_status_file: Option<&Path>,
+    job_unit: Option<&str>,
+    operation_label: &str,
+) -> CliResult<()> {
+    let mut conflicting_flags: Vec<&str> = Vec::new();
+    if global.root.is_some() {
+        conflicting_flags.push("--root");
+    }
+    if config_path.is_some() {
+        conflicting_flags.push("--config");
+    }
+    if keep_releases.is_some() {
+        conflicting_flags.push("--keep-releases");
+    }
+    if job_status_file.is_some() {
+        conflicting_flags.push("--job-status-file");
+    }
+    if job_unit.is_some() {
+        conflicting_flags.push("--job-unit");
+    }
+    for env_key in ["AETHERFLOW_RELEASE_ROOT", "AETHERFLOW_RELEASE_CONF"] {
+        if let Ok(raw_val) = std::env::var(env_key) {
+            if !raw_val.trim().is_empty() {
+                conflicting_flags.push(env_key);
+            }
+        }
+    }
+    if !conflicting_flags.is_empty() {
+        return Err(CliError::Validation(format!(
+            "{} cannot forward local target/config overrides ({}) over the runner socket (/v1/self-update); pass '--local' to execute against the local target/config",
+            operation_label,
+            conflicting_flags.join(", ")
+        )));
+    }
+    Ok(())
 }
 
 fn execute_release_command(
@@ -957,7 +1109,7 @@ fn execute_release_command(
             let prev_str = status
                 .previous_release
                 .as_ref()
-                .map(|p| p.display().to_string())
+                .map(|path_val| path_val.display().to_string())
                 .unwrap_or_else(|| "none".to_string());
             let msg = format!(
                 "Release Status: channel={}, current_version={}, previous_release={}, available_slots={}",
@@ -982,11 +1134,21 @@ fn execute_release_command(
             mode,
             config_path,
             keep_releases,
+            job_status_file,
+            job_unit,
             ..
         } => {
             let action_str = cmd.action_name();
             match mode {
                 ReleaseDispatchMode::RunnerSocket => {
+                    ensure_runner_release_dispatch_has_no_local_overrides(
+                        global,
+                        config_path.as_deref(),
+                        *keep_releases,
+                        job_status_file.as_deref(),
+                        job_unit.as_deref(),
+                        "af release deploy",
+                    )?;
                     let req = build_self_update_runner_request(action_str, *channel)?;
                     if global.dry_run {
                         return Ok(CliResponseEnvelope::success(
@@ -1015,25 +1177,34 @@ fn execute_release_command(
                         })),
                     ))
                 }
-                ReleaseDispatchMode::LocalEngine => {
-                    let cfg = load_release_config(global, config_path.as_deref(), *keep_releases)?;
-                    let opts = build_release_engine_options(cmd, global.dry_run)
-                        .expect("deploy always yields ReleaseOptions");
-                    let engine = ReleaseEngine::new_production(cfg);
-                    let outcome = engine.execute(&opts)?;
-                    format_release_outcome(action_str, outcome)
-                }
+                ReleaseDispatchMode::LocalEngine => execute_local_release_with_status_receipt(
+                    global,
+                    cmd,
+                    config_path.as_deref(),
+                    *keep_releases,
+                    job_status_file.as_deref(),
+                    job_unit.as_deref(),
+                ),
             }
         }
         ReleaseCliCommand::Rollback {
             channel,
             mode,
             config_path,
-            ..
+            job_status_file,
+            job_unit,
         } => {
             let action_str = cmd.action_name();
             match mode {
                 ReleaseDispatchMode::RunnerSocket => {
+                    ensure_runner_release_dispatch_has_no_local_overrides(
+                        global,
+                        config_path.as_deref(),
+                        None,
+                        job_status_file.as_deref(),
+                        job_unit.as_deref(),
+                        "af release rollback",
+                    )?;
                     let req = build_self_update_runner_request(action_str, *channel)?;
                     if global.dry_run {
                         return Ok(CliResponseEnvelope::success(
@@ -1062,14 +1233,14 @@ fn execute_release_command(
                         })),
                     ))
                 }
-                ReleaseDispatchMode::LocalEngine => {
-                    let cfg = load_release_config(global, config_path.as_deref(), None)?;
-                    let opts = build_release_engine_options(cmd, global.dry_run)
-                        .expect("rollback always yields ReleaseOptions");
-                    let engine = ReleaseEngine::new_production(cfg);
-                    let outcome = engine.execute(&opts)?;
-                    format_release_outcome(action_str, outcome)
-                }
+                ReleaseDispatchMode::LocalEngine => execute_local_release_with_status_receipt(
+                    global,
+                    cmd,
+                    config_path.as_deref(),
+                    None,
+                    job_status_file.as_deref(),
+                    job_unit.as_deref(),
+                ),
             }
         }
         ReleaseCliCommand::Cleanup {
@@ -1127,32 +1298,62 @@ fn format_release_outcome(action: &str, outcome: ReleaseOutcome) -> CliResult<Cl
     Ok(CliResponseEnvelope::success("release", action, msg, Some(val)))
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Domain 6: Host Backup, Verification & Non-Destructive Restore Preflight (`af-host`)
-// ─────────────────────────────────────────────────────────────────────────────
-
 fn resolve_backup_config(
     global: &GlobalOptions,
     explicit_backup_dir: Option<&Path>,
     explicit_db_path: Option<&Path>,
     app_version: &str,
-) -> HostBackupConfig {
-    let root = global
-        .root
-        .clone()
-        .unwrap_or_else(|| PathBuf::from("/"));
-    let mut cfg = HostBackupConfig::for_isolated_root(&root, app_version);
+) -> CliResult<HostBackupConfig> {
+    let active_db = af_models::try_resolve_active_db_path_from_env(
+        global.root.as_deref(),
+        "/var/lib/aetherflow/aetherflow.sqlite",
+    )
+    .map_err(CliError::Validation)?;
+    let active_backup_dir = af_models::try_resolve_active_backup_dir_from_env(
+        global.root.as_deref(),
+        Some(&active_db),
+        "/var/lib/aetherflow/backups",
+    )
+    .map_err(CliError::Validation)?;
+    let (env_trusted_uid, _) =
+        af_models::try_resolve_trusted_sqlite_ids_from_env(global.root.as_deref())
+            .map_err(CliError::Validation)?;
+
+    let mut cfg = if let Some(ref root) = global.root {
+        let mut isolated_cfg = HostBackupConfig::for_isolated_root(root, app_version);
+        isolated_cfg.backup_dir = active_backup_dir;
+        isolated_cfg.sqlite_db_path = Some(active_db);
+        isolated_cfg
+    } else {
+        let mut base = HostBackupConfig::for_isolated_root(Path::new("/"), app_version);
+        base.backup_dir = active_backup_dir;
+        base.sqlite_db_path = Some(active_db);
+        base
+    };
+    cfg.snapshot_options.trusted_source_uid = env_trusted_uid;
     if let Some(bdir) = explicit_backup_dir {
-        cfg.backup_dir = bdir.to_path_buf();
+        if let Some(ref root) = global.root {
+            let validated_bdir =
+                af_models::validate_path_within_isolated_root(bdir, root, "--backup-dir")
+                    .map_err(CliError::Validation)?;
+            cfg.backup_dir = validated_bdir;
+        } else {
+            cfg.backup_dir = bdir.to_path_buf();
+        }
     }
     if let Some(db) = explicit_db_path {
-        cfg.sqlite_db_path = Some(db.to_path_buf());
+        if let Some(ref root) = global.root {
+            let validated_db =
+                af_models::validate_path_within_isolated_root(db, root, "--db-path")
+                    .map_err(CliError::Validation)?;
+            cfg.sqlite_db_path = Some(validated_db);
+        } else {
+            cfg.sqlite_db_path = Some(db.to_path_buf());
+        }
     }
-    cfg
+    Ok(cfg)
 }
 
-/// Enforces operator privilege for mutating local backup operations when targeting `/`
-/// without an isolated `--root` or explicit `--operator-privileged` confirmation.
 fn require_backup_write_privilege(
     global: &GlobalOptions,
     backup_dir: &Path,
@@ -1162,7 +1363,6 @@ fn require_backup_write_privilege(
     if global.dry_run || global.root.is_some() || operator_privileged || is_effective_root_user() {
         return Ok(());
     }
-    // Also allow if the caller explicitly passed a custom non-system backup directory
     let is_system_path = backup_dir.starts_with("/var/lib/aetherflow")
         || backup_dir.starts_with("/etc")
         || backup_dir.starts_with("/opt");
@@ -1180,6 +1380,42 @@ fn execute_backup_command(
     global: &GlobalOptions,
     cmd: &BackupCliCommand,
 ) -> CliResult<CliResponseEnvelope> {
+    let (env_trusted_uid, env_trusted_gid) =
+        af_models::try_resolve_trusted_sqlite_ids_from_env(global.root.as_deref())
+            .map_err(CliError::Validation)?;
+    let mutating_backup_dir = match cmd {
+        BackupCliCommand::RestoreDestructive { confirm_destructive_restore: false, .. } => None,
+        BackupCliCommand::Create { backup_dir, operator_privileged, .. }
+        | BackupCliCommand::RestoreDestructive { backup_dir, operator_privileged, .. }
+        | BackupCliCommand::RecoverInterrupted { backup_dir, operator_privileged, .. }
+        | BackupCliCommand::Delete { backup_dir, operator_privileged, .. }
+        | BackupCliCommand::Prune { backup_dir, operator_privileged, .. }
+        | BackupCliCommand::Chunk { backup_dir, operator_privileged, .. }
+        | BackupCliCommand::Assemble { backup_dir, operator_privileged, .. } => {
+            Some((backup_dir.as_deref(), *operator_privileged))
+        }
+        _ => None,
+    };
+    let _maintenance_lock = if global.dry_run {
+        None
+    } else if let Some((backup_dir, operator_privileged)) = mutating_backup_dir {
+        let cfg = resolve_backup_config(global, backup_dir, None, "v4.0.0")?;
+        require_backup_write_privilege(global, &cfg.backup_dir, operator_privileged, cmd.action_name())?;
+        let timeout = std::time::Duration::from_secs(30);
+        Some(if backup_dir.is_none() {
+            let lock_path = af_models::try_resolve_canonical_maintenance_lock_path_from_env(
+                global.root.as_deref(),
+                cfg.sqlite_db_path.as_deref(),
+                Some(&cfg.backup_dir),
+            )
+            .map_err(CliError::Validation)?;
+            af_host::HostMaintenanceLockGuard::acquire(lock_path, timeout)?
+        } else {
+            af_host::HostMaintenanceLockGuard::acquire_default(Some(&cfg.backup_dir), timeout)?
+        })
+    } else {
+        None
+    };
     match cmd {
         BackupCliCommand::Create {
             kind,
@@ -1189,14 +1425,17 @@ fn execute_backup_command(
             chunk_size_bytes,
             timestamp_slug,
             operator_privileged,
+            trusted_sqlite_uid,
+            trusted_sqlite_gid: _,
         } => {
             let mut cfg = resolve_backup_config(
                 global,
                 backup_dir.as_deref(),
                 db_path.as_deref(),
                 app_version,
-            );
+            )?;
             cfg.chunk_size_bytes = *chunk_size_bytes;
+            cfg.snapshot_options.trusted_source_uid = (*trusted_sqlite_uid).or(env_trusted_uid);
 
             require_backup_write_privilege(
                 global,
@@ -1244,7 +1483,7 @@ fn execute_backup_command(
             ))
         }
         BackupCliCommand::List { backup_dir } => {
-            let cfg = resolve_backup_config(global, backup_dir.as_deref(), None, "v4.0.0");
+            let cfg = resolve_backup_config(global, backup_dir.as_deref(), None, "v4.0.0")?;
             let items = list_backup_inventory(&cfg.backup_dir)?;
             let mut lines = vec![format!(
                 "Backups in {} ({} total):",
@@ -1275,9 +1514,15 @@ fn execute_backup_command(
         BackupCliCommand::Verify {
             filename,
             backup_dir,
+            trusted_sqlite_uid,
         } => {
-            let cfg = resolve_backup_config(global, backup_dir.as_deref(), None, "v4.0.0");
-            let (verification, manifest_opt) = verify_backup_artifact(&cfg.backup_dir, filename)?;
+            let cfg = resolve_backup_config(global, backup_dir.as_deref(), None, "v4.0.0")?;
+            let effective_trusted_uid = (*trusted_sqlite_uid).or(env_trusted_uid);
+            let (verification, manifest_opt) = verify_backup_artifact_with_trusted_uid(
+                &cfg.backup_dir,
+                filename,
+                effective_trusted_uid,
+            )?;
             Ok(CliResponseEnvelope::success(
                 "backup",
                 "verify",
@@ -1301,8 +1546,10 @@ fn execute_backup_command(
             host_version,
             max_sqlite_user_version,
             overwrite_policy,
+            trusted_sqlite_uid,
         } => {
-            let cfg = resolve_backup_config(global, backup_dir.as_deref(), None, host_version);
+            let cfg = resolve_backup_config(global, backup_dir.as_deref(), None, host_version)?;
+            let effective_trusted_uid = (*trusted_sqlite_uid).or(env_trusted_uid);
             let artifact_path = safe_backup_file_path(&cfg.backup_dir, filename)?;
             let manifest_path = cfg.backup_dir.join(format!("{}.manifest.json", filename));
 
@@ -1320,12 +1567,47 @@ fn execute_backup_command(
                 require_artifact_sidecar: true,
             };
 
-            let plan: RestorePlan = if filename.ends_with(".tar.gz") {
-                preflight_tar_gz_archive(&artifact_path, &manifest, target_root, &opts)?
-            } else if filename.ends_with(".sqlite") {
-                preflight_restore_directory(&cfg.backup_dir, &manifest, target_root, &opts)?
+            let sqlite_override_buf = if global.root.is_none()
+                || global.root.as_deref() == Some(target_root.as_path())
+            {
+                af_models::resolve_contained_sqlite_restore_override(
+                    target_root,
+                    cfg.sqlite_db_path.as_deref(),
+                )
             } else {
-                plan_restore_from_manifest(&manifest, target_root, &opts)?
+                None
+            };
+            let sqlite_override = sqlite_override_buf.as_deref();
+            let sqlite_target_rel = sqlite_override
+                .and_then(|db_p| af_models::derive_sqlite_target_rel_path(target_root, db_p));
+            let plan: RestorePlan = if filename.ends_with(".tar.gz") {
+                preflight_tar_gz_archive_with_sqlite_overrides_and_trusted_uid(
+                    &artifact_path,
+                    &manifest,
+                    target_root,
+                    &opts,
+                    sqlite_target_rel.as_deref(),
+                    sqlite_override,
+                    effective_trusted_uid,
+                )?
+            } else if filename.ends_with(".sqlite") {
+                preflight_restore_directory_with_sqlite_overrides_and_trusted_uid(
+                    &cfg.backup_dir,
+                    &manifest,
+                    target_root,
+                    &opts,
+                    sqlite_target_rel.as_deref(),
+                    sqlite_override,
+                    effective_trusted_uid,
+                )?
+            } else {
+                plan_restore_from_manifest_with_sqlite_overrides(
+                    &manifest,
+                    target_root,
+                    &opts,
+                    sqlite_target_rel.as_deref(),
+                    sqlite_override,
+                )?
             };
 
             Ok(CliResponseEnvelope::success(
@@ -1346,66 +1628,225 @@ fn execute_backup_command(
             filename,
             backup_dir,
             target_root,
+            confirm_destructive_restore,
+            allow_overwrite,
+            operator_privileged,
+            trusted_sqlite_uid,
+            trusted_sqlite_gid,
         } => {
-            let cfg = resolve_backup_config(global, backup_dir.as_deref(), None, "v4.0.0");
-            match target_root {
-                Some(stage) => {
-                    let artifact_path = safe_backup_file_path(&cfg.backup_dir, filename)?;
-                    let opts = RestorePreflightOptions {
+            let cfg = resolve_backup_config(global, backup_dir.as_deref(), None, "v4.0.0")?;
+            if !*confirm_destructive_restore {
+                let dummy_manifest = BackupManifest::new("v4.0.0", "aetherflow_placeholder.sqlite")?;
+                let dummy_stage = target_root
+                    .clone()
+                    .unwrap_or_else(|| cfg.backup_dir.join("restore-stage"));
+                let dummy_plan = RestorePlan {
+                    backup_id: dummy_manifest.backup_id,
+                    target_root: dummy_stage,
+                    overwrite_policy: af_host::OverwritePolicy::RejectExisting,
+                    compatibility: af_host::CompatibilityReport {
+                        compatible: true,
+                        manifest_schema_version: 1,
+                        backup_app_version: "v4.0.0".to_string(),
                         host_app_version: "v4.0.0".to_string(),
-                        max_supported_sqlite_user_version: None,
-                        overwrite_policy: af_host::OverwritePolicy::AllowRegularFilesInStaging,
-                        require_artifact_sidecar: true,
-                    };
-                    let receipt = execute_coordinated_restore(&artifact_path, stage, opts)?;
-                    Ok(CliResponseEnvelope::success(
-                        "backup",
-                        "restore",
-                        format!(
-                            "Verified staged restore completed for '{}' into '{}' ({} files restored, {} bytes, sqlite_verified={})",
-                            filename,
-                            receipt.target_root.display(),
-                            receipt.restored_files.len(),
-                            receipt.total_bytes,
-                            receipt.sqlite_verified
-                        ),
-                        Some(serde_json::to_value(&receipt).unwrap_or(json!({}))),
-                    ))
-                }
-                None => {
-                    // Refuse uncoordinated live / overwrite without staging root
-                    let dummy_manifest =
-                        BackupManifest::new("v4.0.0", "aetherflow_placeholder.sqlite")?;
-                    let dummy_stage = PathBuf::from("/");
-                    let dummy_plan = RestorePlan {
-                        backup_id: dummy_manifest.backup_id,
-                        target_root: dummy_stage,
-                        overwrite_policy: af_host::OverwritePolicy::RejectExisting,
-                        compatibility: af_host::CompatibilityReport {
-                            compatible: true,
-                            manifest_schema_version: 1,
-                            backup_app_version: "v4.0.0".to_string(),
-                            host_app_version: "v4.0.0".to_string(),
-                            entry_count: 0,
-                            has_sqlite_snapshot: false,
-                            warnings: vec![format!("requested artifact: {}", filename)],
-                        },
-                        items: Vec::new(),
-                        total_bytes: 0,
-                        sqlite_integrity_verified: false,
-                        non_destructive_only: true,
-                    };
-                    execute_destructive_restore(&dummy_plan)?;
-                    unreachable!("execute_destructive_restore always fails closed")
-                }
+                        entry_count: 0,
+                        has_sqlite_snapshot: false,
+                        warnings: vec![format!("requested artifact: {}", filename)],
+                    },
+                    items: Vec::new(),
+                    total_bytes: 0,
+                    sqlite_integrity_verified: false,
+                    non_destructive_only: true,
+                };
+                execute_destructive_restore(&dummy_plan)?;
+                unreachable!("execute_destructive_restore always fails closed")
             }
+
+            let resolved_target = target_root
+                .clone()
+                .or_else(|| global.root.clone())
+                .ok_or_else(|| {
+                    CliError::Usage(
+                        "confirmed restore requires '--target-root <dir>' or '--root <dir>'"
+                            .to_string(),
+                    )
+                })?;
+
+            require_backup_write_privilege(
+                global,
+                &resolved_target,
+                *operator_privileged,
+                "backup restore",
+            )?;
+
+            if global.dry_run {
+                return Ok(CliResponseEnvelope::success(
+                    "backup",
+                    "restore",
+                    format!(
+                        "[DRY-RUN] Would execute confirmed staged restore of '{}' into '{}'",
+                        filename,
+                        resolved_target.display()
+                    ),
+                    Some(json!({
+                        "dry_run": true,
+                        "filename": filename,
+                        "backup_dir": cfg.backup_dir,
+                        "target_root": resolved_target,
+                    })),
+                ));
+            }
+
+            let trusted_sqlite_db_path = if global.root.is_none()
+                || global.root.as_deref() == Some(resolved_target.as_path())
+            {
+                af_models::resolve_contained_sqlite_restore_override(
+                    &resolved_target,
+                    cfg.sqlite_db_path.as_deref(),
+                )
+            } else {
+                None
+            };
+            let exec_opts = af_host::RestoreExecutionOptions {
+                host_app_version: "v4.0.0".to_string(),
+                max_supported_sqlite_user_version: None,
+                allow_overwrite: *allow_overwrite,
+                confirm_destructive_restore: true,
+                quiesce_services: Vec::new(),
+                sqlite_target_rel_path: trusted_sqlite_db_path
+                    .as_deref()
+                    .and_then(|db_p| af_models::derive_sqlite_target_rel_path(&resolved_target, db_p)),
+                trusted_sqlite_db_path,
+                trusted_sqlite_uid: (*trusted_sqlite_uid).or(env_trusted_uid),
+                trusted_sqlite_gid: (*trusted_sqlite_gid).or(env_trusted_gid),
+                ..Default::default()
+            };
+
+            let isolated_target = global.root.is_some() && resolved_target != Path::new("/");
+            let report = if isolated_target || !cfg!(target_os = "linux") {
+                af_host::execute_staged_restore(
+                    &cfg.backup_dir,
+                    filename,
+                    &resolved_target,
+                    &exec_opts,
+                    &af_host::NoopQuiescenceController,
+                )?
+            } else {
+                af_host::execute_staged_restore(
+                    &cfg.backup_dir,
+                    filename,
+                    &resolved_target,
+                    &exec_opts,
+                    &af_host::CommandQuiescenceController::default(),
+                )?
+            };
+
+            Ok(CliResponseEnvelope::success(
+                "backup",
+                "restore",
+                format!(
+                    "Executed verified restore of '{}' into '{}' ({} file(s) restored)",
+                    filename,
+                    resolved_target.display(),
+                    report.restored_files.len()
+                ),
+                Some(serde_json::to_value(&report).unwrap_or(json!({}))),
+            ))
+        }
+        BackupCliCommand::RecoverInterrupted {
+            backup_dir,
+            target_root,
+            operator_privileged,
+            trusted_sqlite_uid,
+            trusted_sqlite_gid,
+        } => {
+            let cfg = resolve_backup_config(global, backup_dir.as_deref(), None, "v4.0.0")?;
+            let resolved_target = target_root
+                .clone()
+                .or_else(|| global.root.clone())
+                .unwrap_or_else(|| PathBuf::from("/"));
+
+            require_backup_write_privilege(
+                global,
+                &resolved_target,
+                *operator_privileged,
+                "backup recover",
+            )?;
+
+            let trusted_sqlite_db_path = if global.root.is_none()
+                || global.root.as_deref() == Some(resolved_target.as_path())
+            {
+                af_models::resolve_contained_sqlite_restore_override(
+                    &resolved_target,
+                    cfg.sqlite_db_path.as_deref(),
+                )
+            } else {
+                None
+            };
+            let mut recovery_context = if resolved_target == Path::new("/") {
+                af_host::RecoveryContext::for_canonical_host(trusted_sqlite_db_path)
+            } else {
+                af_host::RecoveryContext::for_target_root(
+                    resolved_target.clone(),
+                    trusted_sqlite_db_path,
+                )
+            };
+            recovery_context.trusted_sqlite_uid = (*trusted_sqlite_uid).or(env_trusted_uid);
+            recovery_context.trusted_sqlite_gid = (*trusted_sqlite_gid).or(env_trusted_gid);
+
+            if global.dry_run {
+                return Ok(CliResponseEnvelope::success(
+                    "backup",
+                    "recover-interrupted",
+                    format!(
+                        "[DRY-RUN] Would recover interrupted restores in '{}' for target '{}'",
+                        cfg.backup_dir.display(),
+                        resolved_target.display()
+                    ),
+                    Some(json!({
+                        "dry_run": true,
+                        "backup_dir": cfg.backup_dir,
+                        "target_root": resolved_target,
+                    })),
+                ));
+            }
+
+            let isolated_target = global.root.is_some() && resolved_target != Path::new("/");
+            let recovered_directories = if isolated_target || !cfg!(target_os = "linux") {
+                af_host::recover_interrupted_restore_with_context(
+                    &cfg.backup_dir,
+                    &recovery_context,
+                    &af_host::NoopQuiescenceController,
+                )?
+            } else {
+                af_host::recover_interrupted_restore_with_context(
+                    &cfg.backup_dir,
+                    &recovery_context,
+                    &af_host::CommandQuiescenceController::default(),
+                )?
+            };
+
+            Ok(CliResponseEnvelope::success(
+                "backup",
+                "recover-interrupted",
+                format!(
+                    "Recovered {} interrupted restore directory(s) in '{}'",
+                    recovered_directories.len(),
+                    cfg.backup_dir.display()
+                ),
+                Some(json!({
+                    "backup_dir": cfg.backup_dir,
+                    "target_root": resolved_target,
+                    "recovered_directories": recovered_directories,
+                })),
+            ))
         }
         BackupCliCommand::Delete {
             filename,
             backup_dir,
             operator_privileged,
         } => {
-            let cfg = resolve_backup_config(global, backup_dir.as_deref(), None, "v4.0.0");
+            let cfg = resolve_backup_config(global, backup_dir.as_deref(), None, "v4.0.0")?;
             require_backup_write_privilege(
                 global,
                 &cfg.backup_dir,
@@ -1439,7 +1880,7 @@ fn execute_backup_command(
             retention_days,
             operator_privileged,
         } => {
-            let cfg = resolve_backup_config(global, backup_dir.as_deref(), None, "v4.0.0");
+            let cfg = resolve_backup_config(global, backup_dir.as_deref(), None, "v4.0.0")?;
             require_backup_write_privilege(
                 global,
                 &cfg.backup_dir,
@@ -1478,7 +1919,7 @@ fn execute_backup_command(
             backup_dir,
             operator_privileged,
         } => {
-            let cfg = resolve_backup_config(global, backup_dir.as_deref(), None, "v4.0.0");
+            let cfg = resolve_backup_config(global, backup_dir.as_deref(), None, "v4.0.0")?;
             require_backup_write_privilege(
                 global,
                 &cfg.backup_dir,
@@ -1528,7 +1969,7 @@ fn execute_backup_command(
             backup_dir,
             operator_privileged,
         } => {
-            let cfg = resolve_backup_config(global, backup_dir.as_deref(), None, "v4.0.0");
+            let cfg = resolve_backup_config(global, backup_dir.as_deref(), None, "v4.0.0")?;
             require_backup_write_privilege(
                 global,
                 &cfg.backup_dir,

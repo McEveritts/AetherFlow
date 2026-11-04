@@ -14,6 +14,7 @@ import PredictionsCard from '@/components/cards/PredictionsCard';
 import React from 'react';
 import { useConnectionStore } from '@/store/useConnectionStore';
 import { useSystemStore } from '@/store/useSystemStore';
+import { useHistoryStore, TIME_WINDOW_OPTIONS } from '@/store/useHistoryStore';
 import { useShallow } from 'zustand/react/shallow';
 
 function areNumberArraysEqual(first?: number[], second?: number[]): boolean {
@@ -109,6 +110,12 @@ export default function OverviewTab({ metrics, hardware, history }: OverviewTabP
             setActiveSettingsTab: state.setActiveSettingsTab
         }))
     );
+    const { timeWindow, setTimeWindow } = useHistoryStore(
+        useShallow((state) => ({
+            timeWindow: state.timeWindow,
+            setTimeWindow: state.setTimeWindow,
+        }))
+    );
 
     const tMetrics = metrics;
     const tHistory = history;
@@ -178,6 +185,30 @@ export default function OverviewTab({ metrics, hardware, history }: OverviewTabP
 
                 {/* Right Command Controls */}
                 <div className="flex flex-wrap items-center gap-2 shrink-0">
+                    {/* Telemetry History Window Switcher */}
+                    <div
+                        className="flex items-center gap-1 p-1 bg-white/[0.04] border border-white/10 rounded-xl"
+                        role="group"
+                        aria-label="Telemetry History Window"
+                    >
+                        <Clock size={12} className="text-indigo-400 ml-1.5 mr-0.5 shrink-0" />
+                        {TIME_WINDOW_OPTIONS.map((opt) => (
+                            <button
+                                key={opt.id}
+                                type="button"
+                                data-testid={`history-window-${opt.id}`}
+                                onClick={() => setTimeWindow(opt.id)}
+                                className={`obs-touch-target-standard obs-gpu-120hz-interactive px-2 py-1 rounded-lg text-[11px] font-mono font-bold transition-all ${
+                                    timeWindow === opt.id
+                                        ? 'bg-indigo-500/25 border border-indigo-500/40 text-indigo-200 shadow-sm shadow-indigo-500/10'
+                                        : 'text-slate-400 hover:text-white'
+                                }`}
+                            >
+                                {opt.label}
+                            </button>
+                        ))}
+                    </div>
+
                     {/* Density View Switcher */}
                     <div className="flex items-center gap-1 p-1 bg-white/[0.04] border border-white/10 rounded-xl">
                         <button

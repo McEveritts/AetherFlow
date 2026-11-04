@@ -224,7 +224,7 @@ _load_config() {
         (
             # shellcheck disable=1090
             source "${CONFIG_FILE}" 2>/dev/null
-            printf '%s' "${!key}"
+            printf '%s' "${!key-}"
         )
     fi
 }

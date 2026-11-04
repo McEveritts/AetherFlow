@@ -22,15 +22,15 @@ authors = ["AetherFlow Contributors"]
 repository = "https://github.com/McEveritts/AetherFlow"
 
 [workspace.dependencies]
-af-models = { path = "crates/af-models" }
-af-files = { path = "crates/af-files" }
-af-db = { path = "crates/af-db" }
-af-hardware = { path = "crates/af-hardware" }
-af-runner = { path = "crates/af-runner" }
-af-release = { path = "crates/af-release" }
-af-host = { path = "crates/af-host" }
-af-cli = { path = "crates/af-cli" }
-af-services = { path = "crates/af-services" }
+af-models = { path = "crates/af-models", version = "=4.0.0" }
+af-files = { path = "crates/af-files", version = "=4.0.0" }
+af-db = { path = "crates/af-db", version = "=4.0.0" }
+af-hardware = { path = "crates/af-hardware", version = "=4.0.0" }
+af-runner = { path = "crates/af-runner", version = "=4.0.0" }
+af-release = { path = "crates/af-release", version = "=4.0.0" }
+af-host = { path = "crates/af-host", version = "=4.0.0" }
+af-cli = { path = "crates/af-cli", version = "=4.0.0" }
+af-services = { path = "crates/af-services", version = "=4.0.0" }
 
 tokio = { version = "1.43", features = ["full"] }
 axum = { version = "0.7", features = ["ws", "multipart", "macros"] }

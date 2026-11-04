@@ -111,15 +111,16 @@ class ReleaseWorkflowTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertEqual(self.env_file.read_text(), "")
 
-    def test_manual_experimental_dispatch_remains_separate(self):
-        identity = self.resolve(
+    def test_manual_experimental_dispatch_is_retired(self):
+        result = self.run_step(
+            "Resolve Release Identity",
             GITHUB_EVENT_NAME="workflow_dispatch",
             REQUESTED_CHANNEL="experimental",
             GITHUB_REF="refs/heads/experimental",
             GITHUB_REF_NAME="experimental",
         )
-        self.assertEqual(identity["RELEASE_TAG"], "v4.0.0-experimental.123.1")
-        self.assertIn("--prerelease", self.publish(identity["RELEASE_TAG"]))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.env_file.read_text(), "")
 
     def test_rerun_has_distinct_immutable_identity(self):
         identity = self.resolve(GITHUB_RUN_ATTEMPT="2")

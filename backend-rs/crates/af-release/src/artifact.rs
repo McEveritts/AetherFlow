@@ -27,8 +27,6 @@ pub struct GitHubReleaseItem {
 
 /// Resolves a release tag from a GitHub Releases JSON payload using the exact rules of
 /// `resolve_release_tag` in `deploy/release-manager.sh`:
-/// - `experimental`: first non-draft release where `tag == "experimental"`, `target_commitish == "experimental"`,
-///   or `tag` contains `"experimental"` (case-insensitive). Falls back to `"experimental"`.
 /// - `nightly`: first non-draft release where `tag` is not `"nightly"` or `"experimental"`,
 ///   `target_commitish != "experimental"`, `tag` does not contain `"experimental"`, and
 ///   (`target_commitish == "nightly"` OR `prerelease == true` OR `tag` contains `"nightly"`).
@@ -47,24 +45,6 @@ pub fn select_release_tag_from_json(
     };
 
     match channel {
-        ReleaseChannel::Experimental => {
-            for r in &parsed {
-                if r.draft {
-                    continue;
-                }
-                let tag = r.tag_name.trim();
-                let tag_lower = tag.to_ascii_lowercase();
-                let target_lower = r.target_commitish.trim().to_ascii_lowercase();
-                if !tag.is_empty()
-                    && (tag_lower == "experimental"
-                        || target_lower == "experimental"
-                        || tag_lower.contains("experimental"))
-                {
-                    return Ok(tag.to_string());
-                }
-            }
-            Ok("experimental".to_string())
-        }
         ReleaseChannel::Nightly => {
             for r in &parsed {
                 if r.draft {
@@ -1021,9 +1001,11 @@ mod tests {
     }
 
     fn base_config(root: &Path) -> ReleaseConfig {
-        let mut cfg = ReleaseConfig::default();
-        cfg.releases_dir = root.join("releases");
-        cfg.current_link = root.join("current");
+        let cfg = ReleaseConfig {
+            releases_dir: root.join("releases"),
+            current_link: root.join("current"),
+            ..ReleaseConfig::default()
+        };
         fs::create_dir_all(&cfg.releases_dir).expect("create releases_dir");
         cfg
     }

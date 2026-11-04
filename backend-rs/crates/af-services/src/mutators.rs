@@ -2194,11 +2194,12 @@ fn md5_hex(input: &[u8]) -> String {
     let mut c0: u32 = 0x98badcfe;
     let mut d0: u32 = 0x10325476;
 
-    for chunk in msg.chunks_exact(64) {
-        let mut m = [0u32; 16];
-        for (i, word) in chunk.chunks_exact(4).enumerate() {
-            m[i] = u32::from_le_bytes([word[0], word[1], word[2], word[3]]);
+    for chunk in msg.as_chunks::<64>().0 {
+        let mut words = [0u32; 16];
+        for (word_idx, word) in chunk.as_chunks::<4>().0.iter().enumerate() {
+            words[word_idx] = u32::from_le_bytes(*word);
         }
+        let m = words;
         let mut a = a0;
         let mut b = b0;
         let mut c = c0;
@@ -2946,10 +2947,12 @@ pub async fn apply_blueprint_app_config(
                         mutated_files.push(resolved.to_string_lossy().to_string());
                     }
                 }
-                "json" if effective_port > 0 && !bp.port_config_key.is_empty() => {
-                    if mutate_json_key(&resolved, &bp.port_config_key, json!(effective_port))? {
-                        mutated_files.push(resolved.to_string_lossy().to_string());
-                    }
+                "json"
+                    if effective_port > 0
+                        && !bp.port_config_key.is_empty()
+                        && mutate_json_key(&resolved, &bp.port_config_key, json!(effective_port))? =>
+                {
+                    mutated_files.push(resolved.to_string_lossy().to_string());
                 }
                 _ => {}
             },

@@ -19,16 +19,12 @@ pub struct ReleaseLockGuard {
 }
 
 impl ReleaseLockGuard {
-    /// Acquires an exclusive lock at `lock_path`, waiting up to `timeout`.
     pub fn acquire(lock_path: impl AsRef<Path>, timeout: Duration) -> ReleaseResult<Self> {
         let path = lock_path.as_ref().to_path_buf();
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|e| {
-                ReleaseError::io(
-                    format!("creating lock parent directory {}", parent.display()),
-                    e,
-                )
-            })?;
+            if !parent.as_os_str().is_empty() {
+                crate::fs_security::create_dir_all_no_symlinks(parent, 0o750)?;
+            }
         }
 
         let start = Instant::now();
@@ -50,14 +46,18 @@ impl ReleaseLockGuard {
 
     #[cfg(unix)]
     fn try_acquire_once(path: &Path) -> Result<Self, String> {
+        use std::os::unix::fs::OpenOptionsExt;
         use std::os::unix::io::AsRawFd;
 
         let mut file = OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
+            .mode(0o660)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
             .open(path)
-            .map_err(|e| format!("failed to open lockfile: {}", e))?;
+            .map_err(|err| format!("failed to open lockfile: {}", err))?;
 
         let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
         if rc != 0 {

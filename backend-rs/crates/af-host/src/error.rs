@@ -72,6 +72,28 @@ pub enum HostBackupError {
     #[error("destructive restore execution is explicitly unsupported in af-host v1 ({reason}); use plan_restore / preflight_restore for non-destructive verification")]
     DestructiveRestoreUnsupported { reason: String },
 
+    #[error("service quiescence failed for unit '{unit}' during '{phase}': {reason}")]
+    ServiceQuiescenceFailed {
+        unit: String,
+        phase: String,
+        reason: String,
+    },
+
+    #[error("restore failed ({reason}) and was automatically rolled back ({rollback_summary})")]
+    RestoreRolledBack {
+        reason: String,
+        rollback_summary: String,
+    },
+
+    #[error("CRITICAL: restore failed ({reason}) and rollback encountered errors ({rollback_errors}); pre-restore recovery artifacts and failure journal preserved at '{recovery_dir}' (services left stopped for manual recovery: {services_left_stopped})")]
+    RestoreRollbackFailed {
+        reason: String,
+        rollback_errors: String,
+        recovery_dir: PathBuf,
+        failure_journal_path: PathBuf,
+        services_left_stopped: bool,
+    },
+
     #[error("I/O error during {context}: {source}")]
     Io {
         context: String,

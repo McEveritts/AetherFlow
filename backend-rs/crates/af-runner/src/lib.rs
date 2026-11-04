@@ -1,7 +1,8 @@
 use af_models::{
-    AppMetaRunnerRequest, HostsRunnerRequest, NetworkRunnerRequest, Package, PackageAutomation,
-    PackageRunnerRequest, QuotaRunnerRequest, RunnerResponse, SandboxRunnerRequest,
-    SelfUpdateRequest, SystemctlRequest,
+    AppMetaRunnerRequest, BackupRunnerRequest, BackupRunnerResponse, HostsRunnerRequest,
+    NetworkRunnerRequest, Package, PackageAutomation, PackageRunnerRequest, QuotaRunnerRequest,
+    RunnerResponse, SandboxRunnerRequest, SelfUpdateJobStatus, SelfUpdateRequest,
+    SelfUpdateStatusRequest, SystemctlRequest,
 };
 use axum::body::Body;
 use axum::http::{HeaderValue, StatusCode};
@@ -20,7 +21,9 @@ use std::time::Duration;
 use tokio::process::Command;
 use tokio::sync::Mutex;
 
+pub use af_host;
 pub use af_release;
+
 pub mod package_executor;
 pub mod network;
 pub mod self_update;
@@ -28,11 +31,12 @@ pub use package_executor::*;
 
 pub const DEFAULT_RUNNER_SOCKET_PATH: &str = "/run/aetherflow/runner.sock";
 
-const EMBEDDED_PACKAGES_JSON: &str = include_str!("../../../../backend/config/packages.json");
+const EMBEDDED_PACKAGES_JSON: &str = include_str!("../../../../config/packages.json");
 const EMBEDDED_AUTOMATION_JSON: &str =
-    include_str!("../../../../backend/config/package_automation.json");
+    include_str!("../../../../config/package_automation.json");
 
 pub(crate) static PACKAGE_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+pub(crate) static BACKUP_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 pub static SAFE_SCRIPT_NAME: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$").unwrap());
@@ -51,6 +55,56 @@ pub static SAFE_QUOTA_SIZE_REGEX: Lazy<Regex> =
 
 static ALLOWED_SERVICE_ACTIONS: Lazy<HashSet<&'static str>> =
     Lazy::new(|| ["start", "stop", "restart", "reload", "enable", "disable", "status", "heal"].into());
+static ALLOWED_BACKUP_ACTIONS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
+    [
+        "create",
+        "create_sqlite",
+        "create_archive",
+        "verify",
+        "list",
+        "delete",
+        "prune",
+        "restore_preflight",
+        "restore_execute",
+        "recover_interrupted",
+    ]
+    .into()
+});
+
+/// Release engine execution mode selected by the runner for `/v1/self-update`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReleaseEngineMode {
+    /// Executed by the typed Rust `af-release` engine (`ReleaseManager`).
+    NativeRustRelease,
+    /// Executed by the legacy `deploy/release-manager.sh` script.
+    LegacyBashRelease,
+}
+
+/// Evaluates release engine selection given explicit rollout flags (`rust_enabled`, `force_bash`).
+pub fn select_release_engine_with_flags(rust_enabled: bool, force_bash: bool) -> ReleaseEngineMode {
+    if rust_enabled && !force_bash {
+        ReleaseEngineMode::NativeRustRelease
+    } else {
+        ReleaseEngineMode::LegacyBashRelease
+    }
+}
+
+/// Selects the active release engine for `/v1/self-update`.
+///
+/// Rollout control:
+/// - Default is `LegacyBashRelease` (`deploy/release-manager.sh`) unless `AETHERFLOW_ENABLE_RUST_RELEASE=1`
+///   is set.
+/// - `AETHERFLOW_FORCE_BASH_RELEASE=1` forces `LegacyBashRelease` even when `AETHERFLOW_ENABLE_RUST_RELEASE=1`.
+pub fn select_release_engine() -> ReleaseEngineMode {
+    let rust_enabled = env::var("AETHERFLOW_ENABLE_RUST_RELEASE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let force_bash = env::var("AETHERFLOW_FORCE_BASH_RELEASE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    select_release_engine_with_flags(rust_enabled, force_bash)
+}
 
 pub fn resolve_runner_socket_path() -> String {
     if let Ok(p) = env::var("AETHERFLOW_RUNNER_SOCK") {
@@ -156,13 +210,12 @@ pub fn resolve_release_manager_script() -> Option<PathBuf> {
     if let Ok(explicit) = env::var("AETHERFLOW_RELEASE_MANAGER_SCRIPT") {
         let trimmed = explicit.trim();
         if !trimmed.is_empty() {
-            let p = PathBuf::from(trimmed);
-            if p.is_file() {
-                return Some(p);
+            let candidate_path = PathBuf::from(trimmed);
+            if candidate_path.is_file() {
+                return Some(candidate_path);
             }
         }
     }
-
     let mut candidates = vec![
         PathBuf::from("/opt/AetherFlow/current/deploy/release-manager.sh"),
         PathBuf::from("/opt/AetherFlow/deploy/release-manager.sh"),
@@ -175,7 +228,47 @@ pub fn resolve_release_manager_script() -> Option<PathBuf> {
             candidates.push(exe_dir.join("../deploy/release-manager.sh"));
         }
     }
-    candidates.into_iter().find(|c| c.is_file())
+    candidates.into_iter().find(|cand| cand.is_file())
+}
+
+pub fn resolve_systemd_run_binary() -> Option<PathBuf> {
+    if let Ok(explicit) = env::var("AETHERFLOW_SYSTEMD_RUN_BIN") {
+        let trimmed = explicit.trim();
+        if !trimmed.is_empty() {
+            let candidate_path = PathBuf::from(trimmed);
+            if candidate_path.is_file() {
+                return Some(candidate_path);
+            }
+        }
+    }
+    let candidates = [
+        PathBuf::from("/usr/bin/systemd-run"),
+        PathBuf::from("/bin/systemd-run"),
+    ];
+    candidates.into_iter().find(|cand| cand.is_file())
+}
+
+pub fn resolve_af_cli_binary() -> Option<PathBuf> {
+    if let Ok(explicit) = env::var("AETHERFLOW_CLI_BIN") {
+        let trimmed = explicit.trim();
+        if !trimmed.is_empty() {
+            let candidate_path = PathBuf::from(trimmed);
+            if candidate_path.is_file() {
+                return Some(candidate_path);
+            }
+        }
+    }
+    let mut candidates = vec![
+        PathBuf::from("/opt/AetherFlow/current/af"),
+        PathBuf::from("/opt/AetherFlow/current/bin/af"),
+        PathBuf::from("/usr/local/bin/af"),
+    ];
+    if let Ok(exe) = env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            candidates.push(exe_dir.join("af"));
+        }
+    }
+    candidates.into_iter().find(|cand| cand.is_file())
 }
 
 /// Builds the Axum router for the Privileged Root Socket Daemon (`aetherflow-api runner`).
@@ -186,7 +279,8 @@ pub fn build_runner_router() -> Router {
         .route("/v1/package", post(handle_package))
         .route("/v1/package/cancel", post(handle_package_cancel))
         .route("/v1/self-update", post(handle_self_update))
-        .route("/v1/self-update/status", get(handle_self_update_status).post(handle_self_update_status))
+        .route("/v1/self-update/status", post(handle_self_update_status))
+        .route("/v1/backup", post(handle_backup))
         .route("/v1/sandbox", post(handle_sandbox))
         .route("/v1/hosts", post(handle_hosts))
         .route("/v1/network", post(handle_network))
@@ -410,50 +504,1514 @@ async fn handle_package_cancel(
     )
 }
 
+fn build_self_update_transient_unit_name(command: &str, channel: &str) -> String {
+    let cmd_slug: String = command
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '-')
+        .collect();
+    let chan_slug: String = channel
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '-')
+        .collect();
+    let raw_uuid = uuid::Uuid::new_v4().simple().to_string();
+    let short_id = &raw_uuid[..8];
+    format!(
+        "aetherflow-self-update-{}-{}-{}.service",
+        cmd_slug, chan_slug, short_id
+    )
+}
+
+static SAFE_SELF_UPDATE_UNIT_NAME: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"^aetherflow-self-update-[a-z0-9-]+-[a-z0-9-]+-[a-f0-9]{8,32}\.service$").unwrap()
+});
+
+pub fn validate_self_update_job_unit_name(unit_name: &str) -> Result<String, (StatusCode, String)> {
+    let trimmed = unit_name.trim();
+    if trimmed.is_empty()
+        || trimmed.contains("..")
+        || trimmed.contains('/')
+        || trimmed.contains('\\')
+        || !SAFE_SELF_UPDATE_UNIT_NAME.is_match(trimmed)
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("invalid self-update job_unit identifier: {:?}", unit_name),
+        ));
+    }
+    Ok(trimmed.to_string())
+}
+
+fn resolve_self_update_isolated_root_from_env() -> Result<Option<PathBuf>, String> {
+    if let Ok(raw) = env::var("AETHERFLOW_RELEASE_ROOT") {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            let p = PathBuf::from(trimmed);
+            if !p.is_absolute()
+                || p.components()
+                    .any(|c| matches!(c, std::path::Component::ParentDir))
+            {
+                return Err(format!(
+                    "AETHERFLOW_RELEASE_ROOT '{}' must be an absolute path without '..'",
+                    trimmed
+                ));
+            }
+            return Ok(Some(p));
+        }
+    }
+    af_models::try_resolve_isolated_root_with_env(None, |k| env::var(k).ok())
+        .map_err(|e| e.to_string())
+}
+
+fn resolve_self_update_lock_path_for_cfg(
+    cfg: &af_release::ReleaseConfig,
+) -> Result<PathBuf, (StatusCode, String)> {
+    af_release::resolve_maintenance_lock_path_for_config(cfg)
+        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))
+}
+
+fn resolve_self_update_db_path_for_cfg(
+    cfg: &af_release::ReleaseConfig,
+) -> Result<PathBuf, (StatusCode, String)> {
+    af_release::try_resolve_db_path(cfg, None)
+        .map(|resolved| resolved.path)
+        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))
+}
+
+fn resolve_self_update_backup_dir_for_cfg(cfg: &af_release::ReleaseConfig) -> PathBuf {
+    cfg.data_dir.join("backups")
+}
+
+fn resolve_self_update_jobs_dir_for_cfg(
+    cfg: &af_release::ReleaseConfig,
+) -> Result<PathBuf, (StatusCode, String)> {
+    af_release::resolve_self_update_jobs_dir_for_config(cfg)
+        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))
+}
+
+fn resolve_self_update_jobs_dir_from_env() -> Result<PathBuf, (StatusCode, String)> {
+    let explicit_root =
+        resolve_self_update_isolated_root_from_env().map_err(|err| (StatusCode::BAD_REQUEST, err))?;
+    let conf_path = af_release::resolve_release_manager_conf_for_root(explicit_root.as_deref());
+    af_release::resolve_self_update_jobs_dir_from_process_env(
+        explicit_root.as_deref(),
+        conf_path.as_deref(),
+    )
+    .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))
+}
+
+pub fn write_self_update_job_status_atomic(
+    status_path: &Path,
+    status: &SelfUpdateJobStatus,
+) -> std::io::Result<()> {
+    if let Some(parent) = status_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let tmp_path = status_path.with_extension(format!("json.tmp.{}", std::process::id()));
+    let payload = serde_json::to_vec_pretty(status)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    {
+        let mut f = fs::File::create(&tmp_path)?;
+        std::io::Write::write_all(&mut f, &payload)?;
+        f.sync_all()?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&tmp_path, fs::Permissions::from_mode(0o644));
+    }
+    fs::rename(&tmp_path, status_path)?;
+    Ok(())
+}
+
+type ValidatedSelfUpdateConfig = (af_release::ReleaseConfig, Option<PathBuf>, Option<PathBuf>);
+
+fn resolve_validated_self_update_config(
+    channel: af_release::ReleaseChannel,
+) -> Result<ValidatedSelfUpdateConfig, (StatusCode, String)> {
+    let explicit_root =
+        resolve_self_update_isolated_root_from_env().map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let conf_path = af_release::resolve_release_manager_conf_for_root(explicit_root.as_deref());
+    let mut cfg = af_release::ReleaseConfig::load_for_root_from_process_env(
+        explicit_root.as_deref(),
+        conf_path.as_deref(),
+    )
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    cfg.release_channel = channel;
+    af_release::ensure_interoperable_maintenance_lock_file(&cfg)
+        .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?;
+    Ok((cfg, explicit_root, conf_path))
+}
+
+async fn spawn_self_update_transient_unit(
+    unit_name: &str,
+    program: &Path,
+    args: &[String],
+    extra_envs: &[(&str, String)],
+) -> Result<String, (StatusCode, String)> {
+    let Some(systemd_run) = resolve_systemd_run_binary() else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "systemd-run binary not found for out-of-cgroup self-update handoff".to_string(),
+        ));
+    };
+
+    let mut cmd = Command::new(&systemd_run);
+    cmd.arg(format!("--unit={}", unit_name))
+        .arg("--collect")
+        .arg("--no-block")
+        .arg("--property=Type=exec")
+        .arg("--property=KillMode=control-group");
+
+    let preserved_envs = [
+        "AETHERFLOW_ENABLE_RUST_RELEASE",
+        "AETHERFLOW_FORCE_BASH_RELEASE",
+        "AETHERFLOW_RELEASE_ROOT",
+        "AETHERFLOW_ALLOW_ISOLATED_SYSTEMD_LIFECYCLE",
+        "AETHERFLOW_BACKUP_ISOLATED_ROOT",
+        "AETHERFLOW_MAINTENANCE_LOCK_PATH",
+        "AF_DB_PATH",
+        "DB_PATH",
+        "AETHERFLOW_DB_PATH",
+        "AETHERFLOW_BACKUP_DIR",
+        "AF_BACKUP_DIR",
+        "BACKUP_DIR",
+        "AF_OFFLINE",
+        "DRY_RUN_ROOT",
+    ];
+    for env_key in &preserved_envs {
+        if extra_envs.iter().any(|(k, _)| k == env_key) {
+            continue;
+        }
+        if let Ok(env_val) = env::var(env_key) {
+            let trimmed = env_val.trim();
+            if !trimmed.is_empty() {
+                cmd.arg(format!("--setenv={}={}", env_key, trimmed));
+            }
+        }
+    }
+    for (env_key, env_val) in extra_envs {
+        let trimmed = env_val.trim();
+        if !trimmed.is_empty() {
+            cmd.arg(format!("--setenv={}={}", env_key, trimmed));
+        }
+    }
+
+    cmd.arg("--").arg(program);
+    for arg_val in args {
+        cmd.arg(arg_val);
+    }
+
+    match tokio::time::timeout(Duration::from_secs(15), cmd.output()).await {
+        Ok(Ok(out)) => {
+            let combined = format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            )
+            .trim()
+            .to_string();
+            if out.status.success() {
+                Ok(combined)
+            } else {
+                Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!(
+                        "transient systemd unit '{}' failed to start ({}): {}",
+                        unit_name, out.status, combined
+                    ),
+                ))
+            }
+        }
+        Ok(Err(err)) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!(
+                "failed to launch transient systemd unit '{}': {}",
+                unit_name, err
+            ),
+        )),
+        Err(_) => Err((
+            StatusCode::GATEWAY_TIMEOUT,
+            format!(
+                "systemd-run timed out while launching transient unit '{}'",
+                unit_name
+            ),
+        )),
+    }
+}
+
+/// Validates and executes a `SelfUpdateRequest` using either the native Rust `af-release`
+/// engine (when `AETHERFLOW_ENABLE_RUST_RELEASE=1` and not `AETHERFLOW_FORCE_BASH_RELEASE=1`)
+/// or the legacy `deploy/release-manager.sh` script.
+///
+/// Experimental channel safety: `af_release::validate_self_update_request` validates
+/// `stable`, `nightly`, and `experimental` channels.
+pub async fn execute_self_update_request(
+    req: &SelfUpdateRequest,
+    background: bool,
+) -> (StatusCode, RunnerResponse) {
+    let validated = match af_release::validate_self_update_request(req) {
+        Ok(val) => val,
+        Err(err_resp) => return (StatusCode::BAD_REQUEST, err_resp),
+    };
+
+    let (cfg, explicit_root, _resolved_conf) =
+        match resolve_validated_self_update_config(validated.channel) {
+            Ok(tuple) => tuple,
+            Err((code, err_msg)) => {
+                return (
+                    code,
+                    RunnerResponse {
+                        success: false,
+                        output: String::new(),
+                        error: err_msg,
+                    },
+                );
+            }
+        };
+
+    let cfg_lock_path = match resolve_self_update_lock_path_for_cfg(&cfg) {
+        Ok(resolved) => resolved,
+        Err((code, err_msg)) => {
+            return (
+                code,
+                RunnerResponse {
+                    success: false,
+                    output: String::new(),
+                    error: err_msg,
+                },
+            );
+        }
+    };
+    let cfg_db_path = match resolve_self_update_db_path_for_cfg(&cfg) {
+        Ok(resolved) => resolved,
+        Err((code, err_msg)) => {
+            return (
+                code,
+                RunnerResponse {
+                    success: false,
+                    output: String::new(),
+                    error: err_msg,
+                },
+            );
+        }
+    };
+    let cfg_backup_dir = resolve_self_update_backup_dir_for_cfg(&cfg);
+    let cfg_jobs_dir = match resolve_self_update_jobs_dir_for_cfg(&cfg) {
+        Ok(resolved) => resolved,
+        Err((code, err_msg)) => {
+            return (
+                code,
+                RunnerResponse {
+                    success: false,
+                    output: String::new(),
+                    error: err_msg,
+                },
+            );
+        }
+    };
+
+    let engine = select_release_engine();
+    if engine == ReleaseEngineMode::NativeRustRelease {
+        if background {
+            let Some(af_bin) = resolve_af_cli_binary() else {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    RunnerResponse {
+                        success: false,
+                        output: String::new(),
+                        error: "af CLI binary not found for transient systemd release unit"
+                            .to_string(),
+                    },
+                );
+            };
+            let unit_name = build_self_update_transient_unit_name(
+                validated.command.as_str(),
+                validated.channel.as_str(),
+            );
+            let job_status_path = cfg_jobs_dir.join(format!("{}.json", unit_name));
+            let job_conf_path = cfg_jobs_dir.join(format!("{}.conf", unit_name));
+
+            if let Err(err) = cfg.write_protected_config_file(&job_conf_path) {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    RunnerResponse {
+                        success: false,
+                        output: String::new(),
+                        error: format!("failed to persist self-update job config: {}", err),
+                    },
+                );
+            }
+            let initial_status = SelfUpdateJobStatus {
+                status: "running".to_string(),
+                completed: false,
+                success: false,
+                job_unit: unit_name.clone(),
+                error: String::new(),
+                exit_code: None,
+            };
+            if let Err(err) = write_self_update_job_status_atomic(&job_status_path, &initial_status)
+            {
+                let _ = fs::remove_file(&job_conf_path);
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    RunnerResponse {
+                        success: false,
+                        output: String::new(),
+                        error: format!("failed to persist initial self-update job status: {}", err),
+                    },
+                );
+            }
+
+            let mut unit_args = Vec::new();
+            if let Some(ref root) = explicit_root {
+                unit_args.push("--root".to_string());
+                unit_args.push(root.to_string_lossy().into_owned());
+            }
+            unit_args.extend([
+                "release".to_string(),
+                validated.command.as_str().to_string(),
+                "--channel".to_string(),
+                validated.channel.as_str().to_string(),
+                "--local".to_string(),
+                "--config".to_string(),
+                job_conf_path.to_string_lossy().into_owned(),
+                "--job-status-file".to_string(),
+                job_status_path.to_string_lossy().into_owned(),
+                "--job-unit".to_string(),
+                unit_name.clone(),
+            ]);
+
+            let mut extra_envs = vec![
+                (
+                    "AETHERFLOW_SELF_UPDATE_STATUS_FILE",
+                    job_status_path.to_string_lossy().into_owned(),
+                ),
+                ("AETHERFLOW_SELF_UPDATE_JOB_UNIT", unit_name.clone()),
+                (
+                    "AETHERFLOW_RELEASE_CONF",
+                    job_conf_path.to_string_lossy().into_owned(),
+                ),
+                (
+                    "AETHERFLOW_MAINTENANCE_LOCK_PATH",
+                    cfg_lock_path.to_string_lossy().into_owned(),
+                ),
+                (
+                    "AETHERFLOW_DB_PATH",
+                    cfg_db_path.to_string_lossy().into_owned(),
+                ),
+                (
+                    "AETHERFLOW_BACKUP_DIR",
+                    cfg_backup_dir.to_string_lossy().into_owned(),
+                ),
+            ];
+            if let Some(ref root) = explicit_root {
+                extra_envs.push((
+                    "AETHERFLOW_RELEASE_ROOT",
+                    root.to_string_lossy().into_owned(),
+                ));
+            }
+
+            match spawn_self_update_transient_unit(&unit_name, &af_bin, &unit_args, &extra_envs)
+                .await
+            {
+                Ok(_) => {
+                    let payload = json!({
+                        "status": "initiated",
+                        "completed": false,
+                        "engine": "native_rust_release",
+                        "command": validated.command.as_str(),
+                        "channel": validated.channel.as_str(),
+                        "job_unit": unit_name,
+                    });
+                    return (
+                        StatusCode::OK,
+                        RunnerResponse {
+                            success: true,
+                            output: serde_json::to_string(&payload).unwrap_or_default(),
+                            error: String::new(),
+                        },
+                    );
+                }
+                Err((code, err_msg)) => {
+                    if code != StatusCode::GATEWAY_TIMEOUT {
+                        let failed_receipt = SelfUpdateJobStatus {
+                            status: "failed".to_string(),
+                            completed: true,
+                            success: false,
+                            job_unit: unit_name.clone(),
+                            error: err_msg.clone(),
+                            exit_code: Some(1),
+                        };
+                        let _ = write_self_update_job_status_atomic(
+                            &job_status_path,
+                            &failed_receipt,
+                        );
+                        let _ = fs::remove_file(&job_conf_path);
+                    }
+                    return (
+                        code,
+                        RunnerResponse {
+                            success: false,
+                            output: String::new(),
+                            error: err_msg,
+                        },
+                    );
+                }
+            }
+        } else {
+            let req_clone = validated.clone();
+            let (_exit_code, resp) = tokio::task::spawn_blocking(move || {
+                af_release::execute_self_update_sync(&req_clone, cfg)
+            })
+            .await
+            .unwrap_or_else(|err| {
+                (
+                    af_release::ExitCode::ConfigurationOrUsageError,
+                    RunnerResponse {
+                        success: false,
+                        output: String::new(),
+                        error: err.to_string(),
+                    },
+                )
+            });
+            let status = if resp.success {
+                StatusCode::OK
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            return (status, resp);
+        }
+    }
+
+    let Some(script_path) = resolve_release_manager_script() else {
+        return (
+            StatusCode::NOT_FOUND,
+            RunnerResponse {
+                success: false,
+                output: String::new(),
+                error: "release-manager.sh not found".to_string(),
+            },
+        );
+    };
+
+    let cmd_name = validated.command.as_str().to_string();
+    let channel_str = validated.channel.as_str().to_string();
+    if background {
+        let unit_name = build_self_update_transient_unit_name(&cmd_name, &channel_str);
+        let job_status_path = cfg_jobs_dir.join(format!("{}.json", unit_name));
+        let job_conf_path = cfg_jobs_dir.join(format!("{}.conf", unit_name));
+
+        if let Err(err) = cfg.write_protected_config_file(&job_conf_path) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                RunnerResponse {
+                    success: false,
+                    output: String::new(),
+                    error: format!("failed to persist self-update job config: {}", err),
+                },
+            );
+        }
+        let initial_status = SelfUpdateJobStatus {
+            status: "running".to_string(),
+            completed: false,
+            success: false,
+            job_unit: unit_name.clone(),
+            error: String::new(),
+            exit_code: None,
+        };
+        if let Err(err) = write_self_update_job_status_atomic(&job_status_path, &initial_status) {
+            let _ = fs::remove_file(&job_conf_path);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                RunnerResponse {
+                    success: false,
+                    output: String::new(),
+                    error: format!("failed to persist initial self-update job status: {}", err),
+                },
+            );
+        }
+
+        let mut unit_args = vec![
+            script_path.to_string_lossy().into_owned(),
+            cmd_name.clone(),
+            "--channel".to_string(),
+            channel_str.clone(),
+        ];
+        if let Some(ref root) = explicit_root {
+            unit_args.push("--root".to_string());
+            unit_args.push(root.to_string_lossy().into_owned());
+        }
+        unit_args.extend([
+            "--config".to_string(),
+            job_conf_path.to_string_lossy().into_owned(),
+            "--job-status-file".to_string(),
+            job_status_path.to_string_lossy().into_owned(),
+            "--job-unit".to_string(),
+            unit_name.clone(),
+        ]);
+
+        let mut extra_envs = vec![
+            (
+                "AETHERFLOW_SELF_UPDATE_STATUS_FILE",
+                job_status_path.to_string_lossy().into_owned(),
+            ),
+            ("AETHERFLOW_SELF_UPDATE_JOB_UNIT", unit_name.clone()),
+            (
+                "AETHERFLOW_RELEASE_CONF",
+                job_conf_path.to_string_lossy().into_owned(),
+            ),
+            (
+                "AETHERFLOW_MAINTENANCE_LOCK_PATH",
+                cfg_lock_path.to_string_lossy().into_owned(),
+            ),
+            (
+                "AETHERFLOW_DB_PATH",
+                cfg_db_path.to_string_lossy().into_owned(),
+            ),
+            (
+                "AETHERFLOW_BACKUP_DIR",
+                cfg_backup_dir.to_string_lossy().into_owned(),
+            ),
+        ];
+        if let Some(ref root) = explicit_root {
+            extra_envs.push((
+                "AETHERFLOW_RELEASE_ROOT",
+                root.to_string_lossy().into_owned(),
+            ));
+        }
+
+        match spawn_self_update_transient_unit(
+            &unit_name,
+            Path::new("/bin/bash"),
+            &unit_args,
+            &extra_envs,
+        )
+        .await
+        {
+            Ok(_) => {
+                let payload = json!({
+                    "status": "initiated",
+                    "completed": false,
+                    "engine": "legacy_bash_release",
+                    "command": cmd_name,
+                    "channel": channel_str,
+                    "job_unit": unit_name,
+                });
+                (
+                    StatusCode::OK,
+                    RunnerResponse {
+                        success: true,
+                        output: serde_json::to_string(&payload).unwrap_or_default(),
+                        error: String::new(),
+                    },
+                )
+            }
+            Err((code, err_msg)) => {
+                if code != StatusCode::GATEWAY_TIMEOUT {
+                    let failed_receipt = SelfUpdateJobStatus {
+                        status: "failed".to_string(),
+                        completed: true,
+                        success: false,
+                        job_unit: unit_name.clone(),
+                        error: err_msg.clone(),
+                        exit_code: Some(1),
+                    };
+                    let _ = write_self_update_job_status_atomic(&job_status_path, &failed_receipt);
+                    let _ = fs::remove_file(&job_conf_path);
+                }
+                (
+                    code,
+                    RunnerResponse {
+                        success: false,
+                        output: String::new(),
+                        error: err_msg,
+                    },
+                )
+            }
+        }
+    } else {
+        let _guard = BACKUP_MUTEX.lock().await;
+        let sync_conf_path = cfg_jobs_dir.join(format!("sync-{}.conf", std::process::id()));
+        if let Err(err) = cfg.write_protected_config_file(&sync_conf_path) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                RunnerResponse {
+                    success: false,
+                    output: String::new(),
+                    error: format!("failed to persist sync self-update config: {}", err),
+                },
+            );
+        }
+        let mut cmd = Command::new("/bin/bash");
+        cmd.arg(&script_path)
+            .arg(&cmd_name)
+            .arg("--channel")
+            .arg(&channel_str);
+        if let Some(ref root) = explicit_root {
+            cmd.arg("--root").arg(root);
+            cmd.env("AETHERFLOW_RELEASE_ROOT", root);
+        }
+        cmd.arg("--config").arg(&sync_conf_path);
+        cmd.env("AETHERFLOW_RELEASE_CONF", &sync_conf_path);
+        cmd.env("AETHERFLOW_MAINTENANCE_LOCK_PATH", &cfg_lock_path);
+        cmd.env("AETHERFLOW_DB_PATH", &cfg_db_path);
+        cmd.env("AETHERFLOW_BACKUP_DIR", &cfg_backup_dir);
+
+        let res = cmd.output().await;
+        let _ = fs::remove_file(&sync_conf_path);
+        match res {
+            Ok(out) => {
+                let combined = format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&out.stdout),
+                    String::from_utf8_lossy(&out.stderr)
+                );
+                if out.status.success() {
+                    (
+                        StatusCode::OK,
+                        RunnerResponse {
+                            success: true,
+                            output: combined,
+                            error: String::new(),
+                        },
+                    )
+                } else {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        RunnerResponse {
+                            success: false,
+                            output: combined,
+                            error: format!("exit status: {}", out.status),
+                        },
+                    )
+                }
+            }
+            Err(err) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                RunnerResponse {
+                    success: false,
+                    output: String::new(),
+                    error: err.to_string(),
+                },
+            ),
+        }
+    }
+}
+
+pub async fn query_self_update_status_local(
+    job_unit: &str,
+) -> Result<SelfUpdateJobStatus, (StatusCode, String)> {
+    let valid_unit = validate_self_update_job_unit_name(job_unit)?;
+    let jobs_dir = resolve_self_update_jobs_dir_from_env()?;
+    let status_path = jobs_dir.join(format!("{}.json", valid_unit));
+
+    if status_path.is_file() {
+        let raw = fs::read_to_string(&status_path).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to read self-update status file: {}", e),
+            )
+        })?;
+        let mut parsed: SelfUpdateJobStatus = serde_json::from_str(&raw).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("corrupt self-update status file: {}", e),
+            )
+        })?;
+        if parsed.job_unit.is_empty() {
+            parsed.job_unit = valid_unit.clone();
+        }
+        parsed
+            .validate_invariants(Some(&valid_unit))
+            .map_err(|err| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("corrupt self-update status file: {}", err),
+                )
+            })?;
+        if parsed.completed {
+            return Ok(parsed);
+        }
+
+        let custom_systemd_run = env::var("AETHERFLOW_SYSTEMD_RUN_BIN")
+            .map(|val| !val.trim().is_empty())
+            .unwrap_or(false);
+        let systemctl_bin = env::var("AETHERFLOW_SYSTEMCTL_BIN")
+            .ok()
+            .map(|val| val.trim().to_string())
+            .filter(|val| !val.is_empty());
+        if cfg!(target_os = "linux") && (!custom_systemd_run || systemctl_bin.is_some()) {
+            let ctl_prog = systemctl_bin.as_deref().unwrap_or("systemctl");
+            if let Ok(out) = Command::new(ctl_prog)
+                .args([
+                    "show",
+                    "--property=LoadState,ActiveState,SubState,Result,ExecMainStatus",
+                    &valid_unit,
+                ])
+                .output()
+                .await
+            {
+                if out.status.success() {
+                    let stdout = String::from_utf8_lossy(&out.stdout);
+                    let mut load_state = "";
+                    let mut active_state = "";
+                    let mut sub_state = "";
+                    let mut result_prop = "";
+                    let mut exec_status: Option<i32> = None;
+                    for line in stdout.lines() {
+                        if let Some(val) = line.strip_prefix("LoadState=") {
+                            load_state = val.trim();
+                        } else if let Some(val) = line.strip_prefix("ActiveState=") {
+                            active_state = val.trim();
+                        } else if let Some(val) = line.strip_prefix("SubState=") {
+                            sub_state = val.trim();
+                        } else if let Some(val) = line.strip_prefix("Result=") {
+                            result_prop = val.trim();
+                        } else if let Some(val) = line.strip_prefix("ExecMainStatus=") {
+                            exec_status = val.trim().parse::<i32>().ok();
+                        }
+                    }
+                    let unit_no_longer_running = active_state == "failed"
+                        || active_state == "inactive"
+                        || load_state == "not-found";
+                    if unit_no_longer_running {
+                        if let Ok(reread_raw) = fs::read_to_string(&status_path) {
+                            if let Ok(mut reread_status) =
+                                serde_json::from_str::<SelfUpdateJobStatus>(&reread_raw)
+                            {
+                                if reread_status.job_unit.is_empty() {
+                                    reread_status.job_unit = valid_unit.clone();
+                                }
+                                if reread_status.completed
+                                    && reread_status
+                                        .validate_invariants(Some(&valid_unit))
+                                        .is_ok()
+                                {
+                                    return Ok(reread_status);
+                                }
+                            }
+                        }
+                        parsed.status = "failed".to_string();
+                        parsed.completed = true;
+                        parsed.success = false;
+                        parsed.exit_code = exec_status.filter(|code| *code != 0).or(Some(1));
+                        if parsed.error.is_empty() {
+                            parsed.error = format!(
+                                "transient systemd unit '{}' terminated without writing completion receipt (LoadState={}, ActiveState={}, SubState={}, Result={}, exit_code={:?})",
+                                valid_unit,
+                                load_state,
+                                active_state,
+                                sub_state,
+                                result_prop,
+                                parsed.exit_code
+                            );
+                        }
+                        let _ = write_self_update_job_status_atomic(&status_path, &parsed);
+                        return Ok(parsed);
+                    }
+                }
+            }
+        }
+        return Ok(parsed);
+    }
+
+    Err((
+        StatusCode::NOT_FOUND,
+        format!("self-update job '{}' not found", valid_unit),
+    ))
+}
+
 async fn handle_self_update(
     Json(req): Json<SelfUpdateRequest>,
 ) -> (StatusCode, Json<RunnerResponse>) {
-    tokio::task::spawn_blocking(move || {
-        handle_self_update_with_launcher(&req, self_update::launch)
-    })
-    .await
-    .unwrap_or_else(|error| update_failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))
+    let (status, resp) = execute_self_update_request(&req, true).await;
+    (status, Json(resp))
 }
 
-fn update_failure(code: StatusCode, error: String) -> (StatusCode, Json<RunnerResponse>) {
-    (code, Json(RunnerResponse { success: false, output: String::new(), error }))
-}
-
-fn handle_self_update_with_launcher(
-    req: &SelfUpdateRequest,
-    launcher: impl FnOnce(&af_release::admin::ValidatedSelfUpdateRequest) -> Result<String, self_update::LaunchError>,
+async fn handle_self_update_status(
+    Json(req): Json<SelfUpdateStatusRequest>,
 ) -> (StatusCode, Json<RunnerResponse>) {
-    let validated = match af_release::validate_self_update_request(req) {
-        Ok(validated) => validated,
-        Err(error) => return (StatusCode::BAD_REQUEST, Json(error)),
-    };
-    match launcher(&validated) {
-        Ok(operation_id) => (StatusCode::ACCEPTED, Json(RunnerResponse {
-            success: true,
-            output: json!({"operationId": operation_id}).to_string(),
-            error: String::new(),
-        })),
-        Err(self_update::LaunchError::Busy(error)) => update_failure(StatusCode::CONFLICT, error),
-        Err(self_update::LaunchError::Failed(error)) => update_failure(StatusCode::SERVICE_UNAVAILABLE, error),
+    match query_self_update_status_local(&req.job_unit).await {
+        Ok(status_payload) => {
+            let output = serde_json::to_string(&status_payload).unwrap_or_default();
+            (
+                StatusCode::OK,
+                Json(RunnerResponse {
+                    success: true,
+                    output,
+                    error: String::new(),
+                }),
+            )
+        }
+        Err((code, err_msg)) => (
+            code,
+            Json(RunnerResponse {
+                success: false,
+                output: String::new(),
+                error: err_msg,
+            }),
+        ),
     }
 }
 
-async fn handle_self_update_status() -> (StatusCode, Json<RunnerResponse>) {
-    match tokio::task::spawn_blocking(self_update::status).await {
-        Ok(Ok(status)) => (StatusCode::OK, Json(RunnerResponse {
-            success: true,
-            output: serde_json::to_string(&status).unwrap_or_default(),
-            error: String::new(),
-        })),
-        Ok(Err(self_update::LaunchError::Busy(error) | self_update::LaunchError::Failed(error))) =>
-            update_failure(StatusCode::SERVICE_UNAVAILABLE, error),
-        Err(error) => update_failure(StatusCode::SERVICE_UNAVAILABLE, error.to_string()),
+type RunnerResolvedBackupConfig = (
+    af_host::HostBackupConfig,
+    Option<PathBuf>,
+    Option<u32>,
+    Option<u32>,
+);
+
+fn resolve_server_owned_backup_config(
+    app_version: &str,
+) -> Result<RunnerResolvedBackupConfig, (StatusCode, String)> {
+    let isolated_root = af_models::try_resolve_isolated_root_with_env(None, |k| env::var(k).ok())
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let active_db = af_models::try_resolve_active_db_path_from_env(
+        isolated_root.as_deref(),
+        "/var/lib/aetherflow/aetherflow.sqlite",
+    )
+    .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let active_backup_dir = af_models::try_resolve_active_backup_dir_from_env(
+        isolated_root.as_deref(),
+        Some(&active_db),
+        "/var/lib/aetherflow/backups",
+    )
+    .map_err(|err| (StatusCode::BAD_REQUEST, err))?;
+    let (env_sqlite_uid, env_sqlite_gid) =
+        af_models::try_resolve_trusted_sqlite_ids_from_env(isolated_root.as_deref())
+            .map_err(|err| (StatusCode::BAD_REQUEST, err))?;
+
+    if let Some(root_path) = isolated_root {
+        let mut cfg = af_host::HostBackupConfig::for_isolated_root(&root_path, app_version);
+        cfg.backup_dir = active_backup_dir;
+        cfg.sqlite_db_path = Some(active_db);
+        cfg.snapshot_options.trusted_source_uid = env_sqlite_uid;
+        return Ok((cfg, Some(root_path), env_sqlite_uid, env_sqlite_gid));
     }
+
+    let mut cfg = af_host::HostBackupConfig {
+        app_version: app_version.to_string(),
+        backup_dir: active_backup_dir,
+        sqlite_db_path: Some(active_db),
+        ..Default::default()
+    };
+    cfg.snapshot_options.trusted_source_uid = env_sqlite_uid;
+    Ok((cfg, None, env_sqlite_uid, env_sqlite_gid))
+}
+
+fn build_runner_backup_config(
+    req: &BackupRunnerRequest,
+) -> Result<RunnerResolvedBackupConfig, (StatusCode, String)> {
+    let app_version = if req.app_version.trim().is_empty() {
+        "v4.0.0"
+    } else {
+        req.app_version.trim()
+    };
+
+    let (mut cfg, isolated_root, mut trusted_sqlite_uid, mut trusted_sqlite_gid) =
+        resolve_server_owned_backup_config(app_version)?;
+
+    if let Some(req_uid) = req.trusted_sqlite_uid {
+        if let Some(existing_uid) = trusted_sqlite_uid {
+            if existing_uid != req_uid {
+                return Err((
+                    StatusCode::FORBIDDEN,
+                    format!(
+                        "untrusted trusted_sqlite_uid override '{}' rejected: runner enforces configured UID {}",
+                        req_uid, existing_uid
+                    ),
+                ));
+            }
+        } else if isolated_root.is_some() {
+            trusted_sqlite_uid = Some(req_uid);
+        } else {
+            return Err((
+                StatusCode::FORBIDDEN,
+                format!(
+                    "untrusted trusted_sqlite_uid override '{}' rejected without server-side configuration",
+                    req_uid
+                ),
+            ));
+        }
+    }
+    if let Some(req_gid) = req.trusted_sqlite_gid {
+        if let Some(existing_gid) = trusted_sqlite_gid {
+            if existing_gid != req_gid {
+                return Err((
+                    StatusCode::FORBIDDEN,
+                    format!(
+                        "untrusted trusted_sqlite_gid override '{}' rejected: runner enforces configured GID {}",
+                        req_gid, existing_gid
+                    ),
+                ));
+            }
+        } else if isolated_root.is_some() {
+            trusted_sqlite_gid = Some(req_gid);
+        } else {
+            return Err((
+                StatusCode::FORBIDDEN,
+                format!(
+                    "untrusted trusted_sqlite_gid override '{}' rejected without server-side configuration",
+                    req_gid
+                ),
+            ));
+        }
+    }
+    cfg.snapshot_options.trusted_source_uid = trusted_sqlite_uid;
+
+    if !req.backup_dir.trim().is_empty() {
+        let req_bdir = PathBuf::from(req.backup_dir.trim());
+        af_host::validate_no_parent_traversal(&req_bdir, "backup_dir")
+            .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+        let allowed = req_bdir == cfg.backup_dir
+            || isolated_root
+                .as_ref()
+                .map(|iso| req_bdir.starts_with(iso))
+                .unwrap_or(false);
+        if !allowed {
+            return Err((
+                StatusCode::FORBIDDEN,
+                format!(
+                    "untrusted backup_dir override '{}' rejected: runner enforces server-owned backup root '{}'",
+                    req_bdir.display(),
+                    cfg.backup_dir.display()
+                ),
+            ));
+        }
+        cfg.backup_dir = req_bdir;
+    }
+
+    if !req.db_path.trim().is_empty() {
+        let req_db = PathBuf::from(req.db_path.trim());
+        af_host::validate_no_parent_traversal(&req_db, "db_path")
+            .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+        let allowed = cfg.sqlite_db_path.as_ref() == Some(&req_db)
+            || isolated_root
+                .as_ref()
+                .map(|iso| req_db.starts_with(iso))
+                .unwrap_or(false);
+        if !allowed {
+            return Err((
+                StatusCode::FORBIDDEN,
+                format!(
+                    "untrusted db_path override '{}' rejected: runner enforces server-owned database path",
+                    req_db.display()
+                ),
+            ));
+        }
+        cfg.sqlite_db_path = Some(req_db);
+    }
+
+    if let Some(chunk_sz) = req.chunk_size_bytes {
+        cfg.chunk_size_bytes = if chunk_sz > 0 { Some(chunk_sz) } else { None };
+    }
+    if let Some(days) = req.retention_days {
+        cfg.retention_days = days;
+    }
+    if let Some(max_keep) = req.max_retained {
+        cfg.max_retained_backups = max_keep;
+    }
+    Ok((cfg, isolated_root, trusted_sqlite_uid, trusted_sqlite_gid))
+}
+
+fn validate_runner_restore_target_root(raw_target: &str) -> Result<PathBuf, (StatusCode, String)> {
+    let trimmed = raw_target.trim();
+    if trimmed.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "target_root must not be empty".to_string(),
+        ));
+    }
+    let target = PathBuf::from(trimmed);
+    if target == Path::new("/") {
+        return Ok(target);
+    }
+    af_host::validate_no_parent_traversal(&target, "target_root")
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+
+    if target.starts_with("/var/lib/aetherflow/restore-staging") {
+        return Ok(target);
+    }
+    if let Ok(staging_env) = env::var("AETHERFLOW_RESTORE_STAGING_ROOT") {
+        let st = staging_env.trim();
+        if !st.is_empty() && target.starts_with(Path::new(st)) {
+            return Ok(target);
+        }
+    }
+    if let Ok(Some(iso_path)) =
+        af_models::try_resolve_isolated_root_with_env(None, |k| env::var(k).ok())
+    {
+        if target.starts_with(&iso_path)
+            || iso_path
+                .parent()
+                .map(|p| target.starts_with(p))
+                .unwrap_or(false)
+        {
+            return Ok(target);
+        }
+    }
+
+    Err((
+        StatusCode::FORBIDDEN,
+        format!(
+            "untrusted target_root '{}' rejected: runner only permits '/' (canonical FHS mapping) or configured restore-staging roots",
+            target.display()
+        ),
+    ))
+}
+
+/// Executes a validated `BackupRunnerRequest` using `af-host` with serialized write locking.
+pub async fn execute_backup_local(
+    req: &BackupRunnerRequest,
+) -> Result<BackupRunnerResponse, (StatusCode, String)> {
+    let action = req.action.trim();
+    if !ALLOWED_BACKUP_ACTIONS.contains(action) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("disallowed backup action: {:?}", action),
+        ));
+    }
+
+    let _guard = BACKUP_MUTEX.lock().await;
+    let (cfg, isolated_root, trusted_sqlite_uid, trusted_sqlite_gid) =
+        build_runner_backup_config(req)?;
+    let canonical_lock_path = af_models::try_resolve_canonical_maintenance_lock_path_from_env(
+        isolated_root.as_deref(),
+        cfg.sqlite_db_path.as_deref(),
+        Some(&cfg.backup_dir),
+    )
+    .map_err(|err| (StatusCode::BAD_REQUEST, err))?;
+    let _maint_lock =
+        af_host::HostMaintenanceLockGuard::acquire(&canonical_lock_path, Duration::from_secs(30))
+            .map_err(|e| (StatusCode::CONFLICT, e.to_string()))?;
+
+    let slug_opt = if req.timestamp_slug.trim().is_empty() {
+        None
+    } else {
+        Some(req.timestamp_slug.trim())
+    };
+
+    let effective_action = if action == "create" {
+        if req.kind.eq_ignore_ascii_case("archive") || req.kind.eq_ignore_ascii_case("full") {
+            "create_archive"
+        } else {
+            "create_sqlite"
+        }
+    } else {
+        action
+    };
+
+    match effective_action {
+        "create_sqlite" => {
+            let receipt = af_host::create_sqlite_snapshot_backup(&cfg, slug_opt)
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            let filename = receipt
+                .primary_artifact_path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default()
+                .to_string();
+            let sha256 = receipt
+                .manifest
+                .sqlite_snapshot
+                .as_ref()
+                .map(|s| s.sha256.clone())
+                .unwrap_or_default();
+            let size_bytes = receipt
+                .manifest
+                .sqlite_snapshot
+                .as_ref()
+                .map(|s| s.size_bytes)
+                .unwrap_or(0);
+            Ok(BackupRunnerResponse {
+                action: action.to_string(),
+                backup_id: receipt.manifest.backup_id.clone(),
+                filename,
+                artifact_path: receipt.primary_artifact_path.to_string_lossy().into_owned(),
+                manifest_path: receipt.manifest_path.to_string_lossy().into_owned(),
+                sha256,
+                size_bytes,
+                chunk_count: receipt.chunk_paths.len(),
+                verified: true,
+                restored_files: 0,
+                rolled_back: false,
+                details: serde_json::to_value(&receipt.manifest).unwrap_or(Value::Null),
+            })
+        }
+        "create_archive" => {
+            let receipt = af_host::create_host_archive_backup(&cfg, slug_opt)
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            let filename = receipt
+                .primary_artifact_path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default()
+                .to_string();
+            let primary_entry = receipt.manifest.entries.first();
+            Ok(BackupRunnerResponse {
+                action: action.to_string(),
+                backup_id: receipt.manifest.backup_id.clone(),
+                filename,
+                artifact_path: receipt.primary_artifact_path.to_string_lossy().into_owned(),
+                manifest_path: receipt.manifest_path.to_string_lossy().into_owned(),
+                sha256: primary_entry.map(|e| e.sha256.clone()).unwrap_or_default(),
+                size_bytes: fs::metadata(&receipt.primary_artifact_path)
+                    .map(|m| m.len())
+                    .unwrap_or(0),
+                chunk_count: receipt.chunk_paths.len(),
+                verified: true,
+                restored_files: 0,
+                rolled_back: false,
+                details: serde_json::to_value(&receipt.manifest).unwrap_or(Value::Null),
+            })
+        }
+        "list" => {
+            let inv = af_host::list_backup_inventory(&cfg.backup_dir)
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            Ok(BackupRunnerResponse {
+                action: action.to_string(),
+                verified: true,
+                details: serde_json::to_value(&inv).unwrap_or(Value::Array(Vec::new())),
+                ..Default::default()
+            })
+        }
+        "verify" => {
+            let filename = req.filename.trim();
+            af_host::validate_backup_filename(filename)
+                .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+            let (ver, manifest) = af_host::verify_backup_artifact_with_trusted_uid(
+                &cfg.backup_dir,
+                filename,
+                trusted_sqlite_uid,
+            )
+            .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+            Ok(BackupRunnerResponse {
+                action: action.to_string(),
+                backup_id: manifest
+                    .as_ref()
+                    .map(|m| m.backup_id.clone())
+                    .unwrap_or_default(),
+                filename: filename.to_string(),
+                artifact_path: ver.artifact_path.to_string_lossy().into_owned(),
+                manifest_path: manifest
+                    .as_ref()
+                    .map(|_| format!("{}.manifest.json", ver.artifact_path.display()))
+                    .unwrap_or_default(),
+                sha256: ver.actual_sha256,
+                size_bytes: ver.size_bytes,
+                verified: ver.verified,
+                details: serde_json::to_value(&manifest).unwrap_or(Value::Null),
+                ..Default::default()
+            })
+        }
+        "delete" => {
+            let filename = req.filename.trim();
+            af_host::validate_backup_filename(filename)
+                .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+            let removed = af_host::delete_backup_artifacts(&cfg.backup_dir, filename)
+                .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+            Ok(BackupRunnerResponse {
+                action: action.to_string(),
+                filename: filename.to_string(),
+                verified: true,
+                details: json!({
+                    "removed_files": removed.iter().map(|p| p.to_string_lossy().into_owned()).collect::<Vec<_>>(),
+                }),
+                ..Default::default()
+            })
+        }
+        "prune" => {
+            let removed = af_host::prune_backup_inventory(
+                &cfg.backup_dir,
+                cfg.max_retained_backups,
+                cfg.retention_days,
+            )
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            Ok(BackupRunnerResponse {
+                action: action.to_string(),
+                verified: true,
+                details: json!({
+                    "removed_files": removed,
+                }),
+                ..Default::default()
+            })
+        }
+        "restore_preflight" => {
+            let filename = req.filename.trim();
+            af_host::validate_backup_filename(filename)
+                .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+            let target_root = validate_runner_restore_target_root(&req.target_root)?;
+            let (ver, maybe_manifest) = af_host::verify_backup_artifact_with_trusted_uid(
+                &cfg.backup_dir,
+                filename,
+                trusted_sqlite_uid,
+            )
+            .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+            let manifest = maybe_manifest.ok_or_else(|| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    format!("backup '{}' is missing a .manifest.json sidecar", filename),
+                )
+            })?;
+            let opts = af_host::RestorePreflightOptions {
+                host_app_version: cfg.app_version.clone(),
+                max_supported_sqlite_user_version: req.max_sqlite_user_version,
+                overwrite_policy: if req.allow_overwrite {
+                    af_host::OverwritePolicy::AllowRegularFilesInStaging
+                } else {
+                    af_host::OverwritePolicy::RejectExisting
+                },
+                require_artifact_sidecar: true,
+            };
+            let sqlite_override_buf = af_models::resolve_contained_sqlite_restore_override(
+                &target_root,
+                cfg.sqlite_db_path.as_deref(),
+            );
+            let sqlite_override = sqlite_override_buf.as_deref();
+            let sqlite_target_rel = sqlite_override
+                .and_then(|db_p| af_models::derive_sqlite_target_rel_path(&target_root, db_p));
+            let plan = if filename.ends_with(".tar.gz") {
+                af_host::preflight_tar_gz_archive_with_sqlite_overrides_and_trusted_uid(
+                    &ver.artifact_path,
+                    &manifest,
+                    &target_root,
+                    &opts,
+                    sqlite_target_rel.as_deref(),
+                    sqlite_override,
+                    trusted_sqlite_uid,
+                )
+            } else {
+                af_host::preflight_restore_directory_with_sqlite_overrides_and_trusted_uid(
+                    &cfg.backup_dir,
+                    &manifest,
+                    &target_root,
+                    &opts,
+                    sqlite_target_rel.as_deref(),
+                    sqlite_override,
+                    trusted_sqlite_uid,
+                )
+            }
+            .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+
+            Ok(BackupRunnerResponse {
+                action: action.to_string(),
+                backup_id: manifest.backup_id,
+                filename: filename.to_string(),
+                artifact_path: ver.artifact_path.to_string_lossy().into_owned(),
+                manifest_path: format!("{}.manifest.json", ver.artifact_path.display()),
+                sha256: ver.actual_sha256,
+                size_bytes: ver.size_bytes,
+                verified: true,
+                restored_files: plan.items.len(),
+                rolled_back: false,
+                details: serde_json::to_value(&plan).unwrap_or(Value::Null),
+                ..Default::default()
+            })
+        }
+        "restore_execute" => {
+            let filename = req.filename.trim();
+            af_host::validate_backup_filename(filename)
+                .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+            let validated_quiesce =
+                af_host::validate_quiesce_service_entries(&req.quiesce_services)
+                    .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+            for svc in &validated_quiesce {
+                if !SAFE_SERVICE_NAME.is_match(svc) || svc.contains("..") {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        format!("invalid quiesce service unit name: {:?}", svc),
+                    ));
+                }
+            }
+            let target_root = validate_runner_restore_target_root(&req.target_root)?;
+            let trusted_sqlite_db_path = af_models::resolve_contained_sqlite_restore_override(
+                &target_root,
+                cfg.sqlite_db_path.as_deref(),
+            );
+            let sqlite_target_rel_path = trusted_sqlite_db_path
+                .as_deref()
+                .and_then(|db_p| af_models::derive_sqlite_target_rel_path(&target_root, db_p));
+            let exec_opts = af_host::RestoreExecutionOptions {
+                host_app_version: cfg.app_version.clone(),
+                max_supported_sqlite_user_version: req.max_sqlite_user_version,
+                confirm_destructive_restore: req.confirm_destructive_restore,
+                allow_overwrite: req.allow_overwrite,
+                quiesce_services: af_host::resolve_effective_quiesce_services(&validated_quiesce),
+                sqlite_target_rel_path,
+                trusted_sqlite_db_path,
+                trusted_sqlite_uid,
+                trusted_sqlite_gid,
+                ..Default::default()
+            };
+
+            let dry_quiesce = env::var("AETHERFLOW_BACKUP_DRY_RUN_QUIESCENCE")
+                .map(|val| val == "1" || val.eq_ignore_ascii_case("true"))
+                .unwrap_or(false)
+                || af_models::try_resolve_isolated_root_with_env(None, |k| env::var(k).ok())
+                    .ok()
+                    .flatten()
+                    .is_some()
+                || !cfg!(target_os = "linux");
+
+            let report = if dry_quiesce {
+                af_host::execute_staged_restore(
+                    &cfg.backup_dir,
+                    filename,
+                    &target_root,
+                    &exec_opts,
+                    &af_host::NoopQuiescenceController,
+                )
+            } else {
+                af_host::execute_staged_restore(
+                    &cfg.backup_dir,
+                    filename,
+                    &target_root,
+                    &exec_opts,
+                    &af_host::CommandQuiescenceController::default(),
+                )
+            }
+            .map_err(|err| {
+                let code = match err {
+                    af_host::HostBackupError::DestructiveRestoreUnsupported { .. }
+                    | af_host::HostBackupError::UnsafeOverwriteRejected { .. }
+                    | af_host::HostBackupError::TraversalRejected { .. }
+                    | af_host::HostBackupError::SymlinkRejected { .. }
+                    | af_host::HostBackupError::ChecksumMismatch { .. }
+                    | af_host::HostBackupError::InvalidManifest(_)
+                    | af_host::HostBackupError::InvalidConfig(_) => StatusCode::BAD_REQUEST,
+                    _ => StatusCode::INTERNAL_SERVER_ERROR,
+                };
+                (code, err.to_string())
+            })?;
+
+            Ok(BackupRunnerResponse {
+                action: action.to_string(),
+                backup_id: report.backup_id.clone(),
+                filename: filename.to_string(),
+                verified: true,
+                restored_files: report.restored_files.len(),
+                rolled_back: report.rolled_back,
+                details: serde_json::to_value(&report).unwrap_or(Value::Null),
+                ..Default::default()
+            })
+        }
+        "recover_interrupted" => {
+            let mut recovery_context = if !req.target_root.trim().is_empty() {
+                let target_root = validate_runner_restore_target_root(&req.target_root)?;
+                let trusted_sqlite_db_path = af_models::resolve_contained_sqlite_restore_override(
+                    &target_root,
+                    cfg.sqlite_db_path.as_deref(),
+                );
+                if target_root == Path::new("/") {
+                    af_host::RecoveryContext::for_canonical_host(trusted_sqlite_db_path)
+                } else {
+                    af_host::RecoveryContext::for_target_root(target_root, trusted_sqlite_db_path)
+                }
+            } else {
+                let trusted_sqlite_db_path = match isolated_root.as_deref() {
+                    Some(iso_root) => af_models::resolve_contained_sqlite_restore_override(
+                        iso_root,
+                        cfg.sqlite_db_path.as_deref(),
+                    ),
+                    None => cfg.sqlite_db_path.clone(),
+                };
+                af_host::RecoveryContext::from_host_config(
+                    isolated_root.as_deref(),
+                    trusted_sqlite_db_path,
+                )
+            };
+            recovery_context.trusted_sqlite_uid = trusted_sqlite_uid;
+            recovery_context.trusted_sqlite_gid = trusted_sqlite_gid;
+
+            let dry_quiesce = env::var("AETHERFLOW_BACKUP_DRY_RUN_QUIESCENCE")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false)
+                || af_models::try_resolve_isolated_root_with_env(None, |k| env::var(k).ok())
+                    .ok()
+                    .flatten()
+                    .is_some()
+                || !cfg!(target_os = "linux");
+
+            let recovered_directories = if dry_quiesce {
+                af_host::recover_interrupted_restore_with_context(
+                    &cfg.backup_dir,
+                    &recovery_context,
+                    &af_host::NoopQuiescenceController,
+                )
+            } else {
+                af_host::recover_interrupted_restore_with_context(
+                    &cfg.backup_dir,
+                    &recovery_context,
+                    &af_host::CommandQuiescenceController::default(),
+                )
+            }
+            .map_err(|err| {
+                let code = match err {
+                    af_host::HostBackupError::DestructiveRestoreUnsupported { .. }
+                    | af_host::HostBackupError::UnsafeOverwriteRejected { .. }
+                    | af_host::HostBackupError::TraversalRejected { .. }
+                    | af_host::HostBackupError::SymlinkRejected { .. }
+                    | af_host::HostBackupError::ChecksumMismatch { .. }
+                    | af_host::HostBackupError::PathValidation { .. }
+                    | af_host::HostBackupError::InvalidManifest(_)
+                    | af_host::HostBackupError::InvalidConfig(_) => StatusCode::BAD_REQUEST,
+                    _ => StatusCode::INTERNAL_SERVER_ERROR,
+                };
+                (code, err.to_string())
+            })?;
+
+            Ok(BackupRunnerResponse {
+                action: action.to_string(),
+                verified: true,
+                rolled_back: !recovered_directories.is_empty(),
+                details: json!({"recovered_directories": recovered_directories}),
+                ..Default::default()
+            })
+        }
+        _ => Err((StatusCode::BAD_REQUEST, "unsupported backup action".to_string())),
+    }
+}
+
+async fn handle_backup(
+    Json(req): Json<BackupRunnerRequest>,
+) -> (StatusCode, Json<RunnerResponse>) {
+    match execute_backup_local(&req).await {
+        Ok(resp) => {
+            let output = serde_json::to_string(&resp).unwrap_or_default();
+            (
+                StatusCode::OK,
+                Json(RunnerResponse {
+                    success: true,
+                    output,
+                    error: String::new(),
+                }),
+            )
+        }
+        Err((code, err_msg)) => (
+            code,
+            Json(RunnerResponse {
+                success: false,
+                output: String::new(),
+                error: err_msg,
+            }),
+        ),
+    }
+}
+
+pub async fn dispatch_backup_request(
+    req: &BackupRunnerRequest,
+) -> anyhow::Result<BackupRunnerResponse> {
+    if is_runner_available() {
+        let resp = post_runner_json("/v1/backup", req, Duration::from_secs(300)).await?;
+        if !resp.success {
+            anyhow::bail!("runner backup error: {}", resp.error);
+        }
+        let parsed: BackupRunnerResponse = serde_json::from_str(&resp.output)?;
+        return Ok(parsed);
+    }
+    execute_backup_local(req)
+        .await
+        .map_err(|(_, msg)| anyhow::anyhow!(msg))
 }
 
 pub fn resolve_sandbox_script_path() -> Option<PathBuf> {
@@ -501,6 +2059,9 @@ fn load_runner_config_or_embedded(env_var: &str, filename: &str, embedded: &str)
         PathBuf::from("/opt/AetherFlow/current/config").join(filename),
         PathBuf::from("/opt/AetherFlow/current/backend/config").join(filename),
         PathBuf::from("config").join(filename),
+        PathBuf::from("../config").join(filename),
+        PathBuf::from("/opt/AetherFlow/current/config").join(filename),
+        PathBuf::from("/opt/AetherFlow/config").join(filename),
         PathBuf::from("backend/config").join(filename),
         PathBuf::from("../backend/config").join(filename),
         PathBuf::from("/opt/AetherFlow/backend/config").join(filename),
@@ -1546,13 +3107,11 @@ fn query_runner_sqlite_single_string(raw_path: &str, queries: &[&str]) -> String
     };
     let _ = conn.busy_timeout(Duration::from_millis(1000));
 
-    for q in queries {
-        if let Ok(val) = conn.query_row(q, [], |row| row.get::<_, Option<String>>(0)) {
-            if let Some(s) = val {
-                let trimmed = s.trim();
-                if !trimmed.is_empty() {
-                    return trimmed.to_string();
-                }
+    for query_sql in queries {
+        if let Ok(Some(val)) = conn.query_row(query_sql, [], |row| row.get::<_, Option<String>>(0)) {
+            let trimmed = val.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
             }
         }
     }
@@ -2262,9 +3821,7 @@ pub fn extract_app_runtime_meta_local(app_name: &str) -> AppRuntimeMeta {
             for raw_path in &candidates {
                 if let Some(content) = read_runner_config_text(raw_path) {
                     let port = parse_valid_runner_port(
-                        &extract_runner_ini_value(&content, &["port"])
-                            .trim_end_matches(',')
-                            .to_string(),
+                        extract_runner_ini_value(&content, &["port"]).trim_end_matches(','),
                     );
                     if port > 0 {
                         meta.configured_port = port;
@@ -2877,17 +4434,54 @@ where
     decoder.finish(&mut on_line)
 }
 
-pub async fn start_self_update(command: &str, channel: &str) -> anyhow::Result<String> {
-    let req = SelfUpdateRequest { command: command.to_string(), channel: channel.to_string() };
-    let result = post_runner_json("/v1/self-update", &req, Duration::from_secs(15)).await?;
-    if !result.success {
-        anyhow::bail!("runner self-update error: {}", result.error);
+pub async fn dispatch_self_update_request(
+    req: &SelfUpdateRequest,
+) -> anyhow::Result<RunnerResponse> {
+    if is_runner_available() {
+        let result = post_runner_json("/v1/self-update", req, Duration::from_secs(15)).await?;
+        if !result.success {
+            anyhow::bail!("runner self-update error: {}", result.error);
+        }
+        return Ok(result);
     }
-    let response: Value = serde_json::from_str(&result.output)?;
-    let operation_id = response["operationId"].as_str()
-        .ok_or_else(|| anyhow::anyhow!("updater launch did not acknowledge an operation ID"))?;
-    uuid::Uuid::parse_str(operation_id)?;
-    Ok(operation_id.to_string())
+    let (status, resp) = execute_self_update_request(req, true).await;
+    if status != StatusCode::OK || !resp.success {
+        anyhow::bail!(
+            "self-update failed (HTTP {}): {}",
+            status.as_u16(),
+            resp.error
+        );
+    }
+    Ok(resp)
+}
+
+pub async fn dispatch_self_update_status_request(
+    req: &SelfUpdateStatusRequest,
+) -> anyhow::Result<SelfUpdateJobStatus> {
+    if is_runner_available() {
+        let result =
+            post_runner_json("/v1/self-update/status", req, Duration::from_secs(10)).await?;
+        if !result.success {
+            anyhow::bail!("runner self-update status error: {}", result.error);
+        }
+        let parsed: SelfUpdateJobStatus = serde_json::from_str(&result.output)?;
+        return Ok(parsed);
+    }
+    query_self_update_status_local(&req.job_unit)
+        .await
+        .map_err(|(_, msg)| anyhow::anyhow!(msg))
+}
+
+pub async fn start_self_update(command: &str, channel: &str) -> anyhow::Result<String> {
+    let response = dispatch_self_update_request(&SelfUpdateRequest {
+        command: command.to_string(),
+        channel: channel.to_string(),
+    }).await?;
+    let payload: Value = serde_json::from_str(&response.output)?;
+    let job_unit = payload["job_unit"].as_str()
+        .ok_or_else(|| anyhow::anyhow!("updater launch did not acknowledge a job unit"))?;
+    validate_self_update_job_unit_name(job_unit).map_err(|(_, message)| anyhow::anyhow!(message))?;
+    Ok(job_unit.to_string())
 }
 
 pub async fn dispatch_self_update(command: &str, channel: &str) -> anyhow::Result<()> {
@@ -2991,6 +4585,62 @@ pub async fn dispatch_app_meta(app_name: &str) -> anyhow::Result<AppRuntimeMeta>
     Ok(meta)
 }
 
+/// Authorizes a UNIX domain socket peer (`SO_PEERCRED` / `UCred`) connecting to the privileged runner.
+///
+/// Permits:
+/// - `uid == 0` (root)
+/// - `uid == euid` (same effective user running the runner process)
+/// - the `aetherflow` service user UID resolved via `getpwnam` on Unix
+/// - any explicit UID listed in `AETHERFLOW_ALLOWED_RUNNER_UIDS` (comma-separated)
+///
+/// Furthermore, destructive endpoints (`/v1/self-update`, `/v1/backup` with `restore_execute` or `delete`)
+/// require either `uid == 0`, `uid == euid`, the `aetherflow` service account, or an explicitly authorized UID.
+pub fn authorize_runner_peer_credentials(
+    peer_uid: u32,
+    peer_gid: u32,
+    endpoint_path: &str,
+) -> Result<(), (StatusCode, String)> {
+    #[cfg(unix)]
+    let self_euid = unsafe { libc::geteuid() as u32 };
+    #[cfg(not(unix))]
+    let self_euid = 0u32;
+
+    if peer_uid == 0 || peer_uid == self_euid {
+        return Ok(());
+    }
+
+    if let Ok(raw_uids) = env::var("AETHERFLOW_ALLOWED_RUNNER_UIDS") {
+        for token in raw_uids.split(',') {
+            if let Ok(allowed_uid) = token.trim().parse::<u32>() {
+                if peer_uid == allowed_uid {
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    {
+        if let Ok(c_name) = std::ffi::CString::new("aetherflow") {
+            let pw = unsafe { libc::getpwnam(c_name.as_ptr()) };
+            if !pw.is_null() {
+                let af_uid = unsafe { (*pw).pw_uid as u32 };
+                if peer_uid == af_uid {
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    Err((
+        StatusCode::FORBIDDEN,
+        format!(
+            "unauthorized unix socket peer uid={} gid={} for endpoint {}",
+            peer_uid, peer_gid, endpoint_path
+        ),
+    ))
+}
+
 /// Runs the Privileged Root Daemon (`aetherflow-api runner` / `--runner`) over `/run/aetherflow/runner.sock`.
 #[cfg(unix)]
 pub async fn run_privileged_daemon() -> anyhow::Result<()> {
@@ -3015,13 +4665,40 @@ pub async fn run_privileged_daemon() -> anyhow::Result<()> {
         tokio::select! {
             accept_res = listener.accept() => {
                 let (stream, _) = accept_res?;
+                let (peer_uid, peer_gid) = match stream.peer_cred() {
+                    Ok(cred) => (cred.uid(), cred.gid()),
+                    Err(err) => {
+                        tracing::warn!(error = %err, "Rejecting runner connection without SO_PEERCRED");
+                        continue;
+                    }
+                };
+                if let Err((_, reason)) = authorize_runner_peer_credentials(peer_uid, peer_gid, "/v1/*") {
+                    tracing::warn!(peer_uid, peer_gid, %reason, "Rejected unauthorized UNIX socket peer");
+                    continue;
+                }
                 let io = TokioIo::new(stream);
                 let tower_service = app.clone();
                 tokio::spawn(async move {
                     let hyper_service = hyper::service::service_fn(
                         move |request: hyper::Request<hyper::body::Incoming>| {
+                            let req_path = request.uri().path().to_string();
+                            let auth_res = authorize_runner_peer_credentials(peer_uid, peer_gid, &req_path);
                             let mut svc = tower_service.clone();
-                            async move { svc.call(request.map(axum::body::Body::new)).await }
+                            async move {
+                                if let Err((code, msg)) = auth_res {
+                                    let body = serde_json::to_string(&RunnerResponse {
+                                        success: false,
+                                        output: String::new(),
+                                        error: msg,
+                                    }).unwrap_or_default();
+                                    return Ok(Response::builder()
+                                        .status(code)
+                                        .header("Content-Type", "application/json")
+                                        .body(Body::from(body))
+                                        .unwrap());
+                                }
+                                svc.call(request.map(axum::body::Body::new)).await
+                            }
                         },
                     );
                     let _ = Builder::new(TokioExecutor::new())
@@ -3312,32 +4989,500 @@ mod tests {
         assert!(tok.is_cancelled());
     }
 
-    #[test]
-    fn test_handle_self_update_accepts_experimental_and_validates_inputs() {
-        for channel in ["stable", "nightly", "experimental"] {
-            let request = SelfUpdateRequest { command: "deploy".into(), channel: channel.into() };
-            let (code, Json(response)) = handle_self_update_with_launcher(&request, |_| Ok(uuid::Uuid::new_v4().to_string()));
-            assert_eq!(code, StatusCode::ACCEPTED);
-            assert!(response.success);
-            assert!(serde_json::from_str::<Value>(&response.output).unwrap()["operationId"].is_string());
-        }
-        for (command, channel) in [("deploy", "invalid-channel"), ("rm-rf", "nightly")] {
-            let request = SelfUpdateRequest { command: command.into(), channel: channel.into() };
-            let (code, Json(response)) = handle_self_update_with_launcher(&request, |_| panic!("invalid request reached launcher"));
-            assert_eq!(code, StatusCode::BAD_REQUEST);
-            assert!(!response.success);
+    static ENV_TEST_MUTEX: Lazy<tokio::sync::Mutex<()>> =
+        Lazy::new(|| tokio::sync::Mutex::new(()));
+
+    #[tokio::test]
+    async fn test_release_engine_rollout_control_and_self_update_validation() {
+        let _env_guard = ENV_TEST_MUTEX.lock().await;
+        assert_eq!(
+            select_release_engine_with_flags(false, false),
+            ReleaseEngineMode::LegacyBashRelease
+        );
+        assert_eq!(
+            select_release_engine_with_flags(true, false),
+            ReleaseEngineMode::NativeRustRelease
+        );
+        assert_eq!(
+            select_release_engine_with_flags(true, true),
+            ReleaseEngineMode::LegacyBashRelease
+        );
+
+        let (bad_cmd_code, bad_cmd_resp) = execute_self_update_request(
+            &SelfUpdateRequest {
+                command: "rm -rf /".to_string(),
+                channel: "stable".to_string(),
+            },
+            false,
+        )
+        .await;
+        assert_eq!(bad_cmd_code, StatusCode::BAD_REQUEST);
+        assert!(!bad_cmd_resp.success);
+
+        let (bad_chan_code, bad_chan_resp) = execute_self_update_request(
+            &SelfUpdateRequest {
+                command: "deploy".to_string(),
+                channel: "untrusted-channel".to_string(),
+            },
+            false,
+        )
+        .await;
+        assert_eq!(bad_chan_code, StatusCode::BAD_REQUEST);
+        assert!(!bad_chan_resp.success);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let test_dir = env::temp_dir().join(format!(
+                "af-runner-self-update-unit-test-{}-{}",
+                std::process::id(),
+                uuid::Uuid::new_v4()
+            ));
+            fs::create_dir_all(&test_dir).unwrap();
+
+            let args_log = test_dir.join("systemd-run.args");
+            let fake_systemd_run = test_dir.join("fake-systemd-run.sh");
+            fs::write(
+                &fake_systemd_run,
+                format!(
+                    "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"{}\"\nexit 0\n",
+                    args_log.display()
+                ),
+            )
+            .unwrap();
+            fs::set_permissions(&fake_systemd_run, fs::Permissions::from_mode(0o755)).unwrap();
+
+            let fake_af = test_dir.join("af");
+            fs::write(&fake_af, "#!/bin/sh\nexit 0\n").unwrap();
+            fs::set_permissions(&fake_af, fs::Permissions::from_mode(0o755)).unwrap();
+
+            let fake_rm = test_dir.join("release-manager.sh");
+            fs::write(&fake_rm, "#!/bin/sh\nexit 0\n").unwrap();
+            fs::set_permissions(&fake_rm, fs::Permissions::from_mode(0o755)).unwrap();
+
+            env::set_var("AETHERFLOW_RELEASE_ROOT", &test_dir);
+            env::set_var("AETHERFLOW_SYSTEMD_RUN_BIN", &fake_systemd_run);
+            env::set_var("AETHERFLOW_CLI_BIN", &fake_af);
+            env::set_var("AETHERFLOW_RELEASE_MANAGER_SCRIPT", &fake_rm);
+            env::set_var("AETHERFLOW_ENABLE_RUST_RELEASE", "1");
+            env::remove_var("AETHERFLOW_FORCE_BASH_RELEASE");
+            env::set_var("AETHERFLOW_ALLOW_ISOLATED_SYSTEMD_LIFECYCLE", "1");
+
+            let (ok_code, ok_resp) = execute_self_update_request(
+                &SelfUpdateRequest {
+                    command: "deploy".to_string(),
+                    channel: "stable".to_string(),
+                },
+                true,
+            )
+            .await;
+            assert_eq!(ok_code, StatusCode::OK);
+            assert!(ok_resp.success);
+            let parsed_native: Value = serde_json::from_str(&ok_resp.output).unwrap();
+            assert_eq!(parsed_native["status"], "initiated");
+            assert_eq!(parsed_native["completed"], false);
+            assert_eq!(parsed_native["engine"], "native_rust_release");
+            let native_unit = parsed_native["job_unit"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            assert!(native_unit.starts_with("aetherflow-self-update-deploy-stable-"));
+            let logged_native = fs::read_to_string(&args_log).unwrap();
+            assert!(logged_native.contains("--no-block"));
+            assert!(logged_native.contains("--root"));
+            assert!(logged_native.contains(test_dir.to_string_lossy().as_ref()));
+            assert!(logged_native.contains("release"));
+            assert!(logged_native.contains("--local"));
+            assert!(logged_native.contains("--job-status-file"));
+            assert!(logged_native.contains("--setenv=AETHERFLOW_ALLOW_ISOLATED_SYSTEMD_LIFECYCLE=1"));
+
+            // Verify durable status is initially "running" (completed=false)
+            let running_st = query_self_update_status_local(&native_unit).await.unwrap();
+            assert_eq!(running_st.status, "running");
+            assert!(!running_st.completed);
+            assert!(!running_st.success);
+
+            // Simulate completion receipt write and verify query_self_update_status_local returns it
+            let status_file = test_dir
+                .join("var/lib/aetherflow/.self-update-jobs")
+                .join(format!("{}.json", native_unit));
+            write_self_update_job_status_atomic(
+                &status_file,
+                &SelfUpdateJobStatus {
+                    status: "succeeded".to_string(),
+                    completed: true,
+                    success: true,
+                    job_unit: native_unit.clone(),
+                    error: String::new(),
+                    exit_code: Some(0),
+                },
+            )
+            .unwrap();
+            let done_st = query_self_update_status_local(&native_unit).await.unwrap();
+            assert_eq!(done_st.status, "succeeded");
+            assert!(done_st.completed);
+            assert!(done_st.success);
+            assert_eq!(done_st.exit_code, Some(0));
+
+            env::set_var("AETHERFLOW_FORCE_BASH_RELEASE", "1");
+            let (bash_code, bash_resp) = execute_self_update_request(
+                &SelfUpdateRequest {
+                    command: "rollback".to_string(),
+                    channel: "nightly".to_string(),
+                },
+                true,
+            )
+            .await;
+            assert_eq!(bash_code, StatusCode::OK);
+            assert!(bash_resp.success);
+            let parsed_bash: Value = serde_json::from_str(&bash_resp.output).unwrap();
+            assert_eq!(parsed_bash["status"], "initiated");
+            assert_eq!(parsed_bash["completed"], false);
+            assert_eq!(parsed_bash["engine"], "legacy_bash_release");
+            let logged_bash = fs::read_to_string(&args_log).unwrap();
+            assert!(logged_bash.contains("/bin/bash"));
+            assert!(logged_bash.contains("rollback"));
+            assert!(logged_bash.contains("--root"));
+            assert!(logged_bash.contains("--config"));
+            assert!(logged_bash.contains("--job-status-file"));
+            assert!(logged_bash.contains("--setenv=AETHERFLOW_ALLOW_ISOLATED_SYSTEMD_LIFECYCLE=1"));
+
+            env::remove_var("AETHERFLOW_ALLOW_ISOLATED_SYSTEMD_LIFECYCLE");
+            spawn_self_update_transient_unit(
+                "aetherflow-self-update-deploy-stable-12345678.service",
+                &fake_af,
+                &[],
+                &[],
+            )
+            .await
+            .unwrap();
+            let logged_without_opt_in = fs::read_to_string(&args_log).unwrap();
+            assert!(!logged_without_opt_in.contains("AETHERFLOW_ALLOW_ISOLATED_SYSTEMD_LIFECYCLE"));
+
+            // Verify malformed release-manager.conf fails closed instead of defaulting
+            let bad_conf = test_dir.join("malformed.conf");
+            fs::write(&bad_conf, "BROKEN_LINE_WITHOUT_EQUALS\n").unwrap();
+            env::set_var("AETHERFLOW_RELEASE_CONF", &bad_conf);
+            let (mal_code, mal_resp) = execute_self_update_request(
+                &SelfUpdateRequest {
+                    command: "deploy".to_string(),
+                    channel: "stable".to_string(),
+                },
+                true,
+            )
+            .await;
+            assert_eq!(mal_code, StatusCode::INTERNAL_SERVER_ERROR);
+            assert!(!mal_resp.success);
+            env::remove_var("AETHERFLOW_RELEASE_CONF");
+
+            let fail_systemd_run = test_dir.join("fail-systemd-run.sh");
+            fs::write(
+                &fail_systemd_run,
+                "#!/bin/sh\necho 'dbus unit limit exceeded' >&2\nexit 1\n",
+            )
+            .unwrap();
+            fs::set_permissions(&fail_systemd_run, fs::Permissions::from_mode(0o755)).unwrap();
+            env::set_var("AETHERFLOW_SYSTEMD_RUN_BIN", &fail_systemd_run);
+
+            let (fail_code, fail_resp) = execute_self_update_request(
+                &SelfUpdateRequest {
+                    command: "deploy".to_string(),
+                    channel: "stable".to_string(),
+                },
+                true,
+            )
+            .await;
+            assert_eq!(fail_code, StatusCode::INTERNAL_SERVER_ERROR);
+            assert!(!fail_resp.success);
+            assert!(fail_resp.error.contains("failed to start"));
+
+            env::remove_var("AETHERFLOW_RELEASE_ROOT");
+            env::remove_var("AETHERFLOW_SYSTEMD_RUN_BIN");
+            env::remove_var("AETHERFLOW_CLI_BIN");
+            env::remove_var("AETHERFLOW_RELEASE_MANAGER_SCRIPT");
+            env::remove_var("AETHERFLOW_ENABLE_RUST_RELEASE");
+            env::remove_var("AETHERFLOW_FORCE_BASH_RELEASE");
+            env::remove_var("AETHERFLOW_ALLOW_ISOLATED_SYSTEMD_LIFECYCLE");
+            let _ = fs::remove_dir_all(&test_dir);
         }
     }
 
-    #[test]
-    fn test_self_update_rejects_duplicate_or_failed_launch() {
-        let request = SelfUpdateRequest { command: "deploy".into(), channel: "nightly".into() };
-        let (code, Json(response)) = handle_self_update_with_launcher(&request, |_| Err(self_update::LaunchError::Busy("update_in_progress".into())));
-        assert_eq!(code, StatusCode::CONFLICT);
-        assert!(!response.success);
-        let (code, Json(response)) = handle_self_update_with_launcher(&request, |_| Err(self_update::LaunchError::Failed("systemd unavailable".into())));
-        assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
-        assert!(!response.success);
+    #[tokio::test]
+    async fn test_handle_backup_create_verify_list_restore_and_prune() {
+        let _env_guard = ENV_TEST_MUTEX.lock().await;
+        let root = env::temp_dir().join(format!(
+            "af-runner-backup-test-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let host_root = root.join("host");
+        let db_path = host_root.join("var/lib/aetherflow/aetherflow.sqlite");
+        let backup_dir = host_root.join("var/lib/aetherflow/backups");
+        fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        fs::create_dir_all(&backup_dir).unwrap();
+
+        env::set_var(
+            "AETHERFLOW_BACKUP_ISOLATED_ROOT",
+            host_root.to_string_lossy().as_ref(),
+        );
+
+        assert!(authorize_runner_peer_credentials(0, 0, "/v1/backup").is_ok());
+        let (unauth_code, unauth_msg) =
+            authorize_runner_peer_credentials(65534, 65534, "/v1/backup").unwrap_err();
+        assert_eq!(unauth_code, StatusCode::FORBIDDEN);
+        assert!(unauth_msg.contains("unauthorized unix socket peer"));
+
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "PRAGMA journal_mode = WAL;
+                 PRAGMA user_version = 7;
+                 CREATE TABLE settings (id INTEGER PRIMARY KEY, base_domain TEXT NOT NULL);
+                 INSERT INTO settings (id, base_domain) VALUES (1, 'runner.example.test');",
+            )
+            .unwrap();
+        }
+
+        let (bad_code, Json(bad_resp)) = handle_backup(Json(BackupRunnerRequest {
+            action: "drop_table".to_string(),
+            ..Default::default()
+        }))
+        .await;
+        assert_eq!(bad_code, StatusCode::BAD_REQUEST);
+        assert!(!bad_resp.success);
+
+        let (forbid_code, Json(forbid_resp)) = handle_backup(Json(BackupRunnerRequest {
+            action: "delete".to_string(),
+            filename: "aetherflow-db-20261103_000000.sqlite".to_string(),
+            backup_dir: "/etc".to_string(),
+            ..Default::default()
+        }))
+        .await;
+        assert_eq!(forbid_code, StatusCode::FORBIDDEN);
+        assert!(!forbid_resp.success);
+
+        let (create_code, Json(create_resp)) = handle_backup(Json(BackupRunnerRequest {
+            action: "create_sqlite".to_string(),
+            backup_dir: backup_dir.to_string_lossy().into_owned(),
+            db_path: db_path.to_string_lossy().into_owned(),
+            app_version: "v4.0.0".to_string(),
+            ..Default::default()
+        }))
+        .await;
+        assert_eq!(create_code, StatusCode::OK);
+        assert!(create_resp.success);
+        let created: BackupRunnerResponse = serde_json::from_str(&create_resp.output).unwrap();
+        assert!(created.verified);
+        assert!(created.filename.ends_with(".sqlite"));
+
+        let (ver_code, Json(ver_resp)) = handle_backup(Json(BackupRunnerRequest {
+            action: "verify".to_string(),
+            filename: created.filename.clone(),
+            backup_dir: backup_dir.to_string_lossy().into_owned(),
+            ..Default::default()
+        }))
+        .await;
+        assert_eq!(ver_code, StatusCode::OK);
+        assert!(ver_resp.success);
+
+        let stage_target = root.join("restore-stage");
+        let (pf_code, Json(pf_resp)) = handle_backup(Json(BackupRunnerRequest {
+            action: "restore_preflight".to_string(),
+            filename: created.filename.clone(),
+            backup_dir: backup_dir.to_string_lossy().into_owned(),
+            target_root: stage_target.to_string_lossy().into_owned(),
+            ..Default::default()
+        }))
+        .await;
+        assert_eq!(pf_code, StatusCode::OK);
+        assert!(pf_resp.success);
+
+        let (unconf_code, Json(unconf_resp)) = handle_backup(Json(BackupRunnerRequest {
+            action: "restore_execute".to_string(),
+            filename: created.filename.clone(),
+            backup_dir: backup_dir.to_string_lossy().into_owned(),
+            target_root: stage_target.to_string_lossy().into_owned(),
+            confirm_destructive_restore: false,
+            ..Default::default()
+        }))
+        .await;
+        assert_eq!(unconf_code, StatusCode::BAD_REQUEST);
+        assert!(!unconf_resp.success);
+
+        let (self_stop_code, Json(self_stop_resp)) = handle_backup(Json(BackupRunnerRequest {
+            action: "restore_execute".to_string(),
+            filename: created.filename.clone(),
+            backup_dir: backup_dir.to_string_lossy().into_owned(),
+            target_root: stage_target.to_string_lossy().into_owned(),
+            confirm_destructive_restore: true,
+            allow_overwrite: true,
+            quiesce_services: vec!["aetherflow-runner.service".to_string()],
+            ..Default::default()
+        }))
+        .await;
+        assert_eq!(self_stop_code, StatusCode::BAD_REQUEST);
+        assert!(!self_stop_resp.success);
+
+        let (bypass_code, Json(bypass_resp)) = handle_backup(Json(BackupRunnerRequest {
+            action: "restore_execute".to_string(),
+            filename: created.filename.clone(),
+            backup_dir: backup_dir.to_string_lossy().into_owned(),
+            target_root: stage_target.to_string_lossy().into_owned(),
+            confirm_destructive_restore: true,
+            allow_overwrite: true,
+            quiesce_services: vec!["none".to_string()],
+            ..Default::default()
+        }))
+        .await;
+        assert_eq!(bypass_code, StatusCode::BAD_REQUEST);
+        assert!(!bypass_resp.success);
+
+        let (rest_code, Json(rest_resp)) = handle_backup(Json(BackupRunnerRequest {
+            action: "restore_execute".to_string(),
+            filename: created.filename.clone(),
+            backup_dir: backup_dir.to_string_lossy().into_owned(),
+            target_root: stage_target.to_string_lossy().into_owned(),
+            confirm_destructive_restore: true,
+            allow_overwrite: true,
+            quiesce_services: vec!["custom-writer.service".to_string()],
+            ..Default::default()
+        }))
+        .await;
+        assert_eq!(rest_code, StatusCode::OK);
+        assert!(rest_resp.success);
+        let restored: BackupRunnerResponse = serde_json::from_str(&rest_resp.output).unwrap();
+        assert!(restored.verified);
+        assert_eq!(restored.restored_files, 1);
+        assert_eq!(
+            restored.details["quiesced_services"],
+            json!(["aetherflow-api.service", "custom-writer.service"])
+        );
+
+        let (rec_code, Json(rec_resp)) = handle_backup(Json(BackupRunnerRequest {
+            action: "recover_interrupted".to_string(),
+            backup_dir: backup_dir.to_string_lossy().into_owned(),
+            target_root: stage_target.to_string_lossy().into_owned(),
+            ..Default::default()
+        }))
+        .await;
+        assert_eq!(rec_code, StatusCode::OK, "{}", rec_resp.error);
+        assert!(rec_resp.success);
+
+        let custom_db = host_root.join("srv/custom-af/aetherflow.sqlite");
+        fs::create_dir_all(custom_db.parent().unwrap()).unwrap();
+        fs::copy(&db_path, &custom_db).unwrap();
+        env::set_var("AF_DB_PATH", custom_db.to_string_lossy().as_ref());
+
+        let stage_contained = root.join("restore-stage-contained");
+        let (pf2_code, Json(pf2_resp)) = handle_backup(Json(BackupRunnerRequest {
+            action: "restore_preflight".to_string(),
+            filename: created.filename.clone(),
+            backup_dir: backup_dir.to_string_lossy().into_owned(),
+            target_root: stage_contained.to_string_lossy().into_owned(),
+            ..Default::default()
+        }))
+        .await;
+        assert_eq!(pf2_code, StatusCode::OK, "{}", pf2_resp.error);
+        let pf2_parsed: BackupRunnerResponse = serde_json::from_str(&pf2_resp.output).unwrap();
+        let dest_str = pf2_parsed.details["items"][0]["destination_path"]
+            .as_str()
+            .unwrap();
+        assert!(
+            Path::new(dest_str).starts_with(&stage_contained),
+            "staging preflight destination '{}' escaped staging target '{}'",
+            dest_str,
+            stage_contained.display()
+        );
+        env::remove_var("AF_DB_PATH");
+
+        env::remove_var("AETHERFLOW_BACKUP_ISOLATED_ROOT");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn test_self_update_status_honors_custom_data_dir_and_rejects_contradictory_receipts() {
+        let _env_guard = ENV_TEST_MUTEX.lock().await;
+        let test_dir = env::temp_dir().join(format!(
+            "af-runner-status-datadir-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let custom_data_dir = test_dir.join("srv/aetherflow-data");
+        let etc_dir = test_dir.join("etc/aetherflow");
+        fs::create_dir_all(&custom_data_dir).unwrap();
+        fs::create_dir_all(&etc_dir).unwrap();
+        fs::write(
+            etc_dir.join("release-manager.conf"),
+            format!("DATA_DIR=\"{}\"\n", custom_data_dir.display()),
+        )
+        .unwrap();
+
+        env::set_var("AETHERFLOW_RELEASE_ROOT", &test_dir);
+        let jobs_dir = resolve_self_update_jobs_dir_from_env().unwrap();
+        assert_eq!(jobs_dir, custom_data_dir.join(".self-update-jobs"));
+
+        let unit_name = "aetherflow-self-update-deploy-stable-11223344.service";
+        let status_file = jobs_dir.join(format!("{}.json", unit_name));
+        write_self_update_job_status_atomic(
+            &status_file,
+            &SelfUpdateJobStatus {
+                status: "succeeded".to_string(),
+                completed: true,
+                success: true,
+                job_unit: unit_name.to_string(),
+                error: String::new(),
+                exit_code: Some(0),
+            },
+        )
+        .unwrap();
+        let valid_res = query_self_update_status_local(unit_name).await.unwrap();
+        assert!(valid_res.completed);
+        assert!(valid_res.success);
+
+        write_self_update_job_status_atomic(
+            &status_file,
+            &SelfUpdateJobStatus {
+                status: "running".to_string(),
+                completed: false,
+                success: true,
+                job_unit: unit_name.to_string(),
+                error: String::new(),
+                exit_code: None,
+            },
+        )
+        .unwrap();
+        let corrupt_err = query_self_update_status_local(unit_name)
+            .await
+            .expect_err("contradictory receipt must fail closed");
+        assert_eq!(corrupt_err.0, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(corrupt_err.1.contains("corrupt self-update status file"));
+
+        #[cfg(target_os = "linux")]
+        {
+            let vanished_unit = "aetherflow-self-update-deploy-stable-99887766.service";
+            let vanished_file = jobs_dir.join(format!("{}.json", vanished_unit));
+            write_self_update_job_status_atomic(
+                &vanished_file,
+                &SelfUpdateJobStatus {
+                    status: "running".to_string(),
+                    completed: false,
+                    success: false,
+                    job_unit: vanished_unit.to_string(),
+                    error: String::new(),
+                    exit_code: None,
+                },
+            )
+            .unwrap();
+            let reconciled = query_self_update_status_local(vanished_unit).await.unwrap();
+            assert_eq!(reconciled.status, "failed");
+            assert!(reconciled.completed);
+            assert!(!reconciled.success);
+            assert_eq!(reconciled.exit_code, Some(1));
+        }
+
+        env::remove_var("AETHERFLOW_RELEASE_ROOT");
+        let _ = fs::remove_dir_all(&test_dir);
     }
 
     #[test]

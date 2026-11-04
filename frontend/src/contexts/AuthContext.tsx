@@ -71,7 +71,33 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     };
 
     useEffect(() => {
-        checkSession();
+        const currentGen = ++sessionCheckGenRef.current;
+        apiFetch('/api/v1/auth/session')
+            .then(async (response) => {
+                if (currentGen !== sessionCheckGenRef.current) return null;
+                if (!response.ok) {
+                    setIsAuthenticated(false);
+                    setUser(null);
+                    return null;
+                }
+                return response.json();
+            })
+            .then((userData) => {
+                if (currentGen !== sessionCheckGenRef.current || !userData) return;
+                lastAuthenticatedAtRef.current = Date.now();
+                setUser(userData);
+                setIsAuthenticated(true);
+            })
+            .catch((err) => {
+                if (currentGen !== sessionCheckGenRef.current) return;
+                console.error("Auth check failed:", err);
+                setIsAuthenticated(false);
+            })
+            .finally(() => {
+                if (currentGen === sessionCheckGenRef.current) {
+                    setIsLoading(false);
+                }
+            });
 
         // Multi-tab session synchronization listener
         const handleStorageChange = (e: StorageEvent) => {

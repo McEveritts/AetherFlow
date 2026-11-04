@@ -25,12 +25,11 @@ LogsDirectoryMode=0750
 # ── Execution ────────────────────────────────────────────────────────────────
 ExecStart=/opt/AetherFlow/current/aetherflow-api
 
-# Environment injection from hardened FHS path (with legacy fallback).
+Environment=GIN_MODE=release
+Environment=DATA_DIR=/var/lib/aetherflow
+Environment=AETHERFLOW_RUNNER_SOCK=/run/aetherflow/runner.sock
 EnvironmentFile=-/etc/aetherflow/aetherflow.env
 EnvironmentFile=-/opt/AetherFlow/current/backend/.env
-Environment=GIN_MODE=release
-Environment=DB_PATH=/var/lib/aetherflow/aetherflow.sqlite
-Environment=AETHERFLOW_RUNNER_SOCK=/run/aetherflow/runner.sock
 
 # ── Signal Traps & Graceful Shutdown ─────────────────────────────────────────
 KillMode=control-group

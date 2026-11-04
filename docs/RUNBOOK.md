@@ -216,7 +216,7 @@ Updates run inside the isolated `aetherflow-self-update.service` systemd unit so
 # Inspect current release, active symlink, and recovery journal state
 sudo af release status
 
-# Deploy latest release on a channel (stable, nightly, or experimental)
+# Deploy latest release on a channel (stable or nightly)
 sudo af release deploy --local --channel stable
 
 # Roll back to the previous known-good release and verify DB integrity

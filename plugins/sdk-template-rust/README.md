@@ -2,54 +2,66 @@
 
 Standard AetherFlow Rust plugin scaffold (`plugins/sdk-template-rust`).
 
-## Scope & Runtime Reality (Dormant Plugin Runtime Disclosure)
+## Security & Runtime Architecture (`backend-rs` v4.0.0)
 
-> [!IMPORTANT]
-> **No Active Host Plugin Runtime in `backend-rs` (v4.0.0):**
-> AetherFlow v4.0.0 runs a single-binary Rust control plane (`backend-rs` -> `aetherflow-api`). At this stage of the migration, **there is no active in-process or managed plugin runtime**:
-> - Legacy `backend/services/plugin_manager.go` (a `wazero` WebAssembly host prototype) is dormant and has zero callers in either `backend/` or `backend-rs/`.
-> - `aetherflow-api` does **not** automatically discover `plugin.manifest.json`, allocate dynamic ports (`port_allocation: "dynamic"`), execute `lifecycle_hooks` (`on_start` / `on_stop`), mount `/plugins/*` reverse-proxy routes, or dynamically load `frontend/src/index.tsx` slots at runtime.
-> - `permissions` and `api_scopes` in `plugin.manifest.json` are **declarative contract metadata only**. `aetherflow-api` does **not** mint plugin-scoped tokens or enforce fine-grained per-plugin scope RBAC yet.
-> - To call authenticated AetherFlow endpoints (such as `/api/v1/auth/system/metrics`), the standalone plugin process must be provisioned with a valid operator HS256 session JWT in `AETHERFLOW_PLUGIN_TOKEN` (sent via `Authorization: Bearer <jwt>`), or restrict itself to unauthenticated public routes such as `/api/v1/public/marketplace`.
+- **Managed Discovery & Validation**: `aetherflow-api` discovers plugins under `plugins/<id>/plugin.manifest.json`, rejecting symbolic links, path traversal (`..`), and world-writable directories.
+- **Scoped Short-Lived Plugin Tokens**:
+  - Plugins authenticate with a dedicated credential class (`typ: "plugin"`, `iss: "aetherflow-plugin"`, `aud: "aetherflow-plugin-api"`) signed with an HMAC-derived plugin subkey and bound to the verified `plugin.manifest.json` + live database `token_epoch`.
+  - **Never** pass an operator `aetherflow_session` JWT to a plugin. Operator session tokens and plugin tokens are cryptographically and structurally domain-separated.
+  - Plugin tokens are enforced per HTTP method + route pattern and default-deny `/api/v1/auth/session`, `/api/v1/auth/refresh`, `/api/v1/admin/users`, `/api/v1/admin/settings`, and `/api/v1/admin/plugins/*`.
+  - Disabling or stopping a plugin immediately increments its `token_epoch` and revokes all active plugin `jti`s.
+- **Unprivileged Process & Systemd Isolation**:
+  - Host-spawned plugin processes run with `PR_SET_NO_NEW_PRIVS`, scrubbed environment variables, and loopback-only binding (`127.0.0.1:<allocated_port>` in `21000..21999`).
+  - If running via a custom systemd unit, always isolate the plugin user **outside** the `root:aetherflow` privileged runner group:
+    ```ini
+    [Service]
+    User=aetherflow-plugin
+    Group=aetherflow-plugin
+    DynamicUser=yes
+    SupplementaryGroups=
+    NoNewPrivileges=yes
+    ProtectSystem=strict
+    ProtectHome=yes
+    PrivateTmp=yes
+    ```
+- **Sandboxed Frontend Origin & Loopback Proxy**:
+  - Plugin UI mounts inside `<iframe sandbox="allow-scripts">` (without `allow-same-origin`), isolating it in an opaque origin that cannot read `document.cookie` or `localStorage`.
+  - The iframe communicates with the host via `window.parent.postMessage({ type: 'AF_PLUGIN_PROXY_REQUEST', pluginId, path, method }, '*')`.
+  - The host reverse proxy (`/api/v1/auth/plugins/:id/proxy/*`) connects strictly to `127.0.0.1:<allocated_port>`, rejects path traversal, caps bodies at 2 MiB, and strips `Cookie`, `Authorization`, `X-CSRF-Token`, and `Set-Cookie`.
 
 ## Layout
 
-- `plugin.manifest.json`: Declarative plugin metadata, contract version, target API scopes, and lifecycle hook paths.
-- `backend/`: Standalone Rust HTTP companion service (`axum` + `reqwest` + `tokio`) that queries verified AetherFlow v4.0.0 HTTP contracts and exposes `/healthz` and `/snapshot`.
+- `plugin.manifest.json`: Declarative plugin metadata, contract version, method-bound `api_scopes`, and lifecycle hook paths.
+- `backend/`: Rust HTTP companion service (`axum` + `reqwest` + `tokio`) that queries verified AetherFlow v4.0.0 HTTP contracts and exposes `/healthz`, `/status`, and `/snapshot`.
   - `Cargo.toml`: Standalone Cargo manifest (`[workspace]` isolated so it does not mutate `backend-rs/Cargo.toml`).
   - `src/lib.rs`: Typed `AetherFlowClient`, verified endpoint path constants, configuration parser, HTTP router, and contract unit tests.
   - `src/main.rs`: Binary entrypoint reading `AETHERFLOW_API_BASE_URL`, `AETHERFLOW_PLUGIN_TOKEN`, `PLUGIN_BIND_ADDR`, and `PLUGIN_PORT`.
-  - `hooks/start.sh` & `hooks/stop.sh`: Reference lifecycle scripts for operator-managed systemd or supervisor units.
-- `frontend/`: React 19 / TypeScript panel component (`PluginPanel.tsx`) designed for static compilation into the Next.js shell once frontend slot registration is wired.
-- `.env.example`: Environment variable template for standalone operation.
+  - `hooks/start.sh` & `hooks/stop.sh`: Lifecycle scripts invoked by the host plugin manager or isolated unprivileged systemd unit.
+- `frontend/`: React 19 / TypeScript panel component (`PluginPanel.tsx`) using the host `postMessage` capability bridge.
+- `.env.example`: Environment variable template for local development.
 
 ## Verified AetherFlow HTTP Contracts Used
-
-Unlike the legacy Go template (which referenced the unversioned `/api/system/metrics` path), this Rust SDK template targets actual routes mounted by `backend-rs/crates/af-api/src/routes.rs`:
 
 | Route | Auth Contract | Purpose |
 | :--- | :--- | :--- |
 | `GET /api/v1/public/marketplace` | Public (`None` required) | Reads catalog packages and installation state |
-| `GET /api/v1/auth/system/metrics` | `Authorization: Bearer <jwt>` or `aetherflow_session` cookie | Reads live CPU, memory, disk, swap, and uptime telemetry |
+| `GET /api/v1/auth/system/metrics` | `Authorization: Bearer <scoped_plugin_token>` | Reads live CPU, memory, disk, swap, and uptime telemetry |
 | `GET /health` | Public (`None` required) | Control-plane liveness probe (`/health/live`, `/health/ready`) |
 
-## Standalone Development & Verification Flow
+## Development & Verification Flow
 
-1. Generate a Rust scaffold (the optional fourth argument selects the SDK; existing callers still default to Go):
+1. Generate a Rust plugin scaffold:
    ```bash
    bash scripts/create-plugin-sdk.sh my-plugin "My Plugin" plugins/my-plugin rust
    ```
-2. Configure `.env` from `.env.example` with a valid `AETHERFLOW_API_BASE_URL` (default `http://127.0.0.1:8080`) and an operator session JWT in `AETHERFLOW_PLUGIN_TOKEN` if calling `/api/v1/auth/*`.
-3. Run unit and contract tests in `backend/`:
+2. Run unit and contract tests in `backend/`:
    ```bash
    cd plugins/my-plugin/backend
    cargo test
    ```
-4. Build and run the standalone companion service:
+3. Build the release binary so the AetherFlow plugin manager can supervise it:
    ```bash
    cd plugins/my-plugin/backend
-   cargo run --release
+   cargo build --release
    ```
-5. Probe the plugin service locally:
-   - `GET http://127.0.0.1:9123/healthz` -> plugin health and contract metadata
-   - `GET http://127.0.0.1:9123/snapshot` -> combined marketplace + system metrics snapshot from AetherFlow
+4. Enable and start the plugin from **Marketplace -> Installed Plugins & Runtime Extensions** (or `POST /api/v1/admin/plugins/my-plugin/control` with `{"action":"start"}`).

@@ -91,6 +91,8 @@ fn ensure_metrics_history_columns_with_connection(conn: &rusqlite::Connection) {
         "ALTER TABLE metrics_history ADD COLUMN disk_write_mb REAL DEFAULT 0;",
         "ALTER TABLE metrics_history ADD COLUMN net_rx_mb REAL DEFAULT 0;",
         "ALTER TABLE metrics_history ADD COLUMN net_tx_mb REAL DEFAULT 0;",
+        "CREATE INDEX IF NOT EXISTS idx_metrics_history_ts_id ON metrics_history(timestamp DESC, id DESC);",
+        "CREATE INDEX IF NOT EXISTS idx_metrics_history_norm_ts_id ON metrics_history(replace(CAST(timestamp AS TEXT), 'T', ' ') DESC, id DESC);",
     ];
 
     for stmt in alter_stmts {
@@ -105,7 +107,7 @@ fn record_metrics_snapshot(
 ) {
     let metrics = af_hardware::get_system_metrics_core();
     let now_inst = Instant::now();
-    let timestamp = Utc::now().to_rfc3339();
+    let timestamp = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
     let cpu_usage = af_hardware::sanitize_f64(metrics.cpu_usage);
 
@@ -267,21 +269,11 @@ static HEAL_WORKER_ACTIVE: AtomicBool = AtomicBool::new(false);
 const MAX_HEAL_RETRIES: u32 = 3;
 const BASE_BACKOFF_SECS: u64 = 10;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 struct ServiceHealState {
     failure_count: u32,
     next_retry_at: Option<Instant>,
     exhausted: bool,
-}
-
-impl Default for ServiceHealState {
-    fn default() -> Self {
-        Self {
-            failure_count: 0,
-            next_retry_at: None,
-            exhausted: false,
-        }
-    }
 }
 
 static HEAL_STATES: Lazy<Mutex<HashMap<String, ServiceHealState>>> =
@@ -748,15 +740,12 @@ fn check_and_run_smart_backup() {
 
 fn resolve_backups_directory() -> PathBuf {
     let db_path_str = af_db::get_db_path();
-    let db_path = Path::new(&db_path_str);
-    if db_path_str != ":memory:" && !db_path_str.starts_with("file:") {
-        if let Some(parent) = db_path.parent() {
-            if !parent.as_os_str().is_empty() {
-                return parent.join("backups");
-            }
-        }
-    }
-    PathBuf::from("data/backups")
+    let db_path_opt = if db_path_str != ":memory:" && !db_path_str.starts_with("file:") {
+        Some(Path::new(&db_path_str))
+    } else {
+        None
+    };
+    af_models::resolve_active_backup_dir_from_env(None, db_path_opt, "data/backups")
 }
 
 fn execute_online_sqlite_backup() -> anyhow::Result<PathBuf> {
@@ -1186,6 +1175,10 @@ async fn detect_installed_version(pkg: &Package) -> anyhow::Result<String> {
                     out.status,
                     String::from_utf8_lossy(&out.stderr).trim()
                 );
+            }
+
+            if pkg.update_source == "git" {
+                return parse_git_head(&String::from_utf8_lossy(&out.stdout));
             }
 
             let combined = format!(

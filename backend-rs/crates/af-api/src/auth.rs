@@ -221,6 +221,9 @@ pub fn decode_session_claims(token: &str, allow_expired: bool) -> anyhow::Result
         &DecodingKey::from_secret(&jwt_secret_bytes()),
         &validation,
     )?;
+    if data.claims.iss != "aetherflow" || data.claims.jti.starts_with("plg-") {
+        anyhow::bail!("Token is not a regular user session token");
+    }
     Ok(data.claims)
 }
 
@@ -235,15 +238,53 @@ fn check_rotation_grace(jti: &str) -> Option<(i64, String)> {
 // ──────────────────────────────────────────────────────────────────────────────
 
 pub async fn auth_middleware(mut req: Request, next: Next) -> Response {
-    let path = req.uri().path().to_string();
-    if path.ends_with("/auth/refresh") {
+    let path = req
+        .extensions()
+        .get::<axum::extract::OriginalUri>()
+        .map(|u| u.0.path().to_string())
+        .unwrap_or_else(|| req.uri().path().to_string());
+    if path.ends_with("/auth/refresh") || path == "/refresh" {
         return next.run(req).await;
     }
 
+    let method = req.method().clone();
     let headers = req.headers();
+    let bearer_token = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .map(|b| b.trim().to_string())
+        .filter(|b| !b.is_empty());
+
     let Some(token) = resolve_raw_token(headers) else {
         return api_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED", "Unauthorized");
     };
+
+    // Check if the caller presented a scoped short-lived plugin Bearer token
+    if let Some(ref raw_bearer) = bearer_token {
+        if let Ok(plugin_claims) = crate::plugins::decode_and_verify_plugin_token(raw_bearer) {
+            if !crate::plugins::plugin_claims_allow_request(&plugin_claims, &method, &path) {
+                return api_error(
+                    StatusCode::FORBIDDEN,
+                    "PLUGIN_SCOPE_DENIED",
+                    format!(
+                        "Plugin '{}' is not authorized for {} {}",
+                        plugin_claims.plugin_id, method, path
+                    ),
+                );
+            }
+            req.extensions_mut().insert(AuthUser {
+                user_id: 0,
+                username: format!("plugin:{}", plugin_claims.plugin_id),
+                role: "plugin".to_string(),
+                jti: plugin_claims.jti.clone(),
+                plugin_id: Some(plugin_claims.plugin_id.clone()),
+                plugin_scopes: plugin_claims.scopes.iter().map(|scope| format!("{} {}", scope.method, scope.route)).collect(),
+            });
+            req.extensions_mut().insert(plugin_claims);
+            return next.run(req).await;
+        }
+    }
 
     let Ok(claims) = decode_session_claims(&token, false) else {
         return api_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED", "Unauthorized");
@@ -337,6 +378,22 @@ pub async fn auth_middleware(mut req: Request, next: Next) -> Response {
 }
 
 pub async fn admin_only_middleware(req: Request, next: Next) -> Response {
+    if let Some(plugin_claims) = req.extensions().get::<crate::plugins::PluginTokenClaims>() {
+        let method = req.method();
+        let path = req
+            .extensions()
+            .get::<axum::extract::OriginalUri>()
+            .map(|u| u.0.path().to_string())
+            .unwrap_or_else(|| req.uri().path().to_string());
+        if crate::plugins::plugin_claims_allow_request(plugin_claims, method, &path) {
+            return next.run(req).await;
+        }
+        return api_error(
+            StatusCode::FORBIDDEN,
+            "PLUGIN_SCOPE_DENIED",
+            "Plugin token does not hold scope for this admin endpoint",
+        );
+    }
     let is_admin = req
         .extensions()
         .get::<AuthUser>()
@@ -368,8 +425,12 @@ pub async fn csrf_middleware(req: Request, next: Next) -> Response {
         return next.run(req).await;
     }
 
-    let path = req.uri().path();
-    if path.ends_with("/auth/refresh") {
+    let path = req
+        .extensions()
+        .get::<axum::extract::OriginalUri>()
+        .map(|u| u.0.path().to_string())
+        .unwrap_or_else(|| req.uri().path().to_string());
+    if path.ends_with("/auth/refresh") || path == "/refresh" {
         return next.run(req).await;
     }
 
@@ -486,10 +547,10 @@ fn md5_hex(data: &[u8]) -> String {
     let mut c0: u32 = 0x98badcfe;
     let mut d0: u32 = 0x10325476;
 
-    for chunk in msg.chunks_exact(64) {
+    for chunk in msg.as_chunks::<64>().0 {
         let mut m = [0u32; 16];
-        for (i, word) in chunk.chunks_exact(4).enumerate() {
-            m[i] = u32::from_le_bytes([word[0], word[1], word[2], word[3]]);
+        for (word_index, word) in chunk.as_chunks::<4>().0.iter().enumerate() {
+            m[word_index] = u32::from_le_bytes(*word);
         }
 
         let mut a = a0;
@@ -885,6 +946,21 @@ pub async fn logout(req: Request) -> Response {
 }
 
 pub async fn refresh_session(headers: HeaderMap) -> Response {
+    if let Some(auth_hdr) = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+    {
+        if let Some(bearer) = auth_hdr.strip_prefix("Bearer ") {
+            if crate::plugins::decode_and_verify_plugin_token(bearer.trim()).is_ok() {
+                return api_error(
+                    StatusCode::FORBIDDEN,
+                    "PLUGIN_REFRESH_FORBIDDEN",
+                    "Scoped plugin tokens cannot mint or refresh operator sessions",
+                );
+            }
+        }
+    }
+
     let Some(raw_token) = resolve_raw_token(&headers) else {
         return api_error(
             StatusCode::UNAUTHORIZED,
@@ -892,6 +968,14 @@ pub async fn refresh_session(headers: HeaderMap) -> Response {
             "No session token provided",
         );
     };
+
+    if crate::plugins::decode_and_verify_plugin_token(&raw_token).is_ok() {
+        return api_error(
+            StatusCode::FORBIDDEN,
+            "PLUGIN_REFRESH_FORBIDDEN",
+            "Scoped plugin tokens cannot mint or refresh operator sessions",
+        );
+    }
 
     let Ok(claims) = decode_session_claims(&raw_token, true) else {
         return api_error(
@@ -1707,7 +1791,14 @@ mod tests {
         let (token, claims) = mint_plugin_jwt(1, "sdk-template-rust", &scopes, 600).unwrap();
         assert_eq!(claims.plugin_id, "sdk-template-rust");
         assert_eq!(claims.plugin_scopes, scopes);
-        let decoded = decode_session_claims(&token, false).unwrap();
+        assert!(decode_session_claims(&token, false).is_err());
+        let mut validation = Validation::new(Algorithm::HS256);
+        validation.validate_aud = false;
+        let decoded = decode::<SessionClaims>(
+            &token,
+            &DecodingKey::from_secret(&jwt_secret_bytes()),
+            &validation,
+        ).unwrap().claims;
         assert_eq!(decoded.plugin_id, "sdk-template-rust");
         assert_eq!(decoded.plugin_scopes, scopes);
         assert!(af_services::plugins::verify_plugin_route_scope(

@@ -1,7 +1,8 @@
 'use client';
 
-import React, { createContext, useContext, useEffect, useState, useRef, useCallback, useMemo } from 'react';
+import React, { createContext, useContext, useEffect, useRef, useCallback, useMemo } from 'react';
 import { usePathname } from 'next/navigation';
+import { create } from 'zustand';
 import { useShallow } from 'zustand/react/shallow';
 import { SystemMetrics } from '@/types/dashboard';
 import { useConnectionStore, ConnectionState } from '@/store/useConnectionStore';
@@ -32,6 +33,21 @@ interface WebSocketData {
     system: SystemMetrics | null;
     services: Record<string, unknown> | null;
 }
+
+interface WebSocketDataStoreState {
+    data: WebSocketData;
+    setData: (updater: WebSocketData | ((prev: WebSocketData) => WebSocketData)) => void;
+    resetData: () => void;
+}
+
+const useWebSocketDataStore = create<WebSocketDataStoreState>()((set) => ({
+    data: { system: null, services: null },
+    setData: (updater) =>
+        set((state) => ({
+            data: typeof updater === 'function' ? updater(state.data) : updater,
+        })),
+    resetData: () => set({ data: { system: null, services: null } }),
+}));
 
 interface WebSocketContextType {
     data: WebSocketData;
@@ -64,7 +80,7 @@ function isWebSocketDisabled(): boolean {
 
 // ── Provider ───────────────────────────────────────────────────
 export function WebSocketProvider({ children }: { children: React.ReactNode }) {
-    const [data, setData] = useState<WebSocketData>({ system: null, services: null });
+    const data = useWebSocketDataStore((state) => state.data);
     const { isAuthenticated } = useAuth();
     const pathname = usePathname();
 
@@ -166,6 +182,10 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
             addToast('Live connection unavailable — switched to fallback mode', 'info');
         }
 
+        if (!useHistoryStore.getState().isHydrated) {
+            void useHistoryStore.getState().hydrateFromBackend(1);
+        }
+
         let pollTick = 0;
         const poll = async () => {
             if (!isMountedRef.current || transportOwnerRef.current !== 'poll') return;
@@ -199,7 +219,7 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
                 }
                 
                 if (isMountedRef.current && metrics && transportOwnerRef.current === 'poll') {
-                    setData((prev) => {
+                    useWebSocketDataStore.getState().setData((prev) => {
                         const nextServices = polledServices ?? prev.services;
                         const mergedSystem: SystemMetrics = nextServices
                             ? { ...metrics, services: nextServices as SystemMetrics['services'] }
@@ -222,7 +242,8 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
         pollTimerRef.current = setInterval(poll, FALLBACK_POLL_INTERVAL_MS);
     }, [stopPolling, setConnectionState, setLastMessageAt, addToast]);
 
-    // ── Core Connect Logic ─────────────────────────────────────
+    // ── Core Connect Logic ──────────────────────────────────────
+    const connectRef = useRef<() => void>(() => {});
     const connect = useCallback(async () => {
         if (!isMountedRef.current || isWebSocketDisabled()) {
             return;
@@ -256,7 +277,9 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
             setReconnectAttempt(attemptRef.current);
             setConnectionState('RECONNECTING');
             const delay = getBackoffDelay(attemptRef.current - 1);
-            reconnectTimerRef.current = setTimeout(connect, delay);
+            reconnectTimerRef.current = setTimeout(() => {
+                connectRef.current();
+            }, delay);
             return;
         }
 
@@ -286,6 +309,7 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
             setConnectionState('CONNECTED');
             setLastMessageAt(Date.now());
             startHeartbeat();
+            void useHistoryStore.getState().hydrateFromBackend(1);
 
             if (wasReconnecting && hasConnectedOnceRef.current) {
                 addToast('Connection restored', 'success');
@@ -312,7 +336,7 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
                         const sysData = parsedData.data.system as unknown as SystemMetrics;
                         const incomingServices = (parsedData.data.services as Record<string, unknown> | null) ?? null;
 
-                        setData((prev) => {
+                        useWebSocketDataStore.getState().setData((prev) => {
                             const nextServices = incomingServices ?? prev.services;
                             const mergedSystem: SystemMetrics = sysData && nextServices
                                 ? { ...sysData, services: nextServices as SystemMetrics['services'] }
@@ -372,7 +396,9 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
             setConnectionState('RECONNECTING');
             const delay = getBackoffDelay(attemptRef.current - 1);
             console.log(`[WS] Reconnecting in ${Math.round(delay)}ms (attempt ${attemptRef.current})`);
-            reconnectTimerRef.current = setTimeout(connect, delay);
+            reconnectTimerRef.current = setTimeout(() => {
+                connectRef.current();
+            }, delay);
         };
 
         ws.onerror = (e) => {
@@ -386,6 +412,10 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
         startHeartbeat, clearHeartbeat, resetHeartbeatTimeout,
         stopPolling, addToast,
     ]);
+
+    useEffect(() => {
+        connectRef.current = connect;
+    }, [connect]);
 
     // ── Manual Reconnect (exposed to consumers) ────────────────
     const manualReconnect = useCallback(() => {
@@ -406,31 +436,38 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
     // ── Mount / Unmount tracking ───────────────────────────────
     useEffect(() => {
         isMountedRef.current = true;
+        useWebSocketDataStore.getState().resetData();
         return () => {
             isMountedRef.current = false;
+            useWebSocketDataStore.getState().resetData();
         };
     }, []);
 
-    useEffect(() => {
-        if (data.system) {
-            useHistoryStore.getState().pushMetrics(data.system);
-        }
-    }, [data.system]);
+    const exposedData = useMemo<WebSocketData>(
+        () => (!isAuthenticated || pathname === '/login' ? { system: null, services: null } : data),
+        [data, isAuthenticated, pathname]
+    );
 
     useEffect(() => {
-        if (data.services) {
-            useHistoryStore.getState().syncServices(data.services);
+        if (exposedData.system) {
+            useHistoryStore.getState().pushMetrics(exposedData.system);
         }
-    }, [data.services]);
+    }, [exposedData.system]);
 
-    // ── Primary Transport Lifecycle ────────────────────────────
+    useEffect(() => {
+        if (exposedData.services) {
+            useHistoryStore.getState().syncServices(exposedData.services);
+        }
+    }, [exposedData.services]);
+
+    // ── Primary Transport Lifecycle ──────────────────────────────
     useEffect(() => {
         if (!isAuthenticated || pathname === '/login') {
             transportGenRef.current += 1;
+            hasConnectedOnceRef.current = false;
+            attemptRef.current = 0;
+            useWebSocketDataStore.getState().resetData();
             useHistoryStore.getState().resetHistory();
-            setData((previous) => previous.system === null && previous.services === null
-                ? previous
-                : { system: null, services: null });
             if (reconnectTimerRef.current) {
                 clearTimeout(reconnectTimerRef.current);
                 reconnectTimerRef.current = undefined;
@@ -442,6 +479,7 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
                 wsRef.current.close();
                 wsRef.current = null;
             }
+            resetConnection();
             return;
         }
 
@@ -486,11 +524,11 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
                 wsRef.current = null;
             }
         };
-    }, [isAuthenticated, pathname, connect, startPolling, stopPolling, clearHeartbeat, setReconnectAttempt]);
+    }, [isAuthenticated, pathname, connect, startPolling, stopPolling, clearHeartbeat, setReconnectAttempt, resetConnection]);
 
     const contextValue = useMemo(
-        () => ({ data, connectionState, reconnectAttempt, manualReconnect }),
-        [data, connectionState, reconnectAttempt, manualReconnect]
+        () => ({ data: exposedData, connectionState, reconnectAttempt, manualReconnect }),
+        [exposedData, connectionState, reconnectAttempt, manualReconnect]
     );
 
     return (

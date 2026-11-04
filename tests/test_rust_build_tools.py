@@ -18,6 +18,9 @@ class RustBuildToolsTests(unittest.TestCase):
         (self.root / "scripts").mkdir()
         (self.root / "backend-rs").mkdir()
         (self.root / "backend-rs/Cargo.toml").write_text("[workspace]\n")
+        (self.root / "backend-rs/Cargo.lock").write_text("# lockfile\n")
+        (self.root / "backend-rs/crates/af-cli").mkdir(parents=True)
+        (self.root / "backend-rs/crates/af-cli/Cargo.toml").write_text('[package]\nname = "af-cli"\n')
         (self.root / "backend/config").mkdir(parents=True)
         (self.root / "backend/config/packages.json").write_text("[]")
         (self.root / "packages").mkdir()
@@ -46,7 +49,7 @@ directory.mkdir(parents=True, exist_ok=True)
 """)
         cargo.chmod(0o755)
         self.environment = os.environ.copy()
-        for name in ("CARGO_BUILD_TARGET", "CARGO_TARGET_DIR", "BACKEND_DIR", "BACKEND_RS_DIR"):
+        for name in ("CARGO_BUILD_TARGET", "CARGO_TARGET_DIR", "BACKEND_DIR", "BACKEND_RS_DIR", "CARGO_LOCKED", "CARGO_ALLOW_UNLOCKED_DEV"):
             self.environment.pop(name, None)
         self.environment.update({
             "PATH": str(tools) + os.pathsep + self.environment["PATH"],
@@ -63,6 +66,8 @@ directory.mkdir(parents=True, exist_ok=True)
         self.environment["CARGO_TARGET_DIR"] = "custom-target"
         result = self.run_build()
         self.assertEqual(result.returncode, 0, result.stderr)
+        cargo_lines = (self.root / "cargo.log").read_text().splitlines()
+        self.assertTrue(all("--locked" in line for line in cargo_lines), cargo_lines)
         for label, triple in (("amd64", "x86_64-unknown-linux-gnu"),
                               ("arm64", "aarch64-unknown-linux-gnu")):
             artifact = self.root / "output" / ("linux-" + label) / "aetherflow-api"
@@ -76,7 +81,15 @@ directory.mkdir(parents=True, exist_ok=True)
         self.environment["TEST_CARGO_FAILURE"] = "17"
         result = self.run_build()
         self.assertEqual(result.returncode, 17)
-        self.assertEqual((self.root / "cargo.log").read_text().splitlines(), ["test --workspace"])
+        self.assertEqual((self.root / "cargo.log").read_text().splitlines(), ["test --locked --workspace"])
+        self.assertFalse(list((self.root / "output").glob("*.tar.gz")))
+
+    def test_missing_cargo_lock_fails_closed_by_default(self):
+        (self.root / "backend-rs/Cargo.lock").unlink()
+        result = self.run_build()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Cargo.lock is required for reproducible locked builds", result.stderr)
+        self.assertFalse((self.root / "cargo.log").exists())
         self.assertFalse(list((self.root / "output").glob("*.tar.gz")))
 
     def test_rejects_conflicting_target_override(self):

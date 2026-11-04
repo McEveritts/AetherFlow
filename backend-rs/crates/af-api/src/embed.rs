@@ -8,8 +8,8 @@ use std::fs;
 use std::path::Path;
 
 #[derive(RustEmbed)]
-#[folder = "../../../backend/web/dist"]
-struct EmbeddedDist;
+#[folder = "../../../web/dist"]
+struct EmbeddedNeutralDist;
 
 fn read_asset(rel_path: &str) -> Option<Vec<u8>> {
     if let Ok(custom_dir) = env::var("STATIC_DIR") {
@@ -23,7 +23,8 @@ fn read_asset(rel_path: &str) -> Option<Vec<u8>> {
             }
         }
     }
-    EmbeddedDist::get(rel_path).map(|f| f.data.into_owned())
+    EmbeddedNeutralDist::get(rel_path)
+        .map(|f| f.data.into_owned())
 }
 
 fn has_index_bundle() -> bool {

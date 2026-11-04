@@ -50,6 +50,8 @@ FRESH_INSTALL=false
 RESUME_MODE=false
 LIST_ONLY=false
 UNATTENDED=false
+BUILD_FROM_SOURCE=false
+RELEASE_CHANNEL="${AETHERFLOW_RELEASE_CHANNEL:-${RELEASE_CHANNEL:-}}"
 ENV_SEED_FILE=""
 CLI_USERNAME=""
 CLI_PASSWORD=""
@@ -73,6 +75,8 @@ af_usage() {
     echo "  --fresh                Wipe all state and start from scratch"
     echo "  --list-steps           Show all steps and their completion status"
     echo "  --unattended           Skip interactive prompts and use seeded/default values"
+    echo "  --channel <name>       Release channel to pull: stable, nightly (default: stable)"
+    echo "  --from-source          Explicitly build control plane from source instead of pulling prebuilt v4 release"
     echo "  --username <name>      Seed the master account username"
     echo "  --password <secret>    Seed the master account password"
     echo "  --domain <hostname>    Seed the installer hostname/domain value"
@@ -81,9 +85,10 @@ af_usage() {
     echo ""
     echo "Examples:"
     echo "  bash AetherFlow-Setup"
+    echo "  bash AetherFlow-Setup --channel nightly"
     echo "  bash AetherFlow-Setup --resume"
     echo "  bash AetherFlow-Setup --repair build_modern"
-    echo "  bash AetherFlow-Setup --repair install_go install_node build_modern"
+    echo "  bash AetherFlow-Setup --from-source --repair install_go install_node build_modern"
     echo "  bash AetherFlow-Setup --unattended --username admin --password secret --domain aether.local"
     echo "  bash AetherFlow-Setup --env-seed /root/.env.seed --unattended"
     echo ""
@@ -224,6 +229,17 @@ parse_args() {
             --unattended)
                 translated+=(-u)
                 ;;
+            --from-source)
+                translated+=(-S)
+                ;;
+            --channel)
+                [[ $# -ge 2 ]] || af_die "Option --channel requires a value."
+                translated+=(-C "$2")
+                shift
+                ;;
+            --channel=*)
+                translated+=(-C "${1#*=}")
+                ;;
             --username)
                 [[ $# -ge 2 ]] || af_die "Option --username requires a value."
                 translated+=(-U "$2")
@@ -259,12 +275,12 @@ parse_args() {
             --help)
                 translated+=(-h)
                 ;;
-            -p|-U|-P|-D|-E)
+            -p|-U|-P|-D|-E|-C)
                 [[ $# -ge 2 ]] || af_die "Option $1 requires a value."
                 translated+=("$1" "$2")
                 shift
                 ;;
-            -r|-f|-l|-h|-u)
+            -r|-f|-l|-h|-u|-S)
                 translated+=("$1")
                 ;;
             --)
@@ -287,7 +303,7 @@ parse_args() {
 
     set -- "${translated[@]}"
     OPTIND=1
-    while getopts ":rfhlup:U:P:D:E:" opt; do
+    while getopts ":rfhlup:U:P:D:E:C:S" opt; do
         case "${opt}" in
             r) RESUME_MODE=true ;;
             p) REPAIR_STEPS="${OPTARG}" ;;
@@ -298,6 +314,8 @@ parse_args() {
                 exit 0
                 ;;
             u) UNATTENDED=true ;;
+            S) BUILD_FROM_SOURCE=true ;;
+            C) RELEASE_CHANNEL="${OPTARG}" ;;
             U) CLI_USERNAME="${OPTARG}" ;;
             P) CLI_PASSWORD="${OPTARG}" ;;
             D) CLI_DOMAIN="${OPTARG}" ;;
@@ -320,10 +338,62 @@ version_ge() {
     [[ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -n1)" == "$2" ]]
 }
 
+af_detect_default_channel() {
+    local repo_root
+    repo_root="$(dirname "${SCRIPT_DIR}")"
+    if command -v git >/dev/null 2>&1 && [[ -d "${repo_root}/.git" ]]; then
+        local branch
+        branch="$(git -C "${repo_root}" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+        case "${branch,,}" in
+            experimental)
+                printf 'nightly'
+                return 0
+                ;;
+            nightly)
+                printf 'nightly'
+                return 0
+                ;;
+        esac
+    fi
+    if [[ -f "${repo_root}/backend-rs/Cargo.toml" && ! -f "${repo_root}/.force-stable-channel" ]]; then
+        local ver_stamp=""
+        [[ -f "${repo_root}/.version" ]] && ver_stamp="$(tr -d '[:space:]' < "${repo_root}/.version" 2>/dev/null || true)"
+        if [[ "${ver_stamp,,}" == *experimental* ]]; then
+            printf 'nightly'
+            return 0
+        elif [[ "${ver_stamp,,}" == *nightly* ]]; then
+            printf 'nightly'
+            return 0
+        fi
+    fi
+    printf 'stable'
+}
+
 parse_args "$@"
 if af_truthy "${AETHERFLOW_UNATTENDED:-}"; then
     UNATTENDED=true
 fi
+if af_truthy "${AETHERFLOW_BUILD_FROM_SOURCE:-}"; then
+    BUILD_FROM_SOURCE=true
+fi
+if [[ "${BUILD_FROM_SOURCE}" == "true" ]]; then
+    export AETHERFLOW_BUILD_FROM_SOURCE=1
+fi
+if [[ -z "${RELEASE_CHANNEL}" ]]; then
+    RELEASE_CHANNEL="$(af_detect_default_channel)"
+fi
+case "${RELEASE_CHANNEL}" in
+    experimental)
+        RELEASE_CHANNEL="nightly"
+        export AETHERFLOW_RELEASE_CHANNEL="${RELEASE_CHANNEL}"
+        ;;
+    stable|nightly)
+        export AETHERFLOW_RELEASE_CHANNEL="${RELEASE_CHANNEL}"
+        ;;
+    *)
+        af_die "Unsupported release channel: ${RELEASE_CHANNEL} (expected stable or nightly)"
+        ;;
+esac
 
 bootstrap_check_supported_os() {
     if [[ ! -r /etc/os-release ]]; then
@@ -344,6 +414,9 @@ bootstrap_check_supported_os() {
             fi
             ;;
         debian)
+            if [[ -z "${VERSION_ID:-}" && ("${VERSION_CODENAME:-}" == "trixie" || "${PRETTY_NAME:-}" =~ [Tt]rixie) ]]; then
+                version="13"
+            fi
             if ! version_ge "$version" "11"; then
                 echo "Unsupported Debian version: ${version}. AetherFlow requires Debian 11 or newer."
                 exit 1
@@ -359,7 +432,7 @@ bootstrap_check_supported_os() {
     esac
 }
 
-# Auto-Bootstrap if downloaded as a single script via the GitHub one-liner
+## Auto-Bootstrap if downloaded as a single script via the GitHub one-liner
 if [[ ! -d "${SCRIPT_DIR}/modules" ]]; then
     echo "Bootstrapping AetherFlow Installer Environment..."
     bootstrap_check_supported_os
@@ -371,37 +444,91 @@ if [[ ! -d "${SCRIPT_DIR}/modules" ]]; then
         export AETHERFLOW_UNATTENDED=true
     fi
     export DEBIAN_FRONTEND=noninteractive
-    BOOTSTRAP_TARBALL="/tmp/aetherflow-bootstrap.tar.gz"
+    default_bootstrap_ref="nightly"
+    case "${RELEASE_CHANNEL}" in
+        experimental) default_bootstrap_ref="nightly" ;;
+        nightly) default_bootstrap_ref="nightly" ;;
+        stable) default_bootstrap_ref="${AETHERFLOW_STABLE_BOOTSTRAP_REF:-master}" ;;
+    esac
+    BOOTSTRAP_REF="${AETHERFLOW_BOOTSTRAP_REF:-${default_bootstrap_ref}}"
+    BOOTSTRAP_URL="${AETHERFLOW_BOOTSTRAP_URL:-https://codeload.github.com/McEveritts/AetherFlow/tar.gz/refs/heads/${BOOTSTRAP_REF}}"
+    BOOTSTRAP_TARBALL="/tmp/aetherflow-bootstrap.$$.tar.gz"
+    bootstrap_tmp="/tmp/aetherflow-bootstrap.$$"
 
     (
         curl -fsSL --retry 3 --output "${BOOTSTRAP_TARBALL}" \
-            "https://codeload.github.com/McEveritts/AetherFlow/tar.gz/refs/heads/master" >/dev/null 2>&1 || true
+            "${BOOTSTRAP_URL}" >/dev/null 2>&1 || rm -f "${BOOTSTRAP_TARBALL}"
     ) &
     prefetch_pid=$!
 
     apt-get update -y >/dev/null 2>&1
-    apt-get install -y git bc curl ca-certificates >/dev/null 2>&1
+    apt-get install -y git bc curl ca-certificates sqlite3 >/dev/null 2>&1
     wait "${prefetch_pid}" 2>/dev/null || true
-    
-    rm -rf /opt/AetherFlow
+
+    rm -rf "${bootstrap_tmp}"
+    mkdir -p "${bootstrap_tmp}"
+    bootstrap_source=""
+
+    if [[ -n "${AETHERFLOW_BOOTSTRAP_SHA256:-}" ]]; then
+        if [[ ! -s "${BOOTSTRAP_TARBALL}" ]]; then
+            rm -rf "${bootstrap_tmp}" "${BOOTSTRAP_TARBALL}"
+            af_die "Bootstrap archive download failed from ${BOOTSTRAP_URL}; refusing unverified git fallback when AETHERFLOW_BOOTSTRAP_SHA256 is set."
+        fi
+        actual_bootstrap_sha="$(sha256sum "${BOOTSTRAP_TARBALL}" | awk '{print tolower($1)}')"
+        if [[ "${actual_bootstrap_sha}" != "${AETHERFLOW_BOOTSTRAP_SHA256,,}" ]]; then
+            rm -rf "${bootstrap_tmp}" "${BOOTSTRAP_TARBALL}"
+            af_die "Bootstrap archive SHA-256 verification failed (expected=${AETHERFLOW_BOOTSTRAP_SHA256,,}, actual=${actual_bootstrap_sha}). Existing /opt/AetherFlow preserved."
+        fi
+    fi
 
     if [[ -s "${BOOTSTRAP_TARBALL}" ]]; then
-        mkdir -p /opt/AetherFlow
-        bootstrap_tmp="/tmp/aetherflow-bootstrap.$$"
-        rm -rf "${bootstrap_tmp}"
-        mkdir -p "${bootstrap_tmp}"
-        tar -xzf "${BOOTSTRAP_TARBALL}" -C "${bootstrap_tmp}" >/dev/null 2>&1 || true
-        bootstrap_source="$(find "${bootstrap_tmp}" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
-        if [[ -n "${bootstrap_source}" ]]; then
-            cp -a "${bootstrap_source}/." /opt/AetherFlow/
-        else
-            git clone https://github.com/McEveritts/AetherFlow.git /opt/AetherFlow >/dev/null 2>&1
+        if tar --no-same-owner --no-same-permissions -xzf "${BOOTSTRAP_TARBALL}" -C "${bootstrap_tmp}" >/dev/null 2>&1; then
+            bootstrap_source="$(find "${bootstrap_tmp}" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
         fi
-        rm -rf "${bootstrap_tmp}" "${BOOTSTRAP_TARBALL}"
-    else
-        git clone https://github.com/McEveritts/AetherFlow.git /opt/AetherFlow >/dev/null 2>&1
+        rm -f "${BOOTSTRAP_TARBALL}"
     fi
-    
+
+    if [[ -z "${bootstrap_source}" ]]; then
+        if [[ -n "${AETHERFLOW_BOOTSTRAP_SHA256:-}" ]]; then
+            rm -rf "${bootstrap_tmp}"
+            af_die "Failed to extract verified bootstrap archive. Existing /opt/AetherFlow preserved."
+        fi
+        if ! git clone --depth 1 --branch "${BOOTSTRAP_REF}" https://github.com/McEveritts/AetherFlow.git "${bootstrap_tmp}/repo" >/dev/null 2>&1; then
+            rm -rf "${bootstrap_tmp}"
+            af_die "Failed to clone AetherFlow branch '${BOOTSTRAP_REF}'. Refusing implicit branch fallback; existing /opt/AetherFlow preserved."
+        fi
+        bootstrap_source="${bootstrap_tmp}/repo"
+    fi
+
+    if [[ ! -f "${bootstrap_source}/setup/AetherFlow-Setup" || ! -d "${bootstrap_source}/setup/modules" ]]; then
+        rm -rf "${bootstrap_tmp}"
+        af_die "Staged bootstrap tree is incomplete (missing setup/AetherFlow-Setup or setup/modules). Existing /opt/AetherFlow preserved."
+    fi
+
+    # Atomically replace /opt/AetherFlow only after staging & verification succeed
+    bootstrap_backup=""
+    if [[ -e /opt/AetherFlow ]]; then
+        bootstrap_backup="/opt/AetherFlow.bak.$$"
+        rm -rf "${bootstrap_backup}"
+        mv /opt/AetherFlow "${bootstrap_backup}"
+    fi
+    mkdir -p /opt/AetherFlow
+    if ! cp -a "${bootstrap_source}/." /opt/AetherFlow/; then
+        rm -rf /opt/AetherFlow "${bootstrap_tmp}"
+        if [[ -n "${bootstrap_backup}" && -d "${bootstrap_backup}" ]]; then
+            mv "${bootstrap_backup}" /opt/AetherFlow
+        fi
+        af_die "Failed to stage /opt/AetherFlow from verified bootstrap tree; restored previous /opt/AetherFlow."
+    fi
+    # Preserve existing immutable releases/current across bootstrap refresh if present
+    if [[ -n "${bootstrap_backup}" && -d "${bootstrap_backup}/releases" && ! -d /opt/AetherFlow/releases ]]; then
+        mv "${bootstrap_backup}/releases" /opt/AetherFlow/releases
+        if [[ -L "${bootstrap_backup}/current" ]]; then
+            cp -P "${bootstrap_backup}/current" /opt/AetherFlow/current
+        fi
+    fi
+    rm -rf "${bootstrap_tmp}" "${bootstrap_backup}"
+
     # Relaunch from the proper directory
     cd /opt/AetherFlow/setup || exit 1
     exec bash AetherFlow-Setup "${ORIGINAL_ARGS[@]}"
@@ -473,6 +600,8 @@ _apply_seed_config() {
     local seeded_bbr=""
     local seeded_denyhosts=""
     local seeded_reboot=""
+    local seeded_channel=""
+    local seeded_from_source=""
 
     seeded_username="$(af_first_nonempty "${CLI_USERNAME}" "${AETHERFLOW_USERNAME:-}" "${INSTALL_USERNAME:-}" "${username:-}")"
     seeded_password="$(af_first_nonempty "${CLI_PASSWORD}" "${AETHERFLOW_PASSWORD:-}" "${INSTALL_PASSWORD:-}" "${passwd:-${password:-}}")"
@@ -486,6 +615,11 @@ _apply_seed_config() {
     seeded_bbr="$(af_first_nonempty "${AETHERFLOW_BBR:-}" "${bbr:-}")"
     seeded_denyhosts="$(af_first_nonempty "${AETHERFLOW_BLOCK_PUBLIC_TRACKERS:-}" "${denyhosts:-}")"
     seeded_reboot="$(af_first_nonempty "${AETHERFLOW_REBOOT:-}" "${reboot_after_install:-}")"
+    seeded_channel="$(af_first_nonempty "${RELEASE_CHANNEL:-}" "${AETHERFLOW_RELEASE_CHANNEL:-}" "${release_channel:-}" "$(af_detect_default_channel)")"
+    seeded_from_source="$(af_first_nonempty "${AETHERFLOW_BUILD_FROM_SOURCE:-}" "${build_from_source:-}")"
+    if [[ "${BUILD_FROM_SOURCE}" == "true" ]]; then
+        seeded_from_source="yes"
+    fi
 
     _save_seed_value username "${seeded_username}"
     _save_seed_value passwd "${seeded_password}"
@@ -494,6 +628,8 @@ _apply_seed_config() {
     _save_seed_value IP "${seeded_public_ip}"
     _save_seed_value OUTTO "${seeded_log_file}"
     _save_seed_value primaryroot "${seeded_primaryroot}"
+    _save_seed_value release_channel "${seeded_channel}"
+    _save_seed_yes_no build_from_source "${seeded_from_source}" "no"
     _save_seed_yes_no kernel "${seeded_kernel}" "yes"
     _save_seed_yes_no is10g "${seeded_10g}" "no"
     _save_seed_yes_no ffmpeg "${seeded_ffmpeg}" "yes"
@@ -519,6 +655,8 @@ _apply_seed_config() {
 export REPAIR_STEPS
 export FRESH_INSTALL
 export UNATTENDED
+export BUILD_FROM_SOURCE
+export RELEASE_CHANNEL
 
 ################################################################################
 # State Initialization
@@ -544,6 +682,14 @@ _apply_seed_config
 if [[ -f "${CONFIG_FILE}" ]]; then
     # shellcheck disable=1090
     source "${CONFIG_FILE}" 2>/dev/null
+fi
+if af_truthy "${build_from_source:-}"; then
+    BUILD_FROM_SOURCE=true
+    export AETHERFLOW_BUILD_FROM_SOURCE=1
+fi
+if [[ -n "${release_channel:-}" ]]; then
+    RELEASE_CHANNEL="${release_channel}"
+    export AETHERFLOW_RELEASE_CHANNEL="${RELEASE_CHANNEL}"
 fi
 if type _ensure_distro_vars &>/dev/null; then
     _ensure_distro_vars
@@ -679,9 +825,9 @@ _run_step_fg "apachesudo" "Configuring Apache sudo" _apachesudo
 # NOTE: Torrent client installation (rTorrent, qBittorrent, Transmission, Deluge, AutoDL-irssi)
 #       removed from bootstrap — deferred to AetherFlow Marketplace.
 # NOTE: Legacy PHP dashboard removed — Next.js frontend is the sole UI
-_run_step "install_go" "Installing Go compiler" _install_go
-_run_step "install_node" "Installing Node.js and PM2" _install_node
-_run_step "build_modern" "Building Next.js and Go API" _build_modern_stack
+_run_step "install_go" "Checking Go toolchain (source-build fallback only)" _install_go
+_run_step "install_node" "Checking Node.js toolchain (source-build fallback only)" _install_node
+_run_step "build_modern" "Deploying AetherFlow v4 Control Plane" _build_modern_stack
 
 _run_step "apacheconf" "Setting up seedbox.conf for apache" _apacheconf
 _run_step "fix_cert" "Fix SSL Cert for apache" _fix_cert

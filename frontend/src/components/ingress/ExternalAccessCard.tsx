@@ -144,9 +144,9 @@ export function ExternalAccessCard({ appName }: ExternalAccessCardProps) {
                 if (validationError) setValidationError(null);
                 if (saveError) setSaveError(null);
               }}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') {
-                  e.preventDefault();
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  event.preventDefault();
                   handleSaveDomain();
                 }
               }}

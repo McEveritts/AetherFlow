@@ -267,12 +267,20 @@ pub enum ReleaseCliCommand {
         from_source: bool,
         keep_releases: Option<usize>,
         config_path: Option<PathBuf>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        job_status_file: Option<PathBuf>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        job_unit: Option<String>,
     },
     /// Roll back to the previous verified release via `/v1/self-update` or `af_release::ReleaseEngine`.
     Rollback {
         channel: ReleaseChannel,
         mode: ReleaseDispatchMode,
         config_path: Option<PathBuf>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        job_status_file: Option<PathBuf>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        job_unit: Option<String>,
     },
     /// Prune old release slots via `af_release::ReleaseEngine` (`ReleaseCommand::Cleanup`).
     Cleanup {
@@ -320,6 +328,10 @@ pub enum BackupCliCommand {
         chunk_size_bytes: Option<u64>,
         timestamp_slug: Option<String>,
         operator_privileged: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        trusted_sqlite_uid: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        trusted_sqlite_gid: Option<u32>,
     },
     /// List existing `.sqlite` and `.tar.gz` backup artifacts in `backup_dir` via `af_host::list_backup_inventory`.
     List { backup_dir: Option<PathBuf> },
@@ -327,6 +339,8 @@ pub enum BackupCliCommand {
     Verify {
         filename: String,
         backup_dir: Option<PathBuf>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        trusted_sqlite_uid: Option<u32>,
     },
     /// Run a purely NON-DESTRUCTIVE restore preflight and compatibility check via `af-host`
     /// (`preflight_tar_gz_archive`, `preflight_restore_directory`, or `plan_restore_from_manifest`).
@@ -337,13 +351,28 @@ pub enum BackupCliCommand {
         host_version: String,
         max_sqlite_user_version: Option<i64>,
         overwrite_policy: OverwritePolicy,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        trusted_sqlite_uid: Option<u32>,
     },
-    /// Destructive live restore command (`af backup restore ...`) which intentionally fails closed
-    /// via `af_host::execute_destructive_restore` (`HostBackupError::DestructiveRestoreUnsupported`).
+    /// Destructive/staged restore command (`af backup restore ...`).
+    /// Without `--confirm-destructive-restore`, intentionally fails closed via
+    /// `af_host::execute_destructive_restore` (`HostBackupError::DestructiveRestoreUnsupported`).
+    /// When `--confirm-destructive-restore` is supplied, executes `af_host::execute_staged_restore`
+    /// with full pre-restore backup, service quiescence, atomic swap, and automatic rollback on failure.
     RestoreDestructive {
         filename: String,
         backup_dir: Option<PathBuf>,
         target_root: Option<PathBuf>,
+        #[serde(default)]
+        confirm_destructive_restore: bool,
+        #[serde(default)]
+        allow_overwrite: bool,
+        #[serde(default)]
+        operator_privileged: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        trusted_sqlite_uid: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        trusted_sqlite_gid: Option<u32>,
     },
     /// Delete a backup artifact and its companion sidecars/chunks via `af_host::delete_backup_artifacts`.
     Delete {
@@ -373,6 +402,17 @@ pub enum BackupCliCommand {
         backup_dir: Option<PathBuf>,
         operator_privileged: bool,
     },
+    /// Recover an interrupted staged restore using an explicit server-validated `af_host::RecoveryContext`.
+    RecoverInterrupted {
+        backup_dir: Option<PathBuf>,
+        target_root: Option<PathBuf>,
+        #[serde(default)]
+        operator_privileged: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        trusted_sqlite_uid: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        trusted_sqlite_gid: Option<u32>,
+    },
     /// Display the canonical `packages/system/*` maintenance script ownership table from `af-host`.
     OwnershipRegistry,
 }
@@ -389,6 +429,7 @@ impl BackupCliCommand {
             BackupCliCommand::Prune { .. } => "prune",
             BackupCliCommand::Chunk { .. } => "chunk",
             BackupCliCommand::Assemble { .. } => "assemble",
+            BackupCliCommand::RecoverInterrupted { .. } => "recover-interrupted",
             BackupCliCommand::OwnershipRegistry => "ownership",
         }
     }
@@ -539,7 +580,7 @@ pub fn build_package_runner_request(
     };
 
     let port = app_port.unwrap_or(0);
-    if port < 0 || port > 65535 {
+    if !(0..=65535).contains(&port) {
         return Err(CliError::Validation(format!(
             "invalid application port {} (must be 0..=65535)",
             port
@@ -1009,7 +1050,7 @@ fn parse_package_update_args(args: &[String]) -> CliResult<PackageCommand> {
             "--channel" | "-c" => {
                 let raw_ch = args.get(i + 1).ok_or_else(|| {
                     CliError::Usage(
-                        "--channel requires stable, nightly, or experimental".to_string(),
+                        "--channel requires stable or nightly".to_string(),
                     )
                 })?;
                 channel = ReleaseChannel::from_str(raw_ch)?;
@@ -1049,7 +1090,7 @@ fn parse_package_upgrade_args(args: &[String]) -> CliResult<PackageCommand> {
             "--channel" | "-c" => {
                 let raw_ch = args.get(i + 1).ok_or_else(|| {
                     CliError::Usage(
-                        "--channel requires stable, nightly, or experimental".to_string(),
+                        "--channel requires stable or nightly".to_string(),
                     )
                 })?;
                 channel = ReleaseChannel::from_str(raw_ch)?;
@@ -1217,6 +1258,8 @@ fn parse_release_subcommand(args: &[String]) -> CliResult<ReleaseCliCommand> {
     let mut from_source = false;
     let mut keep_releases: Option<usize> = None;
     let mut config_path: Option<PathBuf> = None;
+    let mut job_status_file: Option<PathBuf> = None;
+    let mut job_unit: Option<String> = None;
 
     let mut i = 0usize;
     while i < tail.len() {
@@ -1224,7 +1267,7 @@ fn parse_release_subcommand(args: &[String]) -> CliResult<ReleaseCliCommand> {
             "--channel" | "-c" => {
                 let val = tail.get(i + 1).ok_or_else(|| {
                     CliError::Usage(
-                        "--channel requires stable, nightly, or experimental".to_string(),
+                        "--channel requires stable or nightly".to_string(),
                     )
                 })?;
                 channel = ReleaseChannel::from_str(val)?;
@@ -1274,6 +1317,52 @@ fn parse_release_subcommand(args: &[String]) -> CliResult<ReleaseCliCommand> {
                 config_path = Some(PathBuf::from(val));
                 i += 2;
             }
+            s if s.starts_with("--config=") => {
+                let val = s.trim_start_matches("--config=");
+                if val.is_empty() {
+                    return Err(CliError::Usage(
+                        "--config requires a path to release-manager.conf".to_string(),
+                    ));
+                }
+                config_path = Some(PathBuf::from(val));
+                i += 1;
+            }
+            "--job-status-file" => {
+                let val = tail.get(i + 1).ok_or_else(|| {
+                    CliError::Usage(
+                        "--job-status-file requires a path to a status JSON file".to_string(),
+                    )
+                })?;
+                job_status_file = Some(PathBuf::from(val));
+                i += 2;
+            }
+            s if s.starts_with("--job-status-file=") => {
+                let val = s.trim_start_matches("--job-status-file=");
+                if val.is_empty() {
+                    return Err(CliError::Usage(
+                        "--job-status-file requires a path to a status JSON file".to_string(),
+                    ));
+                }
+                job_status_file = Some(PathBuf::from(val));
+                i += 1;
+            }
+            "--job-unit" => {
+                let val = tail.get(i + 1).ok_or_else(|| {
+                    CliError::Usage("--job-unit requires a transient unit name".to_string())
+                })?;
+                job_unit = Some(val.clone());
+                i += 2;
+            }
+            s if s.starts_with("--job-unit=") => {
+                let val = s.trim_start_matches("--job-unit=");
+                if val.is_empty() {
+                    return Err(CliError::Usage(
+                        "--job-unit requires a transient unit name".to_string(),
+                    ));
+                }
+                job_unit = Some(val.to_string());
+                i += 1;
+            }
             other => {
                 return Err(CliError::Usage(format!(
                     "unknown option for 'af release {}': {}",
@@ -1294,6 +1383,8 @@ fn parse_release_subcommand(args: &[String]) -> CliResult<ReleaseCliCommand> {
                 from_source,
                 keep_releases,
                 config_path,
+                job_status_file,
+                job_unit,
             })
         }
         "rollback" => {
@@ -1302,6 +1393,8 @@ fn parse_release_subcommand(args: &[String]) -> CliResult<ReleaseCliCommand> {
                 channel,
                 mode,
                 config_path,
+                job_status_file,
+                job_unit,
             })
         }
         "cleanup" => Ok(ReleaseCliCommand::Cleanup {
@@ -1333,6 +1426,8 @@ fn parse_backup_subcommand(args: &[String]) -> CliResult<BackupCliCommand> {
             let mut chunk_size_bytes: Option<u64> = None;
             let mut timestamp_slug: Option<String> = None;
             let mut operator_privileged = false;
+            let mut trusted_sqlite_uid: Option<u32> = None;
+            let mut trusted_sqlite_gid: Option<u32> = None;
 
             let mut i = 0usize;
             while i < tail.len() {
@@ -1385,9 +1480,28 @@ fn parse_backup_subcommand(args: &[String]) -> CliResult<BackupCliCommand> {
                         operator_privileged = true;
                         i += 1;
                     }
+                    "--trusted-sqlite-uid" => {
+                        let val = tail.get(i + 1).ok_or_else(|| {
+                            CliError::Usage("--trusted-sqlite-uid requires a numeric UID".to_string())
+                        })?;
+                        let parsed = val.parse::<u32>().map_err(|_| {
+                            CliError::Validation(format!("invalid --trusted-sqlite-uid {:?}", val))
+                        })?;
+                        trusted_sqlite_uid = Some(parsed);
+                        i += 2;
+                    }
+                    "--trusted-sqlite-gid" => {
+                        let val = tail.get(i + 1).ok_or_else(|| {
+                            CliError::Usage("--trusted-sqlite-gid requires a numeric GID".to_string())
+                        })?;
+                        let parsed = val.parse::<u32>().map_err(|_| {
+                            CliError::Validation(format!("invalid --trusted-sqlite-gid {:?}", val))
+                        })?;
+                        trusted_sqlite_gid = Some(parsed);
+                        i += 2;
+                    }
                     other => {
                         if !other.starts_with('-') && chunk_size_bytes.is_none() {
-                            // Legacy `af-backup create [chunk-size]` positional compatibility
                             chunk_size_bytes = Some(parse_byte_size_arg(other)?);
                             i += 1;
                         } else {
@@ -1408,6 +1522,8 @@ fn parse_backup_subcommand(args: &[String]) -> CliResult<BackupCliCommand> {
                 chunk_size_bytes,
                 timestamp_slug,
                 operator_privileged,
+                trusted_sqlite_uid,
+                trusted_sqlite_gid,
             })
         }
         "list" | "ls" => {
@@ -1435,6 +1551,7 @@ fn parse_backup_subcommand(args: &[String]) -> CliResult<BackupCliCommand> {
         "verify" => {
             let mut filename: Option<String> = None;
             let mut backup_dir: Option<PathBuf> = None;
+            let mut trusted_sqlite_uid: Option<u32> = None;
             let mut i = 0usize;
             while i < tail.len() {
                 match tail[i].as_str() {
@@ -1443,6 +1560,16 @@ fn parse_backup_subcommand(args: &[String]) -> CliResult<BackupCliCommand> {
                             CliError::Usage("--backup-dir requires a directory path".to_string())
                         })?;
                         backup_dir = Some(PathBuf::from(val));
+                        i += 2;
+                    }
+                    "--trusted-sqlite-uid" => {
+                        let val = tail.get(i + 1).ok_or_else(|| {
+                            CliError::Usage("--trusted-sqlite-uid requires a numeric UID".to_string())
+                        })?;
+                        let parsed = val.parse::<u32>().map_err(|_| {
+                            CliError::Validation(format!("invalid --trusted-sqlite-uid {:?}", val))
+                        })?;
+                        trusted_sqlite_uid = Some(parsed);
                         i += 2;
                     }
                     arg if !arg.starts_with('-') && filename.is_none() => {
@@ -1466,6 +1593,7 @@ fn parse_backup_subcommand(args: &[String]) -> CliResult<BackupCliCommand> {
             Ok(BackupCliCommand::Verify {
                 filename,
                 backup_dir,
+                trusted_sqlite_uid,
             })
         }
         "restore-preflight" | "plan-restore" | "preflight" => {
@@ -1475,6 +1603,7 @@ fn parse_backup_subcommand(args: &[String]) -> CliResult<BackupCliCommand> {
             let mut host_version = "v4.0.0".to_string();
             let mut max_sqlite_user_version: Option<i64> = None;
             let mut overwrite_policy = OverwritePolicy::RejectExisting;
+            let mut trusted_sqlite_uid: Option<u32> = None;
 
             let mut i = 0usize;
             while i < tail.len() {
@@ -1518,6 +1647,16 @@ fn parse_backup_subcommand(args: &[String]) -> CliResult<BackupCliCommand> {
                         overwrite_policy = OverwritePolicy::AllowRegularFilesInStaging;
                         i += 1;
                     }
+                    "--trusted-sqlite-uid" => {
+                        let val = tail.get(i + 1).ok_or_else(|| {
+                            CliError::Usage("--trusted-sqlite-uid requires a numeric UID".to_string())
+                        })?;
+                        let parsed = val.parse::<u32>().map_err(|_| {
+                            CliError::Validation(format!("invalid --trusted-sqlite-uid {:?}", val))
+                        })?;
+                        trusted_sqlite_uid = Some(parsed);
+                        i += 2;
+                    }
                     arg if !arg.starts_with('-') && filename.is_none() => {
                         let clean = af_host::validate_backup_filename(arg)?;
                         filename = Some(clean);
@@ -1550,12 +1689,18 @@ fn parse_backup_subcommand(args: &[String]) -> CliResult<BackupCliCommand> {
                 host_version,
                 max_sqlite_user_version,
                 overwrite_policy,
+                trusted_sqlite_uid,
             })
         }
         "restore" => {
             let mut filename: Option<String> = None;
             let mut backup_dir: Option<PathBuf> = None;
             let mut target_root: Option<PathBuf> = None;
+            let mut confirm_destructive_restore = false;
+            let mut allow_overwrite = false;
+            let mut operator_privileged = false;
+            let mut trusted_sqlite_uid: Option<u32> = None;
+            let mut trusted_sqlite_gid: Option<u32> = None;
             let mut i = 0usize;
             while i < tail.len() {
                 match tail[i].as_str() {
@@ -1566,11 +1711,43 @@ fn parse_backup_subcommand(args: &[String]) -> CliResult<BackupCliCommand> {
                         backup_dir = Some(PathBuf::from(val));
                         i += 2;
                     }
-                    "--target-root" => {
+                    "--target-root" | "--staging-dir" => {
                         let val = tail.get(i + 1).ok_or_else(|| {
                             CliError::Usage("--target-root requires a directory path".to_string())
                         })?;
                         target_root = Some(PathBuf::from(val));
+                        i += 2;
+                    }
+                    "--confirm-destructive-restore" | "--confirm" => {
+                        confirm_destructive_restore = true;
+                        i += 1;
+                    }
+                    "--allow-overwrite" | "--allow-staging-overwrite" => {
+                        allow_overwrite = true;
+                        i += 1;
+                    }
+                    "--operator-privileged" => {
+                        operator_privileged = true;
+                        i += 1;
+                    }
+                    "--trusted-sqlite-uid" => {
+                        let val = tail.get(i + 1).ok_or_else(|| {
+                            CliError::Usage("--trusted-sqlite-uid requires a numeric UID".to_string())
+                        })?;
+                        let parsed = val.parse::<u32>().map_err(|_| {
+                            CliError::Validation(format!("invalid --trusted-sqlite-uid {:?}", val))
+                        })?;
+                        trusted_sqlite_uid = Some(parsed);
+                        i += 2;
+                    }
+                    "--trusted-sqlite-gid" => {
+                        let val = tail.get(i + 1).ok_or_else(|| {
+                            CliError::Usage("--trusted-sqlite-gid requires a numeric GID".to_string())
+                        })?;
+                        let parsed = val.parse::<u32>().map_err(|_| {
+                            CliError::Validation(format!("invalid --trusted-sqlite-gid {:?}", val))
+                        })?;
+                        trusted_sqlite_gid = Some(parsed);
                         i += 2;
                     }
                     arg if !arg.starts_with('-') && filename.is_none() => {
@@ -1588,6 +1765,11 @@ fn parse_backup_subcommand(args: &[String]) -> CliResult<BackupCliCommand> {
                 filename,
                 backup_dir,
                 target_root,
+                confirm_destructive_restore,
+                allow_overwrite,
+                operator_privileged,
+                trusted_sqlite_uid,
+                trusted_sqlite_gid,
             })
         }
         "delete" | "rm" => {
@@ -1809,9 +1991,72 @@ fn parse_backup_subcommand(args: &[String]) -> CliResult<BackupCliCommand> {
                 operator_privileged,
             })
         }
+        "recover" | "recover-interrupted" => {
+            let mut backup_dir: Option<PathBuf> = None;
+            let mut target_root: Option<PathBuf> = None;
+            let mut operator_privileged = false;
+            let mut trusted_sqlite_uid: Option<u32> = None;
+            let mut trusted_sqlite_gid: Option<u32> = None;
+            let mut index = 0usize;
+            while index < tail.len() {
+                match tail[index].as_str() {
+                    "--backup-dir" => {
+                        let val = tail.get(index + 1).ok_or_else(|| {
+                            CliError::Usage("--backup-dir requires a directory path".to_string())
+                        })?;
+                        backup_dir = Some(PathBuf::from(val));
+                        index += 2;
+                    }
+                    "--target-root" | "--staging-dir" => {
+                        let val = tail.get(index + 1).ok_or_else(|| {
+                            CliError::Usage("--target-root requires a directory path".to_string())
+                        })?;
+                        target_root = Some(PathBuf::from(val));
+                        index += 2;
+                    }
+                    "--operator-privileged" => {
+                        operator_privileged = true;
+                        index += 1;
+                    }
+                    "--trusted-sqlite-uid" => {
+                        let val = tail.get(index + 1).ok_or_else(|| {
+                            CliError::Usage("--trusted-sqlite-uid requires a numeric UID".to_string())
+                        })?;
+                        let parsed = val.parse::<u32>().map_err(|_| {
+                            CliError::Validation(format!("invalid --trusted-sqlite-uid {:?}", val))
+                        })?;
+                        trusted_sqlite_uid = Some(parsed);
+                        index += 2;
+                    }
+                    "--trusted-sqlite-gid" => {
+                        let val = tail.get(index + 1).ok_or_else(|| {
+                            CliError::Usage("--trusted-sqlite-gid requires a numeric GID".to_string())
+                        })?;
+                        let parsed = val.parse::<u32>().map_err(|_| {
+                            CliError::Validation(format!("invalid --trusted-sqlite-gid {:?}", val))
+                        })?;
+                        trusted_sqlite_gid = Some(parsed);
+                        index += 2;
+                    }
+                    other => {
+                        return Err(CliError::Usage(format!(
+                            "unexpected argument for 'af backup {}': {}",
+                            sub, other
+                        )));
+                    }
+                }
+            }
+            Ok(BackupCliCommand::RecoverInterrupted {
+                backup_dir,
+                target_root,
+                operator_privileged,
+                trusted_sqlite_uid,
+                trusted_sqlite_gid,
+            })
+        }
         "ownership" | "registry" => Ok(BackupCliCommand::OwnershipRegistry),
         other => Err(CliError::Usage(format!(
-            "unknown backup subcommand {:?} (expected: create, list, verify, restore-preflight, restore, delete, prune, chunk, assemble, ownership)",
+            "unknown backup subcommand {:?} (expected: create, list, verify, restore-preflight, restore, recover, delete, prune, chunk, assemble, ownership)",
             other
         ))),
     }
@@ -2238,8 +2483,8 @@ LEGACY COMPATIBILITY SHORTHANDS (`packages/system/af`):
   af install <pkg1> [pkg2...] [--port <port>]
   af remove <pkg1> [pkg2...]
   af list [--installed]
-  af update [pkg] [--channel <stable|nightly|experimental>]
-  af upgrade [--channel <stable|nightly|experimental>]
+  af update [pkg] [--channel <stable|nightly>]
+  af upgrade [--channel <stable|nightly>]
 
 ADMINISTRATIVE DOMAINS:
   package     Runner-mediated package install/remove/update/list/info (/v1/package)
@@ -2263,8 +2508,8 @@ NOTE ON UNSUPPORTED INTERACTIVE / DESTRUCTIVE FLOWS:
 USAGE:
   af package install <pkg1> [pkg2...] [--port <port>]
   af package remove <pkg1> [pkg2...]
-  af package update [pkg] [--channel <stable|nightly|experimental>]
-  af package upgrade [--channel <stable|nightly|experimental>]
+  af package update [pkg] [--channel <stable|nightly>]
+  af package upgrade [--channel <stable|nightly>]
   af package list [--installed]
   af package info <pkg>
 
@@ -2299,8 +2544,8 @@ Applies or previews systemd security drop-ins via af-runner (/v1/sandbox & rende
         HelpTopic::Release => "\
 USAGE:
   af release status [--config <path>]
-  af release deploy [--channel <stable|nightly|experimental>] [--local] [--binary <path>] [--frontend-dist <dir>] [--version <ver>] [--keep-releases <n>] [--skip-apache-reload]
-  af release rollback [--channel <stable|nightly|experimental>] [--local] [--skip-apache-reload]
+  af release deploy [--channel <stable|nightly>] [--local] [--binary <path>] [--frontend-dist <dir>] [--version <ver>] [--keep-releases <n>] [--skip-apache-reload]
+  af release rollback [--channel <stable|nightly>] [--local] [--skip-apache-reload]
   af release cleanup [--keep-releases <n>] [--config <path>]
   af release migrate-systemd [--skip-apache-reload] [--config <path>]
 

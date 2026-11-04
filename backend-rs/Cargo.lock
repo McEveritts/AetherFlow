@@ -238,6 +238,7 @@ dependencies = [
 name = "af-runner"
 version = "4.0.0"
 dependencies = [
+ "af-host",
  "af-models",
  "af-release",
  "anyhow",
@@ -313,6 +314,9 @@ dependencies = [
  "futures",
  "hex",
  "hmac",
+ "http-body-util",
+ "libc",
+ "regex",
  "jsonwebtoken",
  "once_cell",
  "r2d2",

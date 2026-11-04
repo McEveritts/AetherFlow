@@ -3,12 +3,26 @@ name: Security Gate
 on:
   workflow_dispatch:
   push:
-    branches: [main, master, development, nightly, Nightly, experimental]
+    branches:
+      - main
+      - master
+      - development
+      - nightly
+      - Nightly
   pull_request:
-    branches: [main, master, development, nightly, Nightly, experimental]
+    branches:
+      - main
+      - master
+      - development
+      - nightly
+      - Nightly
 
 permissions:
   contents: read
+
+concurrency:
+  group: security-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   secret-scan:
@@ -22,11 +36,11 @@ jobs:
       - name: Install and run gitleaks on working tree
         run: |
           GITLEAKS_VERSION="8.24.2"
-          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" | tar -xz -C /usr/local/bin gitleaks
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" | sudo tar -xz -C /usr/local/bin gitleaks
           gitleaks dir . --verbose --redact
 
-  rust-security-checks:
-    name: Rust Control Plane Security & Contract Verification
+  rust-security:
+    name: Rust Control Plane SAST & Advisory Gate
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -34,53 +48,65 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install System Dependencies & Mold Linker
+      - name: Install system build dependencies
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq mold clang pkg-config libssl-dev
 
-      - name: Set up Rust Toolchain
+      - name: Setup Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: clippy, rustfmt
 
-      - name: Rust Cargo Dependency Cache
+      - name: Setup Rust Cache
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: "backend-rs -> target"
 
-      - name: Prepare Embedded SPA Placeholder Directory
+      - name: Prepare Embedded Frontend Staging Directories
         working-directory: .
-        run: mkdir -p backend/web/dist
+        run: |
+          mkdir -p web/dist backend/web/dist
+          touch web/dist/.keep backend/web/dist/.keep
 
-      - name: Verify Rust Workspace Compilation (cargo check)
-        run: cargo check --workspace --all-targets
+      - name: Verify Workspace Lockfile Presence
+        run: |
+          test -f Cargo.lock
+          test -f deny.toml
 
-      - name: Run Rust Workspace Security & Contract Tests
+      - name: Install cargo-audit and cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit, cargo-deny
+
+      - name: Rust Advisory & Supply-Chain Policy (cargo-deny)
+        run: |
+          cargo deny --locked check advisories bans sources
+
+      - name: RustSec Vulnerability Scan (cargo-audit)
+        run: |
+          cargo audit --file Cargo.lock --ignore RUSTSEC-2023-0071
+
+      - name: Rust Static Analysis (workspace + strict restore/release core)
+        run: |
+          cargo clippy --workspace --all-targets --locked
+          cargo clippy --no-deps -p af-models -p af-host -p af-release -p af-cli --all-targets --locked -- -D warnings
+
+      - name: Rust Security Unit & Contract Tests
         env:
           JWT_SECRET: ci-test-secret-exactly-32bytes!!
           AES_MASTER_KEY: ci-test-aes-key-exactly-32bytes!
           ALLOWED_HOSTS: localhost:8080,127.0.0.1:8080
-        run: cargo test --workspace --locked || cargo test --workspace
+          AETHERFLOW_DISABLE_BACKGROUND_WORKERS: "1"
+        run: |
+          cargo test --workspace --locked -- --test-threads=1
 
-  legacy-go-security-checks:
-    name: Legacy Go Compatibility SAST & Tests
+  security-checks:
+    name: Legacy Go Backend SAST & Vulnerability Scan
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: backend
-
-    services:
-      redis:
-        image: redis:7-alpine
-        ports:
-          - 6379:6379
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-
     steps:
       - uses: actions/checkout@v4
 
@@ -90,38 +116,32 @@ jobs:
           go-version-file: backend/go.mod
           cache-dependency-path: backend/go.sum
 
-      - name: Prepare Embedded SPA Placeholder Directory
-        working-directory: .
-        run: mkdir -p backend/web/dist
-
-      - name: Install security tools
+      - name: Install pinned Go security tools
         run: |
-          go install github.com/securego/gosec/v2/cmd/gosec@latest
-          go install honnef.co/go/tools/cmd/staticcheck@latest
-          go install golang.org/x/vuln/cmd/govulncheck@latest
+          go install github.com/securego/gosec/v2/cmd/gosec@v2.22.1
+          go install honnef.co/go/tools/cmd/staticcheck@v0.6.0
+          go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
 
       - name: Dependency verification
         run: |
-          go mod tidy
           go mod verify
 
       - name: Vulnerability scan (govulncheck)
-        run: govulncheck ./... || true
+        run: govulncheck ./...
 
       - name: go vet
         run: go vet ./...
 
       - name: staticcheck
-        run: staticcheck ./... || true
+        run: staticcheck ./...
 
       - name: gosec (SAST)
-        run: gosec -severity high -confidence high ./... || true
+        run: gosec -severity high -confidence high ./...
 
       - name: Unit & integration tests
         env:
           JWT_SECRET: ci-test-secret-exactly-32bytes!!
           AES_MASTER_KEY: ci-test-aes-key-exactly-32bytes!
-          REDIS_ADDR: localhost:6379
           ALLOWED_HOSTS: localhost:8080,127.0.0.1:8080
         run: go test -v -count=1 -race ./...
 

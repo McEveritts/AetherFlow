@@ -3,17 +3,17 @@
   "name": "{{PLUGIN_NAME}}",
   "version": "0.1.0",
   "sdk": "rust",
-  "contract_version": "v1-staged",
-  "runtime_status": "standalone-companion-only",
-  "description": "Standalone Rust companion plugin scaffold for AetherFlow v4.0.0. Note: host-managed plugin loading, lifecycle hooks, and scoped token RBAC are currently dormant in backend-rs.",
+  "contract_version": "v1",
+  "runtime_status": "managed",
+  "description": "Sandboxed Rust companion plugin scaffold for AetherFlow v4.0.0 with short-lived scoped plugin tokens and capability bridge.",
   "author": "Community Developer",
   "permissions": [
     "marketplace:read",
     "system:metrics:read"
   ],
   "api_scopes": [
-    "/api/v1/public/marketplace",
-    "/api/v1/auth/system/metrics"
+    "GET /api/v1/public/marketplace",
+    "GET /api/v1/auth/system/metrics"
   ],
   "lifecycle_hooks": {
     "on_start": "backend/hooks/start.sh",
@@ -29,6 +29,11 @@
   },
   "frontend": {
     "entry": "frontend/src/index.tsx",
-    "slot": "marketplace"
+    "slot": "marketplace",
+    "capabilities": [
+      "sandbox-iframe",
+      "postmessage-bridge",
+      "scoped-proxy"
+    ]
   }
 }

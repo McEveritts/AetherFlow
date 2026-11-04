@@ -1,0 +1,2 @@
+# Placeholder so rust-embed in af-api always compiles cleanly during cargo check / cargo test.
+# Production builds populate web/dist/ (and legacy backend/web/dist/) from frontend/out/.

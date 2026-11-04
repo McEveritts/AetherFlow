@@ -17,7 +17,7 @@ REAL_TOOLS = (
     "sqlite3", "flock", "mkdir", "date", "cp", "mv", "ln", "rm", "cat", "tee",
     "find", "awk", "grep", "sed", "mktemp", "readlink", "chmod", "chown", "id",
     "head", "cut", "tr", "sha256sum", "tar", "gzip", "python3", "touch", "sleep",
-    "basename", "dirname", "sort", "tail", "runuser", "sh",
+    "basename", "dirname", "sort", "tail", "runuser", "sh", "stat",
 )
 
 CURL_MOCK = r'''#!/usr/bin/python3
@@ -90,6 +90,8 @@ if arguments and arguments[0] == "show":
         print(os.environ.get("TEST_SERVICE_USER", pwd.getpwuid(os.getuid()).pw_name))
     else:
         print(os.environ.get("TEST_UNIT_ENV", "Environment="))
+if arguments == ["stop", "aetherflow-api.service", "aetherflow-runner.service"] and os.environ.get("TEST_FAIL_DATABASE_STOP") == "1":
+    sys.exit(1)
 sys.exit(0)
 '''
 
@@ -236,6 +238,23 @@ class ReleaseManagerTests(unittest.TestCase):
             found = list(self.releases.glob("*/data-snapshot/aetherflow.sqlite.bak"))
         self.assertEqual(len(found), 1, f"expected one snapshot, found {found}")
         return found[0]
+
+    @unittest.skipUnless(os.name == "posix", "requires POSIX advisory locks")
+    def test_shared_maintenance_lock_is_acquired_before_release_lock(self):
+        import fcntl
+
+        shared_lock = self.data / ".snapshot.lock"
+        with shared_lock.open("a+b") as held:
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            result = self.run_manager(
+                "deploy", "--dry-run", "--offline",
+                AETHERFLOW_MAINTENANCE_LOCK_PATH=str(shared_lock),
+                SNAPSHOT_TIMEOUT="1",
+            )
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Could not acquire maintenance lock", result.stdout + result.stderr)
+        self.assertFalse((self.dry / "releases" / ".release.lock").exists())
+        self.assertFalse(self.current.exists())
 
     def test_env_file_db_path_wins_over_data_dir_and_unit(self):
         env_db = self.root / "live" / "from-env.sqlite"
@@ -494,6 +513,25 @@ class ReleaseManagerTests(unittest.TestCase):
 
 
 
+    def test_existing_service_owned_sticky_lock_is_not_created_or_truncated(self):
+        shared_parent = self.root / "sticky-lock"
+        shared_parent.mkdir()
+        shared_parent.chmod(0o1770)
+        shared_lock = shared_parent / ".snapshot.lock"
+        shared_lock.write_bytes(b"preserved lock inode\n")
+        shared_lock.chmod(0o660)
+        if os.geteuid() == 0:
+            os.chown(shared_lock, 65534, 65534)
+        original_inode = shared_lock.stat().st_ino
+        result = self.run_manager(
+            "deploy", "--dry-run", "--offline", "--channel", "experimental",
+            AETHERFLOW_MAINTENANCE_LOCK_PATH=str(shared_lock),
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(shared_lock.stat().st_ino, original_inode)
+        self.assertEqual(shared_lock.read_bytes(), b"preserved lock inode\n")
+        self.assertIn("channel: nightly", result.stdout.lower())
+
     def test_nightly_channel_resolves_versioned_v4_release(self):
         live_db = self.root / "live" / "from-env.sqlite"
         self.write_db(live_db, "env")
@@ -512,7 +550,93 @@ class ReleaseManagerTests(unittest.TestCase):
         self.assertIn("Resolved release tag v4.0.0-nightly.123.1 for channel nightly.", result.stdout)
         self.assertIn("releases/download/v4.0.0-nightly.123.1/aetherflow-linux-amd64.tar.gz", self.commands.read_text())
 
-    def test_experimental_channel_resolves_prerelease_tag(self):
+    def prepare_rejected_snapshot_rollback(self):
+        database_path = self.data / "aetherflow.sqlite"
+        previous = self.releases / "100"
+        snapshot_dir = previous / "data-snapshot"
+        snapshot_dir.mkdir(parents=True)
+        self.write_db(snapshot_dir / "aetherflow.sqlite.bak", "verified golden fixture")
+        snapshot_digest = hashlib.sha256((snapshot_dir / "aetherflow.sqlite.bak").read_bytes()).hexdigest()
+        (snapshot_dir / "MANIFEST.sha256").write_text(snapshot_digest + "  aetherflow.sqlite.bak\n")
+        self.current.symlink_to(previous)
+        (self.releases / ".previous_release").write_text(str(previous))
+        self.env_file.write_text(f"DB_PATH={database_path}\n")
+        for suffix in ("", "-wal", "-shm"):
+            Path(f"{database_path}{suffix}").write_bytes(f"corrupt fixture {suffix}".encode())
+        return database_path, snapshot_dir
+
+    def test_rollback_verifies_snapshot_without_python311_digest_helper(self):
+        database_path, snapshot_dir = self.prepare_rejected_snapshot_rollback()
+        compatibility_dir = self.root / "python310-compatibility"
+        compatibility_dir.mkdir()
+        (compatibility_dir / "sitecustomize.py").write_text(
+            'import hashlib\nif hasattr(hashlib, "file_digest"):\n    delattr(hashlib, "file_digest")\n'
+        )
+        environment = self.base_env(PYTHONPATH=str(compatibility_dir))
+        capability = subprocess.run(
+            [str(self.tools / "python3"), "-c", 'import hashlib; print(hasattr(hashlib, "file_digest"))'],
+            env=environment, capture_output=True, text=True,
+        )
+        self.assertEqual(capability.returncode, 0, capability.stderr)
+        self.assertEqual(capability.stdout.strip(), "False")
+        manifest = snapshot_dir / "MANIFEST.sha256"
+        valid_manifest = manifest.read_text()
+        original_database = database_path.read_bytes()
+        manifest.write_text("0" * 64 + "  aetherflow.sqlite.bak\n")
+        rejected = self.run_manager("rollback", PYTHONPATH=str(compatibility_dir))
+        self.assertEqual(rejected.returncode, 4, rejected.stdout + rejected.stderr)
+        self.assertEqual(database_path.read_bytes(), original_database)
+        self.assertNotIn("systemctl restart", self.commands.read_text())
+        manifest.write_text(valid_manifest)
+        self.commands.write_text("")
+        recovered = self.run_manager("rollback", PYTHONPATH=str(compatibility_dir))
+        self.assertEqual(recovered.returncode, 0, recovered.stdout + recovered.stderr)
+        self.assertIn("ROLLBACK COMPLETE", recovered.stdout)
+        self.assertEqual(self.marker(database_path), "verified golden fixture")
+        self.assertFalse(Path(str(database_path) + "-wal").exists())
+        self.assertFalse(Path(str(database_path) + "-shm").exists())
+
+    def test_rejected_rollback_snapshots_fail_without_restarting_writers(self):
+        import json
+
+        database_path, snapshot_dir = self.prepare_rejected_snapshot_rollback()
+        manifest = snapshot_dir / "MANIFEST.sha256"
+        valid_manifest = manifest.read_text()
+        for invalid_manifest in (None, "0" * 64 + "  aetherflow.sqlite.bak\n", valid_manifest * 2):
+            with self.subTest(manifest=invalid_manifest):
+                if invalid_manifest is None:
+                    manifest.unlink(missing_ok=True)
+                else:
+                    manifest.write_text(invalid_manifest)
+                self.commands.write_text("")
+                receipt_path = self.root / "rollback-status.json"
+                result = self.run_manager(
+                    "rollback", "--job-status-file", str(receipt_path),
+                    "--job-unit", "aetherflow-self-update-rollback-stable-deadbeef.service",
+                )
+                self.assertEqual(result.returncode, 4, result.stdout + result.stderr)
+                self.assertNotIn("ROLLBACK COMPLETE", result.stdout)
+                self.assertNotIn("systemctl restart", self.commands.read_text())
+                self.assertIn("systemctl stop aetherflow-api.service aetherflow-runner.service", self.commands.read_text())
+                for suffix in ("", "-wal", "-shm"):
+                    self.assertEqual(Path(f"{database_path}{suffix}").read_bytes(), f"corrupt fixture {suffix}".encode())
+                receipt = json.loads(receipt_path.read_text())
+                self.assertEqual(receipt["status"], "failed")
+                self.assertEqual(receipt["exit_code"], 4)
+                self.assertFalse(receipt["success"])
+                self.assertIn("Database recovery failed", receipt["error"])
+
+    def test_failed_writer_stop_prevents_snapshot_replacement_and_success(self):
+        database_path, _ = self.prepare_rejected_snapshot_rollback()
+        result = self.run_manager("rollback", TEST_FAIL_DATABASE_STOP="1")
+        self.assertEqual(result.returncode, 4, result.stdout + result.stderr)
+        self.assertIn("writer quiescence also failed", result.stdout)
+        self.assertNotIn("ROLLBACK COMPLETE", result.stdout)
+        self.assertNotIn("systemctl restart", self.commands.read_text())
+        for suffix in ("", "-wal", "-shm"):
+            self.assertEqual(Path(f"{database_path}{suffix}").read_bytes(), f"corrupt fixture {suffix}".encode())
+
+    def test_legacy_experimental_channel_redirects_to_nightly(self):
         live_db = self.root / "live" / "from-env.sqlite"
         self.write_db(live_db, "env")
         self.env_file.write_text(f"DB_PATH={live_db}\n")
@@ -525,8 +649,173 @@ class ReleaseManagerTests(unittest.TestCase):
             TEST_RELEASES_JSON=releases_json,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("Resolved release tag experimental for channel experimental.", result.stdout)
-        self.assertIn("releases/download/experimental/aetherflow-linux-amd64.tar.gz", self.commands.read_text())
+        self.assertIn("Resolved release tag nightly for channel nightly.", result.stdout)
+        self.assertIn("releases/download/nightly/aetherflow-linux-amd64.tar.gz", self.commands.read_text())
+
+    def test_archive_deploy_symlink_attack_is_rejected_before_extraction(self):
+        outside_dir = self.root / "outside-victim"
+        outside_dir.mkdir(parents=True)
+        victim_file = outside_dir / "release-manager.sh"
+        victim_file.write_text("UNTOUCHED-VICTIM\n")
+
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+            api_info = tarfile.TarInfo("aetherflow-api")
+            api_payload = b"#!/bin/bash\necho aetherflow-api\n"
+            api_info.size = len(api_payload)
+            api_info.mode = 0o755
+            archive.addfile(api_info, io.BytesIO(api_payload))
+
+            sym_info = tarfile.TarInfo("deploy")
+            sym_info.type = tarfile.SYMTYPE
+            sym_info.linkname = str(outside_dir)
+            archive.addfile(sym_info)
+
+        data = buffer.getvalue()
+        (self.root / "artifact.tar.gz").write_bytes(data)
+        digest = hashlib.sha256(data).hexdigest()
+        (self.root / "SHA256SUMS").write_text(digest + "  aetherflow-linux-amd64.tar.gz\n")
+
+        result = self.run_manager("deploy", "--channel", "stable")
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Archive security validation failed", result.stdout + result.stderr)
+        self.assertEqual(victim_file.read_text(), "UNTOUCHED-VICTIM\n")
+        self.assertFalse(self.current.exists())
+
+    def test_prebuilt_pull_failure_fails_closed_without_source_build_fallback(self):
+        (self.root / "SHA256SUMS").write_text("0" * 64 + "  aetherflow-linux-amd64.tar.gz\n")
+        result = self.run_manager("deploy", "--channel", "stable")
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Refusing implicit source-build fallback", result.stdout + result.stderr)
+        self.assertNotIn("Building single-binary release from source", result.stdout + result.stderr)
+        self.assertFalse(self.current.exists())
+
+    def test_root_isolation_rejects_escaping_config_and_persists_status_receipt(self):
+        import json
+        status_file = self.root / "job-status-fail.json"
+        bad_conf = self.root / "bad.conf"
+        bad_conf.write_text('RELEASES_DIR="/opt/AetherFlow/releases"\n')
+        result = self.run_manager(
+            "deploy",
+            "--root",
+            str(self.root),
+            "--config",
+            str(bad_conf),
+            "--job-status-file",
+            str(status_file),
+            "--job-unit",
+            "aetherflow-self-update-123.service",
+        )
+        self.assertEqual(result.returncode, 4, result.stdout + result.stderr)
+        self.assertIn("escapes isolated release root", result.stdout + result.stderr)
+        receipt = json.loads(status_file.read_text())
+        self.assertEqual(receipt["status"], "failed")
+        self.assertTrue(receipt["completed"])
+        self.assertFalse(receipt["success"])
+        self.assertEqual(receipt["exit_code"], 4)
+        self.assertEqual(receipt["job_unit"], "aetherflow-self-update-123.service")
+
+        ok_status_file = self.root / "job-status-ok.json"
+        ok_result = self.run_manager(
+            "deploy",
+            "--dry-run",
+            "--offline",
+            "--job-status-file",
+            str(ok_status_file),
+            "--job-unit",
+            "aetherflow-self-update-456.service",
+        )
+        self.assertEqual(ok_result.returncode, 0, ok_result.stdout + ok_result.stderr)
+        ok_receipt = json.loads(ok_status_file.read_text())
+        self.assertEqual(ok_receipt["status"], "succeeded")
+        self.assertTrue(ok_receipt["completed"])
+        self.assertTrue(ok_receipt["success"])
+        self.assertEqual(ok_receipt["exit_code"], 0)
+
+    def test_maintenance_lock_enforces_0660_and_rejects_symlink(self):
+        result = self.run_manager("cleanup", "--dry-run")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        lock_file = self.dry / "data" / ".snapshot.lock"
+        self.assertTrue(lock_file.is_file())
+        self.assertFalse(lock_file.is_symlink())
+        self.assertEqual(lock_file.stat().st_mode & 0o777, 0o660)
+
+        lock_file.unlink()
+        victim = self.root / "symlink-lock-target"
+        victim.write_text("victim\n")
+        lock_file.symlink_to(victim)
+        sym_res = self.run_manager("cleanup", "--dry-run")
+        self.assertNotEqual(sym_res.returncode, 0, sym_res.stdout + sym_res.stderr)
+        self.assertIn("symbolic link", sym_res.stdout + sym_res.stderr)
+
+    def test_conf_file_is_parsed_without_shell_execution_and_unescapes_quotes(self):
+        pwned_marker = self.root / "pwned-by-conf"
+        malicious_conf = self.root / "malicious.conf"
+        malicious_conf.write_text(f'GIT_BRANCH="$(touch {pwned_marker})"\n')
+        bad_res = self.run_manager(
+            "deploy", "--dry-run", "--offline", "--config", str(malicious_conf)
+        )
+        self.assertEqual(bad_res.returncode, 4, bad_res.stdout + bad_res.stderr)
+        self.assertFalse(pwned_marker.exists())
+
+        escaped_conf = self.root / "escaped.conf"
+        escaped_conf.write_text('GIT_BRANCH="feat/quote\\"slash\\\\dollar\\$end"\n')
+        ok_res = self.run_manager(
+            "deploy", "--dry-run", "--offline", "--config", str(escaped_conf)
+        )
+        self.assertEqual(ok_res.returncode, 0, ok_res.stdout + ok_res.stderr)
+
+    def test_isolated_root_rejects_live_systemd_without_disposable_guest_and_contains_cli_bin(self):
+        live_res = self.run_manager(
+            "deploy",
+            "--root",
+            str(self.root),
+            "--channel",
+            "stable",
+        )
+        self.assertEqual(live_res.returncode, 4, live_res.stdout + live_res.stderr)
+        self.assertIn(
+            "AETHERFLOW_ALLOW_ISOLATED_SYSTEMD_LIFECYCLE=1",
+            live_res.stdout + live_res.stderr,
+        )
+        self.assertNotIn("systemctl ", self.commands.read_text())
+
+        dry_res = self.run_manager(
+            "deploy",
+            "--root",
+            str(self.root),
+            "--dry-run",
+            "--offline",
+        )
+        self.assertEqual(dry_res.returncode, 0, dry_res.stdout + dry_res.stderr)
+        self.assertTrue((self.dry / "usr" / "local" / "bin" / "af").is_symlink())
+
+    def test_isolated_root_rejects_out_of_root_db_and_skips_host_systemd_env(self):
+        self.env_file.write_text("# no db override in env file\n")
+        host_unit_res = self.run_manager(
+            "deploy",
+            "--root",
+            str(self.root),
+            "--dry-run",
+            "--offline",
+            TEST_UNIT_ENV="Environment=DB_PATH=/var/lib/aetherflow/host-prod.sqlite",
+        )
+        self.assertEqual(host_unit_res.returncode, 0, host_unit_res.stdout + host_unit_res.stderr)
+        self.assertIn(
+            f"Resolved database path: {self.data / 'aetherflow.sqlite'} (source: DATA_DIR)",
+            host_unit_res.stdout,
+        )
+
+        self.env_file.write_text("DB_PATH=/var/lib/aetherflow/outside.sqlite\n")
+        escape_res = self.run_manager(
+            "deploy",
+            "--root",
+            str(self.root),
+            "--dry-run",
+            "--offline",
+        )
+        self.assertEqual(escape_res.returncode, 4, escape_res.stdout + escape_res.stderr)
+        self.assertIn("escapes isolated release root", escape_res.stdout + escape_res.stderr)
 
 
 if __name__ == "__main__":

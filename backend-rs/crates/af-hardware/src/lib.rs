@@ -284,6 +284,7 @@ struct TelemetryState {
     last_disk_write_bytes: u64,
     last_disk_check: Option<Instant>,
     cached_processes: Vec<ProcessInfo>,
+    #[allow(dead_code)]
     prev_proc_cpu_ticks: HashMap<i32, u64>,
     last_process_scan: Option<Instant>,
     cached_gpus: Vec<GpuMetric>,

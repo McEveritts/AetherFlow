@@ -136,6 +136,9 @@ impl CliError {
                 HostBackupError::SqliteSnapshot { .. }
                 | HostBackupError::ChunkError { .. }
                 | HostBackupError::Archive { .. }
+                | HostBackupError::ServiceQuiescenceFailed { .. }
+                | HostBackupError::RestoreRolledBack { .. }
+                | HostBackupError::RestoreRollbackFailed { .. }
                 | HostBackupError::Io { .. } => CliExitCode::ExecutionFailure,
             },
             CliError::Execution(_) | CliError::Io { .. } => CliExitCode::ExecutionFailure,

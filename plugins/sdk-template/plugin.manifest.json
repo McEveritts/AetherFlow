@@ -9,8 +9,8 @@
     "system:metrics:read"
   ],
   "api_scopes": [
-    "/api/v1/system/*",
-    "/api/v1/marketplace/*"
+    "GET /api/v1/public/marketplace",
+    "GET /api/v1/auth/system/metrics"
   ],
   "lifecycle_hooks": {
     "on_start": "backend/hooks/start.sh",

@@ -46,7 +46,7 @@ function RefreshSettings() {
     return <button onClick={() => void mutate('/api/v1/auth/settings')}>Refresh settings data</button>;
 }
 
-async function renderSettings() {
+async function renderSettings(props: React.ComponentProps<typeof SettingsTab> = {}) {
     const cache = new Map();
     await act(async () => {
         render(
@@ -56,7 +56,7 @@ async function renderSettings() {
                 dedupingInterval: 0, errorRetryCount: 3, revalidateOnFocus: false,
                 isVisible: () => true, isOnline: () => true,
             }}>
-                <SettingsTab />
+                <SettingsTab {...props} />
                 <RefreshSettings />
             </SWRConfig>
         );
@@ -65,6 +65,21 @@ async function renderSettings() {
 
 async function click(element: HTMLElement) {
     await act(async () => { fireEvent.click(element); });
+}
+
+function mockJobStatus(jobUnit: string, replies: (Response | Error)[]) {
+    const route = mockedApiFetch.getMockImplementation()!;
+    let index = 0;
+    const poll = jest.fn(async () => {
+        const reply = replies[Math.min(index++, replies.length - 1)];
+        if (reply instanceof Error) throw reply;
+        return reply;
+    });
+    mockedApiFetch.mockImplementation((url, init) => {
+        if (url === `/api/v1/auth/system/update/status?job_unit=${encodeURIComponent(jobUnit)}`) return poll();
+        return route(url, init);
+    });
+    return poll;
 }
 
 describe('SettingsTab system update lifecycle and settings drafts', () => {
@@ -79,6 +94,7 @@ describe('SettingsTab system update lifecycle and settings drafts', () => {
         jest.useFakeTimers();
         jest.spyOn(Math, 'random').mockReturnValue(0.5);
         mockActiveTab = 'system';
+        window.sessionStorage.clear();
         mockAddToast.mockReset();
         status = {
             state: 'idle', operationId: null, phase: null, error: null, selectedVersion: 'v4.0.0',
@@ -108,6 +124,7 @@ describe('SettingsTab system update lifecycle and settings drafts', () => {
 
     afterEach(() => {
         cleanup();
+        window.sessionStorage.clear();
         jest.clearAllTimers();
         jest.useRealTimers();
         jest.restoreAllMocks();
@@ -195,13 +212,14 @@ describe('SettingsTab system update lifecycle and settings drafts', () => {
     });
 
     it('preserves an unsaved channel across background SWR refreshes without changing the launch target', async () => {
+        settings = { ...settings, updateChannel: 'nightly' };
         await renderSettings();
         const channel = await screen.findByRole('combobox', { name: 'Update Channel' });
-        fireEvent.change(channel, { target: { value: 'nightly' } });
+        fireEvent.change(channel, { target: { value: 'stable' } });
         settings = { ...settings, updateChannel: 'experimental' };
         await click(screen.getByRole('button', { name: 'Refresh settings data' }));
         await waitFor(() => expect(mockedApiFetch.mock.calls.filter(([url]) => url === '/api/v1/auth/settings')).toHaveLength(2));
-        expect(channel).toHaveValue('nightly');
+        expect(channel).toHaveValue('stable');
         expect(screen.getByRole('button', { name: 'Update to v4.0.1' })).toBeDisabled();
     });
 
@@ -300,5 +318,167 @@ describe('SettingsTab system update lifecycle and settings drafts', () => {
         expect(screen.getByText(/trigger response was lost/)).toBeInTheDocument();
         expect(screen.getByRole('button', { name: 'Updating System...' })).toBeDisabled();
         expect(mockedApiFetch.mock.calls.filter(([url]) => url === '/api/v1/admin/system/update/run')).toHaveLength(1);
+    });
+
+    it('offers only stable and nightly and normalizes legacy experimental settings and release checks to nightly', async () => {
+        settings = { ...settings, updateChannel: 'experimental' };
+        Object.assign(check, { channel: 'experimental' });
+        await renderSettings();
+        const channel = screen.getByRole('combobox', { name: 'Update Channel' });
+        expect(channel).toHaveValue('nightly');
+        expect(screen.getAllByRole('option').filter(option => option.closest('select') === channel)).toHaveLength(2);
+        expect(screen.queryByRole('option', { name: 'Experimental' })).not.toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'Update to v4.0.1' })).toBeEnabled();
+        await click(screen.getByRole('button', { name: 'Save Configuration' }));
+        const request = mockedApiFetch.mock.calls.find(([url]) => url === '/api/v1/admin/settings');
+        expect(JSON.parse(String(request?.[1]?.body)).updateChannel).toBe('nightly');
+    });
+
+    it('polls the exact initiated job and accepts only its confirmed terminal success without duplicate POSTs', async () => {
+        const jobUnit = 'aetherflow-self-update-deploy-stable-a1b2c3d4.service';
+        runUpdate.mockResolvedValue(response({ status: 'initiated', completed: false, job_unit: jobUnit }));
+        const poll = mockJobStatus(jobUnit, [
+            response({ status: 'running', completed: false, success: false, job_unit: jobUnit, error: '', exit_code: null }),
+            response({ status: 'succeeded', completed: true, success: true, job_unit: jobUnit, error: '', exit_code: 0 }),
+        ]);
+        await renderSettings({ updatePollIntervalMs: 10, updateMaxPollAttempts: 5 });
+        const button = screen.getByRole('button', { name: 'Update to v4.0.1' });
+        await act(async () => { fireEvent.click(button); fireEvent.click(button); });
+        expect(runUpdate).toHaveBeenCalledTimes(1);
+        expect(screen.getByTestId('system-update-status')).toHaveAttribute('data-status', 'pending');
+        expect(window.sessionStorage.getItem('aetherflow_active_update_job_unit')).toBe(jobUnit);
+        expect(screen.getByRole('button', { name: 'Updating System...' })).toBeDisabled();
+        await act(async () => { await jest.advanceTimersByTimeAsync(10); });
+        expect(poll).toHaveBeenCalledTimes(2);
+        expect(screen.getByTestId('system-update-status')).toHaveAttribute('data-status', 'success');
+        expect(screen.getByTestId('system-update-status')).toHaveTextContent(`System update completed successfully (${jobUnit}).`);
+        expect(window.sessionStorage.getItem('aetherflow_active_update_job_unit')).toBeNull();
+        expect(screen.queryByText(/running the latest release/i)).not.toBeInTheDocument();
+        expect(mockedApiFetch.mock.calls.filter(([url]) => url === '/api/v1/auth/system/update/check').length).toBeGreaterThan(1);
+    });
+
+    it('surfaces a terminal nonzero exit as failure rather than a completed update', async () => {
+        const jobUnit = 'aetherflow-self-update-deploy-stable-deadbeef.service';
+        runUpdate.mockResolvedValue(response({ status: 'initiated', completed: false, job_unit: jobUnit }));
+        mockJobStatus(jobUnit, [response({
+            status: 'failed', completed: true, success: false, job_unit: jobUnit,
+            error: 'Release verification failed during stage3_health_probe.', exit_code: 12,
+        })]);
+        await renderSettings();
+        await click(screen.getByRole('button', { name: 'Update to v4.0.1' }));
+        expect(screen.getByTestId('system-update-status')).toHaveAttribute('data-status', 'error');
+        expect(screen.getByTestId('system-update-status')).toHaveTextContent('Release verification failed during stage3_health_probe.');
+        expect(screen.queryByText(/completed successfully/)).not.toBeInTheDocument();
+        expect(window.sessionStorage.getItem('aetherflow_active_update_job_unit')).toBeNull();
+    });
+
+    it.each([
+        { status: 'unknown', completed: false },
+        { status: 'missing', completed: false },
+        { status: 'succeeded', completed: false, success: true, exit_code: 0 },
+        { status: 'succeeded', completed: true, success: false, exit_code: 0 },
+        { status: 'succeeded', completed: true, success: true, exit_code: 7 },
+        { status: 'succeeded', completed: true, success: true },
+        { status: 'running', completed: false, exit_code: 3 },
+        { status: 'succeeded', completed: true, success: true, exit_code: 0, job_unit: 'nginx.service' },
+        { status: 'succeeded', completed: true, success: true, exit_code: 0, job_unit: '' },
+    ])('rejects unknown, inconsistent, or mismatched durable status: %j', async payload => {
+        const jobUnit = 'aetherflow-self-update-deploy-stable-11223344.service';
+        runUpdate.mockResolvedValue(response({ status: 'initiated', completed: false, job_unit: jobUnit }));
+        mockJobStatus(jobUnit, [response({ job_unit: jobUnit, ...payload })]);
+        await renderSettings();
+        await click(screen.getByRole('button', { name: 'Update to v4.0.1' }));
+        expect(screen.getByTestId('system-update-status')).toHaveAttribute('data-status', 'error');
+        expect(screen.queryByText(/completed successfully/)).not.toBeInTheDocument();
+    });
+
+    it('treats a missing tracked job HTTP response as an error rather than success', async () => {
+        const jobUnit = 'aetherflow-self-update-deploy-nightly-feedface.service';
+        runUpdate.mockResolvedValue(response({ status: 'initiated', completed: false, job_unit: jobUnit }));
+        mockJobStatus(jobUnit, [response({ error: 'Tracked update unit could not be found' }, 404)]);
+        await renderSettings();
+        await click(screen.getByRole('button', { name: 'Update to v4.0.1' }));
+        expect(screen.getByTestId('system-update-status')).toHaveAttribute('data-status', 'error');
+        expect(screen.getByTestId('system-update-status')).toHaveTextContent('Tracked update unit could not be found');
+    });
+
+    it.each(['', 'nginx.service'])('does not poll an invalid initiation job unit: %s', async jobUnit => {
+        runUpdate.mockResolvedValue(response({ status: 'initiated', completed: false, job_unit: jobUnit }));
+        await renderSettings();
+        await click(screen.getByRole('button', { name: 'Update to v4.0.1' }));
+        expect(screen.getByTestId('system-update-status')).toHaveAttribute('data-status', 'error');
+        expect(screen.getByTestId('system-update-status')).toHaveTextContent('invalid or missing self-update job unit');
+        expect(mockedApiFetch.mock.calls.some(([url]) => String(url).includes('?job_unit='))).toBe(false);
+    });
+
+    it('keeps the durable job across API restarts and polling batches until it really completes', async () => {
+        const jobUnit = 'aetherflow-self-update-deploy-stable-1234abcd.service';
+        runUpdate.mockResolvedValue(response({ status: 'initiated', completed: false, job_unit: jobUnit }));
+        const poll = mockJobStatus(jobUnit, [
+            new Error('API restarting'),
+            response({ error: 'API is still restarting' }, 503),
+            response({ status: 'running', completed: false, success: false, job_unit: jobUnit, error: '', exit_code: null }),
+            response({ status: 'succeeded', completed: true, success: true, job_unit: jobUnit, error: '', exit_code: 0 }),
+        ]);
+        await renderSettings({ updatePollIntervalMs: 10, updateMaxPollAttempts: 2 });
+        await click(screen.getByRole('button', { name: 'Update to v4.0.1' }));
+        expect(window.sessionStorage.getItem('aetherflow_active_update_job_unit')).toBe(jobUnit);
+        expect(screen.getByRole('button', { name: 'Updating System...' })).toBeDisabled();
+        await act(async () => { await jest.advanceTimersByTimeAsync(10); });
+        expect(screen.getByTestId('system-update-status')).toHaveAttribute('data-status', 'pending');
+        expect(window.sessionStorage.getItem('aetherflow_active_update_job_unit')).toBe(jobUnit);
+        await act(async () => { await jest.advanceTimersByTimeAsync(30); });
+        expect(poll).toHaveBeenCalledTimes(4);
+        expect(screen.getByTestId('system-update-status')).toHaveAttribute('data-status', 'success');
+        expect(runUpdate).toHaveBeenCalledTimes(1);
+    });
+
+    it('recovers an in-flight job from session storage without resubmitting an update', async () => {
+        const jobUnit = 'aetherflow-self-update-deploy-stable-0123456789abcdef.service';
+        window.sessionStorage.setItem('aetherflow_active_update_job_unit', jobUnit);
+        const poll = mockJobStatus(jobUnit, [response({
+            status: 'succeeded', completed: true, success: true, job_unit: jobUnit, error: '', exit_code: 0,
+        })]);
+        await renderSettings();
+        expect(poll).toHaveBeenCalledTimes(1);
+        expect(screen.getByTestId('system-update-status')).toHaveAttribute('data-status', 'success');
+        expect(window.sessionStorage.getItem('aetherflow_active_update_job_unit')).toBeNull();
+        expect(runUpdate).not.toHaveBeenCalled();
+    });
+
+    it('recovers a backend-advertised active durable job even without browser storage', async () => {
+        const jobUnit = 'aetherflow-self-update-deploy-nightly-abcddcba.service';
+        Object.assign(check, { active_job_unit: jobUnit });
+        mockJobStatus(jobUnit, [response({
+            status: 'succeeded', completed: true, success: true, job_unit: jobUnit, error: '', exit_code: 0,
+        })]);
+        await renderSettings();
+        expect(screen.getByTestId('system-update-status')).toHaveAttribute('data-status', 'success');
+        expect(runUpdate).not.toHaveBeenCalled();
+    });
+
+    it('ignores an invalid stored unit instead of querying another service', async () => {
+        window.sessionStorage.setItem('aetherflow_active_update_job_unit', 'nginx.service');
+        await renderSettings();
+        expect(window.sessionStorage.getItem('aetherflow_active_update_job_unit')).toBeNull();
+        expect(mockedApiFetch.mock.calls.some(([url]) => String(url).includes('?job_unit='))).toBe(false);
+        expect(screen.getByRole('button', { name: 'Update to v4.0.1' })).toBeEnabled();
+    });
+
+    it('uses scoped flat polling when the backend requires job_unit without inventing runtime verification', async () => {
+        const jobUnit = 'aetherflow-self-update-deploy-stable-abcd1234.service';
+        const route = mockedApiFetch.getMockImplementation()!;
+        mockedApiFetch.mockImplementation((url, init) => url === '/api/v1/auth/system/update/status'
+            ? Promise.resolve(response({ error: 'job_unit query parameter is required' }, 400))
+            : route(url, init));
+        runUpdate.mockResolvedValue(response({ status: 'initiated', completed: false, job_unit: jobUnit }));
+        mockJobStatus(jobUnit, [response({
+            status: 'succeeded', completed: true, success: true, job_unit: jobUnit, error: '', exit_code: 0,
+        })]);
+        await renderSettings();
+        expect(screen.getByRole('button', { name: 'Update to v4.0.1' })).toBeEnabled();
+        await click(screen.getByRole('button', { name: 'Update to v4.0.1' }));
+        expect(screen.getByTestId('system-update-status')).toHaveAttribute('data-status', 'success');
+        expect(screen.queryByText(/running the latest release/i)).not.toBeInTheDocument();
     });
 });

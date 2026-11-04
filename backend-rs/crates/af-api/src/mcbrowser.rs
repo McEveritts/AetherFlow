@@ -26,7 +26,6 @@ use std::fs::{self, File};
 use std::io::{self, ErrorKind, Read, Seek, SeekFrom};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -1539,7 +1538,7 @@ mod http_tests;
 mod tests {
     use super::*;
     use rand::Rng;
-    use std::os::unix::fs::symlink;
+    use std::os::unix::fs::{symlink, PermissionsExt};
 
     struct TestTempDir {
         path: PathBuf,

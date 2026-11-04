@@ -7,17 +7,18 @@
 
 use crate::error::{HostBackupError, HostBackupResult};
 use crate::manifest::{BackupManifest, BackupManifestEntry, BackupTargetKind};
-use crate::restore::verify_tar_gz_against_manifest;
+use crate::restore::verify_tar_gz_against_manifest_with_trusted_uid;
 use crate::snapshot::{
-    snapshot_sqlite_database, verify_sqlite_snapshot_integrity, SnapshotOptions,
+    snapshot_sqlite_database, verify_sqlite_snapshot_integrity_with_trusted_uid, SnapshotOptions,
     SqliteSnapshotReceipt,
 };
 use crate::verify::{
     checksum_sidecar_path, create_unique_private_staging_dir,
-    create_unique_private_temp_file, ensure_private_dir_all, parse_exact_chunk_index,
-    reject_if_symlink, reject_symlink_chain, safe_backup_file_path, split_backup_into_chunks,
+    create_unique_private_temp_file, ensure_private_dir_all, open_existing_regular_file_nofollow,
+    open_or_create_dir_nofollow, parse_exact_chunk_index, reject_if_symlink, reject_symlink_chain,
+    safe_backup_file_path, split_backup_into_chunks, sync_parent_directory,
     validate_backup_filename, validate_no_parent_traversal, validate_relative_backup_path,
-    verify_file_with_sidecar, write_sha256_sidecar,
+    verify_file_with_sidecar, verify_file_with_sidecar_and_trusted_uid, write_sha256_sidecar,
 };
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use flate2::write::GzEncoder;
@@ -25,7 +26,7 @@ use flate2::Compression;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use tar::Builder;
 
@@ -79,6 +80,26 @@ impl HostBackupConfig {
             sqlite_db_path: Some(root.join("var/lib/aetherflow/aetherflow.sqlite")),
             snapshot_options: SnapshotOptions::default(),
             config_targets: default_host_targets_for_root(root, &owner_home),
+            chunk_size_bytes: None,
+            max_retained_backups: DEFAULT_MAX_RETAINED_BACKUPS,
+            retention_days: DEFAULT_RETENTION_DAYS,
+        }
+    }
+}
+
+impl Default for HostBackupConfig {
+    fn default() -> Self {
+        let owner_home = std::env::var("HOME")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/home/aetherflow"));
+        Self {
+            backup_dir: PathBuf::from("/var/lib/aetherflow/backups"),
+            app_version: "v4.0.0".to_string(),
+            sqlite_db_path: Some(PathBuf::from("/var/lib/aetherflow/aetherflow.sqlite")),
+            snapshot_options: SnapshotOptions::default(),
+            config_targets: default_host_targets_for_root(Path::new("/"), &owner_home),
             chunk_size_bytes: None,
             max_retained_backups: DEFAULT_MAX_RETAINED_BACKUPS,
             retention_days: DEFAULT_RETENTION_DAYS,
@@ -185,26 +206,15 @@ pub fn create_sqlite_snapshot_backup(
 
     let mut manifest = BackupManifest::new(&config.app_version, &filename)?;
     manifest.sqlite_snapshot = Some(sqlite_receipt.metadata.clone());
-    #[cfg(unix)]
-    let unix_mode = {
-        use std::os::unix::fs::PermissionsExt;
-        fs::symlink_metadata(&snapshot_dest)
-            .ok()
-            .map(|m| m.permissions().mode() & 0o7777)
-    };
-    #[cfg(not(unix))]
-    let unix_mode = None;
-    let entry = BackupManifestEntry {
-        relative_path: filename.clone(),
-        logical_target_path: Some(db_source.to_string_lossy().into_owned()),
-        kind: BackupTargetKind::SqliteSnapshot,
-        sha256: sqlite_receipt.metadata.sha256.clone(),
-        size_bytes: sqlite_receipt.metadata.size_bytes,
-        unix_mode,
-        required: true,
-    };
-    entry.validate()?;
-    manifest.entries.push(entry);
+    manifest.add_file_with_metadata_source_and_trusted_uid(
+        &filename,
+        &snapshot_dest,
+        Some(db_source),
+        config.snapshot_options.trusted_source_uid,
+        BackupTargetKind::SqliteSnapshot,
+        Some(db_source.to_string_lossy().into_owned()),
+        true,
+    )?;
 
     let mut chunk_paths = Vec::new();
     if let Some(chunk_size) = config.chunk_size_bytes {
@@ -273,35 +283,34 @@ pub fn create_host_archive_backup(
         // Never follow symlinks when archiving host configuration directories
         tar_builder.follow_symlinks(false);
 
-        // 1. If a live SQLite database is configured and exists, snapshot it safely first
         if let Some(ref db_src) = config.sqlite_db_path {
             validate_no_parent_traversal(db_src, "sqlite_db_path")?;
             reject_if_symlink(db_src, "sqlite_db_path")?;
-            if db_src.exists() {
-                let rel_db_in_archive = "var/lib/aetherflow/aetherflow.sqlite";
-                let receipt = snapshot_sqlite_database(
-                    db_src,
-                    &staged_sqlite_path,
-                    rel_db_in_archive,
-                    &config.snapshot_options,
-                )?;
-                append_verified_file_to_tar(
-                    &mut tar_builder,
-                    &staged_sqlite_path,
-                    rel_db_in_archive,
-                    BackupTargetKind::SqliteSnapshot,
-                    Some(db_src.to_string_lossy().into_owned()),
-                    true,
-                    &mut manifest,
-                )?;
-                let _ = fs::remove_file(&receipt.sidecar_path);
-                let _ = fs::remove_file(&staged_sqlite_path);
-                manifest.sqlite_snapshot = Some(receipt.metadata.clone());
-                sqlite_receipt_opt = Some(receipt);
-            }
+            let rel_db_in_archive = "var/lib/aetherflow/aetherflow.sqlite";
+            let receipt = snapshot_sqlite_database(
+                db_src,
+                &staged_sqlite_path,
+                rel_db_in_archive,
+                &config.snapshot_options,
+            )?;
+            append_verified_file_to_tar(
+                &mut tar_builder,
+                &staging_dir,
+                &staged_sqlite_path,
+                Some(db_src),
+                config.snapshot_options.trusted_source_uid,
+                rel_db_in_archive,
+                BackupTargetKind::SqliteSnapshot,
+                Some(db_src.to_string_lossy().into_owned()),
+                true,
+                &mut manifest,
+            )?;
+            let _ = fs::remove_file(&receipt.sidecar_path);
+            let _ = fs::remove_file(&staged_sqlite_path);
+            manifest.sqlite_snapshot = Some(receipt.metadata.clone());
+            sqlite_receipt_opt = Some(receipt);
         }
 
-        // 2. Walk configured host targets (files and directories)
         for target in &config.config_targets {
             let norm_rel = validate_relative_backup_path(&target.archive_relative_path)?;
             validate_no_parent_traversal(&target.source_path, "target source_path")?;
@@ -340,7 +349,10 @@ pub fn create_host_archive_backup(
                 let rel_str = norm_rel.to_string_lossy().replace('\\', "/");
                 append_verified_file_to_tar(
                     &mut tar_builder,
+                    &staging_dir,
                     &target.source_path,
+                    None,
+                    None,
                     &rel_str,
                     BackupTargetKind::ConfigFile,
                     target.logical_fhs_path.clone(),
@@ -350,12 +362,18 @@ pub fn create_host_archive_backup(
             } else if meta.is_dir() {
                 append_directory_tree_to_tar(
                     &mut tar_builder,
+                    &staging_dir,
                     &target.source_path,
                     &target.source_path,
                     &norm_rel,
                     target.logical_fhs_path.as_deref(),
                     &mut manifest,
                 )?;
+            } else {
+                return Err(HostBackupError::PathValidation {
+                    path: target.source_path.clone(),
+                    reason: "backup target is neither a regular file nor a directory".to_string(),
+                });
             }
         }
 
@@ -365,18 +383,18 @@ pub fn create_host_archive_backup(
             ));
         }
 
-        let gz_encoder = tar_builder.into_inner().map_err(|e| HostBackupError::Archive {
+        let gz_encoder = tar_builder.into_inner().map_err(|err| HostBackupError::Archive {
             archive: archive_path.clone(),
-            reason: format!("finalizing tar stream failed: {}", e),
+            reason: format!("finalizing tar stream failed: {}", err),
         })?;
-        let inner_file = gz_encoder.finish().map_err(|e| HostBackupError::Archive {
+        let inner_file = gz_encoder.finish().map_err(|err| HostBackupError::Archive {
             archive: archive_path.clone(),
-            reason: format!("finalizing gzip stream failed: {}", e),
+            reason: format!("finalizing gzip stream failed: {}", err),
         })?;
-        inner_file.sync_all().map_err(|e| {
+        inner_file.sync_all().map_err(|err| {
             HostBackupError::io(
                 format!("syncing temporary archive {}", tmp_archive_path.display()),
-                e,
+                err,
             )
         })?;
 
@@ -392,12 +410,12 @@ pub fn create_host_archive_backup(
         return Err(err);
     }
 
-    if let Err(e) = reject_if_symlink(&archive_path, "backup archive path") {
+    if let Err(err) = reject_if_symlink(&archive_path, "backup archive path") {
         let _ = fs::remove_file(&tmp_archive_path);
-        return Err(e);
+        return Err(err);
     }
 
-    if let Err(e) = fs::rename(&tmp_archive_path, &archive_path) {
+    if let Err(err) = fs::rename(&tmp_archive_path, &archive_path) {
         let _ = fs::remove_file(&tmp_archive_path);
         return Err(HostBackupError::io(
             format!(
@@ -405,8 +423,21 @@ pub fn create_host_archive_backup(
                 tmp_archive_path.display(),
                 archive_path.display()
             ),
-            e,
+            err,
         ));
+    }
+
+    if let Some(archive_parent) = archive_path.parent() {
+        sync_parent_directory(archive_parent, "activating backup archive")?;
+    }
+
+    if let Err(verify_err) = verify_tar_gz_against_manifest_with_trusted_uid(
+        &archive_path,
+        &manifest,
+        config.snapshot_options.trusted_source_uid,
+    ) {
+        let _ = fs::remove_file(&archive_path);
+        return Err(verify_err);
     }
 
     let post_activate: HostBackupResult<HostBackupReceipt> = (|| {
@@ -444,9 +475,102 @@ pub fn create_host_archive_backup(
     post_activate
 }
 
+type StagedSnapshotDigestAndAttrs = (
+    String,
+    u64,
+    Option<u32>,
+    Option<u32>,
+    Option<u32>,
+    Option<(u64, u64)>,
+);
+
+fn snapshot_file_once_into_staging(
+    source_path: &Path,
+    staged_path: &Path,
+    trusted_source_uid: Option<u32>,
+) -> HostBackupResult<StagedSnapshotDigestAndAttrs> {
+    if let Some(parent) = staged_path.parent() {
+        open_or_create_dir_nofollow(parent, 0o700, "backup staging parent directory")?;
+    }
+    let (mut source_file, fd_mode, fd_uid, fd_gid) =
+        open_existing_regular_file_nofollow(source_path, trusted_source_uid, "backup source file")?
+            .ok_or_else(|| HostBackupError::PathValidation {
+                path: source_path.to_path_buf(),
+                reason: "backup source file does not exist".to_string(),
+            })?;
+    let mut open_opts = fs::OpenOptions::new();
+    open_opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        open_opts.mode(0o600);
+        open_opts.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    }
+    let mut staged_file = open_opts.open(staged_path).map_err(|err| {
+        HostBackupError::io(
+            format!("creating staged snapshot {}", staged_path.display()),
+            err,
+        )
+    })?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    let mut total_bytes = 0u64;
+    loop {
+        let bytes_read = source_file.read(&mut buffer).map_err(|err| {
+            HostBackupError::io(format!("reading source file {}", source_path.display()), err)
+        })?;
+        if bytes_read == 0 {
+            break;
+        }
+        staged_file.write_all(&buffer[..bytes_read]).map_err(|err| {
+            HostBackupError::io(
+                format!("writing staged snapshot {}", staged_path.display()),
+                err,
+            )
+        })?;
+        hasher.update(&buffer[..bytes_read]);
+        total_bytes += bytes_read as u64;
+    }
+    staged_file.sync_all().map_err(|err| {
+        HostBackupError::io(
+            format!("syncing staged snapshot {}", staged_path.display()),
+            err,
+        )
+    })?;
+    #[cfg(unix)]
+    let staged_dev_ino = {
+        use std::os::unix::fs::MetadataExt;
+        staged_file
+            .metadata()
+            .ok()
+            .map(|meta_info| (meta_info.dev(), meta_info.ino()))
+    };
+    #[cfg(not(unix))]
+    let staged_dev_ino: Option<(u64, u64)> = None;
+    #[cfg(unix)]
+    let (unix_mode, unix_uid, unix_gid) = (Some(fd_mode & 0o7777), Some(fd_uid), Some(fd_gid));
+    #[cfg(not(unix))]
+    let (unix_mode, unix_uid, unix_gid) = {
+        let _ = (fd_mode, fd_uid, fd_gid);
+        (None, None, None)
+    };
+    Ok((
+        hex::encode(hasher.finalize()),
+        total_bytes,
+        unix_mode,
+        unix_uid,
+        unix_gid,
+        staged_dev_ino,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
 fn append_verified_file_to_tar(
     tar_builder: &mut Builder<GzEncoder<File>>,
+    staging_dir: &Path,
     disk_path: &Path,
+    metadata_source_path: Option<&Path>,
+    trusted_metadata_uid: Option<u32>,
     archive_rel_path: &str,
     kind: BackupTargetKind,
     logical_target_path: Option<String>,
@@ -454,29 +578,150 @@ fn append_verified_file_to_tar(
     manifest: &mut BackupManifest,
 ) -> HostBackupResult<()> {
     reject_if_symlink(disk_path, "archive member")?;
-    let _ = validate_relative_backup_path(archive_rel_path)?;
+    let attr_path = metadata_source_path.unwrap_or(disk_path);
+    reject_if_symlink(attr_path, "archive member metadata source")?;
+    let norm_rel = validate_relative_backup_path(archive_rel_path)?;
 
-    manifest.add_file_from_disk(
-        archive_rel_path.to_string(),
-        disk_path,
-        kind,
-        logical_target_path,
-        required,
-    )?;
+    let (
+        staged_payload_path,
+        sha256,
+        size_bytes,
+        unix_mode,
+        unix_uid,
+        unix_gid,
+        expected_dev_ino,
+        cleanup_staged,
+    ) = if kind == BackupTargetKind::SqliteSnapshot {
+        #[cfg(unix)]
+        let disk_dev_ino = {
+            use std::os::unix::fs::MetadataExt;
+            fs::symlink_metadata(disk_path)
+                .ok()
+                .map(|meta_info| (meta_info.dev(), meta_info.ino()))
+        };
+        #[cfg(not(unix))]
+        let disk_dev_ino: Option<(u64, u64)> = None;
+        let entry = manifest
+            .add_file_with_metadata_source_and_trusted_uid(
+                archive_rel_path.to_string(),
+                disk_path,
+                metadata_source_path,
+                trusted_metadata_uid,
+                kind,
+                logical_target_path,
+                required,
+            )?
+            .clone();
+        (
+            disk_path.to_path_buf(),
+            entry.sha256,
+            entry.size_bytes,
+            entry.unix_mode,
+            entry.unix_uid,
+            entry.unix_gid,
+            disk_dev_ino,
+            false,
+        )
+    } else {
+        let staged_member_path = staging_dir.join("members").join(&norm_rel);
+        let (digest, byte_len, src_mode, src_uid, src_gid, staged_dev_ino) =
+            snapshot_file_once_into_staging(disk_path, &staged_member_path, trusted_metadata_uid)?;
+        let entry = BackupManifestEntry {
+            relative_path: archive_rel_path.to_string(),
+            logical_target_path,
+            kind,
+            sha256: digest.clone(),
+            size_bytes: byte_len,
+            unix_mode: src_mode,
+            unix_uid: src_uid,
+            unix_gid: src_gid,
+            required,
+        };
+        entry.validate()?;
+        manifest.entries.push(entry);
+        (
+            staged_member_path,
+            digest,
+            byte_len,
+            src_mode,
+            src_uid,
+            src_gid,
+            staged_dev_ino,
+            true,
+        )
+    };
 
-    let mut f = File::open(disk_path)
-        .map_err(|e| HostBackupError::io(format!("opening {}", disk_path.display()), e))?;
-    tar_builder
-        .append_file(archive_rel_path, &mut f)
-        .map_err(|e| HostBackupError::Archive {
-            archive: disk_path.to_path_buf(),
-            reason: format!("appending '{}' to tar failed: {}", archive_rel_path, e),
+    let mut header = tar::Header::new_gnu();
+    header.set_entry_type(tar::EntryType::Regular);
+    header.set_size(size_bytes);
+    header.set_mode(unix_mode.unwrap_or(0o600) & 0o7777);
+    if let Some(uid_val) = unix_uid {
+        header.set_uid(u64::from(uid_val));
+    }
+    if let Some(gid_val) = unix_gid {
+        header.set_gid(u64::from(gid_val));
+    }
+    header.set_cksum();
+
+    let append_res = (|| -> HostBackupResult<()> {
+        let (mut payload_file, _, _, _) =
+            open_existing_regular_file_nofollow(&staged_payload_path, None, "staged archive payload")?
+                .ok_or_else(|| HostBackupError::PathValidation {
+                    path: staged_payload_path.clone(),
+                    reason: "staged archive payload file does not exist".to_string(),
+                })?;
+        #[cfg(unix)]
+        if let Some((exp_dev, exp_ino)) = expected_dev_ino {
+            use std::os::unix::fs::MetadataExt;
+            let current_meta = payload_file.metadata().map_err(|err| {
+                HostBackupError::io(
+                    format!("fstat staged archive payload {}", staged_payload_path.display()),
+                    err,
+                )
+            })?;
+            if current_meta.dev() != exp_dev || current_meta.ino() != exp_ino {
+                return Err(HostBackupError::PathValidation {
+                    path: staged_payload_path.clone(),
+                    reason: "staged archive payload inode changed before tar append".to_string(),
+                });
+            }
+        }
+        #[cfg(not(unix))]
+        let _ = expected_dev_ino;
+        let (actual_digest, actual_len) =
+            crate::verify::compute_reader_sha256(&mut payload_file, &staged_payload_path)?;
+        if actual_len != size_bytes || !actual_digest.eq_ignore_ascii_case(&sha256) {
+            return Err(HostBackupError::ChecksumMismatch {
+                artifact: archive_rel_path.to_string(),
+                expected: sha256.to_ascii_lowercase(),
+                actual: actual_digest,
+            });
+        }
+        use std::io::{Seek, SeekFrom};
+        payload_file.seek(SeekFrom::Start(0)).map_err(|err| {
+            HostBackupError::io(
+                format!("rewinding staged archive payload {}", staged_payload_path.display()),
+                err,
+            )
         })?;
-    Ok(())
+        tar_builder
+            .append_data(&mut header, archive_rel_path, &mut payload_file)
+            .map_err(|err| HostBackupError::Archive {
+                archive: disk_path.to_path_buf(),
+                reason: format!("appending '{}' to tar failed: {}", archive_rel_path, err),
+            })?;
+        Ok(())
+    })();
+
+    if cleanup_staged {
+        let _ = fs::remove_file(&staged_payload_path);
+    }
+    append_res
 }
 
 fn append_directory_tree_to_tar(
     tar_builder: &mut Builder<GzEncoder<File>>,
+    staging_dir: &Path,
     root_dir: &Path,
     current_dir: &Path,
     archive_prefix: &Path,
@@ -486,19 +731,27 @@ fn append_directory_tree_to_tar(
     reject_symlink_chain(root_dir, current_dir)?;
 
     let mut entries: Vec<_> = fs::read_dir(current_dir)
-        .map_err(|e| HostBackupError::io(format!("reading directory {}", current_dir.display()), e))?
+        .map_err(|err| {
+            HostBackupError::io(format!("reading directory {}", current_dir.display()), err)
+        })?
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| {
-            HostBackupError::io(format!("iterating directory {}", current_dir.display()), e)
+        .map_err(|err| {
+            HostBackupError::io(format!("iterating directory {}", current_dir.display()), err)
         })?;
 
-    // Sort deterministically by filename so archive order and manifests are reproducible
-    entries.sort_by_key(|e| e.file_name());
+    entries.sort_by_key(|dir_entry| dir_entry.file_name());
 
     for entry in entries {
+        let entry_name_str = entry.file_name().to_string_lossy().to_ascii_lowercase();
+        if entry_name_str == ".restore-provenance"
+            || entry_name_str.starts_with(".rollback-restore.")
+            || entry_name_str.starts_with(".staging-restore.")
+        {
+            continue;
+        }
         let path = entry.path();
         let meta = fs::symlink_metadata(&path)
-            .map_err(|e| HostBackupError::io(format!("stat {}", path.display()), e))?;
+            .map_err(|err| HostBackupError::io(format!("stat {}", path.display()), err))?;
 
         if meta.file_type().is_symlink() {
             return Err(HostBackupError::SymlinkRejected {
@@ -519,6 +772,7 @@ fn append_directory_tree_to_tar(
         if meta.is_dir() {
             append_directory_tree_to_tar(
                 tar_builder,
+                staging_dir,
                 root_dir,
                 &path,
                 archive_prefix,
@@ -532,13 +786,21 @@ fn append_directory_tree_to_tar(
             });
             append_verified_file_to_tar(
                 tar_builder,
+                staging_dir,
                 &path,
+                None,
+                None,
                 &rel_str,
                 BackupTargetKind::ConfigDirectoryEntry,
                 logical,
                 true,
                 manifest,
             )?;
+        } else {
+            return Err(HostBackupError::PathValidation {
+                path,
+                reason: "special non-regular file inside backed-up configuration directory is forbidden".to_string(),
+            });
         }
     }
 
@@ -593,14 +855,15 @@ pub fn list_backup_inventory(backup_dir: &Path) -> HostBackupResult<Vec<BackupIn
             .unwrap_or_else(|| Utc::now().to_rfc3339());
 
         let sidecar = checksum_sidecar_path(path);
-        let checksum_sha256 = match fs::symlink_metadata(&sidecar) {
-            Ok(sc_meta) if sc_meta.is_file() && !sc_meta.file_type().is_symlink() => {
-                fs::read_to_string(&sidecar)
-                    .ok()
-                    .and_then(|s| crate::verify::parse_sha256_sidecar_str(&s).ok())
-            }
-            _ => None,
-        };
+        let checksum_sha256 = crate::verify::read_verified_text_file_nofollow(
+            &sidecar,
+            None,
+            16 * 1024,
+            "checksum sidecar",
+        )
+        .ok()
+        .flatten()
+        .and_then(|raw_sidecar| crate::verify::parse_sha256_sidecar_str(&raw_sidecar).ok());
 
         let manifest_path = backup_dir.join(format!("{}.manifest.json", name));
         let manifest_present = match fs::symlink_metadata(&manifest_path) {
@@ -637,9 +900,29 @@ fn safe_primary_check(name: &str) -> bool {
 
 /// Deletes a specific backup artifact along with its `.sha256` sidecar, `.manifest.json`,
 /// `.manifest.json.sha256`, and any exact 5-digit `.part.NNNNN` regular non-symlink chunk files
-/// inside `backup_dir`. Rejects symlinks if encountered on companion or chunk paths.
+/// inside `backup_dir`.
+///
+/// # Security Invariants
+/// 1. Only inventoried primary backup artifacts (`list_backup_inventory(backup_dir)`) ending in
+///    `.sqlite` or `.tar.gz` may be deleted — arbitrary files in `backup_dir` (such as `.conf`,
+///    `.db`, `.env`, lockfiles, or non-backup files) are rejected.
+/// 2. The primary artifact MUST have a valid, matching `.sha256` sidecar (`verify_file_with_sidecar`),
+///    and if `<filename>.manifest.json` exists it must pass `BackupManifest::load_from_path(..., true)`
+///    with `manifest.primary_artifact == filename`.
+/// 3. Uses dirfd-relative `unlink_file_at_destination` (`unlinkat` on Unix) after rejecting symlinks.
 pub fn delete_backup_artifacts(backup_dir: &Path, filename: &str) -> HostBackupResult<Vec<PathBuf>> {
-    let primary = safe_backup_file_path(backup_dir, filename)?;
+    let clean_filename = validate_backup_filename(filename)?;
+    if !(clean_filename.ends_with(".sqlite") || clean_filename.ends_with(".tar.gz")) {
+        return Err(HostBackupError::PathValidation {
+            path: backup_dir.join(&clean_filename),
+            reason: format!(
+                "refusing to delete '{}': only inventoried .sqlite or .tar.gz backup artifacts may be deleted",
+                clean_filename
+            ),
+        });
+    }
+
+    let primary = safe_backup_file_path(backup_dir, &clean_filename)?;
     let primary_meta = match fs::symlink_metadata(&primary) {
         Ok(m) => m,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -668,11 +951,46 @@ pub fn delete_backup_artifacts(backup_dir: &Path, filename: &str) -> HostBackupR
         });
     }
 
+    // Require the target file to be present in the verified backup inventory for `backup_dir`
+    let inventory = list_backup_inventory(backup_dir)?;
+    let inv_item = inventory
+        .iter()
+        .find(|item| item.filename == clean_filename)
+        .ok_or_else(|| HostBackupError::PathValidation {
+            path: primary.clone(),
+            reason: format!(
+                "refusing to delete '{}': file is not a registered backup artifact in inventory",
+                clean_filename
+            ),
+        })?;
+
+    if !inv_item.checksum_present {
+        return Err(HostBackupError::MissingChecksumSidecar {
+            artifact: primary.clone(),
+            sidecar_path: checksum_sidecar_path(&primary),
+        });
+    }
+
+    // Verify primary artifact against its `.sha256` sidecar before allowing deletion
+    let _verified_sidecar = verify_file_with_sidecar(&primary)?;
+
+    // If a companion `.manifest.json` exists, verify its `.sha256` sidecar and `primary_artifact` binding
+    let manifest_companion = backup_dir.join(format!("{}.manifest.json", clean_filename));
+    if manifest_companion.exists() {
+        let loaded_manifest = BackupManifest::load_from_path(&manifest_companion, true)?;
+        if loaded_manifest.primary_artifact != clean_filename {
+            return Err(HostBackupError::InvalidManifest(format!(
+                "refusing to delete '{}': companion manifest primary_artifact is '{}'",
+                clean_filename, loaded_manifest.primary_artifact
+            )));
+        }
+    }
+
     let mut to_remove = vec![primary.clone()];
     let companions = [
         checksum_sidecar_path(&primary),
-        backup_dir.join(format!("{}.manifest.json", filename)),
-        backup_dir.join(format!("{}.manifest.json.sha256", filename)),
+        manifest_companion,
+        backup_dir.join(format!("{}.manifest.json.sha256", clean_filename)),
     ];
 
     for c in companions {
@@ -704,7 +1022,7 @@ pub fn delete_backup_artifacts(backup_dir: &Path, filename: &str) -> HostBackupR
     {
         let entry = entry.map_err(|e| HostBackupError::io("reading dir entry", e))?;
         let name = entry.file_name().to_string_lossy().into_owned();
-        if let Some(idx) = parse_exact_chunk_index(filename, &name) {
+        if let Some(idx) = parse_exact_chunk_index(&clean_filename, &name) {
             let p = entry.path();
             let meta = fs::symlink_metadata(&p)
                 .map_err(|e| HostBackupError::io(format!("stat chunk {}", p.display()), e))?;
@@ -726,8 +1044,7 @@ pub fn delete_backup_artifacts(backup_dir: &Path, filename: &str) -> HostBackupR
 
     let mut removed = Vec::with_capacity(to_remove.len());
     for c in to_remove {
-        fs::remove_file(&c)
-            .map_err(|e| HostBackupError::io(format!("removing {}", c.display()), e))?;
+        crate::verify::unlink_file_at_destination(&c, "deleting verified backup artifact")?;
         removed.push(c);
     }
 
@@ -776,58 +1093,70 @@ pub fn verify_backup_artifact(
     backup_dir: &Path,
     filename: &str,
 ) -> HostBackupResult<(crate::verify::ChecksumVerification, Option<BackupManifest>)> {
+    verify_backup_artifact_with_trusted_uid(backup_dir, filename, None)
+}
+
+pub fn verify_backup_artifact_with_trusted_uid(
+    backup_dir: &Path,
+    filename: &str,
+    trusted_uid: Option<u32>,
+) -> HostBackupResult<(crate::verify::ChecksumVerification, Option<BackupManifest>)> {
     let artifact_path = safe_backup_file_path(backup_dir, filename)?;
-    let checksum_res = verify_file_with_sidecar(&artifact_path)?;
+    let checksum_res = verify_file_with_sidecar_and_trusted_uid(&artifact_path, trusted_uid)?;
 
     let manifest_path = backup_dir.join(format!("{}.manifest.json", filename));
     reject_symlink_chain(backup_dir, &manifest_path)?;
     let manifest_opt = if manifest_path.exists() {
-        Some(BackupManifest::load_from_path(&manifest_path, true)?)
+        Some(BackupManifest::load_from_path_with_trusted_uid(
+            &manifest_path,
+            true,
+            trusted_uid,
+        )?)
     } else {
         None
     };
 
-    // Collect any exact 5-digit `.part.NNNNN` files present in `backup_dir` for `filename`
     let mut disk_chunks: Vec<(usize, PathBuf)> = Vec::new();
     for entry in fs::read_dir(backup_dir)
-        .map_err(|e| HostBackupError::io(format!("reading {}", backup_dir.display()), e))?
+        .map_err(|err| HostBackupError::io(format!("reading {}", backup_dir.display()), err))?
     {
-        let entry = entry.map_err(|e| HostBackupError::io("reading dir entry", e))?;
+        let entry = entry.map_err(|err| HostBackupError::io("reading dir entry", err))?;
         let entry_name = entry.file_name().to_string_lossy().into_owned();
         if let Some(idx) = parse_exact_chunk_index(filename, &entry_name) {
-            let p = entry.path();
-            reject_symlink_chain(backup_dir, &p)?;
-            let meta = fs::symlink_metadata(&p)
-                .map_err(|e| HostBackupError::io(format!("stat chunk {}", p.display()), e))?;
+            let chunk_path = entry.path();
+            reject_symlink_chain(backup_dir, &chunk_path)?;
+            let meta = fs::symlink_metadata(&chunk_path).map_err(|err| {
+                HostBackupError::io(format!("stat chunk {}", chunk_path.display()), err)
+            })?;
             if meta.file_type().is_symlink() {
                 return Err(HostBackupError::SymlinkRejected {
-                    path: p,
+                    path: chunk_path,
                     reason: "backup chunk file is a symbolic link".to_string(),
                 });
             }
             if !meta.is_file() {
                 return Err(HostBackupError::ChunkError {
                     artifact: artifact_path.clone(),
-                    reason: format!("chunk path '{}' is not a regular file", p.display()),
+                    reason: format!("chunk path '{}' is not a regular file", chunk_path.display()),
                 });
             }
-            disk_chunks.push((idx, p));
+            disk_chunks.push((idx, chunk_path));
         }
     }
     disk_chunks.sort_by_key(|(idx, _)| *idx);
 
-    if let Some(ref m) = manifest_opt {
-        if m.primary_artifact != filename {
+    if let Some(ref manifest_val) = manifest_opt {
+        if manifest_val.primary_artifact != filename {
             return Err(HostBackupError::InvalidManifest(format!(
                 "manifest primary_artifact '{}' does not match verified filename '{}'",
-                m.primary_artifact, filename
+                manifest_val.primary_artifact, filename
             )));
         }
 
         if filename.ends_with(".tar.gz") {
-            verify_tar_gz_against_manifest(&artifact_path, m, None)?;
+            verify_tar_gz_against_manifest_with_trusted_uid(&artifact_path, manifest_val, trusted_uid)?;
         } else if filename.ends_with(".sqlite") {
-            let Some(ref snap) = m.sqlite_snapshot else {
+            let Some(ref snap) = manifest_val.sqlite_snapshot else {
                 return Err(HostBackupError::InvalidManifest(format!(
                     "SQLite backup artifact '{}' is missing sqlite_snapshot metadata in manifest",
                     filename
@@ -852,14 +1181,19 @@ pub fn verify_backup_artifact(
                     filename, checksum_res.size_bytes, snap.size_bytes
                 )));
             }
-            let (uv, _, _) = verify_sqlite_snapshot_integrity(&artifact_path)?;
+            let (uv, _, _) =
+                verify_sqlite_snapshot_integrity_with_trusted_uid(&artifact_path, trusted_uid)?;
             if uv != snap.sqlite_user_version {
                 return Err(HostBackupError::InvalidManifest(format!(
                     "SQLite artifact '{}' user_version ({}) does not match manifest ({})",
                     filename, uv, snap.sqlite_user_version
                 )));
             }
-        } else if let Some(entry) = m.entries.iter().find(|e| e.relative_path == filename) {
+        } else if let Some(entry) = manifest_val
+            .entries
+            .iter()
+            .find(|manifest_entry| manifest_entry.relative_path == filename)
+        {
             if !checksum_res
                 .actual_sha256
                 .eq_ignore_ascii_case(&entry.sha256)
@@ -878,28 +1212,31 @@ pub fn verify_backup_artifact(
             }
         }
 
-        if m.chunk_count != disk_chunks.len() {
+        if manifest_val.chunk_count != disk_chunks.len() {
             return Err(HostBackupError::ChunkError {
                 artifact: artifact_path.clone(),
                 reason: format!(
                     "manifest declared {} chunks, but found {} chunk files on disk",
-                    m.chunk_count,
+                    manifest_val.chunk_count,
                     disk_chunks.len()
                 ),
             });
         }
     } else if filename.ends_with(".sqlite") {
-        let _ = verify_sqlite_snapshot_integrity(&artifact_path)?;
+        let _ = verify_sqlite_snapshot_integrity_with_trusted_uid(&artifact_path, trusted_uid)?;
     }
 
     if !disk_chunks.is_empty() {
-        let declared_chunk_size = manifest_opt.as_ref().and_then(|m| m.chunk_size_bytes);
+        let declared_chunk_size = manifest_opt
+            .as_ref()
+            .and_then(|manifest_val| manifest_val.chunk_size_bytes);
         verify_chunks_against_primary(
             &artifact_path,
             &disk_chunks,
             &checksum_res.actual_sha256,
             checksum_res.size_bytes,
             declared_chunk_size,
+            trusted_uid,
         )?;
     }
 
@@ -915,6 +1252,7 @@ fn verify_chunks_against_primary(
     expected_sha256: &str,
     expected_total_size: u64,
     declared_chunk_size: Option<u64>,
+    trusted_uid: Option<u32>,
 ) -> HostBackupResult<()> {
     let total_chunks = disk_chunks.len();
     let mut hasher = Sha256::new();
@@ -931,19 +1269,25 @@ fn verify_chunks_against_primary(
                 ),
             });
         }
-        let mut f = File::open(part_path).map_err(|e| {
-            HostBackupError::io(format!("opening chunk {}", part_path.display()), e)
+        let (mut chunk_file, _) = crate::verify::open_verified_regular_file_for_read(
+            part_path,
+            trusted_uid,
+            "backup chunk file",
+        )?
+        .ok_or_else(|| HostBackupError::ChunkError {
+            artifact: artifact_path.to_path_buf(),
+            reason: format!("chunk '{}' disappeared during open", part_path.display()),
         })?;
         let mut part_bytes = 0u64;
         loop {
-            let n = f.read(&mut buf).map_err(|e| {
-                HostBackupError::io(format!("reading chunk {}", part_path.display()), e)
+            let count = chunk_file.read(&mut buf).map_err(|err| {
+                HostBackupError::io(format!("reading chunk {}", part_path.display()), err)
             })?;
-            if n == 0 {
+            if count == 0 {
                 break;
             }
-            hasher.update(&buf[..n]);
-            part_bytes += n as u64;
+            hasher.update(&buf[..count]);
+            part_bytes += count as u64;
         }
         if part_bytes == 0 {
             return Err(HostBackupError::ChunkError {

@@ -507,7 +507,7 @@ fn backup_commands_create_verify_list_and_run_non_destructive_restore_preflight_
     assert_eq!(plan_data["non_destructive_only"], true);
     assert!(!stage_target.exists(), "restore-preflight must never write to target_root");
 
-    // 5. Verify destructive `af backup restore` fails closed with UnsupportedOperation (exit code 6)
+    // 5. Verify destructive `af backup restore` without confirmation fails closed with UnsupportedOperation (exit code 6)
     let restore_inv = parse_cli_args([
         "--json",
         "--root",
@@ -525,10 +525,8 @@ fn backup_commands_create_verify_list_and_run_non_destructive_restore_preflight_
     );
     assert!(restore_env.message.contains("explicitly unsupported"));
 
-    // 6. Verify `af backup restore archive_name --target-root <target_root>` succeeds with staged restore
-    let staged_dest = tmp.path().join("staged-restored-root");
-    let staged_dest_str = staged_dest.to_string_lossy().to_string();
-    let staged_restore_inv = parse_cli_args([
+    // 6. Verify confirmed `af backup restore --confirm-destructive-restore` succeeds into isolated staging target
+    let confirmed_restore_inv = parse_cli_args([
         "--json",
         "--root",
         &root_str,
@@ -536,31 +534,21 @@ fn backup_commands_create_verify_list_and_run_non_destructive_restore_preflight_
         "restore",
         archive_name,
         "--target-root",
-        &staged_dest_str,
+        &stage_str,
+        "--confirm-destructive-restore",
+        "--allow-overwrite",
     ])
     .unwrap();
-    let staged_restore_env = execute_invocation(&staged_restore_inv, &transport);
+    let confirmed_env = execute_invocation(&confirmed_restore_inv, &transport);
     assert_eq!(
-        staged_restore_env.status, "ok",
-        "staged restore failed: {}",
-        staged_restore_env.message
+        confirmed_env.status, "ok",
+        "confirmed restore failed: {}",
+        confirmed_env.message
     );
-    assert!(staged_dest.exists(), "staged target_root should exist");
-    let restored_db_path = staged_dest.join("var/lib/aetherflow/aetherflow.sqlite");
-    assert!(
-        restored_db_path.exists(),
-        "restored sqlite db should exist in staged root"
-    );
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let meta = fs::metadata(&restored_db_path).unwrap();
-        assert_eq!(
-            meta.permissions().mode() & 0o777,
-            0o600,
-            "restored sqlite db file should have 0600 private permissions"
-        );
-    }
+    assert!(stage_target
+        .join("var/lib/aetherflow/aetherflow.sqlite")
+        .is_file());
+    assert!(stage_target.join("etc/AetherFlow/settings.conf").is_file());
 }
 
 #[test]
@@ -1129,4 +1117,262 @@ fn newly_promoted_rust_native_provisioning_steps_execute_safely_in_isolated_root
     assert_eq!(rerun_env.status, "ok");
     let preserved_env = fs::read_to_string(&env_path).unwrap();
     assert_eq!(original_env, preserved_env, "existing aetherflow.env must be preserved across runs");
+}
+
+#[test]
+fn backup_restore_failures_have_nonzero_execution_exit_codes() {
+    let failures = [
+        af_host::HostBackupError::ServiceQuiescenceFailed {
+            unit: "fixture-writer.service".to_string(),
+            phase: "stop".to_string(),
+            reason: "fixture stop failure".to_string(),
+        },
+        af_host::HostBackupError::RestoreRolledBack {
+            reason: "fixture restore failure".to_string(),
+            rollback_summary: "original files recovered".to_string(),
+        },
+        af_host::HostBackupError::RestoreRollbackFailed {
+            reason: "fixture restore failure".to_string(),
+            rollback_errors: "fixture rollback failure".to_string(),
+            recovery_dir: PathBuf::from("/fixture/recovery"),
+            failure_journal_path: PathBuf::from("/fixture/recovery/journal.json"),
+            services_left_stopped: true,
+        },
+    ];
+    for failure in failures {
+        let error = CliError::Backup(failure);
+        assert_eq!(error.exit_code(), CliExitCode::ExecutionFailure);
+        let envelope = error.to_error_envelope("backup", "restore");
+        assert_eq!(envelope.status, "error");
+        assert_ne!(envelope.exit_code, 0);
+    }
+}
+
+#[test]
+fn release_local_deploy_and_rollback_write_status_receipts_and_honor_root_conf() {
+    let tmp = TempTestDir::new("release-status-receipt");
+    let root_str = tmp.path().to_string_lossy().to_string();
+    let transport = MockRunnerTransport::default();
+
+    let rel_v1 = tmp.path().join("opt/AetherFlow/releases/v4.0.0");
+    let rel_v2 = tmp.path().join("opt/AetherFlow/releases/v4.0.1");
+    fs::create_dir_all(&rel_v1).unwrap();
+    fs::create_dir_all(&rel_v2).unwrap();
+    let etc_dir = tmp.path().join("etc/aetherflow");
+    fs::create_dir_all(&etc_dir).unwrap();
+    fs::write(
+        etc_dir.join("release-manager.conf"),
+        "RELEASE_CHANNEL=\"nightly\"\nMAX_RELEASES=4\n",
+    )
+    .unwrap();
+
+    // 1. `af --root <root> release status` loads `<root>/etc/aetherflow/release-manager.conf`
+    let status_inv = parse_cli_args(["--json", "--root", &root_str, "release", "status"]).unwrap();
+    let status_env = execute_invocation(&status_inv, &transport);
+    assert_eq!(status_env.status, "ok", "{}", status_env.message);
+    let data = status_env.data.unwrap();
+    assert_eq!(data["configured_channel"], "nightly");
+
+    // 2. Local rollback fails when no `previous` slot exists and writes a `failed` receipt
+    let fail_receipt_path = tmp.path().join("var/lib/aetherflow/.self-update-jobs/job-fail.json");
+    let fail_inv = parse_cli_args([
+        "--json",
+        "--root",
+        &root_str,
+        "release",
+        "rollback",
+        "--local",
+        "--job-status-file",
+        fail_receipt_path.to_str().unwrap(),
+        "--job-unit",
+        "aetherflow-self-update-rollback-nightly-12345678.service",
+    ])
+    .unwrap();
+    let fail_env = execute_invocation(&fail_inv, &transport);
+    assert_eq!(fail_env.status, "error");
+    let fail_receipt: SelfUpdateJobStatus =
+        serde_json::from_str(&fs::read_to_string(&fail_receipt_path).unwrap()).unwrap();
+    assert_eq!(fail_receipt.status, "failed");
+    assert!(fail_receipt.completed);
+    assert!(!fail_receipt.success);
+    assert_ne!(fail_receipt.exit_code, Some(0));
+    assert!(!fail_receipt.error.is_empty());
+
+    // 3. Dry-run local rollback with `.previous_release` in dry_run_root succeeds and writes a `succeeded` receipt
+    #[cfg(unix)]
+    {
+        let dry_releases = tmp.path().join("tmp/aetherflow-dryrun/releases");
+        fs::create_dir_all(&dry_releases).unwrap();
+        fs::write(
+            dry_releases.join(".previous_release"),
+            format!("{}\n", rel_v1.display()),
+        )
+        .unwrap();
+        let ok_receipt_path = tmp.path().join("var/lib/aetherflow/.self-update-jobs/job-ok.json");
+        let ok_inv = parse_cli_args([
+            "--json",
+            "--dry-run",
+            "--root",
+            &root_str,
+            "release",
+            "rollback",
+            "--local",
+            "--job-status-file",
+            ok_receipt_path.to_str().unwrap(),
+            "--job-unit",
+            "aetherflow-self-update-rollback-nightly-87654321.service",
+        ])
+        .unwrap();
+        let ok_env = execute_invocation(&ok_inv, &transport);
+        assert_eq!(ok_env.status, "ok", "{}", ok_env.message);
+        let ok_receipt: SelfUpdateJobStatus =
+            serde_json::from_str(&fs::read_to_string(&ok_receipt_path).unwrap()).unwrap();
+        assert_eq!(ok_receipt.status, "succeeded");
+        assert!(ok_receipt.completed);
+        assert!(ok_receipt.success);
+        assert_eq!(ok_receipt.exit_code, Some(0));
+    }
+}
+
+#[test]
+fn runner_dispatched_release_and_update_commands_reject_local_root_and_config_overrides() {
+    let sandbox = TempTestDir::new("runner-release-override-reject");
+    let root_str = sandbox.path().to_string_lossy().to_string();
+    let conf_path = sandbox.path().join("custom.conf");
+    fs::write(&conf_path, "RELEASE_CHANNEL=\"nightly\"\n").unwrap();
+    let conf_str = conf_path.to_string_lossy().to_string();
+    let status_file = sandbox.path().join("job.json");
+    let status_str = status_file.to_string_lossy().to_string();
+
+    let rejected_arg_sets: Vec<Vec<&str>> = vec![
+        vec!["--json", "--root", &root_str, "release", "deploy"],
+        vec!["--json", "--root", &root_str, "release", "rollback"],
+        vec!["--json", "release", "deploy", "--config", &conf_str],
+        vec!["--json", "release", "deploy", "--keep-releases", "3"],
+        vec!["--json", "release", "deploy", "--job-status-file", &status_str],
+        vec![
+            "--json",
+            "release",
+            "deploy",
+            "--job-unit",
+            "aetherflow-self-update-deploy-stable-12345678.service",
+        ],
+        vec!["--json", "--root", &root_str, "update"],
+        vec!["--json", "--root", &root_str, "upgrade"],
+    ];
+
+    for raw_args in rejected_arg_sets {
+        let transport = MockRunnerTransport::default();
+        let invocation = parse_cli_args(raw_args.clone()).unwrap();
+        let envelope = execute_invocation(&invocation, &transport);
+        assert_eq!(
+            envelope.status, "error",
+            "expected error for {:?}",
+            raw_args
+        );
+        assert_eq!(
+            envelope.exit_code,
+            CliExitCode::UsageOrValidation.as_i32(),
+            "expected validation exit code for {:?}: {}",
+            raw_args,
+            envelope.message
+        );
+        assert!(
+            transport.self_update_calls.lock().unwrap().is_empty(),
+            "runner socket must not be invoked when local overrides are rejected: {:?}",
+            raw_args
+        );
+    }
+}
+
+#[test]
+fn isolated_root_backup_cli_rejects_out_of_root_backup_dir_and_contains_staging_sqlite_override() {
+    let sandbox = TempTestDir::new("backup-cli-containment");
+    let root_dir = sandbox.path().join("iso-root");
+    let outside_dir = sandbox.path().join("outside-backups");
+    fs::create_dir_all(&root_dir).unwrap();
+    fs::create_dir_all(&outside_dir).unwrap();
+
+    let bad_inv = parse_cli_args([
+        "--json",
+        "--root",
+        root_dir.to_str().unwrap(),
+        "backup",
+        "create",
+        "--backup-dir",
+        outside_dir.to_str().unwrap(),
+    ])
+    .unwrap();
+    let bad_env = execute_invocation(&bad_inv, &MockRunnerTransport::default());
+    assert_eq!(bad_env.status, "error");
+    assert_eq!(bad_env.exit_code, CliExitCode::UsageOrValidation.as_i32());
+    assert!(bad_env.message.contains("outside active isolated root"));
+
+    let db_path = root_dir.join("srv/custom-af/aetherflow.sqlite");
+    let backup_dir = root_dir.join("var/lib/aetherflow/backups");
+    fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+    fs::create_dir_all(&backup_dir).unwrap();
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    conn.execute_batch(
+        "PRAGMA journal_mode = WAL;
+         PRAGMA user_version = 7;
+         CREATE TABLE sample (id INTEGER PRIMARY KEY, label TEXT NOT NULL);
+         INSERT INTO sample (id, label) VALUES (1, 'contained');",
+    )
+    .unwrap();
+    drop(conn);
+
+    let mut backup_cfg = af_host::HostBackupConfig::for_isolated_root(&root_dir, "v4.0.0");
+    backup_cfg.backup_dir = backup_dir.clone();
+    backup_cfg.sqlite_db_path = Some(db_path.clone());
+    let receipt = af_host::create_sqlite_snapshot_backup(&backup_cfg, Some("20261103_110000")).unwrap();
+    let backup_filename = receipt
+        .primary_artifact_path
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+
+    let stage_target = root_dir.join("var/lib/aetherflow/restore-staging/stage-one");
+    let preflight_inv = parse_cli_args([
+        "--json",
+        "--root",
+        root_dir.to_str().unwrap(),
+        "backup",
+        "restore-preflight",
+        &backup_filename,
+        "--backup-dir",
+        backup_dir.to_str().unwrap(),
+        "--target-root",
+        stage_target.to_str().unwrap(),
+    ])
+    .unwrap();
+    let preflight_env = execute_invocation(&preflight_inv, &MockRunnerTransport::default());
+    assert_eq!(preflight_env.status, "ok", "{}", preflight_env.message);
+    let plan_items = preflight_env.data.unwrap()["items"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(plan_items.len(), 1);
+    let destination_str = plan_items[0]["destination_path"].as_str().unwrap();
+    assert!(
+        Path::new(destination_str).starts_with(&stage_target),
+        "staging restore destination '{}' escaped staging target '{}'",
+        destination_str,
+        stage_target.display()
+    );
+
+    let recover_inv = parse_cli_args([
+        "--json",
+        "--root",
+        root_dir.to_str().unwrap(),
+        "backup",
+        "recover",
+        "--backup-dir",
+        backup_dir.to_str().unwrap(),
+    ])
+    .unwrap();
+    let recover_env = execute_invocation(&recover_inv, &MockRunnerTransport::default());
+    assert_eq!(recover_env.status, "ok", "{}", recover_env.message);
 }

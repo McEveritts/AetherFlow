@@ -16,7 +16,6 @@ on:
         default: 'nightly'
         options:
           - nightly
-          - experimental
 
 permissions:
   contents: write
@@ -24,9 +23,82 @@ permissions:
   attestations: write
 
 jobs:
+  security-gate:
+    name: Release Security, SAST & Advisory Gate
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: backend-rs
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Secret Scan (Gitleaks Gate)
+        working-directory: .
+        run: |
+          GITLEAKS_VERSION="8.24.2"
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" | sudo tar -xz -C /usr/local/bin gitleaks
+          gitleaks dir . --verbose --redact
+
+      - name: Install System Build Dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq mold clang pkg-config libssl-dev
+
+      - name: Setup Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Rust Cargo Dependency Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "backend-rs -> target"
+
+      - name: Prepare Embedded Frontend Staging Directories
+        working-directory: .
+        run: |
+          mkdir -p web/dist backend/web/dist
+          touch web/dist/.keep backend/web/dist/.keep
+
+      - name: Verify Workspace Lockfile & Advisory Policy Presence
+        run: |
+          test -f Cargo.lock
+          test -f deny.toml
+
+      - name: Install cargo-audit and cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit, cargo-deny
+
+      - name: Rust Advisory & Supply-Chain Policy (cargo-deny)
+        run: |
+          cargo deny --locked check advisories bans sources
+
+      - name: RustSec Vulnerability Scan (cargo-audit)
+        run: |
+          cargo audit --file Cargo.lock --ignore RUSTSEC-2023-0071
+
+      - name: Rust Static Analysis (workspace + strict restore/release core)
+        run: |
+          cargo clippy --workspace --all-targets --locked
+          cargo clippy --no-deps -p af-models -p af-host -p af-release -p af-cli --all-targets --locked -- -D warnings
+
+      - name: Rust Security Unit & Contract Tests (--locked)
+        env:
+          JWT_SECRET: ci-test-secret-exactly-32bytes!!
+          AES_MASTER_KEY: ci-test-aes-key-exactly-32bytes!
+          ALLOWED_HOSTS: localhost:8080,127.0.0.1:8080
+          AETHERFLOW_DISABLE_BACKGROUND_WORKERS: "1"
+        run: |
+          cargo test --workspace --locked -- --test-threads=1
+
   release-build:
     name: Build, Verify & Publish Signed Release (Rust Control Plane)
-    runs-on: ubuntu-latest
+    needs: [security-gate]
+    runs-on: ubuntu-22.04
     env:
       CARGO_INCREMENTAL: "0"
     steps:
@@ -48,7 +120,7 @@ jobs:
               exit 1
             fi
             case "${RELEASE_CHANNEL}" in
-              nightly|experimental) ;;
+              nightly) ;;
               *) echo "Unsupported release branch: ${GITHUB_REF_NAME}" >&2; exit 1 ;;
             esac
             REPO_VERSION="$(tr -d '[:space:]' < .version)"
@@ -77,13 +149,13 @@ jobs:
       - name: Secret Scan (Gitleaks Gate)
         run: |
           GITLEAKS_VERSION="8.24.2"
-          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" | tar -xz -C /usr/local/bin gitleaks
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" | sudo tar -xz -C /usr/local/bin gitleaks
           gitleaks dir . --verbose --redact
 
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: "24.22.2"
           cache: npm
           cache-dependency-path: package-lock.json
 
@@ -91,11 +163,12 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-unknown-linux-gnu
+          components: clippy
 
       - name: Install mold Fast Linker
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq mold pkg-config libssl-dev
+          sudo apt-get install -y -qq mold clang pkg-config libssl-dev
 
       - name: Rust Cargo Dependency Cache
         uses: Swatinem/rust-cache@v2
@@ -112,20 +185,25 @@ jobs:
           npm run test:ci
           npm run build
 
-      - name: Stage Embedded Frontend Assets
+      - name: Stage Embedded Frontend Assets (Neutral + Legacy)
         run: |
-          rm -rf backend/web/dist
-          mkdir -p backend/web/dist
+          rm -rf web/dist backend/web/dist
+          mkdir -p web/dist backend/web/dist
+          cp -R frontend/out/. web/dist/
           cp -R frontend/out/. backend/web/dist/
 
-      - name: Run Rust Workspace Unit & Contract Tests
+      - name: Run Rust Workspace Unit & Contract Tests (--locked)
         working-directory: backend-rs
         env:
           JWT_SECRET: ci-test-secret-exactly-32bytes!!
           AES_MASTER_KEY: ci-test-aes-key-exactly-32bytes!
           ALLOWED_HOSTS: localhost:8080,127.0.0.1:8080
+          AETHERFLOW_DISABLE_BACKGROUND_WORKERS: "1"
         run: |
-          cargo test --workspace --locked || cargo test --workspace
+          test -f Cargo.lock
+          cargo clippy --workspace --all-targets --locked
+          cargo clippy --no-deps -p af-models -p af-host -p af-release -p af-cli --all-targets --locked -- -D warnings
+          cargo test --workspace --locked -- --test-threads=1
 
       - name: Verify Updater Survives Its Caller Restart
         working-directory: backend-rs
@@ -136,28 +214,37 @@ jobs:
       - name: Package Single-Binary Release Tarball & SHA-256 Manifest
         run: |
           STAGE_DIR="$(mktemp -d)"
+          chmod 0755 "${STAGE_DIR}"
           echo "STAGE_DIR=${STAGE_DIR}" >> "$GITHUB_ENV"
 
           cd backend-rs
-          cargo build --release --bin aetherflow-api --bin af
+          cargo build --release --locked --bin aetherflow-api --bin af
           cp target/release/aetherflow-api "${STAGE_DIR}/aetherflow-api"
           cp target/release/af "${STAGE_DIR}/af"
+          mkdir -p "${STAGE_DIR}/bin"
+          cp target/release/af "${STAGE_DIR}/bin/af"
           cd ..
 
-          cp -R backend/config "${STAGE_DIR}/config"
+          if [[ -d config ]]; then
+            cp -R config "${STAGE_DIR}/config"
+          else
+            cp -R backend/config "${STAGE_DIR}/config"
+          fi
           cp -R packages "${STAGE_DIR}/packages"
           cp -R deploy "${STAGE_DIR}/deploy"
           echo "${VERSION_STAMP}" > "${STAGE_DIR}/.version"
-          chmod +x "${STAGE_DIR}/aetherflow-api" "${STAGE_DIR}/af" "${STAGE_DIR}/deploy/release-manager.sh"
+          chmod 0755 "${STAGE_DIR}/aetherflow-api" "${STAGE_DIR}/af" "${STAGE_DIR}/bin/af" "${STAGE_DIR}/deploy/release-manager.sh"
 
           mkdir -p release-dist
-          tar -C "${STAGE_DIR}" -czf release-dist/aetherflow-linux-amd64.tar.gz .
+          tar --owner=0 --group=0 --numeric-owner -C "${STAGE_DIR}" -czf release-dist/aetherflow-linux-amd64.tar.gz .
           (cd release-dist && sha256sum aetherflow-linux-amd64.tar.gz > SHA256SUMS)
 
       - name: Attest Build Provenance
         uses: actions/attest-build-provenance@v2
         with:
-          subject-path: 'release-dist/aetherflow-linux-amd64.tar.gz'
+          subject-path: |
+            release-dist/aetherflow-linux-amd64.tar.gz
+            release-dist/SHA256SUMS
 
       - name: Publish to GitHub Releases
         env:

@@ -566,7 +566,7 @@ async fn handle_ws_socket(socket: WebSocket) {
 
     let init_payload = TELEMETRY.initial_snapshot().await;
     if let Ok(text) = serde_json::to_string(&init_payload) {
-        let _ = sender.send(Message::Text(text.into())).await;
+        let _ = sender.send(Message::Text(text)).await;
     }
 
     let mut write_task = tokio::spawn(async move {
@@ -574,12 +574,12 @@ async fn handle_ws_socket(socket: WebSocket) {
         loop {
             tokio::select! {
                 Ok(msg) = rx.recv() => {
-                    if sender.send(Message::Text(msg.into())).await.is_err() {
+                    if sender.send(Message::Text(msg)).await.is_err() {
                         break;
                     }
                 }
                 _ = ping_interval.tick() => {
-                    if sender.send(Message::Ping(Vec::new().into())).await.is_err() {
+                    if sender.send(Message::Ping(Vec::new())).await.is_err() {
                         break;
                     }
                 }
@@ -744,7 +744,7 @@ pub async fn handle_log_websocket(
             }
         });
         if let Ok(txt) = serde_json::to_string(&welcome) {
-            if socket.send(Message::Text(txt.into())).await.is_err() {
+            if socket.send(Message::Text(txt)).await.is_err() {
                 return;
             }
         }
@@ -839,13 +839,13 @@ pub async fn handle_log_websocket(
                         "data": entry,
                     });
                     if let Ok(txt) = serde_json::to_string(&payload) {
-                        if socket.send(Message::Text(txt.into())).await.is_err() {
+                        if socket.send(Message::Text(txt)).await.is_err() {
                             break;
                         }
                     }
                 }
                 _ = ping_interval.tick() => {
-                    if socket.send(Message::Ping(Vec::new().into())).await.is_err() {
+                    if socket.send(Message::Ping(Vec::new())).await.is_err() {
                         break;
                     }
                 }

@@ -286,4 +286,197 @@ describe("WebSocketProvider, useMetrics, and useHistoryStore transport decouplin
 
     expect(consumerCommits).toBe(baselineCommits);
   });
+
+  it("hydrates persisted metrics_history on refresh and reconnect and merges with live samples without duplicates", async () => {
+    const baseTs = 1_730_000_000_000;
+    const persistedSnapshots = [
+      {
+        id: 1,
+        timestamp: new Date(baseTs - 60_000).toISOString(),
+        cpu_avg: 18.4,
+        mem_used_gb: 8,
+        mem_total_gb: 32,
+        disk_read_bps: 1024,
+        disk_write_bps: 512,
+        net_rx_bytes: 10_000_000,
+        net_tx_bytes: 5_000_000,
+      },
+      {
+        id: 2,
+        timestamp: new Date(baseTs - 45_000).toISOString(),
+        cpu_avg: 22.6,
+        mem_used_gb: 12,
+        mem_total_gb: 32,
+        disk_read_bps: 2048,
+        disk_write_bps: 1024,
+        net_rx_bytes: 11_500_000, // +1.5 MB over 15s = 100,000 B/s
+        net_tx_bytes: 5_300_000,  // +300 KB over 15s = 20,000 B/s
+      },
+    ];
+
+    mockApiFetch.mockImplementation(async (url: string) => {
+      if (url.includes("/api/v1/auth/ws/ticket")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ ticket: "test-ticket" }),
+        };
+      }
+      if (
+        url.includes("/api/v1/auth/system/metrics/history") ||
+        url.includes("/api/v1/admin/ai/predictions/history")
+      ) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => persistedSnapshots,
+        };
+      }
+      return { ok: false, status: 404, json: async () => ({}) };
+    });
+
+    render(
+      <WebSocketProvider>
+        <SecondMetricsConsumer />
+      </WebSocketProvider>
+    );
+
+    await waitFor(() => {
+      expect(FakeWebSocket.instances.length).toBe(1);
+    });
+
+    const socket = FakeWebSocket.instances[0];
+    await act(async () => {
+      socket.onopen?.();
+    });
+
+    await waitFor(() => {
+      expect(useHistoryStore.getState().isHydrated).toBe(true);
+    });
+
+    expect(useHistoryStore.getState().history.cpu).toEqual([18.4, 22.6]);
+    expect(useHistoryStore.getState().history.memory).toEqual([25, 37.5]);
+    expect(useHistoryStore.getState().history.netDown).toEqual([0, 100000]);
+    expect(useHistoryStore.getState().history.netUp).toEqual([0, 20000]);
+
+    // Push a live sample and duplicate timestamp sample to verify merge & deduplication
+    act(() => {
+      useHistoryStore.getState().pushMetrics(
+        {
+          cpu_usage: 29.5,
+          cpu_freq_mhz: 3600,
+          per_core_cpu: [29.5],
+          memory: { used: 16, total: 32 },
+          swap: { used: 0, total: 8 },
+          disk_space: { used: 100, total: 500, free: 400 },
+          is_windows: false,
+          disks: [],
+          disk_io: { read_bytes_sec: 4096, write_bytes_sec: 2048 },
+          network: { down: "2 MB/s", up: "1 MB/s", active_connections: 10 },
+          total_net_bytes: { rx: 12_000_000, tx: 6_000_000 },
+          load_average: [0.5, 0.4, 0.3],
+          uptime: "1d",
+          processes: [],
+          gpus: [],
+          services: {},
+        },
+        baseTs - 30_000
+      );
+      // Re-hydrating same persisted snapshots on reconnect must not duplicate points
+      useHistoryStore.getState().hydrateHistory(persistedSnapshots);
+    });
+
+    expect(useHistoryStore.getState().history.cpu).toEqual([18.4, 22.6, 29.5]);
+    expect(useHistoryStore.getState().history.timestamps).toEqual([
+      baseTs - 60_000,
+      baseTs - 45_000,
+      baseTs - 30_000,
+    ]);
+  });
+
+  it("supports longer time windows (1m, 5m, 15m, 1h, 6h, 24h), timestamp-based slicing, and gap handling", () => {
+    const now = 1_730_050_000_000;
+    const snapshots = [
+      // 12 hours ago
+      {
+        timestamp: now - 12 * 3600_000,
+        cpu_avg: 11,
+        mem_used_gb: 4,
+        mem_total_gb: 16,
+        net_rx_bytes: 1_000_000,
+        net_tx_bytes: 1_000_000,
+      },
+      // 2 hours ago (10h gap -> counter delta must clamp to 0 instead of spiking)
+      {
+        timestamp: now - 2 * 3600_000,
+        cpu_avg: 22,
+        mem_used_gb: 6,
+        mem_total_gb: 16,
+        net_rx_bytes: 500_000_000,
+        net_tx_bytes: 250_000_000,
+      },
+      // 10 minutes ago
+      {
+        timestamp: now - 10 * 60_000,
+        cpu_avg: 33,
+        mem_used_gb: 8,
+        mem_total_gb: 16,
+        net_rx_bytes: 600_000_000,
+        net_tx_bytes: 300_000_000,
+      },
+      // 3 minutes ago
+      {
+        timestamp: now - 3 * 60_000,
+        cpu_avg: 44,
+        mem_used_gb: 10,
+        mem_total_gb: 16,
+        net_rx_bytes: 700_000_000,
+        net_tx_bytes: 350_000_000,
+      },
+      // Latest (now) — 3m gap since previous is > 2m GAP_THRESHOLD_MS, and only 1 point in 1m window
+      {
+        timestamp: now,
+        cpu_avg: 55,
+        mem_used_gb: 12,
+        mem_total_gb: 16,
+        net_rx_bytes: 701_800_000, // +1.8 MB over 180s = 10,000 B/s
+        net_tx_bytes: 350_900_000, // +900 KB over 180s = 5,000 B/s
+      },
+    ];
+
+    act(() => {
+      useHistoryStore.getState().hydrateHistory(snapshots);
+    });
+
+    const stateAfterHydrate = useHistoryStore.getState();
+    expect(stateAfterHydrate.gapCount).toBeGreaterThanOrEqual(3);
+    // Counter jump across the 10-hour gap at index 1 must be clamped to 0 B/s
+    expect(stateAfterHydrate.history.netDown[1]).toBe(0);
+    // 180s delta (<= 300s) at index 4 computes valid rate
+    expect(stateAfterHydrate.history.netDown[4]).toBe(10000);
+    expect(stateAfterHydrate.history.netUp[4]).toBe(5000);
+
+    // Default 5m window includes points at -3m and now
+    expect(stateAfterHydrate.visibleHistory.cpu).toEqual([44, 55]);
+
+    // 1m window only has `now` within [now - 60s, now], so gap handling pads it to 2 points [55, 55] for Sparkline
+    act(() => useHistoryStore.getState().setTimeWindow("1m"));
+    expect(useHistoryStore.getState().visibleHistory.cpu).toEqual([55, 55]);
+
+    // 15m window includes -10m, -3m, now
+    act(() => useHistoryStore.getState().setTimeWindow("15m"));
+    expect(useHistoryStore.getState().visibleHistory.cpu).toEqual([33, 44, 55]);
+
+    // 1h window still excludes -2h and -12h
+    act(() => useHistoryStore.getState().setTimeWindow("1h"));
+    expect(useHistoryStore.getState().visibleHistory.cpu).toEqual([33, 44, 55]);
+
+    // 6h window includes -2h, -10m, -3m, now
+    act(() => useHistoryStore.getState().setTimeWindow("6h"));
+    expect(useHistoryStore.getState().visibleHistory.cpu).toEqual([22, 33, 44, 55]);
+
+    // 24h window includes all 5 points (-12h, -2h, -10m, -3m, now)
+    act(() => useHistoryStore.getState().setTimeWindow("24h"));
+    expect(useHistoryStore.getState().visibleHistory.cpu).toEqual([11, 22, 33, 44, 55]);
+  });
 });

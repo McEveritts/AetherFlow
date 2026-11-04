@@ -10,8 +10,8 @@ Type=simple
 User=aetherflow
 Group=aetherflow
 SupplementaryGroups=systemd-journal adm
-WorkingDirectory=/opt/AetherFlow/backend
-ExecStart=/opt/AetherFlow/backend/aetherflow-api
+WorkingDirectory=/opt/AetherFlow/current
+ExecStart=/opt/AetherFlow/current/aetherflow-api
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal
@@ -23,15 +23,14 @@ StateDirectoryMode=0700
 LogsDirectory=aetherflow
 LogsDirectoryMode=0750
 
-# Environment injection from hardened FHS path with legacy fallback
 Environment=GIN_MODE=release
 Environment=PORT=8080
-Environment=DB_PATH=/opt/AetherFlow/backend/data/aetherflow.sqlite
-Environment=AETHERFLOW_DB_PATH=/opt/AetherFlow/backend/data/aetherflow.sqlite
+Environment=DATA_DIR=/var/lib/aetherflow
 Environment=AETHERFLOW_RUNNER_SOCK=/run/aetherflow/runner.sock
 Environment=PRIVILEGED_RUNNER_ENABLED=true
 Environment=COOKIE_SECURE=false
 EnvironmentFile=-/etc/aetherflow/aetherflow.env
+EnvironmentFile=-/opt/AetherFlow/current/backend/.env
 
 # Zero-Trust Namespace Isolation
 ProtectSystem=strict
@@ -54,8 +53,8 @@ SystemCallArchitectures=native
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 UMask=0027
 
-ReadWritePaths=/var/lib/aetherflow /var/log/aetherflow /run/aetherflow /opt/AetherFlow/backend/data
-ReadWritePaths=-/var/lib/openclaw -/home/hdd
+ReadWritePaths=/var/lib/aetherflow /var/log/aetherflow /run/aetherflow
+ReadWritePaths=-/opt/AetherFlow/backend/data -/var/lib/openclaw -/home/hdd
 
 LimitNOFILE=65535
 

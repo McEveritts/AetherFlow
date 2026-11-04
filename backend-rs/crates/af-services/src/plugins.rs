@@ -308,7 +308,7 @@ fn validate_safe_relative_path(
 
 /// Validates a `PluginManifest` for structural and security constraints:
 /// - Plugin ID matches `^[a-z0-9][a-z0-9_-]{1,62}$` (no `..` or `/`).
-/// - Every `api_scopes` entry starts with `/api/v1/` and has no traversal or whitespace.
+/// - Every `api_scopes` route starts with `/api/v1/` and has no traversal or whitespace; an explicit HTTP method may precede it.
 /// - Every `permissions` entry matches `^[a-zA-Z0-9][a-zA-Z0-9:_-]{0,63}$`.
 /// - `entry_points`, `backend`, `frontend`, and `lifecycle_hooks` paths do not traverse or escape via symlinks.
 pub fn validate_plugin_manifest(manifest: &PluginManifest) -> anyhow::Result<()> {
@@ -351,7 +351,20 @@ pub fn validate_plugin_manifest_in_dir(
     }
 
     for scope in &manifest.api_scopes {
-        let s = scope.trim();
+        let scope_specification = scope.trim();
+        let s = if let Some((method, route)) = scope_specification.split_once(' ') {
+            if !matches!(method, "GET" | "HEAD" | "POST" | "PUT" | "PATCH" | "DELETE") {
+                anyhow::bail!("invalid api_scope method '{}'", method);
+            }
+            if !matches!(method, "GET" | "HEAD") && !manifest.permissions.iter().any(|permission| {
+                permission.ends_with(":write") || permission.ends_with(":admin") || permission.ends_with(":control")
+            }) {
+                anyhow::bail!("mutating api_scope '{}' requires a write permission", scope);
+            }
+            route
+        } else {
+            scope_specification
+        };
         if !s.starts_with("/api/v1/")
             || s.len() <= "/api/v1/".len()
             || s.contains("..")
@@ -684,7 +697,7 @@ mod tests {
             .expect("should parse sdk-template-rust manifest");
         assert_eq!(manifest.id, "sdk-template-rust");
         assert_eq!(manifest.version, "0.1.0");
-        assert_eq!(manifest.api_version, "v1-staged");
+        assert_eq!(manifest.api_version, "v1");
         assert_eq!(manifest.entry_points.backend, "backend/src/main.rs");
         assert_eq!(manifest.entry_points.frontend, "frontend/src/index.tsx");
         assert_eq!(manifest.frontend_slot.as_deref(), Some("marketplace"));
@@ -700,8 +713,8 @@ mod tests {
         assert_eq!(
             manifest.api_scopes,
             vec![
-                "/api/v1/public/marketplace".to_string(),
-                "/api/v1/auth/system/metrics".to_string()
+                "GET /api/v1/public/marketplace".to_string(),
+                "GET /api/v1/auth/system/metrics".to_string()
             ]
         );
 
@@ -778,6 +791,8 @@ mod tests {
             "/api/v1/auth/../admin/users",
             "http://127.0.0.1:8080/api/v1/public/marketplace",
             "/api/v1/public/marketplace with space",
+            "* /api/v1/auth/system/metrics",
+            "POST /api/v1/auth/system/metrics",
         ] {
             let mut m = base.clone();
             m.api_scopes = vec![bad_scope.to_string()];

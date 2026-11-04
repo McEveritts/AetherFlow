@@ -1,19 +1,19 @@
 use crate::auth::{
     admin_only_middleware, api_error, auth_middleware, check_setup_needed, csrf_middleware,
     disable_2fa, get_session, issue_csrf_token, list_active_sessions, local_login, logout,
-    mfa_login_verify, mint_plugin_jwt, refresh_session, revoke_session, setup_2fa, setup_admin,
+    mfa_login_verify, refresh_session, revoke_session, setup_2fa, setup_admin,
     verify_2fa, verify_proxy_auth, AuthUser,
 };
 use crate::embed::spa_fallback_handler;
 use crate::intelligence::{
     ai_chat, ai_support, analyze_predictions,
     approve_mediaflow_item, bandwidth_analyze, bandwidth_apply, bookmark_log,
-    decline_mediaflow_item, enroll_worker, get_bookmarks,
-    get_cluster_nodes, get_log_sources, get_logs, get_mediaflow_queue, get_metrics_history,
-    get_predictions, get_system_topology,
-    get_worker_metrics, metadata_results,
-    metadata_scan, metadata_status, remove_worker, test_ai_connection,
-    trigger_mediaflow_scan,
+    decline_mediaflow_item, enroll_worker, get_auth_metrics_history,
+    get_bookmarks, get_cluster_nodes, get_log_sources, get_logs, get_mediaflow_queue,
+    get_metrics_history, get_predictions, get_system_topology,
+    get_worker_metrics,
+    metadata_results, metadata_scan, metadata_status, remove_worker,
+    test_ai_connection, trigger_mediaflow_scan,
 };
 use crate::middlewares::{
     ai_rate_limit_middleware, auth_rate_limit_middleware, host_validation_middleware,
@@ -35,12 +35,16 @@ use crate::oidc::{
     oidc_authorize, oidc_consent, oidc_device_authorize, oidc_device_consent, oidc_device_verify,
     oidc_discovery, oidc_introspect, oidc_jwks, oidc_revoke, oidc_token, oidc_userinfo,
 };
+use crate::plugins::{
+    control_plugin_handler, list_plugins_handler, mint_plugin_token_handler,
+    proxy_plugin_root_handler, proxy_plugin_wildcard_handler, serve_plugin_ui_handler,
+};
 use crate::storage::{
     check_update, delete_shared_file, download_backup, download_file, get_backups_list,
-    get_files_list, get_optimal_backup_window, get_own_quota, handle_billing_webhook,
-    handle_deploy_process, handle_deploy_stream, list_billing_webhook_events, list_user_quotas,
-    refresh_user_quota, run_backup, run_update, set_backup_schedule, update_user_quota,
-    upload_backup_chunk, upload_file,
+    get_files_list, get_optimal_backup_window, get_own_quota, get_system_update_status,
+    handle_billing_webhook, handle_deploy_process, handle_deploy_stream,
+    list_billing_webhook_events, list_user_quotas, refresh_user_quota, run_backup, run_update,
+    set_backup_schedule, update_user_quota, upload_backup_chunk, upload_file,
 };
 use crate::streaming_ext::{
     clear_streaming_demo_data, control_streaming_session, get_streaming_artwork,
@@ -52,12 +56,11 @@ use crate::ws::{
     issue_ws_ticket_for_user,
 };
 use af_models::{AppIngressConfig, MarketplaceApp, User};
-use axum::body::Body;
 use axum::extract::{Extension, Path, Query, Request};
-use axum::http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Json, Response};
-use axum::routing::{any, delete, get, post, put};
+use axum::routing::{ delete, get, post, put};
 use axum::Router;
 use chrono::Utc;
 use futures::StreamExt;
@@ -72,7 +75,7 @@ use std::time::Instant;
 
 static START_TIME: Lazy<Instant> = Lazy::new(Instant::now);
 
-const OPENAPI_YAML: &str = include_str!("../../../../backend/api/spec/openapi-v1.yaml");
+const OPENAPI_YAML: &str = include_str!("../../../../config/openapi-v1.yaml");
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Security Headers, Request ID & API Versioning Middlewares
@@ -95,13 +98,19 @@ pub async fn security_headers_middleware(mut req: Request, next: Next) -> Respon
         HeaderValue::from_str(&req_id).unwrap_or_else(|_| HeaderValue::from_static("0")),
     );
 
+    let is_plugin_ui = req_path.contains("/plugins/") && req_path.ends_with("/ui");
+
     let mut resp = next.run(req).await;
     let h = resp.headers_mut();
     h.insert(
         "X-Content-Type-Options",
         HeaderValue::from_static("nosniff"),
     );
-    h.insert("X-Frame-Options", HeaderValue::from_static("DENY"));
+    if is_plugin_ui {
+        h.insert("X-Frame-Options", HeaderValue::from_static("SAMEORIGIN"));
+    } else {
+        h.insert("X-Frame-Options", HeaderValue::from_static("DENY"));
+    }
     h.insert(
         "Strict-Transport-Security",
         HeaderValue::from_static("max-age=31536000; includeSubDomains"),
@@ -110,12 +119,14 @@ pub async fn security_headers_middleware(mut req: Request, next: Next) -> Respon
         "X-XSS-Protection",
         HeaderValue::from_static("1; mode=block"),
     );
-    h.insert(
-        "Content-Security-Policy",
-        HeaderValue::from_static(
-            "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws: wss:; frame-ancestors 'none'",
-        ),
-    );
+    if !is_plugin_ui {
+        h.insert(
+            "Content-Security-Policy",
+            HeaderValue::from_static(
+                "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws: wss:; frame-ancestors 'none'",
+            ),
+        );
+    }
     h.insert(
         "Referrer-Policy",
         HeaderValue::from_static("strict-origin-when-cross-origin"),
@@ -147,17 +158,29 @@ pub async fn security_headers_middleware(mut req: Request, next: Next) -> Respon
 pub fn build_router() -> Router {
     let v1 = build_v1_router();
     let legacy = build_v1_router();
-
-    let top_level_plugin_proxy = Router::new()
-        .route("/plugins/:id", any(proxy_plugin_root_request))
-        .route("/plugins/:id/*path", any(proxy_plugin_request))
+    let top_level_plugins = Router::new()
+        .route("/plugins/:id/ui", get(serve_plugin_ui_handler))
+        .route(
+            "/plugins/:id/proxy",
+            get(proxy_plugin_root_handler)
+                .post(proxy_plugin_root_handler)
+                .put(proxy_plugin_root_handler)
+                .delete(proxy_plugin_root_handler),
+        )
+        .route(
+            "/plugins/:id/proxy/*rest",
+            get(proxy_plugin_wildcard_handler)
+                .post(proxy_plugin_wildcard_handler)
+                .put(proxy_plugin_wildcard_handler)
+                .delete(proxy_plugin_wildcard_handler),
+        )
         .layer(middleware::from_fn(csrf_middleware))
         .layer(middleware::from_fn(auth_middleware));
 
     Router::new()
         .nest("/api/v1", v1)
         .nest("/api", legacy)
-        .merge(top_level_plugin_proxy)
+        .merge(top_level_plugins)
         .route("/.well-known/openid-configuration", get(oidc_discovery))
         .route("/health", get(health_check))
         .route("/health/live", get(health_live))
@@ -240,8 +263,9 @@ fn build_v1_router() -> Router {
         .route("/services", get(get_services))
         .route("/packages/:id/progress", get(package_progress))
         .route("/system/update/check", get(check_update))
-        .route("/system/update/status", get(crate::storage::update_status))
+        .route("/system/update/status", get(get_system_update_status))
         .route("/system/metrics", get(get_system_metrics))
+        .route("/system/metrics/history", get(get_auth_metrics_history))
         .route("/system/hardware", get(get_hardware_info))
         .route("/notifications", get(get_notifications))
         .route("/notifications/:id/read", put(mark_notification_read))
@@ -300,8 +324,21 @@ fn build_v1_router() -> Router {
         )
         .route("/streaming/artwork/:itemId", get(get_streaming_artwork))
         .route("/plugins", get(list_plugins_handler))
-        .route("/plugins/:id/proxy", any(proxy_plugin_root_request))
-        .route("/plugins/:id/proxy/*path", any(proxy_plugin_request))
+        .route("/plugins/:id/ui", get(serve_plugin_ui_handler))
+        .route(
+            "/plugins/:id/proxy",
+            get(proxy_plugin_root_handler)
+                .post(proxy_plugin_root_handler)
+                .put(proxy_plugin_root_handler)
+                .delete(proxy_plugin_root_handler),
+        )
+        .route(
+            "/plugins/:id/proxy/*rest",
+            get(proxy_plugin_wildcard_handler)
+                .post(proxy_plugin_wildcard_handler)
+                .put(proxy_plugin_wildcard_handler)
+                .delete(proxy_plugin_wildcard_handler),
+        )
         .layer(middleware::from_fn(csrf_middleware))
         .layer(middleware::from_fn(auth_middleware));
 
@@ -310,6 +347,9 @@ fn build_v1_router() -> Router {
         .layer(middleware::from_fn(quota_upload_guard_middleware));
 
     let admin_routes = Router::new()
+        .route("/plugins", get(list_plugins_handler))
+        .route("/plugins/:id/control", post(control_plugin_handler))
+        .route("/plugins/:id/token", post(mint_plugin_token_handler))
         .route("/backup/run", post(run_backup))
         .route("/backup/list", get(get_backups_list))
         .route("/backup/download/:filename", get(download_backup))
@@ -335,6 +375,7 @@ fn build_v1_router() -> Router {
         .route("/packages/updates/check", post(check_package_updates))
         .route("/system/update/check", get(check_update))
         .route("/system/update/run", post(run_update))
+        .route("/system/update/status", get(get_system_update_status))
         .route("/system/metrics", get(get_system_metrics))
         .merge(quota_guarded_upload)
         .route("/fileshare/download/:filename", get(download_file))
@@ -472,8 +513,6 @@ fn build_v1_router() -> Router {
             post(control_streaming_session),
         )
         .route("/streaming/demo", post(handle_streaming_demo))
-        .route("/plugins", get(list_plugins_handler))
-        .route("/plugins/:id/token", post(mint_plugin_token_handler))
         .layer(middleware::from_fn(admin_only_middleware))
         .layer(middleware::from_fn(csrf_middleware))
         .layer(middleware::from_fn(auth_middleware));
@@ -3289,302 +3328,6 @@ async fn get_audit_log(Query(q): Query<PageQuery>) -> Json<serde_json::Value> {
 // ──────────────────────────────────────────────────────────────────────────────
 // Plugin Discovery, Scoped Token Minting & Streaming Reverse Proxy Endpoints
 // ──────────────────────────────────────────────────────────────────────────────
-
-static PLUGIN_PROXY_HTTP_CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
-    reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new())
-});
-
-#[derive(Deserialize, Default)]
-struct ListPluginsQuery {
-    #[serde(default)]
-    include_templates: Option<bool>,
-}
-
-async fn list_plugins_handler(Query(q): Query<ListPluginsQuery>) -> Json<serde_json::Value> {
-    let all = af_services::plugins::discover_installed_plugins();
-    let include_templates = q.include_templates.unwrap_or(true);
-    let plugins: Vec<af_services::plugins::PluginInstanceView> = all
-        .into_iter()
-        .filter(|p| include_templates || !p.is_template)
-        .collect();
-    let count = plugins.len();
-    Json(serde_json::json!({
-        "plugins": plugins,
-        "count": count,
-    }))
-}
-
-#[derive(Deserialize, Default)]
-struct MintPluginTokenReq {
-    #[serde(default)]
-    ttl_seconds: Option<i64>,
-}
-
-async fn mint_plugin_token_handler(
-    Path(plugin_id): Path<String>,
-    Extension(auth_user): Extension<AuthUser>,
-    headers: HeaderMap,
-    body: Option<Json<MintPluginTokenReq>>,
-) -> Response {
-    let clean_id = plugin_id.trim().to_lowercase();
-    let discovered = af_services::plugins::discover_installed_plugins();
-    let Some(plugin) = discovered.into_iter().find(|p| p.id == clean_id) else {
-        return api_error(
-            StatusCode::NOT_FOUND,
-            "PLUGIN_NOT_FOUND",
-            format!("Plugin '{}' not found", clean_id),
-        );
-    };
-
-    if plugin.status == "invalid" {
-        return api_error(
-            StatusCode::BAD_REQUEST,
-            "INVALID_PLUGIN_MANIFEST",
-            plugin
-                .validation_error
-                .unwrap_or_else(|| "Plugin manifest failed validation".to_string()),
-        );
-    }
-
-    let ttl = body
-        .and_then(|Json(r)| r.ttl_seconds)
-        .unwrap_or(900)
-        .clamp(60, 86400);
-
-    let Ok((token, claims)) =
-        mint_plugin_jwt(auth_user.user_id, &plugin.id, &plugin.api_scopes, ttl)
-    else {
-        return api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            "Failed to mint plugin token",
-        );
-    };
-
-    let ip = extract_client_ip(&headers);
-    let ua = headers
-        .get(header::USER_AGENT)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    af_db::record_audit(
-        auth_user.user_id,
-        &auth_user.username,
-        "plugin_token_mint",
-        "plugin",
-        &plugin.id,
-        &format!("scopes={}", plugin.api_scopes.join(",")),
-        &ip,
-        ua,
-    );
-
-    Json(serde_json::json!({
-        "plugin_id": plugin.id,
-        "token": token,
-        "scopes": plugin.api_scopes,
-        "allocated_port": plugin.allocated_port,
-        "expires_at": claims.exp,
-    }))
-    .into_response()
-}
-
-fn is_plugin_hop_by_hop_header(name: &str) -> bool {
-    matches!(
-        name.to_ascii_lowercase().as_str(),
-        "connection"
-            | "keep-alive"
-            | "proxy-authenticate"
-            | "proxy-authorization"
-            | "te"
-            | "trailer"
-            | "transfer-encoding"
-            | "upgrade"
-            | "content-length"
-            | "host"
-    )
-}
-
-fn is_plugin_sensitive_auth_header(name: &str) -> bool {
-    matches!(
-        name.to_ascii_lowercase().as_str(),
-        "authorization" | "cookie" | "x-csrf-token"
-    )
-}
-
-async fn proxy_plugin_root_request(
-    Path(plugin_id): Path<String>,
-    Extension(auth_user): Extension<AuthUser>,
-    req: Request,
-) -> Response {
-    forward_plugin_proxy_request(plugin_id, String::new(), auth_user, req).await
-}
-
-async fn proxy_plugin_request(
-    Path((plugin_id, sub_path)): Path<(String, String)>,
-    Extension(auth_user): Extension<AuthUser>,
-    req: Request,
-) -> Response {
-    forward_plugin_proxy_request(plugin_id, sub_path, auth_user, req).await
-}
-
-async fn forward_plugin_proxy_request(
-    plugin_id: String,
-    sub_path: String,
-    auth_user: AuthUser,
-    req: Request,
-) -> Response {
-    let clean_id = plugin_id.trim().to_lowercase();
-    if let Some(ref caller_plugin_id) = auth_user.plugin_id {
-        if !caller_plugin_id.is_empty() && !caller_plugin_id.eq_ignore_ascii_case(&clean_id) {
-            return api_error(
-                StatusCode::FORBIDDEN,
-                "PLUGIN_SCOPE_DENIED",
-                format!(
-                    "Plugin '{}' token cannot proxy requests to plugin '{}'",
-                    caller_plugin_id, clean_id
-                ),
-            );
-        }
-    }
-
-    if sub_path.contains("..")
-        || sub_path.contains('\\')
-        || sub_path.contains('?')
-        || sub_path.contains('#')
-        || sub_path.chars().any(|c| c.is_control())
-        || std::path::Path::new(&sub_path)
-            .components()
-            .any(|c| matches!(c, std::path::Component::ParentDir))
-    {
-        return api_error(
-            StatusCode::BAD_REQUEST,
-            "INVALID_PROXY_PATH",
-            "Disallowed path traversal or control characters in plugin proxy route",
-        );
-    }
-
-    let discovered = af_services::plugins::discover_installed_plugins();
-    let Some(plugin) = discovered.into_iter().find(|p| p.id == clean_id) else {
-        return api_error(
-            StatusCode::NOT_FOUND,
-            "PLUGIN_NOT_FOUND",
-            format!("Plugin '{}' not found", clean_id),
-        );
-    };
-
-    if plugin.status == "invalid" {
-        return api_error(
-            StatusCode::BAD_REQUEST,
-            "INVALID_PLUGIN_MANIFEST",
-            plugin
-                .validation_error
-                .unwrap_or_else(|| "Plugin manifest failed validation".to_string()),
-        );
-    }
-
-    let clean_sub = sub_path.trim_start_matches('/');
-    let query_suffix = req
-        .uri()
-        .query()
-        .filter(|q| !q.is_empty())
-        .map(|q| format!("?{}", q))
-        .unwrap_or_default();
-
-    let target_url = if clean_sub.is_empty() {
-        format!("http://127.0.0.1:{}/{}", plugin.allocated_port, query_suffix)
-    } else {
-        format!(
-            "http://127.0.0.1:{}/{}{}",
-            plugin.allocated_port, clean_sub, query_suffix
-        )
-    };
-
-    let method_str = req.method().as_str().to_string();
-    let incoming_headers = req.headers().clone();
-    let Ok(body_bytes) = axum::body::to_bytes(req.into_body(), 16 * 1024 * 1024).await else {
-        return api_error(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "PAYLOAD_TOO_LARGE",
-            "Plugin proxy request body exceeds 16MB limit",
-        );
-    };
-
-    let connection_nominated: std::collections::HashSet<String> = incoming_headers
-        .get_all(header::CONNECTION)
-        .iter()
-        .filter_map(|v| v.to_str().ok())
-        .flat_map(|s| s.split(','))
-        .map(|token| token.trim().to_ascii_lowercase())
-        .filter(|token| !token.is_empty())
-        .collect();
-
-    let reqwest_method =
-        reqwest::Method::from_bytes(method_str.as_bytes()).unwrap_or(reqwest::Method::GET);
-    let mut upstream_req = PLUGIN_PROXY_HTTP_CLIENT.request(reqwest_method, &target_url);
-
-    for (k, v) in incoming_headers.iter() {
-        let name_str = k.as_str();
-        let name_lower = name_str.to_ascii_lowercase();
-        if is_plugin_hop_by_hop_header(name_str)
-            || is_plugin_sensitive_auth_header(name_str)
-            || connection_nominated.contains(&name_lower)
-            || name_str.eq_ignore_ascii_case("x-aetherflow-user")
-            || name_str.eq_ignore_ascii_case("x-aetherflow-plugin-id")
-        {
-            continue;
-        }
-        if let (Ok(rk), Ok(rv)) = (
-            reqwest::header::HeaderName::from_bytes(name_str.as_bytes()),
-            reqwest::header::HeaderValue::from_bytes(v.as_bytes()),
-        ) {
-            upstream_req = upstream_req.header(rk, rv);
-        }
-    }
-
-    upstream_req = upstream_req
-        .header("X-Aetherflow-User", &auth_user.username)
-        .header("X-Aetherflow-Plugin-Id", &plugin.id);
-
-    if !body_bytes.is_empty() {
-        upstream_req = upstream_req.body(body_bytes.to_vec());
-    }
-
-    match upstream_req.send().await {
-        Ok(upstream_resp) => {
-            let status = StatusCode::from_u16(upstream_resp.status().as_u16())
-                .unwrap_or(StatusCode::BAD_GATEWAY);
-            let upstream_headers = upstream_resp.headers().clone();
-            let stream = upstream_resp.bytes_stream();
-            let mut response = Response::new(Body::from_stream(stream));
-            *response.status_mut() = status;
-
-            let resp_headers = response.headers_mut();
-            for (k, v) in upstream_headers.iter() {
-                if is_plugin_hop_by_hop_header(k.as_str()) {
-                    continue;
-                }
-                if let (Ok(hk), Ok(hv)) = (
-                    HeaderName::from_bytes(k.as_str().as_bytes()),
-                    HeaderValue::from_bytes(v.as_bytes()),
-                ) {
-                    resp_headers.append(hk, hv);
-                }
-            }
-            response
-        }
-        Err(err) => api_error(
-            StatusCode::BAD_GATEWAY,
-            "PLUGIN_UPSTREAM_UNAVAILABLE",
-            format!(
-                "Companion plugin '{}' on port {} is unavailable: {}",
-                plugin.id, plugin.allocated_port, err
-            ),
-        ),
-    }
-}
 
 #[cfg(test)]
 mod tests {

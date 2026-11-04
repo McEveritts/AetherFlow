@@ -10,6 +10,9 @@ mod mcbrowser_integration_tests;
 pub mod notifications_ext;
 pub mod network;
 pub mod oidc;
+pub mod plugins;
+#[cfg(test)]
+mod plugins_router_tests;
 pub mod routes;
 pub mod storage;
 pub mod streaming_ext;
@@ -29,7 +32,38 @@ use std::time::Duration;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use axum::http::{header, HeaderName, HeaderValue, Method};
 
+fn env_flag_enabled(name: &str) -> bool {
+    env::var(name)
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
 fn load_env_files() {
+    if env_flag_enabled("AETHERFLOW_SKIP_ENV_FILES") || env_flag_enabled("AETHERFLOW_E2E_ISOLATED") {
+        if let Ok(explicit) = env::var("AETHERFLOW_ENV_FILE") {
+            let trimmed = explicit.trim();
+            if !trimmed.is_empty() && Path::new(trimmed).is_file() {
+                let _ = dotenvy::from_path(trimmed);
+            }
+        }
+        return;
+    }
+
+    if let Ok(explicit) = env::var("AETHERFLOW_ENV_FILE") {
+        let trimmed = explicit.trim();
+        if !trimmed.is_empty() {
+            if Path::new(trimmed).is_file() {
+                let _ = dotenvy::from_path(trimmed);
+            }
+            return;
+        }
+    }
+
     let candidates = [
         "/etc/aetherflow/aetherflow.env",
         "../.env",
@@ -159,35 +193,58 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!(error = %e, "failed to migrate legacy secrets");
     }
 
+    let disable_workers = env_flag_enabled("AETHERFLOW_DISABLE_BACKGROUND_WORKERS")
+        || env_flag_enabled("AETHERFLOW_DISABLE_WORKERS")
+        || env_flag_enabled("AETHERFLOW_E2E_ISOLATED");
+    let disable_autoheal = disable_workers || env_flag_enabled("AETHERFLOW_DISABLE_AUTOHEAL");
+
     // Background 15-minute expired data pruning loop
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(30)).await;
-        let mut interval = tokio::time::interval(Duration::from_secs(900));
-        loop {
-            interval.tick().await;
-            af_db::prune_expired_data();
-        }
-    });
+    if !disable_workers {
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            let mut interval = tokio::time::interval(Duration::from_secs(900));
+            loop {
+                interval.tick().await;
+                af_db::prune_expired_data();
+            }
+        });
+    }
 
     // Background 1 Hz WebSocket telemetry loop
-    ws::start_metrics_broadcast_loop();
+    if !env_flag_enabled("AETHERFLOW_DISABLE_WS_BROADCAST") {
+        ws::start_metrics_broadcast_loop();
+    }
 
     // Background Subsystems: Metrics Recorder, Auto-Heal, Smart Backup, App Update Watcher,
     // Cluster Master/Worker Runtime, Notification Rule Engine, and Jellyfin Streaming Poller
-    af_services::workers::start_metrics_recorder();
-    af_services::workers::start_heal_worker(10);
-    af_services::workers::start_smart_backup_scheduler();
-    af_services::workers::start_app_update_watcher();
-    af_services::workers::start_mediaflow_poller();
-    af_services::cluster_daemon::start_cluster_runtime();
-    notifications_ext::start_notification_engine();
-    streaming_ext::start_streaming_monitor();
-    tokio::spawn(async move {
-        af_services::mutators::provision_all_installed_app_subdomains().await;
-    });
+    if !disable_workers {
+        af_services::workers::start_metrics_recorder();
+        if !disable_autoheal {
+            af_services::workers::start_heal_worker(10);
+        }
+        af_services::workers::start_smart_backup_scheduler();
+        af_services::workers::start_app_update_watcher();
+        af_services::workers::start_mediaflow_poller();
+        af_services::cluster_daemon::start_cluster_runtime();
+        notifications_ext::start_notification_engine();
+        streaming_ext::start_streaming_monitor();
+        tokio::spawn(async move {
+            af_services::mutators::provision_all_installed_app_subdomains().await;
+        });
+    } else {
+        tracing::info!(
+            "Background mutating workers disabled via AETHERFLOW_DISABLE_BACKGROUND_WORKERS / AETHERFLOW_DISABLE_WORKERS / AETHERFLOW_E2E_ISOLATED"
+        );
+    }
 
-    let port = env::var("PORT").unwrap_or_else(|_| "8080".to_string());
-    let bind_addr = format!("0.0.0.0:{}", port);
+    let bind_addr = resolve_bind_addr(
+        env::var("BIND_ADDR")
+            .or_else(|_| env::var("AETHERFLOW_BIND_ADDR"))
+            .ok()
+            .as_deref(),
+        env::var("PORT").ok().as_deref(),
+        env_flag_enabled("AETHERFLOW_E2E_ISOLATED"),
+    );
 
     let app = routes::build_router()
         .layer(build_cors_layer())
@@ -214,4 +271,56 @@ async fn main() -> anyhow::Result<()> {
     .await?;
 
     Ok(())
+}
+
+pub fn resolve_bind_addr(
+    bind_host_env: Option<&str>,
+    port_env: Option<&str>,
+    isolated_mode: bool,
+) -> String {
+    let port = port_env
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("8080");
+    let bind_host = bind_host_env
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(if isolated_mode { "127.0.0.1" } else { "0.0.0.0" });
+
+    // IPv6 bracketed literal without port (`[::1]`) -> `[::1]:8080`
+    if bind_host.starts_with('[') && bind_host.ends_with(']') {
+        return format!("{}:{}", bind_host, port);
+    }
+    // Unbracketed IPv6 literal (`::1` or `::`) -> `[::1]:8080`
+    if bind_host.matches(':').count() > 1 && !bind_host.starts_with('[') {
+        return format!("[{}]:{}", bind_host, port);
+    }
+    if bind_host.contains(':') {
+        bind_host.to_string()
+    } else {
+        format!("{}:{}", bind_host, port)
+    }
+}
+
+#[cfg(test)]
+mod main_isolation_tests {
+    use super::*;
+
+    #[test]
+    fn resolve_bind_addr_honors_bind_addr_port_and_isolated_defaults() {
+        assert_eq!(resolve_bind_addr(None, None, false), "0.0.0.0:8080");
+        assert_eq!(resolve_bind_addr(None, Some("18080"), true), "127.0.0.1:18080");
+        assert_eq!(
+            resolve_bind_addr(Some("127.0.0.1"), Some("18080"), false),
+            "127.0.0.1:18080"
+        );
+        assert_eq!(
+            resolve_bind_addr(Some("127.0.0.1:19090"), Some("18080"), false),
+            "127.0.0.1:19090"
+        );
+        assert_eq!(
+            resolve_bind_addr(Some("::1"), Some("18080"), false),
+            "[::1]:18080"
+        );
+    }
 }

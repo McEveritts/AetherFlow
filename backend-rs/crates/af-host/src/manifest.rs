@@ -13,7 +13,6 @@ use crate::verify::{
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::fs;
 use std::path::{Path, PathBuf};
 
 /// Canonical schema identifier for `af-host` backup manifests.
@@ -63,6 +62,12 @@ pub struct BackupManifestEntry {
     /// Optional POSIX octal permissions mode (e.g., `0o600` or `0o644`).
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub unix_mode: Option<u32>,
+    /// Optional POSIX owner user ID (`uid`) recorded at backup time.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub unix_uid: Option<u32>,
+    /// Optional POSIX owner group ID (`gid`) recorded at backup time.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub unix_gid: Option<u32>,
     /// Whether this entry is mandatory for the backup to be considered complete.
     #[serde(default = "default_true")]
     pub required: bool,
@@ -77,6 +82,20 @@ impl BackupManifestEntry {
     /// (if present) contains no parent traversal or NUL bytes.
     pub fn validate(&self) -> HostBackupResult<PathBuf> {
         let rel = validate_relative_backup_path(&self.relative_path)?;
+        for comp in rel.components() {
+            if let std::path::Component::Normal(seg) = comp {
+                let seg_str = seg.to_string_lossy();
+                if seg_str == ".restore-provenance"
+                    || seg_str.starts_with(".rollback-restore.")
+                    || seg_str.starts_with(".staging-restore.")
+                {
+                    return Err(HostBackupError::InvalidManifest(format!(
+                        "entry '{}' targets reserved restore provenance or staging path",
+                        self.relative_path
+                    )));
+                }
+            }
+        }
         if self.sha256.len() != 64 || !self.sha256.chars().all(|c| c.is_ascii_hexdigit()) {
             return Err(HostBackupError::InvalidManifest(format!(
                 "entry '{}' has invalid SHA-256 digest {:?}",
@@ -89,6 +108,15 @@ impl BackupManifestEntry {
                     path: logical.clone(),
                     reason: "logical_target_path must not contain '..' or NUL bytes".to_string(),
                 });
+            }
+            if logical.contains(".restore-provenance")
+                || logical.contains(".rollback-restore.")
+                || logical.contains(".staging-restore.")
+            {
+                return Err(HostBackupError::InvalidManifest(format!(
+                    "entry '{}' logical_target_path '{}' targets reserved restore provenance or staging path",
+                    self.relative_path, logical
+                )));
             }
         }
         Ok(rel)
@@ -195,20 +223,72 @@ impl BackupManifest {
         logical_target_path: Option<String>,
         required: bool,
     ) -> HostBackupResult<&BackupManifestEntry> {
+        self.add_file_with_metadata_source(
+            relative_path,
+            disk_path,
+            None,
+            kind,
+            logical_target_path,
+            required,
+        )
+    }
+
+    pub fn add_file_with_metadata_source(
+        &mut self,
+        relative_path: impl Into<String>,
+        disk_path: &Path,
+        metadata_source_path: Option<&Path>,
+        kind: BackupTargetKind,
+        logical_target_path: Option<String>,
+        required: bool,
+    ) -> HostBackupResult<&BackupManifestEntry> {
+        self.add_file_with_metadata_source_and_trusted_uid(
+            relative_path,
+            disk_path,
+            metadata_source_path,
+            None,
+            kind,
+            logical_target_path,
+            required,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_file_with_metadata_source_and_trusted_uid(
+        &mut self,
+        relative_path: impl Into<String>,
+        disk_path: &Path,
+        metadata_source_path: Option<&Path>,
+        trusted_metadata_uid: Option<u32>,
+        kind: BackupTargetKind,
+        logical_target_path: Option<String>,
+        required: bool,
+    ) -> HostBackupResult<&BackupManifestEntry> {
         let rel_str = relative_path.into();
         let _ = validate_relative_backup_path(&rel_str)?;
         reject_if_symlink(disk_path, "manifest source file")?;
+        let attr_path = metadata_source_path.unwrap_or(disk_path);
+        reject_if_symlink(attr_path, "manifest metadata source file")?;
 
         let (sha256, size_bytes) = compute_file_sha256(disk_path)?;
         #[cfg(unix)]
-        let unix_mode = {
-            use std::os::unix::fs::PermissionsExt;
-            fs::symlink_metadata(disk_path)
-                .ok()
-                .map(|m| m.permissions().mode() & 0o7777)
+        let (unix_mode, unix_uid, unix_gid) = {
+            let (_, fd_mode, fd_uid, fd_gid) = crate::verify::open_existing_regular_file_nofollow(
+                attr_path,
+                trusted_metadata_uid,
+                "manifest metadata source file",
+            )?
+            .ok_or_else(|| HostBackupError::PathValidation {
+                path: attr_path.to_path_buf(),
+                reason: "manifest metadata source file does not exist".to_string(),
+            })?;
+            (Some(fd_mode & 0o7777), Some(fd_uid), Some(fd_gid))
         };
         #[cfg(not(unix))]
-        let unix_mode = None;
+        let (unix_mode, unix_uid, unix_gid) = {
+            let _ = trusted_metadata_uid;
+            (None, None, None)
+        };
 
         let entry = BackupManifestEntry {
             relative_path: rel_str,
@@ -217,6 +297,8 @@ impl BackupManifest {
             sha256,
             size_bytes,
             unix_mode,
+            unix_uid,
+            unix_gid,
             required,
         };
         entry.validate()?;
@@ -277,12 +359,43 @@ impl BackupManifest {
         }
 
         let mut seen_paths = HashSet::new();
+        let mut seen_canonical_targets = HashSet::new();
+        let mut sqlite_entry_count = 0usize;
         for entry in &self.entries {
             let norm = entry.validate()?;
             let key = norm.to_string_lossy().replace('\\', "/");
-            if !seen_paths.insert(key) {
+            if !seen_paths.insert(key.clone()) {
                 return Err(HostBackupError::InvalidManifest(format!(
                     "duplicate manifest entry relative_path '{}'",
+                    entry.relative_path
+                )));
+            }
+            if entry.kind == BackupTargetKind::SqliteSnapshot {
+                sqlite_entry_count += 1;
+                if sqlite_entry_count > 1 {
+                    return Err(HostBackupError::InvalidManifest(
+                        "manifest contains multiple SqliteSnapshot entries".to_string(),
+                    ));
+                }
+            } else if key == "var/lib/aetherflow/aetherflow.sqlite"
+                || key == "var/lib/aetherflow/aetherflow.sqlite-wal"
+                || key == "var/lib/aetherflow/aetherflow.sqlite-shm"
+            {
+                return Err(HostBackupError::InvalidManifest(format!(
+                    "non-SQLite manifest entry '{}' cannot target canonical SQLite database or sidecar path",
+                    entry.relative_path
+                )));
+            }
+            let canonical_target_key = if entry.kind == BackupTargetKind::SqliteSnapshot {
+                "var/lib/aetherflow/aetherflow.sqlite".to_string()
+            } else if key == "home/aetherflow/.rtorrent.rc" {
+                "home/owner/.rtorrent.rc".to_string()
+            } else {
+                key
+            };
+            if !seen_canonical_targets.insert(canonical_target_key) {
+                return Err(HostBackupError::InvalidManifest(format!(
+                    "manifest entry '{}' resolves to a duplicate canonical target path",
                     entry.relative_path
                 )));
             }
@@ -291,7 +404,7 @@ impl BackupManifest {
         if let Some(ref snap) = self.sqlite_snapshot {
             let snap_norm = validate_relative_backup_path(&snap.snapshot_relative_path)?;
             let snap_key = snap_norm.to_string_lossy().replace('\\', "/");
-            if snap.sha256.len() != 64 || !snap.sha256.chars().all(|c| c.is_ascii_hexdigit()) {
+            if snap.sha256.len() != 64 || !snap.sha256.chars().all(|ch| ch.is_ascii_hexdigit()) {
                 return Err(HostBackupError::InvalidManifest(
                     "sqlite_snapshot has invalid SHA-256 digest".to_string(),
                 ));
@@ -317,7 +430,7 @@ impl BackupManifest {
             let matching_entry = self
                 .entries
                 .iter()
-                .find(|e| e.relative_path.replace('\\', "/") == snap_key)
+                .find(|entry_item| entry_item.relative_path.replace('\\', "/") == snap_key)
                 .ok_or_else(|| {
                     HostBackupError::InvalidManifest(format!(
                         "sqlite_snapshot '{}' has no matching entry in manifest.entries",
@@ -470,21 +583,36 @@ impl BackupManifest {
     /// alongside `manifest_path` (or `require_sidecar` is `true`), verifies the manifest's
     /// SHA-256 digest before parsing JSON.
     pub fn load_from_path(manifest_path: &Path, require_sidecar: bool) -> HostBackupResult<Self> {
+        Self::load_from_path_with_trusted_uid(manifest_path, require_sidecar, None)
+    }
+
+    pub fn load_from_path_with_trusted_uid(
+        manifest_path: &Path,
+        require_sidecar: bool,
+        trusted_uid: Option<u32>,
+    ) -> HostBackupResult<Self> {
         validate_no_parent_traversal(manifest_path, "manifest file")?;
         reject_if_symlink(manifest_path, "manifest file")?;
         let sidecar = crate::verify::checksum_sidecar_path(manifest_path);
         if require_sidecar || sidecar.exists() {
-            crate::verify::verify_file_with_sidecar(manifest_path)?;
+            crate::verify::verify_file_with_sidecar_and_trusted_uid(manifest_path, trusted_uid)?;
         }
 
-        let raw = fs::read_to_string(manifest_path).map_err(|e| {
-            HostBackupError::io(format!("reading manifest {}", manifest_path.display()), e)
+        let raw = crate::verify::read_verified_text_file_nofollow(
+            manifest_path,
+            trusted_uid,
+            16 * 1024 * 1024,
+            "manifest file",
+        )?
+        .ok_or_else(|| HostBackupError::PathValidation {
+            path: manifest_path.to_path_buf(),
+            reason: "manifest file does not exist".to_string(),
         })?;
-        let manifest: Self = serde_json::from_str(&raw).map_err(|e| {
+        let manifest: Self = serde_json::from_str(&raw).map_err(|parse_err| {
             HostBackupError::InvalidManifest(format!(
                 "failed to parse manifest {}: {}",
                 manifest_path.display(),
-                e
+                parse_err
             ))
         })?;
         manifest.validate()?;

@@ -34,10 +34,7 @@
 //!      compensating rollback actions in reverse order, restores `.bak-af` backups, removes
 //!      newly created files, cleans up temporary artifacts, and preserves the pre-operation lock state.
 
-use crate::{
-    apply_package_sandbox_local, resolve_package_script_path, SAFE_PKG_ID,
-    SAFE_SERVICE_NAME, SAFE_USERNAME,
-};
+use crate::{resolve_package_script_path, SAFE_PKG_ID, SAFE_SERVICE_NAME, SAFE_USERNAME};
 use af_models::PackageRunnerRequest;
 use chrono::Utc;
 use flate2::read::GzDecoder;
@@ -80,6 +77,28 @@ pub static SAFE_VERSION_TAG: Lazy<Regex> =
 pub static SAFE_TLS_SUBJECT: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"^/CN=[A-Za-z0-9_.-]{1,64}(/[A-Za-z]{1,4}=[A-Za-z0-9_.-]{1,64})*$").unwrap()
 });
+
+/// Pinned upstream Threadfin release version (`https://github.com/Threadfin/Threadfin/releases/expanded_assets/1.2.37`).
+pub const THREADFIN_PINNED_VERSION: &str = "1.2.37";
+
+/// Pinned SHA-256 digest for `Threadfin_linux_amd64_glibc_2.31_compat` (`Threadfin_linux_amd64_compat`) 1.2.37.
+pub const THREADFIN_AMD64_COMPAT_SHA256: &str =
+    "0b80a1bb5dc270c35288531408657189fd27c2e4346686743ebd36f3b6acbe42";
+
+/// Pinned SHA-256 digest for `Threadfin_linux_arm64` 1.2.37.
+pub const THREADFIN_ARM64_SHA256: &str =
+    "1e5e6f065cf2470d1460fae80c68c9631ca79e67ff76f83d47ab4bcb9ceb6213";
+
+/// Pinned SHA-256 digest for `Threadfin_linux_arm` (armhf) 1.2.37.
+pub const THREADFIN_ARMHF_SHA256: &str =
+    "d64e6b7f8a1ab8aebdd37d06bfb0bddb991c68c9fed52e25530b92ead10c8328";
+
+/// Secondary upstream SHA-256 digest for plain `Threadfin_linux_amd64` 1.2.37.
+pub const THREADFIN_AMD64_PLAIN_SHA256: &str =
+    "19183058cf28b0080df059113e546a8e8cac16cae210d13be51bda42af94dfc2";
+
+/// Default Quassel IRC core listen port when no custom `app_port` is requested.
+pub const QUASSEL_DEFAULT_LISTEN_PORT: i32 = 4242;
 
 /// Allowed managed prefixes for declarative file writes, creations, and removals.
 const ALLOWED_MANAGED_PREFIXES: &[&str] = &[
@@ -295,9 +314,12 @@ pub struct ArtifactVerificationPolicy {
     pub min_size_bytes: u64,
     /// Maximum allowed size in bytes (guards against unbounded disk exhaustion).
     pub max_size_bytes: u64,
-    /// Optional pinned hex-encoded SHA-256 digest.
+    /// Optional pinned hex-encoded SHA-256 digest (architecture-independent or single-arch override).
     #[serde(default)]
     pub expected_sha256: Option<String>,
+    /// Optional per-architecture pinned hex-encoded SHA-256 digests (`amd64`, `arm64`, `armhf`).
+    #[serde(default)]
+    pub arch_sha256: Option<ArchAssetMap>,
     /// Verify gzip magic header (`1f 8b`) before extraction.
     #[serde(default)]
     pub require_gzip_magic: bool,
@@ -312,6 +334,7 @@ impl Default for ArtifactVerificationPolicy {
             min_size_bytes: 1024,
             max_size_bytes: 512 * 1024 * 1024, // 512 MiB
             expected_sha256: None,
+            arch_sha256: None,
             require_gzip_magic: false,
             require_elf_magic: false,
         }
@@ -327,6 +350,13 @@ pub enum DeclarativeStep {
     /// Runs `apt-get install -y -qq <packages>` with validated package identifiers.
     AptInstall {
         packages: Vec<String>,
+        progress_pct: u8,
+        description: String,
+    },
+    AptRemove {
+        packages: Vec<String>,
+        autoremove: bool,
+        ignore_errors: bool,
         progress_pct: u8,
         description: String,
     },
@@ -394,6 +424,7 @@ pub enum DeclarativeStep {
         progress_pct: u8,
         description: String,
     },
+    EnsureThreadfinConfig { progress_pct: u8, description: String },
     /// Resolves the latest release tag for a GitHub repository (`owner/repo`) with a deterministic fallback version.
     ResolveGitHubReleaseTag {
         repo: String,
@@ -1188,6 +1219,7 @@ fn validate_step(step: &DeclarativeStep) -> Result<(), PackageExecutorError> {
     match step {
         DeclarativeStep::AptUpdate { .. } => Ok(()),
         DeclarativeStep::AptInstall { packages, .. }
+        | DeclarativeStep::AptRemove { packages, .. }
         | DeclarativeStep::AptPurge { packages, .. } => {
             if packages.is_empty() {
                 return Err(PackageExecutorError::Validation(
@@ -1260,7 +1292,8 @@ fn validate_step(step: &DeclarativeStep) -> Result<(), PackageExecutorError> {
             }
             Ok(())
         }
-        DeclarativeStep::ProbeSshPort { .. } => Ok(()),
+        DeclarativeStep::ProbeSshPort { .. }
+        | DeclarativeStep::EnsureThreadfinConfig { .. } => Ok(()),
         DeclarativeStep::GenerateSelfSignedTlsCert {
             cert_path,
             key_out_path,
@@ -1485,11 +1518,62 @@ fn normalize_unit_filename(unit: &str) -> String {
 // Artifact Verification Engine
 // -----------------------------------------------------------------------------
 
+/// Verifies that an ELF header's `e_machine` field (if populated with a known architecture constant)
+/// matches `expected_arch` (`amd64`, `arm64`, or `armhf`).
+pub fn verify_elf_header_architecture(
+    header: &[u8],
+    expected_arch: &str,
+    artifact_label: &str,
+) -> Result<(), PackageExecutorError> {
+    if header.len() < 20 || header[..4] != [0x7f, b'E', b'L', b'F'] {
+        return Ok(());
+    }
+    let is_big_endian = header[5] == 2;
+    let e_machine = if is_big_endian {
+        u16::from_be_bytes([header[18], header[19]])
+    } else {
+        u16::from_le_bytes([header[18], header[19]])
+    };
+    let actual_arch = match e_machine {
+        62 => Some("amd64"),  // EM_X86_64
+        183 => Some("arm64"), // EM_AARCH64
+        40 => Some("armhf"),  // EM_ARM
+        3 => Some("i386"),    // EM_386
+        243 => Some("riscv64"), // EM_RISCV
+        _ => None,
+    };
+    if let Some(actual) = actual_arch {
+        let norm_expected = match expected_arch.trim() {
+            "x86_64" | "amd64" => "amd64",
+            "aarch64" | "arm64" => "arm64",
+            "armv7l" | "arm" | "armhf" => "armhf",
+            other => other,
+        };
+        if actual != norm_expected {
+            return Err(PackageExecutorError::ArtifactVerification(format!(
+                "ELF architecture mismatch for {}: binary header is '{}' (e_machine=0x{:04x}) but target architecture is '{}'",
+                artifact_label, actual, e_machine, norm_expected
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Verifies a downloaded or staged artifact file against size bounds, optional SHA-256 digest,
 /// and magic header signatures. Returns the computed lowercase hex SHA-256 digest.
 pub fn verify_artifact_file(
     path: &Path,
     policy: &ArtifactVerificationPolicy,
+) -> Result<String, PackageExecutorError> {
+    verify_artifact_file_for_arch(path, policy, None)
+}
+
+/// Verifies a downloaded or staged artifact file against size bounds, architecture-specific or
+/// global SHA-256 digest, and magic/ELF architecture header signatures.
+pub fn verify_artifact_file_for_arch(
+    path: &Path,
+    policy: &ArtifactVerificationPolicy,
+    target_arch: Option<&str>,
 ) -> Result<String, PackageExecutorError> {
     let meta = fs::metadata(path).map_err(|e| {
         PackageExecutorError::ArtifactVerification(format!(
@@ -1523,7 +1607,7 @@ pub fn verify_artifact_file(
     }
 
     let mut file = File::open(path)?;
-    let mut header = [0u8; 4];
+    let mut header = [0u8; 20];
     let head_read = file.read(&mut header)?;
 
     if policy.require_gzip_magic && (head_read < 2 || header[0] != 0x1f || header[1] != 0x8b) {
@@ -1532,13 +1616,16 @@ pub fn verify_artifact_file(
             path.display()
         )));
     }
-    if policy.require_elf_magic
-        && (head_read < 4 || header != [0x7f, b'E', b'L', b'F'])
-    {
+    if policy.require_elf_magic && (head_read < 4 || header[..4] != [0x7f, b'E', b'L', b'F']) {
         return Err(PackageExecutorError::ArtifactVerification(format!(
             "artifact {} does not have a valid ELF executable header (0x7f454c46)",
             path.display()
         )));
+    }
+    if policy.require_elf_magic {
+        if let Some(arch) = target_arch {
+            verify_elf_header_architecture(&header[..head_read], arch, &path.display().to_string())?;
+        }
     }
 
     let mut hasher = Sha256::new();
@@ -1553,13 +1640,31 @@ pub fn verify_artifact_file(
     }
     let digest = hex::encode(hasher.finalize());
 
-    if let Some(ref expected) = policy.expected_sha256 {
-        let clean_expected = expected.trim().to_lowercase();
-        if !clean_expected.is_empty() && clean_expected != "skip" && digest != clean_expected {
+    let expected_opt: Option<&str> = if let Some(ref expected) = policy.expected_sha256 {
+        Some(expected.as_str())
+    } else if let (Some(ref arch_map), Some(arch)) = (&policy.arch_sha256, target_arch) {
+        Some(arch_map.resolve(arch).ok_or_else(|| {
+            PackageExecutorError::ArtifactVerification(format!(
+                "no pinned SHA-256 digest configured for architecture '{}' on {}",
+                arch,
+                path.display()
+            ))
+        })?)
+    } else {
+        None
+    };
+
+    if let Some(expected_raw) = expected_opt {
+        let allowed_digests: Vec<String> = expected_raw
+            .split('|')
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty() && s != "skip")
+            .collect();
+        if !allowed_digests.is_empty() && !allowed_digests.iter().any(|d| d == &digest) {
             return Err(PackageExecutorError::ArtifactVerification(format!(
                 "SHA-256 mismatch for {}: expected {}, got {}",
                 path.display(),
-                clean_expected,
+                allowed_digests.join(" or "),
                 digest
             )));
         }
@@ -1578,6 +1683,7 @@ enum RollbackEntry {
     RestorableFile {
         target: PathBuf,
         backup: PathBuf,
+        ownership: Option<(u32, u32)>,
     },
     /// A file that did not exist before the execution and should be removed on failure/cancellation.
     CreatedFile {
@@ -1638,6 +1744,15 @@ impl RollbackJournal {
                     self.entries.push(RollbackEntry::RestorableFile {
                         target: target.to_path_buf(),
                         backup,
+                        ownership: {
+                            #[cfg(unix)]
+                            {
+                                use std::os::unix::fs::MetadataExt;
+                                Some((meta.uid(), meta.gid()))
+                            }
+                            #[cfg(not(unix))]
+                            { None }
+                        },
                     });
                 } else {
                     return Err(PackageExecutorError::SecurityViolation(format!(
@@ -1727,7 +1842,7 @@ impl RollbackJournal {
                         notes.push(format!("rolled back systemd unit {}", unit_name));
                     }
                 }
-                RollbackEntry::RestorableFile { target, backup } => {
+                RollbackEntry::RestorableFile { target, backup, ownership } => {
                     if let Err(err) = validate_filesystem_path(&target, self.fs_root.as_deref())
                         .and_then(|_| validate_filesystem_path(&backup, self.fs_root.as_deref()))
                     {
@@ -1739,6 +1854,18 @@ impl RollbackJournal {
                         continue;
                     }
                     if backup.is_file() {
+                        if let Some((owner_uid, owner_gid)) = ownership {
+                            let result = runner.run_command(
+                                "chown",
+                                &[format!("{}:{}", owner_uid, owner_gid), backup.to_string_lossy().to_string()],
+                                &[],
+                                &noop_cancel,
+                            ).await;
+                            if !matches!(result, Ok(output) if output.success()) {
+                                notes.push(format!("failed to restore ownership for {}", target.display()));
+                                continue;
+                            }
+                        }
                         if fs::rename(&backup, &target).is_err() {
                             let _ = fs::copy(&backup, &target);
                             let _ = fs::remove_file(&backup);
@@ -2136,27 +2263,32 @@ fn build_fail2ban_recipe() -> DeclarativePackageRecipe {
         update_steps: install_steps.clone(),
         install_steps,
         remove_steps: vec![
+            DeclarativeStep::AptRemove {
+                packages: vec!["fail2ban".to_string()],
+                autoremove: false,
+                ignore_errors: false,
+                progress_pct: 20,
+                description: "Removing fail2ban APT package (purging only with DELETE_DATA=true)...".to_string(),
+            },
             DeclarativeStep::PurgeSystemdUnit {
                 unit_name: "fail2ban.service".to_string(),
-                progress_pct: 20,
-                description: "Stopping and disabling fail2ban.service...".to_string(),
-            },
-            DeclarativeStep::AptPurge {
-                packages: vec!["fail2ban".to_string()],
-                autoremove: true,
-                ignore_errors: true,
                 progress_pct: 55,
-                description: "Purging fail2ban APT package...".to_string(),
+                description: "Stopping and disabling fail2ban.service...".to_string(),
             },
             DeclarativeStep::RemovePaths {
                 paths: vec![
                     "/etc/fail2ban".to_string(),
                     "/var/lib/fail2ban".to_string(),
-                    "/run/fail2ban".to_string(),
                 ],
                 only_if_delete_data: true,
+                progress_pct: 80,
+                description: "Purging Fail2ban configuration and state only with DELETE_DATA=true...".to_string(),
+            },
+            DeclarativeStep::RemovePaths {
+                paths: vec!["/run/fail2ban".to_string()],
+                only_if_delete_data: false,
                 progress_pct: 85,
-                description: "Removing Fail2ban configuration and state directories...".to_string(),
+                description: "Removing Fail2ban runtime directory...".to_string(),
             },
             DeclarativeStep::Systemctl {
                 unit: None,
@@ -2170,90 +2302,6 @@ fn build_fail2ban_recipe() -> DeclarativePackageRecipe {
 }
 
 fn build_quassel_recipe() -> DeclarativePackageRecipe {
-    let install_steps = vec![
-        DeclarativeStep::AptUpdate {
-            progress_pct: 15,
-            description: "Updating APT package indexes for Quassel Core...".to_string(),
-        },
-        DeclarativeStep::AptInstall {
-            packages: vec!["quassel-core".to_string(), "openssl".to_string()],
-            progress_pct: 35,
-            description: "Installing quassel-core and openssl...".to_string(),
-        },
-        DeclarativeStep::EnsureSystemUser {
-            username: "quasselcore".to_string(),
-            home_dir: "/var/lib/quassel".to_string(),
-            create_home: true,
-            progress_pct: 45,
-            description: "Ensuring dedicated quasselcore system user...".to_string(),
-        },
-        DeclarativeStep::EnsureDirectories {
-            paths: vec!["/var/lib/quassel".to_string()],
-            mode: 0o750,
-            owner: Some("quasselcore".to_string()),
-            group: Some("quasselcore".to_string()),
-            progress_pct: 55,
-            description: "Preparing /var/lib/quassel state directory...".to_string(),
-        },
-        DeclarativeStep::GenerateSelfSignedTlsCert {
-            cert_path: "/var/lib/quassel/quasselCert.pem".to_string(),
-            key_out_path: None,
-            days: 3650,
-            subject: "/CN=AetherFlow-Quassel".to_string(),
-            mode: 0o600,
-            owner: Some("quasselcore".to_string()),
-            group: Some("quasselcore".to_string()),
-            overwrite: false,
-            progress_pct: 65,
-            description: "Generating self-signed TLS certificate for Quassel Core...".to_string(),
-        },
-        DeclarativeStep::CaptureDpkgVersion {
-            package: "quassel-core".to_string(),
-            fallback_version: "0.14.0".to_string(),
-            version_file_path: Some("/var/lib/quassel/.af-version".to_string()),
-            owner: Some("quasselcore".to_string()),
-            group: Some("quasselcore".to_string()),
-            progress_pct: 72,
-            description: "Capturing installed quassel-core dpkg version...".to_string(),
-        },
-        DeclarativeStep::WriteTemplateFile {
-            path: "/etc/default/quasselcore".to_string(),
-            content_template: "LISTEN=\"0.0.0.0\"\nPORT=\"4242\"\nCONFIGDIR=\"/var/lib/quassel\"\nLOGFILE=\"/var/log/quasselcore.log\"\nLOGLEVEL=\"Info\"\n".to_string(),
-            mode: 0o644,
-            overwrite: true,
-            owner: None,
-            group: None,
-            progress_pct: 78,
-            description: "Writing /etc/default/quasselcore configuration...".to_string(),
-        },
-        DeclarativeStep::WriteSystemdUnit {
-            unit_name: "quasselcore.service".to_string(),
-            content_template: "[Unit]\nDescription=Quassel Core IRC Bouncer\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nUser=quasselcore\nGroup=quasselcore\nEnvironmentFile=-/etc/default/quasselcore\nExecStart=/usr/bin/quasselcore --configdir=/var/lib/quassel --listen=0.0.0.0 --port=4242\nRestart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=multi-user.target\n".to_string(),
-            progress_pct: 84,
-            description: "Writing quasselcore.service systemd unit...".to_string(),
-        },
-        DeclarativeStep::Systemctl {
-            unit: None,
-            operation: SystemctlOp::DaemonReload,
-            ignore_errors: false,
-            progress_pct: 88,
-            description: "Reloading systemd manager configuration...".to_string(),
-        },
-        DeclarativeStep::Systemctl {
-            unit: Some("quasselcore.service".to_string()),
-            operation: SystemctlOp::EnableNow,
-            ignore_errors: false,
-            progress_pct: 92,
-            description: "Enabling and starting quasselcore.service...".to_string(),
-        },
-        DeclarativeStep::Systemctl {
-            unit: Some("quasselcore.service".to_string()),
-            operation: SystemctlOp::Restart,
-            ignore_errors: false,
-            progress_pct: 96,
-            description: "Restarting quasselcore.service...".to_string(),
-        },
-    ];
     DeclarativePackageRecipe {
         package_id: "quassel".to_string(),
         label: "Quassel".to_string(),
@@ -2261,35 +2309,130 @@ fn build_quassel_recipe() -> DeclarativePackageRecipe {
         service_name: "quasselcore".to_string(),
         lock_file: "/install/.quassel.lock".to_string(),
         apply_systemd_sandbox: true,
-        update_steps: install_steps.clone(),
-        install_steps,
+        install_steps: vec![
+            DeclarativeStep::AptUpdate {
+                progress_pct: 15,
+                description: "Updating APT package indexes for Quassel Core...".to_string(),
+            },
+            DeclarativeStep::AptInstall {
+                packages: vec!["openssl".to_string()],
+                progress_pct: 25,
+                description: "Installing OpenSSL before provisioning Quassel credentials...".to_string(),
+            },
+            DeclarativeStep::EnsureSystemUser {
+                username: "quasselcore".to_string(),
+                home_dir: "/var/lib/quassel".to_string(),
+                create_home: false,
+                progress_pct: 35,
+                description: "Ensuring dedicated quasselcore system user...".to_string(),
+            },
+            DeclarativeStep::EnsureDirectories {
+                paths: vec![
+                    "/var/lib/quassel".to_string(),
+                    "/var/log/quassel".to_string(),
+                ],
+                mode: 0o750,
+                owner: Some("quasselcore".to_string()),
+                group: Some("quasselcore".to_string()),
+                progress_pct: 45,
+                description: "Configuring Quassel data and log directories...".to_string(),
+            },
+            DeclarativeStep::GenerateSelfSignedTlsCert {
+                cert_path: "/var/lib/quassel/quasselCert.pem".to_string(),
+                key_out_path: None,
+                subject: "/CN=quassel.aether.local".to_string(),
+                days: 3650,
+                mode: 0o600,
+                owner: Some("quasselcore".to_string()),
+                group: Some("quasselcore".to_string()),
+                overwrite: false,
+                progress_pct: 55,
+                description: "Ensuring Quassel TLS certificate (/var/lib/quassel/quasselCert.pem)...".to_string(),
+            },
+            DeclarativeStep::WriteTemplateFile {
+                path: "/etc/default/quasselcore".to_string(),
+                content_template: "LISTEN=\"0.0.0.0\"\nPORT=\"{{LISTEN_PORT}}\"\nCONFIGDIR=\"/var/lib/quassel\"\nLOGFILE=\"/var/log/quassel/quasselcore.log\"\nLOGLEVEL=\"Info\"\n".to_string(),
+                mode: 0o644,
+                overwrite: true,
+                owner: None,
+                group: None,
+                progress_pct: 65,
+                description: "Writing /etc/default/quasselcore daemon defaults...".to_string(),
+            },
+            DeclarativeStep::AptInstall {
+                packages: vec!["quassel-core".to_string()],
+                progress_pct: 75,
+                description: "Installing quassel-core with preserved TLS credentials and configured defaults...".to_string(),
+            },
+            DeclarativeStep::CaptureDpkgVersion {
+                package: "quassel-core".to_string(),
+                fallback_version: "0.14.0".to_string(),
+                version_file_path: Some("/var/lib/quassel/.af-version".to_string()),
+                owner: Some("quasselcore".to_string()),
+                group: Some("quasselcore".to_string()),
+                progress_pct: 80,
+                description: "Capturing installed quassel-core dpkg version...".to_string(),
+            },
+            DeclarativeStep::WriteSystemdUnit {
+                unit_name: "quasselcore.service".to_string(),
+                content_template: "[Unit]\nDescription=Quassel Core IRC Bouncer\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nUser=quasselcore\nGroup=quasselcore\nEnvironmentFile=-/etc/default/quasselcore\nExecStart=/usr/bin/quasselcore --configdir=/var/lib/quassel --listen=0.0.0.0 --port={{LISTEN_PORT}}\nRestart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=multi-user.target\n".to_string(),
+                progress_pct: 85,
+                description: "Writing quasselcore.service systemd unit...".to_string(),
+            },
+            DeclarativeStep::Systemctl {
+                unit: None,
+                operation: SystemctlOp::DaemonReload,
+                ignore_errors: false,
+                progress_pct: 90,
+                description: "Reloading systemd manager configuration...".to_string(),
+            },
+            DeclarativeStep::Systemctl {
+                unit: Some("quasselcore.service".to_string()),
+                operation: SystemctlOp::EnableNow,
+                ignore_errors: false,
+                progress_pct: 93,
+                description: "Enabling and starting quasselcore.service...".to_string(),
+            },
+            DeclarativeStep::Systemctl {
+                unit: Some("quasselcore.service".to_string()),
+                operation: SystemctlOp::Restart,
+                ignore_errors: false,
+                progress_pct: 96,
+                description: "Restarting quasselcore.service with active configuration...".to_string(),
+            },
+        ],
+        update_steps: Vec::new(),
         remove_steps: vec![
+            DeclarativeStep::AptRemove {
+                packages: vec!["quassel-core".to_string(), "quassel-data".to_string()],
+                autoremove: false,
+                ignore_errors: false,
+                progress_pct: 25,
+                description: "Removing quassel-core APT package (purging only with DELETE_DATA=true)...".to_string(),
+            },
             DeclarativeStep::PurgeSystemdUnit {
                 unit_name: "quasselcore.service".to_string(),
-                progress_pct: 20,
+                progress_pct: 55,
                 description: "Stopping and disabling quasselcore.service...".to_string(),
             },
-            DeclarativeStep::AptPurge {
-                packages: vec!["quassel-core".to_string(), "quassel-data".to_string()],
-                autoremove: true,
-                ignore_errors: true,
-                progress_pct: 55,
-                description: "Purging quassel-core APT packages...".to_string(),
-            },
             DeclarativeStep::RemovePaths {
-                paths: vec!["/etc/default/quasselcore".to_string()],
-                only_if_delete_data: true,
+                paths: vec![
+                    "/etc/default/quasselcore".to_string(),
+                    "/var/lib/quassel/.af-version".to_string(),
+                ],
+                only_if_delete_data: false,
                 progress_pct: 75,
-                description: "Removing /etc/default/quasselcore...".to_string(),
+                description: "Removing Quassel runtime metadata files...".to_string(),
             },
             DeclarativeStep::RemovePaths {
                 paths: vec![
                     "/var/lib/quassel".to_string(),
+                    "/var/log/quassel".to_string(),
                     "/var/log/quasselcore.log".to_string(),
                 ],
                 only_if_delete_data: true,
                 progress_pct: 88,
-                description: "Removing Quassel state directory (when DELETE_DATA=true)...".to_string(),
+                description: "Conditionally purging Quassel SQLite database and TLS certificate (when DELETE_DATA=true)...".to_string(),
             },
             DeclarativeStep::Systemctl {
                 unit: None,
@@ -2303,105 +2446,6 @@ fn build_quassel_recipe() -> DeclarativePackageRecipe {
 }
 
 fn build_threadfin_recipe() -> DeclarativePackageRecipe {
-    let install_steps = vec![
-        DeclarativeStep::AptUpdate {
-            progress_pct: 10,
-            description: "Updating APT package indexes for Threadfin...".to_string(),
-        },
-        DeclarativeStep::AptInstall {
-            packages: vec![
-                "ca-certificates".to_string(),
-                "curl".to_string(),
-                "ffmpeg".to_string(),
-                "vlc-bin".to_string(),
-            ],
-            progress_pct: 25,
-            description: "Installing ffmpeg, vlc-bin, and TLS prerequisites...".to_string(),
-        },
-        DeclarativeStep::EnsureSystemUser {
-            username: "threadfin".to_string(),
-            home_dir: "/var/lib/threadfin".to_string(),
-            create_home: true,
-            progress_pct: 35,
-            description: "Creating threadfin system user...".to_string(),
-        },
-        DeclarativeStep::EnsureDirectories {
-            paths: vec![
-                "/opt/threadfin".to_string(),
-                "/var/lib/threadfin".to_string(),
-                "/var/lib/threadfin/conf".to_string(),
-                "/var/lib/threadfin/temp".to_string(),
-            ],
-            mode: 0o750,
-            owner: Some("threadfin".to_string()),
-            group: Some("threadfin".to_string()),
-            progress_pct: 45,
-            description: "Creating /opt/threadfin and /var/lib/threadfin directories...".to_string(),
-        },
-        DeclarativeStep::ResolveGitHubReleaseTag {
-            repo: "Threadfin/Threadfin".to_string(),
-            fallback_version: "1.2.33".to_string(),
-            strip_v_prefix: true,
-            progress_pct: 55,
-            description: "Resolving latest Threadfin GitHub release version...".to_string(),
-        },
-        DeclarativeStep::DownloadBinary {
-            url_template: "https://github.com/Threadfin/Threadfin/releases/download/{{VERSION}}/{{ARCH_ASSET}}".to_string(),
-            arch_map: ArchAssetMap {
-                amd64: "Threadfin_linux_amd64".to_string(),
-                arm64: "Threadfin_linux_arm64".to_string(),
-                armhf: None,
-            },
-            dest_path: "/usr/local/bin/threadfin".to_string(),
-            mode: 0o755,
-            verification: ArtifactVerificationPolicy {
-                min_size_bytes: 1024,
-                max_size_bytes: 512 * 1024 * 1024,
-                expected_sha256: None,
-                require_gzip_magic: false,
-                require_elf_magic: true,
-            },
-            progress_pct: 70,
-            description: "Downloading and verifying Threadfin ELF binary...".to_string(),
-        },
-        DeclarativeStep::WriteTemplateFile {
-            path: "/var/lib/threadfin/.af-version".to_string(),
-            content_template: "{{VERSION}}\n".to_string(),
-            mode: 0o644,
-            overwrite: true,
-            owner: Some("threadfin".to_string()),
-            group: Some("threadfin".to_string()),
-            progress_pct: 78,
-            description: "Writing /var/lib/threadfin/.af-version...".to_string(),
-        },
-        DeclarativeStep::WriteSystemdUnit {
-            unit_name: "threadfin.service".to_string(),
-            content_template: "[Unit]\nDescription=Threadfin M3U/HDHomeRun Proxy for Plex/Jellyfin/Emby\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nUser=threadfin\nGroup=threadfin\nWorkingDirectory=/var/lib/threadfin\nExecStart=/usr/local/bin/threadfin -port={{APP_PORT}} -config=/var/lib/threadfin/conf -temp=/var/lib/threadfin/temp\nRestart=on-failure\nRestartSec=5\nLimitNOFILE=65535\n\n[Install]\nWantedBy=multi-user.target\n".to_string(),
-            progress_pct: 84,
-            description: "Writing threadfin.service systemd unit...".to_string(),
-        },
-        DeclarativeStep::Systemctl {
-            unit: None,
-            operation: SystemctlOp::DaemonReload,
-            ignore_errors: false,
-            progress_pct: 88,
-            description: "Reloading systemd manager configuration...".to_string(),
-        },
-        DeclarativeStep::Systemctl {
-            unit: Some("threadfin.service".to_string()),
-            operation: SystemctlOp::EnableNow,
-            ignore_errors: false,
-            progress_pct: 92,
-            description: "Enabling and starting threadfin.service...".to_string(),
-        },
-        DeclarativeStep::Systemctl {
-            unit: Some("threadfin.service".to_string()),
-            operation: SystemctlOp::Restart,
-            ignore_errors: false,
-            progress_pct: 96,
-            description: "Restarting threadfin.service...".to_string(),
-        },
-    ];
     DeclarativePackageRecipe {
         package_id: "threadfin".to_string(),
         label: "Threadfin".to_string(),
@@ -2409,33 +2453,144 @@ fn build_threadfin_recipe() -> DeclarativePackageRecipe {
         service_name: "threadfin".to_string(),
         lock_file: "/install/.threadfin.lock".to_string(),
         apply_systemd_sandbox: true,
-        update_steps: install_steps.clone(),
-        install_steps,
+        install_steps: vec![
+            DeclarativeStep::AptUpdate {
+                progress_pct: 10,
+                description: "Updating APT package indexes for Threadfin...".to_string(),
+            },
+            DeclarativeStep::AptInstall {
+                packages: vec![
+                    "curl".to_string(),
+                    "wget".to_string(),
+                    "ca-certificates".to_string(),
+                    "ffmpeg".to_string(),
+                    "vlc-bin".to_string(),
+                ],
+                progress_pct: 22,
+                description: "Installing Threadfin prerequisites (curl, wget, ca-certificates, ffmpeg, vlc-bin)...".to_string(),
+            },
+            DeclarativeStep::EnsureSystemUser {
+                username: "threadfin".to_string(),
+                home_dir: "/var/lib/threadfin".to_string(),
+                create_home: true,
+                progress_pct: 32,
+                description: "Ensuring dedicated threadfin system user...".to_string(),
+            },
+            DeclarativeStep::EnsureDirectories {
+                paths: vec![
+                    "/opt/threadfin".to_string(),
+                    "/var/lib/threadfin".to_string(),
+                    "/var/lib/threadfin/conf".to_string(),
+                    "/var/lib/threadfin/temp".to_string(),
+                ],
+                mode: 0o750,
+                owner: Some("threadfin".to_string()),
+                group: Some("threadfin".to_string()),
+                progress_pct: 42,
+                description: "Creating /var/lib/threadfin state and configuration directories...".to_string(),
+            },
+            DeclarativeStep::DownloadBinary {
+                url_template: format!(
+                    "https://github.com/Threadfin/Threadfin/releases/download/{}/{{{{ARCH_ASSET}}}}",
+                    THREADFIN_PINNED_VERSION
+                ),
+                arch_map: ArchAssetMap {
+                    amd64: "Threadfin_linux_amd64_glibc_2.31_compat".to_string(),
+                    arm64: "Threadfin_linux_arm64".to_string(),
+                    armhf: Some("Threadfin_linux_arm".to_string()),
+                },
+                dest_path: "/usr/local/bin/threadfin".to_string(),
+                mode: 0o755,
+                verification: ArtifactVerificationPolicy {
+                    min_size_bytes: 1024,
+                    max_size_bytes: 128 * 1024 * 1024,
+                    expected_sha256: None,
+                    arch_sha256: Some(ArchAssetMap {
+                        amd64: format!(
+                            "{}|{}",
+                            THREADFIN_AMD64_COMPAT_SHA256, THREADFIN_AMD64_PLAIN_SHA256
+                        ),
+                        arm64: THREADFIN_ARM64_SHA256.to_string(),
+                        armhf: Some(THREADFIN_ARMHF_SHA256.to_string()),
+                    }),
+                    require_gzip_magic: false,
+                    require_elf_magic: true,
+                },
+                progress_pct: 65,
+                description: format!(
+                    "Downloading and verifying pinned Threadfin {} binary...",
+                    THREADFIN_PINNED_VERSION
+                ),
+            },
+            DeclarativeStep::WriteTemplateFile {
+                path: "/var/lib/threadfin/.af-version".to_string(),
+                content_template: format!("{}\n", THREADFIN_PINNED_VERSION),
+                mode: 0o644,
+                overwrite: true,
+                owner: Some("threadfin".to_string()),
+                group: Some("threadfin".to_string()),
+                progress_pct: 75,
+                description: "Writing /var/lib/threadfin/.af-version metadata...".to_string(),
+            },
+            DeclarativeStep::WriteSystemdUnit {
+                unit_name: "threadfin.service".to_string(),
+                content_template: "[Unit]\nDescription=Threadfin M3U and HDHomeRun IPTV Proxy\nAfter=syslog.target network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nUser=threadfin\nGroup=threadfin\nEnvironment=HOME=/var/lib/threadfin\nWorkingDirectory=/var/lib/threadfin\nExecStart=/usr/local/bin/threadfin -port={{APP_PORT}} -bind=0.0.0.0 -config=/var/lib/threadfin/conf\nRestart=on-failure\nRestartSec=5\nLimitNOFILE=65535\n\n[Install]\nWantedBy=multi-user.target\n".to_string(),
+                progress_pct: 84,
+                description: "Writing /etc/systemd/system/threadfin.service...".to_string(),
+            },
+            DeclarativeStep::EnsureThreadfinConfig {
+                progress_pct: 87,
+                description: "Ensuring Threadfin has a loopback bind default without replacing user settings...".to_string(),
+            },
+            DeclarativeStep::Systemctl {
+                unit: None,
+                operation: SystemctlOp::DaemonReload,
+                ignore_errors: false,
+                progress_pct: 90,
+                description: "Reloading systemd manager configuration...".to_string(),
+            },
+            DeclarativeStep::Systemctl {
+                unit: Some("threadfin.service".to_string()),
+                operation: SystemctlOp::EnableNow,
+                ignore_errors: false,
+                progress_pct: 95,
+                description: "Enabling and starting threadfin.service...".to_string(),
+            },
+            DeclarativeStep::Systemctl {
+                unit: Some("threadfin.service".to_string()),
+                operation: SystemctlOp::Restart,
+                ignore_errors: false,
+                progress_pct: 98,
+                description: "Restarting threadfin.service to apply the verified binary and configuration...".to_string(),
+            },
+        ],
+        update_steps: Vec::new(),
         remove_steps: vec![
             DeclarativeStep::PurgeSystemdUnit {
                 unit_name: "threadfin.service".to_string(),
                 progress_pct: 25,
-                description: "Stopping and removing threadfin.service...".to_string(),
+                description: "Stopping, disabling, and removing threadfin.service...".to_string(),
             },
             DeclarativeStep::RemovePaths {
                 paths: vec![
                     "/usr/local/bin/threadfin".to_string(),
                     "/opt/threadfin".to_string(),
+                    "/var/lib/threadfin/.af-version".to_string(),
                 ],
                 only_if_delete_data: false,
                 progress_pct: 55,
-                description: "Removing Threadfin binaries...".to_string(),
+                description: "Removing /usr/local/bin/threadfin binary and version marker...".to_string(),
             },
             DeclarativeStep::RemovePaths {
                 paths: vec!["/var/lib/threadfin".to_string()],
                 only_if_delete_data: true,
                 progress_pct: 75,
-                description: "Removing Threadfin state directory (when DELETE_DATA=true)...".to_string(),
+                description: "Conditionally removing /var/lib/threadfin state directory (when DELETE_DATA=true)...".to_string(),
             },
             DeclarativeStep::PurgeSystemUser {
                 username: "threadfin".to_string(),
-                progress_pct: 88,
-                description: "Removing threadfin system user...".to_string(),
+                progress_pct: 85,
+                description: "Removing threadfin system user and group...".to_string(),
             },
             DeclarativeStep::Systemctl {
                 unit: None,
@@ -3480,6 +3635,55 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
         Self { env_cfg, runner }
     }
 
+    async fn apply_recipe_sandbox(
+        &self,
+        package_id: &str,
+        journal: &mut RollbackJournal,
+        cancel: &CancellationToken,
+    ) -> Result<String, PackageExecutorError> {
+        let systemd_root = self.env_cfg.fs_root.as_ref()
+            .map(|root| root.join("etc/systemd/system"))
+            .unwrap_or_else(|| PathBuf::from("/etc/systemd/system"));
+        let status = apply_sandbox_in_root_with_journal(
+            package_id, &systemd_root, Some(journal), self.env_cfg.fs_root.as_deref(),
+        )?;
+        let output = self.runner.run_command("systemctl", &["daemon-reload".to_string()], &[], cancel).await?;
+        if !output.success() {
+            return Err(PackageExecutorError::StepFailed {
+                step: "apply_systemd_sandbox".to_string(), reason: output.combined_output(),
+            });
+        }
+        Ok(status)
+    }
+
+    async fn apply_file_metadata(
+        &self,
+        path: &Path,
+        mode: u32,
+        owner: Option<&str>,
+        group: Option<&str>,
+        cancel: &CancellationToken,
+    ) -> Result<(), PackageExecutorError> {
+        validate_filesystem_path(path, self.env_cfg.fs_root.as_deref())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
+        }
+        if let (None, Some(owner_name)) = (self.env_cfg.fs_root.as_ref(), owner) {
+                let group_name = group.unwrap_or(owner_name);
+                let output = self.runner.run_command("chown", &[
+                    format!("{}:{}", owner_name, group_name), path.to_string_lossy().to_string(),
+                ], &[], cancel).await?;
+                if !output.success() {
+                    return Err(PackageExecutorError::StepFailed {
+                        step: "apply_file_metadata".to_string(), reason: output.combined_output(),
+                    });
+                }
+        }
+        Ok(())
+    }
+
     /// Executes a declarative package recipe for `action` (`Install`, `Update`, or `Remove`),
     /// emitting structured [`PackageProgressEvent`] notifications to `on_progress`.
     pub async fn execute_recipe<F>(
@@ -3524,15 +3728,41 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
         } else {
             recipe.default_port
         };
+        let listen_port = if (1024..=65535).contains(&effective_port) {
+            effective_port
+        } else if recipe.package_id == "quassel" {
+            env::var("AF_QUASSEL_PORT")
+                .or_else(|_| env::var("AF_APP_PORT"))
+                .or_else(|_| env::var("AETHERFLOW_APP_PORT"))
+                .ok()
+                .and_then(|v| v.trim().parse::<i32>().ok())
+                .filter(|p| (1024..=65535).contains(p))
+                .unwrap_or(QUASSEL_DEFAULT_LISTEN_PORT)
+        } else {
+            effective_port
+        };
+        let initial_version = if recipe.package_id == "threadfin" {
+            THREADFIN_PINNED_VERSION.to_string()
+        } else {
+            "unknown".to_string()
+        };
 
         let mut vars: HashMap<String, String> = HashMap::new();
         vars.insert("PACKAGE_ID".to_string(), recipe.package_id.clone());
         vars.insert("APP_NAME".to_string(), recipe.package_id.clone());
         vars.insert("APP_LABEL".to_string(), recipe.label.clone());
         vars.insert("APP_PORT".to_string(), effective_port.to_string());
+        vars.insert("LISTEN_PORT".to_string(), listen_port.to_string());
         vars.insert("SSH_PORT".to_string(), "ssh".to_string());
-        vars.insert("VERSION".to_string(), "unknown".to_string());
-        vars.insert("TAG".to_string(), "unknown".to_string());
+        vars.insert("VERSION".to_string(), initial_version.clone());
+        vars.insert(
+            "TAG".to_string(),
+            if initial_version == "unknown" {
+                "unknown".to_string()
+            } else {
+                format!("v{}", initial_version)
+            },
+        );
         vars.insert("ARCH".to_string(), self.env_cfg.effective_arch());
 
         self.emit_event(
@@ -3573,7 +3803,8 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                 && !sandbox_applied
                 && matches!(
                     step,
-                    DeclarativeStep::Systemctl {
+                    DeclarativeStep::AptInstall { .. }
+                    | DeclarativeStep::Systemctl {
                         operation: SystemctlOp::DaemonReload
                             | SystemctlOp::EnableNow
                             | SystemctlOp::Enable
@@ -3599,22 +3830,9 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                     &mut logs,
                     &mut on_progress,
                 );
-                let sb_res = if let Some(ref root) = self.env_cfg.fs_root {
-                    let sys_root = root.join("etc/systemd/system");
-                    apply_sandbox_in_root_with_journal(
-                        &recipe.package_id,
-                        &sys_root,
-                        Some(&mut journal),
-                        Some(root.as_path()),
-                    )
-                } else {
-                    apply_package_sandbox_local(&recipe.package_id)
-                        .await
-                        .map_err(|e| PackageExecutorError::StepFailed {
-                            step: "apply_systemd_sandbox".to_string(),
-                            reason: e.to_string(),
-                        })
-                };
+                let sb_res = self
+                    .apply_recipe_sandbox(&recipe.package_id, &mut journal, &cancel)
+                    .await;
                 match sb_res {
                     Ok(st) => {
                         sandbox_status = Some(st);
@@ -3679,28 +3897,21 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                     &mut logs,
                     &mut on_progress,
                 );
-                let sb_res = if let Some(ref root) = self.env_cfg.fs_root {
-                    let sys_root = root.join("etc/systemd/system");
-                    apply_sandbox_in_root_with_journal(
-                        &recipe.package_id,
-                        &sys_root,
-                        Some(&mut journal),
-                        Some(root.as_path()),
-                    )
-                } else {
-                    apply_package_sandbox_local(&recipe.package_id)
-                        .await
-                        .map_err(|e| PackageExecutorError::StepFailed {
-                            step: "apply_systemd_sandbox".to_string(),
-                            reason: e.to_string(),
-                        })
-                };
+                let sb_res = self
+                    .apply_recipe_sandbox(&recipe.package_id, &mut journal, &cancel)
+                    .await;
                 match sb_res {
                     Ok(st) => sandbox_status = Some(st),
                     Err(err) => {
                         exec_err = Some(err);
                     }
                 }
+            }
+        }
+
+        if exec_err.is_none() {
+            if let Err(e) = cancel.check(&recipe.package_id) {
+                exec_err = Some(e);
             }
         }
 
@@ -3731,6 +3942,15 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
             for note in rb_notes {
                 append_log_line(&log_file_path, &format!("[WARN] [rollback] {}", note));
                 logs.push(format!("[WARN] [rollback] {}", note));
+            }
+            if action == PackageAction::Remove {
+                validate_filesystem_path(&lock_file_path, self.env_cfg.fs_root.as_deref())?;
+                match fs::remove_file(&lock_file_path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(PackageExecutorError::Io(error)),
+                }
+                append_log_line(&log_file_path, "[WARN] Removal incomplete; installed marker invalidated. Retry removal or reinstall to reconcile package state.");
             }
             self.emit_event(
                 &recipe.package_id,
@@ -3853,6 +4073,7 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
         journal: &mut RollbackJournal,
         cancel: &CancellationToken,
     ) -> Result<String, PackageExecutorError> {
+        cancel.check(&recipe.package_id)?;
         let apt_env = vec![
             ("DEBIAN_FRONTEND".to_string(), "noninteractive".to_string()),
             ("DPKG_LOCK_TIMEOUT".to_string(), "120".to_string()),
@@ -3888,6 +4109,10 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                 let mut args = vec![
                     "-o".to_string(),
                     "DPkg::Lock::Timeout=120".to_string(),
+                    "-o".to_string(),
+                    "DPkg::Options::=--force-confdef".to_string(),
+                    "-o".to_string(),
+                    "DPkg::Options::=--force-confold".to_string(),
                     "install".to_string(),
                     "-y".to_string(),
                     "-qq".to_string(),
@@ -3911,17 +4136,23 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                 Ok(format!("installed APT packages: {}", packages.join(", ")))
             }
 
-            DeclarativeStep::AptPurge {
+            DeclarativeStep::AptRemove {
+                packages,
+                autoremove,
+                ignore_errors,
+                ..
+            }
+            | DeclarativeStep::AptPurge {
                 packages,
                 autoremove,
                 ignore_errors,
                 ..
             } => {
-                let operation = if self.env_cfg.delete_data { "purge" } else { "remove" };
+                let removal_action = if self.env_cfg.delete_data { "purge" } else { "remove" };
                 let mut args = vec![
                     "-o".to_string(),
                     "DPkg::Lock::Timeout=120".to_string(),
-                    operation.to_string(),
+                    removal_action.to_string(),
                     "-y".to_string(),
                     "-qq".to_string(),
                 ];
@@ -3932,9 +4163,10 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                     .await?;
                 if !out.success() && !ignore_errors {
                     return Err(PackageExecutorError::StepFailed {
-                        step: "apt_purge".to_string(),
+                        step: format!("apt_{}", removal_action),
                         reason: format!(
-                            "apt-get purge {:?} exited with {}: {}",
+                            "apt-get {} {:?} exited with {}: {}",
+                            removal_action,
                             packages,
                             out.exit_code,
                             out.combined_output()
@@ -3942,6 +4174,7 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                     });
                 }
                 if *autoremove {
+                    cancel.check(&recipe.package_id)?;
                     let ar_args = vec![
                         "-o".to_string(),
                         "DPkg::Lock::Timeout=120".to_string(),
@@ -3952,9 +4185,9 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                     let _ = self
                         .runner
                         .run_command("apt-get", &ar_args, &apt_env, cancel)
-                        .await;
+                        .await?;
                 }
-                Ok(format!("{} APT packages: {}", operation, packages.join(", ")))
+                Ok(format!("APT {} packages: {}", removal_action, packages.join(", ")))
             }
 
             DeclarativeStep::EnsureSystemUser {
@@ -3971,6 +4204,7 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                 if check.success() {
                     return Ok(format!("system user {} already exists", username));
                 }
+                cancel.check(&recipe.package_id)?;
                 let mut args = vec![
                     "--system".to_string(),
                     "--user-group".to_string(),
@@ -4017,12 +4251,12 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                 }
                 let _ = self
                     .runner
-                    .run_command("userdel", &[username.clone()], &[], cancel)
-                    .await;
+                    .run_command("userdel", std::slice::from_ref(username), &[], cancel)
+                    .await?;
                 let _ = self
                     .runner
-                    .run_command("groupdel", &[username.clone()], &[], cancel)
-                    .await;
+                    .run_command("groupdel", std::slice::from_ref(username), &[], cancel)
+                    .await?;
                 Ok(format!("purged system user {}", username))
             }
 
@@ -4034,6 +4268,7 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                 ..
             } => {
                 for logical in paths {
+                    cancel.check(&recipe.package_id)?;
                     if owner.is_some() || group.is_some() {
                         validate_chown_target_path(logical)?;
                     }
@@ -4056,7 +4291,7 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                                     &[],
                                     cancel,
                                 )
-                                .await;
+                                .await?;
                         }
                     }
                 }
@@ -4098,6 +4333,28 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                     None => cert_resolved.clone(),
                 };
                 if !*overwrite && (cert_resolved.is_file() || key_resolved.is_file()) {
+                    if cert_resolved.is_file() {
+                        journal.stage_file_mutation(&cert_resolved)?;
+                        self.apply_file_metadata(
+                            &cert_resolved,
+                            *mode,
+                            owner.as_deref(),
+                            group.as_deref(),
+                            cancel,
+                        )
+                        .await?;
+                    }
+                    if key_resolved != cert_resolved && key_resolved.is_file() {
+                        journal.stage_file_mutation(&key_resolved)?;
+                        self.apply_file_metadata(
+                            &key_resolved,
+                            *mode,
+                            owner.as_deref(),
+                            group.as_deref(),
+                            cancel,
+                        )
+                        .await?;
+                    }
                     return Ok(format!("preserved existing TLS certificate {}", cert_path));
                 }
                 if let Some(parent) = cert_resolved.parent() {
@@ -4195,41 +4452,23 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                     }
                 }
 
-                set_path_mode(&cert_resolved, *mode);
+                self.apply_file_metadata(
+                    &cert_resolved,
+                    *mode,
+                    owner.as_deref(),
+                    group.as_deref(),
+                    cancel,
+                )
+                .await?;
                 if key_resolved != cert_resolved {
-                    set_path_mode(&key_resolved, *mode);
-                }
-
-                if let Some(ref o) = owner {
-                    let grp = group.as_deref().unwrap_or(o.as_str());
-                    if self.env_cfg.fs_root.is_none() {
-                        let _ = self
-                            .runner
-                            .run_command(
-                                "chown",
-                                &[
-                                    format!("{}:{}", o, grp),
-                                    cert_resolved.to_string_lossy().to_string(),
-                                ],
-                                &[],
-                                cancel,
-                            )
-                            .await;
-                        if key_resolved != cert_resolved {
-                            let _ = self
-                                .runner
-                                .run_command(
-                                    "chown",
-                                    &[
-                                        format!("{}:{}", o, grp),
-                                        key_resolved.to_string_lossy().to_string(),
-                                    ],
-                                    &[],
-                                    cancel,
-                                )
-                                .await;
-                        }
-                    }
+                    self.apply_file_metadata(
+                        &key_resolved,
+                        *mode,
+                        owner.as_deref(),
+                        group.as_deref(),
+                        cancel,
+                    )
+                    .await?;
                 }
                 Ok(format!("generated self-signed TLS certificate {}", cert_path))
             }
@@ -4296,6 +4535,63 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                 ))
             }
 
+            DeclarativeStep::EnsureThreadfinConfig { .. } => {
+                let resolved = self.env_cfg.resolve_path("/var/lib/threadfin/conf/settings.json")?;
+                let mut settings = serde_json::Map::new();
+                if resolved.exists() {
+                    let mut contents = Vec::new();
+                    File::open(&resolved)?.take(1024 * 1024 + 1).read_to_end(&mut contents)?;
+                    if contents.len() > 1024 * 1024 {
+                        return Err(PackageExecutorError::Validation("Threadfin settings exceed 1 MiB".to_string()));
+                    }
+                    settings = serde_json::from_slice::<serde_json::Value>(&contents)
+                        .map_err(|error| PackageExecutorError::Validation(format!("invalid Threadfin settings: {}", error)))?
+                        .as_object()
+                        .cloned()
+                        .ok_or_else(|| PackageExecutorError::Validation("Threadfin settings must be a JSON object".to_string()))?;
+                }
+                if settings.is_empty() {
+                    settings.insert("version".to_string(), serde_json::Value::String("0.5.0".to_string()));
+                } else if !matches!(settings.get("version"), Some(serde_json::Value::String(version)) if !version.is_empty()) {
+                    return Err(PackageExecutorError::Validation("existing Threadfin settings require a version string".to_string()));
+                }
+                match settings.get("bindIpAddress") {
+                    Some(serde_json::Value::String(address)) if !address.is_empty() => {
+                        journal.stage_file_mutation(&resolved)?;
+                        self.apply_file_metadata(
+                            &resolved,
+                            0o600,
+                            Some("threadfin"),
+                            Some("threadfin"),
+                            cancel,
+                        )
+                        .await?;
+                        return Ok("preserved explicit Threadfin bindIpAddress".to_string());
+                    }
+                    Some(serde_json::Value::String(_) | serde_json::Value::Null) | None => {}
+                    Some(_) => return Err(PackageExecutorError::Validation("Threadfin bindIpAddress must be a string".to_string())),
+                }
+                settings.insert("bindIpAddress".to_string(), serde_json::Value::String("127.0.0.1".to_string()));
+                journal.stage_file_mutation(&resolved)?;
+                let contents = serde_json::to_vec_pretty(&settings)
+                    .map_err(|error| PackageExecutorError::Validation(error.to_string()))?;
+                write_file_atomic_with_mode_bounded(
+                    &resolved,
+                    &contents,
+                    0o600,
+                    self.env_cfg.fs_root.as_deref(),
+                )?;
+                self.apply_file_metadata(
+                    &resolved,
+                    0o600,
+                    Some("threadfin"),
+                    Some("threadfin"),
+                    cancel,
+                )
+                .await?;
+                Ok("defaulted Threadfin bindIpAddress to 127.0.0.1 while preserving other settings".to_string())
+            }
+
             DeclarativeStep::ResolveGitHubReleaseTag {
                 repo,
                 fallback_version,
@@ -4340,10 +4636,17 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                 })?;
                 vars.insert("ARCH_ASSET".to_string(), arch_asset.to_string());
                 let resolved_url = interpolate_template(url_template, vars);
+                if !resolved_url.starts_with("https://") && !resolved_url.starts_with("file://") {
+                    return Err(PackageExecutorError::SecurityViolation(format!(
+                        "refusing non-HTTPS binary download URL: {}",
+                        resolved_url
+                    )));
+                }
                 let tmp_artifact = self
                     .fetch_artifact_to_temp(&recipe.package_id, &resolved_url, arch_asset, journal, cancel)
                     .await?;
-                let sha256 = verify_artifact_file(&tmp_artifact, verification)?;
+                cancel.check(&recipe.package_id)?;
+                let sha256 = verify_artifact_file_for_arch(&tmp_artifact, verification, Some(&arch))?;
 
                 let dest_resolved = self.env_cfg.resolve_path(dest_path)?;
                 journal.stage_file_mutation(&dest_resolved)?;
@@ -4381,13 +4684,20 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                 })?;
                 vars.insert("ARCH_ASSET".to_string(), arch_asset.to_string());
                 let resolved_url = interpolate_template(url_template, vars);
+                if !resolved_url.starts_with("https://") && !resolved_url.starts_with("file://") {
+                    return Err(PackageExecutorError::SecurityViolation(format!(
+                        "refusing non-HTTPS archive download URL: {}",
+                        resolved_url
+                    )));
+                }
                 let tmp_archive = self
                     .fetch_artifact_to_temp(&recipe.package_id, &resolved_url, arch_asset, journal, cancel)
                     .await?;
+                cancel.check(&recipe.package_id)?;
 
                 let mut gz_policy = verification.clone();
                 gz_policy.require_gzip_magic = true;
-                let sha256 = verify_artifact_file(&tmp_archive, &gz_policy)?;
+                let sha256 = verify_artifact_file_for_arch(&tmp_archive, &gz_policy, Some(&arch))?;
 
                 let dest_dir_resolved = self.env_cfg.resolve_path(dest_dir)?;
                 fs::create_dir_all(&dest_dir_resolved)?;
@@ -4447,7 +4757,7 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                                 &[],
                                 cancel,
                             )
-                            .await;
+                            .await?;
                     }
                 }
                 Ok(format!("wrote configuration file {}", path))
@@ -4542,6 +4852,7 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
             DeclarativeStep::PurgeSystemdUnit { unit_name, .. } => {
                 let norm = normalize_unit_filename(unit_name);
                 for op in ["stop", "disable", "reset-failed"] {
+                    cancel.check(&recipe.package_id)?;
                     let _ = self
                         .runner
                         .run_command(
@@ -4550,7 +4861,7 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                             &[],
                             cancel,
                         )
-                        .await;
+                        .await?;
                 }
                 let unit_logical = format!("/etc/systemd/system/{}", norm);
                 let dropin_logical = format!("/etc/systemd/system/{}.d", norm);
@@ -4574,6 +4885,7 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                     return Ok("skipped data directory removal (DELETE_DATA=false)".to_string());
                 }
                 for logical in paths {
+                    cancel.check(&recipe.package_id)?;
                     let resolved = self.env_cfg.resolve_path(logical)?;
                     match fs::symlink_metadata(&resolved) {
                         Ok(meta) => {
@@ -4685,11 +4997,18 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
         // 1. Check local artifact cache directory first (used by isolated tests and offline staging)
         if let Some(ref cache_dir) = self.env_cfg.artifact_cache_dir {
             validate_filesystem_path(cache_dir, self.env_cfg.fs_root.as_deref())?;
-            let cached = cache_dir.join(asset_name);
-            validate_filesystem_path(&cached, self.env_cfg.fs_root.as_deref())?;
-            if cached.is_file() {
-                fs::copy(&cached, &tmp_dest)?;
-                return Ok(tmp_dest);
+            let mut candidate_names = vec![asset_name];
+            if asset_name == "Threadfin_linux_amd64_glibc_2.31_compat" {
+                candidate_names.push("Threadfin_linux_amd64_compat");
+                candidate_names.push("Threadfin_linux_amd64");
+            }
+            for cand in candidate_names {
+                let cached = cache_dir.join(cand);
+                validate_filesystem_path(&cached, self.env_cfg.fs_root.as_deref())?;
+                if cached.is_file() {
+                    fs::copy(&cached, &tmp_dest)?;
+                    return Ok(tmp_dest);
+                }
             }
         }
 
@@ -4707,7 +5026,15 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
             return Ok(tmp_dest);
         }
 
-        // 3. Perform HTTPS download via reqwest with chunked cancellation checks
+        // 3. Enforce HTTPS fail-closed on remote downloads
+        if !url.starts_with("https://") {
+            return Err(PackageExecutorError::SecurityViolation(format!(
+                "refusing non-HTTPS artifact download URL: {}",
+                url
+            )));
+        }
+
+        // 4. Perform HTTPS download via reqwest with chunked cancellation checks
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(120))
             .user_agent("AetherFlow-PackageExecutor/4.0")
@@ -4807,6 +5134,11 @@ fn step_progress_meta(step: &DeclarativeStep) -> (u8, &str) {
             description,
             ..
         }
+        | DeclarativeStep::AptRemove {
+            progress_pct,
+            description,
+            ..
+        }
         | DeclarativeStep::EnsureSystemUser {
             progress_pct,
             description,
@@ -4835,6 +5167,10 @@ fn step_progress_meta(step: &DeclarativeStep) -> (u8, &str) {
             progress_pct,
             description,
             ..
+        }
+        | DeclarativeStep::EnsureThreadfinConfig {
+            progress_pct,
+            description,
         }
         | DeclarativeStep::ResolveGitHubReleaseTag {
             progress_pct,
@@ -5161,8 +5497,10 @@ pub fn execute_package_request_stream(
 
         if select_package_engine(&req.package_id) == PackageEngineMode::DeclarativeRust {
             if let Some(recipe) = get_declarative_recipe(&req.package_id) {
-                let mut env_cfg = PackageExecutionEnv::default();
-                env_cfg.app_port = req.app_port;
+                let env_cfg = PackageExecutionEnv {
+                    app_port: req.app_port,
+                    ..Default::default()
+                };
                 let executor = Arc::new(DeclarativePackageExecutor::new(env_cfg));
                 let cancel = CancellationToken::new();
                 let mut stream = std::pin::pin!(execute_declarative_recipe_stream(
@@ -5310,6 +5648,11 @@ mod tests {
                     step,
                     DeclarativeStep::CaptureDpkgVersion { .. }
                         | DeclarativeStep::ResolveGitHubReleaseTag { .. }
+                )) || recipe.install_steps.iter().any(|step| matches!(
+                    step,
+                    DeclarativeStep::WriteTemplateFile { path, content_template, .. }
+                        if path == "/var/lib/threadfin/.af-version"
+                            && content_template.trim() == THREADFIN_PINNED_VERSION
                 )),
                 "{} must capture an installed version",
                 id
@@ -5474,8 +5817,18 @@ mod tests {
     }
 
     fn create_mock_elf_payload(size: usize) -> Vec<u8> {
+        create_mock_elf_payload_for_arch(size, 62) // EM_X86_64 = 62
+    }
+
+    fn create_mock_elf_payload_for_arch(size: usize, e_machine: u16) -> Vec<u8> {
         let mut data = vec![0x7f, b'E', b'L', b'F'];
         data.resize(size.max(2048), 0x90);
+        // ELF little-endian (EI_DATA = 1 at offset 5) and e_machine at offset 18..20
+        data[4] = if e_machine == 40 { 1 } else { 2 }; // ELFCLASS32 for ARM, ELFCLASS64 for x86_64/aarch64
+        data[5] = 1; // ELFDATA2LSB
+        let machine_bytes = e_machine.to_le_bytes();
+        data[18] = machine_bytes[0];
+        data[19] = machine_bytes[1];
         data
     }
 
@@ -5700,7 +6053,7 @@ mod tests {
         let fail_env = PackageExecutionEnv::isolated(&fail_root);
         // Fail on systemctl enable --now after TLS cert, .af-version, and /etc/default/quasselcore were written
         let fail_mock = MockCommandRunner {
-            fail_on_call: Some(7),
+            fail_on_call: Some(8),
             ..Default::default()
         };
         let fail_exec = DeclarativePackageExecutor::with_runner(fail_env, fail_mock);
@@ -5731,13 +6084,18 @@ mod tests {
         let _serial = TEST_EXECUTION_SERIALIZER.lock().await;
         let root = create_isolated_test_dir("threadfin-lifecycle");
         let mut env_cfg = PackageExecutionEnv::isolated(&root);
-        let elf_bytes = create_mock_elf_payload(4096);
+        let elf_bytes = create_mock_elf_payload_for_arch(4096, 62);
         let cache_dir = env_cfg.artifact_cache_dir.clone().unwrap();
         fs::create_dir_all(&cache_dir).unwrap();
         fs::write(cache_dir.join("Threadfin_linux_amd64"), &elf_bytes).unwrap();
 
-        let recipe =
+        let mut recipe =
             get_declarative_recipe("threadfin").expect("threadfin recipe must be registered");
+        for step in &mut recipe.install_steps {
+            if let DeclarativeStep::DownloadBinary { verification, .. } = step {
+                verification.expected_sha256 = Some(hex::encode(Sha256::digest(&elf_bytes)));
+            }
+        }
 
         // 1. Install
         let mock = MockCommandRunner::default();
@@ -5758,7 +6116,7 @@ mod tests {
             fs::read_to_string(root.join("var/lib/threadfin/.af-version"))
                 .unwrap()
                 .trim(),
-            "1.2.33"
+            THREADFIN_PINNED_VERSION
         );
         let unit = fs::read_to_string(root.join("etc/systemd/system/threadfin.service")).unwrap();
         assert!(unit.contains("-port=34400"));
@@ -5831,6 +6189,8 @@ mod tests {
         assert!(validate_managed_path("/etc/fail2ban/jail.local").is_ok());
         assert!(validate_managed_path("/var/lib/threadfin/conf").is_ok());
         assert!(validate_managed_path("/install/.fail2ban.lock").is_ok());
+        assert!(validate_managed_path("/var/lib/quassel/quasselCert.pem").is_ok());
+        assert!(validate_managed_path("/etc/default/quasselcore").is_ok());
 
         // Reject relative paths, parent traversal, and root/critical/shared files
         assert!(validate_managed_path("etc/fail2ban").is_err());
@@ -5887,6 +6247,7 @@ mod tests {
             min_size_bytes: 1024,
             max_size_bytes: 1024 * 1024,
             expected_sha256: Some(expected_hash.clone()),
+            arch_sha256: None,
             require_gzip_magic: false,
             require_elf_magic: true,
         };
@@ -5972,6 +6333,12 @@ mod tests {
             .any(|c| c.program == "systemctl" && c.args.contains(&"fail2ban.service".to_string())));
 
         // Now execute Remove and verify cleanup + lock removal
+        fs::create_dir_all(root.join("run/fail2ban")).unwrap();
+        #[cfg(unix)]
+        {
+            fs::create_dir_all(root.join("var")).unwrap();
+            std::os::unix::fs::symlink("../run", root.join("var/run")).unwrap();
+        }
         let remove_outcome = executor
             .execute_recipe(
                 &recipe,
@@ -5985,6 +6352,7 @@ mod tests {
         assert!(!remove_outcome.lock_present);
         assert!(!root.join("install/.fail2ban.lock").exists());
         assert!(root.join("etc/fail2ban/jail.local").is_file());
+        assert!(!root.join("run/fail2ban").exists());
         assert_eq!(outcome.resolved_version.as_deref(), Some("0.14.2"));
         assert!(mock
             .recorded_commands()
@@ -6072,6 +6440,7 @@ mod tests {
                         min_size_bytes: 1024,
                         max_size_bytes: 10 * 1024 * 1024,
                         expected_sha256: Some(expected_sha256),
+                        arch_sha256: None,
                         require_gzip_magic: false,
                         require_elf_magic: true,
                     },
@@ -6157,9 +6526,8 @@ mod tests {
         fs::create_dir_all(jail_path.parent().unwrap()).unwrap();
         fs::write(&jail_path, "# previous user custom config\nmaxretry = 9\n").unwrap();
 
-        // Fail on the 3rd command (`systemctl enable --now fail2ban.service`) AFTER jail.local was overwritten
         let mock = MockCommandRunner {
-            fail_on_call: Some(3),
+            fail_on_call: Some(5),
             ..Default::default()
         };
         let executor = DeclarativePackageExecutor::with_runner(env_cfg, mock);
@@ -6589,6 +6957,735 @@ mod tests {
             lines.push(item.unwrap());
         }
         assert!(lines.last().unwrap().contains("[PROGRESS:100]"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn test_quassel_install_update_remove_and_cert_data_preservation() {
+        let _serial = TEST_EXECUTION_SERIALIZER.lock().await;
+        let root = create_isolated_test_dir("quassel-lifecycle");
+        let mut env_cfg = PackageExecutionEnv::isolated(&root);
+        // Verify custom app_port propagates to /etc/default/quasselcore
+        env_cfg.app_port = 4249;
+
+        // Custom runner that simulates openssl writing a cert file when invoked
+        #[derive(Clone, Default)]
+        struct QuasselMockRunner {
+            recorded: Arc<StdMutex<Vec<RecordedCommand>>>,
+            fail_systemctl_restart: bool,
+        }
+
+        impl CommandRunner for QuasselMockRunner {
+            fn run_command<'a>(
+                &'a self,
+                program: &'a str,
+                args: &'a [String],
+                env_vars: &'a [(String, String)],
+                cancel: &'a CancellationToken,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<Output = Result<CommandOutput, PackageExecutorError>>
+                        + Send
+                        + 'a,
+                >,
+            > {
+                Box::pin(async move {
+                    if cancel.is_cancelled() {
+                        return Err(PackageExecutorError::Cancelled(program.to_string()));
+                    }
+                    self.recorded.lock().unwrap().push(RecordedCommand {
+                        program: program.to_string(),
+                        args: args.to_vec(),
+                        env: env_vars.to_vec(),
+                    });
+
+                    if program == "id" {
+                        return Ok(CommandOutput {
+                            exit_code: 1,
+                            stdout: String::new(),
+                            stderr: "no such user".to_string(),
+                        });
+                    }
+                    if program == "dpkg-query" {
+                        return Ok(CommandOutput {
+                            exit_code: 0,
+                            stdout: "1:0.14.0-1ubuntu2\n".to_string(),
+                            stderr: String::new(),
+                        });
+                    }
+                    if program == "openssl" {
+                        // Find `-out` and `-keyout` argument and write synthetic PEM payload
+                        if let Some(pos) = args.iter().position(|a| a == "-out") {
+                            if let Some(out_path) = args.get(pos + 1) {
+                                fs::write(
+                                    out_path,
+                                    b"-----BEGIN PRIVATE KEY-----\nNEWKEY\n-----END PRIVATE KEY-----\n-----BEGIN CERTIFICATE-----\nNEWCERT\n-----END CERTIFICATE-----\n",
+                                )
+                                .unwrap();
+                            }
+                        }
+                        return Ok(CommandOutput {
+                            exit_code: 0,
+                            stdout: "Certificate generated".to_string(),
+                            stderr: String::new(),
+                        });
+                    }
+                    if self.fail_systemctl_restart
+                        && program == "systemctl"
+                        && args.iter().any(|a| a == "restart")
+                    {
+                        return Ok(CommandOutput {
+                            exit_code: 1,
+                            stdout: String::new(),
+                            stderr: "simulated systemctl restart failure".to_string(),
+                        });
+                    }
+                    Ok(CommandOutput {
+                        exit_code: 0,
+                        stdout: format!("ok: {} {}", program, args.join(" ")),
+                        stderr: String::new(),
+                    })
+                })
+            }
+        }
+
+        let runner = QuasselMockRunner::default();
+        let executor = DeclarativePackageExecutor::with_runner(env_cfg.clone(), runner.clone());
+        let recipe = get_declarative_recipe("quassel").unwrap();
+
+        let mut install_events = Vec::new();
+        let outcome = executor
+            .execute_recipe(
+                &recipe,
+                PackageAction::Install,
+                CancellationToken::new(),
+                |ev| install_events.push(ev),
+            )
+            .await
+            .expect("quassel install should succeed");
+
+        assert!(outcome.lock_present);
+        assert!(root.join("install/.quassel.lock").is_file());
+        assert_eq!(outcome.resolved_version.as_deref(), Some("0.14.0"));
+        let install_commands = runner.recorded.lock().unwrap().clone();
+        let certificate_command = install_commands
+            .iter()
+            .position(|command| command.program == "openssl")
+            .expect("TLS credentials must be provisioned");
+        let quassel_install_command = install_commands
+            .iter()
+            .position(|command| {
+                command.program == "apt-get"
+                    && command.args.contains(&"install".to_string())
+                    && command.args.contains(&"quassel-core".to_string())
+            })
+            .expect("quassel-core must be installed");
+        assert!(certificate_command < quassel_install_command);
+        assert!(install_commands[quassel_install_command].args.contains(&"DPkg::Options::=--force-confold".to_string()));
+        let defaults_step = recipe.install_steps.iter().position(|step| matches!(
+            step, DeclarativeStep::WriteTemplateFile { path, .. } if path == "/etc/default/quasselcore"
+        )).unwrap();
+        let package_step = recipe.install_steps.iter().position(|step| matches!(
+            step, DeclarativeStep::AptInstall { packages, .. } if packages.iter().any(|package| package == "quassel-core")
+        )).unwrap();
+        assert!(defaults_step < package_step);
+        let sandbox_event = install_events.iter().position(|event| event.phase == ExecutionPhase::SandboxApply).unwrap();
+        let first_install_event = install_events.iter().position(|event| event.phase == ExecutionPhase::ExecuteStep && event.message.contains("Installing")).unwrap();
+        assert!(sandbox_event < first_install_event);
+
+        // Verify dependencies, config, sandbox drop-in, cert, and version metadata
+        let default_cfg = fs::read_to_string(root.join("etc/default/quasselcore")).unwrap();
+        assert!(default_cfg.contains("LISTEN=\"0.0.0.0\""));
+        assert!(default_cfg.contains("PORT=\"4249\""));
+        assert!(default_cfg.contains("CONFIGDIR=\"/var/lib/quassel\""));
+        assert!(default_cfg.contains("LOGFILE=\"/var/log/quassel/quasselcore.log\""));
+
+        let sandbox_cfg = fs::read_to_string(
+            root.join("etc/systemd/system/quasselcore.service.d/aetherflow-sandbox.conf"),
+        )
+        .unwrap();
+        assert!(sandbox_cfg.contains("ReadWritePaths=-/var/lib/quassel -/var/log/quassel"));
+
+        let cert_path = root.join("var/lib/quassel/quasselCert.pem");
+        assert!(cert_path.is_file());
+
+        let version_marker =
+            fs::read_to_string(root.join("var/lib/quassel/.af-version")).unwrap();
+        assert_eq!(version_marker.trim(), "0.14.0");
+
+        // Verify bounded monotonic progress
+        assert!(!install_events.is_empty());
+        for pair in install_events.windows(2) {
+            assert!(pair[1].progress_pct >= pair[0].progress_pct);
+        }
+        assert_eq!(install_events.last().unwrap().progress_pct, 100);
+
+        // Verify apt-get installed quassel-core and openssl
+        let cmds = runner.recorded.lock().unwrap().clone();
+        for dependency in ["quassel-core", "openssl"] {
+            assert!(cmds.iter().any(|command| {
+                command.program == "apt-get"
+                    && command.args.contains(&"install".to_string())
+                    && command.args.contains(&dependency.to_string())
+            }));
+        }
+        assert!(cmds.iter().any(|c| c.program == "openssl"));
+
+        // Seed custom certificate and SQLite database to verify preservation across reinstall/update/remove
+        let custom_cert = b"-----BEGIN CERTIFICATE-----\nEXISTING_USER_CERT_DO_NOT_OVERWRITE\n-----END CERTIFICATE-----\n";
+        fs::write(&cert_path, custom_cert).unwrap();
+        let sqlite_db = root.join("var/lib/quassel/quassel-storage.sqlite");
+        fs::write(&sqlite_db, b"SQLite format 3 user backlog data").unwrap();
+
+        // Clear recorded commands and run Update
+        runner.recorded.lock().unwrap().clear();
+        let update_outcome = executor
+            .execute_recipe(
+                &recipe,
+                PackageAction::Update,
+                CancellationToken::new(),
+                |_| {},
+            )
+            .await
+            .expect("quassel update should succeed");
+        assert!(update_outcome.lock_present);
+        assert_eq!(
+            fs::read(&cert_path).unwrap(),
+            custom_cert,
+            "existing Quassel TLS certificate must be preserved on update"
+        );
+        assert!(
+            !runner
+                .recorded
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|c| c.program == "openssl"),
+            "openssl must not be invoked when quasselCert.pem already exists"
+        );
+
+        // Even if a subsequent reinstall fails mid-flight and rolls back, pre-existing cert must survive!
+        let failing_runner = QuasselMockRunner {
+            recorded: Arc::new(StdMutex::new(Vec::new())),
+            fail_systemctl_restart: true,
+        };
+        let failing_exec =
+            DeclarativePackageExecutor::with_runner(env_cfg.clone(), failing_runner);
+        let err = failing_exec
+            .execute_recipe(
+                &recipe,
+                PackageAction::Install,
+                CancellationToken::new(),
+                |_| {},
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, PackageExecutorError::StepFailed { .. }));
+        assert_eq!(
+            fs::read(&cert_path).unwrap(),
+            custom_cert,
+            "rollback on failed reinstall must never delete pre-existing quasselCert.pem"
+        );
+        assert!(
+            sqlite_db.is_file(),
+            "rollback must preserve existing Quassel SQLite database"
+        );
+
+        // Remove with delete_data = false (default): must remove /etc/default/quasselcore, lock, and sandbox drop-in,
+        // but PRESERVE /var/lib/quassel & cert
+        let remove_command_start = runner.recorded.lock().unwrap().len();
+        let remove_preserve = executor
+            .execute_recipe(
+                &recipe,
+                PackageAction::Remove,
+                CancellationToken::new(),
+                |_| {},
+            )
+            .await
+            .expect("quassel remove (preserve data) should succeed");
+        assert!(!remove_preserve.lock_present);
+        let remove_commands = runner.recorded.lock().unwrap()[remove_command_start..].to_vec();
+        assert!(remove_commands.iter().any(|command| {
+            command.program == "apt-get"
+                && command.args.contains(&"remove".to_string())
+                && command.args.contains(&"quassel-core".to_string())
+        }));
+        assert!(!remove_commands.iter().any(|command| {
+            command.program == "apt-get" && command.args.contains(&"purge".to_string())
+        }));
+        assert!(!root.join("install/.quassel.lock").exists());
+        assert!(!root.join("etc/default/quasselcore").exists());
+        assert_eq!(
+            fs::read(&cert_path).unwrap(),
+            custom_cert,
+            "quasselCert.pem must be preserved on remove when delete_data=false"
+        );
+        assert!(
+            sqlite_db.is_file(),
+            "quassel SQLite database must be preserved on remove when delete_data=false"
+        );
+
+        // Remove with delete_data = true: must purge /var/lib/quassel and /var/log/quassel
+        let mut purge_env = env_cfg.clone();
+        purge_env.delete_data = true;
+        let purge_exec = DeclarativePackageExecutor::with_runner(purge_env, runner.clone());
+        let purge_command_start = runner.recorded.lock().unwrap().len();
+        purge_exec
+            .execute_recipe(
+                &recipe,
+                PackageAction::Remove,
+                CancellationToken::new(),
+                |_| {},
+            )
+            .await
+            .expect("quassel remove (purge data) should succeed");
+        assert!(!root.join("var/lib/quassel").exists());
+        assert!(!root.join("var/log/quassel").exists());
+        let purge_commands = runner.recorded.lock().unwrap()[purge_command_start..].to_vec();
+        assert!(purge_commands.iter().any(|command| {
+            command.program == "apt-get"
+                && command.args.contains(&"purge".to_string())
+                && command.args.contains(&"quassel-core".to_string())
+        }));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_threadfin_recipe_verifies_pinned_digests_tamper_arch_and_https_fail_closed() {
+        let recipe = get_declarative_recipe("threadfin").expect("threadfin recipe must exist");
+        recipe
+            .validate()
+            .expect("threadfin recipe must validate cleanly");
+
+        // Ensure no ResolveGitHubReleaseTag step or unverified latest download exists in threadfin
+        let mut found_download_step = false;
+        for step in recipe
+            .install_steps
+            .iter()
+            .chain(recipe.update_steps.iter())
+        {
+            assert!(
+                !matches!(step, DeclarativeStep::ResolveGitHubReleaseTag { .. }),
+                "threadfin must use pinned release 1.2.37 rather than unverified latest release lookup"
+            );
+            if let DeclarativeStep::DownloadBinary {
+                url_template,
+                arch_map,
+                verification,
+                ..
+            } = step
+            {
+                found_download_step = true;
+                assert_eq!(
+                    url_template,
+                    "https://github.com/Threadfin/Threadfin/releases/download/1.2.37/{{ARCH_ASSET}}"
+                );
+                assert_eq!(arch_map.amd64, "Threadfin_linux_amd64_glibc_2.31_compat");
+                assert_eq!(arch_map.arm64, "Threadfin_linux_arm64");
+                let arch_digests = verification
+                    .arch_sha256
+                    .as_ref()
+                    .expect("threadfin must pin per-architecture SHA-256 digests");
+                assert!(arch_digests.amd64.contains(THREADFIN_AMD64_COMPAT_SHA256));
+                assert!(arch_digests.amd64.contains(THREADFIN_AMD64_PLAIN_SHA256));
+                assert_eq!(arch_digests.arm64, THREADFIN_ARM64_SHA256);
+                assert_eq!(
+                    arch_digests.armhf.as_deref(),
+                    Some(THREADFIN_ARMHF_SHA256)
+                );
+                assert!(verification.require_elf_magic);
+            }
+        }
+        assert!(found_download_step);
+
+        // Also confirm the plain amd64 upstream digest constant matches official 1.2.37 metadata
+        assert_eq!(
+            THREADFIN_AMD64_PLAIN_SHA256,
+            "19183058cf28b0080df059113e546a8e8cac16cae210d13be51bda42af94dfc2"
+        );
+
+        let root = create_isolated_test_dir("threadfin-verify");
+        let bin_path = root.join("Threadfin_linux_amd64_compat");
+
+        // 1. Construct a valid x86_64 ELF binary (EM_X86_64 = 62) and verify arch_sha256 matching
+        let amd64_elf = create_mock_elf_payload_for_arch(4096, 62);
+        let amd64_sha = hex::encode(Sha256::digest(&amd64_elf));
+        let arm64_elf = create_mock_elf_payload_for_arch(4096, 183);
+        let arm64_sha = hex::encode(Sha256::digest(&arm64_elf));
+
+        let policy = ArtifactVerificationPolicy {
+            min_size_bytes: 2048,
+            max_size_bytes: 1024 * 1024,
+            expected_sha256: None,
+            arch_sha256: Some(ArchAssetMap {
+                amd64: amd64_sha.clone(),
+                arm64: arm64_sha.clone(),
+                armhf: Some(THREADFIN_ARMHF_SHA256.to_string()),
+            }),
+            require_gzip_magic: false,
+            require_elf_magic: true,
+        };
+
+        fs::write(&bin_path, &amd64_elf).unwrap();
+        let verified_sha =
+            verify_artifact_file_for_arch(&bin_path, &policy, Some("amd64")).unwrap();
+        assert_eq!(verified_sha, amd64_sha);
+
+        // 2. Digest tamper must fail closed with ArtifactVerification error
+        let mut tampered = amd64_elf.clone();
+        tampered[100] ^= 0xff;
+        fs::write(&bin_path, &tampered).unwrap();
+        let tamper_err =
+            verify_artifact_file_for_arch(&bin_path, &policy, Some("amd64")).unwrap_err();
+        assert!(matches!(
+            tamper_err,
+            PackageExecutorError::ArtifactVerification(_)
+        ));
+        assert!(tamper_err.to_string().contains("SHA-256 mismatch"));
+
+        // 3. Wrong architecture ELF header (e.g. arm64 binary supplied on amd64 host even if hash matches) must fail closed
+        fs::write(&bin_path, &arm64_elf).unwrap();
+        let wrong_arch_policy = ArtifactVerificationPolicy {
+            arch_sha256: Some(ArchAssetMap {
+                amd64: arm64_sha.clone(), // pretend digest matched so ELF header check is tested directly
+                arm64: arm64_sha,
+                armhf: Some(THREADFIN_ARMHF_SHA256.to_string()),
+            }),
+            ..policy.clone()
+        };
+        let arch_err =
+            verify_artifact_file_for_arch(&bin_path, &wrong_arch_policy, Some("amd64"))
+                .unwrap_err();
+        assert!(matches!(
+            arch_err,
+            PackageExecutorError::ArtifactVerification(_)
+        ));
+        assert!(arch_err.to_string().contains("ELF architecture mismatch"));
+
+        // 4. Unsupported architecture in ArchAssetMap::resolve must fail closed
+        assert!(ArchAssetMap {
+            amd64: "a".to_string(),
+            arm64: "b".to_string(),
+            armhf: Some("c".to_string()),
+        }
+        .resolve("riscv64")
+        .is_none());
+
+        // 5. Non-HTTPS URL in DownloadBinary must fail validation closed
+        let insecure_http_step = DeclarativeStep::DownloadBinary {
+            url_template: "http://github.com/Threadfin/Threadfin/releases/download/1.2.37/{{ARCH_ASSET}}".to_string(),
+            arch_map: ArchAssetMap {
+                amd64: "Threadfin_linux_amd64_compat".to_string(),
+                arm64: "Threadfin_linux_arm64".to_string(),
+                armhf: Some("Threadfin_linux_arm_v7".to_string()),
+            },
+            dest_path: "/usr/local/bin/threadfin".to_string(),
+            mode: 0o755,
+            verification: policy,
+            progress_pct: 50,
+            description: "insecure http".to_string(),
+        };
+        let http_err = validate_step(&insecure_http_step).unwrap_err();
+        assert!(matches!(
+            http_err,
+            PackageExecutorError::SecurityViolation(_)
+        ));
+        assert!(http_err.to_string().contains("https://"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn test_incomplete_removal_invalidates_completion_marker_without_purging_data() {
+        let _serial = TEST_EXECUTION_SERIALIZER.lock().await;
+        for package_id in ["fail2ban", "quassel"] {
+            let root = create_isolated_test_dir(&format!("incomplete-remove-{}", package_id));
+            let recipe = get_declarative_recipe(package_id).unwrap();
+            let env_cfg = PackageExecutionEnv::isolated(&root);
+            let marker = root.join(format!("install/.{}.lock", package_id));
+            fs::create_dir_all(marker.parent().unwrap()).unwrap();
+            fs::write(&marker, "engine=declarative_rust\n").unwrap();
+            let state_dir = root.join(format!("var/lib/{}", package_id));
+            fs::create_dir_all(&state_dir).unwrap();
+            fs::write(state_dir.join("sentinel"), "preserved user data").unwrap();
+            let mock = MockCommandRunner { fail_program: Some("apt-get".to_string()), ..Default::default() };
+            let executor = DeclarativePackageExecutor::with_runner(env_cfg.clone(), mock.clone());
+            assert!(executor.execute_recipe(&recipe, PackageAction::Remove, CancellationToken::new(), |_| {}).await.is_err());
+            assert!(!marker.exists());
+            assert_eq!(fs::read_to_string(state_dir.join("sentinel")).unwrap(), "preserved user data");
+            assert!(!mock.recorded_commands().iter().any(|command| command.program == "systemctl"));
+            let retry = DeclarativePackageExecutor::with_runner(env_cfg, MockCommandRunner::default());
+            assert!(retry.execute_recipe(&recipe, PackageAction::Install, CancellationToken::new(), |_| {}).await.unwrap().lock_present);
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_threadfin_bind_default_preserves_settings_and_rollback() {
+        let root = create_isolated_test_dir("threadfin-bind-default");
+        let settings_path = root.join("var/lib/threadfin/conf/settings.json");
+        fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
+        let original = br#"{"version":"0.5.0","bindIpAddress":"","custom":{"playlist":"keep"}}"#;
+        fs::write(&settings_path, original).unwrap();
+        let runner = MockCommandRunner::default();
+        let executor = DeclarativePackageExecutor::with_runner(PackageExecutionEnv::isolated(&root), runner.clone());
+        let recipe = get_declarative_recipe("threadfin").unwrap();
+        let step = DeclarativeStep::EnsureThreadfinConfig { progress_pct: 85, description: "bind default".to_string() };
+        let mut journal = RollbackJournal::new(Some(root.clone()));
+        executor.run_single_step(&recipe, &step, &mut HashMap::new(), &mut journal, &CancellationToken::new()).await.unwrap();
+        let settings: serde_json::Value = serde_json::from_slice(&fs::read(&settings_path).unwrap()).unwrap();
+        assert_eq!(settings["bindIpAddress"], "127.0.0.1");
+        assert_eq!(settings["custom"]["playlist"], "keep");
+        journal.rollback(&runner).await;
+        assert_eq!(fs::read(&settings_path).unwrap(), original);
+        let explicit = br#"{"version":"0.5.0","bindIpAddress":"192.0.2.10","custom":"preserve"}"#;
+        fs::write(&settings_path, explicit).unwrap();
+        executor.run_single_step(&recipe, &step, &mut HashMap::new(), &mut journal, &CancellationToken::new()).await.unwrap();
+        assert_eq!(fs::read(&settings_path).unwrap(), explicit);
+        fs::write(&settings_path, br#"{"bindIpAddress":42}"#).unwrap();
+        assert!(executor.run_single_step(&recipe, &step, &mut HashMap::new(), &mut journal, &CancellationToken::new()).await.is_err());
+        fs::remove_file(&settings_path).unwrap();
+        executor.run_single_step(&recipe, &step, &mut HashMap::new(), &mut journal, &CancellationToken::new()).await.unwrap();
+        let fresh: serde_json::Value = serde_json::from_slice(&fs::read(&settings_path).unwrap()).unwrap();
+        assert_eq!(fresh["version"], "0.5.0");
+        assert_eq!(fresh["bindIpAddress"], "127.0.0.1");
+        journal.commit();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_existing_certificate_normalizes_mode_and_rollback_preserves_original_bytes() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = create_isolated_test_dir("existing-certificate-mode");
+        let certificate_path = root.join("var/lib/quassel/quasselCert.pem");
+        fs::create_dir_all(certificate_path.parent().unwrap()).unwrap();
+        fs::write(&certificate_path, "existing private certificate").unwrap();
+        fs::set_permissions(&certificate_path, fs::Permissions::from_mode(0o644)).unwrap();
+        let runner = MockCommandRunner::default();
+        let executor = DeclarativePackageExecutor::with_runner(PackageExecutionEnv::isolated(&root), runner.clone());
+        let recipe = get_declarative_recipe("quassel").unwrap();
+        let step = recipe.install_steps.iter().find(|step| matches!(step, DeclarativeStep::GenerateSelfSignedTlsCert { .. })).unwrap();
+        let mut journal = RollbackJournal::new(Some(root.clone()));
+        executor.run_single_step(&recipe, step, &mut HashMap::new(), &mut journal, &CancellationToken::new()).await.unwrap();
+        assert_eq!(fs::metadata(&certificate_path).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(fs::read_to_string(&certificate_path).unwrap(), "existing private certificate");
+        assert!(!runner.recorded_commands().iter().any(|command| command.program == "openssl"));
+        journal.rollback(&runner).await;
+        assert_eq!(fs::metadata(&certificate_path).unwrap().permissions().mode() & 0o777, 0o644);
+        assert_eq!(fs::read_to_string(&certificate_path).unwrap(), "existing private certificate");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_threadfin_install_remove_cancellation_and_rollback_in_isolated_root() {
+        let _serial = TEST_EXECUTION_SERIALIZER.lock().await;
+        let root = create_isolated_test_dir("threadfin-lifecycle");
+        let mut env_cfg = PackageExecutionEnv::isolated(&root);
+        env_cfg.app_port = 34409;
+
+        let mock = MockCommandRunner::default();
+        let executor = DeclarativePackageExecutor::with_runner(env_cfg.clone(), mock.clone());
+
+        // 1. Non-HTTPS remote download URL must fail closed in fetch_artifact_to_temp
+        let mut journal = RollbackJournal::new(Some(root.clone()));
+        let cancel = CancellationToken::new();
+        let http_fail = executor
+            .fetch_artifact_to_temp(
+                "threadfin",
+                "http://github.com/Threadfin/Threadfin/releases/download/1.2.37/Threadfin_linux_amd64_compat",
+                "Threadfin_linux_amd64_compat",
+                &mut journal,
+                &cancel,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            http_fail,
+            PackageExecutorError::SecurityViolation(_)
+        ));
+
+        // 2. Pre-cancelled token must abort fetch_artifact_to_temp before any network request
+        let pre_cancelled = CancellationToken::new();
+        pre_cancelled.cancel();
+        let cancel_fetch_err = executor
+            .fetch_artifact_to_temp(
+                "threadfin",
+                "https://github.com/Threadfin/Threadfin/releases/download/1.2.37/Threadfin_linux_amd64_compat",
+                "Threadfin_linux_amd64_compat",
+                &mut journal,
+                &pre_cancelled,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            cancel_fetch_err,
+            PackageExecutorError::Cancelled(_)
+        ));
+
+        // 3. Stage a valid mock ELF binary in `artifact_cache_dir` and run the real DownloadBinary step!
+        let cache_dir = root.join("artifact-cache");
+        fs::create_dir_all(&cache_dir).unwrap();
+        env_cfg.artifact_cache_dir = Some(cache_dir.clone());
+
+        let elf_payload = create_mock_elf_payload_for_arch(1_100_000, 62); // > 1 MiB min_size_bytes
+        let elf_sha = hex::encode(Sha256::digest(&elf_payload));
+        fs::write(cache_dir.join("Threadfin_linux_amd64_compat"), &elf_payload).unwrap();
+
+        let mut recipe = get_declarative_recipe("threadfin").unwrap();
+        for step in recipe.install_steps.iter_mut() {
+            if let DeclarativeStep::DownloadBinary { verification, .. } = step {
+                verification.arch_sha256 = Some(ArchAssetMap {
+                    amd64: elf_sha.clone(),
+                    arm64: elf_sha.clone(),
+                    armhf: Some(elf_sha.clone()),
+                });
+            }
+        }
+
+        let executor = DeclarativePackageExecutor::with_runner(env_cfg.clone(), mock.clone());
+        let mut events = Vec::new();
+        let outcome = executor
+            .execute_recipe(
+                &recipe,
+                PackageAction::Install,
+                CancellationToken::new(),
+                |ev| events.push(ev),
+            )
+            .await
+            .expect("threadfin install should succeed");
+
+        assert!(outcome.lock_present);
+        assert_eq!(outcome.resolved_version.as_deref(), Some("1.2.37"));
+        assert!(root.join("install/.threadfin.lock").is_file());
+        assert!(root.join("usr/local/bin/threadfin").is_file());
+        assert!(root.join("var/lib/threadfin/conf").is_dir());
+        assert!(root.join("var/lib/threadfin/temp").is_dir());
+
+        let unit_content =
+            fs::read_to_string(root.join("etc/systemd/system/threadfin.service")).unwrap();
+        assert!(unit_content.contains("User=threadfin"));
+        assert!(unit_content.contains("Group=threadfin"));
+        assert!(unit_content.contains("Environment=HOME=/var/lib/threadfin"));
+        assert!(unit_content.contains(
+            "ExecStart=/usr/local/bin/threadfin -port=34409 -bind=0.0.0.0 -config=/var/lib/threadfin/conf"
+        ));
+
+        let sandbox_content = fs::read_to_string(
+            root.join("etc/systemd/system/threadfin.service.d/aetherflow-sandbox.conf"),
+        )
+        .unwrap();
+        assert!(sandbox_content.contains("ProtectSystem=strict"));
+        assert!(sandbox_content.contains("/var/lib/threadfin"));
+
+        let version_marker =
+            fs::read_to_string(root.join("var/lib/threadfin/.af-version")).unwrap();
+        assert_eq!(version_marker.trim(), "1.2.37");
+
+        let settings_path = root.join("var/lib/threadfin/conf/settings.json");
+        let settings_before_update = fs::read(&settings_path).unwrap();
+        let commands_before_update = mock.recorded_commands().len();
+        env_cfg.app_port = 34410;
+        let update_executor =
+            DeclarativePackageExecutor::with_runner(env_cfg.clone(), mock.clone());
+        let update_outcome = update_executor
+            .execute_recipe(
+                &recipe,
+                PackageAction::Update,
+                CancellationToken::new(),
+                |_| {},
+            )
+            .await
+            .expect("threadfin update should restart the daemon after rewriting its unit");
+        assert!(update_outcome.lock_present);
+        assert_eq!(fs::read(&settings_path).unwrap(), settings_before_update);
+        let updated_unit =
+            fs::read_to_string(root.join("etc/systemd/system/threadfin.service")).unwrap();
+        assert!(updated_unit.contains("-port=34410"));
+        let recorded_commands = mock.recorded_commands();
+        let update_systemctl_commands: Vec<_> = recorded_commands[commands_before_update..]
+            .iter()
+            .filter(|command| command.program == "systemctl")
+            .map(|command| command.args.join(" "))
+            .collect();
+        assert!(update_systemctl_commands
+            .iter()
+            .any(|command| command == "daemon-reload"));
+        assert!(update_systemctl_commands
+            .iter()
+            .any(|command| command == "enable --now -- threadfin.service"));
+        assert_eq!(
+            update_systemctl_commands.last().map(String::as_str),
+            Some("restart -- threadfin.service")
+        );
+
+        // Verify injected failure rollback on a fresh install root cleans up unit, binary, and lock
+        let fail_root = create_isolated_test_dir("threadfin-rollback");
+        let fail_cache_dir = fail_root.join("artifact-cache");
+        fs::create_dir_all(&fail_cache_dir).unwrap();
+        fs::write(fail_cache_dir.join("Threadfin_linux_amd64_compat"), &elf_payload).unwrap();
+        let mut fail_env = PackageExecutionEnv::isolated(&fail_root);
+        fail_env.artifact_cache_dir = Some(fail_cache_dir);
+        let fail_mock = MockCommandRunner {
+            fail_program: Some("systemctl".to_string()),
+            ..Default::default()
+        };
+        let fail_exec = DeclarativePackageExecutor::with_runner(fail_env, fail_mock);
+        let fail_res = fail_exec
+            .execute_recipe(
+                &recipe,
+                PackageAction::Install,
+                CancellationToken::new(),
+                |_| {},
+            )
+            .await;
+        assert!(matches!(
+            fail_res,
+            Err(PackageExecutorError::StepFailed { .. })
+        ));
+        assert!(!fail_root.join("install/.threadfin.lock").exists());
+        assert!(!fail_root
+            .join("etc/systemd/system/threadfin.service")
+            .exists());
+        assert!(!fail_root.join("usr/local/bin/threadfin").exists());
+        let _ = fs::remove_dir_all(&fail_root);
+
+        // Verify Threadfin removal preserves /var/lib/threadfin when delete_data=false and purges when delete_data=true
+        let user_conf = root.join("var/lib/threadfin/conf/settings.json");
+        fs::write(&user_conf, b"{\"port\":34409}").unwrap();
+
+        let rem_outcome = executor
+            .execute_recipe(
+                &recipe,
+                PackageAction::Remove,
+                CancellationToken::new(),
+                |_| {},
+            )
+            .await
+            .expect("threadfin remove (preserve data) should succeed");
+        assert!(!rem_outcome.lock_present);
+        assert!(!root.join("install/.threadfin.lock").exists());
+        assert!(!root.join("usr/local/bin/threadfin").exists());
+        assert!(
+            user_conf.is_file(),
+            "threadfin user config must be preserved when delete_data=false"
+        );
+
+        let mut purge_env = env_cfg.clone();
+        purge_env.delete_data = true;
+        let purge_exec = DeclarativePackageExecutor::with_runner(purge_env, mock.clone());
+        purge_exec
+            .execute_recipe(
+                &recipe,
+                PackageAction::Remove,
+                CancellationToken::new(),
+                |_| {},
+            )
+            .await
+            .expect("threadfin remove (purge data) should succeed");
+        assert!(!root.join("var/lib/threadfin").exists());
 
         let _ = fs::remove_dir_all(&root);
     }

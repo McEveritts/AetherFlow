@@ -4,6 +4,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tarfile
 import tempfile
@@ -116,10 +117,15 @@ write_lock() { touch "$TEST_ROOT/completed"; }
         checksum = hashlib.sha256(archive.read_bytes()).hexdigest()
         (self.root / "SHASUMS256.txt").write_text(f"{checksum}  node-v22.23.4-linux-{self.architecture()}.tar.xz\n")
         source = INSTALLER.read_text()
-        for prefix in ("/opt/", "/var/", "/etc/", "/run/", "/install"):
-            source = source.replace(prefix, str(self.root) + prefix)
-        self.script = self.root / "installer"
-        self.script.write_text(source)
+        prefixes = ("/opt/", "/var/", "/etc/", "/run/", "/install")
+        for idx, prefix in enumerate(prefixes):
+            source = source.replace(prefix, f"__AF_TEST_PREFIX_{idx}__")
+        for idx, prefix in enumerate(prefixes):
+            source = source.replace(f"__AF_TEST_PREFIX_{idx}__", str(self.root) + prefix)
+        self.script = self.root / "packages/package/install/installpackage-jellyseerr"
+        self.script.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(common, self.root / "packages/common.sh")
+        self.script.write_text(source, newline="\n")
 
     @staticmethod
     def architecture():

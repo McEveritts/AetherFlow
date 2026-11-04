@@ -3,6 +3,8 @@
 
 #[path = "../../af-api/src/auth.rs"]
 mod auth;
+#[path = "../../af-api/src/plugins.rs"]
+mod plugins;
 #[path = "../../af-api/src/streaming_ext.rs"]
 mod streaming_ext;
 #[path = "../../af-api/src/streaming_history.rs"]

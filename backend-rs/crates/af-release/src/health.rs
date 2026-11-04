@@ -89,9 +89,125 @@ pub fn install_packaged_unit_if_missing(
     Ok(true)
 }
 
+/// Verifies that live systemd or PM2 lifecycle mutations are explicitly authorized
+/// when running under an isolated release root (`--root` / `AETHERFLOW_RELEASE_ROOT`).
+pub fn verify_isolated_systemd_lifecycle_authorized(config: &ReleaseConfig) -> ReleaseResult<()> {
+    let Some(ref isolated_root) = config.isolated_root else {
+        return Ok(());
+    };
+    let normalized_root =
+        af_models::normalize_lexical_path(isolated_root, "isolated_root").map_err(|reason| {
+            ReleaseError::PathValidation {
+                path: isolated_root.clone(),
+                reason,
+            }
+        })?;
+    if normalized_root == Path::new("/") {
+        return Ok(());
+    }
+
+    let allow_flag = std::env::var("AETHERFLOW_ALLOW_ISOLATED_SYSTEMD_LIFECYCLE")
+        .ok()
+        .map(|val| val.trim().to_string())
+        .unwrap_or_default();
+    if allow_flag != "1" {
+        return Err(ReleaseError::Systemd {
+            action: "isolated_systemd_guard".to_string(),
+            reason: format!(
+                "refusing live host systemd/PM2 lifecycle mutation under isolated root '{}' without AETHERFLOW_ALLOW_ISOLATED_SYSTEMD_LIFECYCLE=1 and /etc/aetherflow-disposable-guest; pass --dry-run on non-disposable hosts",
+                normalized_root.display()
+            ),
+        });
+    }
+
+    let marker_path = Path::new("/etc/aetherflow-disposable-guest");
+    let marker_meta = fs::symlink_metadata(marker_path).map_err(|_| ReleaseError::Systemd {
+        action: "isolated_systemd_guard".to_string(),
+        reason: format!(
+            "refusing live systemd/PM2 lifecycle mutation under isolated root '{}': missing disposable-guest marker file {}",
+            normalized_root.display(),
+            marker_path.display()
+        ),
+    })?;
+    if !marker_meta.file_type().is_file() {
+        return Err(ReleaseError::Systemd {
+            action: "isolated_systemd_guard".to_string(),
+            reason: format!(
+                "refusing live systemd/PM2 lifecycle mutation under isolated root '{}': {} must be a regular non-symlink file",
+                normalized_root.display(),
+                marker_path.display()
+            ),
+        });
+    }
+
+    Ok(())
+}
+
+/// Synchronizes `<cli_bin_dir>/af` symlink when the release contains `af` or `bin/af`,
+/// matching `sync_cli_entrypoints` in `deploy/release-manager.sh` while staying strictly
+/// contained within `config.cli_bin_dir`.
+pub fn sync_cli_entrypoints(config: &ReleaseConfig, epoch_id: &str) -> ReleaseResult<()> {
+    if let Some(ref isolated_root) = config.isolated_root {
+        af_models::validate_path_within_isolated_root(
+            &config.cli_bin_dir,
+            isolated_root,
+            "CLI_BIN_DIR",
+        )
+        .map_err(|reason| ReleaseError::PathValidation {
+            path: config.cli_bin_dir.clone(),
+            reason,
+        })?;
+    }
+
+    let candidate_af = if config.current_link.join("af").is_file() {
+        Some(config.current_link.join("af"))
+    } else if config.current_link.join("bin/af").is_file() {
+        Some(config.current_link.join("bin/af"))
+    } else {
+        None
+    };
+
+    let Some(target_af) = candidate_af else {
+        return Ok(());
+    };
+
+    if create_dir_all_for_cli_bin(&config.cli_bin_dir, config.isolated_root.is_some()).is_err() {
+        return Ok(());
+    }
+
+    let dest_af = config.cli_bin_dir.join("af");
+    let replace_allowed = match fs::symlink_metadata(&dest_af) {
+        Ok(meta) => meta.file_type().is_symlink(),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => true,
+        Err(_) => false,
+    };
+    if replace_allowed {
+        let _ = crate::symlink::atomic_replace_symlink(
+            &dest_af,
+            &target_af,
+            &format!("af.{}", epoch_id),
+        );
+    }
+    Ok(())
+}
+
+fn create_dir_all_for_cli_bin(cli_bin_dir: &Path, strict: bool) -> ReleaseResult<()> {
+    match crate::fs_security::create_dir_all_no_symlinks(cli_bin_dir, 0o755) {
+        Ok(()) => Ok(()),
+        Err(err) if strict => Err(err),
+        Err(_) => Ok(()),
+    }
+}
+
 /// Trait abstracting host service lifecycle operations (`systemctl` and legacy `pm2` cleanup).
 /// Tests MUST use a mock implementation so real host services are never touched.
 pub trait LifecycleController: Send + Sync {
+    /// Returns `true` if this controller mutates real host systemd/PM2 state and therefore
+    /// requires explicit disposable-guest authorization when `config.isolated_root` is active.
+    fn requires_isolated_systemd_authorization(&self) -> bool {
+        false
+    }
+
     /// Queries `systemctl show -p Environment aetherflow-api` for Stage 0 database path resolution.
     fn query_unit_environment(&self, unit: &str) -> Option<String>;
 
@@ -225,6 +341,10 @@ impl LifecycleController for SystemdLifecycleController {
         Ok(())
     }
 
+    fn requires_isolated_systemd_authorization(&self) -> bool {
+        true
+    }
+
     fn query_unit_environment(&self, unit: &str) -> Option<String> {
         let out = Command::new("systemctl")
             .args(["show", "-p", "Environment", unit])
@@ -242,6 +362,7 @@ impl LifecycleController for SystemdLifecycleController {
     }
 
     fn restart_systemd_units(&self, config: &ReleaseConfig) -> ReleaseResult<()> {
+        verify_isolated_systemd_lifecycle_authorized(config)?;
         let packaged_systemd_dir = packaged_systemd_directory(config)?;
         if packaged_systemd_dir.is_dir() {
             let _ = install_packaged_unit_if_missing(
@@ -256,14 +377,12 @@ impl LifecycleController for SystemdLifecycleController {
 
         run_systemctl(&["daemon-reload"], true)?;
 
-        // Stop legacy separate frontend service or PM2 if still present (best-effort)
         let _ = run_systemctl(&["stop", "aetherflow-frontend.service"], false);
         let _ = run_systemctl(&["disable", "aetherflow-frontend.service"], false);
         let _ = Command::new("pm2")
             .args(["delete", "aetherflow-frontend", "aetherflow-api"])
             .output();
 
-        // Propagate `systemctl enable` failure when `systemctl` is present
         run_systemctl(
             &[
                 "enable",

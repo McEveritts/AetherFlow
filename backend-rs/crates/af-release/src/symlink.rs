@@ -157,6 +157,7 @@ fn create_symlink_or_pointer(link_path: &Path, target_dir: &Path) -> std::io::Re
 /// 1. If `current_link` already points to a release distinct from `new_release_dir`,
 ///    records its resolved path atomically in `${RELEASES_DIR}/.previous_release`.
 /// 2. Atomically swaps `current_link` to `new_release_dir`.
+///
 /// Returns the previous release path if one existed.
 pub fn perform_symlink_swap(
     releases_dir: &Path,

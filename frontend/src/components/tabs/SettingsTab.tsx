@@ -1,7 +1,7 @@
 import { Settings, Sparkles, DownloadCloud, AlertCircle, Eye, EyeOff, Key, Monitor, Globe, Clock, LayoutDashboard, Radio, HardDriveDownload, Shield, KeyRound, RefreshCw, UserCircle, Bell, Cpu, CheckCircle2, ArrowUpRight, Terminal, Layers, Save, Folder } from 'lucide-react';
 import { AI_MODELS, ALL_MODEL_IDS, resolveProviderForModel } from '@/lib/ai-models';
 import type { AIProviderID } from '@/lib/ai-models';
-import { useEffect, useRef, useState, FormEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, FormEvent } from 'react';
 import useSWR from 'swr';
 import dynamic from 'next/dynamic';
 import GlassSelect, { type GlassSelectOption } from '@/components/ui/GlassSelect';
@@ -20,8 +20,8 @@ import { useTranslations } from 'next-intl';
 import { SettingsSkeleton } from '@/components/layout/SkeletonBox';
 import { apiFetch } from '@/lib/fetcher';
 import {
-    getSystemUpdateView, isSystemUpdateLaunchTerminal, UPDATE_STATUS_POLL_MS,
-    type SystemUpdateCheck, type SystemUpdateLaunch, type SystemUpdateStatus, type UpdateSnapshot,
+    getSystemUpdateView, isSystemUpdateLaunchTerminal, UPDATE_STATUS_POLL_MS, UPDATE_CHECK_MAX_AGE_MS,
+    type SystemUpdateCheck, type SystemUpdateLaunch, type SystemUpdateStatus, type SystemUpdateView, type UpdateSnapshot,
 } from '@/lib/system-update';
 
 const PROVIDER_CARDS: {
@@ -114,24 +114,15 @@ const UPDATE_CHANNEL_OPTIONS: GlassSelectOption[] = [
         badgeVariant: 'amber',
         dotColor: 'bg-amber-400 shadow-[0_0_8px_rgba(251,191,36,0.85)]',
     },
-    {
-        value: 'experimental',
-        label: 'Experimental',
-        description: 'Preview builds from the experimental branch. May break or need manual recovery',
-        badge: 'Experimental',
-        badgeVariant: 'rose',
-        dotColor: 'bg-rose-400 shadow-[0_0_8px_rgba(251,113,133,0.85)]',
-    },
 ];
 
 const UPDATE_CHANNEL_PILL_STYLES: Record<string, string> = {
     stable: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30',
     nightly: 'bg-amber-500/15 text-amber-300 border-amber-500/30',
-    experimental: 'bg-rose-500/15 text-rose-300 border-rose-500/30',
 };
 
 const normalizeUpdateChannel = (channel: unknown): string =>
-    channel === 'nightly' || channel === 'experimental' ? channel : 'stable';
+    channel === 'nightly' || channel === 'experimental' ? 'nightly' : 'stable';
 
 const SETTINGS_DEFAULTS = {
     aiModel: 'gemini-4-argon',
@@ -164,7 +155,7 @@ async function fetchUpdateSnapshot<Value>(url: string): Promise<UpdateSnapshot<V
     try {
         const response = await apiFetch(url, { signal: controller.signal, cache: 'no-store' });
         const data = await response.json();
-        if (!response.ok) throw new Error(data.error || data.message || `Update request failed (${response.status})`);
+        if (!response.ok) throw Object.assign(new Error(data?.error || data?.message || `Update request failed (${response.status})`), { status: response.status });
         if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('Invalid update response');
         return { ...data, checkedAt: Date.now() };
     } finally {
@@ -172,7 +163,102 @@ async function fetchUpdateSnapshot<Value>(url: string): Promise<UpdateSnapshot<V
     }
 }
 
-export default function SettingsTab() {
+const ACTIVE_UPDATE_JOB_STORAGE_KEY = 'aetherflow_active_update_job_unit';
+const DEFAULT_UPDATE_POLL_INTERVAL_MS = process.env.NODE_ENV === 'test' ? 20 : 1500;
+const DEFAULT_UPDATE_MAX_POLL_ATTEMPTS = 40;
+const VALID_SELF_UPDATE_JOB_UNIT_PATTERN =
+    /^aetherflow-self-update-[a-z0-9-]+-[a-z0-9-]+-[a-f0-9]{8,32}\.service$/;
+
+type UpdateJobOutcome = 'idle' | 'pending' | 'success' | 'error';
+
+interface UpdateStatusPayload {
+    status?: string;
+    completed?: boolean;
+    success?: boolean;
+    job_unit?: string;
+    active_job_unit?: string;
+    channel?: string;
+    engine?: string;
+    error?: string | null;
+    exit_code?: number | null;
+    message?: string;
+}
+
+interface SettingsTabProps {
+    updatePollIntervalMs?: number;
+    updateMaxPollAttempts?: number;
+}
+
+function isValidSelfUpdateJobUnit(jobUnit: string): boolean {
+    return VALID_SELF_UPDATE_JOB_UNIT_PATTERN.test(jobUnit.trim());
+}
+
+function readStoredUpdateJobUnit(): string {
+    if (typeof window === 'undefined') return '';
+    try {
+        const storedUnit = window.sessionStorage.getItem(ACTIVE_UPDATE_JOB_STORAGE_KEY)?.trim() || '';
+        if (!storedUnit) return '';
+        if (!isValidSelfUpdateJobUnit(storedUnit)) {
+            window.sessionStorage.removeItem(ACTIVE_UPDATE_JOB_STORAGE_KEY);
+            return '';
+        }
+        return storedUnit;
+    } catch {
+        return '';
+    }
+}
+
+function writeStoredUpdateJobUnit(jobUnit: string): void {
+    if (typeof window === 'undefined') return;
+    try {
+        const cleanUnit = jobUnit.trim();
+        if (cleanUnit && isValidSelfUpdateJobUnit(cleanUnit)) {
+            window.sessionStorage.setItem(ACTIVE_UPDATE_JOB_STORAGE_KEY, cleanUnit);
+        } else {
+            window.sessionStorage.removeItem(ACTIVE_UPDATE_JOB_STORAGE_KEY);
+        }
+    } catch {
+        return;
+    }
+}
+
+function evaluateUpdateStatusPayload(
+    payload: UpdateStatusPayload | null | undefined,
+    expectedJobUnit: string
+): { isTerminal: boolean; isSuccess: boolean; message: string } {
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+        return { isTerminal: true, isSuccess: false, message: 'Update job returned an invalid status payload.' };
+    }
+    const status = typeof payload.status === 'string' ? payload.status.trim().toLowerCase() : '';
+    const jobUnit = typeof payload.job_unit === 'string' ? payload.job_unit.trim() : '';
+    const error = typeof payload.error === 'string' ? payload.error.trim() : '';
+    const message = typeof payload.message === 'string' ? payload.message.trim() : '';
+    if (jobUnit !== expectedJobUnit || !isValidSelfUpdateJobUnit(jobUnit)) {
+        return { isTerminal: true, isSuccess: false, message: 'Update status returned a missing or mismatched job unit.' };
+    }
+    const nonZeroExit = typeof payload.exit_code === 'number' && payload.exit_code !== 0;
+    if (status === 'running' && payload.completed === false && !error && !nonZeroExit) {
+        return { isTerminal: false, isSuccess: false, message: message || `Updating system (${jobUnit})...` };
+    }
+    if (status === 'succeeded' && payload.completed === true && payload.success === true && payload.exit_code === 0 && !error) {
+        return {
+            isTerminal: true, isSuccess: true,
+            message: message || `System update completed successfully (${jobUnit}).`,
+        };
+    }
+    const exitCode = typeof payload.exit_code === 'number' ? ` (exit code ${payload.exit_code})` : '';
+    return {
+        isTerminal: true, isSuccess: false,
+        message: error || message || (status === 'failed'
+            ? `System update failed${exitCode}.`
+            : 'Update job status is unknown, unavailable, or inconsistent.'),
+    };
+}
+
+export default function SettingsTab({
+    updatePollIntervalMs = DEFAULT_UPDATE_POLL_INTERVAL_MS,
+    updateMaxPollAttempts = DEFAULT_UPDATE_MAX_POLL_ATTEMPTS,
+}: SettingsTabProps = {}) {
     const t = useTranslations('Settings');
     const { addToast } = useToast();
     const {
@@ -221,6 +307,31 @@ export default function SettingsTab() {
     const launchRequestInFlight = useRef(false);
     const [updateNow, setUpdateNow] = useState(Date.now);
     const [isTesting, setIsTesting] = useState(false);
+    const [isUpdating, setIsUpdating] = useState(() => Boolean(readStoredUpdateJobUnit()));
+    const [updateMessage, setUpdateMessage] = useState(() => {
+        const storedUnit = readStoredUpdateJobUnit();
+        return storedUnit ? `Recovering update status (${storedUnit})...` : '';
+    });
+    const [updateOutcome, setUpdateOutcome] = useState<UpdateJobOutcome>(() =>
+        readStoredUpdateJobUnit() ? 'pending' : 'idle'
+    );
+
+    const isMountedRef = useRef(true);
+    const activePollIdRef = useRef(0);
+    const pollingJobUnitRef = useRef('');
+    const pollAbortControllerRef = useRef<AbortController | null>(null);
+    const pollRetryTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+
+    useEffect(() => {
+        isMountedRef.current = true;
+        return () => {
+            isMountedRef.current = false;
+            activePollIdRef.current += 1;
+            pollingJobUnitRef.current = '';
+            pollAbortControllerRef.current?.abort();
+            if (pollRetryTimerRef.current) clearTimeout(pollRetryTimerRef.current);
+        };
+    }, []);
 
     const handleTestConnection = async (providerOverride?: string, extraPayload?: Record<string, string>) => {
         const testProvider = providerOverride || resolveProviderForModel(model);
@@ -250,18 +361,18 @@ export default function SettingsTab() {
         }
     };
 
-    const { data: updateData, error: updateError, isValidating: isCheckingUpdate, mutate: mutateUpdateData } = useSWR<UpdateSnapshot<SystemUpdateCheck>>(
+    const { data: updateData, error: updateError, isValidating: isCheckingUpdate, mutate: mutateUpdateData } = useSWR<UpdateSnapshot<SystemUpdateCheck & UpdateStatusPayload>>(
         settingsData ? ['/api/v1/auth/system/update/check', savedSettings.updateChannel] as const : null,
         async ([url, channel]: readonly [string, string]) => {
-            const data = await fetchUpdateSnapshot<SystemUpdateCheck>(url);
-            return { ...data, channel: data.channel || channel };
+            const data = await fetchUpdateSnapshot<SystemUpdateCheck & UpdateStatusPayload>(url);
+            return { ...data, channel: normalizeUpdateChannel(data.channel || channel) };
         },
         { refreshInterval: 60000, onSuccess: () => setUpdateNow(Date.now()) }
     );
 
-    const { data: updateStatus, error: updateStatusError, mutate: mutateUpdateStatus } = useSWR<UpdateSnapshot<SystemUpdateStatus>>(
+    const { data: updateStatus, error: updateStatusError, mutate: mutateUpdateStatus } = useSWR<UpdateSnapshot<SystemUpdateStatus & UpdateStatusPayload>>(
         '/api/v1/auth/system/update/status',
-        fetchUpdateSnapshot<SystemUpdateStatus>,
+        fetchUpdateSnapshot<SystemUpdateStatus & UpdateStatusPayload>,
         {
             refreshInterval: UPDATE_STATUS_POLL_MS,
             dedupingInterval: 1000,
@@ -276,11 +387,104 @@ export default function SettingsTab() {
                 setUpdateNow(Date.now());
                 setUpdateLaunch(current => isSystemUpdateLaunchTerminal(current, status, Date.now()) ? null : current);
             },
-            onErrorRetry: (_error, _key, _config, revalidate, { retryCount }) => {
+            onErrorRetry: (error, _key, _config, revalidate, { retryCount }) => {
+                if (error?.status === 400 && /job_unit/i.test(error.message)) return;
                 setTimeout(() => revalidate({ retryCount }), UPDATE_STATUS_POLL_MS);
             },
         }
     );
+
+    const monitorUpdateJob = useCallback(
+        async function monitorJob(rawJobUnit: string, initialMessage?: string): Promise<void> {
+            const jobUnit = rawJobUnit.trim();
+            if (!isMountedRef.current) return;
+            if (!isValidSelfUpdateJobUnit(jobUnit)) {
+                writeStoredUpdateJobUnit('');
+                pollingJobUnitRef.current = '';
+                setUpdateLaunch(null);
+                setUpdateOutcome('error');
+                setUpdateMessage('Update initiation returned an invalid or missing self-update job unit.');
+                setIsUpdating(false);
+                return;
+            }
+            if (pollRetryTimerRef.current) clearTimeout(pollRetryTimerRef.current);
+            pollAbortControllerRef.current?.abort();
+            const pollId = ++activePollIdRef.current;
+            pollingJobUnitRef.current = jobUnit;
+            writeStoredUpdateJobUnit(jobUnit);
+            setIsUpdating(true);
+            setUpdateOutcome('pending');
+            setUpdateMessage(initialMessage || `Recovering update status (${jobUnit})...`);
+            const maxAttempts = Number.isFinite(updateMaxPollAttempts)
+                ? Math.max(1, Math.floor(updateMaxPollAttempts)) : DEFAULT_UPDATE_MAX_POLL_ATTEMPTS;
+            const intervalMs = Number.isFinite(updatePollIntervalMs)
+                ? Math.max(5, updatePollIntervalMs) : DEFAULT_UPDATE_POLL_INTERVAL_MS;
+            for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+                if (!isMountedRef.current || activePollIdRef.current !== pollId) return;
+                const controller = new AbortController();
+                pollAbortControllerRef.current = controller;
+                const timeout = setTimeout(() => controller.abort(), 10000);
+                try {
+                    const response = await apiFetch(
+                        `/api/v1/auth/system/update/status?job_unit=${encodeURIComponent(jobUnit)}`,
+                        { signal: controller.signal, cache: 'no-store' }
+                    );
+                    const payload: UpdateStatusPayload | null = await response.json().catch(() => null);
+                    if (!isMountedRef.current || activePollIdRef.current !== pollId) return;
+                    if (!response.ok && (response.status >= 500 || response.status === 408 || response.status === 429)) {
+                        throw new Error('Update status is temporarily unavailable.');
+                    }
+                    const evaluation = response.ok
+                        ? evaluateUpdateStatusPayload(payload, jobUnit)
+                        : {
+                            isTerminal: true, isSuccess: false,
+                            message: payload?.error || payload?.message || `Failed to query update job status (HTTP ${response.status}).`,
+                        };
+                    if (evaluation.isTerminal) {
+                        writeStoredUpdateJobUnit('');
+                        pollingJobUnitRef.current = '';
+                        setUpdateLaunch(null);
+                        setLaunchError(evaluation.isSuccess ? '' : evaluation.message);
+                        setUpdateOutcome(evaluation.isSuccess ? 'success' : 'error');
+                        setUpdateMessage(evaluation.message);
+                        setIsUpdating(false);
+                        if (evaluation.isSuccess) {
+                            void mutateUpdateData().catch(() => undefined);
+                            void mutateUpdateStatus().catch(() => undefined);
+                        }
+                        return;
+                    }
+                    setUpdateMessage(evaluation.message);
+                } catch {
+                    if (!isMountedRef.current || activePollIdRef.current !== pollId) return;
+                    setUpdateMessage(`Reconnecting automatically to update status (${jobUnit}); no duplicate update will be submitted.`);
+                } finally {
+                    clearTimeout(timeout);
+                }
+                if (attempt < maxAttempts) {
+                    await new Promise<void>(resolve => setTimeout(resolve, intervalMs));
+                }
+            }
+            if (!isMountedRef.current || activePollIdRef.current !== pollId) return;
+            setUpdateMessage(`Update is still pending (${jobUnit}). Monitoring will continue automatically.`);
+            pollRetryTimerRef.current = setTimeout(() => {
+                if (isMountedRef.current && activePollIdRef.current === pollId) void monitorJob(jobUnit);
+            }, intervalMs);
+        },
+        [mutateUpdateData, mutateUpdateStatus, updateMaxPollAttempts, updatePollIntervalMs]
+    );
+
+    const recoverableJobUnit = [
+        updateData?.active_job_unit,
+        updateStatus?.active_job_unit,
+        updateData?.completed === false ? updateData.job_unit : '',
+        updateStatus?.completed === false ? updateStatus.job_unit : '',
+    ].find((unit): unit is string => typeof unit === 'string' && isValidSelfUpdateJobUnit(unit)) || '';
+
+    useEffect(() => {
+        const jobUnit = recoverableJobUnit || readStoredUpdateJobUnit();
+        if (jobUnit && pollingJobUnitRef.current !== jobUnit) void monitorUpdateJob(jobUnit);
+    }, [recoverableJobUnit, monitorUpdateJob]);
 
     useEffect(() => {
         const timer = setInterval(() => setUpdateNow(Date.now()), UPDATE_STATUS_POLL_MS);
@@ -296,7 +500,34 @@ export default function SettingsTab() {
         launch: updateLaunch, launchError, channel: updateChannel,
         savedChannel: savedSettings.updateChannel, settingsPending: isSaving, now: updateNow,
     };
-    const updateView = getSystemUpdateView(updateViewInput);
+    const getCurrentUpdateView = (now: number): SystemUpdateView => {
+        let view = getSystemUpdateView({ ...updateViewInput, now });
+        if (updateStatusError?.status === 400 && /job_unit/i.test(updateStatusError.message || '')) {
+            const versionsKnown = [updateData?.currentVersion, updateData?.latestVersion].every(version =>
+                typeof version === 'string' && /^(?:v?\d[\w.+-]*|(?:nightly|experimental)-[0-9a-f]{7,40})$/i.test(version)
+            );
+            const checkVerified = Boolean(updateData && !updateError && !updateData.error && versionsKnown
+                && updateData.checkedAt <= now && now - updateData.checkedAt < UPDATE_CHECK_MAX_AGE_MS
+                && (!updateData.channel || normalizeUpdateChannel(updateData.channel) === savedSettings.updateChannel));
+            const available = checkVerified && updateData?.updateAvailable === true
+                && updateData.currentVersion !== updateData.latestVersion;
+            view = {
+                ...view, kind: available ? 'available' : 'unknown', isLatest: false, updateAvailable: available,
+                canLaunch: available && !view.isBusy && !isSaving && updateChannel === savedSettings.updateChannel,
+                message: available ? `A verified update to ${updateData?.latestVersion} is available.`
+                    : 'Independent runtime verification is unavailable; latest-release status is not confirmed.',
+            };
+        }
+        return {
+            ...view,
+            kind: isUpdating ? 'running' : view.kind,
+            message: isUpdating ? updateMessage : view.message,
+            isLatest: !isUpdating && view.isLatest,
+            isBusy: view.isBusy || isUpdating,
+            canLaunch: view.canLaunch && !isUpdating,
+        };
+    };
+    const updateView = getCurrentUpdateView(updateNow);
 
     if (isLoading) return <SettingsSkeleton />;
 
@@ -386,9 +617,11 @@ export default function SettingsTab() {
     };
 
     const handleRunUpdate = async () => {
-        if (launchRequestInFlight.current || !getSystemUpdateView({ ...updateViewInput, now: Date.now() }).canLaunch) return;
+        if (launchRequestInFlight.current || pollingJobUnitRef.current || !getCurrentUpdateView(Date.now()).canLaunch) return;
         launchRequestInFlight.current = true;
         setLaunchError('');
+        setUpdateMessage('');
+        setUpdateOutcome('idle');
         setUpdateLaunch({
             state: 'launching', startedAt: Date.now(), operationId: null,
             previousOperationId: updateStatus?.operationId ?? null, message: '',
@@ -399,10 +632,22 @@ export default function SettingsTab() {
             const res = await apiFetch('/api/v1/admin/system/update/run', {
                 method: 'POST', signal: controller.signal,
             });
-            const data = await res.json().catch(() => null) as {
-                message?: string; error?: string; operationId?: string;
-            } | null;
-            if (res.status === 202) {
+            const data = await res.json().catch(() => null) as (UpdateStatusPayload & { operationId?: string }) | null;
+            if (!isMountedRef.current) return;
+            if (res.ok && data && (data.status !== undefined || data.job_unit !== undefined)) {
+                const jobUnit = typeof data.job_unit === 'string' ? data.job_unit.trim() : '';
+                if (data.status !== 'initiated' || data.completed !== false || !isValidSelfUpdateJobUnit(jobUnit)) {
+                    const message = 'Update initiation returned an invalid or missing self-update job unit.';
+                    setUpdateLaunch(null);
+                    setLaunchError(message);
+                    setUpdateOutcome('error');
+                    setUpdateMessage(message);
+                    setIsUpdating(false);
+                    return;
+                }
+                setUpdateLaunch(current => current && ({ ...current, state: 'accepted', operationId: data.operationId || null }));
+                void monitorUpdateJob(jobUnit, data.message || `Updating system (${jobUnit})...`);
+            } else if (res.status === 202) {
                 setUpdateLaunch(current => current && ({
                     ...current, state: 'accepted', operationId: data?.operationId || null,
                     message: data?.message || 'Update launcher acknowledged the request.',
@@ -1163,15 +1408,6 @@ export default function SettingsTab() {
                                             options={UPDATE_CHANNEL_OPTIONS}
                                             ariaLabel="Update Channel"
                                         />
-                                        {updateChannel === 'experimental' && (
-                                            <div role="alert" className="flex items-start gap-2 text-xs text-rose-300 bg-rose-500/10 border border-rose-500/20 p-3 rounded-lg">
-                                                <AlertCircle size={14} className="mt-0.5 shrink-0" />
-                                                <span>
-                                                    Experimental builds track the <code className="font-mono">experimental</code> branch and may include breaking changes
-                                                    (such as the v4 Rust control plane). A database snapshot is taken before each deploy so you can roll back.
-                                                </span>
-                                            </div>
-                                        )}
                                     </div>
 
                                     <div className="space-y-4 text-sm text-slate-400">
@@ -1225,10 +1461,20 @@ export default function SettingsTab() {
                                                         : <AlertCircle size={15} className="shrink-0" />}
                                                     <span className="min-w-0">{updateView.message}</span>
                                                 </div>
+                                                {updateMessage && (
+                                                    <div
+                                                        data-testid="system-update-status"
+                                                        data-status={updateOutcome}
+                                                        className={`text-xs break-words ${updateOutcome === 'error' ? 'text-red-400' : updateOutcome === 'success' ? 'text-emerald-400' : 'text-amber-300'}`}
+                                                    >
+                                                        {updateMessage}
+                                                    </div>
+                                                )}
                                                 {(updateData?.updateAvailable === true || updateView.isBusy) && (
                                                     <div className="pt-2">
                                                         <button
                                                             type="button"
+                                                            data-testid="run-system-update-button"
                                                             onClick={handleRunUpdate}
                                                             disabled={!updateView.canLaunch}
                                                             className="obs-touch-target-standard obs-gpu-120hz-interactive w-full px-4 py-3 bg-blue-600 hover:bg-blue-500 disabled:bg-blue-600/50 disabled:cursor-not-allowed text-white font-bold rounded-xl transition-colors shadow-lg shadow-blue-500/20 text-center"

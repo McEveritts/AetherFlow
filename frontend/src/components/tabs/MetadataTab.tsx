@@ -45,12 +45,30 @@ export default function MetadataTab() {
         }
     };
 
-    // Load existing metadata on mount
     useEffect(() => {
-        fetchResults();
+        let active = true;
+        const pollTimer = pollTimerRef.current;
+        apiFetch('/api/v1/admin/ai/metadata/results')
+            .then(async (response) => (response.ok ? response.json() : null))
+            .then((mediaItems) => {
+                if (active && mediaItems !== null) {
+                    setResults(Array.isArray(mediaItems) ? mediaItems : []);
+                }
+            })
+            .catch((err) => {
+                console.error('Failed to fetch enriched metadata results', err);
+            })
+            .finally(() => {
+                if (active) {
+                    setIsLoadingResults(false);
+                }
+            });
         return () => {
+            active = false;
             if (pollTimerRef.current) {
                 clearInterval(pollTimerRef.current);
+            } else if (pollTimer) {
+                clearInterval(pollTimer);
             }
         };
     }, []);

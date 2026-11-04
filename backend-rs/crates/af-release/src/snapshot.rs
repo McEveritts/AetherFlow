@@ -13,6 +13,9 @@ use crate::lock::ReleaseLockGuard;
 use rusqlite::{backup::Backup, Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::io::Read;
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -143,6 +146,20 @@ pub fn sqlite_integrity(db_path: &Path) -> String {
         }
     } else {
         return "missing".to_string();
+    }
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    let Ok(mut source) = options.open(db_path) else {
+        return "error".to_string();
+    };
+    let mut header = [0_u8; 16];
+    if !source.metadata().is_ok_and(|metadata| metadata.is_file())
+        || source.read_exact(&mut header).is_err()
+        || &header != b"SQLite format 3\0"
+    {
+        return "error".to_string();
     }
     let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
     let Ok(conn) = Connection::open_with_flags(db_path, flags) else {

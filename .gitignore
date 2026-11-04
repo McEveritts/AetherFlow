@@ -58,7 +58,12 @@ patch_*.py
 *.bak
 backend/data/
 **/.master.creds
-/config/
+/config/*
+!/config/packages.json
+!/config/package_automation.json
+!/config/openapi-v1.yaml
+/web/dist/*
+!/web/dist/.keep
 
 # Agent teamwork & IDE state
 .agents/

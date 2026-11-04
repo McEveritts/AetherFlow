@@ -1,7 +1,7 @@
 import { useAuth } from '@/contexts/AuthContext';
 import { useToast } from '@/contexts/ToastContext';
 import { Mail, AlertCircle, Save, HardDrive, KeyRound, Lock, X, Loader2 } from 'lucide-react';
-import { useState, useEffect, useRef } from 'react';
+import { useState, useRef } from 'react';
 import useSWR from 'swr';
 import SkeletonBox from '@/components/layout/SkeletonBox';
 import Image from 'next/image';
@@ -10,7 +10,8 @@ import { apiFetch } from '@/lib/fetcher';
 export default function ProfileTab() {
     const { user, refreshSession } = useAuth();
     const { addToast } = useToast();
-    const [email, setEmail] = useState('');
+    const [emailDraft, setEmailDraft] = useState<string | null>(null);
+    const email = emailDraft ?? user?.email ?? '';
     const [isSaving, setIsSaving] = useState(false);
 
     // Avatar state
@@ -28,10 +29,6 @@ export default function ProfileTab() {
     const { data: quota, isLoading: isQuotaLoading } = useSWR(
         user ? `/api/v1/auth/user/quota` : null
     );
-
-    useEffect(() => {
-        if (user) setEmail(user.email);
-    }, [user]);
 
     const handleAvatarChange = (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
@@ -246,7 +243,7 @@ export default function ProfileTab() {
                                 <input
                                     type="email"
                                     value={email}
-                                    onChange={(e) => setEmail(e.target.value)}
+                                    onChange={(event) => setEmailDraft(event.target.value)}
                                     className="flex-1 bg-slate-900 border border-white/10 rounded-xl px-4 py-2.5 text-slate-200 text-sm focus:outline-none focus:border-indigo-500/50 transition-colors"
                                 />
                                 <button

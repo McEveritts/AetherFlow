@@ -8,12 +8,12 @@ use once_cell::sync::Lazy;
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use rand::RngCore;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::env;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Mutex, RwLock};
 use std::time::{Duration, Instant};
 
@@ -170,37 +170,43 @@ static DB_POOL: Lazy<RwLock<Option<Pool<SqliteConnectionManager>>>> =
     Lazy::new(|| RwLock::new(None));
 static DB_PATH_RESOLVED: Lazy<RwLock<String>> = Lazy::new(|| RwLock::new(String::new()));
 
+pub fn try_resolve_db_path() -> anyhow::Result<String> {
+    let default_fallback = env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|exe_dir| exe_dir.join("data/aetherflow.sqlite")))
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "aetherflow.sqlite".to_string());
+
+    let resolved = af_models::try_resolve_active_db_path_from_env(None, &default_fallback)
+        .map_err(|err| anyhow::anyhow!(err))?;
+    let resolved_str = resolved.to_string_lossy().into_owned();
+    if resolved_str != ":memory:" && !resolved_str.starts_with("file:") {
+        if let Some(parent) = resolved.parent() {
+            if !parent.as_os_str().is_empty() {
+                let _ = fs::create_dir_all(parent);
+            }
+        }
+    }
+    Ok(resolved_str)
+}
+
 pub fn resolve_db_path() -> String {
-    if let Ok(p) = env::var("DB_PATH") {
-        if !p.trim().is_empty() {
-            return p;
+    let default_fallback = env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|exe_dir| exe_dir.join("data/aetherflow.sqlite")))
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "aetherflow.sqlite".to_string());
+
+    let resolved = af_models::resolve_active_db_path_from_env(None, &default_fallback);
+    let resolved_str = resolved.to_string_lossy().into_owned();
+    if resolved_str != ":memory:" && !resolved_str.starts_with("file:") {
+        if let Some(parent) = resolved.parent() {
+            if !parent.as_os_str().is_empty() {
+                let _ = fs::create_dir_all(parent);
+            }
         }
     }
-    if let Ok(p) = env::var("AETHERFLOW_DB_PATH") {
-        if !p.trim().is_empty() {
-            return p;
-        }
-    }
-    if let Ok(state_dir) = env::var("STATE_DIRECTORY") {
-        if !state_dir.trim().is_empty() {
-            let _ = fs::create_dir_all(&state_dir);
-            return Path::new(&state_dir)
-                .join("aetherflow.sqlite")
-                .to_string_lossy()
-                .into_owned();
-        }
-    }
-    if let Ok(exe) = env::current_exe() {
-        if let Some(exe_dir) = exe.parent() {
-            let db_dir = exe_dir.join("data");
-            let _ = fs::create_dir_all(&db_dir);
-            return db_dir
-                .join("aetherflow.sqlite")
-                .to_string_lossy()
-                .into_owned();
-        }
-    }
-    "aetherflow.sqlite".to_string()
+    resolved_str
 }
 
 pub fn get_db_path() -> String {
@@ -269,7 +275,7 @@ fn migrate(conn: &Connection, version: i32, description: &str, stmts: &[&str]) {
 }
 
 pub fn init_db() -> anyhow::Result<()> {
-    let db_path = resolve_db_path();
+    let db_path = try_resolve_db_path()?;
     if db_path != ":memory:" && !db_path.starts_with("file:") {
         if let Some(parent) = Path::new(&db_path).parent() {
             if !parent.as_os_str().is_empty() {
@@ -535,6 +541,8 @@ pub fn init_db() -> anyhow::Result<()> {
             "CREATE INDEX IF NOT EXISTS idx_notifications_user_read ON notifications(user_id, read);",
             "CREATE INDEX IF NOT EXISTS idx_notifications_created ON notifications(created_at);",
             "CREATE INDEX IF NOT EXISTS idx_metrics_history_ts ON metrics_history(timestamp);",
+            "CREATE INDEX IF NOT EXISTS idx_metrics_history_ts_id ON metrics_history(timestamp DESC, id DESC);",
+            "CREATE INDEX IF NOT EXISTS idx_metrics_history_norm_ts_id ON metrics_history(replace(CAST(timestamp AS TEXT), 'T', ' ') DESC, id DESC);",
             "CREATE INDEX IF NOT EXISTS idx_login_history_user ON login_history(user_id);",
             "CREATE INDEX IF NOT EXISTS idx_login_history_created ON login_history(created_at);",
             "CREATE INDEX IF NOT EXISTS idx_users_google_id ON users(google_id);",
@@ -812,6 +820,25 @@ pub fn init_db() -> anyhow::Result<()> {
     );
 
     streaming::migrate_history(&conn, &db_path)?;
+    migrate(
+        &conn,
+        21,
+        "Add plugins_registry table for Rust plugin platform lifecycle state",
+        &[
+            r#"CREATE TABLE IF NOT EXISTS plugins_registry (
+                plugin_id TEXT PRIMARY KEY,
+                enabled BOOLEAN NOT NULL DEFAULT 0,
+                allocated_port INTEGER NOT NULL DEFAULT 0,
+                token_epoch INTEGER NOT NULL DEFAULT 1,
+                status TEXT NOT NULL DEFAULT 'stopped',
+                last_health_at DATETIME,
+                last_error TEXT NOT NULL DEFAULT '',
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );"#,
+            "CREATE INDEX IF NOT EXISTS idx_plugins_registry_enabled ON plugins_registry(enabled);",
+        ],
+    );
+
 
     // Singleton settings row & model normalization
     let _ = conn.execute("INSERT OR IGNORE INTO settings (id) VALUES (1)", []);
@@ -836,9 +863,14 @@ pub fn init_db() -> anyhow::Result<()> {
         [],
     );
 
+    let _ = conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_metrics_history_ts_id ON metrics_history(timestamp DESC, id DESC);
+         CREATE INDEX IF NOT EXISTS idx_metrics_history_norm_ts_id ON metrics_history(replace(CAST(timestamp AS TEXT), 'T', ' ') DESC, id DESC);",
+    );
+
     let env_domain = env::var("AETHERFLOW_BASE_DOMAIN")
         .or_else(|_| env::var("AETHERFLOW_DOMAIN"))
-        .map(|d| normalize_base_domain(&d))
+        .map(|dom| normalize_base_domain(&dom))
         .unwrap_or_default();
     if !env_domain.is_empty() {
         let _ = conn.execute(
@@ -863,7 +895,7 @@ pub fn init_db() -> anyhow::Result<()> {
 pub fn db_health_check() -> anyhow::Result<serde_json::Value> {
     let start = Instant::now();
     let conn = get_conn()?;
-    let _one: i32 = conn.query_row("SELECT 1", [], |r| r.get(0))?;
+    let _one: i32 = conn.query_row("SELECT 1", [], |row| row.get(0))?;
     let latency_ms = start.elapsed().as_millis() as i64;
 
     let tables = [
@@ -874,15 +906,15 @@ pub fn db_health_check() -> anyhow::Result<serde_json::Value> {
         "metrics_history",
     ];
     let mut counts = HashMap::new();
-    for t in tables {
-        let q = format!("SELECT COUNT(*) FROM {}", t);
-        if let Ok(c) = conn.query_row(&q, [], |r| r.get::<_, i64>(0)) {
-            counts.insert(t.to_string(), c);
+    for tbl in tables {
+        let query_sql = format!("SELECT COUNT(*) FROM {}", tbl);
+        if let Ok(cnt) = conn.query_row(&query_sql, [], |row| row.get::<_, i64>(0)) {
+            counts.insert(tbl.to_string(), cnt);
         }
     }
 
     let wal_pages: i64 = conn
-        .query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |r| r.get(0))
+        .query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |row| row.get(0))
         .unwrap_or(0);
 
     Ok(serde_json::json!({
@@ -904,18 +936,18 @@ pub fn prune_expired_data() {
         "DELETE FROM oidc_refresh_tokens WHERE expires_at < ?1 OR revoked = 1",
         "DELETE FROM active_sessions WHERE expires_at < ?1",
     ];
-    for q in param_queries {
-        let _ = conn.execute(q, params![now]);
+    for query_sql in param_queries {
+        let _ = conn.execute(query_sql, params![now]);
     }
 
     let static_queries = [
-        "DELETE FROM metrics_history WHERE timestamp < datetime('now', '-90 days')",
+        "DELETE FROM metrics_history WHERE replace(CAST(timestamp AS TEXT), 'T', ' ') < datetime('now', '-90 days')",
         "DELETE FROM login_history WHERE created_at < datetime('now', '-90 days')",
         "DELETE FROM billing_webhook_events WHERE processed_at < datetime('now', '-30 days')",
         "DELETE FROM streaming_bandwidth_samples WHERE timestamp < datetime('now', '-90 days')",
     ];
-    for q in static_queries {
-        let _ = conn.execute(q, []);
+    for query_sql in static_queries {
+        let _ = conn.execute(query_sql, []);
     }
 }
 
@@ -1126,6 +1158,7 @@ pub struct AuditEntry {
     pub created_at: String,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn record_audit(
     user_id: i64,
     username: &str,
@@ -1518,7 +1551,7 @@ mod tests {
 
     #[test]
     fn test_aes_gcm_roundtrip_and_format() {
-        env::set_var("AES_MASTER_KEY", &"a".repeat(32));
+        env::set_var("AES_MASTER_KEY", "a".repeat(32));
         init_aes_key().unwrap();
         assert!(is_encryption_enabled());
 
@@ -1534,6 +1567,23 @@ mod tests {
         init_db().unwrap();
         let health = db_health_check().unwrap();
         assert_eq!(health["status"], "healthy");
+
+        {
+            let conn = get_conn().unwrap();
+            let migration_count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM schema_versions WHERE version IN (20, 21)",
+                [],
+                |row| row.get(0),
+            ).unwrap();
+            assert_eq!(migration_count, 2);
+            let provenance_column_count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('streaming_history') WHERE name = 'provenance'",
+                [],
+                |row| row.get(0),
+            ).unwrap();
+            assert_eq!(provenance_column_count, 1);
+            conn.query_row("SELECT COUNT(*) FROM plugins_registry", [], |row| row.get::<_, i64>(0)).unwrap();
+        }
 
         for new_status in ["approved", "rejected"] {
             let action_id = {

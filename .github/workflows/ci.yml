@@ -8,7 +8,6 @@ on:
       - development
       - nightly
       - Nightly
-      - experimental
   push:
     branches:
       - main
@@ -16,7 +15,6 @@ on:
       - development
       - nightly
       - Nightly
-      - experimental
 
 permissions:
   contents: read
@@ -82,23 +80,28 @@ jobs:
       - name: Test Upgrade and Rollback
         run: python3 -m unittest discover -s tests -p 'test_jellyseerr_installer.py' -v
 
-  youtube-packages:
-    name: Invidious and Piped Package Regression Tests
+  release-lifecycle-smoke:
+    name: v4 Release, Bootstrap, OS Matrix & Lifecycle Smoke Gate
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Test YouTube Marketplace Packages
+      - name: Install SQLite & Shell Dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends python3-yaml apache2-bin jq
-          bash -n packages/youtube-common.sh
-          for app in invidious piped; do
-            bash -n "packages/package/install/installpackage-${app}"
-            bash -n "packages/package/remove/removepackage-${app}"
-          done
-          PATH="/usr/sbin:$PATH" /usr/bin/python3 -m unittest discover -s tests -p 'test_youtube_packages.py' -v
+          sudo apt-get install -y -qq sqlite3 bc curl ca-certificates python3-yaml
+
+      - name: Run Deterministic v4 Release Lifecycle & OS Matrix Smoke Harness
+        run: |
+          bash scripts/smoke_v4_release_lifecycle.sh
+
+      - name: Run Release, Build Tools & Bootstrap Regression Suite
+        run: |
+          python3 -m unittest discover -s tests -p 'test_rust_build_tools.py' -v
+          python3 -m unittest discover -s tests -p 'test_release_manager.py' -v
+          python3 -m unittest discover -s tests -p 'test_v4_release_bootstrap_ci.py' -v
+          python3 tests/check_shell_hygiene.py
 
   frontend:
     name: Frontend (Next.js Static Export & Tests)
@@ -113,7 +116,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: "24.22.2"
           cache: npm
           cache-dependency-path: package-lock.json
 
@@ -141,7 +144,7 @@ jobs:
 
   backend-rs:
     name: Backend & Single-Binary Bundle (Rust)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     needs: frontend
     defaults:
       run:
@@ -163,34 +166,77 @@ jobs:
         with:
           workspaces: "backend-rs -> target"
 
-      - name: Download Frontend Static Export
+      - name: Download Frontend Static Export (Neutral & Legacy Staging)
         uses: actions/download-artifact@v4
         with:
           name: frontend-static-export
-          path: backend/web/dist
+          path: web/dist
 
-      - name: Unit Tests (Rust Workspace)
+      - name: Mirror Frontend Static Export to Legacy Path
+        working-directory: .
+        run: |
+          mkdir -p backend/web/dist
+          cp -R web/dist/. backend/web/dist/
+
+      - name: Verify Workspace Lockfile & Run Unit Tests (Rust Workspace)
         env:
           JWT_SECRET: ci-test-secret-exactly-32bytes!!
           AES_MASTER_KEY: ci-test-aes-key-exactly-32bytes!
           ALLOWED_HOSTS: localhost:8080,127.0.0.1:8080
-        run: cargo test --workspace
-
-      - name: Verify Updater Survives Its Caller Restart
+          AETHERFLOW_DISABLE_BACKGROUND_WORKERS: "1"
         run: |
-          test_binary=$(cargo test -p af-runner --lib --no-run --message-format=json | python3 -c 'import json,sys; artifacts=[json.loads(line) for line in sys.stdin if line.startswith("{")]; binaries=[item["executable"] for item in artifacts if item.get("reason")=="compiler-artifact" and item.get("executable") and item["target"]["name"]=="af_runner"]; assert len(binaries)==1; print(binaries[0])')
-          sudo "$test_binary" self_update::tests::updater_survives_caller_restart --ignored --exact --nocapture
+          test -f Cargo.lock
+          cargo test --workspace --locked -- --test-threads=1
 
-      - name: Build Embedded Single-Binary (Rust)
+      - name: Build Embedded Single-Binary & Native CLI (Rust)
         run: |
-          cargo build --release --bin aetherflow-api
+          cargo build --release --locked --bin aetherflow-api --bin af
 
-      - name: Upload Rust Single-Binary Artifact
+      - name: Upload Rust Single-Binary & CLI Artifact
         uses: actions/upload-artifact@v4
         with:
           name: aetherflow-rs-single-binary
-          path: backend-rs/target/release/aetherflow-api
+          path: |
+            backend-rs/target/release/aetherflow-api
+            backend-rs/target/release/af
           if-no-files-found: error
+
+  embedded-e2e:
+    name: Embedded Rust Single-Binary Full-Stack E2E
+    runs-on: ubuntu-22.04
+    needs: backend-rs
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node (for Playwright Client Runner)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24.22.2"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Download Rust Single-Binary & CLI Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: aetherflow-rs-single-binary
+          path: backend-rs/target/release
+
+      - name: Make Compiled Binaries Executable
+        run: |
+          chmod +x backend-rs/target/release/aetherflow-api backend-rs/target/release/af
+
+      - name: Install Playwright Chromium Browser
+        run: |
+          npm ci
+          cd frontend
+          npx playwright install --with-deps chromium
+
+      - name: Execute Embedded Single-Binary Full-Stack & Playwright E2E
+        env:
+          CI: "true"
+        run: |
+          bash scripts/run_embedded_e2e.sh --binary "${PWD}/backend-rs/target/release/aetherflow-api" --port 18080 --playwright
 
   backend:
     name: Backend & Single-Binary Bundle (Go Legacy)

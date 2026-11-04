@@ -6,7 +6,8 @@ license.workspace = true
 
 [dependencies]
 af-models.workspace = true
-af-release = { path = "../af-release" }
+af-host.workspace = true
+af-release.workspace = true
 tokio.workspace = true
 axum.workspace = true
 tower.workspace = true

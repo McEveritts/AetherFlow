@@ -68,7 +68,7 @@ function _boot() {
 				break
 			fi
 			sleep 0.5
-			((_api_try++))
+			_api_try=$((_api_try + 1))
 		done
 		python3 -c '
 import json, sys, urllib.request
@@ -135,6 +135,19 @@ _harden_permissions() {
 		if [[ -f "${af_root}/backend/aetherflow-api" ]]; then
 			chmod 755 "${af_root}/backend/aetherflow-api"
 		fi
+		if [[ -f "${af_root}/current/aetherflow-api" ]]; then
+			chmod 755 "${af_root}/current/aetherflow-api"
+		fi
+		if [[ -f "${af_root}/current/af" ]]; then
+			chmod 755 "${af_root}/current/af"
+		fi
+		if [[ -f "${af_root}/current/bin/af" ]]; then
+			chmod 755 "${af_root}/current/bin/af"
+		fi
+		if [[ -d "${af_root}/releases" ]]; then
+			find "${af_root}/releases" -type f \( -name "aetherflow-api" -o -name "af" -o -name "*.sh" \) -exec chmod 755 {} + 2>/dev/null || true
+			find "${af_root}/releases" -path "*/packages/*" -type f -exec chmod 755 {} + 2>/dev/null || true
+		fi
 
 		# Node binaries in node_modules/.bin (including workspace root) need execute
 		chmod 755 "${af_root}"/node_modules/.bin/* "${af_root}"/frontend/node_modules/.bin/* 2>/dev/null || true
@@ -146,6 +159,15 @@ _harden_permissions() {
 		# Shell scripts in setup, packages, deploy, scripts, and root need execute and root ownership
 		if [[ -f "${af_root}/backend/aetherflow-api" ]]; then
 			chown root:aetherflow "${af_root}/backend/aetherflow-api" 2>/dev/null || true
+		fi
+		if [[ -f "${af_root}/current/aetherflow-api" ]]; then
+			chown root:aetherflow "${af_root}/current/aetherflow-api" 2>/dev/null || true
+		fi
+		if [[ -f "${af_root}/current/af" ]]; then
+			chown root:aetherflow "${af_root}/current/af" 2>/dev/null || true
+		fi
+		if [[ -f "${af_root}/current/bin/af" ]]; then
+			chown root:aetherflow "${af_root}/current/bin/af" 2>/dev/null || true
 		fi
 		if [[ -d "${af_root}/setup" ]]; then
 			chown -R root:aetherflow "${af_root}/setup" 2>/dev/null || true

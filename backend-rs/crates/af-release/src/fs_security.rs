@@ -71,19 +71,18 @@ pub fn create_dir_all_no_symlinks(dir: &Path, mode: u32) -> ReleaseResult<()> {
                     });
                 }
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
                 create_single_dir_with_mode(&accum, mode)?;
             }
-            Err(e) => {
+            Err(err) => {
                 return Err(ReleaseError::io(
                     format!("inspecting directory component {}", accum.display()),
-                    e,
+                    err,
                 ));
             }
         }
     }
 
-    set_dir_mode(dir, mode)?;
     Ok(())
 }
 

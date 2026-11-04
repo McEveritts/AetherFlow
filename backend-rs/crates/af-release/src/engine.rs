@@ -6,17 +6,18 @@ use crate::artifact::{
     ArtifactProvider, GithubHttpArtifactProvider,
 };
 use crate::config::{
-    resolve_db_path, ReleaseChannel, ReleaseCommand, ReleaseConfig, ReleaseOptions, ResolvedDbPath,
+    try_resolve_db_path, ReleaseChannel, ReleaseCommand, ReleaseConfig, ReleaseOptions,
+    ResolvedDbPath,
 };
 use crate::error::{ReleaseError, ReleaseResult};
 use crate::fs_security::{
     apply_data_dir_ownership_and_mode, apply_service_ownership, atomic_copy_file_with_mode,
     create_dir_all_no_symlinks, create_new_dir_exclusive, ensure_no_symlink_ancestors,
-    OwnershipMetadata,
+    set_dir_mode, OwnershipMetadata,
 };
 use crate::health::{
-    poll_readiness_probe, HealthProber, LifecycleController, ReqwestHealthProber,
-    SystemdLifecycleController,
+    poll_readiness_probe, sync_cli_entrypoints, verify_isolated_systemd_lifecycle_authorized,
+    HealthProber, LifecycleController, ReqwestHealthProber, SystemdLifecycleController,
 };
 use crate::lock::{RecoveryState, ReleaseLockGuard, ReleasePhase};
 use crate::snapshot::{
@@ -211,8 +212,12 @@ where
     /// Inspects the current immutable-release directory layout, active version, resolved DB path,
     /// and any persisted `.recovery_state.json` without mutating host state.
     pub fn inspect_status(&self) -> ReleaseResult<ReleaseEngineStatus> {
-        let unit_env = self.lifecycle.query_unit_environment("aetherflow-api");
-        let resolved_db = resolve_db_path(&self.base_config, unit_env.as_deref());
+        let unit_env = if self.base_config.isolated_root.is_some() {
+            None
+        } else {
+            self.lifecycle.query_unit_environment("aetherflow-api")
+        };
+        let resolved_db = try_resolve_db_path(&self.base_config, unit_env.as_deref())?;
         let current_release = read_current_link_target(&self.base_config.current_link);
         let current_version = current_release
             .as_ref()
@@ -250,19 +255,33 @@ where
     }
 
     /// Executes any `ReleaseOptions` command (`deploy`, `rollback`, `cleanup`, `migrate-systemd`)
-    /// under an exclusive engine lock.
+    /// under an exclusive engine lock and the shared cross-process maintenance lock.
     pub fn execute(&self, opts: &ReleaseOptions) -> ReleaseResult<ReleaseOutcome> {
         opts.validate()?;
         let effective_cfg = self.base_config.with_dry_run(opts.dry_run);
         effective_cfg.validate()?;
 
+        if !opts.dry_run
+            && self.lifecycle.requires_isolated_systemd_authorization()
+            && matches!(
+                opts.command,
+                ReleaseCommand::Deploy | ReleaseCommand::Rollback | ReleaseCommand::MigrateSystemd
+            )
+        {
+            verify_isolated_systemd_lifecycle_authorized(&effective_cfg)?;
+        }
+
         ensure_no_symlink_ancestors(&effective_cfg.releases_dir)?;
         create_dir_all_no_symlinks(&effective_cfg.releases_dir, 0o755)?;
+
+        let shared_lock_path =
+            crate::admin::ensure_interoperable_maintenance_lock_file(&effective_cfg)?;
+        let _shared_maintenance_lock =
+            ReleaseLockGuard::acquire(&shared_lock_path, effective_cfg.snapshot_timeout)?;
 
         let lock_path = effective_cfg.releases_dir.join(".release.lock");
         let _engine_lock = ReleaseLockGuard::acquire(&lock_path, effective_cfg.snapshot_timeout)?;
 
-        // Honor any persisted unfinished RecoveryState before performing new mutations
         self.guard_unfinished_recovery_state(&effective_cfg, opts)?;
 
         match opts.command {
@@ -285,18 +304,6 @@ where
         }
     }
 
-    /// Inspects `${RELEASES_DIR}/.recovery_state.json` before starting a new mutating operation.
-    ///
-    /// - If a previous deployment crashed **after** Stage 2 symlink swap (`Stage2SymlinkSwap`,
-    ///   `Stage3HealthProbe`, or `Stage4Rollback`) without completing rollback, `current` may still
-    ///   point to the broken candidate while `.previous_release` holds the last known-good release.
-    ///   Starting a new `deploy`, `cleanup`, or `migrate-systemd` would overwrite `.previous_release`
-    ///   with the broken release or prune the known-good release! We fail closed and require an
-    ///   explicit `rollback` (which honors the persisted `candidate_release` snapshot and `previous_release`).
-    /// - If a previous deployment crashed **before** Stage 2 symlink swap (`Stage0FhsLayout`,
-    ///   `Stage1Scaffold`, or `Stage1_5Snapshot`), `current` and `.previous_release` were never mutated;
-    ///   we clean up any partial `candidate_release` directory if it is not referenced by `current` or
-    ///   `.previous_release`.
     fn guard_unfinished_recovery_state(
         &self,
         cfg: &ReleaseConfig,
@@ -312,8 +319,6 @@ where
         if existing.has_unhealthy_or_interrupted_post_swap_deploy() {
             match opts.command {
                 ReleaseCommand::Rollback => {
-                    // Explicit rollback is the sanctioned recovery action; restore `.previous_release`
-                    // from the recovery journal if needed so the last known-good pointer is never lost.
                     if let Some(ref good_prev) = existing.previous_release {
                         if good_prev.is_dir() {
                             let _ = write_previous_release(&cfg.releases_dir, good_prev);
@@ -334,8 +339,6 @@ where
             }
         }
 
-        // Pre-swap interrupted operation (`Stage0FhsLayout`, `Stage1Scaffold`, `Stage1_5Snapshot`):
-        // clean up orphaned candidate release directory if it is not active or previous.
         if matches!(
             existing.phase,
             ReleasePhase::Stage0FhsLayout
@@ -379,13 +382,18 @@ where
         create_dir_all_no_symlinks(&cfg.data_dir, 0o700)?;
         create_dir_all_no_symlinks(&cfg.env_dir, 0o755)?;
         if dry_run {
+            set_dir_mode(&cfg.data_dir, 0o700)?;
             let _ = create_dir_all_no_symlinks(&cfg.repo_dir, 0o755);
         } else {
             apply_data_dir_ownership_and_mode(&cfg.data_dir)?;
         }
 
-        let unit_env = self.lifecycle.query_unit_environment("aetherflow-api");
-        let resolved = resolve_db_path(cfg, unit_env.as_deref());
+        let unit_env = if cfg.isolated_root.is_some() {
+            None
+        } else {
+            self.lifecycle.query_unit_environment("aetherflow-api")
+        };
+        let resolved = try_resolve_db_path(cfg, unit_env.as_deref())?;
         append_jsonl_log(
             &cfg.log_file,
             "INFO",
@@ -396,8 +404,6 @@ where
             ),
         );
 
-        // Only migrate a legacy DB when the resolved live path IS the FHS file and that file is missing.
-        // Copying into DATA_DIR while the process uses another path creates a divergent stale database.
         let fhs_db = cfg.host_data_dir.join(&cfg.sqlite_db);
         if resolved.path == fhs_db && !fhs_db.is_file() {
             let legacy_candidates = [
@@ -452,7 +458,6 @@ where
             );
         }
 
-        // Migrate legacy .env only on a real deploy. Dry-run must not copy secrets.
         if !dry_run && !cfg.host_env_file.is_file() {
             let legacy_envs = [
                 cfg.legacy_opt_root.join("backend/.env"),
@@ -514,7 +519,6 @@ where
         recovery.phase = ReleasePhase::Stage1Scaffold;
         recovery.save(&cfg.releases_dir)?;
 
-        // STAGE 1: Release Scaffold — create candidate release directory exclusively (no symlink traversal or pre-planted files)
         append_jsonl_log(
             &cfg.log_file,
             "INFO",
@@ -596,9 +600,6 @@ where
         recovery.snapshot_path = snapshot.backup_path.clone();
         recovery.save(&cfg.releases_dir)?;
 
-        // STAGE 2: Atomic Symlink Swap
-        // Capture prior `.previous_release` and current target BEFORE mutating symlinks so we can
-        // record them in `.recovery_state.json` and restore `.previous_release` if Stage 3 rolls back.
         let prior_previous_release = read_previous_release(&cfg.releases_dir).ok();
         let current_before_swap = read_current_link_target(&cfg.current_link);
         recovery.previous_release = current_before_swap
@@ -619,6 +620,7 @@ where
             &epoch_id,
         ) {
             Ok(prev) => {
+                sync_cli_entrypoints(cfg, &epoch_id)?;
                 if let Some(ref p) = prev {
                     append_jsonl_log(
                         &cfg.log_file,
@@ -648,7 +650,6 @@ where
         recovery.previous_release = previous_release.clone();
         recovery.save(&cfg.releases_dir)?;
 
-        // STAGE 3: Systemd Service Restart & Deep Readiness Probe
         recovery.phase = ReleasePhase::Stage3HealthProbe;
         recovery.save(&cfg.releases_dir)?;
         append_jsonl_log(
@@ -680,12 +681,8 @@ where
                     recovery.last_error = Some(probe_err.to_string());
                     let _ = recovery.save(&cfg.releases_dir);
 
-                    // STAGE 4: Automatic Rollback using the candidate release's pre-swap snapshot.
                     match self.run_rollback_locked(cfg, opts.dry_run, Some(&release_dir)) {
                         Ok(rb_report) => {
-                            // If a prior `.previous_release` existed before this failed deploy,
-                            // restore `.previous_release` to that older release so `previous != current`
-                            // where possible; otherwise keep the reverted known-good release.
                             if let Some(ref prior_prev) = prior_previous_release {
                                 if prior_prev.is_dir()
                                     && canonicalize_preserve_normal(prior_prev)
@@ -706,8 +703,6 @@ where
                             });
                         }
                         Err(rb_err) => {
-                            // Keep recovery state in Stage4Rollback so subsequent deploys fail closed
-                            // until manual rollback/recovery succeeds.
                             recovery.phase = ReleasePhase::Stage4Rollback;
                             recovery.last_error = Some(format!(
                                 "probe failed ({}) and rollback failed: {}",
@@ -724,7 +719,6 @@ where
             }
         };
 
-        // STAGE 5: Housekeeping
         recovery.phase = ReleasePhase::Stage5Cleanup;
         recovery.save(&cfg.releases_dir)?;
         append_jsonl_log(
@@ -811,8 +805,6 @@ where
             ),
         );
 
-        // Fresh, globally unique private staging directory (0700) created with `create_new_dir_exclusive`
-        // (never `remove_dir_all` + `create_dir_all` on a predictable path).
         let staging_dir = cfg.releases_dir.join(format!(
             ".staging-{}-{}-{}",
             target_tag,
@@ -902,7 +894,6 @@ where
         let previous_target = match read_previous_release(&cfg.releases_dir) {
             Ok(p) => p,
             Err(e) => {
-                // Fall back to the persisted previous_release in `.recovery_state.json` if present
                 if let Some(ref rec_prev) = recovery.previous_release {
                     if rec_prev.is_dir() {
                         write_previous_release(&cfg.releases_dir, rec_prev)?;
@@ -928,6 +919,7 @@ where
             &previous_target,
             &format!("rollback.{}", epoch_id),
         )?;
+        sync_cli_entrypoints(cfg, &epoch_id)?;
         append_jsonl_log(
             &cfg.log_file,
             "INFO",
@@ -938,8 +930,6 @@ where
             ),
         );
 
-        // If this is a manual rollback recovering from an interrupted post-swap deployment,
-        // prefer the interrupted candidate release's pre-swap `data-snapshot` if present.
         let inferred_failed_candidate = existing_recovery
             .as_ref()
             .filter(|r| r.has_unhealthy_or_interrupted_post_swap_deploy())
@@ -959,14 +949,14 @@ where
             ),
         );
 
-        let unit_env = self.lifecycle.query_unit_environment("aetherflow-api");
-        let resolved_db = resolve_db_path(cfg, unit_env.as_deref());
+        let unit_env = if cfg.isolated_root.is_some() {
+            None
+        } else {
+            self.lifecycle.query_unit_environment("aetherflow-api")
+        };
+        let resolved_db = try_resolve_db_path(cfg, unit_env.as_deref())?;
 
-        // Restore failure must not skip the restart of the reverted symlink (matching release-manager.sh:
-        // `state_restore "${snapshot_release}" || log_error "Database restore failed; continuing with the reverted symlink."`)
-        let mut restore_report = None;
-        let mut restore_error = None;
-        match restore_state_if_corrupted(
+        let restore_report = match restore_state_if_corrupted(
             cfg,
             &resolved_db,
             &snapshot_release,
@@ -994,20 +984,31 @@ where
                         ),
                     );
                 }
-                restore_report = Some(rep);
+                Some(rep)
             }
             Err(err) => {
-                append_jsonl_log(
-                    &cfg.log_file,
-                    "ERROR",
-                    &format!(
-                        "Database restore failed ({}); continuing with the reverted symlink.",
+                let stop_error = if dry_run {
+                    None
+                } else {
+                    self.lifecycle.stop_database_services(&resolved_db.path).err()
+                };
+                let failure = match stop_error {
+                    Some(stop_error) => format!(
+                        "database recovery failed: {}; writer quiescence also failed: {}",
+                        err, stop_error
+                    ),
+                    None => format!(
+                        "database recovery failed: {}; database services remain stopped",
                         err
                     ),
-                );
-                restore_error = Some(err.to_string());
+                };
+                append_jsonl_log(&cfg.log_file, "ERROR", &failure);
+                recovery.phase = ReleasePhase::Failed;
+                recovery.last_error = Some(failure.clone());
+                recovery.save(&cfg.releases_dir)?;
+                return Err(ReleaseError::Rollback(failure));
             }
-        }
+        };
 
         if !dry_run {
             if let Err(err) = self.lifecycle.restart_systemd_units(cfg) {
@@ -1036,7 +1037,7 @@ where
             snapshot_release,
             resolved_db,
             restore_report,
-            restore_error,
+            restore_error: None,
             dry_run,
         })
     }

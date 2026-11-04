@@ -84,7 +84,7 @@ function _depends() {
 	prefetch_pid=$!
 
 	if [[ ${DISTRO} == Debian ]]; then
-		_af_apt_install fail2ban bc build-essential ed sudo screen zip irssi unzip nano bwm-ng htop nethogs iotop git dos2unix subversion automake make mktorrent libtool libcppunit-dev libssl-dev pkg-config libxml2-dev libcurl4-openssl-dev libsigc++-2.0-dev apache2-utils autoconf cron curl libapache2-mod-fcgid libapache2-mod-php"${PHP_VER}" libncurses-dev yasm pcre2-utils apache2 php-net-socket php-memcached memcached php"${PHP_VER}" php"${PHP_VER}"-cli php"${PHP_VER}"-curl php"${PHP_VER}"-fpm php"${PHP_VER}"-gd php"${PHP_VER}"-mbstring php"${PHP_VER}"-msgpack php"${PHP_VER}"-mysql php"${PHP_VER}"-opcache php"${PHP_VER}"-xml php"${PHP_VER}"-zip python3-lxml fontconfig comerr-dev ca-certificates libfontconfig1-dev libdbd-mysql-perl libdbi-perl libfontconfig1 mediainfo ifstat checkinstall dtach libarchive-zip-perl libnet-ssleay-perl ca-certificates-java libxslt1-dev libxml2 libffi-dev python3-pip python3-dev libhtml-parser-perl libxml-libxml-perl libjson-perl libjson-xs-perl libxml-libxslt-perl zlib1g-dev vnstat vnstati openvpn iptables iptables-persistent xz-utils || {
+		_af_apt_install fail2ban bc build-essential ed sudo screen zip irssi unzip nano bwm-ng htop nethogs iotop git dos2unix subversion automake make mktorrent libtool libcppunit-dev libssl-dev pkg-config libxml2-dev libcurl4-openssl-dev libsigc++-2.0-dev apache2-utils autoconf cron curl sqlite3 libapache2-mod-fcgid libapache2-mod-php"${PHP_VER}" libncurses-dev yasm pcre2-utils apache2 php-net-socket php-memcached memcached php"${PHP_VER}" php"${PHP_VER}"-cli php"${PHP_VER}"-curl php"${PHP_VER}"-fpm php"${PHP_VER}"-gd php"${PHP_VER}"-mbstring php"${PHP_VER}"-msgpack php"${PHP_VER}"-mysql php"${PHP_VER}"-opcache php"${PHP_VER}"-xml php"${PHP_VER}"-zip python3-lxml fontconfig comerr-dev ca-certificates libfontconfig1-dev libdbd-mysql-perl libdbi-perl libfontconfig1 mediainfo ifstat checkinstall dtach libarchive-zip-perl libnet-ssleay-perl ca-certificates-java libxslt1-dev libxml2 libffi-dev python3-pip python3-dev libhtml-parser-perl libxml-libxml-perl libjson-perl libjson-xs-perl libxml-libxslt-perl zlib1g-dev vnstat vnstati openvpn iptables iptables-persistent xz-utils || {
 			wait "${prefetch_pid}" 2>/dev/null || true
 			return 1
 		}
@@ -96,7 +96,7 @@ function _depends() {
 		if [[ "${CODENAME}" =~ ("noble") ]] || ! apt-cache show dstat >/dev/null 2>&1; then
 			stat_pkg="dool"
 		fi
-		_af_apt_install build-essential debian-archive-keyring fail2ban bc sudo screen zip irssi unzip nano bwm-ng htop iotop git dos2unix subversion "${stat_pkg}" automake make mktorrent libtool libcppunit-dev libssl-dev pkg-config libxml2-dev libcurl4-openssl-dev libsigc++-2.0-dev apache2-utils autoconf cron curl libapache2-mod-php"${PHP_VER}" libncurses-dev yasm pcre2-utils apache2 php-net-socket libdbd-mysql-perl libdbi-perl php-memcached memcached php"${PHP_VER}" php"${PHP_VER}"-cli php"${PHP_VER}"-curl php"${PHP_VER}"-fpm php"${PHP_VER}"-gd php"${PHP_VER}"-mbstring php"${PHP_VER}"-msgpack php"${PHP_VER}"-mysql php"${PHP_VER}"-opcache php"${PHP_VER}"-xml php"${PHP_VER}"-zip fontconfig comerr-dev ca-certificates libfontconfig1-dev libfontconfig1 mediainfo ifstat python3-lxml checkinstall dtach libarchive-zip-perl libnet-ssleay-perl libxslt1-dev libxml2 libffi-dev python3-pip python3-dev libhtml-parser-perl libxml-libxml-perl libjson-perl libjson-xs-perl libxml-libxslt-perl zlib1g-dev vnstat vnstati openvpn iptables iptables-persistent xz-utils || {
+		_af_apt_install build-essential debian-archive-keyring fail2ban bc sudo screen zip irssi unzip nano bwm-ng htop iotop git dos2unix subversion "${stat_pkg}" automake make mktorrent libtool libcppunit-dev libssl-dev pkg-config libxml2-dev libcurl4-openssl-dev libsigc++-2.0-dev apache2-utils autoconf cron curl sqlite3 libapache2-mod-php"${PHP_VER}" libncurses-dev yasm pcre2-utils apache2 php-net-socket libdbd-mysql-perl libdbi-perl php-memcached memcached php"${PHP_VER}" php"${PHP_VER}"-cli php"${PHP_VER}"-curl php"${PHP_VER}"-fpm php"${PHP_VER}"-gd php"${PHP_VER}"-mbstring php"${PHP_VER}"-msgpack php"${PHP_VER}"-mysql php"${PHP_VER}"-opcache php"${PHP_VER}"-xml php"${PHP_VER}"-zip fontconfig comerr-dev ca-certificates libfontconfig1-dev libfontconfig1 mediainfo ifstat python3-lxml checkinstall dtach libarchive-zip-perl libnet-ssleay-perl libxslt1-dev libxml2 libffi-dev python3-pip python3-dev libhtml-parser-perl libxml-libxml-perl libjson-perl libjson-xs-perl libxml-libxslt-perl zlib1g-dev vnstat vnstati openvpn iptables iptables-persistent xz-utils || {
 			wait "${prefetch_pid}" 2>/dev/null || true
 			return 1
 		}
@@ -141,8 +141,25 @@ function _syscommands() {
 	\cp -f /usr/local/bin/AetherFlow/system/af-systemd-sandbox /usr/bin/af-systemd-sandbox
 	\cp -f /usr/local/bin/AetherFlow/system/af-certbot-sync /usr/local/bin/af-certbot-sync
 	\cp -f /usr/local/bin/AetherFlow/system/af-certbot-sync /usr/bin/af-certbot-sync
-	ln -sf /usr/local/bin/AetherFlow/system/af /usr/local/bin/af
-	ln -sf /usr/local/bin/AetherFlow/system/af /usr/bin/af
+	rm -f /usr/local/bin/af /usr/bin/af
+	cat > /usr/local/bin/af <<'EOF'
+#!/bin/bash
+if [[ "${1:-}" == "--tui" ]]; then
+	shift
+	exec /usr/local/bin/AetherFlow/system/af "$@"
+fi
+if [[ $# -eq 0 && -t 0 && -t 1 && -x /usr/local/bin/AetherFlow/system/af ]]; then
+	exec /usr/local/bin/AetherFlow/system/af
+fi
+for candidate in /opt/AetherFlow/current/af /opt/AetherFlow/current/bin/af /opt/AetherFlow/backend-rs/target/release/af; do
+	if [[ -x "${candidate}" ]]; then
+		exec "${candidate}" "$@"
+	fi
+done
+exec /usr/local/bin/AetherFlow/system/af "$@"
+EOF
+	chmod 0755 /usr/local/bin/af
+	ln -sf /usr/local/bin/af /usr/bin/af
 	cat > /usr/local/bin/aetherflow <<'EOF'
 #!/bin/bash
 case "${1:-}" in
@@ -156,14 +173,17 @@ case "${1:-}" in
 		;;
 	status)
 		shift
+		if [[ -x /opt/AetherFlow/current/af ]]; then
+			exec /opt/AetherFlow/current/af status "$@"
+		fi
 		exec systemctl status aetherflow-api aetherflow-runner "$@"
 		;;
 	*)
-		exec /usr/local/bin/AetherFlow/system/af "$@"
+		exec /usr/local/bin/af "$@"
 		;;
 esac
 EOF
-	chmod +x /usr/local/bin/aetherflow
+	chmod 0755 /usr/local/bin/aetherflow
 	ln -sf /usr/local/bin/aetherflow /usr/bin/aetherflow
 }
 

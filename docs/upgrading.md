@@ -10,11 +10,12 @@ AetherFlow supports three release channels managed from **Settings → System Up
 | :--- | :--- | :--- | :--- |
 | **Stable (`stable`)** | `master` / GitHub Releases | High | Production servers, SHA-256 verified single-binary Rust release bundles (`v4.0.0+`). |
 | **Nightly (`nightly`)** | `nightly` / versioned GitHub pre-releases | Rolling | Rolling v4 Rust control plane updates, new Marketplace apps, and early validation (`v4.0.0-nightly.<run>.<attempt>`). |
-| **Experimental (`experimental`)** | `experimental` / pre-releases | Experimental | Feature staging and compatibility track (`v4.0.0-experimental.<run>.<attempt>`). |
+
+The experimental release track is retired. Existing `experimental` channel settings and CLI arguments migrate to `nightly`; historical tags and releases remain available.
 
 Changing the update channel in **Settings → System Updates** does not deploy an update automatically until you click **Install Update** or run `af release deploy`.
 
-Nightly and Experimental pre-releases use unique immutable tags such as `v4.0.0-nightly.85.1`, with the workflow run and attempt identifying the exact build and commit.
+Nightly pre-releases use unique immutable tags such as `v4.0.0-nightly.85.1`, with the workflow run and attempt identifying the exact build and commit.
 
 ---
 

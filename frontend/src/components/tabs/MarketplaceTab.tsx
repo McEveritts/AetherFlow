@@ -1,12 +1,41 @@
-import React, { useState, useMemo, useEffect, useRef } from 'react';
+import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import { useMarketplace, useGithubDownloads, App } from '@/hooks/useMarketplace';
-import { Search, Package, Download, RefreshCw, XCircle, AlertCircle, Filter, Globe } from 'lucide-react';
+import { Search, Package, Download, RefreshCw, XCircle, AlertCircle, Filter, Globe, Puzzle, ShieldCheck, Play, Square, ExternalLink } from 'lucide-react';
 import { useToast } from '@/contexts/ToastContext';
 import { ProgressRing } from '@/components/ui/ProgressRing';
 import { apiFetch } from '@/lib/fetcher';
 import { getSVGLCatalog, matchSVGLLogo } from '@/lib/svgl';
 import { ExternalAccessCard } from '@/components/ingress/ExternalAccessCard';
 import { DeploymentStatus } from '@/components/deploy/DeploymentStatus';
+
+export interface PluginScopeRule {
+    method: string;
+    route: string;
+}
+
+export interface PluginRuntimeView {
+    id: string;
+    name: string;
+    version: string;
+    sdk: string;
+    contract_version: string;
+    runtime_status: string;
+    description: string;
+    author: string;
+    permissions: string[];
+    granted_scopes: PluginScopeRule[];
+    enabled: boolean;
+    status: string;
+    healthy: boolean;
+    allocated_port: number;
+    health_path: string;
+    ui_url: string;
+    proxy_base_url: string;
+    slot: string;
+    capabilities: string[];
+    last_health_at?: string | null;
+    last_error?: string;
+}
 
 const AppIcon = ({ app }: { app: App }) => {
     const [failedAppId, setFailedAppId] = useState<string | null>(null);
@@ -70,6 +99,156 @@ export default function MarketplaceTab() {
     const [categoryFilter, setCategoryFilter] = useState('All');
     const [operatingApp, setOperatingApp] = useState<string | null>(null);
     const [ingressModalApp, setIngressModalApp] = useState<string | null>(null);
+
+    // Installed Plugins & Sandboxed Capability Bridge State
+    const [plugins, setPlugins] = useState<PluginRuntimeView[]>([]);
+    const [rejectedPlugins, setRejectedPlugins] = useState<Array<{ id: string; error: string }>>([]);
+    const [operatingPlugin, setOperatingPlugin] = useState<string | null>(null);
+    const [mountedPlugin, setMountedPlugin] = useState<PluginRuntimeView | null>(null);
+    const pluginIframeRef = useRef<HTMLIFrameElement | null>(null);
+
+    const fetchPlugins = useCallback(async () => {
+        try {
+            const res = await apiFetch('/api/v1/auth/plugins');
+            if (!res.ok) return;
+            const data = await res.json();
+            if (Array.isArray(data?.plugins)) {
+                setPlugins(data.plugins);
+            }
+            if (Array.isArray(data?.rejected)) {
+                setRejectedPlugins(data.rejected);
+            }
+        } catch {
+            // Silently ignore when unauthenticated or offline
+        }
+    }, []);
+
+    useEffect(() => {
+        let active = true;
+        apiFetch('/api/v1/auth/plugins')
+            .then(async (response) => (response.ok ? response.json() : null))
+            .then((payload) => {
+                if (!active || !payload) return;
+                if (Array.isArray(payload.plugins)) {
+                    setPlugins(payload.plugins);
+                }
+                if (Array.isArray(payload.rejected)) {
+                    setRejectedPlugins(payload.rejected);
+                }
+            })
+            .catch(() => {});
+        return () => {
+            active = false;
+        };
+    }, []);
+
+    // Sandboxed iframe postMessage capability bridge
+    useEffect(() => {
+        if (!mountedPlugin) return;
+
+        const handlePluginMessage = async (event: MessageEvent) => {
+            const iframeWin = pluginIframeRef.current?.contentWindow;
+            if (!iframeWin || event.source !== iframeWin) return;
+            const msg = event.data;
+            if (!msg || typeof msg !== 'object') return;
+
+            if (msg.type === 'AF_PLUGIN_READY' && msg.pluginId === mountedPlugin.id) {
+                iframeWin.postMessage(
+                    {
+                        type: 'AF_PLUGIN_INIT',
+                        pluginId: mountedPlugin.id,
+                        capabilities: mountedPlugin.capabilities,
+                        scopes: mountedPlugin.granted_scopes,
+                    },
+                    '*'
+                );
+                return;
+            }
+
+            if (msg.type === 'AF_PLUGIN_PROXY_REQUEST' && msg.pluginId === mountedPlugin.id) {
+                const rawPath = String(msg.path || '').replace(/^\/+/, '');
+                if (rawPath.includes('..') || rawPath.includes('\\')) {
+                    iframeWin.postMessage(
+                        {
+                            type: 'AF_PLUGIN_PROXY_RESPONSE',
+                            pluginId: mountedPlugin.id,
+                            error: 'Path traversal is forbidden',
+                        },
+                        '*'
+                    );
+                    return;
+                }
+                const method = String(msg.method || 'GET').toUpperCase();
+                if (!['GET', 'POST', 'PUT', 'DELETE'].includes(method)) {
+                    iframeWin.postMessage(
+                        {
+                            type: 'AF_PLUGIN_PROXY_RESPONSE',
+                            pluginId: mountedPlugin.id,
+                            error: 'Unsupported HTTP method',
+                        },
+                        '*'
+                    );
+                    return;
+                }
+                const proxyUrl = rawPath
+                    ? `${mountedPlugin.proxy_base_url}/${rawPath}`
+                    : mountedPlugin.proxy_base_url;
+                try {
+                    const resp = await apiFetch(proxyUrl, { method });
+                    const payload = await resp.json().catch(() => ({ status: resp.status }));
+                    iframeWin.postMessage(
+                        {
+                            type: 'AF_PLUGIN_PROXY_RESPONSE',
+                            pluginId: mountedPlugin.id,
+                            status: resp.status,
+                            payload,
+                        },
+                        '*'
+                    );
+                } catch (err: unknown) {
+                    iframeWin.postMessage(
+                        {
+                            type: 'AF_PLUGIN_PROXY_RESPONSE',
+                            pluginId: mountedPlugin.id,
+                            error: err instanceof Error ? err.message : 'Proxy request failed',
+                        },
+                        '*'
+                    );
+                }
+            }
+        };
+
+        window.addEventListener('message', handlePluginMessage);
+        return () => window.removeEventListener('message', handlePluginMessage);
+    }, [mountedPlugin]);
+
+    const handlePluginControl = async (plugin: PluginRuntimeView, action: 'start' | 'stop' | 'restart' | 'revoke_tokens') => {
+        setOperatingPlugin(plugin.id);
+        try {
+            const res = await apiFetch(`/api/v1/admin/plugins/${encodeURIComponent(plugin.id)}/control`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ action }),
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) {
+                throw new Error(data.message || `Plugin ${action} failed`);
+            }
+            addToast(data.message || `Plugin ${plugin.name} (${action}) completed`, 'success');
+            if (data.plugin) {
+                setPlugins((prev) => prev.map((p) => (p.id === plugin.id ? data.plugin : p)));
+                if (mountedPlugin?.id === plugin.id && (action === 'stop' || !data.plugin.enabled)) {
+                    setMountedPlugin(null);
+                }
+            } else {
+                await fetchPlugins();
+            }
+        } catch (err: unknown) {
+            addToast(err instanceof Error ? err.message : 'Plugin control error', 'error');
+        } finally {
+            setOperatingPlugin(null);
+        }
+    };
 
     // Job Completion Monitoring
     const prevAppsRef = useRef<App[] | undefined>(undefined);
@@ -420,6 +599,188 @@ export default function MarketplaceTab() {
                         </div>
                         );
                     })}
+                </div>
+            )}
+
+            {/* Installed Plugins & Runtime Extensions Section */}
+            <div className="pt-8 border-t border-white/10 space-y-6" data-testid="installed-plugins-section">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                    <div className="space-y-1">
+                        <h3 className="text-xl font-black text-white tracking-tight flex items-center gap-2.5">
+                            <Puzzle size={20} className="text-indigo-400" />
+                            Installed Plugins &amp; Runtime Extensions
+                            <span className="text-[10px] font-bold px-2.5 py-0.5 bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 rounded-full uppercase tracking-widest">
+                                Scoped Sandbox v1
+                            </span>
+                        </h3>
+                        <p className="text-slate-400 text-xs font-medium">
+                            Isolated loopback companion plugins with manifest-bound short-lived tokens and opaque sandboxed UI origins.
+                        </p>
+                    </div>
+                    <button
+                        onClick={() => fetchPlugins()}
+                        className="obs-touch-target-standard px-3.5 py-2 rounded-xl bg-slate-900/60 hover:bg-slate-800/80 border border-white/10 text-xs font-bold text-slate-300 flex items-center gap-2 transition-colors self-start sm:self-auto"
+                    >
+                        <RefreshCw size={13} />
+                        Refresh Plugins
+                    </button>
+                </div>
+
+                {rejectedPlugins.length > 0 && (
+                    <div className="rounded-2xl border border-amber-500/20 bg-amber-500/5 p-4 space-y-1" data-testid="rejected-plugins-banner">
+                        <p className="text-xs font-bold text-amber-300 uppercase tracking-wider">Rejected Plugin Manifests</p>
+                        {rejectedPlugins.map((item) => (
+                            <p key={item.id} className="text-xs text-amber-200/80 font-mono">
+                                {item.id}: {item.error}
+                            </p>
+                        ))}
+                    </div>
+                )}
+
+                {plugins.length === 0 ? (
+                    <div className="rounded-2xl border border-white/5 bg-slate-900/30 p-6 text-center text-slate-400 text-xs">
+                        No validated plugins discovered in <code className="text-indigo-300">plugins/</code>. Scaffold one with <code className="text-indigo-300">bash scripts/create-plugin-sdk.sh my-plugin &quot;My Plugin&quot; plugins/my-plugin rust</code>.
+                    </div>
+                ) : (
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                        {plugins.map((plugin) => {
+                            const isBusy = operatingPlugin === plugin.id;
+                            return (
+                                <div
+                                    key={plugin.id}
+                                    data-testid={`plugin-card-${plugin.id}`}
+                                    className="glass-card bg-slate-950/50 border border-white/10 rounded-3xl p-6 flex flex-col justify-between gap-5"
+                                >
+                                    <div className="space-y-4">
+                                        <div className="flex items-start justify-between gap-3">
+                                            <div>
+                                                <div className="flex items-center gap-2">
+                                                    <h4 className="text-lg font-black text-white">{plugin.name}</h4>
+                                                    <span className="text-[10px] font-mono text-slate-400 bg-white/5 px-2 py-0.5 rounded-md">
+                                                        v{plugin.version}
+                                                    </span>
+                                                </div>
+                                                <p className="text-[11px] font-mono text-indigo-400 mt-0.5">
+                                                    id: {plugin.id} · sdk: {plugin.sdk}
+                                                </p>
+                                            </div>
+                                            <span
+                                                className={`text-[10px] font-black uppercase tracking-wider px-2.5 py-1 rounded-full border ${
+                                                    plugin.enabled
+                                                        ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
+                                                        : 'bg-slate-800/80 text-slate-400 border-white/10'
+                                                }`}
+                                            >
+                                                {plugin.enabled ? (plugin.healthy ? 'Healthy' : 'Enabled') : 'Stopped'}
+                                            </span>
+                                        </div>
+
+                                        <p className="text-xs text-slate-400 leading-relaxed">
+                                            {plugin.description || 'Sandboxed AetherFlow runtime extension.'}
+                                        </p>
+
+                                        <div className="space-y-1.5">
+                                            <div className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                                                <ShieldCheck size={12} className="text-indigo-400" />
+                                                Granted Scopes
+                                            </div>
+                                            <div className="flex flex-wrap gap-1.5">
+                                                {plugin.granted_scopes.length === 0 ? (
+                                                    <span className="text-[10px] font-mono text-slate-500 bg-slate-900 px-2 py-0.5 rounded">
+                                                        default-deny (no host API scopes)
+                                                    </span>
+                                                ) : (
+                                                    plugin.granted_scopes.map((s, idx) => (
+                                                        <span
+                                                            key={`${s.method}-${s.route}-${idx}`}
+                                                            className="text-[10px] font-mono text-indigo-300 bg-indigo-500/10 border border-indigo-500/20 px-2 py-0.5 rounded"
+                                                        >
+                                                            {s.method} {s.route}
+                                                        </span>
+                                                    ))
+                                                )}
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    <div className="pt-4 border-t border-white/5 flex items-center justify-between gap-2">
+                                        <span className="text-[10px] font-mono text-slate-500">
+                                            {plugin.allocated_port > 0 ? `127.0.0.1:${plugin.allocated_port}` : 'Loopback dynamic'}
+                                        </span>
+                                        <div className="flex items-center gap-2">
+                                            {plugin.enabled && (
+                                                <button
+                                                    type="button"
+                                                    onClick={() => setMountedPlugin(plugin)}
+                                                    data-testid={`open-plugin-ui-${plugin.id}`}
+                                                    className="px-3 py-2 rounded-xl text-xs font-bold bg-indigo-500/15 text-indigo-300 hover:bg-indigo-500/25 border border-indigo-500/30 flex items-center gap-1.5 transition-all"
+                                                >
+                                                    <ExternalLink size={12} />
+                                                    Open Sandboxed UI
+                                                </button>
+                                            )}
+                                            <button
+                                                type="button"
+                                                disabled={isBusy}
+                                                onClick={() => handlePluginControl(plugin, plugin.enabled ? 'stop' : 'start')}
+                                                data-testid={`toggle-plugin-${plugin.id}`}
+                                                className={`px-3.5 py-2 rounded-xl text-xs font-black flex items-center gap-1.5 transition-all ${
+                                                    plugin.enabled
+                                                        ? 'bg-white/5 text-slate-300 hover:bg-red-500/15 hover:text-red-300 border border-white/10'
+                                                        : 'bg-indigo-600 text-white hover:bg-indigo-500 border border-indigo-400/30'
+                                                }`}
+                                            >
+                                                {plugin.enabled ? <Square size={11} /> : <Play size={11} />}
+                                                {plugin.enabled ? 'Disable' : 'Enable'}
+                                            </button>
+                                        </div>
+                                    </div>
+                                </div>
+                            );
+                        })}
+                    </div>
+                )}
+            </div>
+
+            {mountedPlugin && (
+                <div
+                    className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-fade-in"
+                    data-testid="plugin-sandbox-modal"
+                >
+                    <div className="glass-panel w-full max-w-3xl rounded-3xl p-6 border border-white/10 relative shadow-2xl space-y-4 bg-slate-950">
+                        <div className="flex items-center justify-between pb-3 border-b border-white/10">
+                            <div className="flex items-center gap-2.5">
+                                <ShieldCheck className="text-emerald-400" size={20} />
+                                <div>
+                                    <h3 className="text-base font-bold text-white">
+                                        {mountedPlugin.name} <span className="text-xs font-mono text-slate-400">({mountedPlugin.id})</span>
+                                    </h3>
+                                    <p className="text-[11px] text-slate-400">
+                                        Isolated Opaque Origin Sandbox (<code className="text-emerald-300">sandbox=&quot;allow-scripts&quot;</code>) · Loopback Proxy <code className="text-indigo-300">127.0.0.1:{mountedPlugin.allocated_port}</code>
+                                    </p>
+                                </div>
+                            </div>
+                            <button
+                                type="button"
+                                onClick={() => setMountedPlugin(null)}
+                                data-testid="close-plugin-sandbox"
+                                className="obs-touch-target-standard p-2 text-slate-400 hover:text-white rounded-lg hover:bg-white/5 transition-colors flex items-center justify-center"
+                            >
+                                <XCircle size={18} />
+                            </button>
+                        </div>
+                        <div className="rounded-2xl overflow-hidden border border-white/10 bg-slate-950 h-[360px]">
+                            <iframe
+                                ref={pluginIframeRef}
+                                title={`Plugin Sandbox: ${mountedPlugin.name}`}
+                                src={mountedPlugin.ui_url}
+                                sandbox="allow-scripts"
+                                referrerPolicy="no-referrer"
+                                data-testid="plugin-sandbox-iframe"
+                                className="w-full h-full border-0"
+                            />
+                        </div>
+                    </div>
                 </div>
             )}
 

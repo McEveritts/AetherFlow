@@ -5,11 +5,19 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BACKEND_DIR="${BACKEND_DIR:-${ROOT_DIR}/backend}"
 BACKEND_RS_DIR="${BACKEND_RS_DIR:-${ROOT_DIR}/backend-rs}"
 FRONTEND_DIR="${FRONTEND_DIR:-${ROOT_DIR}/frontend}"
+CONFIG_DIR="${CONFIG_DIR:-${ROOT_DIR}/config}"
+EMBED_DIST_DIR="${EMBED_DIST_DIR:-${ROOT_DIR}/web/dist}"
+LEGACY_EMBED_DIST_DIR="${LEGACY_EMBED_DIST_DIR:-${BACKEND_DIR}/web/dist}"
 VERSION_FILE="${VERSION_FILE:-${ROOT_DIR}/.version}"
 VERSION="${VERSION:-$(tr -d '\r\n' < "${VERSION_FILE}")}"
 RELEASE_CHANNEL="${RELEASE_CHANNEL:-Gold}"
 BINARY_NAME="${BINARY_NAME:-aetherflow-api}"
 CARGO_BIN_NAME="${CARGO_BIN_NAME:-aetherflow-api}"
+CLI_BINARY_NAME="${CLI_BINARY_NAME:-af}"
+CARGO_CLI_BIN_NAME="${CARGO_CLI_BIN_NAME:-af}"
+BUILD_CLI="${BUILD_CLI:-1}"
+CARGO_LOCKED="${CARGO_LOCKED:-1}"
+CARGO_ALLOW_UNLOCKED_DEV="${CARGO_ALLOW_UNLOCKED_DEV:-0}"
 OUTPUT_DIR="${OUTPUT_DIR:-${ROOT_DIR}/dist/gold/${VERSION}}"
 BUILD_DATE="${BUILD_DATE:-$(date -u +"%Y-%m-%dT%H:%M:%SZ")}"
 RUN_TESTS="${RUN_TESTS:-1}"
@@ -27,6 +35,40 @@ require_tool() {
   local tool="$1"
   if ! command -v "${tool}" >/dev/null 2>&1; then
     echo "error: required tool '${tool}' was not found in PATH" >&2
+    exit 1
+  fi
+}
+
+resolve_cargo_locked_args() {
+  CARGO_LOCKED_ARGS=()
+  case "${CARGO_LOCKED}" in
+    1|true|TRUE|yes|YES|"")
+      if [[ ! -f "${BACKEND_RS_DIR}/Cargo.lock" ]]; then
+        echo "error: ${BACKEND_RS_DIR}/Cargo.lock is required for reproducible locked builds (refusing unlocked fallback)" >&2
+        exit 1
+      fi
+      CARGO_LOCKED_ARGS=(--locked)
+      ;;
+    0|false|FALSE|no|NO)
+      if [[ "${CARGO_ALLOW_UNLOCKED_DEV}" != "1" ]]; then
+        echo "error: CARGO_LOCKED=0 is only permitted for non-release dev builds when CARGO_ALLOW_UNLOCKED_DEV=1" >&2
+        exit 1
+      fi
+      ;;
+    *)
+      echo "error: invalid CARGO_LOCKED='${CARGO_LOCKED}' (expected 1 or 0 with CARGO_ALLOW_UNLOCKED_DEV=1)" >&2
+      exit 1
+      ;;
+  esac
+}
+
+resolve_config_source_dir() {
+  if [[ -d "${CONFIG_DIR}" ]]; then
+    printf '%s' "${CONFIG_DIR}"
+  elif [[ -d "${BACKEND_DIR}/config" ]]; then
+    printf '%s' "${BACKEND_DIR}/config"
+  else
+    echo "error: neither '${CONFIG_DIR}' nor '${BACKEND_DIR}/config' exists" >&2
     exit 1
   fi
 }
@@ -74,8 +116,12 @@ build_target() {
   fi
   local target_dir="${OUTPUT_DIR}/linux-${arch}"
   local artifact="${target_dir}/${BINARY_NAME}"
+  local cli_artifact="${target_dir}/${CLI_BINARY_NAME}"
   local archive="${OUTPUT_DIR}/aetherflow-linux-${arch}.tar.gz"
   local compiled_bin=""
+  local compiled_cli=""
+  local cfg_src=""
+  cfg_src="$(resolve_config_source_dir)"
 
   mkdir -p "${target_dir}"
 
@@ -86,8 +132,10 @@ build_target() {
     export AETHERFLOW_GIT_COMMIT="${GIT_COMMIT}"
     export AETHERFLOW_BUILD_DATE="${BUILD_DATE}"
     export AETHERFLOW_RELEASE_CHANNEL="${RELEASE_CHANNEL}"
-    cargo build --release --target "${rust_target}" --bin "${CARGO_BIN_NAME}"
-    cargo build --release --target "${rust_target}" --bin af
+    cargo build "${CARGO_LOCKED_ARGS[@]}" --release --target "${rust_target}" --bin "${CARGO_BIN_NAME}"
+    if [[ "${BUILD_CLI}" == "1" && -f "${BACKEND_RS_DIR}/crates/af-cli/Cargo.toml" ]]; then
+      cargo build "${CARGO_LOCKED_ARGS[@]}" --release --target "${rust_target}" --bin "${CARGO_CLI_BIN_NAME}"
+    fi
   )
 
   local cargo_target_dir="${CARGO_TARGET_DIR:-${BACKEND_RS_DIR}/target}"
@@ -102,18 +150,29 @@ build_target() {
   fi
 
   cp "${compiled_bin}" "${artifact}"
-  if [[ -f "${compiled_cli}" ]]; then
-    cp "${compiled_cli}" "${target_dir}/af"
-    chmod +x "${target_dir}/af"
+  chmod 0755 "${artifact}"
+
+  if [[ "${BUILD_CLI}" == "1" && -f "${BACKEND_RS_DIR}/crates/af-cli/Cargo.toml" ]]; then
+    compiled_cli="${cargo_target_dir}/${rust_target}/release/${CARGO_CLI_BIN_NAME}"
+    if [[ ! -f "${compiled_cli}" ]]; then
+      echo "error: expected compiled CLI binary '${compiled_cli}' not found" >&2
+      exit 1
+    fi
+    cp "${compiled_cli}" "${cli_artifact}"
+    mkdir -p "${target_dir}/bin"
+    cp "${compiled_cli}" "${target_dir}/bin/${CLI_BINARY_NAME}"
+    chmod 0755 "${cli_artifact}" "${target_dir}/bin/${CLI_BINARY_NAME}"
   fi
-  cp -R "${BACKEND_DIR}/config" "${target_dir}/config"
+
+  cp -R "${cfg_src}" "${target_dir}/config"
   cp -R "${ROOT_DIR}/packages" "${target_dir}/packages"
   cp -R "${ROOT_DIR}/deploy" "${target_dir}/deploy"
   printf '%s\n' "${VERSION}" > "${target_dir}/.version"
-  chmod +x "${artifact}" "${target_dir}/deploy/release-manager.sh"
+  chmod 0755 "${target_dir}" "${target_dir}/deploy/release-manager.sh"
 
   if [[ "${PACKAGE_RELEASE}" == "1" ]] && command -v tar >/dev/null 2>&1; then
-    tar -C "${target_dir}" -czf "${archive}" .
+    tar --owner=0 --group=0 --numeric-owner -C "${target_dir}" -czf "${archive}" . 2>/dev/null \
+      || tar -C "${target_dir}" -czf "${archive}" .
     if command -v sha256sum >/dev/null 2>&1; then
       (cd "${OUTPUT_DIR}" && sha256sum "aetherflow-linux-${arch}.tar.gz" >> SHA256SUMS)
     fi
@@ -127,6 +186,8 @@ if [[ ! -f "${BACKEND_RS_DIR}/Cargo.toml" ]]; then
   exit 1
 fi
 
+resolve_cargo_locked_args
+
 mkdir -p "${OUTPUT_DIR}"
 rm -f "${OUTPUT_DIR}/SHA256SUMS"
 
@@ -137,12 +198,13 @@ if [[ "${BUILD_FRONTEND}" == "1" ]]; then
     cd "${FRONTEND_DIR}"
     env NEXT_STATIC_EXPORT=1 npm run build
   )
-  rm -rf "${BACKEND_DIR}/web/dist"
-  mkdir -p "${BACKEND_DIR}/web/dist"
-  cp -R "${FRONTEND_DIR}/out/." "${BACKEND_DIR}/web/dist/"
+  rm -rf "${EMBED_DIST_DIR}" "${LEGACY_EMBED_DIST_DIR}"
+  mkdir -p "${EMBED_DIST_DIR}" "${LEGACY_EMBED_DIST_DIR}"
+  cp -R "${FRONTEND_DIR}/out/." "${EMBED_DIST_DIR}/"
+  cp -R "${FRONTEND_DIR}/out/." "${LEGACY_EMBED_DIST_DIR}/"
 else
-  # Ensure backend/web/dist exists so rust-embed in af-api compiles cleanly when BUILD_FRONTEND=0
-  mkdir -p "${BACKEND_DIR}/web/dist"
+  # Ensure web/dist and backend/web/dist exist so rust-embed in af-api compiles cleanly when BUILD_FRONTEND=0
+  mkdir -p "${EMBED_DIST_DIR}" "${LEGACY_EMBED_DIST_DIR}"
 fi
 
 if [[ "${RUN_TESTS}" == "1" ]]; then
@@ -152,7 +214,7 @@ if [[ "${RUN_TESTS}" == "1" ]]; then
     export JWT_SECRET="${JWT_SECRET:-ci-test-secret-exactly-32bytes!!}"
     export AES_MASTER_KEY="${AES_MASTER_KEY:-ci-test-aes-key-exactly-32bytes!}"
     export ALLOWED_HOSTS="${ALLOWED_HOSTS:-localhost:8080,127.0.0.1:8080}"
-    cargo test --workspace
+    cargo test "${CARGO_LOCKED_ARGS[@]}" --workspace
   )
 fi
 

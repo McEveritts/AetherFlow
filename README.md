@@ -180,7 +180,7 @@ Upgrading an existing v3.2.x or v4.0.0 node: see **[Upgrading & Rollbacks](./doc
 | **[Threat Model](./docs/threat_model.md)** | CWE mapping, security boundaries, AI escapement mitigations, and socket sandboxing. |
 | **[Deployment Checklist](./docs/deployment_checklist.md)** | Pre-flight production security checklist, secret generation, and post-deploy verification. |
 | **[Operations Runbook](./docs/RUNBOOK.md)** | Production administration, `af` CLI workflows, health probes, backups, and recovery. |
-| **[Upgrading & Rollbacks](./docs/upgrading.md)** | Release channels (`stable` / `nightly` / `experimental`), atomic upgrades, and rollbacks. |
+| **[Upgrading & Rollbacks](./docs/upgrading.md)** | Release channels (`stable` / `nightly`), atomic upgrades, and rollbacks. |
 | **[Self-Update Lifecycle](./docs/self-update.md)** | Isolated `aetherflow-self-update.service` execution, recovery journals, and binary verification. |
 
 ### Subsystems, Rust Crates & Marketplace

@@ -68,8 +68,37 @@ export default function BackupTab() {
     };
 
     useEffect(() => {
-        fetchBackups();
-        fetchSchedule();
+        let active = true;
+        apiFetch('/api/v1/admin/backup/list')
+            .then(async (response) => (response.ok ? response.json() : null))
+            .then((backupItems) => {
+                if (!active || !Array.isArray(backupItems)) return;
+                setBackups(
+                    backupItems.sort(
+                        (firstItem: BackupFile, secondItem: BackupFile) =>
+                            new Date(secondItem.timestamp).getTime() - new Date(firstItem.timestamp).getTime()
+                    )
+                );
+            })
+            .catch((err) => {
+                console.error("Failed to fetch backups", err);
+            })
+            .finally(() => {
+                if (active) {
+                    setIsLoadingBackups(false);
+                }
+            });
+        apiFetch('/api/v1/admin/ai/backup/optimal-window')
+            .then(async (response) => (response.ok ? response.json() : null))
+            .then((scheduleData: ScheduleStatus | null) => {
+                if (active && scheduleData) {
+                    setSchedule(scheduleData);
+                }
+            })
+            .catch(() => {});
+        return () => {
+            active = false;
+        };
     }, []);
 
     const handleRunBackup = async () => {

@@ -71,6 +71,268 @@ mod audit_tests {
         }
         assert_eq!(safe_backup_path(&base, "backup.sqlite").unwrap(), base.join("backup.sqlite"));
     }
+
+    #[test]
+    fn finalize_assembled_backup_upload_cleans_up_partial_file_when_manifest_write_fails() {
+        let dir = env::temp_dir().join(format!("af-upload-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let clean_base = "uploaded_20261103.sqlite";
+        let final_path = dir.join(clean_base);
+        let temp_final = dir.join(format!("{}.uploading", clean_base));
+
+        let conn = rusqlite::Connection::open(&temp_final).unwrap();
+        conn.execute_batch("PRAGMA user_version = 7; CREATE TABLE t (id INTEGER PRIMARY KEY);")
+            .unwrap();
+        drop(conn);
+
+        let checksum = compute_file_sha256(&temp_final).unwrap();
+
+        // Force manifest save to fail by pre-creating `<final_path>.manifest.json` as a directory
+        let manifest_blocker = dir.join(format!("{}.manifest.json", clean_base));
+        fs::create_dir_all(&manifest_blocker).unwrap();
+
+        let err = finalize_assembled_backup_upload(
+            &dir,
+            clean_base,
+            &temp_final,
+            &final_path,
+            &checksum,
+        )
+        .expect_err("must fail when manifest sidecar cannot be written");
+        assert!(
+            err.to_string().contains("manifest"),
+            "unexpected error: {}",
+            err
+        );
+
+        assert!(
+            !final_path.exists(),
+            "activated backup file must be removed when companion write fails"
+        );
+        assert!(
+            !temp_final.exists(),
+            "temp uploading file must be removed when companion write fails"
+        );
+        assert!(
+            !dir.join(format!("{}.sha256", clean_base)).exists(),
+            "sha256 sidecar must be removed when companion write fails"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn finalize_assembled_backup_upload_preserves_existing_generation_when_overwrite_fails() {
+        let dir = env::temp_dir().join(format!("af-upload-preserve-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let clean_base = "preserve_20261103.sqlite";
+        let final_path = dir.join(clean_base);
+        let first_temp = dir.join(format!("{}.uploading.1", clean_base));
+
+        let first_conn = rusqlite::Connection::open(&first_temp).unwrap();
+        first_conn
+            .execute_batch(
+                "PRAGMA user_version = 11; CREATE TABLE generation (marker TEXT); INSERT INTO generation VALUES ('original');",
+            )
+            .unwrap();
+        drop(first_conn);
+        let first_checksum = compute_file_sha256(&first_temp).unwrap();
+        finalize_assembled_backup_upload(
+            &dir,
+            clean_base,
+            &first_temp,
+            &final_path,
+            &first_checksum,
+        )
+        .expect("initial generation must activate");
+
+        let second_temp = dir.join(format!("{}.uploading.2", clean_base));
+        let second_conn = rusqlite::Connection::open(&second_temp).unwrap();
+        second_conn
+            .execute_batch(
+                "PRAGMA user_version = 12; CREATE TABLE generation (marker TEXT); INSERT INTO generation VALUES ('replacement');",
+            )
+            .unwrap();
+        drop(second_conn);
+
+        let wrong_checksum = "0".repeat(64);
+        let overwrite_err = finalize_assembled_backup_upload(
+            &dir,
+            clean_base,
+            &second_temp,
+            &final_path,
+            &wrong_checksum,
+        );
+        assert!(overwrite_err.is_err(), "mismatched checksum must fail activation");
+
+        let (verified, _manifest) =
+            read_verified_backup_checksum(&dir, clean_base).expect("original backup must remain verified");
+        assert_eq!(verified.actual_sha256, first_checksum);
+        let check_conn = rusqlite::Connection::open(&final_path).unwrap();
+        let marker: String = check_conn
+            .query_row("SELECT marker FROM generation LIMIT 1", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(marker, "original");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_verified_backup_checksum_never_regenerates_missing_or_mismatched_sidecars() {
+        let dir = env::temp_dir().join(format!("af-readonly-verify-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let clean_base = "unverified_20261103.sqlite";
+        let sqlite_path = dir.join(clean_base);
+        let sha_path = dir.join(format!("{}.sha256", clean_base));
+
+        let conn = rusqlite::Connection::open(&sqlite_path).unwrap();
+        conn.execute_batch("PRAGMA user_version = 3; CREATE TABLE item (id INTEGER PRIMARY KEY);")
+            .unwrap();
+        drop(conn);
+
+        assert!(read_verified_backup_checksum(&dir, clean_base).is_err());
+        assert!(
+            !sha_path.exists(),
+            "read-only verification must never synthesize a missing .sha256 sidecar"
+        );
+
+        let temp_stage = dir.join("staged.uploading");
+        fs::copy(&sqlite_path, &temp_stage).unwrap();
+        let valid_sum = compute_file_sha256(&temp_stage).unwrap();
+        finalize_assembled_backup_upload(&dir, clean_base, &temp_stage, &sqlite_path, &valid_sum)
+            .unwrap();
+
+        let mut file = OpenOptions::new().append(true).open(&sqlite_path).unwrap();
+        file.write_all(b"tampered-tail").unwrap();
+        drop(file);
+
+        let before_sidecar = fs::read_to_string(&sha_path).unwrap();
+        assert!(read_verified_backup_checksum(&dir, clean_base).is_err());
+        let after_sidecar = fs::read_to_string(&sha_path).unwrap();
+        assert_eq!(before_sidecar, after_sidecar);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn chunked_backup_upload_enforces_bounds_and_isolates_concurrent_sessions() {
+        let dir = env::temp_dir().join(format!("af-chunk-sessions-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let source_sqlite = dir.join("source.sqlite");
+        let conn = rusqlite::Connection::open(&source_sqlite).unwrap();
+        conn.execute_batch(
+            "PRAGMA user_version = 9; CREATE TABLE records (label TEXT); INSERT INTO records VALUES ('alpha-session');",
+        )
+        .unwrap();
+        drop(conn);
+        let full_bytes = fs::read(&source_sqlite).unwrap();
+        let expected_sha = compute_file_sha256(&source_sqlite).unwrap();
+        let split_at = full_bytes.len() / 2;
+        let part_zero = full_bytes[..split_at].to_vec();
+        let part_one = full_bytes[split_at..].to_vec();
+
+        let backup_dir = dir.join("backups");
+        fs::create_dir_all(&backup_dir).unwrap();
+        let clean_base = "session_isolated.sqlite";
+
+        let out_of_bounds_status = process_backup_chunk_upload_in_dir(
+            &backup_dir,
+            clean_base,
+            2,
+            2,
+            None,
+            Some("session_alpha"),
+            None,
+            &part_zero,
+        )
+        .unwrap_err()
+        .0;
+        assert_eq!(out_of_bounds_status, StatusCode::BAD_REQUEST);
+
+        let first_resp = process_backup_chunk_upload_in_dir(
+            &backup_dir,
+            clean_base,
+            0,
+            2,
+            Some(&expected_sha),
+            Some("session_alpha"),
+            Some((1, "jti-alpha")),
+            &part_zero,
+        )
+        .unwrap();
+        assert_eq!(first_resp["complete"], serde_json::json!(false));
+
+        let mismatch_total_status = process_backup_chunk_upload_in_dir(
+            &backup_dir,
+            clean_base,
+            1,
+            3,
+            Some(&expected_sha),
+            Some("session_alpha"),
+            Some((1, "jti-alpha")),
+            &part_one,
+        )
+        .unwrap_err()
+        .0;
+        assert_eq!(mismatch_total_status, StatusCode::CONFLICT);
+
+        let other_session_bad_bytes = vec![0u8; 64];
+        let other_resp = process_backup_chunk_upload_in_dir(
+            &backup_dir,
+            clean_base,
+            0,
+            2,
+            None,
+            Some("session_beta"),
+            Some((2, "jti-beta")),
+            &other_session_bad_bytes,
+        )
+        .unwrap();
+        assert_eq!(other_resp["complete"], serde_json::json!(false));
+
+        let final_resp = process_backup_chunk_upload_in_dir(
+            &backup_dir,
+            clean_base,
+            1,
+            2,
+            Some(&expected_sha),
+            Some("session_alpha"),
+            Some((1, "jti-alpha")),
+            &part_one,
+        )
+        .unwrap();
+        assert_eq!(final_resp["complete"], serde_json::json!(true));
+        assert_eq!(final_resp["checksum"], serde_json::json!(expected_sha));
+
+        let (verified, _manifest) =
+            read_verified_backup_checksum(&backup_dir, clean_base).expect("completed upload must verify");
+        assert_eq!(verified.actual_sha256, expected_sha);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn validate_runner_self_update_initiation_payload_rejects_empty_or_invalid_job_unit() {
+        assert!(validate_runner_self_update_initiation_payload("{}").is_err());
+        assert!(validate_runner_self_update_initiation_payload(
+            r#"{"status":"initiated","completed":false,"job_unit":""}"#
+        )
+        .is_err());
+        assert!(validate_runner_self_update_initiation_payload(
+            r#"{"status":"initiated","completed":false,"job_unit":"nginx.service"}"#
+        )
+        .is_err());
+        assert!(validate_runner_self_update_initiation_payload(
+            r#"{"status":"failed","completed":false,"job_unit":"aetherflow-self-update-deploy-stable-abcdef12.service"}"#
+        )
+        .is_err());
+        let (unit, engine) = validate_runner_self_update_initiation_payload(
+            r#"{"status":"initiated","completed":false,"job_unit":"aetherflow-self-update-deploy-stable-abcdef12.service","engine":"af_release_rust"}"#,
+        )
+        .expect("valid initiation payload must succeed");
+        assert_eq!(unit, "aetherflow-self-update-deploy-stable-abcdef12.service");
+        assert_eq!(engine, "af_release_rust");
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -79,6 +341,8 @@ mod audit_tests {
 
 static VALID_BACKUP_FILENAME_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^[a-zA-Z0-9_.-]+\.sqlite$").unwrap());
+static VALID_UPLOAD_SESSION_ID_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"^[a-zA-Z0-9_-]{1,64}$").unwrap());
 static BACKUP_UPLOAD_MU: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 const DEFAULT_BACKUP_CHUNK_SIZE: u64 = 10 * 1024 * 1024; // 10 MiB
@@ -94,12 +358,82 @@ pub struct BackupFile {
     pub checksum: String,
 }
 
-pub fn get_active_db_path() -> PathBuf {
-    if let Ok(override_path) = env::var("DB_PATH") {
-        if !override_path.trim().is_empty() {
-            return PathBuf::from(override_path);
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BackupUploadSessionMeta {
+    total_chunks: usize,
+    #[serde(default)]
+    expected_sha256: Option<String>,
+    user_id: i64,
+    session_jti: String,
+    upload_id: String,
+}
+
+struct CrossProcessUploadLock {
+    file: fs::File,
+}
+
+impl CrossProcessUploadLock {
+    fn acquire(lock_path: &StdPath) -> anyhow::Result<Self> {
+        if let Some(parent) = lock_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(lock_path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::AsRawFd;
+            let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+            if rc != 0 {
+                return Err(anyhow::anyhow!(
+                    "failed to acquire upload lock {}: {}",
+                    lock_path.display(),
+                    std::io::Error::last_os_error()
+                ));
+            }
+        }
+        Ok(Self { file })
+    }
+}
+
+#[cfg(unix)]
+impl Drop for CrossProcessUploadLock {
+    fn drop(&mut self) {
+        use std::os::unix::io::AsRawFd;
+        unsafe {
+            let _ = libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
         }
     }
+}
+
+pub fn get_active_db_path() -> PathBuf {
+    let has_env_override = [
+        "AF_DB_PATH",
+        "DB_PATH",
+        "AETHERFLOW_DB_PATH",
+        "AETHERFLOW_RESTORE_STAGING_ROOT",
+        "AETHERFLOW_RELEASE_ROOT",
+        "STATE_DIRECTORY",
+        "DATA_DIR",
+    ]
+    .iter()
+    .any(|k| env::var(k).ok().filter(|v| !v.trim().is_empty()).is_some());
+
+    if has_env_override {
+        return af_models::resolve_active_db_path_from_env(
+            None,
+            "/var/lib/aetherflow/aetherflow.sqlite",
+        );
+    }
+
+    let initialized = PathBuf::from(af_db::get_db_path());
+    if initialized.exists() {
+        return initialized;
+    }
+
     let base_dir = env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|d| d.to_path_buf()))
@@ -109,6 +443,7 @@ pub fn get_active_db_path() -> PathBuf {
         base_dir.join("data").join("aetherflow.sqlite"),
         base_dir.join("..").join("backend").join("data").join("aetherflow.sqlite"),
         PathBuf::from("/opt/AetherFlow/backend/data/aetherflow.sqlite"),
+        PathBuf::from("/var/lib/aetherflow/aetherflow.sqlite"),
         base_dir.join("..").join("dashboard").join("db").join("aetherflow.sqlite"),
         base_dir.join("dashboard").join("db").join("aetherflow.sqlite"),
         base_dir.join("aetherflow.sqlite"),
@@ -123,12 +458,15 @@ pub fn get_active_db_path() -> PathBuf {
 }
 
 pub fn get_backup_dir() -> PathBuf {
-    get_active_db_path()
-        .parent()
-        .map(|p| p.join("backups"))
-        .unwrap_or_else(|| PathBuf::from("data/backups"))
+    let active_db = get_active_db_path();
+    af_models::resolve_active_backup_dir_from_env(
+        None,
+        Some(&active_db),
+        "/var/lib/aetherflow/backups",
+    )
 }
 
+#[allow(dead_code)]
 fn is_valid_backup_filename(name: &str) -> bool {
     VALID_BACKUP_FILENAME_RE.is_match(name)
 }
@@ -161,91 +499,115 @@ fn compute_file_sha256(path: &StdPath) -> anyhow::Result<String> {
     Ok(hex::encode(hasher.finalize()))
 }
 
-fn ensure_stored_checksum(path: &StdPath) -> String {
-    let sha_path = PathBuf::from(format!("{}.sha256", path.display()));
-    if let Ok(existing) = fs::read_to_string(&sha_path) {
-        let trimmed = existing.trim();
-        if !trimmed.is_empty() {
-            return trimmed.to_string();
-        }
+pub(crate) fn read_verified_backup_checksum(
+    backup_dir: &StdPath,
+    filename: &str,
+) -> anyhow::Result<(
+    af_runner::af_host::ChecksumVerification,
+    af_runner::af_host::BackupManifest,
+)> {
+    let (trusted_sqlite_uid, _) = af_models::resolve_trusted_sqlite_ids_from_env(None);
+    let (verification, maybe_manifest) = af_runner::af_host::verify_backup_artifact_with_trusted_uid(
+        backup_dir,
+        filename,
+        trusted_sqlite_uid,
+    )
+    .map_err(|err| anyhow::anyhow!("backup artifact verification failed: {}", err))?;
+    let manifest = maybe_manifest.ok_or_else(|| {
+        anyhow::anyhow!(
+            "backup artifact {} is missing a verified companion manifest",
+            filename
+        )
+    })?;
+    Ok((verification, manifest))
+}
+
+fn sanitize_session_token_component(raw: &str) -> String {
+    let filtered: String = raw
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '_' || *ch == '-')
+        .take(48)
+        .collect();
+    if filtered.is_empty() {
+        "default".to_string()
+    } else {
+        filtered
     }
-    if let Ok(sum) = compute_file_sha256(path) {
-        let _ = fs::write(&sha_path, format!("{}\n", sum));
-        return sum;
-    }
-    String::new()
 }
 
 pub fn prune_old_backups() {
     let backup_dir = get_backup_dir();
-    let Ok(entries) = fs::read_dir(&backup_dir) else {
-        return;
-    };
-
-    let mut backups = Vec::new();
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().to_string();
-        let Ok(ft) = entry.file_type() else {
-            continue;
-        };
-        if ft.is_dir() || !is_valid_backup_filename(&name) {
-            continue;
-        }
-        if let Ok(meta) = entry.metadata() {
-            if let Ok(modified) = meta.modified() {
-                let dt: DateTime<Utc> = modified.into();
-                backups.push((name, dt, entry.path()));
-            }
-        }
-    }
-
-    backups.sort_by(|a, b| b.1.cmp(&a.1));
-    if backups.len() <= MAX_RETAINED_BACKUPS {
-        return;
-    }
-
-    let cutoff = Utc::now() - Duration::days(RETENTION_DAYS);
-    for (name, mod_time, path) in backups.into_iter().skip(MAX_RETAINED_BACKUPS) {
-        if mod_time > cutoff {
-            continue;
-        }
-        if fs::remove_file(&path).is_ok() {
-            let _ = fs::remove_file(format!("{}.sha256", path.display()));
-            tracing::info!(name = %name, "Pruned old backup");
-        }
-    }
+    let _ = af_runner::af_host::prune_backup_inventory(
+        &backup_dir,
+        MAX_RETAINED_BACKUPS,
+        RETENTION_DAYS,
+    );
 }
 
 pub fn perform_system_backup() -> anyhow::Result<BackupFile> {
-    let backup_dir = get_backup_dir();
+    let active_db_path = get_active_db_path();
+    let backup_dir = af_models::resolve_active_backup_dir_from_env(
+        None,
+        Some(&active_db_path),
+        "/var/lib/aetherflow/backups",
+    );
     fs::create_dir_all(&backup_dir)?;
 
-    let ts = Utc::now().format("%Y-%m-%d_%H-%M-%S").to_string();
-    let filename = format!("aetherflow_{}.sqlite", ts);
-    if !is_valid_backup_filename(&filename) {
-        anyhow::bail!("invalid backup filename");
-    }
-    let backup_file = safe_backup_path(&backup_dir, &filename)?;
-    let safe_sql_path = backup_file.to_string_lossy().replace('\'', "''");
-
-    {
-        let conn = af_db::get_conn()?;
-        conn.execute_batch(&format!("VACUUM INTO '{}';", safe_sql_path))?;
-    }
-
-    let meta = fs::metadata(&backup_file)?;
-    let checksum = compute_file_sha256(&backup_file)?;
-    let _ = fs::write(
-        format!("{}.sha256", backup_file.display()),
-        format!("{}\n", checksum),
+    let lock_path = af_models::resolve_canonical_maintenance_lock_path_from_env(
+        None,
+        Some(&active_db_path),
+        Some(&backup_dir),
     );
+    let _maint_lock = af_runner::af_host::HostMaintenanceLockGuard::acquire(
+        &lock_path,
+        std::time::Duration::from_secs(30),
+    )
+    .map_err(|e| anyhow::anyhow!("backup maintenance lock busy: {}", e))?;
+
+    let (trusted_sqlite_uid, _) = af_models::resolve_trusted_sqlite_ids_from_env(None);
+    let cfg = af_runner::af_host::HostBackupConfig {
+        backup_dir: backup_dir.clone(),
+        app_version: get_local_version(),
+        sqlite_db_path: Some(active_db_path),
+        config_targets: Vec::new(),
+        max_retained_backups: MAX_RETAINED_BACKUPS,
+        retention_days: RETENTION_DAYS,
+        snapshot_options: af_runner::af_host::SnapshotOptions {
+            trusted_source_uid: trusted_sqlite_uid,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let ts_slug = Utc::now().format("%Y%m%d_%H%M%S").to_string();
+    let receipt = af_runner::af_host::create_sqlite_snapshot_backup(&cfg, Some(&ts_slug))
+        .map_err(|e| anyhow::anyhow!("af-host backup failed: {}", e))?;
+
+    let filename = receipt
+        .primary_artifact_path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default()
+        .to_string();
+    let size = receipt
+        .manifest
+        .sqlite_snapshot
+        .as_ref()
+        .map(|s| s.size_bytes as i64)
+        .unwrap_or(0);
+    let checksum = receipt
+        .manifest
+        .sqlite_snapshot
+        .as_ref()
+        .map(|s| s.sha256.clone())
+        .unwrap_or_default();
 
     prune_old_backups();
 
     Ok(BackupFile {
         filename,
-        size: meta.len() as i64,
-        timestamp: Utc::now().to_rfc3339(),
+        size,
+        timestamp: receipt.manifest.created_at,
         checksum,
     })
 }
@@ -291,21 +653,24 @@ pub async fn get_backups_list() -> Response {
         if !name.ends_with(".sqlite") {
             continue;
         }
-        let Ok(meta) = entry.metadata() else {
+        let Ok((verification, manifest)) = read_verified_backup_checksum(&backup_dir, &name) else {
             continue;
         };
-        let ts = meta
-            .modified()
-            .ok()
-            .map(|m| DateTime::<Utc>::from(m).to_rfc3339())
-            .unwrap_or_else(|| Utc::now().to_rfc3339());
-        let path = entry.path();
-        let checksum = ensure_stored_checksum(&path);
+        let ts = if !manifest.created_at.trim().is_empty() {
+            manifest.created_at
+        } else {
+            entry
+                .metadata()
+                .ok()
+                .and_then(|meta| meta.modified().ok())
+                .map(|m| DateTime::<Utc>::from(m).to_rfc3339())
+                .unwrap_or_else(|| Utc::now().to_rfc3339())
+        };
         backups.push(BackupFile {
             filename: name,
-            size: meta.len() as i64,
+            size: verification.size_bytes as i64,
             timestamp: ts,
-            checksum,
+            checksum: verification.actual_sha256,
         });
     }
     Json(backups).into_response()
@@ -387,6 +752,27 @@ pub async fn download_backup(
     let Ok(file_path) = safe_backup_path(&backup_dir, &filename) else {
         return api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", "Invalid backup path");
     };
+    if !file_path.exists() {
+        return api_error(
+            StatusCode::NOT_FOUND,
+            "NOT_FOUND",
+            "Backup file not found",
+        );
+    }
+    let clean_name = file_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(&filename);
+    let (verification, _manifest) = match read_verified_backup_checksum(&backup_dir, clean_name) {
+        Ok(pair) => pair,
+        Err(err) => {
+            return api_error(
+                StatusCode::CONFLICT,
+                "INTEGRITY_ERROR",
+                format!("Backup integrity verification failed: {}", err),
+            );
+        }
+    };
 
     let Ok(mut file) = fs::File::open(&file_path) else {
         return api_error(
@@ -395,15 +781,8 @@ pub async fn download_backup(
             "Backup file not found",
         );
     };
-    let Ok(meta) = file.metadata() else {
-        return api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            "Failed to read backup metadata",
-        );
-    };
-    let total_size = meta.len();
-    let checksum = ensure_stored_checksum(&file_path);
+    let total_size = verification.size_bytes;
+    let checksum = verification.actual_sha256;
 
     if let Some(chunk_str) = q.get("chunk").filter(|s| !s.is_empty()) {
         let Ok(chunk_index) = chunk_str.parse::<u64>() else {
@@ -520,6 +899,327 @@ pub async fn download_backup(
     resp
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn process_backup_chunk_upload_in_dir(
+    backup_dir: &StdPath,
+    filename: &str,
+    chunk_index: usize,
+    total_chunks: usize,
+    expected_checksum: Option<&str>,
+    upload_id_param: Option<&str>,
+    auth_session: Option<(i64, &str)>,
+    bytes: &[u8],
+) -> Result<serde_json::Value, (StatusCode, &'static str, String)> {
+    if filename.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "BAD_REQUEST",
+            "Filename required".to_string(),
+        ));
+    }
+    if total_chunks == 0 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "BAD_REQUEST",
+            "total query must be a positive integer".to_string(),
+        ));
+    }
+    if chunk_index >= total_chunks {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "BAD_REQUEST",
+            format!(
+                "chunk index {} out of bounds for total_chunks {}",
+                chunk_index, total_chunks
+            ),
+        ));
+    }
+    if bytes.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "BAD_REQUEST",
+            "Failed to persist chunk payload".to_string(),
+        ));
+    }
+
+    let upload_id = if let Some(raw_upload_id) =
+        upload_id_param.map(str::trim).filter(|val| !val.is_empty())
+    {
+        if !VALID_UPLOAD_SESSION_ID_RE.is_match(raw_upload_id) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "BAD_REQUEST",
+                "Invalid upload_id parameter".to_string(),
+            ));
+        }
+        raw_upload_id.to_string()
+    } else {
+        "default".to_string()
+    };
+
+    let (user_id, session_jti) = match auth_session {
+        Some((uid, jti)) => (uid, sanitize_session_token_component(jti)),
+        None => (0, "anon".to_string()),
+    };
+    let session_key = format!("u{}-{}-{}", user_id, session_jti, upload_id);
+
+    if fs::create_dir_all(backup_dir).is_err() {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL_ERROR",
+            "Failed to prepare backup directory".to_string(),
+        ));
+    }
+    let Ok(final_path) = safe_backup_path(backup_dir, filename) else {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "BAD_REQUEST",
+            "Invalid filename".to_string(),
+        ));
+    };
+    let clean_base = final_path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(filename)
+        .to_string();
+    if !is_valid_backup_filename(&clean_base) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "BAD_REQUEST",
+            "Backup filename must end with .sqlite and contain only safe characters".to_string(),
+        ));
+    }
+
+    let lock_path = backup_dir.join(format!(".upload-lock-{}.lock", clean_base));
+    let _file_lock = CrossProcessUploadLock::acquire(&lock_path).map_err(|err| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL_ERROR",
+            err.to_string(),
+        )
+    })?;
+    let _mutex_guard = BACKUP_UPLOAD_MU
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let upload_dir = backup_dir
+        .join(".upload-staging")
+        .join(&clean_base)
+        .join(&session_key);
+    if fs::create_dir_all(&upload_dir).is_err() {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL_ERROR",
+            "Failed to prepare upload staging directory".to_string(),
+        ));
+    }
+
+    let normalized_expected = expected_checksum
+        .map(str::trim)
+        .filter(|val| !val.is_empty())
+        .map(|val| val.to_ascii_lowercase());
+    let meta_path = upload_dir.join("meta.json");
+    if meta_path.exists() {
+        let raw_meta = fs::read_to_string(&meta_path).map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL_ERROR",
+                "Failed to read upload session metadata".to_string(),
+            )
+        })?;
+        let mut session_meta: BackupUploadSessionMeta =
+            serde_json::from_str(&raw_meta).map_err(|_| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "INTERNAL_ERROR",
+                    "Corrupt upload session metadata".to_string(),
+                )
+            })?;
+        if session_meta.total_chunks != total_chunks
+            || session_meta.user_id != user_id
+            || session_meta.session_jti != session_jti
+            || session_meta.upload_id != upload_id
+        {
+            return Err((
+                StatusCode::CONFLICT,
+                "CONFLICT",
+                "Upload session metadata mismatch; start a new upload_id".to_string(),
+            ));
+        }
+        if let Some(ref incoming_sha) = normalized_expected {
+            if let Some(ref existing_sha) = session_meta.expected_sha256 {
+                if existing_sha != incoming_sha {
+                    return Err((
+                        StatusCode::CONFLICT,
+                        "CONFLICT",
+                        "Upload session expected checksum mismatch".to_string(),
+                    ));
+                }
+            } else {
+                session_meta.expected_sha256 = Some(incoming_sha.clone());
+                let serialized = serde_json::to_string(&session_meta).unwrap_or_default();
+                let _ = fs::write(&meta_path, serialized);
+            }
+        }
+    } else {
+        let session_meta = BackupUploadSessionMeta {
+            total_chunks,
+            expected_sha256: normalized_expected.clone(),
+            user_id,
+            session_jti: session_jti.clone(),
+            upload_id: upload_id.clone(),
+        };
+        let serialized = serde_json::to_string(&session_meta).map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL_ERROR",
+                "Failed to serialize upload session metadata".to_string(),
+            )
+        })?;
+        if fs::write(&meta_path, serialized).is_err() {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL_ERROR",
+                "Failed to persist upload session metadata".to_string(),
+            ));
+        }
+    }
+
+    let chunk_path = upload_dir.join(format!("{:06}.part", chunk_index));
+    let temp_chunk_path = upload_dir.join(format!("{:06}.part.tmp", chunk_index));
+    if fs::write(&temp_chunk_path, bytes).is_err()
+        || fs::rename(&temp_chunk_path, &chunk_path).is_err()
+    {
+        let _ = fs::remove_file(&temp_chunk_path);
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL_ERROR",
+            "Failed to create chunk file".to_string(),
+        ));
+    }
+
+    let mut received = 0usize;
+    for index in 0..total_chunks {
+        if upload_dir.join(format!("{:06}.part", index)).is_file() {
+            received += 1;
+        }
+    }
+    let progress = (received as f64 / total_chunks as f64) * 100.0;
+    if received < total_chunks {
+        return Ok(serde_json::json!({
+            "message": "Chunk received",
+            "filename": clean_base,
+            "upload_id": upload_id,
+            "received": received,
+            "total": total_chunks,
+            "progress": progress,
+            "complete": false,
+        }));
+    }
+
+    let temp_final = upload_dir.join(format!("{}.uploading", clean_base));
+    let Ok(mut out) = fs::File::create(&temp_final) else {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL_ERROR",
+            "Failed to build staged backup file".to_string(),
+        ));
+    };
+
+    for index in 0..total_chunks {
+        let part_path = upload_dir.join(format!("{:06}.part", index));
+        let Ok(mut part) = fs::File::open(&part_path) else {
+            let _ = fs::remove_file(&temp_final);
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "BAD_REQUEST",
+                format!("Missing chunk {}", index),
+            ));
+        };
+        if std::io::copy(&mut part, &mut out).is_err() {
+            let _ = fs::remove_file(&temp_final);
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL_ERROR",
+                "Failed to assemble backup file".to_string(),
+            ));
+        }
+    }
+    let _ = out.flush();
+    drop(out);
+
+    let Ok(checksum) = compute_file_sha256(&temp_final) else {
+        let _ = fs::remove_file(&temp_final);
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL_ERROR",
+            "Failed to compute assembled checksum".to_string(),
+        ));
+    };
+
+    let session_expected = fs::read_to_string(&meta_path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<BackupUploadSessionMeta>(&raw).ok())
+        .and_then(|meta| meta.expected_sha256)
+        .or(normalized_expected);
+    if let Some(expected) = session_expected {
+        if !expected.eq_ignore_ascii_case(&checksum) {
+            let _ = fs::remove_file(&temp_final);
+            let _ = fs::remove_dir_all(&upload_dir);
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "CHECKSUM_MISMATCH",
+                format!(
+                    "Checksum verification failed: expected {}, actual {}",
+                    expected, checksum
+                ),
+            ));
+        }
+    }
+
+    if let Err(err) = af_runner::af_host::verify_sqlite_snapshot_integrity(&temp_final) {
+        let _ = fs::remove_file(&temp_final);
+        let _ = fs::remove_dir_all(&upload_dir);
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "BAD_REQUEST",
+            format!("Uploaded backup failed SQLite integrity verification: {}", err),
+        ));
+    }
+
+    let size = match finalize_assembled_backup_upload(
+        backup_dir,
+        &clean_base,
+        &temp_final,
+        &final_path,
+        &checksum,
+    ) {
+        Ok(sz) => sz,
+        Err(err) => {
+            let _ = fs::remove_dir_all(&upload_dir);
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL_ERROR",
+                format!("Failed to finalize uploaded backup artifacts: {}", err),
+            ));
+        }
+    };
+    let _ = fs::remove_dir_all(&upload_dir);
+
+    Ok(serde_json::json!({
+        "message": "Chunked upload completed",
+        "filename": clean_base,
+        "upload_id": upload_id,
+        "size": size,
+        "checksum": checksum,
+        "received": total_chunks,
+        "total": total_chunks,
+        "progress": 100.0,
+        "complete": true,
+        "timestamp": Utc::now().to_rfc3339(),
+    }))
+}
+
 pub async fn upload_backup_chunk(
     Path(filename): Path<String>,
     Query(q): Query<HashMap<String, String>>,
@@ -554,24 +1254,7 @@ pub async fn upload_backup_chunk(
         );
     }
 
-    let backup_dir = get_backup_dir();
-    if fs::create_dir_all(&backup_dir).is_err() {
-        return api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            "Failed to prepare backup directory",
-        );
-    }
-    let Ok(final_path) = safe_backup_path(&backup_dir, &filename) else {
-        return api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", "Invalid filename");
-    };
-    let clean_base = final_path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or(&filename)
-        .to_string();
-    let upload_dir = backup_dir.join(format!(".upload-{}", clean_base));
-
+    let auth_user = req.extensions().get::<AuthUser>().cloned();
     let Ok(bytes) = axum::body::to_bytes(req.into_body(), 64 * 1024 * 1024).await else {
         return api_error(
             StatusCode::BAD_REQUEST,
@@ -579,137 +1262,164 @@ pub async fn upload_backup_chunk(
             "Failed to read chunk payload",
         );
     };
-    if bytes.is_empty() {
-        return api_error(
-            StatusCode::BAD_REQUEST,
-            "BAD_REQUEST",
-            "Failed to persist chunk payload",
+
+    let backup_dir = get_backup_dir();
+    let expected_checksum = q.get("checksum").map(|s| s.as_str());
+    let upload_id_param = q
+        .get("upload_id")
+        .or_else(|| q.get("session_id"))
+        .map(|s| s.as_str());
+    let auth_pair = auth_user
+        .as_ref()
+        .map(|user| (user.user_id, user.jti.as_str()));
+
+    match process_backup_chunk_upload_in_dir(
+        &backup_dir,
+        &filename,
+        chunk_index,
+        total_chunks,
+        expected_checksum,
+        upload_id_param,
+        auth_pair,
+        &bytes,
+    ) {
+        Ok(payload) => Json(payload).into_response(),
+        Err((status, code, msg)) => {
+            if code == "CHECKSUM_MISMATCH" {
+                return (
+                    status,
+                    Json(serde_json::json!({
+                        "error": "Checksum verification failed",
+                        "message": msg,
+                    })),
+                )
+                    .into_response();
+            }
+            api_error(status, code, msg)
+        }
+    }
+}
+
+fn cleanup_backup_upload_artifacts(temp_final: &StdPath, final_path: &StdPath) {
+    let _ = fs::remove_file(temp_final);
+    let _ = fs::remove_file(final_path);
+    let _ = fs::remove_file(format!("{}.sha256", final_path.display()));
+    let _ = fs::remove_file(format!("{}.manifest.json", final_path.display()));
+    let _ = fs::remove_file(format!("{}.manifest.json.sha256", final_path.display()));
+}
+
+pub(crate) fn finalize_assembled_backup_upload(
+    backup_dir: &StdPath,
+    clean_base: &str,
+    temp_final: &StdPath,
+    final_path: &StdPath,
+    checksum: &str,
+) -> anyhow::Result<i64> {
+    let actual_checksum = compute_file_sha256(temp_final)
+        .map_err(|err| anyhow::anyhow!("Failed to hash staged backup: {}", err))?;
+    if !actual_checksum.eq_ignore_ascii_case(checksum.trim()) {
+        let _ = fs::remove_file(temp_final);
+        anyhow::bail!(
+            "Staged backup checksum mismatch: expected {}, actual {}",
+            checksum,
+            actual_checksum
         );
     }
 
-    let _guard = BACKUP_UPLOAD_MU
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if fs::create_dir_all(&upload_dir).is_err() {
-        return api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            "Failed to prepare upload staging directory",
-        );
-    }
+    let (user_version, journal_mode, integrity_check) =
+        af_runner::af_host::verify_sqlite_snapshot_integrity(temp_final)
+            .map_err(|err| anyhow::anyhow!("SQLite integrity verification failed: {}", err))?;
 
-    let chunk_path = upload_dir.join(format!("{:06}.part", chunk_index));
-    if fs::write(&chunk_path, &bytes).is_err() {
-        return api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            "Failed to create chunk file",
-        );
-    }
-    let mut received = 0usize;
-    if let Ok(entries) = fs::read_dir(&upload_dir) {
-        for e in entries.flatten() {
-            if e.file_name().to_string_lossy().ends_with(".part") {
-                received += 1;
+    let size_u64 = fs::metadata(temp_final)
+        .map_err(|err| anyhow::anyhow!("Failed to stat staged backup: {}", err))?
+        .len();
+
+    let mut manifest = af_runner::af_host::BackupManifest::new(get_local_version(), clean_base)
+        .map_err(|err| anyhow::anyhow!("Failed to initialize backup manifest: {}", err))?;
+
+    manifest.sqlite_snapshot = Some(af_runner::af_host::SqliteSnapshotMetadata {
+        snapshot_relative_path: clean_base.to_string(),
+        capture_method: "vacuum_into".to_string(),
+        sqlite_user_version: user_version,
+        journal_mode,
+        integrity_check,
+        size_bytes: size_u64,
+        sha256: actual_checksum.clone(),
+    });
+    manifest
+        .add_file_from_disk(
+            clean_base,
+            temp_final,
+            af_runner::af_host::BackupTargetKind::SqliteSnapshot,
+            Some(get_active_db_path().to_string_lossy().into_owned()),
+            true,
+        )
+        .map_err(|err| anyhow::anyhow!("Failed to record backup manifest entry: {}", err))?;
+
+    let sha_path = PathBuf::from(format!("{}.sha256", final_path.display()));
+    let manifest_path = PathBuf::from(format!("{}.manifest.json", final_path.display()));
+    let manifest_sha_path = PathBuf::from(format!("{}.manifest.json.sha256", final_path.display()));
+
+    let prev_tag = uuid::Uuid::new_v4().to_string();
+    let prev_final = PathBuf::from(format!("{}.prev-{}", final_path.display(), prev_tag));
+    let prev_sha = PathBuf::from(format!("{}.prev-{}", sha_path.display(), prev_tag));
+    let prev_manifest = PathBuf::from(format!("{}.prev-{}", manifest_path.display(), prev_tag));
+    let prev_manifest_sha =
+        PathBuf::from(format!("{}.prev-{}", manifest_sha_path.display(), prev_tag));
+
+    let mut preserved_previous = Vec::<(PathBuf, PathBuf)>::new();
+    for (live_path, backup_path) in [
+        (final_path.to_path_buf(), prev_final),
+        (sha_path, prev_sha),
+        (manifest_path.clone(), prev_manifest),
+        (manifest_sha_path, prev_manifest_sha),
+    ] {
+        if let Ok(meta) = fs::symlink_metadata(&live_path) {
+            if meta.is_file() {
+                fs::rename(&live_path, &backup_path).map_err(|err| {
+                    for (orig_path, moved_path) in preserved_previous.iter().rev() {
+                        let _ = fs::rename(moved_path, orig_path);
+                    }
+                    anyhow::anyhow!(
+                        "Failed to stage existing backup artifact {} for safe replacement: {}",
+                        live_path.display(),
+                        err
+                    )
+                })?;
+                preserved_previous.push((live_path, backup_path));
             }
         }
     }
-    let progress = (received as f64 / total_chunks as f64) * 100.0;
-    if received < total_chunks {
-        return Json(serde_json::json!({
-            "message": "Chunk received",
-            "filename": clean_base,
-            "received": received,
-            "total": total_chunks,
-            "progress": progress,
-            "complete": false,
-        }))
-        .into_response();
-    }
 
-    let temp_final = PathBuf::from(format!("{}.uploading", final_path.display()));
-    let Ok(mut out) = fs::File::create(&temp_final) else {
-        return api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            "Failed to build final backup file",
-        );
-    };
+    let activate_result = (|| -> anyhow::Result<i64> {
+        fs::rename(temp_final, final_path)
+            .map_err(|err| anyhow::anyhow!("Failed to activate assembled backup file: {}", err))?;
+        af_runner::af_host::write_sha256_sidecar(final_path)
+            .map_err(|err| anyhow::anyhow!("Failed to write .sha256 sidecar: {}", err))?;
+        manifest
+            .save_atomic(&manifest_path)
+            .map_err(|err| anyhow::anyhow!("Failed to write .manifest.json sidecar: {}", err))?;
+        af_runner::af_host::verify_backup_artifact(backup_dir, clean_base)
+            .map_err(|err| anyhow::anyhow!("Post-upload artifact verification failed: {}", err))?;
+        let size = fs::metadata(final_path)
+            .map_err(|err| anyhow::anyhow!("Failed to stat activated backup: {}", err))?
+            .len() as i64;
+        Ok(size)
+    })();
 
-    for i in 0..total_chunks {
-        let part_path = upload_dir.join(format!("{:06}.part", i));
-        let Ok(mut part) = fs::File::open(&part_path) else {
-            let _ = fs::remove_file(&temp_final);
-            return api_error(
-                StatusCode::BAD_REQUEST,
-                "BAD_REQUEST",
-                format!("Missing chunk {}", i),
-            );
-        };
-        if std::io::copy(&mut part, &mut out).is_err() {
-            let _ = fs::remove_file(&temp_final);
-            return api_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "INTERNAL_ERROR",
-                "Failed to assemble backup file",
-            );
+    if let Err(err) = activate_result {
+        cleanup_backup_upload_artifacts(temp_final, final_path);
+        for (orig_path, moved_path) in preserved_previous.into_iter().rev() {
+            let _ = fs::rename(&moved_path, &orig_path);
         }
-    }
-    let _ = out.flush();
-    drop(out);
-
-    let Ok(checksum) = compute_file_sha256(&temp_final) else {
-        let _ = fs::remove_file(&temp_final);
-        return api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            "Failed to compute assembled checksum",
-        );
-    };
-
-    if let Some(expected) = q.get("checksum").map(|s| s.trim()).filter(|s| !s.is_empty()) {
-        if !expected.eq_ignore_ascii_case(&checksum) {
-            let _ = fs::remove_file(&temp_final);
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "error": "Checksum verification failed",
-                    "expected": expected,
-                    "actual": checksum,
-                })),
-            )
-                .into_response();
-        }
+        return Err(err);
     }
 
-    if fs::rename(&temp_final, &final_path).is_err() {
-        let _ = fs::remove_file(&temp_final);
-        return api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            "Failed to activate assembled backup file",
-        );
+    for (_orig_path, moved_path) in preserved_previous {
+        let _ = fs::remove_file(moved_path);
     }
 
-    let _ = fs::write(
-        format!("{}.sha256", final_path.display()),
-        format!("{}\n", checksum),
-    );
-    let _ = fs::remove_dir_all(&upload_dir);
-    let size = fs::metadata(&final_path).map(|m| m.len() as i64).unwrap_or(0);
-
-    Json(serde_json::json!({
-        "message": "Chunked upload completed",
-        "filename": clean_base,
-        "size": size,
-        "checksum": checksum,
-        "received": total_chunks,
-        "total": total_chunks,
-        "progress": 100.0,
-        "complete": true,
-        "timestamp": Utc::now().to_rfc3339(),
-    }))
-    .into_response()
+    Ok(size_u64 as i64)
 }
 
 pub async fn get_optimal_backup_window() -> Response {
@@ -2219,7 +2929,7 @@ pub fn sanitize_release_body(body: &str) -> String {
 pub fn normalize_update_channel(channel: &str) -> &'static str {
     match channel.trim().to_ascii_lowercase().as_str() {
         UPDATE_CHANNEL_NIGHTLY => UPDATE_CHANNEL_NIGHTLY,
-        UPDATE_CHANNEL_EXPERIMENTAL => UPDATE_CHANNEL_EXPERIMENTAL,
+        UPDATE_CHANNEL_EXPERIMENTAL => UPDATE_CHANNEL_NIGHTLY,
         _ => UPDATE_CHANNEL_STABLE,
     }
 }
@@ -2275,19 +2985,6 @@ pub fn nightly_update_available(current_version: &str, latest_version: &str) -> 
     !is_newer_version(latest_version, current_version)
 }
 
-pub fn experimental_update_available(current_version: &str, latest_version: &str) -> bool {
-    if current_version.trim().eq_ignore_ascii_case(latest_version.trim()) {
-        return false;
-    }
-    if current_version
-        .to_ascii_lowercase()
-        .contains(UPDATE_CHANNEL_EXPERIMENTAL)
-    {
-        return true;
-    }
-    !is_newer_version(latest_version, current_version)
-}
-
 pub fn select_release_for_channel(
     releases: &[GitHubReleasePayload],
     channel: &str,
@@ -2314,15 +3011,6 @@ pub fn select_release_for_channel(
             || tag_lower.contains("nightly");
 
         match norm_channel {
-            UPDATE_CHANNEL_EXPERIMENTAL => {
-                if is_experimental {
-                    return Some((
-                        tag.to_string(),
-                        sanitize_release_body(&rel.body),
-                        rel.html_url.clone(),
-                    ));
-                }
-            }
             UPDATE_CHANNEL_NIGHTLY => {
                 if is_nightly_target && !is_experimental {
                     return Some((
@@ -2438,47 +3126,6 @@ pub async fn check_update() -> Response {
     let mut resolution_err: Option<GitHubUpdateError> = None;
 
     match channel {
-        UPDATE_CHANNEL_EXPERIMENTAL => {
-            match fetch_releases_from_github().await {
-                Ok(releases) => {
-                    if let Some((tag, body, url)) =
-                        select_release_for_channel(&releases, UPDATE_CHANNEL_EXPERIMENTAL)
-                    {
-                        latest_version = tag;
-                        message = body;
-                        html_url = url;
-                    }
-                }
-                Err(err) => {
-                    resolution_err = Some(err);
-                }
-            }
-
-            if latest_version.is_empty()
-                && !resolution_err
-                    .as_ref()
-                    .map(|e| e.is_rate_limited())
-                    .unwrap_or(false)
-            {
-                match fetch_branch_head(UPDATE_CHANNEL_EXPERIMENTAL, &["experimental"]).await {
-                    Ok((ver, msg, url)) => {
-                        latest_version = ver;
-                        message = msg;
-                        html_url = url;
-                        resolution_err = None;
-                    }
-                    Err(Some(err)) => {
-                        resolution_err = Some(err);
-                    }
-                    Err(None) => {}
-                }
-            }
-
-            if !latest_version.is_empty() {
-                update_available = experimental_update_available(&current_version, &latest_version);
-            }
-        }
-
         UPDATE_CHANNEL_NIGHTLY => {
             match fetch_releases_from_github().await {
                 Ok(releases) => {
@@ -2503,7 +3150,7 @@ pub async fn check_update() -> Response {
                     .map(|e| e.is_rate_limited())
                     .unwrap_or(false)
             {
-                match fetch_branch_head(UPDATE_CHANNEL_NIGHTLY, &["nightly", "Nightly", "master"])
+                match fetch_branch_head(UPDATE_CHANNEL_NIGHTLY, &["nightly", "Nightly"])
                     .await
                 {
                     Ok((ver, msg, url)) => {
@@ -2586,45 +3233,151 @@ pub async fn check_update() -> Response {
     .into_response()
 }
 
-pub async fn update_status() -> Response {
-    match af_runner::fetch_self_update_status().await {
-        Ok(status) => {
-            let mut response = serde_json::to_value(status).unwrap_or_else(|_| serde_json::json!({}));
-            response["currentVersion"] = serde_json::json!(get_local_version());
-            Json(response).into_response()
-        }
-        Err(error) => (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({
-            "error": error.to_string(), "message": "Deployment status could not be verified."
-        }))).into_response(),
+pub(crate) fn validate_runner_self_update_initiation_payload(
+    output: &str,
+) -> Result<(String, String), String> {
+    let parsed_job: serde_json::Value = serde_json::from_str(output)
+        .map_err(|err| format!("runner returned invalid self-update JSON payload: {}", err))?;
+    let status = parsed_job
+        .get("status")
+        .and_then(|val| val.as_str())
+        .unwrap_or("");
+    if status != "initiated" {
+        return Err(format!(
+            "runner self-update payload reported unexpected status {:?}",
+            status
+        ));
     }
+    let completed = parsed_job
+        .get("completed")
+        .and_then(|val| val.as_bool())
+        .unwrap_or(true);
+    if completed {
+        return Err("runner self-update initiation payload reported completed=true".to_string());
+    }
+    let job_unit = parsed_job
+        .get("job_unit")
+        .and_then(|val| val.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if !af_models::is_valid_self_update_job_unit_name(&job_unit) {
+        return Err(format!(
+            "runner self-update payload returned invalid or empty job_unit {:?}",
+            job_unit
+        ));
+    }
+    let engine_name = parsed_job
+        .get("engine")
+        .and_then(|val| val.as_str())
+        .map(str::trim)
+        .filter(|val| !val.is_empty())
+        .unwrap_or("legacy_bash_release")
+        .to_string();
+    Ok((job_unit, engine_name))
 }
 
 pub async fn run_update(req: Request) -> Response {
     let actor = req.extensions().get::<AuthUser>().cloned();
     let ip = extract_client_ip(req.headers());
-    let ua = req.headers().get(header::USER_AGENT)
-        .and_then(|value| value.to_str().ok()).unwrap_or_default().to_string();
-    let channel = read_update_channel().to_string();
-    let operation_id = match af_runner::start_self_update("deploy", &channel).await {
-        Ok(operation_id) => operation_id,
-        Err(error) => {
-            let message = error.to_string();
-            let code = if message.contains("update_in_progress:") || message.contains("recovery_required:") {
-                StatusCode::CONFLICT
+    let ua = req
+        .headers()
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+
+    let channel: String = af_db::get_conn()
+        .ok()
+        .and_then(|conn| {
+            conn.query_row("SELECT update_channel FROM settings WHERE id = 1", [], |r| {
+                r.get(0)
+            })
+            .ok()
+        })
+        .unwrap_or_else(|| "stable".to_string());
+    let channel = normalize_update_channel(&channel).to_string();
+
+    let update_req = af_models::SelfUpdateRequest {
+        command: "deploy".to_string(),
+        channel: channel.clone(),
+    };
+    let runner_resp = match af_runner::dispatch_self_update_request(&update_req).await {
+        Ok(resp) => resp,
+        Err(err) => {
+            tracing::error!(error = %err, "Failed to initiate self-update via runner");
+            return api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "SERVICE_UNAVAILABLE",
+                format!("Failed to initiate self-update: {}", err),
+            );
+        }
+    };
+
+    let (job_unit, engine_name) =
+        match validate_runner_self_update_initiation_payload(&runner_resp.output) {
+            Ok(pair) => pair,
+            Err(err) => {
+                tracing::error!(error = %err, "Runner returned invalid self-update initiation payload");
+                return api_error(StatusCode::BAD_GATEWAY, "BAD_GATEWAY", err);
+            }
+        };
+
+    if let Some(actor_ctx) = actor {
+        af_db::record_audit(
+            actor_ctx.user_id,
+            &actor_ctx.username,
+            "system_deployment",
+            "engine",
+            "blue_green",
+            &format!("Channel: {} (unit: {})", channel, job_unit),
+            &ip,
+            &ua,
+        );
+    }
+
+    Json(serde_json::json!({
+        "message": "Atomic deployment initiated. The system will cleanly transition once builds are complete.",
+        "status": "initiated",
+        "completed": false,
+        "channel": channel,
+        "engine": engine_name,
+        "job_unit": job_unit
+    }))
+    .into_response()
+}
+
+pub async fn get_system_update_status(Query(q): Query<HashMap<String, String>>) -> Response {
+    let job_unit = q
+        .get("job_unit")
+        .or_else(|| q.get("unit"))
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    if job_unit.is_empty() {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "BAD_REQUEST",
+            "job_unit query parameter is required",
+        );
+    }
+
+    let status_req = af_models::SelfUpdateStatusRequest {
+        job_unit: job_unit.clone(),
+    };
+    match af_runner::dispatch_self_update_status_request(&status_req).await {
+        Ok(status) => Json(status).into_response(),
+        Err(err) => {
+            let msg = err.to_string();
+            let code = if msg.contains("invalid") || msg.contains("Invalid") {
+                StatusCode::BAD_REQUEST
+            } else if msg.contains("not found") || msg.contains("Not found") {
+                StatusCode::NOT_FOUND
             } else {
                 StatusCode::SERVICE_UNAVAILABLE
             };
-            return (code, Json(serde_json::json!({"error": message}))).into_response();
+            api_error(code, "UPDATE_STATUS_ERROR", msg)
         }
-    };
-    if let Some(user) = actor {
-        af_db::record_audit(user.user_id, &user.username, "system_deployment", "engine", "blue_green",
-            &format!("Channel: {channel}; operation: {operation_id}"), &ip, &ua);
     }
-    (StatusCode::ACCEPTED, Json(serde_json::json!({
-        "message": "Independent updater started. Progress will survive application restarts.",
-        "operationId": operation_id,
-    }))).into_response()
 }
 
 fn allocate_or_verify_deploy_port(app_name: &str, default_port: i32) -> i32 {
@@ -2633,10 +3386,10 @@ fn allocate_or_verify_deploy_port(app_name: &str, default_port: i32) -> i32 {
             return existing.listen_port;
         }
     }
-    if (1..=65535).contains(&default_port) {
-        if std::net::TcpListener::bind(("127.0.0.1", default_port as u16)).is_ok() {
-            return default_port;
-        }
+    if (1..=65535).contains(&default_port)
+        && std::net::TcpListener::bind(("127.0.0.1", default_port as u16)).is_ok()
+    {
+        return default_port;
     }
     for candidate in 17000..=19999 {
         if std::net::TcpListener::bind(("127.0.0.1", candidate)).is_ok() {
@@ -2707,9 +3460,9 @@ pub async fn handle_deploy_process(
             bp_clone.internal_domain
         ));
         if !bp_clone.internal_domain.trim().is_empty() {
-            if let Err(err) = af_services::mutators::sync_local_dns_domains(&[
-                bp_clone.internal_domain.clone(),
-            ])
+            if let Err(err) = af_services::mutators::sync_local_dns_domains(
+                std::slice::from_ref(&bp_clone.internal_domain),
+            )
             .await
             {
                 send_step(format!(
@@ -2884,7 +3637,7 @@ mod updater_tests {
     }
 
     #[test]
-    fn test_select_release_for_channel_separates_stable_nightly_and_experimental() {
+    fn test_select_release_for_channel_migrates_legacy_experimental_to_nightly() {
         let releases = sample_releases();
 
         // Stable selects v3.2.7 and ignores prereleases / hyphenated tags
@@ -2899,11 +3652,10 @@ mod updater_tests {
         assert_eq!(nightly_tag, "v3.3.0-nightly.20261101");
         assert_eq!(nightly_body, "Nightly build notes");
 
-        // Experimental selects v4.0.0-experimental and sanitizes BOM + CRLF + separator
         let (exp_tag, exp_body, _) =
             select_release_for_channel(&releases, "experimental").expect("experimental release");
-        assert_eq!(exp_tag, "v4.0.0-experimental");
-        assert_eq!(exp_body, "Release Notes — Experimental\nLine 2");
+        assert_eq!(exp_tag, nightly_tag);
+        assert_eq!(exp_body, nightly_body);
 
         // When only experimental and stable releases exist, nightly returns None (so it falls back to branch head)
         let without_nightly = vec![releases[0].clone(), releases[2].clone()];
@@ -2920,7 +3672,8 @@ mod updater_tests {
         let (tag, _, _) = select_release_for_channel(&releases, "nightly").expect("automated nightly");
         assert_eq!(tag, "v4.0.0-nightly.123.1");
         assert!(select_release_for_channel(&releases, "stable").is_none());
-        assert!(select_release_for_channel(&releases, "experimental").is_none());
+        let (legacy_tag, _, _) = select_release_for_channel(&releases, "experimental").unwrap();
+        assert_eq!(legacy_tag, tag);
 
         release.author.login = "untrusted-author".to_string();
         assert!(select_release_for_channel(&[release], "nightly").is_none());
@@ -2949,23 +3702,9 @@ mod updater_tests {
     }
 
     #[test]
-    fn test_experimental_update_available_semantics() {
-        assert!(!experimental_update_available(
-            "experimental-abc1234",
-            "experimental-abc1234"
-        ));
-        assert!(experimental_update_available(
-            "experimental-abc1234",
-            "experimental-def5678"
-        ));
-        assert!(experimental_update_available(
-            "v3.2.7",
-            "v4.0.0-experimental"
-        ));
-        assert!(!experimental_update_available(
-            "v4.1.0",
-            "v4.0.0-experimental"
-        ));
+    fn legacy_experimental_channel_migrates_to_nightly() {
+        assert_eq!(normalize_update_channel("experimental"), "nightly");
+        assert_eq!(normalize_update_channel(" EXPERIMENTAL "), "nightly");
     }
 
     #[test]

@@ -1,12 +1,9 @@
 //! AetherFlow Rust Plugin SDK Template (`{{PLUGIN_ID}}` / `{{PLUGIN_NAME}}`)
 //!
-//! IMPORTANT CONTRACT & RUNTIME NOTE:
-//! AetherFlow v4.0.0 (`backend-rs`) does not currently run an in-process plugin manager,
-//! manifest loader, dynamic port allocator, or plugin-scoped token mint.
-//! This crate operates as a standalone companion HTTP service that communicates with the
-//! verified AetherFlow v4.0.0 HTTP routes:
+//! Operates as a host-managed or standalone companion HTTP service that communicates with
+//! verified AetherFlow v4.0.0 HTTP routes using a short-lived scoped plugin token (`AETHERFLOW_PLUGIN_TOKEN`):
 //! - `GET /api/v1/public/marketplace` (unauthenticated public catalog route)
-//! - `GET /api/v1/auth/system/metrics` (authenticated via `Authorization: Bearer <jwt>`)
+//! - `GET /api/v1/auth/system/metrics` (authenticated via `Authorization: Bearer <scoped_plugin_token>`)
 
 use std::env;
 use std::net::SocketAddr;
@@ -98,6 +95,7 @@ pub fn sanitize_token(raw: Option<&str>) -> Option<String> {
     let token = raw?.trim();
     if token.is_empty()
         || token == "replace-me"
+        || token == "replace-with-scoped-plugin-token"
         || token == "replace-with-operator-session-jwt"
     {
         None
@@ -240,7 +238,7 @@ impl AetherFlowClient {
     }
 
     /// Queries authenticated system metrics (`GET /api/v1/auth/system/metrics`).
-    /// Requires a valid operator HS256 session JWT in `AETHERFLOW_PLUGIN_TOKEN`.
+    /// Requires a valid short-lived scoped plugin token in `AETHERFLOW_PLUGIN_TOKEN`.
     pub async fn get_system_metrics(&self) -> Result<Value, ClientError> {
         self.get_json(PATH_AUTH_SYSTEM_METRICS, true).await
     }
@@ -265,10 +263,11 @@ pub struct SnapshotResponse {
     pub marketplace_count: Option<usize>,
 }
 
-/// Builds the Axum router for the standalone plugin companion service.
+/// Builds the Axum router for the plugin companion service.
 pub fn build_router(client: Arc<AetherFlowClient>) -> Router {
     Router::new()
         .route("/healthz", get(healthz_handler))
+        .route("/status", get(healthz_handler))
         .route("/snapshot", get(snapshot_handler))
         .with_state(client)
 }
@@ -279,7 +278,7 @@ async fn healthz_handler(State(client): State<Arc<AetherFlowClient>>) -> Json<He
         plugin_id: PLUGIN_ID.to_string(),
         plugin_name: PLUGIN_NAME.to_string(),
         sdk: "rust".to_string(),
-        runtime_mode: "standalone-companion".to_string(),
+        runtime_mode: "managed".to_string(),
         auth_token_configured: client.has_bearer_token(),
     })
 }

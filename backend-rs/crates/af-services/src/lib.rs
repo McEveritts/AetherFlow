@@ -23,9 +23,9 @@ use tokio::process::Command;
 // ─────────────────────────────────────────────────────────────────────────────
 
 const EMBEDDED_PACKAGES_JSON: &str =
-    include_str!("../../../../backend/config/packages.json");
+    include_str!("../../../../config/packages.json");
 const EMBEDDED_AUTOMATION_JSON: &str =
-    include_str!("../../../../backend/config/package_automation.json");
+    include_str!("../../../../config/package_automation.json");
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PackageJobInfo {
@@ -102,10 +102,11 @@ fn load_config_file_or_embedded(env_var: &str, filename: &str, embedded: &str) -
         PathBuf::from("/opt/AetherFlow/current/config").join(filename),
         PathBuf::from("/opt/AetherFlow/current/backend/config").join(filename),
         PathBuf::from("config").join(filename),
+        PathBuf::from("../config").join(filename),
+        PathBuf::from("/opt/AetherFlow/current/config").join(filename),
+        PathBuf::from("/opt/AetherFlow/config").join(filename),
         PathBuf::from("backend/config").join(filename),
         PathBuf::from("../backend/config").join(filename),
-        PathBuf::from("../../backend/config").join(filename),
-        PathBuf::from("../../../backend/config").join(filename),
         PathBuf::from("/opt/AetherFlow/backend/config").join(filename),
     ];
     if let Ok(exe) = env::current_exe() {
@@ -610,10 +611,13 @@ pub struct ServiceComponentPolicy {
     pub configured: bool,
 }
 
-static SERVICE_INFO_CACHE: Lazy<RwLock<HashMap<String, ((String, String, String), Instant)>>> =
+type ServiceInfoCacheEntry = ((String, String, String), Instant);
+type Pm2ServicesCacheState = (HashMap<String, (String, String)>, Option<Instant>);
+
+static SERVICE_INFO_CACHE: Lazy<RwLock<HashMap<String, ServiceInfoCacheEntry>>> =
     Lazy::new(|| RwLock::new(HashMap::new()));
 
-static PM2_SERVICES_CACHE: Lazy<RwLock<(HashMap<String, (String, String)>, Option<Instant>)>> =
+static PM2_SERVICES_CACHE: Lazy<RwLock<Pm2ServicesCacheState>> =
     Lazy::new(|| RwLock::new((HashMap::new(), None)));
 
 pub fn clear_service_status_cache() {
@@ -1483,7 +1487,7 @@ pub fn get_active_services() -> HashMap<String, ServiceStatusItem> {
         let control_scope = resolve_service_control_scope(&p.name).to_string();
 
         map.insert(
-            p.Label_or_name(),
+            p.label_or_name(),
             ServiceStatusItem {
                 id: p.name.clone(),
                 status: svc_status,
@@ -1525,11 +1529,11 @@ pub fn get_active_services() -> HashMap<String, ServiceStatusItem> {
 }
 
 trait PackageExt {
-    fn Label_or_name(&self) -> String;
+    fn label_or_name(&self) -> String;
 }
 
 impl PackageExt for Package {
-    fn Label_or_name(&self) -> String {
+    fn label_or_name(&self) -> String {
         if !self.label.is_empty() {
             self.label.clone()
         } else {
@@ -1550,11 +1554,15 @@ async fn dispatch_runner_systemctl_unix(action: &str, unit: &str) -> Option<Resu
     if !Path::new(&sock_path).exists() {
         return None;
     }
-    let mut stream =
-        match tokio::time::timeout(Duration::from_secs(5), UnixStream::connect(&sock_path)).await {
-            Ok(Ok(s)) => s,
-            _ => return None,
-        };
+    let mut stream = match tokio::time::timeout(
+        Duration::from_secs(5),
+        UnixStream::connect(&sock_path),
+    )
+    .await
+    {
+        Ok(Ok(s)) => s,
+        _ => return None,
+    };
 
     let body = serde_json::to_string(&af_models::SystemctlRequest {
         action: action.to_string(),
@@ -1566,14 +1574,10 @@ async fn dispatch_runner_systemctl_unix(action: &str, unit: &str) -> Option<Resu
         body.len(),
         body
     );
-    if tokio::time::timeout(Duration::from_secs(5), stream.write_all(req.as_bytes()))
+    tokio::time::timeout(Duration::from_secs(5), stream.write_all(req.as_bytes()))
         .await
         .ok()
-        .and_then(|r| r.ok())
-        .is_none()
-    {
-        return None;
-    }
+        .and_then(|res| res.ok())?;
 
     let mut resp = String::new();
     match tokio::time::timeout(RUNNER_SYSTEMCTL_TIMEOUT, stream.read_to_string(&mut resp)).await {

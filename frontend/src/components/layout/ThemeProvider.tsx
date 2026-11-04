@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect } from 'react';
 import { useSystemStore } from '@/store/useSystemStore';
 
 function quantizeRefreshRate(fps: number): number {
@@ -32,11 +32,8 @@ export default function ThemeProvider({ children }: { children: React.ReactNode 
         detectedTouchDevice,
         setDetectedTouchDevice,
     } = useSystemStore();
-    const [mounted, setMounted] = useState(false);
 
     useEffect(() => {
-        setMounted(true);
-
         // 1. Detect Touch / Coarse Pointer Capability
         const detectTouch = () => {
             if (typeof window === 'undefined') return false;
@@ -90,8 +87,6 @@ export default function ThemeProvider({ children }: { children: React.ReactNode 
     }, [setDetectedRefreshRate, setDetectedTouchDevice]);
 
     useEffect(() => {
-        if (!mounted) return;
-
         const root = document.documentElement;
         
         // Handle Theme
@@ -145,7 +140,6 @@ export default function ThemeProvider({ children }: { children: React.ReactNode 
         detectedRefreshRate,
         touchMode,
         detectedTouchDevice,
-        mounted,
     ]);
 
     // Transparent passthrough with zero redundant floating blur divs

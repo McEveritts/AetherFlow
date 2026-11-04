@@ -13,11 +13,13 @@ WorkingDirectory=/opt/AetherFlow/current
 
 # Creates /run/aetherflow owned by root:aetherflow (0750)
 RuntimeDirectory=aetherflow
-RuntimeDirectoryMode=0750
-RuntimeDirectoryPreserve=restart
+RuntimeDirectoryMode=1770
+RuntimeDirectoryPreserve=yes
 
-EnvironmentFile=-/etc/aetherflow/aetherflow.env
+Environment=DATA_DIR=/var/lib/aetherflow
 Environment=AETHERFLOW_RUNNER_SOCK=/run/aetherflow/runner.sock
+EnvironmentFile=-/etc/aetherflow/aetherflow.env
+EnvironmentFile=-/opt/AetherFlow/current/backend/.env
 
 ExecStart=/opt/AetherFlow/current/aetherflow-api runner
 

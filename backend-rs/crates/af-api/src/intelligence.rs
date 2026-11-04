@@ -85,7 +85,12 @@ mod audit_tests {
         std::os::unix::fs::symlink(&outside, root.join("escape")).unwrap();
         std::os::unix::fs::symlink(outside.join("secret.mp4"), root.join("linked.mp4")).unwrap();
         std::os::unix::fs::symlink(&root, root.join("nested/cycle")).unwrap();
-        assert_eq!(validate_mediaflow_directory(&root.join("escape"), &[root.clone()]).unwrap_err().0, StatusCode::FORBIDDEN);
+        assert_eq!(
+            validate_mediaflow_directory(&root.join("escape"), std::slice::from_ref(&root))
+                .unwrap_err()
+                .0,
+            StatusCode::FORBIDDEN
+        );
         let mut files = Vec::new();
         collect_mediaflow_files(&root, &root, &mut files);
         assert!(files.is_empty());
@@ -146,6 +151,108 @@ mod audit_tests {
         let rows: Vec<(String, String)> = stmt.query_map([2], |row| Ok((row.get(1)?, row.get(3)?)))
             .unwrap().collect::<rusqlite::Result<_>>().unwrap();
         assert_eq!(rows, vec![("event".to_string(), "".to_string()), ("update".to_string(), "channel stable".to_string())]);
+    }
+
+    #[test]
+    fn metrics_history_selects_latest_rows_in_chronological_order_and_supports_windows_and_downsample() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE metrics_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                cpu_avg REAL,
+                mem_used_gb REAL,
+                mem_total_gb REAL,
+                disk_read_bps REAL,
+                disk_write_bps REAL,
+                net_rx_bytes INTEGER,
+                net_tx_bytes INTEGER,
+                load_avg_1 REAL,
+                active_conns INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS idx_metrics_history_ts ON metrics_history(timestamp);
+            CREATE INDEX IF NOT EXISTS idx_metrics_history_ts_id ON metrics_history(timestamp DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_metrics_history_norm_ts_id ON metrics_history(replace(CAST(timestamp AS TEXT), 'T', ' ') DESC, id DESC);",
+        )
+        .unwrap();
+
+        let now = Utc::now();
+        for step_idx in 0..10i64 {
+            let point_time = now - Duration::minutes(10 - step_idx);
+            let ts = if step_idx % 2 == 1 {
+                point_time.format("%Y-%m-%dT%H:%M:%SZ").to_string()
+            } else {
+                point_time.format("%Y-%m-%d %H:%M:%S").to_string()
+            };
+            conn.execute(
+                "INSERT INTO metrics_history (timestamp, cpu_avg, mem_used_gb, mem_total_gb, disk_read_bps, disk_write_bps, net_rx_bytes, net_tx_bytes, load_avg_1, active_conns)
+                 VALUES (?1, ?2, 8.0, 32.0, 1024.0, 2048.0, ?3, ?4, 1.25, 10)",
+                params![ts, (step_idx as f64) * 10.0, step_idx * 1000, step_idx * 500],
+            )
+            .unwrap();
+        }
+
+        for (query_sql, param_count) in [
+            (METRICS_HISTORY_QUERY_SQL, 2usize),
+            (METRICS_PREDICTIONS_HISTORY_SQL, 1usize),
+        ] {
+            let explain_sql = format!("EXPLAIN QUERY PLAN {}", query_sql);
+            let mut explain_stmt = conn.prepare(&explain_sql).unwrap();
+            let plan_details: Vec<String> = if param_count == 2 {
+                explain_stmt
+                    .query_map(params!["1970-01-01 00:00:00", 100i64], |row| {
+                        row.get::<_, String>(3)
+                    })
+                    .unwrap()
+                    .collect::<rusqlite::Result<_>>()
+                    .unwrap()
+            } else {
+                explain_stmt
+                    .query_map(params!["1970-01-01 00:00:00"], |row| {
+                        row.get::<_, String>(3)
+                    })
+                    .unwrap()
+                    .collect::<rusqlite::Result<_>>()
+                    .unwrap()
+            };
+            assert!(
+                plan_details.iter().any(|detail| {
+                    detail.contains("SEARCH")
+                        && detail.contains("USING INDEX idx_metrics_history_norm_ts_id")
+                }),
+                "expected index search in query plan, got: {:?}",
+                plan_details
+            );
+            assert!(
+                !plan_details
+                    .iter()
+                    .any(|detail| detail.contains("TEMP B-TREE")),
+                "unexpected temp sort in query plan: {:?}",
+                plan_details
+            );
+        }
+
+        let mut query_params = HashMap::new();
+        query_params.insert("days".to_string(), "7".to_string());
+        query_params.insert("limit".to_string(), "4".to_string());
+        let rows = query_metrics_history_rows(&conn, &query_params);
+        assert_eq!(rows.len(), 4);
+        assert_eq!(rows[0]["cpu_avg"], 60.0);
+        assert_eq!(rows[1]["cpu_avg"], 70.0);
+        assert_eq!(rows[2]["cpu_avg"], 80.0);
+        assert_eq!(rows[3]["cpu_avg"], 90.0);
+        assert_eq!(rows[3]["net_rx_bytes"], 9000);
+        assert_eq!(rows[3]["net_tx_bytes"], 4500);
+        assert!(rows[3].get("net_down_bps").is_none());
+
+        let mut q_ds = HashMap::new();
+        q_ds.insert("window".to_string(), "1h".to_string());
+        q_ds.insert("downsample".to_string(), "true".to_string());
+        q_ds.insert("target_points".to_string(), "3".to_string());
+        let ds_rows = query_metrics_history_rows(&conn, &q_ds);
+        assert_eq!(ds_rows.len(), 3);
+        assert_eq!(ds_rows[0]["cpu_avg"], 0.0);
+        assert_eq!(ds_rows[2]["cpu_avg"], 90.0);
     }
 }
 
@@ -560,6 +667,7 @@ fn extract_proposed_action(ai_reply: &str, user_message: &str) -> Option<Propose
     None
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_chat_session(
     user: Option<AuthUser>,
     ip: &str,
@@ -1663,16 +1771,13 @@ async fn build_resource_predictions(invoke_ai: bool) -> serde_json::Value {
 
     #[derive(Clone)]
     struct HistPoint {
-        timestamp: String,
         cpu_avg: f64,
         mem_used_gb: f64,
         mem_total_gb: f64,
-        disk_read_bps: f64,
         disk_write_bps: f64,
         net_rx_bytes: i64,
         net_tx_bytes: i64,
         load_avg_1: f64,
-        active_conns: i64,
     }
 
     let mut history: Vec<HistPoint> = Vec::new();
@@ -1680,24 +1785,16 @@ async fn build_resource_predictions(invoke_ai: bool) -> serde_json::Value {
         let cutoff = (Utc::now() - Duration::days(30))
             .format("%Y-%m-%d %H:%M:%S")
             .to_string();
-        if let Ok(mut stmt) = conn.prepare(
-            "SELECT COALESCE(CAST(timestamp AS TEXT), ''), COALESCE(cpu_avg, 0), COALESCE(mem_used_gb, 0), COALESCE(mem_total_gb, 0), \
-             COALESCE(disk_read_bps, 0), COALESCE(disk_write_bps, 0), COALESCE(net_rx_bytes, 0), COALESCE(net_tx_bytes, 0), \
-             COALESCE(load_avg_1, 0), COALESCE(active_conns, 0) \
-             FROM metrics_history WHERE timestamp >= ?1 ORDER BY timestamp ASC LIMIT 2000",
-        ) {
-            if let Ok(rows) = stmt.query_map(params![cutoff], |r| {
+        if let Ok(mut stmt) = conn.prepare(METRICS_PREDICTIONS_HISTORY_SQL) {
+            if let Ok(rows) = stmt.query_map(params![cutoff], |row| {
                 Ok(HistPoint {
-                    timestamp: r.get(0)?,
-                    cpu_avg: r.get(1)?,
-                    mem_used_gb: r.get(2)?,
-                    mem_total_gb: r.get(3)?,
-                    disk_read_bps: r.get(4)?,
-                    disk_write_bps: r.get(5)?,
-                    net_rx_bytes: r.get(6)?,
-                    net_tx_bytes: r.get(7)?,
-                    load_avg_1: r.get(8)?,
-                    active_conns: r.get(9)?,
+                    cpu_avg: row.get(1)?,
+                    mem_used_gb: row.get(2)?,
+                    mem_total_gb: row.get(3)?,
+                    disk_write_bps: row.get(5)?,
+                    net_rx_bytes: row.get(6)?,
+                    net_tx_bytes: row.get(7)?,
+                    load_avg_1: row.get(8)?,
                 })
             }) {
                 for pt in rows.flatten() {
@@ -1705,6 +1802,7 @@ async fn build_resource_predictions(invoke_ai: bool) -> serde_json::Value {
                 }
             }
         }
+        history.reverse();
     }
 
     let mut cpu_vals = Vec::with_capacity(history.len().max(1));
@@ -1946,38 +2044,130 @@ pub async fn analyze_predictions() -> Response {
     Json(build_resource_predictions(true).await).into_response()
 }
 
-pub async fn get_metrics_history(Query(q): Query<HashMap<String, String>>) -> Response {
-    let days = q
-        .get("days")
+pub fn resolve_metrics_history_window_and_limit(q: &HashMap<String, String>) -> (Duration, i64, Option<usize>) {
+    let mut default_limit: i64 = 2000;
+    let window_dur = if let Some(win_raw) = q
+        .get("window")
+        .or_else(|| q.get("range"))
+        .or_else(|| q.get("timeWindow"))
+    {
+        let w = win_raw.trim().to_ascii_lowercase();
+        match w.as_str() {
+            "1m" => Duration::minutes(1),
+            "5m" => Duration::minutes(5),
+            "15m" => Duration::minutes(15),
+            "1h" => Duration::hours(1),
+            "6h" => Duration::hours(6),
+            "24h" | "1d" => {
+                default_limit = 2400;
+                Duration::hours(24)
+            }
+            "7d" => Duration::days(7),
+            "30d" => Duration::days(30),
+            "90d" => Duration::days(90),
+            _ => {
+                if let Some(num) = w.strip_suffix('m').and_then(|s| s.parse::<i64>().ok()) {
+                    Duration::minutes(num.clamp(1, 60 * 24 * 365))
+                } else if let Some(num) = w.strip_suffix('h').and_then(|s| s.parse::<i64>().ok()) {
+                    Duration::hours(num.clamp(1, 24 * 365))
+                } else if let Some(num) = w.strip_suffix('d').and_then(|s| s.parse::<i64>().ok()) {
+                    Duration::days(num.clamp(1, 365))
+                } else {
+                    Duration::days(90)
+                }
+            }
+        }
+    } else if let Some(mins) = q
+        .get("minutes")
         .and_then(|s| s.parse::<i64>().ok())
-        .filter(|&d| d > 0)
-        .unwrap_or(90);
-
-    let Ok(conn) = af_db::get_conn() else {
-        return Json(serde_json::json!([])).into_response();
+        .filter(|&m| m > 0)
+    {
+        Duration::minutes(mins.clamp(1, 60 * 24 * 365))
+    } else if let Some(hrs) = q
+        .get("hours")
+        .and_then(|s| s.parse::<i64>().ok())
+        .filter(|&h| h > 0)
+    {
+        if hrs <= 24 {
+            default_limit = 2400;
+        }
+        Duration::hours(hrs.clamp(1, 24 * 365))
+    } else {
+        let days = q
+            .get("days")
+            .and_then(|s| s.parse::<i64>().ok())
+            .filter(|&d| d > 0)
+            .unwrap_or(90)
+            .clamp(1, 365);
+        if days == 1 {
+            default_limit = 2400;
+        }
+        Duration::days(days)
     };
-    let cutoff = (Utc::now() - Duration::days(days))
+
+    let limit = q
+        .get("limit")
+        .or_else(|| q.get("max_points"))
+        .and_then(|s| s.parse::<i64>().ok())
+        .filter(|&l| l > 0)
+        .map(|l| l.clamp(1, 10_000))
+        .unwrap_or(default_limit);
+
+    let downsample_target = if q
+        .get("downsample")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+    {
+        let target = q
+            .get("target_points")
+            .or_else(|| q.get("downsample_points"))
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|&n| n >= 2)
+            .unwrap_or(360);
+        Some(target)
+    } else {
+        None
+    };
+
+    (window_dur, limit, downsample_target)
+}
+
+pub const METRICS_PREDICTIONS_HISTORY_SQL: &str = "SELECT COALESCE(CAST(timestamp AS TEXT), ''), COALESCE(cpu_avg, 0), COALESCE(mem_used_gb, 0), COALESCE(mem_total_gb, 0), \
+     COALESCE(disk_read_bps, 0), COALESCE(disk_write_bps, 0), COALESCE(net_rx_bytes, 0), COALESCE(net_tx_bytes, 0), \
+     COALESCE(load_avg_1, 0), COALESCE(active_conns, 0) \
+     FROM metrics_history WHERE replace(CAST(timestamp AS TEXT), 'T', ' ') >= ?1 \
+     ORDER BY replace(CAST(timestamp AS TEXT), 'T', ' ') DESC, id DESC LIMIT 2000";
+
+pub const METRICS_HISTORY_QUERY_SQL: &str = "SELECT id, COALESCE(CAST(timestamp AS TEXT), ''), COALESCE(cpu_avg, 0), COALESCE(mem_used_gb, 0), COALESCE(mem_total_gb, 0), \
+     COALESCE(disk_read_bps, 0), COALESCE(disk_write_bps, 0), COALESCE(net_rx_bytes, 0), COALESCE(net_tx_bytes, 0), \
+     COALESCE(load_avg_1, 0), COALESCE(active_conns, 0) \
+     FROM metrics_history WHERE replace(CAST(timestamp AS TEXT), 'T', ' ') >= ?1 \
+     ORDER BY replace(CAST(timestamp AS TEXT), 'T', ' ') DESC, id DESC LIMIT ?2";
+
+pub fn query_metrics_history_rows(
+    conn: &rusqlite::Connection,
+    query_params: &HashMap<String, String>,
+) -> Vec<serde_json::Value> {
+    let (window_dur, limit, downsample_target) =
+        resolve_metrics_history_window_and_limit(query_params);
+    let cutoff = (Utc::now() - window_dur)
         .format("%Y-%m-%d %H:%M:%S")
         .to_string();
+
     let mut snapshots = Vec::new();
-    if let Ok(mut stmt) = conn.prepare(
-        "SELECT id, COALESCE(CAST(timestamp AS TEXT), ''), COALESCE(cpu_avg, 0), COALESCE(mem_used_gb, 0), COALESCE(mem_total_gb, 0), \
-         COALESCE(disk_read_bps, 0), COALESCE(disk_write_bps, 0), COALESCE(net_rx_bytes, 0), COALESCE(net_tx_bytes, 0), \
-         COALESCE(load_avg_1, 0), COALESCE(active_conns, 0) \
-         FROM metrics_history WHERE replace(CAST(timestamp AS TEXT), 'T', ' ') >= ?1 ORDER BY timestamp ASC LIMIT 2000",
-    ) {
-        if let Ok(rows) = stmt.query_map(params![cutoff], |r| {
-            let id: i64 = r.get(0)?;
-            let timestamp: String = r.get(1)?;
-            let cpu_avg: f64 = r.get(2)?;
-            let mem_used_gb: f64 = r.get(3)?;
-            let mem_total_gb: f64 = r.get(4)?;
-            let disk_read_bps: f64 = r.get(5)?;
-            let disk_write_bps: f64 = r.get(6)?;
-            let net_rx_bytes: i64 = r.get(7)?;
-            let net_tx_bytes: i64 = r.get(8)?;
-            let load_avg_1: f64 = r.get(9)?;
-            let active_conns: i64 = r.get(10)?;
+    if let Ok(mut stmt) = conn.prepare(METRICS_HISTORY_QUERY_SQL) {
+        if let Ok(rows) = stmt.query_map(params![cutoff, limit], |row| {
+            let id: i64 = row.get(0)?;
+            let timestamp: String = row.get(1)?;
+            let cpu_avg: f64 = row.get(2)?;
+            let mem_used_gb: f64 = row.get(3)?;
+            let mem_total_gb: f64 = row.get(4)?;
+            let disk_read_bps: f64 = row.get(5)?;
+            let disk_write_bps: f64 = row.get(6)?;
+            let net_rx_bytes: i64 = row.get(7)?;
+            let net_tx_bytes: i64 = row.get(8)?;
+            let load_avg_1: f64 = row.get(9)?;
+            let active_conns: i64 = row.get(10)?;
             Ok(serde_json::json!({
                 "id": id,
                 "timestamp": timestamp,
@@ -2000,7 +2190,39 @@ pub async fn get_metrics_history(Query(q): Query<HashMap<String, String>>) -> Re
             }
         }
     }
+
+    // Reverse newest-first rows into chronological ASC order (`oldest -> newest` within the latest bounded slice)
+    snapshots.reverse();
+
+    if let Some(target_pts) = downsample_target {
+        if snapshots.len() > target_pts && target_pts >= 2 {
+            let total = snapshots.len();
+            let mut sampled = Vec::with_capacity(target_pts);
+            for i in 0..target_pts {
+                let idx = if i + 1 == target_pts {
+                    total - 1
+                } else {
+                    (i * (total - 1)) / (target_pts - 1)
+                };
+                sampled.push(snapshots[idx].clone());
+            }
+            return sampled;
+        }
+    }
+
+    snapshots
+}
+
+pub async fn get_metrics_history(Query(q): Query<HashMap<String, String>>) -> Response {
+    let Ok(conn) = af_db::get_conn() else {
+        return Json(serde_json::json!([])).into_response();
+    };
+    let snapshots = query_metrics_history_rows(&conn, &q);
     Json(snapshots).into_response()
+}
+
+pub async fn get_auth_metrics_history(Query(q): Query<HashMap<String, String>>) -> Response {
+    get_metrics_history(Query(q)).await
 }
 
 pub async fn get_mediaflow_queue() -> Response {

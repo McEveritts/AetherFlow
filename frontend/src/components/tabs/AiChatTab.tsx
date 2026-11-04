@@ -56,8 +56,8 @@ export default function AiChatTab() {
     ]);
     const [input, setInput] = useState('');
     const [isTyping, setIsTyping] = useState(false);
-    const [selectedProvider, setSelectedProvider] = useState<AIProviderID>('gemini');
-    const [selectedModel, setSelectedModel] = useState('gemini-4-argon');
+    const [manualProvider, setManualProvider] = useState<AIProviderID | null>(null);
+    const [manualModel, setManualModel] = useState<string | null>(null);
     const [showModelPicker, setShowModelPicker] = useState(false);
     const [supportMode, setSupportMode] = useState(false);
     const [contextMode, setContextMode] = useState('full');
@@ -66,24 +66,33 @@ export default function AiChatTab() {
     const scrollRef = useRef<HTMLDivElement>(null);
     const modelPickerRef = useRef<HTMLDivElement>(null);
     const contextPickerRef = useRef<HTMLDivElement>(null);
-    const userSelectedModelRef = useRef(false);
 
     const { data: settingsData } = useSWR<Record<string, string>>('/api/v1/auth/settings');
 
-    // Sync default model & provider from saved user settings unless manually overridden in this session
-    useEffect(() => {
-        if (!settingsData || userSelectedModelRef.current) return;
-        if (settingsData.aiModel && ALL_MODEL_IDS.includes(settingsData.aiModel)) {
-            setSelectedModel(settingsData.aiModel);
-            setSelectedProvider(resolveProviderForModel(settingsData.aiModel));
-        } else if (settingsData.aiProvider && AI_PROVIDERS.some(p => p.id === settingsData.aiProvider)) {
-            const prov = settingsData.aiProvider as AIProviderID;
-            setSelectedProvider(prov);
-            if (AI_MODELS[prov]?.[0]?.id) {
-                setSelectedModel(AI_MODELS[prov][0].id);
-            }
+    const defaultProviderAndModel = (() => {
+        if (settingsData?.aiModel && ALL_MODEL_IDS.includes(settingsData.aiModel)) {
+            return {
+                provider: resolveProviderForModel(settingsData.aiModel),
+                model: settingsData.aiModel,
+            };
         }
-    }, [settingsData]);
+        if (
+            settingsData?.aiProvider &&
+            AI_PROVIDERS.some((providerItem) => providerItem.id === settingsData.aiProvider)
+        ) {
+            const configuredProvider = settingsData.aiProvider as AIProviderID;
+            return {
+                provider: configuredProvider,
+                model: AI_MODELS[configuredProvider]?.[0]?.id || 'gemini-4-argon',
+            };
+        }
+        return {
+            provider: 'gemini' as AIProviderID,
+            model: 'gemini-4-argon',
+        };
+    })();
+    const selectedProvider: AIProviderID = manualProvider ?? defaultProviderAndModel.provider;
+    const selectedModel: string = manualModel ?? defaultProviderAndModel.model;
 
     useEffect(() => {
         if (scrollRef.current) {
@@ -276,16 +285,15 @@ export default function AiChatTab() {
                                     <select
                                         className="obs-touch-target-standard bg-slate-800 text-xs text-slate-200 font-semibold rounded-lg border border-white/10 px-2.5 py-1 outline-none focus:border-indigo-500/50 cursor-pointer"
                                         value={selectedProvider}
-                                        onChange={(e) => {
-                                            const newProvider = e.target.value as AIProviderID;
-                                            userSelectedModelRef.current = true;
-                                            setSelectedProvider(newProvider);
-                                            setSelectedModel(AI_MODELS[newProvider]?.[0]?.id || '');
+                                        onChange={(event) => {
+                                            const newProvider = event.target.value as AIProviderID;
+                                            setManualProvider(newProvider);
+                                            setManualModel(AI_MODELS[newProvider]?.[0]?.id || '');
                                         }}
-                                        onClick={(e) => e.stopPropagation()}
+                                        onClick={(event) => event.stopPropagation()}
                                     >
-                                        {AI_PROVIDERS.map((p) => (
-                                            <option key={p.id} value={p.id}>{p.name}</option>
+                                        {AI_PROVIDERS.map((providerOption) => (
+                                            <option key={providerOption.id} value={providerOption.id}>{providerOption.name}</option>
                                         ))}
                                     </select>
                                 </div>
@@ -295,8 +303,8 @@ export default function AiChatTab() {
                                             key={model.id}
                                             type="button"
                                             onClick={() => {
-                                                userSelectedModelRef.current = true;
-                                                setSelectedModel(model.id);
+                                                setManualProvider(selectedProvider);
+                                                setManualModel(model.id);
                                                 setShowModelPicker(false);
                                             }}
                                             className={`obs-touch-target-standard w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-sm transition-all cursor-pointer ${selectedModel === model.id

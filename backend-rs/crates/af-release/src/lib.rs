@@ -3,7 +3,7 @@
 //! Incrementally replaces `deploy/release-manager.sh` with a strongly-typed, lock-serialized,
 //! crash-recoverable Rust library and administrative interface while preserving:
 //! - Stage 0: FHS state & secret layout verification and 4-tier live SQLite path resolution (`resolve_db_path`).
-//! - Stage 1: Release tag resolution (`stable`, `nightly`, `experimental`), SHA-256 manifest verification,
+//! - Stage 1: Release tag resolution (`stable`, `nightly`), SHA-256 manifest verification,
 //!   Zip-Slip-safe archive extraction, and `--dry-run --offline` simulation.
 //! - Stage 1.5: WAL-safe online SQLite backups (`rusqlite::backup::Backup` opened read-only so hot WALs are never checkpointed),
 //!   `PRAGMA integrity_check` verification, and `MANIFEST.sha256` generation.
@@ -27,8 +27,11 @@ pub mod snapshot;
 pub mod symlink;
 
 pub use admin::{
-    execute_self_update_sync, is_unsupported_error, resolve_release_manager_conf,
-    run_cli_from_args, validate_self_update_request, ValidatedSelfUpdateRequest,
+    ensure_interoperable_maintenance_lock_file, execute_self_update_sync, is_unsupported_error,
+    resolve_maintenance_lock_path_for_config, resolve_release_manager_conf,
+    resolve_release_manager_conf_for_root, resolve_self_update_jobs_dir_for_config,
+    resolve_self_update_jobs_dir_from_process_env, run_cli_from_args, validate_self_update_request,
+    ValidatedSelfUpdateRequest,
 };
 pub use artifact::{
     compute_file_sha256, extract_and_validate_release_archive, parse_sha256_manifest,
@@ -38,8 +41,9 @@ pub use artifact::{
     ArtifactProvider, GitHubReleaseItem, GithubHttpArtifactProvider,
 };
 pub use config::{
-    parse_conf_file, parse_conf_str, read_env_file_value, read_env_str_value,
-    read_systemd_environment_value, resolve_db_path, validate_no_parent_traversal, DbPathSource,
+    decode_quoted_or_raw_conf_value, escape_conf_value, parse_conf_file, parse_conf_str,
+    read_env_file_value, read_env_str_value, read_systemd_environment_value, resolve_db_path,
+    try_parse_conf_entries, try_resolve_db_path, validate_no_parent_traversal, DbPathSource,
     ReleaseChannel, ReleaseCommand, ReleaseConfig, ReleaseOptions, ResolvedDbPath,
 };
 pub use engine::{
@@ -55,7 +59,8 @@ pub use fs_security::{
 };
 pub use health::{
     install_packaged_unit_if_missing, is_healthy_status, parse_endpoint_socket_addr,
-    parse_health_status, poll_readiness_probe, wait_for_listener_stopped, HealthCheckAttempt,
+    parse_health_status, poll_readiness_probe, sync_cli_entrypoints,
+    verify_isolated_systemd_lifecycle_authorized, wait_for_listener_stopped, HealthCheckAttempt,
     HealthProber, LifecycleController, NoopLifecycleController, ReqwestHealthProber,
     SystemdLifecycleController,
 };
@@ -353,7 +358,7 @@ SYSTEMD_UNITS_SRC="${SYSTEMD_UNITS_SRC:-${SCRIPT_DIR}/systemd}"
         env_map.insert("MAX_RELEASES".to_string(), "5".to_string());
 
         let cfg = ReleaseConfig::load_with_env(Some(&conf_file), &env_map).unwrap();
-        assert_eq!(cfg.release_channel, ReleaseChannel::Experimental);
+        assert_eq!(cfg.release_channel, ReleaseChannel::Nightly);
         assert_eq!(cfg.max_releases, 5);
         assert_eq!(
             cfg.releases_dir,
@@ -383,14 +388,13 @@ AETHERFLOW_DB_PATH=fallback.sqlite
     fn test_resolve_db_path_four_tier_precedence() {
         let sb = TempSandbox::new("db-precedence");
         let mut cfg = ReleaseConfig::for_root(sb.path());
+        cfg.isolated_root = None;
         fs::create_dir_all(&cfg.env_dir).unwrap();
 
-        // Tier 4: DATA_DIR default when nothing else is set
         let r4 = resolve_db_path(&cfg, None);
         assert_eq!(r4.path, cfg.host_data_dir.join("aetherflow.sqlite"));
         assert_eq!(r4.source, DbPathSource::DataDirDefault);
 
-        // Tier 3: systemd Environment= blob
         let unit_blob = "Environment=GIN_MODE=release \"DB_PATH=/srv/systemd/af.sqlite\"\n";
         let r3 = resolve_db_path(&cfg, Some(unit_blob));
         assert_eq!(r3.path, PathBuf::from("/srv/systemd/af.sqlite"));
@@ -402,7 +406,6 @@ AETHERFLOW_DB_PATH=fallback.sqlite
             }
         );
 
-        // Tier 2: ENV_FILE overrides systemd unit
         fs::write(
             &cfg.host_env_file,
             "AETHERFLOW_DB_PATH=/opt/AetherFlow/backend/data/aetherflow.sqlite\n",
@@ -421,7 +424,6 @@ AETHERFLOW_DB_PATH=fallback.sqlite
             }
         );
 
-        // DB_PATH in ENV_FILE wins over AETHERFLOW_DB_PATH in ENV_FILE
         fs::write(
             &cfg.host_env_file,
             "AETHERFLOW_DB_PATH=/opt/secondary.sqlite\nDB_PATH=/opt/primary.sqlite\n",
@@ -430,7 +432,6 @@ AETHERFLOW_DB_PATH=fallback.sqlite
         let r2b = resolve_db_path(&cfg, Some(unit_blob));
         assert_eq!(r2b.path, PathBuf::from("/opt/primary.sqlite"));
 
-        // Tier 1: AF_DB_PATH override wins over everything
         cfg.af_db_path_override = Some(PathBuf::from("/override/af.sqlite"));
         let r1 = resolve_db_path(&cfg, Some(unit_blob));
         assert_eq!(r1.path, PathBuf::from("/override/af.sqlite"));
@@ -455,18 +456,18 @@ AETHERFLOW_DB_PATH=fallback.sqlite
             "v4.0.1-nightly.20261031"
         );
         assert_eq!(
-            select_release_tag_from_json(ReleaseChannel::Experimental, sample_json).unwrap(),
-            "experimental"
+            select_release_tag_from_json("experimental".parse::<ReleaseChannel>().unwrap(), sample_json).unwrap(),
+            "v4.0.1-nightly.20261031"
         );
 
-        // Fallback behavior when JSON is empty: nightly -> "nightly", experimental -> "experimental", stable -> Err
+        // Fallback behavior when JSON is empty: nightly and legacy experimental -> "nightly", stable -> Err
         assert_eq!(
             select_release_tag_from_json(ReleaseChannel::Nightly, "").unwrap(),
             "nightly"
         );
         assert_eq!(
-            select_release_tag_from_json(ReleaseChannel::Experimental, "").unwrap(),
-            "experimental"
+            select_release_tag_from_json("experimental".parse::<ReleaseChannel>().unwrap(), "").unwrap(),
+            "nightly"
         );
         assert!(select_release_tag_from_json(ReleaseChannel::Stable, "").is_err());
     }
@@ -760,7 +761,7 @@ AETHERFLOW_DB_PATH=fallback.sqlite
     #[test]
     fn test_regression_legacy_completed_manifest_requires_valid_completion_time() {
         let sandbox = TempSandbox::new("invalid-legacy-completion");
-        let state = RecoveryState::new(ReleaseCommand::Deploy, ReleaseChannel::Experimental, false);
+        let state = RecoveryState::new(ReleaseCommand::Deploy, ReleaseChannel::Nightly, false);
         for timestamp in [
             None,
             Some(serde_json::json!(null)),
@@ -926,7 +927,7 @@ AETHERFLOW_DB_PATH=fallback.sqlite
 
         assert!(report.dry_run);
         assert!(report.offline);
-        assert_eq!(report.channel, ReleaseChannel::Experimental);
+        assert_eq!(report.channel, ReleaseChannel::Nightly);
         assert!(report.release_dir.starts_with(&cfg.dry_run_root));
         assert!(report.current_link.starts_with(&cfg.dry_run_root));
         assert!(!cfg.current_link.exists(), "production current_link must remain untouched");
@@ -970,7 +971,7 @@ AETHERFLOW_DB_PATH=fallback.sqlite
             channel: "experimental".to_string(),
         };
         let v_exp = validate_self_update_request(&req_exp).unwrap();
-        assert_eq!(v_exp.channel, ReleaseChannel::Experimental);
+        assert_eq!(v_exp.channel, ReleaseChannel::Nightly);
 
         // Invalid command / channel preserve exact runner error strings
         let bad_cmd = SelfUpdateRequest {
@@ -1082,6 +1083,74 @@ AETHERFLOW_DB_PATH=fallback.sqlite
             )
             .unwrap_err();
             assert!(matches!(err_anc, ReleaseError::PathValidation { .. }));
+        }
+    }
+
+    #[test]
+    fn test_rollback_database_failure_remains_failed_without_readmitting_writers() {
+        for fail_stop_services in [false, true] {
+            let sandbox = TempSandbox::new("rollback-recovery-failure");
+            let config = ReleaseConfig::for_root(sandbox.path());
+            let live_db = config.host_data_dir.join(&config.sqlite_db);
+            seed_valid_sqlite_db(&live_db, "protected-rollback-state");
+            let previous_release = config.releases_dir.join("1700000001");
+            let candidate_release = config.releases_dir.join("1700000002");
+            fs::create_dir_all(&previous_release).unwrap();
+            fs::create_dir_all(&candidate_release).unwrap();
+            let resolved = ResolvedDbPath {
+                path: live_db.clone(),
+                source: DbPathSource::DataDirDefault,
+            };
+            create_state_snapshot(&config, &resolved, &previous_release, false).unwrap();
+            fs::write(
+                previous_release.join("data-snapshot/MANIFEST.sha256"),
+                format!("{}  {}.bak\n", "0".repeat(64), config.sqlite_db),
+            )
+            .unwrap();
+            fs::write(&live_db, b"CORRUPT DATABASE MUST REMAIN UNMODIFIED").unwrap();
+            let wal_path = PathBuf::from(format!("{}-wal", live_db.display()));
+            fs::write(&wal_path, b"PRESERVED WAL SENTINEL").unwrap();
+            let shm_path = PathBuf::from(format!("{}-shm", live_db.display()));
+            fs::write(&shm_path, b"PRESERVED SHM SENTINEL").unwrap();
+            fs::write(
+                config.releases_dir.join(".previous_release"),
+                previous_release.to_string_lossy().as_bytes(),
+            )
+            .unwrap();
+            atomic_replace_symlink(&config.current_link, &candidate_release, "failed-rollback")
+                .unwrap();
+            let lifecycle = MockLifecycle {
+                fail_stop_services,
+                ..MockLifecycle::default()
+            };
+            let provider = MockArtifactProvider {
+                resolved_tag: Err("rollback must not fetch a release".to_string()),
+                archive_source: PathBuf::new(),
+                manifest_content: String::new(),
+            };
+            let engine = ReleaseEngine::new(
+                config.clone(), provider, lifecycle.clone(), MockHealthProber::new(vec![]),
+            );
+            let options = ReleaseOptions {
+                command: ReleaseCommand::Rollback,
+                ..ReleaseOptions::default()
+            };
+            let error = engine.execute(&options).unwrap_err();
+            assert_eq!(error.exit_code(), ExitCode::RollbackFailed);
+            assert!(error.to_string().contains("database recovery failed"));
+            let calls = lifecycle.recorded_calls();
+            assert!(calls.iter().any(|call| call.starts_with("stop_db_services:")));
+            assert!(!calls.iter().any(|call| call == "restart_units"));
+            let recovery = RecoveryState::load(&config.releases_dir).unwrap().unwrap();
+            assert_eq!(recovery.phase, ReleasePhase::Failed);
+            assert!(recovery.last_error.unwrap().contains("database recovery failed"));
+            assert_eq!(fs::read(&live_db).unwrap(), b"CORRUPT DATABASE MUST REMAIN UNMODIFIED");
+            assert_eq!(fs::read(&wal_path).unwrap(), b"PRESERVED WAL SENTINEL");
+            assert_eq!(fs::read(&shm_path).unwrap(), b"PRESERVED SHM SENTINEL");
+            assert!(!fs::read_to_string(&config.log_file).unwrap().contains("ROLLBACK COMPLETE"));
+            if fail_stop_services {
+                assert!(error.to_string().contains("writer quiescence also failed"));
+            }
         }
     }
 
@@ -1413,10 +1482,9 @@ AETHERFLOW_DB_PATH=fallback.sqlite
             select_release_tag_from_json(ReleaseChannel::Nightly, payload).unwrap(),
             "v3.3.0-nightly.1"
         );
-        // Experimental must select v4.0.0-experimental
         assert_eq!(
-            select_release_tag_from_json(ReleaseChannel::Experimental, payload).unwrap(),
-            "v4.0.0-experimental"
+            select_release_tag_from_json("experimental".parse::<ReleaseChannel>().unwrap(), payload).unwrap(),
+            "v3.3.0-nightly.1"
         );
     }
 
@@ -1449,6 +1517,81 @@ AETHERFLOW_DB_PATH=fallback.sqlite
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn test_regression_conf_serialization_roundtrip_and_strict_rejection() {
+        let sandbox = TempSandbox::new("conf-roundtrip");
+        let mut cfg = ReleaseConfig::for_root(sandbox.path());
+        cfg.git_branch = "feat/quote\"backslash\\dollar$tick`tab\t".to_string();
+        let conf_path = sandbox.path().join("serialized.conf");
+        cfg.write_protected_config_file(&conf_path).unwrap();
+
+        let parsed = parse_conf_file(&conf_path).unwrap();
+        assert_eq!(
+            parsed.get("GIT_BRANCH").map(|val| val.as_str()),
+            Some("feat/quote\"backslash\\dollar$tick`tab\t")
+        );
+
+        let bad_conf = sandbox.path().join("bad-unterminated.conf");
+        fs::write(&bad_conf, "RELEASES_DIR=\"/unterminated\n").unwrap();
+        assert!(parse_conf_file(&bad_conf).is_err());
+
+        let bad_sub = sandbox.path().join("bad-cmdsub.conf");
+        fs::write(&bad_sub, "RELEASES_DIR=\"$(id)\"\n").unwrap();
+        assert!(parse_conf_file(&bad_sub).is_err());
+    }
+
+    #[test]
+    fn test_regression_isolated_root_db_and_systemd_and_cli_containment() {
+        let sandbox = TempSandbox::new("isolated-containment");
+        let mut cfg = ReleaseConfig::for_root(sandbox.path());
+        fs::create_dir_all(&cfg.env_dir).unwrap();
+
+        let host_blob = "Environment=\"DB_PATH=/var/lib/aetherflow/aetherflow.sqlite\"\n";
+        let resolved_default = try_resolve_db_path(&cfg, Some(host_blob)).unwrap();
+        assert_eq!(
+            resolved_default.path,
+            cfg.host_data_dir.join("aetherflow.sqlite")
+        );
+        assert_eq!(resolved_default.source, DbPathSource::DataDirDefault);
+
+        fs::write(&cfg.host_env_file, "DB_PATH=/var/lib/aetherflow/outside.sqlite\n").unwrap();
+        assert!(try_resolve_db_path(&cfg, None).is_err());
+
+        let inside_a = sandbox.path().join("var/lib/aetherflow/a.sqlite");
+        let inside_b = sandbox.path().join("var/lib/aetherflow/b.sqlite");
+        fs::write(
+            &cfg.host_env_file,
+            format!(
+                "DB_PATH={}\nAETHERFLOW_DB_PATH={}\n",
+                inside_a.display(),
+                inside_b.display()
+            ),
+        )
+        .unwrap();
+        assert!(try_resolve_db_path(&cfg, None).is_err());
+
+        fs::write(&cfg.host_env_file, format!("DB_PATH={}\n", inside_a.display())).unwrap();
+        let resolved_inside = try_resolve_db_path(&cfg, None).unwrap();
+        assert_eq!(resolved_inside.path, inside_a);
+
+        let lock_path = resolve_maintenance_lock_path_for_config(&cfg).unwrap();
+        assert_eq!(
+            lock_path,
+            sandbox.path().join("var/lib/aetherflow/.snapshot.lock")
+        );
+
+        let jobs_dir = resolve_self_update_jobs_dir_for_config(&cfg).unwrap();
+        assert_eq!(
+            jobs_dir,
+            sandbox.path().join("var/lib/aetherflow/.self-update-jobs")
+        );
+
+        assert!(verify_isolated_systemd_lifecycle_authorized(&cfg).is_err());
+
+        cfg.cli_bin_dir = PathBuf::from("/usr/local/bin");
+        assert!(sync_cli_entrypoints(&cfg, "100").is_err());
     }
 
     #[cfg(unix)]
@@ -1521,5 +1664,32 @@ AETHERFLOW_DB_PATH=fallback.sqlite
                 & 0o777,
             0o644
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_regression_create_dir_all_no_symlinks_preserves_existing_parent_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let sandbox = TempSandbox::new("preserve-parent-mode");
+        let sticky_parent = sandbox.path().join("sticky-tmp");
+        fs::create_dir_all(&sticky_parent).unwrap();
+        fs::set_permissions(&sticky_parent, fs::Permissions::from_mode(0o1777)).unwrap();
+
+        let child_dir = sticky_parent.join("nested-private");
+        create_dir_all_no_symlinks(&child_dir, 0o750).unwrap();
+
+        let parent_mode = fs::symlink_metadata(&sticky_parent)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777;
+        assert_eq!(parent_mode, 0o1777);
+
+        let child_mode = fs::symlink_metadata(&child_dir)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(child_mode, 0o750);
     }
 }

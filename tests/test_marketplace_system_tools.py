@@ -87,6 +87,9 @@ resolve_master_user() { echo admin; }
     def test_release_swap_syncs_existing_legacy_packages_and_shared_helpers(self):
         source = (ROOT / "deploy/release-manager.sh").read_text()
         functions = source[source.index("sync_legacy_package_paths() {"):source.index("\n###############################################################################\n# STAGE 3")]
+        validator_start = source.index("validate_path_within_isolated_root() {")
+        validator_end = source.index("\n}\n", validator_start) + 3
+        functions = source[validator_start:validator_end] + "\n" + functions
         self.file("releases/new/packages/package/install/installpackage-dispatcharr", "new-installer")
         self.file("releases/new/packages/common.sh", "new-common")
         self.file("releases/old/packages/package/install/installpackage-dispatcharr", "old-installer")
@@ -103,6 +106,7 @@ resolve_master_user() { echo admin; }
         environment = {
             "DRY_RUN": "false", "CURRENT_LINK": str(current), "RELEASE_DIR": str(self.root / "releases/new"),
             "RELEASES_DIR": str(self.root / "releases"), "EPOCH": "1",
+            "EFFECTIVE_RELEASE_ROOT": str(self.root), "DRY_RUN_ROOT": str(self.root / "dry-run"),
             "LEGACY_OPT_ROOT": str(self.root / "legacy-opt"), "LEGACY_BIN_ROOT": str(self.root / "legacy-bin"),
         }
         for release, expected in (("new", "new"), ("old", "old")):

@@ -62,14 +62,14 @@ Preserves supported non-interactive subcommands of `packages/system/af`. The leg
 af install <pkg1> [pkg2...] [--port <port>]
 af remove <pkg1> [pkg2...]
 af list [--installed]
-af update [pkg] [--channel <stable|nightly|experimental>]
-af upgrade [--channel <stable|nightly|experimental>]
+af update [pkg] [--channel <stable|nightly>]
+af upgrade [--channel <stable|nightly>]
 
 # Structured subcommands:
 af package install <pkg1> [pkg2...] [--port <port>]
 af package remove <pkg1> [pkg2...]
-af package update [pkg] [--channel <stable|nightly|experimental>]
-af package upgrade [--channel <stable|nightly|experimental>]
+af package update [pkg] [--channel <stable|nightly>]
+af package upgrade [--channel <stable|nightly>]
 af package list [--installed]
 af package info <pkg>
 af package cancel <pkg>
@@ -112,8 +112,8 @@ af sandbox render <package> [--user <username>]
 
 ```bash
 af release status [--config <path>]
-af release deploy [--channel <stable|nightly|experimental>] [--local] [--offline] [--from-source] [--keep-releases <n>] [--config <path>]
-af release rollback [--channel <stable|nightly|experimental>] [--local] [--config <path>]
+af release deploy [--channel <stable|nightly>] [--local] [--offline] [--from-source] [--keep-releases <n>] [--config <path>]
+af release rollback [--channel <stable|nightly>] [--local] [--config <path>]
 af release cleanup [--keep-releases <n>] [--config <path>]
 af release migrate-systemd [--config <path>]
 ```
