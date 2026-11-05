@@ -179,4 +179,89 @@ describe("fetcher", () => {
       expect(fetchMock).not.toHaveBeenCalled();
     });
   });
+
+  describe("OPUS-005: credential verification failures (403 INVALID_CURRENT_PASSWORD / INVALID_2FA_CODE)", () => {
+    it("does not call refresh, does not set af_logout_sync, and does not dispatch af:session-expired on 403 INVALID_CURRENT_PASSWORD", async () => {
+      document.cookie = "csrf_token=valid-csrf-token; path=/";
+      const initialSync = "initial-sync-marker";
+      window.localStorage.setItem("af_logout_sync", initialSync);
+      const expiredListener = jest.fn();
+      window.addEventListener("af:session-expired", expiredListener);
+
+      const fetchMock = jest.spyOn(global, "fetch").mockResolvedValue({
+        ok: false,
+        status: 403,
+        statusText: "Forbidden",
+        json: async () => ({
+          code: "INVALID_CURRENT_PASSWORD",
+          message: "Current password verification failed",
+        }),
+      } as Response);
+
+      const res = await apiFetch("/api/v1/auth/profile/password", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ current_password: "wrong", new_password: "new-password-123" }),
+      });
+
+      window.removeEventListener("af:session-expired", expiredListener);
+
+      expect(res.status).toBe(403);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(fetchMock.mock.calls.filter(([url]) => url === "/api/v1/auth/refresh")).toHaveLength(0);
+      expect(expiredListener).not.toHaveBeenCalled();
+      expect(window.localStorage.getItem("af_logout_sync")).toBe(initialSync);
+    });
+
+    it("does not call refresh, does not set af_logout_sync, and does not dispatch af:session-expired on 403 INVALID_2FA_CODE", async () => {
+      document.cookie = "csrf_token=valid-csrf-token; path=/";
+      const initialSync = "initial-sync-marker";
+      window.localStorage.setItem("af_logout_sync", initialSync);
+      const expiredListener = jest.fn();
+      window.addEventListener("af:session-expired", expiredListener);
+
+      const fetchMock = jest.spyOn(global, "fetch").mockResolvedValue({
+        ok: false,
+        status: 403,
+        statusText: "Forbidden",
+        json: async () => ({
+          code: "INVALID_2FA_CODE",
+          message: "The provided 2FA code is invalid",
+        }),
+      } as Response);
+
+      const res = await apiFetch("/api/v1/auth/user/2fa/verify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code: "000000" }),
+      });
+
+      window.removeEventListener("af:session-expired", expiredListener);
+
+      expect(res.status).toBe(403);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(fetchMock.mock.calls.filter(([url]) => url === "/api/v1/auth/refresh")).toHaveLength(0);
+      expect(expiredListener).not.toHaveBeenCalled();
+      expect(window.localStorage.getItem("af_logout_sync")).toBe(initialSync);
+    });
+
+    it("parses 403 APIError with code and verifies isSessionError is false", async () => {
+      jest.spyOn(global, "fetch").mockResolvedValue({
+        ok: false,
+        status: 403,
+        statusText: "Forbidden",
+        json: async () => ({
+          code: "INVALID_CURRENT_PASSWORD",
+          message: "Incorrect password",
+        }),
+      } as Response);
+
+      await expect(fetcher("/api/v1/auth/profile/password")).rejects.toMatchObject({
+        name: "APIError",
+        status: 403,
+        code: "INVALID_CURRENT_PASSWORD",
+        isSessionError: false,
+      });
+    });
+  });
 });

@@ -125,7 +125,7 @@ export default function ProfileTab() {
                 setNewPassword('');
                 setConfirmPassword('');
             } else {
-                setPasswordError(data.error || 'Password update failed');
+                setPasswordError(data.message || data.error || (data.code === 'INVALID_CURRENT_PASSWORD' ? 'Current password is incorrect.' : 'Password update failed'));
             }
         } catch {
             setPasswordError('Network error while updating password');
@@ -136,18 +136,20 @@ export default function ProfileTab() {
 
     const handleUpdate = async (e: React.FormEvent) => {
         e.preventDefault();
+        const submittedEmail = email;
         setIsSaving(true);
 
         try {
             const res = await apiFetch('/api/v1/auth/profile', {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ email })
+                body: JSON.stringify({ email: submittedEmail })
             });
 
             const data = await res.json();
             if (res.ok) {
                 await refreshSession();
+                setEmailDraft(current => current === submittedEmail ? null : current);
                 addToast('Profile updated successfully.', 'success');
             } else {
                 addToast(data.error || 'Profile state mutation rejected.', 'error');

@@ -5,13 +5,12 @@ use axum::extract::{Extension, Path};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
 use chrono::Utc;
-use data_encoding::BASE32_NOPAD;
 use once_cell::sync::Lazy;
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Mutex;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Request & Response Payloads
@@ -82,23 +81,30 @@ pub struct StoredChannel {
 // 1. 2FA Recovery Code Regeneration (`POST /user/2fa/recovery/regenerate`)
 // ─────────────────────────────────────────────────────────────────────────────
 
-fn verify_totp_code_local(secret_b32: &str, code: &str) -> bool {
-    let clean = secret_b32.trim().to_uppercase();
-    let Ok(secret_bytes) = BASE32_NOPAD.decode(clean.as_bytes()) else {
-        return false;
-    };
-    let now_secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    for offset in [0i64, -30i64, 30i64] {
-        let ts = (now_secs as i64 + offset).max(0) as u64;
-        let expected = totp_lite::totp_custom::<totp_lite::Sha1>(30, 6, &secret_bytes, ts);
-        if expected == code.trim() {
-            return true;
-        }
+fn replace_verified_recovery_codes(
+    conn: &rusqlite::Connection,
+    user_id: i64,
+    encrypted_secret: &str,
+    password_hash: &str,
+    code: &str,
+    password_verified: bool,
+) -> anyhow::Result<Option<Vec<String>>> {
+    let transaction = conn.unchecked_transaction()?;
+    let current: (String, bool, String) = transaction.query_row(
+        "SELECT COALESCE(totp_secret, ''), COALESCE(totp_enabled, 0), COALESCE(password_hash, '') FROM users WHERE id = ?1",
+        params![user_id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+    )?;
+    if !current.1 || current.0 != encrypted_secret || current.2 != password_hash {
+        return Ok(None);
     }
-    false
+    let secret = af_db::decrypt_key(&current.0).unwrap_or(current.0);
+    if !password_verified && !crate::auth::consume_totp_code(&transaction, user_id, &secret, code) {
+        return Ok(None);
+    }
+    let codes = generate_recovery_codes();
+    store_recovery_codes(&transaction, user_id, &codes)?;
+    transaction.commit()?;
+    Ok(Some(codes))
 }
 
 pub async fn regenerate_2fa_recovery_codes(
@@ -114,8 +120,8 @@ pub async fn regenerate_2fa_recovery_codes(
         );
     }
 
-    tokio::task::spawn_blocking(move || {
-        let Ok(conn) = af_db::get_conn() else {
+    crate::auth::blocking_response(move || {
+        let Ok(conn) = af_db::get_read_conn() else {
             return api_error(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", "Database unavailable");
         };
         let row = conn.query_row(
@@ -130,31 +136,19 @@ pub async fn regenerate_2fa_recovery_codes(
         if !totp_enabled {
             return api_error(StatusCode::BAD_REQUEST, "VALIDATION_ERROR", "Two-factor authentication is not enabled");
         }
-        let secret = af_db::decrypt_key(&encrypted_secret).unwrap_or(encrypted_secret);
-        let verified = (!secret.is_empty() && !req.code.trim().is_empty() && verify_totp_code_local(&secret, &req.code))
-            || (!req.password.is_empty() && !password_hash.is_empty()
-                && crate::auth::verify_password(&req.password, &password_hash));
-        if !verified {
-            return api_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED", "Invalid verification code or password");
-        }
-        let codes = generate_recovery_codes();
-        let result = (|| -> anyhow::Result<()> {
+        let password_verified = !req.password.is_empty() && !password_hash.is_empty()
+            && crate::auth::verify_password(&req.password, &password_hash);
+        let result = (|| -> anyhow::Result<_> {
             let conn = af_db::get_conn()?;
-            let transaction = conn.unchecked_transaction()?;
-            let current: (String, bool, String) = transaction.query_row(
-                "SELECT COALESCE(totp_secret, ''), COALESCE(totp_enabled, 0), COALESCE(password_hash, '') FROM users WHERE id = ?1",
-                params![user.user_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )?;
-            let current_secret = af_db::decrypt_key(&current.0).unwrap_or(current.0);
-            anyhow::ensure!(current.1 && current_secret == secret && current.2 == password_hash, "Credentials changed");
-            store_recovery_codes(&transaction, user.user_id, &codes)?;
-            transaction.commit()?;
-            Ok(())
+            replace_verified_recovery_codes(&conn, user.user_id, &encrypted_secret, &password_hash, &req.code, password_verified)
         })();
-        if result.is_err() {
-            return api_error(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", "Failed to regenerate recovery codes");
-        }
+        let codes = match result {
+            Ok(Some(codes)) => codes,
+            Ok(None) => return api_error(StatusCode::FORBIDDEN,
+                if req.code.trim().is_empty() { "INVALID_CURRENT_PASSWORD" } else { "INVALID_2FA_CODE" },
+                "Invalid verification code or password"),
+            Err(_) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", "Failed to regenerate recovery codes"),
+        };
         let ip = extract_client_ip(&headers);
         let ua = headers.get(header::USER_AGENT).and_then(|value| value.to_str().ok()).unwrap_or("");
         af_db::record_audit(user.user_id, &user.username, "2fa_recovery_regenerate", "user", "", "", &ip, ua);
@@ -162,7 +156,7 @@ pub async fn regenerate_2fa_recovery_codes(
             "message": "Recovery codes regenerated",
             "recovery_codes": codes,
         })).into_response()
-    }).await.unwrap_or_else(|_| api_error(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", "Verification failed"))
+    }).await
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -372,13 +366,7 @@ pub async fn create_notification_channel(Json(req): Json<CreateChannelReq>) -> R
     }
 
     let valid_types = [
-        "discord",
-        "slack",
-        "gotify",
-        "webhook",
-        "email",
-        "telegram",
-        "custom",
+        "discord", "slack", "gotify", "webhook", "email", "telegram", "custom",
     ];
     if !valid_types.contains(&req.channel_type.as_str()) {
         return api_error(
@@ -508,13 +496,19 @@ fn is_public_webhook_ip(address: std::net::IpAddr) -> bool {
     match address {
         std::net::IpAddr::V4(address) => {
             let [first, second, third, fourth] = address.octets();
-            !(first == 0 || first == 10 || first == 127 || first >= 224
+            !(first == 0
+                || first == 10
+                || first == 127
+                || first >= 224
                 || (first == 100 && (64..=127).contains(&second))
                 || (first == 169 && second == 254)
                 || (first == 172 && (16..=31).contains(&second))
-                || (first == 192 && (second == 168 || (second == 0 && (third == 0 || third == 2))
-                    || (second == 88 && third == 99)))
-                || (first == 198 && (second == 18 || second == 19 || (second == 51 && third == 100)))
+                || (first == 192
+                    && (second == 168
+                        || (second == 0 && (third == 0 || third == 2))
+                        || (second == 88 && third == 99)))
+                || (first == 198
+                    && (second == 18 || second == 19 || (second == 51 && third == 100)))
                 || (first == 203 && second == 0 && third == 113)
                 || [first, second, third, fourth] == [168, 63, 129, 16])
         }
@@ -530,12 +524,27 @@ fn is_public_webhook_ip(address: std::net::IpAddr) -> bool {
 
 fn parse_webhook_url(target: &str) -> anyhow::Result<url::Url> {
     let url = url::Url::parse(target)?;
-    anyhow::ensure!(matches!(url.scheme(), "http" | "https"), "Webhook must use HTTP or HTTPS");
-    anyhow::ensure!(url.username().is_empty() && url.password().is_none(), "Webhook credentials in URL are not allowed");
-    anyhow::ensure!(url.host().is_some() && url.port_or_known_default().is_some(), "Invalid webhook host or port");
+    anyhow::ensure!(
+        matches!(url.scheme(), "http" | "https"),
+        "Webhook must use HTTP or HTTPS"
+    );
+    anyhow::ensure!(
+        url.username().is_empty() && url.password().is_none(),
+        "Webhook credentials in URL are not allowed"
+    );
+    anyhow::ensure!(
+        url.host().is_some() && url.port_or_known_default().is_some(),
+        "Invalid webhook host or port"
+    );
     match url.host() {
-        Some(url::Host::Ipv4(address)) => anyhow::ensure!(is_public_webhook_ip(address.into()), "Webhook target must be public"),
-        Some(url::Host::Ipv6(address)) => anyhow::ensure!(is_public_webhook_ip(address.into()), "Webhook target must be public"),
+        Some(url::Host::Ipv4(address)) => anyhow::ensure!(
+            is_public_webhook_ip(address.into()),
+            "Webhook target must be public"
+        ),
+        Some(url::Host::Ipv6(address)) => anyhow::ensure!(
+            is_public_webhook_ip(address.into()),
+            "Webhook target must be public"
+        ),
         _ => {}
     }
     Ok(url)
@@ -543,18 +552,38 @@ fn parse_webhook_url(target: &str) -> anyhow::Result<url::Url> {
 
 async fn webhook_client(target: &str) -> anyhow::Result<(reqwest::Client, url::Url)> {
     let url = parse_webhook_url(target)?;
-    let port = url.port_or_known_default().ok_or_else(|| anyhow::anyhow!("Invalid webhook port"))?;
-    let (host, addresses) = match url.host().ok_or_else(|| anyhow::anyhow!("Missing webhook host"))? {
+    let port = url
+        .port_or_known_default()
+        .ok_or_else(|| anyhow::anyhow!("Invalid webhook port"))?;
+    let (host, addresses) = match url
+        .host()
+        .ok_or_else(|| anyhow::anyhow!("Missing webhook host"))?
+    {
         url::Host::Domain(host) => {
             let addresses: Vec<std::net::SocketAddr> = tokio::time::timeout(
-                Duration::from_secs(5), tokio::net::lookup_host((host, port)),
-            ).await??.collect();
+                Duration::from_secs(5),
+                tokio::net::lookup_host((host, port)),
+            )
+            .await??
+            .collect();
             (host.to_owned(), addresses)
         }
-        url::Host::Ipv4(address) => (address.to_string(), vec![std::net::SocketAddr::new(address.into(), port)]),
-        url::Host::Ipv6(address) => (address.to_string(), vec![std::net::SocketAddr::new(address.into(), port)]),
+        url::Host::Ipv4(address) => (
+            address.to_string(),
+            vec![std::net::SocketAddr::new(address.into(), port)],
+        ),
+        url::Host::Ipv6(address) => (
+            address.to_string(),
+            vec![std::net::SocketAddr::new(address.into(), port)],
+        ),
     };
-    anyhow::ensure!(!addresses.is_empty() && addresses.iter().all(|address| is_public_webhook_ip(address.ip())), "Webhook DNS must resolve only to public addresses");
+    anyhow::ensure!(
+        !addresses.is_empty()
+            && addresses
+                .iter()
+                .all(|address| is_public_webhook_ip(address.ip())),
+        "Webhook DNS must resolve only to public addresses"
+    );
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .redirect(reqwest::redirect::Policy::none())
@@ -788,7 +817,14 @@ pub async fn dispatch_to_channel(
         Ok(target) => target,
         Err(_) => {
             let message = "Webhook target rejected or DNS resolution failed";
-            record_delivery_log(channel.id, &channel.channel_type, notification_id, "failed", 0, message);
+            record_delivery_log(
+                channel.id,
+                &channel.channel_type,
+                notification_id,
+                "failed",
+                0,
+                message,
+            );
             anyhow::bail!(message);
         }
     };
@@ -1026,13 +1062,134 @@ pub fn start_notification_engine() {
 mod tests {
     use super::*;
 
+    fn recovery_database() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE users (id INTEGER PRIMARY KEY,totp_secret TEXT,totp_enabled INTEGER,password_hash TEXT,last_totp_step INTEGER DEFAULT -1);
+            INSERT INTO users VALUES (1,'JBSWY3DPEHPK3PXP',1,'test-hash',-1);
+            CREATE TABLE recovery_codes (id INTEGER PRIMARY KEY,user_id INTEGER,code_hash TEXT,used INTEGER DEFAULT 0);
+            INSERT INTO recovery_codes VALUES (1,1,'old-hash',0);").unwrap();
+        conn
+    }
+
+    fn recovery_totp() -> String {
+        let key = data_encoding::BASE32_NOPAD
+            .decode(b"JBSWY3DPEHPK3PXP")
+            .unwrap();
+        totp_lite::totp_custom::<totp_lite::Sha1>(30, 6, &key, Utc::now().timestamp() as u64)
+    }
+
+    #[test]
+    fn recovery_regeneration_consumes_totp_and_rejects_replay_or_changed_credentials() {
+        let conn = recovery_database();
+        let code = recovery_totp();
+        assert!(replace_verified_recovery_codes(
+            &conn,
+            1,
+            "JBSWY3DPEHPK3PXP",
+            "test-hash",
+            &code,
+            false
+        )
+        .unwrap()
+        .is_some());
+        let hashes: Vec<String> = conn
+            .prepare("SELECT code_hash FROM recovery_codes ORDER BY id")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(replace_verified_recovery_codes(
+            &conn,
+            1,
+            "JBSWY3DPEHPK3PXP",
+            "test-hash",
+            &code,
+            false
+        )
+        .unwrap()
+        .is_none());
+        assert!(replace_verified_recovery_codes(
+            &conn,
+            1,
+            "JBSWY3DPEHPK3PXP",
+            "stale-password-hash",
+            "",
+            true
+        )
+        .unwrap()
+        .is_none());
+        let unchanged: Vec<String> = conn
+            .prepare("SELECT code_hash FROM recovery_codes ORDER BY id")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(hashes, unchanged);
+    }
+
+    #[test]
+    fn recovery_storage_failure_rolls_back_totp_consumption_and_existing_codes() {
+        let conn = recovery_database();
+        let code = recovery_totp();
+        conn.execute_batch("CREATE TRIGGER reject_recovery BEFORE INSERT ON recovery_codes BEGIN SELECT RAISE(ABORT,'simulated failure'); END;").unwrap();
+        assert!(replace_verified_recovery_codes(
+            &conn,
+            1,
+            "JBSWY3DPEHPK3PXP",
+            "test-hash",
+            &code,
+            false
+        )
+        .is_err());
+        let old: String = conn
+            .query_row("SELECT code_hash FROM recovery_codes", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(old, "old-hash");
+        let step: i64 = conn
+            .query_row("SELECT last_totp_step FROM users WHERE id=1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(step, -1);
+        conn.execute_batch("DROP TRIGGER reject_recovery;").unwrap();
+        assert!(replace_verified_recovery_codes(
+            &conn,
+            1,
+            "JBSWY3DPEHPK3PXP",
+            "test-hash",
+            &code,
+            false
+        )
+        .unwrap()
+        .is_some());
+    }
+
     #[test]
     fn webhook_rejects_nonpublic_and_embedded_addresses() {
         for address in [
-            "0.0.0.0", "10.0.0.1", "100.64.0.1", "127.0.0.1", "169.254.169.254",
-            "172.16.0.1", "192.168.1.1", "192.0.2.1", "198.18.0.1", "224.0.0.1",
-            "168.63.129.16", "::", "::1", "::ffff:127.0.0.1", "fc00::1", "fe80::1",
-            "ff02::1", "64:ff9b::7f00:1", "2001:db8::1", "2002:7f00:1::", "3fff::1",
+            "0.0.0.0",
+            "10.0.0.1",
+            "100.64.0.1",
+            "127.0.0.1",
+            "169.254.169.254",
+            "172.16.0.1",
+            "192.168.1.1",
+            "192.0.2.1",
+            "198.18.0.1",
+            "224.0.0.1",
+            "168.63.129.16",
+            "::",
+            "::1",
+            "::ffff:127.0.0.1",
+            "fc00::1",
+            "fe80::1",
+            "ff02::1",
+            "64:ff9b::7f00:1",
+            "2001:db8::1",
+            "2002:7f00:1::",
+            "3fff::1",
         ] {
             assert!(!is_public_webhook_ip(address.parse().unwrap()), "{address}");
         }
@@ -1049,9 +1206,14 @@ mod tests {
     #[test]
     fn webhook_url_validation_blocks_alternate_literal_encodings() {
         for target in [
-            "file:///etc/passwd", "ftp://example.com", "http://127.0.0.1/",
-            "http://2130706433/", "http://0x7f000001/", "http://[::1]/",
-            "http://[::ffff:127.0.0.1]/", "https://user:password@example.com/",
+            "file:///etc/passwd",
+            "ftp://example.com",
+            "http://127.0.0.1/",
+            "http://2130706433/",
+            "http://0x7f000001/",
+            "http://[::1]/",
+            "http://[::ffff:127.0.0.1]/",
+            "https://user:password@example.com/",
         ] {
             assert!(parse_webhook_url(target).is_err(), "{target}");
         }

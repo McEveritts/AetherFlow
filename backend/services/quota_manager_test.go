@@ -1,10 +1,6 @@
 package services
 
 import (
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/hex"
-	"net/http"
 	"testing"
 )
 
@@ -38,65 +34,6 @@ func TestQuotaScriptSizeRoundsUpToSupportedUnits(t *testing.T) {
 	}
 }
 
-func TestVerifyBillingWebhookRequestWithHMAC(t *testing.T) {
-	t.Setenv("WHMCS_WEBHOOK_SECRET", "super-secret")
-
-	body := []byte(`{"event_type":"service_upgrade","username":"alice","quota":"500GB"}`)
-	mac := hmac.New(sha256.New, []byte("super-secret"))
-	mac.Write(body)
-	signature := hex.EncodeToString(mac.Sum(nil))
-
-	headers := http.Header{}
-	headers.Set("X-WHMCS-Signature", signature)
-
-	if err := VerifyBillingWebhookRequest("whmcs", headers, body); err != nil {
-		t.Fatalf("VerifyBillingWebhookRequest() returned error: %v", err)
-	}
-}
-
-func TestExtractBillingEventFallsBackToPlanMap(t *testing.T) {
-	t.Setenv("BILLING_QUOTA_PLAN_MAP", `{"Enterprise":"4TB"}`)
-
-	event, err := extractBillingEvent("blesta", []byte(`{
-		"event_type":"service_upgrade",
-		"client":{"email":"owner@example.com"},
-		"product":{"name":"Enterprise"}
-	}`))
-	if err != nil {
-		t.Fatalf("extractBillingEvent() returned error: %v", err)
-	}
-
-	if event.Plan != "Enterprise" {
-		t.Fatalf("event.Plan = %q, want Enterprise", event.Plan)
-	}
-	if event.QuotaBytes != 4*1024*1024*1024*1024 {
-		t.Fatalf("event.QuotaBytes = %d, want 4TB", event.QuotaBytes)
-	}
-	if event.Email != "owner@example.com" {
-		t.Fatalf("event.Email = %q, want owner@example.com", event.Email)
-	}
-}
-
-func TestVerifyBillingWebhookRequestWithBearerToken(t *testing.T) {
-	t.Setenv("BLESTA_WEBHOOK_SECRET", "my-bearer-secret")
-
-	body := []byte(`{"event_type":"service_create","username":"bob","quota":"1TB"}`)
-
-	headers := http.Header{}
-	headers.Set("Authorization", "Bearer my-bearer-secret")
-
-	if err := VerifyBillingWebhookRequest("blesta", headers, body); err != nil {
-		t.Fatalf("VerifyBillingWebhookRequest(bearer) returned error: %v", err)
-	}
-
-	// Should reject wrong bearer
-	badHeaders := http.Header{}
-	badHeaders.Set("Authorization", "Bearer wrong-secret")
-	if err := VerifyBillingWebhookRequest("blesta", badHeaders, body); err == nil {
-		t.Fatal("VerifyBillingWebhookRequest(bad bearer) should have returned an error")
-	}
-}
-
 func TestValidateUsername(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -121,11 +58,29 @@ func TestValidateUsername(t *testing.T) {
 	}
 }
 
-func TestBillingSecretFallsBackToGlobalSecret(t *testing.T) {
-	t.Setenv("BLESTA_WEBHOOK_SECRET", "")
-	t.Setenv("BILLING_WEBHOOK_SECRET", "fallback-secret")
+func TestQuotaNormalizationRetainsCapacityAndStorageSuspension(t *testing.T) {
+	for _, source := range []string{"", "retired-provider", "manual", "runner"} {
+		record := normalizeQuotaRecord(UserQuotaRecord{
+			UserID: 42, QuotaBytes: 100, UsedBytes: 75,
+			Status: "suspended", Source: source,
+		})
+		if record.Status != "suspended" || !record.Configured || record.AvailableBytes != 25 || record.UsagePct != 75 {
+			t.Fatalf("quota normalization must preserve capacity and storage suspension: %+v", record)
+		}
+		wantSource := "manual"
+		if source == "runner" {
+			wantSource = "runner"
+		}
+		if record.Source != wantSource {
+			t.Fatalf("source = %q, want %q", record.Source, wantSource)
+		}
+	}
+}
 
-	if got := billingSecret("blesta"); got != "fallback-secret" {
-		t.Fatalf("billingSecret() = %q, want fallback-secret", got)
+func TestQuotaNormalizationDefaultsOnlyEmptyStatus(t *testing.T) {
+	for input, expected := range map[string]string{"": "active", "  ": "active", " ACTIVE ": "active", " Suspended ": "suspended", "pending": "pending"} {
+		if record := normalizeQuotaRecord(UserQuotaRecord{Status: input}); record.Status != expected {
+			t.Fatalf("status %q normalized to %q, want %q", input, record.Status, expected)
+		}
 	}
 }

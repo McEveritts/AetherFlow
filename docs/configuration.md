@@ -45,7 +45,7 @@ Optional external OAuth2 login and built-in OIDC provider settings for downstrea
 | `ADMIN_EMAIL` | Email address granted automatic `admin` role on first OAuth login. | `(Optional)` |
 | `GOOGLE_CLIENT_ID` | Google OAuth 2.0 Client ID. | `(Optional)` |
 | `GOOGLE_CLIENT_SECRET` | Google OAuth 2.0 Client Secret. | `(Optional)` |
-| `GOOGLE_REDIRECT_URI` | Typically `https://<YOUR_DOMAIN>/api/auth/google/callback`. | `(Optional)` |
+| `GOOGLE_REDIRECT_URI` | Typically `https://<YOUR_DOMAIN>/api/v1/public/auth/google/callback`. | `(Optional)` |
 | `OIDC_ISSUER` | Issuer URL for the built-in AetherFlow OIDC provider. | `(Auto-detected)` |
 | `OIDC_KEY_PATH` | Path to the persisted RSA 2048-bit PEM key used for OIDC JWKS signing. | `/var/lib/aetherflow/oidc_rsa.pem` |
 
@@ -56,6 +56,28 @@ Optional external OAuth2 login and built-in OIDC provider settings for downstrea
 | `ALLOWED_CORS_ORIGIN` | Comma-separated list of explicit frontend origin URLs for CORS and WebSocket `Origin` checks. | `(Auto-detected)` |
 | `COOKIE_SECURE` | Enforces `Secure` flag on `aetherflow_session` cookies. Set `false` only for local HTTP testing. | `true` |
 | `CSRF_DISABLED` | Disables CSRF validation when `true` (never enable in production). | `false` |
+
+### Systemd Service Hardening & Operator Drop-ins
+The packaged control plane unit (`aetherflow-api.service`) enforces portable, least-privilege zero-trust sandboxing (`ProtectSystem=strict`, `ProtectHome=read-only`, `PrivateTmp=yes`, standard `systemd-journal,adm` groups).
+
+Host-specific overrides (custom supplementary groups, media directories, or extra storage bind mounts) must never be edited directly into the packaged unit file. Instead, define them using an operator-owned systemd drop-in configuration file at `/etc/systemd/system/aetherflow-api.service.d/local.conf` (or via `systemctl edit aetherflow-api`):
+
+```ini
+[Service]
+# Add host-specific supplementary groups (e.g. for shared media file access)
+SupplementaryGroups=media
+
+# Grant read/write access to host storage directories outside standard FHS paths
+ReadWritePaths=/mnt/storage
+
+# Bind host storage paths into McBrowser user root
+BindPaths=/mnt/storage/media:/var/lib/aetherflow/mcbrowser/user-1/Media
+```
+After creating or modifying a drop-in, apply the changes with:
+```bash
+systemctl daemon-reload
+systemctl restart aetherflow-api
+```
 
 ---
 
@@ -70,6 +92,14 @@ Settings here act as fallback defaults; API keys configured in **Settings → Fl
 | `OPENAI_API_KEY` | OpenAI API key for GPT-6 / GPT-6.1 models. |
 | `OLLAMA_ENDPOINT` | Local Ollama endpoint (defaults to `http://localhost:11434`). |
 | `LM_STUDIO_ENDPOINT` | Local LM Studio endpoint (defaults to `http://localhost:1234`). |
+
+Local AI settings persist the runtime (`localProvider`: `lm-studio`, `ollama`, or `anthropic-local`) separately from the installed model identifier (`localModel`, for example `qwen2.5:14b`). `aiModel` selects the active model. A remembered local runtime does not override a selected cloud model. Provider and runtime aliases are not inference model identifiers. Legacy runtime-prefixed model settings remain readable.
+
+## Storage Quotas And Suspension
+
+Storage quotas are administrator-managed capacity limits, not billing subscriptions. A non-empty quota status other than `active` suspends storage access; quota inspection and refresh preserve that status. McBrowser and FileShare enforce suspension independently of available capacity, including empty uploads and replacements. Role changes and account deletion cannot remove the last active, non-plugin administrator.
+
+Backup uploads accept between 1 and 4,096 chunks per upload. Invalid chunk counts are rejected before staging files, and progress inspection enumerates staged parts rather than probing every claimed chunk index.
 
 ---
 
@@ -89,6 +119,9 @@ Settings here act as fallback defaults; API keys configured in **Settings → Fl
 ## Database & Backup Inspection
 
 AetherFlow uses bundled **SQLite (`rusqlite`)** in `WAL` mode as its sole persistence engine (Redis is not required in v4.0.0).
+
+Browser backup downloads prompt for the current administrator password. The dashboard sends it in `X-Reauth-Password` to `POST /api/v1/admin/backup/download/{filename}` with session and CSRF verification, then starts a native streaming GET. A short lived HttpOnly proof cookie authorizes one download of that filename for that session within 60 seconds. Request a new download after expiry or a server restart. Command line API clients may send `X-Reauth-Password` directly on the authenticated GET; the password never belongs in a URL.
+
 
 > [!CAUTION]
 > Never copy a live SQLite database with plain `cp` or `tar` while `aetherflow-api` is running. Always use **Settings → Backups** or `sudo af backup create` (`af-host` online backup API + `PRAGMA quick_check` + `.manifest.json` + `.sha256`). Changing `AES_MASTER_KEY` without re-entering stored credentials will render existing encrypted secrets unreadable.

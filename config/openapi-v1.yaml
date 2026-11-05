@@ -19,7 +19,6 @@ tags:
   - { name: Backup }
   - { name: Users }
   - { name: Quotas }
-  - { name: Billing }
   - { name: Notifications }
   - { name: OIDC }
   - { name: AI }
@@ -57,7 +56,67 @@ paths:
   /fileshare/download/{filename}: { get: { tags: [Files], summary: Download a fileshare item, security: [ { cookieAuth: [] } ], parameters: [ { $ref: '#/components/parameters/Filename' } ], responses: { '200': { description: File stream, content: { application/octet-stream: { schema: { type: string, format: binary } } } } } } }
   /backup/run: { post: { tags: [Backup], summary: Run backup, security: [ { cookieAuth: [] } ], responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/GenericObject' } } } } } } }
   /backup/list: { get: { tags: [Backup], summary: List backups, security: [ { cookieAuth: [] } ], responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/GenericArray' } } } } } } }
-  /backup/download/{filename}: { get: { tags: [Backup], summary: Download backup, security: [ { cookieAuth: [] } ], parameters: [ { $ref: '#/components/parameters/Filename' } ], responses: { '200': { description: Backup stream, content: { application/octet-stream: { schema: { type: string, format: binary } } } } } } }
+  /admin/backup/download/{filename}:
+    parameters:
+      - { $ref: '#/components/parameters/Filename' }
+    post:
+      tags: [Backup]
+      summary: Authorize one browser backup download
+      description: >
+        Requires an administrator session and CSRF verification. Validates the current
+        password and issues an HttpOnly SameSite Strict af_backup_download cookie,
+        scoped to /api/v1/admin/backup/download/. The cookie expires after 60 seconds,
+        is single use, and is bound to the administrator, session, and filename.
+        Reauthorize after a server restart or expiry. Does not read the backup stream.
+      security: [ { cookieAuth: [] } ]
+      parameters:
+        - { in: header, name: X-Reauth-Password, required: true, schema: { type: string, minLength: 1, maxLength: 1024 }, description: Current administrator password }
+        - { in: header, name: X-CSRF-Token, required: true, schema: { type: string }, description: CSRF token for the authenticated session }
+      responses:
+        '200':
+          description: Download authorization issued
+          headers:
+            Set-Cookie: { description: Short lived HttpOnly download proof, schema: { type: string } }
+            Cache-Control: { schema: { type: string, const: no-store } }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [url]
+                properties:
+                  url: { type: string, description: Local native download URL }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { description: Administrator access, CSRF verification, or current password check failed }
+        '503': { description: Authorization capacity unavailable }
+    get:
+      tags: [Backup]
+      summary: Stream a verified backup
+      description: >
+        Requires an administrator session and either the single use download proof
+        issued by POST on this path or X-Reauth-Password for command line clients.
+        A native browser navigation uses the HttpOnly proof and streams without buffering
+        the entire backup in browser memory. Invalid, expired, or replayed proofs require
+        fresh authorization. Each chunk request also requires fresh authorization.
+      security: [ { cookieAuth: [] } ]
+      parameters:
+        - { in: header, name: X-Reauth-Password, required: false, schema: { type: string, maxLength: 1024 }, description: Current password for clients without a valid download proof }
+        - { in: query, name: chunk, required: false, schema: { type: integer, minimum: 0 }, description: Optional zero based chunk index }
+        - { in: query, name: chunk_size, required: false, schema: { type: integer, minimum: 1, maximum: 67108864, default: 10485760 }, description: Chunk size in bytes }
+      responses:
+        '200':
+          description: Verified backup stream
+          headers:
+            Cache-Control: { schema: { type: string, const: no-store } }
+            X-Checksum-SHA256: { schema: { type: string } }
+          content: { application/octet-stream: { schema: { type: string, format: binary } } }
+        '206': { description: Verified backup chunk stream, content: { application/octet-stream: { schema: { type: string, format: binary } } } }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { description: Administrator access or reauthentication required }
+        '409': { description: Backup verification failed or backup unavailable }
+        '416': { description: Chunk is outside the backup }
+        '503': { description: Backup capacity unavailable }
   /backup/upload/{filename}: { post: { tags: [Backup], summary: Upload backup chunk, security: [ { cookieAuth: [] } ], parameters: [ { $ref: '#/components/parameters/Filename' } ], requestBody: { required: true, content: { application/octet-stream: { schema: { type: string, format: binary } } } }, responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/GenericObject' } } } } } } }
   /users: { get: { tags: [Users], summary: List users, security: [ { cookieAuth: [] } ], responses: { '200': { description: OK, content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/User' } } } } } } } }
   /users/{id}/role: { put: { tags: [Users], summary: Update user role, security: [ { cookieAuth: [] } ], parameters: [ { $ref: '#/components/parameters/UserID' } ], requestBody: { required: true, content: { application/json: { schema: { type: object, properties: { role: { type: string } }, required: [role] } } } }, responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/MessageResponse' } } } } } } }
@@ -66,8 +125,6 @@ paths:
   /quotas: { get: { tags: [Quotas], summary: List quotas, security: [ { cookieAuth: [] } ], responses: { '200': { description: OK, content: { application/json: { schema: { type: object, properties: { quotas: { type: array, items: { $ref: '#/components/schemas/UserQuota' } } } } } } } } } }
   /quotas/{id}: { put: { tags: [Quotas], summary: Set quota, security: [ { cookieAuth: [] } ], parameters: [ { $ref: '#/components/parameters/UserID' } ], requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/GenericObject' } } } }, responses: { '200': { description: OK, content: { application/json: { schema: { type: object, properties: { message: { type: string }, quota: { $ref: '#/components/schemas/UserQuota' } } } } } } } } }
   /quotas/{id}/refresh: { post: { tags: [Quotas], summary: Refresh quota usage, security: [ { cookieAuth: [] } ], parameters: [ { $ref: '#/components/parameters/UserID' } ], responses: { '200': { description: OK, content: { application/json: { schema: { type: object, properties: { quota: { $ref: '#/components/schemas/UserQuota' } } } } } } } } }
-  /billing/webhooks: { get: { tags: [Billing], summary: List billing webhook audits, security: [ { cookieAuth: [] } ], responses: { '200': { description: OK, content: { application/json: { schema: { type: object, properties: { events: { type: array, items: { $ref: '#/components/schemas/BillingWebhookAudit' } } } } } } } } } }
-  /billing/webhooks/{provider}: { post: { tags: [Billing], summary: Receive billing webhook, parameters: [ { in: path, name: provider, required: true, schema: { type: string, enum: [whmcs, blesta] } } ], requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/GenericObject' } } } }, responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/BillingWebhookResult' } } } }, '400': { $ref: '#/components/responses/Error' }, '503': { $ref: '#/components/responses/Error' } } } }
   /notifications: { get: { tags: [Notifications], summary: List notifications, responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/GenericObject' } } } } } } }
   /notifications/{id}/read: { put: { tags: [Notifications], summary: Mark notification as read, parameters: [ { in: path, name: id, required: true, schema: { type: string } } ], responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/MessageResponse' } } } } } } }
   /notifications/dismiss-all: { post: { tags: [Notifications], summary: Dismiss all notifications, responses: { '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/MessageResponse' } } } } } } }
@@ -143,9 +200,7 @@ components:
     MarketplaceApp: { type: object, properties: { id: { type: string }, name: { type: string }, desc: { type: string }, hits: { type: integer }, category: { type: string }, status: { type: string }, progress: { type: integer }, started_at: { type: string }, log_line: { type: string }, installed_version: { type: string }, latest_version: { type: string }, update_available: { type: boolean }, update_checked_at: { type: string }, update_url: { type: string }, update_error: { type: string } } }
     PackageProgress: { type: object, properties: { status: { type: string }, progress: { type: integer }, started_at: { type: string }, log_line: { type: string }, log_lines: { type: integer } } }
     FileInfo: { type: object, properties: { name: { type: string }, size: { type: integer }, modTime: { type: string }, extension: { type: string } } }
-    UserQuota: { type: object, properties: { user_id: { type: integer }, username: { type: string }, quota_bytes: { type: integer }, used_bytes: { type: integer }, available_bytes: { type: integer }, usage_pct: { type: number }, configured: { type: boolean }, status: { type: string }, source: { type: string }, billing_provider: { type: string }, billing_external_id: { type: string }, updated_at: { type: string } } }
-    BillingWebhookAudit: { type: object, properties: { id: { type: integer }, provider: { type: string }, event_id: { type: string }, event_type: { type: string }, username: { type: string }, quota_bytes: { type: integer }, status: { type: string }, error: { type: string }, payload: { type: string }, processed_at: { type: string } } }
-    BillingWebhookResult: { type: object, properties: { provider: { type: string }, event_id: { type: string }, event_type: { type: string }, username: { type: string }, quota_bytes: { type: integer }, applied: { type: boolean }, status: { type: string }, message: { type: string }, quota: { $ref: '#/components/schemas/UserQuota' } } }
+    UserQuota: { type: object, properties: { user_id: { type: integer }, username: { type: string }, quota_bytes: { type: integer }, used_bytes: { type: integer }, available_bytes: { type: integer }, usage_pct: { type: number }, configured: { type: boolean }, status: { type: string }, source: { type: string }, updated_at: { type: string } } }
     GenericObject: { type: object, additionalProperties: true }
     GenericArray: { type: array, items: { type: object, additionalProperties: true } }
     SystemMetrics: { type: object, properties: { cpu_usage: { type: number }, memory: { type: object, properties: { used: { type: number }, total: { type: number } } }, network: { type: object, properties: { down: { type: string }, up: { type: string } } }, disk_io: { type: object, properties: { read_bytes_sec: { type: integer }, write_bytes_sec: { type: integer } } }, disks: { type: array, items: { type: object, properties: { mount_point: { type: string }, used_pct: { type: number } } } } } }

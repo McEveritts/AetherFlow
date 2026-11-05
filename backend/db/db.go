@@ -742,8 +742,6 @@ func PruneExpiredData() {
 		{"metrics_history", "DELETE FROM metrics_history WHERE timestamp < datetime('now', '-90 days')"},
 		// Keep 90 days of login history
 		{"login_history", "DELETE FROM login_history WHERE created_at < datetime('now', '-90 days')"},
-		// Keep 30 days of billing webhook events
-		{"billing_webhook_events", "DELETE FROM billing_webhook_events WHERE processed_at < datetime('now', '-30 days')"},
 		// Keep 90 days of streaming bandwidth telemetry samples
 		{"streaming_bandwidth_samples", "DELETE FROM streaming_bandwidth_samples WHERE timestamp < datetime('now', '-90 days')"},
 	}

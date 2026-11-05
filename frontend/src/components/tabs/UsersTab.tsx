@@ -9,7 +9,7 @@ import { DataGrid } from '@/components/ui/DataGrid';
 import { ColumnDef } from '@tanstack/react-table';
 import { apiFetch } from '@/lib/fetcher';
 import RequireClaim from '@/components/auth/RequireClaim';
-import QuotasBillingTab from '@/components/tabs/QuotasBillingTab';
+import QuotasTab from '@/components/tabs/QuotasTab';
 
 export default function UsersTab() {
     const { addToast } = useToast();
@@ -233,7 +233,7 @@ export default function UsersTab() {
                             }`}
                         >
                             <HardDrive size={13} />
-                            Storage Quotas &amp; Billing
+                            Storage Quotas
                         </button>
                     </div>
 
@@ -313,7 +313,7 @@ export default function UsersTab() {
                     </div>
                 </>
             ) : (
-                <QuotasBillingTab />
+                <QuotasTab />
             )}
         </div>
     );

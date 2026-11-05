@@ -1313,7 +1313,7 @@ export default function McBrowserTab({ isActive = true }: { isActive?: boolean }
                         )}
                     </div>
                 ) : (
-                    <div className="overflow-x-auto">
+                    <div className="overflow-x-auto min-w-0 max-w-full">
                         <table
                             aria-label="Directory entries"
                             className="w-full text-left border-collapse"

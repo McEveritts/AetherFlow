@@ -24,16 +24,16 @@ use tokio::sync::Mutex;
 pub use af_host;
 pub use af_release;
 
-pub mod package_executor;
 pub mod network;
+pub mod quota;
+pub mod package_executor;
 pub mod self_update;
 pub use package_executor::*;
 
 pub const DEFAULT_RUNNER_SOCKET_PATH: &str = "/run/aetherflow/runner.sock";
 
 const EMBEDDED_PACKAGES_JSON: &str = include_str!("../../../../config/packages.json");
-const EMBEDDED_AUTOMATION_JSON: &str =
-    include_str!("../../../../config/package_automation.json");
+const EMBEDDED_AUTOMATION_JSON: &str = include_str!("../../../../config/package_automation.json");
 
 pub(crate) static PACKAGE_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 pub(crate) static BACKUP_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
@@ -48,13 +48,19 @@ pub static SAFE_USERNAME: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^[a-z_][a-z0-9_-]{0,31}$").unwrap());
 pub static SAFE_USERNAME_REGEX: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^(?:[a-z_][a-z0-9_-]{0,31}|[a-zA-Z0-9_.-]{1,64})$").unwrap());
-pub static SAFE_QUOTA_SIZE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^(?:[0-9]+[KMGTPkmgtp]?[Bb]?|[0-9]+(?:\.[0-9]+)?\s*[KMGTPEkmgtpe]?[Bb]?|0)$").unwrap());
+pub static SAFE_QUOTA_SIZE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"^(?:[0-9]+[KMGTPkmgtp]?[Bb]?|[0-9]+(?:\.[0-9]+)?\s*[KMGTPEkmgtpe]?[Bb]?|0)$")
+        .unwrap()
+});
 pub static SAFE_QUOTA_SIZE_REGEX: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^(?:[0-9]+(?:\.[0-9]+)?\s*[KMGTPEkmgtpe]?[Bb]?|0)$").unwrap());
 
-static ALLOWED_SERVICE_ACTIONS: Lazy<HashSet<&'static str>> =
-    Lazy::new(|| ["start", "stop", "restart", "reload", "enable", "disable", "status", "heal"].into());
+static ALLOWED_SERVICE_ACTIONS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
+    [
+        "start", "stop", "restart", "reload", "enable", "disable", "status", "heal",
+    ]
+    .into()
+});
 static ALLOWED_BACKUP_ACTIONS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
     [
         "create",
@@ -139,7 +145,6 @@ pub fn is_runner_available() -> bool {
         path.exists()
     }
 }
-
 
 pub fn resolve_package_script_path(action: &str, script_name: &str) -> Option<PathBuf> {
     resolve_package_script_in_roots(action, script_name, &package_script_roots())
@@ -285,8 +290,12 @@ pub fn build_runner_router() -> Router {
         .route("/v1/hosts", post(handle_hosts))
         .route("/v1/network", post(handle_network))
         .route("/v1/quota", post(handle_quota))
+        .route("/v1/quota/usage", post(quota::handle))
         .route("/v1/app-meta", post(handle_app_meta))
-        .route("/v1/dispatcharr-credentials", post(handle_dispatcharr_credentials))
+        .route(
+            "/v1/dispatcharr-credentials",
+            post(handle_dispatcharr_credentials),
+        )
 }
 
 async fn handle_health() -> Json<RunnerResponse> {
@@ -427,7 +436,6 @@ async fn handle_systemctl(Json(req): Json<SystemctlRequest>) -> (StatusCode, Jso
         ),
     }
 }
-
 
 async fn handle_package(Json(req): Json<PackageRunnerRequest>) -> Response {
     if !matches!(req.action.as_str(), "install" | "remove" | "update") {
@@ -589,8 +597,8 @@ fn resolve_self_update_jobs_dir_for_cfg(
 }
 
 fn resolve_self_update_jobs_dir_from_env() -> Result<PathBuf, (StatusCode, String)> {
-    let explicit_root =
-        resolve_self_update_isolated_root_from_env().map_err(|err| (StatusCode::BAD_REQUEST, err))?;
+    let explicit_root = resolve_self_update_isolated_root_from_env()
+        .map_err(|err| (StatusCode::BAD_REQUEST, err))?;
     let conf_path = af_release::resolve_release_manager_conf_for_root(explicit_root.as_deref());
     af_release::resolve_self_update_jobs_dir_from_process_env(
         explicit_root.as_deref(),
@@ -942,10 +950,8 @@ pub async fn execute_self_update_request(
                             error: err_msg.clone(),
                             exit_code: Some(1),
                         };
-                        let _ = write_self_update_job_status_atomic(
-                            &job_status_path,
-                            &failed_receipt,
-                        );
+                        let _ =
+                            write_self_update_job_status_atomic(&job_status_path, &failed_receipt);
                         let _ = fs::remove_file(&job_conf_path);
                     }
                     return (
@@ -1283,9 +1289,7 @@ pub async fn query_self_update_status_local(
                                     reread_status.job_unit = valid_unit.clone();
                                 }
                                 if reread_status.completed
-                                    && reread_status
-                                        .validate_invariants(Some(&valid_unit))
-                                        .is_ok()
+                                    && reread_status.validate_invariants(Some(&valid_unit)).is_ok()
                                 {
                                     return Ok(reread_status);
                                 }
@@ -1968,13 +1972,14 @@ pub async fn execute_backup_local(
                 ..Default::default()
             })
         }
-        _ => Err((StatusCode::BAD_REQUEST, "unsupported backup action".to_string())),
+        _ => Err((
+            StatusCode::BAD_REQUEST,
+            "unsupported backup action".to_string(),
+        )),
     }
 }
 
-async fn handle_backup(
-    Json(req): Json<BackupRunnerRequest>,
-) -> (StatusCode, Json<RunnerResponse>) {
+async fn handle_backup(Json(req): Json<BackupRunnerRequest>) -> (StatusCode, Json<RunnerResponse>) {
     match execute_backup_local(&req).await {
         Ok(resp) => {
             let output = serde_json::to_string(&resp).unwrap_or_default();
@@ -2123,22 +2128,25 @@ fn normalize_systemd_unit(unit: &str) -> String {
 }
 
 pub(crate) fn is_exempt_sandbox_unit(unit: &str) -> bool {
-    unit.ends_with(".timer") || unit.ends_with(".socket") || matches!(
-        unit,
-        "aetherflow-api.service"
-            | "aetherflow-runner.service"
-            | "fail2ban.service"
-            | "pihole-FTL.service"
-            | "netdata.service"
-            | "node_exporter.service"
-            | "apache2.service"
-            | "mariadb.service"
-            | "mysql.service"
-            | "tailscale"
-            | "tailscaled"
-            | "tailscale.service"
-            | "tailscaled.service"
-    ) || unit.starts_with("wg-quick@")
+    unit.ends_with(".timer")
+        || unit.ends_with(".socket")
+        || matches!(
+            unit,
+            "aetherflow-api.service"
+                | "aetherflow-runner.service"
+                | "fail2ban.service"
+                | "pihole-FTL.service"
+                | "netdata.service"
+                | "node_exporter.service"
+                | "apache2.service"
+                | "mariadb.service"
+                | "mysql.service"
+                | "tailscale"
+                | "tailscaled"
+                | "tailscale.service"
+                | "tailscaled.service"
+        )
+        || unit.starts_with("wg-quick@")
         || unit.starts_with("wireguard")
         || unit.starts_with("tailscale")
         || unit.starts_with("tailscaled")
@@ -2152,13 +2160,17 @@ pub(crate) fn is_exempt_sandbox_unit(unit: &str) -> bool {
 fn sandbox_master_user(credentials: &str) -> Option<String> {
     if let Ok(value) = serde_json::from_str::<Value>(credentials) {
         let username = value.get("username")?.as_str()?;
-        return SAFE_USERNAME.is_match(username).then(|| username.to_string());
+        return SAFE_USERNAME
+            .is_match(username)
+            .then(|| username.to_string());
     }
     let first = credentials.lines().next()?.trim();
     let username = first
         .strip_prefix("username=")
         .or_else(|| first.split_once(':').map(|(username, _)| username))?;
-    SAFE_USERNAME.is_match(username).then(|| username.to_string())
+    SAFE_USERNAME
+        .is_match(username)
+        .then(|| username.to_string())
 }
 
 fn expand_sandbox_path(
@@ -2184,11 +2196,7 @@ fn expand_sandbox_path(
     }
 }
 
-pub fn render_systemd_sandbox_dropin(
-    profile: &str,
-    unit: &str,
-    rw_paths: &[String],
-) -> String {
+pub fn render_systemd_sandbox_dropin(profile: &str, unit: &str, rw_paths: &[String]) -> String {
     let norm_unit = normalize_systemd_unit(unit);
     let private_devices = if norm_unit.starts_with("jellyfin")
         || norm_unit.starts_with("plex")
@@ -2257,22 +2265,30 @@ pub fn render_systemd_sandbox_dropin(
             .and_then(|passwd| {
                 passwd.lines().find_map(|entry| {
                     let fields: Vec<_> = entry.split(':').collect();
-                    (fields.len() >= 7 && fields[0] == service_user)
-                        .then(|| fields[5].to_string())
+                    (fields.len() >= 7 && fields[0] == service_user).then(|| fields[5].to_string())
                 })
             })
             .unwrap_or_else(|| format!("/home/{}", service_user));
-        let master_user = ["/var/lib/aetherflow/.master.creds", "/etc/aetherflow/.master.creds", "/root/.master.creds"]
-            .iter()
-            .find_map(|path| {
-                fs::read_to_string(path)
-                    .ok()
-                    .and_then(|credentials| sandbox_master_user(&credentials))
-            })
-            .unwrap_or_else(|| service_user.clone());
+        let master_user = [
+            "/var/lib/aetherflow/.master.creds",
+            "/etc/aetherflow/.master.creds",
+            "/root/.master.creds",
+        ]
+        .iter()
+        .find_map(|path| {
+            fs::read_to_string(path)
+                .ok()
+                .and_then(|credentials| sandbox_master_user(&credentials))
+        })
+        .unwrap_or_else(|| service_user.clone());
         let mut expanded = Vec::with_capacity(rw_paths.len());
         for raw in rw_paths {
-            expanded.push(expand_sandbox_path(raw, &service_user, &service_home, &master_user));
+            expanded.push(expand_sandbox_path(
+                raw,
+                &service_user,
+                &service_home,
+                &master_user,
+            ));
         }
         lines.push(format!("ReadWritePaths={}", expanded.join(" ")));
     }
@@ -2457,9 +2473,7 @@ async fn handle_sandbox(
     }
 }
 
-async fn handle_hosts(
-    Json(req): Json<HostsRunnerRequest>,
-) -> (StatusCode, Json<RunnerResponse>) {
+async fn handle_hosts(Json(req): Json<HostsRunnerRequest>) -> (StatusCode, Json<RunnerResponse>) {
     let mut domains = req.domains;
     if domains.is_empty() && !req.domain.is_empty() {
         domains.push(req.domain);
@@ -2662,7 +2676,7 @@ pub fn parse_quota_size_to_1k_blocks(size_raw: &str) -> Option<(u64, u64)> {
 }
 
 pub async fn execute_set_quota_local(username: &str, size: &str) -> anyhow::Result<String> {
-    if !SAFE_USERNAME.is_match(username) && !SAFE_USERNAME_REGEX.is_match(username) {
+    if !quota::valid_username(username) {
         anyhow::bail!("invalid username format");
     }
     if !SAFE_QUOTA_SIZE.is_match(size) && !SAFE_QUOTA_SIZE_REGEX.is_match(size) {
@@ -2692,7 +2706,9 @@ pub async fn execute_set_quota_local(username: &str, size: &str) -> anyhow::Resu
         }
     });
 
-    if let Some(bin_setdisk) = bin_setdisk_opt {
+    // Legacy setdisk only accepts whole MB/GB/TB. Exact byte requests must
+    // use setquota directly rather than failing inside the legacy script.
+    if let Some(bin_setdisk) = bin_setdisk_opt.filter(|_| Regex::new(r"(?i)^[0-9]+[MGT]B$").unwrap().is_match(size)) {
         let out = Command::new("bash")
             .arg(&bin_setdisk)
             .arg("--username")
@@ -2729,10 +2745,9 @@ pub async fn execute_set_quota_local(username: &str, size: &str) -> anyhow::Resu
     let (blocks_1k, quota_bytes) = parse_quota_size_to_1k_blocks(size)
         .ok_or_else(|| anyhow::anyhow!("invalid quota size: {:?}", size))?;
     let block_str = blocks_1k.to_string();
-    let out = Command::new("setquota")
-        .args(["-u", username, &block_str, &block_str, "0", "0", "-a"])
-        .output()
-        .await?;
+    let mut command = Command::new("setquota");
+    command.args(["-u", username, &block_str, &block_str, "0", "0", "-a"]).kill_on_drop(true);
+    let out = tokio::time::timeout(Duration::from_secs(20), command.output()).await??;
     let combined = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
@@ -2751,12 +2766,8 @@ pub async fn execute_set_quota_local(username: &str, size: &str) -> anyhow::Resu
     .to_string())
 }
 
-async fn handle_quota(
-    Json(req): Json<QuotaRunnerRequest>,
-) -> (StatusCode, Json<RunnerResponse>) {
-    if (!SAFE_USERNAME.is_match(&req.username) && !SAFE_USERNAME_REGEX.is_match(&req.username))
-        || req.username.contains("..")
-    {
+async fn handle_quota(Json(req): Json<QuotaRunnerRequest>) -> (StatusCode, Json<RunnerResponse>) {
+    if !quota::valid_username(&req.username) {
         return (
             StatusCode::BAD_REQUEST,
             Json(RunnerResponse {
@@ -2904,10 +2915,7 @@ fn extract_runner_xml_tag(content: &str, tag: &str) -> String {
     if content.is_empty() || tag.is_empty() {
         return String::new();
     }
-    let pattern = format!(
-        r"(?is)<{0}>\s*([^<]*?)\s*</{0}>",
-        regex::escape(tag)
-    );
+    let pattern = format!(r"(?is)<{0}>\s*([^<]*?)\s*</{0}>", regex::escape(tag));
     let Ok(re) = Regex::new(&pattern) else {
         return String::new();
     };
@@ -3101,14 +3109,16 @@ fn query_runner_sqlite_single_string(raw_path: &str, queries: &[&str]) -> String
     if !meta.is_file() || meta.len() == 0 {
         return String::new();
     }
-    let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let flags =
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
     let Ok(conn) = rusqlite::Connection::open_with_flags(&resolved, flags) else {
         return String::new();
     };
     let _ = conn.busy_timeout(Duration::from_millis(1000));
 
     for query_sql in queries {
-        if let Ok(Some(val)) = conn.query_row(query_sql, [], |row| row.get::<_, Option<String>>(0)) {
+        if let Ok(Some(val)) = conn.query_row(query_sql, [], |row| row.get::<_, Option<String>>(0))
+        {
             let trimmed = val.trim();
             if !trimmed.is_empty() {
                 return trimmed.to_string();
@@ -3453,8 +3463,7 @@ pub fn extract_app_runtime_meta_local(app_name: &str) -> AppRuntimeMeta {
                             parse_valid_runner_port(&extract_runner_ini_value(&content, &["port"]));
                     }
                     if meta.api_key.is_empty() {
-                        meta.api_key =
-                            extract_runner_ini_value(&content, &["api_key", "apikey"]);
+                        meta.api_key = extract_runner_ini_value(&content, &["api_key", "apikey"]);
                     }
                 }
             }
@@ -3626,8 +3635,7 @@ pub fn extract_app_runtime_meta_local(app_name: &str) -> AppRuntimeMeta {
                 meta.api_key = extract_runner_ini_value(&content, &["WEBPASSWORD"]);
             }
             if let Some(content) = read_runner_config_text("/etc/pihole/pihole.toml") {
-                let port_val =
-                    extract_runner_ini_value(&content, &["port", "webserver.port"]);
+                let port_val = extract_runner_ini_value(&content, &["port", "webserver.port"]);
                 if !port_val.is_empty() {
                     meta.configured_port = parse_pihole_runner_port(&port_val);
                 }
@@ -3814,10 +3822,7 @@ pub fn extract_app_runtime_meta_local(app_name: &str) -> AppRuntimeMeta {
         }
 
         "thelounge" => {
-            let candidates = [
-                "/var/lib/thelounge/config.js",
-                "/etc/thelounge/config.js",
-            ];
+            let candidates = ["/var/lib/thelounge/config.js", "/etc/thelounge/config.js"];
             for raw_path in &candidates {
                 if let Some(content) = read_runner_config_text(raw_path) {
                     let port = parse_valid_runner_port(
@@ -3855,8 +3860,10 @@ pub fn extract_app_runtime_meta_local(app_name: &str) -> AppRuntimeMeta {
             ];
             for raw_path in &candidates {
                 if let Some(content) = read_runner_config_text(raw_path) {
-                    let port =
-                        parse_valid_runner_port(&extract_runner_ini_value(&content, &["Port", "port"]));
+                    let port = parse_valid_runner_port(&extract_runner_ini_value(
+                        &content,
+                        &["Port", "port"],
+                    ));
                     if port > 0 {
                         meta.configured_port = port;
                         break;
@@ -3873,9 +3880,9 @@ pub fn extract_app_runtime_meta_local(app_name: &str) -> AppRuntimeMeta {
             ];
             for raw_path in &candidates {
                 if let Some(content) = read_runner_config_text(raw_path) {
-                    let mut port = parse_valid_runner_port(
-                        &extract_runner_yaml_key_in_section(&content, "server", "port"),
-                    );
+                    let mut port = parse_valid_runner_port(&extract_runner_yaml_key_in_section(
+                        &content, "server", "port",
+                    ));
                     if port <= 0 {
                         port = parse_valid_runner_port(&extract_runner_ini_value(
                             &content,
@@ -3891,10 +3898,7 @@ pub fn extract_app_runtime_meta_local(app_name: &str) -> AppRuntimeMeta {
         }
 
         "calibre-web" => {
-            let db_paths = [
-                "/var/lib/calibre-web/app.db",
-                "/opt/calibre-web/app.db",
-            ];
+            let db_paths = ["/var/lib/calibre-web/app.db", "/opt/calibre-web/app.db"];
             for raw_path in &db_paths {
                 let port_str = query_runner_sqlite_single_string(
                     raw_path,
@@ -3969,10 +3973,8 @@ pub fn extract_app_runtime_meta_local(app_name: &str) -> AppRuntimeMeta {
             for raw_path in &candidates {
                 if let Some(content) = read_runner_config_text(raw_path) {
                     if meta.api_key.is_empty() {
-                        meta.api_key = extract_runner_ini_value(
-                            &content,
-                            &["IMMICH_API_KEY", "API_KEY"],
-                        );
+                        meta.api_key =
+                            extract_runner_ini_value(&content, &["IMMICH_API_KEY", "API_KEY"]);
                     }
                     if meta.configured_port <= 0 {
                         meta.configured_port = parse_valid_runner_port(&extract_runner_ini_value(
@@ -4036,37 +4038,61 @@ async fn handle_dispatcharr_credentials(
     Json(req): Json<DispatcharrCredentialsRequest>,
 ) -> (StatusCode, Json<RunnerResponse>) {
     let username = req.username.trim();
-    if username.is_empty() || req.password.is_empty()
-        || username.len() > 256 || req.password.len() > 4096
-        || username.contains('\0') || req.password.contains('\0')
+    if username.is_empty()
+        || req.password.is_empty()
+        || username.len() > 256
+        || req.password.len() > 4096
+        || username.contains('\0')
+        || req.password.contains('\0')
     {
-        return (StatusCode::BAD_REQUEST, Json(RunnerResponse {
-            success: false,
-            output: String::new(),
-            error: "invalid Dispatcharr credentials".to_string(),
-        }));
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(RunnerResponse {
+                success: false,
+                output: String::new(),
+                error: "invalid Dispatcharr credentials".to_string(),
+            }),
+        );
     }
     if !Path::new("/opt/dispatcharr/manage.py").is_file() {
-        return (StatusCode::OK, Json(RunnerResponse {
-            success: true,
-            output: "Dispatcharr is not installed".to_string(),
-            error: String::new(),
-        }));
+        return (
+            StatusCode::OK,
+            Json(RunnerResponse {
+                success: true,
+                output: "Dispatcharr is not installed".to_string(),
+                error: String::new(),
+            }),
+        );
     }
     let result = tokio::time::timeout(Duration::from_secs(20), async {
         use tokio::io::AsyncWriteExt;
         let mut child = dispatcharr_credentials_command(username, &req.password).spawn()?;
-        let mut input = child.stdin.take().ok_or_else(|| std::io::Error::other("missing stdin"))?;
+        let mut input = child
+            .stdin
+            .take()
+            .ok_or_else(|| std::io::Error::other("missing stdin"))?;
         input.write_all(DISPATCHARR_ADMIN_SCRIPT.as_bytes()).await?;
         drop(input);
         child.wait().await
-    }).await;
+    })
+    .await;
     let success = matches!(result, Ok(Ok(status)) if status.success());
-    (if success { StatusCode::OK } else { StatusCode::INTERNAL_SERVER_ERROR }, Json(RunnerResponse {
-        success,
-        output: String::new(),
-        error: if success { String::new() } else { "Dispatcharr credential sync failed".to_string() },
-    }))
+    (
+        if success {
+            StatusCode::OK
+        } else {
+            StatusCode::INTERNAL_SERVER_ERROR
+        },
+        Json(RunnerResponse {
+            success,
+            output: String::new(),
+            error: if success {
+                String::new()
+            } else {
+                "Dispatcharr credential sync failed".to_string()
+            },
+        }),
+    )
 }
 
 async fn handle_app_meta(
@@ -4182,7 +4208,11 @@ pub async fn dispatch_systemctl(service_name: &str, action: &str) -> anyhow::Res
     };
     let result = post_runner_json("/v1/systemctl", &req, Duration::from_secs(45)).await?;
     if !result.success {
-        anyhow::bail!("runner systemctl error: {} ({})", result.error, result.output);
+        anyhow::bail!(
+            "runner systemctl error: {} ({})",
+            result.error,
+            result.output
+        );
     }
     Ok(())
 }
@@ -4232,7 +4262,8 @@ impl IncrementalPackageLineDecoder {
             } else if let Some(nl_pos) = rest.iter().position(|&b| b == b'\n') {
                 let to_take = &rest[..nl_pos];
                 let room = MAX_PACKAGE_STREAM_LINE_BYTES.saturating_sub(self.pending.len());
-                self.pending.extend_from_slice(&to_take[..to_take.len().min(room)]);
+                self.pending
+                    .extend_from_slice(&to_take[..to_take.len().min(room)]);
                 let drained = std::mem::take(&mut self.pending);
                 self.handle_line_bytes(&drained, on_line);
                 rest = &rest[nl_pos + 1..];
@@ -4476,11 +4507,14 @@ pub async fn start_self_update(command: &str, channel: &str) -> anyhow::Result<S
     let response = dispatch_self_update_request(&SelfUpdateRequest {
         command: command.to_string(),
         channel: channel.to_string(),
-    }).await?;
+    })
+    .await?;
     let payload: Value = serde_json::from_str(&response.output)?;
-    let job_unit = payload["job_unit"].as_str()
+    let job_unit = payload["job_unit"]
+        .as_str()
         .ok_or_else(|| anyhow::anyhow!("updater launch did not acknowledge a job unit"))?;
-    validate_self_update_job_unit_name(job_unit).map_err(|(_, message)| anyhow::anyhow!(message))?;
+    validate_self_update_job_unit_name(job_unit)
+        .map_err(|(_, message)| anyhow::anyhow!(message))?;
     Ok(job_unit.to_string())
 }
 
@@ -4489,7 +4523,8 @@ pub async fn dispatch_self_update(command: &str, channel: &str) -> anyhow::Resul
 }
 
 pub async fn fetch_self_update_status() -> anyhow::Result<self_update::UpdateStatus> {
-    let result = post_runner_json("/v1/self-update/status", &json!({}), Duration::from_secs(5)).await?;
+    let result =
+        post_runner_json("/v1/self-update/status", &json!({}), Duration::from_secs(5)).await?;
     if !result.success {
         anyhow::bail!("updater status unavailable: {}", result.error);
     }
@@ -4548,9 +4583,7 @@ pub async fn dispatch_network_control(
     Ok(result)
 }
 
-pub async fn dispatch_network_action(
-    req: &NetworkRunnerRequest,
-) -> anyhow::Result<RunnerResponse> {
+pub async fn dispatch_network_action(req: &NetworkRunnerRequest) -> anyhow::Result<RunnerResponse> {
     dispatch_network_control(req).await
 }
 
@@ -4641,13 +4674,29 @@ pub fn authorize_runner_peer_credentials(
     ))
 }
 
+/// Register both termination signals before serving requests. Shared by API and runner.
+pub fn shutdown_signal() -> anyhow::Result<impl std::future::Future<Output = ()> + Send> {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut interrupt = signal(SignalKind::interrupt())?;
+        let mut terminate = signal(SignalKind::terminate())?;
+        Ok(async move {
+            tokio::select! { _ = interrupt.recv() => {}, _ = terminate.recv() => {} }
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(async {
+            let _ = tokio::signal::ctrl_c().await;
+        })
+    }
+}
+
 /// Runs the Privileged Root Daemon (`aetherflow-api runner` / `--runner`) over `/run/aetherflow/runner.sock`.
 #[cfg(unix)]
 pub async fn run_privileged_daemon() -> anyhow::Result<()> {
-    use hyper_util::rt::{TokioExecutor, TokioIo};
-    use hyper_util::server::conn::auto::Builder;
     use std::os::unix::fs::PermissionsExt;
-    use tower::Service;
 
     let sock_path = runner_socket_path();
     if let Some(dir) = Path::new(&sock_path).parent() {
@@ -4661,8 +4710,30 @@ pub async fn run_privileged_daemon() -> anyhow::Result<()> {
     tracing::info!(socket = %sock_path, "AetherFlow Privileged Runner listening");
     let app = build_runner_router();
 
+    serve_runner_connections(listener, app, shutdown_signal()?).await?;
+    let _ = fs::remove_file(&sock_path);
+    Ok(())
+}
+
+#[cfg(unix)]
+async fn serve_runner_connections(
+    listener: tokio::net::UnixListener,
+    app: Router,
+    shutdown: impl std::future::Future<Output = ()>,
+) -> anyhow::Result<()> {
+    use hyper_util::rt::{TokioExecutor, TokioIo};
+    use hyper_util::server::conn::auto::Builder;
+    use tower::Service;
+    let mut connections = tokio::task::JoinSet::new();
+    let (drain, drain_rx) = tokio::sync::watch::channel(false);
+    tokio::pin!(shutdown);
     loop {
         tokio::select! {
+            biased;
+            _ = &mut shutdown => break,
+            Some(result) = connections.join_next(), if !connections.is_empty() => {
+                if let Err(error) = result { tracing::warn!(%error, "Runner connection task failed"); }
+            }
             accept_res = listener.accept() => {
                 let (stream, _) = accept_res?;
                 let (peer_uid, peer_gid) = match stream.peer_cred() {
@@ -4678,7 +4749,8 @@ pub async fn run_privileged_daemon() -> anyhow::Result<()> {
                 }
                 let io = TokioIo::new(stream);
                 let tower_service = app.clone();
-                tokio::spawn(async move {
+                let mut drain_rx = drain_rx.clone();
+                connections.spawn(async move {
                     let hyper_service = hyper::service::service_fn(
                         move |request: hyper::Request<hyper::body::Incoming>| {
                             let req_path = request.uri().path().to_string();
@@ -4701,17 +4773,31 @@ pub async fn run_privileged_daemon() -> anyhow::Result<()> {
                             }
                         },
                     );
-                    let _ = Builder::new(TokioExecutor::new())
-                        .serve_connection(io, hyper_service)
-                        .await;
+                    let builder = Builder::new(TokioExecutor::new());
+                    let connection = builder.serve_connection(io, hyper_service);
+                    tokio::pin!(connection);
+                    tokio::select! {
+                        _ = &mut connection => {},
+                        _ = drain_rx.changed() => {
+                            connection.as_mut().graceful_shutdown();
+                            let _ = connection.await;
+                        }
+                    }
                 });
             }
-            _ = tokio::signal::ctrl_c() => {
-                tracing::info!("Privileged Runner shutting down");
-                let _ = fs::remove_file(&sock_path);
-                break;
-            }
         }
+    }
+    drop(listener);
+    tracing::info!("Privileged Runner draining active requests");
+    let _ = drain.send(true);
+    let draining = async { while connections.join_next().await.is_some() {} };
+    if tokio::time::timeout(std::time::Duration::from_secs(30), draining)
+        .await
+        .is_err()
+    {
+        tracing::warn!("Runner drain deadline exceeded; terminating remaining connections");
+        connections.abort_all();
+        while connections.join_next().await.is_some() {}
     }
     Ok(())
 }
@@ -4726,12 +4812,129 @@ pub async fn run_privileged_daemon() -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shutdown_signal_handles_sigint_and_sigterm_in_isolated_processes() {
+        const ENV: &str = "AETHERFLOW_SHUTDOWN_TEST_SIGNAL";
+        if let Ok(number) = env::var(ENV) {
+            let signal = shutdown_signal().unwrap();
+            let number = number.parse::<i32>().unwrap();
+            assert_eq!(unsafe { libc::kill(std::process::id() as i32, number) }, 0);
+            tokio::time::timeout(Duration::from_secs(2), signal)
+                .await
+                .unwrap();
+            return;
+        }
+        for signal in [libc::SIGINT, libc::SIGTERM] {
+            let status = std::process::Command::new(env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "tests::shutdown_signal_handles_sigint_and_sigterm_in_isolated_processes",
+                    "--nocapture",
+                ])
+                .env(ENV, signal.to_string())
+                .status()
+                .unwrap();
+            assert!(
+                status.success(),
+                "Signal {signal} must complete the graceful-shutdown future"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn runner_shutdown_drains_inflight_response_before_exiting() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let root = env::temp_dir().join(format!("af-drain-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("runner.sock");
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        // Test auth in a child so process-global peer settings cannot affect other tests.
+        const ENV: &str = "AETHERFLOW_RUNNER_DRAIN_TEST";
+        if env::var_os(ENV).is_none() {
+            drop(listener);
+            fs::remove_dir_all(root).unwrap();
+            let status = std::process::Command::new(env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "tests::runner_shutdown_drains_inflight_response_before_exiting",
+                    "--nocapture",
+                ])
+                .env(ENV, "1")
+                .env(
+                    "AETHERFLOW_ALLOWED_RUNNER_UIDS",
+                    unsafe { libc::geteuid() }.to_string(),
+                )
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
+        let entered = std::sync::Arc::new(tokio::sync::Notify::new());
+        let release = std::sync::Arc::new(tokio::sync::Notify::new());
+        let enter_handler = entered.clone();
+        let release_handler = release.clone();
+        let app = Router::new().route(
+            "/v1/drain-test",
+            axum::routing::get(move || {
+                let entered = enter_handler.clone();
+                let release = release_handler.clone();
+                async move {
+                    entered.notify_one();
+                    release.notified().await;
+                    "completed-before-exit"
+                }
+            }),
+        );
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(serve_runner_connections(listener, app, async {
+            let _ = shutdown_rx.await;
+        }));
+        let mut stream = tokio::net::UnixStream::connect(&path).await.unwrap();
+        stream
+            .write_all(b"GET /v1/drain-test HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), entered.notified())
+            .await
+            .unwrap();
+        shutdown_tx.send(()).unwrap();
+        tokio::task::yield_now().await;
+        assert!(
+            !server.is_finished(),
+            "Active request must keep runner alive during drain"
+        );
+        release.notify_one();
+        let mut response = String::new();
+        tokio::time::timeout(Duration::from_secs(2), stream.read_to_string(&mut response))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(response.contains("completed-before-exit"));
+        tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn test_package_script_resolution_prefers_current_release() {
         let defaults = package_script_roots();
-        assert_eq!(defaults[0], PathBuf::from("/opt/AetherFlow/current/packages/package"));
-        assert_eq!(defaults[1], PathBuf::from("/opt/AetherFlow/packages/package"));
-        assert_eq!(defaults[2], PathBuf::from("/usr/local/bin/AetherFlow/package"));
+        assert_eq!(
+            defaults[0],
+            PathBuf::from("/opt/AetherFlow/current/packages/package")
+        );
+        assert_eq!(
+            defaults[1],
+            PathBuf::from("/opt/AetherFlow/packages/package")
+        );
+        assert_eq!(
+            defaults[2],
+            PathBuf::from("/usr/local/bin/AetherFlow/package")
+        );
 
         let scratch = env::temp_dir().join(format!("af-script-paths-{}", uuid::Uuid::new_v4()));
         let roots: Vec<_> = defaults[..3]
@@ -4775,7 +4978,10 @@ mod tests {
             Some(roots[2].join("install/installpackage-dispatcharr"))
         );
         assert!(resolve_package_script_in_roots("install", "../dispatcharr", &roots).is_none());
-        assert!(resolve_package_script_in_roots("invalid", "installpackage-dispatcharr", &roots).is_none());
+        assert!(
+            resolve_package_script_in_roots("invalid", "installpackage-dispatcharr", &roots)
+                .is_none()
+        );
         fs::remove_dir_all(scratch).unwrap();
     }
 
@@ -4866,9 +5072,18 @@ mod tests {
 
     #[test]
     fn test_sandbox_master_credentials_formats() {
-        assert_eq!(sandbox_master_user(r#"{"username":"media_owner","password":"secret"}"#), Some("media_owner".into()));
-        assert_eq!(sandbox_master_user("username=media_owner\r\npassword=secret"), Some("media_owner".into()));
-        assert_eq!(sandbox_master_user("media_owner:secret\n"), Some("media_owner".into()));
+        assert_eq!(
+            sandbox_master_user(r#"{"username":"media_owner","password":"secret"}"#),
+            Some("media_owner".into())
+        );
+        assert_eq!(
+            sandbox_master_user("username=media_owner\r\npassword=secret"),
+            Some("media_owner".into())
+        );
+        assert_eq!(
+            sandbox_master_user("media_owner:secret\n"),
+            Some("media_owner".into())
+        );
         assert_eq!(sandbox_master_user("username=../../etc"), None);
         assert_eq!(sandbox_master_user("password=secret"), None);
         assert_eq!(sandbox_master_user(""), None);
@@ -4877,11 +5092,21 @@ mod tests {
     #[test]
     fn test_sandbox_paths_use_distinct_service_and_master_identities() {
         assert_eq!(
-            expand_sandbox_path("-/home/{{MASTER_USER}}/Google/Media/Music Import", "sonarr", "/var/lib/sonarr", "media_owner"),
+            expand_sandbox_path(
+                "-/home/{{MASTER_USER}}/Google/Media/Music Import",
+                "sonarr",
+                "/var/lib/sonarr",
+                "media_owner"
+            ),
             "\"-/home/media_owner/Google/Media/Music Import\""
         );
         assert_eq!(
-            expand_sandbox_path("-{{SERVICE_HOME}}/{{SERVICE_USER}}", "sonarr", "/var/lib/sonarr", "media_owner"),
+            expand_sandbox_path(
+                "-{{SERVICE_HOME}}/{{SERVICE_USER}}",
+                "sonarr",
+                "/var/lib/sonarr",
+                "media_owner"
+            ),
             "-/var/lib/sonarr/sonarr"
         );
     }
@@ -4930,7 +5155,10 @@ mod tests {
     #[test]
     fn test_dispatcharr_runtime_port_and_package_fallback() {
         assert_eq!(dispatcharr_runtime_port("DISPATCHARR_PORT=19200\n"), 19200);
-        assert_eq!(dispatcharr_runtime_port("DISPATCHARR_PORT=\"9191\"\n"), 9191);
+        assert_eq!(
+            dispatcharr_runtime_port("DISPATCHARR_PORT=\"9191\"\n"),
+            9191
+        );
         assert_eq!(dispatcharr_runtime_port("DISPATCHARR_PORT=70000\n"), 0);
         assert_eq!(dispatcharr_runtime_port("POSTGRES_PORT=5432\n"), 0);
         assert!(package_script_roots().contains(&PathBuf::from("../../packages/package")));
@@ -4943,13 +5171,27 @@ mod tests {
         let command = dispatcharr_credentials_command(username, password);
         let command = command.as_std();
         assert_eq!(command.get_program(), "runuser");
-        let args: Vec<_> = command.get_args().map(|arg| arg.to_string_lossy()).collect();
+        let args: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy())
+            .collect();
         assert_eq!(&args[..5], &["-u", "dispatcharr", "--", "/bin/bash", "-ec"]);
-        assert!(args.last().unwrap().contains("source /etc/dispatcharr/dispatcharr.env"));
-        assert!(!args.iter().any(|arg| arg.contains(password) || arg.contains(username)));
+        assert!(args
+            .last()
+            .unwrap()
+            .contains("source /etc/dispatcharr/dispatcharr.env"));
+        assert!(!args
+            .iter()
+            .any(|arg| arg.contains(password) || arg.contains(username)));
         let variables: HashMap<_, _> = command.get_envs().collect();
-        assert_eq!(variables[std::ffi::OsStr::new("AF_ADMIN_USER")], Some(std::ffi::OsStr::new(username)));
-        assert_eq!(variables[std::ffi::OsStr::new("AF_ADMIN_PASS")], Some(std::ffi::OsStr::new(password)));
+        assert_eq!(
+            variables[std::ffi::OsStr::new("AF_ADMIN_USER")],
+            Some(std::ffi::OsStr::new(username))
+        );
+        assert_eq!(
+            variables[std::ffi::OsStr::new("AF_ADMIN_PASS")],
+            Some(std::ffi::OsStr::new(password))
+        );
         assert!(DISPATCHARR_ADMIN_SCRIPT.contains("user.user_level = 10"));
         assert!(DISPATCHARR_ADMIN_SCRIPT.contains("os.environ[\"AF_ADMIN_PASS\"]"));
     }
@@ -4957,10 +5199,12 @@ mod tests {
     #[tokio::test]
     async fn test_dispatcharr_sync_rejects_invalid_credentials_before_execution() {
         for (username, password) in [("", "secret"), ("admin", ""), ("admin\0", "secret")] {
-            let (status, Json(response)) = handle_dispatcharr_credentials(Json(DispatcharrCredentialsRequest {
-                username: username.to_string(),
-                password: password.to_string(),
-            })).await;
+            let (status, Json(response)) =
+                handle_dispatcharr_credentials(Json(DispatcharrCredentialsRequest {
+                    username: username.to_string(),
+                    password: password.to_string(),
+                }))
+                .await;
             assert_eq!(status, StatusCode::BAD_REQUEST);
             assert!(!response.success);
         }
@@ -4989,8 +5233,7 @@ mod tests {
         assert!(tok.is_cancelled());
     }
 
-    static ENV_TEST_MUTEX: Lazy<tokio::sync::Mutex<()>> =
-        Lazy::new(|| tokio::sync::Mutex::new(()));
+    static ENV_TEST_MUTEX: Lazy<tokio::sync::Mutex<()>> = Lazy::new(|| tokio::sync::Mutex::new(()));
 
     #[tokio::test]
     async fn test_release_engine_rollout_control_and_self_update_validation() {
@@ -5095,7 +5338,9 @@ mod tests {
             assert!(logged_native.contains("release"));
             assert!(logged_native.contains("--local"));
             assert!(logged_native.contains("--job-status-file"));
-            assert!(logged_native.contains("--setenv=AETHERFLOW_ALLOW_ISOLATED_SYSTEMD_LIFECYCLE=1"));
+            assert!(
+                logged_native.contains("--setenv=AETHERFLOW_ALLOW_ISOLATED_SYSTEMD_LIFECYCLE=1")
+            );
 
             // Verify durable status is initially "running" (completed=false)
             let running_st = query_self_update_status_local(&native_unit).await.unwrap();

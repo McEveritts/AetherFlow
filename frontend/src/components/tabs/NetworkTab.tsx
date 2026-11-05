@@ -673,7 +673,10 @@ export default function NetworkTab() {
         });
     };
 
-    const submitTailscaleRoutes = async (routes: string[]) => {
+    const submitTailscaleRoutes = async (
+        routes: string[],
+        options?: { clearDraftIfMatches?: string | null; removeCidrFromDraft?: string }
+    ) => {
         setIsAdvertisingRoutes(true);
         try {
             const data = await networkApiRequest<TailscaleRoutesResponse>(
@@ -684,7 +687,18 @@ export default function NetworkTab() {
                 }
             );
             const updatedRoutes = data.routes ?? routes;
-            setSubnetRouteInput(updatedRoutes.join(', '));
+            setSubnetRouteInput((currentDraft) => {
+                if (options && 'clearDraftIfMatches' in options) {
+                    return currentDraft === options.clearDraftIfMatches ? null : currentDraft;
+                }
+                if (options?.removeCidrFromDraft && currentDraft !== null) {
+                    const remaining = parseRoutesList(currentDraft).filter(
+                        (r) => r !== options.removeCidrFromDraft
+                    );
+                    return remaining.join(', ');
+                }
+                return currentDraft;
+            });
             await mutateStatus(current => current?.tailscale ? {
                 ...current,
                 tailscale: { ...current.tailscale, advertised_routes: updatedRoutes },
@@ -706,18 +720,20 @@ export default function NetworkTab() {
 
     const handleAdvertiseRoutesSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
+        const draftSnapshot = subnetRouteDraft;
         const routes = parseRoutesList(subnetRouteInput);
-        await submitTailscaleRoutes(routes);
+        await submitTailscaleRoutes(routes, { clearDraftIfMatches: draftSnapshot });
     };
 
     const handleRemoveSingleRoute = async (cidrToRemove: string) => {
         const current = tsStatus?.advertised_routes ?? [];
         const nextRoutes = current.filter((r) => r !== cidrToRemove);
-        await submitTailscaleRoutes(nextRoutes);
+        await submitTailscaleRoutes(nextRoutes, { removeCidrFromDraft: cidrToRemove });
     };
 
     const handleClearAllRoutes = async () => {
-        await submitTailscaleRoutes([]);
+        const draftSnapshot = subnetRouteDraft;
+        await submitTailscaleRoutes([], { clearDraftIfMatches: draftSnapshot });
     };
 
     const handleUpdateTailscaleSettings = async (patch: {

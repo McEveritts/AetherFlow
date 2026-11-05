@@ -8,7 +8,7 @@ use once_cell::sync::Lazy;
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use rand::RngCore;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::env;
@@ -38,7 +38,9 @@ pub fn init_aes_key() -> anyhow::Result<()> {
                  Set a 32-byte key (raw or base64-encoded) to enable API key encryption."
             );
         }
-        tracing::info!("WARNING: AES_MASTER_KEY not set. API key encryption is disabled (dev/test mode only).");
+        tracing::info!(
+            "WARNING: AES_MASTER_KEY not set. API key encryption is disabled (dev/test mode only)."
+        );
         if let Ok(mut guard) = AES_MASTER_KEY.write() {
             *guard = None;
         }
@@ -79,10 +81,7 @@ pub fn init_aes_key() -> anyhow::Result<()> {
 }
 
 pub fn is_encryption_enabled() -> bool {
-    AES_MASTER_KEY
-        .read()
-        .map(|g| g.is_some())
-        .unwrap_or(false)
+    AES_MASTER_KEY.read().map(|g| g.is_some()).unwrap_or(false)
 }
 
 /// Encrypts plaintext using AES-256-GCM with a 12-byte random nonce, returning
@@ -107,7 +106,11 @@ pub fn encrypt_key(plaintext: &str) -> anyhow::Result<String> {
     combined.extend_from_slice(&nonce_bytes);
     combined.extend_from_slice(&ciphertext);
 
-    Ok(format!("{}{}", CIPHERTEXT_PREFIX, BASE64_STD.encode(combined)))
+    Ok(format!(
+        "{}{}",
+        CIPHERTEXT_PREFIX,
+        BASE64_STD.encode(combined)
+    ))
 }
 
 /// Decrypts a versioned `"enc:v1:<base64>"` string produced by Go or Rust.
@@ -168,12 +171,17 @@ pub fn migrate_legacy_secrets() -> anyhow::Result<()> {
 
 static DB_POOL: Lazy<RwLock<Option<Pool<SqliteConnectionManager>>>> =
     Lazy::new(|| RwLock::new(None));
+static DB_READ_POOL: Lazy<RwLock<Option<Pool<SqliteConnectionManager>>>> =
+    Lazy::new(|| RwLock::new(None));
 static DB_PATH_RESOLVED: Lazy<RwLock<String>> = Lazy::new(|| RwLock::new(String::new()));
 
 pub fn try_resolve_db_path() -> anyhow::Result<String> {
     let default_fallback = env::current_exe()
         .ok()
-        .and_then(|exe| exe.parent().map(|exe_dir| exe_dir.join("data/aetherflow.sqlite")))
+        .and_then(|exe| {
+            exe.parent()
+                .map(|exe_dir| exe_dir.join("data/aetherflow.sqlite"))
+        })
         .map(|path| path.to_string_lossy().into_owned())
         .unwrap_or_else(|| "aetherflow.sqlite".to_string());
 
@@ -193,7 +201,10 @@ pub fn try_resolve_db_path() -> anyhow::Result<String> {
 pub fn resolve_db_path() -> String {
     let default_fallback = env::current_exe()
         .ok()
-        .and_then(|exe| exe.parent().map(|exe_dir| exe_dir.join("data/aetherflow.sqlite")))
+        .and_then(|exe| {
+            exe.parent()
+                .map(|exe_dir| exe_dir.join("data/aetherflow.sqlite"))
+        })
         .map(|path| path.to_string_lossy().into_owned())
         .unwrap_or_else(|| "aetherflow.sqlite".to_string());
 
@@ -218,12 +229,40 @@ pub fn get_db_path() -> String {
 }
 
 pub fn get_conn() -> anyhow::Result<r2d2::PooledConnection<SqliteConnectionManager>> {
-    let guard = DB_POOL.read().unwrap();
-    let pool = guard
+    let pool = DB_POOL
+        .read()
+        .unwrap()
         .as_ref()
+        .cloned()
         .ok_or_else(|| anyhow::anyhow!("Database pool not initialized"))?;
     pool.get()
         .map_err(|e| anyhow::anyhow!("Failed to acquire SQLite connection: {}", e))
+}
+
+/// Bounded, read-only WAL connections. The writer remains a pool of one.
+/// Private in-memory test databases must use their original connection.
+pub fn get_read_conn() -> anyhow::Result<r2d2::PooledConnection<SqliteConnectionManager>> {
+    let pool = DB_READ_POOL.read().unwrap().clone();
+    match pool {
+        Some(pool) => pool.get().map_err(Into::into),
+        None => get_conn(),
+    }
+}
+
+fn build_read_pool(db_path: &str) -> anyhow::Result<Pool<SqliteConnectionManager>> {
+    let manager = SqliteConnectionManager::file(db_path)
+        .with_flags(OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI)
+        .with_init(|conn| {
+            conn.busy_timeout(Duration::from_secs(5))?;
+            conn.execute_batch(
+                "PRAGMA query_only=ON; PRAGMA foreign_keys=ON; PRAGMA cache_size=-8000;",
+            )
+        });
+    Ok(Pool::builder()
+        .max_size(4)
+        .min_idle(Some(1))
+        .connection_timeout(Duration::from_secs(5))
+        .build(manager)?)
 }
 
 fn apply_pragmas(conn: &Connection) {
@@ -295,7 +334,10 @@ pub fn init_db() -> anyhow::Result<()> {
     });
 
     // Constrain pool to 1 writer connection matching Go's `DB.SetMaxOpenConns(1)`
-    let pool = Pool::builder().max_size(1).build(manager)?;
+    let pool = Pool::builder()
+        .max_size(1)
+        .connection_timeout(Duration::from_secs(5))
+        .build(manager)?;
     let conn = pool.get()?;
     apply_pragmas(&conn);
 
@@ -317,6 +359,8 @@ pub fn init_db() -> anyhow::Result<()> {
             ollama_endpoint TEXT DEFAULT '',
             anthropic_api_key TEXT DEFAULT '',
             anthropic_endpoint TEXT DEFAULT '',
+            local_provider TEXT DEFAULT '',
+            local_model TEXT DEFAULT '',
             base_domain TEXT DEFAULT '',
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
@@ -440,6 +484,16 @@ pub fn init_db() -> anyhow::Result<()> {
             billing_external_id TEXT DEFAULT '',
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
+
+        CREATE TABLE IF NOT EXISTS fileshare_objects (
+            storage_root TEXT NOT NULL,
+            directory TEXT NOT NULL,
+            filename TEXT NOT NULL,
+            user_id INTEGER NOT NULL REFERENCES users(id),
+            size_bytes INTEGER NOT NULL CHECK(size_bytes >= 0),
+            PRIMARY KEY(storage_root, directory, filename)
+        );
+        CREATE INDEX IF NOT EXISTS idx_fileshare_objects_user ON fileshare_objects(user_id);
 
         CREATE TABLE IF NOT EXISTS billing_webhook_events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -839,8 +893,44 @@ pub fn init_db() -> anyhow::Result<()> {
         ],
     );
 
+    migrate(&conn, 22, "Persist MFA replay guards and OIDC nonces", &[
+        "ALTER TABLE users ADD COLUMN last_totp_step INTEGER NOT NULL DEFAULT -1;",
+        "ALTER TABLE oidc_auth_codes ADD COLUMN nonce TEXT NOT NULL DEFAULT '';",
+        "CREATE TABLE IF NOT EXISTS mfa_challenges (token TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, attempts INTEGER NOT NULL DEFAULT 0, expires_at INTEGER NOT NULL);",
+        "CREATE INDEX IF NOT EXISTS idx_mfa_challenges_expiry ON mfa_challenges(expires_at);",
+        "CREATE TABLE IF NOT EXISTS revoked_tokens (jti TEXT PRIMARY KEY, expires_at TEXT NOT NULL);",
+    ]);
+
+    let security_migration: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM schema_versions WHERE version = 22",
+        [],
+        |r| r.get(0),
+    )?;
+    anyhow::ensure!(
+        security_migration == 1,
+        "Security schema migration v22 failed"
+    );
 
     // Singleton settings row & model normalization
+    migrate(
+        &conn,
+        23,
+        "Persist installed local AI model and runtime separately",
+        &[
+            "ALTER TABLE settings ADD COLUMN local_provider TEXT DEFAULT '';",
+            "ALTER TABLE settings ADD COLUMN local_model TEXT DEFAULT '';",
+        ],
+    );
+    let local_settings_migration: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM schema_versions WHERE version = 23",
+        [],
+        |row| row.get(0),
+    )?;
+    anyhow::ensure!(
+        local_settings_migration == 1,
+        "Local AI settings migration v23 failed"
+    );
+
     let _ = conn.execute("INSERT OR IGNORE INTO settings (id) VALUES (1)", []);
     let _ = conn.execute(
         "UPDATE settings SET ai_model = 'gemini-4-argon' WHERE id = 1 AND ai_model IN ('gemini-3.8-flash', 'gemini-2.0-flash', 'gemini-2.0-flash-lite', 'gemini-1.5-pro', 'gemini-1.5-flash', 'gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-3.1-pro-preview', 'gemini-3-flash-preview', 'gemini-3.1-flash-lite-preview', 'gemini-3-pro-image-preview', 'gemini-3.1-flash-image-preview')",
@@ -880,8 +970,14 @@ pub fn init_db() -> anyhow::Result<()> {
     }
 
     drop(conn);
+    let read_pool = if db_path == ":memory:" || db_path.contains("mode=memory") {
+        None
+    } else {
+        Some(build_read_pool(&db_path)?)
+    };
     *DB_PATH_RESOLVED.write().unwrap() = db_path.clone();
     *DB_POOL.write().unwrap() = Some(pool);
+    *DB_READ_POOL.write().unwrap() = read_pool;
     invalidate_ingress_cache();
 
     tracing::info!(path = %db_path, "SQLite WAL database connected");
@@ -939,11 +1035,14 @@ pub fn prune_expired_data() {
     for query_sql in param_queries {
         let _ = conn.execute(query_sql, params![now]);
     }
+    let _ = conn.execute(
+        "DELETE FROM mfa_challenges WHERE expires_at <= ?1",
+        params![Utc::now().timestamp()],
+    );
 
     let static_queries = [
         "DELETE FROM metrics_history WHERE replace(CAST(timestamp AS TEXT), 'T', ' ') < datetime('now', '-90 days')",
         "DELETE FROM login_history WHERE created_at < datetime('now', '-90 days')",
-        "DELETE FROM billing_webhook_events WHERE processed_at < datetime('now', '-30 days')",
         "DELETE FROM streaming_bandwidth_samples WHERE timestamp < datetime('now', '-90 days')",
     ];
     for query_sql in static_queries {
@@ -1053,8 +1152,7 @@ fn parse_sqlite_dt(s: &str) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(s)
         .map(|d| d.with_timezone(&Utc))
         .or_else(|_| {
-            chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S")
-                .map(|ndt| ndt.and_utc())
+            chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S").map(|ndt| ndt.and_utc())
         })
         .unwrap_or_else(|_| Utc::now())
 }
@@ -1212,7 +1310,9 @@ pub fn query_audit_log(
     let total: i64 = match bind_vals.len() {
         0 => conn.query_row(&count_sql, [], |r| r.get(0))?,
         1 => conn.query_row(&count_sql, params![bind_vals[0]], |r| r.get(0))?,
-        _ => conn.query_row(&count_sql, params![bind_vals[0], bind_vals[1]], |r| r.get(0))?,
+        _ => conn.query_row(&count_sql, params![bind_vals[0], bind_vals[1]], |r| {
+            r.get(0)
+        })?,
     };
 
     let list_sql = format!(
@@ -1419,8 +1519,6 @@ static TOKEN_BLACKLIST: Lazy<Mutex<HashMap<String, Instant>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 static PENDING_2FA_CACHE: Lazy<Mutex<HashMap<i64, (String, Instant)>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
-static MFA_CHALLENGE_CACHE: Lazy<Mutex<HashMap<String, (i64, Instant)>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
 
 fn ensure_revoked_tokens_table(conn: &Connection) -> bool {
     conn.execute_batch(
@@ -1445,7 +1543,8 @@ pub fn revoke_token(jti: &str, ttl: Duration) {
             let _ = conn.execute("DELETE FROM active_sessions WHERE jti = ?1", params![jti]);
             return;
         }
-        let exp_rfc3339 = (Utc::now() + chrono::Duration::seconds(ttl.as_secs() as i64)).to_rfc3339();
+        let exp_rfc3339 =
+            (Utc::now() + chrono::Duration::seconds(ttl.as_secs() as i64)).to_rfc3339();
         let _ = conn.execute(
             "INSERT OR REPLACE INTO revoked_tokens (jti, expires_at) VALUES (?1, ?2)",
             params![jti, exp_rfc3339],
@@ -1458,44 +1557,39 @@ pub fn revoke_token(jti: &str, ttl: Duration) {
     }
 }
 
-pub fn is_token_revoked(jti: &str) -> bool {
+/// Errors are distinct from a confirmed revocation so rotation grace cannot mask a DB failure.
+pub fn token_revocation_status(jti: &str) -> anyhow::Result<bool> {
     if jti.is_empty() {
-        return false;
+        return Ok(true);
     }
     if let Ok(mut map) = TOKEN_BLACKLIST.lock() {
         if let Some(&exp) = map.get(jti) {
             if exp > Instant::now() {
-                return true;
-            } else {
-                map.remove(jti);
+                return Ok(true);
             }
+            map.remove(jti);
         }
     }
-    let Ok(conn) = get_conn() else {
-        return false;
-    };
-    if !ensure_revoked_tokens_table(&conn) {
-        return false;
+    let conn = get_read_conn()?;
+    token_revocation_status_with_conn(&conn, jti)
+}
+
+fn token_revocation_status_with_conn(conn: &Connection, jti: &str) -> anyhow::Result<bool> {
+    let expiry: Option<String> = conn
+        .query_row(
+            "SELECT expires_at FROM revoked_tokens WHERE jti = ?1",
+            params![jti],
+            |r| r.get(0),
+        )
+        .optional()?;
+    match expiry {
+        None => Ok(false),
+        Some(expiry) => Ok(DateTime::parse_from_rfc3339(&expiry)?.with_timezone(&Utc) > Utc::now()),
     }
-    let Ok(exp_rfc3339) = conn.query_row(
-        "SELECT expires_at FROM revoked_tokens WHERE jti = ?1",
-        params![jti],
-        |r| r.get::<_, String>(0),
-    ) else {
-        return false;
-    };
-    match DateTime::parse_from_rfc3339(&exp_rfc3339) {
-        Ok(exp) if exp.with_timezone(&Utc) > Utc::now() => {
-            if let Ok(mut map) = TOKEN_BLACKLIST.lock() {
-                map.insert(jti.to_string(), Instant::now() + Duration::from_secs(60));
-            }
-            true
-        }
-        _ => {
-            let _ = conn.execute("DELETE FROM revoked_tokens WHERE jti = ?1", params![jti]);
-            false
-        }
-    }
+}
+
+pub fn is_token_revoked(jti: &str) -> bool {
+    token_revocation_status(jti).unwrap_or(true)
 }
 
 pub fn store_2fa_pending(user_id: i64, secret: &str, ttl: Duration) {
@@ -1521,33 +1615,109 @@ pub fn delete_2fa_pending(user_id: i64) {
     }
 }
 
-pub fn store_mfa_challenge(token: &str, user_id: i64, ttl: Duration) {
-    if let Ok(mut map) = MFA_CHALLENGE_CACHE.lock() {
-        map.retain(|_, (_, exp)| *exp > Instant::now());
-        map.insert(token.to_string(), (user_id, Instant::now() + ttl));
-    }
+pub const MAX_MFA_ATTEMPTS: i64 = 5;
+
+pub fn store_mfa_challenge(token: &str, user_id: i64, ttl: Duration) -> anyhow::Result<()> {
+    let conn = get_conn()?;
+    let now = Utc::now().timestamp();
+    conn.execute(
+        "DELETE FROM mfa_challenges WHERE expires_at <= ?1",
+        params![now],
+    )?;
+    conn.execute(
+        "INSERT INTO mfa_challenges (token, user_id, expires_at) VALUES (?1, ?2, ?3)",
+        params![token, user_id, now + ttl.as_secs().min(300) as i64],
+    )?;
+    Ok(())
 }
 
-pub fn get_mfa_challenge(token: &str) -> Option<i64> {
-    let mut map = MFA_CHALLENGE_CACHE.lock().ok()?;
-    if let Some((uid, exp)) = map.get(token) {
-        if *exp > Instant::now() {
-            return Some(*uid);
-        }
-        map.remove(token);
-    }
-    None
+/// Call within the same write transaction as factor verification and consumption.
+/// Failed verification must commit this attempt; successful consumption must commit with the factor.
+pub fn begin_mfa_attempt(conn: &Connection, token: &str) -> anyhow::Result<Option<i64>> {
+    Ok(conn.query_row(
+        "UPDATE mfa_challenges SET attempts = attempts + 1 WHERE token = ?1 AND attempts < ?2 AND expires_at > ?3 RETURNING user_id",
+        params![token, MAX_MFA_ATTEMPTS, Utc::now().timestamp()], |r| r.get(0),
+    ).optional()?)
 }
 
-pub fn delete_mfa_challenge(token: &str) {
-    if let Ok(mut map) = MFA_CHALLENGE_CACHE.lock() {
-        map.remove(token);
-    }
+pub fn consume_mfa_challenge(conn: &Connection, token: &str, user_id: i64) -> anyhow::Result<bool> {
+    let consumed: Option<i64> = conn.query_row(
+        "DELETE FROM mfa_challenges WHERE token = ?1 AND user_id = ?2 AND attempts <= ?3 AND expires_at > ?4 RETURNING user_id",
+        params![token, user_id, MAX_MFA_ATTEMPTS, Utc::now().timestamp()], |r| r.get(0),
+    ).optional()?;
+    Ok(consumed == Some(user_id))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn revocation_query_distinguishes_absent_revoked_and_database_errors() {
+        let conn = Connection::open_in_memory().unwrap();
+        assert!(token_revocation_status_with_conn(&conn, "session").is_err());
+        conn.execute_batch(
+            "CREATE TABLE revoked_tokens (jti TEXT PRIMARY KEY, expires_at TEXT NOT NULL);",
+        )
+        .unwrap();
+        assert!(!token_revocation_status_with_conn(&conn, "absent").unwrap());
+        for (jti, expiry) in [
+            (
+                "active",
+                (Utc::now() + chrono::Duration::hours(1)).to_rfc3339(),
+            ),
+            (
+                "expired",
+                (Utc::now() - chrono::Duration::hours(1)).to_rfc3339(),
+            ),
+            ("bad-date", "invalid".into()),
+        ] {
+            conn.execute(
+                "INSERT INTO revoked_tokens VALUES (?1, ?2)",
+                params![jti, expiry],
+            )
+            .unwrap();
+        }
+        assert!(token_revocation_status_with_conn(&conn, "active").unwrap());
+        assert!(!token_revocation_status_with_conn(&conn, "expired").unwrap());
+        assert!(token_revocation_status_with_conn(&conn, "bad-date").is_err());
+        conn.execute_batch("DROP TABLE revoked_tokens;").unwrap();
+        assert!(token_revocation_status_with_conn(&conn, "absent").is_err());
+    }
+
+    #[test]
+    fn bounded_read_pool_works_while_writer_is_held_and_cannot_write() {
+        let path = std::env::temp_dir().join(format!(
+            "af-read-pool-{}-{}.sqlite",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let writer_pool = Pool::builder()
+            .max_size(1)
+            .build(SqliteConnectionManager::file(&path))
+            .unwrap();
+        let writer = writer_pool.get().unwrap();
+        writer.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE example (id INTEGER); INSERT INTO example VALUES (1); BEGIN IMMEDIATE; INSERT INTO example VALUES (2);").unwrap();
+        let readers = build_read_pool(path.to_str().unwrap()).unwrap();
+        let reader = readers.get().unwrap();
+        let count: i64 = reader
+            .query_row("SELECT COUNT(*) FROM example", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            count, 1,
+            "Reader sees committed WAL snapshot while writer is busy"
+        );
+        assert!(reader
+            .execute("INSERT INTO example VALUES (3)", [])
+            .is_err());
+        assert_eq!(readers.max_size(), 4);
+        writer.execute_batch("ROLLBACK;").unwrap();
+        drop(reader);
+        drop(readers);
+        drop(writer);
+        drop(writer_pool);
+        let _ = fs::remove_file(path);
+    }
 
     #[test]
     fn test_aes_gcm_roundtrip_and_format() {
@@ -1570,19 +1740,28 @@ mod tests {
 
         {
             let conn = get_conn().unwrap();
-            let migration_count: i64 = conn.query_row(
-                "SELECT COUNT(*) FROM schema_versions WHERE version IN (20, 21)",
-                [],
-                |row| row.get(0),
+            let migration_count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM schema_versions WHERE version IN (20, 21, 22)",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(migration_count, 3);
+            let retired_runtime_tables: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='billing_webhook_cursors'", [], |row| row.get(0)
             ).unwrap();
-            assert_eq!(migration_count, 2);
+            assert_eq!(retired_runtime_tables, 0);
             let provenance_column_count: i64 = conn.query_row(
                 "SELECT COUNT(*) FROM pragma_table_info('streaming_history') WHERE name = 'provenance'",
                 [],
                 |row| row.get(0),
             ).unwrap();
             assert_eq!(provenance_column_count, 1);
-            conn.query_row("SELECT COUNT(*) FROM plugins_registry", [], |row| row.get::<_, i64>(0)).unwrap();
+            conn.query_row("SELECT COUNT(*) FROM plugins_registry", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap();
         }
 
         for new_status in ["approved", "rejected"] {

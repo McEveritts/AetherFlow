@@ -2,15 +2,17 @@
 
 import { useAuth } from '@/contexts/AuthContext';
 import { Sparkles, KeyRound, LogIn, ShieldCheck, ArrowRight, Fingerprint, Info } from 'lucide-react';
-import { FormEvent, useState, useEffect, useRef } from 'react';
+import { FormEvent, useState, useEffect, useRef, Suspense } from 'react';
+import { useSearchParams } from 'next/navigation';
 import { apiFetch } from '@/lib/fetcher';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
 
 type AuthStep = 'credentials' | 'mfa_challenge' | 'mfa_setup';
 
-export default function LoginPage() {
+function LoginFormContent() {
     const { login, loginLocal } = useAuth();
+    const searchParams = useSearchParams();
     const [step, setStep] = useState<AuthStep>('credentials');
     const [username, setUsername] = useState('');
     const [password, setPassword] = useState('');
@@ -32,12 +34,53 @@ export default function LoginPage() {
         useRef<HTMLInputElement>(null),
     ];
 
+    const mfaHandledRef = useRef(false);
+    const errorHandledRef = useRef(false);
+
     useEffect(() => {
         apiFetch('/api/v1/public/auth/setup/check')
             .then(res => res.json())
             .then(data => setIsSetup(data.setupRequired))
             .catch(() => { });
-    }, []);
+
+        // OPUS-002: Sol redirects Google users needing MFA to /login?mfa=<challenge>
+        // Or if Google account is not allowlisted: /login?error=not_authorized
+        const urlParams = typeof window !== 'undefined'
+            ? new URLSearchParams(window.location.search)
+            : null;
+        const mfaChallenge = searchParams?.get('mfa') || urlParams?.get('mfa');
+        const errorParam = searchParams?.get('error') || urlParams?.get('error');
+
+        if (mfaChallenge && !mfaHandledRef.current) {
+            mfaHandledRef.current = true;
+            setMfaToken(mfaChallenge);
+            setStep('mfa_challenge');
+
+            // Clear sensitive challenge token from browser address bar & history immediately
+            if (typeof window !== 'undefined') {
+                const url = new URL(window.location.href);
+                url.searchParams.delete('mfa');
+                const remaining = url.searchParams.toString();
+                window.history.replaceState(null, '', url.pathname + (remaining ? `?${remaining}` : ''));
+            }
+        }
+
+        if (errorParam && !errorHandledRef.current) {
+            errorHandledRef.current = true;
+            if (errorParam === 'not_authorized') {
+                setError('Google account is not authorized. Access is restricted to invited or allowlisted users.');
+            } else {
+                setError(`Authentication failed: ${errorParam.replace(/_/g, ' ')}`);
+            }
+
+            if (typeof window !== 'undefined') {
+                const url = new URL(window.location.href);
+                url.searchParams.delete('error');
+                const remaining = url.searchParams.toString();
+                window.history.replaceState(null, '', url.pathname + (remaining ? `?${remaining}` : ''));
+            }
+        }
+    }, [searchParams]);
 
     const handleLogin = async (e: FormEvent) => {
         e.preventDefault();
@@ -66,10 +109,11 @@ export default function LoginPage() {
                     loginLocal();
                 }
             } else {
+                const errMsg = data.message || data.error;
                 setError(
-                    data.error?.includes('credentials') ? 'Authentication denied: Invalid credentials provided.' :
-                    data.error?.includes('locked') ? 'Identity locked: Maximum attempts exceeded. Try again in 15m.' :
-                    data.error || 'Authentication sequence failed. Check daemon logs.'
+                    errMsg?.includes('credentials') ? 'Authentication denied: Invalid credentials provided.' :
+                    errMsg?.includes('locked') ? 'Identity locked: Maximum attempts exceeded. Try again in 15m.' :
+                    errMsg || 'Authentication sequence failed. Check daemon logs.'
                 );
             }
         } catch (_err) {
@@ -100,7 +144,7 @@ export default function LoginPage() {
             if (res.ok) {
                 loginLocal();
             } else {
-                setError(data.message || 'Verification failed. Check your code and try again.');
+                setError(data.message || data.error || 'Verification failed. Check your code and try again.');
             }
         } catch (_err) {
              setError('Cryptographic verification failed. Check clock sync or token validity.');
@@ -286,6 +330,10 @@ export default function LoginPage() {
                                         onClick={() => {
                                             setStep('credentials');
                                             setIsRecoveryMode(false);
+                                            setMfaToken('');
+                                            setMfaCode(['', '', '', '', '', '']);
+                                            setRecoveryCode('');
+                                            setError('');
                                         }}
                                         className="w-full text-center text-slate-500 hover:text-slate-300 text-sm font-medium transition-colors"
                                     >
@@ -315,5 +363,24 @@ export default function LoginPage() {
                 </div>
             </div>
         </div>
+    );
+}
+
+export default function LoginPage() {
+    return (
+        <Suspense fallback={
+            <div className="min-h-screen bg-transparent flex items-center justify-center p-4">
+                <div className="w-full max-w-md p-4 sm:p-8 relative z-10">
+                    <div className="glass-panel overflow-hidden rounded-3xl p-6 sm:p-8 relative shadow-2xl border border-indigo-500/30 text-center text-slate-400">
+                        <div className="mx-auto h-20 w-20 mb-6 rounded-[1.25rem] shadow-[0_0_30px_rgba(99,102,241,0.3)] relative overflow-hidden ring-1 ring-white/10">
+                            <img src="/img/aetherflow-icon.svg" alt="AetherFlow Logo" className="w-full h-full" />
+                        </div>
+                        <p className="text-sm font-medium">Verifying session context...</p>
+                    </div>
+                </div>
+            </div>
+        }>
+            <LoginFormContent />
+        </Suspense>
     );
 }

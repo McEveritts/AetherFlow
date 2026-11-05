@@ -3,7 +3,7 @@ Tier 1: Feature Coverage (Category-Partition & Happy Paths)
 Features:
 - F24: Network & VPN Operator Panel
 - F25: Notifications & Alerting Panel
-- F26: Quotas & Billing Panel
+- F26: Storage Quotas Panel
 - F27: Cluster Nodes Panel
 """
 
@@ -93,46 +93,46 @@ class TestF25TestNotificationChannelTrigger(TestCase):
         tab = inspector.read_file("frontend/src/components/tabs/NotificationsSettingsTab.tsx") or inspector.read_file("frontend/src/components/tabs/NotificationsTab.tsx")
         self.assert_true(bool(tab and ("test" in tab.lower() or "/test" in tab)), "F25: Notifications panel must support testing channels")
 
-class TestF26QuotasBillingTabExists(TestCase):
+class TestF26QuotasTabExists(TestCase):
     def __init__(self):
-        super().__init__("T1_F26_01", "F26", 1, "QuotasBillingTab.tsx exists in frontend/src/components/tabs/")
+        super().__init__("T1_F26_01", "F26", 1, "QuotasTab.tsx exists in frontend/src/components/tabs/")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        exists = inspector.file_exists("frontend/src/components/tabs/QuotasBillingTab.tsx") or inspector.file_exists("frontend/src/components/tabs/QuotasTab.tsx")
-        self.assert_true(exists, "F26: QuotasBillingTab.tsx must be created")
+        exists = inspector.file_exists("frontend/src/components/tabs/QuotasTab.tsx")
+        self.assert_true(exists, "F26: QuotasTab.tsx must be created")
 
-class TestF26QuotasBillingMountedInSidebar(TestCase):
+class TestF26QuotasMountedInSidebar(TestCase):
     def __init__(self):
-        super().__init__("T1_F26_02", "F26", 1, "Quotas & Billing tab is registered in navigation")
+        super().__init__("T1_F26_02", "F26", 1, "Storage Quotas tab is registered in navigation")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
         sidebar = inspector.read_file("frontend/src/components/layout/Sidebar.tsx")
         page = inspector.read_file("frontend/src/app/page.tsx")
-        mounted = (sidebar and ("quota" in sidebar.lower() or "billing" in sidebar.lower())) or (page and "Quota" in page)
-        self.assert_true(bool(mounted), "F26: Quotas & Billing must be navigable in Sidebar")
+        mounted = (sidebar and "quota" in sidebar.lower()) or (page and "Quota" in page)
+        self.assert_true(bool(mounted), "F26: Storage Quotas must be navigable in Sidebar")
 
 class TestF26UserQuotasTable(TestCase):
     def __init__(self):
         super().__init__("T1_F26_03", "F26", 1, "Quotas tab lists user storage usage and quota thresholds")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        tab = inspector.read_file("frontend/src/components/tabs/QuotasBillingTab.tsx") or inspector.read_file("frontend/src/components/tabs/QuotasTab.tsx")
+        tab = inspector.read_file("frontend/src/components/tabs/QuotasTab.tsx")
         self.assert_true(bool(tab and ("quota" in tab.lower() or "/api/v1/admin/quotas" in tab)), "F26: Quotas tab must display user quotas")
 
-class TestF26BillingWebhookEventsList(TestCase):
+class TestF26QuotaEditModal(TestCase):
     def __init__(self):
-        super().__init__("T1_F26_04", "F26", 1, "Quotas tab lists billing webhook audit events")
+        super().__init__("T1_F26_04", "F26", 1, "Quotas tab provides modal to edit user storage quota")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        tab = inspector.read_file("frontend/src/components/tabs/QuotasBillingTab.tsx") or inspector.read_file("frontend/src/components/tabs/QuotasTab.tsx")
-        self.assert_true(bool(tab and ("webhook" in tab.lower() or "billing" in tab.lower())), "F26: Quotas panel must list billing webhook events")
+        tab = inspector.read_file("frontend/src/components/tabs/QuotasTab.tsx")
+        self.assert_true(bool(tab and ("update disk quota" in tab.lower() or "editinguser" in tab.lower())), "F26: Quotas panel must allow editing user storage quota")
 
 class TestF26QuotaRefreshTrigger(TestCase):
     def __init__(self):
         super().__init__("T1_F26_05", "F26", 1, "Quotas tab provides manual disk usage refresh button")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        tab = inspector.read_file("frontend/src/components/tabs/QuotasBillingTab.tsx") or inspector.read_file("frontend/src/components/tabs/QuotasTab.tsx")
+        tab = inspector.read_file("frontend/src/components/tabs/QuotasTab.tsx")
         self.assert_true(bool(tab and ("refresh" in tab.lower() or "/refresh" in tab)), "F26: Quotas panel must allow refreshing quota stats")
 
 class TestF27ClusterTabExists(TestCase):
@@ -181,6 +181,6 @@ def get_tests():
     return [
         TestF24NetworkTabComponentExists(), TestF24NetworkTabMountedInSidebar(), TestF24WireGuardPeersDisplay(), TestF24TailscaleRoutesControls(), TestF24NetworkBackendEndpointsWired(),
         TestF25NotificationsTabExists(), TestF25NotificationsTabMountedInSidebar(), TestF25NotificationRulesList(), TestF25NotificationChannelsManagement(), TestF25TestNotificationChannelTrigger(),
-        TestF26QuotasBillingTabExists(), TestF26QuotasBillingMountedInSidebar(), TestF26UserQuotasTable(), TestF26BillingWebhookEventsList(), TestF26QuotaRefreshTrigger(),
+        TestF26QuotasTabExists(), TestF26QuotasMountedInSidebar(), TestF26UserQuotasTable(), TestF26QuotaEditModal(), TestF26QuotaRefreshTrigger(),
         TestF27ClusterTabExists(), TestF27ClusterTabMountedInSidebar(), TestF27ClusterNodesList(), TestF27ClusterEnrollWorkerModal(), TestF27ClusterNodeRemovalAction()
     ]

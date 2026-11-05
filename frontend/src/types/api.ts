@@ -19,7 +19,9 @@ export type APIErrorCode =
     | 'QUOTA_EXCEEDED'
     | 'AI_UNAVAILABLE'
     | 'SESSION_EXPIRED'
-    | 'SESSION_HIJACKED';
+    | 'SESSION_HIJACKED'
+    | 'INVALID_CURRENT_PASSWORD'
+    | 'INVALID_2FA_CODE';
 
 /** Structured API error matching the backend APIError shape */
 export interface APIErrorBody {

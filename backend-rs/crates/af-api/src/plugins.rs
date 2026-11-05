@@ -5,7 +5,6 @@ use axum::http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode}
 use axum::response::{IntoResponse, Json, Response};
 use chrono::Utc;
 use hmac::{Hmac, Mac};
-use http_body_util::BodyExt;
 use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use once_cell::sync::Lazy;
 use regex::Regex;
@@ -291,13 +290,19 @@ pub fn is_route_default_denied(path: &str) -> bool {
     false
 }
 
-pub fn normalize_scope_entry(raw: &RawScopeEntry, permissions: &[String]) -> Result<Vec<PluginScopeRule>, String> {
+pub fn normalize_scope_entry(
+    raw: &RawScopeEntry,
+    permissions: &[String],
+) -> Result<Vec<PluginScopeRule>, String> {
     let can_write_permission = permissions
         .iter()
         .any(|p| p.ends_with(":write") || p.ends_with(":admin") || p.ends_with(":control"));
 
     let (raw_method, raw_route) = match raw {
-        RawScopeEntry::Structured(rule) => (rule.method.trim().to_uppercase(), rule.route.trim().to_string()),
+        RawScopeEntry::Structured(rule) => (
+            rule.method.trim().to_uppercase(),
+            rule.route.trim().to_string(),
+        ),
         RawScopeEntry::Simple(spec) => {
             let trimmed = spec.trim();
             if let Some((m, r)) = trimmed.split_once(' ') {
@@ -309,7 +314,10 @@ pub fn normalize_scope_entry(raw: &RawScopeEntry, permissions: &[String]) -> Res
     };
 
     if raw_route.is_empty() || !raw_route.starts_with("/api/") || raw_route.contains("..") {
-        return Err(format!("Invalid plugin API scope route '{}': must start with /api/ and not contain '..'", raw_route));
+        return Err(format!(
+            "Invalid plugin API scope route '{}': must start with /api/ and not contain '..'",
+            raw_route
+        ));
     }
 
     if is_route_default_denied(raw_route.trim_end_matches('*').trim_end_matches('/')) {
@@ -332,9 +340,9 @@ pub fn normalize_scope_entry(raw: &RawScopeEntry, permissions: &[String]) -> Res
         }
         _ => {
             return Err(format!(
-                "Unsupported or wildcard HTTP method '{}' in plugin scope (explicit method required)",
-                raw_method
-            ))
+            "Unsupported or wildcard HTTP method '{}' in plugin scope (explicit method required)",
+            raw_method
+        ))
         }
     };
 
@@ -384,7 +392,11 @@ pub fn route_pattern_matches(pattern: &str, request_path: &str) -> bool {
     false
 }
 
-pub fn plugin_claims_allow_request(claims: &PluginTokenClaims, method: &Method, path: &str) -> bool {
+pub fn plugin_claims_allow_request(
+    claims: &PluginTokenClaims,
+    method: &Method,
+    path: &str,
+) -> bool {
     if is_route_default_denied(path) {
         return false;
     }
@@ -405,7 +417,10 @@ pub fn validate_relative_plugin_subpath(
     }
     let rel_path = StdPath::new(trimmed);
     if rel_path.is_absolute() {
-        return Err(format!("Absolute path '{}' is forbidden in plugin manifest", trimmed));
+        return Err(format!(
+            "Absolute path '{}' is forbidden in plugin manifest",
+            trimmed
+        ));
     }
     for comp in rel_path.components() {
         match comp {
@@ -427,7 +442,10 @@ pub fn validate_relative_plugin_subpath(
         let sym_meta = fs::symlink_metadata(&joined)
             .map_err(|e| format!("Failed to inspect '{}': {}", trimmed, e))?;
         if sym_meta.file_type().is_symlink() {
-            return Err(format!("Symlink '{}' inside plugin directory is forbidden", trimmed));
+            return Err(format!(
+                "Symlink '{}' inside plugin directory is forbidden",
+                trimmed
+            ));
         }
         let canon_target = fs::canonicalize(&joined)
             .map_err(|e| format!("Failed to canonicalize '{}': {}", trimmed, e))?;
@@ -578,7 +596,12 @@ pub fn resolve_plugins_dir() -> PathBuf {
             }
         }
     }
-    for candidate in ["plugins", "../plugins", "../../plugins", "/opt/AetherFlow/plugins"] {
+    for candidate in [
+        "plugins",
+        "../plugins",
+        "../../plugins",
+        "/opt/AetherFlow/plugins",
+    ] {
         let p = PathBuf::from(candidate);
         if p.is_dir() {
             return p;
@@ -754,7 +777,9 @@ fn allocate_plugin_port(plugin_id: &str, preferred: u16) -> Result<u16, String> 
         if let Ok(mut stmt) = conn.prepare(
             "SELECT plugin_id, allocated_port FROM plugins_registry WHERE allocated_port > 0",
         ) {
-            if let Ok(rows) = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))) {
+            if let Ok(rows) =
+                stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+            {
                 for (pid, p) in rows.flatten() {
                     if pid != plugin_id && (1024..=65535).contains(&p) {
                         used_ports.insert(p as u16);
@@ -867,7 +892,9 @@ pub fn decode_and_verify_plugin_token(token: &str) -> Result<PluginTokenClaims, 
 
     let reg = get_or_init_registry_state(&claims.plugin_id);
     if !reg.enabled || reg.status == "stopped" || reg.token_epoch != claims.epoch {
-        return Err("Plugin token is no longer active for the current plugin lifecycle epoch".to_string());
+        return Err(
+            "Plugin token is no longer active for the current plugin lifecycle epoch".to_string(),
+        );
     }
 
     // Intersect token scopes with the live verified manifest on disk if discoverable
@@ -885,7 +912,10 @@ pub fn revoke_all_tokens_for_plugin(plugin_id: &str) {
     if let Ok(mut map) = ACTIVE_PLUGIN_JTIS.lock() {
         if let Some(jtis) = map.remove(plugin_id) {
             for jti in jtis {
-                af_db::revoke_token(&jti, Duration::from_secs(MAX_PLUGIN_TOKEN_TTL_SECS as u64 + 60));
+                af_db::revoke_token(
+                    &jti,
+                    Duration::from_secs(MAX_PLUGIN_TOKEN_TTL_SECS as u64 + 60),
+                );
             }
         }
     }
@@ -898,8 +928,14 @@ pub fn revoke_all_tokens_for_plugin(plugin_id: &str) {
 fn resolve_plugin_executable(manifest: &ValidatedPluginManifest) -> Option<(PathBuf, Vec<String>)> {
     if !manifest.backend.binary_name.trim().is_empty() {
         for rel in [
-            format!("backend/target/release/{}", manifest.backend.binary_name.trim()),
-            format!("backend/target/debug/{}", manifest.backend.binary_name.trim()),
+            format!(
+                "backend/target/release/{}",
+                manifest.backend.binary_name.trim()
+            ),
+            format!(
+                "backend/target/debug/{}",
+                manifest.backend.binary_name.trim()
+            ),
             format!("bin/{}", manifest.backend.binary_name.trim()),
             manifest.backend.binary_name.trim().to_string(),
         ] {
@@ -911,9 +947,11 @@ fn resolve_plugin_executable(manifest: &ValidatedPluginManifest) -> Option<(Path
         }
     }
     if !manifest.lifecycle_hooks.on_start.trim().is_empty() {
-        if let Ok(hook_path) =
-            validate_relative_plugin_subpath(&manifest.plugin_dir, &manifest.lifecycle_hooks.on_start, true)
-        {
+        if let Ok(hook_path) = validate_relative_plugin_subpath(
+            &manifest.plugin_dir,
+            &manifest.lifecycle_hooks.on_start,
+            true,
+        ) {
             if hook_path.is_file() && cfg!(unix) {
                 return Some((
                     PathBuf::from("/bin/bash"),
@@ -964,7 +1002,10 @@ fn configure_unprivileged_command(
 
 pub async fn probe_plugin_health(port: u16, health_path: &str) -> Result<bool, String> {
     if !(PLUGIN_PORT_RANGE_START..=PLUGIN_PORT_RANGE_END).contains(&port) {
-        return Err(format!("Port {} is outside allowed plugin loopback range", port));
+        return Err(format!(
+            "Port {} is outside allowed plugin loopback range",
+            port
+        ));
     }
     let clean_path = if health_path.starts_with('/') {
         health_path.to_string()
@@ -987,7 +1028,9 @@ pub async fn probe_plugin_health(port: u16, health_path: &str) -> Result<bool, S
     }
 }
 
-pub async fn start_plugin_instance(manifest: &ValidatedPluginManifest) -> Result<PluginRuntimeView, String> {
+pub async fn start_plugin_instance(
+    manifest: &ValidatedPluginManifest,
+) -> Result<PluginRuntimeView, String> {
     let resolved_exec = resolve_plugin_executable(manifest);
     if resolved_exec.is_some() {
         stop_running_process(&manifest.id).await;
@@ -996,7 +1039,8 @@ pub async fn start_plugin_instance(manifest: &ValidatedPluginManifest) -> Result
     let port = allocate_plugin_port(&manifest.id, existing.allocated_port)?;
 
     let _ = update_registry_state(&manifest.id, true, port, "running", "", false);
-    let (scoped_token, _) = mint_scoped_plugin_token(manifest, Some(DEFAULT_PLUGIN_TOKEN_TTL_SECS))?;
+    let (scoped_token, _) =
+        mint_scoped_plugin_token(manifest, Some(DEFAULT_PLUGIN_TOKEN_TTL_SECS))?;
 
     let mut spawned_managed = false;
     if let Some((program, args)) = resolved_exec {
@@ -1048,15 +1092,26 @@ async fn stop_running_process(plugin_id: &str) {
     }
 }
 
-pub async fn stop_plugin_instance(manifest: &ValidatedPluginManifest) -> Result<PluginRuntimeView, String> {
+pub async fn stop_plugin_instance(
+    manifest: &ValidatedPluginManifest,
+) -> Result<PluginRuntimeView, String> {
     stop_running_process(&manifest.id).await;
     revoke_all_tokens_for_plugin(&manifest.id);
     let existing = get_or_init_registry_state(&manifest.id);
-    let state = update_registry_state(&manifest.id, false, existing.allocated_port, "stopped", "", true);
+    let state = update_registry_state(
+        &manifest.id,
+        false,
+        existing.allocated_port,
+        "stopped",
+        "",
+        true,
+    );
     Ok(build_runtime_view(manifest, &state, false))
 }
 
-pub async fn restart_plugin_instance(manifest: &ValidatedPluginManifest) -> Result<PluginRuntimeView, String> {
+pub async fn restart_plugin_instance(
+    manifest: &ValidatedPluginManifest,
+) -> Result<PluginRuntimeView, String> {
     let _ = stop_plugin_instance(manifest).await;
     start_plugin_instance(manifest).await
 }
@@ -1279,7 +1334,11 @@ pub async fn control_plugin_handler(
             }))
             .into_response()
         }
-        Err(err) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "PLUGIN_LIFECYCLE_ERROR", err),
+        Err(err) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "PLUGIN_LIFECYCLE_ERROR",
+            err,
+        ),
     }
 }
 
@@ -1519,6 +1578,59 @@ pub async fn proxy_plugin_wildcard_handler(
     proxy_plugin_request_inner(id, rest, auth_user, req).await
 }
 
+async fn collect_proxy_body(body: Body) -> Result<axum::body::Bytes, Response> {
+    match axum::body::to_bytes(body, MAX_PLUGIN_PROXY_BODY_BYTES).await {
+        Ok(bytes) => Ok(bytes),
+        Err(error) => {
+            use std::error::Error;
+            if error
+                .source()
+                .is_some_and(|cause| cause.is::<http_body_util::LengthLimitError>())
+            {
+                Err(api_error(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "PAYLOAD_TOO_LARGE",
+                    "Plugin proxy request body exceeds 2 MiB limit",
+                ))
+            } else {
+                Err(api_error(
+                    StatusCode::BAD_REQUEST,
+                    "INVALID_BODY",
+                    "Failed to read plugin proxy request body",
+                ))
+            }
+        }
+    }
+}
+
+async fn collect_proxy_response(mut upstream_resp: reqwest::Response) -> Result<Vec<u8>, Response> {
+    let mut resp_bytes = Vec::new();
+    loop {
+        match upstream_resp.chunk().await {
+            Ok(Some(chunk)) => {
+                if resp_bytes.len().saturating_add(chunk.len()) > MAX_PLUGIN_PROXY_BODY_BYTES {
+                    return Err(api_error(
+                        StatusCode::BAD_GATEWAY,
+                        "PLUGIN_RESPONSE_TOO_LARGE",
+                        "Plugin upstream response exceeded maximum 2 MiB size limit",
+                    ));
+                }
+                resp_bytes.extend_from_slice(&chunk);
+            }
+            Ok(None) => break,
+            Err(e) => {
+                return Err(api_error(
+                    StatusCode::BAD_GATEWAY,
+                    "PLUGIN_READ_ERROR",
+                    format!("Failed reading plugin response: {}", e),
+                ));
+            }
+        }
+    }
+
+    Ok(resp_bytes)
+}
+
 async fn proxy_plugin_request_inner(
     id: String,
     subpath: String,
@@ -1595,31 +1707,18 @@ async fn proxy_plugin_request_inner(
     let target_url = if clean_subpath.is_empty() {
         format!("http://127.0.0.1:{}/{}", port, query_suffix)
     } else {
-        format!("http://127.0.0.1:{}/{}{}", port, clean_subpath, query_suffix)
+        format!(
+            "http://127.0.0.1:{}/{}{}",
+            port, clean_subpath, query_suffix
+        )
     };
 
     let method = req.method().clone();
     let req_headers = req.headers().clone();
 
-    let body_bytes = match req.into_body().collect().await {
-        Ok(collected) => {
-            let bytes = collected.to_bytes();
-            if bytes.len() > MAX_PLUGIN_PROXY_BODY_BYTES {
-                return api_error(
-                    StatusCode::PAYLOAD_TOO_LARGE,
-                    "PAYLOAD_TOO_LARGE",
-                    "Plugin proxy request body exceeds 2 MiB limit",
-                );
-            }
-            bytes
-        }
-        Err(_) => {
-            return api_error(
-                StatusCode::BAD_REQUEST,
-                "INVALID_BODY",
-                "Failed to read plugin proxy request body",
-            )
-        }
+    let body_bytes = match collect_proxy_body(req.into_body()).await {
+        Ok(bytes) => bytes,
+        Err(response) => return response,
     };
 
     let reqwest_method = match reqwest::Method::from_bytes(method.as_str().as_bytes()) {
@@ -1691,28 +1790,13 @@ async fn proxy_plugin_request_inner(
         );
     }
 
-    let status = StatusCode::from_u16(upstream_resp.status().as_u16())
-        .unwrap_or(StatusCode::BAD_GATEWAY);
+    let status =
+        StatusCode::from_u16(upstream_resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
     let upstream_headers = upstream_resp.headers().clone();
 
-    let resp_bytes = match upstream_resp.bytes().await {
-        Ok(b) => {
-            if b.len() > MAX_PLUGIN_PROXY_BODY_BYTES {
-                return api_error(
-                    StatusCode::BAD_GATEWAY,
-                    "PLUGIN_RESPONSE_TOO_LARGE",
-                    "Plugin upstream response exceeded maximum 2 MiB size limit",
-                );
-            }
-            b
-        }
-        Err(e) => {
-            return api_error(
-                StatusCode::BAD_GATEWAY,
-                "PLUGIN_READ_ERROR",
-                format!("Failed reading plugin response: {}", e),
-            )
-        }
+    let resp_bytes = match collect_proxy_response(upstream_resp).await {
+        Ok(bytes) => bytes,
+        Err(error) => return error,
     };
 
     let mut response = Response::builder()
@@ -1768,8 +1852,86 @@ pub(crate) mod tests {
             .env("AETHERFLOW_PLUGIN_TEST_ISOLATED", "1")
             .status()
             .expect("start isolated plugin fixture");
-        assert!(status.success(), "isolated plugin fixture failed: {test_name}");
+        assert!(
+            status.success(),
+            "isolated plugin fixture failed: {test_name}"
+        );
         true
+    }
+
+    #[tokio::test]
+    async fn proxy_body_collection_stops_at_limit_and_distinguishes_transport_errors() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        let polls = Arc::new(AtomicUsize::new(0));
+        let observed = polls.clone();
+        let body = Body::from_stream(futures::stream::unfold(0, move |index| {
+            let observed = observed.clone();
+            async move {
+                observed.fetch_add(1, Ordering::SeqCst);
+                assert!(
+                    index <= MAX_PLUGIN_PROXY_BODY_BYTES / 65536,
+                    "Must not poll stream past first over-limit chunk"
+                );
+                Some((Ok::<_, std::io::Error>(vec![0u8; 65536]), index + 1))
+            }
+        }));
+        assert_eq!(
+            collect_proxy_body(body).await.unwrap_err().status(),
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+        assert_eq!(
+            polls.load(Ordering::SeqCst),
+            MAX_PLUGIN_PROXY_BODY_BYTES / 65536 + 1
+        );
+        assert_eq!(
+            collect_proxy_body(Body::from(vec![0u8; MAX_PLUGIN_PROXY_BODY_BYTES]))
+                .await
+                .unwrap()
+                .len(),
+            MAX_PLUGIN_PROXY_BODY_BYTES
+        );
+        let body = Body::from_stream(futures::stream::once(async {
+            Err::<Vec<u8>, _>(std::io::Error::other("broken transport"))
+        }));
+        assert_eq!(
+            collect_proxy_body(body).await.unwrap_err().status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[tokio::test]
+    async fn upstream_response_limit_rejects_before_the_unfinished_body_ends() {
+        use futures::StreamExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let app = axum::Router::new().route(
+                "/",
+                axum::routing::get(|| async {
+                    let stream = futures::stream::iter(
+                        (0..34).map(|_| Ok::<_, std::io::Error>(vec![b'x'; 65536])),
+                    )
+                    .chain(futures::stream::pending());
+                    Body::from_stream(stream)
+                }),
+            );
+            axum::serve(listener, app).await.unwrap();
+        });
+        let response = reqwest::get(format!("http://{address}/")).await.unwrap();
+        let result =
+            tokio::time::timeout(Duration::from_secs(2), collect_proxy_response(response)).await;
+        server.abort();
+        let rejected = result
+            .expect("Must reject the first chunk beyond 2 MiB without waiting for EOF")
+            .unwrap_err();
+        assert_eq!(rejected.status(), StatusCode::BAD_GATEWAY);
+        let body = axum::body::to_bytes(rejected.into_body(), 10000)
+            .await
+            .unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("PLUGIN_RESPONSE_TOO_LARGE"));
     }
 
     #[test]
@@ -1900,6 +2062,7 @@ pub(crate) mod tests {
             sub: "1".to_string(),
             iss: "aetherflow".to_string(),
             iat: Utc::now().timestamp(),
+            auth_time: Utc::now().timestamp(),
             exp: Utc::now().timestamp() + 900,
             jti: "op-session-1".to_string(),
             cfp: String::new(),
@@ -1923,7 +2086,8 @@ pub(crate) mod tests {
     pub(crate) fn ensure_shared_test_db() -> &'static PathBuf {
         static DB_PATH: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
         DB_PATH.get_or_init(|| {
-            let db_dir = std::env::temp_dir().join(format!("af-plugin-shared-db-{}", Uuid::new_v4()));
+            let db_dir =
+                std::env::temp_dir().join(format!("af-plugin-shared-db-{}", Uuid::new_v4()));
             fs::create_dir_all(&db_dir).unwrap();
             let db_path = db_dir.join("test.sqlite");
             std::env::set_var("DB_PATH", &db_path);
@@ -1946,7 +2110,12 @@ pub(crate) mod tests {
         let tmp = std::env::temp_dir().join(format!("af-plugin-concurrent-{}", Uuid::new_v4()));
         fs::create_dir_all(&tmp).unwrap();
 
-        let plugin_ids = ["plugin-alpha", "plugin-beta", "plugin-gamma", "plugin-delta"];
+        let plugin_ids = [
+            "plugin-alpha",
+            "plugin-beta",
+            "plugin-gamma",
+            "plugin-delta",
+        ];
         let mut manifests = Vec::new();
         let mut next_candidate_port = 21200u16;
 
@@ -1955,7 +2124,8 @@ pub(crate) mod tests {
             let start_port = next_candidate_port;
             let mut allocated_port = start_port;
             for candidate in start_port..=21400 {
-                if let Ok(listener) = tokio::net::TcpListener::bind(("127.0.0.1", candidate)).await {
+                if let Ok(listener) = tokio::net::TcpListener::bind(("127.0.0.1", candidate)).await
+                {
                     allocated_port = candidate;
                     next_candidate_port = candidate + 1;
                     bound_listener = Some(listener);

@@ -284,7 +284,7 @@ class TestRunner:
             ("F23", "Real App Topology Map", "M3"),
             ("F24", "Network & VPN Operator Panel", "M3"),
             ("F25", "Notifications & Alerting Panel", "M3"),
-            ("F26", "Quotas & Billing Panel", "M3"),
+            ("F26", "Storage Quotas Panel", "M3"),
             ("F27", "Cluster Nodes Panel", "M3"),
             ("F28", "Modernize Debian APT Template", "M4"),
             ("F29", "Debian 13 Core OS Detection", "M4"),

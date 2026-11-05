@@ -1,5 +1,7 @@
 import { HardDriveDownload, Archive, CheckCircle2, Clock, ShieldCheck, Database, Download, BrainCircuit, Loader2, ToggleLeft, ToggleRight } from 'lucide-react';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, FormEvent } from 'react';
+import { Modal } from '@/components/ui/Modal';
+import { navigateBrowser } from '@/lib/browser-navigation';
 import { apiFetch } from '@/lib/fetcher';
 
 interface BackupProgress {
@@ -39,6 +41,10 @@ export default function BackupTab() {
     const [isLoadingBackups, setIsLoadingBackups] = useState(true);
     const [schedule, setSchedule] = useState<ScheduleStatus | null>(null);
     const [isTogglingSchedule, setIsTogglingSchedule] = useState(false);
+    const [downloadFilename, setDownloadFilename] = useState<string | null>(null);
+    const [downloadPassword, setDownloadPassword] = useState('');
+    const [downloadError, setDownloadError] = useState('');
+    const [isPreparingDownload, setIsPreparingDownload] = useState(false);
 
     const fetchBackups = async () => {
         setIsLoadingBackups(true);
@@ -128,7 +134,33 @@ export default function BackupTab() {
     };
 
     const handleDownloadBackup = (filename: string) => {
-        window.location.assign(`/api/v1/admin/backup/download/${encodeURIComponent(filename)}`);
+        setDownloadFilename(filename);
+        setDownloadPassword('');
+        setDownloadError('');
+    };
+
+    const confirmDownload = async (event: FormEvent) => {
+        event.preventDefault();
+        if (!downloadFilename || !downloadPassword || isPreparingDownload) return;
+        setIsPreparingDownload(true);
+        setDownloadError('');
+        const url = `/api/v1/admin/backup/download/${encodeURIComponent(downloadFilename)}`;
+        try {
+            const response = await apiFetch(url, {
+                method: 'POST',
+                headers: { 'X-Reauth-Password': downloadPassword },
+            });
+            const data = await response.json();
+            if (!response.ok) throw new Error(data.message || data.error || 'Unable to authorize download.');
+            // The HttpOnly proof cookie authorizes one native, streaming download.
+            setDownloadPassword('');
+            setDownloadFilename(null);
+            navigateBrowser(url);
+        } catch (error) {
+            setDownloadError(error instanceof Error ? error.message : 'Unable to authorize download.');
+        } finally {
+            setIsPreparingDownload(false);
+        }
     };
 
     const toggleSmartSchedule = async () => {
@@ -340,6 +372,23 @@ export default function BackupTab() {
                         </div>
                     </div>
                 </div>
+            <Modal isOpen={downloadFilename !== null} title="Download backup" role="dialog" aria-modal="true" aria-label="Download backup"
+                onClose={() => { if (!isPreparingDownload) { setDownloadFilename(null); setDownloadPassword(''); setDownloadError(''); } }}>
+                <form onSubmit={confirmDownload} className="space-y-4">
+                    <p className="text-sm text-slate-300 break-all">Confirm your password to download {downloadFilename}.</p>
+                    <label className="block text-sm">
+                        Current password
+                        <input type="password" autoComplete="current-password" autoFocus required value={downloadPassword}
+                            onChange={event => setDownloadPassword(event.target.value)} disabled={isPreparingDownload}
+                            className="mt-2 block w-full rounded-lg bg-slate-950 border border-white/10 p-3" />
+                    </label>
+                    {downloadError && <p role="alert" className="text-sm text-red-400">{downloadError}</p>}
+                    <button type="submit" disabled={isPreparingDownload || !downloadPassword}
+                        className="obs-touch-target-standard w-full rounded-lg p-3 bg-emerald-600 disabled:opacity-50">
+                        {isPreparingDownload ? 'Authorizing…' : 'Authorize download'}
+                    </button>
+                </form>
+            </Modal>
         </div>
     );
 }

@@ -1,4 +1,4 @@
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import useSWR from 'swr';
 import { FolderUp, File as FileIcon, UploadCloud, Download, HardDrive, FolderOpen, X, ChevronRight, Trash2, RefreshCw, Loader2 } from 'lucide-react';
 import { useToast } from '@/contexts/ToastContext';
@@ -25,6 +25,8 @@ export default function FileshareTab() {
     const fileInputRef = useRef<HTMLInputElement>(null);
     const { addToast } = useToast();
 
+    useEffect(() => () => abortControllerRef.current?.abort(), []);
+
     const totalUsedBytes = Array.isArray(files) ? files.reduce((acc, f) => acc + (f.size || 0), 0) : 0;
     const totalCapacityBytes = 50 * 1024 * 1024 * 1024; // 50 GB
     const usedPercentage = Math.min((totalUsedBytes / totalCapacityBytes) * 100, 100);
@@ -32,16 +34,23 @@ export default function FileshareTab() {
     const dirCount = Array.isArray(files) ? files.filter(f => f.isDir).length : 0;
 
     const handleUpload = async (file: File) => {
+        if (abortControllerRef.current) return;
+        if (file.size > 50 * 1024 * 1024) {
+            addToast('File exceeds the 50 MiB upload limit.', 'error');
+            return;
+        }
         setIsUploading(true);
         setUploadProgress(0);
-        abortControllerRef.current = new AbortController();
+        const controller = new AbortController();
+        abortControllerRef.current = controller;
 
-        const chunkSize = 50 * 1024 * 1024; // 50MB chunks
-        const totalChunks = Math.ceil(file.size / chunkSize);
+        const chunkSize = 5 * 1024 * 1024;
+        const totalChunks = Math.max(1, Math.ceil(file.size / chunkSize));
+        const uploadId = Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, '0')).join('');
 
         try {
             for (let i = 0; i < totalChunks; i++) {
-                if (abortControllerRef.current.signal.aborted) throw new Error('aborted');
+                if (controller.signal.aborted) throw new Error('aborted');
 
                 const start = i * chunkSize;
                 const end = Math.min(start + chunkSize, file.size);
@@ -53,8 +62,9 @@ export default function FileshareTab() {
                 const res = await apiFetch('/api/v1/admin/fileshare/upload', {
                     method: 'POST',
                     body: formData,
-                    signal: abortControllerRef.current.signal,
+                    signal: controller.signal,
                     headers: {
+                        'X-Upload-ID': uploadId,
                         'X-Chunk-Index': i.toString(),
                         'X-Total-Chunks': totalChunks.toString(),
                         'X-Target-Path': currentPath,
@@ -64,7 +74,7 @@ export default function FileshareTab() {
 
                 if (!res.ok) {
                     const data = await res.json().catch(() => ({}));
-                    throw new Error(data.error || 'Chunk upload failed');
+                    throw new Error(data.error || data.message || 'Chunk upload failed');
                 }
 
                 setUploadProgress(Math.round(((i + 1) / totalChunks) * 100));
@@ -73,7 +83,7 @@ export default function FileshareTab() {
             addToast(`Uploaded ${file.name} successfully`, 'success');
             mutate();
         } catch (err) {
-            if (abortControllerRef.current?.signal.aborted || (err instanceof Error && err.message === 'aborted')) {
+            if (controller.signal.aborted || (err instanceof Error && err.message === 'aborted')) {
                 addToast('Upload cancelled.', 'info');
             } else {
                 console.error("Upload failed", err);
@@ -101,7 +111,7 @@ export default function FileshareTab() {
             });
             if (!res.ok) {
                 const data = await res.json().catch(() => ({}));
-                throw new Error(data.error || 'Failed to delete file');
+                throw new Error(data.error || data.message || 'Failed to delete file');
             }
             addToast(`Deleted ${filename}`, 'success');
             mutate();
@@ -259,11 +269,13 @@ export default function FileshareTab() {
 
                     <input
                         type="file"
+                        aria-label="Select file to upload"
                         className="hidden"
                         ref={fileInputRef}
                         onChange={(e) => {
                             if (e.target.files && e.target.files[0]) {
                                 handleUpload(e.target.files[0]);
+                                e.target.value = '';
                             }
                         }}
                     />

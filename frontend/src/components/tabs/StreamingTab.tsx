@@ -2137,7 +2137,7 @@ export default function StreamingTab() {
                         </div>
                     )}
 
-                    <div className="overflow-x-auto">
+                    <div className="overflow-x-auto min-w-0 max-w-full">
                         <table className="w-full text-left border-collapse text-xs">
                             <thead>
                                 <tr className="border-b border-white/[0.06] text-slate-400 uppercase tracking-wider text-xs">

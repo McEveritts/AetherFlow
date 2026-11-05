@@ -2,7 +2,7 @@ import React from 'react';
 import { render, screen, fireEvent } from '@testing-library/react';
 import NetworkTab from '@/components/tabs/NetworkTab';
 import NotificationsSettingsTab from '@/components/tabs/NotificationsSettingsTab';
-import QuotasBillingTab from '@/components/tabs/QuotasBillingTab';
+import QuotasTab from '@/components/tabs/QuotasTab';
 import ClusterTab from '@/components/tabs/ClusterTab';
 
 // Mock ToastContext
@@ -96,25 +96,6 @@ jest.mock('swr', () => {
                 mutate: jest.fn(),
             };
         }
-        if (key.includes('/billing/webhooks')) {
-            return {
-                data: {
-                    events: [
-                        {
-                            id: 1,
-                            provider: 'whmcs',
-                            event_id: 'evt_101',
-                            event_type: 'service_created',
-                            username: 'operator',
-                            quota_bytes: 107374182400,
-                            status: 'success',
-                            processed_at: new Date().toISOString(),
-                        },
-                    ],
-                },
-                mutate: jest.fn(),
-            };
-        }
         if (key.includes('/cluster/nodes')) {
             return {
                 data: {
@@ -189,22 +170,23 @@ describe('Operator Management Panels (M3 Features F24-F27)', () => {
         });
     });
 
-    describe('QuotasBillingTab (F26)', () => {
+    describe('QuotasTab (F26)', () => {
         it('renders user disk quotas and summary telemetry cards', () => {
-            render(<QuotasBillingTab />);
-            expect(screen.getByText(/Storage Quotas & Billing Sync/i)).toBeInTheDocument();
+            render(<QuotasTab />);
+            expect(screen.getByText(/Storage Quotas/i)).toBeInTheDocument();
             expect(screen.getByText(/Total Allocated Storage/i)).toBeInTheDocument();
+            expect(screen.getByText(/Quota Enforcement Status/i)).toBeInTheDocument();
             expect(screen.getByText(/operator/i)).toBeInTheDocument();
             expect(screen.getByRole('button', { name: /Scan Disk/i })).toBeInTheDocument();
             expect(screen.getByRole('button', { name: /Edit Quota/i })).toBeInTheDocument();
         });
 
-        it('switches to Billing Webhook Audit Log section', () => {
-            render(<QuotasBillingTab />);
-            const auditBtn = screen.getByRole('button', { name: /Billing Audit Log/i });
-            fireEvent.click(auditBtn);
-            expect(screen.getByText(/service_created/i)).toBeInTheDocument();
-            expect(screen.getAllByText(/whmcs/i).length).toBeGreaterThan(0);
+        it('opens Edit Disk Quota modal with exact byte allocation', () => {
+            render(<QuotasTab />);
+            const editBtn = screen.getByRole('button', { name: /Edit Quota/i });
+            fireEvent.click(editBtn);
+            expect(screen.getByText(/Update Disk Quota/i)).toBeInTheDocument();
+            expect(screen.getByDisplayValue('107374182400B')).toBeInTheDocument();
         });
     });
 

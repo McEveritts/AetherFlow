@@ -185,15 +185,6 @@ func main() {
 		return err
 	})
 
-	// Phase 22 — warn if billing webhook secrets are not configured.
-	// The POST /billing/webhooks/:provider endpoint is intentionally outside
-	// AdminOnly (billing providers can't hold a session), so the HMAC/bearer
-	// secret is the sole authentication gate.  Alert operators at boot time.
-	if os.Getenv("WHMCS_WEBHOOK_SECRET") == "" && os.Getenv("BLESTA_WEBHOOK_SECRET") == "" && os.Getenv("BILLING_WEBHOOK_SECRET") == "" {
-		slog.Warn("no billing webhook secret configured",
-			"hint", "set WHMCS_WEBHOOK_SECRET, BLESTA_WEBHOOK_SECRET, or BILLING_WEBHOOK_SECRET")
-	}
-
 	// Warn if running in production without ALLOWED_HOSTS
 	if gin.Mode() == gin.ReleaseMode && os.Getenv("ALLOWED_HOSTS") == "" {
 		slog.Warn("ALLOWED_HOSTS not set in production mode",
@@ -268,7 +259,7 @@ func main() {
 	// CORS Configuration
 	corsConfig := cors.Config{
 		AllowMethods:     []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
-		AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "Authorization", "X-API-Version", "X-CSRF-Token", "X-Requested-With", "X-AetherFlow-Signature", "X-WHMCS-Signature", "X-BLESTA-Signature"},
+		AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "Authorization", "X-API-Version", "X-CSRF-Token", "X-Requested-With"},
 		ExposeHeaders:    []string{"Content-Length", "X-API-Version", "Deprecation", "Link"},
 		AllowCredentials: true,
 	}

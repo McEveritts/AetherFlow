@@ -1,5 +1,6 @@
 use crate::auth::{
-    api_error, create_standard_jwt, decode_session_claims, secure_cookie_enabled, AuthUser,
+    api_error, blocking_response, create_standard_jwt, decode_session_claims,
+    secure_cookie_enabled, AuthUser,
 };
 use crate::ws::{build_set_cookie, extract_client_ip, extract_cookie};
 use axum::extract::{Form, Path, Query, Request};
@@ -14,13 +15,14 @@ use rand::RngCore;
 use rsa::pkcs1::{DecodeRsaPrivateKey, EncodeRsaPrivateKey, EncodeRsaPublicKey, LineEnding};
 use rsa::traits::PublicKeyParts;
 use rsa::{RsaPrivateKey, RsaPublicKey};
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
-use std::path::PathBuf;
+use std::io::{Read, Write};
+use std::path::{Path as StdPath, PathBuf};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // OIDC RSA-2048 Key Management (`backend/api/oidc.go`)
@@ -36,18 +38,23 @@ pub struct OidcKeyMaterial {
 
 static OIDC_KEYS: Lazy<Option<OidcKeyMaterial>> = Lazy::new(load_or_generate_oidc_key);
 
+fn oidc_key_path(override_path: Option<&str>, state_directory: Option<&str>) -> PathBuf {
+    if let Some(path) = override_path.map(str::trim).filter(|s| !s.is_empty()) {
+        return PathBuf::from(path);
+    }
+    let state = state_directory
+        .and_then(|s| s.split(':').next())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("/var/lib/aetherflow");
+    PathBuf::from(state).join("oidc_rsa.pem")
+}
+
 fn resolve_oidc_key_path() -> PathBuf {
-    if let Ok(p) = env::var("OIDC_KEY_PATH") {
-        if !p.trim().is_empty() {
-            return PathBuf::from(p);
-        }
-    }
-    if let Ok(exe) = env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            return dir.join("data").join("oidc_rsa.pem");
-        }
-    }
-    PathBuf::from("data/oidc_rsa.pem")
+    oidc_key_path(
+        env::var("OIDC_KEY_PATH").ok().as_deref(),
+        env::var("STATE_DIRECTORY").ok().as_deref(),
+    )
 }
 
 fn compute_key_id(pub_key: &RsaPublicKey) -> String {
@@ -60,7 +67,10 @@ fn compute_key_id(pub_key: &RsaPublicKey) -> String {
     "aetherflow-oidc-1".to_string()
 }
 
-fn build_material_from_private_key(priv_key: &RsaPrivateKey, pem_str: &str) -> Option<OidcKeyMaterial> {
+fn build_material_from_private_key(
+    priv_key: &RsaPrivateKey,
+    pem_str: &str,
+) -> Option<OidcKeyMaterial> {
     let pub_key = RsaPublicKey::from(priv_key);
     let kid = compute_key_id(&pub_key);
     let n_b64 = URL_SAFE_NO_PAD.encode(pub_key.n().to_bytes_be());
@@ -77,36 +87,86 @@ fn build_material_from_private_key(priv_key: &RsaPrivateKey, pem_str: &str) -> O
 }
 
 fn load_or_generate_oidc_key() -> Option<OidcKeyMaterial> {
-    let key_path = resolve_oidc_key_path();
-    if let Ok(existing_pem) = fs::read_to_string(&key_path) {
-        if let Ok(priv_key) = RsaPrivateKey::from_pkcs1_pem(&existing_pem) {
-            if let Some(mat) = build_material_from_private_key(&priv_key, &existing_pem) {
-                tracing::info!(path = %key_path.display(), kid = %mat.kid, "OIDC RSA key loaded");
-                return Some(mat);
-            }
+    let path = resolve_oidc_key_path();
+    match load_or_generate_oidc_key_at(&path) {
+        Ok(material) => Some(material),
+        Err(err) => {
+            tracing::error!(path = %path.display(), error = %err, "OIDC signing disabled: cannot load persistent key");
+            None
         }
     }
+}
 
-    let mut rng = rand::rngs::OsRng;
-    let priv_key = RsaPrivateKey::new(&mut rng, 2048).ok()?;
-    let pem_zeroizing = priv_key.to_pkcs1_pem(LineEnding::LF).ok()?;
-    let pem_str = pem_zeroizing.as_str();
-
-    if let Some(parent) = key_path.parent() {
-        let _ = fs::create_dir_all(parent);
+fn read_oidc_key(path: &StdPath) -> anyhow::Result<OidcKeyMaterial> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        options.custom_flags(libc::O_NOFOLLOW);
+        let file = options.open(path)?;
+        anyhow::ensure!(
+            file.metadata()?.is_file(),
+            "OIDC key must be a regular file"
+        );
+        anyhow::ensure!(
+            file.metadata()?.permissions().mode() & 0o077 == 0,
+            "OIDC key permissions must be 0600 or stricter"
+        );
+        return read_oidc_material(file);
     }
-    if let Err(e) = fs::write(&key_path, pem_str.as_bytes()) {
-        tracing::warn!(error = %e, "OIDC: failed to persist RSA key");
-    } else {
+    #[cfg(not(unix))]
+    read_oidc_material(options.open(path)?)
+}
+
+fn read_oidc_material(mut file: fs::File) -> anyhow::Result<OidcKeyMaterial> {
+    let mut pem = String::new();
+    file.read_to_string(&mut pem)?;
+    let private_key = RsaPrivateKey::from_pkcs1_pem(&pem)?;
+    build_material_from_private_key(&private_key, &pem)
+        .ok_or_else(|| anyhow::anyhow!("Invalid OIDC signing key"))
+}
+
+fn load_or_generate_oidc_key_at(path: &StdPath) -> anyhow::Result<OidcKeyMaterial> {
+    match read_oidc_key(path) {
+        Ok(material) => return Ok(material),
+        Err(err)
+            if err
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) => {}
+        Err(err) => return Err(err),
+    }
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| StdPath::new("."));
+    fs::create_dir_all(parent)?;
+    let private_key = RsaPrivateKey::new(&mut rand::rngs::OsRng, 2048)?;
+    let pem = private_key.to_pkcs1_pem(LineEnding::LF)?;
+    // Write and fsync a private file, then publish it without replacing another process's key.
+    let temporary = parent.join(format!(".oidc-{}.tmp", uuid::Uuid::new_v4()));
+    let result = (|| -> anyhow::Result<OidcKeyMaterial> {
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&key_path, fs::Permissions::from_mode(0o600));
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
         }
-        tracing::info!(path = %key_path.display(), "OIDC RSA key generated");
-    }
-
-    build_material_from_private_key(&priv_key, pem_str)
+        let mut file = options.open(&temporary)?;
+        file.write_all(pem.as_bytes())?;
+        file.sync_all()?;
+        match fs::hard_link(&temporary, path) {
+            Ok(()) => {
+                fs::File::open(parent)?.sync_all()?;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e.into()),
+        }
+        read_oidc_key(path)
+    })();
+    let _ = fs::remove_file(&temporary);
+    result
 }
 
 pub fn get_base_url(headers: &HeaderMap) -> String {
@@ -163,6 +223,10 @@ pub async fn oidc_discovery(headers: HeaderMap) -> Response {
 }
 
 pub async fn oidc_jwks() -> Response {
+    blocking_response(move || oidc_jwks_blocking()).await
+}
+
+fn oidc_jwks_blocking() -> Response {
     let Some(keys) = OIDC_KEYS.as_ref() else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -216,7 +280,7 @@ fn validate_oidc_scopes(requested: &str) -> String {
 }
 
 fn has_existing_consent(user_id: i64, client_id: &str, requested_scope: &str) -> bool {
-    let Ok(conn) = af_db::get_conn() else {
+    let Ok(conn) = af_db::get_read_conn() else {
         return false;
     };
     let Ok(stored_scope) = conn.query_row(
@@ -249,6 +313,7 @@ fn generate_and_store_auth_code(
     scope: &str,
     code_challenge: &str,
     code_challenge_method: &str,
+    nonce: &str,
 ) -> anyhow::Result<String> {
     let mut code_bytes = [0u8; 32];
     rand::rngs::OsRng.fill_bytes(&mut code_bytes);
@@ -257,8 +322,8 @@ fn generate_and_store_auth_code(
 
     let conn = af_db::get_conn()?;
     conn.execute(
-        "INSERT INTO oidc_auth_codes (code, client_id, user_id, redirect_uri, scope, code_challenge, code_challenge_method, expires_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        "INSERT INTO oidc_auth_codes (code, client_id, user_id, redirect_uri, scope, code_challenge, code_challenge_method, expires_at, nonce) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             code,
             client_id,
@@ -267,7 +332,8 @@ fn generate_and_store_auth_code(
             scope,
             code_challenge,
             code_challenge_method,
-            expires_at
+            expires_at,
+            nonce
         ],
     )?;
     Ok(code)
@@ -286,15 +352,18 @@ pub struct AuthorizeQuery {
     #[serde(default)]
     pub state: String,
     #[serde(default)]
+    pub nonce: String,
+    #[serde(default)]
     pub code_challenge: String,
     #[serde(default)]
     pub code_challenge_method: String,
 }
 
-pub async fn oidc_authorize(
-    Query(q): Query<AuthorizeQuery>,
-    req: Request,
-) -> Response {
+pub async fn oidc_authorize(Query(q): Query<AuthorizeQuery>, req: Request) -> Response {
+    blocking_response(move || oidc_authorize_blocking(q, req)).await
+}
+
+fn oidc_authorize_blocking(q: AuthorizeQuery, req: Request) -> Response {
     if q.response_type != "code" {
         return (
             StatusCode::BAD_REQUEST,
@@ -303,7 +372,7 @@ pub async fn oidc_authorize(
             .into_response();
     }
 
-    let Ok(conn) = af_db::get_conn() else {
+    let Ok(conn) = af_db::get_read_conn() else {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": "server_error" })),
@@ -372,6 +441,7 @@ pub async fn oidc_authorize(
             &validated_scope,
             &q.code_challenge,
             &q.code_challenge_method,
+            &q.nonce,
         ) else {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -380,7 +450,11 @@ pub async fn oidc_authorize(
                 .into_response();
         };
 
-        let sep = if q.redirect_uri.contains('?') { "&" } else { "?" };
+        let sep = if q.redirect_uri.contains('?') {
+            "&"
+        } else {
+            "?"
+        };
         let mut redirect_url = format!("{}{}code={}", q.redirect_uri, sep, code);
         if !q.state.is_empty() {
             redirect_url.push_str(&format!("&state={}", urlencoding::encode(&q.state)));
@@ -389,7 +463,7 @@ pub async fn oidc_authorize(
     }
 
     let consent_url = format!(
-        "/oauth/consent?client_id={}&redirect_uri={}&response_type={}&scope={}&state={}&code_challenge={}&code_challenge_method={}",
+        "/oauth/consent?client_id={}&redirect_uri={}&response_type={}&scope={}&state={}&code_challenge={}&code_challenge_method={}&nonce={}",
         urlencoding::encode(&q.client_id),
         urlencoding::encode(&q.redirect_uri),
         urlencoding::encode(&q.response_type),
@@ -397,6 +471,7 @@ pub async fn oidc_authorize(
         urlencoding::encode(&q.state),
         urlencoding::encode(&q.code_challenge),
         urlencoding::encode(&q.code_challenge_method),
+        urlencoding::encode(&q.nonce),
     );
     Redirect::temporary(&consent_url).into_response()
 }
@@ -410,6 +485,8 @@ pub struct ConsentRequest {
     pub scope: String,
     #[serde(default)]
     pub state: String,
+    #[serde(default)]
+    pub nonce: String,
     #[serde(default)]
     pub code_challenge: String,
     #[serde(default)]
@@ -442,6 +519,10 @@ pub async fn oidc_consent(req: Request) -> Response {
             .into_response();
     };
 
+    blocking_response(move || oidc_consent_blocking(user, payload)).await
+}
+
+fn oidc_consent_blocking(user: AuthUser, payload: ConsentRequest) -> Response {
     if !payload.approved {
         let Ok(conn) = af_db::get_conn() else {
             return (
@@ -469,7 +550,11 @@ pub async fn oidc_consent(req: Request) -> Response {
                 .into_response();
         }
         drop(conn);
-        let sep = if payload.redirect_uri.contains('?') { "&" } else { "?" };
+        let sep = if payload.redirect_uri.contains('?') {
+            "&"
+        } else {
+            "?"
+        };
         let mut redirect_url = format!(
             "{}{}error=access_denied&error_description=User+denied+access",
             payload.redirect_uri, sep
@@ -529,6 +614,7 @@ pub async fn oidc_consent(req: Request) -> Response {
         &scope,
         &payload.code_challenge,
         &payload.code_challenge_method,
+        &payload.nonce,
     ) else {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -539,7 +625,11 @@ pub async fn oidc_consent(req: Request) -> Response {
 
     record_consent(user.user_id, &payload.client_id, &scope);
 
-    let sep = if payload.redirect_uri.contains('?') { "&" } else { "?" };
+    let sep = if payload.redirect_uri.contains('?') {
+        "&"
+    } else {
+        "?"
+    };
     let mut redirect_url = format!("{}{}code={}", payload.redirect_uri, sep, code);
     if !payload.state.is_empty() {
         redirect_url.push_str(&format!("&state={}", urlencoding::encode(&payload.state)));
@@ -569,7 +659,7 @@ fn verify_client_credentials(client_id: &str, client_secret: &str) -> bool {
     if client_id.is_empty() {
         return false;
     }
-    let Ok(conn) = af_db::get_conn() else {
+    let Ok(conn) = af_db::get_read_conn() else {
         return false;
     };
     let Ok(stored_hash) = conn.query_row(
@@ -612,6 +702,8 @@ struct IdTokenClaims {
     email: String,
     picture: String,
     role: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    nonce: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -624,7 +716,13 @@ struct AccessTokenClaims {
     scope: String,
 }
 
-fn issue_oidc_tokens(headers: &HeaderMap, client_id: &str, user_id: i64, scope: &str) -> Response {
+fn issue_oidc_tokens(
+    headers: &HeaderMap,
+    client_id: &str,
+    user_id: i64,
+    scope: &str,
+    nonce: Option<&str>,
+) -> Response {
     let Some(keys) = OIDC_KEYS.as_ref() else {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -670,6 +768,7 @@ fn issue_oidc_tokens(headers: &HeaderMap, client_id: &str, user_id: i64, scope: 
         email,
         picture: avatar_url,
         role,
+        nonce: nonce.filter(|v| !v.is_empty()).map(str::to_string),
     };
 
     let access_claims = AccessTokenClaims {
@@ -702,10 +801,10 @@ fn issue_oidc_tokens(headers: &HeaderMap, client_id: &str, user_id: i64, scope: 
     let refresh_token = hex::encode(refresh_bytes);
     let refresh_exp = (Utc::now() + Duration::days(30)).to_rfc3339();
 
-    let _ = conn.execute(
+    if conn.execute(
         "INSERT INTO oidc_refresh_tokens (token, client_id, user_id, scope, expires_at) VALUES (?1, ?2, ?3, ?4, ?5)",
         params![refresh_token, client_id, user_id, scope, refresh_exp],
-    );
+    ).is_err() { return api_error(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", "Failed to persist OIDC refresh token"); }
 
     Json(serde_json::json!({
         "access_token": access_token,
@@ -718,10 +817,20 @@ fn issue_oidc_tokens(headers: &HeaderMap, client_id: &str, user_id: i64, scope: 
     .into_response()
 }
 
-pub async fn oidc_token(
-    headers: HeaderMap,
-    Form(form): Form<HashMap<String, String>>,
-) -> Response {
+fn consume_device_code(
+    conn: &rusqlite::Connection,
+    code: &str,
+    client_id: &str,
+) -> rusqlite::Result<Option<(i64, String)>> {
+    conn.query_row("DELETE FROM oidc_device_codes WHERE device_code = ?1 AND client_id = ?2 AND status = 'approved' AND user_id IS NOT NULL AND expires_at > ?3 RETURNING user_id, scope",
+        params![code, client_id, Utc::now().to_rfc3339()], |r| Ok((r.get(0)?, r.get(1)?))).optional()
+}
+
+pub async fn oidc_token(headers: HeaderMap, Form(form): Form<HashMap<String, String>>) -> Response {
+    blocking_response(move || oidc_token_blocking(headers, form)).await
+}
+
+fn oidc_token_blocking(headers: HeaderMap, form: HashMap<String, String>) -> Response {
     let grant_type = form.get("grant_type").cloned().unwrap_or_default();
     let mut client_id = form.get("client_id").cloned().unwrap_or_default();
     let mut client_secret = form.get("client_secret").cloned().unwrap_or_default();
@@ -755,9 +864,9 @@ pub async fn oidc_token(
                     .into_response();
             };
 
-            let Ok((stored_client, user_id, stored_redirect, scope, challenge, challenge_method, expires_at, used)) =
+            let Ok((stored_client, user_id, stored_redirect, scope, challenge, challenge_method, expires_at, used, nonce)) =
                 conn.query_row(
-                    "SELECT client_id, user_id, redirect_uri, scope, COALESCE(code_challenge, ''), COALESCE(code_challenge_method, ''), expires_at, used \
+                    "SELECT client_id, user_id, redirect_uri, scope, COALESCE(code_challenge, ''), COALESCE(code_challenge_method, ''), expires_at, used, nonce \
                      FROM oidc_auth_codes WHERE code = ?1",
                     params![code],
                     |r| {
@@ -770,6 +879,7 @@ pub async fn oidc_token(
                             r.get::<_, String>(5)?,
                             r.get::<_, String>(6)?,
                             r.get::<_, bool>(7)?,
+                            r.get::<_, String>(8)?,
                         ))
                     },
                 )
@@ -821,7 +931,8 @@ pub async fn oidc_token(
                     .into_response();
             }
 
-            if !challenge.is_empty() && !verify_pkce(&code_verifier, &challenge, &challenge_method) {
+            if !challenge.is_empty() && !verify_pkce(&code_verifier, &challenge, &challenge_method)
+            {
                 return (
                     StatusCode::BAD_REQUEST,
                     Json(serde_json::json!({
@@ -857,7 +968,7 @@ pub async fn oidc_token(
             }
 
             drop(conn);
-            issue_oidc_tokens(&headers, &client_id, user_id, &scope)
+            issue_oidc_tokens(&headers, &client_id, user_id, &scope, Some(&nonce))
         }
         "refresh_token" => {
             let refresh_token = form.get("refresh_token").cloned().unwrap_or_default();
@@ -943,7 +1054,7 @@ pub async fn oidc_token(
             }
 
             drop(conn);
-            issue_oidc_tokens(&headers, &client_id, user_id, &scope)
+            issue_oidc_tokens(&headers, &client_id, user_id, &scope, None)
         }
         "urn:ietf:params:oauth:grant-type:device_code" => {
             let device_code = form.get("device_code").cloned().unwrap_or_default();
@@ -1017,12 +1128,16 @@ pub async fn oidc_token(
                         )
                             .into_response();
                     };
-                    let _ = conn.execute(
-                        "DELETE FROM oidc_device_codes WHERE device_code = ?1",
-                        params![device_code],
-                    );
+                    if !matches!(consume_device_code(&conn, &device_code, &client_id), Ok(Some((consumed_uid, _))) if consumed_uid == uid)
+                    {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(serde_json::json!({"error":"invalid_grant"})),
+                        )
+                            .into_response();
+                    }
                     drop(conn);
-                    issue_oidc_tokens(&headers, &client_id, uid, &scope)
+                    issue_oidc_tokens(&headers, &client_id, uid, &scope, None)
                 }
                 _ => (
                     StatusCode::BAD_REQUEST,
@@ -1040,6 +1155,10 @@ pub async fn oidc_token(
 }
 
 pub async fn oidc_userinfo(headers: HeaderMap) -> Response {
+    blocking_response(move || oidc_userinfo_blocking(headers)).await
+}
+
+fn oidc_userinfo_blocking(headers: HeaderMap) -> Response {
     let Some(auth) = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
@@ -1067,7 +1186,9 @@ pub async fn oidc_userinfo(headers: HeaderMap) -> Response {
 
     let mut validation = Validation::new(Algorithm::RS256);
     validation.validate_aud = false;
-    let Ok(token_data) = decode::<AccessTokenClaims>(token_str.trim(), &keys.decoding_key, &validation) else {
+    let Ok(token_data) =
+        decode::<AccessTokenClaims>(token_str.trim(), &keys.decoding_key, &validation)
+    else {
         return (
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({ "error": "invalid_token" })),
@@ -1076,7 +1197,7 @@ pub async fn oidc_userinfo(headers: HeaderMap) -> Response {
     };
 
     let sub = token_data.claims.sub;
-    let Ok(conn) = af_db::get_conn() else {
+    let Ok(conn) = af_db::get_read_conn() else {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": "server_error" })),
@@ -1113,6 +1234,10 @@ pub async fn oidc_revoke(
     headers: HeaderMap,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
+    blocking_response(move || oidc_revoke_blocking(headers, form)).await
+}
+
+fn oidc_revoke_blocking(headers: HeaderMap, form: HashMap<String, String>) -> Response {
     let mut client_id = form.get("client_id").cloned().unwrap_or_default();
     let mut client_secret = form.get("client_secret").cloned().unwrap_or_default();
     if client_id.is_empty() {
@@ -1197,6 +1322,10 @@ pub async fn oidc_introspect(
     headers: HeaderMap,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
+    blocking_response(move || oidc_introspect_blocking(headers, form)).await
+}
+
+fn oidc_introspect_blocking(headers: HeaderMap, form: HashMap<String, String>) -> Response {
     let mut client_id = form.get("client_id").cloned().unwrap_or_default();
     let mut client_secret = form.get("client_secret").cloned().unwrap_or_default();
     if client_id.is_empty() {
@@ -1240,8 +1369,10 @@ pub async fn oidc_introspect(
         if let Some(keys) = OIDC_KEYS.as_ref() {
             let mut validation = Validation::new(Algorithm::RS256);
             validation.validate_aud = false;
-            if let Ok(data) = decode::<AccessTokenClaims>(&token_str, &keys.decoding_key, &validation) {
-                let subject_exists = af_db::get_conn().ok().is_some_and(|connection| {
+            if let Ok(data) =
+                decode::<AccessTokenClaims>(&token_str, &keys.decoding_key, &validation)
+            {
+                let subject_exists = af_db::get_read_conn().ok().is_some_and(|connection| {
                     access_token_subject_exists(&connection, &data.claims.sub)
                 });
                 if data.claims.aud == client_id && subject_exists {
@@ -1261,7 +1392,7 @@ pub async fn oidc_introspect(
     }
 
     if hint != "access_token" {
-        if let Ok(conn) = af_db::get_conn() {
+        if let Ok(conn) = af_db::get_read_conn() {
             if let Ok((user_id, scope, revoked, expires_at)) = conn.query_row(
                 "SELECT user_id, scope, revoked, expires_at FROM oidc_refresh_tokens WHERE token = ?1 AND client_id = ?2",
                 params![token_str, client_id],
@@ -1320,6 +1451,10 @@ pub async fn oidc_device_authorize(
     headers: HeaderMap,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
+    blocking_response(move || oidc_device_authorize_blocking(headers, form)).await
+}
+
+fn oidc_device_authorize_blocking(headers: HeaderMap, form: HashMap<String, String>) -> Response {
     let client_id = form.get("client_id").cloned().unwrap_or_default();
     let mut scope = form.get("scope").cloned().unwrap_or_default();
     if scope.is_empty() {
@@ -1385,10 +1520,11 @@ pub async fn oidc_device_authorize(
 }
 
 pub async fn oidc_device_verify(Json(req): Json<serde_json::Value>) -> Response {
-    let user_code = req
-        .get("user_code")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    blocking_response(move || oidc_device_verify_blocking(req)).await
+}
+
+fn oidc_device_verify_blocking(req: serde_json::Value) -> Response {
+    let user_code = req.get("user_code").and_then(|v| v.as_str()).unwrap_or("");
     if user_code.is_empty() {
         return (
             StatusCode::BAD_REQUEST,
@@ -1397,7 +1533,7 @@ pub async fn oidc_device_verify(Json(req): Json<serde_json::Value>) -> Response 
             .into_response();
     }
 
-    let Ok(conn) = af_db::get_conn() else {
+    let Ok(conn) = af_db::get_read_conn() else {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": "server_error" })),
@@ -1481,10 +1617,11 @@ pub async fn oidc_device_consent(req: Request) -> Response {
         )
             .into_response();
     };
-    let user_code = body
-        .get("user_code")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    blocking_response(move || oidc_device_consent_blocking(user, body)).await
+}
+
+fn oidc_device_consent_blocking(user: AuthUser, body: serde_json::Value) -> Response {
+    let user_code = body.get("user_code").and_then(|v| v.as_str()).unwrap_or("");
     let approved = body
         .get("approved")
         .and_then(|v| v.as_bool())
@@ -1528,7 +1665,11 @@ pub async fn oidc_device_consent(req: Request) -> Response {
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub async fn get_oidc_clients() -> Response {
-    let Ok(conn) = af_db::get_conn() else {
+    blocking_response(move || get_oidc_clients_blocking()).await
+}
+
+fn get_oidc_clients_blocking() -> Response {
+    let Ok(conn) = af_db::get_read_conn() else {
         return api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "INTERNAL_ERROR",
@@ -1574,6 +1715,15 @@ pub async fn create_oidc_client(req: Request) -> Response {
         return api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", "Invalid JSON");
     };
 
+    blocking_response(move || create_oidc_client_blocking(actor, ip, ua, body)).await
+}
+
+fn create_oidc_client_blocking(
+    actor: Option<AuthUser>,
+    ip: String,
+    ua: String,
+    body: serde_json::Value,
+) -> Response {
     let name = body
         .get("name")
         .and_then(|v| v.as_str())
@@ -1652,10 +1802,11 @@ pub async fn create_oidc_client(req: Request) -> Response {
         .into_response()
 }
 
-pub async fn delete_oidc_client(
-    Path(client_id): Path<String>,
-    req: Request,
-) -> Response {
+pub async fn delete_oidc_client(Path(client_id): Path<String>, req: Request) -> Response {
+    blocking_response(move || delete_oidc_client_blocking(client_id, req)).await
+}
+
+fn delete_oidc_client_blocking(client_id: String, req: Request) -> Response {
     if client_id.is_empty() {
         return api_error(
             StatusCode::BAD_REQUEST,
@@ -1717,7 +1868,55 @@ pub async fn delete_oidc_client(
 // Google OAuth2 Login & Callback (`backend/api/auth.go`)
 // ─────────────────────────────────────────────────────────────────────────────
 
-pub async fn google_login() -> Response {
+fn safe_login_return_to(raw: &str) -> Option<String> {
+    if raw.len() > 2048
+        || !raw.starts_with('/')
+        || raw.starts_with("//")
+        || raw.bytes().any(|b| b <= 0x20 || b == 0x7f || b == b'\\')
+    {
+        return None;
+    }
+    let decoded = urlencoding::decode(raw).ok()?;
+    if decoded.starts_with("//") || decoded.bytes().any(|b| b < 0x20 || b == 0x7f || b == b'\\') {
+        return None;
+    }
+    let url = url::Url::parse(&format!("https://aetherflow.invalid{raw}")).ok()?;
+    if url.host_str() != Some("aetherflow.invalid") || url.path().starts_with("//") {
+        return None;
+    }
+    Some(url[url::Position::BeforePath..].to_string())
+}
+
+fn google_return_to(headers: &HeaderMap) -> Option<String> {
+    let cookie = extract_cookie(headers, "oauth2_return_to")?;
+    safe_login_return_to(&urlencoding::decode(&cookie).ok()?)
+}
+
+fn google_login_location(headers: &HeaderMap, parameter: &str, value: &str) -> String {
+    let mut location = format!("/login?{parameter}={}", urlencoding::encode(value));
+    if let Some(destination) = google_return_to(headers) {
+        location.push_str(&format!("&return_to={}", urlencoding::encode(&destination)));
+    }
+    location
+}
+
+fn clear_google_cookies(response: &mut Response) {
+    for name in ["oauth2_state", "oauth2_return_to"] {
+        let cookie = build_set_cookie(name, "", -1, "Lax", secure_cookie_enabled(), true);
+        if let Ok(value) = HeaderValue::from_str(&cookie) {
+            response.headers_mut().append(header::SET_COOKIE, value);
+        }
+    }
+}
+
+fn google_login_error(headers: &HeaderMap, error: &str) -> Response {
+    let mut response =
+        Redirect::temporary(&google_login_location(headers, "error", error)).into_response();
+    clear_google_cookies(&mut response);
+    response
+}
+
+pub async fn google_login(Query(q): Query<HashMap<String, String>>) -> Response {
     let client_id = env::var("GOOGLE_CLIENT_ID").unwrap_or_default();
     let redirect_uri = env::var("GOOGLE_REDIRECT_URI").unwrap_or_default();
     if client_id.is_empty() || redirect_uri.is_empty() {
@@ -1749,7 +1948,26 @@ pub async fn google_login() -> Response {
 
     let mut resp = Redirect::temporary(&auth_url).into_response();
     if let Ok(hv) = HeaderValue::from_str(&cookie) {
-        resp.headers_mut().insert(header::SET_COOKIE, hv);
+        resp.headers_mut().append(header::SET_COOKIE, hv);
+    }
+    // Keep continuation out of the external provider URL; clear any stale value.
+    let destination = q
+        .get("return_to")
+        .and_then(|value| safe_login_return_to(value));
+    let continuation = destination
+        .as_deref()
+        .map(urlencoding::encode)
+        .unwrap_or_default();
+    let cookie = build_set_cookie(
+        "oauth2_return_to",
+        &continuation,
+        if destination.is_some() { 600 } else { -1 },
+        "Lax",
+        secure_cookie_enabled(),
+        true,
+    );
+    if let Ok(hv) = HeaderValue::from_str(&cookie) {
+        resp.headers_mut().append(header::SET_COOKIE, hv);
     }
     resp
 }
@@ -1758,15 +1976,9 @@ pub async fn google_callback(
     headers: HeaderMap,
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
-    let base_url = get_base_url(&headers);
     if let Some(err_param) = q.get("error") {
         if !err_param.is_empty() {
-            return Redirect::temporary(&format!(
-                "{}/login?error={}",
-                base_url,
-                urlencoding::encode(err_param)
-            ))
-            .into_response();
+            return google_login_error(&headers, err_param);
         }
     }
 
@@ -1774,8 +1986,7 @@ pub async fn google_callback(
     let state = q.get("state").cloned().unwrap_or_default();
     let cookie_state = extract_cookie(&headers, "oauth2_state").unwrap_or_default();
     if state.is_empty() || state != cookie_state {
-        return Redirect::temporary(&format!("{}/login?error=invalid_state", base_url))
-            .into_response();
+        return google_login_error(&headers, "invalid_state");
     }
 
     let client_id = env::var("GOOGLE_CLIENT_ID").unwrap_or_default();
@@ -1796,25 +2007,21 @@ pub async fn google_callback(
         .await;
 
     let Ok(resp) = token_res else {
-        return Redirect::temporary(&format!("{}/login?error=token_exchange_failed", base_url))
-            .into_response();
+        return google_login_error(&headers, "token_exchange_failed");
     };
     if !resp.status().is_success() {
-        return Redirect::temporary(&format!("{}/login?error=token_exchange_failed", base_url))
-            .into_response();
+        return google_login_error(&headers, "token_exchange_failed");
     }
 
     let Ok(token_json) = resp.json::<serde_json::Value>().await else {
-        return Redirect::temporary(&format!("{}/login?error=token_exchange_failed", base_url))
-            .into_response();
+        return google_login_error(&headers, "token_exchange_failed");
     };
     let access_token = token_json
         .get("access_token")
         .and_then(|v| v.as_str())
         .unwrap_or("");
     if access_token.is_empty() {
-        return Redirect::temporary(&format!("{}/login?error=no_access_token", base_url))
-            .into_response();
+        return google_login_error(&headers, "no_access_token");
     }
 
     let Ok(info_resp) = client
@@ -1823,121 +2030,595 @@ pub async fn google_callback(
         .send()
         .await
     else {
-        return Redirect::temporary(&format!("{}/login?error=userinfo_failed", base_url))
-            .into_response();
+        return google_login_error(&headers, "userinfo_failed");
     };
+    let info_resp_status_success = info_resp.status().is_success();
     let Ok(user_info) = info_resp.json::<serde_json::Value>().await else {
-        return Redirect::temporary(&format!("{}/login?error=userinfo_failed", base_url))
-            .into_response();
+        return google_login_error(&headers, "userinfo_failed");
     };
 
-    let google_id = user_info
-        .get("id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let email = user_info
+    if !info_resp_status_success {
+        return google_login_error(&headers, "userinfo_failed");
+    }
+    blocking_response(move || complete_google_login(&headers, &user_info)).await
+}
+
+fn google_email_allowed(email: &str, emails: &str, domains: &str) -> bool {
+    let Some((local, domain)) = email.split_once('@') else {
+        return false;
+    };
+    if local.is_empty() || domain.is_empty() || domain.contains('@') {
+        return false;
+    }
+    let entries = |list: &str| {
+        list.split(|c: char| c == ',' || c.is_whitespace())
+            .filter(|item| !item.is_empty())
+            .map(str::to_ascii_lowercase)
+            .collect::<HashSet<_>>()
+    };
+    entries(emails).contains(&email.to_ascii_lowercase())
+        || entries(domains).contains(&domain.to_ascii_lowercase())
+}
+
+fn resolve_google_user(
+    conn: &rusqlite::Connection,
+    info: &serde_json::Value,
+    emails: &str,
+    domains: &str,
+) -> anyhow::Result<Option<(i64, bool)>> {
+    let google_id = info.get("id").and_then(|v| v.as_str()).unwrap_or("");
+    let email = info
         .get("email")
         .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let name = user_info
-        .get("name")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let avatar_url = user_info
-        .get("picture")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+        .unwrap_or("")
+        .trim();
+    let verified = info
+        .get("verified_email")
+        .or_else(|| info.get("email_verified"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if google_id.is_empty() || email.is_empty() || !verified {
+        return Ok(None);
+    }
+    let avatar = info.get("picture").and_then(|v| v.as_str()).unwrap_or("");
+    let tx = conn.unchecked_transaction()?;
+    let existing: Option<(i64, bool)> = tx
+        .query_row(
+            "SELECT id, COALESCE(totp_enabled, 0) FROM users WHERE google_id = ?1",
+            params![google_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let user = if let Some(user) = existing {
+        // Preserve configured role, username and email for a previously linked identity.
+        tx.execute(
+            "UPDATE users SET avatar_url = ?1 WHERE id = ?2",
+            params![avatar, user.0],
+        )?;
+        user
+    } else {
+        let matches: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM users WHERE email = ?1 COLLATE NOCASE",
+            params![email],
+            |r| r.get(0),
+        )?;
+        if matches > 1 {
+            return Ok(None);
+        }
+        if matches == 1 {
+            let (id, linked, mfa): (i64, String, bool) = tx.query_row(
+                "SELECT id, COALESCE(google_id, ''), COALESCE(totp_enabled, 0) FROM users WHERE email = ?1 COLLATE NOCASE", params![email], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )?;
+            if !linked.is_empty() {
+                return Ok(None);
+            }
+            tx.execute("UPDATE users SET google_id = ?1, avatar_url = ?2 WHERE id = ?3 AND COALESCE(google_id, '') = ''", params![google_id, avatar, id])?;
+            (id, mfa)
+        } else {
+            if !google_email_allowed(email, emails, domains) {
+                return Ok(None);
+            }
+            let prefix: String = email
+                .split('@')
+                .next()
+                .unwrap_or("user")
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+                .take(48)
+                .collect();
+            let username = format!(
+                "{}-{}",
+                if prefix.is_empty() { "user" } else { &prefix },
+                &uuid::Uuid::new_v4().simple().to_string()[..8]
+            );
+            tx.execute("INSERT INTO users (username, google_id, email, avatar_url, role) VALUES (?1, ?2, ?3, ?4, 'user')", params![username, google_id, email, avatar])?;
+            (tx.last_insert_rowid(), false)
+        }
+    };
+    tx.commit()?;
+    Ok(Some(user))
+}
 
-    if google_id.is_empty() {
-        return Redirect::temporary(&format!("{}/login?error=no_google_id", base_url))
-            .into_response();
+fn complete_google_login(headers: &HeaderMap, info: &serde_json::Value) -> Response {
+    let result = af_db::get_conn().and_then(|conn| {
+        resolve_google_user(
+            &conn,
+            info,
+            &env::var("AETHERFLOW_GOOGLE_ALLOWED_EMAILS").unwrap_or_default(),
+            &env::var("AETHERFLOW_GOOGLE_ALLOWED_DOMAINS").unwrap_or_default(),
+        )
+    });
+    let mut response = match result {
+        Ok(Some((user_id, true))) => {
+            let mut bytes = [0u8; 32];
+            rand::rngs::OsRng.fill_bytes(&mut bytes);
+            let challenge = hex::encode(bytes);
+            if af_db::store_mfa_challenge(&challenge, user_id, std::time::Duration::from_secs(300))
+                .is_ok()
+            {
+                Redirect::temporary(&google_login_location(headers, "mfa", &challenge))
+                    .into_response()
+            } else {
+                google_login_error(headers, "db_error")
+            }
+        }
+        Ok(Some((user_id, false))) => match create_standard_jwt(user_id, headers) {
+            Ok((token, _)) => {
+                crate::auth::record_login(user_id, headers);
+                let mut response =
+                    Redirect::temporary(google_return_to(headers).as_deref().unwrap_or("/"))
+                        .into_response();
+                crate::auth::set_session_cookie(&mut response, &token);
+                response
+            }
+            Err(_) => google_login_error(headers, "jwt_failed"),
+        },
+        Ok(None) => google_login_error(headers, "not_authorized"),
+        Err(_) => google_login_error(headers, "db_error"),
+    };
+    clear_google_cookies(&mut response);
+    response
+}
+
+#[cfg(test)]
+mod hardening_tests {
+    use super::*;
+
+    #[test]
+    fn continuation_validation_rejects_external_and_normalized_authorities() {
+        for path in [
+            "https://example.test/",
+            "//example.test/",
+            "/a/..//example.test/",
+            "/%2fexample.test",
+            "/\\example.test",
+            "/%5cexample.test",
+            "/path%0aLocation:evil",
+            " /local",
+        ] {
+            assert!(safe_login_return_to(path).is_none(), "{path}");
+        }
+        assert_eq!(
+            safe_login_return_to("/api/v1/public/oidc/authorize?state=hello%20world"),
+            Some("/api/v1/public/oidc/authorize?state=hello%20world".into())
+        );
     }
 
-    let Ok(conn) = af_db::get_conn() else {
-        return Redirect::temporary(&format!("{}/login?error=db_error", base_url)).into_response();
-    };
-
-    let existing_id = conn
-        .query_row(
-            "SELECT id FROM users WHERE google_id = ?1",
-            params![google_id],
-            |r| r.get::<_, i64>(0),
-        )
-        .ok();
-
-    let user_id = if let Some(uid) = existing_id {
-        let _ = conn.execute(
-            "UPDATE users SET email = ?1, avatar_url = ?2 WHERE google_id = ?3",
-            params![email, avatar_url, google_id],
+    #[tokio::test]
+    async fn callback_errors_are_relative_and_preserve_safe_continuation() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::HOST,
+            HeaderValue::from_static("localhost:@example.test"),
         );
-        uid
-    } else {
-        let raw_username = if let Some((prefix, _)) = email.split_once('@') {
-            prefix
-        } else {
-            name
-        };
-        let clean_username: String = raw_username
-            .chars()
-            .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '.' || *c == '-')
-            .collect();
+        headers.insert("x-forwarded-host", HeaderValue::from_static("example.test"));
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_static(
+                "oauth2_return_to=%2Fapi%2Fv1%2Fpublic%2Foidc%2Fauthorize%3Fstate%3Dretained",
+            ),
+        );
+        let response = google_callback(
+            headers.clone(),
+            Query(HashMap::from([("error".into(), "access_denied".into())])),
+        )
+        .await;
+        assert_eq!(response.headers()[header::LOCATION], "/login?error=access_denied&return_to=%2Fapi%2Fv1%2Fpublic%2Foidc%2Fauthorize%3Fstate%3Dretained");
+        assert_eq!(
+            response
+                .headers()
+                .get_all(header::SET_COOKIE)
+                .iter()
+                .count(),
+            2
+        );
+        let response = google_callback(headers, Query(HashMap::new())).await;
+        assert!(response.headers()[header::LOCATION]
+            .to_str()
+            .unwrap()
+            .starts_with("/login?error=invalid_state&return_to="));
+    }
+
+    fn google_database() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT UNIQUE, google_id TEXT DEFAULT '', email TEXT DEFAULT '', avatar_url TEXT DEFAULT '', role TEXT DEFAULT 'user', totp_enabled INTEGER DEFAULT 0);").unwrap();
+        conn
+    }
+
+    fn identity(verified: bool) -> serde_json::Value {
+        serde_json::json!({"id":"google-123", "email":"person@example.com", "verified_email": verified, "picture":"avatar"})
+    }
+
+    #[test]
+    fn google_provisioning_denies_by_default_and_never_bootstraps_an_admin() {
+        let conn = google_database();
+        assert!(resolve_google_user(&conn, &identity(true), "", "")
+            .unwrap()
+            .is_none());
+        assert!(
+            resolve_google_user(&conn, &identity(false), "person@example.com", "example.com")
+                .unwrap()
+                .is_none()
+        );
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM users", [], |r| r.get(0))
-            .unwrap_or(0);
-        let admin_email = env::var("ADMIN_EMAIL").unwrap_or_default();
-        let email_verified = user_info
-            .get("verified_email")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let role = if count == 0
-            || (!admin_email.is_empty()
-                && email_verified
-                && email.eq_ignore_ascii_case(&admin_email))
-        {
-            "admin"
-        } else {
-            "user"
-        };
-        if conn
-            .execute(
-                "INSERT INTO users (username, google_id, email, avatar_url, role) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![clean_username, google_id, email, avatar_url, role],
-            )
-            .is_err()
-        {
-            return Redirect::temporary(&format!("{}/login?error=db_error", base_url))
-                .into_response();
+            .unwrap();
+        assert_eq!(count, 0);
+        let (id, mfa) = resolve_google_user(&conn, &identity(true), " PERSON@example.com ", "")
+            .unwrap()
+            .unwrap();
+        assert!(!mfa);
+        let role: String = conn
+            .query_row("SELECT role FROM users WHERE id = ?1", params![id], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(role, "user");
+        assert!(google_email_allowed(
+            "other@EXAMPLE.com",
+            "",
+            "example.com,company.org"
+        ));
+        for email in [
+            "evil@sub.example.com",
+            "person@example.com.evil",
+            "bad@@example.com",
+            "@example.com",
+        ] {
+            assert!(!google_email_allowed(email, "", "example.com"));
         }
-        conn.last_insert_rowid()
-    };
-
-    let ip = extract_client_ip(&headers);
-    let ua = headers
-        .get(header::USER_AGENT)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    let _ = conn.execute(
-        "INSERT INTO login_history (user_id, ip_address, user_agent) VALUES (?1, ?2, ?3)",
-        params![user_id, ip, ua],
-    );
-
-    drop(conn);
-    let Ok((token, _)) = create_standard_jwt(user_id, &headers) else {
-        return Redirect::temporary(&format!("{}/login?error=jwt_failed", base_url))
-            .into_response();
-    };
-
-    let session_cookie = build_set_cookie(
-        "aetherflow_session",
-        &token,
-        86400,
-        "Lax",
-        secure_cookie_enabled(),
-        true,
-    );
-    let mut resp = Redirect::temporary(&format!("{}/", base_url)).into_response();
-    if let Ok(hv) = HeaderValue::from_str(&session_cookie) {
-        resp.headers_mut().insert(header::SET_COOKIE, hv);
     }
-    resp
+
+    #[test]
+    fn google_linking_requires_verification_and_preserves_existing_configuration() {
+        let conn = google_database();
+        conn.execute("INSERT INTO users (id, username, email, role, totp_enabled) VALUES (1, 'configured-admin', 'PERSON@example.com', 'admin', 1)", []).unwrap();
+        assert!(resolve_google_user(&conn, &identity(false), "", "")
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            resolve_google_user(&conn, &identity(true), "", "").unwrap(),
+            Some((1, true))
+        );
+        let (name, role, email): (String, String, String) = conn
+            .query_row(
+                "SELECT username, role, email FROM users WHERE id = 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (name.as_str(), role.as_str(), email.as_str()),
+            ("configured-admin", "admin", "PERSON@example.com")
+        );
+        let mut other = identity(true);
+        other["id"] = "different-id".into();
+        assert!(resolve_google_user(&conn, &other, "person@example.com", "")
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            resolve_google_user(&conn, &identity(true), "", "").unwrap(),
+            Some((1, true))
+        );
+    }
+
+    #[tokio::test]
+    async fn google_callback_mfa_has_no_session_until_factor_verification() {
+        use crate::plugins::tests::{ensure_shared_test_db, run_plugin_test_in_subprocess};
+        if run_plugin_test_in_subprocess() {
+            return;
+        }
+        ensure_shared_test_db();
+        env::remove_var("AETHERFLOW_GOOGLE_ALLOWED_EMAILS");
+        env::remove_var("AETHERFLOW_GOOGLE_ALLOWED_DOMAINS");
+        let denied = complete_google_login(&HeaderMap::new(), &identity(true));
+        assert_eq!(
+            denied.headers()[header::LOCATION],
+            "/login?error=not_authorized"
+        );
+        assert!(denied
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .all(|v| !v.to_str().unwrap().starts_with("aetherflow_session=")));
+        let conn = af_db::get_conn().unwrap();
+        conn.execute("INSERT INTO users (id, username, google_id, email, role, totp_enabled, totp_secret) VALUES (654, 'google-mfa', 'google-123', 'person@example.com', 'admin', 1, 'JBSWY3DPEHPK3PXP')", []).unwrap();
+        drop(conn);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_static(
+                "oauth2_return_to=%2Fapi%2Fv1%2Fpublic%2Foidc%2Fauthorize%3Fstate%3Dmfa",
+            ),
+        );
+        let response = complete_google_login(&headers, &identity(true));
+        let location = response.headers()[header::LOCATION].to_str().unwrap();
+        assert!(
+            location.ends_with("&return_to=%2Fapi%2Fv1%2Fpublic%2Foidc%2Fauthorize%3Fstate%3Dmfa")
+        );
+        let challenge = location
+            .strip_prefix("/login?mfa=")
+            .expect("Exact MFA query contract")
+            .split('&')
+            .next()
+            .unwrap();
+        assert!(response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .all(|v| !v.to_str().unwrap().starts_with("aetherflow_session=")));
+        let conn = af_db::get_read_conn().unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM active_sessions WHERE user_id = 654",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0);
+        drop(conn);
+        let secret = data_encoding::BASE32_NOPAD
+            .decode(b"JBSWY3DPEHPK3PXP")
+            .unwrap();
+        let code = totp_lite::totp_custom::<totp_lite::Sha1>(
+            30,
+            6,
+            &secret,
+            Utc::now().timestamp() as u64,
+        );
+        let response = crate::auth::mfa_login_verify(
+            HeaderMap::new(),
+            Json(crate::auth::MfaVerifyRequest {
+                mfa_token: challenge.into(),
+                code,
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let cookie = response.headers()[header::SET_COOKIE].to_str().unwrap();
+        assert!(cookie.contains("HttpOnly"));
+        assert!(cookie.contains("SameSite=Lax"));
+        assert!(cookie.contains("Secure"));
+        let raw = cookie
+            .split(';')
+            .next()
+            .unwrap()
+            .strip_prefix("aetherflow_session=")
+            .unwrap();
+        let claims = decode_session_claims(raw, false).unwrap();
+        assert_eq!(claims.user_id, 654);
+        assert_eq!(claims.exp - claims.iat, 900);
+        let conn = af_db::get_read_conn().unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM active_sessions WHERE user_id = 654 AND jti = ?1",
+                params![claims.jti],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn oidc_key_defaults_use_persistent_state_and_explicit_override() {
+        assert_eq!(
+            oidc_key_path(None, None),
+            PathBuf::from("/var/lib/aetherflow/oidc_rsa.pem")
+        );
+        assert_eq!(
+            oidc_key_path(None, Some("/state/aetherflow:/state/other")),
+            PathBuf::from("/state/aetherflow/oidc_rsa.pem")
+        );
+        assert_eq!(
+            oidc_key_path(Some("/custom/key.pem"), Some("/state")),
+            PathBuf::from("/custom/key.pem")
+        );
+    }
+
+    #[test]
+    fn oidc_key_is_private_persistent_and_never_replaces_corrupt_or_inaccessible_keys() {
+        let root = env::temp_dir().join(format!("af-oidc-key-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("oidc.pem");
+        let first = load_or_generate_oidc_key_at(&path).unwrap();
+        let second = load_or_generate_oidc_key_at(&path).unwrap();
+        assert_eq!(first.kid, second.kid);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{symlink, PermissionsExt};
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            let link = root.join("symlink.pem");
+            symlink(&path, &link).unwrap();
+            assert!(load_or_generate_oidc_key_at(&link).is_err());
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+            assert!(load_or_generate_oidc_key_at(&path).is_err());
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        fs::write(&path, "corrupt key").unwrap();
+        assert!(load_or_generate_oidc_key_at(&path).is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "corrupt key");
+        let parent_file = root.join("not-directory");
+        fs::write(&parent_file, "x").unwrap();
+        assert!(load_or_generate_oidc_key_at(&parent_file.join("key.pem")).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn oidc_key_concurrent_creation_publishes_one_identity() {
+        let root = env::temp_dir().join(format!("af-oidc-key-race-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("oidc.pem");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let tasks: Vec<_> = (0..2)
+            .map(|_| {
+                let path = path.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    load_or_generate_oidc_key_at(&path).unwrap().kid
+                })
+            })
+            .collect();
+        let kids: Vec<_> = tasks.into_iter().map(|t| t.join().unwrap()).collect();
+        assert_eq!(kids[0], kids[1]);
+        assert_eq!(kids[0], read_oidc_key(&path).unwrap().kid);
+        assert_eq!(
+            fs::read_dir(&root).unwrap().count(),
+            1,
+            "Temporary private files must be removed"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn device_code_redemption_is_single_use_under_concurrency() {
+        let path = env::temp_dir().join(format!("af-device-code-{}.sqlite", uuid::Uuid::new_v4()));
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch("CREATE TABLE oidc_device_codes (device_code TEXT PRIMARY KEY, client_id TEXT, user_id INTEGER, scope TEXT, status TEXT, expires_at TEXT);").unwrap();
+        conn.execute("INSERT INTO oidc_device_codes VALUES ('device', 'client', 1, 'openid', 'approved', ?1)", params![(Utc::now() + Duration::minutes(1)).to_rfc3339()]).unwrap();
+        assert!(consume_device_code(&conn, "device", "wrong-client")
+            .unwrap()
+            .is_none());
+        drop(conn);
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let tasks: Vec<_> = (0..2)
+            .map(|_| {
+                let path = path.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    let conn = rusqlite::Connection::open(path).unwrap();
+                    conn.busy_timeout(std::time::Duration::from_secs(2))
+                        .unwrap();
+                    barrier.wait();
+                    consume_device_code(&conn, "device", "client")
+                        .unwrap()
+                        .is_some()
+                })
+            })
+            .collect();
+        assert_eq!(
+            tasks
+                .into_iter()
+                .map(|t| usize::from(t.join().unwrap()))
+                .sum::<usize>(),
+            1
+        );
+        let _ = fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn oidc_nonce_roundtrips_authorization_consent_code_and_id_token() {
+        use crate::plugins::tests::{ensure_shared_test_db, run_plugin_test_in_subprocess};
+        if run_plugin_test_in_subprocess() {
+            return;
+        }
+        let db = ensure_shared_test_db();
+        env::set_var("OIDC_KEY_PATH", db.parent().unwrap().join("oidc.pem"));
+        let conn = af_db::get_conn().unwrap();
+        conn.execute(
+            "INSERT INTO users (id, username, role) VALUES (765, 'oidc-user', 'user')",
+            [],
+        )
+        .unwrap();
+        let secret = hex::encode(Sha256::digest(b"client-secret"));
+        conn.execute("INSERT INTO oidc_clients (id, client_secret_hash, name, redirect_uris) VALUES ('client', ?1, 'test', '[\"https://client.example/callback\"]')", params![secret]).unwrap();
+        drop(conn);
+        let (session, _) = create_standard_jwt(765, &HeaderMap::new()).unwrap();
+        let q = AuthorizeQuery {
+            client_id: "client".into(),
+            redirect_uri: "https://client.example/callback".into(),
+            response_type: "code".into(),
+            scope: "openid".into(),
+            state: "state".into(),
+            nonce: "nonce-value&?".into(),
+            code_challenge: String::new(),
+            code_challenge_method: String::new(),
+        };
+        let req = Request::builder()
+            .uri("/api/v1/public/oidc/authorize")
+            .header(header::COOKIE, format!("aetherflow_session={session}"))
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let response = oidc_authorize(Query(q), req).await;
+        let location = response.headers()[header::LOCATION].to_str().unwrap();
+        let url = url::Url::parse(&format!("https://dashboard.example{location}")).unwrap();
+        let values: HashMap<String, String> = url.query_pairs().into_owned().collect();
+        assert_eq!(values["nonce"], "nonce-value&?");
+        let mut payload = serde_json::to_value(&values).unwrap();
+        payload["approved"] = true.into();
+        let mut req = Request::new(axum::body::Body::from(payload.to_string()));
+        req.extensions_mut().insert(AuthUser {
+            user_id: 765,
+            username: "oidc-user".into(),
+            role: "user".into(),
+            jti: "consent".into(),
+            plugin_id: None,
+            plugin_scopes: Vec::new(),
+        });
+        let response = oidc_consent(req).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 8192)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let redirect = url::Url::parse(value["redirect_uri"].as_str().unwrap()).unwrap();
+        let code = redirect
+            .query_pairs()
+            .find(|(k, _)| k == "code")
+            .unwrap()
+            .1
+            .into_owned();
+        let form: HashMap<String, String> = [
+            ("grant_type", "authorization_code"),
+            ("client_id", "client"),
+            ("client_secret", "client-secret"),
+            ("redirect_uri", "https://client.example/callback"),
+            ("code", &code),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.into(), v.into()))
+        .collect();
+        let response = oidc_token(HeaderMap::new(), Form(form.clone())).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 32768)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let mut validation = Validation::new(Algorithm::RS256);
+        validation.set_audience(&["client"]);
+        let decoded = decode::<IdTokenClaims>(
+            value["id_token"].as_str().unwrap(),
+            &OIDC_KEYS.as_ref().unwrap().decoding_key,
+            &validation,
+        )
+        .unwrap();
+        assert_eq!(decoded.claims.nonce.as_deref(), Some("nonce-value&?"));
+        assert_eq!(
+            oidc_token(HeaderMap::new(), Form(form)).await.status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
 }

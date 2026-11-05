@@ -3,7 +3,7 @@ Tier 4: Real-World Application Scenarios (Operator E2E Workflows)
 5 Multi-Step Production Scenarios:
 1. Operator Bootstrap & Privilege Drop Lifecycle
 2. Application Ingress Provisioning & Apache2 Subdomain/DNS Routing Sync
-3. Multi-Tenant Storage Quota Enforcement & Webhook Billing Flow
+3. Multi-Tenant Storage Quota Enforcement & Usage Refresh Flow
 4. Zero-Trust Mesh VPN & Route Advertisement Flow
 5. AI Anomaly Detection, Alerting & Runner Self-Healing Flow
 """
@@ -58,9 +58,9 @@ class TestScenarioAppIngressProvisioning(TestCase):
             has_card = inspector.file_exists("frontend/src/components/ingress/ExternalAccessCard.tsx")
             self.assert_true(has_ingress and has_gateway and has_stream and has_card, "Scenario 02: Ingress provisioning pipeline must be satisfied")
 
-class TestScenarioMultitenantQuotaBilling(TestCase):
+class TestScenarioMultitenantQuotaEnforcement(TestCase):
     def __init__(self):
-        super().__init__("T4_SCENARIO_03", "QuotaBilling", 4, "Multi-Tenant Storage Quota Assignment, Runner setdisk & Billing Audit Log")
+        super().__init__("T4_SCENARIO_03", "StorageQuotas", 4, "Multi-Tenant Storage Quota Assignment, Runner setdisk & Usage Refresh")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
         if mode == "live" and client.is_server_reachable():
@@ -68,9 +68,9 @@ class TestScenarioMultitenantQuotaBilling(TestCase):
             self.assert_status_code(code, 200)
         else:
             has_quota_api = bool(inspector.read_file("backend/api/routes.go") and "/quotas" in inspector.read_file("backend/api/routes.go"))
-            has_billing_api = bool(inspector.read_file("backend/api/routes.go") and "/billing" in inspector.read_file("backend/api/routes.go"))
-            has_quota_ui = inspector.file_exists("frontend/src/components/tabs/QuotasBillingTab.tsx") or inspector.file_exists("frontend/src/components/tabs/QuotasTab.tsx")
-            self.assert_true(has_quota_api and has_billing_api and has_quota_ui, "Scenario 03: Quotas & billing lifecycle must be satisfied")
+            has_runner_quota = bool(inspector.read_file("backend/services/privileged_runner.go") and "/v1/quota" in inspector.read_file("backend/services/privileged_runner.go"))
+            has_quota_ui = inspector.file_exists("frontend/src/components/tabs/QuotasTab.tsx")
+            self.assert_true(has_quota_api and has_runner_quota and has_quota_ui, "Scenario 03: Storage quotas lifecycle must be satisfied")
 
 class TestScenarioMeshVpnOrchestration(TestCase):
     def __init__(self):
@@ -106,7 +106,7 @@ def get_tier4_tests():
     return [
         TestScenarioOperatorBootstrap(),
         TestScenarioAppIngressProvisioning(),
-        TestScenarioMultitenantQuotaBilling(),
+        TestScenarioMultitenantQuotaEnforcement(),
         TestScenarioMeshVpnOrchestration(),
         TestScenarioAiAnomalyHealing()
     ]

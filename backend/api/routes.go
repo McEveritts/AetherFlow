@@ -62,7 +62,6 @@ func registerV1Routes(apiGroup *gin.RouterGroup) {
 
 	authLimiter := RateLimitMiddleware(5, 1*time.Minute)
 	oidcLimiter := RateLimitMiddleware(10, 1*time.Minute)
-	webhookLimiter := RateLimitMiddleware(30, 1*time.Minute)
 	aiLimiter := RateLimitMiddleware(20, 1*time.Minute)
 
 	publicGroup.GET("/auth/google/login", GoogleLogin)
@@ -73,8 +72,6 @@ func registerV1Routes(apiGroup *gin.RouterGroup) {
 	publicGroup.POST("/auth/setup", authLimiter, SetupAdmin)
 	publicGroup.GET("/auth/setup/check", CheckSetupNeeded)
 	publicGroup.POST("/auth/refresh", RefreshSession)
-
-	publicGroup.POST("/billing/webhooks/:provider", webhookLimiter, HandleBillingWebhook)
 
 	publicGroup.GET("/marketplace", GetMarketplaceApps)
 
@@ -184,8 +181,6 @@ func registerV1Routes(apiGroup *gin.RouterGroup) {
 		adminGroup.PUT("/quotas/:id", UpdateUserQuota)
 		// Requires admin context (Phase 8)
 		adminGroup.POST("/quotas/:id/refresh", RefreshUserQuota)
-		// Requires admin context (Phase 8)
-		adminGroup.GET("/billing/webhooks", ListBillingWebhookEvents)
 
 		// Requires admin context (Phase 8)
 		adminGroup.GET("/services", getServices)

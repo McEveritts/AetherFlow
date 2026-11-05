@@ -557,11 +557,42 @@ _build_modern_stack_from_source() {
     return 0
 }
 
+_af_read_env_raw() {
+    local env_file="$1"
+    local key="$2"
+    [[ -f "${env_file}" ]] || return 0
+    awk -v k="${key}" '
+        {
+            line = $0
+            sub(/\r$/, "", line)
+            if (line ~ "^[[:space:]]*" k "=") {
+                sub("^[[:space:]]*" k "=", "", line)
+                value = line
+                found = 1
+            }
+        }
+        END { if (found) print value }
+    ' "${env_file}"
+}
+
+_af_unquote_env_val() {
+    local val="$1"
+    if [[ ${#val} -ge 2 ]]; then
+        if [[ "${val:0:1}" == '"' && "${val: -1}" == '"' ]]; then
+            val="${val:1:${#val}-2}"
+        elif [[ "${val:0:1}" == "'" && "${val: -1}" == "'" ]]; then
+            val="${val:1:${#val}-2}"
+        fi
+    fi
+    printf '%s' "${val}"
+}
+
 _build_modern_stack() {
     local af_root="${AF_INSTALL_ROOT:-/opt/AetherFlow}"
     local env_dir="${AF_ENV_DIR:-/etc/aetherflow}"
     local data_dir="${AF_DATA_DIR:-/var/lib/aetherflow}"
     local sysd_dst="${AF_SYSTEMD_DIR:-/etc/systemd/system}"
+    local run_dir="${AF_RUN_DIR:-/run/aetherflow}"
 
     if _af_modern_from_source_enabled; then
         echo "Explicit --from-source mode enabled: compiling control plane from source..."
@@ -580,29 +611,19 @@ _build_modern_stack() {
             useradd --system --no-create-home --shell /usr/sbin/nologin aetherflow || true
         fi
         usermod -a -G systemd-journal,adm aetherflow 2>/dev/null || true
-    fi
 
-    # Enforce Least-Privilege Boundary: Remove legacy sudoers permissions
-    rm -f /etc/sudoers.d/aether* 2>/dev/null || true
+        # Enforce Least-Privilege Boundary: Remove legacy sudoers permissions
+        rm -f /etc/sudoers.d/aether* 2>/dev/null || true
+    fi
 
     # Ensure FHS data dir and legacy backend data dir exist
-    mkdir -p "${data_dir}" "${af_root}/backend/data" /run/aetherflow 2>/dev/null || true
+    mkdir -p "${data_dir}" "${af_root}/backend/data" "${run_dir}" 2>/dev/null || true
     if [[ "${AF_SKIP_SYSTEMCTL:-0}" != "1" ]]; then
         chown -R aetherflow:aetherflow "${data_dir}" "${af_root}/backend/data" 2>/dev/null || true
-        chown root:aetherflow /run/aetherflow 2>/dev/null || true
+        chown root:aetherflow "${run_dir}" 2>/dev/null || true
+        chmod 1770 "${run_dir}" 2>/dev/null || true
     fi
     chmod 0700 "${data_dir}" 2>/dev/null || true
-    chmod 1770 /run/aetherflow 2>/dev/null || true
-
-    # ── Generate cryptographic keys ───────────────────────────────────────
-    local aes_key
-    aes_key="$(head -c 32 /dev/urandom | tr -dc 'A-Za-z0-9' | head -c 32)"
-    while [[ ${#aes_key} -lt 32 ]]; do
-        aes_key="${aes_key}$(head -c 4 /dev/urandom | tr -dc 'A-Za-z0-9' | head -c 1)"
-    done
-
-    local jwt_secret
-    jwt_secret="$(head -c 64 /dev/urandom | tr -dc 'A-Za-z0-9' | head -c 64)"
 
     # ── Detect host IPs for ALLOWED_HOSTS / CORS ──────────────────────────
     local host_ip
@@ -627,7 +648,57 @@ _build_modern_stack() {
         chown root:aetherflow "${env_dir}" 2>/dev/null || true
     fi
 
+    local existing_env="${env_dir}/aetherflow.env"
+    local existing_aes_key=""
+    local existing_jwt_secret=""
+    local existing_bind_addr=""
+    local existing_port=""
+    local existing_cookie_secure=""
+    local existing_cors=""
+    local existing_hosts=""
+    local existing_domain=""
+    local existing_runner_sock=""
+    local existing_priv_runner=""
+    local existing_db_path=""
+    local existing_af_db_path=""
+    local existing_gin_mode=""
+
+    if [[ -f "${existing_env}" ]]; then
+        existing_aes_key="$(_af_read_env_raw "${existing_env}" "AES_MASTER_KEY")"
+        existing_jwt_secret="$(_af_read_env_raw "${existing_env}" "JWT_SECRET")"
+        existing_bind_addr="$(_af_read_env_raw "${existing_env}" "BIND_ADDR")"
+        existing_port="$(_af_read_env_raw "${existing_env}" "PORT")"
+        existing_cookie_secure="$(_af_read_env_raw "${existing_env}" "COOKIE_SECURE")"
+        existing_cors="$(_af_read_env_raw "${existing_env}" "ALLOWED_CORS_ORIGIN")"
+        existing_hosts="$(_af_read_env_raw "${existing_env}" "ALLOWED_HOSTS")"
+        existing_domain="$(_af_read_env_raw "${existing_env}" "AETHERFLOW_BASE_DOMAIN")"
+        existing_runner_sock="$(_af_read_env_raw "${existing_env}" "AETHERFLOW_RUNNER_SOCK")"
+        existing_priv_runner="$(_af_read_env_raw "${existing_env}" "PRIVILEGED_RUNNER_ENABLED")"
+        existing_db_path="$(_af_read_env_raw "${existing_env}" "DB_PATH")"
+        existing_af_db_path="$(_af_read_env_raw "${existing_env}" "AETHERFLOW_DB_PATH")"
+        existing_gin_mode="$(_af_read_env_raw "${existing_env}" "GIN_MODE")"
+    fi
+
+    # ── Preserve or Generate Cryptographic Keys ───────────────────────────
+    local aes_key
+    if [[ -n "${existing_aes_key}" ]]; then
+        aes_key="${existing_aes_key}"
+    else
+        aes_key="$(head -c 32 /dev/urandom | tr -dc 'A-Za-z0-9' | head -c 32)"
+        while [[ ${#aes_key} -lt 32 ]]; do
+            aes_key="${aes_key}$(head -c 4 /dev/urandom | tr -dc 'A-Za-z0-9' | head -c 1)"
+        done
+    fi
+
+    local jwt_secret
+    if [[ -n "${existing_jwt_secret}" ]]; then
+        jwt_secret="${existing_jwt_secret}"
+    else
+        jwt_secret="$(head -c 64 /dev/urandom | tr -dc 'A-Za-z0-9' | head -c 64)"
+    fi
+
     local saved_domain=""
+    local saved_domain_raw=""
     if type _load_config &>/dev/null; then
         saved_domain="$(_load_config hostname_value)"
         if [[ -z "${saved_domain}" ]]; then
@@ -637,40 +708,123 @@ _build_modern_stack() {
     if [[ -z "${saved_domain}" ]]; then
         saved_domain="${AETHERFLOW_BASE_DOMAIN:-${AETHERFLOW_DOMAIN:-}}"
     fi
+    if [[ -n "${saved_domain}" ]]; then
+        saved_domain_raw="${saved_domain}"
+        saved_domain="$(_af_unquote_env_val "${saved_domain}")"
+    elif [[ -n "${existing_domain}" ]]; then
+        saved_domain_raw="${existing_domain}"
+        saved_domain="$(_af_unquote_env_val "${existing_domain}")"
+    fi
     if [[ "${saved_domain}" == "localhost" || "${saved_domain}" == *.local ]]; then
         saved_domain=""
+        saved_domain_raw=""
     fi
 
+    # ── OPUS-004: Ingress & Binding Strategy ─────────────────────────────
+    # Apache2 is primary ingress: bind loopback (127.0.0.1) by default.
+    # Preserve existing operator choice if present, or bind 0.0.0.0 only if explicit opt-in.
+    local allow_direct_8080=0
+    if [[ "${AF_ALLOW_DIRECT_8080:-0}" == "1" || "${AETHERFLOW_DIRECT_ACCESS:-0}" == "1" || "${AF_DIRECT_ACCESS:-0}" == "1" ]]; then
+        allow_direct_8080=1
+    fi
+
+    local bind_addr
+    if [[ -n "${existing_bind_addr}" ]]; then
+        bind_addr="${existing_bind_addr}"
+    elif [[ -n "${BIND_ADDR:-}" ]]; then
+        bind_addr="${BIND_ADDR}"
+    elif [[ "${allow_direct_8080}" == "1" ]]; then
+        bind_addr="0.0.0.0"
+    else
+        bind_addr="127.0.0.1"
+    fi
+    local bind_addr_clean
+    bind_addr_clean="$(_af_unquote_env_val "${bind_addr}")"
+
+    # ── OPUS-004: Secure Cookie Policy ───────────────────────────────────
+    # Enforce COOKIE_SECURE=true when domain or TLS is configured.
+    # Preserve existing operator choice if present.
+    local cookie_secure
+    if [[ -n "${existing_cookie_secure}" ]]; then
+        cookie_secure="${existing_cookie_secure}"
+    elif [[ -n "${COOKIE_SECURE:-}" ]]; then
+        cookie_secure="${COOKIE_SECURE}"
+    elif [[ -n "${saved_domain}" || "${AF_TLS_ENABLED:-0}" == "1" || "${SSL_ENABLED:-0}" == "1" ]]; then
+        cookie_secure="true"
+    else
+        cookie_secure="false"
+    fi
+
+    # ── OPUS-004: CORS & Host Allowlist ──────────────────────────────────
+    # Always include loopback for local health checks and reverse proxying
     local cors_origins="http://localhost:8080,http://127.0.0.1:8080,https://localhost,https://127.0.0.1"
     local allowed_hosts="localhost,localhost:8080,127.0.0.1,127.0.0.1:8080"
-    if [[ -n "${host_ip}" && "${host_ip}" != "127.0.0.1" ]]; then
-        cors_origins="${cors_origins},http://${host_ip}:8080,https://${host_ip},http://${host_ip}"
-        allowed_hosts="${allowed_hosts},${host_ip},${host_ip}:8080"
+
+    if [[ "${allow_direct_8080}" == "1" || ("${bind_addr_clean}" == "0.0.0.0" && -n "${existing_bind_addr}") ]]; then
+        # Explicit direct-access opt-in: include direct :8080 origins on non-loopback addresses
+        if [[ -n "${host_ip}" && "${host_ip}" != "127.0.0.1" ]]; then
+            cors_origins="${cors_origins},http://${host_ip}:8080,https://${host_ip},http://${host_ip}"
+            allowed_hosts="${allowed_hosts},${host_ip},${host_ip}:8080"
+        fi
+        if [[ -n "${public_ip}" ]]; then
+            cors_origins="${cors_origins},http://${public_ip}:8080,https://${public_ip},http://${public_ip}"
+            allowed_hosts="${allowed_hosts},${public_ip},${public_ip}:8080"
+        fi
+        if [[ -n "${saved_domain}" ]]; then
+            cors_origins="${cors_origins},http://${saved_domain}:8080,https://${saved_domain},http://${saved_domain}"
+            allowed_hosts="${allowed_hosts},${saved_domain},${saved_domain}:8080"
+        fi
+    else
+        # Default Apache2 primary ingress: avoid public direct :8080 origins
+        if [[ -n "${host_ip}" && "${host_ip}" != "127.0.0.1" ]]; then
+            cors_origins="${cors_origins},https://${host_ip},http://${host_ip}"
+            allowed_hosts="${allowed_hosts},${host_ip}"
+        fi
+        if [[ -n "${public_ip}" ]]; then
+            cors_origins="${cors_origins},https://${public_ip},http://${public_ip}"
+            allowed_hosts="${allowed_hosts},${public_ip}"
+        fi
+        if [[ -n "${saved_domain}" ]]; then
+            cors_origins="${cors_origins},https://${saved_domain},http://${saved_domain}"
+            allowed_hosts="${allowed_hosts},${saved_domain}"
+        fi
     fi
-    if [[ -n "${public_ip}" ]]; then
-        cors_origins="${cors_origins},http://${public_ip}:8080,https://${public_ip},http://${public_ip}"
-        allowed_hosts="${allowed_hosts},${public_ip},${public_ip}:8080"
-    fi
-    if [[ -n "${saved_domain}" ]]; then
-        cors_origins="${cors_origins},http://${saved_domain}:8080,https://${saved_domain},http://${saved_domain}"
-        allowed_hosts="${allowed_hosts},${saved_domain},${saved_domain}:8080"
+
+    local port="${existing_port:-${PORT:-8080}}"
+    local runner_sock="${existing_runner_sock:-/run/aetherflow/runner.sock}"
+    local priv_runner="${existing_priv_runner:-true}"
+    local default_db_path="${data_dir}/aetherflow.sqlite"
+    local effective_db_path="${existing_db_path:-${DB_PATH:-${existing_af_db_path:-${AETHERFLOW_DB_PATH:-${default_db_path}}}}}"
+    local effective_af_db_path="${existing_af_db_path:-${AETHERFLOW_DB_PATH:-${effective_db_path}}}"
+    local final_hosts="${existing_hosts:-${allowed_hosts}}"
+    local final_cors="${existing_cors:-${cors_origins}}"
+    local gin_mode="${existing_gin_mode:-release}"
+
+    # Preserve any custom operator environment variables from existing file before overwriting
+    local extra_lines=""
+    if [[ -f "${existing_env}" ]]; then
+        extra_lines="$(grep -v -E '^[[:space:]]*(AES_MASTER_KEY|JWT_SECRET|PORT|BIND_ADDR|ALLOWED_HOSTS|ALLOWED_CORS_ORIGIN|AETHERFLOW_BASE_DOMAIN|DB_PATH|AETHERFLOW_DB_PATH|AETHERFLOW_RUNNER_SOCK|PRIVILEGED_RUNNER_ENABLED|COOKIE_SECURE|GIN_MODE)=' "${existing_env}" | grep -v '^[[:space:]]*#' | grep -v '^[[:space:]]*$' || true)"
     fi
 
     cat > "${env_dir}/aetherflow.env" <<EOF
 AES_MASTER_KEY=${aes_key}
 JWT_SECRET=${jwt_secret}
-PORT=8080
-BIND_ADDR=0.0.0.0
-ALLOWED_HOSTS=${allowed_hosts}
-ALLOWED_CORS_ORIGIN=${cors_origins}
-AETHERFLOW_BASE_DOMAIN=${saved_domain}
-DB_PATH=${data_dir}/aetherflow.sqlite
-AETHERFLOW_DB_PATH=${data_dir}/aetherflow.sqlite
-AETHERFLOW_RUNNER_SOCK=/run/aetherflow/runner.sock
-PRIVILEGED_RUNNER_ENABLED=true
-COOKIE_SECURE=false
-GIN_MODE=release
+PORT=${port}
+BIND_ADDR=${bind_addr}
+ALLOWED_HOSTS=${final_hosts}
+ALLOWED_CORS_ORIGIN=${final_cors}
+AETHERFLOW_BASE_DOMAIN=${saved_domain_raw}
+DB_PATH=${effective_db_path}
+AETHERFLOW_DB_PATH=${effective_af_db_path}
+AETHERFLOW_RUNNER_SOCK=${runner_sock}
+PRIVILEGED_RUNNER_ENABLED=${priv_runner}
+COOKIE_SECURE=${cookie_secure}
+GIN_MODE=${gin_mode}
 EOF
+
+    if [[ -n "${extra_lines}" ]]; then
+        printf "\n# Preserved Operator Custom Configurations\n%s\n" "${extra_lines}" >> "${env_dir}/aetherflow.env"
+    fi
     chmod 0640 "${env_dir}/aetherflow.env"
     if [[ "${AF_SKIP_SYSTEMCTL:-0}" != "1" ]]; then
         chown root:aetherflow "${env_dir}/aetherflow.env" 2>/dev/null || true

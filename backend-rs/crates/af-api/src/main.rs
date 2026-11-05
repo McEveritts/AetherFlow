@@ -3,34 +3,34 @@
 pub mod auth;
 pub mod embed;
 pub mod intelligence;
-pub mod middlewares;
 pub mod mcbrowser;
 #[cfg(test)]
 mod mcbrowser_integration_tests;
-pub mod notifications_ext;
+pub mod middlewares;
 pub mod network;
+pub mod notifications_ext;
 pub mod oidc;
 pub mod plugins;
 #[cfg(test)]
 mod plugins_router_tests;
 pub mod routes;
 pub mod storage;
+pub mod streaming_emby;
 pub mod streaming_ext;
 pub mod streaming_history;
-pub mod streaming_patterns;
-pub mod streaming_emby;
-pub mod streaming_portability;
-pub mod streaming_import;
-pub mod streaming_metadata;
 #[cfg(test)]
 mod streaming_http_tests;
+pub mod streaming_import;
+pub mod streaming_metadata;
+pub mod streaming_patterns;
+pub mod streaming_portability;
 pub mod ws;
 
+use axum::http::{header, HeaderName, HeaderValue, Method};
 use std::env;
 use std::path::Path;
 use std::time::Duration;
 use tower_http::cors::{AllowOrigin, CorsLayer};
-use axum::http::{header, HeaderName, HeaderValue, Method};
 
 fn env_flag_enabled(name: &str) -> bool {
     env::var(name)
@@ -44,7 +44,8 @@ fn env_flag_enabled(name: &str) -> bool {
 }
 
 fn load_env_files() {
-    if env_flag_enabled("AETHERFLOW_SKIP_ENV_FILES") || env_flag_enabled("AETHERFLOW_E2E_ISOLATED") {
+    if env_flag_enabled("AETHERFLOW_SKIP_ENV_FILES") || env_flag_enabled("AETHERFLOW_E2E_ISOLATED")
+    {
         if let Ok(explicit) = env::var("AETHERFLOW_ENV_FILE") {
             let trimmed = explicit.trim();
             if !trimmed.is_empty() && Path::new(trimmed).is_file() {
@@ -64,11 +65,7 @@ fn load_env_files() {
         }
     }
 
-    let candidates = [
-        "/etc/aetherflow/aetherflow.env",
-        "../.env",
-        ".env",
-    ];
+    let candidates = ["/etc/aetherflow/aetherflow.env", "../.env", ".env"];
     for path in candidates {
         if Path::new(path).is_file() {
             let _ = dotenvy::from_path(path);
@@ -103,9 +100,6 @@ fn build_cors_layer() -> CorsLayer {
         header::CACHE_CONTROL,
         HeaderName::from_static("x-mcbrowser-share-token"),
         HeaderName::from_static("x-requested-with"),
-        HeaderName::from_static("x-aetherflow-signature"),
-        HeaderName::from_static("x-whmcs-signature"),
-        HeaderName::from_static("x-blesta-signature"),
         HeaderName::from_static("rsc"),
     ];
     let expose_headers = [
@@ -259,13 +253,14 @@ async fn main() -> anyhow::Result<()> {
         "AetherFlow Rust backend starting"
     );
 
+    let shutdown = af_runner::shutdown_signal()?;
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
-    .with_graceful_shutdown(async {
-        let _ = tokio::signal::ctrl_c().await;
+    .with_graceful_shutdown(async move {
+        shutdown.await;
         tracing::info!("shutdown signal received, draining connections");
     })
     .await?;
@@ -285,7 +280,11 @@ pub fn resolve_bind_addr(
     let bind_host = bind_host_env
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .unwrap_or(if isolated_mode { "127.0.0.1" } else { "0.0.0.0" });
+        .unwrap_or(if isolated_mode {
+            "127.0.0.1"
+        } else {
+            "0.0.0.0"
+        });
 
     // IPv6 bracketed literal without port (`[::1]`) -> `[::1]:8080`
     if bind_host.starts_with('[') && bind_host.ends_with(']') {
@@ -306,10 +305,83 @@ pub fn resolve_bind_addr(
 mod main_isolation_tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn api_sigterm_drains_inflight_response() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        const ENV: &str = "AETHERFLOW_API_DRAIN_TEST";
+        if env::var_os(ENV).is_none() {
+            let status = std::process::Command::new(env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "main_isolation_tests::api_sigterm_drains_inflight_response",
+                    "--nocapture",
+                ])
+                .env(ENV, "1")
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
+        let shutdown = af_runner::shutdown_signal().unwrap();
+        let entered = std::sync::Arc::new(tokio::sync::Notify::new());
+        let release = std::sync::Arc::new(tokio::sync::Notify::new());
+        let enter_handler = entered.clone();
+        let release_handler = release.clone();
+        let app = axum::Router::new().route(
+            "/drain-test",
+            axum::routing::get(move || {
+                let entered = enter_handler.clone();
+                let release = release_handler.clone();
+                async move {
+                    entered.notify_one();
+                    release.notified().await;
+                    "completed-before-exit"
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(shutdown)
+                .await
+                .unwrap();
+        });
+        let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+        stream
+            .write_all(b"GET /drain-test HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), entered.notified())
+            .await
+            .unwrap();
+        assert_eq!(
+            unsafe { libc::kill(std::process::id() as i32, libc::SIGTERM) },
+            0
+        );
+        tokio::task::yield_now().await;
+        assert!(!server.is_finished());
+        release.notify_one();
+        let mut response = String::new();
+        tokio::time::timeout(Duration::from_secs(2), stream.read_to_string(&mut response))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(response.contains("completed-before-exit"));
+        tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
     #[test]
     fn resolve_bind_addr_honors_bind_addr_port_and_isolated_defaults() {
         assert_eq!(resolve_bind_addr(None, None, false), "0.0.0.0:8080");
-        assert_eq!(resolve_bind_addr(None, Some("18080"), true), "127.0.0.1:18080");
+        assert_eq!(
+            resolve_bind_addr(None, Some("18080"), true),
+            "127.0.0.1:18080"
+        );
         assert_eq!(
             resolve_bind_addr(Some("127.0.0.1"), Some("18080"), false),
             "127.0.0.1:18080"

@@ -1,23 +1,21 @@
 use crate::auth::{
     admin_only_middleware, api_error, auth_middleware, check_setup_needed, csrf_middleware,
     disable_2fa, get_session, issue_csrf_token, list_active_sessions, local_login, logout,
-    mfa_login_verify, refresh_session, revoke_session, setup_2fa, setup_admin,
-    verify_2fa, verify_proxy_auth, AuthUser,
+    mfa_login_verify, refresh_session, revoke_session, setup_2fa, setup_admin, verify_2fa,
+    verify_proxy_auth, AuthUser,
 };
 use crate::embed::spa_fallback_handler;
 use crate::intelligence::{
-    ai_chat, ai_support, analyze_predictions,
-    approve_mediaflow_item, bandwidth_analyze, bandwidth_apply, bookmark_log,
-    decline_mediaflow_item, enroll_worker, get_auth_metrics_history,
+    ai_chat, ai_support, analyze_predictions, approve_mediaflow_item, bandwidth_analyze,
+    bandwidth_apply, bookmark_log, decline_mediaflow_item, enroll_worker, get_auth_metrics_history,
     get_bookmarks, get_cluster_nodes, get_log_sources, get_logs, get_mediaflow_queue,
-    get_metrics_history, get_predictions, get_system_topology,
-    get_worker_metrics,
-    metadata_results, metadata_scan, metadata_status, remove_worker,
-    test_ai_connection, trigger_mediaflow_scan,
+    get_metrics_history, get_predictions, get_system_topology, get_worker_metrics,
+    metadata_results, metadata_scan, metadata_status, remove_worker, test_ai_connection,
+    trigger_mediaflow_scan,
 };
 use crate::middlewares::{
     ai_rate_limit_middleware, auth_rate_limit_middleware, host_validation_middleware,
-    oidc_rate_limit_middleware, quota_upload_guard_middleware, webhook_rate_limit_middleware,
+    oidc_rate_limit_middleware, quota_upload_guard_middleware,
 };
 use crate::network::{
     add_wireguard_peer, advertise_tailscale_routes, generate_wireguard_keys, get_network_status,
@@ -42,9 +40,9 @@ use crate::plugins::{
 use crate::storage::{
     check_update, delete_shared_file, download_backup, download_file, get_backups_list,
     get_files_list, get_optimal_backup_window, get_own_quota, get_system_update_status,
-    handle_billing_webhook, handle_deploy_process, handle_deploy_stream,
-    list_billing_webhook_events, list_user_quotas, refresh_user_quota, run_backup, run_update,
-    set_backup_schedule, update_user_quota, upload_backup_chunk, upload_file,
+    handle_deploy_process, handle_deploy_stream, list_user_quotas, prepare_backup_download,
+    refresh_user_quota, run_backup, run_update, set_backup_schedule, update_user_quota,
+    upload_backup_chunk, upload_file,
 };
 use crate::streaming_ext::{
     clear_streaming_demo_data, control_streaming_session, get_streaming_artwork,
@@ -60,7 +58,7 @@ use axum::extract::{Extension, Path, Query, Request};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Json, Response};
-use axum::routing::{ delete, get, post, put};
+use axum::routing::{delete, get, post, put};
 use axum::Router;
 use chrono::Utc;
 use futures::StreamExt;
@@ -89,8 +87,8 @@ pub async fn security_headers_middleware(mut req: Request, next: Next) -> Respon
         .map(|s| s.to_string())
         .unwrap_or_else(|| format!("{}", Utc::now().timestamp_nanos_opt().unwrap_or(0)));
 
-    let is_legacy_api = req.uri().path().starts_with("/api/")
-        && !req.uri().path().starts_with("/api/v1/");
+    let is_legacy_api =
+        req.uri().path().starts_with("/api/") && !req.uri().path().starts_with("/api/v1/");
     let req_path = req.uri().path().to_string();
 
     req.headers_mut().insert(
@@ -206,10 +204,6 @@ fn build_v1_router() -> Router {
         .route("/oidc/device/authorize", post(oidc_device_authorize))
         .layer(middleware::from_fn(oidc_rate_limit_middleware));
 
-    let webhook_limited_public = Router::new()
-        .route("/billing/webhooks/:provider", post(handle_billing_webhook))
-        .layer(middleware::from_fn(webhook_rate_limit_middleware));
-
     let public_routes = Router::new()
         .merge(crate::mcbrowser::public_router())
         .route("/openapi.yaml", get(get_openapi_spec))
@@ -222,8 +216,7 @@ fn build_v1_router() -> Router {
         .route("/marketplace", get(get_marketplace_apps))
         .route("/oidc/jwks", get(oidc_jwks))
         .merge(auth_limited_public)
-        .merge(oidc_limited_public)
-        .merge(webhook_limited_public);
+        .merge(oidc_limited_public);
 
     let ai_limited_auth = Router::new()
         .route("/ai/chat", post(ai_chat))
@@ -258,8 +251,14 @@ fn build_v1_router() -> Router {
             post(regenerate_2fa_recovery_codes),
         )
         .route("/settings", get(get_settings))
-        .route("/fileshare", get(get_files_list))
-        .route("/fileshare/download/:filename", get(download_file))
+        .route(
+            "/fileshare",
+            get(get_files_list).layer(middleware::from_fn(quota_upload_guard_middleware)),
+        )
+        .route(
+            "/fileshare/download/:filename",
+            get(download_file).layer(middleware::from_fn(quota_upload_guard_middleware)),
+        )
         .route("/services", get(get_services))
         .route("/packages/:id/progress", get(package_progress))
         .route("/system/update/check", get(check_update))
@@ -344,6 +343,9 @@ fn build_v1_router() -> Router {
 
     let quota_guarded_upload = Router::new()
         .route("/fileshare/upload", post(upload_file))
+        // Allow multipart framing above the 50 MiB legacy whole-file cap.
+        // The handler separately enforces 5 MiB chunks and 50 MiB total files.
+        .layer(axum::extract::DefaultBodyLimit::max(51 * 1024 * 1024))
         .layer(middleware::from_fn(quota_upload_guard_middleware));
 
     let admin_routes = Router::new()
@@ -352,7 +354,10 @@ fn build_v1_router() -> Router {
         .route("/plugins/:id/token", post(mint_plugin_token_handler))
         .route("/backup/run", post(run_backup))
         .route("/backup/list", get(get_backups_list))
-        .route("/backup/download/:filename", get(download_backup))
+        .route(
+            "/backup/download/:filename",
+            get(download_backup).post(prepare_backup_download),
+        )
         .route("/backup/upload/:filename", post(upload_backup_chunk))
         .route("/settings", get(get_settings).put(update_settings))
         .route("/settings/test-ai", post(test_ai_connection))
@@ -362,7 +367,6 @@ fn build_v1_router() -> Router {
         .route("/quotas", get(list_user_quotas))
         .route("/quotas/:id", put(update_user_quota))
         .route("/quotas/:id/refresh", post(refresh_user_quota))
-        .route("/billing/webhooks", get(list_billing_webhook_events))
         .route("/services", get(get_services))
         .route("/services/:name/control", post(control_service_handler))
         .route("/packages/:id/install", post(install_package))
@@ -378,8 +382,14 @@ fn build_v1_router() -> Router {
         .route("/system/update/status", get(get_system_update_status))
         .route("/system/metrics", get(get_system_metrics))
         .merge(quota_guarded_upload)
-        .route("/fileshare/download/:filename", get(download_file))
-        .route("/fileshare/:filename", delete(delete_shared_file))
+        .route(
+            "/fileshare/download/:filename",
+            get(download_file).layer(middleware::from_fn(quota_upload_guard_middleware)),
+        )
+        .route(
+            "/fileshare/:filename",
+            delete(delete_shared_file).layer(middleware::from_fn(quota_upload_guard_middleware)),
+        )
         .route("/cluster/nodes", get(get_cluster_nodes))
         .route("/cluster/enroll", post(enroll_worker))
         .route("/cluster/nodes/:id", delete(remove_worker))
@@ -1327,8 +1337,8 @@ async fn dispatch_package_lifecycle(
         );
 
         let fs_root_override_raw = env::var("AETHERFLOW_FS_ROOT").unwrap_or_default();
-        let fs_root_override = Option::from(fs_root_override_raw.clone())
-            .filter(|s| !s.trim().is_empty());
+        let fs_root_override =
+            Option::from(fs_root_override_raw.clone()).filter(|s| !s.trim().is_empty());
         let can_run_bash =
             cfg!(unix) && fs_root_override.is_none() && std::path::Path::new("/bin/bash").exists();
 
@@ -1659,6 +1669,10 @@ fn build_single_package_update_response(
 #[serde(rename_all = "camelCase")]
 pub struct SettingsPayload {
     pub ai_model: String,
+    #[serde(default)]
+    pub local_provider: String,
+    #[serde(default)]
+    pub local_model: String,
     pub system_prompt: String,
     pub language: String,
     pub timezone: String,
@@ -1675,7 +1689,13 @@ pub struct SettingsPayload {
 }
 
 fn mask_secret(raw: &str) -> String {
-    let dec = af_db::decrypt_key(raw).unwrap_or_else(|_| raw.to_string());
+    if raw.is_empty() {
+        return String::new();
+    }
+    let dec = match af_db::decrypt_key(raw) {
+        Ok(value) if !value.starts_with("enc:v1:") => value,
+        _ => return "****".to_string(),
+    };
     if dec.len() > 4 {
         let last4: String = dec
             .chars()
@@ -1691,8 +1711,23 @@ fn mask_secret(raw: &str) -> String {
     }
 }
 
-async fn get_settings() -> Response {
-    let Ok(conn) = af_db::get_conn() else {
+fn redact_settings_for_role(payload: &mut SettingsPayload, role: &str) {
+    if role != "admin" {
+        payload.gemini_api_key.clear();
+        payload.openai_api_key.clear();
+        payload.anthropic_api_key.clear();
+        payload.lm_studio_endpoint.clear();
+        payload.ollama_endpoint.clear();
+        payload.anthropic_endpoint.clear();
+    }
+}
+
+async fn get_settings(Extension(user): Extension<AuthUser>) -> Response {
+    crate::auth::blocking_response(move || get_settings_for_role(&user.role)).await
+}
+
+fn get_settings_for_role(role: &str) -> Response {
+    let Ok(conn) = af_db::get_read_conn() else {
         return api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "INTERNAL_ERROR",
@@ -1705,7 +1740,8 @@ async fn get_settings() -> Response {
          COALESCE(timezone, 'UTC'), COALESCE(update_channel, 'stable'), COALESCE(default_dashboard, 'overview'), \
          COALESCE(setup_completed, 0), COALESCE(base_domain, ''), COALESCE(gemini_api_key, ''), \
          COALESCE(openai_api_key, ''), COALESCE(lm_studio_endpoint, ''), COALESCE(ollama_endpoint, ''), \
-         COALESCE(anthropic_api_key, ''), COALESCE(anthropic_endpoint, '') FROM settings WHERE id = 1",
+         COALESCE(anthropic_api_key, ''), COALESCE(anthropic_endpoint, ''), \
+         COALESCE(local_provider, ''), COALESCE(local_model, '') FROM settings WHERE id = 1",
         [],
         |r| {
             let base_domain: String = r.get(7)?;
@@ -1727,6 +1763,8 @@ async fn get_settings() -> Response {
                 ollama_endpoint: r.get(11)?,
                 anthropic_api_key: mask_secret(&anthropic_raw),
                 anthropic_endpoint: r.get(13)?,
+                local_provider: r.get(14)?,
+                local_model: r.get(15)?,
             })
         },
     );
@@ -1737,6 +1775,7 @@ async fn get_settings() -> Response {
             if payload.base_domain.is_empty() {
                 payload.base_domain = af_services::resolve_base_domain();
             }
+            redact_settings_for_role(&mut payload, role);
             Json(payload).into_response()
         }
         Err(_) => Json(SettingsPayload::default()).into_response(),
@@ -1744,9 +1783,47 @@ async fn get_settings() -> Response {
 }
 
 async fn update_settings(Json(mut req): Json<SettingsPayload>) -> Response {
+    req.ai_model = req.ai_model.trim().to_owned();
+    req.local_provider = req.local_provider.trim().to_owned();
+    req.local_model = req.local_model.trim().to_owned();
+    if (!req.local_provider.is_empty()
+        && !matches!(
+            req.local_provider.as_str(),
+            "lm-studio" | "ollama" | "anthropic-local"
+        ))
+        || (!req.local_model.is_empty()
+            && !crate::intelligence::is_valid_local_model_id(&req.local_model))
+        || crate::intelligence::is_forbidden_model_alias(&req.ai_model)
+    {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "INVALID_AI_SETTINGS",
+            "Use a local runtime and an installed model identifier, not a provider alias",
+        );
+    }
+    for endpoint in [
+        &mut req.lm_studio_endpoint,
+        &mut req.ollama_endpoint,
+        &mut req.anthropic_endpoint,
+    ] {
+        if !endpoint.trim().is_empty() {
+            match af_services::validate_server_url(endpoint) {
+                Ok(clean) => *endpoint = clean,
+                Err(_) => {
+                    return api_error(
+                        StatusCode::BAD_REQUEST,
+                        "INVALID_ENDPOINT",
+                        "Invalid or disallowed AI endpoint URL",
+                    )
+                }
+            }
+        } else {
+            endpoint.clear();
+        }
+    }
     let prev_base_domain = af_db::get_base_domain();
 
-    let Ok(conn) = af_db::get_conn() else {
+    let Ok(mut conn) = af_db::get_conn() else {
         return api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "INTERNAL_ERROR",
@@ -1775,49 +1852,55 @@ async fn update_settings(Json(mut req): Json<SettingsPayload>) -> Response {
         n
     };
 
-    let _ = conn.execute(
-        "UPDATE settings SET ai_model = ?1, system_prompt = ?2, language = ?3, timezone = ?4, \
+    let saved = (|| -> anyhow::Result<()> {
+        let transaction =
+            conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let updated = transaction.execute(
+            "UPDATE settings SET ai_model = ?1, system_prompt = ?2, language = ?3, timezone = ?4, \
          update_channel = ?5, default_dashboard = ?6, setup_completed = ?7, base_domain = ?8, \
          lm_studio_endpoint = ?9, ollama_endpoint = ?10, anthropic_endpoint = ?11, \
+         local_provider = ?12, local_model = ?13, \
          updated_at = CURRENT_TIMESTAMP WHERE id = 1",
-        params![
-            req.ai_model,
-            req.system_prompt,
-            req.language,
-            req.timezone,
-            channel,
-            req.default_dashboard,
-            req.setup_completed,
-            norm_domain,
-            req.lm_studio_endpoint,
-            req.ollama_endpoint,
-            req.anthropic_endpoint,
-        ],
-    );
-
-    if !req.gemini_api_key.is_empty() && !req.gemini_api_key.starts_with("****") {
-        if let Ok(enc) = af_db::encrypt_key(&req.gemini_api_key) {
-            let _ = conn.execute(
-                "UPDATE settings SET gemini_api_key = ?1 WHERE id = 1",
-                params![enc],
-            );
+            params![
+                req.ai_model,
+                req.system_prompt,
+                req.language,
+                req.timezone,
+                channel,
+                req.default_dashboard,
+                req.setup_completed,
+                norm_domain,
+                req.lm_studio_endpoint,
+                req.ollama_endpoint,
+                req.anthropic_endpoint,
+                req.local_provider,
+                req.local_model,
+            ],
+        )?;
+        anyhow::ensure!(updated == 1, "Settings row is missing");
+        for (column, value) in [
+            ("gemini_api_key", &req.gemini_api_key),
+            ("openai_api_key", &req.openai_api_key),
+            ("anthropic_api_key", &req.anthropic_api_key),
+        ] {
+            if !value.is_empty() && !value.starts_with("****") {
+                let encrypted = af_db::encrypt_key(value)?;
+                transaction.execute(
+                    &format!("UPDATE settings SET {column} = ?1 WHERE id = 1"),
+                    params![encrypted],
+                )?;
+            }
         }
-    }
-    if !req.openai_api_key.is_empty() && !req.openai_api_key.starts_with("****") {
-        if let Ok(enc) = af_db::encrypt_key(&req.openai_api_key) {
-            let _ = conn.execute(
-                "UPDATE settings SET openai_api_key = ?1 WHERE id = 1",
-                params![enc],
-            );
-        }
-    }
-    if !req.anthropic_api_key.is_empty() && !req.anthropic_api_key.starts_with("****") {
-        if let Ok(enc) = af_db::encrypt_key(&req.anthropic_api_key) {
-            let _ = conn.execute(
-                "UPDATE settings SET anthropic_api_key = ?1 WHERE id = 1",
-                params![enc],
-            );
-        }
+        transaction.commit()?;
+        Ok(())
+    })();
+    if let Err(error) = saved {
+        tracing::warn!(%error, "Settings update was rolled back");
+        return api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "SETTINGS_SAVE_FAILED",
+            "Settings could not be saved",
+        );
     }
 
     drop(conn);
@@ -1972,8 +2055,8 @@ async fn update_password(
         Ok(Ok(hash)) => hash,
         Ok(Err("bad")) => {
             return api_error(
-                StatusCode::UNAUTHORIZED,
-                "UNAUTHORIZED",
+                StatusCode::FORBIDDEN,
+                "INVALID_CURRENT_PASSWORD",
                 "Current password is incorrect",
             );
         }
@@ -2147,39 +2230,12 @@ async fn update_user_role(
             "Invalid role specified. Must be 'admin' or 'user'.",
         );
     }
-    let Ok(conn) = af_db::get_conn() else {
-        return api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            "Database error",
-        );
-    };
-    let admin_count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM users WHERE role = 'admin'", [], |r| {
-            r.get(0)
-        })
-        .unwrap_or(1);
-    let Ok(current_role) =
-        conn.query_row("SELECT role FROM users WHERE id = ?1", params![id], |r| {
-            r.get::<_, String>(0)
-        })
-    else {
-        return api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "User not found");
-    };
-
-    if current_role == "admin" && req.role != "admin" && admin_count <= 1 {
-        return api_error(
-            StatusCode::BAD_REQUEST,
-            "BAD_REQUEST",
-            "Cannot demote the last remaining admin.",
-        );
+    if let Err(error) =
+        crate::mcbrowser::lifecycle::update_account_role(auth_user.clone(), id, req.role.clone())
+            .await
+    {
+        return error.into_response();
     }
-
-    let _ = conn.execute(
-        "UPDATE users SET role = ?1 WHERE id = ?2",
-        params![req.role, id],
-    );
-    drop(conn);
     let ip = extract_client_ip(&headers);
     let ua = headers
         .get(header::USER_AGENT)
@@ -2534,10 +2590,7 @@ async fn get_blueprints() -> Json<serde_json::Value> {
 
 async fn get_app_blueprint(Path(app_name): Path<String>) -> Response {
     let all = af_services::get_all_blueprints();
-    if let Some(bp) = all
-        .into_iter()
-        .find(|b| b.blueprint.app_name == app_name)
-    {
+    if let Some(bp) = all.into_iter().find(|b| b.blueprint.app_name == app_name) {
         Json(bp).into_response()
     } else {
         api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "Blueprint not found")
@@ -2574,7 +2627,11 @@ async fn sync_app_blueprint(
         .as_ref()
         .map(|c| c.listen_port)
         .filter(|&p| p > 0)
-        .unwrap_or(if configured_port > 0 { configured_port } else { bp.default_port });
+        .unwrap_or(if configured_port > 0 {
+            configured_port
+        } else {
+            bp.default_port
+        });
     let base_domain = af_services::resolve_base_domain();
     let public_domain = existing_ing
         .as_ref()
@@ -2596,9 +2653,10 @@ async fn sync_app_blueprint(
         .map(|c| c.tls_enabled)
         .unwrap_or(!public_domain.is_empty());
 
-    let config_applied = af_services::mutators::apply_blueprint_app_config(&app_name, allocated_port)
-        .await
-        .is_ok();
+    let config_applied =
+        af_services::mutators::apply_blueprint_app_config(&app_name, allocated_port)
+            .await
+            .is_ok();
 
     let now = Utc::now();
     let ingress_cfg = AppIngressConfig {
@@ -3333,6 +3391,77 @@ async fn get_audit_log(Query(q): Query<PageQuery>) -> Json<serde_json::Value> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn member_settings_hide_provider_keys_and_private_endpoints() {
+        let original = SettingsPayload {
+            ai_model: "model".into(),
+            language: "en".into(),
+            gemini_api_key: "****last".into(),
+            openai_api_key: "****tail".into(),
+            anthropic_api_key: "****more".into(),
+            lm_studio_endpoint: "http://internal:1234".into(),
+            ollama_endpoint: "http://internal:11434".into(),
+            anthropic_endpoint: "http://private".into(),
+            ..Default::default()
+        };
+        let mut member = original.clone();
+        redact_settings_for_role(&mut member, "user");
+        for value in [
+            &member.gemini_api_key,
+            &member.openai_api_key,
+            &member.anthropic_api_key,
+            &member.lm_studio_endpoint,
+            &member.ollama_endpoint,
+            &member.anthropic_endpoint,
+        ] {
+            assert!(value.is_empty());
+        }
+        assert_eq!(member.ai_model, original.ai_model);
+        assert_eq!(member.language, original.language);
+        let mut admin = original.clone();
+        redact_settings_for_role(&mut admin, "admin");
+        assert_eq!(admin.lm_studio_endpoint, original.lm_studio_endpoint);
+        assert_eq!(mask_secret("enc:v1:not-decryptable-ciphertext"), "****");
+    }
+
+    #[tokio::test]
+    async fn wrong_current_password_is_forbidden_without_expiring_session() {
+        use crate::plugins::tests::{ensure_shared_test_db, run_plugin_test_in_subprocess};
+        if run_plugin_test_in_subprocess() {
+            return;
+        }
+        ensure_shared_test_db();
+        let hash = bcrypt::hash("correct-password", 4).unwrap();
+        let conn = af_db::get_conn().unwrap();
+        conn.execute("INSERT INTO users (id, username, password_hash, role) VALUES (876, 'password-contract', ?1, 'user')", params![hash]).unwrap();
+        drop(conn);
+        let response = update_password(
+            Extension(AuthUser {
+                user_id: 876,
+                username: "password-contract".into(),
+                role: "user".into(),
+                jti: "current-session".into(),
+                plugin_id: None,
+                plugin_scopes: Vec::new(),
+            }),
+            HeaderMap::new(),
+            Json(ChangePasswordReq {
+                current_password: "wrong".into(),
+                new_password: "new-password".into(),
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert!(!response
+            .headers()
+            .contains_key(axum::http::header::SET_COOKIE));
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["code"], "INVALID_CURRENT_PASSWORD");
+    }
+
     #[tokio::test]
     async fn test_dispatch_package_update_pre_stop_skips_maintainerr_and_stops_radarr() {
         use std::sync::{Arc, Mutex};
@@ -3691,36 +3820,37 @@ mod tests {
         recorded_dispatch_ports.lock().unwrap().clear();
         let control_recorder = Arc::clone(&recorded_control_actions);
         let dispatch_recorder = Arc::clone(&recorded_dispatch_ports);
-        let (install_port, install_stopped, install_res) = run_package_lifecycle_dispatch_gate_with(
-            "install",
-            "maintainerr",
-            6246,
-            "",
-            |_app_id| 0,
-            |_app_id| Ok(None),
-            |_app_id, _default_port| 17420,
-            af_services::resolve_service_units,
-            |_unit_name| "running".to_string(),
-            move |unit_name, control_action| {
-                let recorder = Arc::clone(&control_recorder);
-                async move {
-                    recorder
-                        .lock()
-                        .unwrap()
-                        .push(format!("{} {}", control_action, unit_name));
-                    Ok(())
-                }
-            },
-            move |port| {
-                let recorder = Arc::clone(&dispatch_recorder);
-                async move {
-                    recorder.lock().unwrap().push(port);
-                    Ok(())
-                }
-            },
-        )
-        .await
-        .expect("fresh maintainerr install should allocate port");
+        let (install_port, install_stopped, install_res) =
+            run_package_lifecycle_dispatch_gate_with(
+                "install",
+                "maintainerr",
+                6246,
+                "",
+                |_app_id| 0,
+                |_app_id| Ok(None),
+                |_app_id, _default_port| 17420,
+                af_services::resolve_service_units,
+                |_unit_name| "running".to_string(),
+                move |unit_name, control_action| {
+                    let recorder = Arc::clone(&control_recorder);
+                    async move {
+                        recorder
+                            .lock()
+                            .unwrap()
+                            .push(format!("{} {}", control_action, unit_name));
+                        Ok(())
+                    }
+                },
+                move |port| {
+                    let recorder = Arc::clone(&dispatch_recorder);
+                    async move {
+                        recorder.lock().unwrap().push(port);
+                        Ok(())
+                    }
+                },
+            )
+            .await
+            .expect("fresh maintainerr install should allocate port");
         assert!(install_res.is_ok());
         assert_eq!(install_port, 17420);
         assert!(install_stopped.is_empty());
@@ -3890,6 +4020,229 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(stopped, expected);
+        }
+    }
+}
+
+#[cfg(test)]
+mod hillclimb_tests {
+    use super::*;
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn local_ai_settings_round_trip_runtime_and_installed_model_without_overriding_cloud_selection(
+    ) {
+        use crate::plugins::tests::{ensure_shared_test_db, run_plugin_test_in_subprocess};
+        if run_plugin_test_in_subprocess() {
+            return;
+        }
+        ensure_shared_test_db();
+        af_db::get_conn().unwrap().execute("INSERT INTO users(id, username, role) VALUES(678, 'local-settings-contract', 'admin')", []).unwrap();
+        let (token, _) = crate::auth::create_standard_jwt(678, &HeaderMap::new()).unwrap();
+        let app = build_router();
+        for runtime in ["lm-studio", "ollama", "anthropic-local"] {
+            for model in ["qwen2.5:14b", "gemini-4-argon"] {
+                let payload = SettingsPayload {
+                    ai_model: model.to_owned(),
+                    local_provider: runtime.to_owned(),
+                    local_model: "qwen2.5:14b".to_owned(),
+                    ..Default::default()
+                };
+                let response = app
+                    .clone()
+                    .oneshot(
+                        axum::http::Request::builder()
+                            .method("PUT")
+                            .uri("/api/v1/admin/settings")
+                            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                            .header(header::CONTENT_TYPE, "application/json")
+                            .body(axum::body::Body::from(
+                                serde_json::to_vec(&payload).unwrap(),
+                            ))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::OK, "{runtime} {model}");
+                let response = app
+                    .clone()
+                    .oneshot(
+                        axum::http::Request::builder()
+                            .uri("/api/v1/auth/settings")
+                            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                            .body(axum::body::Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::OK);
+                let bytes = axum::body::to_bytes(response.into_body(), 65536)
+                    .await
+                    .unwrap();
+                let returned: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(returned["aiModel"], model);
+                assert_eq!(returned["localProvider"], runtime);
+                assert_eq!(returned["localModel"], "qwen2.5:14b");
+                let provider = crate::intelligence::resolve_provider_settings();
+                assert_eq!(provider.default_model, model);
+                assert_eq!(provider.local_model, "qwen2.5:14b");
+                assert_eq!(
+                    provider.local_provider,
+                    if model == "gemini-4-argon" {
+                        ""
+                    } else {
+                        runtime
+                    }
+                );
+            }
+        }
+        let mut legacy_payload = serde_json::to_value(SettingsPayload::default()).unwrap();
+        legacy_payload
+            .as_object_mut()
+            .unwrap()
+            .remove("localProvider");
+        legacy_payload.as_object_mut().unwrap().remove("localModel");
+        let legacy: SettingsPayload = serde_json::from_value(legacy_payload).unwrap();
+        assert!(legacy.local_provider.is_empty() && legacy.local_model.is_empty());
+    }
+
+    #[tokio::test]
+    async fn settings_persistence_failure_does_not_report_success_or_change_saved_fields() {
+        use crate::plugins::tests::{ensure_shared_test_db, run_plugin_test_in_subprocess};
+        if run_plugin_test_in_subprocess() {
+            return;
+        }
+        ensure_shared_test_db();
+        let conn = af_db::get_conn().unwrap();
+        conn.execute(
+            "UPDATE settings SET ai_model='gemini-4-argon', system_prompt='preserved' WHERE id=1",
+            [],
+        )
+        .unwrap();
+        conn.execute_batch("CREATE TRIGGER fail_settings_update BEFORE UPDATE OF local_provider ON settings BEGIN SELECT RAISE(FAIL, 'forced persistence failure'); END;").unwrap();
+        drop(conn);
+        let payload = SettingsPayload {
+            ai_model: "qwen2.5:14b".to_owned(),
+            local_provider: "ollama".to_owned(),
+            local_model: "qwen2.5:14b".to_owned(),
+            system_prompt: "not-saved".to_owned(),
+            ..Default::default()
+        };
+        assert_eq!(
+            update_settings(Json(payload)).await.status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        let conn = af_db::get_conn().unwrap();
+        let saved: (String, String) = conn
+            .query_row(
+                "SELECT ai_model, system_prompt FROM settings WHERE id=1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(saved, ("gemini-4-argon".to_owned(), "preserved".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn role_routes_reject_last_usable_admin_demotion_and_failed_writes_without_success_audit()
+    {
+        use crate::plugins::tests::{ensure_shared_test_db, run_plugin_test_in_subprocess};
+        if run_plugin_test_in_subprocess() {
+            return;
+        }
+        ensure_shared_test_db();
+        let conn = af_db::get_conn().unwrap();
+        conn.execute_batch("INSERT INTO users(id, username, role) VALUES(679, 'role-operator', 'admin'), (680, 'role-target', 'user'), (681, 'disabled-role-admin', 'admin'); INSERT INTO user_quotas(user_id,username,status) VALUES(681, 'disabled-role-admin', 'suspended'); CREATE TRIGGER fail_role_update BEFORE UPDATE OF role ON users WHEN NEW.id=680 BEGIN SELECT RAISE(FAIL, 'forced persistence failure'); END;").unwrap();
+        drop(conn);
+        let (token, _) = crate::auth::create_standard_jwt(679, &HeaderMap::new()).unwrap();
+        let app = build_router();
+        for (target, role, expected) in [
+            (679, "user", StatusCode::BAD_REQUEST),
+            (680, "admin", StatusCode::INTERNAL_SERVER_ERROR),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("PUT")
+                        .uri(format!("/api/v1/admin/users/{target}/role"))
+                        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(axum::body::Body::from(
+                            serde_json::json!({"role":role}).to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected);
+        }
+        let conn = af_db::get_conn().unwrap();
+        let success_audits: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM admin_audit_log WHERE action='user_role_change'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(success_audits, 0);
+        let role: String = conn
+            .query_row("SELECT role FROM users WHERE id=680", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(role, "user");
+    }
+
+    #[tokio::test]
+    async fn ai_endpoint_settings_reject_invalid_targets_before_persistence() {
+        use crate::plugins::tests::{ensure_shared_test_db, run_plugin_test_in_subprocess};
+        if run_plugin_test_in_subprocess() {
+            return;
+        }
+        ensure_shared_test_db();
+        let conn = af_db::get_conn().unwrap();
+        conn.execute(
+            "INSERT INTO users(id, username, role) VALUES(677, 'settings-contract', 'admin')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE settings SET lm_studio_endpoint='http://localhost:1234' WHERE id=1",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        let (token, _) = crate::auth::create_standard_jwt(677, &HeaderMap::new()).unwrap();
+        let app = build_router();
+        for (name, invalid) in [
+            ("lmStudioEndpoint", "file:///etc/unused"),
+            ("ollamaEndpoint", "http://169.254.169.254"),
+            ("anthropicEndpoint", "https://fixture:password@example.test"),
+        ] {
+            let mut payload = serde_json::to_value(SettingsPayload::default()).unwrap();
+            payload[name] = invalid.into();
+            let response = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("PUT")
+                        .uri("/api/v1/admin/settings")
+                        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(axum::body::Body::from(payload.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let stored: String = af_db::get_conn()
+                .unwrap()
+                .query_row(
+                    "SELECT lm_studio_endpoint FROM settings WHERE id=1",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(stored, "http://localhost:1234");
         }
     }
 }

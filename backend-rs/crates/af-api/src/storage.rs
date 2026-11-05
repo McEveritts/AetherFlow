@@ -1,16 +1,14 @@
-use crate::auth::{api_error, AuthUser};
-use crate::ws::extract_client_ip;
+use crate::auth::{api_error, blocking_auth_work, secure_cookie_enabled, AuthUser};
+use crate::ws::{build_set_cookie, extract_client_ip, extract_cookie};
 use axum::body::Body;
 use axum::extract::{Multipart, Path, Query, Request};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
-use base64::engine::general_purpose::{STANDARD as BASE64_STD, STANDARD_NO_PAD as BASE64_RAW};
-use base64::Engine;
 use chrono::{DateTime, Duration, Utc};
-use hmac::{Hmac, Mac};
 use once_cell::sync::Lazy;
+use rand::RngCore;
 use regex::Regex;
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -18,10 +16,37 @@ use std::env;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path as StdPath, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration as StdDuration, Instant};
+use tokio::io::AsyncReadExt;
 use tokio::sync::broadcast;
 
-type HmacSha256 = Hmac<Sha256>;
+#[cfg(test)]
+#[path = "storage_hillclimb_tests.rs"]
+mod hillclimb_tests;
+
+#[path = "storage_accounting.rs"]
+mod accounting;
+
+// Each response owns an already-open file. Reads stay bounded, including for
+// full downloads, and never occupy a runtime worker with filesystem I/O.
+fn stream_file(file: fs::File, size: u64) -> Body {
+    let stream = async_stream::stream! {
+        let mut file = tokio::fs::File::from_std(file).take(size);
+        let mut buffer = vec![0u8; 64 * 1024];
+        loop {
+            let count = match file.read(&mut buffer).await {
+                Ok(count) => count,
+                Err(error) => { yield Err(error); break; }
+            };
+            if count == 0 {
+                break;
+            }
+            yield Ok::<_, std::io::Error>(axum::body::Bytes::copy_from_slice(&buffer[..count]));
+        }
+    };
+    Body::from_stream(stream)
+}
 
 #[cfg(test)]
 mod audit_tests {
@@ -69,7 +94,10 @@ mod audit_tests {
         for name in ["../backup.sqlite", "nested/backup.sqlite", "", ".", ".."] {
             assert!(safe_backup_path(&base, name).is_err());
         }
-        assert_eq!(safe_backup_path(&base, "backup.sqlite").unwrap(), base.join("backup.sqlite"));
+        assert_eq!(
+            safe_backup_path(&base, "backup.sqlite").unwrap(),
+            base.join("backup.sqlite")
+        );
     }
 
     #[test]
@@ -91,14 +119,9 @@ mod audit_tests {
         let manifest_blocker = dir.join(format!("{}.manifest.json", clean_base));
         fs::create_dir_all(&manifest_blocker).unwrap();
 
-        let err = finalize_assembled_backup_upload(
-            &dir,
-            clean_base,
-            &temp_final,
-            &final_path,
-            &checksum,
-        )
-        .expect_err("must fail when manifest sidecar cannot be written");
+        let err =
+            finalize_assembled_backup_upload(&dir, clean_base, &temp_final, &final_path, &checksum)
+                .expect_err("must fail when manifest sidecar cannot be written");
         assert!(
             err.to_string().contains("manifest"),
             "unexpected error: {}",
@@ -163,14 +186,19 @@ mod audit_tests {
             &final_path,
             &wrong_checksum,
         );
-        assert!(overwrite_err.is_err(), "mismatched checksum must fail activation");
+        assert!(
+            overwrite_err.is_err(),
+            "mismatched checksum must fail activation"
+        );
 
-        let (verified, _manifest) =
-            read_verified_backup_checksum(&dir, clean_base).expect("original backup must remain verified");
+        let (verified, _manifest) = read_verified_backup_checksum(&dir, clean_base)
+            .expect("original backup must remain verified");
         assert_eq!(verified.actual_sha256, first_checksum);
         let check_conn = rusqlite::Connection::open(&final_path).unwrap();
         let marker: String = check_conn
-            .query_row("SELECT marker FROM generation LIMIT 1", [], |row| row.get(0))
+            .query_row("SELECT marker FROM generation LIMIT 1", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         assert_eq!(marker, "original");
 
@@ -304,8 +332,8 @@ mod audit_tests {
         assert_eq!(final_resp["complete"], serde_json::json!(true));
         assert_eq!(final_resp["checksum"], serde_json::json!(expected_sha));
 
-        let (verified, _manifest) =
-            read_verified_backup_checksum(&backup_dir, clean_base).expect("completed upload must verify");
+        let (verified, _manifest) = read_verified_backup_checksum(&backup_dir, clean_base)
+            .expect("completed upload must verify");
         assert_eq!(verified.actual_sha256, expected_sha);
 
         let _ = fs::remove_dir_all(&dir);
@@ -330,7 +358,10 @@ mod audit_tests {
             r#"{"status":"initiated","completed":false,"job_unit":"aetherflow-self-update-deploy-stable-abcdef12.service","engine":"af_release_rust"}"#,
         )
         .expect("valid initiation payload must succeed");
-        assert_eq!(unit, "aetherflow-self-update-deploy-stable-abcdef12.service");
+        assert_eq!(
+            unit,
+            "aetherflow-self-update-deploy-stable-abcdef12.service"
+        );
         assert_eq!(engine, "af_release_rust");
     }
 }
@@ -346,6 +377,7 @@ static VALID_UPLOAD_SESSION_ID_RE: Lazy<Regex> =
 static BACKUP_UPLOAD_MU: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 const DEFAULT_BACKUP_CHUNK_SIZE: u64 = 10 * 1024 * 1024; // 10 MiB
+const MAX_BACKUP_UPLOAD_CHUNKS: usize = 4096;
 const MAX_RETAINED_BACKUPS: usize = 10;
 const RETENTION_DAYS: i64 = 7;
 
@@ -441,11 +473,22 @@ pub fn get_active_db_path() -> PathBuf {
 
     let candidates = [
         base_dir.join("data").join("aetherflow.sqlite"),
-        base_dir.join("..").join("backend").join("data").join("aetherflow.sqlite"),
+        base_dir
+            .join("..")
+            .join("backend")
+            .join("data")
+            .join("aetherflow.sqlite"),
         PathBuf::from("/opt/AetherFlow/backend/data/aetherflow.sqlite"),
         PathBuf::from("/var/lib/aetherflow/aetherflow.sqlite"),
-        base_dir.join("..").join("dashboard").join("db").join("aetherflow.sqlite"),
-        base_dir.join("dashboard").join("db").join("aetherflow.sqlite"),
+        base_dir
+            .join("..")
+            .join("dashboard")
+            .join("db")
+            .join("aetherflow.sqlite"),
+        base_dir
+            .join("dashboard")
+            .join("db")
+            .join("aetherflow.sqlite"),
         base_dir.join("aetherflow.sqlite"),
     ];
 
@@ -507,12 +550,13 @@ pub(crate) fn read_verified_backup_checksum(
     af_runner::af_host::BackupManifest,
 )> {
     let (trusted_sqlite_uid, _) = af_models::resolve_trusted_sqlite_ids_from_env(None);
-    let (verification, maybe_manifest) = af_runner::af_host::verify_backup_artifact_with_trusted_uid(
-        backup_dir,
-        filename,
-        trusted_sqlite_uid,
-    )
-    .map_err(|err| anyhow::anyhow!("backup artifact verification failed: {}", err))?;
+    let (verification, maybe_manifest) =
+        af_runner::af_host::verify_backup_artifact_with_trusted_uid(
+            backup_dir,
+            filename,
+            trusted_sqlite_uid,
+        )
+        .map_err(|err| anyhow::anyhow!("backup artifact verification failed: {}", err))?;
     let manifest = maybe_manifest.ok_or_else(|| {
         anyhow::anyhow!(
             "backup artifact {} is missing a verified companion manifest",
@@ -520,6 +564,339 @@ pub(crate) fn read_verified_backup_checksum(
         )
     })?;
     Ok((verification, manifest))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BackupFileStamp {
+    device: u64,
+    inode: u64,
+    size: u64,
+    modified: (i64, i64),
+    changed: (i64, i64),
+    mode: u32,
+    uid: u32,
+    links: u64,
+}
+
+fn backup_file_stamp(meta: &fs::Metadata) -> BackupFileStamp {
+    use std::os::unix::fs::MetadataExt;
+    BackupFileStamp {
+        device: meta.dev(),
+        inode: meta.ino(),
+        size: meta.len(),
+        modified: (meta.mtime(), meta.mtime_nsec()),
+        changed: (meta.ctime(), meta.ctime_nsec()),
+        mode: meta.mode(),
+        uid: meta.uid(),
+        links: meta.nlink(),
+    }
+}
+
+type BackupStamp = Vec<(PathBuf, BackupFileStamp)>;
+struct CachedBackupVerification {
+    stamp: BackupStamp,
+    checked: Instant,
+    verification: af_runner::af_host::ChecksumVerification,
+    manifest: af_runner::af_host::BackupManifest,
+}
+static BACKUP_VERIFICATIONS: Lazy<
+    Mutex<HashMap<(PathBuf, Option<u32>), CachedBackupVerification>>,
+> = Lazy::new(|| Mutex::new(HashMap::new()));
+
+fn backup_artifact_stamp(directory: &StdPath, filename: &str) -> anyhow::Result<BackupStamp> {
+    let mut result = Vec::new();
+    let prefix = format!("{}.", filename);
+    for entry in fs::read_dir(directory)? {
+        let name = entry?.file_name().to_string_lossy().to_string();
+        if name == filename || name.starts_with(&prefix) {
+            let path = af_runner::af_host::safe_backup_file_path(directory, &name)?;
+            let meta = fs::symlink_metadata(&path)?;
+            anyhow::ensure!(meta.is_file(), "Backup companion must be a regular file");
+            result.push((path, backup_file_stamp(&meta)));
+        }
+    }
+    result.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(result)
+}
+
+fn open_verified_backup_with_manifest(
+    directory: &StdPath,
+    filename: &str,
+) -> anyhow::Result<(
+    fs::File,
+    af_runner::af_host::ChecksumVerification,
+    af_runner::af_host::BackupManifest,
+)> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let path = af_runner::af_host::safe_backup_file_path(directory, filename)?;
+    let stamp = backup_artifact_stamp(directory, filename)?;
+    let (uid, _) = af_models::resolve_trusted_sqlite_ids_from_env(None);
+    let key = (path.clone(), uid);
+    let cached = BACKUP_VERIFICATIONS.lock().ok().and_then(|cache| {
+        cache
+            .get(&key)
+            .filter(|value| {
+                value.stamp == stamp && value.checked.elapsed() < StdDuration::from_secs(60)
+            })
+            .map(|value| (value.verification.clone(), value.manifest.clone()))
+    });
+    let (verification, manifest) = if let Some(pair) = cached {
+        pair
+    } else {
+        let (verification, manifest) = read_verified_backup_checksum(directory, filename)?;
+        anyhow::ensure!(
+            backup_artifact_stamp(directory, filename)? == stamp,
+            "Backup changed during verification"
+        );
+        if let Ok(mut cache) = BACKUP_VERIFICATIONS.lock() {
+            cache.retain(|_, value| value.checked.elapsed() < StdDuration::from_secs(60));
+            if cache.len() >= 32 {
+                cache.clear();
+            }
+            cache.insert(
+                key,
+                CachedBackupVerification {
+                    stamp: stamp.clone(),
+                    checked: Instant::now(),
+                    verification: verification.clone(),
+                    manifest: manifest.clone(),
+                },
+            );
+        }
+        (verification, manifest)
+    };
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(&path)?;
+    let actual = backup_file_stamp(&file.metadata()?);
+    anyhow::ensure!(
+        stamp
+            .iter()
+            .any(|(candidate, expected)| candidate == &path && *expected == actual),
+        "Backup changed before download"
+    );
+    Ok((file, verification, manifest))
+}
+
+fn open_verified_backup(
+    directory: &StdPath,
+    filename: &str,
+) -> anyhow::Result<(fs::File, af_runner::af_host::ChecksumVerification)> {
+    let (file, verification, _) = open_verified_backup_with_manifest(directory, filename)?;
+    Ok((file, verification))
+}
+
+// Bound expensive verification and assembly independently from password checks.
+static BACKUP_BLOCKING_LIMIT: Lazy<tokio::sync::Semaphore> =
+    Lazy::new(|| tokio::sync::Semaphore::new(2));
+async fn blocking_backup_work<T: Send + 'static>(
+    work: impl FnOnce() -> T + Send + 'static,
+) -> anyhow::Result<T> {
+    let permit = BACKUP_BLOCKING_LIMIT
+        .try_acquire()
+        .map_err(|_| anyhow::anyhow!("Backup workers busy; retry shortly"))?;
+    Ok(tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        work()
+    })
+    .await?)
+}
+
+fn backup_download_chunk(q: &HashMap<String, String>) -> anyhow::Result<Option<(u64, u64)>> {
+    let Some(chunk) = q.get("chunk").filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    let index = chunk.parse::<u64>()?;
+    let size = match q.get("chunk_size").filter(|s| !s.is_empty()) {
+        Some(size) => size.parse::<u64>()?,
+        None => DEFAULT_BACKUP_CHUNK_SIZE,
+    };
+    anyhow::ensure!(
+        size > 0 && size <= 64 * 1024 * 1024,
+        "chunk_size must be between 1 byte and 64 MiB"
+    );
+    anyhow::ensure!(index.checked_mul(size).is_some(), "Chunk offset overflow");
+    Ok(Some((index, size)))
+}
+
+struct BackupReauth {
+    attempts: HashMap<i64, Vec<Instant>>,
+    verified: HashMap<(i64, String, [u8; 32]), Instant>,
+}
+static BACKUP_REAUTH: Lazy<Mutex<BackupReauth>> = Lazy::new(|| {
+    Mutex::new(BackupReauth {
+        attempts: HashMap::new(),
+        verified: HashMap::new(),
+    })
+});
+
+fn verify_backup_password(user_id: i64, session: &str, password: &str, hash: &str) -> bool {
+    let mut digest = Sha256::new();
+    digest.update(hash.as_bytes());
+    digest.update([0]);
+    digest.update(password.as_bytes());
+    let key = (
+        user_id,
+        session.to_string(),
+        <[u8; 32]>::from(digest.finalize()),
+    );
+    let Ok(mut state) = BACKUP_REAUTH.lock() else {
+        return false;
+    };
+    let now = Instant::now();
+    state
+        .verified
+        .retain(|_, timestamp| now.duration_since(*timestamp) < StdDuration::from_secs(60));
+    if state.verified.contains_key(&key) {
+        return true;
+    }
+    state.attempts.retain(|_, entries| {
+        entries.retain(|time| now.duration_since(*time) < StdDuration::from_secs(60));
+        !entries.is_empty()
+    });
+    let attempts = state.attempts.entry(user_id).or_default();
+    if attempts.len() >= 10 {
+        return false;
+    }
+    attempts.push(now);
+    drop(state);
+    let valid = !hash.is_empty() && bcrypt::verify(password, hash).unwrap_or(false);
+    if valid {
+        if let Ok(mut state) = BACKUP_REAUTH.lock() {
+            if state.verified.len() >= 1024 {
+                state.verified.clear();
+            }
+            state.verified.insert(key, now);
+        }
+    }
+    valid
+}
+
+const BACKUP_DOWNLOAD_COOKIE: &str = "af_backup_download";
+const BACKUP_DOWNLOAD_TTL: StdDuration = StdDuration::from_secs(60);
+struct BackupDownloadTicket {
+    user_id: i64,
+    session: String,
+    filename: String,
+    issued: Instant,
+}
+static BACKUP_DOWNLOAD_TICKETS: Lazy<Mutex<HashMap<String, BackupDownloadTicket>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+fn issue_backup_download_ticket(user: &AuthUser, filename: &str) -> anyhow::Result<String> {
+    let mut tickets = BACKUP_DOWNLOAD_TICKETS
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Download authorization unavailable"))?;
+    tickets.retain(|_, ticket| {
+        ticket.issued.elapsed() < BACKUP_DOWNLOAD_TTL
+            && !(ticket.user_id == user.user_id && ticket.session == user.jti)
+    });
+    anyhow::ensure!(
+        tickets.len() < 256,
+        "Download authorizations busy; retry shortly"
+    );
+    let mut random = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut random);
+    let token = hex::encode(random);
+    tickets.insert(
+        token.clone(),
+        BackupDownloadTicket {
+            user_id: user.user_id,
+            session: user.jti.clone(),
+            filename: filename.to_string(),
+            issued: Instant::now(),
+        },
+    );
+    Ok(token)
+}
+
+fn redeem_backup_download_ticket(token: &str, user: &AuthUser, filename: &str) -> bool {
+    let Ok(mut tickets) = BACKUP_DOWNLOAD_TICKETS.lock() else {
+        return false;
+    };
+    tickets.retain(|_, ticket| ticket.issued.elapsed() < BACKUP_DOWNLOAD_TTL);
+    let matches = tickets.get(token).is_some_and(|ticket| {
+        ticket.user_id == user.user_id && ticket.session == user.jti && ticket.filename == filename
+    });
+    if matches {
+        tickets.remove(token);
+    }
+    matches
+}
+
+fn backup_ticket_cookie(token: &str, max_age: i64) -> String {
+    build_set_cookie(
+        BACKUP_DOWNLOAD_COOKIE,
+        token,
+        max_age,
+        "Strict",
+        secure_cookie_enabled(),
+        true,
+    )
+    .replace("Path=/;", "Path=/api/v1/admin/backup/download/;")
+}
+
+async fn authorize_backup_password(user: &AuthUser, headers: &HeaderMap) -> bool {
+    let password = headers
+        .get("X-Reauth-Password")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    if password.is_empty() || password.len() > 1024 {
+        return false;
+    }
+    let uid = user.user_id;
+    let session = user.jti.clone();
+    matches!(
+        blocking_auth_work(move || -> anyhow::Result<bool> {
+            let conn = af_db::get_read_conn()?;
+            let hash: String = conn.query_row(
+                "SELECT COALESCE(password_hash, '') FROM users WHERE id = ?1",
+                params![uid],
+                |row| row.get(0),
+            )?;
+            drop(conn);
+            Ok(verify_backup_password(uid, &session, &password, &hash))
+        })
+        .await,
+        Ok(Ok(true))
+    )
+}
+
+pub async fn prepare_backup_download(Path(filename): Path<String>, req: Request) -> Response {
+    let Some(user) = req.extensions().get::<AuthUser>().cloned() else {
+        return api_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED", "Invalid session");
+    };
+    if user.role != "admin" {
+        return api_error(StatusCode::FORBIDDEN, "FORBIDDEN", "Admin access required");
+    }
+    if safe_backup_path(&get_backup_dir(), &filename).is_err() {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "BAD_REQUEST",
+            "Invalid backup path",
+        );
+    }
+    if !authorize_backup_password(&user, req.headers()).await {
+        return api_error(
+            StatusCode::FORBIDDEN,
+            "INVALID_CURRENT_PASSWORD",
+            "Re-authentication failed or attempt limit reached",
+        );
+    }
+    let token = match issue_backup_download_ticket(&user, &filename) {
+        Ok(token) => token,
+        Err(error) => return api_error(StatusCode::SERVICE_UNAVAILABLE, "BUSY", error.to_string()),
+    };
+    let mut response = Json(serde_json::json!({"url": format!("/api/v1/admin/backup/download/{}", urlencoding::encode(&filename))})).into_response();
+    if let Ok(value) = HeaderValue::from_str(&backup_ticket_cookie(&token, 60)) {
+        response.headers_mut().append(header::SET_COOKIE, value);
+    }
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
 }
 
 fn sanitize_session_token_component(raw: &str) -> String {
@@ -613,7 +990,7 @@ pub fn perform_system_backup() -> anyhow::Result<BackupFile> {
 }
 
 pub async fn run_backup() -> Response {
-    match tokio::task::spawn_blocking(perform_system_backup).await {
+    match blocking_backup_work(perform_system_backup).await {
         Ok(Ok(bf)) => Json(serde_json::json!({
             "message": "Backup completed successfully",
             "filename": bf.filename,
@@ -627,15 +1004,18 @@ pub async fn run_backup() -> Response {
             "INTERNAL_ERROR",
             e.to_string(),
         ),
-        Err(e) => api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            e.to_string(),
-        ),
+        Err(e) => api_error(StatusCode::SERVICE_UNAVAILABLE, "BUSY", e.to_string()),
     }
 }
 
 pub async fn get_backups_list() -> Response {
+    match blocking_backup_work(list_verified_backups).await {
+        Ok(response) => response,
+        Err(error) => api_error(StatusCode::SERVICE_UNAVAILABLE, "BUSY", error.to_string()),
+    }
+}
+
+fn list_verified_backups() -> Response {
     let backup_dir = get_backup_dir();
     let Ok(entries) = fs::read_dir(&backup_dir) else {
         return Json(Vec::<BackupFile>::new()).into_response();
@@ -653,7 +1033,9 @@ pub async fn get_backups_list() -> Response {
         if !name.ends_with(".sqlite") {
             continue;
         }
-        let Ok((verification, manifest)) = read_verified_backup_checksum(&backup_dir, &name) else {
+        let Ok((_file, verification, manifest)) =
+            open_verified_backup_with_manifest(&backup_dir, &name)
+        else {
             continue;
         };
         let ts = if !manifest.created_at.trim().is_empty() {
@@ -681,130 +1063,60 @@ pub async fn download_backup(
     Query(q): Query<HashMap<String, String>>,
     req: Request,
 ) -> Response {
-    let reauth_password = req
-        .headers()
-        .get("X-Reauth-Password")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    if reauth_password.is_empty() {
-        return api_error(
-            StatusCode::FORBIDDEN,
-            "FORBIDDEN",
-            "Re-authentication required for backup download. Provide X-Reauth-Password header.",
-        );
-    }
-
+    let chunk = match backup_download_chunk(&q) {
+        Ok(chunk) => chunk,
+        Err(error) => return api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()),
+    };
     let Some(user) = req.extensions().get::<AuthUser>().cloned() else {
         return api_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED", "Invalid session");
     };
-
-    let Ok(conn) = af_db::get_conn() else {
-        return api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            "Database unavailable",
-        );
-    };
-
-    let password_hash: String = conn
-        .query_row(
-            "SELECT COALESCE(password_hash, '') FROM users WHERE id = ?1",
-            params![user.user_id],
-            |r| r.get(0),
-        )
-        .unwrap_or_default();
-    drop(conn);
-
-    let password_for_verify = reauth_password.to_string();
-    let hash_for_verify = password_hash.clone();
-    let verified = tokio::task::spawn_blocking(move || {
-        !hash_for_verify.is_empty()
-            && bcrypt::verify(&password_for_verify, &hash_for_verify).unwrap_or(false)
-    })
-    .await
-    .unwrap_or(false);
-    if !verified {
+    if user.role != "admin" {
+        return api_error(StatusCode::FORBIDDEN, "FORBIDDEN", "Admin access required");
+    }
+    let ticket = extract_cookie(req.headers(), BACKUP_DOWNLOAD_COOKIE);
+    let ticket_authorized = ticket
+        .as_deref()
+        .is_some_and(|token| redeem_backup_download_ticket(token, &user, &filename));
+    if !ticket_authorized && !authorize_backup_password(&user, req.headers()).await {
         return api_error(
             StatusCode::FORBIDDEN,
-            "FORBIDDEN",
-            "Re-authentication failed: invalid password",
+            "INVALID_CURRENT_PASSWORD",
+            "Re-authentication required for backup download",
         );
     }
-
-    let ip = extract_client_ip(req.headers());
-    let ua = req
-        .headers()
-        .get(header::USER_AGENT)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    af_db::record_audit(
-        user.user_id,
-        &user.username,
-        "backup_download",
-        "backup",
-        &filename,
-        "",
-        &ip,
-        ua,
-    );
-
     let backup_dir = get_backup_dir();
-    let Ok(file_path) = safe_backup_path(&backup_dir, &filename) else {
-        return api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", "Invalid backup path");
-    };
-    if !file_path.exists() {
+    if safe_backup_path(&backup_dir, &filename).is_err() {
         return api_error(
-            StatusCode::NOT_FOUND,
-            "NOT_FOUND",
-            "Backup file not found",
+            StatusCode::BAD_REQUEST,
+            "BAD_REQUEST",
+            "Invalid backup path",
         );
     }
-    let clean_name = file_path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or(&filename);
-    let (verification, _manifest) = match read_verified_backup_checksum(&backup_dir, clean_name) {
-        Ok(pair) => pair,
-        Err(err) => {
+    let download_name = filename.clone();
+    let opened = blocking_backup_work(move || -> anyhow::Result<_> {
+        open_verified_backup(&backup_dir, &download_name)
+    })
+    .await;
+    let (mut file, verification) = match opened {
+        Ok(Ok(pair)) => pair,
+        Ok(Err(error)) => {
             return api_error(
                 StatusCode::CONFLICT,
                 "INTEGRITY_ERROR",
-                format!("Backup integrity verification failed: {}", err),
-            );
+                format!("Backup integrity verification failed: {}", error),
+            )
+        }
+        Err(_) => {
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL_ERROR",
+                "Backup worker failed",
+            )
         }
     };
-
-    let Ok(mut file) = fs::File::open(&file_path) else {
-        return api_error(
-            StatusCode::NOT_FOUND,
-            "NOT_FOUND",
-            "Backup file not found",
-        );
-    };
     let total_size = verification.size_bytes;
-    let checksum = verification.actual_sha256;
-
-    if let Some(chunk_str) = q.get("chunk").filter(|s| !s.is_empty()) {
-        let Ok(chunk_index) = chunk_str.parse::<u64>() else {
-            return api_error(
-                StatusCode::BAD_REQUEST,
-                "BAD_REQUEST",
-                "Invalid chunk index",
-            );
-        };
-        let chunk_size = if let Some(cs_str) = q.get("chunk_size").filter(|s| !s.is_empty()) {
-            let Ok(parsed) = cs_str.parse::<u64>() else {
-                return api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", "Invalid chunk_size");
-            };
-            if parsed == 0 {
-                return api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", "Invalid chunk_size");
-            }
-            parsed
-        } else {
-            DEFAULT_BACKUP_CHUNK_SIZE
-        };
-
-        let start = chunk_index.saturating_mul(chunk_size);
+    let (status, count, range) = if let Some((index, size)) = chunk {
+        let start = index * size;
         if start >= total_size {
             return api_error(
                 StatusCode::RANGE_NOT_SATISFIABLE,
@@ -812,91 +1124,92 @@ pub async fn download_backup(
                 "Chunk out of range",
             );
         }
-        let end = (start + chunk_size - 1).min(total_size - 1);
-        let to_send = (end - start + 1) as usize;
-        let progress = ((end + 1) as f64 / total_size as f64) * 100.0;
-
-        if file.seek(SeekFrom::Start(start)).is_err() {
-            return api_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "INTERNAL_ERROR",
-                "Failed to seek backup file",
-            );
-        }
-        let mut buf = vec![0u8; to_send];
-        if file.read_exact(&mut buf).is_err() {
-            return api_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "INTERNAL_ERROR",
-                "Failed to read backup chunk",
-            );
-        }
-
-        let mut resp = Response::new(Body::from(buf));
-        *resp.status_mut() = StatusCode::PARTIAL_CONTENT;
-        let h = resp.headers_mut();
-        h.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
-        h.insert(
-            header::CONTENT_TYPE,
-            HeaderValue::from_static("application/octet-stream"),
-        );
-        if !checksum.is_empty() {
-            if let Ok(hv) = HeaderValue::from_str(&checksum) {
-                h.insert("X-Checksum-SHA256", hv);
+        let count = size.min(total_size - start);
+        let seek = tokio::task::spawn_blocking(move || -> std::io::Result<_> {
+            file.seek(SeekFrom::Start(start))?;
+            Ok(file)
+        })
+        .await;
+        file = match seek {
+            Ok(Ok(file)) => file,
+            _ => {
+                return api_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "INTERNAL_ERROR",
+                    "Failed to seek backup",
+                )
             }
-        }
-        if let Ok(hv) = HeaderValue::from_str(&total_size.to_string()) {
-            h.insert("X-Backup-Size", hv);
-        }
-        if let Ok(hv) = HeaderValue::from_str(&format!("attachment; filename=\"{}\"", filename)) {
-            h.insert(header::CONTENT_DISPOSITION, hv);
-        }
-        if let Ok(hv) = HeaderValue::from_str(&format!("bytes {}-{}/{}", start, end, total_size)) {
-            h.insert(header::CONTENT_RANGE, hv);
-        }
-        if let Ok(hv) = HeaderValue::from_str(&to_send.to_string()) {
-            h.insert(header::CONTENT_LENGTH, hv);
-        }
-        if let Ok(hv) = HeaderValue::from_str(&chunk_index.to_string()) {
-            h.insert("X-Chunk-Index", hv);
-        }
-        if let Ok(hv) = HeaderValue::from_str(&chunk_size.to_string()) {
-            h.insert("X-Chunk-Size", hv);
-        }
-        if let Ok(hv) = HeaderValue::from_str(&format!("{:.2}", progress)) {
-            h.insert("X-Progress", hv);
-        }
-        return resp;
-    }
-
-    let mut buf = Vec::with_capacity(total_size as usize);
-    if file.read_to_end(&mut buf).is_err() {
-        return api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            "Failed to read backup file",
-        );
-    }
-
-    let mut resp = Response::new(Body::from(buf));
-    let h = resp.headers_mut();
+        };
+        (
+            StatusCode::PARTIAL_CONTENT,
+            count,
+            Some((index, size, start, start + count - 1)),
+        )
+    } else {
+        (StatusCode::OK, total_size, None)
+    };
+    let ip = extract_client_ip(req.headers());
+    let ua = req
+        .headers()
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let audit_name = filename.clone();
+    tokio::task::spawn_blocking(move || {
+        af_db::record_audit(
+            user.user_id,
+            &user.username,
+            "backup_download",
+            "backup",
+            &audit_name,
+            "",
+            &ip,
+            &ua,
+        )
+    });
+    let mut response = Response::new(stream_file(file, count));
+    *response.status_mut() = status;
+    let h = response.headers_mut();
     h.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
     h.insert(
         header::CONTENT_TYPE,
         HeaderValue::from_static("application/octet-stream"),
     );
-    if !checksum.is_empty() {
-        if let Ok(hv) = HeaderValue::from_str(&checksum) {
-            h.insert("X-Checksum-SHA256", hv);
+    h.insert(header::CONTENT_LENGTH, HeaderValue::from(count));
+    h.insert("X-Backup-Size", HeaderValue::from(total_size));
+    if let Ok(value) = HeaderValue::from_str(&verification.actual_sha256) {
+        h.insert("X-Checksum-SHA256", value);
+    }
+    if let Ok(value) = HeaderValue::from_str(&format!(
+        "attachment; filename=\"{}\"",
+        filename.replace(['\"', '\\'], "_")
+    )) {
+        h.insert(header::CONTENT_DISPOSITION, value);
+    }
+    if let Some((index, size, start, end)) = range {
+        h.insert("X-Chunk-Index", HeaderValue::from(index));
+        h.insert("X-Chunk-Size", HeaderValue::from(size));
+        if let Ok(value) = HeaderValue::from_str(&format!("bytes {}-{}/{}", start, end, total_size))
+        {
+            h.insert(header::CONTENT_RANGE, value);
+        }
+        if let Ok(value) = HeaderValue::from_str(&format!(
+            "{:.2}",
+            ((end + 1) as f64 / total_size as f64) * 100.0
+        )) {
+            h.insert("X-Progress", value);
         }
     }
-    if let Ok(hv) = HeaderValue::from_str(&total_size.to_string()) {
-        h.insert("X-Backup-Size", hv);
+    if ticket_authorized {
+        if let Ok(cookie) = HeaderValue::from_str(&backup_ticket_cookie("", -1)) {
+            response.headers_mut().append(header::SET_COOKIE, cookie);
+        }
     }
-    if let Ok(hv) = HeaderValue::from_str(&format!("attachment; filename=\"{}\"", filename)) {
-        h.insert(header::CONTENT_DISPOSITION, hv);
-    }
-    resp
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -917,11 +1230,11 @@ pub(crate) fn process_backup_chunk_upload_in_dir(
             "Filename required".to_string(),
         ));
     }
-    if total_chunks == 0 {
+    if total_chunks == 0 || total_chunks > MAX_BACKUP_UPLOAD_CHUNKS {
         return Err((
             StatusCode::BAD_REQUEST,
             "BAD_REQUEST",
-            "total query must be a positive integer".to_string(),
+            format!("total query must be between 1 and {MAX_BACKUP_UPLOAD_CHUNKS}"),
         ));
     }
     if chunk_index >= total_chunks {
@@ -942,20 +1255,19 @@ pub(crate) fn process_backup_chunk_upload_in_dir(
         ));
     }
 
-    let upload_id = if let Some(raw_upload_id) =
-        upload_id_param.map(str::trim).filter(|val| !val.is_empty())
-    {
-        if !VALID_UPLOAD_SESSION_ID_RE.is_match(raw_upload_id) {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                "BAD_REQUEST",
-                "Invalid upload_id parameter".to_string(),
-            ));
-        }
-        raw_upload_id.to_string()
-    } else {
-        "default".to_string()
-    };
+    let upload_id =
+        if let Some(raw_upload_id) = upload_id_param.map(str::trim).filter(|val| !val.is_empty()) {
+            if !VALID_UPLOAD_SESSION_ID_RE.is_match(raw_upload_id) {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "BAD_REQUEST",
+                    "Invalid upload_id parameter".to_string(),
+                ));
+            }
+            raw_upload_id.to_string()
+        } else {
+            "default".to_string()
+        };
 
     let (user_id, session_jti) = match auth_session {
         Some((uid, jti)) => (uid, sanitize_session_token_component(jti)),
@@ -1099,8 +1411,37 @@ pub(crate) fn process_backup_chunk_upload_in_dir(
     }
 
     let mut received = 0usize;
-    for index in 0..total_chunks {
-        if upload_dir.join(format!("{:06}.part", index)).is_file() {
+    for entry in fs::read_dir(&upload_dir).map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "INTERNAL_ERROR",
+            "Unable to inspect upload progress".to_owned(),
+        )
+    })? {
+        let entry = entry.map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL_ERROR",
+                "Unable to inspect upload progress".to_owned(),
+            )
+        })?;
+        let filename = entry.file_name();
+        let index = filename
+            .to_str()
+            .and_then(|name| name.strip_suffix(".part"))
+            .and_then(|index| index.parse::<usize>().ok());
+        if index.is_some_and(|index| index < total_chunks)
+            && entry
+                .file_type()
+                .map_err(|_| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "INTERNAL_ERROR",
+                        "Unable to inspect upload progress".to_owned(),
+                    )
+                })?
+                .is_file()
+        {
             received += 1;
         }
     }
@@ -1183,7 +1524,10 @@ pub(crate) fn process_backup_chunk_upload_in_dir(
         return Err((
             StatusCode::BAD_REQUEST,
             "BAD_REQUEST",
-            format!("Uploaded backup failed SQLite integrity verification: {}", err),
+            format!(
+                "Uploaded backup failed SQLite integrity verification: {}",
+                err
+            ),
         ));
     }
 
@@ -1246,14 +1590,24 @@ pub async fn upload_backup_chunk(
             "total query must be a positive integer",
         );
     };
-    if chunk_index >= total_chunks {
+    if total_chunks > MAX_BACKUP_UPLOAD_CHUNKS || chunk_index >= total_chunks {
         return api_error(
             StatusCode::BAD_REQUEST,
             "BAD_REQUEST",
-            "chunk query must be less than total",
+            "Invalid chunk count or chunk index",
         );
     }
 
+    let permit = match BACKUP_BLOCKING_LIMIT.try_acquire() {
+        Ok(permit) => permit,
+        Err(_) => {
+            return api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "BUSY",
+                "Backup workers busy; retry shortly",
+            )
+        }
+    };
     let auth_user = req.extensions().get::<AuthUser>().cloned();
     let Ok(bytes) = axum::body::to_bytes(req.into_body(), 64 * 1024 * 1024).await else {
         return api_error(
@@ -1264,39 +1618,40 @@ pub async fn upload_backup_chunk(
     };
 
     let backup_dir = get_backup_dir();
-    let expected_checksum = q.get("checksum").map(|s| s.as_str());
-    let upload_id_param = q
-        .get("upload_id")
-        .or_else(|| q.get("session_id"))
-        .map(|s| s.as_str());
-    let auth_pair = auth_user
-        .as_ref()
-        .map(|user| (user.user_id, user.jti.as_str()));
-
-    match process_backup_chunk_upload_in_dir(
-        &backup_dir,
-        &filename,
-        chunk_index,
-        total_chunks,
-        expected_checksum,
-        upload_id_param,
-        auth_pair,
-        &bytes,
-    ) {
-        Ok(payload) => Json(payload).into_response(),
-        Err((status, code, msg)) => {
+    let expected_checksum = q.get("checksum").cloned();
+    let upload_id = q.get("upload_id").or_else(|| q.get("session_id")).cloned();
+    match tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let auth_pair = auth_user
+            .as_ref()
+            .map(|user| (user.user_id, user.jti.as_str()));
+        process_backup_chunk_upload_in_dir(
+            &backup_dir,
+            &filename,
+            chunk_index,
+            total_chunks,
+            expected_checksum.as_deref(),
+            upload_id.as_deref(),
+            auth_pair,
+            &bytes,
+        )
+    })
+    .await
+    {
+        Ok(Ok(payload)) => Json(payload).into_response(),
+        Ok(Err((status, code, msg))) => {
             if code == "CHECKSUM_MISMATCH" {
                 return (
                     status,
-                    Json(serde_json::json!({
-                        "error": "Checksum verification failed",
-                        "message": msg,
-                    })),
+                    Json(
+                        serde_json::json!({"error":"Checksum verification failed", "message": msg}),
+                    ),
                 )
                     .into_response();
             }
             api_error(status, code, msg)
         }
+        Err(error) => api_error(StatusCode::SERVICE_UNAVAILABLE, "BUSY", error.to_string()),
     }
 }
 
@@ -1501,39 +1856,39 @@ static BLOCKED_EXTENSIONS: &[&str] = &[
     ".vbs", ".vbe", ".wsf", ".wsh", ".py", ".rb", ".pl", ".jar",
 ];
 
-fn get_upload_dir() -> PathBuf {
-    if let Ok(env_path) = env::var("AETHERFLOW_UPLOAD_DIR") {
-        let p = PathBuf::from(&env_path);
-        if p.exists() {
-            return p;
-        }
+fn upload_dir_from_config(upload: Option<&str>, state: Option<&str>) -> PathBuf {
+    if let Some(path) = upload.filter(|p| !p.trim().is_empty()) {
+        return PathBuf::from(path);
     }
-    for candidate in ["./uploads", "../uploads", "/opt/AetherFlow/uploads"] {
-        let p = PathBuf::from(candidate);
-        if p.exists() {
-            return p;
-        }
-    }
-    let default_path = PathBuf::from("./uploads");
-    let _ = fs::create_dir_all(&default_path);
-    default_path
+    let state = state
+        .and_then(|p| p.split(':').next())
+        .filter(|p| !p.trim().is_empty())
+        .unwrap_or("/var/lib/aetherflow");
+    PathBuf::from(state).join("uploads")
 }
 
-fn resolve_upload_subdir(raw_sub_path: &str) -> anyhow::Result<PathBuf> {
-    let base_dir = fs::canonicalize(get_upload_dir()).unwrap_or_else(|_| get_upload_dir());
-    let trimmed = raw_sub_path.trim();
-    if trimmed.is_empty() || trimmed == "/" || trimmed == "." {
-        return Ok(base_dir);
+fn get_upload_dir() -> PathBuf {
+    upload_dir_from_config(
+        env::var("AETHERFLOW_UPLOAD_DIR").ok().as_deref(),
+        env::var("STATE_DIRECTORY").ok().as_deref(),
+    )
+}
+
+fn fileshare_directory(root: &StdPath, raw_sub_path: &str) -> anyhow::Result<af_files::BrowserFs> {
+    fs::create_dir_all(root)?;
+    let browser = af_files::BrowserFs::open(root)?;
+    let relative = raw_sub_path.trim().trim_start_matches('/');
+    if relative.is_empty() || relative == "." {
+        return Ok(browser);
     }
-    if trimmed.contains("..") {
-        anyhow::bail!("Invalid directory path");
-    }
-    let rel_sub = trimmed.trim_start_matches(['/', '\\']);
-    let target = base_dir.join(rel_sub);
-    if !target.starts_with(&base_dir) {
-        anyhow::bail!("Invalid directory path");
-    }
-    Ok(target)
+    // Resolve all user-selected components through the same no-follow directory
+    // capability as McBrowser, rather than validating a path and reopening it.
+    browser.create_directory_all(relative)?;
+    Ok(browser.scoped(relative)?)
+}
+
+fn resolve_upload_subdir(raw_sub_path: &str) -> anyhow::Result<af_files::BrowserFs> {
+    fileshare_directory(&get_upload_dir(), raw_sub_path)
 }
 
 fn sanitize_filename(name: &str) -> anyhow::Result<String> {
@@ -1567,191 +1922,375 @@ fn is_blocked_executable_magic(bytes: &[u8]) -> Option<&'static str> {
 }
 
 pub async fn get_files_list(Query(q): Query<HashMap<String, String>>) -> Response {
-    let raw_path = q.get("path").map(|s| s.as_str()).unwrap_or("");
-    let Ok(target_dir) = resolve_upload_subdir(raw_path) else {
-        return api_error(
-            StatusCode::BAD_REQUEST,
-            "BAD_REQUEST",
-            "Invalid directory path",
-        );
-    };
-    if !target_dir.exists() && fs::create_dir_all(&target_dir).is_err() {
-        return Json(Vec::<serde_json::Value>::new()).into_response();
-    }
-
-    let Ok(entries) = fs::read_dir(&target_dir) else {
-        return api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            "Failed to read files directory",
-        );
-    };
-
-    #[derive(Serialize)]
-    struct FileInfo {
-        name: String,
-        size: i64,
-        #[serde(rename = "modTime")]
-        mod_time: String,
-        extension: String,
-        #[serde(rename = "isDir")]
-        is_dir: bool,
-    }
-
-    let mut list = Vec::new();
-    for entry in entries.flatten() {
-        let Ok(meta) = entry.metadata() else {
-            continue;
-        };
-        let is_dir = meta.is_dir();
-        let name = entry.file_name().to_string_lossy().to_string();
-        let ext = if is_dir {
-            String::new()
-        } else {
-            StdPath::new(&name)
-                .extension()
-                .and_then(|e| e.to_str())
-                .map(|e| format!(".{}", e))
-                .unwrap_or_default()
-        };
-        let mod_time = meta
-            .modified()
-            .ok()
-            .map(|m| DateTime::<Utc>::from(m).to_rfc3339())
-            .unwrap_or_else(|| Utc::now().to_rfc3339());
-        list.push(FileInfo {
-            name,
-            size: meta.len() as i64,
-            mod_time,
-            extension: ext,
-            is_dir,
-        });
-    }
-
-    list.sort_by(|a, b| {
-        if a.is_dir != b.is_dir {
-            b.is_dir.cmp(&a.is_dir)
-        } else {
-            a.name.to_lowercase().cmp(&b.name.to_lowercase())
+    let raw_path = q.get("path").cloned().unwrap_or_default();
+    let listing = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+        resolve_upload_subdir(&raw_path)?
+            .list("")
+            .map_err(Into::into)
+    })
+    .await;
+    let entries = match listing {
+        Ok(Ok(entries)) => entries,
+        _ => {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "BAD_REQUEST",
+                "Unable to open files directory",
+            )
         }
+    };
+    let mut list: Vec<_> = entries
+        .into_iter()
+        .filter(|entry| {
+            matches!(entry.kind.as_str(), "file" | "directory")
+                && !entry.name.starts_with(".af-upload-")
+        })
+        .map(|entry| {
+            let is_dir = entry.kind == "directory";
+            let extension = if is_dir {
+                String::new()
+            } else {
+                StdPath::new(&entry.name)
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| format!(".{}", e))
+                    .unwrap_or_default()
+            };
+            serde_json::json!({
+                "name": entry.name, "size": entry.size, "modTime": entry.modified,
+                "extension": extension, "isDir": is_dir,
+            })
+        })
+        .collect();
+    list.sort_by(|a, b| {
+        b["isDir"]
+            .as_bool()
+            .cmp(&a["isDir"].as_bool())
+            .then_with(|| {
+                a["name"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_lowercase()
+                    .cmp(&b["name"].as_str().unwrap_or("").to_lowercase())
+            })
     });
-
     Json(list).into_response()
 }
 
+const MAX_FILESHARE_CHUNK_BYTES: usize = 5 * 1024 * 1024;
+const FILESHARE_UPLOAD_TTL: StdDuration = StdDuration::from_secs(10 * 60);
+
+struct FileshareUpload {
+    filename: String,
+    directory: String,
+    total_chunks: usize,
+    next_chunk: usize,
+    size: usize,
+    prefix: Vec<u8>,
+    pending: af_files::PendingUpload,
+    original: Option<fs::File>,
+    updated: Instant,
+}
+
+static FILESHARE_WORKERS: Lazy<Arc<tokio::sync::Semaphore>> =
+    Lazy::new(|| Arc::new(tokio::sync::Semaphore::new(4)));
+
+static FILESHARE_UPLOADS: Lazy<Mutex<HashMap<(i64, String), FileshareUpload>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+fn append_fileshare_chunk_with(
+    sessions: &mut HashMap<(i64, String), FileshareUpload>,
+    root: &StdPath,
+    user_id: i64,
+    upload_id: &str,
+    directory: &str,
+    filename: &str,
+    chunk_index: usize,
+    total_chunks: usize,
+    data: &[u8],
+    publish: impl FnOnce(FileshareUpload) -> anyhow::Result<()>,
+) -> anyhow::Result<bool> {
+    anyhow::ensure!(
+        total_chunks > 0 && total_chunks <= 1024 && chunk_index < total_chunks,
+        "Invalid chunk index or count"
+    );
+    anyhow::ensure!(
+        VALID_UPLOAD_SESSION_ID_RE.is_match(upload_id),
+        "Invalid upload session id"
+    );
+    anyhow::ensure!(
+        data.len() <= MAX_FILESHARE_CHUNK_BYTES,
+        "Upload chunk exceeds 5 MiB"
+    );
+    sessions.retain(|_, session| session.updated.elapsed() < FILESHARE_UPLOAD_TTL);
+    let key = (user_id, upload_id.to_string());
+    if chunk_index == 0 {
+        anyhow::ensure!(
+            !sessions.contains_key(&key),
+            "Upload session already exists"
+        );
+        anyhow::ensure!(sessions.len() < 64, "Too many pending uploads");
+        let browser = fileshare_directory(root, directory)?;
+        let original = match browser.open_file(filename) {
+            Ok(file) => Some(file),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+        let pending = if original.is_some() {
+            browser.begin_replace(filename)?
+        } else {
+            browser.begin_upload(filename)?
+        };
+        sessions.insert(
+            key.clone(),
+            FileshareUpload {
+                filename: filename.to_string(),
+                directory: directory.to_string(),
+                total_chunks,
+                next_chunk: 0,
+                size: 0,
+                prefix: Vec::new(),
+                pending,
+                original,
+                updated: Instant::now(),
+            },
+        );
+    }
+    let session = sessions
+        .get_mut(&key)
+        .ok_or_else(|| anyhow::anyhow!("Upload session expired or missing"))?;
+    anyhow::ensure!(
+        session.filename == filename
+            && session.directory == directory
+            && session.total_chunks == total_chunks,
+        "Upload session metadata changed"
+    );
+    anyhow::ensure!(
+        session.next_chunk == chunk_index,
+        "Upload chunk out of order"
+    );
+    if session.size.saturating_add(data.len()) > MAX_UPLOAD_SIZE {
+        sessions.remove(&key);
+        anyhow::bail!("File exceeds maximum allowed size of 50 MiB");
+    }
+    // Inspect the assembled prefix too, so splitting an executable's magic
+    // bytes between requests cannot bypass the file content check.
+    let mut file = session.pending.file()?;
+    let mut prefix = session.prefix.clone();
+    prefix.extend_from_slice(&data[..data.len().min(4 - prefix.len())]);
+    if is_blocked_executable_magic(&prefix).is_some() {
+        sessions.remove(&key);
+        anyhow::bail!("File content type not allowed");
+    }
+    session.prefix = prefix;
+    file.seek(SeekFrom::Start(session.size as u64))?;
+    if let Err(error) = file.write_all(data) {
+        sessions.remove(&key);
+        return Err(error.into());
+    }
+    session.size += data.len();
+    session.next_chunk += 1;
+    session.updated = Instant::now();
+    if session.next_chunk == total_chunks {
+        let session = sessions.remove(&key).expect("session exists while locked");
+        publish(session)?;
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
+#[cfg(test)]
+fn append_fileshare_chunk(
+    sessions: &mut HashMap<(i64, String), FileshareUpload>,
+    root: &StdPath,
+    user_id: i64,
+    upload_id: &str,
+    directory: &str,
+    filename: &str,
+    chunk_index: usize,
+    total_chunks: usize,
+    data: &[u8],
+) -> anyhow::Result<bool> {
+    append_fileshare_chunk_with(
+        sessions,
+        root,
+        user_id,
+        upload_id,
+        directory,
+        filename,
+        chunk_index,
+        total_chunks,
+        data,
+        |session| {
+            if let Some(original) = session.original {
+                session.pending.commit_replace(&original)?;
+            } else {
+                session.pending.commit()?;
+            }
+            Ok(())
+        },
+    )
+}
+
 pub async fn upload_file(
+    axum::Extension(user): axum::Extension<AuthUser>,
     headers: HeaderMap,
     mut multipart: Multipart,
 ) -> Response {
-    let header_filename = headers
-        .get("X-File-Name")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .trim()
-        .to_string();
-    let target_path = headers
-        .get("X-Target-Path")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    let chunk_idx: usize = headers
-        .get("X-Chunk-Index")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
-
-    let Ok(upload_dir) = resolve_upload_subdir(target_path) else {
-        return api_error(
-            StatusCode::BAD_REQUEST,
-            "BAD_REQUEST",
-            "Invalid directory path",
-        );
+    // Admission precedes multipart body collection. The blocking closure owns
+    // this permit too, including when the requesting client disconnects.
+    let permit = match FILESHARE_WORKERS.clone().try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(_) => {
+            return api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "BUSY",
+                "Upload workers busy; retry shortly",
+            )
+        }
     };
-    if fs::create_dir_all(&upload_dir).is_err() {
-        return api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            "Failed to prepare target directory",
-        );
-    }
-
-    while let Ok(Some(field)) = multipart.next_field().await {
+    let header_value = |key: &str| {
+        headers
+            .get(key)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string()
+    };
+    let header_filename = header_value("X-File-Name");
+    let directory = header_value("X-Target-Path");
+    let upload_id = header_value("X-Upload-ID");
+    let chunk_index = header_value("X-Chunk-Index");
+    let total_chunks = header_value("X-Total-Chunks");
+    let chunked = !upload_id.is_empty() || !chunk_index.is_empty() || !total_chunks.is_empty();
+    let (chunk_index, total_chunks) = if chunked {
+        match (chunk_index.parse::<usize>(), total_chunks.parse::<usize>()) {
+            (Ok(index), Ok(count)) if !upload_id.is_empty() => (index, count),
+            _ => {
+                return api_error(
+                    StatusCode::BAD_REQUEST,
+                    "BAD_REQUEST",
+                    "Chunked uploads require a session id, index and total",
+                )
+            }
+        }
+    } else {
+        (0, 1)
+    };
+    let limit = if chunked {
+        MAX_FILESHARE_CHUNK_BYTES
+    } else {
+        MAX_UPLOAD_SIZE
+    };
+    while let Ok(Ok(Some(mut field))) =
+        tokio::time::timeout(StdDuration::from_secs(120), multipart.next_field()).await
+    {
         if field.name() != Some("file") {
             continue;
         }
-        let mut raw_filename = field.file_name().unwrap_or("").to_string();
-        if !header_filename.is_empty() && (raw_filename.is_empty() || raw_filename == "blob") {
-            raw_filename = header_filename.clone();
-        }
-        let safe_name = match sanitize_filename(&raw_filename) {
-            Ok(s) => s,
-            Err(e) => {
-                return api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", e.to_string());
+        let raw_filename = field
+            .file_name()
+            .filter(|name| !name.is_empty() && *name != "blob")
+            .unwrap_or(&header_filename);
+        let filename = match sanitize_filename(raw_filename) {
+            Ok(name) => name,
+            Err(error) => {
+                return api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string())
             }
         };
-
-        let Ok(data) = field.bytes().await else {
+        let mut data = Vec::new();
+        loop {
+            match tokio::time::timeout(StdDuration::from_secs(120), field.chunk()).await {
+                Ok(Ok(Some(bytes))) => {
+                    if data.len().saturating_add(bytes.len()) > limit {
+                        return api_error(
+                            StatusCode::PAYLOAD_TOO_LARGE,
+                            "PAYLOAD_TOO_LARGE",
+                            "Upload exceeds file or chunk size limit",
+                        );
+                    }
+                    data.extend_from_slice(&bytes);
+                }
+                Ok(Ok(None)) => break,
+                _ => {
+                    return api_error(
+                        StatusCode::BAD_REQUEST,
+                        "BAD_REQUEST",
+                        "Invalid or timed out upload stream",
+                    )
+                }
+            }
+        }
+        if is_blocked_executable_magic(&data).is_some() {
             return api_error(
                 StatusCode::BAD_REQUEST,
                 "BAD_REQUEST",
-                "Failed to read uploaded file stream",
-            );
-        };
-        if data.len() > MAX_UPLOAD_SIZE {
-            return api_error(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "PAYLOAD_TOO_LARGE",
-                "File exceeds maximum allowed size of 50 MB",
+                "File content type not allowed",
             );
         }
-        if let Some(blocked_mime) = is_blocked_executable_magic(&data) {
-            return api_error(
-                StatusCode::BAD_REQUEST,
-                "BAD_REQUEST",
-                format!("File content type not allowed: {}", blocked_mime),
-            );
-        }
-
-        let dst = upload_dir.join(&safe_name);
-        if chunk_idx > 0 {
-            let existing_len = fs::metadata(&dst).map(|m| m.len() as usize).unwrap_or(0);
-            if existing_len.saturating_add(data.len()) > MAX_UPLOAD_SIZE {
-                return api_error(
-                    StatusCode::PAYLOAD_TOO_LARGE,
-                    "PAYLOAD_TOO_LARGE",
-                    "File exceeds maximum allowed size of 50 MB",
-                );
+        let response_name = filename.clone();
+        let shared = accounting::MUTATIONS.clone().lock_owned().await;
+        let result = tokio::task::spawn_blocking(move || -> anyhow::Result<bool> {
+            let _permit = permit;
+            let _shared = shared;
+            let root = get_upload_dir();
+            let conn = af_db::get_conn()?;
+            if chunked {
+                let mut sessions = FILESHARE_UPLOADS
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("Upload state unavailable"))?;
+                append_fileshare_chunk_with(
+                    &mut sessions,
+                    &root,
+                    user.user_id,
+                    &upload_id,
+                    &directory,
+                    &filename,
+                    chunk_index,
+                    total_chunks,
+                    &data,
+                    |session| accounting::publish(&conn, &root, user.user_id, session),
+                )
+            } else {
+                let browser = resolve_upload_subdir(&directory)?;
+                let original = match browser.open_file(&filename) {
+                    Ok(file) => Some(file),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                    Err(error) => return Err(error.into()),
+                };
+                let pending = if original.is_some() {
+                    browser.begin_replace(&filename)?
+                } else {
+                    browser.begin_upload(&filename)?
+                };
+                pending.file()?.write_all(&data)?;
+                accounting::publish(
+                    &conn,
+                    &root,
+                    user.user_id,
+                    FileshareUpload {
+                        filename,
+                        directory,
+                        total_chunks: 1,
+                        next_chunk: 1,
+                        size: data.len(),
+                        prefix: Vec::new(),
+                        pending,
+                        original,
+                        updated: Instant::now(),
+                    },
+                )?;
+                Ok(true)
             }
-        }
-        let mut opts = OpenOptions::new();
-        opts.create(true).write(true);
-        if chunk_idx > 0 {
-            opts.append(true);
-        } else {
-            opts.truncate(true);
-        }
-
-        let Ok(mut out) = opts.open(&dst) else {
-            return api_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "INTERNAL_ERROR",
-                "Failed to save file securely",
-            );
+        })
+        .await;
+        return match result {
+            Ok(Ok(complete)) => Json(serde_json::json!({ "message": if complete { "File uploaded successfully" } else { "Chunk received" }, "filename": response_name, "complete": complete })).into_response(),
+            Ok(Err(error)) if error.is::<accounting::QuotaExceeded>() => api_error(StatusCode::PAYLOAD_TOO_LARGE, "QUOTA_EXCEEDED", error.to_string()),
+            Ok(Err(error)) => api_error(StatusCode::CONFLICT, "UPLOAD_REJECTED", error.to_string()),
+            Err(_) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", "Upload worker failed"),
         };
-        if out.write_all(&data).is_err() {
-            return api_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "INTERNAL_ERROR",
-                "Failed to save file securely",
-            );
-        }
-
-        return Json(serde_json::json!({
-            "message": "File uploaded successfully",
-            "filename": safe_name,
-        }))
-        .into_response();
     }
-
     api_error(
         StatusCode::BAD_REQUEST,
         "BAD_REQUEST",
@@ -1763,31 +2302,35 @@ pub async fn download_file(
     Path(filename): Path<String>,
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
-    let safe_name = match sanitize_filename(&filename) {
-        Ok(s) => s,
-        Err(e) => return api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", e.to_string()),
+    let filename = match sanitize_filename(&filename) {
+        Ok(name) => name,
+        Err(error) => return api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()),
     };
-    let raw_path = q.get("path").map(|s| s.as_str()).unwrap_or("");
-    let Ok(upload_dir) = resolve_upload_subdir(raw_path) else {
-        return api_error(
-            StatusCode::BAD_REQUEST,
-            "BAD_REQUEST",
-            "Invalid directory path",
-        );
+    let name = filename.clone();
+    let directory = q.get("path").cloned().unwrap_or_default();
+    let opened = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+        let file = resolve_upload_subdir(&directory)?.open_file(&name)?;
+        let size = file.metadata()?.len();
+        Ok((file, size))
+    })
+    .await;
+    let (file, size) = match opened {
+        Ok(Ok(pair)) => pair,
+        _ => return api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "File not found"),
     };
-    let file_path = upload_dir.join(&safe_name);
-    let Ok(bytes) = fs::read(&file_path) else {
-        return api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "File not found");
-    };
-    let mime = mime_guess::from_path(&safe_name).first_or_octet_stream();
-    let mut resp = Response::new(Body::from(bytes));
+    let mime = mime_guess::from_path(&filename).first_or_octet_stream();
+    let mut resp = Response::new(stream_file(file, size));
     let h = resp.headers_mut();
-    if let Ok(hv) = HeaderValue::from_str(mime.as_ref()) {
-        h.insert(header::CONTENT_TYPE, hv);
+    if let Ok(value) = HeaderValue::from_str(mime.as_ref()) {
+        h.insert(header::CONTENT_TYPE, value);
     }
-    if let Ok(hv) = HeaderValue::from_str(&format!("attachment; filename=\"{}\"", safe_name)) {
-        h.insert(header::CONTENT_DISPOSITION, hv);
+    if let Ok(value) = HeaderValue::from_str(&format!(
+        "attachment; filename=\"{}\"",
+        filename.replace(['\"', '\\'], "_")
+    )) {
+        h.insert(header::CONTENT_DISPOSITION, value);
     }
+    h.insert(header::CONTENT_LENGTH, HeaderValue::from(size));
     resp
 }
 
@@ -1795,45 +2338,34 @@ pub async fn delete_shared_file(
     Path(filename): Path<String>,
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
-    let safe_name = match sanitize_filename(&filename) {
-        Ok(s) => s,
-        Err(e) => return api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", e.to_string()),
+    let filename = match sanitize_filename(&filename) {
+        Ok(name) => name,
+        Err(error) => return api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", error.to_string()),
     };
-    let raw_path = q.get("path").map(|s| s.as_str()).unwrap_or("");
-    let Ok(upload_dir) = resolve_upload_subdir(raw_path) else {
-        return api_error(
+    let response_name = filename.clone();
+    let directory = q.get("path").cloned().unwrap_or_default();
+    let shared = accounting::MUTATIONS.clone().lock_owned().await;
+    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+        let _shared = shared;
+        let conn = af_db::get_conn()?;
+        accounting::delete(&conn, &get_upload_dir(), &directory, &filename)
+    })
+    .await;
+    match result {
+        Ok(Ok(())) => {
+            Json(serde_json::json!({"message": "File deleted", "filename": response_name}))
+                .into_response()
+        }
+        _ => api_error(
             StatusCode::BAD_REQUEST,
             "BAD_REQUEST",
-            "Invalid directory path",
-        );
-    };
-    let file_path = upload_dir.join(&safe_name);
-    let Ok(meta) = fs::metadata(&file_path) else {
-        return api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "File not found");
-    };
-    if meta.is_dir() {
-        return api_error(
-            StatusCode::BAD_REQUEST,
-            "BAD_REQUEST",
-            "Cannot delete directory via file endpoint",
-        );
+            "Unable to delete shared file",
+        ),
     }
-    if fs::remove_file(&file_path).is_err() {
-        return api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            "Failed to delete file",
-        );
-    }
-    Json(serde_json::json!({
-        "message": "File deleted",
-        "filename": safe_name,
-    }))
-    .into_response()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 3. Quotas & Billing Webhooks (`quota_handlers.go` & `quota_manager.go`)
+// 3. Storage Quotas (`quota_handlers.go` & `quota_manager.go`)
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1847,10 +2379,6 @@ pub struct UserQuotaRecord {
     pub configured: bool,
     pub status: String,
     pub source: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub billing_provider: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub billing_external_id: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub updated_at: String,
     #[serde(rename = "usedGB")]
@@ -1895,10 +2423,11 @@ fn normalize_quota_record(mut rec: UserQuotaRecord) -> UserQuotaRecord {
     rec.used_gb = rec.used_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
     rec.total_gb = rec.quota_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
     rec.percentage = rec.usage_pct;
-    if rec.status.is_empty() {
-        rec.status = "active".to_string();
-    }
-    if rec.source.is_empty() {
+    rec.status = match rec.status.trim() {
+        "" => "active".to_owned(),
+        status => status.to_ascii_lowercase(),
+    };
+    if !matches!(rec.source.as_str(), "manual" | "runner") {
         rec.source = "manual".to_string();
     }
     rec
@@ -1914,7 +2443,7 @@ pub fn query_user_quota_record(user_id: i64) -> anyhow::Result<UserQuotaRecord> 
 
     let row = conn.query_row(
         "SELECT quota_bytes, used_bytes, COALESCE(status, 'active'), COALESCE(source, 'manual'), \
-         COALESCE(billing_provider, ''), COALESCE(billing_external_id, ''), COALESCE(updated_at, '') \
+         COALESCE(updated_at, '') \
          FROM user_quotas WHERE user_id = ?1",
         params![user_id],
         |r| {
@@ -1928,9 +2457,7 @@ pub fn query_user_quota_record(user_id: i64) -> anyhow::Result<UserQuotaRecord> 
                 configured: false,
                 status: r.get(2)?,
                 source: r.get(3)?,
-                billing_provider: r.get(4)?,
-                billing_external_id: r.get(5)?,
-                updated_at: r.get(6)?,
+                updated_at: r.get(4)?,
                 used_gb: 0.0,
                 total_gb: 0.0,
                 percentage: 0.0,
@@ -1940,7 +2467,7 @@ pub fn query_user_quota_record(user_id: i64) -> anyhow::Result<UserQuotaRecord> 
 
     match row {
         Ok(rec) => Ok(normalize_quota_record(rec)),
-        Err(_) => Ok(normalize_quota_record(UserQuotaRecord {
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(normalize_quota_record(UserQuotaRecord {
             user_id,
             username,
             quota_bytes: 0,
@@ -1950,13 +2477,12 @@ pub fn query_user_quota_record(user_id: i64) -> anyhow::Result<UserQuotaRecord> 
             configured: false,
             status: "active".to_string(),
             source: "manual".to_string(),
-            billing_provider: String::new(),
-            billing_external_id: String::new(),
             updated_at: String::new(),
             used_gb: 0.0,
             total_gb: 0.0,
             percentage: 0.0,
         })),
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -1986,7 +2512,7 @@ pub async fn list_user_quotas() -> Response {
     if let Ok(mut stmt) = conn.prepare(
         "SELECT u.id, u.username, COALESCE(q.quota_bytes, 0), COALESCE(q.used_bytes, 0), \
          COALESCE(q.status, 'active'), COALESCE(q.source, 'manual'), \
-         COALESCE(q.billing_provider, ''), COALESCE(q.billing_external_id, ''), COALESCE(q.updated_at, '') \
+         COALESCE(q.updated_at, '') \
          FROM users u LEFT JOIN user_quotas q ON q.user_id = u.id ORDER BY u.username ASC",
     ) {
         if let Ok(rows) = stmt.query_map([], |r| {
@@ -2000,9 +2526,7 @@ pub async fn list_user_quotas() -> Response {
                 configured: false,
                 status: r.get(4)?,
                 source: r.get(5)?,
-                billing_provider: r.get(6)?,
-                billing_external_id: r.get(7)?,
-                updated_at: r.get(8)?,
+                updated_at: r.get(6)?,
                 used_gb: 0.0,
                 total_gb: 0.0,
                 percentage: 0.0,
@@ -2041,509 +2565,11 @@ pub async fn update_user_quota(
         );
     }
 
-    let source = req
-        .get("source")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .unwrap_or("manual");
-    let billing_provider = req
-        .get("billing_provider")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let billing_external_id = req
-        .get("billing_external_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-
-    let Ok(conn) = af_db::get_conn() else {
-        return api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            "Database unavailable",
-        );
-    };
-    let Ok(username) = conn.query_row(
-        "SELECT username FROM users WHERE id = ?1",
-        params![user_id],
-        |r| r.get::<_, String>(0),
-    ) else {
-        return api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "User not found");
-    };
-
-    let _ = conn.execute(
-        "INSERT INTO user_quotas (user_id, username, quota_bytes, used_bytes, status, source, billing_provider, billing_external_id, updated_at) \
-         VALUES (?1, ?2, ?3, COALESCE((SELECT used_bytes FROM user_quotas WHERE user_id = ?1), 0), 'active', ?4, ?5, ?6, CURRENT_TIMESTAMP) \
-         ON CONFLICT(user_id) DO UPDATE SET \
-            username = excluded.username, \
-            quota_bytes = excluded.quota_bytes, \
-            status = excluded.status, \
-            source = excluded.source, \
-            billing_provider = excluded.billing_provider, \
-            billing_external_id = excluded.billing_external_id, \
-            updated_at = CURRENT_TIMESTAMP",
-        params![
-            user_id,
-            username,
-            quota_bytes,
-            source,
-            billing_provider,
-            billing_external_id
-        ],
-    );
-
-    drop(conn);
-    match query_user_quota_record(user_id) {
-        Ok(rec) => Json(serde_json::json!({
-            "message": "Quota updated successfully",
-            "quota": rec,
-        }))
-        .into_response(),
-        Err(e) => api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            e.to_string(),
-        ),
-    }
+    accounting::quota_operation(user_id, Some(quota_bytes)).await
 }
 
 pub async fn refresh_user_quota(Path(user_id): Path<i64>) -> Response {
-    match query_user_quota_record(user_id) {
-        Ok(rec) => Json(serde_json::json!({ "quota": rec })).into_response(),
-        Err(e) => api_error(StatusCode::NOT_FOUND, "NOT_FOUND", e.to_string()),
-    }
-}
-
-fn verify_billing_webhook(provider: &str, headers: &HeaderMap, body: &[u8]) -> anyhow::Result<()> {
-    let env_key = format!("{}_WEBHOOK_SECRET", provider.to_uppercase());
-    let secret = env::var(&env_key)
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .or_else(|| env::var("BILLING_WEBHOOK_SECRET").ok())
-        .unwrap_or_default();
-    let secret = secret.trim();
-    if secret.is_empty() {
-        anyhow::bail!("{} webhook secret is not configured", provider);
-    }
-
-    if let Some(auth) = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-    {
-        if let Some(token) = auth.strip_prefix("Bearer ").or_else(|| auth.strip_prefix("bearer ")) {
-            if token.trim() == secret {
-                return Ok(());
-            }
-        }
-    }
-
-    for hdr in [
-        "X-AetherFlow-Token",
-        "X-Webhook-Token",
-        "X-WHMCS-Token",
-        "X-BLESTA-Token",
-    ] {
-        if let Some(val) = headers.get(hdr).and_then(|v| v.to_str().ok()) {
-            if val.trim() == secret {
-                return Ok(());
-            }
-        }
-    }
-
-    for hdr in [
-        "X-AetherFlow-Signature",
-        "X-Webhook-Signature",
-        "X-WHMCS-Signature",
-        "X-BLESTA-Signature",
-    ] {
-        if let Some(val) = headers.get(hdr).and_then(|v| v.to_str().ok()) {
-            let clean = val
-                .trim()
-                .trim_start_matches("sha256=")
-                .trim_start_matches("SHA256=");
-            if let Ok(mut mac) = HmacSha256::new_from_slice(secret.as_bytes()) {
-                mac.update(body);
-                let expected = mac.finalize().into_bytes();
-                if let Ok(decoded) = hex::decode(clean) {
-                    if decoded.as_slice() == expected.as_slice() {
-                        return Ok(());
-                    }
-                }
-                if let Ok(decoded) = BASE64_STD.decode(clean).or_else(|_| BASE64_RAW.decode(clean)) {
-                    if decoded.as_slice() == expected.as_slice() {
-                        return Ok(());
-                    }
-                }
-            }
-        }
-    }
-
-    anyhow::bail!("missing or invalid {} webhook signature", provider)
-}
-
-fn extract_json_str(payload: &serde_json::Value, pointers: &[&str]) -> String {
-    for ptr in pointers {
-        let val = if ptr.starts_with('/') {
-            payload.pointer(ptr)
-        } else {
-            payload.get(*ptr)
-        };
-        if let Some(v) = val {
-            if let Some(s) = v.as_str() {
-                let t = s.trim();
-                if !t.is_empty() {
-                    return t.to_string();
-                }
-            } else if let Some(n) = v.as_i64() {
-                return n.to_string();
-            } else if let Some(n) = v.as_u64() {
-                return n.to_string();
-            }
-        }
-    }
-    String::new()
-}
-
-fn resolve_webhook_quota_bytes(payload: &serde_json::Value, plan: &str) -> i64 {
-    for ptr in [
-        "quota_bytes",
-        "disk_bytes",
-        "/service/quota_bytes",
-        "/service/disk_bytes",
-    ] {
-        let val = if ptr.starts_with('/') {
-            payload.pointer(ptr)
-        } else {
-            payload.get(ptr)
-        };
-        if let Some(v) = val {
-            if let Some(n) = v.as_i64() {
-                if n > 0 {
-                    return n;
-                }
-            } else if let Some(s) = v.as_str() {
-                if let Ok(n) = s.trim().parse::<i64>() {
-                    if n > 0 {
-                        return n;
-                    }
-                }
-            }
-        }
-    }
-
-    for ptr in [
-        "quota",
-        "diskspace",
-        "/service/quota",
-        "/service/diskspace",
-        "/configoptions/diskspace",
-    ] {
-        let val = if ptr.starts_with('/') {
-            payload.pointer(ptr)
-        } else {
-            payload.get(ptr)
-        };
-        if let Some(v) = val {
-            if let Some(s) = v.as_str() {
-                if let Ok(parsed) = parse_human_size(s) {
-                    if parsed > 0 {
-                        return parsed;
-                    }
-                }
-            } else if let Some(n) = v.as_i64() {
-                if n > 0 {
-                    return if n < 1024 * 1024 {
-                        n * 1024 * 1024
-                    } else {
-                        n
-                    };
-                }
-            }
-        }
-    }
-
-    if !plan.trim().is_empty() {
-        if let Ok(raw_map) = env::var("BILLING_QUOTA_PLAN_MAP") {
-            let want = plan.trim().to_lowercase();
-            for pair in raw_map.split([',', ';']) {
-                if let Some((k, v)) = pair.split_once(['=', ':']) {
-                    if k.trim().to_lowercase() == want {
-                        if let Ok(parsed) = parse_human_size(v.trim()) {
-                            if parsed > 0 {
-                                return parsed;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    0
-}
-
-pub async fn handle_billing_webhook(
-    Path(provider): Path<String>,
-    req: Request,
-) -> Response {
-    let prov = provider.trim().to_lowercase();
-    if prov != "whmcs" && prov != "blesta" {
-        return api_error(
-            StatusCode::NOT_FOUND,
-            "NOT_FOUND",
-            "Unsupported billing provider",
-        );
-    }
-
-    let headers = req.headers().clone();
-    let Ok(body) = axum::body::to_bytes(req.into_body(), 1024 * 1024).await else {
-        return api_error(
-            StatusCode::BAD_REQUEST,
-            "BAD_REQUEST",
-            "Failed to read webhook body",
-        );
-    };
-
-    if let Err(e) = verify_billing_webhook(&prov, &headers, &body) {
-        let status = if e.to_string().contains("not configured") {
-            StatusCode::SERVICE_UNAVAILABLE
-        } else {
-            StatusCode::BAD_REQUEST
-        };
-        return api_error(status, "BAD_REQUEST", e.to_string());
-    }
-
-    let Ok(payload) = serde_json::from_slice::<serde_json::Value>(&body) else {
-        return api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", "Invalid JSON body");
-    };
-
-    let event_id = {
-        let raw = extract_json_str(
-            &payload,
-            &["event_id", "id", "webhook_id", "transaction_id"],
-        );
-        if raw.is_empty() {
-            let mut h = Sha256::new();
-            h.update(&body);
-            hex::encode(&h.finalize()[..16])
-        } else {
-            raw
-        }
-    };
-
-    let event_type = {
-        let raw = extract_json_str(&payload, &["event_type", "event", "type", "action", "name"]);
-        if raw.is_empty() {
-            "unknown".to_string()
-        } else {
-            raw
-        }
-    };
-    let event_type_lower = event_type.to_lowercase();
-
-    let mut username = extract_json_str(
-        &payload,
-        &[
-            "username",
-            "/user/username",
-            "/service/username",
-            "/client/username",
-            "/metadata/username",
-            "/custom_fields/username",
-        ],
-    );
-    let email = extract_json_str(
-        &payload,
-        &[
-            "email",
-            "/user/email",
-            "/client/email",
-            "/service/email",
-        ],
-    );
-    let external_id = extract_json_str(
-        &payload,
-        &[
-            "service_id",
-            "/service/id",
-            "invoice_id",
-            "client_id",
-            "/client/id",
-        ],
-    );
-    let plan = extract_json_str(
-        &payload,
-        &[
-            "plan",
-            "plan_name",
-            "/product/name",
-            "product_name",
-            "/service/package",
-            "/configoptions/diskspace_plan",
-        ],
-    );
-
-    let quota_bytes = resolve_webhook_quota_bytes(&payload, &plan);
-    let payload_str = String::from_utf8_lossy(&body).to_string();
-
-    let is_suspend_or_terminate = event_type_lower.contains("suspend")
-        || event_type_lower.contains("cancel")
-        || event_type_lower.contains("terminate");
-
-    let mut applied = false;
-    let mut updated_quota_record: Option<UserQuotaRecord> = None;
-
-    if let Ok(conn) = af_db::get_conn() {
-        let mut target_user: Option<(i64, String)> = None;
-        if !username.is_empty() {
-            target_user = conn
-                .query_row(
-                    "SELECT id, username FROM users WHERE LOWER(username) = LOWER(?1) LIMIT 1",
-                    params![username],
-                    |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)),
-                )
-                .ok();
-        }
-        if target_user.is_none() && !email.is_empty() {
-            target_user = conn
-                .query_row(
-                    "SELECT id, username FROM users WHERE LOWER(email) = LOWER(?1) LIMIT 1",
-                    params![email],
-                    |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)),
-                )
-                .ok();
-        }
-
-        if let Some((uid, db_uname)) = target_user {
-            username = db_uname.clone();
-            let target_status = if is_suspend_or_terminate {
-                "suspended"
-            } else {
-                "active"
-            };
-
-            let (existing_quota, existing_used): (i64, i64) = conn
-                .query_row(
-                    "SELECT COALESCE(quota_bytes, 0), COALESCE(used_bytes, 0) FROM user_quotas WHERE user_id = ?1",
-                    params![uid],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )
-                .unwrap_or((0, 0));
-
-            let effective_quota_bytes = if quota_bytes > 0 {
-                quota_bytes
-            } else {
-                existing_quota
-            };
-
-            let _ = conn.execute(
-                "INSERT INTO user_quotas (user_id, username, quota_bytes, used_bytes, status, source, billing_provider, billing_external_id, updated_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, 'billing_webhook', ?6, ?7, CURRENT_TIMESTAMP) \
-                 ON CONFLICT(user_id) DO UPDATE SET \
-                    username = excluded.username, \
-                    quota_bytes = excluded.quota_bytes, \
-                    status = excluded.status, \
-                    source = 'billing_webhook', \
-                    billing_provider = excluded.billing_provider, \
-                    billing_external_id = CASE WHEN excluded.billing_external_id != '' THEN excluded.billing_external_id ELSE user_quotas.billing_external_id END, \
-                    updated_at = CURRENT_TIMESTAMP",
-                params![
-                    uid,
-                    db_uname,
-                    effective_quota_bytes,
-                    existing_used,
-                    target_status,
-                    prov,
-                    external_id,
-                ],
-            );
-
-            applied = is_suspend_or_terminate || quota_bytes > 0;
-            drop(conn);
-            updated_quota_record = query_user_quota_record(uid).ok();
-        } else {
-            applied = quota_bytes > 0;
-        }
-    }
-
-    if let Ok(conn) = af_db::get_conn() {
-        let _ = conn.execute(
-            "INSERT INTO billing_webhook_events (provider, event_id, event_type, username, quota_bytes, status, payload, error, processed_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, 'processed', ?6, '', CURRENT_TIMESTAMP) \
-             ON CONFLICT(provider, event_id) DO UPDATE SET \
-                event_type = excluded.event_type, \
-                username = excluded.username, \
-                quota_bytes = excluded.quota_bytes, \
-                status = excluded.status, \
-                payload = excluded.payload, \
-                error = '', \
-                processed_at = CURRENT_TIMESTAMP",
-            params![
-                prov,
-                event_id,
-                event_type,
-                username,
-                quota_bytes,
-                payload_str
-            ],
-        );
-    }
-
-    Json(serde_json::json!({
-        "provider": prov,
-        "event_id": event_id,
-        "event_type": event_type,
-        "username": username,
-        "email": email,
-        "external_id": external_id,
-        "plan": plan,
-        "quota_bytes": quota_bytes,
-        "applied": applied,
-        "quota": updated_quota_record,
-        "status": "processed",
-        "message": "Billing webhook processed",
-    }))
-    .into_response()
-}
-
-pub async fn list_billing_webhook_events(Query(q): Query<HashMap<String, String>>) -> Response {
-    let limit = q
-        .get("limit")
-        .and_then(|s| s.parse::<i64>().ok())
-        .filter(|&l| l > 0 && l <= 200)
-        .unwrap_or(50);
-
-    let Ok(conn) = af_db::get_conn() else {
-        return api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            "Failed to load billing webhook events",
-        );
-    };
-    let mut events = Vec::new();
-    if let Ok(mut stmt) = conn.prepare(
-        "SELECT id, provider, event_id, COALESCE(event_type, ''), COALESCE(username, ''), \
-         COALESCE(quota_bytes, 0), COALESCE(status, ''), COALESCE(error, ''), COALESCE(processed_at, '') \
-         FROM billing_webhook_events ORDER BY id DESC LIMIT ?1",
-    ) {
-        if let Ok(rows) = stmt.query_map(params![limit], |r| {
-            Ok(serde_json::json!({
-                "id": r.get::<_, i64>(0)?,
-                "provider": r.get::<_, String>(1)?,
-                "event_id": r.get::<_, String>(2)?,
-                "event_type": r.get::<_, String>(3)?,
-                "username": r.get::<_, String>(4)?,
-                "quota_bytes": r.get::<_, i64>(5)?,
-                "status": r.get::<_, String>(6)?,
-                "error": r.get::<_, String>(7)?,
-                "processed_at": r.get::<_, String>(8)?,
-            }))
-        }) {
-            for e in rows.flatten() {
-                events.push(e);
-            }
-        }
-    }
-    Json(serde_json::json!({ "events": events })).into_response()
+    accounting::quota_operation(user_id, None).await
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2554,6 +2580,69 @@ static DEPLOY_STREAMS: Lazy<Mutex<HashMap<String, broadcast::Sender<String>>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 pub static SSE_DEPLOY_TX: Lazy<Mutex<HashMap<String, broadcast::Sender<String>>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
+
+struct DeploymentRegistration {
+    app_name: String,
+    sender: broadcast::Sender<String>,
+}
+
+fn register_deployment(app_name: &str) -> Result<DeploymentRegistration, Response> {
+    let mut streams = DEPLOY_STREAMS.lock().map_err(|_| {
+        api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "INTERNAL_ERROR",
+            "Deployment state unavailable",
+        )
+    })?;
+    if streams.contains_key(app_name) {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "DEPLOYMENT_IN_PROGRESS",
+            "A deployment for this application is already running",
+        ));
+    }
+    let mut sse = SSE_DEPLOY_TX.lock().map_err(|_| {
+        api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "INTERNAL_ERROR",
+            "Deployment state unavailable",
+        )
+    })?;
+    let (sender, _) = broadcast::channel(64);
+    streams.insert(app_name.to_string(), sender.clone());
+    sse.insert(app_name.to_string(), sender.clone());
+    Ok(DeploymentRegistration {
+        app_name: app_name.to_string(),
+        sender,
+    })
+}
+
+impl Drop for DeploymentRegistration {
+    fn drop(&mut self) {
+        for map in [&*DEPLOY_STREAMS, &*SSE_DEPLOY_TX] {
+            if let Ok(mut map) = map.lock() {
+                if map
+                    .get(&self.app_name)
+                    .is_some_and(|sender| sender.same_channel(&self.sender))
+                {
+                    map.remove(&self.app_name);
+                }
+            }
+        }
+    }
+}
+
+fn deployment_restart_status(result: anyhow::Result<()>) -> String {
+    match result {
+        Ok(()) => {
+            "[SUCCESS] Deployment configuration applied and managed service restarted.".to_string()
+        }
+        Err(error) => format!(
+            "[ERROR] Deployment configuration applied, but managed service restart failed: {}",
+            error
+        ),
+    }
+}
 
 const GITHUB_REPO: &str = "McEveritts/AetherFlow";
 const UPDATE_CHANNEL_STABLE: &str = "stable";
@@ -2877,7 +2966,14 @@ async fn fetch_github_update(path: &str) -> Result<Vec<u8>, GitHubUpdateError> {
         path
     );
     let token = github_update_token();
-    fetch_github_update_url(&UPDATE_GITHUB_CACHE, &UPDATE_HTTP_CLIENT, &url, &token, Utc::now()).await
+    fetch_github_update_url(
+        &UPDATE_GITHUB_CACHE,
+        &UPDATE_HTTP_CLIENT,
+        &url,
+        &token,
+        Utc::now(),
+    )
+    .await
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -2938,9 +3034,11 @@ fn read_update_channel() -> &'static str {
     let raw: String = af_db::get_conn()
         .ok()
         .and_then(|conn| {
-            conn.query_row("SELECT update_channel FROM settings WHERE id = 1", [], |r| {
-                r.get(0)
-            })
+            conn.query_row(
+                "SELECT update_channel FROM settings WHERE id = 1",
+                [],
+                |r| r.get(0),
+            )
             .ok()
         })
         .unwrap_or_else(|| UPDATE_CHANNEL_STABLE.to_string());
@@ -2948,15 +3046,28 @@ fn read_update_channel() -> &'static str {
 }
 
 fn get_local_version() -> String {
-    af_runner::af_release::runtime::runtime_identity().version.clone()
+    af_runner::af_release::runtime::runtime_identity()
+        .version
+        .clone()
 }
 
 pub fn is_newer_version(local: &str, remote: &str) -> bool {
     let parse_ver = |v: &str| -> (i32, i32, i32, i32) {
-        let clean = v.trim().trim_start_matches('v').split('-').next().unwrap_or("");
+        let clean = v
+            .trim()
+            .trim_start_matches('v')
+            .split('-')
+            .next()
+            .unwrap_or("");
         let parts: Vec<&str> = clean.split('.').collect();
-        let major = parts.first().and_then(|p| p.parse::<i32>().ok()).unwrap_or(0);
-        let minor = parts.get(1).and_then(|p| p.parse::<i32>().ok()).unwrap_or(0);
+        let major = parts
+            .first()
+            .and_then(|p| p.parse::<i32>().ok())
+            .unwrap_or(0);
+        let minor = parts
+            .get(1)
+            .and_then(|p| p.parse::<i32>().ok())
+            .unwrap_or(0);
         let (patch, subpatch) = if let Some(p2) = parts.get(2) {
             if p2.len() > 1 && p2.starts_with('0') {
                 (0, p2.parse::<i32>().unwrap_or(0))
@@ -2979,7 +3090,11 @@ pub fn nightly_update_available(current_version: &str, latest_version: &str) -> 
     {
         return false;
     }
-    if current_version.trim().to_ascii_lowercase().starts_with("nightly-") {
+    if current_version
+        .trim()
+        .to_ascii_lowercase()
+        .starts_with("nightly-")
+    {
         return true;
     }
     !is_newer_version(latest_version, current_version)
@@ -3036,10 +3151,12 @@ pub fn select_release_for_channel(
 
 async fn fetch_releases_from_github() -> Result<Vec<GitHubReleasePayload>, GitHubUpdateError> {
     let body_bytes = fetch_github_update("/releases").await?;
-    serde_json::from_slice::<Vec<GitHubReleasePayload>>(&body_bytes).map_err(|e| GitHubUpdateError {
-        status: 0,
-        retry_at: None,
-        custom_message: Some(e.to_string()),
+    serde_json::from_slice::<Vec<GitHubReleasePayload>>(&body_bytes).map_err(|e| {
+        GitHubUpdateError {
+            status: 0,
+            retry_at: None,
+            custom_message: Some(e.to_string()),
+        }
     })
 }
 
@@ -3150,9 +3267,7 @@ pub async fn check_update() -> Response {
                     .map(|e| e.is_rate_limited())
                     .unwrap_or(false)
             {
-                match fetch_branch_head(UPDATE_CHANNEL_NIGHTLY, &["nightly", "Nightly"])
-                    .await
-                {
+                match fetch_branch_head(UPDATE_CHANNEL_NIGHTLY, &["nightly", "Nightly"]).await {
                     Ok((ver, msg, url)) => {
                         latest_version = ver;
                         message = msg;
@@ -3290,9 +3405,11 @@ pub async fn run_update(req: Request) -> Response {
     let channel: String = af_db::get_conn()
         .ok()
         .and_then(|conn| {
-            conn.query_row("SELECT update_channel FROM settings WHERE id = 1", [], |r| {
-                r.get(0)
-            })
+            conn.query_row(
+                "SELECT update_channel FROM settings WHERE id = 1",
+                [],
+                |r| r.get(0),
+            )
             .ok()
         })
         .unwrap_or_else(|| "stable".to_string());
@@ -3314,14 +3431,15 @@ pub async fn run_update(req: Request) -> Response {
         }
     };
 
-    let (job_unit, engine_name) =
-        match validate_runner_self_update_initiation_payload(&runner_resp.output) {
-            Ok(pair) => pair,
-            Err(err) => {
-                tracing::error!(error = %err, "Runner returned invalid self-update initiation payload");
-                return api_error(StatusCode::BAD_GATEWAY, "BAD_GATEWAY", err);
-            }
-        };
+    let (job_unit, engine_name) = match validate_runner_self_update_initiation_payload(
+        &runner_resp.output,
+    ) {
+        Ok(pair) => pair,
+        Err(err) => {
+            tracing::error!(error = %err, "Runner returned invalid self-update initiation payload");
+            return api_error(StatusCode::BAD_GATEWAY, "BAD_GATEWAY", err);
+        }
+    };
 
     if let Some(actor_ctx) = actor {
         af_db::record_audit(
@@ -3437,16 +3555,17 @@ pub async fn handle_deploy_process(
             .into_response();
     };
 
-    let (tx, _) = broadcast::channel(64);
-    if let Ok(mut map) = DEPLOY_STREAMS.lock() {
-        map.insert(bp.app_name.clone(), tx.clone());
-    }
-    if let Ok(mut map) = SSE_DEPLOY_TX.lock() {
-        map.insert(bp.app_name.clone(), tx.clone());
-    }
+    let registration = match register_deployment(&bp.app_name) {
+        Ok(registration) => registration,
+        Err(response) => return response,
+    };
+    let tx = registration.sender.clone();
 
     let bp_clone = bp.clone();
     tokio::spawn(async move {
+        // Release the slot and both stream registrations on every exit,
+        // including task cancellation or panic.
+        let _registration = registration;
         let send_step = |msg: String| {
             let _ = tx.send(msg);
         };
@@ -3460,9 +3579,9 @@ pub async fn handle_deploy_process(
             bp_clone.internal_domain
         ));
         if !bp_clone.internal_domain.trim().is_empty() {
-            if let Err(err) = af_services::mutators::sync_local_dns_domains(
-                std::slice::from_ref(&bp_clone.internal_domain),
-            )
+            if let Err(err) = af_services::mutators::sync_local_dns_domains(std::slice::from_ref(
+                &bp_clone.internal_domain,
+            ))
             .await
             {
                 send_step(format!(
@@ -3475,8 +3594,7 @@ pub async fn handle_deploy_process(
         }
 
         // Step 2: Allocate/verify port and apply blueprint app config
-        let target_port =
-            allocate_or_verify_deploy_port(&bp_clone.app_name, bp_clone.default_port);
+        let target_port = allocate_or_verify_deploy_port(&bp_clone.app_name, bp_clone.default_port);
         send_step(format!(
             "[STEP 2] Applying blueprint configuration for {} on port {}...",
             bp_clone.app_name, target_port
@@ -3500,7 +3618,10 @@ pub async fn handle_deploy_process(
         let ingress_cfg = match af_db::get_app_ingress_config(&bp_clone.app_name) {
             Ok(existing) => deployment_ingress_config(&bp_clone.app_name, target_port, existing),
             Err(err) => {
-                send_step(format!("[ROLLBACK] Failed to read ingress configuration: {}", err));
+                send_step(format!(
+                    "[ROLLBACK] Failed to read ingress configuration: {}",
+                    err
+                ));
                 cleanup_deploy_channel(&bp_clone.app_name).await;
                 return;
             }
@@ -3524,9 +3645,9 @@ pub async fn handle_deploy_process(
             "[STEP 4] Restarting managed service {}...",
             service_unit
         ));
-        let _ = af_services::control_service(&service_unit, "restart").await;
-
-        send_step("[SUCCESS] Atomic deployment verified and live.".to_string());
+        send_step(deployment_restart_status(
+            af_services::control_service(&service_unit, "restart").await,
+        ));
         cleanup_deploy_channel(&bp_clone.app_name).await;
     });
 
@@ -3541,14 +3662,10 @@ pub async fn handle_deploy_process(
         .into_response()
 }
 
-async fn cleanup_deploy_channel(app_name: &str) {
+async fn cleanup_deploy_channel(_app_name: &str) {
+    // Give connected subscribers time to receive the terminal event. The
+    // owning registration removes only its own channels when the task ends.
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    if let Ok(mut map) = DEPLOY_STREAMS.lock() {
-        map.remove(app_name);
-    }
-    if let Ok(mut map) = SSE_DEPLOY_TX.lock() {
-        map.remove(app_name);
-    }
 }
 
 pub async fn handle_deploy_stream(Query(q): Query<HashMap<String, String>>) -> Response {
@@ -3568,7 +3685,9 @@ pub async fn handle_deploy_stream(Query(q): Query<HashMap<String, String>>) -> R
     let Some(mut rx) = rx_opt else {
         return (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "error": "No active deployment found for this application." })),
+            Json(
+                serde_json::json!({ "error": "No active deployment found for this application." }),
+            ),
         )
             .into_response();
     };
@@ -3576,7 +3695,7 @@ pub async fn handle_deploy_stream(Query(q): Query<HashMap<String, String>>) -> R
     let stream = async_stream::stream! {
         while let Ok(msg) = rx.recv().await {
             yield Ok::<_, std::convert::Infallible>(format!("data: {}\n\n", msg));
-            if msg.starts_with("[SUCCESS]") || msg.starts_with("[ROLLBACK]") {
+            if msg.starts_with("[SUCCESS]") || msg.starts_with("[ROLLBACK]") || msg.starts_with("[ERROR]") {
                 break;
             }
         }
@@ -3606,7 +3725,9 @@ mod updater_tests {
                 prerelease: true,
                 draft: false,
                 body: "\u{FEFF}Release Notes ? Experimental\r\nLine 2".to_string(),
-                html_url: "https://github.com/McEveritts/AetherFlow/releases/tag/v4.0.0-experimental".to_string(),
+                html_url:
+                    "https://github.com/McEveritts/AetherFlow/releases/tag/v4.0.0-experimental"
+                        .to_string(),
                 author: GitHubReleaseAuthor {
                     login: "McEveritts".to_string(),
                 },
@@ -3617,7 +3738,9 @@ mod updater_tests {
                 prerelease: true,
                 draft: false,
                 body: "Nightly build notes".to_string(),
-                html_url: "https://github.com/McEveritts/AetherFlow/releases/tag/v3.3.0-nightly.20261101".to_string(),
+                html_url:
+                    "https://github.com/McEveritts/AetherFlow/releases/tag/v3.3.0-nightly.20261101"
+                        .to_string(),
                 author: GitHubReleaseAuthor {
                     login: "McEveritts".to_string(),
                 },
@@ -3628,7 +3751,8 @@ mod updater_tests {
                 prerelease: false,
                 draft: false,
                 body: "Stable release notes".to_string(),
-                html_url: "https://github.com/McEveritts/AetherFlow/releases/tag/v3.2.7".to_string(),
+                html_url: "https://github.com/McEveritts/AetherFlow/releases/tag/v3.2.7"
+                    .to_string(),
                 author: GitHubReleaseAuthor {
                     login: "McEveritts".to_string(),
                 },
@@ -3669,7 +3793,8 @@ mod updater_tests {
         release.target_commitish = "abc1234".to_string();
         release.author.login = "github-actions[bot]".to_string();
         let releases = vec![release.clone()];
-        let (tag, _, _) = select_release_for_channel(&releases, "nightly").expect("automated nightly");
+        let (tag, _, _) =
+            select_release_for_channel(&releases, "nightly").expect("automated nightly");
         assert_eq!(tag, "v4.0.0-nightly.123.1");
         assert!(select_release_for_channel(&releases, "stable").is_none());
         let (legacy_tag, _, _) = select_release_for_channel(&releases, "experimental").unwrap();

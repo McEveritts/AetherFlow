@@ -35,6 +35,67 @@ mod audit_tests {
         }
     }
 
+    #[tokio::test]
+    async fn custom_ai_clients_do_not_forward_credentials_on_redirect() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let visited = Arc::new(AtomicUsize::new(0));
+        let observed = visited.clone();
+        let server = tokio::spawn(async move {
+            let app = axum::Router::new()
+                .route(
+                    "/v1/messages",
+                    axum::routing::post(|| async {
+                        axum::response::Redirect::temporary("/capture")
+                    }),
+                )
+                .route(
+                    "/v1/chat/completions",
+                    axum::routing::post(|| async {
+                        axum::response::Redirect::temporary("/capture")
+                    }),
+                )
+                .route(
+                    "/capture",
+                    axum::routing::any(move || {
+                        let observed = observed.clone();
+                        async move {
+                            observed.fetch_add(1, Ordering::SeqCst);
+                            "unexpected redirect"
+                        }
+                    }),
+                );
+            axum::serve(listener, app).await.unwrap();
+        });
+        let base = format!("http://{address}");
+        assert!(
+            call_anthropic_api(&base, "fixture-only", "model", "", &[], "hello")
+                .await
+                .is_err()
+        );
+        assert!(
+            call_openai_compatible_api(&base, "fixture-only", "model", "", &[], "hello")
+                .await
+                .is_err()
+        );
+        assert_eq!(visited.load(Ordering::SeqCst), 0);
+        server.abort();
+        assert!(call_anthropic_api(
+            "file:///tmp/unused",
+            "fixture-only",
+            "model",
+            "",
+            &[],
+            "hello"
+        )
+        .await
+        .is_err());
+    }
+
     #[test]
     fn mediaflow_paths_enforce_canonical_root_boundaries() {
         let fixture = ScanFixture::new();
@@ -51,10 +112,23 @@ mod audit_tests {
                 StatusCode::FORBIDDEN
             );
         }
-        assert_eq!(validate_mediaflow_directory(&root, &[]).unwrap_err().0, StatusCode::FORBIDDEN);
-        assert_eq!(validate_mediaflow_directory(&root.join("missing"), &roots).unwrap_err().0, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            validate_mediaflow_directory(&root, &[]).unwrap_err().0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            validate_mediaflow_directory(&root.join("missing"), &roots)
+                .unwrap_err()
+                .0,
+            StatusCode::BAD_REQUEST
+        );
         std::fs::write(root.join("video.mp4"), []).unwrap();
-        assert_eq!(validate_mediaflow_directory(&root.join("video.mp4"), &roots).unwrap_err().0, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            validate_mediaflow_directory(&root.join("video.mp4"), &roots)
+                .unwrap_err()
+                .0,
+            StatusCode::BAD_REQUEST
+        );
     }
 
     #[test]
@@ -104,11 +178,14 @@ mod audit_tests {
         assert_eq!(status["public_key"], "public-key");
         assert_eq!(status["listen_port"], "51820");
         assert_eq!(status["peers"].as_array().unwrap().len(), 1);
-        assert_eq!(status["peers"][0], serde_json::json!({
-            "public_key": "peer-key", "endpoint": "192.0.2.1:1234",
-            "allowed_ips": "10.0.0.2/32", "latest_handshake": "123",
-            "transfer_rx": "456", "transfer_tx": "789",
-        }));
+        assert_eq!(
+            status["peers"][0],
+            serde_json::json!({
+                "public_key": "peer-key", "endpoint": "192.0.2.1:1234",
+                "allowed_ips": "10.0.0.2/32", "latest_handshake": "123",
+                "transfer_rx": "456", "transfer_tx": "789",
+            })
+        );
         assert!(!status.to_string().contains("secret"));
     }
 
@@ -116,7 +193,8 @@ mod audit_tests {
     fn wireguard_dump_handles_empty_interfaces_and_malformed_rows() {
         assert!(parse_wireguard_dump("").is_none());
         assert!(parse_wireguard_dump("invalid\trow").is_none());
-        let status = parse_wireguard_dump("wg0\tprivate\tpublic\t51820\toff\nwg0\ttruncated\n").unwrap();
+        let status =
+            parse_wireguard_dump("wg0\tprivate\tpublic\t51820\toff\nwg0\ttruncated\n").unwrap();
         assert_eq!(status["peers"], serde_json::json!([]));
     }
 
@@ -148,13 +226,23 @@ mod audit_tests {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch("CREATE TABLE admin_audit_log (id INTEGER PRIMARY KEY, created_at TEXT, action TEXT, target_type TEXT, detail TEXT); INSERT INTO admin_audit_log VALUES (1, '2026-10-31', 'update', 'system', 'channel stable'), (2, NULL, NULL, NULL, NULL);").unwrap();
         let mut stmt = conn.prepare(AUDIT_LOG_FALLBACK_SQL).unwrap();
-        let rows: Vec<(String, String)> = stmt.query_map([2], |row| Ok((row.get(1)?, row.get(3)?)))
-            .unwrap().collect::<rusqlite::Result<_>>().unwrap();
-        assert_eq!(rows, vec![("event".to_string(), "".to_string()), ("update".to_string(), "channel stable".to_string())]);
+        let rows: Vec<(String, String)> = stmt
+            .query_map([2], |row| Ok((row.get(1)?, row.get(3)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                ("event".to_string(), "".to_string()),
+                ("update".to_string(), "channel stable".to_string())
+            ]
+        );
     }
 
     #[test]
-    fn metrics_history_selects_latest_rows_in_chronological_order_and_supports_windows_and_downsample() {
+    fn metrics_history_selects_latest_rows_in_chronological_order_and_supports_windows_and_downsample(
+    ) {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE metrics_history (
@@ -254,6 +342,347 @@ mod audit_tests {
         assert_eq!(ds_rows[0]["cpu_avg"], 0.0);
         assert_eq!(ds_rows[2]["cpu_avg"], 90.0);
     }
+
+    fn init_ai_test_settings() {
+        crate::plugins::tests::ensure_shared_test_db();
+        af_db::get_conn()
+            .unwrap()
+            .execute(
+                "UPDATE settings SET gemini_api_key = '', openai_api_key = '', anthropic_api_key = '', \
+                 anthropic_endpoint = '', lm_studio_endpoint = 'http://localhost:1234', \
+                 ollama_endpoint = 'http://localhost:11434', ai_model = 'gemini-4-argon' WHERE id = 1",
+                [],
+            )
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn local_provider_rejects_locality_aliases_and_dispatches_installed_model_id() {
+        if crate::plugins::tests::run_plugin_test_in_subprocess() {
+            return;
+        }
+        init_ai_test_settings();
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<serde_json::Value>();
+        let app = axum::Router::new().route(
+            "/v1/chat/completions",
+            axum::routing::post(move |axum::Json(body): axum::Json<serde_json::Value>| {
+                let tx = tx.clone();
+                async move {
+                    let _ = tx.send(body);
+                    axum::Json(serde_json::json!({
+                        "choices": [{ "message": { "content": "local-ok" } }]
+                    }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        af_db::get_conn()
+            .unwrap()
+            .execute(
+                "UPDATE settings SET ollama_endpoint = ?1 WHERE id = 1",
+                [endpoint.as_str()],
+            )
+            .unwrap();
+
+        for alias in [
+            "ollama",
+            "lm-studio",
+            "anthropic-local",
+            "localai",
+            "local-test",
+        ] {
+            let rejected = run_chat_session(
+                None,
+                "",
+                "",
+                "",
+                alias,
+                "localai",
+                vec![],
+                "hello".to_string(),
+            )
+            .await;
+            assert_eq!(
+                rejected.status(),
+                StatusCode::BAD_REQUEST,
+                "alias '{alias}' must be rejected before calling upstream"
+            );
+        }
+        assert!(
+            rx.try_recv().is_err(),
+            "no upstream call should occur for forbidden aliases"
+        );
+
+        let accepted = run_chat_session(
+            None,
+            "",
+            "",
+            "",
+            "fixture-installed-model",
+            "localai",
+            vec![],
+            "hello".to_string(),
+        )
+        .await;
+        assert_eq!(accepted.status(), StatusCode::OK);
+        let sent_body = rx
+            .recv()
+            .await
+            .expect("expected upstream chat completion request");
+        assert_eq!(sent_body["model"], "fixture-installed-model");
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn anthropic_local_uses_messages_protocol_and_credentials() {
+        if crate::plugins::tests::run_plugin_test_in_subprocess() {
+            return;
+        }
+        init_ai_test_settings();
+
+        let (msg_tx, mut msg_rx) =
+            tokio::sync::mpsc::unbounded_channel::<(String, String, serde_json::Value)>();
+        let (openai_tx, mut openai_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+        let app = axum::Router::new()
+            .route(
+                "/v1/messages",
+                axum::routing::post(
+                    move |headers: axum::http::HeaderMap,
+                          axum::Json(body): axum::Json<serde_json::Value>| {
+                        let msg_tx = msg_tx.clone();
+                        async move {
+                            let api_key = headers
+                                .get("x-api-key")
+                                .and_then(|v| v.to_str().ok())
+                                .unwrap_or("")
+                                .to_string();
+                            let version = headers
+                                .get("anthropic-version")
+                                .and_then(|v| v.to_str().ok())
+                                .unwrap_or("")
+                                .to_string();
+                            let _ = msg_tx.send((api_key, version, body));
+                            axum::Json(serde_json::json!({
+                                "content": [{ "type": "text", "text": "anthropic-local-ok" }]
+                            }))
+                        }
+                    },
+                ),
+            )
+            .route(
+                "/v1/chat/completions",
+                axum::routing::post(move || {
+                    let openai_tx = openai_tx.clone();
+                    async move {
+                        let _ = openai_tx.send(());
+                        StatusCode::NOT_FOUND
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        af_db::get_conn()
+            .unwrap()
+            .execute(
+                "UPDATE settings SET anthropic_endpoint = ?1, anthropic_api_key = 'fixture-local-key', ai_model = 'anthropic-local:local-claude-sonnet' WHERE id = 1",
+                [endpoint.as_str()],
+            )
+            .unwrap();
+
+        let resp = run_chat_session(
+            None,
+            "",
+            "",
+            "",
+            "",
+            "localai",
+            vec![],
+            "diagnose".to_string(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(
+            openai_rx.try_recv().is_err(),
+            "must not hit OpenAI chat/completions"
+        );
+
+        let (api_key, version, body) = msg_rx
+            .recv()
+            .await
+            .expect("expected request to /v1/messages");
+        assert_eq!(api_key, "fixture-local-key");
+        assert_eq!(version, "2023-06-01");
+        assert_eq!(body["model"], "local-claude-sonnet");
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn versioned_v1_base_urls_do_not_duplicate_v1_segment() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let tx_msg = tx.clone();
+        let tx_chat = tx.clone();
+        let app = axum::Router::new()
+            .route(
+                "/v1/messages",
+                axum::routing::post(move |uri: axum::http::Uri| {
+                    let tx_msg = tx_msg.clone();
+                    async move {
+                        let _ = tx_msg.send(uri.path().to_string());
+                        axum::Json(serde_json::json!({
+                            "content": [{ "type": "text", "text": "ok-anthropic" }]
+                        }))
+                    }
+                }),
+            )
+            .route(
+                "/v1/chat/completions",
+                axum::routing::post(move |uri: axum::http::Uri| {
+                    let tx_chat = tx_chat.clone();
+                    async move {
+                        let _ = tx_chat.send(uri.path().to_string());
+                        axum::Json(serde_json::json!({
+                            "choices": [{ "message": { "content": "ok-openai" } }]
+                        }))
+                    }
+                }),
+            )
+            .fallback(move |uri: axum::http::Uri| {
+                let tx = tx.clone();
+                async move {
+                    let _ = tx.send(uri.path().to_string());
+                    StatusCode::NOT_FOUND
+                }
+            });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_with_v1 = format!("http://{}/v1/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let validated = af_services::validate_server_url(&base_with_v1).unwrap();
+        let anth_reply = call_anthropic_api(
+            &validated,
+            "fixture-key",
+            "claude-sonnet-5-5",
+            "",
+            &[],
+            "hello",
+        )
+        .await
+        .expect("Anthropic call with /v1 base URL should succeed");
+        assert_eq!(anth_reply, "ok-anthropic");
+        assert_eq!(rx.recv().await.unwrap(), "/v1/messages");
+
+        let oai_reply = call_openai_compatible_api(
+            &validated,
+            "fixture-key",
+            "qwen2.5-coder:7b",
+            "",
+            &[],
+            "hello",
+        )
+        .await
+        .expect("OpenAI-compatible call with /v1 base URL should succeed");
+        assert_eq!(oai_reply, "ok-openai");
+        assert_eq!(rx.recv().await.unwrap(), "/v1/chat/completions");
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn test_ai_connection_honors_unsaved_anthropic_drafts_and_returns_bad_gateway_on_upstream_error(
+    ) {
+        if crate::plugins::tests::run_plugin_test_in_subprocess() {
+            return;
+        }
+        init_ai_test_settings();
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<serde_json::Value>();
+        let app = axum::Router::new().route(
+            "/v1/messages",
+            axum::routing::post(move |axum::Json(body): axum::Json<serde_json::Value>| {
+                let tx = tx.clone();
+                async move {
+                    let model = body["model"].as_str().unwrap_or("").to_string();
+                    let _ = tx.send(body);
+                    if model == "claude-opus-5-6" {
+                        (
+                            StatusCode::OK,
+                            axum::Json(serde_json::json!({
+                                "content": [{ "type": "text", "text": "SUCCESS" }]
+                            })),
+                        )
+                    } else {
+                        (
+                            StatusCode::UNAUTHORIZED,
+                            axum::Json(serde_json::json!({
+                                "error": "invalid upstream key"
+                            })),
+                        )
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let draft_endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let admin = AuthUser {
+            user_id: 1,
+            username: "admin".to_string(),
+            role: "admin".to_string(),
+            jti: String::new(),
+            plugin_id: None,
+            plugin_scopes: Vec::new(),
+        };
+
+        // 1. Unsaved draft endpoint + model override succeeds without saving settings first
+        let ok_resp = test_ai_connection(
+            axum::Extension(admin.clone()),
+            Json(serde_json::json!({
+                "provider": "anthropic",
+                "anthropic_api_key": "draft-key",
+                "endpoint": draft_endpoint,
+                "model": "claude-opus-5-6",
+            })),
+        )
+        .await;
+        assert_eq!(ok_resp.status(), StatusCode::OK);
+        let recorded = rx
+            .recv()
+            .await
+            .expect("expected request to draft anthropic endpoint");
+        assert_eq!(recorded["model"], "claude-opus-5-6");
+
+        // 2. Upstream 401 maps to 502 BAD_GATEWAY (never 401 UNAUTHORIZED session logout)
+        let err_resp = test_ai_connection(
+            axum::Extension(admin),
+            Json(serde_json::json!({
+                "provider": "anthropic",
+                "anthropic_api_key": "bad-key",
+                "endpoint": draft_endpoint,
+                "model": "claude-sonnet-5-5",
+            })),
+        )
+        .await;
+        assert_eq!(err_resp.status(), StatusCode::BAD_GATEWAY);
+
+        server.abort();
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -278,13 +707,66 @@ static ALLOWED_AI_MODELS: &[&str] = &[
     "gpt-6.1-terra",
     "gpt-6-luna",
     "claude-fable-5-1",
+    "claude-opus-5-6",
     "claude-opus-5-5",
     "claude-sonnet-5-5",
     "claude-haiku-5-5",
+];
+
+static FORBIDDEN_MODEL_ALIASES: &[&str] = &[
     "lm-studio",
     "ollama",
     "anthropic-local",
+    "localai",
+    "local-test",
+    "local",
+    "gemini",
+    "openai",
+    "anthropic",
 ];
+
+pub(crate) fn is_forbidden_model_alias(model_id: &str) -> bool {
+    let trimmed = model_id.trim();
+    trimmed.is_empty()
+        || FORBIDDEN_MODEL_ALIASES
+            .iter()
+            .any(|alias| alias.eq_ignore_ascii_case(trimmed))
+}
+
+pub(crate) fn is_valid_local_model_id(model_id: &str) -> bool {
+    let trimmed = model_id.trim();
+    !trimmed.is_empty()
+        && trimmed.len() <= 128
+        && !is_forbidden_model_alias(trimmed)
+        && trimmed
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':' | '/' | '@'))
+}
+
+fn build_versioned_endpoint_url(validated_base: &str, v1_subpath: &str) -> String {
+    let trimmed = validated_base.trim_end_matches('/');
+    let without_v1 = trimmed
+        .strip_suffix("/v1")
+        .unwrap_or(trimmed)
+        .trim_end_matches('/');
+    let clean_subpath = v1_subpath.trim_start_matches('/');
+    format!("{without_v1}/v1/{clean_subpath}")
+}
+
+fn split_runtime_prefixed_model(raw: &str) -> (Option<&'static str>, &str) {
+    let trimmed = raw.trim();
+    for runtime in ["lm-studio", "ollama", "anthropic-local"] {
+        if let Some(rest) = trimmed.strip_prefix(runtime) {
+            if let Some(model_part) = rest.strip_prefix(':') {
+                let model_trimmed = model_part.trim();
+                if !model_trimmed.is_empty() {
+                    return (Some(runtime), model_trimmed);
+                }
+            }
+        }
+    }
+    (None, trimmed)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
@@ -314,6 +796,8 @@ pub struct ProviderSettings {
     pub lm_studio_endpoint: String,
     pub ollama_endpoint: String,
     pub default_model: String,
+    pub local_provider: String,
+    pub local_model: String,
     pub system_prompt: String,
 }
 
@@ -326,6 +810,8 @@ pub fn resolve_provider_settings() -> ProviderSettings {
         lm_studio_endpoint: String::new(),
         ollama_endpoint: String::new(),
         default_model: "gemini-4-argon".to_string(),
+        local_provider: String::new(),
+        local_model: String::new(),
         system_prompt: "You are FlowAI, a helpful server assistant.".to_string(),
     };
 
@@ -333,7 +819,8 @@ pub fn resolve_provider_settings() -> ProviderSettings {
         let _ = conn.query_row(
             "SELECT COALESCE(gemini_api_key, ''), COALESCE(openai_api_key, ''), COALESCE(anthropic_api_key, ''), \
              COALESCE(anthropic_endpoint, ''), COALESCE(lm_studio_endpoint, ''), COALESCE(ollama_endpoint, ''), \
-             COALESCE(ai_model, ''), COALESCE(system_prompt, '') FROM settings WHERE id = 1",
+             COALESCE(ai_model, ''), COALESCE(system_prompt, ''), \
+             COALESCE(local_provider, ''), COALESCE(local_model, '') FROM settings WHERE id = 1",
             [],
             |r| {
                 ps.gemini_api_key = r.get(0)?;
@@ -343,12 +830,38 @@ pub fn resolve_provider_settings() -> ProviderSettings {
                 ps.lm_studio_endpoint = r.get(4)?;
                 ps.ollama_endpoint = r.get(5)?;
                 let m: String = r.get(6)?;
-                if !m.is_empty() {
-                    ps.default_model = m;
+                let trimmed_m = m.trim();
+                if !trimmed_m.is_empty() {
+                    let (prefixed_rt, clean_m) = split_runtime_prefixed_model(trimmed_m);
+                    if let Some(rt) = prefixed_rt {
+                        ps.local_provider = rt.to_string();
+                        ps.default_model = clean_m.to_string();
+                        if !is_forbidden_model_alias(clean_m) {
+                            ps.local_model = clean_m.to_string();
+                        }
+                    } else if matches!(trimmed_m, "lm-studio" | "ollama" | "anthropic-local") {
+                        ps.local_provider = trimmed_m.to_string();
+                        ps.default_model = trimmed_m.to_string();
+                    } else {
+                        ps.default_model = clean_m.to_string();
+                        if !ALLOWED_AI_MODELS.contains(&clean_m) && is_valid_local_model_id(clean_m) {
+                            ps.local_model = clean_m.to_string();
+                        }
+                    }
                 }
                 let sp: String = r.get(7)?;
                 if !sp.is_empty() {
                     ps.system_prompt = sp;
+                }
+                let local_provider: String = r.get(8)?;
+                let local_model: String = r.get(9)?;
+                if is_valid_local_model_id(local_model.trim()) {
+                    ps.local_model = local_model.trim().to_owned();
+                }
+                if !ALLOWED_AI_MODELS.contains(&ps.default_model.as_str())
+                    && matches!(local_provider.trim(), "lm-studio" | "ollama" | "anthropic-local")
+                {
+                    ps.local_provider = local_provider.trim().to_owned();
                 }
                 Ok(())
             },
@@ -384,12 +897,40 @@ pub fn resolve_provider_settings() -> ProviderSettings {
     ps
 }
 
+fn infer_local_runtime(provider_hint: &str, ps: &ProviderSettings) -> &'static str {
+    match provider_hint.trim() {
+        "ollama" => return "ollama",
+        "lm-studio" => return "lm-studio",
+        "anthropic-local" => return "anthropic-local",
+        _ => {}
+    }
+    match ps.local_provider.as_str() {
+        "ollama" => return "ollama",
+        "lm-studio" => return "lm-studio",
+        "anthropic-local" => return "anthropic-local",
+        _ => {}
+    }
+    let anthropic_ep = ps.anthropic_endpoint.trim();
+    if !anthropic_ep.is_empty() && anthropic_ep != "https://api.anthropic.com" {
+        return "anthropic-local";
+    }
+    let ollama_ep = ps.ollama_endpoint.trim();
+    let lm_ep = ps.lm_studio_endpoint.trim();
+    if !ollama_ep.is_empty()
+        && ollama_ep != "http://localhost:11434"
+        && (lm_ep.is_empty() || lm_ep == "http://localhost:1234")
+    {
+        return "ollama";
+    }
+    "lm-studio"
+}
+
 fn resolve_provider(provider_hint: &str, model_id: &str) -> &'static str {
     match provider_hint.trim() {
         "gemini" => return "gemini",
         "openai" => return "openai",
         "anthropic" => return "anthropic",
-        "localai" => return "localai",
+        "localai" | "lm-studio" | "ollama" | "anthropic-local" => return "localai",
         _ => {}
     }
     if model_id.starts_with("gemini") {
@@ -398,7 +939,7 @@ fn resolve_provider(provider_hint: &str, model_id: &str) -> &'static str {
         "openai"
     } else if model_id.starts_with("claude") {
         "anthropic"
-    } else if model_id == "lm-studio" || model_id == "ollama" || model_id == "anthropic-local" {
+    } else if !ALLOWED_AI_MODELS.contains(&model_id) && is_valid_local_model_id(model_id) {
         "localai"
     } else {
         "gemini"
@@ -411,8 +952,15 @@ pub fn get_system_metrics_context() -> String {
     sb.push_str(&format!("CPU Usage: {:.1}%\n", m.cpu_usage));
     sb.push_str(&format!("CPU Frequency: {:.0} MHz\n", m.cpu_freq_mhz));
     if let (Some(&used), Some(&total)) = (m.memory.get("used"), m.memory.get("total")) {
-        let pct = if total > 0.0 { (used / total) * 100.0 } else { 0.0 };
-        sb.push_str(&format!("Memory: {:.2} / {:.2} GB ({:.1}%)\n", used, total, pct));
+        let pct = if total > 0.0 {
+            (used / total) * 100.0
+        } else {
+            0.0
+        };
+        sb.push_str(&format!(
+            "Memory: {:.2} / {:.2} GB ({:.1}%)\n",
+            used, total, pct
+        ));
     }
     for disk in &m.disks {
         sb.push_str(&format!(
@@ -447,7 +995,11 @@ async fn call_gemini_api(
 
     let mut contents = Vec::new();
     for hm in history {
-        let role = if hm.role == "assistant" { "model" } else { "user" };
+        let role = if hm.role == "assistant" {
+            "model"
+        } else {
+            "user"
+        };
         contents.push(serde_json::json!({
             "role": role,
             "parts": [{ "text": hm.text }],
@@ -486,7 +1038,10 @@ async fn call_gemini_api(
 
     let val: serde_json::Value = resp.json().await?;
     let mut out = String::new();
-    if let Some(parts) = val.pointer("/candidates/0/content/parts").and_then(|v| v.as_array()) {
+    if let Some(parts) = val
+        .pointer("/candidates/0/content/parts")
+        .and_then(|v| v.as_array())
+    {
         for p in parts {
             if let Some(t) = p.get("text").and_then(|v| v.as_str()) {
                 out.push_str(t);
@@ -504,7 +1059,14 @@ async fn call_openai_compatible_api(
     history: &[ChatMessage],
     message: &str,
 ) -> anyhow::Result<String> {
+    if is_forbidden_model_alias(model_name) {
+        anyhow::bail!(
+            "Invalid AI model identifier '{}': provider or locality aliases cannot be sent as inference model IDs",
+            model_name.trim()
+        );
+    }
     let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
         .timeout(std::time::Duration::from_secs(120))
         .build()?;
 
@@ -517,9 +1079,11 @@ async fn call_openai_compatible_api(
     }
     messages.push(serde_json::json!({ "role": "user", "content": message }));
 
-    let url = format!("{}/v1/chat/completions", endpoint.trim_end_matches('/'));
+    let endpoint = af_services::validate_server_url(endpoint)
+        .map_err(|error| anyhow::anyhow!("Invalid AI endpoint: {error}"))?;
+    let url = build_versioned_endpoint_url(&endpoint, "chat/completions");
     let mut req = client.post(&url).json(&serde_json::json!({
-        "model": model_name,
+        "model": model_name.trim(),
         "messages": messages,
     }));
     if !api_key.is_empty() {
@@ -548,10 +1112,26 @@ async fn call_anthropic_api(
     history: &[ChatMessage],
     message: &str,
 ) -> anyhow::Result<String> {
-    if api_key.trim().is_empty() {
-        anyhow::bail!("anthropic API key not configured. Set it in Settings → FlowAI Engine");
+    if is_forbidden_model_alias(model_name) {
+        anyhow::bail!(
+            "Invalid AI model identifier '{}': provider or locality aliases cannot be sent as inference model IDs",
+            model_name.trim()
+        );
+    }
+    let base_raw = if endpoint.trim().is_empty() {
+        "https://api.anthropic.com"
+    } else {
+        endpoint.trim().trim_end_matches('/')
+    };
+    let base = af_services::validate_server_url(base_raw)
+        .map_err(|error| anyhow::anyhow!("Invalid AI endpoint: {error}"))?;
+    if base == "https://api.anthropic.com" && api_key.trim().is_empty() {
+        anyhow::bail!(
+            "anthropic API key not configured. Set it in Settings \u{2192} FlowAI Engine"
+        );
     }
     let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
         .timeout(std::time::Duration::from_secs(120))
         .build()?;
 
@@ -561,13 +1141,8 @@ async fn call_anthropic_api(
     }
     messages.push(serde_json::json!({ "role": "user", "content": message }));
 
-    let base = if endpoint.trim().is_empty() {
-        "https://api.anthropic.com"
-    } else {
-        endpoint.trim().trim_end_matches('/')
-    };
     let mut body = serde_json::json!({
-        "model": model_name,
+        "model": model_name.trim(),
         "messages": messages,
         "max_tokens": 4096,
     });
@@ -575,13 +1150,16 @@ async fn call_anthropic_api(
         body["system"] = serde_json::Value::String(system_prompt.to_string());
     }
 
-    let resp = client
-        .post(format!("{}/v1/messages", base))
-        .header("x-api-key", api_key)
+    let url = build_versioned_endpoint_url(&base, "messages");
+    let mut req = client
+        .post(&url)
         .header("anthropic-version", "2023-06-01")
-        .json(&body)
-        .send()
-        .await?;
+        .json(&body);
+    if !api_key.trim().is_empty() {
+        req = req.header("x-api-key", api_key);
+    }
+
+    let resp = req.send().await?;
 
     if !resp.status().is_success() {
         let status = resp.status();
@@ -605,12 +1183,45 @@ async fn call_anthropic_api(
 fn extract_service_target(message: &str) -> &'static str {
     let lower = message.to_lowercase();
     for svc in [
-        "apache2", "apache", "aetherflow-api", "aetherflow-runner", "nginx", "postgres",
-        "postgresql", "redis", "qbittorrent", "qui", "autobrr", "sonarr", "radarr", "lidarr",
-        "prowlarr", "plex", "jellyfin", "emby", "threadfin", "dispatcharr", "transmission",
-        "deluge", "jackett", "wireguard", "tailscale", "traefik", "duplicati", "filebot",
-        "listenarr", "notifiarr", "novnc", "pyload", "quassel", "requestrr", "seedcross",
-        "unmanic", "x2go", "invidious", "piped",
+        "apache2",
+        "apache",
+        "aetherflow-api",
+        "aetherflow-runner",
+        "nginx",
+        "postgres",
+        "postgresql",
+        "redis",
+        "qbittorrent",
+        "qui",
+        "autobrr",
+        "sonarr",
+        "radarr",
+        "lidarr",
+        "prowlarr",
+        "plex",
+        "jellyfin",
+        "emby",
+        "threadfin",
+        "dispatcharr",
+        "transmission",
+        "deluge",
+        "jackett",
+        "wireguard",
+        "tailscale",
+        "traefik",
+        "duplicati",
+        "filebot",
+        "listenarr",
+        "notifiarr",
+        "novnc",
+        "pyload",
+        "quassel",
+        "requestrr",
+        "seedcross",
+        "unmanic",
+        "x2go",
+        "invidious",
+        "piped",
     ] {
         if lower.contains(svc) {
             return svc;
@@ -679,13 +1290,41 @@ async fn run_chat_session(
     message: String,
 ) -> Response {
     let ps = resolve_provider_settings();
-    let ai_model = if model_override.trim().is_empty() {
-        ps.default_model.clone()
+    let trimmed_override = model_override.trim();
+    let (override_rt, clean_override) = split_runtime_prefixed_model(trimmed_override);
+
+    if !trimmed_override.is_empty() && is_forbidden_model_alias(clean_override) {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "BAD_REQUEST",
+            "Invalid AI model: provider or locality aliases cannot be used as model identifiers.",
+        );
+    }
+
+    let effective_hint = if !provider_hint.trim().is_empty() {
+        provider_hint.trim()
+    } else if let Some(rt) = override_rt {
+        rt
+    } else if !ps.local_provider.is_empty() && trimmed_override.is_empty() {
+        ps.local_provider.as_str()
     } else {
-        model_override.trim().to_string()
+        ""
     };
 
-    if !ALLOWED_AI_MODELS.contains(&ai_model.as_str()) {
+    let ai_model = if !clean_override.is_empty() {
+        clean_override.to_string()
+    } else if !ps.local_model.is_empty()
+        && matches!(
+            effective_hint,
+            "localai" | "lm-studio" | "ollama" | "anthropic-local"
+        )
+    {
+        ps.local_model.clone()
+    } else {
+        ps.default_model.clone()
+    };
+
+    if is_forbidden_model_alias(&ai_model) {
         return api_error(
             StatusCode::BAD_REQUEST,
             "BAD_REQUEST",
@@ -693,7 +1332,23 @@ async fn run_chat_session(
         );
     }
 
-    let provider_type = resolve_provider(provider_hint, &ai_model);
+    let provider_type = resolve_provider(effective_hint, &ai_model);
+    if provider_type == "localai" {
+        if !is_valid_local_model_id(&ai_model) {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "BAD_REQUEST",
+                "Invalid AI model. Check settings for available models.",
+            );
+        }
+    } else if !ALLOWED_AI_MODELS.contains(&ai_model.as_str()) {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "BAD_REQUEST",
+            "Invalid AI model. Check settings for available models.",
+        );
+    }
+
     let prompt = if !system_prompt_override.is_empty() {
         system_prompt_override.to_string()
     } else if user.as_ref().map(|u| u.role == "admin").unwrap_or(false) {
@@ -710,7 +1365,7 @@ async fn run_chat_session(
         "openai" => {
             if ps.openai_api_key.is_empty() {
                 Err(anyhow::anyhow!(
-                    "AI provider initialization failed: openai API key not configured. Set it in Settings → FlowAI Engine"
+                    "AI provider initialization failed: openai API key not configured. Set it in Settings \u{2192} FlowAI Engine"
                 ))
             } else {
                 call_openai_compatible_api(
@@ -736,17 +1391,47 @@ async fn run_chat_session(
             .await
         }
         "localai" => {
-            let endpoint = match ai_model.as_str() {
-                "ollama" if !ps.ollama_endpoint.is_empty() => ps.ollama_endpoint.clone(),
-                "ollama" => "http://localhost:11434".to_string(),
-                "anthropic-local" if !ps.anthropic_endpoint.is_empty() => {
-                    ps.anthropic_endpoint.clone()
+            let local_runtime = infer_local_runtime(effective_hint, &ps);
+            match local_runtime {
+                "anthropic-local" => {
+                    let endpoint = if !ps.anthropic_endpoint.is_empty() {
+                        ps.anthropic_endpoint.clone()
+                    } else {
+                        "http://localhost:8080".to_string()
+                    };
+                    call_anthropic_api(
+                        &endpoint,
+                        &ps.anthropic_api_key,
+                        &ai_model,
+                        &prompt,
+                        &history,
+                        &message,
+                    )
+                    .await
                 }
-                "anthropic-local" => "http://localhost:8080".to_string(),
-                _ if !ps.lm_studio_endpoint.is_empty() => ps.lm_studio_endpoint.clone(),
-                _ => "http://localhost:1234".to_string(),
-            };
-            call_openai_compatible_api(&endpoint, "", &ai_model, &prompt, &history, &message).await
+                "ollama" => {
+                    let endpoint = if !ps.ollama_endpoint.is_empty() {
+                        ps.ollama_endpoint.clone()
+                    } else {
+                        "http://localhost:11434".to_string()
+                    };
+                    call_openai_compatible_api(
+                        &endpoint, "", &ai_model, &prompt, &history, &message,
+                    )
+                    .await
+                }
+                _ => {
+                    let endpoint = if !ps.lm_studio_endpoint.is_empty() {
+                        ps.lm_studio_endpoint.clone()
+                    } else {
+                        "http://localhost:1234".to_string()
+                    };
+                    call_openai_compatible_api(
+                        &endpoint, "", &ai_model, &prompt, &history, &message,
+                    )
+                    .await
+                }
+            }
         }
         _ => call_gemini_api(&ps.gemini_api_key, &ai_model, &prompt, &history, &message).await,
     };
@@ -781,7 +1466,10 @@ async fn run_chat_session(
                 "ai_action_proposed",
                 "pending_action",
                 &action_id.to_string(),
-                &format!("classification={} title={}", proposal.danger_level, proposal.title),
+                &format!(
+                    "classification={} title={}",
+                    proposal.danger_level, proposal.title
+                ),
                 ip,
                 ua,
             );
@@ -935,6 +1623,7 @@ pub async fn test_ai_connection(
     let provider_type = req
         .get("provider")
         .and_then(|v| v.as_str())
+        .map(str::trim)
         .filter(|s| !s.is_empty())
         .unwrap_or("gemini");
 
@@ -962,6 +1651,7 @@ pub async fn test_ai_connection(
     if let Some(ep) = req
         .get("endpoint")
         .and_then(|v| v.as_str())
+        .map(str::trim)
         .filter(|s| !s.is_empty())
     {
         let Ok(clean_ep) = af_services::validate_server_url(ep) else {
@@ -971,16 +1661,89 @@ pub async fn test_ai_connection(
                 "Invalid or disallowed endpoint URL",
             );
         };
+        ps.anthropic_endpoint = clean_ep.clone();
         ps.lm_studio_endpoint = clean_ep.clone();
         ps.ollama_endpoint = clean_ep;
+    }
+    if let Some(ep) = req
+        .get("anthropic_endpoint")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let Ok(clean_ep) = af_services::validate_server_url(ep) else {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "BAD_REQUEST",
+                "Invalid or disallowed endpoint URL",
+            );
+        };
+        ps.anthropic_endpoint = clean_ep;
+    }
+    if let Some(ep) = req
+        .get("lm_studio_endpoint")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let Ok(clean_ep) = af_services::validate_server_url(ep) else {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "BAD_REQUEST",
+                "Invalid or disallowed endpoint URL",
+            );
+        };
+        ps.lm_studio_endpoint = clean_ep;
+    }
+    if let Some(ep) = req
+        .get("ollama_endpoint")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let Ok(clean_ep) = af_services::validate_server_url(ep) else {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "BAD_REQUEST",
+                "Invalid or disallowed endpoint URL",
+            );
+        };
+        ps.ollama_endpoint = clean_ep;
+    }
+
+    let requested_model = req
+        .get("model")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    if let Some(m) = requested_model {
+        let (_, clean_m) = split_runtime_prefixed_model(m);
+        if is_forbidden_model_alias(clean_m) {
+            return api_error(
+                StatusCode::BAD_REQUEST,
+                "BAD_REQUEST",
+                "Invalid AI model: provider or locality aliases cannot be used as model identifiers",
+            );
+        }
     }
 
     let res = match provider_type {
         "openai" => {
+            let model = requested_model.unwrap_or_else(|| {
+                if ps.default_model.starts_with("gpt-") {
+                    ps.default_model.as_str()
+                } else {
+                    "gpt-6.1-sol"
+                }
+            });
+            if !ALLOWED_AI_MODELS.contains(&model) {
+                return api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", "Invalid AI model");
+            }
             call_openai_compatible_api(
                 "https://api.openai.com",
                 &ps.openai_api_key,
-                "gpt-6.1-sol",
+                model,
                 "",
                 &[],
                 "Reply with the exact word: SUCCESS",
@@ -988,36 +1751,115 @@ pub async fn test_ai_connection(
             .await
         }
         "anthropic" => {
+            let model = requested_model.unwrap_or_else(|| {
+                if ps.default_model.starts_with("claude-") {
+                    ps.default_model.as_str()
+                } else {
+                    "claude-sonnet-5-5"
+                }
+            });
+            if !ALLOWED_AI_MODELS.contains(&model) && !is_valid_local_model_id(model) {
+                return api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", "Invalid AI model");
+            }
             call_anthropic_api(
                 &ps.anthropic_endpoint,
                 &ps.anthropic_api_key,
-                "claude-sonnet-5-5",
+                model,
                 "",
                 &[],
                 "Reply with the exact word: SUCCESS",
             )
             .await
         }
-        "localai" => {
-            let ep = if !ps.lm_studio_endpoint.is_empty() {
-                ps.lm_studio_endpoint.clone()
+        "localai" | "lm-studio" | "ollama" | "anthropic-local" => {
+            let explicit_local_rt = req
+                .get("local_provider")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or(provider_type);
+            let local_runtime = infer_local_runtime(explicit_local_rt, &ps);
+            let local_model = if let Some(m) = requested_model {
+                let (_, clean_m) = split_runtime_prefixed_model(m);
+                clean_m
+            } else if !ps.local_model.is_empty() {
+                ps.local_model.as_str()
+            } else if !is_forbidden_model_alias(&ps.default_model)
+                && !ALLOWED_AI_MODELS.contains(&ps.default_model.as_str())
+            {
+                ps.default_model.as_str()
             } else {
-                "http://localhost:1234".to_string()
+                "qwen2.5-coder:7b"
             };
-            call_openai_compatible_api(
-                &ep,
-                "",
-                "local-test",
-                "",
-                &[],
-                "Reply with the exact word: SUCCESS",
-            )
-            .await
+            if !is_valid_local_model_id(local_model) {
+                return api_error(
+                    StatusCode::BAD_REQUEST,
+                    "BAD_REQUEST",
+                    "Invalid local AI model identifier",
+                );
+            }
+            match local_runtime {
+                "anthropic-local" => {
+                    let ep = if !ps.anthropic_endpoint.is_empty() {
+                        ps.anthropic_endpoint.clone()
+                    } else {
+                        "http://localhost:8080".to_string()
+                    };
+                    call_anthropic_api(
+                        &ep,
+                        &ps.anthropic_api_key,
+                        local_model,
+                        "",
+                        &[],
+                        "Reply with the exact word: SUCCESS",
+                    )
+                    .await
+                }
+                "ollama" => {
+                    let ep = if !ps.ollama_endpoint.is_empty() {
+                        ps.ollama_endpoint.clone()
+                    } else {
+                        "http://localhost:11434".to_string()
+                    };
+                    call_openai_compatible_api(
+                        &ep,
+                        "",
+                        local_model,
+                        "",
+                        &[],
+                        "Reply with the exact word: SUCCESS",
+                    )
+                    .await
+                }
+                _ => {
+                    let ep = if !ps.lm_studio_endpoint.is_empty() {
+                        ps.lm_studio_endpoint.clone()
+                    } else {
+                        "http://localhost:1234".to_string()
+                    };
+                    call_openai_compatible_api(
+                        &ep,
+                        "",
+                        local_model,
+                        "",
+                        &[],
+                        "Reply with the exact word: SUCCESS",
+                    )
+                    .await
+                }
+            }
         }
         _ => {
+            let model = requested_model.unwrap_or_else(|| {
+                if ps.default_model.starts_with("gemini-") {
+                    ps.default_model.as_str()
+                } else {
+                    "gemini-4-argon"
+                }
+            });
             call_gemini_api(
                 &ps.gemini_api_key,
-                "gemini-4-argon",
+                model,
                 "",
                 &[],
                 "Reply with the exact word: SUCCESS",
@@ -1032,8 +1874,8 @@ pub async fn test_ai_connection(
         }))
         .into_response(),
         Err(e) => api_error(
-            StatusCode::UNAUTHORIZED,
-            "UNAUTHORIZED",
+            StatusCode::BAD_GATEWAY,
+            "AI_CONNECTION_FAILED",
             format!("Connection test failed: {}", e),
         ),
     }
@@ -1080,7 +1922,7 @@ pub(crate) async fn call_configured_ai(
     system_prompt: &str,
     message: &str,
 ) -> anyhow::Result<String> {
-    let provider = resolve_provider("", &ps.default_model);
+    let provider = resolve_provider(&ps.local_provider, &ps.default_model);
     match provider {
         "openai" if !ps.openai_api_key.is_empty() => {
             call_openai_compatible_api(
@@ -1105,19 +1947,50 @@ pub(crate) async fn call_configured_ai(
             .await
         }
         "localai" => {
-            let ep = if ps.default_model == "ollama" {
-                if ps.ollama_endpoint.is_empty() {
-                    "http://localhost:11434".to_string()
-                } else {
-                    ps.ollama_endpoint.clone()
-                }
-            } else if ps.lm_studio_endpoint.is_empty() {
-                "http://localhost:1234".to_string()
+            let local_model = if !ps.local_model.is_empty() {
+                ps.local_model.as_str()
+            } else if !is_forbidden_model_alias(&ps.default_model) {
+                ps.default_model.as_str()
             } else {
-                ps.lm_studio_endpoint.clone()
+                anyhow::bail!("Local AI model identifier is not configured");
             };
-            call_openai_compatible_api(&ep, "", &ps.default_model, system_prompt, &[], message)
-                .await
+            let runtime = infer_local_runtime(&ps.local_provider, ps);
+            match runtime {
+                "anthropic-local" => {
+                    let ep = if ps.anthropic_endpoint.is_empty() {
+                        "http://localhost:8080".to_string()
+                    } else {
+                        ps.anthropic_endpoint.clone()
+                    };
+                    call_anthropic_api(
+                        &ep,
+                        &ps.anthropic_api_key,
+                        local_model,
+                        system_prompt,
+                        &[],
+                        message,
+                    )
+                    .await
+                }
+                "ollama" => {
+                    let ep = if ps.ollama_endpoint.is_empty() {
+                        "http://localhost:11434".to_string()
+                    } else {
+                        ps.ollama_endpoint.clone()
+                    };
+                    call_openai_compatible_api(&ep, "", local_model, system_prompt, &[], message)
+                        .await
+                }
+                _ => {
+                    let ep = if ps.lm_studio_endpoint.is_empty() {
+                        "http://localhost:1234".to_string()
+                    } else {
+                        ps.lm_studio_endpoint.clone()
+                    };
+                    call_openai_compatible_api(&ep, "", local_model, system_prompt, &[], message)
+                        .await
+                }
+            }
         }
         _ => {
             if !ps.gemini_api_key.is_empty() {
@@ -1262,18 +2135,18 @@ fn parse_filename_metadata(filename: &str) -> (String, String, String, String, V
     };
 
     let lower = stem.to_lowercase();
-    let language = if lower.contains("japanese") || lower.contains(".jpn.") || lower.contains("dual")
-    {
-        "ja".to_string()
-    } else if lower.contains("spanish") || lower.contains(".spa.") {
-        "es".to_string()
-    } else if lower.contains("french") || lower.contains(".fre.") {
-        "fr".to_string()
-    } else if lower.contains("german") || lower.contains(".ger.") {
-        "de".to_string()
-    } else {
-        "en".to_string()
-    };
+    let language =
+        if lower.contains("japanese") || lower.contains(".jpn.") || lower.contains("dual") {
+            "ja".to_string()
+        } else if lower.contains("spanish") || lower.contains(".spa.") {
+            "es".to_string()
+        } else if lower.contains("french") || lower.contains(".fre.") {
+            "fr".to_string()
+        } else if lower.contains("german") || lower.contains(".ger.") {
+            "de".to_string()
+        } else {
+            "en".to_string()
+        };
 
     let mut subs = Vec::new();
     if lower.contains("sub") || lower.contains("multi") {
@@ -1334,7 +2207,11 @@ fn upsert_media_metadata_row(
 }
 
 pub async fn metadata_scan(Json(req): Json<serde_json::Value>) -> Response {
-    let raw_path = req.get("path").and_then(|v| v.as_str()).unwrap_or("").trim();
+    let raw_path = req
+        .get("path")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
     if raw_path.is_empty() {
         return api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", "path is required");
     }
@@ -1449,10 +2326,8 @@ pub async fn metadata_scan(Json(req): Json<serde_json::Value>) -> Response {
                         for (i, item) in parsed_arr.iter().enumerate() {
                             if let Some(full_path) = chunk.get(i) {
                                 let fp_str = full_path.to_string_lossy().to_string();
-                                let fname = full_path
-                                    .file_name()
-                                    .and_then(|n| n.to_str())
-                                    .unwrap_or("");
+                                let fname =
+                                    full_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
                                 let (def_title, def_year, def_lang, def_qual, def_subs) =
                                     parse_filename_metadata(fname);
                                 let title = item
@@ -1945,7 +2820,8 @@ async fn build_resource_predictions(invoke_ai: bool) -> serde_json::Value {
         );
     }
     if recommendations.is_empty() {
-        recommendations.push("Storage utilization is within healthy operational bounds.".to_string());
+        recommendations
+            .push("Storage utilization is within healthy operational bounds.".to_string());
         recommendations.push("SQLite WAL retention pruning is active.".to_string());
     }
 
@@ -2044,7 +2920,9 @@ pub async fn analyze_predictions() -> Response {
     Json(build_resource_predictions(true).await).into_response()
 }
 
-pub fn resolve_metrics_history_window_and_limit(q: &HashMap<String, String>) -> (Duration, i64, Option<usize>) {
+pub fn resolve_metrics_history_window_and_limit(
+    q: &HashMap<String, String>,
+) -> (Duration, i64, Option<usize>) {
     let mut default_limit: i64 = 2000;
     let window_dur = if let Some(win_raw) = q
         .get("window")
@@ -2348,7 +3226,10 @@ fn mediaflow_library_roots() -> Vec<PathBuf> {
             PathBuf::from("/var/lib/aetherflow"),
         ],
     };
-    roots.into_iter().filter_map(|root| root.canonicalize().ok()).collect()
+    roots
+        .into_iter()
+        .filter_map(|root| root.canonicalize().ok())
+        .collect()
 }
 
 fn validate_mediaflow_directory(
@@ -2410,9 +3291,14 @@ fn collect_mediaflow_files(directory: &StdPath, root: &StdPath, out: &mut Vec<Pa
                 continue;
             };
             if path.starts_with(root)
-                && path.extension().and_then(|ext| ext.to_str()).is_some_and(|ext| {
-                    MEDIAFLOW_VIDEO_EXTS.iter().any(|allowed| allowed[1..].eq_ignore_ascii_case(ext))
-                })
+                && path
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .is_some_and(|ext| {
+                        MEDIAFLOW_VIDEO_EXTS
+                            .iter()
+                            .any(|allowed| allowed[1..].eq_ignore_ascii_case(ext))
+                    })
             {
                 out.push(path);
             }
@@ -2473,7 +3359,9 @@ pub async fn trigger_mediaflow_scan(Json(req): Json<serde_json::Value>) -> Respo
     let directory = PathBuf::from(dir);
     let dir_buf = match tokio::task::spawn_blocking(move || {
         validate_mediaflow_directory(&directory, &mediaflow_library_roots())
-    }).await {
+    })
+    .await
+    {
         Ok(Ok(directory)) => directory,
         Ok(Err((status, message))) => return api_error(status, "INVALID_SCAN_PATH", message),
         Err(error) => {
@@ -2592,14 +3480,8 @@ fn parse_tailscale_peer_obj(fallback_id: &str, p: &serde_json::Value) -> serde_j
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
         .unwrap_or(fallback_id);
-    let host_name = p
-        .get("HostName")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let dns_name = p
-        .get("DNSName")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let host_name = p.get("HostName").and_then(|v| v.as_str()).unwrap_or("");
+    let dns_name = p.get("DNSName").and_then(|v| v.as_str()).unwrap_or("");
     let os = p.get("OS").and_then(|v| v.as_str()).unwrap_or("");
     let online = p.get("Online").and_then(|v| v.as_bool()).unwrap_or(false);
     let exit_node = p.get("ExitNode").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -2615,7 +3497,9 @@ fn parse_tailscale_peer_obj(fallback_id: &str, p: &serde_json::Value) -> serde_j
         })
         .unwrap_or_default();
     let primary_ip = ips.first().cloned().unwrap_or_default();
-    let tags: Vec<&str> = p.get("Tags").and_then(|value| value.as_array())
+    let tags: Vec<&str> = p
+        .get("Tags")
+        .and_then(|value| value.as_array())
         .map(|tags| tags.iter().filter_map(|tag| tag.as_str()).collect())
         .unwrap_or_default();
 
@@ -3048,7 +3932,10 @@ pub async fn bookmark_log(req: Request) -> Response {
     let Ok(body) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
         return api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", "Invalid JSON");
     };
-    let log_source = body.get("log_source").and_then(|v| v.as_str()).unwrap_or("");
+    let log_source = body
+        .get("log_source")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     let log_line = body.get("log_line").and_then(|v| v.as_str()).unwrap_or("");
     let timestamp = body.get("timestamp").and_then(|v| v.as_str()).unwrap_or("");
     let note = body.get("note").and_then(|v| v.as_str()).unwrap_or("");

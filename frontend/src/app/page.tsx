@@ -23,7 +23,7 @@ const AuditTab = dynamic(() => import('@/components/tabs/AuditTab'), { ssr: fals
 const NetworkTab = dynamic(() => import('@/components/tabs/NetworkTab'), { ssr: false });
 const ClusterTab = dynamic(() => import('@/components/tabs/ClusterTab'), { ssr: false });
 const NotificationsSettingsTab = dynamic(() => import('@/components/tabs/NotificationsSettingsTab'), { ssr: false });
-const QuotasBillingTab = dynamic(() => import('@/components/tabs/QuotasBillingTab'), { ssr: false });
+const QuotasTab = dynamic(() => import('@/components/tabs/QuotasTab'), { ssr: false });
 import { useMetrics } from '@/hooks/useMetrics';
 import { OverviewSkeleton } from '@/components/layout/SkeletonBox';
 import OnboardingWizard from '@/components/layout/OnboardingWizard';
@@ -113,7 +113,7 @@ export default function Dashboard() {
       case 'notifications':
         return <NotificationsSettingsTab />;
       case 'quotas':
-        return <QuotasBillingTab />;
+        return <QuotasTab />;
       default:
         return <div className="text-slate-400">Please select an option from the sidebar.</div>;
     }

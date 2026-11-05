@@ -677,6 +677,7 @@ describe('NetworkTab Component Integration & Real API Flows', () => {
         fireEvent.change(screen.getByLabelText(/Advertised Subnet Routes/i),{target:{value:'10.99.0.0/16'}});
         fireEvent.click(screen.getByRole('button',{name:'Remove route 10.66.66.0/24'}));
         await waitFor(() => expect(submittedRoutes).toEqual(['192.168.1.0/24']));
+        expect(screen.getByLabelText(/Advertised Subnet Routes/i)).toHaveValue('10.99.0.0/16');
     });
 
     it('links to Marketplace and Services via Zustand store when packages are not installed', async () => {

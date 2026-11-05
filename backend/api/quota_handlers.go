@@ -1,7 +1,6 @@
 package api
 
 import (
-	"io"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -22,8 +21,6 @@ func quotaErrorStatus(err error) int {
 		return http.StatusNotFound
 	case strings.Contains(message, "invalid"):
 		return http.StatusBadRequest
-	case strings.Contains(message, "secret"):
-		return http.StatusServiceUnavailable
 	default:
 		return http.StatusInternalServerError
 	}
@@ -49,8 +46,8 @@ func quotaErrorCode(err error) string {
 // QuotaUploadGuard blocks uploads that would exceed the current user's configured quota.
 func QuotaUploadGuard() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if c.Request.ContentLength <= 0 {
-			c.Next()
+		if c.Request.ContentLength < 0 {
+			c.AbortWithStatusJSON(http.StatusLengthRequired, gin.H{"error": "Content-Length is required for quota enforcement"})
 			return
 		}
 
@@ -59,12 +56,21 @@ func QuotaUploadGuard() gin.HandlerFunc {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
 			return
 		}
-		userID := rawUserID.(int)
+		userID, valid := rawUserID.(int)
+		if !valid || userID <= 0 {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+			return
+		}
 
 		allowed, quota, err := services.HasQuotaHeadroom(userID, c.Request.ContentLength)
 		if err != nil {
 			slog.Error("quota upload guard check failed", "user_id", userID, "error", err)
-			c.Next()
+			c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "Unable to verify storage quota headroom"})
+			return
+		}
+
+		if status := strings.TrimSpace(quota.Status); status != "" && !strings.EqualFold(status, "active") {
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "Account is not active"})
 			return
 		}
 
@@ -81,7 +87,6 @@ func QuotaUploadGuard() gin.HandlerFunc {
 		c.Next()
 	}
 }
-
 
 // GetOwnQuota returns the authenticated user's own quota — no URL parameter,
 // no IDOR risk. Bound to GET /user/quota.
@@ -123,11 +128,9 @@ func UpdateUserQuota(c *gin.Context) {
 	}
 
 	var req struct {
-		QuotaBytes        int64  `json:"quota_bytes"`
-		Quota             string `json:"quota"`
-		Source            string `json:"source"`
-		BillingProvider   string `json:"billing_provider"`
-		BillingExternalID string `json:"billing_external_id"`
+		QuotaBytes int64  `json:"quota_bytes"`
+		Quota      string `json:"quota"`
+		Source     string `json:"source"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		BadRequest(c, err.Error())
@@ -148,7 +151,7 @@ func UpdateUserQuota(c *gin.Context) {
 		return
 	}
 
-	record, err := services.SetQuotaForUserID(userID, quotaBytes, req.Source, req.BillingProvider, req.BillingExternalID)
+	record, err := services.SetQuotaForUserID(userID, quotaBytes, req.Source)
 	if err != nil {
 		RespondError(c, quotaErrorStatus(err), quotaErrorCode(err), err.Error())
 		return
@@ -174,45 +177,4 @@ func RefreshUserQuota(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"quota": record})
-}
-
-func HandleBillingWebhook(c *gin.Context) {
-	provider := strings.ToLower(strings.TrimSpace(c.Param("provider")))
-	switch provider {
-	case "whmcs", "blesta":
-	default:
-		NotFoundError(c, "Unsupported billing provider")
-		return
-	}
-
-	body, err := io.ReadAll(http.MaxBytesReader(c.Writer, c.Request.Body, 1<<20))
-	if err != nil {
-		BadRequest(c, "Failed to read webhook body")
-		return
-	}
-
-	result, err := services.ProcessBillingWebhook(provider, c.Request.Header, body)
-	if err != nil {
-		RespondError(c, quotaErrorStatus(err), quotaErrorCode(err), err.Error())
-		return
-	}
-
-	c.JSON(http.StatusOK, result)
-}
-
-func ListBillingWebhookEvents(c *gin.Context) {
-	limit := 50
-	if raw := c.Query("limit"); raw != "" {
-		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 && parsed <= 200 {
-			limit = parsed
-		}
-	}
-
-	events, err := services.ListBillingWebhookAudits(limit)
-	if err != nil {
-		InternalError(c, "Failed to load billing webhook events")
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{"events": events})
 }

@@ -11,7 +11,7 @@ RequiresMountsFor=/opt/AetherFlow
 Type=simple
 User=aetherflow
 Group=aetherflow
-SupplementaryGroups=systemd-journal adm qbittorrent betheenvy
+SupplementaryGroups=systemd-journal adm
 WorkingDirectory=/opt/AetherFlow/current
 
 # ── FHS Managed Directories ──────────────────────────────────────────────────
@@ -48,15 +48,34 @@ ProtectHome=read-only
 PrivateTmp=yes
 NoNewPrivileges=yes
 ProtectControlGroups=yes
+PrivateDevices=yes
+ProtectClock=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
 ProtectKernelTunables=yes
+LockPersonality=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
 RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+UMask=0027
 
 ReadWritePaths=/var/lib/aetherflow /var/log/aetherflow /run/aetherflow
 # Legacy v3 databases live in /opt/AetherFlow/backend/data. The '-' skips the
-# path when that directory was never created. release-manager.sh does not
-# replace a unit that is already installed.
-ReadWritePaths=-/opt/AetherFlow/backend/data -/var/lib/openclaw -/home/hdd -/home/betheenvy/.google_root -/home/betheenvy/Google -/home/betheenvy/torrents
-BindPaths=-/home/betheenvy/.google_root:/var/lib/aetherflow/mcbrowser/user-1/Google -/home/hdd/torrents:/var/lib/aetherflow/mcbrowser/user-1/Torrents
+# path when that directory was never created.
+ReadWritePaths=-/opt/AetherFlow/backend/data -/var/lib/openclaw
+
+# ── Operator Drop-in Overrides ──────────────────────────────────────────────
+# Host-specific bind mounts, local media paths, or supplementary groups (such as
+# media downloader groups or user storage directories) should not be hard-coded
+# in this packaged unit. Instead, configure them in an operator-owned systemd
+# drop-in file at /etc/systemd/system/aetherflow-api.service.d/local.conf:
+#
+#   [Service]
+#   SupplementaryGroups=media
+#   ReadWritePaths=/mnt/storage
+#   BindPaths=/mnt/storage/media:/var/lib/aetherflow/mcbrowser/user-1/Media
 
 # ── Resource Limits ──────────────────────────────────────────────────────────
 LimitNOFILE=65535

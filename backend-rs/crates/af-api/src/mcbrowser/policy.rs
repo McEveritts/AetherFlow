@@ -836,15 +836,14 @@ fn verify_active_user_and_quota_conn(
     }
 
     let clean_status = raw_status.trim();
-    let normalized_status = if clean_status.is_empty() {
-        "active".to_string()
-    } else if clean_status.eq_ignore_ascii_case("active") {
-        "active".to_string()
-    } else {
-        return Err(McBrowserError::Forbidden(format!(
-            "Storage operations are disabled because user quota status is '{clean_status}'"
-        )));
-    };
+    let normalized_status =
+        if clean_status.is_empty() || clean_status.eq_ignore_ascii_case("active") {
+            "active".to_string()
+        } else {
+            return Err(McBrowserError::Forbidden(format!(
+                "Storage operations are disabled because user quota status is '{clean_status}'"
+            )));
+        };
 
     Ok(VerifiedUserState {
         role,

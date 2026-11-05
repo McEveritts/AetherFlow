@@ -83,7 +83,7 @@ The test suite is organized into four complementary verification tiers covering 
   1. `test_combo_ingress_dns_proxy`: Ingress CRUD (F05) + Privileged Hosts Runner (F07) + Reverse Proxy Topology (F06, F23) + Migration 17 (F09).
   2. `test_combo_auth_session_lifecycle`: Auth Refresh (F02) + Profile Password (F03) + Session Invalidation + Wire Profile UI (F22).
   3. `test_combo_pathselector_fs_mediaflow`: PathSelector (F01, F20) + FS Handler (F01) + MediaFlow Transcoding + Token Fixes (F20).
-  4. `test_combo_quota_billing_runner`: Quotas Panel (F26) + Runner Quota Socket (F07, F08) + Billing Webhook Audit Logs (F26).
+  4. `test_combo_quota_runner`: Quotas Panel (F26) + Runner Quota Socket (F07, F08) + Storage Quota Enforcement (F26).
   5. `test_combo_network_wireguard_tailscale`: Network Panel (F24) + Runner Network Socket (F07, F08) + Key Generation.
   6. `test_combo_cluster_telemetry_mgmt`: Cluster Manager Startup (F10) + Cluster Panel (F27) + Worker Enrollment + Node Metrics.
   7. `test_combo_single_binary_spa_tokens`: Single-Binary Build (F32) + SPA Embedding (F32) + Obsidian CSS (F13, F14) + Static Export (F11).
@@ -98,7 +98,7 @@ The test suite is organized into four complementary verification tiers covering 
 - **Scenarios**:
   1. `test_scenario_operator_bootstrap`: Clean system install on Debian 13 -> single binary daemon startup -> privileged runner socket binding -> unprivileged user drops capabilities -> admin login -> password update -> profile avatar -> topology verification.
   2. `test_scenario_app_ingress_provisioning`: Radarr application deployment -> dynamic Apache2 Subdomain Gateway upstream proxying -> external domain assignment -> `/etc/hosts` sync via privileged runner -> deployment SSE status streaming -> topology visualization.
-  3. `test_scenario_multitenant_quota_enforcement`: User provisioning -> storage quota assignment via runner `setdisk` -> billing webhook notification -> quota recalculation -> boundary limit enforcement.
+  3. `test_scenario_multitenant_quota_enforcement`: User provisioning -> storage quota assignment via runner `setdisk` -> usage refresh -> quota recalculation -> boundary limit enforcement.
   4. `test_scenario_mesh_vpn_orchestration`: Operator navigates to Network & VPN panel -> generates WireGuard keypair -> enrolls peer -> advertises Tailscale subnet route via privileged runner -> live interface verification.
   5. `test_scenario_ai_anomaly_healing`: Hardware metrics collection -> AI predictions report computation (real metrics history, no sine waves) -> anomaly alert rule trigger -> notification dispatch -> automated self-healing action dispatched through runner socket.
 
@@ -234,7 +234,7 @@ python tests/run_e2e.py --report-out TEST_READY.md
 | **F23** | Real App Topology Map | `AppTopologyMap.tsx` renders live nodes from `/api/v1/auth/system/topology`. 4 hardcoded dummy nodes removed. |
 | **F24** | Network & VPN Panel | `NetworkTab.tsx` manages WireGuard peers/keygen and Tailscale status/peers/routes. |
 | **F25** | Notifications & Alerting Panel | `NotificationsSettingsTab.tsx` manages notification rules and channels (with test alert trigger). |
-| **F26** | Quotas & Billing Panel | `QuotasBillingTab.tsx` manages user storage quotas and lists billing webhook audit logs. |
+| **F26** | Storage Quotas Panel | `QuotasTab.tsx` manages user storage quotas, usage thresholds, and manual disk usage refresh. |
 | **F27** | Cluster Nodes Panel | `ClusterTab.tsx` displays node telemetry, worker enrollment join tokens, and node removal. |
 | **F28** | Modernize Debian APT Template | `setup/templates/apt.sources/debian.template` updated to `https://deb.debian.org/debian/` with `non-free-firmware`. |
 | **F29** | Debian 13 Core OS Detection | `setup/modules/00-core.sh` supports Trixie without `VERSION_ID` and detects PHP 8.4 natively. |

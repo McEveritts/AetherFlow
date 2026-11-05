@@ -40,3 +40,6 @@ tracing.workspace = true
 urlencoding.workspace = true
 url.workspace = true
 uuid.workspace = true
+
+[dev-dependencies]
+tower.workspace = true

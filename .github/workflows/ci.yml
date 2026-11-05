@@ -41,7 +41,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node with the affected npm version
+      - name: Setup Node with pinned older version for installer npm regression testing (distinct from frontend engine >=22.19)
         uses: actions/setup-node@v4
         with:
           node-version: 22.12.0
@@ -185,9 +185,22 @@ jobs:
           AES_MASTER_KEY: ci-test-aes-key-exactly-32bytes!
           ALLOWED_HOSTS: localhost:8080,127.0.0.1:8080
           AETHERFLOW_DISABLE_BACKGROUND_WORKERS: "1"
+          TMPDIR: /tmp
         run: |
           test -f Cargo.lock
           cargo test --workspace --locked -- --test-threads=1
+
+      - name: Enforce Strict Clippy on Restore & Release Core Crates
+        run: |
+          cargo clippy --no-deps -p af-models -p af-host -p af-release -p af-cli --all-targets --locked -- -D warnings
+
+      - name: Evaluate Workspace Clippy Lints (Advisory Diagnostics)
+        continue-on-error: true
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Evaluate Formatting Gate (Advisory Check)
+        continue-on-error: true
+        run: cargo fmt --all -- --check
 
       - name: Build Embedded Single-Binary & Native CLI (Rust)
         run: |

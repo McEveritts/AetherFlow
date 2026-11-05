@@ -481,4 +481,76 @@ describe('SettingsTab system update lifecycle and settings drafts', () => {
         expect(screen.getByTestId('system-update-status')).toHaveAttribute('data-status', 'success');
         expect(screen.queryByText(/running the latest release/i)).not.toBeInTheDocument();
     });
+
+    it('carries unsaved Anthropic endpoint and model draft overrides in connection test payload', async () => {
+        mockActiveTab = 'ai';
+        const route = mockedApiFetch.getMockImplementation()!;
+        mockedApiFetch.mockImplementation((url, init) => {
+            if (url === '/api/v1/admin/settings/test-ai' && init?.method === 'POST') {
+                return Promise.resolve(response({ message: 'anthropic connection successful' }));
+            }
+            return route(url, init);
+        });
+
+        await renderSettings();
+
+        const anthropicKeyInput = screen.getByPlaceholderText('sk-ant-...');
+        fireEvent.change(anthropicKeyInput, { target: { value: 'sk-ant-draft-key' } });
+
+        const anthropicEndpointInput = screen.getByPlaceholderText('https://api.anthropic.com/v1/');
+        fireEvent.change(anthropicEndpointInput, { target: { value: 'http://127.0.0.1:8088/v1' } });
+
+        fireEvent.change(screen.getByRole('combobox', { name: 'defaultModel' }), {
+            target: { value: 'claude-opus-5-5' },
+        });
+        await click(screen.getByRole('button', { name: /Test Anthropic/i }));
+
+        const testCall = mockedApiFetch.mock.calls.find(([url]) => url === '/api/v1/admin/settings/test-ai');
+        expect(testCall).toBeDefined();
+        const payload = JSON.parse(String(testCall?.[1]?.body));
+        expect(payload).toMatchObject({
+            provider: 'anthropic',
+            anthropic_api_key: 'sk-ant-draft-key',
+            endpoint: 'http://127.0.0.1:8088/v1',
+            anthropic_endpoint: 'http://127.0.0.1:8088/v1',
+            model: 'claude-opus-5-5',
+        });
+    });
+
+    it('configures and tests installed local model IDs separately from local runtime without sending provider aliases', async () => {
+        mockActiveTab = 'ai';
+        const route = mockedApiFetch.getMockImplementation()!;
+        mockedApiFetch.mockImplementation((url, init) => {
+            if (url === '/api/v1/admin/settings/test-ai' && init?.method === 'POST') {
+                return Promise.resolve(response({ message: 'localai connection successful' }));
+            }
+            return route(url, init);
+        });
+
+        await renderSettings();
+
+        await click(screen.getByRole('button', { name: /Ollama \(Local\)/i }));
+        const localModelInput = screen.getByLabelText('Installed Local Model ID');
+        fireEvent.change(localModelInput, { target: { value: 'deepseek-r1:14b' } });
+
+        await click(screen.getByRole('button', { name: /Test Ollama/i }));
+        const testCall = mockedApiFetch.mock.calls.find(([url]) => url === '/api/v1/admin/settings/test-ai');
+        expect(testCall).toBeDefined();
+        const testPayload = JSON.parse(String(testCall?.[1]?.body));
+        expect(testPayload).toMatchObject({
+            provider: 'localai',
+            local_provider: 'ollama',
+            endpoint: 'http://localhost:11434',
+            model: 'deepseek-r1:14b',
+        });
+        expect(['ollama', 'lm-studio', 'anthropic-local', 'local-test', 'localai']).not.toContain(testPayload.model);
+
+        await click(screen.getByRole('button', { name: 'Save Configuration' }));
+        const saveCall = mockedApiFetch.mock.calls.find(([url]) => url === '/api/v1/admin/settings');
+        expect(saveCall).toBeDefined();
+        const savePayload = JSON.parse(String(saveCall?.[1]?.body));
+        expect(savePayload.aiModel).toBe('deepseek-r1:14b');
+        expect(savePayload.localModel).toBe('deepseek-r1:14b');
+        expect(savePayload.localProvider).toBe('ollama');
+    });
 });

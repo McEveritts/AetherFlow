@@ -701,16 +701,17 @@ export default function McBrowserWorkspace({
         }
 
         const sequence = editorSeqRef.current;
+        const contentToSave = editorContent;
         editorSaveInFlightRef.current = true;
         setEditorSaving(true);
         setEditorError(null);
         setEditorStaleConflict(false);
 
         try {
-            const res = await saveMcBrowserContent(editorTarget.path, editorContent, editorEtag);
+            const res = await saveMcBrowserContent(editorTarget.path, contentToSave, editorEtag);
             if (sequence !== editorSeqRef.current) return;
             setEditorEtag(res.etag || editorEtag);
-            setEditorSavedContent(editorContent);
+            setEditorSavedContent(contentToSave);
             setEditorDiscardAction(null);
             if (res.accounting_pending) {
                 addToast(`Saved "${editorTarget.name}"; storage accounting requires reconciliation`, 'info');
@@ -2124,7 +2125,7 @@ export default function McBrowserWorkspace({
                     })}
                 </div>
             ) : (
-                <div className="overflow-x-auto">
+                <div className="overflow-x-auto min-w-0 max-w-full">
                     <table
                         aria-label="Workspace selection table"
                         className="w-full text-left border-collapse text-xs"

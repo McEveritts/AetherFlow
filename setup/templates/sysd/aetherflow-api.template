@@ -28,7 +28,6 @@ Environment=PORT=8080
 Environment=DATA_DIR=/var/lib/aetherflow
 Environment=AETHERFLOW_RUNNER_SOCK=/run/aetherflow/runner.sock
 Environment=PRIVILEGED_RUNNER_ENABLED=true
-Environment=COOKIE_SECURE=false
 EnvironmentFile=-/etc/aetherflow/aetherflow.env
 EnvironmentFile=-/opt/AetherFlow/current/backend/.env
 
@@ -54,7 +53,7 @@ RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 UMask=0027
 
 ReadWritePaths=/var/lib/aetherflow /var/log/aetherflow /run/aetherflow
-ReadWritePaths=-/opt/AetherFlow/backend/data -/var/lib/openclaw -/home/hdd
+ReadWritePaths=-/opt/AetherFlow/backend/data -/var/lib/openclaw
 
 LimitNOFILE=65535
 

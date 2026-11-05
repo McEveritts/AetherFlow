@@ -52,10 +52,6 @@ type AppConfig struct {
 	// ── Encryption ──────────────────────────────────────────────────────
 	AESMasterKey string
 
-	// ── Billing ─────────────────────────────────────────────────────────
-	BillingWebhookSecret string
-	BillingQuotaPlanMap  string
-
 	// ── Cluster ─────────────────────────────────────────────────────────
 	ClusterMode       string // "master", "worker", ""
 	ClusterMasterAddr string
@@ -109,14 +105,6 @@ func Load() {
 		// Encryption
 		AESMasterKey: os.Getenv("AES_MASTER_KEY"),
 
-		// Billing
-		BillingWebhookSecret: coalesce(
-			os.Getenv("BILLING_WEBHOOK_SECRET"),
-			os.Getenv("WHMCS_WEBHOOK_SECRET"),
-			os.Getenv("BLESTA_WEBHOOK_SECRET"),
-		),
-		BillingQuotaPlanMap: os.Getenv("BILLING_QUOTA_PLAN_MAP"),
-
 		// Cluster
 		ClusterMode:       os.Getenv("CLUSTER_MODE"),
 		ClusterMasterAddr: os.Getenv("CLUSTER_MASTER_ADDR"),
@@ -157,10 +145,6 @@ func Validate() error {
 
 	if Cfg.AESMasterKey == "" {
 		warnings = append(warnings, "AES_MASTER_KEY is empty — API keys stored in plaintext")
-	}
-
-	if Cfg.BillingWebhookSecret == "" {
-		warnings = append(warnings, "No billing webhook secret configured (BILLING_WEBHOOK_SECRET)")
 	}
 
 	if len(Cfg.AllowedHosts) == 0 {

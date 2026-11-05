@@ -3,7 +3,7 @@ Tier 2: Boundary & Corner Cases (Adversarial Verification)
 Features:
 - B24: Network & VPN Panel Boundaries
 - B25: Notifications & Alerting Panel Boundaries
-- B26: Quotas & Billing Panel Boundaries
+- B26: Storage Quotas Panel Boundaries
 - B27: Cluster Nodes Panel Boundaries
 """
 
@@ -95,14 +95,14 @@ class TestB25DuplicateRuleNamesHandled(TestCase):
         self.assert_true(True, "B25: Duplicate rule collision contract verified")
 
 # ============================================================================
-# B26: Quotas & Billing Panel Boundaries
+# B26: Storage Quotas Panel Boundaries
 # ============================================================================
 class TestB26NegativeQuotaValueRejected(TestCase):
     def __init__(self):
         super().__init__("T2_B26_01", "F26", 2, "Setting negative or invalid quota string (e.g. '-50GB', 'abc') is rejected")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        tab = inspector.read_file("frontend/src/components/tabs/QuotasBillingTab.tsx") or inspector.read_file("frontend/src/components/tabs/QuotasTab.tsx")
+        tab = inspector.read_file("frontend/src/components/tabs/QuotasTab.tsx")
         self.assert_true(bool(tab and ("quota" in tab.lower() or "size" in tab.lower() or "validate" in tab.lower())), "B26: Quota input must validate size string")
 
 class TestB26QuotaExceedingDiskCapacityWarned(TestCase):
@@ -110,23 +110,23 @@ class TestB26QuotaExceedingDiskCapacityWarned(TestCase):
         super().__init__("T2_B26_02", "F26", 2, "Assigning quota exceeding physical disk volume triggers operator warning")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        tab = inspector.read_file("frontend/src/components/tabs/QuotasBillingTab.tsx") or inspector.read_file("frontend/src/components/tabs/QuotasTab.tsx")
+        tab = inspector.read_file("frontend/src/components/tabs/QuotasTab.tsx")
         self.assert_true(bool(tab and ("warn" in tab.lower() or "max" in tab.lower() or "capacity" in tab.lower() or "quota" in tab.lower())), "B26: Excessive quota assignment must be flagged")
 
 class TestB26WebhookPayloadViewerExpandable(TestCase):
     def __init__(self):
-        super().__init__("T2_B26_03", "F26", 2, "Billing webhook events allow expanding raw JSON payload")
+        super().__init__("T2_B26_03", "F26", 2, "Quota update form submits JSON payload and handles form event boundaries")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        tab = inspector.read_file("frontend/src/components/tabs/QuotasBillingTab.tsx") or inspector.read_file("frontend/src/components/tabs/QuotasTab.tsx")
-        self.assert_true(bool(tab and ("json" in tab.lower() or "payload" in tab.lower() or "event" in tab.lower())), "B26: Webhook events must provide JSON viewer")
+        tab = inspector.read_file("frontend/src/components/tabs/QuotasTab.tsx")
+        self.assert_true(bool(tab and ("json" in tab.lower() or "event" in tab.lower())), "B26: Quota update form must serialize JSON payload")
 
 class TestB26QuotaRefreshThrottling(TestCase):
     def __init__(self):
         super().__init__("T2_B26_04", "F26", 2, "Manual refresh disk quota button throttles repeated clicks")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        tab = inspector.read_file("frontend/src/components/tabs/QuotasBillingTab.tsx") or inspector.read_file("frontend/src/components/tabs/QuotasTab.tsx")
+        tab = inspector.read_file("frontend/src/components/tabs/QuotasTab.tsx")
         self.assert_true(bool(tab and ("disabled" in tab or "loading" in tab.lower() or "refresh" in tab.lower())), "B26: Refresh button must prevent rapid double-clicks")
 
 class TestB26NonAdminQuotasForbidden(TestCase):

@@ -192,7 +192,7 @@ pub fn public_router() -> Router {
     shares::public_router()
 }
 
-fn user_mutation_stripe(user_id: i64) -> Arc<AsyncMutex<()>> {
+pub(crate) fn user_mutation_stripe(user_id: i64) -> Arc<AsyncMutex<()>> {
     let idx = (user_id.unsigned_abs() as usize) % USER_LOCK_STRIPES;
     Arc::clone(&USER_MUTATION_STRIPES[idx])
 }
@@ -507,20 +507,19 @@ fn load_active_quota_conn(
 
     let row: Option<(i64, i64, String)> = conn
         .query_row(
-            "SELECT COALESCE(quota_bytes, 0), COALESCE(used_bytes, 0), COALESCE(status, 'active') \
+            "SELECT COALESCE(quota_bytes, 0), COALESCE(used_bytes, 0), COALESCE(status, '') \
              FROM user_quotas WHERE user_id = ?1",
             params![user_id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()
         .map_err(|_| McBrowserError::Internal("Failed to read user storage quota".to_string()))?;
 
-    let (quota_bytes, used_bytes, status) = row.unwrap_or((0, 0, "active".to_string()));
-    let clean_status = status.trim();
-    if !clean_status.is_empty() && !clean_status.eq_ignore_ascii_case("active") {
-        return Err(McBrowserError::Forbidden(format!(
-            "Storage operations are disabled because user quota status is '{clean_status}'"
-        )));
+    let (quota_bytes, used_bytes, status) = row.unwrap_or((0, 0, String::new()));
+    if !status.trim().is_empty() && !status.trim().eq_ignore_ascii_case("active") {
+        return Err(McBrowserError::Forbidden(
+            "Account is not active".to_owned(),
+        ));
     }
 
     let used_non_neg = used_bytes.max(0);
@@ -537,7 +536,7 @@ fn load_active_quota_conn(
     })
 }
 
-fn check_user_quota_pre_mutation(
+pub(crate) fn check_user_quota_pre_mutation(
     user_id: i64,
     expected_add_bytes: u64,
 ) -> Result<(), McBrowserError> {
@@ -546,63 +545,62 @@ fn check_user_quota_pre_mutation(
     })?;
     load_active_quota_conn(&conn, user_id, expected_add_bytes).map(|_| ())
 }
-fn reserve_user_quota_atomic(
+pub(crate) fn reserve_user_quota_conn(
+    conn: &rusqlite::Connection,
+    user_id: i64,
+    delta_bytes: u64,
+) -> Result<(), McBrowserError> {
+    let username: Option<String> = conn
+        .query_row(
+            "SELECT username FROM users WHERE id = ?1",
+            params![user_id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|_| McBrowserError::Internal("Failed to query user record".to_string()))?;
+
+    let Some(username) = username else {
+        return Err(McBrowserError::Unauthorized(
+            "User account not found".to_string(),
+        ));
+    };
+
+    let snapshot = load_active_quota_conn(conn, user_id, delta_bytes)?;
+    let delta_i64 = i64::try_from(delta_bytes).unwrap_or(i64::MAX);
+    let new_used = snapshot.used_bytes.saturating_add(delta_i64);
+
+    conn.execute(
+        "INSERT INTO user_quotas (user_id, username, quota_bytes, used_bytes, status, source, updated_at) \
+         VALUES (?1, ?2, 0, ?3, 'active', 'manual', CURRENT_TIMESTAMP) \
+         ON CONFLICT(user_id) DO UPDATE SET \
+            used_bytes = ?3, \
+            updated_at = CURRENT_TIMESTAMP",
+        params![user_id, username, new_used],
+    )
+    .map_err(|_| McBrowserError::Internal("Failed to reserve user storage quota".to_string()))?;
+    Ok(())
+}
+
+pub(crate) fn reserve_user_quota_atomic(
     conn: &rusqlite::Connection,
     user_id: i64,
     delta_bytes: u64,
 ) -> Result<(), McBrowserError> {
     conn.execute_batch("BEGIN IMMEDIATE TRANSACTION")
-        .map_err(|_| McBrowserError::Internal("Failed to start quota transaction".to_string()))?;
-
-    let result = (|| -> Result<(), McBrowserError> {
-        let username: Option<String> = conn
-            .query_row(
-                "SELECT username FROM users WHERE id = ?1",
-                params![user_id],
-                |r| r.get(0),
-            )
-            .optional()
-            .map_err(|_| McBrowserError::Internal("Failed to query user record".to_string()))?;
-
-        let Some(username) = username else {
-            return Err(McBrowserError::Unauthorized(
-                "User account not found".to_string(),
-            ));
-        };
-
-        let snapshot = load_active_quota_conn(conn, user_id, delta_bytes)?;
-        let delta_i64 = i64::try_from(delta_bytes).unwrap_or(i64::MAX);
-        let new_used = snapshot.used_bytes.saturating_add(delta_i64);
-
-        conn.execute(
-            "INSERT INTO user_quotas (user_id, username, quota_bytes, used_bytes, status, source, updated_at) \
-             VALUES (?1, ?2, 0, ?3, 'active', 'manual', CURRENT_TIMESTAMP) \
-             ON CONFLICT(user_id) DO UPDATE SET \
-                used_bytes = ?3, \
-                updated_at = CURRENT_TIMESTAMP",
-            params![user_id, username, new_used],
-        )
-        .map_err(|_| McBrowserError::Internal("Failed to reserve user storage quota".to_string()))?;
-
-        Ok(())
-    })();
-
-    match result {
-        Ok(()) => {
-            conn.execute_batch("COMMIT").map_err(|_| {
-                let _ = conn.execute_batch("ROLLBACK");
-                McBrowserError::Internal("Failed to commit quota reservation".to_string())
-            })?;
-            Ok(())
-        }
-        Err(err) => {
+        .map_err(|_| McBrowserError::Internal("Failed to start quota transaction".into()))?;
+    match reserve_user_quota_conn(conn, user_id, delta_bytes) {
+        Ok(()) => conn.execute_batch("COMMIT").map_err(|_| {
             let _ = conn.execute_batch("ROLLBACK");
-            Err(err)
+            McBrowserError::Internal("Failed to commit quota reservation".into())
+        }),
+        Err(error) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(error)
         }
     }
 }
 
-fn release_user_quota_conn(
+pub(crate) fn release_user_quota_conn(
     conn: &rusqlite::Connection,
     user_id: i64,
     delta_bytes: u64,
@@ -622,14 +620,14 @@ fn release_user_quota_conn(
     Ok(())
 }
 
-fn reserve_user_quota_db(user_id: i64, delta_bytes: u64) -> Result<(), McBrowserError> {
+pub(crate) fn reserve_user_quota_db(user_id: i64, delta_bytes: u64) -> Result<(), McBrowserError> {
     let conn = af_db::get_conn().map_err(|_| {
         McBrowserError::Internal("Database unavailable for quota reservation".to_string())
     })?;
     reserve_user_quota_atomic(&conn, user_id, delta_bytes)
 }
 
-fn release_user_quota_db(user_id: i64, delta_bytes: u64) -> Result<(), McBrowserError> {
+pub(crate) fn release_user_quota_db(user_id: i64, delta_bytes: u64) -> Result<(), McBrowserError> {
     let conn = af_db::get_conn().map_err(|_| {
         McBrowserError::Internal("Database unavailable for quota update".to_string())
     })?;
@@ -1021,26 +1019,7 @@ async fn delete_entry(
                 policy::Permission::Delete,
                 &normalized_path,
             )?;
-            let user_status: Option<String> = conn
-                .query_row(
-                    "SELECT COALESCE((SELECT status FROM user_quotas WHERE user_id = u.id), 'active') \
-                     FROM users u WHERE u.id = ?1",
-                    params![user_id],
-                    |r| r.get(0),
-                )
-                .optional()
-                .map_err(|_| McBrowserError::Internal("Failed to verify user status".to_string()))?;
-            let Some(status) = user_status else {
-                return Err(McBrowserError::Unauthorized(
-                    "User account not found".to_string(),
-                ));
-            };
-            let clean_status = status.trim();
-            if !clean_status.is_empty() && !clean_status.eq_ignore_ascii_case("active") {
-                return Err(McBrowserError::Forbidden(format!(
-                    "Storage operations are disabled because user quota status is '{clean_status}'"
-                )));
-            }
+            load_active_quota_conn(&conn, user_id, 0)?;
 
             let bfs = open_configured_user_browser_fs_with_conn(&conn, user_id)?;
             let pending = events::record_pending_intent_with_conn(
@@ -1833,7 +1812,7 @@ mod tests {
     }
 
     #[test]
-    fn quota_reservation_enforces_limits_status_and_compensating_rollback() {
+    fn quota_reservation_enforces_capacity_and_storage_suspension() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT NOT NULL);
@@ -1877,6 +1856,38 @@ mod tests {
         assert!(matches!(
             reserve_user_quota_atomic(&conn, 2, 10),
             Err(McBrowserError::Forbidden(_))
+        ));
+        assert!(matches!(
+            reserve_user_quota_atomic(&conn, 2, 0),
+            Err(McBrowserError::Forbidden(_))
+        ));
+        assert_eq!(
+            conn.query_row(
+                "SELECT status FROM user_quotas WHERE user_id = 2",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            "suspended"
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT used_bytes FROM user_quotas WHERE user_id = 2",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+        conn.execute(
+            "UPDATE user_quotas SET status = ' ACTIVE ' WHERE user_id = 2",
+            [],
+        )
+        .unwrap();
+        reserve_user_quota_atomic(&conn, 2, 10).unwrap();
+        assert!(matches!(
+            reserve_user_quota_atomic(&conn, 2, 991),
+            Err(McBrowserError::QuotaExceeded(_))
         ));
     }
 

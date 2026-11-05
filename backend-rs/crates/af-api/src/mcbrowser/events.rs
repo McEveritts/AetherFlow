@@ -604,7 +604,7 @@ fn verify_live_actor_with_conn(
         .query_row(
             "SELECT COALESCE(status, 'active') FROM user_quotas WHERE user_id = ?1",
             params![user_id],
-            |r| r.get(0),
+            |row| row.get(0),
         )
         .optional()
         .map_err(|_| McBrowserError::Internal("Failed to read user storage quota".to_string()))?;
@@ -666,7 +666,7 @@ pub(super) fn verify_live_admin_with_conn(
         .query_row(
             "SELECT COALESCE(status, 'active') FROM user_quotas WHERE user_id = ?1",
             params![caller_id],
-            |r| r.get(0),
+            |row| row.get(0),
         )
         .optional()
         .map_err(|_| McBrowserError::Internal("Failed to verify admin quota status".to_string()))?;

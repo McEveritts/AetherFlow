@@ -1,6 +1,16 @@
 import { Settings, Sparkles, DownloadCloud, AlertCircle, Eye, EyeOff, Key, Monitor, Globe, Clock, LayoutDashboard, Radio, HardDriveDownload, Shield, KeyRound, RefreshCw, UserCircle, Bell, Cpu, CheckCircle2, ArrowUpRight, Terminal, Layers, Save, Folder } from 'lucide-react';
-import { AI_MODELS, ALL_MODEL_IDS, resolveProviderForModel } from '@/lib/ai-models';
-import type { AIProviderID } from '@/lib/ai-models';
+import {
+    AI_MODELS,
+    CLOUD_MODEL_IDS,
+    DEFAULT_LOCAL_MODEL_ID,
+    DEFAULT_LOCAL_RUNTIME_ID,
+    LOCAL_AI_RUNTIMES,
+    isForbiddenModelAlias,
+    isLocalRuntimeId,
+    parseStoredAiSettings,
+    resolveProviderForModel,
+} from '@/lib/ai-models';
+import type { AIProviderID, LocalAIRuntimeID } from '@/lib/ai-models';
 import { useCallback, useEffect, useRef, useState, FormEvent } from 'react';
 import useSWR from 'swr';
 import dynamic from 'next/dynamic';
@@ -126,6 +136,8 @@ const normalizeUpdateChannel = (channel: unknown): string =>
 
 const SETTINGS_DEFAULTS = {
     aiModel: 'gemini-4-argon',
+    localRuntime: DEFAULT_LOCAL_RUNTIME_ID as string,
+    localModel: DEFAULT_LOCAL_MODEL_ID,
     systemPrompt: 'You are FlowAI, a highly intelligent infrastructure assistant connected to a local Next.js + Go Nexus environment. Always prioritize safe and performant configurations.',
     geminiApiKey: '',
     openaiApiKey: '',
@@ -144,7 +156,10 @@ function readSettingsValues(data?: Record<string, string>): typeof SETTINGS_DEFA
     for (const key of Object.keys(values) as (keyof typeof values)[]) {
         if (typeof data?.[key] === 'string') values[key] = data[key];
     }
-    if (!ALL_MODEL_IDS.includes(values.aiModel)) values.aiModel = SETTINGS_DEFAULTS.aiModel;
+    const parsedAi = parseStoredAiSettings(data);
+    values.aiModel = parsedAi.aiModel;
+    values.localRuntime = parsedAi.localRuntime;
+    values.localModel = parsedAi.localModel;
     values.updateChannel = normalizeUpdateChannel(values.updateChannel);
     return values;
 }
@@ -278,13 +293,74 @@ export default function SettingsTab({
     const [settingsDraft, setSettingsDraft] = useState<Partial<typeof SETTINGS_DEFAULTS>>({});
     const savedSettings = readSettingsValues(settingsData);
     const {
-        aiModel: model, systemPrompt: prompt, geminiApiKey: apiKey, openaiApiKey,
-        anthropicApiKey, lmStudioEndpoint, ollamaEndpoint, anthropicEndpoint,
-        timezone, updateChannel, defaultDashboard, baseDomain,
+        aiModel: model,
+        localRuntime: rawLocalRuntime,
+        localModel,
+        systemPrompt: prompt,
+        geminiApiKey: apiKey,
+        openaiApiKey,
+        anthropicApiKey,
+        lmStudioEndpoint,
+        ollamaEndpoint,
+        anthropicEndpoint,
+        timezone,
+        updateChannel,
+        defaultDashboard,
+        baseDomain,
     } = { ...savedSettings, ...settingsDraft };
+    const localRuntime: LocalAIRuntimeID = isLocalRuntimeId(rawLocalRuntime)
+        ? rawLocalRuntime
+        : DEFAULT_LOCAL_RUNTIME_ID;
+    const effectiveLocalModel =
+        localModel.trim() && !isForbiddenModelAlias(localModel)
+            ? localModel.trim()
+            : LOCAL_AI_RUNTIMES.find((rt) => rt.id === localRuntime)?.defaultModel || DEFAULT_LOCAL_MODEL_ID;
+
     const setField = (key: keyof typeof SETTINGS_DEFAULTS, value: string) =>
         setSettingsDraft(current => ({ ...current, [key]: value }));
-    const setModel = (value: string) => setField('aiModel', value);
+    const setModel = (value: string) => {
+        if (isLocalRuntimeId(value)) {
+            const rtDef = LOCAL_AI_RUNTIMES.find((rt) => rt.id === value);
+            const nextLocalModel =
+                localModel.trim() && !isForbiddenModelAlias(localModel)
+                    ? localModel.trim()
+                    : rtDef?.defaultModel || DEFAULT_LOCAL_MODEL_ID;
+            setSettingsDraft(current => ({
+                ...current,
+                localRuntime: value,
+                localModel: nextLocalModel,
+                aiModel: nextLocalModel,
+            }));
+            return;
+        }
+        setSettingsDraft(current => ({
+            ...current,
+            aiModel: value,
+            ...(!CLOUD_MODEL_IDS.includes(value) && !isForbiddenModelAlias(value)
+                ? { localModel: value }
+                : {}),
+        }));
+    };
+    const setLocalRuntime = (runtimeId: LocalAIRuntimeID) => {
+        const rtDef = LOCAL_AI_RUNTIMES.find((rt) => rt.id === runtimeId);
+        const nextLocalModel =
+            localModel.trim() && !isForbiddenModelAlias(localModel)
+                ? localModel.trim()
+                : rtDef?.defaultModel || DEFAULT_LOCAL_MODEL_ID;
+        setSettingsDraft(current => ({
+            ...current,
+            localRuntime: runtimeId,
+            localModel: nextLocalModel,
+            aiModel: nextLocalModel,
+        }));
+    };
+    const setLocalModel = (value: string) => {
+        setSettingsDraft(current => ({
+            ...current,
+            localModel: value,
+            aiModel: value,
+        }));
+    };
     const setPrompt = (value: string) => setField('systemPrompt', value);
     const setApiKey = (value: string) => setField('geminiApiKey', value);
     const setOpenaiApiKey = (value: string) => setField('openaiApiKey', value);
@@ -335,6 +411,56 @@ export default function SettingsTab({
 
     const handleTestConnection = async (providerOverride?: string, extraPayload?: Record<string, string>) => {
         const testProvider = providerOverride || resolveProviderForModel(model);
+        const trimmedAnthropicEp = anthropicEndpoint.trim();
+
+        let resolvedTestModel = extraPayload?.model?.trim() || '';
+        if (!resolvedTestModel) {
+            if (testProvider === 'anthropic' || testProvider === 'anthropic-local') {
+                if (
+                    settingsDraft.localModel !== undefined &&
+                    settingsDraft.localModel.trim() !== '' &&
+                    !isForbiddenModelAlias(settingsDraft.localModel)
+                ) {
+                    resolvedTestModel = settingsDraft.localModel.trim();
+                } else if (
+                    resolveProviderForModel(model) === 'localai' &&
+                    localRuntime === 'anthropic-local'
+                ) {
+                    resolvedTestModel = effectiveLocalModel;
+                } else if (model.startsWith('claude-')) {
+                    resolvedTestModel = model;
+                } else {
+                    resolvedTestModel = 'claude-sonnet-5-5';
+                }
+            } else if (
+                testProvider === 'localai' ||
+                testProvider === 'lm-studio' ||
+                testProvider === 'ollama'
+            ) {
+                resolvedTestModel = localModel.trim() || effectiveLocalModel;
+            } else if (testProvider === 'openai') {
+                resolvedTestModel = model.startsWith('gpt-') ? model : 'gpt-6.1-sol';
+            } else {
+                resolvedTestModel = model.startsWith('gemini-') ? model : 'gemini-4-argon';
+            }
+        }
+
+        if (isForbiddenModelAlias(resolvedTestModel)) {
+            addToast(
+                'Invalid model ID: provider or locality aliases cannot be used as inference model IDs.',
+                'error'
+            );
+            return;
+        }
+
+        const anthropicOverrides =
+            (testProvider === 'anthropic' || testProvider === 'anthropic-local') && trimmedAnthropicEp
+                ? {
+                      endpoint: trimmedAnthropicEp,
+                      anthropic_endpoint: trimmedAnthropicEp,
+                  }
+                : {};
+
         setIsTesting(true);
         try {
             const res = await apiFetch('/api/v1/admin/settings/test-ai', {
@@ -345,6 +471,8 @@ export default function SettingsTab({
                     openai_api_key: openaiApiKey,
                     anthropic_api_key: anthropicApiKey,
                     provider: testProvider,
+                    model: resolvedTestModel,
+                    ...anthropicOverrides,
                     ...extraPayload,
                 }),
             });
@@ -536,7 +664,7 @@ export default function SettingsTab({
     const activeModelDef = Object.values(AI_MODELS).flat().find(m => m.id === model) || {
         id: model,
         name: model,
-        tier: 'latest' as const,
+        tier: activeProvider === 'localai' ? ('local' as const) : ('latest' as const),
     };
 
     const isActiveProviderConfigured =
@@ -555,19 +683,31 @@ export default function SettingsTab({
             ? 'api.openai.com/v1'
             : activeProvider === 'anthropic'
             ? anthropicEndpoint || 'api.anthropic.com/v1'
-            : model === 'ollama'
+            : localRuntime === 'ollama'
             ? ollamaEndpoint || 'http://localhost:11434'
-            : model === 'anthropic-local'
-            ? anthropicEndpoint || 'http://localhost:8000'
+            : localRuntime === 'anthropic-local'
+            ? anthropicEndpoint || 'http://localhost:8080'
             : lmStudioEndpoint || 'http://localhost:1234';
 
     const handleSave = async (e: FormEvent) => {
         e.preventDefault();
+        const isLocalActive = activeProvider === 'localai';
+        const resolvedModelForSave = isLocalActive ? localModel.trim() : model.trim();
+        if (isForbiddenModelAlias(resolvedModelForSave)) {
+            addToast(
+                'Invalid AI model ID: specify an installed model ID instead of a provider or runtime alias.',
+                'error'
+            );
+            return;
+        }
+
         setIsSaving(true);
 
         const submittedSettings = { ...savedSettings, ...settingsDraft };
         const payload = {
-            aiModel: model,
+            aiModel: resolvedModelForSave,
+            localModel: effectiveLocalModel,
+            localProvider: localRuntime,
             systemPrompt: prompt,
             geminiApiKey: apiKey,
             openaiApiKey: openaiApiKey,
@@ -961,7 +1101,9 @@ export default function SettingsTab({
                                                             key={prov.id}
                                                             type="button"
                                                             onClick={() => {
-                                                                if (activeProvider !== prov.id && AI_MODELS[prov.id]?.[0]?.id) {
+                                                                if (prov.id === 'localai') {
+                                                                    setModel(effectiveLocalModel);
+                                                                } else if (activeProvider !== prov.id && AI_MODELS[prov.id]?.[0]?.id) {
                                                                     setModel(AI_MODELS[prov.id][0].id);
                                                                 }
                                                             }}
@@ -1034,6 +1176,46 @@ export default function SettingsTab({
                                                             group: providerId.charAt(0).toUpperCase() + providerId.slice(1),
                                                         }))
                                                     )}
+                                                />
+                                            </div>
+
+                                            {/* Installed Local Model ID & Local Runtime Target */}
+                                            <div className="pt-2 border-t border-white/[0.06] space-y-2.5">
+                                                <div className="flex flex-wrap items-center justify-between gap-2">
+                                                    <label
+                                                        htmlFor="installed-local-model-input"
+                                                        className="text-xs font-semibold text-slate-200 flex items-center gap-2"
+                                                    >
+                                                        <Cpu size={14} className="text-purple-400" /> Installed Local Model ID
+                                                    </label>
+                                                    <div className="flex flex-wrap gap-1.5">
+                                                        {LOCAL_AI_RUNTIMES.map((rt) => (
+                                                            <button
+                                                                key={rt.id}
+                                                                type="button"
+                                                                onClick={() => setLocalRuntime(rt.id)}
+                                                                className={`px-2 py-1 rounded-md text-xs font-semibold border transition-colors ${
+                                                                    localRuntime === rt.id
+                                                                        ? 'bg-purple-500/20 border-purple-500/40 text-purple-200'
+                                                                        : 'bg-slate-900 border-white/10 text-slate-400 hover:text-slate-200'
+                                                                }`}
+                                                            >
+                                                                {rt.name}
+                                                            </button>
+                                                        ))}
+                                                    </div>
+                                                </div>
+                                                <p className="text-xs text-slate-500">
+                                                    Exact model identifier installed in your local runner (used for local chat and connection tests; never a provider alias).
+                                                </p>
+                                                <input
+                                                    id="installed-local-model-input"
+                                                    aria-label="Installed Local Model ID"
+                                                    type="text"
+                                                    value={localModel}
+                                                    onChange={(e) => setLocalModel(e.target.value)}
+                                                    placeholder="llama3.2:latest"
+                                                    className="w-full bg-slate-900 border border-white/10 rounded-xl px-3.5 py-2.5 text-slate-200 text-xs focus:outline-none focus:border-indigo-500/50 transition-colors font-mono"
                                                 />
                                             </div>
                                         </div>
@@ -1179,7 +1361,7 @@ export default function SettingsTab({
                                                     <button
                                                         type="button"
                                                         onClick={() => handleTestConnection('anthropic')}
-                                                        disabled={isTesting || !anthropicApiKey}
+                                                        disabled={isTesting || (!anthropicApiKey && !anthropicEndpoint)}
                                                         className="obs-touch-target-standard obs-gpu-120hz-interactive px-4 py-2.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 border border-white/10 rounded-xl text-xs font-semibold text-slate-200 transition-colors flex items-center justify-center gap-2 shrink-0"
                                                     >
                                                         {isTesting ? (
@@ -1221,7 +1403,13 @@ export default function SettingsTab({
                                                 />
                                                 <button
                                                     type="button"
-                                                    onClick={() => handleTestConnection('localai', { endpoint: lmStudioEndpoint || 'http://localhost:1234' })}
+                                                    onClick={() =>
+                                                        handleTestConnection('localai', {
+                                                            local_provider: 'lm-studio',
+                                                            endpoint: lmStudioEndpoint || 'http://localhost:1234',
+                                                            model: localModel.trim() || effectiveLocalModel,
+                                                        })
+                                                    }
                                                     disabled={isTesting}
                                                     className="obs-touch-target-standard obs-gpu-120hz-interactive w-full py-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 border border-white/10 rounded-lg text-xs font-semibold text-slate-300 transition-colors flex items-center justify-center gap-2"
                                                 >
@@ -1242,7 +1430,13 @@ export default function SettingsTab({
                                                 />
                                                 <button
                                                     type="button"
-                                                    onClick={() => handleTestConnection('localai', { endpoint: ollamaEndpoint || 'http://localhost:11434' })}
+                                                    onClick={() =>
+                                                        handleTestConnection('localai', {
+                                                            local_provider: 'ollama',
+                                                            endpoint: ollamaEndpoint || 'http://localhost:11434',
+                                                            model: localModel.trim() || effectiveLocalModel,
+                                                        })
+                                                    }
                                                     disabled={isTesting}
                                                     className="obs-touch-target-standard obs-gpu-120hz-interactive w-full py-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 border border-white/10 rounded-lg text-xs font-semibold text-slate-300 transition-colors flex items-center justify-center gap-2"
                                                 >

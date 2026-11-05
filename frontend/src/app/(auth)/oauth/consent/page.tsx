@@ -23,6 +23,7 @@ export default function ConsentPage() {
     const responseType = searchParams.get('response_type');
     const scope = searchParams.get('scope') || 'openid profile email';
     const state = searchParams.get('state');
+    const nonce = searchParams.get('nonce');
     const codeChallenge = searchParams.get('code_challenge');
     const codeChallengeMethod = searchParams.get('code_challenge_method');
 
@@ -54,6 +55,7 @@ export default function ConsentPage() {
                     response_type: responseType,
                     scope,
                     state: state || '',
+                    nonce: nonce || '',
                     code_challenge: codeChallenge || '',
                     code_challenge_method: codeChallengeMethod || '',
                     approved,
@@ -65,7 +67,7 @@ export default function ConsentPage() {
             if (res.ok && redirectTarget) {
                 window.location.assign(redirectTarget);
             } else {
-                setError(data.error || 'Authorization sequence refused by operator core.');
+                setError(data.message || data.error || 'Authorization sequence refused by operator core.');
                 setIsSubmitting(false);
             }
         } catch (_err) {

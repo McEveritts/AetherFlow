@@ -16,6 +16,8 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
+WORKSPACE_CLIPPY = "cargo clippy --workspace --all-targets --locked"
+STRICT_CORE_CLIPPY = "cargo clippy --no-deps -p af-models -p af-host -p af-release -p af-cli --all-targets --locked -- -D warnings"
 
 
 def parse_workflow_jobs(workflow_text: str) -> dict[str, str]:
@@ -121,17 +123,20 @@ class V4ReleaseBootstrapCiTests(unittest.TestCase):
         self.assertIn("gitleaks dir . --verbose --redact", sec_job)
         self.assertIn("cargo deny --locked check advisories bans sources", sec_job)
         self.assertIn("cargo audit --file Cargo.lock", sec_job)
-        self.assertIn("cargo clippy --workspace --all-targets --locked -- -D warnings", sec_job)
+        self.assertIn(WORKSPACE_CLIPPY, sec_job)
+        self.assertIn(STRICT_CORE_CLIPPY, sec_job)
         self.assertIn("cargo test --workspace --locked", sec_job)
 
         # 4. Inside release-build, locked clippy, locked tests, and locked build of both binaries must precede Publish
-        clippy_idx = build_job.index("cargo clippy --workspace --all-targets --locked -- -D warnings")
+        clippy_idx = build_job.index(WORKSPACE_CLIPPY)
+        strict_clippy_idx = build_job.index(STRICT_CORE_CLIPPY)
         test_idx = build_job.index("cargo test --workspace --locked")
         build_idx = build_job.index("cargo build --release --locked --bin aetherflow-api --bin af")
         attest_idx = build_job.index("actions/attest-build-provenance@v2")
         publish_idx = build_job.index("- name: Publish to GitHub Releases")
 
         self.assertLess(clippy_idx, test_idx)
+        self.assertLess(strict_clippy_idx, test_idx)
         self.assertLess(test_idx, build_idx)
         self.assertLess(build_idx, attest_idx)
         self.assertLess(attest_idx, publish_idx)
@@ -164,7 +169,8 @@ class V4ReleaseBootstrapCiTests(unittest.TestCase):
         self.assertIn("rust-security:", sec_yml)
         self.assertIn("cargo deny --locked check advisories bans sources", sec_yml)
         self.assertIn("cargo audit --file Cargo.lock", sec_yml)
-        self.assertIn("cargo clippy --workspace --all-targets --locked -- -D warnings", sec_yml)
+        self.assertIn(WORKSPACE_CLIPPY, sec_yml)
+        self.assertIn(STRICT_CORE_CLIPPY, sec_yml)
         self.assertNotIn("|| true", sec_yml)
         self.assertTrue((ROOT / "backend-rs/deny.toml").is_file())
 

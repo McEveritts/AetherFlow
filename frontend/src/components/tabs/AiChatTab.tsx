@@ -5,8 +5,15 @@ import { useSystemStore } from '@/store/useSystemStore';
 import { apiFetch } from '@/lib/fetcher';
 import { useMetrics } from '@/hooks/useMetrics';
 import { useToast } from '@/contexts/ToastContext';
-import { AI_PROVIDERS, AI_MODELS, ALL_MODEL_IDS, resolveProviderForModel } from '@/lib/ai-models';
-import type { AIProviderID } from '@/lib/ai-models';
+import {
+    AI_PROVIDERS,
+    AI_MODELS,
+    DEFAULT_LOCAL_MODEL_ID,
+    LOCAL_AI_RUNTIMES,
+    isForbiddenModelAlias,
+    parseStoredAiSettings,
+} from '@/lib/ai-models';
+import type { AIProviderID, LocalAIRuntimeID } from '@/lib/ai-models';
 import FlowAiMarkdown from '@/components/ui/FlowAiMarkdown';
 
 interface ChatMessage {
@@ -57,6 +64,7 @@ export default function AiChatTab() {
     const [input, setInput] = useState('');
     const [isTyping, setIsTyping] = useState(false);
     const [manualProvider, setManualProvider] = useState<AIProviderID | null>(null);
+    const [manualLocalRuntime, setManualLocalRuntime] = useState<LocalAIRuntimeID | null>(null);
     const [manualModel, setManualModel] = useState<string | null>(null);
     const [showModelPicker, setShowModelPicker] = useState(false);
     const [supportMode, setSupportMode] = useState(false);
@@ -69,30 +77,21 @@ export default function AiChatTab() {
 
     const { data: settingsData } = useSWR<Record<string, string>>('/api/v1/auth/settings');
 
-    const defaultProviderAndModel = (() => {
-        if (settingsData?.aiModel && ALL_MODEL_IDS.includes(settingsData.aiModel)) {
-            return {
-                provider: resolveProviderForModel(settingsData.aiModel),
-                model: settingsData.aiModel,
-            };
+    const parsedSettings = parseStoredAiSettings(settingsData);
+    const selectedProvider: AIProviderID = manualProvider ?? parsedSettings.provider;
+    const selectedLocalRuntime: LocalAIRuntimeID = manualLocalRuntime ?? parsedSettings.localRuntime;
+    const selectedModel: string = (() => {
+        if (manualModel && !isForbiddenModelAlias(manualModel)) {
+            return manualModel;
         }
-        if (
-            settingsData?.aiProvider &&
-            AI_PROVIDERS.some((providerItem) => providerItem.id === settingsData.aiProvider)
-        ) {
-            const configuredProvider = settingsData.aiProvider as AIProviderID;
-            return {
-                provider: configuredProvider,
-                model: AI_MODELS[configuredProvider]?.[0]?.id || 'gemini-4-argon',
-            };
+        if (selectedProvider === 'localai') {
+            return parsedSettings.localModel || DEFAULT_LOCAL_MODEL_ID;
         }
-        return {
-            provider: 'gemini' as AIProviderID,
-            model: 'gemini-4-argon',
-        };
+        if (parsedSettings.provider === selectedProvider && !isForbiddenModelAlias(parsedSettings.aiModel)) {
+            return parsedSettings.aiModel;
+        }
+        return AI_MODELS[selectedProvider]?.[0]?.id || 'gemini-4-argon';
     })();
-    const selectedProvider: AIProviderID = manualProvider ?? defaultProviderAndModel.provider;
-    const selectedModel: string = manualModel ?? defaultProviderAndModel.model;
 
     useEffect(() => {
         if (scrollRef.current) {
@@ -115,12 +114,24 @@ export default function AiChatTab() {
     }, []);
 
     const activeModels = AI_MODELS[selectedProvider] || [];
-    const currentModel = activeModels.find(m => m.id === selectedModel) || activeModels[0] || { name: 'Unknown', tier: 'unknown' };
+    const currentModel = activeModels.find(m => m.id === selectedModel) || {
+        id: selectedModel,
+        name: selectedModel,
+        tier: selectedProvider === 'localai' ? 'local' : 'latest',
+    };
     const currentContext = CONTEXT_MODES.find(m => m.id === contextMode) || CONTEXT_MODES[0];
 
     const dispatchMessage = async (rawText: string) => {
         const text = rawText.trim();
         if (!text || isTyping) return;
+        const resolvedModel = selectedModel.trim();
+        if (isForbiddenModelAlias(resolvedModel)) {
+            addToast(
+                'Specify an installed model ID in FlowAI settings before sending requests.',
+                'error'
+            );
+            return;
+        }
 
         setInput('');
         setMessages(prev => [...prev, { role: 'user', text }]);
@@ -128,11 +139,13 @@ export default function AiChatTab() {
 
         try {
             const endpoint = supportMode ? '/api/v1/auth/ai/support' : '/api/v1/auth/ai/chat';
+            const effectiveProvider =
+                selectedProvider === 'localai' ? selectedLocalRuntime : selectedProvider;
             const body: Record<string, unknown> = {
                 message: text,
                 history: messages,
-                model: selectedModel,
-                provider: selectedProvider,
+                model: resolvedModel,
+                provider: effectiveProvider,
             };
             if (supportMode) {
                 body.context_mode = contextMode;
@@ -298,6 +311,40 @@ export default function AiChatTab() {
                                     </select>
                                 </div>
                                 <div className="p-1.5 space-y-1 max-h-72 overflow-y-auto custom-scrollbar">
+                                    {selectedProvider === 'localai' && (
+                                        <div
+                                            className="p-2 mb-1 rounded-xl bg-slate-950/70 border border-white/10 space-y-2"
+                                            onClick={(event) => event.stopPropagation()}
+                                        >
+                                            <p className="text-xs uppercase tracking-wider text-slate-400 font-bold">Local Runtime</p>
+                                            <div className="grid grid-cols-3 gap-1">
+                                                {LOCAL_AI_RUNTIMES.map((rt) => (
+                                                    <button
+                                                        key={rt.id}
+                                                        type="button"
+                                                        onClick={() => setManualLocalRuntime(rt.id)}
+                                                        className={`px-2 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${selectedLocalRuntime === rt.id
+                                                            ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+                                                            : 'bg-slate-900 text-slate-400 border border-white/5 hover:text-slate-200'
+                                                            }`}
+                                                    >
+                                                        {rt.id === 'lm-studio' ? 'LM Studio' : rt.id === 'ollama' ? 'Ollama' : 'Anthropic'}
+                                                    </button>
+                                                ))}
+                                            </div>
+                                            <input
+                                                type="text"
+                                                aria-label="Chat Local Model ID"
+                                                value={selectedModel}
+                                                onChange={(event) => {
+                                                    setManualProvider('localai');
+                                                    setManualModel(event.target.value);
+                                                }}
+                                                placeholder="Installed local model ID"
+                                                className="w-full bg-slate-900 border border-white/10 rounded-lg px-2.5 py-1.5 text-xs text-slate-200 font-mono focus:outline-none focus:border-emerald-500/50"
+                                            />
+                                        </div>
+                                    )}
                                     {activeModels.map((model) => (
                                         <button
                                             key={model.id}

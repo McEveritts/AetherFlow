@@ -4,7 +4,7 @@ Tier 3: Cross-Feature Combinations (Pairwise Interoperability)
 1. Ingress + Privileged Hosts + Reverse Proxy Topology + Migration 17
 2. Auth Refresh + Profile Password + Session Invalidation + Profile UI
 3. PathSelector + Go FS Browser + MediaFlow Tab + Cookie Auth
-4. Quotas Panel + Privileged Runner Quota + Billing Webhooks
+4. Quotas Panel + Privileged Runner Quota + Quota Manager Enforcement
 5. Network VPN Panel + Privileged Runner Network + WireGuard/Tailscale
 6. Cluster Manager Startup + Cluster Nodes Panel + Worker Enrollment
 7. Single-Binary Pipeline + Embedded SPA + Obsidian CSS Tokens + Static Export
@@ -53,12 +53,12 @@ class TestComboPathSelectorFsMediaflow(TestCase):
         has_mediaflow_api = bool(mediaflow and "apiFetch" in mediaflow)
         self.assert_true(has_fs and has_selector and has_mediaflow_api, "Combo 03: PathSelector, FS API, and MediaFlow wiring must be satisfied")
 
-class TestComboQuotasBillingRunner(TestCase):
+class TestComboQuotasRunner(TestCase):
     def __init__(self):
-        super().__init__("T3_COMBO_04", "F26+F07+F08", 3, "Quotas UI, runner /v1/quota dispatch, and billing webhook events")
+        super().__init__("T3_COMBO_04", "F26+F07+F08", 3, "Quotas UI, runner /v1/quota dispatch, and quota manager enforcement")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
-        quotas_ui = inspector.file_exists("frontend/src/components/tabs/QuotasBillingTab.tsx") or inspector.file_exists("frontend/src/components/tabs/QuotasTab.tsx")
+        quotas_ui = inspector.file_exists("frontend/src/components/tabs/QuotasTab.tsx")
         runner_quota = bool(inspector.read_file("backend/services/privileged_runner.go") and "/v1/quota" in inspector.read_file("backend/services/privileged_runner.go"))
         quota_mgr = bool(inspector.read_file("backend/services/quota_manager.go") and "runner" in inspector.read_file("backend/services/quota_manager.go").lower())
         self.assert_true(quotas_ui and runner_quota and quota_mgr, "Combo 04: Quotas UI, runner quota socket, and quota manager caller must be satisfied")
@@ -160,7 +160,7 @@ def get_tier3_tests():
         TestComboIngressDnsProxyTopology(),
         TestComboAuthSessionPasswordLifecycle(),
         TestComboPathSelectorFsMediaflow(),
-        TestComboQuotasBillingRunner(),
+        TestComboQuotasRunner(),
         TestComboNetworkVpnRunner(),
         TestComboClusterTelemetryManagement(),
         TestComboSingleBinarySpaAtmosphere(),

@@ -20,14 +20,52 @@ use std::time::{Duration, Instant};
 // ──────────────────────────────────────────────────────────────────────────────
 
 fn strip_host_port_and_dot(raw_host: &str) -> String {
-    let mut host = raw_host.trim().to_lowercase();
-    if let Some(colon_idx) = host.rfind(':') {
-        if !host[colon_idx..].contains(']') {
-            host = host[..colon_idx].to_string();
-        }
+    // Parse an authority, never discard arbitrary suffixes as if they were ports.
+    if raw_host.is_empty() || raw_host.bytes().any(|b| b <= 0x20 || b >= 0x7f) {
+        return String::new();
     }
-    host = host.trim_matches(['[', ']']).trim_end_matches('.').to_string();
-    host
+    if let Ok(ip) = raw_host.parse::<IpAddr>() {
+        return ip.to_string();
+    }
+    let valid_port = |value: &str| {
+        !value.is_empty()
+            && value.bytes().all(|b| b.is_ascii_digit())
+            && value.parse::<u16>().is_ok()
+    };
+    if let Some(rest) = raw_host.strip_prefix('[') {
+        let Some((host, suffix)) = rest.split_once(']') else {
+            return String::new();
+        };
+        if !suffix.is_empty() && !suffix.strip_prefix(':').is_some_and(valid_port) {
+            return String::new();
+        }
+        return host
+            .parse::<std::net::Ipv6Addr>()
+            .map(|ip| ip.to_string())
+            .unwrap_or_default();
+    }
+    let (host, port) = raw_host
+        .split_once(':')
+        .map_or((raw_host, None), |(host, port)| (host, Some(port)));
+    if port.is_some_and(|port| !valid_port(port)) {
+        return String::new();
+    }
+    let host = host.strip_suffix('.').unwrap_or(host);
+    if host.is_empty()
+        || host.len() > 253
+        || !host.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                && label.as_bytes()[0].is_ascii_alphanumeric()
+                && label.as_bytes()[label.len() - 1].is_ascii_alphanumeric()
+        })
+    {
+        return String::new();
+    }
+    host.to_ascii_lowercase()
 }
 
 fn query_settings_base_domain() -> String {
@@ -236,7 +274,7 @@ fn resolve_authenticated_username(headers: &axum::http::HeaderMap) -> Option<Str
     {
         return None;
     }
-    let conn = af_db::get_conn().ok()?;
+    let conn = af_db::get_read_conn().ok()?;
     conn.query_row(
         "SELECT username FROM users WHERE id = ?1",
         params![claims.user_id],
@@ -321,7 +359,27 @@ pub async fn app_subdomain_proxy_middleware(req: Request, next: Next) -> Respons
         }
     }
 
-    let Some((app_name, target_port)) = resolve_app_target_for_host(&raw_host) else {
+    let lookup_host = raw_host.clone();
+    let lookup_headers = req.headers().clone();
+    let lookup = crate::auth::blocking_auth_work(move || {
+        let target = resolve_app_target_for_host(&lookup_host);
+        let username = target
+            .as_ref()
+            .and_then(|_| resolve_authenticated_username(&lookup_headers));
+        (target, username)
+    })
+    .await;
+    let (target, authenticated_user) = match lookup {
+        Ok(result) => result,
+        Err(_) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Proxy authentication unavailable",
+            )
+                .into_response()
+        }
+    };
+    let Some((app_name, target_port)) = target else {
         return next.run(req).await;
     };
     if target_port <= 0 {
@@ -352,11 +410,12 @@ pub async fn app_subdomain_proxy_middleware(req: Request, next: Next) -> Respons
         .to_string();
     let target_url = format!("http://127.0.0.1:{}{}", target_port, path_and_query);
 
-    let authenticated_user = resolve_authenticated_username(req.headers());
     let incoming_headers = req.headers().clone();
 
     if is_ws_upgrade {
-        let tcp_stream = match tokio::net::TcpStream::connect(("127.0.0.1", target_port as u16)).await {
+        let tcp_stream = match tokio::net::TcpStream::connect(("127.0.0.1", target_port as u16))
+            .await
+        {
             Ok(stream) => stream,
             Err(err) => {
                 tracing::warn!(
@@ -460,7 +519,9 @@ pub async fn app_subdomain_proxy_middleware(req: Request, next: Next) -> Respons
             }
         }
 
-        let Ok(upstream_ws_req) = req_builder.body(http_body_util::Empty::<axum::body::Bytes>::new()) else {
+        let Ok(upstream_ws_req) =
+            req_builder.body(http_body_util::Empty::<axum::body::Bytes>::new())
+        else {
             return (
                 StatusCode::BAD_GATEWAY,
                 Json(serde_json::json!({
@@ -502,7 +563,8 @@ pub async fn app_subdomain_proxy_middleware(req: Request, next: Next) -> Respons
                     Ok((client_upgraded, upstream_upgraded)) => {
                         let mut client_io = hyper_util::rt::TokioIo::new(client_upgraded);
                         let mut upstream_io = hyper_util::rt::TokioIo::new(upstream_upgraded);
-                        let _ = tokio::io::copy_bidirectional(&mut client_io, &mut upstream_io).await;
+                        let _ =
+                            tokio::io::copy_bidirectional(&mut client_io, &mut upstream_io).await;
                     }
                     Err(err) => {
                         tracing::debug!(error = %err, "subdomain websocket upgrade tunnel closed");
@@ -555,8 +617,8 @@ pub async fn app_subdomain_proxy_middleware(req: Request, next: Next) -> Respons
             .into_response();
     };
 
-    let reqwest_method = reqwest::Method::from_bytes(method_str.as_bytes())
-        .unwrap_or(reqwest::Method::GET);
+    let reqwest_method =
+        reqwest::Method::from_bytes(method_str.as_bytes()).unwrap_or(reqwest::Method::GET);
     let mut upstream_req = PROXY_HTTP_CLIENT.request(reqwest_method, &target_url);
 
     upstream_req = forward_proxy_http_headers(upstream_req, &incoming_headers, &raw_host);
@@ -617,10 +679,10 @@ pub async fn app_subdomain_proxy_middleware(req: Request, next: Next) -> Respons
 
 fn is_host_trusted(candidate_raw: &str, allowed_set: &HashSet<String>) -> bool {
     let trimmed = candidate_raw.trim().to_lowercase();
-    if trimmed.is_empty() {
-        return true;
+    let clean = strip_host_port_and_dot(candidate_raw);
+    if clean.is_empty() {
+        return false;
     }
-    let clean = strip_host_port_and_dot(&trimmed);
 
     if allowed_set.contains(&trimmed) || allowed_set.contains(&clean) {
         return true;
@@ -661,7 +723,11 @@ pub async fn host_validation_middleware(req: Request, next: Next) -> Response {
         return next.run(req).await;
     }
 
-    if let Some(host_val) = req.headers().get(header::HOST).and_then(|v| v.to_str().ok()) {
+    if let Some(host_val) = req
+        .headers()
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+    {
         if !is_host_trusted(host_val, &allowed_set) {
             return api_error(
                 StatusCode::BAD_REQUEST,
@@ -740,8 +806,6 @@ static AUTH_RATE_LIMITER: Lazy<SlidingWindowLimiter> =
     Lazy::new(|| SlidingWindowLimiter::new(10, Duration::from_secs(60)));
 static OIDC_RATE_LIMITER: Lazy<SlidingWindowLimiter> =
     Lazy::new(|| SlidingWindowLimiter::new(20, Duration::from_secs(60)));
-static WEBHOOK_RATE_LIMITER: Lazy<SlidingWindowLimiter> =
-    Lazy::new(|| SlidingWindowLimiter::new(30, Duration::from_secs(60)));
 static AI_RATE_LIMITER: Lazy<SlidingWindowLimiter> =
     Lazy::new(|| SlidingWindowLimiter::new(20, Duration::from_secs(60)));
 
@@ -801,17 +865,6 @@ pub async fn oidc_rate_limit_middleware(req: Request, next: Next) -> Response {
     next.run(req).await
 }
 
-pub async fn webhook_rate_limit_middleware(req: Request, next: Next) -> Response {
-    if rate_limit_disabled() {
-        return next.run(req).await;
-    }
-    let ip = extract_request_ip(&req);
-    if !WEBHOOK_RATE_LIMITER.allow(&ip) {
-        return rate_limited_response();
-    }
-    next.run(req).await
-}
-
 pub async fn ai_rate_limit_middleware(req: Request, next: Next) -> Response {
     if rate_limit_disabled() {
         return next.run(req).await;
@@ -832,34 +885,21 @@ pub async fn quota_upload_guard_middleware(req: Request, next: Next) -> Response
         return api_error(StatusCode::UNAUTHORIZED, "UNAUTHORIZED", "Unauthorized");
     };
     let user_id = auth_user.user_id;
-
-    let content_length: i64 = req
-        .headers()
-        .get(header::CONTENT_LENGTH)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.trim().parse::<i64>().ok())
-        .unwrap_or(0)
-        .max(0);
-
-    if let Ok(conn) = af_db::get_conn() {
-        if let Ok((quota_bytes, used_bytes)) = conn.query_row(
-            "SELECT COALESCE(quota_bytes, 0), COALESCE(used_bytes, 0) FROM user_quotas WHERE user_id = ?1",
-            params![user_id],
-            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
-        ) {
-            if quota_bytes > 0
-                && (used_bytes >= quota_bytes
-                    || used_bytes.saturating_add(content_length) > quota_bytes)
-            {
-                return api_error(
-                    StatusCode::PAYLOAD_TOO_LARGE,
-                    "QUOTA_EXCEEDED",
-                    "Storage quota exceeded. Free up space or contact an administrator.",
-                );
-            }
+    match tokio::task::spawn_blocking(move || {
+        crate::mcbrowser::check_user_quota_pre_mutation(user_id, 0)
+    })
+    .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => return error.into_response(),
+        Err(_) => {
+            return api_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "INTERNAL_ERROR",
+                "Storage authorization worker failed",
+            )
         }
     }
-
     next.run(req).await
 }
 
@@ -868,13 +908,46 @@ mod proxy_header_tests {
     use super::*;
 
     #[test]
+    fn authority_validation_rejects_userinfo_and_non_numeric_ports() {
+        let allowed = HashSet::from(["localhost".to_string()]);
+        for invalid in [
+            "localhost:@example.test",
+            "localhost:word",
+            "localhost:65536",
+            "localhost:80:90",
+            "localhost\\example.test",
+            " localhost",
+            "localhost/evil",
+            "[::1]:bad",
+        ] {
+            assert!(strip_host_port_and_dot(invalid).is_empty(), "{invalid}");
+            assert!(!is_host_trusted(invalid, &allowed), "{invalid}");
+        }
+        for (input, expected) in [
+            ("LOCALHOST.:8080", "localhost"),
+            ("example.test:443", "example.test"),
+            ("[::1]:8080", "::1"),
+            ("::1", "::1"),
+            ("[2001:db8::1]", "2001:db8::1"),
+        ] {
+            assert_eq!(strip_host_port_and_dot(input), expected);
+        }
+    }
+
+    #[test]
     fn forwards_public_host_once_and_filters_untrusted_headers() {
         let mut headers = axum::http::HeaderMap::new();
-        headers.insert(header::HOST, HeaderValue::from_static("jellyfin.example.com"));
+        headers.insert(
+            header::HOST,
+            HeaderValue::from_static("jellyfin.example.com"),
+        );
         headers.insert(header::CONNECTION, HeaderValue::from_static("keep-alive"));
         headers.insert("x-aetherflow-user", HeaderValue::from_static("spoofed"));
         headers.insert("x-forwarded-proto", HeaderValue::from_static("https"));
-        headers.insert("authorization", HeaderValue::from_static("Bearer test-token"));
+        headers.insert(
+            "authorization",
+            HeaderValue::from_static("Bearer test-token"),
+        );
         let request = forward_proxy_http_headers(
             reqwest::Client::new().get("http://127.0.0.1:8096/health"),
             &headers,
@@ -885,7 +958,10 @@ mod proxy_header_tests {
 
         assert_eq!(request.headers().get_all(header::HOST).iter().count(), 1);
         assert_eq!(request.headers()[header::HOST], "jellyfin.example.com");
-        assert_eq!(request.headers()["x-forwarded-host"], "jellyfin.example.com");
+        assert_eq!(
+            request.headers()["x-forwarded-host"],
+            "jellyfin.example.com"
+        );
         assert_eq!(request.headers()["x-forwarded-proto"], "https");
         assert_eq!(request.headers()["authorization"], "Bearer test-token");
         assert!(!request.headers().contains_key(header::CONNECTION));
@@ -921,9 +997,7 @@ mod tests {
                             Ok(0) | Err(_) => return,
                             Ok(n) => {
                                 buf.extend_from_slice(&temp[..n]);
-                                if let Some(pos) =
-                                    buf.windows(4).position(|w| w == b"\r\n\r\n")
-                                {
+                                if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
                                     break pos;
                                 }
                             }

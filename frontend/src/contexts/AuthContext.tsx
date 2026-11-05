@@ -3,6 +3,8 @@
 import React, { createContext, useContext, useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { apiFetch } from '@/lib/fetcher';
+import { navigateBrowser } from '@/lib/browser-navigation';
+import { loginReturnToFromLocation, navigateToLoginDestination } from '@/lib/login-navigation';
 import { mutate as globalMutate } from 'swr';
 import { useConnectionStore } from '@/store/useConnectionStore';
 
@@ -161,16 +163,18 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     }, [isAuthenticated]);
 
     const login = () => {
-        // Redirect to the Go backend to start the OAuth2 flow
-        window.location.href = '/api/v1/public/auth/google/login';
+        const returnTo = loginReturnToFromLocation();
+        const query = returnTo === '/' ? '' : `?return_to=${encodeURIComponent(returnTo)}`;
+        navigateBrowser(`/api/v1/public/auth/google/login${query}`);
     };
 
     const loginLocal = () => {
+        const destination = loginReturnToFromLocation();
         lastAuthenticatedAtRef.current = Date.now();
-        // Re-check session after local login set the cookie, then redirect
+        // Re-check session after local login set the cookie, then resume authorization
         checkSession().then(() => {
             window.localStorage.setItem('af_login_sync', String(Date.now()));
-            router.push('/');
+            navigateToLoginDestination(destination, path => router.push(path));
         });
     };
 

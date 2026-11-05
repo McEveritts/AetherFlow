@@ -23,3 +23,36 @@ test('navigates to OAuth authorization via Google provider', async ({ page }) =>
   // Validate we arrived at the mock Google OAuth page
   await expect(page.locator('body')).toHaveText('Mock Google OAuth Page');
 });
+
+test('OIDC consent page forwards nonce query parameter in consent JSON request', async ({ page }) => {
+  await installAetherFlowMocks(page, { authenticated: true, setupRequired: false });
+  await stabilizeVisuals(page);
+
+  let capturedBody: Record<string, unknown> | null = null;
+  await page.route('**/api/v1/auth/oidc/consent', async (route) => {
+    capturedBody = route.request().postDataJSON();
+    await route.fulfill({
+      status: 400,
+      contentType: 'application/json',
+      body: JSON.stringify({ message: 'Intercepted for test' }),
+    });
+  });
+
+  await page.goto(
+    '/oauth/consent?client_id=test-oidc-client&redirect_uri=https%3A%2F%2Fapp.example.com%2Fcb&response_type=code&scope=openid%20profile&state=st-1&nonce=nonce-e2e-777&code_challenge=cc-1&code_challenge_method=S256'
+  );
+
+  await expect(page.getByRole('button', { name: 'Grant Authorization' })).toBeVisible();
+  await page.getByRole('button', { name: 'Grant Authorization' }).click();
+
+  await expect.poll(() => capturedBody).toMatchObject({
+    client_id: 'test-oidc-client',
+    redirect_uri: 'https://app.example.com/cb',
+    response_type: 'code',
+    state: 'st-1',
+    nonce: 'nonce-e2e-777',
+    code_challenge: 'cc-1',
+    code_challenge_method: 'S256',
+    approved: true,
+  });
+});
