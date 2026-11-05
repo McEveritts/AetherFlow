@@ -29,20 +29,34 @@ report_progress 10 "Setting up Node.js runtime and prerequisites for The Lounge.
 DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl ca-certificates build-essential python3 python3-setuptools >> "$LOGFILE" 2>&1
 
-ensure_node 20
+ensure_node 22
+
+NODE_PATH="$(command -v node)"
+NODE_ARGS=()
+TL_BIN=/usr/local/bin/thelounge
+SQLITE_CHECK="const { DatabaseSync } = require(\"node:sqlite\"); new DatabaseSync(\":memory:\").close();"
+if ! "${NODE_PATH}" -e "$SQLITE_CHECK" >> "$LOGFILE" 2>&1; then
+    if "${NODE_PATH}" --experimental-sqlite -e "$SQLITE_CHECK" >> "$LOGFILE" 2>&1; then
+        NODE_ARGS=(--experimental-sqlite)
+    else
+        log_error "The Lounge requires a Node.js runtime with working node:sqlite support."
+        exit 1
+    fi
+fi
 
 if ! id -u thelounge >/dev/null 2>&1; then
     useradd --system --user-group --create-home --home-dir /var/lib/thelounge --shell /usr/sbin/nologin thelounge
 fi
 
-mkdir -p /var/lib/thelounge
+mkdir -p /var/lib/thelounge/users
 
 report_progress 40 "Installing The Lounge with its complete dependency build toolchain..."
 install_npm_app thelounge /opt/thelounge /usr/local/bin/thelounge
 
-TL_VER="$(/usr/local/bin/thelounge -v 2>/dev/null || true)"
-if [[ -n "$TL_VER" ]]; then
-    printf '%s\n' "${TL_VER#v}" > /var/lib/thelounge/.af-version
+TL_VER="$("${NODE_PATH}" "${NODE_ARGS[@]}" "${TL_BIN}" -v)"
+if [[ ! "$TL_VER" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]]; then
+    log_error "The Lounge did not report a valid installed version."
+    exit 1
 fi
 
 report_progress 65 "Configuring The Lounge state and ports..."
@@ -64,11 +78,19 @@ fi
 
 chown -R thelounge:thelounge /var/lib/thelounge
 
-NODE_PATH="$(command -v node || echo /usr/bin/node)"
-TL_BIN=/usr/local/bin/thelounge
-
 if [[ ! -f "/var/lib/thelounge/users/${MASTER_USER}.json" ]]; then
-    printf '%s\n' "${MASTER_PASS}" | sudo -u thelounge THELOUNGE_HOME=/var/lib/thelounge "${NODE_PATH}" "${TL_BIN}" add "${MASTER_USER}" >> "$LOGFILE" 2>&1 || true
+    printf '%s' "${MASTER_PASS}" | sudo -u thelounge THELOUNGE_HOME=/var/lib/thelounge \
+        "${NODE_PATH}" "${NODE_ARGS[@]}" -e '
+const fs = require("fs");
+const [binary, username] = process.argv.slice(1);
+process.argv = [process.execPath, binary, "add", username,
+    "--password", fs.readFileSync(0, "utf8"), "--save-logs"];
+require(binary);
+' "${TL_BIN}" "${MASTER_USER}" >> "$LOGFILE" 2>&1
+    if [[ ! -s "/var/lib/thelounge/users/${MASTER_USER}.json" ]]; then
+        log_error "The Lounge did not create the configured user account."
+        exit 1
+    fi
 fi
 chown -R thelounge:thelounge /var/lib/thelounge
 
@@ -83,7 +105,7 @@ Type=simple
 User=thelounge
 Group=thelounge
 Environment=THELOUNGE_HOME=/var/lib/thelounge
-ExecStart=${NODE_PATH} ${TL_BIN} start
+ExecStart=${NODE_PATH} ${NODE_ARGS[*]} ${TL_BIN} start
 Restart=on-failure
 RestartSec=5
 
@@ -92,8 +114,18 @@ WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload >> "$LOGFILE" 2>&1
-systemctl enable --now thelounge >> "$LOGFILE" 2>&1
+systemctl enable thelounge >> "$LOGFILE" 2>&1
+systemctl restart thelounge >> "$LOGFILE" 2>&1
 
+if ! curl --fail --silent --show-error --output /dev/null --connect-timeout 2 --max-time 5 \
+    --retry 20 --retry-connrefused --retry-delay 1 --retry-max-time 60 \
+    "http://127.0.0.1:${APP_PORT}/" >> "$LOGFILE" 2>&1 \
+    || ! systemctl is-active --quiet thelounge; then
+    log_error "The Lounge failed its HTTP and service readiness checks."
+    exit 1
+fi
+
+printf '%s\n' "${TL_VER#v}" > /var/lib/thelounge/.af-version
 write_lock "${PACKAGE_NAME}"
 report_progress 100 "The Lounge installed on port ${APP_PORT}."
 log_info "${PACKAGE_NAME} installed successfully"

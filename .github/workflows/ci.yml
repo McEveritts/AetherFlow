@@ -49,6 +49,7 @@ jobs:
       - name: Test Dependency Preparation and Marketplace Lifecycle
         run: |
           python3 -m unittest discover -s tests -p 'test_node_installers.py' -v
+          python3 -m unittest discover -s tests -p 'test_thelounge_installer.py' -v
           python3 -m unittest discover -s tests -p 'test_marketplace*.py' -v
           python3 tests/check_shell_hygiene.py
 
