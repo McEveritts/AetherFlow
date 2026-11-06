@@ -277,6 +277,9 @@ cat > "${RM_ROOT}/deploy/release-manager.conf" <<EOF
 RELEASES_DIR="${RM_ROOT}/releases"
 CURRENT_LINK="${RM_ROOT}/current"
 REPO_DIR="${RM_ROOT}/repo"
+LEGACY_OPT_ROOT="${RM_ROOT}/opt/AetherFlow"
+DRY_RUN_ROOT="${RM_ROOT}/dry-run"
+CLI_BIN_DIR="${RM_ROOT}/usr/local/bin"
 DATA_DIR="${RM_ROOT}/data"
 SQLITE_DB="aetherflow.sqlite"
 LOG_FILE="${RM_ROOT}/deploy.log"
@@ -289,7 +292,6 @@ GIT_REMOTE="origin"
 GIT_BRANCH="main"
 GO_BIN="/usr/local/go/bin/go"
 NODE_HEAP_MB=1024
-API_PORT=8080
 HEALTH_ENDPOINT="http://127.0.0.1:8080/health/ready"
 HEALTH_RETRIES=2
 HEALTH_INTERVAL=0
