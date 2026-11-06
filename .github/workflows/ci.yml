@@ -166,6 +166,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: "backend-rs -> target"
+          cache-targets: "false"
 
       - name: Download Frontend Static Export (Neutral & Legacy Staging)
         uses: actions/download-artifact@v4

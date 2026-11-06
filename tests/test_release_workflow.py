@@ -23,6 +23,34 @@ def step_script(name):
     return textwrap.dedent(step.group(1).split("        run: |\n", 1)[1]).strip()
 
 
+class RustCacheWorkflowTests(unittest.TestCase):
+    def test_rust_jobs_cache_downloads_without_compiled_artifacts(self):
+        jobs = {
+            "ci.yml": ["backend-rs"],
+            "release.yml": ["security-gate", "release-build"],
+            "security.yml": ["rust-security"],
+        }
+        for filename, job_names in jobs.items():
+            workflow = (WORKFLOW.parent / filename).read_text()
+            for job_name in job_names:
+                with self.subTest(workflow=filename, job=job_name):
+                    job = re.search(
+                        rf"^  {re.escape(job_name)}:\n(.*?)(?=^  [\w-]+:|\Z)",
+                        workflow,
+                        re.MULTILINE | re.DOTALL,
+                    )
+                    self.assertIsNotNone(job, f"Missing Rust job: {job_name}")
+                    steps = re.findall(
+                        r"^      - name: [^\n]+\n(.*?)(?=^      - |\Z)",
+                        job.group(1),
+                        re.MULTILINE | re.DOTALL,
+                    )
+                    caches = [step for step in steps if "uses: Swatinem/rust-cache@" in step]
+                    self.assertEqual(len(caches), 1)
+                    self.assertIn("          cache-targets: \"false\"\n", caches[0])
+                    self.assertIn("          workspaces: \"backend-rs -> target\"\n", caches[0])
+
+
 class ReleaseWorkflowTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
