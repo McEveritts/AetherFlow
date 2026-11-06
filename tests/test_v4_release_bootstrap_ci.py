@@ -181,6 +181,11 @@ class V4ReleaseBootstrapCiTests(unittest.TestCase):
         self.assertNotIn('unmaintained = "warn"', policy)
         self.assertNotIn('unsound = "deny"', policy)
 
+    def test_advisory_tools_use_separate_database_roots(self):
+        policy = (ROOT / "backend-rs/deny.toml").read_text(encoding="utf-8")
+        self.assertIn('db-path = "~/.cargo/advisory-dbs"', policy)
+        self.assertNotIn('db-path = "~/.cargo/advisory-db"', policy)
+
     def test_local_workspace_dependencies_are_explicitly_versioned(self):
         workspace_manifest = (ROOT / "backend-rs/Cargo.toml").read_text(encoding="utf-8")
         local_dependencies = [

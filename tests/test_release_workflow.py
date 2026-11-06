@@ -141,6 +141,19 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn("--prerelease", command)
         self.assertIn("--latest=false", command)
 
+    def test_manual_nightly_tag_keeps_requested_version(self):
+        tag = "v4.0.0-nightly.89.1"
+        identity = self.resolve(
+            GITHUB_EVENT_NAME="workflow_dispatch",
+            REQUESTED_CHANNEL="nightly",
+            GITHUB_REF=f"refs/tags/{tag}",
+            GITHUB_REF_NAME=tag,
+        )
+        self.assertEqual(identity, {"RELEASE_TAG": tag, "VERSION_STAMP": tag})
+        command = self.publish(tag)
+        self.assertIn("--prerelease", command)
+        self.assertIn("--latest=false", command)
+
     def test_invalid_base_version_fails_closed(self):
         (self.root / ".version").write_text("v4.0.0-experimental\n")
         result = self.run_step("Resolve Release Identity")
