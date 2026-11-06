@@ -5087,6 +5087,20 @@ mod tests {
             return;
         }
         let (root, connection) = lifecycle_status_fixture();
+        let package_id = "lifecycle-admission-fixture";
+        let package = af_models::Package {
+            name: package_id.into(),
+            label: "Lifecycle admission fixture".into(),
+            service_name: package_id.into(),
+            lock_file: "/install/.lifecycle-admission-fixture.lock".into(),
+            ..Default::default()
+        };
+        let catalog = root.join("catalog.json");
+        let automation = root.join("automation.json");
+        std::fs::write(&catalog, serde_json::to_vec(&vec![package]).unwrap()).unwrap();
+        std::fs::write(&automation, "{}").unwrap();
+        std::env::set_var("AETHERFLOW_PACKAGES_CONFIG", catalog);
+        std::env::set_var("AETHERFLOW_PACKAGE_AUTOMATION_CONFIG", automation);
         std::env::set_var(
             "AETHERFLOW_RUNNER_SOCK",
             format!(
@@ -5097,15 +5111,19 @@ mod tests {
         af_db::init_db().unwrap();
         let scripts = root.join("packages/package/install");
         std::fs::create_dir_all(&scripts).unwrap();
-        std::fs::write(
-            scripts.join("installpackage-sonarr"),
-            "#!/bin/sh\nexit 91\n",
-        )
-        .unwrap();
+        let script_name = format!("installpackage-{package_id}");
+        let script = scripts.join(&script_name);
+        std::fs::write(&script, "#!/bin/sh\nexit 91\n").unwrap();
+        let previous_directory = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&root).unwrap();
+        assert_eq!(
+            af_runner::resolve_package_script_path("install", &script_name),
+            Some(std::path::PathBuf::from("packages/package/install").join(&script_name))
+        );
         assert!(af_services::try_start_package_job(
             af_services::PackageJobInfo {
                 job_id: "abandoned-install".into(),
-                package_id: "sonarr".into(),
+                package_id: package_id.into(),
                 action: "install".into(),
                 status: "installing".into(),
                 progress: 20,
@@ -5113,14 +5131,14 @@ mod tests {
                 started_at: "fixture-start".into(),
             }
         ));
-        drop(af_services::take_package_job_lease("sonarr", "abandoned-install").unwrap());
+        drop(af_services::take_package_job_lease(package_id, "abandoned-install").unwrap());
         assert_eq!(
-            af_services::package_job_snapshot().unwrap().active["sonarr"].status,
+            af_services::package_job_snapshot().unwrap().active[package_id].status,
             "installing"
         );
         let execution_blocked = af_services::PACKAGE_LIFECYCLE_MUTEX.lock().await;
         let response = dispatch_package_lifecycle(
-            "sonarr".into(),
+            package_id.into(),
             "install",
             "installing",
             false,
@@ -5128,19 +5146,20 @@ mod tests {
             HeaderMap::new(),
         )
         .await;
-        assert_eq!(response.status(), StatusCode::OK);
+        let response_status = response.status();
         let body = axum::body::to_bytes(response.into_body(), 4096)
             .await
             .unwrap();
         let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(response_status, StatusCode::OK, "{payload}");
         let identity = payload["job_id"].as_str().unwrap();
         assert_ne!(identity, "abandoned-install");
         assert_eq!(
-            af_services::package_job_snapshot().unwrap().active["sonarr"].job_id,
+            af_services::package_job_snapshot().unwrap().active[package_id].job_id,
             identity
         );
         let rejected = dispatch_package_lifecycle(
-            "sonarr".into(),
+            package_id.into(),
             "install",
             "installing",
             false,
@@ -5150,16 +5169,17 @@ mod tests {
         .await;
         assert_eq!(rejected.status(), StatusCode::CONFLICT);
         assert!(af_services::finish_package_job(
-            "sonarr",
+            package_id,
             "install",
             true,
             "late",
             "abandoned-install"
         )
         .is_none());
-        af_services::finish_package_job("sonarr", "install", true, "fixture done", identity)
+        af_services::finish_package_job(package_id, "install", true, "fixture done", identity)
             .unwrap();
         drop(connection);
+        std::env::set_current_dir(previous_directory).unwrap();
         std::fs::remove_dir_all(root).unwrap();
         drop(execution_blocked);
     }
