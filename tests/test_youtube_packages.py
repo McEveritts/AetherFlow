@@ -34,6 +34,7 @@ curl() { [[ "${MOCK_FAIL_HTTP:-0}" != 1 ]]; }
 systemctl() {
     record "systemctl $*"
     if [[ "$1" == restart && "${MOCK_FAIL_START:-0}" == 1 ]]; then return 42; fi
+    if [[ "$1" == stop && "${MOCK_FAIL_STOP:-0}" == 1 ]]; then return 42; fi
     if [[ "$1" == disable && "${MOCK_FAIL_REMOVE:-0}" == 1 ]]; then return 42; fi
 }
 install() {
@@ -120,7 +121,8 @@ class YouTubeLifecycleTest(unittest.TestCase):
         self.root = Path(self.temp.name)
         for directory in ("etc/systemd/system", "var/lib", "var/log/aetherflow", "opt", "install", "tmp"):
             (self.root / directory).mkdir(parents=True)
-        (self.root / "common.sh").write_text(COMMON + common_functions("node_build"))
+        helpers = common_functions("node_build", "systemd_unit_inactive", "stop_systemd_unit", "purge_systemd_unit")
+        (self.root / "common.sh").write_text(COMMON + self.rewrite(helpers))
         (self.root / "overrides.sh").write_text(OVERRIDES)
         helper = self.rewrite((REPO / "packages/youtube-common.sh").read_text())
         (self.root / "youtube-common.sh").write_text(helper)
@@ -181,9 +183,14 @@ class YouTubeLifecycleTest(unittest.TestCase):
                     self.assertIn("BG_HELPER_URL:https://tokens.example.com", (config_dir / "config.properties").read_text())
                 marker = self.root / f"var/lib/{app}/keep"
                 marker.touch()
-                result = self.run_script(app, "remove", MOCK_FAIL_REMOVE="1")
-                self.assertNotEqual(result.returncode, 0)
-                self.assertTrue(lock.exists())
+                units = list((self.root / "etc/systemd/system").glob(f"af-{app}*.service"))
+                self.assertGreater(len(units), 1)
+                for failure in ("MOCK_FAIL_STOP", "MOCK_FAIL_REMOVE"):
+                    result = self.run_script(app, "remove", **{failure: "1"})
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertTrue(lock.exists())
+                    self.assertTrue(marker.exists())
+                    self.assertTrue(all(unit.exists() for unit in units))
                 result = self.run_script(app, "remove")
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertFalse(lock.exists())
