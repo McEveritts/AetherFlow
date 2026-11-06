@@ -527,3 +527,107 @@ where
 pub fn is_unsupported_error(err: &ReleaseError) -> bool {
     matches!(err, ReleaseError::Unsupported(_))
 }
+
+/// Called under the shared maintenance lock by both the launcher and local
+/// release engine. API orchestration also covers pre-stop and post-script work;
+/// the runner's script lock alone cannot protect those phases.
+pub fn ensure_no_active_package_lifecycle_jobs(
+    cfg: &ReleaseConfig,
+    command: ReleaseCommand,
+) -> ReleaseResult<()> {
+    let path = crate::config::try_resolve_db_path(cfg, None)?.path;
+    if !path.exists() {
+        return Ok(());
+    }
+    // Reject a corrupt header before opening SQLite: even a read-only WAL
+    // connection can rebuild -shm. Explicit recovery must preserve those files
+    // until the rollback engine validates its snapshot and quiesces writers.
+    let mut header = [0u8; 16];
+    let mut file = std::fs::File::open(&path)
+        .map_err(|e| ReleaseError::io("reading lifecycle database header", e))?;
+    use std::io::Read;
+    let count = file
+        .read(&mut header)
+        .map_err(|e| ReleaseError::io("reading lifecycle database header", e))?;
+    if count == 0 {
+        return Ok(());
+    }
+    if count != 16 || &header != b"SQLite format 3\0" {
+        if command == ReleaseCommand::Rollback {
+            return Ok(());
+        }
+        return Err(ReleaseError::Config(
+            "Cannot verify application lifecycle journal: invalid SQLite header".into(),
+        ));
+    }
+    let active = (|| -> rusqlite::Result<bool> {
+        let conn = rusqlite::Connection::open_with_flags(
+            &path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+        )?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        let table: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='package_lifecycle_jobs')", [], |r| r.get(0))?;
+        if !table {
+            return Ok(false);
+        }
+        crate::lifecycle::reconcile_jobs(&conn, &path).map_err(|error| {
+            error
+                .downcast::<rusqlite::Error>()
+                .unwrap_or_else(|error| rusqlite::Error::InvalidParameterName(error.to_string()))
+        })?;
+        conn.query_row("SELECT EXISTS(SELECT 1 FROM package_lifecycle_jobs WHERE status NOT IN ('completed','failed','interrupted'))", [], |r| r.get(0))
+    })();
+    let active = match active {
+        Ok(active) => active,
+        // Explicit rollback must still be able to recover a corrupt database.
+        // Other I/O, busy, or permission errors remain fail-closed.
+        Err(rusqlite::Error::SqliteFailure(error, _))
+            if command == ReleaseCommand::Rollback
+                && matches!(
+                    error.code,
+                    rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase
+                ) =>
+        {
+            false
+        }
+        Err(error) => {
+            return Err(ReleaseError::Config(format!(
+                "Cannot verify application lifecycle journal: {}",
+                error
+            )))
+        }
+    };
+    if active {
+        return Err(ReleaseError::LockBusy {
+            lock_path: path,
+            reason: "Application lifecycle orchestration is active".into(),
+        });
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod package_admission_tests {
+    use super::*;
+    #[test]
+    fn durable_api_jobs_block_updates_in_pre_stop_and_post_script_phases() {
+        let root = std::env::temp_dir().join(format!("af-api-admission-{}", uuid::Uuid::new_v4()));
+        let cfg = ReleaseConfig::for_root(&root);
+        let path = crate::config::try_resolve_db_path(&cfg, None).unwrap().path;
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch("CREATE TABLE package_lifecycle_jobs(status TEXT); INSERT INTO package_lifecycle_jobs VALUES ('updating');").unwrap();
+        assert!(ensure_no_active_package_lifecycle_jobs(&cfg, ReleaseCommand::Deploy).is_err());
+        conn.execute("UPDATE package_lifecycle_jobs SET status='failed'", [])
+            .unwrap();
+        assert!(ensure_no_active_package_lifecycle_jobs(&cfg, ReleaseCommand::Deploy).is_ok());
+        conn.execute("UPDATE package_lifecycle_jobs SET status='interrupted'", [])
+            .unwrap();
+        assert!(ensure_no_active_package_lifecycle_jobs(&cfg, ReleaseCommand::Deploy).is_ok());
+        drop(conn);
+        std::fs::write(&path, b"corrupt database fixture").unwrap();
+        assert!(ensure_no_active_package_lifecycle_jobs(&cfg, ReleaseCommand::Deploy).is_err());
+        assert!(ensure_no_active_package_lifecycle_jobs(&cfg, ReleaseCommand::Rollback).is_ok());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}

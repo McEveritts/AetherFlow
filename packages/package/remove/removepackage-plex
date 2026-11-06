@@ -28,8 +28,8 @@ report_progress 20 "Stopping and disabling plexmediaserver service..."
 purge_systemd_unit "plexmediaserver"
 
 report_progress 50 "Purging plexmediaserver APT package and repositories..."
-DEBIAN_FRONTEND=noninteractive apt-get "$APT_REMOVE_ACTION" -y -qq plexmediaserver >> "$LOGFILE" 2>&1 || true
-DEBIAN_FRONTEND=noninteractive apt-get autoremove -y -qq >> "$LOGFILE" 2>&1 || true
+DEBIAN_FRONTEND=noninteractive apt-get "$APT_REMOVE_ACTION" -y -qq plexmediaserver >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get autoremove -y -qq >> "$LOGFILE" 2>&1
 rm -f /etc/apt/sources.list.d/plexmediaserver.list /etc/apt/keyrings/plex.gpg
 
 report_progress 80 "Removing Plex data, caches, and user account..."
@@ -38,7 +38,7 @@ if [[ "${DELETE_DATA:-false}" == true ]]; then
     rm -rf /var/lib/plexmediaserver /etc/default/plexmediaserver
 fi
 purge_system_user "plex"
-systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
+systemctl daemon-reload >> "$LOGFILE" 2>&1
 
 remove_lock "${PACKAGE_NAME}"
 report_progress 100 "Plex Media Server removed; application data retained unless DELETE_DATA=true."

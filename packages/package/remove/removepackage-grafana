@@ -28,8 +28,8 @@ report_progress 20 "Stopping and disabling grafana-server.service..."
 purge_systemd_unit "grafana-server"
 
 report_progress 50 "Purging Grafana APT package and repository..."
-DEBIAN_FRONTEND=noninteractive apt-get "$APT_REMOVE_ACTION" -y -qq grafana >> "$LOGFILE" 2>&1 || true
-DEBIAN_FRONTEND=noninteractive apt-get autoremove -y -qq >> "$LOGFILE" 2>&1 || true
+DEBIAN_FRONTEND=noninteractive apt-get "$APT_REMOVE_ACTION" -y -qq grafana >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get autoremove -y -qq >> "$LOGFILE" 2>&1
 rm -f /etc/apt/sources.list.d/grafana.list /etc/apt/keyrings/grafana.gpg
 
 report_progress 80 "Removing Grafana state, logs, configuration, and user account..."
@@ -38,7 +38,7 @@ if [[ "${DELETE_DATA:-false}" == true ]]; then
     rm -rf /var/lib/grafana /etc/grafana
 fi
 purge_system_user "grafana"
-systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
+systemctl daemon-reload >> "$LOGFILE" 2>&1
 
 remove_lock "${PACKAGE_NAME}"
 report_progress 100 "Grafana removed; application data retained unless DELETE_DATA=true."

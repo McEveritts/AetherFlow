@@ -31,7 +31,7 @@ if [[ "${DELETE_DATA:-false}" == true ]]; then
     rm -rf /home/homeassistant
 fi
 purge_system_user "homeassistant"
-systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
+systemctl daemon-reload >> "$LOGFILE" 2>&1
 
 remove_lock "${PACKAGE_NAME}"
 report_progress 100 "Home Assistant removed; application data retained unless DELETE_DATA=true."

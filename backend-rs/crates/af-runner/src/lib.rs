@@ -24,10 +24,25 @@ use tokio::sync::Mutex;
 pub use af_host;
 pub use af_release;
 
+pub mod bounded_command;
+mod job_receipts;
+mod legacy_stream_output;
+#[cfg(all(test, unix))]
+mod lifecycle_tests;
 pub mod network;
-pub mod quota;
 pub mod package_executor;
+pub mod package_lifecycle;
+pub mod quota;
 pub mod self_update;
+
+tokio::task_local! {
+    pub static PACKAGE_JOB_ID: String;
+    static PACKAGE_MAINTENANCE_LEASE: std::sync::Arc<af_release::ReleaseLockGuard>;
+}
+
+pub fn current_package_job_id() -> String {
+    PACKAGE_JOB_ID.try_with(Clone::clone).unwrap_or_default()
+}
 pub use package_executor::*;
 
 pub const DEFAULT_RUNNER_SOCKET_PATH: &str = "/run/aetherflow/runner.sock";
@@ -57,7 +72,15 @@ pub static SAFE_QUOTA_SIZE_REGEX: Lazy<Regex> =
 
 static ALLOWED_SERVICE_ACTIONS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
     [
-        "start", "stop", "restart", "reload", "enable", "disable", "status", "heal",
+        "start",
+        "stop",
+        "restart",
+        "reload",
+        "enable",
+        "disable",
+        "status",
+        "heal",
+        "restart-deferred",
     ]
     .into()
 });
@@ -306,6 +329,32 @@ async fn handle_health() -> Json<RunnerResponse> {
     })
 }
 
+/// Schedule core restarts independently so killing the API/runner does not kill
+/// the response reporting acceptance. Completion remains a status/readiness check.
+fn deferred_restart_arguments(service: &str) -> Result<Vec<String>, String> {
+    let service = service.trim_end_matches(".service");
+    if !matches!(service, "aetherflow-api" | "aetherflow-runner") {
+        return Err("Deferred restart is restricted to core API/runner services".into());
+    }
+    Ok(vec![
+        format!(
+            "--unit={}",
+            build_self_update_transient_unit_name("restart", service)
+        ),
+        "--on-active=2s".into(),
+        "--timer-property=AccuracySec=100ms".into(),
+        "--timer-property=RemainAfterElapse=no".into(),
+        "--collect".into(),
+        "--quiet".into(),
+        "--".into(),
+        "/bin/bash".into(),
+        "-c".into(),
+        include_str!("core_restart_worker.sh").into(),
+        "aetherflow-core-restart".into(),
+        service.into(),
+    ])
+}
+
 async fn handle_systemctl(Json(req): Json<SystemctlRequest>) -> (StatusCode, Json<RunnerResponse>) {
     if !ALLOWED_SERVICE_ACTIONS.contains(req.action.as_str()) {
         return (
@@ -332,16 +381,25 @@ async fn handle_systemctl(Json(req): Json<SystemctlRequest>) -> (StatusCode, Jso
     // The persistent flock file's existence alone never means a job is active.
     let _heal_mutex;
     let _heal_flock;
-    let action = if req.action == "heal" {
+    let action = if req.action != "status" {
         _heal_mutex = match PACKAGE_MUTEX.try_lock() {
             Ok(guard) => Some(guard),
             Err(_) => {
                 return (
-                    StatusCode::OK,
+                    if req.action == "heal" {
+                        StatusCode::OK
+                    } else {
+                        StatusCode::CONFLICT
+                    },
                     Json(RunnerResponse {
-                        success: true,
-                        output: "skipped".into(),
-                        error: String::new(),
+                        success: req.action == "heal",
+                        output: if req.action == "heal" { "skipped" } else { "" }.into(),
+                        error: if req.action == "heal" {
+                            ""
+                        } else {
+                            "Package lifecycle operation is active"
+                        }
+                        .into(),
                     }),
                 )
             }
@@ -353,11 +411,20 @@ async fn handle_systemctl(Json(req): Json<SystemctlRequest>) -> (StatusCode, Jso
             Ok(guard) => Some(guard),
             Err(PackageExecutorError::LockConflict(_)) => {
                 return (
-                    StatusCode::OK,
+                    if req.action == "heal" {
+                        StatusCode::OK
+                    } else {
+                        StatusCode::CONFLICT
+                    },
                     Json(RunnerResponse {
-                        success: true,
-                        output: "skipped".into(),
-                        error: String::new(),
+                        success: req.action == "heal",
+                        output: if req.action == "heal" { "skipped" } else { "" }.into(),
+                        error: if req.action == "heal" {
+                            ""
+                        } else {
+                            "Package lifecycle operation is active"
+                        }
+                        .into(),
                     }),
                 )
             }
@@ -372,24 +439,255 @@ async fn handle_systemctl(Json(req): Json<SystemctlRequest>) -> (StatusCode, Jso
                 )
             }
         };
-        "restart"
+        if req.action == "heal" {
+            "restart"
+        } else {
+            req.action.as_str()
+        }
     } else {
         _heal_mutex = None;
         _heal_flock = None;
         req.action.as_str()
     };
 
-    match tokio::time::timeout(
-        Duration::from_secs(45),
-        Command::new("systemctl")
-            .arg(action)
-            .arg("--")
-            .arg(&req.service)
-            .output(),
-    )
-    .await
-    {
-        Ok(Ok(out)) => {
+    let _maintenance_guard = if action != "status" {
+        match acquire_package_maintenance_guard(
+            PackageExecutionEnv::default().fs_root.as_deref(),
+            service_reservation_target(&req.service, action),
+            &req.lifecycle_job_id,
+            None,
+        )
+        .await
+        {
+            Ok(guard) => Some(guard),
+            Err(error) => {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(RunnerResponse {
+                        success: false,
+                        output: String::new(),
+                        error: error.to_string(),
+                    }),
+                )
+            }
+        }
+    } else {
+        None
+    };
+    if action == "restart-deferred" {
+        let mut args = match deferred_restart_arguments(&req.service) {
+            Ok(args) => args,
+            Err(error) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(RunnerResponse {
+                        success: false,
+                        output: String::new(),
+                        error,
+                    }),
+                )
+            }
+        };
+        let cfg = match resolve_validated_self_update_config(af_release::ReleaseChannel::Stable) {
+            Ok((cfg, _, _)) => cfg,
+            Err((code, error)) => {
+                return (
+                    code,
+                    Json(RunnerResponse {
+                        success: false,
+                        output: String::new(),
+                        error,
+                    }),
+                )
+            }
+        };
+        let lock_path = match resolve_self_update_lock_path_for_cfg(&cfg) {
+            Ok(path) => path,
+            Err((code, error)) => {
+                return (
+                    code,
+                    Json(RunnerResponse {
+                        success: false,
+                        output: String::new(),
+                        error,
+                    }),
+                )
+            }
+        };
+        let unit = args[0].trim_start_matches("--unit=").to_string();
+        let jobs_dir = match resolve_self_update_jobs_dir_for_cfg(&cfg) {
+            Ok(dir) => dir,
+            Err((code, error)) => {
+                return (
+                    code,
+                    Json(RunnerResponse {
+                        success: false,
+                        output: String::new(),
+                        error,
+                    }),
+                )
+            }
+        };
+        let path = jobs_dir.join(format!("{unit}.json"));
+        let _launch_owner = match job_receipts::begin_launch(&path) {
+            Ok(owner) => owner,
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(RunnerResponse {
+                        success: false,
+                        output: String::new(),
+                        error: error.to_string(),
+                    }),
+                )
+            }
+        };
+        let initial = SelfUpdateJobStatus {
+            status: "launching".into(),
+            completed: false,
+            success: false,
+            job_unit: unit.clone(),
+            error: String::new(),
+            exit_code: None,
+        };
+        if let Err(error) = write_self_update_job_status_atomic(&path, &initial) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(RunnerResponse {
+                    success: false,
+                    output: String::new(),
+                    error: error.to_string(),
+                }),
+            );
+        }
+        args.extend([
+            path.to_string_lossy().into_owned(),
+            unit.clone(),
+            lock_path.to_string_lossy().into_owned(),
+            env::var("AETHERFLOW_SYSTEMCTL_BIN").unwrap_or_else(|_| "/usr/bin/systemctl".into()),
+        ]);
+        #[cfg(unix)]
+        match _maintenance_guard.as_ref().unwrap().file_identity() {
+            Ok((device, inode)) => args.extend([device.to_string(), inode.to_string()]),
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(RunnerResponse {
+                        success: false,
+                        output: String::new(),
+                        error: error.to_string(),
+                    }),
+                )
+            }
+        }
+        match _launch_owner.directory_identity() {
+            Ok((device, inode)) => args.extend([device.to_string(), inode.to_string()]),
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(RunnerResponse {
+                        success: false,
+                        output: String::new(),
+                        error: error.to_string(),
+                    }),
+                )
+            }
+        }
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            Command::new("systemd-run")
+                .args(args)
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await;
+        if let Ok(Ok(output)) = &result {
+            if output.status.success() {
+                let mut running = initial.clone();
+                running.status = "running".into();
+                let observed = match job_receipts::compare_exchange(&path, &initial, &running) {
+                    Ok(observed) => observed,
+                    Err(error) => {
+                        return (
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            Json(RunnerResponse {
+                                success: false,
+                                output: String::new(),
+                                error: error.to_string(),
+                            }),
+                        );
+                    }
+                };
+                if observed.completed && !observed.success {
+                    return (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        Json(RunnerResponse {
+                            success: false,
+                            output: String::new(),
+                            error:
+                                "Core restart already failed; inspect its receipt and service logs."
+                                    .into(),
+                        }),
+                    );
+                }
+                return (
+                    StatusCode::ACCEPTED,
+                    Json(RunnerResponse {
+                        success: true,
+                        output: json!({
+                            "status": if observed.completed { observed.status.as_str() } else { "accepted" },
+                            "job_unit": unit,
+                            "completed": observed.completed,
+                            "success": observed.success,
+                        }).to_string(),
+                        error: String::new(),
+                    }),
+                );
+            }
+        }
+        let error = format!("Could not schedule core restart: {:?}", result);
+        if result.is_ok() {
+            let failure = SelfUpdateJobStatus {
+                status: "failed".into(),
+                completed: true,
+                success: false,
+                job_unit: unit,
+                error: error.clone(),
+                exit_code: Some(1),
+            };
+            let _ = job_receipts::compare_exchange(&path, &initial, &failure);
+        }
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(RunnerResponse {
+                success: false,
+                output: String::new(),
+                error,
+            }),
+        );
+    }
+
+    let mut command = Command::new("systemctl");
+    command
+        .arg(action)
+        .arg("--")
+        .arg(&req.service)
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    if let Some(guard) = &_maintenance_guard {
+        if let Err(error) = guard.preserve_in_child(command.as_std_mut()) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(RunnerResponse {
+                    success: false,
+                    output: String::new(),
+                    error: error.to_string(),
+                }),
+            );
+        }
+    }
+    match bounded_command::output(command, Duration::from_secs(40), 1024 * 1024).await {
+        Ok(out) => {
             let combined = format!(
                 "{}{}",
                 String::from_utf8_lossy(&out.stdout),
@@ -415,23 +713,16 @@ async fn handle_systemctl(Json(req): Json<SystemctlRequest>) -> (StatusCode, Jso
                 )
             }
         }
-        Ok(Err(e)) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
+        Err(error) => (
+            if error.kind() == std::io::ErrorKind::TimedOut {
+                StatusCode::GATEWAY_TIMEOUT
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            },
             Json(RunnerResponse {
                 success: false,
                 output: String::new(),
-                error: e.to_string(),
-            }),
-        ),
-        Err(_) => (
-            StatusCode::GATEWAY_TIMEOUT,
-            Json(RunnerResponse {
-                success: false,
-                output: String::new(),
-                error: format!(
-                    "systemctl {} {} timed out after 45s",
-                    req.action, req.service
-                ),
+                error: error.to_string(),
             }),
         ),
     }
@@ -451,13 +742,20 @@ async fn handle_package(Json(req): Json<PackageRunnerRequest>) -> Response {
     if req.app_port != 0 && !(1024..=65535).contains(&req.app_port) {
         return (StatusCode::BAD_REQUEST, "invalid application port").into_response();
     }
+    if req.delete_data && req.action != "remove" {
+        return (
+            StatusCode::BAD_REQUEST,
+            "data purge is only valid for package removal",
+        )
+            .into_response();
+    }
 
     if !can_resolve_package_operation(&req.action, &req.package_id, &req.script_name) {
         return (StatusCode::NOT_FOUND, "package script not found").into_response();
     }
 
     let engine = select_package_engine(&req.package_id);
-    let stream = execute_package_request_stream(req);
+    let stream = package_lifecycle::execute_coordinated_package_stream(req);
 
     let mut resp = Response::new(Body::from_stream(stream));
     resp.headers_mut().insert(
@@ -611,24 +909,11 @@ pub fn write_self_update_job_status_atomic(
     status_path: &Path,
     status: &SelfUpdateJobStatus,
 ) -> std::io::Result<()> {
-    if let Some(parent) = status_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let tmp_path = status_path.with_extension(format!("json.tmp.{}", std::process::id()));
-    let payload = serde_json::to_vec_pretty(status)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    {
-        let mut f = fs::File::create(&tmp_path)?;
-        std::io::Write::write_all(&mut f, &payload)?;
-        f.sync_all()?;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&tmp_path, fs::Permissions::from_mode(0o644));
-    }
-    fs::rename(&tmp_path, status_path)?;
-    Ok(())
+    job_receipts::write(status_path, status)
+}
+
+pub fn claim_self_update_job(status_path: &Path, unit: &str) -> std::io::Result<()> {
+    job_receipts::claim(status_path, unit)
 }
 
 type ValidatedSelfUpdateConfig = (af_release::ReleaseConfig, Option<PathBuf>, Option<PathBuf>);
@@ -664,6 +949,7 @@ async fn spawn_self_update_transient_unit(
     };
 
     let mut cmd = Command::new(&systemd_run);
+    cmd.kill_on_drop(true);
     cmd.arg(format!("--unit={}", unit_name))
         .arg("--collect")
         .arg("--no-block")
@@ -747,6 +1033,33 @@ async fn spawn_self_update_transient_unit(
     }
 }
 
+/// A successful launch request may already have a terminal worker receipt.
+/// `RunnerResponse::success` reports that the request was handled; the payload
+/// carries the actual operation result, including a fast failure.
+fn self_update_launch_response(
+    engine: &str,
+    command: &str,
+    channel: &str,
+    observed: &SelfUpdateJobStatus,
+) -> RunnerResponse {
+    RunnerResponse {
+        success: true,
+        output: json!({
+            "status": if observed.completed { observed.status.as_str() } else { "initiated" },
+            "completed": observed.completed,
+            "success": observed.success,
+            "error": observed.error,
+            "exit_code": observed.exit_code,
+            "engine": engine,
+            "command": command,
+            "channel": channel,
+            "job_unit": observed.job_unit,
+        })
+        .to_string(),
+        error: String::new(),
+    }
+}
+
 /// Validates and executes a `SelfUpdateRequest` using either the native Rust `af-release`
 /// engine (when `AETHERFLOW_ENABLE_RUST_RELEASE=1` and not `AETHERFLOW_FORCE_BASH_RELEASE=1`)
 /// or the legacy `deploy/release-manager.sh` script.
@@ -818,6 +1131,63 @@ pub async fn execute_self_update_request(
         }
     };
 
+    let _admission_guard = if background {
+        let guard = match af_release::ReleaseLockGuard::acquire(&cfg_lock_path, Duration::ZERO) {
+            Ok(guard) => guard,
+            Err(err) => {
+                return (
+                    StatusCode::CONFLICT,
+                    RunnerResponse {
+                        success: false,
+                        output: String::new(),
+                        error: format!("Application or system lifecycle work is active: {}", err),
+                    },
+                )
+            }
+        };
+        if let Err(error) =
+            af_release::admin::ensure_no_active_package_lifecycle_jobs(&cfg, validated.command)
+        {
+            return (
+                StatusCode::CONFLICT,
+                RunnerResponse {
+                    success: false,
+                    output: String::new(),
+                    error: error.to_string(),
+                },
+            );
+        }
+        match discover_system_update(&cfg).await {
+            Ok(status) if update_status_allows_launch(&status, validated.command) => {}
+            Ok(status) => {
+                return (
+                    StatusCode::CONFLICT,
+                    RunnerResponse {
+                        success: false,
+                        output: String::new(),
+                        error: format!(
+                            "System update in progress or recovery required: {}",
+                            status.error
+                        ),
+                    },
+                )
+            }
+            Err((code, error)) => {
+                return (
+                    code,
+                    RunnerResponse {
+                        success: false,
+                        output: String::new(),
+                        error,
+                    },
+                )
+            }
+        }
+        Some(guard)
+    } else {
+        None
+    };
+
     let engine = select_release_engine();
     if engine == ReleaseEngineMode::NativeRustRelease {
         if background {
@@ -838,6 +1208,19 @@ pub async fn execute_self_update_request(
             );
             let job_status_path = cfg_jobs_dir.join(format!("{}.json", unit_name));
             let job_conf_path = cfg_jobs_dir.join(format!("{}.conf", unit_name));
+            let _launch_owner = match job_receipts::begin_launch(&job_status_path) {
+                Ok(owner) => owner,
+                Err(error) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        RunnerResponse {
+                            success: false,
+                            output: String::new(),
+                            error: format!("Cannot reserve updater launch: {error}"),
+                        },
+                    )
+                }
+            };
 
             if let Err(err) = cfg.write_protected_config_file(&job_conf_path) {
                 return (
@@ -850,7 +1233,7 @@ pub async fn execute_self_update_request(
                 );
             }
             let initial_status = SelfUpdateJobStatus {
-                status: "running".to_string(),
+                status: "launching".to_string(),
                 completed: false,
                 success: false,
                 job_unit: unit_name.clone(),
@@ -923,21 +1306,28 @@ pub async fn execute_self_update_request(
                 .await
             {
                 Ok(_) => {
-                    let payload = json!({
-                        "status": "initiated",
-                        "completed": false,
-                        "engine": "native_rust_release",
-                        "command": validated.command.as_str(),
-                        "channel": validated.channel.as_str(),
-                        "job_unit": unit_name,
-                    });
+                    let mut admitted = initial_status.clone();
+                    admitted.status = "running".into();
+                    let observed = match job_receipts::compare_exchange(
+                        &job_status_path,
+                        &initial_status,
+                        &admitted,
+                    ) {
+                        Ok(observed) => observed,
+                        Err(error) => {
+                            return (StatusCode::INTERNAL_SERVER_ERROR, RunnerResponse {
+                                success: false, output: String::new(), error: format!("Unit admitted but launch acknowledgment could not be persisted: {error}"),
+                            });
+                        }
+                    };
                     return (
                         StatusCode::OK,
-                        RunnerResponse {
-                            success: true,
-                            output: serde_json::to_string(&payload).unwrap_or_default(),
-                            error: String::new(),
-                        },
+                        self_update_launch_response(
+                            "native_rust_release",
+                            validated.command.as_str(),
+                            validated.channel.as_str(),
+                            &observed,
+                        ),
                     );
                 }
                 Err((code, err_msg)) => {
@@ -950,8 +1340,11 @@ pub async fn execute_self_update_request(
                             error: err_msg.clone(),
                             exit_code: Some(1),
                         };
-                        let _ =
-                            write_self_update_job_status_atomic(&job_status_path, &failed_receipt);
+                        let _ = job_receipts::compare_exchange(
+                            &job_status_path,
+                            &initial_status,
+                            &failed_receipt,
+                        );
                         let _ = fs::remove_file(&job_conf_path);
                     }
                     return (
@@ -1006,6 +1399,19 @@ pub async fn execute_self_update_request(
         let unit_name = build_self_update_transient_unit_name(&cmd_name, &channel_str);
         let job_status_path = cfg_jobs_dir.join(format!("{}.json", unit_name));
         let job_conf_path = cfg_jobs_dir.join(format!("{}.conf", unit_name));
+        let _launch_owner = match job_receipts::begin_launch(&job_status_path) {
+            Ok(owner) => owner,
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    RunnerResponse {
+                        success: false,
+                        output: String::new(),
+                        error: format!("Cannot reserve updater launch: {error}"),
+                    },
+                )
+            }
+        };
 
         if let Err(err) = cfg.write_protected_config_file(&job_conf_path) {
             return (
@@ -1018,7 +1424,7 @@ pub async fn execute_self_update_request(
             );
         }
         let initial_status = SelfUpdateJobStatus {
-            status: "running".to_string(),
+            status: "launching".to_string(),
             completed: false,
             success: false,
             job_unit: unit_name.clone(),
@@ -1037,6 +1443,15 @@ pub async fn execute_self_update_request(
             );
         }
 
+        let receipt_directory_identity = match _launch_owner.directory_identity() {
+            Ok(identity) => identity,
+            Err(error) => {
+                return (StatusCode::INTERNAL_SERVER_ERROR, RunnerResponse {
+                    success: false, output: String::new(),
+                    error: format!("Cannot bind updater receipt directory: {error}"),
+                });
+            }
+        };
         let mut unit_args = vec![
             script_path.to_string_lossy().into_owned(),
             cmd_name.clone(),
@@ -1062,6 +1477,8 @@ pub async fn execute_self_update_request(
                 job_status_path.to_string_lossy().into_owned(),
             ),
             ("AETHERFLOW_SELF_UPDATE_JOB_UNIT", unit_name.clone()),
+            ("AETHERFLOW_SELF_UPDATE_DIRECTORY_DEV", receipt_directory_identity.0.to_string()),
+            ("AETHERFLOW_SELF_UPDATE_DIRECTORY_INO", receipt_directory_identity.1.to_string()),
             (
                 "AETHERFLOW_RELEASE_CONF",
                 job_conf_path.to_string_lossy().into_owned(),
@@ -1095,22 +1512,29 @@ pub async fn execute_self_update_request(
         .await
         {
             Ok(_) => {
-                let payload = json!({
-                    "status": "initiated",
-                    "completed": false,
-                    "engine": "legacy_bash_release",
-                    "command": cmd_name,
-                    "channel": channel_str,
-                    "job_unit": unit_name,
-                });
-                (
+                let mut admitted = initial_status.clone();
+                admitted.status = "running".into();
+                let observed = match job_receipts::compare_exchange(
+                    &job_status_path,
+                    &initial_status,
+                    &admitted,
+                ) {
+                    Ok(observed) => observed,
+                    Err(error) => {
+                        return (StatusCode::INTERNAL_SERVER_ERROR, RunnerResponse {
+                            success: false, output: String::new(), error: format!("Unit admitted but launch acknowledgment could not be persisted: {error}"),
+                        });
+                    }
+                };
+                return (
                     StatusCode::OK,
-                    RunnerResponse {
-                        success: true,
-                        output: serde_json::to_string(&payload).unwrap_or_default(),
-                        error: String::new(),
-                    },
-                )
+                    self_update_launch_response(
+                        "legacy_bash_release",
+                        &cmd_name,
+                        &channel_str,
+                        &observed,
+                    ),
+                );
             }
             Err((code, err_msg)) => {
                 if code != StatusCode::GATEWAY_TIMEOUT {
@@ -1122,7 +1546,11 @@ pub async fn execute_self_update_request(
                         error: err_msg.clone(),
                         exit_code: Some(1),
                     };
-                    let _ = write_self_update_job_status_atomic(&job_status_path, &failed_receipt);
+                    let _ = job_receipts::compare_exchange(
+                        &job_status_path,
+                        &initial_status,
+                        &failed_receipt,
+                    );
                     let _ = fs::remove_file(&job_conf_path);
                 }
                 (
@@ -1204,38 +1632,239 @@ pub async fn execute_self_update_request(
     }
 }
 
+/// Empty job identity discovers all persisted receipts, even after API/runner
+/// restart. Missing directories mean no jobs; unreadable/corrupt state fails closed.
 pub async fn query_self_update_status_local(
+    job_unit: &str,
+) -> Result<SelfUpdateJobStatus, (StatusCode, String)> {
+    if !job_unit.trim().is_empty() {
+        return query_self_update_job_status_local(job_unit).await;
+    }
+    let root =
+        resolve_self_update_isolated_root_from_env().map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let conf = af_release::resolve_release_manager_conf_for_root(root.as_deref());
+    let cfg =
+        af_release::ReleaseConfig::load_for_root_from_process_env(root.as_deref(), conf.as_deref())
+            .map_err(|e| (StatusCode::SERVICE_UNAVAILABLE, e.to_string()))?;
+    discover_system_update(&cfg).await
+}
+
+fn update_status_allows_launch(
+    status: &SelfUpdateJobStatus,
+    command: af_release::ReleaseCommand,
+) -> bool {
+    status.completed
+        || (status.status == "recovery_required" && command == af_release::ReleaseCommand::Rollback)
+}
+
+async fn discover_system_update(
+    cfg: &af_release::ReleaseConfig,
+) -> Result<SelfUpdateJobStatus, (StatusCode, String)> {
+    let dir = resolve_self_update_jobs_dir_for_cfg(cfg)?;
+    match job_receipts::ReceiptDirectory::open_existing(&dir) {
+        Ok(Some(directory)) => {
+            let names = directory
+                .names()
+                .map_err(|error| (StatusCode::SERVICE_UNAVAILABLE, error.to_string()))?;
+            for name in names {
+                let path = dir.join(name);
+                if path.extension().and_then(|p| p.to_str()) != Some("json") {
+                    continue;
+                }
+                let unit = path
+                    .file_stem()
+                    .and_then(|p| p.to_str())
+                    .unwrap_or_default();
+                validate_self_update_job_unit_name(unit)
+                    .map_err(|(_, error)| (StatusCode::SERVICE_UNAVAILABLE, error))?;
+                let status = query_self_update_job_in(unit, &path, &directory).await?;
+                if !status.completed {
+                    return Ok(status);
+                }
+            }
+        }
+        Ok(None) => {}
+        Err(e) => return Err((StatusCode::SERVICE_UNAVAILABLE, e.to_string())),
+    }
+    let recovery = af_release::RecoveryState::load(&cfg.releases_dir)
+        .map_err(|e| (StatusCode::SERVICE_UNAVAILABLE, e.to_string()))?;
+    if recovery
+        .is_some_and(|r| r.is_unfinished() || r.has_unhealthy_or_interrupted_post_swap_deploy())
+    {
+        return Ok(SelfUpdateJobStatus {
+            status: "recovery_required".into(),
+            completed: false,
+            success: false,
+            job_unit: String::new(),
+            error: "System update recovery is required before application work".into(),
+            exit_code: None,
+        });
+    }
+    Ok(SelfUpdateJobStatus {
+        status: "succeeded".into(),
+        completed: true,
+        success: true,
+        job_unit: String::new(),
+        error: String::new(),
+        exit_code: Some(0),
+    })
+}
+
+/// API admission holds this only while checking updater receipts and persisting
+/// its job. Updaters inspect that durable row under the same lock before launch.
+pub fn acquire_lifecycle_admission_lock(
+    root: Option<&Path>,
+) -> anyhow::Result<af_release::ReleaseLockGuard> {
+    let env_root = resolve_self_update_isolated_root_from_env().map_err(|e| anyhow::anyhow!(e))?;
+    let root = root.or(env_root.as_deref());
+    let conf = af_release::resolve_release_manager_conf_for_root(root);
+    let cfg = af_release::ReleaseConfig::load_for_root_from_process_env(root, conf.as_deref())?;
+    let path = af_release::ensure_interoperable_maintenance_lock_file(&cfg)?;
+    Ok(af_release::ReleaseLockGuard::acquire(path, Duration::ZERO)?)
+}
+
+/// Same cross-process lock used by local releases. Order: package process lock,
+/// package flock, maintenance lock. Updater launch takes only maintenance.
+async fn acquire_package_maintenance_guard(
+    root: Option<&Path>,
+    target: af_release::lifecycle::ReservationTarget<'_>,
+    job_id: &str,
+    action: Option<&str>,
+) -> anyhow::Result<af_release::ReleaseLockGuard> {
+    let conf = af_release::resolve_release_manager_conf_for_root(root);
+    let cfg = af_release::ReleaseConfig::load_for_root_from_process_env(root, conf.as_deref())?;
+    let path = af_release::ensure_interoperable_maintenance_lock_file(&cfg)?;
+    let owned_restore = !job_id.is_empty()
+        && matches!(target, af_release::lifecycle::ReservationTarget::Service(_));
+    let guard = if owned_restore {
+        tokio::task::spawn_blocking(move || {
+            af_release::ReleaseLockGuard::acquire(path, Duration::from_secs(30))
+        })
+        .await??
+    } else {
+        af_release::ReleaseLockGuard::acquire(path, Duration::ZERO)?
+    };
+    let status = discover_system_update(&cfg)
+        .await
+        .map_err(|(_, e)| anyhow::anyhow!(e))?;
+    anyhow::ensure!(status.completed, LifecycleBusy);
+    let database = af_release::config::try_resolve_db_path(&cfg, None)?.path;
+    if database.exists() {
+        let conn = rusqlite::Connection::open_with_flags(
+            &database,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+        )?;
+        conn.busy_timeout(Duration::from_secs(5))?;
+        af_release::lifecycle::reconcile_jobs(&conn, &database)?;
+        match target {
+            af_release::lifecycle::ReservationTarget::Package(package) => {
+                let units = package_lifecycle::package_service_units(package)?;
+                af_release::lifecycle::check_package_reservation(
+                    &conn, package, &units, job_id, action,
+                )
+            }
+            _ => af_release::lifecycle::check_reservation(&conn, target, job_id, action),
+        }
+        .map_err(|error| error.context(LifecycleBusy))?;
+    } else {
+        anyhow::ensure!(
+            job_id.is_empty(),
+            "Lifecycle reservation database is missing"
+        );
+    }
+    Ok(guard)
+}
+
+fn service_reservation_target<'a>(
+    service: &'a str,
+    action: &str,
+) -> af_release::lifecycle::ReservationTarget<'a> {
+    if matches!(
+        service.trim_end_matches(".service"),
+        "aetherflow-api" | "aetherflow-runner"
+    ) && matches!(action, "stop" | "restart" | "restart-deferred")
+    {
+        af_release::lifecycle::ReservationTarget::System
+    } else {
+        af_release::lifecycle::ReservationTarget::Service(service)
+    }
+}
+
+pub async fn acquire_service_maintenance_guard(
+    service: &str,
+    action: &str,
+) -> anyhow::Result<af_release::ReleaseLockGuard> {
+    acquire_package_maintenance_guard(
+        PackageExecutionEnv::default().fs_root.as_deref(),
+        service_reservation_target(service, action),
+        &current_package_job_id(),
+        None,
+    )
+    .await
+}
+
+async fn query_self_update_job_status_local(
     job_unit: &str,
 ) -> Result<SelfUpdateJobStatus, (StatusCode, String)> {
     let valid_unit = validate_self_update_job_unit_name(job_unit)?;
     let jobs_dir = resolve_self_update_jobs_dir_from_env()?;
     let status_path = jobs_dir.join(format!("{}.json", valid_unit));
+    query_self_update_job_at(&valid_unit, &status_path).await
+}
 
-    if status_path.is_file() {
-        let raw = fs::read_to_string(&status_path).map_err(|e| {
+async fn query_self_update_job_at(
+    valid_unit: &str,
+    status_path: &Path,
+) -> Result<SelfUpdateJobStatus, (StatusCode, String)> {
+    let directory = job_receipts::ReceiptDirectory::open_existing(
+        status_path.parent().unwrap_or(Path::new(".")),
+    )
+    .map_err(|error| (StatusCode::SERVICE_UNAVAILABLE, error.to_string()))?
+    .ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            format!("self-update job '{valid_unit}' not found"),
+        )
+    })?;
+    query_self_update_job_in(valid_unit, status_path, &directory).await
+}
+
+async fn query_self_update_job_in(
+    valid_unit: &str,
+    status_path: &Path,
+    directory: &job_receipts::ReceiptDirectory,
+) -> Result<SelfUpdateJobStatus, (StatusCode, String)> {
+    let name = status_path.file_name().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Missing receipt filename".into(),
+        )
+    })?;
+    if let Some(mut parsed) = directory.read_status(name, valid_unit).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::InvalidData {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to read self-update status file: {}", e),
+                format!("corrupt self-update status file: {error}"),
             )
-        })?;
-        let mut parsed: SelfUpdateJobStatus = serde_json::from_str(&raw).map_err(|e| {
+        } else {
             (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("corrupt self-update status file: {}", e),
+                StatusCode::SERVICE_UNAVAILABLE,
+                format!("Cannot read confined self-update status: {error}"),
             )
-        })?;
-        if parsed.job_unit.is_empty() {
-            parsed.job_unit = valid_unit.clone();
         }
-        parsed
-            .validate_invariants(Some(&valid_unit))
-            .map_err(|err| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("corrupt self-update status file: {}", err),
-                )
-            })?;
+    })? {
         if parsed.completed {
+            return Ok(parsed);
+        }
+        if directory
+            .launch_is_alive(name, parsed.status == "launching")
+            .map_err(|error| {
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    format!("Cannot verify launch owner: {error}"),
+                )
+            })?
+        {
             return Ok(parsed);
         }
 
@@ -1248,16 +1877,20 @@ pub async fn query_self_update_status_local(
             .filter(|val| !val.is_empty());
         if cfg!(target_os = "linux") && (!custom_systemd_run || systemctl_bin.is_some()) {
             let ctl_prog = systemctl_bin.as_deref().unwrap_or("systemctl");
-            if let Ok(out) = Command::new(ctl_prog)
-                .args([
-                    "show",
-                    "--property=LoadState,ActiveState,SubState,Result,ExecMainStatus",
-                    &valid_unit,
-                ])
-                .output()
-                .await
+            if let Ok(Ok(out)) = tokio::time::timeout(
+                Duration::from_secs(5),
+                Command::new(ctl_prog)
+                    .args([
+                        "show",
+                        "--property=LoadState,ActiveState,SubState,Result,ExecMainStatus",
+                        valid_unit,
+                    ])
+                    .kill_on_drop(true)
+                    .output(),
+            )
+            .await
             {
-                if out.status.success() {
+                {
                     let stdout = String::from_utf8_lossy(&out.stdout);
                     let mut load_state = "";
                     let mut active_state = "";
@@ -1277,23 +1910,27 @@ pub async fn query_self_update_status_local(
                             exec_status = val.trim().parse::<i32>().ok();
                         }
                     }
-                    let unit_no_longer_running = active_state == "failed"
-                        || active_state == "inactive"
-                        || load_state == "not-found";
+                    let unit_no_longer_running =
+                        matches!(load_state, "loaded" | "not-found" | "error" | "masked")
+                            && matches!(active_state, "failed" | "inactive");
                     if unit_no_longer_running {
-                        if let Ok(reread_raw) = fs::read_to_string(&status_path) {
-                            if let Ok(mut reread_status) =
-                                serde_json::from_str::<SelfUpdateJobStatus>(&reread_raw)
-                            {
-                                if reread_status.job_unit.is_empty() {
-                                    reread_status.job_unit = valid_unit.clone();
-                                }
-                                if reread_status.completed
-                                    && reread_status.validate_invariants(Some(&valid_unit)).is_ok()
-                                {
-                                    return Ok(reread_status);
-                                }
-                            }
+                        if valid_unit.contains("-restart-")
+                            && core_restart_timer_pending(ctl_prog, valid_unit).await?
+                        {
+                            return Ok(parsed);
+                        }
+                        let expected = parsed.clone();
+                        let reread_status = directory
+                            .read_status(name, valid_unit)
+                            .map_err(|error| (StatusCode::SERVICE_UNAVAILABLE, error.to_string()))?
+                            .ok_or_else(|| {
+                                (
+                                    StatusCode::SERVICE_UNAVAILABLE,
+                                    "Receipt disappeared during reconciliation".into(),
+                                )
+                            })?;
+                        if reread_status.completed {
+                            return Ok(reread_status);
                         }
                         parsed.status = "failed".to_string();
                         parsed.completed = true;
@@ -1310,11 +1947,36 @@ pub async fn query_self_update_status_local(
                                 parsed.exit_code
                             );
                         }
-                        let _ = write_self_update_job_status_atomic(&status_path, &parsed);
+                        return directory
+                            .compare_exchange(name, &expected, &parsed)
+                            .map_err(|error| {
+                                (
+                                    StatusCode::SERVICE_UNAVAILABLE,
+                                    format!("Cannot persist reconciled updater status: {error}"),
+                                )
+                            });
+                    }
+                    if load_state == "loaded"
+                        && matches!(
+                            active_state,
+                            "active" | "activating" | "deactivating" | "reloading"
+                        )
+                    {
+                        if parsed.status == "launching" {
+                            let mut admitted = parsed.clone();
+                            admitted.status = "running".into();
+                            return directory
+                                .compare_exchange(name, &parsed, &admitted)
+                                .map_err(|error| {
+                                    (StatusCode::SERVICE_UNAVAILABLE, error.to_string())
+                                });
+                        }
                         return Ok(parsed);
                     }
                 }
             }
+            return Err((StatusCode::SERVICE_UNAVAILABLE,
+                format!("Cannot determine authoritative systemd state for '{valid_unit}'; receipt retained as unresolved. Retry status after restoring systemd access.")));
         }
         return Ok(parsed);
     }
@@ -1322,6 +1984,59 @@ pub async fn query_self_update_status_local(
     Err((
         StatusCode::NOT_FOUND,
         format!("self-update job '{}' not found", valid_unit),
+    ))
+}
+
+async fn core_restart_timer_pending(
+    program: &str,
+    unit: &str,
+) -> Result<bool, (StatusCode, String)> {
+    let timer = format!("{}.timer", unit.trim_end_matches(".service"));
+    let output = tokio::time::timeout(
+        Duration::from_secs(5),
+        Command::new(program)
+            .args(["show", "--property=LoadState,ActiveState,SubState", &timer])
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .map_err(|_| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Core restart timer query timed out".into(),
+        )
+    })?
+    .map_err(|error| (StatusCode::SERVICE_UNAVAILABLE, error.to_string()))?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let load = text
+        .lines()
+        .find_map(|line| line.strip_prefix("LoadState="))
+        .unwrap_or("");
+    let active = text
+        .lines()
+        .find_map(|line| line.strip_prefix("ActiveState="))
+        .unwrap_or("");
+    let phase = text
+        .lines()
+        .find_map(|line| line.strip_prefix("SubState="))
+        .unwrap_or("");
+    if load == "loaded"
+        && matches!(active, "active" | "activating" | "deactivating")
+        && matches!(phase, "waiting" | "running")
+    {
+        return Ok(true);
+    }
+    if load == "loaded" && active == "active" && phase == "elapsed" {
+        return Ok(false);
+    }
+    if matches!(load, "loaded" | "not-found" | "error" | "masked")
+        && matches!(active, "inactive" | "failed")
+    {
+        return Ok(false);
+    }
+    Err((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Core restart timer state is unknown; admission remains reserved".into(),
     ))
 }
 
@@ -2301,15 +3016,27 @@ pub async fn apply_package_sandbox_local(pkg_id: &str) -> anyhow::Result<String>
         anyhow::bail!("invalid package identifier");
     }
 
-    let pkg = get_runner_package_definition(pkg_id).unwrap_or_else(|| Package {
-        name: pkg_id.to_string(),
-        service_type: "systemd".to_string(),
-        service_name: pkg_id.to_string(),
-        sandbox_profile: "native".to_string(),
-        sandbox_read_write: vec![format!("/var/lib/{}", pkg_id)],
-        sandbox_service_ids: vec![format!("{}.service", pkg_id)],
-        ..Default::default()
-    });
+    let target = if matches!(pkg_id, "aetherflow-api" | "aetherflow-runner") {
+        af_release::lifecycle::ReservationTarget::System
+    } else {
+        af_release::lifecycle::ReservationTarget::Package(pkg_id)
+    };
+    let guard = acquire_package_maintenance_guard(
+        PackageExecutionEnv::default().fs_root.as_deref(),
+        target,
+        &current_package_job_id(),
+        None,
+    )
+    .await?;
+    apply_package_sandbox_reserved(pkg_id, &guard).await
+}
+
+async fn apply_package_sandbox_reserved(
+    pkg_id: &str,
+    guard: &af_release::ReleaseLockGuard,
+) -> anyhow::Result<String> {
+    let pkg = get_runner_package_definition(pkg_id)
+        .ok_or_else(|| anyhow::anyhow!("Sandbox target is not a managed package: {pkg_id}"))?;
 
     if !pkg.service_type.is_empty() && pkg.service_type != "systemd" {
         return Ok("sandbox skipped (non-systemd service)".to_string());
@@ -2388,7 +3115,11 @@ pub async fn apply_package_sandbox_local(pkg_id: &str) -> anyhow::Result<String>
             args.push(u.clone());
         }
 
-        if let Ok(out) = Command::new("bash").args(&args).output().await {
+        let mut command = Command::new("bash");
+        command.args(&args).kill_on_drop(true);
+        #[cfg(unix)]
+        guard.preserve_in_child(command.as_std_mut())?;
+        if let Ok(out) = command.output().await {
             if out.status.success() {
                 return Ok("sandbox applied".to_string());
             }
@@ -2421,10 +3152,11 @@ pub async fn apply_package_sandbox_local(pkg_id: &str) -> anyhow::Result<String>
                 let _ = fs::write(&dropin_10, &content);
             }
         }
-        let _ = Command::new("systemctl")
-            .arg("daemon-reload")
-            .output()
-            .await;
+        let mut command = Command::new("systemctl");
+        command.arg("daemon-reload").kill_on_drop(true);
+        #[cfg(unix)]
+        guard.preserve_in_child(command.as_std_mut())?;
+        let _ = command.output().await;
     }
 
     Ok("sandbox applied".to_string())
@@ -2433,6 +3165,26 @@ pub async fn apply_package_sandbox_local(pkg_id: &str) -> anyhow::Result<String>
 async fn handle_sandbox(
     Json(req): Json<SandboxRunnerRequest>,
 ) -> (StatusCode, Json<RunnerResponse>) {
+    let identity = req.lifecycle_job_id.clone();
+    PACKAGE_JOB_ID
+        .scope(
+            identity,
+            handle_sandbox_with(
+                req,
+                |pkg| async move { apply_package_sandbox_local(&pkg).await },
+            ),
+        )
+        .await
+}
+
+async fn handle_sandbox_with<F, Fut>(
+    req: SandboxRunnerRequest,
+    apply: F,
+) -> (StatusCode, Json<RunnerResponse>)
+where
+    F: FnOnce(String) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<String>>,
+{
     let pkg = if !req.package.trim().is_empty() {
         req.package.trim().to_string()
     } else {
@@ -2449,7 +3201,7 @@ async fn handle_sandbox(
         );
     }
 
-    match apply_package_sandbox_local(&pkg).await {
+    match apply(pkg).await {
         Ok(out) => (
             StatusCode::OK,
             Json(RunnerResponse {
@@ -4129,6 +4881,19 @@ async fn handle_app_meta(
 // UNIX Domain Socket Client Dispatchers (`backend/services/privileged_runner.go`)
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Retryable lifecycle exclusion, kept typed across runner and API boundaries.
+#[derive(Debug, thiserror::Error)]
+#[error("Application lifecycle or system maintenance is busy. Retry after the active operation completes.")]
+pub struct LifecycleBusy;
+
+pub fn is_lifecycle_busy(error: &anyhow::Error) -> bool {
+    error.is::<LifecycleBusy>()
+        || matches!(
+            error.downcast_ref::<af_release::ReleaseError>(),
+            Some(af_release::ReleaseError::LockBusy { .. })
+        )
+}
+
 #[cfg(unix)]
 async fn post_runner_json<T: Serialize + ?Sized>(
     endpoint: &str,
@@ -4158,6 +4923,9 @@ async fn post_runner_json<T: Serialize + ?Sized>(
             .body(Full::new(Bytes::from(body_bytes)))?;
 
         let resp = sender.send_request(req).await?;
+        if endpoint == "/v1/systemctl" && resp.status() == StatusCode::CONFLICT {
+            return Err(LifecycleBusy.into());
+        }
         let collected = resp.into_body().collect().await?.to_bytes();
         let decoded: RunnerResponse = serde_json::from_slice(&collected)?;
         Ok::<RunnerResponse, anyhow::Error>(decoded)
@@ -4184,6 +4952,7 @@ pub async fn dispatch_heal_restart(service_name: &str) -> anyhow::Result<bool> {
     let req = SystemctlRequest {
         service: service_name.to_string(),
         action: "heal".to_string(),
+        lifecycle_job_id: String::new(),
     };
     let result = if is_runner_available() {
         post_runner_json("/v1/systemctl", &req, Duration::from_secs(45)).await?
@@ -4205,6 +4974,7 @@ pub async fn dispatch_systemctl(service_name: &str, action: &str) -> anyhow::Res
     let req = SystemctlRequest {
         service: service_name.to_string(),
         action: action.to_string(),
+        lifecycle_job_id: current_package_job_id(),
     };
     let result = post_runner_json("/v1/systemctl", &req, Duration::from_secs(45)).await?;
     if !result.success {
@@ -4215,6 +4985,30 @@ pub async fn dispatch_systemctl(service_name: &str, action: &str) -> anyhow::Res
         );
     }
     Ok(())
+}
+
+pub async fn dispatch_core_restart(service_name: &str) -> anyhow::Result<String> {
+    let req = SystemctlRequest {
+        service: service_name.into(),
+        action: "restart-deferred".into(),
+        lifecycle_job_id: String::new(),
+    };
+    let result = post_runner_json("/v1/systemctl", &req, Duration::from_secs(45)).await?;
+    anyhow::ensure!(
+        result.success,
+        "runner core restart error: {}",
+        result.error
+    );
+    let payload: serde_json::Value = serde_json::from_str(&result.output)?;
+    let unit = payload
+        .get("job_unit")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    anyhow::ensure!(
+        af_models::is_valid_self_update_job_unit_name(unit),
+        "Core restart acknowledgment is missing its receipt identity"
+    );
+    Ok(unit.into())
 }
 
 const MAX_PACKAGE_STREAM_LINE_BYTES: usize = 64 * 1024;
@@ -4309,11 +5103,31 @@ pub async fn dispatch_package_action<F>(
     pkg_id: &str,
     script_name: &str,
     app_port: i32,
+    on_line: F,
+) -> anyhow::Result<()>
+where
+    F: FnMut(String),
+{
+    dispatch_package_action_with_options(action, pkg_id, script_name, app_port, false, on_line)
+        .await
+}
+
+/// Dispatches a package operation through the runner socket. `delete_data` is
+/// only honored for `remove`; it is the sole way to request a destructive purge.
+pub async fn dispatch_package_action_with_options<F>(
+    action: &str,
+    pkg_id: &str,
+    script_name: &str,
+    app_port: i32,
+    delete_data: bool,
     mut on_line: F,
 ) -> anyhow::Result<()>
 where
     F: FnMut(String),
 {
+    if delete_data && action != "remove" {
+        anyhow::bail!("data purge is only valid for package removal");
+    }
     #[cfg(unix)]
     {
         use http_body_util::{BodyExt, Full};
@@ -4325,7 +5139,9 @@ where
             action: action.to_string(),
             package_id: pkg_id.to_string(),
             script_name: script_name.to_string(),
+            lifecycle_job_id: current_package_job_id(),
             app_port,
+            delete_data,
         };
         let body_bytes = serde_json::to_vec(&req_payload)?;
 
@@ -4384,7 +5200,14 @@ where
     }
     #[cfg(not(unix))]
     {
-        let _ = (action, pkg_id, script_name, app_port, &mut on_line);
+        let _ = (
+            action,
+            pkg_id,
+            script_name,
+            app_port,
+            delete_data,
+            &mut on_line,
+        );
         anyhow::bail!("UNIX domain socket runner client is only supported on Unix hosts")
     }
 }
@@ -4415,6 +5238,7 @@ pub async fn dispatch_package_cancel(pkg_id: &str) -> anyhow::Result<bool> {
         let req = SandboxRunnerRequest {
             package: pkg_id.to_string(),
             package_id: pkg_id.to_string(),
+            lifecycle_job_id: current_package_job_id(),
         };
         let result = post_runner_json("/v1/package/cancel", &req, Duration::from_secs(5)).await?;
         return Ok(result.success && result.output.starts_with("cancellation signalled"));
@@ -4453,7 +5277,9 @@ where
         action: action.to_string(),
         package_id: pkg_id.to_string(),
         script_name: script_name.to_string(),
+        lifecycle_job_id: current_package_job_id(),
         app_port,
+        delete_data: false,
     };
     let stream = execute_package_request_stream(req);
     futures::pin_mut!(stream);
@@ -4535,6 +5361,7 @@ pub async fn dispatch_sandbox_apply(pkg_id: &str) -> anyhow::Result<()> {
     let req = SandboxRunnerRequest {
         package: pkg_id.to_string(),
         package_id: pkg_id.to_string(),
+        lifecycle_job_id: current_package_job_id(),
     };
     let result = post_runner_json("/v1/sandbox", &req, Duration::from_secs(30)).await?;
     if !result.success {
@@ -4985,17 +5812,39 @@ mod tests {
         fs::remove_dir_all(scratch).unwrap();
     }
 
+    #[test]
+    fn test_core_restart_is_independent_and_restricted() {
+        let args = deferred_restart_arguments("aetherflow-api.service").unwrap();
+        assert!(args.contains(&"--on-active=2s".to_string()));
+        assert!(args[0].starts_with("--unit=aetherflow-self-update-restart-"));
+        assert_eq!(args.last().unwrap(), "aetherflow-api");
+        assert!(args
+            .iter()
+            .any(|arg| arg == include_str!("core_restart_worker.sh")));
+        assert!(deferred_restart_arguments("sonarr").is_err());
+        assert!(deferred_restart_arguments("../aetherflow-api").is_err());
+    }
+
     #[tokio::test]
     async fn test_heal_restart_skips_active_package_operation() {
         let _operation = PACKAGE_MUTEX.lock().await;
         let (status, Json(response)) = handle_systemctl(Json(SystemctlRequest {
             service: "gitea".into(),
             action: "heal".into(),
+            lifecycle_job_id: String::new(),
         }))
         .await;
         assert_eq!(status, StatusCode::OK);
         assert!(response.success);
         assert_eq!(response.output, "skipped");
+        let (status, Json(response)) = handle_systemctl(Json(SystemctlRequest {
+            service: "gitea".into(),
+            action: "restart".into(),
+            lifecycle_job_id: String::new(),
+        }))
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(!response.success);
     }
 
     #[test]
@@ -5113,18 +5962,26 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_sandbox_and_quota_graceful_fallback() {
-        let (code, Json(resp)) = handle_sandbox(Json(SandboxRunnerRequest {
-            package: "sonarr".to_string(),
-            package_id: String::new(),
-        }))
+        let (code, Json(resp)) = handle_sandbox_with(
+            SandboxRunnerRequest {
+                package: "sonarr".to_string(),
+                package_id: String::new(),
+                lifecycle_job_id: String::new(),
+            },
+            |_| async { Ok("sandbox fixture applied".into()) },
+        )
         .await;
         assert_eq!(code, StatusCode::OK);
         assert!(resp.success);
 
-        let (bad_code, Json(bad_resp)) = handle_sandbox(Json(SandboxRunnerRequest {
-            package: "../evil".to_string(),
-            package_id: String::new(),
-        }))
+        let (bad_code, Json(bad_resp)) = handle_sandbox_with(
+            SandboxRunnerRequest {
+                package: "../evil".to_string(),
+                package_id: String::new(),
+                lifecycle_job_id: String::new(),
+            },
+            |_| async { Ok("sandbox fixture applied".into()) },
+        )
         .await;
         assert_eq!(bad_code, StatusCode::BAD_REQUEST);
         assert!(!bad_resp.success);
@@ -5211,10 +6068,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_handle_package_rejects_purge_for_non_remove_actions() {
+        for action in ["install", "update"] {
+            let response = handle_package(Json(PackageRunnerRequest {
+                action: action.to_string(),
+                package_id: "sonarr".to_string(),
+                script_name: "installpackage-sonarr".to_string(),
+                lifecycle_job_id: String::new(),
+                app_port: 0,
+                delete_data: true,
+            }))
+            .await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{}", action);
+        }
+        let error = dispatch_package_action_with_options(
+            "update",
+            "sonarr",
+            "installpackage-sonarr",
+            0,
+            true,
+            |_| {},
+        )
+        .await
+        .expect_err("client must refuse purge outside removal");
+        assert!(error.to_string().contains("only valid for package removal"));
+    }
+
+    #[tokio::test]
     async fn test_handle_package_cancel_validation_and_signalling() {
         let (bad_code, Json(bad_resp)) = handle_package_cancel(Json(SandboxRunnerRequest {
             package: "../bad".to_string(),
             package_id: String::new(),
+            lifecycle_job_id: String::new(),
         }))
         .await;
         assert_eq!(bad_code, StatusCode::BAD_REQUEST);
@@ -5225,6 +6110,7 @@ mod tests {
         let (ok_code, Json(ok_resp)) = handle_package_cancel(Json(SandboxRunnerRequest {
             package: String::new(),
             package_id: "cancel-handler-test".to_string(),
+            lifecycle_job_id: String::new(),
         }))
         .await;
         assert_eq!(ok_code, StatusCode::OK);
@@ -5234,6 +6120,104 @@ mod tests {
     }
 
     static ENV_TEST_MUTEX: Lazy<tokio::sync::Mutex<()>> = Lazy::new(|| tokio::sync::Mutex::new(()));
+
+    #[tokio::test]
+    async fn test_update_discovery_and_admission_survive_api_restart_and_fail_closed() {
+        let _env_guard = ENV_TEST_MUTEX.lock().await;
+        let root = env::temp_dir().join(format!("af-admission-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let cfg =
+            af_release::ReleaseConfig::load_for_root_from_process_env(Some(&root), None).unwrap();
+        assert!(discover_system_update(&cfg).await.unwrap().completed);
+        let lock = af_release::ensure_interoperable_maintenance_lock_file(&cfg).unwrap();
+        let guard = af_release::ReleaseLockGuard::acquire(&lock, Duration::ZERO).unwrap();
+        assert!(
+            af_release::ReleaseLockGuard::acquire(&lock, Duration::ZERO).is_err(),
+            "simultaneous updater/package admission cannot both hold the lock"
+        );
+        drop(guard);
+        let dir = resolve_self_update_jobs_dir_for_cfg(&cfg).unwrap();
+        let unit = "aetherflow-self-update-deploy-nightly-1234abcd.service";
+        let path = dir.join(format!("{}.json", unit));
+        let mut receipt = SelfUpdateJobStatus {
+            status: "running".into(),
+            completed: false,
+            success: false,
+            job_unit: unit.into(),
+            error: String::new(),
+            exit_code: None,
+        };
+        write_self_update_job_status_atomic(&path, &receipt).unwrap();
+        // No ACTIVE_SYSTEM_UPDATE flag is set. Read from a fresh config, as a
+        // restarted API would. A fake launcher disables real systemd queries.
+        let previous = env::var_os("AETHERFLOW_SYSTEMD_RUN_BIN");
+        env::set_var("AETHERFLOW_SYSTEMD_RUN_BIN", root.join("unused-fixture"));
+        assert!(!discover_system_update(&cfg).await.unwrap().completed);
+        assert!(acquire_package_maintenance_guard(
+            Some(&root),
+            af_release::lifecycle::ReservationTarget::Package("fixture"),
+            "",
+            Some("update")
+        )
+        .await
+        .is_err());
+        receipt.status = "failed".into();
+        receipt.completed = true;
+        receipt.exit_code = Some(1);
+        receipt.error = "fixture failure".into();
+        write_self_update_job_status_atomic(&path, &receipt).unwrap();
+        assert!(discover_system_update(&cfg).await.unwrap().completed);
+        let package_guard = acquire_package_maintenance_guard(
+            Some(&root),
+            af_release::lifecycle::ReservationTarget::Package("fixture"),
+            "",
+            Some("update"),
+        )
+        .await
+        .unwrap();
+        assert!(af_release::ReleaseLockGuard::acquire(&lock, Duration::ZERO).is_err());
+        drop(package_guard);
+        fs::write(&path, "{invalid receipt").unwrap();
+        assert!(discover_system_update(&cfg).await.is_err());
+        assert!(acquire_package_maintenance_guard(
+            Some(&root),
+            af_release::lifecycle::ReservationTarget::Package("fixture"),
+            "",
+            Some("update")
+        )
+        .await
+        .is_err());
+        fs::remove_file(&path).unwrap();
+        let mut recovery = af_release::RecoveryState::new(
+            af_release::ReleaseCommand::Deploy,
+            af_release::ReleaseChannel::Nightly,
+            false,
+        );
+        recovery.save(&cfg.releases_dir).unwrap();
+        let recovery_status = discover_system_update(&cfg).await.unwrap();
+        assert!(!update_status_allows_launch(
+            &recovery_status,
+            af_release::ReleaseCommand::Deploy
+        ));
+        assert!(update_status_allows_launch(
+            &recovery_status,
+            af_release::ReleaseCommand::Rollback
+        ));
+        assert!(!recovery_status.completed);
+        assert!(acquire_package_maintenance_guard(
+            Some(&root),
+            af_release::lifecycle::ReservationTarget::Package("fixture"),
+            "",
+            Some("update")
+        )
+        .await
+        .is_err());
+        match previous {
+            Some(value) => env::set_var("AETHERFLOW_SYSTEMD_RUN_BIN", value),
+            None => env::remove_var("AETHERFLOW_SYSTEMD_RUN_BIN"),
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[tokio::test]
     async fn test_release_engine_rollout_control_and_self_update_validation() {
@@ -5386,12 +6370,31 @@ mod tests {
             assert_eq!(parsed_bash["completed"], false);
             assert_eq!(parsed_bash["engine"], "legacy_bash_release");
             let logged_bash = fs::read_to_string(&args_log).unwrap();
+            let directory = fs::metadata(test_dir.join("var/lib/aetherflow/.self-update-jobs")).unwrap();
+            assert!(logged_bash.contains(&format!("--setenv=AETHERFLOW_SELF_UPDATE_DIRECTORY_DEV={}", std::os::unix::fs::MetadataExt::dev(&directory))));
+            assert!(logged_bash.contains(&format!("--setenv=AETHERFLOW_SELF_UPDATE_DIRECTORY_INO={}", std::os::unix::fs::MetadataExt::ino(&directory))));
             assert!(logged_bash.contains("/bin/bash"));
             assert!(logged_bash.contains("rollback"));
             assert!(logged_bash.contains("--root"));
             assert!(logged_bash.contains("--config"));
             assert!(logged_bash.contains("--job-status-file"));
             assert!(logged_bash.contains("--setenv=AETHERFLOW_ALLOW_ISOLATED_SYSTEMD_LIFECYCLE=1"));
+
+            let bash_unit = parsed_bash["job_unit"].as_str().unwrap();
+            write_self_update_job_status_atomic(
+                &test_dir
+                    .join("var/lib/aetherflow/.self-update-jobs")
+                    .join(format!("{}.json", bash_unit)),
+                &SelfUpdateJobStatus {
+                    status: "succeeded".into(),
+                    completed: true,
+                    success: true,
+                    job_unit: bash_unit.into(),
+                    error: String::new(),
+                    exit_code: Some(0),
+                },
+            )
+            .unwrap();
 
             env::remove_var("AETHERFLOW_ALLOW_ISOLATED_SYSTEMD_LIFECYCLE");
             spawn_self_update_transient_unit(
@@ -5685,16 +6688,17 @@ mod tests {
         assert!(valid_res.completed);
         assert!(valid_res.success);
 
-        write_self_update_job_status_atomic(
+        fs::write(
             &status_file,
-            &SelfUpdateJobStatus {
+            serde_json::to_vec(&SelfUpdateJobStatus {
                 status: "running".to_string(),
                 completed: false,
                 success: true,
                 job_unit: unit_name.to_string(),
                 error: String::new(),
                 exit_code: None,
-            },
+            })
+            .unwrap(),
         )
         .unwrap();
         let corrupt_err = query_self_update_status_local(unit_name)
@@ -5719,7 +6723,14 @@ mod tests {
                 },
             )
             .unwrap();
+            // A missing unit is a fixture, never a query to the host manager.
+            use std::os::unix::fs::PermissionsExt;
+            let fake_ctl = test_dir.join("systemctl-fixture");
+            fs::write(&fake_ctl, "#!/bin/sh\nprintf 'LoadState=not-found\\nActiveState=inactive\\nExecMainStatus=0\\n'\n").unwrap();
+            fs::set_permissions(&fake_ctl, fs::Permissions::from_mode(0o755)).unwrap();
+            env::set_var("AETHERFLOW_SYSTEMCTL_BIN", &fake_ctl);
             let reconciled = query_self_update_status_local(vanished_unit).await.unwrap();
+            env::remove_var("AETHERFLOW_SYSTEMCTL_BIN");
             assert_eq!(reconciled.status, "failed");
             assert!(reconciled.completed);
             assert!(!reconciled.success);

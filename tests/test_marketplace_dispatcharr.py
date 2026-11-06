@@ -451,6 +451,8 @@ elif command not in ("apt-get", "chown", "id", "useradd"):
 
 
 class DispatcharrUpgradeTests(unittest.TestCase):
+    retained_environment = "CUSTOM_SETTING=old-env\n"
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -488,7 +490,7 @@ write_lock() { touch "$TEST_ROOT/install/.$1.lock"; }
         self.install = self.root / "opt/dispatcharr"
         self.config = self.root / "etc/dispatcharr"
         self.config.mkdir(parents=True)
-        (self.config / "dispatcharr.env").write_text("old-env")
+        (self.config / "dispatcharr.env").write_text(self.retained_environment)
         (self.config / "db_pass").write_text("a" * 32)
         (self.config / "secret_key").write_text("b" * 64)
         (self.root / "database").write_text("old-schema")
@@ -534,6 +536,7 @@ write_lock() { touch "$TEST_ROOT/install/.$1.lock"; }
             self.assertEqual(result.returncode, 0, result.stderr + (self.root / "var/log/aetherflow/install-dispatcharr.log").read_text())
             self.assertFalse((self.root / "compromised").exists())
             self.assertNotEqual((self.config / "dispatcharr.env").stat().st_ino, old_env_inode)
+            self.assertIn(self.retained_environment.strip(), (self.config / "dispatcharr.env").read_text())
             self.assertEqual(self.git(self.install, "rev-parse", "HEAD").stdout.strip(), self.target)
             self.assertEqual((self.install / "media/retained").read_text(), "retained")
             self.assertEqual((self.install / "logo_cache/retained").read_text(), "retained")
@@ -555,7 +558,7 @@ write_lock() { touch "$TEST_ROOT/install/.$1.lock"; }
                 result = self.run_install(FAIL_STAGE=stage)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertEqual((self.install / "old-code").read_text(), "retained")
-                self.assertEqual((self.config / "dispatcharr.env").read_text(), "old-env")
+                self.assertEqual((self.config / "dispatcharr.env").read_text(), self.retained_environment)
                 self.assertEqual((self.root / "database").read_text(), "old-schema")
                 self.assertFalse((self.root / "install/.dispatcharr.lock").exists())
                 for unit in self.units.iterdir():
@@ -581,23 +584,25 @@ write_lock() { touch "$TEST_ROOT/install/.$1.lock"; }
         self.assertEqual((self.install / "old-code").read_text(), "retained")
         self.assertNotIn("systemctl stop dispatcharr", (self.root / "commands").read_text())
 
-    def test_canonical_data_migrates_legacy_files_without_chowning_shared_root(self):
+    def test_unmarked_legacy_data_refuses_automatic_adoption_and_preserves_state(self):
         legacy = self.root / "var/lib/dispatcharr"
         (legacy / "logos").mkdir(parents=True)
-        (legacy / "logos/channel.png").write_text("legacy-logo")
+        (legacy / "logos/channel.png").write_bytes(b"legacy-logo")
         shared = self.root / "data"
         shared.symlink_to(legacy, target_is_directory=True)
         result = self.run_install()
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertFalse(shared.is_symlink())
-        self.assertEqual((shared / "logos/channel.png").resolve(), shared / "logos/channel.png")
-        self.assertEqual((legacy / "logos/channel.png").read_text(), "legacy-logo")
-        self.assertTrue((legacy / "logos").is_symlink())
-        retained = shared / "unrelated"
-        retained.write_text("other-app")
-        self.assertEqual(self.run_install().returncode, 0)
-        self.assertEqual(retained.read_text(), "other-app")
-        self.assertNotIn("chown -R dispatcharr:dispatcharr " + str(shared) + "\n", (self.root / "commands").read_text())
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("explicit operator migration is required", result.stderr)
+        self.assertTrue(shared.is_symlink())
+        self.assertEqual(shared.readlink(), legacy)
+        self.assertFalse((legacy / "logos").is_symlink())
+        self.assertEqual((legacy / "logos/channel.png").read_bytes(), b"legacy-logo")
+        self.assertFalse((legacy / ".aetherflow-data-owner").exists())
+        self.assertEqual((self.install / "old-code").read_text(), "retained")
+        self.assertEqual((self.config / "dispatcharr.env").read_text(), self.retained_environment)
+        self.assertEqual((self.root / "database").read_text(), "old-schema")
+        self.assertFalse((self.root / "install/.dispatcharr.lock").exists())
+        self.assertFalse((self.root / "commands").exists())
 
     def test_unrelated_data_symlinks_are_rejected_and_preserved(self):
         shared = self.root / "data"
@@ -618,7 +623,7 @@ write_lock() { touch "$TEST_ROOT/install/.$1.lock"; }
                 result = self.run_install(AF_APP_PORT=port)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("Invalid Dispatcharr port", result.stderr)
-                self.assertEqual((self.config / "dispatcharr.env").read_text(), "old-env")
+                self.assertEqual((self.config / "dispatcharr.env").read_text(), self.retained_environment)
 
     def test_canonical_data_subdirectory_symlinks_are_not_followed(self):
         target = self.root / "other-app"
@@ -629,7 +634,7 @@ write_lock() { touch "$TEST_ROOT/install/.$1.lock"; }
         link.symlink_to(target)
         result = self.run_install()
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("must be a real directory", result.stderr)
+        self.assertIn("exclusive Dispatcharr compatibility symlink", result.stderr)
         self.assertTrue(link.is_symlink())
         self.assertEqual((target / "keep").read_text(), "untouched")
 

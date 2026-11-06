@@ -510,6 +510,7 @@ describe('StreamingInsights', () => {
         });
         fireEvent.click(screen.getByTestId('drilldown-client-btn-1'));
         expect(onDrilldown).toHaveBeenLastCalledWith({
+            serverId: '',
             client: 'Unknown',
             device: 'Unknown',
         });

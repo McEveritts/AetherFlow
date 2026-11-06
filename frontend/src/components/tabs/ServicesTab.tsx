@@ -1,7 +1,9 @@
 'use client';
 
 import { RefreshCw, Box, Settings, Globe, RotateCcw, Square, Play, Server, Cpu, X, Network, ArrowUpCircle, ExternalLink, Key, Eye, EyeOff, Copy, Check, AlertCircle } from 'lucide-react';
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
+import { useCoreRestart } from '@/hooks/useCoreRestart';
+import { useLifecyclePollRecovery } from '@/hooks/useLifecyclePollRecovery';
 import useSWR, { useSWRConfig } from 'swr';
 import { useToast } from '@/contexts/ToastContext';
 import { useAuth } from '@/contexts/AuthContext';
@@ -14,6 +16,7 @@ import { useSystemStore } from '@/store/useSystemStore';
 import { ExternalAccessCard } from '@/components/ingress/ExternalAccessCard';
 import { DeploymentStatus } from '@/components/deploy/DeploymentStatus';
 import { ProgressRing } from '@/components/ui/ProgressRing';
+import { isLifecycleStatus, lifecycleIdentity, matchingActiveJob, matchingJobOutcome, MarketplaceJobOutcome, PendingAction, LIFECYCLE_RECEIPT_TIMEOUT_MS } from '@/hooks/useMarketplace';
 
 // Fallback map when default_port is not provided by backend
 const SERVICE_WEB_PORTS: Record<string, number | string> = {
@@ -107,6 +110,8 @@ export interface ServiceInfo {
     update_url?: string;
     update_error?: string;
     job_status?: string;
+    job_id?: string;
+    last_job?: MarketplaceJobOutcome;
     progress?: number;
     log_line?: string;
     started_at?: string;
@@ -206,9 +211,10 @@ interface ServicesTabProps {
 
 export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
     const { addToast } = useToast();
+    const { restarts, trackRestart } = useCoreRestart(addToast);
     const { user } = useAuth();
     const { mutate: globalMutate } = useSWRConfig();
-    const [loadingService, setLoadingService] = useState<string | null>(null);
+    const [serviceControl, setServiceControl] = useState<{ name: string; status: string } | null>(null);
     const [updatingServices, setUpdatingServices] = useState<Set<string>>(new Set());
     const [checkingUpdates, setCheckingUpdates] = useState(false);
     const [checkingSingleService, setCheckingSingleService] = useState<string | null>(null);
@@ -216,14 +222,49 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
     const [logsModalUnits, setLogsModalUnits] = useState<string[] | undefined>(undefined);
     const [ingressModalApp, setIngressModalApp] = useState<string | null>(null);
     const [revealedKeys, setRevealedKeys] = useState<Set<string>>(new Set());
+    const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    useEffect(() => () => { if (copyTimerRef.current) clearTimeout(copyTimerRef.current); }, []);
     const [copiedKeyService, setCopiedKeyService] = useState<string | null>(null);
     const canControlServices = user?.role === 'admin';
     const { setActiveTab } = useSystemStore();
 
-    const prevServicesRef = useRef<Record<string, ServiceInfo> | undefined>(undefined);
+    const observedJobsRef = useRef<Map<string, { action: PendingAction; identity: string }>>(new Map());
     const notifiedUpdateRef = useRef<Set<string>>(new Set());
+    const expectedJobsRef = useRef<Map<string, string>>(new Map());
+    const updateDeadlinesRef = useRef<Map<string, number>>(new Map());
 
-    const { data: services, mutate, isLoading } = useSWR<Record<string, ServiceInfo>>(
+    useEffect(() => {
+        if (!updatingServices.size || !updateDeadlinesRef.current.size) return;
+        let timer: ReturnType<typeof setTimeout>;
+        const schedule = () => {
+            if (updateDeadlinesRef.current.size) timer = setTimeout(checkDeadlines, Math.max(0, Math.min(...updateDeadlinesRef.current.values()) - Date.now()));
+        };
+        const checkDeadlines = () => {
+            const expired: string[] = [];
+            updateDeadlinesRef.current.forEach((deadline, appId) => {
+                if (deadline > Date.now()) return;
+                expired.push(appId);
+                // Retain accepted identity so a late terminal receipt still resolves.
+                updateDeadlinesRef.current.delete(appId);
+                addToast(`${appId}: update outcome could not be confirmed; its receipt may have been superseded. Check service state and logs before retrying.`, 'error');
+            });
+            if (expired.length) setUpdatingServices(current => new Set([...current].filter(appId => !expired.includes(appId))));
+            schedule();
+        };
+        schedule();
+        return () => clearTimeout(timer);
+    }, [updatingServices, addToast]);
+
+    const renewActiveUpdates = useCallback((snapshot?: Record<string, ServiceInfo>) => {
+        Object.entries(snapshot || {}).forEach(([name, info]) => {
+            const appId = info.id || name;
+            if (updateDeadlinesRef.current.has(appId) && matchingActiveJob(info, 'updating', expectedJobsRef.current.get(appId))) {
+                updateDeadlinesRef.current.set(appId, Date.now() + LIFECYCLE_RECEIPT_TIMEOUT_MS);
+            }
+        });
+    }, []);
+
+    const { data: services, error: servicesError, mutate, isLoading, isValidating } = useSWR<Record<string, ServiceInfo>>(
         '/api/v1/auth/services',
         {
             refreshInterval: (currentData) => {
@@ -233,48 +274,47 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                     (s) => s.status === 'updating' || s.job_status === 'updating' || s.job_status === 'installing' || s.job_status === 'uninstalling'
                 );
                 return hasActiveJob ? 1500 : 15000;
-            }
+            },
+            onSuccess: renewActiveUpdates,
+            shouldRetryOnError: false,
         }
     );
 
+    useLifecyclePollRecovery('/api/v1/auth/services', servicesError, () => mutate());
+
+    useEffect(() => {
+        if (!servicesError && !isValidating) renewActiveUpdates(services);
+    }, [services, servicesError, isValidating, renewActiveUpdates]);
+
     useEffect(() => {
         if (!services) return;
-        const prev = prevServicesRef.current;
-
         Object.entries(services).forEach(([name, info]) => {
             const appId = info.id || name;
-            const prevInfo = prev?.[name];
-            const wasUpdating =
-                prevInfo?.status === 'updating' ||
-                prevInfo?.job_status === 'updating' ||
-                updatingServices.has(appId);
-            const isNowUpdating = info.status === 'updating' || info.job_status === 'updating';
-
-            if (wasUpdating && !isNowUpdating) {
-                if (updatingServices.has(appId)) {
-                    setUpdatingServices((curr) => {
-                        const next = new Set(curr);
-                        next.delete(appId);
-                        return next;
-                    });
-                }
-
-                if (!notifiedUpdateRef.current.has(appId)) {
-                    notifiedUpdateRef.current.add(appId);
-                    if (info.job_status === 'failed' || info.status === 'error') {
-                        addToast(`Update failed for ${name}. Check system logs for details.`, 'error');
-                    } else {
-                        const ver = info.installed_version || info.version;
-                        const verSuffix = ver ? ` to v${ver.replace(/^v/i, '')}` : '';
-                        addToast(`${name} updated${verSuffix} and restarted.`, 'success');
-                    }
-                    globalMutate('/api/v1/public/marketplace');
-                    setTimeout(() => notifiedUpdateRef.current.delete(appId), 5000);
-                }
+            const activeAction = isLifecycleStatus(info.job_status) ? info.job_status : isLifecycleStatus(info.status) ? info.status : undefined;
+            const activeIdentity = lifecycleIdentity(info);
+            if (activeAction && activeIdentity && (!updatingServices.has(appId) || activeIdentity === expectedJobsRef.current.get(appId))) observedJobsRef.current.set(appId, { action: activeAction, identity: activeIdentity });
+            const observed = observedJobsRef.current.get(appId);
+            const localPending = updatingServices.has(appId);
+            const acceptedIdentity = expectedJobsRef.current.get(appId);
+            const action: PendingAction | undefined = localPending || acceptedIdentity ? 'updating' : observed?.action;
+            const identity = localPending ? acceptedIdentity : acceptedIdentity || observed?.identity;
+            if (!action) return;
+            const outcome = matchingJobOutcome(info, action, identity);
+            const outcomeId = lifecycleIdentity(outcome);
+            if (!outcome || !outcomeId || notifiedUpdateRef.current.has(outcomeId)) return;
+            notifiedUpdateRef.current.add(outcomeId);
+            expectedJobsRef.current.delete(appId);
+            updateDeadlinesRef.current.delete(appId);
+            observedJobsRef.current.delete(appId);
+            setUpdatingServices(curr => { const next = new Set(curr); next.delete(appId); return next; });
+            if (outcome.status === 'completed') {
+                addToast(`${name}: ${outcome.action} completed.`, 'success');
+            } else {
+                addToast(`${name}: ${outcome.action} ${outcome.status === 'failed' ? 'failed' : 'could not be confirmed'}. ${outcome.message || 'Check application state and logs.'}`, 'error');
             }
+            void globalMutate('/api/v1/public/marketplace');
         });
 
-        prevServicesRef.current = services;
     }, [services, updatingServices, addToast, globalMutate]);
 
     const handleCheckAllUpdates = async () => {
@@ -282,6 +322,7 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
         try {
             if (canControlServices) {
                 const res = await apiFetch('/api/v1/admin/packages/updates/check', { method: 'POST' });
+                if (!res.ok) throw new Error('Application update inventory unavailable');
                 if (res.ok) {
                     const payload = await res.json().catch(() => null);
                     await mutate();
@@ -323,8 +364,7 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
             await mutate();
             addToast('Synchronized service states.', 'info');
         } catch {
-            await mutate();
-            addToast('Failed to check remote updates; refreshed local service status.', 'error');
+            addToast('Failed to check remote updates; try again shortly.', 'error');
         } finally {
             setCheckingUpdates(false);
         }
@@ -372,6 +412,10 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
             return;
         }
 
+        expectedJobsRef.current.delete(appId);
+        observedJobsRef.current.delete(appId);
+        updateDeadlinesRef.current.set(appId, Date.now() + LIFECYCLE_RECEIPT_TIMEOUT_MS);
+        setUpdatingServices(curr => new Set(curr).add(appId));
         try {
             const res = await apiFetch(`/api/v1/admin/packages/${encodeURIComponent(appId)}/update`, {
                 method: 'POST',
@@ -380,28 +424,20 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                 const d = await res.json().catch(() => ({}));
                 throw new Error(d.message || d.error || 'Package update request rejected.');
             }
-            setUpdatingServices((curr) => new Set(curr).add(appId));
-            if (services) {
-                mutate(
-                    {
-                        ...services,
-                        [name]: {
-                            ...data,
-                            status: 'updating',
-                            job_status: 'updating',
-                            progress: 5,
-                            log_line: `Preparing update for ${name}...`,
-                            started_at: new Date().toISOString(),
-                        },
-                    },
-                    false
-                );
-            }
+            const receipt = await res.json() as { job_id?: string; started_at?: string };
+            const identity = lifecycleIdentity(receipt);
+            if (!identity) throw new Error('The server did not return a job identity. Refresh status and check logs before retrying.');
+            if (!updateDeadlinesRef.current.has(appId)) throw new Error('Acceptance arrived after status tracking expired. Check service state and logs before retrying.');
+            expectedJobsRef.current.set(appId, identity);
+            setUpdatingServices(curr => new Set(curr).add(appId));
             const targetVer = data.latest_version ? ` to v${data.latest_version.replace(/^v/i, '')}` : '';
             addToast(`Updating ${name}${targetVer}...`, 'info');
             mutate();
             globalMutate('/api/v1/public/marketplace');
         } catch (err: unknown) {
+            expectedJobsRef.current.delete(appId);
+            updateDeadlinesRef.current.delete(appId);
+            observedJobsRef.current.delete(appId);
             setUpdatingServices((curr) => {
                 const next = new Set(curr);
                 next.delete(appId);
@@ -425,17 +461,10 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
             return;
         }
 
-        setLoadingService(name);
-
-        // Optimistic update — instantly reflect the pending state in the UI
+        // Keep optimistic feedback local: SWR mutate(data) clears its error and
+        // would make a cached lifecycle receipt look like a fresh server poll.
         const optimisticStatus = action === 'stop' ? 'stopping' : action === 'start' ? 'starting' : 'restarting';
-        const prevData = services;
-        if (services) {
-            mutate(
-                { ...services, [name]: { ...data, status: optimisticStatus } },
-                false // don't revalidate yet
-            );
-        }
+        setServiceControl({ name, status: optimisticStatus });
 
         const canonicalTarget = (data.id || data.process || name).trim();
         const processTarget = (data.id || data.process || name).trim();
@@ -453,13 +482,15 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                 const d = await res.json().catch(() => ({}));
                 throw new Error(d.message || d.error || 'Daemon control operation rejected.');
             }
-            addToast(`Successfully executed '${action}' on ${name}.`, 'success');
-            setTimeout(() => mutate(), 1500);
+            const receipt = await res.json().catch(() => ({}));
+            if (receipt.status === 'accepted') trackRestart(name, receipt);
+            else addToast(`Successfully executed '${action}' on ${name}.`, 'success');
+            void mutate();
         } catch (err: unknown) {
-            mutate(prevData, false);
+            void mutate();
             addToast(err instanceof Error ? err.message : 'Undefined system exception encountered.', 'error');
         } finally {
-            setLoadingService(null);
+            setServiceControl(null);
         }
     };
 
@@ -528,7 +559,8 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
             await navigator.clipboard.writeText(apiKey);
             setCopiedKeyService(name);
             addToast(`Copied ${name} API key to clipboard.`, 'success');
-            setTimeout(() => {
+            if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+            copyTimerRef.current = setTimeout(() => {
                 setCopiedKeyService((curr) => (curr === name ? null : curr));
             }, 2000);
         } catch {
@@ -709,17 +741,19 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
     };
 
     const renderServiceCard = (name: string, rawData: unknown) => {
-        const data = rawData as ServiceInfo;
+        const info = rawData as ServiceInfo;
+        const data = serviceControl?.name === name ? { ...info, status: serviceControl.status } : info;
         const isCore = isCorePlatformService(data);
         const appId = data.id || '';
         const isUpdating =
             data.status === 'updating' ||
-            data.job_status === 'updating' ||
+            isLifecycleStatus(data.job_status) ||
+            isLifecycleStatus(data.status) ||
             (appId ? updatingServices.has(appId) : false);
         const { degraded: isDegraded, unhealthyUnits } = getDegradedSummary(data);
         const isRunning = (data.status === 'running' || isDegraded) && !isUpdating;
         const isError = data.status === 'error';
-        const isBusy = loadingService === name || isUpdating;
+        const isBusy = serviceControl?.name === name || isUpdating || restarts.has(name);
         const controlDisabled = isBusy || !canControlServices;
         const sharedVhost = isSharedVhostService(name, data);
         const sharedVhostMessage = `${name} runs on the shared Apache web server. Per-app stop/restart is disabled to protect other sites and the gateway.`;
@@ -739,16 +773,26 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                 <div className={`absolute top-0 left-0 w-1 h-full ${isUpdating ? 'bg-amber-400 animate-pulse' : (isDegraded ? 'bg-amber-500' : (hasUpdate ? 'bg-amber-500/70' : (isRunning ? 'bg-emerald-500/50' : (isError ? 'bg-red-500/50' : 'bg-slate-500/50'))))} transition-colors z-20`}></div>
 
                 {isUpdating && (
-                    <div className="absolute inset-0 bg-slate-950/90 backdrop-blur-md rounded-2xl z-30 flex items-center justify-center p-6 text-center">
+                    <div className="mb-4 min-w-0 max-w-full rounded-xl bg-slate-900/90 p-4 text-center">
                         <ProgressRing
                             progress={data.progress || 10}
-                            status="updating"
+                            status={isLifecycleStatus(data.job_status) ? data.job_status : 'updating'}
                             logLine={data.log_line || `Updating ${name}...`}
                             startedAt={data.started_at}
                         />
                     </div>
                 )}
 
+                {data.components && data.components.length > 1 && (
+                    <ul aria-label="Service components" className="mb-4 min-w-0 max-w-full space-y-1 text-xs text-slate-400">
+                        {data.components.map(component => <li key={component.unit} className="flex min-w-0 items-center justify-between gap-2"><span className="min-w-0 break-all">{component.unit}: {component.status || 'unknown'} ({component.role || 'required'}{component.configured === false ? ', unconfigured' : ''})</span><button disabled={!canControlServices} title={`View logs for ${component.unit}`} onClick={() => { setLogsModalUnits(serviceLogUnits); setLogsModalService(component.unit); }} className="shrink-0 rounded p-2 text-indigo-300 disabled:opacity-50"><Terminal size={14} /></button></li>)}
+                    </ul>
+                )}
+                {data.last_job && data.last_job.status !== 'completed' && !isUpdating && (
+                    <div role="status" className="mb-4 min-w-0 max-w-full break-words rounded-lg border border-red-500/20 bg-red-500/5 p-3 text-xs text-red-300">
+                        Last {data.last_job.action}: {data.last_job.status}. {data.last_job.message || 'Check application state and logs before retrying.'}
+                    </div>
+                )}
                 <div className="flex justify-between items-start mb-6 relative z-10">
                     <div className="flex items-center gap-4">
                         <div className="h-12 w-12 bg-white/5 rounded-xl border border-white/10 flex items-center justify-center shadow-inner overflow-hidden group-hover:scale-105 transition-transform">
@@ -787,7 +831,7 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                                     <span className={`relative inline-flex rounded-full h-2 w-2 ${isUpdating || isDegraded ? 'bg-amber-400' : (isRunning ? 'bg-emerald-500' : (isError ? 'bg-red-500' : 'bg-slate-500'))}`}></span>
                                 </span>
                                 <span className={`text-xs font-medium capitalize ${isDegraded ? 'text-amber-400' : 'text-slate-400'}`}>
-                                    {isUpdating ? 'updating' : (isDegraded ? 'degraded' : data.status)}
+                                    {isUpdating ? (data.job_status || 'updating') : (isDegraded ? 'degraded' : data.status)}
                                 </span>
                                 {isDegraded && unhealthyUnits.length > 0 && (
                                     <span
@@ -819,6 +863,17 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                         </div>
                     </div>
                     <div className="flex items-center gap-1">
+                                <button
+                                    onClick={() => {
+                                        setLogsModalUnits(serviceLogUnits);
+                                        setLogsModalService(serviceLogUnits[0] || data.process || name);
+                                    }}
+                                    disabled={!canControlServices}
+                                    title={canControlServices ? 'View live logs' : 'Admin access required'}
+                                    className="obs-touch-target-standard obs-gpu-120hz-interactive p-2.5 bg-slate-800/80 hover:bg-indigo-500/20 hover:text-indigo-400 text-slate-400 rounded-lg transition-colors disabled:opacity-50 flex items-center justify-center"
+                                >
+                                    <Terminal size={16} />
+                                </button>
                         {!isCore && webAvailable && (
                             <button 
                                 onClick={() => setIngressModalApp(data.id || data.process || name)}
@@ -844,7 +899,7 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
 
                 {(() => {
                     const { port: effectivePort, defaultPort, reassigned } = resolveServicePort(name, data);
-                    const apiKey = data.api_key?.trim() || '';
+                    const apiKey = user?.role === 'admin' ? data.api_key?.trim() || '' : '';
                     const isKeyRevealed = revealedKeys.has(name);
                     const isKeyCopied = copiedKeyService === name;
 
@@ -975,7 +1030,7 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                 )}
 
                 <div className="flex gap-2">
-                    {isRunning ? (
+                    {isRunning || isUpdating ? (
                         <>
                             {webAvailable && (
                                 <button
@@ -988,17 +1043,7 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                                 </button>
                             )}
                             <RequireClaim>
-                                <button
-                                    onClick={() => {
-                                        setLogsModalUnits(serviceLogUnits);
-                                        setLogsModalService(serviceLogUnits[0] || data.process || name);
-                                    }}
-                                    disabled={controlDisabled}
-                                    title={canControlServices ? 'View live logs' : 'Admin access required'}
-                                    className="obs-touch-target-standard obs-gpu-120hz-interactive p-2.5 bg-slate-800/80 hover:bg-indigo-500/20 hover:text-indigo-400 text-slate-400 rounded-lg transition-colors disabled:opacity-50 flex items-center justify-center"
-                                >
-                                    <Terminal size={16} />
-                                </button>
+
                                 <button
                                     onClick={() => handleServiceControl(name, data, 'restart')}
                                     disabled={daemonControlDisabled}

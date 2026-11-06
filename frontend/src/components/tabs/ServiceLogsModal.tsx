@@ -14,12 +14,12 @@ interface ServiceLogsModalProps {
     onClose: () => void;
 }
 
-export default function ServiceLogsModal({ serviceName, units, onClose }: ServiceLogsModalProps) {
-    const bottomRef = useRef<HTMLDivElement>(null);
-    const { addToast } = useToast();
-    const [isAnalyzing, setIsAnalyzing] = useState(false);
-    const [aiAnalysis, setAiAnalysis] = useState<{ rootCause: string, recommendation: string, hasError: boolean, proposedAction?: AIProposedAction } | null>(null);
-    const [showRemediationBoundary, setShowRemediationBoundary] = useState(false);
+export default function ServiceLogsModal(props: ServiceLogsModalProps) {
+    if (!props.serviceName) return null;
+    return <ServiceLogsSession key={props.serviceName} {...props} />;
+}
+
+function ServiceLogsSession({ serviceName, units, onClose }: ServiceLogsModalProps) {
     const normalizedUnits = Array.from(
         new Set(
             (units && units.length > 0 ? units : serviceName ? [serviceName] : [])
@@ -28,17 +28,43 @@ export default function ServiceLogsModal({ serviceName, units, onClose }: Servic
         )
     );
     const [selectedUnit, setSelectedUnit] = useState<string | null>(null);
+    const requestedUnit = serviceName && normalizedUnits.includes(serviceName)
+        ? serviceName
+        : normalizedUnits[0] || serviceName;
     const activeUnit = selectedUnit && normalizedUnits.includes(selectedUnit)
         ? selectedUnit
-        : normalizedUnits[0] || serviceName;
+        : requestedUnit;
+
+    if (!serviceName || !activeUnit) return null;
+    return <ServiceLogsUnit key={activeUnit} serviceName={serviceName} activeUnit={activeUnit}
+        normalizedUnits={normalizedUnits} onSelectUnit={setSelectedUnit} onClose={onClose} />;
+}
+
+// A unit owns its log cache subscription and diagnostic request for this session.
+// Changing companions unmounts it, so previous data or late diagnostics cannot
+// be relabelled as the new unit, even when the network ignores cancellation.
+function ServiceLogsUnit({ serviceName, activeUnit, normalizedUnits, onSelectUnit, onClose }: {
+    serviceName: string;
+    activeUnit: string;
+    normalizedUnits: string[];
+    onSelectUnit: (unit: string) => void;
+    onClose: () => void;
+}) {
+    const bottomRef = useRef<HTMLDivElement>(null);
+    const { addToast } = useToast();
+    const [isAnalyzing, setIsAnalyzing] = useState(false);
+    const [aiAnalysis, setAiAnalysis] = useState<{ rootCause: string, recommendation: string, hasError: boolean, proposedAction?: AIProposedAction } | null>(null);
+    const [showRemediationBoundary, setShowRemediationBoundary] = useState(false);
+    const diagnosticRequest = useRef<AbortController | null>(null);
+    useEffect(() => () => { diagnosticRequest.current?.abort(); }, []);
 
     const { data: rawData, error, isLoading, mutate } = useSWR<{ logs: { message: string }[] }>(
         activeUnit ? `/api/v1/admin/logs?unit=${encodeURIComponent(activeUnit)}` : null,
-        { refreshInterval: 2000, keepPreviousData: true }
+        { refreshInterval: 2000, keepPreviousData: false }
     );
 
     
-    const logs = rawData ? { logs: rawData.logs.map(l => l.message) } : null;
+    const logs = rawData && !error ? { logs: rawData.logs.map(l => l.message) } : null;
 
     useEffect(() => {
         if (logs?.logs && bottomRef.current) {
@@ -61,6 +87,10 @@ export default function ServiceLogsModal({ serviceName, units, onClose }: Servic
 
     const runAiDiagnostic = async () => {
         if (!logs?.logs || logs.logs.length === 0) return;
+        diagnosticRequest.current?.abort();
+        const request = new AbortController();
+        diagnosticRequest.current = request;
+        const isCurrent = () => diagnosticRequest.current === request && !request.signal.aborted;
         setIsAnalyzing(true);
         setAiAnalysis(null);
         
@@ -69,6 +99,7 @@ export default function ServiceLogsModal({ serviceName, units, onClose }: Servic
             
             const res = await apiFetch('/api/v1/auth/ai/support', {
                 method: 'POST',
+                signal: request.signal,
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ 
                     message: prompt,
@@ -79,7 +110,8 @@ export default function ServiceLogsModal({ serviceName, units, onClose }: Servic
             if (!res.ok) throw new Error('AI analysis failed');
             
             const data = await res.json();
-            
+            if (!isCurrent()) return;
+
             setAiAnalysis({
                 rootCause: data.reply,
                 recommendation: data.proposed_action ? data.proposed_action.description : "No immediate remediation required.",
@@ -88,9 +120,9 @@ export default function ServiceLogsModal({ serviceName, units, onClose }: Servic
             });
             
         } catch {
-            addToast('FlowAI diagnostic failed. Backend might be unreachable.', 'error');
+            if (isCurrent()) addToast('FlowAI diagnostic failed. Backend might be unreachable.', 'error');
         } finally {
-            setIsAnalyzing(false);
+            if (isCurrent()) setIsAnalyzing(false);
         }
     };
 
@@ -122,7 +154,7 @@ export default function ServiceLogsModal({ serviceName, units, onClose }: Servic
                                         type="button"
                                         role="tab"
                                         aria-selected={isSelected}
-                                        onClick={() => setSelectedUnit(unit)}
+                                        onClick={() => onSelectUnit(unit)}
                                         className={`px-2.5 py-1 rounded-md text-xs font-mono transition-colors border ${
                                             isSelected
                                                 ? 'bg-indigo-500/20 text-indigo-300 border-indigo-500/40 font-semibold'
@@ -141,7 +173,7 @@ export default function ServiceLogsModal({ serviceName, units, onClose }: Servic
                 <div className="flex items-center gap-2">
                     <button 
                         onClick={runAiDiagnostic}
-                        disabled={isAnalyzing || !logs?.logs}
+                        disabled={isAnalyzing || !logs?.logs.length}
                         className="flex items-center gap-2 px-3 py-1.5 text-indigo-300 hover:text-white bg-indigo-500/10 hover:bg-indigo-500/20 rounded-lg transition-colors border border-indigo-500/30 disabled:opacity-50 text-xs font-bold tracking-wide"
                         title="Run FlowAI Log Diagnostic"
                     >
@@ -158,6 +190,7 @@ export default function ServiceLogsModal({ serviceName, units, onClose }: Servic
                     </button>
                     <button 
                         onClick={handleDownload}
+                        disabled={!logs?.logs}
                         className="p-1.5 text-slate-400 hover:text-white bg-white/5 hover:bg-white/10 rounded-lg transition-colors border border-white/5"
                         title="Export Matrix"
                     >

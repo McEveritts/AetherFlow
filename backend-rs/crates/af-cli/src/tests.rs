@@ -25,6 +25,82 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+#[test]
+fn direct_cli_requires_matching_durable_terminal_not_progress_or_eof() {
+    let request = build_package_runner_request("remove", "syncthing", None).unwrap();
+    let identity = uuid::Uuid::new_v4().to_string();
+    let admitted = format!("{}{}\n", af_runner::package_lifecycle::JOB_MARKER,
+        serde_json::json!({"job_id":identity,"package_id":"syncthing","action":"remove"}));
+    let terminal = af_runner::package_lifecycle::LifecycleReceipt {
+        job_id: identity.clone(), package_id: "syncthing".into(), action: "remove".into(),
+        status: "completed".into(), started_at: "2026-11-06T00:00:00Z".into(),
+        finished_at: "2026-11-06T00:01:00Z".into(), app_port: 0,
+    };
+    let receipt_line = |receipt: &af_runner::package_lifecycle::LifecycleReceipt| {
+        format!("{}{}\n", af_runner::package_lifecycle::RECEIPT_MARKER, serde_json::to_string(receipt).unwrap())
+    };
+    let mut progress_only = PackageStreamAccumulator::new();
+    progress_only.push_chunk(format!("{admitted}[PROGRESS:100] Installer finished\n").as_bytes(), |_| {});
+    assert!(matches!(progress_only.finish_verified(&request, |_| {}), Err(CliError::RunnerIpc { message, .. }) if message.contains("unconfirmed")));
+    let mut success = PackageStreamAccumulator::new();
+    success.push_chunk(format!("{admitted}[PROGRESS:100] Script finished\n{}", receipt_line(&terminal)).as_bytes(), |_| {});
+    assert_eq!(success.finish_verified(&request, |_| {}).unwrap().lifecycle.unwrap(), terminal);
+    let mut failed_terminal = terminal.clone();
+    failed_terminal.status = "failed".into();
+    let mut failed = PackageStreamAccumulator::new();
+    failed.push_chunk(format!("{admitted}{}", receipt_line(&failed_terminal)).as_bytes(), |_| {});
+    assert!(matches!(failed.finish_verified(&request, |_| {}), Err(CliError::Execution(message)) if message.contains(&identity)));
+    let mut wrong_identity = terminal.clone();
+    wrong_identity.job_id = uuid::Uuid::new_v4().to_string();
+    let mut wrong = PackageStreamAccumulator::new();
+    wrong.push_chunk(format!("{admitted}{}", receipt_line(&wrong_identity)).as_bytes(), |_| {});
+    assert!(matches!(wrong.finish_verified(&request, |_| {}), Err(CliError::RunnerIpc { .. })));
+}
+
+#[test]
+fn direct_cli_purge_is_explicit_and_ordinary_removal_retains_data() {
+    for (args, purge) in [(vec!["remove", "syncthing"], false),
+        (vec!["package", "remove", "syncthing", "--purge"], true)] {
+        let invocation = parse_cli_args(args.into_iter().map(String::from).collect::<Vec<_>>()).unwrap();
+        assert!(matches!(invocation.command, AfCommand::Package(PackageCommand::Remove { purge: actual, .. }) if actual == purge));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn actual_unix_transport_rejects_eof_after_script_success_without_durable_receipt() {
+    use std::io::{Read, Write};
+    let root = TempTestDir { path: std::env::temp_dir().join(format!("s-{}", uuid::Uuid::new_v4().simple())) };
+    fs::create_dir_all(root.path()).unwrap();
+    let socket = root.path().join("runner.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+        let mut request = Vec::new();
+        loop {
+            let mut chunk = [0u8; 1024];
+            let count = stream.read(&mut chunk).unwrap();
+            assert_ne!(count, 0);
+            request.extend_from_slice(&chunk[..count]);
+            if let Some(end) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                let headers = String::from_utf8_lossy(&request[..end]);
+                let length = headers.lines().find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length").then(|| value.trim().parse::<usize>().unwrap())
+                }).unwrap();
+                if request.len() >= end + 4 + length { break; }
+            }
+        }
+        let body = "[PROGRESS:100] Installer script succeeded\n";
+        write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+    });
+    let client = UnixSocketRunnerClient::new(socket);
+    let request = build_package_runner_request("remove", "syncthing", None).unwrap();
+    assert!(matches!(client.execute_package(&request), Err(CliError::RunnerIpc { message, .. }) if message.contains("unconfirmed")));
+    server.join().unwrap();
+}
+
 /// RAII temporary directory guard under `std::env::temp_dir()` so tests never touch real system paths.
 struct TempTestDir {
     path: PathBuf,
@@ -1197,6 +1273,11 @@ fn release_local_deploy_and_rollback_write_status_receipts_and_honor_root_conf()
     assert!(!fail_receipt.success);
     assert_ne!(fail_receipt.exit_code, Some(0));
     assert!(!fail_receipt.error.is_empty());
+    let retry_closed_receipt = execute_invocation(&fail_inv, &transport);
+    assert_eq!(retry_closed_receipt.status, "error");
+    assert!(retry_closed_receipt
+        .message
+        .contains("admission was closed"));
 
     // 3. Dry-run local rollback with `.previous_release` in dry_run_root succeeds and writes a `succeeded` receipt
     #[cfg(unix)]
@@ -1232,6 +1313,49 @@ fn release_local_deploy_and_rollback_write_status_receipts_and_honor_root_conf()
         assert!(ok_receipt.success);
         assert_eq!(ok_receipt.exit_code, Some(0));
     }
+}
+
+#[test]
+fn standalone_cleanup_reconciles_dead_api_owner_without_api_startup() {
+    let root = TempTestDir::new("standalone-owner-recovery");
+    let cfg = af_release::ReleaseConfig::for_root(root.path());
+    let database = af_release::config::try_resolve_db_path(&cfg, None)
+        .unwrap()
+        .path;
+    fs::create_dir_all(database.parent().unwrap()).unwrap();
+    let conn = Connection::open(&database).unwrap();
+    conn.execute_batch("PRAGMA journal_mode=WAL;").unwrap();
+    af_release::lifecycle::initialize_schema(&conn).unwrap();
+    let owner = af_release::lifecycle::OwnerLease::create(&database).unwrap();
+    conn.execute(
+        "INSERT INTO package_lifecycle_jobs(package_id,job_id,action,status,started_at,owner_id)
+        VALUES ('fixture','original-job','update','updating','now',?1)",
+        [&owner.id],
+    )
+    .unwrap();
+    let invocation = parse_cli_args([
+        "--json",
+        "--root",
+        root.path().to_str().unwrap(),
+        "release",
+        "cleanup",
+    ])
+    .unwrap();
+    let transport = MockRunnerTransport::default();
+    let blocked = execute_invocation(&invocation, &transport);
+    assert_eq!(blocked.status, "error");
+    assert!(blocked
+        .message
+        .contains("lifecycle orchestration is active"));
+    drop(owner);
+    let recovered = execute_invocation(&invocation, &transport);
+    assert_eq!(recovered.status, "ok", "{}", recovered.message);
+    let status: String = conn
+        .query_row("SELECT status FROM package_lifecycle_jobs", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(status, "interrupted");
 }
 
 #[test]

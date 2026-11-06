@@ -353,7 +353,7 @@ async fn mounted_streaming_routes_enforce_scope_approval_backup_and_restore_isol
             [],
         )
         .unwrap();
-    let stale_history = fixture
+    let stable_history = fixture
         .request(
             Method::GET,
             &format!("{history_path}&snapshot={snapshot}"),
@@ -361,7 +361,7 @@ async fn mounted_streaming_routes_enforce_scope_approval_backup_and_restore_isol
             None,
         )
         .await;
-    assert_eq!(stale_history.status(), StatusCode::CONFLICT);
+    assert_eq!(stable_history.status(), StatusCode::OK);
     let stale_payload =
         json!({"archive": archive, "mode": "replace", "approvalToken": preview["approvalToken"]});
     let stale_restore = fixture
@@ -373,6 +373,20 @@ async fn mounted_streaming_routes_enforce_scope_approval_backup_and_restore_isol
         )
         .await;
     assert_eq!(stale_restore.status(), StatusCode::CONFLICT);
+
+    af_db::get_conn().unwrap().execute(
+        "UPDATE streaming_user_links SET provider_user_id='new-explicit-identity' WHERE af_user_id=2",
+        [],
+    ).unwrap();
+    let stale_identity = fixture
+        .request(
+            Method::GET,
+            &format!("{history_path}&snapshot={snapshot}"),
+            Some(&fixture.linked_token),
+            None,
+        )
+        .await;
+    assert_eq!(stale_identity.status(), StatusCode::CONFLICT);
 
     let fresh = response_json(
         fixture

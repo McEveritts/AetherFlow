@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"log"
 	"log/slog"
@@ -109,13 +110,13 @@ func InitDB() {
 
 	// ─── v3.1.0 Gold: Performance PRAGMAs for bare-metal ──────────────
 	pragmas := []string{
-		"PRAGMA journal_mode=WAL;",       // Write-Ahead Logging — concurrent reads
-		"PRAGMA synchronous=NORMAL;",     // Safe with WAL; full sync on checkpoint only
-		"PRAGMA busy_timeout=5000;",      // 5 s retry on lock contention
-		"PRAGMA cache_size=-64000;",      // 64 MB page cache (negative = KiB)
-		"PRAGMA foreign_keys=ON;",        // Enforce referential integrity
-		"PRAGMA temp_store=MEMORY;",      // Temp tables in RAM
-		"PRAGMA mmap_size=268435456;",    // 256 MB memory-mapped I/O
+		"PRAGMA journal_mode=WAL;",    // Write-Ahead Logging — concurrent reads
+		"PRAGMA synchronous=NORMAL;",  // Safe with WAL; full sync on checkpoint only
+		"PRAGMA busy_timeout=5000;",   // 5 s retry on lock contention
+		"PRAGMA cache_size=-64000;",   // 64 MB page cache (negative = KiB)
+		"PRAGMA foreign_keys=ON;",     // Enforce referential integrity
+		"PRAGMA temp_store=MEMORY;",   // Temp tables in RAM
+		"PRAGMA mmap_size=268435456;", // 256 MB memory-mapped I/O
 	}
 	for _, p := range pragmas {
 		if _, err := DB.Exec(p); err != nil {
@@ -784,6 +785,7 @@ const ingressCacheTTL = 5 * time.Second
 var (
 	ingressCacheMu         sync.RWMutex
 	ingressCacheDB         *sql.DB
+	ingressCacheGeneration uint64
 	cachedIngressConfigs   []models.AppIngressConfig
 	cachedIngressConfigsAt time.Time
 	cachedBaseDomain       string
@@ -793,6 +795,7 @@ var (
 // InvalidateIngressCache clears the in-memory cache for app ingress configs and base domain.
 func InvalidateIngressCache() {
 	ingressCacheMu.Lock()
+	ingressCacheGeneration++
 	ingressCacheDB = DB
 	cachedIngressConfigs = nil
 	cachedIngressConfigsAt = time.Time{}
@@ -808,6 +811,7 @@ func GetAllAppIngressConfigs() ([]models.AppIngressConfig, error) {
 	}
 
 	ingressCacheMu.RLock()
+	generation := ingressCacheGeneration
 	if ingressCacheDB == DB && cachedIngressConfigs != nil && time.Since(cachedIngressConfigsAt) < ingressCacheTTL {
 		out := make([]models.AppIngressConfig, len(cachedIngressConfigs))
 		copy(out, cachedIngressConfigs)
@@ -850,10 +854,12 @@ func GetAllAppIngressConfigs() ([]models.AppIngressConfig, error) {
 	}
 
 	ingressCacheMu.Lock()
-	ingressCacheDB = DB
-	cachedIngressConfigs = make([]models.AppIngressConfig, len(configs))
-	copy(cachedIngressConfigs, configs)
-	cachedIngressConfigsAt = time.Now()
+	if ingressCacheGeneration == generation {
+		ingressCacheDB = DB
+		cachedIngressConfigs = make([]models.AppIngressConfig, len(configs))
+		copy(cachedIngressConfigs, configs)
+		cachedIngressConfigsAt = time.Now()
+	}
 	ingressCacheMu.Unlock()
 
 	return configs, nil
@@ -903,10 +909,11 @@ func GetAppIngressConfig(appName string) (*models.AppIngressConfig, error) {
 
 // SetAppIngressConfig atomically inserts or updates the ingress configuration for an app.
 func SetAppIngressConfig(cfg models.AppIngressConfig) error {
-	if DB == nil {
-		return nil
-	}
-	_, err := DB.Exec(`
+	return setAppIngressConfig(cfg, nil)
+}
+
+func writeAppIngressConfig(ctx context.Context, conn *sql.Conn, cfg models.AppIngressConfig) error {
+	_, err := conn.ExecContext(ctx, `
 		INSERT INTO app_ingress_configs (app_name, public_domain, external_access_enabled, listen_port, tls_enabled, updated_at)
 		VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 		ON CONFLICT(app_name) DO UPDATE SET
@@ -916,7 +923,6 @@ func SetAppIngressConfig(cfg models.AppIngressConfig) error {
 			tls_enabled = excluded.tls_enabled,
 			updated_at = CURRENT_TIMESTAMP
 	`, cfg.AppName, cfg.PublicDomain, cfg.ExternalAccessEnabled, cfg.ListenPort, cfg.TLSEnabled)
-	InvalidateIngressCache()
 	return err
 }
 
@@ -989,5 +995,3 @@ func SetBaseDomain(domain string) error {
 	InvalidateIngressCache()
 	return err
 }
-
-

@@ -28,15 +28,15 @@ report_progress 20 "Stopping and disabling fail2ban.service..."
 purge_systemd_unit "fail2ban"
 
 report_progress 55 "Purging fail2ban APT package..."
-DEBIAN_FRONTEND=noninteractive apt-get "$APT_REMOVE_ACTION" -y -qq fail2ban >> "$LOGFILE" 2>&1 || true
-DEBIAN_FRONTEND=noninteractive apt-get autoremove -y -qq >> "$LOGFILE" 2>&1 || true
+DEBIAN_FRONTEND=noninteractive apt-get "$APT_REMOVE_ACTION" -y -qq fail2ban >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get autoremove -y -qq >> "$LOGFILE" 2>&1
 
 report_progress 85 "Removing Fail2ban configuration and state directories..."
 rm -rf /var/run/fail2ban
 if [[ "${DELETE_DATA:-false}" == true ]]; then
     rm -rf /etc/fail2ban /var/lib/fail2ban
 fi
-systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
+systemctl daemon-reload >> "$LOGFILE" 2>&1
 
 remove_lock "${PACKAGE_NAME}"
 report_progress 100 "Fail2ban removed; application data retained unless DELETE_DATA=true."

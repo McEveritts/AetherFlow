@@ -30,7 +30,7 @@ log_info "Removing ${APP_NAME}..."
 report_progress 20 "Stopping ${APP_NAME} service..."
 
 purge_systemd_unit "requestrr"
-systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
+systemctl daemon-reload >> "$LOGFILE" 2>&1
 
 report_progress 60 "Removing ${APP_NAME} runtime files..."
 rm -rf "${INSTALL_DIR}"

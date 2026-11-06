@@ -34,6 +34,10 @@
 //!      compensating rollback actions in reverse order, restores `.bak-af` backups, removes
 //!      newly created files, cleans up temporary artifacts, and preserves the pre-operation lock state.
 
+#[cfg(test)]
+#[path = "teardown_regressions.rs"]
+mod teardown_regressions;
+
 use crate::{resolve_package_script_path, SAFE_PKG_ID, SAFE_SERVICE_NAME, SAFE_USERNAME};
 use af_models::PackageRunnerRequest;
 use chrono::Utc;
@@ -54,7 +58,7 @@ use std::sync::{
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tar::Archive;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use crate::legacy_stream_output::BoundedLines;
 use tokio::process::Command;
 
 // -----------------------------------------------------------------------------
@@ -835,6 +839,13 @@ impl CommandRunner for TokioCommandRunner {
                 cmd.env(k, v);
             }
 
+            #[cfg(unix)]
+            if let Ok(result) = crate::PACKAGE_MAINTENANCE_LEASE
+                .try_with(|guard| guard.preserve_in_child(cmd.as_std_mut()))
+            {
+                result.map_err(PackageExecutorError::Io)?;
+            }
+
             let mut child = cmd.spawn().map_err(|e| PackageExecutorError::StepFailed {
                 step: program.to_string(),
                 reason: format!("failed to spawn {}: {}", program, e),
@@ -911,6 +922,7 @@ impl CommandRunner for TokioCommandRunner {
 /// Execution context and filesystem root configuration for [`DeclarativePackageExecutor`].
 #[derive(Debug, Clone)]
 pub struct PackageExecutionEnv {
+    pub lifecycle_job_id: String,
     /// Optional root prefix for isolated testing (`AETHERFLOW_FS_ROOT`). Empty/`/` in production.
     pub fs_root: Option<PathBuf>,
     /// Directory for package lock files (`/install` by default).
@@ -952,6 +964,7 @@ impl Default for PackageExecutionEnv {
             .map(PathBuf::from);
 
         Self {
+            lifecycle_job_id: crate::current_package_job_id(),
             fs_root,
             lock_dir,
             log_dir,
@@ -968,6 +981,7 @@ impl PackageExecutionEnv {
     /// Creates an isolated execution environment rooted inside `root` (for unit/integration tests).
     pub fn isolated(root: &Path) -> Self {
         Self {
+            lifecycle_job_id: String::new(),
             fs_root: Some(root.to_path_buf()),
             lock_dir: PathBuf::from("/install"),
             log_dir: PathBuf::from("/var/log/aetherflow"),
@@ -3691,13 +3705,24 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
         recipe: &DeclarativePackageRecipe,
         action: PackageAction,
         cancel: CancellationToken,
-        mut on_progress: F,
+        on_progress: F,
     ) -> Result<PackageExecutionOutcome, PackageExecutorError>
     where
         F: FnMut(PackageProgressEvent) + Send,
     {
         recipe.validate()?;
         cancel.check(&recipe.package_id)?;
+
+        drop(
+            crate::acquire_package_maintenance_guard(
+                self.env_cfg.fs_root.as_deref(),
+                af_release::lifecycle::ReservationTarget::Package(&recipe.package_id),
+                &self.env_cfg.lifecycle_job_id,
+                Some(action.as_str()),
+            )
+            .await
+            .map_err(|error| PackageExecutorError::LockConflict(error.to_string()))?,
+        );
 
         // Register in-flight cancellation guard BEFORE waiting on process/file locks
         // (rejects duplicate concurrent action on the same package ID immediately).
@@ -3709,6 +3734,33 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
             CrossProcessLockGuard::acquire_with_cancel(&self.env_cfg, &recipe.package_id, &cancel)
                 .await?;
 
+        let _maintenance_guard = crate::acquire_package_maintenance_guard(
+            self.env_cfg.fs_root.as_deref(),
+            af_release::lifecycle::ReservationTarget::Package(&recipe.package_id),
+            &self.env_cfg.lifecycle_job_id,
+            Some(action.as_str()),
+        )
+        .await
+        .map_err(|e| PackageExecutorError::LockConflict(e.to_string()))?;
+
+        crate::PACKAGE_MAINTENANCE_LEASE
+            .scope(
+                Arc::new(_maintenance_guard),
+                self.execute_reserved_recipe(recipe, action, cancel, on_progress),
+            )
+            .await
+    }
+
+    async fn execute_reserved_recipe<F>(
+        &self,
+        recipe: &DeclarativePackageRecipe,
+        action: PackageAction,
+        cancel: CancellationToken,
+        mut on_progress: F,
+    ) -> Result<PackageExecutionOutcome, PackageExecutorError>
+    where
+        F: FnMut(PackageProgressEvent) + Send,
+    {
         let steps = recipe.steps_for_action(action);
         let total_steps = steps.len();
         let lock_file_path = self.env_cfg.resolve_lock_file(recipe)?;
@@ -3791,7 +3843,45 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                 && recipe.apply_systemd_sandbox;
         let mut sandbox_applied = false;
 
+        if action == PackageAction::Remove {
+            let mut units = vec![normalize_unit_filename(&recipe.service_name)];
+            for step in steps {
+                match step {
+                    DeclarativeStep::PurgeSystemdUnit { unit_name, .. } => {
+                        units.push(normalize_unit_filename(unit_name));
+                    }
+                    DeclarativeStep::Systemctl {
+                        unit: Some(unit),
+                        operation: SystemctlOp::Stop | SystemctlOp::Disable | SystemctlOp::ResetFailed,
+                        ..
+                    } => units.push(normalize_unit_filename(unit)),
+                    _ => {}
+                }
+            }
+            units.sort_by_key(|unit| {
+                (!unit.ends_with(".timer") && !unit.ends_with(".socket"), unit.clone())
+            });
+            units.dedup();
+            for unit in &units {
+                if let Err(error) = self.teardown_systemctl("stop", unit, &cancel).await {
+                    exec_err = Some(error);
+                    break;
+                }
+            }
+            if exec_err.is_none() {
+                for unit in &units {
+                    if let Err(error) = self.teardown_systemctl("disable", unit, &cancel).await {
+                        exec_err = Some(error);
+                        break;
+                    }
+                }
+            }
+        }
+
         for (idx, step) in steps.iter().enumerate() {
+            if exec_err.is_some() {
+                break;
+            }
             if let Err(e) = cancel.check(&recipe.package_id) {
                 exec_err = Some(e);
                 break;
@@ -3944,13 +4034,7 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                 logs.push(format!("[WARN] [rollback] {}", note));
             }
             if action == PackageAction::Remove {
-                validate_filesystem_path(&lock_file_path, self.env_cfg.fs_root.as_deref())?;
-                match fs::remove_file(&lock_file_path) {
-                    Ok(()) => {}
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(error) => return Err(PackageExecutorError::Io(error)),
-                }
-                append_log_line(&log_file_path, "[WARN] Removal incomplete; installed marker invalidated. Retry removal or reinstall to reconcile package state.");
+                append_log_line(&log_file_path, "[WARN] Removal incomplete; installed marker retained. Retry removal to reconcile package state.");
             }
             self.emit_event(
                 &recipe.package_id,
@@ -3993,8 +4077,10 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
             }
             PackageAction::Remove => {
                 validate_filesystem_path(&lock_file_path, self.env_cfg.fs_root.as_deref())?;
-                if lock_file_path.exists() {
-                    fs::remove_file(&lock_file_path)?;
+                match fs::remove_file(&lock_file_path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error.into()),
                 }
             }
         }
@@ -4063,6 +4149,52 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
         append_log_line(log_file_path, &wire_line);
         logs.push(wire_line);
         on_progress(event);
+    }
+
+    async fn teardown_systemctl(
+        &self,
+        operation: &str,
+        unit: &str,
+        cancel: &CancellationToken,
+    ) -> Result<(), PackageExecutorError> {
+        let output = self.runner.run_command(
+            "systemctl",
+            &[operation.to_string(), "--".to_string(), unit.to_string()],
+            &[],
+            cancel,
+        ).await?;
+        if output.success() {
+            return Ok(());
+        }
+        let state = self.runner.run_command(
+            "systemctl",
+            &[
+                "show".to_string(),
+                "--property=LoadState".to_string(),
+                "--property=ActiveState".to_string(),
+                "--".to_string(),
+                unit.to_string(),
+            ],
+            &[],
+            cancel,
+        ).await?;
+        let load_state = state.stdout.lines()
+            .find_map(|line| line.strip_prefix("LoadState="));
+        let active_state = state.stdout.lines()
+            .find_map(|line| line.strip_prefix("ActiveState="));
+        let known_inactive = state.success()
+            && active_state == Some("inactive")
+            && matches!(load_state, Some("loaded" | "masked" | "not-found"));
+        if known_inactive && (operation == "stop" || load_state == Some("not-found")) {
+            return Ok(());
+        }
+        Err(PackageExecutorError::StepFailed {
+            step: format!("systemctl_{operation}"),
+            reason: format!(
+                "systemctl {operation} {unit} exited with {}: {}; teardown state unproven: {}",
+                output.exit_code, output.combined_output(), state.combined_output()
+            ),
+        })
     }
 
     async fn run_single_step(
@@ -4139,13 +4271,13 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
             DeclarativeStep::AptRemove {
                 packages,
                 autoremove,
-                ignore_errors,
+                ignore_errors: _,
                 ..
             }
             | DeclarativeStep::AptPurge {
                 packages,
                 autoremove,
-                ignore_errors,
+                ignore_errors: _,
                 ..
             } => {
                 let removal_action = if self.env_cfg.delete_data { "purge" } else { "remove" };
@@ -4161,7 +4293,7 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                     .runner
                     .run_command("apt-get", &args, &apt_env, cancel)
                     .await?;
-                if !out.success() && !ignore_errors {
+                if !out.success() {
                     return Err(PackageExecutorError::StepFailed {
                         step: format!("apt_{}", removal_action),
                         reason: format!(
@@ -4182,10 +4314,16 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                         "-y".to_string(),
                         "-qq".to_string(),
                     ];
-                    let _ = self
+                    let output = self
                         .runner
                         .run_command("apt-get", &ar_args, &apt_env, cancel)
                         .await?;
+                    if !output.success() {
+                        return Err(PackageExecutorError::StepFailed {
+                            step: "apt_autoremove".to_string(),
+                            reason: output.combined_output(),
+                        });
+                    }
                 }
                 Ok(format!("APT {} packages: {}", removal_action, packages.join(", ")))
             }
@@ -4249,14 +4387,29 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                 if !self.env_cfg.delete_data {
                     return Ok(format!("retained system user {} with application data", username));
                 }
-                let _ = self
-                    .runner
-                    .run_command("userdel", std::slice::from_ref(username), &[], cancel)
-                    .await?;
-                let _ = self
-                    .runner
-                    .run_command("groupdel", std::slice::from_ref(username), &[], cancel)
-                    .await?;
+                for (database, program) in [("passwd", "userdel"), ("group", "groupdel")] {
+                    let account = self.runner.run_command(
+                        "getent", &[database.to_string(), username.clone()], &[], cancel,
+                    ).await?;
+                    if account.exit_code == 2 {
+                        continue;
+                    }
+                    if !account.success() {
+                        return Err(PackageExecutorError::StepFailed {
+                            step: "account_lookup".to_string(),
+                            reason: account.combined_output(),
+                        });
+                    }
+                    let output = self.runner.run_command(
+                        program, std::slice::from_ref(username), &[], cancel,
+                    ).await?;
+                    if !output.success() {
+                        return Err(PackageExecutorError::StepFailed {
+                            step: program.to_string(),
+                            reason: output.combined_output(),
+                        });
+                    }
+                }
                 Ok(format!("purged system user {}", username))
             }
 
@@ -4792,6 +4945,22 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                 ignore_errors,
                 ..
             } => {
+                if matches!(
+                    operation,
+                    SystemctlOp::Stop | SystemctlOp::Disable | SystemctlOp::ResetFailed
+                ) {
+                    let operation_name = match operation {
+                        SystemctlOp::Stop => "stop",
+                        SystemctlOp::Disable => "disable",
+                        _ => "reset-failed",
+                    };
+                    self.teardown_systemctl(
+                        operation_name,
+                        &normalize_unit_filename(unit.as_deref().unwrap_or_default()),
+                        cancel,
+                    ).await?;
+                    return Ok(format!("systemctl {operation_name} completed"));
+                }
                 let args: Vec<String> = match operation {
                     SystemctlOp::DaemonReload => vec!["daemon-reload".to_string()],
                     SystemctlOp::EnableNow => vec![
@@ -4835,7 +5004,9 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                     .runner
                     .run_command("systemctl", &args, &[], cancel)
                     .await?;
-                if !out.success() && !ignore_errors {
+                if !out.success()
+                    && (!ignore_errors || matches!(operation, SystemctlOp::DaemonReload))
+                {
                     return Err(PackageExecutorError::StepFailed {
                         step: format!("systemctl {:?}", operation),
                         reason: format!(
@@ -4853,25 +5024,30 @@ impl<R: CommandRunner> DeclarativePackageExecutor<R> {
                 let norm = normalize_unit_filename(unit_name);
                 for op in ["stop", "disable", "reset-failed"] {
                     cancel.check(&recipe.package_id)?;
-                    let _ = self
-                        .runner
-                        .run_command(
-                            "systemctl",
-                            &[op.to_string(), "--".to_string(), norm.clone()],
-                            &[],
-                            cancel,
-                        )
-                        .await?;
+                    self.teardown_systemctl(op, &norm, cancel).await?;
                 }
                 let unit_logical = format!("/etc/systemd/system/{}", norm);
                 let dropin_logical = format!("/etc/systemd/system/{}.d", norm);
                 let unit_path = self.env_cfg.resolve_path(&unit_logical)?;
                 let dropin_path = self.env_cfg.resolve_path(&dropin_logical)?;
-                if unit_path.is_file() {
-                    let _ = fs::remove_file(&unit_path);
+                match fs::remove_file(&unit_path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error.into()),
                 }
-                if dropin_path.is_dir() {
-                    let _ = fs::remove_dir_all(&dropin_path);
+                match fs::remove_dir_all(&dropin_path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error.into()),
+                }
+                let reload = self.runner.run_command(
+                    "systemctl", &["daemon-reload".to_string()], &[], cancel,
+                ).await?;
+                if !reload.success() {
+                    return Err(PackageExecutorError::StepFailed {
+                        step: "systemctl_daemon_reload".to_string(),
+                        reason: reload.combined_output(),
+                    });
                 }
                 Ok(format!("purged systemd unit {}", norm))
             }
@@ -5483,6 +5659,38 @@ where
     }
 }
 
+/// Whether a request explicitly asks a removal to purge retained application
+/// data. Install and update never purge, and the runner's own `DELETE_DATA`
+/// environment is deliberately ignored so a stray daemon setting cannot turn
+/// every ordinary uninstall into a destructive one.
+pub(crate) fn package_request_deletes_data(req: &PackageRunnerRequest) -> bool {
+    req.delete_data && req.action == "remove"
+}
+
+/// Sets the lifecycle contract environment for a legacy Bash package script.
+/// `DELETE_DATA` is always set explicitly so an inherited runner value can
+/// never turn an ordinary removal into a purge.
+pub(crate) fn apply_legacy_package_environment(cmd: &mut Command, req: &PackageRunnerRequest) {
+    cmd.env("DEBIAN_FRONTEND", "noninteractive")
+        .env("AF_PACKAGE_ACTION", req.action.as_str())
+        .env(
+            "DELETE_DATA",
+            if package_request_deletes_data(req) {
+                "true"
+            } else {
+                "false"
+            },
+        )
+        .env("DPKG_LOCK_TIMEOUT", "120");
+    if (1024..=65535).contains(&req.app_port) {
+        cmd.env("AF_APP_PORT", req.app_port.to_string());
+        cmd.env("AETHERFLOW_APP_PORT", req.app_port.to_string());
+    } else {
+        cmd.env_remove("AF_APP_PORT");
+        cmd.env_remove("AETHERFLOW_APP_PORT");
+    }
+}
+
 /// Streams a package lifecycle operation (`install`, `remove`, or `update`) as newline-delimited
 /// progress/log lines, dispatching to [`DeclarativePackageExecutor`] for migrated recipes and
 /// automatically falling back to the legacy Bash script for unported recipes.
@@ -5494,11 +5702,23 @@ pub fn execute_package_request_stream(
             yield Ok("__RUNNER_EXIT_ERROR__:disallowed package action\n".to_string());
             return;
         };
+        if let Err(error) = crate::acquire_package_maintenance_guard(
+            PackageExecutionEnv::default().fs_root.as_deref(),
+            af_release::lifecycle::ReservationTarget::Package(&req.package_id),
+            &req.lifecycle_job_id, Some(&req.action),
+        ).await {
+            yield Ok(format!("__RUNNER_EXIT_ERROR__:{}\n", error));
+            return;
+        }
 
         if select_package_engine(&req.package_id) == PackageEngineMode::DeclarativeRust {
             if let Some(recipe) = get_declarative_recipe(&req.package_id) {
                 let env_cfg = PackageExecutionEnv {
                     app_port: req.app_port,
+                    lifecycle_job_id: req.lifecycle_job_id.clone(),
+                    // Purge is an explicit request property, never ambient
+                    // runner environment.
+                    delete_data: package_request_deletes_data(&req),
                     ..Default::default()
                 };
                 let executor = Arc::new(DeclarativePackageExecutor::new(env_cfg));
@@ -5550,11 +5770,17 @@ pub fn execute_package_request_stream(
                 }
             };
 
+        let _maintenance_guard = match crate::acquire_package_maintenance_guard(
+            env_cfg.fs_root.as_deref(),
+            af_release::lifecycle::ReservationTarget::Package(&req.package_id),
+            &req.lifecycle_job_id, Some(&req.action),
+        ).await {
+            Ok(guard) => guard,
+            Err(e) => { yield Ok(format!("__RUNNER_EXIT_ERROR__:{}\n", e)); return; }
+        };
+
         let mut cmd = Command::new("bash");
         cmd.arg(&script_path)
-            .env("DEBIAN_FRONTEND", "noninteractive")
-            .env("AF_PACKAGE_ACTION", req.action.as_str())
-            .env("DPKG_LOCK_TIMEOUT", "120")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -5563,15 +5789,18 @@ pub fn execute_package_request_stream(
         {
             cmd.process_group(0);
         }
-        if (1024..=65535).contains(&req.app_port) {
-            cmd.env("AF_APP_PORT", req.app_port.to_string());
-            cmd.env("AETHERFLOW_APP_PORT", req.app_port.to_string());
+        apply_legacy_package_environment(&mut cmd, &req);
+
+        #[cfg(unix)]
+        if let Err(error) = _maintenance_guard.preserve_in_child(cmd.as_std_mut()) {
+            yield Ok(format!("__RUNNER_EXIT_ERROR__:{error}\n"));
+            return;
         }
 
         match cmd.spawn() {
             Ok(mut child) => {
-                let mut stdout = BufReader::new(child.stdout.take().unwrap()).lines();
-                let mut stderr = BufReader::new(child.stderr.take().unwrap()).lines();
+                let mut stdout = BoundedLines::new(child.stdout.take().unwrap());
+                let mut stderr = BoundedLines::new(child.stderr.take().unwrap());
                 let mut stdout_open = true;
                 let mut stderr_open = true;
                 while stdout_open || stderr_open {
@@ -5633,6 +5862,67 @@ mod tests {
     use flate2::write::GzEncoder;
     use flate2::Compression;
     use std::sync::atomic::AtomicUsize;
+
+    fn legacy_env(req: &PackageRunnerRequest) -> HashMap<String, Option<String>> {
+        let mut cmd = Command::new("bash");
+        apply_legacy_package_environment(&mut cmd, req);
+        cmd.as_std()
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.map(|v| v.to_string_lossy().into_owned()),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_purge_is_explicit_per_request_and_never_inherited() {
+        let request = |action: &str, delete_data: bool| PackageRunnerRequest {
+            action: action.to_string(),
+            package_id: "sonarr".to_string(),
+            script_name: "removepackage-sonarr".to_string(),
+            lifecycle_job_id: String::new(),
+            app_port: 0,
+            delete_data,
+        };
+        assert!(!package_request_deletes_data(&request("remove", false)));
+        assert!(package_request_deletes_data(&request("remove", true)));
+        assert!(!package_request_deletes_data(&request("install", true)));
+        assert!(!package_request_deletes_data(&request("update", true)));
+
+        // Ordinary removal explicitly overrides any DELETE_DATA the runner
+        // daemon itself may carry in its environment.
+        let env = legacy_env(&request("remove", false));
+        assert_eq!(env.get("DELETE_DATA"), Some(&Some("false".to_string())));
+        assert_eq!(
+            env.get("AF_PACKAGE_ACTION"),
+            Some(&Some("remove".to_string()))
+        );
+        assert_eq!(env.get("AF_APP_PORT"), Some(&None));
+        let env = legacy_env(&request("remove", true));
+        assert_eq!(env.get("DELETE_DATA"), Some(&Some("true".to_string())));
+        let mut update = request("update", true);
+        update.app_port = 18989;
+        let env = legacy_env(&update);
+        assert_eq!(env.get("DELETE_DATA"), Some(&Some("false".to_string())));
+        assert_eq!(env.get("AF_APP_PORT"), Some(&Some("18989".to_string())));
+        assert_eq!(
+            env.get("AETHERFLOW_APP_PORT"),
+            Some(&Some("18989".to_string()))
+        );
+
+        // Wire compatibility: older clients omit the field and get retention.
+        let legacy: PackageRunnerRequest = serde_json::from_str(
+            r#"{"action":"remove","package_id":"sonarr","script_name":"removepackage-sonarr"}"#,
+        )
+        .unwrap();
+        assert!(!legacy.delete_data);
+        assert!(!serde_json::to_string(&request("remove", false))
+            .unwrap()
+            .contains("delete_data"));
+    }
 
     #[test]
     fn test_registry_contains_catalog_packages_and_defers_incomplete_recipes() {
@@ -7398,7 +7688,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_incomplete_removal_invalidates_completion_marker_without_purging_data() {
+    async fn test_incomplete_removal_retains_completion_marker_without_purging_data() {
         let _serial = TEST_EXECUTION_SERIALIZER.lock().await;
         for package_id in ["fail2ban", "quassel"] {
             let root = create_isolated_test_dir(&format!("incomplete-remove-{}", package_id));
@@ -7413,11 +7703,11 @@ mod tests {
             let mock = MockCommandRunner { fail_program: Some("apt-get".to_string()), ..Default::default() };
             let executor = DeclarativePackageExecutor::with_runner(env_cfg.clone(), mock.clone());
             assert!(executor.execute_recipe(&recipe, PackageAction::Remove, CancellationToken::new(), |_| {}).await.is_err());
-            assert!(!marker.exists());
+            assert!(marker.exists());
             assert_eq!(fs::read_to_string(state_dir.join("sentinel")).unwrap(), "preserved user data");
-            assert!(!mock.recorded_commands().iter().any(|command| command.program == "systemctl"));
+            assert!(mock.recorded_commands().iter().any(|command| command.program == "systemctl" && command.args.first().map(String::as_str) == Some("stop")));
             let retry = DeclarativePackageExecutor::with_runner(env_cfg, MockCommandRunner::default());
-            assert!(retry.execute_recipe(&recipe, PackageAction::Install, CancellationToken::new(), |_| {}).await.unwrap().lock_present);
+            assert!(!retry.execute_recipe(&recipe, PackageAction::Remove, CancellationToken::new(), |_| {}).await.unwrap().lock_present);
             fs::remove_dir_all(root).unwrap();
         }
     }

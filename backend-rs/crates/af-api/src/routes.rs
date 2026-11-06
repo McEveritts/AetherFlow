@@ -233,6 +233,7 @@ fn build_v1_router() -> Router {
         .route("/oidc/device/consent", post(oidc_device_consent))
         .merge(ai_limited_auth)
         .route("/session", get(get_session))
+        .route("/ready", get(authenticated_ready))
         .route("/refresh", post(refresh_session))
         .route("/sessions", get(list_active_sessions))
         .route("/sessions/:jti", delete(revoke_session))
@@ -369,6 +370,7 @@ fn build_v1_router() -> Router {
         .route("/quotas/:id/refresh", post(refresh_user_quota))
         .route("/services", get(get_services))
         .route("/services/:name/control", post(control_service_handler))
+        .route("/services/restart/status", get(get_core_restart_status))
         .route("/packages/:id/install", post(install_package))
         .route("/packages/:id/uninstall", post(uninstall_package))
         .route("/packages/:id/update", post(update_package))
@@ -592,6 +594,34 @@ async fn health_ready() -> Response {
         .into_response()
 }
 
+async fn authenticated_ready() -> Response {
+    let ready = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        tokio::task::spawn_blocking(|| -> anyhow::Result<()> {
+            let conn = af_db::get_conn()?;
+            let value: i32 = conn.query_row("SELECT 1", [], |row| row.get(0))?;
+            anyhow::ensure!(value == 1, "database readiness probe failed");
+            Ok(())
+        }),
+    )
+    .await;
+    let healthy = matches!(ready, Ok(Ok(Ok(()))));
+    (
+        if healthy {
+            StatusCode::OK
+        } else {
+            StatusCode::SERVICE_UNAVAILABLE
+        },
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(serde_json::json!({
+            "service": "aetherflow-api",
+            "status": if healthy { "ready" } else { "not_ready" },
+            "database": if healthy { "ok" } else { "unreachable" },
+        })),
+    )
+        .into_response()
+}
+
 async fn prometheus_metrics() -> Response {
     let m = af_hardware::get_system_metrics_core();
     let mem_total_gb = m.memory.get("total").copied().unwrap_or(0.0);
@@ -670,11 +700,33 @@ async fn get_hardware_info() -> Json<af_models::HardwareReport> {
     Json(af_hardware::get_detailed_hardware())
 }
 
-async fn get_services() -> Json<HashMap<String, af_services::ServiceStatusItem>> {
-    Json(af_services::get_active_services())
+async fn get_services(Extension(auth_user): Extension<AuthUser>) -> Response {
+    let diagnostics_allowed = crate::ws::package_diagnostics_allowed(&auth_user);
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tokio::task::spawn_blocking(|| {
+            let jobs = af_services::package_job_snapshot()?;
+            af_services::get_active_services_with_jobs(&jobs)
+        }),
+    )
+    .await
+    {
+        Ok(Ok(Ok(services))) => {
+            let mut services = serde_json::to_value(services).unwrap_or_default();
+            if !diagnostics_allowed {
+                crate::ws::sanitize_services_for_viewer(&mut services);
+            }
+            Json(services).into_response()
+        }
+        _ => api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "STATUS_UNAVAILABLE",
+            "Service status could not be confirmed; retry shortly",
+        ),
+    }
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct ServiceControlReq {
     action: String,
     #[serde(default)]
@@ -683,64 +735,156 @@ struct ServiceControlReq {
     process: String,
 }
 
-async fn control_service_handler(
-    Path(name): Path<String>,
-    Extension(auth_user): Extension<AuthUser>,
-    headers: HeaderMap,
-    Json(req): Json<ServiceControlReq>,
-) -> Response {
+/// Validates a Services control request before any privileged command runs.
+/// Returns the exact target to control, or an `(status, code, message)` error.
+fn validate_service_control_request(
+    name: &str,
+    req: &ServiceControlReq,
+) -> Result<String, (StatusCode, &'static str, String)> {
     if !matches!(req.action.as_str(), "start" | "stop" | "restart") {
-        return api_error(
+        return Err((
             StatusCode::BAD_REQUEST,
             "BAD_REQUEST",
-            "Invalid action. Allowed: start, stop, restart",
-        );
+            "Invalid action. Allowed: start, stop, restart".to_string(),
+        ));
     }
     let manager = req.managed_by.trim();
-    if manager != "systemd-unit"
-        && af_services::resolve_service_control_scope(&name) == "shared-vhost"
-    {
-        return api_error(
+    if manager == "embedded" {
+        return Err((
             StatusCode::BAD_REQUEST,
-            "SHARED_VHOST_CONTROL_UNSUPPORTED",
+            "EMBEDDED_SERVICE_CONTROL_UNSUPPORTED",
             format!(
-                "{} is hosted as a shared Apache vhost; use the Apache2 Web Server card for daemon-wide controls",
+                "{} is served by the AetherFlow API process and has no separate daemon to control",
                 name
             ),
-        );
+        ));
     }
-
-    let target = if req.process.trim().is_empty() {
-        name.clone()
-    } else {
-        req.process.trim().to_string()
-    };
-
-    if manager != "systemd-unit"
-        && af_services::resolve_service_control_scope(&target) == "shared-vhost"
-    {
-        return api_error(
+    if !matches!(manager, "" | "systemd" | "systemd-unit" | "pm2") {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "BAD_REQUEST",
+            format!("Unsupported service manager {:?}", manager),
+        ));
+    }
+    let shared_vhost_error = |target: &str| {
+        (
             StatusCode::BAD_REQUEST,
             "SHARED_VHOST_CONTROL_UNSUPPORTED",
             format!(
                 "{} is hosted as a shared Apache vhost; use the Apache2 Web Server card for daemon-wide controls",
                 target
             ),
-        );
+        )
+    };
+    if manager != "systemd-unit"
+        && af_services::resolve_service_control_scope(name) == "shared-vhost"
+    {
+        return Err(shared_vhost_error(name));
     }
+    // The card may only control its own service and catalog companion units;
+    // this endpoint is not a generic root systemctl proxy.
+    let target = af_services::authorize_service_control_target(name, &req.process, manager)
+        .map_err(|message| (StatusCode::FORBIDDEN, "SERVICE_CONTROL_FORBIDDEN", message))?;
+    if manager != "systemd-unit"
+        && af_services::resolve_service_control_scope(&target) == "shared-vhost"
+    {
+        return Err(shared_vhost_error(&target));
+    }
+    // Lifecycle jobs stop, replace, and restart units themselves. A manual
+    // control in the middle would race the installer (for example starting an
+    // old binary during an atomic swap or undoing an update pre-stop).
+    let jobs = af_services::package_job_snapshot().map_err(|_| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "STATUS_UNAVAILABLE",
+            "Lifecycle status could not be confirmed; retry shortly".to_string(),
+        )
+    })?;
+    for candidate in [name, target.as_str()] {
+        if let Some(owner) = af_services::resolve_owning_package_id(candidate) {
+            if let Some(job) = jobs.active.get(&owner) {
+                return Err((
+                    StatusCode::CONFLICT,
+                    "PACKAGE_LIFECYCLE_IN_PROGRESS",
+                    format!(
+                        "{} is currently {}; service controls are unavailable until the operation finishes",
+                        owner, job.status
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(target)
+}
 
-    let result = if manager.is_empty() {
+fn service_control_failure_response(error: &anyhow::Error, target: &str, action: &str) -> Response {
+    let id = uuid::Uuid::new_v4().to_string();
+    tracing::error!(error_id = %id, %target, %action, detail = %format!("{error:#}"), "service control failed");
+    let (status, code, message) = if af_services::is_service_control_timeout(error) {
+        (StatusCode::GATEWAY_TIMEOUT, "SERVICE_CONTROL_TIMEOUT", "Service control timed out; refresh status before retrying. The resulting service state is unconfirmed.")
+    } else {
+        (StatusCode::INTERNAL_SERVER_ERROR, "SERVICE_CONTROL_FAILED", "Service control failed; check service state and authorized diagnostics before retrying.")
+    };
+    (
+        status,
+        Json(serde_json::json!({"code":code,"message":message,"error_id":id})),
+    )
+        .into_response()
+}
+
+async fn control_service_handler(
+    Path(name): Path<String>,
+    Extension(auth_user): Extension<AuthUser>,
+    headers: HeaderMap,
+    Json(req): Json<ServiceControlReq>,
+) -> Response {
+    if let Some(message) = system_update_lifecycle_block().await {
+        return message.into_response();
+    }
+    let validation_name = name.clone();
+    let validation_request = req.clone();
+    let target = match tokio::task::spawn_blocking(move || {
+        validate_service_control_request(&validation_name, &validation_request)
+    })
+    .await
+    {
+        Ok(Ok(target)) => target,
+        Ok(Err((status, code, message))) => return api_error(status, code, message),
+        Err(_) => {
+            return api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "STATUS_UNAVAILABLE",
+                "Service control status could not be confirmed",
+            )
+        }
+    };
+    let manager = req.managed_by.trim();
+
+    let deferred = req.action == "restart"
+        && matches!(
+            target.trim_end_matches(".service"),
+            "aetherflow-api" | "aetherflow-runner"
+        );
+    let mut restart_job_unit = None;
+    let result = if deferred {
+        af_runner::dispatch_core_restart(&target)
+            .await
+            .map(|unit| restart_job_unit = Some(unit))
+    } else if manager.is_empty() {
         af_services::control_service(&target, &req.action).await
     } else {
         af_services::control_service_with_manager(&target, &req.action, manager).await
     };
 
     if let Err(e) = result {
-        return api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            format!("Failed to {} service: {}", req.action, e),
-        );
+        if af_runner::is_lifecycle_busy(&e) {
+            return api_error(
+                StatusCode::CONFLICT,
+                "LIFECYCLE_BUSY",
+                af_runner::LifecycleBusy.to_string(),
+            );
+        }
+        return service_control_failure_response(&e, &target, &req.action);
     }
 
     af_services::mutators::clear_app_runtime_meta_cache();
@@ -761,16 +905,50 @@ async fn control_service_handler(
         ua,
     );
 
-    Json(serde_json::json!({
-        "message": "Service control command executed successfully",
+    (if deferred { StatusCode::ACCEPTED } else { StatusCode::OK }, Json(serde_json::json!({
+        "message": if deferred { "Restart scheduled; poll its receipt before checking readiness" } else { "Service control command executed successfully" },
+        "status": if deferred { "accepted" } else { "completed" },
         "service": name,
         "action": req.action,
-    }))
-    .into_response()
+        "job_unit": restart_job_unit,
+    }))).into_response()
+}
+
+async fn get_core_restart_status(Query(query): Query<HashMap<String, String>>) -> Response {
+    let unit = query.get("job_unit").map(String::as_str).unwrap_or("");
+    if !unit.starts_with("aetherflow-self-update-restart-")
+        || !af_models::is_valid_self_update_job_unit_name(unit)
+    {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "INVALID_RESTART_RECEIPT",
+            "A valid core restart receipt is required",
+        );
+    }
+    crate::storage::get_system_update_status(Query(query)).await
 }
 
 async fn get_marketplace_apps() -> Response {
-    let Ok(pkgs) = af_services::get_packages() else {
+    tokio::task::spawn_blocking(get_marketplace_apps_blocking)
+        .await
+        .unwrap_or_else(|_| {
+            api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "STATUS_UNAVAILABLE",
+                "Marketplace status unavailable",
+            )
+        })
+}
+
+fn get_marketplace_apps_blocking() -> Response {
+    let Ok(jobs) = af_services::package_job_snapshot() else {
+        return api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "STATUS_UNAVAILABLE",
+            "Lifecycle status could not be confirmed; retry shortly",
+        );
+    };
+    let Ok(pkgs) = af_services::get_packages_with_jobs(&jobs) else {
         return api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "INTERNAL_ERROR",
@@ -826,19 +1004,22 @@ async fn get_marketplace_apps() -> Response {
             web_path: p.web_path,
             progress: 0,
             started_at: None,
+            job_id: None,
             log_line: String::new(),
             installed_version: p.installed_version,
             latest_version: p.latest_version,
             update_available: p.update_available,
             update_checked_at: p.update_checked_at,
             update_url: p.update_url,
-            update_error: p.update_error,
+            update_error: af_services::workers::public_update_error(&p.update_error),
+            last_job: jobs.outcomes.get(&p.name).cloned().map(public_job_outcome),
         };
 
-        if let Some(job) = af_services::get_package_job_info(&p.name) {
+        if let Some(job) = jobs.active.get(&p.name).cloned() {
             app.progress = job.progress;
+            app.job_id = Some(job.job_id);
             app.started_at = Some(job.started_at);
-            app.log_line = job.last_line;
+            app.log_line = format!("{} application…", job.status);
         }
 
         apps.push(app);
@@ -847,17 +1028,83 @@ async fn get_marketplace_apps() -> Response {
     Json(apps).into_response()
 }
 
-async fn package_progress(Path(id): Path<String>) -> Response {
-    if let Some(job) = af_services::get_package_job_info(&id) {
-        Json(job).into_response()
-    } else {
-        Json(serde_json::json!({
-            "package_id": id,
-            "status": "idle",
-            "progress": 0,
-        }))
-        .into_response()
+fn public_job_outcome(outcome: af_services::PackageJobOutcome) -> af_models::MarketplaceJobOutcome {
+    af_models::MarketplaceJobOutcome {
+        job_id: outcome.job_id,
+        action: outcome.action,
+        status: outcome.status,
+        started_at: outcome.started_at,
+        finished_at: outcome.finished_at,
     }
+}
+
+fn package_progress_payload(
+    id: &str,
+    active: Option<af_services::PackageJobInfo>,
+    outcome: Option<af_services::PackageJobOutcome>,
+    diagnostics_allowed: bool,
+) -> serde_json::Value {
+    if let Some(mut job) = active {
+        if !diagnostics_allowed {
+            job.last_line = af_services::package_job_progress_summary(&job.status).into();
+        }
+        return serde_json::to_value(job).unwrap_or_default();
+    }
+    if let Some(mut outcome) = outcome {
+        // Authenticated view: include the terminal failure message so clients
+        // can report why a job failed after the active entry is gone.
+        if !diagnostics_allowed {
+            outcome.message = af_services::package_job_progress_summary(&outcome.status).into();
+        }
+        return serde_json::json!({
+            "package_id": id,
+            "job_id": outcome.job_id,
+            "action": outcome.action,
+            "status": outcome.status,
+            "progress": if outcome.status == "completed" { 100 } else { 0 },
+            "last_line": outcome.message,
+            "message": outcome.message,
+            "started_at": outcome.started_at,
+            "finished_at": outcome.finished_at,
+            "last_job": outcome,
+        });
+    }
+    serde_json::json!({
+        "package_id": id,
+        "status": "idle",
+        "progress": 0,
+    })
+}
+
+async fn package_progress(
+    Path(id): Path<String>,
+    Extension(auth_user): Extension<AuthUser>,
+) -> Response {
+    let diagnostics_allowed = crate::ws::package_diagnostics_allowed(&auth_user);
+    tokio::task::spawn_blocking(move || {
+        let Ok(jobs) = af_services::package_job_snapshot() else {
+            return api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "STATUS_UNAVAILABLE",
+                "Lifecycle status could not be confirmed; retry shortly",
+            );
+        };
+        Json(package_progress_payload(
+            &id,
+            jobs.active.get(&id).cloned(),
+            jobs.outcomes.get(&id).cloned(),
+            diagnostics_allowed,
+        ))
+        .into_response()
+    })
+    .await
+    .unwrap_or_else(|_| {
+        api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "STATUS_UNAVAILABLE",
+            "Lifecycle status could not be confirmed; retry shortly",
+        )
+    })
 }
 
 async fn install_package(
@@ -865,15 +1112,39 @@ async fn install_package(
     Extension(auth_user): Extension<AuthUser>,
     headers: HeaderMap,
 ) -> Response {
-    dispatch_package_lifecycle(id, "install", "installing", auth_user, headers).await
+    dispatch_package_lifecycle(id, "install", "installing", false, auth_user, headers).await
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct UninstallQuery {
+    #[serde(default)]
+    purge: Option<String>,
+}
+
+/// Removal is data-preserving unless the caller explicitly asks for a purge
+/// with `?purge=true`. Any other value is rejected rather than guessed.
+fn parse_uninstall_purge(query: &UninstallQuery) -> Result<bool, String> {
+    match query.purge.as_deref().map(str::trim) {
+        None | Some("") | Some("false") | Some("0") => Ok(false),
+        Some("true") | Some("1") => Ok(true),
+        Some(other) => Err(format!(
+            "Invalid purge value {:?}; use purge=true for an explicit data purge",
+            other
+        )),
+    }
 }
 
 async fn uninstall_package(
     Path(id): Path<String>,
+    Query(query): Query<UninstallQuery>,
     Extension(auth_user): Extension<AuthUser>,
     headers: HeaderMap,
 ) -> Response {
-    dispatch_package_lifecycle(id, "remove", "uninstalling", auth_user, headers).await
+    let purge = match parse_uninstall_purge(&query) {
+        Ok(purge) => purge,
+        Err(message) => return api_error(StatusCode::BAD_REQUEST, "BAD_REQUEST", message),
+    };
+    dispatch_package_lifecycle(id, "remove", "uninstalling", purge, auth_user, headers).await
 }
 
 async fn update_package(
@@ -881,11 +1152,107 @@ async fn update_package(
     Extension(auth_user): Extension<AuthUser>,
     headers: HeaderMap,
 ) -> Response {
-    dispatch_package_lifecycle(id, "update", "updating", auth_user, headers).await
+    dispatch_package_lifecycle(id, "update", "updating", false, auth_user, headers).await
+}
+
+/// Ends a lifecycle job: records the terminal outcome (so polling clients can
+/// distinguish failure from success) and broadcasts the terminal event.
+fn finish_package_lifecycle(
+    pkg_id: &str,
+    action: &str,
+    failure: Option<af_services::PackageJobFailure>,
+    progress: i32,
+    message: &str,
+    started_at: &str,
+    job_id: &str,
+) {
+    let succeeded = failure.is_none();
+    let outcome = match failure {
+        Some(failure) => af_services::fail_package_job(pkg_id, action, failure, job_id),
+        None => af_services::finish_package_job(pkg_id, action, true, message, job_id),
+    };
+    let Some(outcome) = outcome else {
+        return;
+    };
+    broadcast_ws_message(&serde_json::json!({
+        "type": "package:progress",
+        "package_id": pkg_id,
+        "action": action,
+        "status": outcome.status,
+        "progress": if succeeded { 100 } else { progress },
+        "line": message,
+        "started_at": started_at,
+        "job_id": outcome.job_id,
+        "finished_at": outcome.finished_at,
+    }));
+}
+
+struct SystemUpdateLifecycleBlock {
+    status: StatusCode,
+    code: &'static str,
+    message: &'static str,
+    error_id: Option<String>,
+}
+
+impl std::fmt::Display for SystemUpdateLifecycleBlock {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.message)
+    }
+}
+
+impl IntoResponse for SystemUpdateLifecycleBlock {
+    fn into_response(self) -> Response {
+        (
+            self.status,
+            Json(serde_json::json!({
+                "code": self.code, "message": self.message, "error_id": self.error_id,
+            })),
+        )
+            .into_response()
+    }
+}
+
+/// Discover authoritative runner receipts; do not rely on API process memory.
+async fn system_update_lifecycle_block_with<QueryFn, QueryFut>(
+    query_status: QueryFn,
+) -> Option<SystemUpdateLifecycleBlock>
+where
+    QueryFn: FnOnce() -> QueryFut,
+    QueryFut: std::future::Future<Output = anyhow::Result<af_models::SelfUpdateJobStatus>>,
+{
+    match query_status().await {
+        Ok(status) if status.completed && matches!(status.status.as_str(), "succeeded" | "failed") && (status.job_unit.is_empty() || status.validate_invariants(None).is_ok()) => None,
+        Ok(_) => Some(SystemUpdateLifecycleBlock {
+            status: StatusCode::CONFLICT,
+            code: "SYSTEM_UPDATE_IN_PROGRESS",
+            message: "An AetherFlow system update is in progress or requires recovery; retry after it completes",
+            error_id: None,
+        }),
+        Err(error) => {
+            let error_id = uuid::Uuid::new_v4().to_string();
+            tracing::error!(%error_id, detail = %format!("{error:#}"), "system update observation failed");
+            Some(SystemUpdateLifecycleBlock {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                code: "STATUS_UNAVAILABLE",
+                message: "AetherFlow system update status is unavailable; retry after it can be verified",
+                error_id: Some(error_id),
+            })
+        },
+    }
+}
+
+async fn system_update_lifecycle_block() -> Option<SystemUpdateLifecycleBlock> {
+    system_update_lifecycle_block_with(|| async {
+        af_runner::dispatch_self_update_status_request(&af_models::SelfUpdateStatusRequest {
+            job_unit: String::new(),
+        })
+        .await
+    })
+    .await
 }
 
 fn allocate_or_resolve_app_port(app_name: &str, default_port: i32) -> i32 {
-    if let Ok(Some(existing)) = af_db::get_app_ingress_config(app_name) {
+    if let Ok(Some(existing)) = load_authoritative_app_ingress_config(app_name) {
         if existing.listen_port > 0 {
             return existing.listen_port;
         }
@@ -923,8 +1290,10 @@ fn emit_package_progress(
     progress: i32,
     line: &str,
     started_at: &str,
+    job_id: &str,
 ) {
     let info = af_services::PackageJobInfo {
+        job_id: job_id.to_string(),
         package_id: pkg_id.to_string(),
         action: action.to_string(),
         status: status.to_string(),
@@ -932,12 +1301,16 @@ fn emit_package_progress(
         last_line: line.to_string(),
         started_at: started_at.to_string(),
     };
-    af_services::set_package_job_info(info);
+    let Some(info) = af_services::set_package_job_info(info) else {
+        return;
+    };
+    let progress = info.progress;
     broadcast_ws_message(&serde_json::json!({
         "type": "package:progress",
         "package_id": pkg_id,
         "action": action,
         "status": status,
+        "job_id": job_id,
         "progress": progress,
         "line": line,
         "started_at": started_at,
@@ -964,16 +1337,29 @@ where
         && fs_root_override.trim().is_empty()
     {
         let mut units = resolve_units(clean_id);
+        units.sort();
+        units.dedup();
         units.sort_by_key(|unit| !unit.ends_with(".timer"));
+        let mut running_units = Vec::new();
         for unit_name in units {
-            if query_status(&unit_name) == "running" {
-                if let Err(error) = control_unit(unit_name.clone(), "stop").await {
-                    for stopped_unit in &stopped_units {
-                        let _ = control_unit(stopped_unit.clone(), "start").await;
+            match query_status(&unit_name).as_str() {
+                "running" => running_units.push(unit_name),
+                "stopped" | "failed" | "idle" => {},
+                observation => return Err((unit_name, format!("Required service state is unconfirmed ({observation}); update was not started"))),
+            }
+        }
+        for unit_name in running_units {
+            stopped_units.push(unit_name.clone());
+            if let Err(error) = control_unit(unit_name.clone(), "stop").await {
+                let mut errors = vec![error.to_string()];
+                for stopped_unit in stopped_units.iter().rev() {
+                    if let Err(restore_error) = control_unit(stopped_unit.clone(), "start").await {
+                        errors.push(format!(
+                            "Required restoration of {stopped_unit} failed: {restore_error}"
+                        ));
                     }
-                    return Err((unit_name, error.to_string()));
                 }
-                stopped_units.push(unit_name);
+                return Err((unit_name, errors.join("; ")));
             }
         }
     }
@@ -984,7 +1370,8 @@ fn load_authoritative_app_ingress_config(
     app_name: &str,
 ) -> anyhow::Result<Option<AppIngressConfig>> {
     af_db::invalidate_ingress_cache();
-    af_db::get_app_ingress_config(app_name)
+    let conn = af_db::get_conn()?;
+    af_db::load_lifecycle_ingress(&conn, app_name)
 }
 
 fn resolve_existing_update_port_with<LoadIngressFn>(
@@ -1054,17 +1441,20 @@ where
         // Read native configuration before stopping the application. An update
         // must keep its port even while that port is owned by the old process.
         let configured_port = query_runtime_port(clean_id);
-        let ingress_port = load_ingress_config(clean_id)
-            .ok()
-            .flatten()
-            .map(|c| c.listen_port)
-            .unwrap_or(0);
-        let resolved_port = if configured_port > 0 {
+        let ingress = load_ingress_config(clean_id).map_err(|error| {
+            format!("cannot read existing configured port for {clean_id}: {error}")
+        })?;
+        let ingress_port = ingress.map(|config| config.listen_port).unwrap_or(0);
+        let resolved_port = if (1..=65535).contains(&configured_port) {
             configured_port
-        } else if ingress_port > 0 {
+        } else if (1..=65535).contains(&ingress_port) {
             ingress_port
+        } else if pkg_default_port <= 0 {
+            0
         } else {
-            pkg_default_port
+            return Err(format!(
+                "existing configured port for {clean_id} update is unavailable"
+            ));
         };
         Ok(resolved_port)
     } else if action == "install" {
@@ -1138,6 +1528,34 @@ where
     Ok((allocated_port, stopped_units, execution_result))
 }
 
+#[derive(Debug)]
+struct PackageLifecycleFailure {
+    kind: af_services::PackageJobFailure,
+    message: String,
+}
+
+fn merge_blueprint_finalization(
+    finalization: Result<(), PackageLifecycleFailure>,
+    blueprint_error: Option<String>,
+) -> Result<(), PackageLifecycleFailure> {
+    match (finalization, blueprint_error) {
+        (result, None) => result,
+        (Ok(()), Some(error)) => Err(PackageLifecycleFailure {
+            kind: af_services::PackageJobFailure::Configuration,
+            message: format!("Required blueprint configuration synchronization failed: {error}"),
+        }),
+        (Err(mut failure), Some(error)) => {
+            if failure.kind == af_services::PackageJobFailure::ServiceRestore {
+                failure.kind = af_services::PackageJobFailure::ConfigurationAndServiceRestore;
+            }
+            failure.message.push_str(&format!(
+                "; Required blueprint configuration synchronization failed: {error}"
+            ));
+            Err(failure)
+        }
+    }
+}
+
 async fn finalize_post_script_lifecycle_with<
     LoadIngressFn,
     SaveIngressFn,
@@ -1155,7 +1573,7 @@ async fn finalize_post_script_lifecycle_with<
     mut save_ingress: SaveIngressFn,
     mut control_unit: ControlFn,
     mut refresh_update: RefreshUpdateFn,
-) -> Result<(), String>
+) -> Result<(), PackageLifecycleFailure>
 where
     LoadIngressFn: FnMut(&str) -> anyhow::Result<Option<AppIngressConfig>>,
     SaveIngressFn: FnMut(&AppIngressConfig) -> anyhow::Result<()>,
@@ -1169,6 +1587,8 @@ where
     }
 
     let mut required_errors: Vec<String> = Vec::new();
+    let mut configuration_failed = false;
+    let mut service_restore_failed = false;
 
     if allocated_port > 0 {
         match load_ingress(clean_id) {
@@ -1203,10 +1623,12 @@ where
                     updated_at: now,
                 };
                 if let Err(e) = save_ingress(&cfg) {
+                    configuration_failed = true;
                     required_errors.push(format!("Failed to persist ingress configuration: {}", e));
                 }
             }
             Err(error) => {
+                configuration_failed = true;
                 required_errors.push(format!("Failed to load ingress configuration: {}", error))
             }
         }
@@ -1215,6 +1637,7 @@ where
     if action == "update" && af_services::should_pre_stop_on_update(clean_id) {
         for u in stopped_units {
             if let Err(e) = control_unit(u.clone(), "start").await {
+                service_restore_failed = true;
                 required_errors.push(format!("Failed to restart stopped unit {}: {}", u, e));
             }
         }
@@ -1225,7 +1648,15 @@ where
     if required_errors.is_empty() {
         Ok(())
     } else {
-        Err(required_errors.join("; "))
+        let kind = match (configuration_failed, service_restore_failed) {
+            (true, true) => af_services::PackageJobFailure::ConfigurationAndServiceRestore,
+            (false, true) => af_services::PackageJobFailure::ServiceRestore,
+            _ => af_services::PackageJobFailure::Configuration,
+        };
+        Err(PackageLifecycleFailure {
+            kind,
+            message: required_errors.join("; "),
+        })
     }
 }
 
@@ -1233,15 +1664,55 @@ async fn dispatch_package_lifecycle(
     pkg_id: String,
     action: &'static str,
     status_label: &'static str,
+    delete_data: bool,
     auth_user: AuthUser,
     headers: HeaderMap,
 ) -> Response {
-    let Ok(pkgs) = af_services::get_packages() else {
+    if delete_data && action != "remove" {
         return api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
-            "Failed to load package catalog configuration",
+            StatusCode::BAD_REQUEST,
+            "BAD_REQUEST",
+            "Data purge is only valid for package removal",
         );
+    }
+    let (pkgs, admission_guard) = match tokio::task::spawn_blocking(|| {
+        let guard = af_runner::acquire_lifecycle_admission_lock(None).map_err(|error| {
+            api_error(
+                StatusCode::CONFLICT,
+                "LIFECYCLE_ADMISSION_UNAVAILABLE",
+                format!("Cannot reserve application lifecycle admission: {}", error),
+            )
+        })?;
+        af_services::package_job_snapshot()
+            .and_then(|_| af_services::reconcile_package_jobs_under_admission())
+            .map_err(|_| {
+                api_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "STATUS_UNAVAILABLE",
+                    "Lifecycle status could not be reconciled; retry shortly",
+                )
+            })?;
+        af_services::get_packages()
+            .map(|packages| (packages, guard))
+            .map_err(|_| {
+                api_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "STATUS_UNAVAILABLE",
+                    "Package catalog and lifecycle status could not be confirmed; retry shortly",
+                )
+            })
+    })
+    .await
+    {
+        Ok(Ok(admission)) => admission,
+        Ok(Err(response)) => return response,
+        _ => {
+            return api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "STATUS_UNAVAILABLE",
+                "Package catalog and lifecycle status could not be confirmed; retry shortly",
+            )
+        }
     };
     let Some(pkg) = pkgs.into_iter().find(|p| p.name == pkg_id) else {
         return api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "Package not found");
@@ -1266,6 +1737,10 @@ async fn dispatch_package_lifecycle(
         );
     }
 
+    if let Some(message) = system_update_lifecycle_block().await {
+        return message.into_response();
+    }
+
     let script_prefix = if action == "remove" {
         "removepackage-"
     } else {
@@ -1285,10 +1760,15 @@ async fn dispatch_package_lifecycle(
         .get(header::USER_AGENT)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
+    let audit_action = if delete_data {
+        "package_purge".to_string()
+    } else {
+        format!("package_{}", action)
+    };
     af_db::record_audit(
         auth_user.user_id,
         &auth_user.username,
-        &format!("package_{}", action),
+        &audit_action,
         "package",
         &pkg.name,
         &pkg.label,
@@ -1296,8 +1776,16 @@ async fn dispatch_package_lifecycle(
         ua,
     );
 
-    let started_at = Utc::now().to_rfc3339();
+    if let Some(message) = system_update_lifecycle_block().await {
+        return message.into_response();
+    }
+
+    // This value is also the job identity clients use to match a terminal
+    // outcome to the job they started; jobs for one package are sequential.
+    let job_id = uuid::Uuid::new_v4().to_string();
+    let started_at = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
     if !af_services::try_start_package_job(af_services::PackageJobInfo {
+        job_id: job_id.clone(),
         package_id: pkg.name.clone(),
         action: action.to_string(),
         status: status_label.to_string(),
@@ -1311,6 +1799,7 @@ async fn dispatch_package_lifecycle(
             "Package is already modifying state",
         );
     }
+    drop(admission_guard);
     emit_package_progress(
         &pkg.name,
         action,
@@ -1318,15 +1807,52 @@ async fn dispatch_package_lifecycle(
         5,
         &format!("Starting {} for {}...", action, pkg.label),
         &started_at,
+        &job_id,
     );
 
+    let response_job_id = job_id.clone();
+    let response_started_at = started_at.clone();
     let clean_id = pkg.name.clone();
     let pkg_label = pkg.label.clone();
     let pkg_default_port = pkg.default_port;
     let pkg_lock_file = pkg.lock_file.clone();
+    let job_lease = af_services::take_package_job_lease(&clean_id, &job_id);
 
-    tokio::spawn(async move {
-        let _lifecycle_guard = af_services::PACKAGE_LIFECYCLE_MUTEX.lock().await;
+    tokio::spawn(af_runner::PACKAGE_JOB_ID.scope(job_id.clone(), async move {
+        let _job_lease = job_lease;
+        let _lifecycle_guard = match af_services::PACKAGE_LIFECYCLE_MUTEX.try_lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                emit_package_progress(
+                    &clean_id,
+                    action,
+                    status_label,
+                    5,
+                    &format!(
+                        "Queued: waiting for another lifecycle operation to finish before {} {}...",
+                        action, pkg_label
+                    ),
+                    &started_at,
+                    &job_id,
+                );
+                af_services::PACKAGE_LIFECYCLE_MUTEX.lock().await
+            }
+        };
+        // Re-check under the lifecycle mutex: a system update may have been
+        // launched while this job was queued (run_update holds this mutex
+        // while launching, so the check cannot race with the launch).
+        if let Some(message) = system_update_lifecycle_block().await {
+            finish_package_lifecycle(
+                &clean_id,
+                action,
+                Some(af_services::PackageJobFailure::Preparation),
+                5,
+                &message.to_string(),
+                &started_at,
+                &job_id,
+            );
+            return;
+        }
         emit_package_progress(
             &clean_id,
             action,
@@ -1334,6 +1860,7 @@ async fn dispatch_package_lifecycle(
             10,
             &format!("Preparing environment for {}...", pkg_label),
             &started_at,
+            &job_id,
         );
 
         let fs_root_override_raw = env::var("AETHERFLOW_FS_ROOT").unwrap_or_default();
@@ -1367,6 +1894,7 @@ async fn dispatch_package_lifecycle(
                     let script_name = script_name.clone();
                     let pkg_lock_file = pkg_lock_file.clone();
                     let started_at = started_at.clone();
+                    let job_id = job_id.clone();
                     let fs_root_override = fs_root_override.clone();
                     async move {
                         emit_package_progress(
@@ -1376,14 +1904,16 @@ async fn dispatch_package_lifecycle(
                             25,
                             &format!("Executing {} script for {}...", action, pkg_label),
                             &started_at,
+                            &job_id,
                         );
 
                         if can_run_bash && af_runner::is_runner_available() {
-                            af_runner::dispatch_package_stream(
+                            af_runner::dispatch_package_action_with_options(
                                 action,
                                 &clean_id,
                                 &script_name,
                                 resolved_port,
+                                delete_data,
                                 |line| {
                                     let (pct, msg) = af_runner::parse_progress_line(&line)
                                         .map(|(p, m)| (p as i32, m))
@@ -1400,6 +1930,7 @@ async fn dispatch_package_lifecycle(
                                         pct,
                                         &display_msg,
                                         &started_at,
+                                        &job_id,
                                     );
                                 },
                             )
@@ -1409,7 +1940,9 @@ async fn dispatch_package_lifecycle(
                                 action: action.to_string(),
                                 package_id: clean_id.clone(),
                                 script_name: script_name.clone(),
+                                lifecycle_job_id: job_id.clone(),
                                 app_port: resolved_port,
+                                delete_data,
                             };
                             let stream = af_runner::execute_package_request_stream(request);
                             tokio::pin!(stream);
@@ -1432,6 +1965,7 @@ async fn dispatch_package_lifecycle(
                                                 pct,
                                                 msg.trim(),
                                                 &started_at,
+                                                &job_id,
                                             );
                                         }
                                     }
@@ -1450,6 +1984,7 @@ async fn dispatch_package_lifecycle(
                                 60,
                                 &format!("Applying package state changes for {}...", pkg_label),
                                 &started_at,
+                                &job_id,
                             );
                             if !pkg_lock_file.is_empty() {
                                 let lock_path = if let Some(ref root) = fs_root_override {
@@ -1476,20 +2011,22 @@ async fn dispatch_package_lifecycle(
             {
                 Ok(outcome) => outcome,
                 Err(error_message) => {
-                    emit_package_progress(
+                    finish_package_lifecycle(
                         &clean_id,
                         action,
-                        "failed",
+                        Some(af_services::PackageJobFailure::Preparation),
                         10,
                         &error_message,
                         &started_at,
+                        &job_id,
                     );
-                    af_services::clear_package_job_info(&clean_id);
                     return;
                 }
             };
 
         if let Err(error) = execution_result {
+            af_services::mutators::clear_app_runtime_meta_cache();
+            let _ = af_services::workers::refresh_package_update_by_id(&clean_id).await;
             if af_services::should_pre_stop_on_update(&clean_id) {
                 for unit in &stopped_units {
                     let _ =
@@ -1499,15 +2036,15 @@ async fn dispatch_package_lifecycle(
             }
             af_services::clear_service_status_cache();
             af_services::mutators::clear_app_runtime_meta_cache();
-            emit_package_progress(
+            finish_package_lifecycle(
                 &clean_id,
                 action,
-                "failed",
+                Some(af_services::PackageJobFailure::Installer),
                 60,
                 &error.to_string(),
                 &started_at,
+                &job_id,
             );
-            af_services::clear_package_job_info(&clean_id);
             return;
         }
 
@@ -1518,37 +2055,35 @@ async fn dispatch_package_lifecycle(
             85,
             &format!("Synchronizing blueprint & ingress for {}...", pkg_label),
             &started_at,
+            &job_id,
         );
 
         if action == "install" || action == "update" {
-            if let Err(e) =
-                af_services::mutators::apply_blueprint_app_config(&clean_id, allocated_port).await
-            {
-                tracing::warn!(
-                    package = %clean_id,
-                    port = allocated_port,
-                    error = %e,
-                    "Optional blueprint app config synchronization warning"
-                );
-            }
-
-            let (master_user, master_pass, _) = af_services::mutators::load_master_credentials();
-            if !master_user.is_empty() && !master_pass.is_empty() {
-                af_services::mutators::sync_master_credentials_to_installed_apps(
-                    &master_user,
-                    &master_pass,
-                );
-            }
+            let blueprint_error =
+                af_services::mutators::apply_blueprint_app_config(&clean_id, allocated_port)
+                    .await
+                    .err();
 
             let base_domain = af_services::resolve_base_domain();
-            if let Err(required_err) = finalize_post_script_lifecycle_with(
+            let finalization = finalize_post_script_lifecycle_with(
                 action,
                 &clean_id,
                 allocated_port,
                 stopped_units,
                 &base_domain,
-                |app_id| af_db::get_app_ingress_config(app_id),
-                |cfg| af_db::set_app_ingress_config(cfg),
+                |app_id| load_authoritative_app_ingress_config(app_id),
+                |_cfg| {
+                    let mut conn = af_db::get_conn()?;
+                    af_db::synchronize_lifecycle_ingress(
+                        &mut conn,
+                        &clean_id,
+                        action,
+                        &job_id,
+                        allocated_port,
+                        false,
+                        &base_domain,
+                    )
+                },
                 |unit_name, ctrl_action| async move {
                     af_services::control_service_with_manager(
                         &unit_name,
@@ -1561,21 +2096,48 @@ async fn dispatch_package_lifecycle(
                     let _ = af_services::workers::refresh_package_update_by_id(&app_id).await;
                 },
             )
-            .await
-            {
+            .await;
+            let finalization = merge_blueprint_finalization(finalization, blueprint_error);
+            if let Err(required_err) = finalization {
                 af_services::clear_service_status_cache();
                 af_services::mutators::clear_app_runtime_meta_cache();
-                emit_package_progress(&clean_id, action, "failed", 90, &required_err, &started_at);
-                af_services::clear_package_job_info(&clean_id);
+                finish_package_lifecycle(
+                    &clean_id,
+                    action,
+                    Some(required_err.kind),
+                    90,
+                    &required_err.message,
+                    &started_at,
+                    &job_id,
+                );
                 return;
             }
         } else if action == "remove" {
-            let _ = af_db::delete_app_ingress_config(&clean_id);
-            if let Ok(conn) = af_db::get_conn() {
-                let _ = conn.execute(
-                    "DELETE FROM app_updates WHERE package_name = ?1",
-                    params![clean_id],
+            let retained = af_db::get_conn().and_then(|mut conn| {
+                af_db::synchronize_lifecycle_ingress(
+                    &mut conn,
+                    &clean_id,
+                    action,
+                    &job_id,
+                    0,
+                    delete_data,
+                    "",
+                )
+            });
+            if let Err(error) = retained {
+                finish_package_lifecycle(
+                    &clean_id,
+                    action,
+                    Some(af_services::PackageJobFailure::Retention),
+                    90,
+                    &format!(
+                        "Package removed but reinstall settings could not be retained: {}",
+                        error
+                    ),
+                    &started_at,
+                    &job_id,
                 );
+                return;
             }
             let _ = af_services::mutators::sync_network_dns_providers().await;
         }
@@ -1583,16 +2145,16 @@ async fn dispatch_package_lifecycle(
         af_services::clear_service_status_cache();
         af_services::mutators::clear_app_runtime_meta_cache();
 
-        emit_package_progress(
+        finish_package_lifecycle(
             &clean_id,
             action,
-            "completed",
+            None,
             100,
             &format!("Completed {} for {}", action, pkg_label),
             &started_at,
+            &job_id,
         );
-        af_services::clear_package_job_info(&clean_id);
-    });
+    }));
 
     let msg = match action {
         "install" => "Installation started successfully",
@@ -1604,12 +2166,26 @@ async fn dispatch_package_lifecycle(
         "message": msg,
         "package": pkg_id,
         "status": status_label,
+        "action": action,
+        "started_at": response_started_at,
+        "job_id": response_job_id,
+        "purge": delete_data,
     }))
     .into_response()
 }
 
 async fn check_package_updates() -> Response {
-    let records = af_services::workers::refresh_all_package_updates().await;
+    let records = match af_services::workers::refresh_all_package_updates().await {
+        Ok(records) => records,
+        Err(error) => {
+            tracing::warn!(error = %error, "package update check inventory unavailable");
+            return api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "STATUS_UNAVAILABLE",
+                "Application inventory could not be confirmed; retry the update check shortly",
+            );
+        }
+    };
     let updates_available = records.iter().filter(|r| r.update_available).count();
     Json(serde_json::json!({
         "message": "Package update check completed",
@@ -1636,8 +2212,11 @@ async fn check_single_package_update(Path(id): Path<String>) -> Response {
 
 fn build_single_package_update_response(
     pkg_name: &str,
-    record: Option<af_services::workers::PackageUpdateRecord>,
+    mut record: Option<af_services::workers::PackageUpdateRecord>,
 ) -> serde_json::Value {
+    if let Some(record) = record.as_mut() {
+        record.error = af_services::workers::public_update_error(&record.error);
+    }
     let update_available = record.as_ref().map(|r| r.update_available).unwrap_or(false);
     let installed_version = record.as_ref().map(|r| r.installed_version.clone());
     let latest_version = record.as_ref().map(|r| r.latest_version.clone());
@@ -1907,64 +2486,88 @@ async fn update_settings(Json(mut req): Json<SettingsPayload>) -> Response {
     af_db::invalidate_ingress_cache();
 
     if !norm_domain.is_empty() && norm_domain != prev_base_domain {
-        let now = Utc::now();
-        let old_suffix = if prev_base_domain.is_empty() {
-            String::new()
-        } else {
-            format!(".{}", prev_base_domain)
-        };
+        let synchronized = af_services::mutators::with_blueprint_admission(async {
+            let now = Utc::now();
+            let old_suffix = if prev_base_domain.is_empty() {
+                String::new()
+            } else {
+                format!(".{}", prev_base_domain)
+            };
 
-        let mut handled_apps = std::collections::HashSet::new();
-        for mut cfg in af_db::get_all_app_ingress_configs().unwrap_or_default() {
-            handled_apps.insert(cfg.app_name.clone());
-            let should_auto_update = cfg.public_domain.trim().is_empty()
-                || (!old_suffix.is_empty() && cfg.public_domain.ends_with(&old_suffix));
-            if should_auto_update {
-                if cfg.listen_port <= 0 {
-                    cfg.listen_port = af_services::get_blueprint(&cfg.app_name)
-                        .map(|b| b.default_port)
-                        .unwrap_or(0);
-                }
-                if cfg.listen_port > 0 {
-                    cfg.public_domain =
-                        af_services::format_app_public_domain(&cfg.app_name, &norm_domain);
-                    cfg.external_access_enabled = true;
-                    cfg.tls_enabled = true;
-                    cfg.updated_at = now;
-                    let _ = af_db::set_app_ingress_config(&cfg);
-                    let _ = af_services::mutators::apply_blueprint_app_config(
-                        &cfg.app_name,
-                        cfg.listen_port,
-                    )
-                    .await;
-                }
-            }
-        }
-
-        if let Ok(pkgs) = af_services::get_packages() {
-            for p in pkgs {
-                if p.status == "installed" && p.default_port > 0 && !handled_apps.contains(&p.name)
-                {
-                    let pub_dom = af_services::format_app_public_domain(&p.name, &norm_domain);
-                    let cfg = AppIngressConfig {
-                        app_name: p.name.clone(),
-                        public_domain: pub_dom,
-                        external_access_enabled: true,
-                        listen_port: p.default_port,
-                        tls_enabled: true,
-                        created_at: now,
-                        updated_at: now,
-                    };
-                    let _ = af_db::set_app_ingress_config(&cfg);
-                    let _ =
-                        af_services::mutators::apply_blueprint_app_config(&p.name, p.default_port)
-                            .await;
+            let mut handled_apps = std::collections::HashSet::new();
+            for mut cfg in af_db::get_all_app_ingress_configs()? {
+                handled_apps.insert(cfg.app_name.clone());
+                let should_auto_update = cfg.public_domain.trim().is_empty()
+                    || (!old_suffix.is_empty() && cfg.public_domain.ends_with(&old_suffix));
+                if should_auto_update {
+                    if cfg.listen_port <= 0 {
+                        cfg.listen_port = af_services::get_blueprint(&cfg.app_name)
+                            .map(|b| b.default_port)
+                            .unwrap_or(0);
+                    }
+                    if cfg.listen_port > 0 {
+                        cfg.public_domain =
+                            af_services::format_app_public_domain(&cfg.app_name, &norm_domain);
+                        cfg.external_access_enabled = true;
+                        cfg.tls_enabled = true;
+                        cfg.updated_at = now;
+                        af_services::mutators::with_blueprint_mutation(&cfg.app_name, async {
+                            af_db::set_app_ingress_config(&cfg)?;
+                            af_services::mutators::apply_blueprint_app_config(
+                                &cfg.app_name,
+                                cfg.listen_port,
+                            )
+                            .await
+                            .map_err(anyhow::Error::msg)?;
+                            Ok(())
+                        })
+                        .await?;
+                    }
                 }
             }
-        }
 
-        let _ = af_services::mutators::sync_network_dns_providers().await;
-        af_services::mutators::trigger_apache_cert_sync().await;
+            let pkgs = af_services::get_packages()?;
+            {
+                for p in pkgs {
+                    if p.status == "installed"
+                        && p.default_port > 0
+                        && !handled_apps.contains(&p.name)
+                    {
+                        let pub_dom = af_services::format_app_public_domain(&p.name, &norm_domain);
+                        let cfg = AppIngressConfig {
+                            app_name: p.name.clone(),
+                            public_domain: pub_dom,
+                            external_access_enabled: true,
+                            listen_port: p.default_port,
+                            tls_enabled: true,
+                            created_at: now,
+                            updated_at: now,
+                        };
+                        af_services::mutators::with_blueprint_mutation(&p.name, async {
+                            af_db::set_app_ingress_config(&cfg)?;
+                            af_services::mutators::apply_blueprint_app_config(
+                                &p.name,
+                                p.default_port,
+                            )
+                            .await
+                            .map_err(anyhow::Error::msg)?;
+                            Ok(())
+                        })
+                        .await?;
+                    }
+                }
+            }
+
+            af_services::mutators::sync_network_dns_providers()
+                .await
+                .map_err(anyhow::Error::msg)?;
+            af_services::mutators::trigger_apache_cert_sync().await;
+            Ok(())
+        })
+        .await;
+        if let Err(error) = synchronized {
+            return blueprint_sync_failure_response(&error);
+        }
     }
 
     req.gemini_api_key.clear();
@@ -1983,10 +2586,20 @@ async fn update_settings(Json(mut req): Json<SettingsPayload>) -> Response {
 async fn issue_ws_ticket(
     Extension(auth_user): Extension<AuthUser>,
     headers: HeaderMap,
-) -> Json<serde_json::Value> {
+) -> Response {
+    if auth_user.plugin_id.is_some()
+        || !auth_user.plugin_scopes.is_empty()
+        || auth_user.role == "plugin"
+    {
+        return api_error(
+            StatusCode::FORBIDDEN,
+            "PLUGIN_WEBSOCKET_FORBIDDEN",
+            "Scoped plugins cannot create operator WebSocket sessions; use scoped telemetry reads",
+        );
+    }
     let ip = extract_client_ip(&headers);
     let ticket = issue_ws_ticket_for_user(auth_user.user_id, &ip);
-    Json(serde_json::json!({ "ticket": ticket }))
+    Json(serde_json::json!({ "ticket": ticket })).into_response()
 }
 
 #[derive(Deserialize)]
@@ -2602,6 +3215,40 @@ async fn sync_app_blueprint(
     Extension(auth_user): Extension<AuthUser>,
     headers: HeaderMap,
 ) -> Response {
+    if af_services::get_blueprint(&app_name).is_none() {
+        return api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "Blueprint not found");
+    }
+    let guarded_app = app_name.clone();
+    match af_services::mutators::with_blueprint_mutation(&guarded_app, async move {
+        Ok(sync_app_blueprint_admitted(Path(app_name), Extension(auth_user), headers).await)
+    })
+    .await
+    {
+        Ok(response) => response,
+        Err(error) => blueprint_sync_failure_response(&error),
+    }
+}
+
+fn blueprint_sync_failure_response(error: &anyhow::Error) -> Response {
+    let error_id = uuid::Uuid::new_v4().to_string();
+    tracing::error!(%error_id, detail = %format!("{error:#}"), "blueprint synchronization failed");
+    let (status, code, message) = if af_runner::is_lifecycle_busy(error) {
+        (StatusCode::CONFLICT, "LIFECYCLE_BUSY", "Application configuration is reserved by another lifecycle operation; retry after it completes")
+    } else {
+        (StatusCode::SERVICE_UNAVAILABLE, "BLUEPRINT_SYNC_FAILED", "Blueprint synchronization could not be completed; inspect authorized diagnostics before retrying")
+    };
+    (
+        status,
+        Json(serde_json::json!({"code":code,"message":message,"error_id":error_id})),
+    )
+        .into_response()
+}
+
+async fn sync_app_blueprint_admitted(
+    Path(app_name): Path<String>,
+    Extension(auth_user): Extension<AuthUser>,
+    headers: HeaderMap,
+) -> Response {
     let Some(bp) = af_services::get_blueprint(&app_name) else {
         return api_error(StatusCode::NOT_FOUND, "NOT_FOUND", "Blueprint not found");
     };
@@ -2621,7 +3268,10 @@ async fn sync_app_blueprint(
         ua,
     );
 
-    let existing_ing = af_db::get_app_ingress_config(&app_name).ok().flatten();
+    let existing_ing = match load_authoritative_app_ingress_config(&app_name) {
+        Ok(existing) => existing,
+        Err(error) => return blueprint_sync_failure_response(&error),
+    };
     let configured_port = af_services::mutators::get_app_runtime_meta(&app_name).configured_port;
     let allocated_port = existing_ing
         .as_ref()
@@ -2653,10 +3303,12 @@ async fn sync_app_blueprint(
         .map(|c| c.tls_enabled)
         .unwrap_or(!public_domain.is_empty());
 
-    let config_applied =
-        af_services::mutators::apply_blueprint_app_config(&app_name, allocated_port)
-            .await
-            .is_ok();
+    if let Err(error) =
+        af_services::mutators::apply_blueprint_app_config(&app_name, allocated_port).await
+    {
+        return blueprint_sync_failure_response(&anyhow::Error::msg(error));
+    }
+    let config_applied = true;
 
     let now = Utc::now();
     let ingress_cfg = AppIngressConfig {
@@ -2669,9 +3321,11 @@ async fn sync_app_blueprint(
         updated_at: now,
     };
     let ingress_synced = if allocated_port > 0 {
-        let ok = af_db::set_app_ingress_config(&ingress_cfg).is_ok();
+        if let Err(error) = af_db::set_app_ingress_config(&ingress_cfg) {
+            return blueprint_sync_failure_response(&error);
+        }
         af_db::invalidate_ingress_cache();
-        ok
+        true
     } else {
         false
     };
@@ -2686,13 +3340,15 @@ async fn sync_app_blueprint(
     let hosts_synced = if dns_domains.is_empty() {
         true
     } else {
-        af_services::mutators::sync_local_dns_domains(&dns_domains)
-            .await
-            .is_ok()
+        if let Err(error) = af_services::mutators::sync_local_dns_domains(&dns_domains).await {
+            return blueprint_sync_failure_response(&anyhow::Error::msg(error));
+        }
+        true
     };
-    let network_dns_synced = af_services::mutators::sync_network_dns_providers()
-        .await
-        .is_ok();
+    if let Err(error) = af_services::mutators::sync_network_dns_providers().await {
+        return blueprint_sync_failure_response(&anyhow::Error::msg(error));
+    }
+    let network_dns_synced = true;
 
     let res = af_services::BlueprintSetupResult {
         app_name: bp.app_name,
@@ -3388,6 +4044,18 @@ async fn get_audit_log(Query(q): Query<PageQuery>) -> Json<serde_json::Value> {
 // ──────────────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
+#[path = "http_lifecycle_regressions.rs"]
+mod http_lifecycle_regressions;
+
+#[cfg(all(test, unix))]
+#[path = "services_readiness_regressions.rs"]
+mod services_readiness_regressions;
+
+#[cfg(all(test, unix))]
+#[path = "update_error_regressions.rs"]
+mod update_error_regressions;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -3771,7 +4439,6 @@ mod tests {
             assert!(recorded_dispatch_ports.lock().unwrap().is_empty());
         }
 
-        // Unrelated package update (radarr) preserves fallback to default_port and pre-stops unit
         recorded_control_actions.lock().unwrap().clear();
         recorded_dispatch_ports.lock().unwrap().clear();
         let control_recorder = Arc::clone(&recorded_control_actions);
@@ -3781,7 +4448,7 @@ mod tests {
             "radarr",
             7878,
             "",
-            |_app_id| 0,
+            |_app_id| 17878,
             |_app_id| Ok(None),
             |_app_id, _default_port| 7878,
             af_services::resolve_service_units,
@@ -3805,15 +4472,15 @@ mod tests {
             },
         )
         .await
-        .expect("radarr update should fall back to default port when unconfigured");
+        .expect("radarr update must preserve its authoritative native port");
         assert!(radarr_res.is_ok());
-        assert_eq!(radarr_port, 7878);
+        assert_eq!(radarr_port, 17878);
         assert_eq!(radarr_stopped, vec!["radarr".to_string()]);
         assert_eq!(
             *recorded_control_actions.lock().unwrap(),
             vec!["stop radarr".to_string()]
         );
-        assert_eq!(*recorded_dispatch_ports.lock().unwrap(), vec![7878]);
+        assert_eq!(*recorded_dispatch_ports.lock().unwrap(), vec![17878]);
 
         // Fresh install of maintainerr preserves install port allocation without pre-existing ingress
         recorded_control_actions.lock().unwrap().clear();
@@ -3880,8 +4547,8 @@ mod tests {
             "https://github.com/Radarr/Radarr/releases/tag/v5.15.0"
         );
         assert_eq!(body["checked_at"], "2026-11-02T12:00:00Z");
-        assert_eq!(body["last_error"], "github rate limit warning");
-        assert_eq!(body["error"], "github rate limit warning");
+        assert_eq!(body["last_error"], "Update status could not be confirmed");
+        assert_eq!(body["error"], "Update status could not be confirmed");
         assert_eq!(body["update"]["package_id"], "radarr");
     }
 
@@ -3925,7 +4592,13 @@ mod tests {
         )
         .await
         .expect_err("ingress persistence failure must fail required post-script stage");
-        assert!(err_ingress.contains("Failed to persist ingress configuration"));
+        assert!(err_ingress
+            .message
+            .contains("Failed to persist ingress configuration"));
+        assert_eq!(
+            err_ingress.kind,
+            af_services::PackageJobFailure::Configuration
+        );
 
         let restored = Arc::new(Mutex::new(Vec::new()));
         let restore_handle = Arc::clone(&restored);
@@ -3945,7 +4618,10 @@ mod tests {
         )
         .await
         .expect_err("failed ingress read must fail required synchronization");
-        assert!(err_read.contains("Failed to load ingress configuration"));
+        assert!(err_read
+            .message
+            .contains("Failed to load ingress configuration"));
+        assert_eq!(err_read.kind, af_services::PackageJobFailure::Configuration);
         assert_eq!(*restored.lock().unwrap(), vec!["radarr".to_string()]);
 
         let err_restart = finalize_post_script_lifecycle_with(
@@ -3961,7 +4637,31 @@ mod tests {
         )
         .await
         .expect_err("stopped unit restart failure must fail required post-script stage");
-        assert!(err_restart.contains("Failed to restart stopped unit radarr"));
+        assert!(err_restart
+            .message
+            .contains("Failed to restart stopped unit radarr"));
+        assert_eq!(
+            err_restart.kind,
+            af_services::PackageJobFailure::ServiceRestore
+        );
+
+        let both = finalize_post_script_lifecycle_with(
+            "update",
+            "radarr",
+            7878,
+            vec!["radarr".into()],
+            "example.com",
+            |_| Err(anyhow::anyhow!("secret ingress failure")),
+            |_| Ok(()),
+            |_, _| async { Err(anyhow::anyhow!("secret service failure")) },
+            |_| async {},
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            both.kind,
+            af_services::PackageJobFailure::ConfigurationAndServiceRestore
+        );
     }
 
     #[test]
@@ -4001,6 +4701,754 @@ mod tests {
         assert_eq!(err.0, StatusCode::CONFLICT);
         assert_eq!(err.1, "PORT_RECONFIGURATION_UNSUPPORTED");
     }
+    fn control_req(action: &str, managed_by: &str, process: &str) -> ServiceControlReq {
+        ServiceControlReq {
+            action: action.to_string(),
+            managed_by: managed_by.to_string(),
+            process: process.to_string(),
+        }
+    }
+
+    #[test]
+    fn test_service_control_rejects_foreign_units_and_unknown_managers() {
+        let err = validate_service_control_request(
+            "sonarr",
+            &control_req("stop", "systemd-unit", "sshd"),
+        )
+        .expect_err("a package card must not stop an unrelated host unit");
+        assert_eq!(err.0, StatusCode::FORBIDDEN);
+        assert_eq!(err.1, "SERVICE_CONTROL_FORBIDDEN");
+        let err = validate_service_control_request(
+            "sonarr",
+            &control_req("restart", "systemd", "aetherflow-runner"),
+        )
+        .expect_err("process override must stay within the card");
+        assert_eq!(err.0, StatusCode::FORBIDDEN);
+        let err =
+            validate_service_control_request("sonarr", &control_req("restart", "shell", "sonarr"))
+                .expect_err("unknown managers are rejected");
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        let err =
+            validate_service_control_request("sonarr", &control_req("enable", "systemd", "sonarr"))
+                .expect_err("only start/stop/restart are allowed");
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        let err = validate_service_control_request(
+            "AetherFlow Frontend",
+            &control_req("restart", "embedded", "aetherflow-frontend"),
+        )
+        .expect_err("embedded frontend has no daemon");
+        assert_eq!(err.1, "EMBEDDED_SERVICE_CONTROL_UNSUPPORTED");
+        let err = validate_service_control_request(
+            "nextcloud",
+            &control_req("restart", "systemd", "nextcloud"),
+        )
+        .expect_err("shared vhost controls stay blocked");
+        assert_eq!(err.1, "SHARED_VHOST_CONTROL_UNSUPPORTED");
+        assert_eq!(
+            validate_service_control_request(
+                "sonarr",
+                &control_req("restart", "systemd", "sonarr")
+            )
+            .unwrap(),
+            "sonarr"
+        );
+    }
+
+    #[test]
+    fn test_service_control_is_serialized_with_active_lifecycle_job() {
+        // Regression: manual restarts during an update raced the installer's
+        // own stop/replace/start sequence.
+        let started_at = "hillclimb-control-lock";
+        assert!(af_services::try_start_package_job(
+            af_services::PackageJobInfo {
+                job_id: started_at.to_string(),
+                package_id: "lidarr".into(),
+                action: "update".into(),
+                status: "updating".into(),
+                progress: 25,
+                last_line: String::new(),
+                started_at: started_at.into(),
+            }
+        ));
+        let err = validate_service_control_request(
+            "lidarr",
+            &control_req("restart", "systemd", "lidarr"),
+        )
+        .expect_err("controls must wait for the lifecycle job");
+        assert_eq!(err.0, StatusCode::CONFLICT);
+        assert_eq!(err.1, "PACKAGE_LIFECYCLE_IN_PROGRESS");
+        af_services::finish_package_job("lidarr", "update", true, "done", started_at);
+        assert_eq!(
+            validate_service_control_request(
+                "lidarr",
+                &control_req("restart", "systemd", "lidarr")
+            )
+            .unwrap(),
+            "lidarr"
+        );
+    }
+
+    #[test]
+    fn test_uninstall_purge_requires_explicit_true() {
+        let parse = |value: Option<&str>| {
+            parse_uninstall_purge(&UninstallQuery {
+                purge: value.map(str::to_string),
+            })
+        };
+        assert_eq!(parse(None), Ok(false));
+        assert_eq!(parse(Some("")), Ok(false));
+        assert_eq!(parse(Some("false")), Ok(false));
+        assert_eq!(parse(Some("true")), Ok(true));
+        assert_eq!(parse(Some("1")), Ok(true));
+        assert!(parse(Some("yes")).is_err());
+        assert!(parse(Some("TRUE ; rm")).is_err());
+    }
+
+    #[test]
+    fn test_progress_reports_failed_outcome_after_job_clears_but_public_view_has_no_detail() {
+        let outcome = af_services::PackageJobOutcome {
+            job_id: "test-job".into(),
+            package_id: "sonarr".into(),
+            action: "update".into(),
+            status: "failed".into(),
+            message: "Could not stop sonarr: exit status 5".into(),
+            started_at: "2026-11-05T20:00:00.000Z".into(),
+            finished_at: "2026-11-05T20:01:00Z".into(),
+        };
+        let payload = package_progress_payload("sonarr", None, Some(outcome.clone()), true);
+        assert_eq!(payload["status"], "failed");
+        assert_eq!(payload["action"], "update");
+        assert_eq!(payload["message"], "Could not stop sonarr: exit status 5");
+        assert_eq!(payload["started_at"], "2026-11-05T20:00:00.000Z");
+        let idle = package_progress_payload("sonarr", None, None, false);
+        assert_eq!(idle["status"], "idle");
+
+        let public = serde_json::to_value(public_job_outcome(outcome.clone())).unwrap();
+        assert_eq!(public["status"], "failed");
+        assert_eq!(public["started_at"], "2026-11-05T20:00:00.000Z");
+        assert!(
+            public.get("message").is_none(),
+            "unauthenticated catalog must not leak errors"
+        );
+        let ordinary = package_progress_payload("sonarr", None, Some(outcome), false);
+        assert!(!ordinary.to_string().contains("exit status"));
+        assert_eq!(ordinary["last_job"]["job_id"], "test-job");
+    }
+
+    fn lifecycle_status_fixture() -> (std::path::PathBuf, rusqlite::Connection) {
+        let root = std::env::temp_dir().join(format!("af-api-status-{}", uuid::Uuid::new_v4()));
+        let path = root.join("backend/data/aetherflow.sqlite");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::env::set_var("AETHERFLOW_FS_ROOT", &root);
+        std::env::set_var("AETHERFLOW_RELEASE_ROOT", &root);
+        std::env::set_var("DB_PATH", &path);
+        af_services::initialize_package_jobs(rusqlite::Connection::open(&path).unwrap()).unwrap();
+        (root, rusqlite::Connection::open(path).unwrap())
+    }
+
+    fn progress_test_user(role: &str, plugin: Option<&str>) -> AuthUser {
+        AuthUser {
+            user_id: 1,
+            username: "progress-fixture".into(),
+            role: role.into(),
+            jti: "progress-fixture".into(),
+            plugin_id: plugin.map(str::to_owned),
+            plugin_scopes: plugin
+                .map(|_| vec!["telemetry:read".into()])
+                .unwrap_or_default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn routine_service_control_failures_are_sanitized_and_correlated() {
+        for timed_out in [false, true] {
+            let detail = "SYNTHETIC_PRIVATE_DETAIL /private/review/secret.json";
+            let error = if timed_out {
+                anyhow::Error::from(std::io::Error::new(std::io::ErrorKind::TimedOut, detail))
+                    .context("control failed")
+            } else {
+                anyhow::anyhow!(detail)
+            };
+            let response = service_control_failure_response(&error, "sonarr", "restart");
+            assert_eq!(
+                response.status(),
+                if timed_out {
+                    StatusCode::GATEWAY_TIMEOUT
+                } else {
+                    StatusCode::INTERNAL_SERVER_ERROR
+                }
+            );
+            let bytes = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert!(!body.to_string().contains("SYNTHETIC_PRIVATE_DETAIL"));
+            assert!(!body.to_string().contains("/private/"));
+            assert!(uuid::Uuid::parse_str(body["error_id"].as_str().unwrap()).is_ok());
+            assert_eq!(
+                body["code"],
+                if timed_out {
+                    "SERVICE_CONTROL_TIMEOUT"
+                } else {
+                    "SERVICE_CONTROL_FAILED"
+                }
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn bulk_update_inventory_errors_are_unavailable_without_success_counts() {
+        if crate::plugins::tests::run_plugin_test_in_subprocess() {
+            return;
+        }
+        let (root, blocker) = lifecycle_status_fixture();
+        let catalog = root.join("catalog.json");
+        let automation = root.join("automation.json");
+        std::env::set_var("AETHERFLOW_PACKAGES_CONFIG", &catalog);
+        std::env::set_var("AETHERFLOW_PACKAGE_AUTOMATION_CONFIG", &automation);
+        std::fs::write(&automation, "{}").unwrap();
+        let package = af_models::Package {
+            name: "sonarr".into(),
+            lock_file: "/install/.sonarr.lock".into(),
+            ..Default::default()
+        };
+        let valid_catalog = serde_json::to_vec(&vec![package]).unwrap();
+        for failure in ["catalog", "lock", "journal"] {
+            std::fs::write(&catalog, &valid_catalog).unwrap();
+            match failure {
+                "catalog" => std::fs::write(&catalog, "{corrupt").unwrap(),
+                "lock" => std::fs::create_dir_all(root.join("install/.sonarr.lock")).unwrap(),
+                "journal" => blocker.execute_batch("BEGIN EXCLUSIVE").unwrap(),
+                _ => unreachable!(),
+            }
+            let response = check_package_updates().await;
+            assert_eq!(
+                response.status(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "{failure}"
+            );
+            let bytes = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(body["code"], "STATUS_UNAVAILABLE");
+            assert!(body.get("updates").is_none());
+            assert!(body.get("updates_available").is_none());
+            assert!(!body.to_string().contains(root.to_str().unwrap()));
+            if failure == "lock" {
+                std::fs::remove_dir(root.join("install/.sonarr.lock")).unwrap();
+            }
+            if failure == "journal" {
+                blocker.execute_batch("ROLLBACK").unwrap();
+            }
+        }
+        std::fs::write(&catalog, "[]").unwrap();
+        let response = check_package_updates().await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["updates"], serde_json::json!([]));
+        assert_eq!(body["updates_available"], 0);
+        drop(blocker);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn services_credentials_require_a_human_admin_for_http_views() {
+        if crate::plugins::tests::run_plugin_test_in_subprocess() {
+            return;
+        }
+        let (root, connection) = lifecycle_status_fixture();
+        af_db::init_db().unwrap();
+        std::fs::create_dir_all(root.join("install")).unwrap();
+        std::fs::create_dir_all(root.join("var/lib/sonarr")).unwrap();
+        std::fs::write(root.join("install/.sonarr.lock"), "installed").unwrap();
+        std::fs::write(
+            root.join("var/lib/sonarr/config.xml"),
+            "<Config><ApiKey>synthetic-service-credential</ApiKey><Port>18989</Port></Config>",
+        )
+        .unwrap();
+        let package = af_models::Package {
+            name: "sonarr".into(),
+            label: "Sonarr".into(),
+            service_name: "sonarr".into(),
+            lock_file: "/install/.sonarr.lock".into(),
+            ..Default::default()
+        };
+        let catalog = root.join("catalog.json");
+        let automation = root.join("automation.json");
+        std::fs::write(&catalog, serde_json::to_vec(&vec![package]).unwrap()).unwrap();
+        std::fs::write(&automation, "{}").unwrap();
+        std::env::set_var("AETHERFLOW_PACKAGES_CONFIG", catalog);
+        std::env::set_var("AETHERFLOW_PACKAGE_AUTOMATION_CONFIG", automation);
+        for (role, plugin, allowed) in [
+            ("user", None, false),
+            ("plugin", Some("status-reader"), false),
+            ("admin", Some("status-reader"), false),
+            ("admin", None, true),
+        ] {
+            let response = get_services(Extension(progress_test_user(role, plugin))).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = axum::body::to_bytes(response.into_body(), 65536)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(
+                body["Sonarr"].get("api_key").is_some(),
+                allowed,
+                "{role} {plugin:?}"
+            );
+            assert_eq!(
+                body.to_string().contains("synthetic-service-credential"),
+                allowed
+            );
+            assert_eq!(body["Sonarr"]["id"], "sonarr");
+        }
+        drop(connection);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn package_progress_sanitizes_users_and_plugins_but_keeps_admin_diagnostics() {
+        if crate::plugins::tests::run_plugin_test_in_subprocess() {
+            return;
+        }
+        let (root, connection) = lifecycle_status_fixture();
+        assert!(af_services::try_start_package_job(
+            af_services::PackageJobInfo {
+                job_id: "privileged-output-job".into(),
+                package_id: "sonarr".into(),
+                action: "update".into(),
+                status: "updating".into(),
+                progress: 42,
+                last_line: "PASSWORD=private-installer-output".into(),
+                started_at: "fixture-start".into(),
+            }
+        ));
+        for (role, plugin, raw_expected) in [
+            ("user", None, false),
+            ("plugin", Some("telemetry-client"), false),
+            ("admin", Some("telemetry-client"), false),
+            ("admin", None, true),
+        ] {
+            let user = progress_test_user(role, plugin);
+            let response = package_progress(Path("sonarr".into()), Extension(user.clone())).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(payload["job_id"], "privileged-output-job");
+            assert_eq!(payload["progress"], 42);
+            assert_eq!(payload["status"], "updating");
+            assert_eq!(
+                payload.to_string().contains("private-installer-output"),
+                raw_expected
+            );
+            if plugin.is_some() {
+                assert_eq!(
+                    issue_ws_ticket(Extension(user), HeaderMap::new())
+                        .await
+                        .status(),
+                    StatusCode::FORBIDDEN
+                );
+            }
+        }
+        af_services::fail_package_job(
+            "sonarr",
+            "update",
+            af_services::PackageJobFailure::Installer,
+            "privileged-output-job",
+        )
+        .unwrap();
+        let response = package_progress(
+            Path("sonarr".into()),
+            Extension(progress_test_user("admin", None)),
+        )
+        .await;
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let outcome: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            outcome["message"],
+            af_services::PackageJobFailure::Installer.summary()
+        );
+        assert!(!outcome.to_string().contains("private-installer-output"));
+        drop(connection);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn package_admission_reconciles_dead_same_package_before_catalog_validation() {
+        if crate::plugins::tests::run_plugin_test_in_subprocess() {
+            return;
+        }
+        let (root, connection) = lifecycle_status_fixture();
+        std::env::set_var(
+            "AETHERFLOW_RUNNER_SOCK",
+            format!(
+                "/tmp/afr-{}.sock",
+                &uuid::Uuid::new_v4().simple().to_string()[..12]
+            ),
+        );
+        af_db::init_db().unwrap();
+        let scripts = root.join("packages/package/install");
+        std::fs::create_dir_all(&scripts).unwrap();
+        std::fs::write(
+            scripts.join("installpackage-sonarr"),
+            "#!/bin/sh\nexit 91\n",
+        )
+        .unwrap();
+        assert!(af_services::try_start_package_job(
+            af_services::PackageJobInfo {
+                job_id: "abandoned-install".into(),
+                package_id: "sonarr".into(),
+                action: "install".into(),
+                status: "installing".into(),
+                progress: 20,
+                last_line: String::new(),
+                started_at: "fixture-start".into(),
+            }
+        ));
+        drop(af_services::take_package_job_lease("sonarr", "abandoned-install").unwrap());
+        assert_eq!(
+            af_services::package_job_snapshot().unwrap().active["sonarr"].status,
+            "installing"
+        );
+        let execution_blocked = af_services::PACKAGE_LIFECYCLE_MUTEX.lock().await;
+        let response = dispatch_package_lifecycle(
+            "sonarr".into(),
+            "install",
+            "installing",
+            false,
+            progress_test_user("admin", None),
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let identity = payload["job_id"].as_str().unwrap();
+        assert_ne!(identity, "abandoned-install");
+        assert_eq!(
+            af_services::package_job_snapshot().unwrap().active["sonarr"].job_id,
+            identity
+        );
+        let rejected = dispatch_package_lifecycle(
+            "sonarr".into(),
+            "install",
+            "installing",
+            false,
+            progress_test_user("admin", None),
+            HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(rejected.status(), StatusCode::CONFLICT);
+        assert!(af_services::finish_package_job(
+            "sonarr",
+            "install",
+            true,
+            "late",
+            "abandoned-install"
+        )
+        .is_none());
+        af_services::finish_package_job("sonarr", "install", true, "fixture done", identity)
+            .unwrap();
+        drop(connection);
+        std::fs::remove_dir_all(root).unwrap();
+        drop(execution_blocked);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn package_ingress_callbacks_require_the_current_lifecycle_owner() {
+        if crate::plugins::tests::run_plugin_test_in_subprocess() {
+            return;
+        }
+        let (root, connection) = lifecycle_status_fixture();
+        af_db::init_db().unwrap();
+        let job = |identity: &str, action: &str, status: &str| af_services::PackageJobInfo {
+            job_id: identity.into(),
+            package_id: "sonarr".into(),
+            action: action.into(),
+            status: status.into(),
+            progress: 20,
+            last_line: String::new(),
+            started_at: "fixture-start".into(),
+        };
+        assert!(af_services::try_start_package_job(job(
+            "ingress-install",
+            "install",
+            "installing"
+        )));
+        finalize_post_script_lifecycle_with(
+            "install",
+            "sonarr",
+            18989,
+            Vec::new(),
+            "example.com",
+            load_authoritative_app_ingress_config,
+            |cfg| af_db::set_app_ingress_config_for_lifecycle(cfg, "ingress-install", "install"),
+            |_, _| async { Ok(()) },
+            |_| async {},
+        )
+        .await
+        .unwrap();
+        let ingress = af_db::get_app_ingress_config("sonarr").unwrap().unwrap();
+        assert_eq!(ingress.listen_port, 18989);
+        assert!(af_db::set_app_ingress_config(&ingress).is_err());
+        assert!(
+            af_db::set_app_ingress_config_for_lifecycle(&ingress, "wrong-owner", "install")
+                .is_err()
+        );
+        af_services::finish_package_job("sonarr", "install", true, "done", "ingress-install")
+            .unwrap();
+        assert!(af_services::try_start_package_job(job(
+            "ingress-remove",
+            "remove",
+            "uninstalling"
+        )));
+        assert!(af_db::archive_app_ingress_config("sonarr", false).is_err());
+        assert!(af_db::archive_app_ingress_config_for_lifecycle(
+            "sonarr",
+            false,
+            "ingress-install"
+        )
+        .is_err());
+        af_db::archive_app_ingress_config_for_lifecycle("sonarr", false, "ingress-remove").unwrap();
+        assert!(af_db::get_app_ingress_config("sonarr").unwrap().is_none());
+        assert_eq!(
+            load_authoritative_app_ingress_config("sonarr")
+                .unwrap()
+                .unwrap()
+                .listen_port,
+            18989
+        );
+        af_services::finish_package_job("sonarr", "remove", true, "done", "ingress-remove")
+            .unwrap();
+        drop(connection);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn package_progress_yields_and_fails_closed_on_blocked_journal() {
+        if crate::plugins::tests::run_plugin_test_in_subprocess() {
+            return;
+        }
+        let (root, blocker) = lifecycle_status_fixture();
+        blocker.execute_batch("BEGIN EXCLUSIVE").unwrap();
+        let mut response = Box::pin(package_progress(
+            Path("sonarr".into()),
+            Extension(progress_test_user("user", None)),
+        ));
+        assert!(
+            futures::poll!(&mut response).is_pending(),
+            "journal status must not block the async runtime or return idle on read failure"
+        );
+        let response = tokio::time::timeout(std::time::Duration::from_secs(2), response)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["code"], "STATUS_UNAVAILABLE");
+        assert!(af_runner::acquire_lifecycle_admission_lock(Some(&root)).is_ok());
+        let mut admission = Box::pin(dispatch_package_lifecycle(
+            "sonarr".into(),
+            "install",
+            "installing",
+            false,
+            AuthUser {
+                user_id: 1,
+                username: "isolated-admin".into(),
+                role: "admin".into(),
+                jti: "isolated-session".into(),
+                plugin_id: None,
+                plugin_scopes: Vec::new(),
+            },
+            HeaderMap::new(),
+        ));
+        assert!(
+            futures::poll!(&mut admission).is_pending(),
+            "admission status lookup must yield before reading the journal"
+        );
+        let response = tokio::time::timeout(std::time::Duration::from_secs(2), admission)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        blocker.execute_batch("ROLLBACK").unwrap();
+        blocker.execute("INSERT INTO package_lifecycle_jobs (package_id,job_id,action,status,started_at) VALUES ('sonarr','matching-receipt','update','completed','fixture')", []).unwrap();
+        let response = package_progress(
+            Path("sonarr".into()),
+            Extension(progress_test_user("user", None)),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["job_id"], "matching-receipt");
+        assert_eq!(payload["status"], "completed");
+        drop(blocker);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn service_control_fails_closed_for_unreadable_or_unknown_journal() {
+        if crate::plugins::tests::run_plugin_test_in_subprocess() {
+            return;
+        }
+        let (root, blocker) = lifecycle_status_fixture();
+        blocker.execute_batch("BEGIN EXCLUSIVE").unwrap();
+        let unavailable = validate_service_control_request(
+            "sonarr",
+            &control_req("restart", "systemd", "sonarr"),
+        );
+        blocker.execute_batch("ROLLBACK").unwrap();
+        blocker.execute("INSERT INTO package_lifecycle_jobs (package_id,job_id,action,status,started_at) VALUES ('sonarr','unknown-receipt','update','unrecognized-phase','fixture')", []).unwrap();
+        let unknown = validate_service_control_request(
+            "sonarr",
+            &control_req("restart", "systemd", "sonarr"),
+        );
+        assert_eq!(unavailable.unwrap_err().0, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(unknown.unwrap_err().1, "PACKAGE_LIFECYCLE_IN_PROGRESS");
+        drop(blocker);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn service_control_contention_returns_409_without_lock_details() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        if crate::plugins::tests::run_plugin_test_in_subprocess() {
+            return;
+        }
+        let (root, _connection) = lifecycle_status_fixture();
+        let socket =
+            std::env::temp_dir().join(format!("c-{}.sock", &uuid::Uuid::new_v4().to_string()[..8]));
+        std::env::set_var("AETHERFLOW_RUNNER_SOCK", &socket);
+        let guard = af_runner::acquire_lifecycle_admission_lock(Some(&root)).unwrap();
+        let request = |name: &str| {
+            control_service_handler(
+                Path(name.to_string()),
+                Extension(AuthUser {
+                    user_id: 1,
+                    username: "fixture".into(),
+                    role: "admin".into(),
+                    jti: "fixture".into(),
+                    plugin_id: None,
+                    plugin_scopes: Vec::new(),
+                }),
+                HeaderMap::new(),
+                Json(control_req("restart", "systemd", name)),
+            )
+        };
+        // With no runner, the fallback must fail before invoking a real command.
+        let local = request("aetherflow-frontend").await;
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let fake_runner = tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut buffer = [0u8; 4096];
+                let count = stream.read(&mut buffer).await.unwrap();
+                if count == 0 {
+                    continue;
+                } // runner availability probe
+                let request = String::from_utf8_lossy(&buffer[..count]);
+                let (status, response) = if request
+                    .lines()
+                    .next()
+                    .unwrap()
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap()
+                    .ends_with("/v1/self-update/status")
+                {
+                    ("200 OK", af_models::RunnerResponse { success: true, output: serde_json::json!({"status":"succeeded","completed":true,"success":true,"job_unit":"","error":"","exit_code":null}).to_string(), error: String::new() })
+                } else {
+                    assert!(request
+                        .lines()
+                        .next()
+                        .unwrap()
+                        .split_whitespace()
+                        .nth(1)
+                        .unwrap()
+                        .ends_with("/v1/systemctl"));
+                    (
+                        "409 Conflict",
+                        af_models::RunnerResponse {
+                            success: false,
+                            output: String::new(),
+                            error: "release lock contention at /private/fixture.lock".into(),
+                        },
+                    )
+                };
+                let body = serde_json::to_string(&response).unwrap();
+                stream.write_all(format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+            }
+        });
+        let remote = request("aetherflow-frontend").await;
+        let core = request("aetherflow-api").await;
+        fake_runner.abort();
+        for response in [local, remote, core] {
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+            let body = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(payload["code"], "LIFECYCLE_BUSY");
+            assert!(payload["message"].as_str().unwrap().contains("Retry"));
+            assert!(!String::from_utf8_lossy(&body).contains(".lock"));
+        }
+        drop(guard);
+        std::fs::remove_file(socket).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_system_update_blocks_package_lifecycle_until_terminal() {
+        let status = |completed: bool| af_models::SelfUpdateJobStatus {
+            status: if completed { "succeeded" } else { "running" }.to_string(),
+            completed,
+            success: completed,
+            job_unit: "aetherflow-self-update-deploy-nightly-0123abcd.service".to_string(),
+            error: String::new(),
+            exit_code: if completed { Some(0) } else { None },
+        };
+        assert!(
+            system_update_lifecycle_block_with(|| async { Ok(status(false)) })
+                .await
+                .is_some()
+        );
+        let running = system_update_lifecycle_block_with(|| async { Ok(status(false)) })
+            .await
+            .expect("running updater must block lifecycle jobs");
+        assert!(running.to_string().contains("in progress"));
+        let unavailable = system_update_lifecycle_block_with(|| async {
+            Err(anyhow::anyhow!("runner socket connection refused"))
+        })
+        .await
+        .expect("unknown status for a launched updater fails closed");
+        assert!(unavailable.to_string().contains("unavailable"));
+        assert!(
+            system_update_lifecycle_block_with(|| async { Ok(status(true)) })
+                .await
+                .is_none()
+        );
+        assert!(system_update_lifecycle_block_with(|| async {
+            Err(anyhow::anyhow!("self-update job 'x' not found"))
+        })
+        .await
+        .is_some());
+    }
+
     #[tokio::test]
     async fn test_update_prestop_uses_daemon_and_timer_policy_not_jobs_or_unconfigured_mounts() {
         for (app, expected) in [

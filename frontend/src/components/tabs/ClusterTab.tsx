@@ -59,7 +59,9 @@ export interface WorkerNode {
     last_heartbeat: string;
     enrolled_at: string;
     metrics?: WorkerMetrics;
-    services?: WorkerService[];
+    services?: WorkerService[] | null;
+    services_status?: 'fresh' | 'stale' | 'unknown';
+    services_observed_at?: number | null;
     system_info?: WorkerSystemInfo;
 }
 
@@ -103,6 +105,8 @@ export default function ClusterTab() {
 
     // Node Telemetry Modal State
     const [selectedNode, setSelectedNode] = useState<WorkerNode | null>(null);
+    const selectedInventoryStatus = selectedNode?.services_status
+        ?? (selectedNode?.services ? 'fresh' : 'unknown');
 
     // Decommissioning node state
     const [decommissioningNodeId, setDecommissioningNodeId] = useState<string | null>(null);
@@ -561,8 +565,20 @@ export default function ClusterTab() {
                             <h4 className="text-xs font-bold uppercase tracking-wider text-slate-400">
                                 Supervised Services on Worker
                             </h4>
+                            {selectedInventoryStatus !== 'fresh' && (
+                                <p role="status" className="text-xs text-amber-300 leading-relaxed">
+                                    {selectedInventoryStatus === 'stale'
+                                        ? 'Service inventory is stale. Showing the last known service states.'
+                                        : 'Service inventory is unavailable. Node heartbeats may still be current.'}
+                                    {selectedInventoryStatus === 'stale' && typeof selectedNode.services_observed_at === 'number' && (
+                                        <span className="block text-slate-400">
+                                            Last observed: {new Date(selectedNode.services_observed_at * 1000).toLocaleString()}
+                                        </span>
+                                    )}
+                                </p>
+                            )}
                             <div className="rounded-xl border border-white/[0.06] bg-black/40 divide-y divide-white/[0.04] overflow-hidden">
-                                {(!selectedNode.services || selectedNode.services.length === 0) ? (
+                                {selectedInventoryStatus === 'unknown' ? null : (!selectedNode.services || selectedNode.services.length === 0) ? (
                                     <div className="p-4 text-center text-xs text-slate-500">
                                         No isolated daemon services reported on this worker.
                                     </div>

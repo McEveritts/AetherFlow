@@ -107,8 +107,14 @@ pub struct WorkerHeartbeatRequest {
     pub disk_usage: Option<f64>,
     #[serde(default)]
     pub metrics: serde_json::Value,
-    #[serde(default)]
-    pub services: Vec<WorkerService>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub services: Option<Vec<WorkerService>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub services_status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub services_observed_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub services_error: Option<String>,
     #[serde(default)]
     pub system_info: Option<WorkerSystemInfo>,
 }
@@ -414,7 +420,9 @@ pub fn register_worker_node(req: &RegisterWorkerRequest) -> anyhow::Result<Regis
         "ram_usage": existing.as_ref().and_then(|v| v.get("ram_usage")).and_then(|v| v.as_f64()).unwrap_or(0.0),
         "disk_usage": existing.as_ref().and_then(|v| v.get("disk_usage")).and_then(|v| v.as_f64()).unwrap_or(0.0),
         "metrics": existing.as_ref().and_then(|v| v.get("metrics")).cloned().unwrap_or(serde_json::Value::Null),
-        "services": existing.as_ref().and_then(|v| v.get("services")).cloned().unwrap_or_else(|| serde_json::json!([])),
+        "services": existing.as_ref().and_then(|v| v.get("services")).cloned().unwrap_or(serde_json::Value::Null),
+        "services_status": if existing.as_ref().and_then(|v| v.get("services")).is_some_and(|value| value.is_array()) { "stale" } else { "unknown" },
+        "services_observed_at": existing.as_ref().and_then(|v| v.get("services_observed_at")).cloned().unwrap_or(serde_json::Value::Null),
         "system_info": req.system_info,
     });
     cache_worker_metrics(&node_id, initial_snapshot);
@@ -526,6 +534,8 @@ pub fn process_worker_heartbeat(
     } else {
         req.metrics.clone()
     };
+    let (services, services_status, services_observed_at) =
+        merge_worker_service_inventory(req, previous.as_ref(), ts);
 
     let snapshot = serde_json::json!({
         "node_id": node_id,
@@ -542,7 +552,10 @@ pub fn process_worker_heartbeat(
         "ram_usage": ram_usage,
         "disk_usage": disk_usage,
         "metrics": metrics_val,
-        "services": req.services,
+        "services": services,
+        "services_status": services_status,
+        "services_observed_at": services_observed_at,
+        "services_error": req.services_error,
         "system_info": sys_info,
     });
 
@@ -554,6 +567,43 @@ pub fn process_worker_heartbeat(
         acknowledged: true,
         command,
     })
+}
+
+fn merge_worker_service_inventory(
+    request: &WorkerHeartbeatRequest,
+    previous: Option<&serde_json::Value>,
+    now: i64,
+) -> (serde_json::Value, &'static str, Option<i64>) {
+    let status = request.services_status.as_deref().unwrap_or("fresh");
+    if status == "fresh" {
+        if let Some(services) = &request.services {
+            return (
+                serde_json::json!(services),
+                "fresh",
+                Some(request.services_observed_at.unwrap_or(now)),
+            );
+        }
+    }
+    let previous_services = previous
+        .and_then(|snapshot| snapshot.get("services"))
+        .filter(|services| services.is_array())
+        .cloned();
+    if let Some(services) = previous_services {
+        let observed_at = previous
+            .and_then(|snapshot| snapshot.get("services_observed_at"))
+            .and_then(|value| value.as_i64());
+        return (services, "stale", observed_at);
+    }
+    if status == "stale" && request.services_observed_at.is_some() {
+        if let Some(services) = &request.services {
+            return (
+                serde_json::json!(services),
+                "stale",
+                request.services_observed_at,
+            );
+        }
+    }
+    (serde_json::Value::Null, "unknown", None)
 }
 
 #[allow(non_snake_case)]
@@ -866,8 +916,8 @@ fn resolve_local_hostname() -> String {
     "aetherflow-worker".to_string()
 }
 
-fn collect_worker_services() -> Vec<WorkerService> {
-    crate::get_active_services()
+fn collect_worker_services() -> anyhow::Result<Vec<WorkerService>> {
+    Ok(crate::get_active_services()?
         .into_iter()
         .map(|(name, svc)| WorkerService {
             name,
@@ -875,7 +925,65 @@ fn collect_worker_services() -> Vec<WorkerService> {
             uptime: svc.uptime,
             managed_by: svc.managed_by,
         })
-        .collect()
+        .collect())
+}
+
+#[derive(Default)]
+struct WorkerServiceInventory {
+    services: Option<Vec<WorkerService>>,
+    observed_at: Option<i64>,
+    error: Option<String>,
+    fresh: bool,
+}
+
+impl WorkerServiceInventory {
+    fn observe(&mut self, result: anyhow::Result<Vec<WorkerService>>, now: i64) {
+        match result {
+            Ok(services) => {
+                self.services = Some(services);
+                self.observed_at = Some(now);
+                self.error = None;
+                self.fresh = true;
+            }
+            Err(error) => {
+                self.error = Some(error.to_string());
+                self.fresh = false;
+            }
+        }
+    }
+
+    fn status(&self) -> &'static str {
+        if self.fresh {
+            "fresh"
+        } else if self.services.is_some() {
+            "stale"
+        } else {
+            "unknown"
+        }
+    }
+}
+
+type WorkerInventoryTask = tokio::task::JoinHandle<anyhow::Result<Vec<WorkerService>>>;
+
+async fn poll_worker_service_inventory(
+    task: &mut Option<WorkerInventoryTask>,
+    inventory: &mut WorkerServiceInventory,
+    now: i64,
+) {
+    if task.as_ref().is_some_and(|task| task.is_finished()) {
+        let result = task
+            .take()
+            .unwrap()
+            .await
+            .unwrap_or_else(|error| Err(anyhow::anyhow!("inventory worker failed: {error}")));
+        if let Err(error) = &result {
+            tracing::warn!(%error, "cluster inventory unknown; continuing liveness heartbeat");
+        }
+        inventory.observe(result, now);
+    } else if task.is_none() {
+        inventory.fresh = false;
+        *task = Some(tokio::task::spawn_blocking(collect_worker_services));
+    }
 }
 
 fn build_worker_heartbeat_payload(
@@ -883,6 +991,7 @@ fn build_worker_heartbeat_payload(
     hostname: &str,
     address: &str,
     psk: &str,
+    inventory: &WorkerServiceInventory,
 ) -> (WorkerHeartbeatRequest, WorkerSystemInfo) {
     let sys_metrics = af_hardware::get_system_metrics_core();
     let mem_used_gb = sys_metrics.memory.get("used").copied().unwrap_or(0.0);
@@ -945,7 +1054,10 @@ fn build_worker_heartbeat_payload(
         ram_usage: Some(ram_pct),
         disk_usage: Some(disk_pct),
         metrics: rich_metrics,
-        services: collect_worker_services(),
+        services: inventory.services.clone(),
+        services_status: Some(inventory.status().to_string()),
+        services_observed_at: inventory.observed_at,
+        services_error: inventory.error.clone(),
         system_info: Some(sys_info.clone()),
     };
 
@@ -983,8 +1095,13 @@ async fn run_worker_registration_and_heartbeat_loop(master_addr: String, psk: St
         .build()
         .unwrap_or_default();
 
-    let (_, sys_info) =
-        build_worker_heartbeat_payload(&assigned_node_id, &hostname, &worker_address, &psk);
+    let (_, sys_info) = build_worker_heartbeat_payload(
+        &assigned_node_id,
+        &hostname,
+        &worker_address,
+        &psk,
+        &WorkerServiceInventory::default(),
+    );
     let reg_payload = RegisterWorkerRequest {
         node_id: assigned_node_id.clone(),
         hostname: hostname.clone(),
@@ -1041,10 +1158,20 @@ async fn run_worker_registration_and_heartbeat_loop(master_addr: String, psk: St
     // 5-second metric heartbeat loop pushing `af_hardware::get_system_metrics_core()`
     let heartbeat_url = format!("{}/cluster/v1/heartbeat", base_url);
     let mut ticker = tokio::time::interval(Duration::from_secs(5));
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut inventory = WorkerServiceInventory::default();
+    let mut inventory_task = None;
     loop {
         ticker.tick().await;
-        let (hb_payload, _) =
-            build_worker_heartbeat_payload(&assigned_node_id, &hostname, &worker_address, &psk);
+        poll_worker_service_inventory(&mut inventory_task, &mut inventory, Utc::now().timestamp())
+            .await;
+        let (hb_payload, _) = build_worker_heartbeat_payload(
+            &assigned_node_id,
+            &hostname,
+            &worker_address,
+            &psk,
+            &inventory,
+        );
 
         match client
             .post(&heartbeat_url)
@@ -1203,6 +1330,104 @@ pub fn start_cluster_runtime() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn heartbeat_liveness_survives_unknown_and_pending_service_inventory() {
+        use crate::inventory_regressions::{isolated, Fixture};
+        let name = "cluster_daemon::tests::heartbeat_liveness_survives_unknown_and_pending_service_inventory";
+        if !isolated(name) {
+            return;
+        }
+        let fixture = Fixture::new();
+        af_db::init_db().unwrap();
+        assert_eq!(std::path::Path::new(&af_db::get_db_path()), fixture.journal);
+        ensure_cluster_schema();
+        let psk = "disposable-inventory-heartbeat-secret";
+        env::set_var("CLUSTER_PSK", psk);
+        let node = "node-inventory-regression";
+        let mut inventory = WorkerServiceInventory::default();
+        let (unknown, _) =
+            build_worker_heartbeat_payload(node, "fixture", "fixture:8080", psk, &inventory);
+        assert!(serde_json::to_value(&unknown)
+            .unwrap()
+            .get("services")
+            .is_none());
+        assert!(process_worker_heartbeat(&unknown).unwrap().acknowledged);
+        let cached = get_cached_worker_metrics(node).unwrap();
+        assert!(cached["services"].is_null());
+        assert_eq!(cached["services_status"], "unknown");
+        let observed_at = Utc::now().timestamp() - 80;
+        inventory.observe(collect_worker_services(), observed_at);
+        let (healthy, _) =
+            build_worker_heartbeat_payload(node, "fixture", "fixture:8080", psk, &inventory);
+        process_worker_heartbeat(&healthy).unwrap();
+        let previous_services = get_cached_worker_metrics(node).unwrap()["services"].clone();
+        assert_eq!(previous_services.as_array().unwrap().len(), 4);
+        let hidden = fixture.journal.with_extension("temporarily-hidden");
+        std::fs::rename(&fixture.journal, &hidden).unwrap();
+        inventory.observe(collect_worker_services(), observed_at + 5);
+        std::fs::rename(&hidden, &fixture.journal).unwrap();
+        assert_eq!(inventory.status(), "stale");
+        assert_eq!(inventory.observed_at, Some(observed_at));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let (release, blocked) = tokio::sync::oneshot::channel::<()>();
+            let mut pending = Some(tokio::spawn(async move {
+                let _ = blocked.await;
+                Err(anyhow::anyhow!("simulated inventory failure after a blocked collector"))
+            }));
+            let (stale, _) = build_worker_heartbeat_payload(node, "fixture", "fixture:8080", psk, &inventory);
+            for elapsed in (5..=80).step_by(5) {
+                poll_worker_service_inventory(&mut pending, &mut inventory, observed_at + elapsed).await;
+                assert!(pending.as_ref().is_some_and(|task| !task.is_finished()));
+                {
+                    let conn = af_db::get_conn().unwrap();
+                    conn.execute("UPDATE cluster_nodes SET last_seen=datetime('now','-65 seconds'),last_heartbeat=datetime('now','-65 seconds') WHERE id=?1", params![node]).unwrap();
+                }
+                let mut request = stale.clone();
+                request.timestamp = observed_at + elapsed;
+                assert!(process_worker_heartbeat(&request).unwrap().acknowledged);
+                assert_eq!(sweep_stale_cluster_nodes(), 0);
+                let cached = get_cached_worker_metrics(node).unwrap();
+                assert_eq!(cached["status"], "online");
+                assert_eq!(cached["services"], previous_services);
+                assert_eq!(cached["services_status"], "stale");
+                assert_eq!(cached["services_observed_at"], observed_at);
+            }
+            release.send(()).unwrap();
+            inventory.observe(pending.take().unwrap().await.unwrap(), observed_at + 80);
+        });
+        inventory.observe(collect_worker_services(), observed_at + 85);
+        let (recovered, _) =
+            build_worker_heartbeat_payload(node, "fixture", "fixture:8080", psk, &inventory);
+        process_worker_heartbeat(&recovered).unwrap();
+        assert_eq!(
+            get_cached_worker_metrics(node).unwrap()["services_status"],
+            "fresh"
+        );
+        assert_eq!(
+            get_cached_worker_metrics(node).unwrap()["services_observed_at"],
+            observed_at + 85
+        );
+        inventory.observe(Ok(Vec::new()), observed_at + 90);
+        let (empty, _) =
+            build_worker_heartbeat_payload(node, "fixture", "fixture:8080", psk, &inventory);
+        process_worker_heartbeat(&empty).unwrap();
+        assert_eq!(
+            get_cached_worker_metrics(node).unwrap()["services"],
+            serde_json::json!([])
+        );
+        {
+            let conn = af_db::get_conn().unwrap();
+            conn.execute("UPDATE cluster_nodes SET last_seen=datetime('now','-65 seconds'),last_heartbeat=datetime('now','-65 seconds') WHERE id=?1", params![node]).unwrap();
+        }
+        assert_eq!(sweep_stale_cluster_nodes(), 1);
+        println!("16 fake 5-second heartbeats across 80 seconds kept actual disposable DB node online despite corrupt journal and pending inventory; retained services and original observation time; no-heartbeat negative control went offline");
+    }
 
     #[test]
     fn test_heartbeat_requires_psk_before_mutating_state() {

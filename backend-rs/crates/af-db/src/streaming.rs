@@ -41,7 +41,7 @@ pub fn verified_backup(conn: &Connection, db_path: &str) -> anyhow::Result<Optio
 pub fn migrate_history(conn: &Connection, db_path: &str) -> anyhow::Result<()> {
     let applied: Option<i64> = conn.query_row("SELECT version FROM schema_versions WHERE version = 20", [], |row| row.get(0)).optional()?;
     if applied.is_some() {
-        return Ok(());
+        return migrate_read_epoch(conn);
     }
     let backup = verified_backup(conn, db_path)?;
     if let Some(path) = backup {
@@ -57,5 +57,27 @@ pub fn migrate_history(conn: &Connection, db_path: &str) -> anyhow::Result<()> {
     if result.is_err() {
         let _ = conn.execute_batch("ROLLBACK");
     }
-    result
+    result?;
+    migrate_read_epoch(conn)
+}
+
+fn migrate_read_epoch(conn: &Connection) -> anyhow::Result<()> {
+    const DESCRIPTION: &str = "Streaming historical read epoch; destructive revision retained";
+    let transaction = conn.unchecked_transaction()?;
+    transaction.execute("DELETE FROM schema_versions WHERE version=21 AND description=?1", [DESCRIPTION])?;
+    let existing: Option<String> = transaction.query_row("SELECT description FROM schema_versions WHERE version=24", [], |row| row.get(0)).optional()?;
+    if let Some(description) = existing {
+        anyhow::ensure!(description == DESCRIPTION, "Streaming read-epoch migration version24 collision: {description}");
+        transaction.commit()?;
+        return Ok(());
+    }
+    transaction.execute_batch(include_str!("migrations/024_streaming_read_epoch.sql"))?;
+    for (table, label) in [("streaming_user_links", "links"), ("streaming_history_labels", "labels")] {
+        for operation in ["INSERT", "UPDATE", "DELETE"] {
+            transaction.execute_batch(&format!("CREATE TRIGGER IF NOT EXISTS streaming_read_{label}_{} AFTER {operation} ON {table} BEGIN UPDATE streaming_history_read_revision SET revision=revision+1 WHERE id=1; END;", operation.to_ascii_lowercase()))?;
+        }
+    }
+    transaction.execute("INSERT INTO schema_versions(version,description) VALUES(24,?1)", [DESCRIPTION])?;
+    transaction.commit()?;
+    Ok(())
 }

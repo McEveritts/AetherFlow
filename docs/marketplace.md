@@ -73,9 +73,22 @@ Installation scripts communicate their state back to the dashboard over WebSocke
 - **Green (Check)**: Service has been successfully created and started.
 - **Red (Alert)**: Installation failed. You can inspect the logs directly in the **System Logs** panel.
 
-### Removing an App
-To uninstall, click the **Uninstall** button on an active application card.
-- **Warning**: Most removal scripts offer a prompt to "Delete Data". If selected, this will permanently remove your configuration and database for that application.
+### Reinstalling and Removing an App
+Use **Reinstall** on an installed application to reapply its installer in place. The confirmation describes retaining configuration, data, secrets, and the allocated port. Installers can restart the application during this operation.
+
+**Uninstall** opens a confirmation and keeps application data by default. Reinstall settings are archived separately from active ingress routes so a later install can reuse the port and domain without retaining a gateway route to the removed app.
+
+To request destructive removal, select **Permanently delete application data and configuration** and type the application's identifier. Only this confirmed purge sends `purge=true` and `DELETE_DATA=true` to the remover. Existing backups can remain; the application-specific remover defines which managed data and accounts it can remove. A failed stop blocks destructive teardown unless the service is positively confirmed inactive or absent. Required teardown failures prevent a successful completion receipt; partial removal can still require administrator inspection.
+
+Dispatcharr uses dedicated, ownership-marked storage at `/var/lib/dispatcharr` and an exclusive `/data` compatibility link. An existing real/shared `/data` directory or nonempty unmarked legacy storage requires an audited manual migration before install or update. AetherFlow refuses to adopt that storage automatically; purge also refuses ambiguous ownership and retains the data and credentials. Ordinary uninstall retains Dispatcharr storage and its compatibility path.
+
+Lifecycle responses include a server job ID. Completion messages require a matching terminal receipt. A failed update does not imply that rollback or database recovery succeeded. An API restart alone does not prove that its installer stopped: a surviving command keeps maintenance reserved until it exits. Once recovery can prove that the owner and its commands are gone, an unfinished job becomes **interrupted**; check application state and authorized logs before retrying. Unknown owner or command state remains unresolved rather than being reported as success.
+
+The Rust API and runner keep a durable reservation for the package and its complete catalog service set across pre-stop, script execution, and required ingress persistence/service restoration. Apps that share a companion, such as Apache, cannot run conflicting orchestration at the same time. Direct Rust CLI package requests use the runner to acquire and finish their own durable job; the CLI confirms completion only from its matching durable terminal receipt. An installer progress line or a lost connection alone cannot confirm success. An admitted runner job continues its required callbacks if that CLI disconnects. Service controls and sandbox application honor these reservations; only the exact owning job can perform its callbacks. Core API/runner restarts and system releases cannot interrupt an active lifecycle. Service mutations also share the global maintenance lock with application jobs and releases. Unrelated service cards can remain visible and enabled, but start/stop/restart returns a retryable `409 LIFECYCLE_BUSY` while maintenance holds that lock. Retry once the active operation completes.
+
+After a crash, standalone `af release ... --local` can reconcile a known abandoned API job without starting the API. Reconciliation requires a released UUID owner lease and exclusive maintenance admission; surviving installer subprocesses retain the maintenance lock. It records **interrupted**, never successful recovery. Missing/unknown owner evidence stays unresolved. Do not delete the persistent `*.lifecycle-owners` lease directory or release recovery journal to clear a busy message: those files protect restored database snapshots and real work. Inspect the reported owner/maintenance conflict and application state before retrying.
+
+System-update receipts distinguish **launching** from **running**. A live launcher retains admission before systemd creates its unit; an abandoned launcher is reconciled against systemd, and unknown systemd state returns an actionable unavailable response rather than false completion. Deferred core restarts have their own durable receipt covering the timer delay and restart worker. Their successful receipt confirms the restart command and active unit, not HTTP/UDS application readiness. Use the normal health checks before treating the application as ready.
 
 ---
 
@@ -88,3 +101,4 @@ When you install an app through AetherMarketplace:
 
 > [!TIP]
 > You can manually control any marketplace app from the CLI using standard commands: `sudo systemctl restart af-plex`.
+> Prefer runner-mediated `af` controls while AetherFlow manages lifecycle work; raw administrator `systemctl` commands bypass its admission safeguards.

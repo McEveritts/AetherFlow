@@ -41,8 +41,16 @@ mkdir -p /var/lib/rtorrent/session \
          /var/lib/rtorrent/watch \
          /run/rtorrent
 
-report_progress 65 "Generating hardened .rtorrent.rc configuration..."
-cat <<'EOF' > /var/lib/rtorrent/.rtorrent.rc
+report_progress 65 "Preparing rTorrent configuration..."
+if [[ -e /var/lib/rtorrent/.rtorrent.rc || -L /var/lib/rtorrent/.rtorrent.rc ]]; then
+    [[ -f /var/lib/rtorrent/.rtorrent.rc ]] || { log_error "Existing rTorrent configuration is not a regular file"; exit 1; }
+    log_info "Retaining existing rTorrent configuration."
+else
+    # Publish complete defaults without ever truncating an operator's config.
+    (
+        config_temp="$(mktemp /var/lib/rtorrent/.rtorrent.rc.af-XXXXXX)"
+        trap 'rm -f -- "${config_temp}"' EXIT
+    cat <<'EOF' > "${config_temp}"
 # AetherFlow rTorrent native configuration
 session.path.set = /var/lib/rtorrent/session/
 directory.default.set = /var/lib/rtorrent/downloads
@@ -65,6 +73,10 @@ throttle.max_peers.seed.set = -1
 throttle.max_uploads.set = 100
 pieces.hash.on_completion.set = no
 EOF
+
+        ln -- "${config_temp}" /var/lib/rtorrent/.rtorrent.rc
+    )
+fi
 
 chown -R rtorrent:www-data /var/lib/rtorrent /run/rtorrent
 chmod 775 /var/lib/rtorrent /run/rtorrent

@@ -8,7 +8,7 @@ import subprocess
 import tempfile
 import unittest
 
-from installer_test_helpers import common_functions
+from installer_test_helpers import common_functions, replace_paths_once
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -381,9 +381,11 @@ set_config_value() { :; }
         script_path = ROOT / f"packages/package/{action}/{action}package-{package}"
         source = script_path.read_text()
         root_posix = str(self.root).replace("\\", "/")
-        source = source.replace("/usr/bin/kasmvncpasswd", f"{root_posix}/mock-bin/kasmvncpasswd")
 
+        (self.root / "tmp").mkdir(exist_ok=True)
         replacements = [
+            ("/tmp/", f"{root_posix}/tmp/"),
+            ("/usr/bin/kasmvncpasswd", f"{root_posix}/mock-bin/kasmvncpasswd"),
             ("/mnt/", f"{root_posix}/mnt/"),
             ("/opt/", f"{root_posix}/opt/"),
             ("/var/", f"{root_posix}/var/"),
@@ -395,8 +397,7 @@ set_config_value() { :; }
             ("/run/lock", f"{root_posix}/run/lock"),
             (" /install", f" {root_posix}/install"),
         ]
-        for src, dst in replacements:
-            source = source.replace(src, dst)
+        source = replace_paths_once(source, replacements)
 
         staged_script = self.root / "run_test_script.sh"
         staged_script.write_text(source)

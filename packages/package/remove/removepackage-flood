@@ -34,7 +34,7 @@ if [[ "${DELETE_DATA:-false}" == true ]]; then
     rm -rf /var/lib/flood /srv/rutorrent/home/flood /etc/apache2/sites-enabled/flood.conf /etc/apache2/sites-available/flood.conf
 fi
 purge_system_user "flood"
-systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
+systemctl daemon-reload >> "$LOGFILE" 2>&1
 
 remove_lock "${PACKAGE_NAME}"
 report_progress 100 "Flood removed; application data retained unless DELETE_DATA=true."

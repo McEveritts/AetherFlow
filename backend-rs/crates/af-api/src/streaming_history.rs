@@ -240,7 +240,7 @@ pub(crate) fn resolve_query_scope(conn: &Connection, raw: HistoryQuery, user: &A
     let mut query = normalize(raw, user.role == "admin")?;
     if query.cursor.is_some() { return Err(HistoryError::invalid("Analytics accepts a snapshot, not a page cursor")); }
     let token = query.snapshot.take();
-    let revision: i64 = conn.query_row("SELECT revision FROM streaming_history_revision WHERE id = 1", [], |row| row.get(0))?;
+    let revision = read_revision(conn)?;
     if let Some(token) = token {
         let snapshot = decode(&token, now)?;
         if snapshot.anchor.is_some() || snapshot.fingerprint != fingerprint(&query, user) {
@@ -254,6 +254,11 @@ pub(crate) fn resolve_query_scope(conn: &Connection, raw: HistoryQuery, user: &A
 }
 
 pub(crate) fn inclusion_predicate() -> &'static str { INCLUDED }
+
+fn read_revision(conn: &Connection) -> rusqlite::Result<i64> {
+    conn.query_row("SELECT revision FROM streaming_history_read_revision WHERE id=1", [], |row| row.get(0))
+        .or_else(|_| conn.query_row("SELECT revision FROM streaming_history_revision WHERE id=1", [], |row| row.get(0)))
+}
 
 pub(crate) fn scope_filters(query: &HistoryQuery, user: &AuthUser, watermark: i64) -> (Vec<String>, Vec<Value>) {
     let mut clauses = vec!["p.id = 1".into(), "h.provider != 'demo'".into(), "h.id <= ?".into()];
@@ -356,7 +361,7 @@ fn query_history_batch(conn: &Connection, raw: HistoryQuery, user: &AuthUser, no
     let token = query.cursor.take().or_else(|| query.snapshot.take());
     let expected_fingerprint = fingerprint(&query, user);
     let tx = conn.unchecked_transaction()?;
-    let revision: i64 = tx.query_row("SELECT revision FROM streaming_history_revision WHERE id = 1", [], |row| row.get(0))?;
+    let revision = read_revision(&tx)?;
     let mut snapshot = if let Some(token) = token {
         let snapshot = decode(&token, now)?;
         if cursor_requested != snapshot.anchor.is_some() {
@@ -400,7 +405,7 @@ fn query_history_batch(conn: &Connection, raw: HistoryQuery, user: &AuthUser, no
                 values.push(Value::Integer(anchor.id));
             }
         }
-    let sql = format!("SELECT h.id,h.provider,h.server_id,h.source_event_id,h.provenance,h.timestamp_certainty,h.byte_accuracy,h.user_id,h.user_name,NULLIF(h.client_name,''),NULLIF(h.device_name,''),h.device_id,h.ip_address,h.item_id,h.item_name,NULLIF(h.item_type,''),NULLIF(h.series_name,''),h.play_method,h.watched_secs,h.duration_secs,h.data_used_bytes,h.event_unix,CAST(strftime('%s',NULLIF(h.last_seen_at,'')) AS INTEGER),CAST(strftime('%s',NULLIF(h.ended_at,'')) AS INTEGER),h.is_active,({INCLUDED}),h.policy_status,COALESCE((SELECT json_group_array(value) FROM streaming_history_labels WHERE history_id=h.id AND kind='library'),'[]'),COALESCE((SELECT json_group_array(value) FROM streaming_history_labels WHERE history_id=h.id AND kind='genre'),'[]') {FROM_HISTORY} WHERE {} ORDER BY h.event_missing ASC,h.event_unix {direction},h.id {direction} LIMIT ?", clauses.join(" AND "));
+    let sql = format!("SELECT h.id,h.provider,h.server_id,h.source_event_id,h.provenance,h.timestamp_certainty,h.byte_accuracy,h.user_id,h.user_name,NULLIF(h.client_name,''),NULLIF(h.device_name,''),h.device_id,h.ip_address,h.item_id,h.item_name,NULLIF(h.item_type,''),NULLIF(h.series_name,''),h.play_method,h.watched_secs,h.duration_secs,h.data_used_bytes,h.event_unix,CAST(strftime('%s',NULLIF(h.last_seen_at,'')) AS INTEGER),CAST(strftime('%s',NULLIF(h.ended_at,'')) AS INTEGER),(h.is_active AND CAST(strftime('%s',h.last_seen_at) AS INTEGER)>=CAST(strftime('%s','now') AS INTEGER)-60),({INCLUDED}),h.policy_status,COALESCE((SELECT json_group_array(value) FROM streaming_history_labels WHERE history_id=h.id AND kind='library'),'[]'),COALESCE((SELECT json_group_array(value) FROM streaming_history_labels WHERE history_id=h.id AND kind='genre'),'[]') {FROM_HISTORY} WHERE {} ORDER BY h.event_missing ASC,h.event_unix {direction},h.id {direction} LIMIT ?", clauses.join(" AND "));
         values.push(Value::Integer((page_size + 1 - items.len()) as i64));
         let batch: Vec<HistoryItem> = tx.prepare(&sql)?.query_map(params_from_iter(&values), |row| read_item(row, user.role == "admin"))?.collect::<rusqlite::Result<_>>()?;
         items.extend(batch);

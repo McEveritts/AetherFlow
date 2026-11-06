@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 af-models.workspace = true
+af-db.workspace = true
 af-host.workspace = true
 af-release.workspace = true
 tokio.workspace = true

@@ -28,15 +28,15 @@ report_progress 20 "Stopping and disabling emby-server service..."
 purge_systemd_unit "emby-server"
 
 report_progress 50 "Purging emby-server package..."
-DEBIAN_FRONTEND=noninteractive apt-get "$APT_REMOVE_ACTION" -y -qq emby-server >> "$LOGFILE" 2>&1 || dpkg "--$APT_REMOVE_ACTION" emby-server >> "$LOGFILE" 2>&1 || true
-DEBIAN_FRONTEND=noninteractive apt-get autoremove -y -qq >> "$LOGFILE" 2>&1 || true
+DEBIAN_FRONTEND=noninteractive apt-get "$APT_REMOVE_ACTION" -y -qq emby-server >> "$LOGFILE" 2>&1 || dpkg "--$APT_REMOVE_ACTION" emby-server >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get autoremove -y -qq >> "$LOGFILE" 2>&1
 
 report_progress 80 "Removing Emby binaries, data directories, and user account..."
 if [[ "${DELETE_DATA:-false}" == true ]]; then
     rm -rf /opt/emby-server /var/lib/emby /var/lib/emby-server /etc/emby-server.conf
 fi
 purge_system_user "emby"
-systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
+systemctl daemon-reload >> "$LOGFILE" 2>&1
 
 remove_lock "${PACKAGE_NAME}"
 report_progress 100 "Emby Server removed; application data retained unless DELETE_DATA=true."

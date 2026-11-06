@@ -1,3 +1,9 @@
+mod retained_ingress;
+pub use retained_ingress::{
+    archive_app_ingress_config, archive_app_ingress_config_for_lifecycle,
+    get_retained_app_ingress_config, load_lifecycle_ingress, synchronize_lifecycle_ingress,
+};
+
 use aes_gcm::aead::{Aead, KeyInit, OsRng};
 use aes_gcm::{Aes256Gcm, Nonce};
 use af_models::AppIngressConfig;
@@ -1055,6 +1061,7 @@ pub fn prune_expired_data() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 struct IngressCache {
+    generation: u64,
     configs: Option<Vec<AppIngressConfig>>,
     configs_at: Option<Instant>,
     base_domain: String,
@@ -1063,6 +1070,7 @@ struct IngressCache {
 
 static INGRESS_CACHE: Lazy<RwLock<IngressCache>> = Lazy::new(|| {
     RwLock::new(IngressCache {
+        generation: 0,
         configs: None,
         configs_at: None,
         base_domain: String::new(),
@@ -1074,6 +1082,7 @@ const INGRESS_CACHE_TTL: Duration = Duration::from_secs(5);
 
 pub fn invalidate_ingress_cache() {
     if let Ok(mut guard) = INGRESS_CACHE.write() {
+        guard.generation = guard.generation.wrapping_add(1);
         guard.configs = None;
         guard.configs_at = None;
         guard.base_domain.clear();
@@ -1158,6 +1167,7 @@ fn parse_sqlite_dt(s: &str) -> DateTime<Utc> {
 }
 
 pub fn get_all_app_ingress_configs() -> anyhow::Result<Vec<AppIngressConfig>> {
+    let generation = INGRESS_CACHE.read().map(|guard| guard.generation).unwrap_or(0);
     if let Ok(guard) = INGRESS_CACHE.read() {
         if let (Some(ref cfgs), Some(at)) = (&guard.configs, guard.configs_at) {
             if at.elapsed() < INGRESS_CACHE_TTL {
@@ -1192,8 +1202,10 @@ pub fn get_all_app_ingress_configs() -> anyhow::Result<Vec<AppIngressConfig>> {
     }
 
     if let Ok(mut guard) = INGRESS_CACHE.write() {
-        guard.configs = Some(result.clone());
-        guard.configs_at = Some(Instant::now());
+        if guard.generation == generation {
+            guard.configs = Some(result.clone());
+            guard.configs_at = Some(Instant::now());
+        }
     }
     Ok(result)
 }
@@ -1204,7 +1216,32 @@ pub fn get_app_ingress_config(app_name: &str) -> anyhow::Result<Option<AppIngres
 }
 
 pub fn set_app_ingress_config(cfg: &AppIngressConfig) -> anyhow::Result<()> {
-    let conn = get_conn()?;
+    let mut conn = get_conn()?;
+    retained_ingress::set_config(&mut conn, cfg, None)?;
+    invalidate_ingress_cache();
+    Ok(())
+}
+
+pub fn set_app_ingress_config_for_lifecycle(
+    cfg: &AppIngressConfig,
+    job_id: &str,
+    action: &str,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        matches!(action, "install" | "update"),
+        "Invalid ingress lifecycle action"
+    );
+    anyhow::ensure!(
+        !job_id.is_empty(),
+        "Ingress lifecycle job identity is required"
+    );
+    let mut conn = get_conn()?;
+    retained_ingress::set_config(&mut conn, cfg, Some((job_id, action)))?;
+    invalidate_ingress_cache();
+    Ok(())
+}
+
+fn write_app_ingress_config(conn: &Connection, cfg: &AppIngressConfig) -> anyhow::Result<()> {
     conn.execute(
         r#"
         INSERT INTO app_ingress_configs (app_name, public_domain, external_access_enabled, listen_port, tls_enabled, updated_at)
@@ -1224,7 +1261,6 @@ pub fn set_app_ingress_config(cfg: &AppIngressConfig) -> anyhow::Result<()> {
             cfg.tls_enabled,
         ],
     )?;
-    invalidate_ingress_cache();
     Ok(())
 }
 

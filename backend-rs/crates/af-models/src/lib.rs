@@ -254,6 +254,8 @@ pub struct PackageAutomation {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct MarketplaceApp {
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub job_id: Option<String>,
     pub id: String,
     pub name: String,
     pub desc: String,
@@ -291,6 +293,21 @@ pub struct MarketplaceApp {
     pub update_url: String,
     #[serde(skip_serializing_if = "String::is_empty", default)]
     pub update_error: String,
+    /// Terminal outcome of the most recent lifecycle job. Deliberately carries
+    /// no error text because this catalog is served without authentication;
+    /// failure detail is available from the authenticated progress endpoint.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub last_job: Option<MarketplaceJobOutcome>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct MarketplaceJobOutcome {
+    pub job_id: String,
+    pub action: String,
+    /// `completed` or `failed`.
+    pub status: String,
+    pub started_at: String,
+    pub finished_at: String,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -301,6 +318,8 @@ pub struct MarketplaceApp {
 pub struct SystemctlRequest {
     pub service: String,
     pub action: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub lifecycle_job_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -308,8 +327,14 @@ pub struct PackageRunnerRequest {
     pub action: String,
     pub package_id: String,
     pub script_name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub lifecycle_job_id: String,
     #[serde(skip_serializing_if = "is_zero_i32", default)]
     pub app_port: i32,
+    /// Explicit destructive purge for `remove` only. The runner never inherits
+    /// `DELETE_DATA` from its own environment; ordinary removals retain data.
+    #[serde(skip_serializing_if = "is_false", default)]
+    pub delete_data: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -479,6 +504,8 @@ pub struct SandboxRunnerRequest {
     pub package: String,
     #[serde(skip_serializing_if = "String::is_empty", default)]
     pub package_id: String,
+    #[serde(skip_serializing_if = "String::is_empty", default)]
+    pub lifecycle_job_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]

@@ -30,7 +30,7 @@ if [[ "${DELETE_DATA:-false}" == true ]]; then
     rm -rf /opt/overseerr /var/lib/overseerr
 fi
 purge_system_user "overseerr"
-systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
+systemctl daemon-reload >> "$LOGFILE" 2>&1
 
 remove_lock "${PACKAGE_NAME}"
 report_progress 100 "Overseerr removed; application data retained unless DELETE_DATA=true."

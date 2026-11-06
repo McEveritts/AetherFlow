@@ -36,7 +36,7 @@ if [[ -f /etc/systemd/resolved.conf ]]; then
     systemctl restart systemd-resolved >> "$LOGFILE" 2>&1 || true
 fi
 
-systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
+systemctl daemon-reload >> "$LOGFILE" 2>&1
 
 remove_lock "${PACKAGE_NAME}"
 report_progress 100 "AdGuard Home removed; application data retained unless DELETE_DATA=true."

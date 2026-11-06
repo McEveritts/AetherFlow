@@ -28,15 +28,15 @@ report_progress 20 "Stopping and disabling wg-quick@wg0 service..."
 purge_systemd_unit "wg-quick@wg0"
 
 report_progress 50 "Purging WireGuard APT packages..."
-DEBIAN_FRONTEND=noninteractive apt-get "$APT_REMOVE_ACTION" -y -qq wireguard wireguard-tools >> "$LOGFILE" 2>&1 || true
-DEBIAN_FRONTEND=noninteractive apt-get autoremove -y -qq >> "$LOGFILE" 2>&1 || true
+DEBIAN_FRONTEND=noninteractive apt-get "$APT_REMOVE_ACTION" -y -qq wireguard wireguard-tools >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get autoremove -y -qq >> "$LOGFILE" 2>&1
 
 report_progress 80 "Removing WireGuard keys, configuration, and sysctl rules..."
 if [[ "${DELETE_DATA:-false}" == true ]]; then
     rm -rf /etc/wireguard /etc/sysctl.d/99-wireguard.conf
 fi
 sysctl --system >> "$LOGFILE" 2>&1 || true
-systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
+systemctl daemon-reload >> "$LOGFILE" 2>&1
 
 remove_lock "${PACKAGE_NAME}"
 report_progress 100 "WireGuard removed; application data retained unless DELETE_DATA=true."

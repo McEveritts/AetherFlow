@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
-import { useMarketplace, useGithubDownloads, App } from '@/hooks/useMarketplace';
+import { useMarketplace, useGithubDownloads, App, PendingAction, isLifecycleStatus, lifecycleIdentity, matchingJobOutcome } from '@/hooks/useMarketplace';
 import { Search, Package, Download, RefreshCw, XCircle, AlertCircle, Filter, Globe, Puzzle, ShieldCheck, Play, Square, ExternalLink } from 'lucide-react';
 import { useToast } from '@/contexts/ToastContext';
 import { ProgressRing } from '@/components/ui/ProgressRing';
@@ -92,7 +92,7 @@ const AppIcon = ({ app }: { app: App }) => {
 };
 
 export default function MarketplaceTab() {
-    const { apps, isLoading, isError, mutate, pendingJobs, markPending, clearPending } = useMarketplace();
+    const { apps, isLoading, isError, mutate, pendingJobs, unconfirmedJobs, markPending, clearPending, registerJob } = useMarketplace();
     const totalGithubDownloads = useGithubDownloads();
     const { addToast } = useToast();
     const [searchQuery, setSearchQuery] = useState('');
@@ -122,6 +122,14 @@ export default function MarketplaceTab() {
             // Silently ignore when unauthenticated or offline
         }
     }, []);
+
+    useEffect(() => {
+        unconfirmedJobs?.forEach((identity, appId) => {
+            if (unconfirmedNotifiedRef.current.has(identity)) return;
+            unconfirmedNotifiedRef.current.add(identity);
+            addToast(`${apps?.find(app => app.id === appId)?.name || appId}: operation outcome could not be confirmed. Its receipt may have been superseded. Check application state and logs before retrying.`, 'error');
+        });
+    }, [unconfirmedJobs, apps, addToast]);
 
     useEffect(() => {
         let active = true;
@@ -251,74 +259,43 @@ export default function MarketplaceTab() {
     };
 
     // Job Completion Monitoring
-    const prevAppsRef = useRef<App[] | undefined>(undefined);
+    const observedJobsRef = useRef<Map<string, { action: 'installing' | 'updating' | 'uninstalling'; identity: string }>>(new Map());
     const notifiedRef = useRef<Set<string>>(new Set());
+    const unconfirmedNotifiedRef = useRef<Set<string>>(new Set());
+    // Keep accepted identity/action after an observation timeout: a later receipt
+    // can still confirm the real result, independently of the unknown notice.
+    const acceptedJobsRef = useRef<Map<string, { action: PendingAction; identity: string }>>(new Map());
+    const rememberJob = async (appId: string, res: Response, action: PendingAction) => {
+        const body = await res.json() as { job_id?: string; started_at?: string };
+        acceptedJobsRef.current.set(appId, { action, identity: registerJob(appId, body) });
+    };
 
     useEffect(() => {
         if (!apps) return;
-
         apps.forEach(app => {
-            const prevApp = prevAppsRef.current?.find(a => a.id === app.id);
-
-            if (prevApp) {
-                if (prevApp.status === 'installing' && app.status === 'installed') {
-                    if (!notifiedRef.current.has(app.id)) {
-                        notifiedRef.current.add(app.id);
-                        const domainSuffix = app.public_domain ? ` (${app.public_domain})` : '';
-                        addToast(`${app.name} has been successfully installed${domainSuffix}.`, 'success');
-                        setTimeout(() => notifiedRef.current.delete(app.id), 5000);
-                    }
-                }
-                if (prevApp.status === 'updating' && app.status === 'installed') {
-                    if (!notifiedRef.current.has(app.id)) {
-                        notifiedRef.current.add(app.id);
-                        const verSuffix = app.installed_version ? ` to v${app.installed_version.replace(/^v/i, '')}` : '';
-                        addToast(`${app.name} has been updated${verSuffix}.`, 'success');
-                        setTimeout(() => notifiedRef.current.delete(app.id), 5000);
-                    }
-                }
-                if (prevApp.status === 'uninstalling' && app.status !== 'uninstalling' && app.status !== 'installed') {
-                    if (!notifiedRef.current.has(app.id)) {
-                        notifiedRef.current.add(app.id);
-                        addToast(`${app.name} has been successfully removed.`, 'success');
-                        setTimeout(() => notifiedRef.current.delete(app.id), 5000);
-                    }
-                }
-                if ((prevApp.status === 'installing' || prevApp.status === 'uninstalling' || prevApp.status === 'updating') && app.status === 'failed') {
-                    if (!notifiedRef.current.has(app.id)) {
-                        notifiedRef.current.add(app.id);
-                        addToast(`Operation failed for ${app.name}. Check system logs.`, 'error');
-                        setTimeout(() => notifiedRef.current.delete(app.id), 5000);
-                    }
-                }
+            if (isLifecycleStatus(app.status)) {
+                const identity = lifecycleIdentity(app);
+                if (identity && (!pendingJobs.has(app.id) || identity === acceptedJobsRef.current.get(app.id)?.identity)) observedJobsRef.current.set(app.id, { action: app.status, identity });
             }
-
-            // Fast-finish: pending action completed before first poll saw the transient state
-            if (pendingJobs.has(app.id) && !notifiedRef.current.has(app.id)) {
-                const action = pendingJobs.get(app.id);
-                if (action === 'installing' && app.status === 'installed') {
-                    notifiedRef.current.add(app.id);
-                    const domainSuffix = app.public_domain ? ` (${app.public_domain})` : '';
-                    addToast(`${app.name} has been successfully installed${domainSuffix}.`, 'success');
-                    setTimeout(() => notifiedRef.current.delete(app.id), 5000);
-                } else if (action === 'updating' && app.status === 'installed') {
-                    notifiedRef.current.add(app.id);
-                    const verSuffix = app.installed_version ? ` to v${app.installed_version.replace(/^v/i, '')}` : '';
-                    addToast(`${app.name} has been updated${verSuffix}.`, 'success');
-                    setTimeout(() => notifiedRef.current.delete(app.id), 5000);
-                } else if (action === 'uninstalling' && app.status === 'uninstalled') {
-                    notifiedRef.current.add(app.id);
-                    addToast(`${app.name} has been successfully removed.`, 'success');
-                    setTimeout(() => notifiedRef.current.delete(app.id), 5000);
-                } else if (app.status === 'failed') {
-                    notifiedRef.current.add(app.id);
-                    addToast(`Operation failed for ${app.name}. Check system logs.`, 'error');
-                    setTimeout(() => notifiedRef.current.delete(app.id), 5000);
-                }
+            const observed = observedJobsRef.current.get(app.id);
+            const localAction = pendingJobs.get(app.id);
+            const accepted = acceptedJobsRef.current.get(app.id);
+            const action = localAction || accepted?.action || observed?.action;
+            const expected = localAction ? accepted?.identity : accepted?.identity || observed?.identity;
+            if (!action) return;
+            const outcome = matchingJobOutcome(app, action, expected);
+            const identity = lifecycleIdentity(outcome);
+            if (!outcome || !identity || notifiedRef.current.has(identity)) return;
+            notifiedRef.current.add(identity);
+            acceptedJobsRef.current.delete(app.id);
+            observedJobsRef.current.delete(app.id);
+            if (outcome.status === 'completed') {
+                const verb = outcome.action === 'remove' ? 'removed' : outcome.action === 'update' ? 'updated' : 'installed';
+                addToast(`${app.name} has been successfully ${verb}.`, 'success');
+            } else {
+                addToast(`${app.name}: ${outcome.action} ${outcome.status === 'failed' ? 'failed' : 'could not be confirmed'}. Check application state and system logs.`, 'error');
             }
         });
-
-        prevAppsRef.current = apps;
     }, [apps, addToast, pendingJobs]);
 
     const categories = useMemo(() => {
@@ -348,16 +325,25 @@ export default function MarketplaceTab() {
         return app.status;
     };
 
+    const [removeAppId, setRemoveAppId] = useState<string | null>(null);
+    const [purgeData, setPurgeData] = useState(false);
+    const [purgeConfirmation, setPurgeConfirmation] = useState('');
+    const [reinstallAppId, setReinstallAppId] = useState<string | null>(null);
+    const selectedRemoveApp = apps?.find(app => app.id === removeAppId);
+    const selectedReinstallApp = apps?.find(app => app.id === reinstallAppId);
+
     const handleInstall = async (app: App) => {
+        acceptedJobsRef.current.delete(app.id);
         setOperatingApp(app.id);
         markPending(app.id, 'installing');
         try {
-            const res = await apiFetch(`/api/v1/admin/packages/${app.id}/install`, { method: 'POST' });
+            const res = await apiFetch(`/api/v1/admin/packages/${encodeURIComponent(app.id)}/install`, { method: 'POST' });
             if (!res.ok) {
                 const data = await res.json().catch(() => ({}));
                 clearPending(app.id);
                 throw new Error(data.message || 'Installation request failed');
             }
+            await rememberJob(app.id, res, 'installing');
             addToast(`Installation started for ${app.name}`, 'info');
             setOperatingApp(null);
             mutate();
@@ -369,6 +355,7 @@ export default function MarketplaceTab() {
     };
 
     const handleUpdate = async (app: App) => {
+        acceptedJobsRef.current.delete(app.id);
         setOperatingApp(app.id);
         markPending(app.id, 'updating');
         try {
@@ -378,6 +365,7 @@ export default function MarketplaceTab() {
                 clearPending(app.id);
                 throw new Error(data.message || 'Update request failed');
             }
+            await rememberJob(app.id, res, 'updating');
             addToast(`Updating ${app.name}${app.latest_version ? ` to v${app.latest_version.replace(/^v/i, '')}` : ''}...`, 'info');
             setOperatingApp(null);
             mutate();
@@ -388,16 +376,18 @@ export default function MarketplaceTab() {
         }
     };
 
-    const handleUninstall = async (app: App) => {
+    const handleUninstall = async (app: App, purge = false) => {
+        acceptedJobsRef.current.delete(app.id);
         setOperatingApp(app.id);
         markPending(app.id, 'uninstalling');
         try {
-            const res = await apiFetch(`/api/v1/admin/packages/${app.id}/uninstall`, { method: 'POST' });
+            const res = await apiFetch(`/api/v1/admin/packages/${encodeURIComponent(app.id)}/uninstall${purge ? "?purge=true" : ""}`, { method: 'POST' });
             if (!res.ok) {
                 const data = await res.json().catch(() => ({}));
                 clearPending(app.id);
                 throw new Error(data.message || 'Uninstallation request failed');
             }
+            await rememberJob(app.id, res, 'uninstalling');
             addToast(`Uninstalling ${app.name}...`, 'info');
             setOperatingApp(null);
             mutate();
@@ -564,7 +554,7 @@ export default function MarketplaceTab() {
                                             <Download size={14} className="text-indigo-400/60" />
                                             {displayInstalls} <span className="text-[10px] font-medium opacity-50 lowercase tracking-normal">units</span>
                                         </div>
-                                        <div className="flex items-center gap-2">
+                                        <div className="flex items-center justify-end flex-wrap gap-2 min-w-0">
                                             {app.status === 'installed' && (
                                                 <button
                                                     onClick={() => setIngressModalApp(app.id)}
@@ -585,12 +575,16 @@ export default function MarketplaceTab() {
                                                     Update
                                                 </button>
                                             )}
+                                            {app.last_job && app.last_job.status !== 'completed' && !busy && <span role="status" className="text-xs text-red-300">Last {app.last_job.action}: {app.last_job.status}. Check logs.</span>}
+                                            {effectiveStatus === 'installed' && (
+                                                <button disabled={busy} onClick={() => setReinstallAppId(app.id)} className="px-3 py-2 text-xs text-slate-300 rounded-lg border border-white/10 disabled:opacity-50">Reinstall</button>
+                                            )}
                                             <button
-                                                onClick={() => busy ? null : (effectiveStatus === 'installed' ? handleUninstall(app) : handleInstall(app))}
+                                                onClick={() => busy ? null : (effectiveStatus === 'installed' ? setRemoveAppId(app.id) : handleInstall(app))}
                                                 disabled={busy}
                                                 className={`obs-touch-target-standard obs-gpu-120hz-interactive px-6 py-2.5 rounded-xl text-xs font-black transition-all ${busy ? 'bg-slate-900 text-slate-600 cursor-not-allowed shadow-none' : (effectiveStatus === 'installed' ? 'bg-white/5 text-slate-300 hover:bg-red-500/10 hover:text-red-400 hover:border-red-500/20 border border-transparent shadow-lg' : 'bg-indigo-600 text-white hover:bg-indigo-500 hover:shadow-indigo-500/30 border border-indigo-400/30 shadow-xl shadow-indigo-900/10')}`}
                                             >
-                                                {effectiveStatus === 'installed' ? 'Teardown' : (effectiveStatus === 'installing' ? 'Deploying...' : (effectiveStatus === 'updating' ? 'Updating...' : (effectiveStatus === 'uninstalling' ? 'Removing...' : 'Provision')))}
+                                                {effectiveStatus === 'installed' ? 'Uninstall' : (effectiveStatus === 'installing' ? 'Deploying...' : (effectiveStatus === 'updating' ? 'Updating...' : (effectiveStatus === 'uninstalling' ? 'Removing...' : 'Provision')))}
                                             </button>
                                         </div>
                                     </div>
@@ -599,6 +593,27 @@ export default function MarketplaceTab() {
                         </div>
                         );
                     })}
+                </div>
+            )}
+
+            {selectedRemoveApp && (
+                <div role="dialog" aria-modal="true" aria-label={`Uninstall ${selectedRemoveApp.name}`} className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4">
+                    <div className="min-w-0 w-full max-w-lg max-h-[90vh] overflow-y-auto bg-slate-900 border border-white/10 rounded-xl p-6 space-y-4">
+                        <h3 className="text-lg font-bold">Uninstall {selectedRemoveApp.name}</h3>
+                        <p className="text-sm text-slate-300">Ordinary uninstall retains application data, configuration, secrets, and the allocated port for a later reinstall.</p>
+                        <label className="flex gap-2 text-sm"><input type="checkbox" checked={purgeData} onChange={event => setPurgeData(event.target.checked)} /> Permanently delete application data and configuration</label>
+                        {purgeData && <><p className="text-sm text-red-300">Purge asks the remover to delete {selectedRemoveApp.name}&apos;s managed databases, configuration, credentials, and data. Existing backups may remain. This cannot be undone.</p><label className="block text-sm">Type {selectedRemoveApp.id} to confirm<input aria-label="Purge confirmation" value={purgeConfirmation} onChange={event => setPurgeConfirmation(event.target.value)} className="block w-full mt-2 bg-slate-950 rounded p-2" /></label></>}
+                        <div className="flex justify-end gap-3"><button onClick={() => { setRemoveAppId(null); setPurgeData(false); setPurgeConfirmation(''); }}>Cancel</button><button disabled={isAppBusy(selectedRemoveApp) || (purgeData && purgeConfirmation !== selectedRemoveApp.id)} onClick={() => { void handleUninstall(selectedRemoveApp, purgeData); setRemoveAppId(null); setPurgeData(false); setPurgeConfirmation(''); }} className="bg-red-600 disabled:opacity-40 rounded px-4 py-2">{purgeData ? 'Permanently purge' : 'Uninstall and keep data'}</button></div>
+                    </div>
+                </div>
+            )}
+            {selectedReinstallApp && (
+                <div role="dialog" aria-modal="true" aria-label={`Reinstall ${selectedReinstallApp.name}`} className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4">
+                    <div className="min-w-0 w-full max-w-lg bg-slate-900 border border-white/10 rounded-xl p-6 space-y-4">
+                        <h3 className="text-lg font-bold">Reinstall {selectedReinstallApp.name}</h3>
+                        <p className="text-sm text-slate-300">Reapply the installer in place using the existing configuration, data, secrets, and allocated port. The application may restart.</p>
+                        <div className="flex justify-end gap-3"><button onClick={() => setReinstallAppId(null)}>Cancel</button><button disabled={isAppBusy(selectedReinstallApp)} onClick={() => { void handleInstall(selectedReinstallApp); setReinstallAppId(null); }} className="bg-indigo-600 rounded px-4 py-2 disabled:opacity-40">Reinstall and keep data</button></div>
+                    </div>
                 </div>
             )}
 

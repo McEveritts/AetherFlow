@@ -357,6 +357,22 @@ describe('SettingsTab system update lifecycle and settings drafts', () => {
         expect(mockedApiFetch.mock.calls.filter(([url]) => url === '/api/v1/auth/system/update/check').length).toBeGreaterThan(1);
     });
 
+    it.each([true, false])('preserves a fast terminal launch receipt without another update POST (success=%s)', async success => {
+        const jobUnit = 'aetherflow-self-update-deploy-stable-1111aaaa.service';
+        runUpdate.mockResolvedValue(response({
+            status: success ? 'succeeded' : 'failed', completed: true, success,
+            job_unit: jobUnit, error: success ? '' : 'Fixture update failed.', exit_code: success ? 0 : 9,
+        }));
+        const poll = mockJobStatus(jobUnit, [response({ status: 'running', completed: false, job_unit: jobUnit })]);
+        await renderSettings();
+        await click(screen.getByRole('button', { name: 'Update to v4.0.1' }));
+        expect(runUpdate).toHaveBeenCalledTimes(1);
+        expect(poll).not.toHaveBeenCalled();
+        expect(screen.getByTestId('system-update-status')).toHaveAttribute('data-status', success ? 'success' : 'error');
+        expect(screen.getByTestId('system-update-status')).toHaveTextContent(success ? 'completed successfully' : 'Fixture update failed.');
+        expect(window.sessionStorage.getItem('aetherflow_active_update_job_unit')).toBeNull();
+    });
+
     it('surfaces a terminal nonzero exit as failure rather than a completed update', async () => {
         const jobUnit = 'aetherflow-self-update-deploy-stable-deadbeef.service';
         runUpdate.mockResolvedValue(response({ status: 'initiated', completed: false, job_unit: jobUnit }));
@@ -465,8 +481,9 @@ describe('SettingsTab system update lifecycle and settings drafts', () => {
         expect(screen.getByRole('button', { name: 'Update to v4.0.1' })).toBeEnabled();
     });
 
-    it('uses scoped flat polling when the backend requires job_unit without inventing runtime verification', async () => {
+    it('recovers a stored job when old backend discovery is unavailable without permitting a duplicate launch', async () => {
         const jobUnit = 'aetherflow-self-update-deploy-stable-abcd1234.service';
+        window.sessionStorage.setItem('aetherflow_active_update_job_unit', jobUnit);
         const route = mockedApiFetch.getMockImplementation()!;
         mockedApiFetch.mockImplementation((url, init) => url === '/api/v1/auth/system/update/status'
             ? Promise.resolve(response({ error: 'job_unit query parameter is required' }, 400))
@@ -476,8 +493,8 @@ describe('SettingsTab system update lifecycle and settings drafts', () => {
             status: 'succeeded', completed: true, success: true, job_unit: jobUnit, error: '', exit_code: 0,
         })]);
         await renderSettings();
-        expect(screen.getByRole('button', { name: 'Update to v4.0.1' })).toBeEnabled();
-        await click(screen.getByRole('button', { name: 'Update to v4.0.1' }));
+        expect(screen.getByRole('button', { name: 'Update to v4.0.1' })).toBeDisabled();
+        expect(runUpdate).not.toHaveBeenCalled();
         expect(screen.getByTestId('system-update-status')).toHaveAttribute('data-status', 'success');
         expect(screen.queryByText(/running the latest release/i)).not.toBeInTheDocument();
     });

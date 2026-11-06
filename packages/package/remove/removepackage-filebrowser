@@ -34,7 +34,7 @@ if [[ "${DELETE_DATA:-false}" == true ]]; then
     rm -rf /opt/filebrowser
 fi
 purge_system_user "filebrowser"
-systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
+systemctl daemon-reload >> "$LOGFILE" 2>&1
 
 remove_lock "${PACKAGE_NAME}"
 report_progress 100 "File Browser removed; application data retained unless DELETE_DATA=true."

@@ -68,7 +68,7 @@ chown -R emby:emby /var/lib/emby 2>/dev/null || true
 report_progress 90 "Starting and enabling emby-server service on port ${APP_PORT}..."
 systemctl daemon-reload >> "$LOGFILE" 2>&1
 systemctl enable --now emby-server >> "$LOGFILE" 2>&1
-systemctl restart emby-server >> "$LOGFILE" 2>&1 || true
+systemctl restart emby-server >> "$LOGFILE" 2>&1
 seed_jellyfin_master_user ${APP_PORT}
 
 write_lock "${PACKAGE_NAME}"

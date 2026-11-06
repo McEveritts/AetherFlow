@@ -31,7 +31,7 @@ if [[ "${DELETE_DATA:-false}" == true ]]; then
     rm -rf /var/lib/jackett
 fi
 purge_system_user "jackett"
-systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
+systemctl daemon-reload >> "$LOGFILE" 2>&1
 
 remove_lock "${PACKAGE_NAME}"
 report_progress 100 "Jackett removed; application data retained unless DELETE_DATA=true."

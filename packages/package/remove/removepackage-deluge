@@ -25,12 +25,11 @@ if [[ "${DELETE_DATA:-false}" == true ]]; then APT_REMOVE_ACTION=purge; fi
 log_info "Starting removal for ${PACKAGE_NAME}..."
 report_progress 20 "Stopping and removing deluged and deluge-web services..."
 
-purge_systemd_unit "deluge-web"
-purge_systemd_unit "deluged"
+purge_systemd_unit "deluge-web" "deluged"
 
 report_progress 50 "Purging Deluge APT packages..."
-DEBIAN_FRONTEND=noninteractive apt-get "$APT_REMOVE_ACTION" -y -qq deluged deluge-web deluge-console deluge-common >> "$LOGFILE" 2>&1 || true
-DEBIAN_FRONTEND=noninteractive apt-get autoremove -y -qq >> "$LOGFILE" 2>&1 || true
+DEBIAN_FRONTEND=noninteractive apt-get "$APT_REMOVE_ACTION" -y -qq deluged deluge-web deluge-console deluge-common >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get autoremove -y -qq >> "$LOGFILE" 2>&1
 
 report_progress 80 "Removing Deluge configuration, logs, and user account..."
 rm -rf /var/log/deluge
@@ -38,7 +37,7 @@ if [[ "${DELETE_DATA:-false}" == true ]]; then
     rm -rf /var/lib/deluge /etc/default/deluged
 fi
 purge_system_user "deluge"
-systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
+systemctl daemon-reload >> "$LOGFILE" 2>&1
 
 remove_lock "${PACKAGE_NAME}"
 report_progress 100 "Deluge removed; application data retained unless DELETE_DATA=true."

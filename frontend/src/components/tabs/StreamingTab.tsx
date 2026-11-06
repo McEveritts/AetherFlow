@@ -1,8 +1,9 @@
 'use client';
 
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useRef } from 'react';
 import useSWR from 'swr';
 import StreamingHistoryExplorer from '@/components/streaming/StreamingHistoryExplorer';
+import StreamingDialog from '@/components/streaming/StreamingDialog';
 import {
     Tv,
     Play,
@@ -79,7 +80,7 @@ export interface StreamingServerStatus {
     apiKeyMasked: string;
     configured: boolean;
     enabled: boolean;
-    status: 'connected' | 'unreachable' | 'unconfigured' | 'coming_soon' | 'demo';
+    status: 'connected' | 'unreachable' | 'unavailable' | 'disabled' | 'unconfigured' | 'coming_soon' | 'demo';
     supportStage: 'active' | 'coming_soon';
     serverId: string;
     version: string;
@@ -93,6 +94,7 @@ export interface ActiveStreamSession {
     sessionId: string;
     provider: string;
     serverName: string;
+    serverId?: string;
     userId: string;
     userName: string;
     clientName: string;
@@ -391,12 +393,16 @@ export default function StreamingTab() {
     const [serverNameInput, setServerNameInput] = useState<string>('Jellyfin');
     const [serverUrlInput, setServerUrlInput] = useState<string>('http://127.0.0.1:8096');
     const [apiKeyInput, setApiKeyInput] = useState<string>('');
+    const [configProvider, setConfigProvider] = useState<'jellyfin' | 'emby'>('jellyfin');
+    const [serverEnabledInput, setServerEnabledInput] = useState(true);
+    const configRevision = useRef(0);
+    const providerDrafts = useRef<Partial<Record<'jellyfin' | 'emby', { name: string; url: string; key: string; enabled: boolean }>>>({});
     const [isTestingConn, setIsTestingConn] = useState<boolean>(false);
     const [isSavingConn, setIsSavingConn] = useState<boolean>(false);
     const [isSyncingHistory, setIsSyncingHistory] = useState<boolean>(false);
     const [isDemoLoading, setIsDemoLoading] = useState<boolean>(false);
     const [testResultMsg, setTestResultMsg] = useState<{ ok: boolean; text: string } | null>(null);
-    const [pendingSessionAction, setPendingSessionAction] = useState<string | null>(null);
+    const [pendingSessionActions, setPendingSessionActions] = useState<Set<string>>(new Set());
 
     // Message modal state for active stream
     const [messageSession, setMessageSession] = useState<ActiveStreamSession | null>(null);
@@ -431,16 +437,33 @@ export default function StreamingTab() {
         };
     }, [data]);
 
+    const selectConfigProvider = (provider: 'jellyfin' | 'emby', preserveCurrent = true) => {
+        if (preserveCurrent) providerDrafts.current[configProvider] = {
+            name: serverNameInput, url: serverUrlInput, key: apiKeyInput, enabled: serverEnabledInput,
+        };
+        const server = data?.servers.find(candidate => candidate.provider === provider);
+        const draft = providerDrafts.current[provider];
+        setConfigProvider(provider);
+        setServerNameInput(draft?.name ?? server?.name ?? (provider === 'emby' ? 'Emby' : 'Jellyfin'));
+        setServerUrlInput(draft?.url ?? server?.url ?? 'http://127.0.0.1:8096');
+        setApiKeyInput(draft?.key ?? server?.apiKeyMasked ?? '');
+        setServerEnabledInput(draft?.enabled ?? server?.enabled ?? true);
+        configRevision.current += 1;
+        setTestResultMsg(null);
+    };
+
+    const closeConfig = () => { if (!isSavingConn && !isTestingConn) setShowConfigModal(false); };
+    const closeMessage = () => { if (!isSendingMessage) setMessageSession(null); };
+
     const openServerConfig = () => {
         triggerHaptic(8, hapticFeedback);
-        setServerNameInput(jellyfinServer.name || 'Jellyfin');
-        setServerUrlInput(jellyfinServer.url || 'http://127.0.0.1:8096');
-        setApiKeyInput(jellyfinServer.apiKeyMasked || '');
-        setTestResultMsg(null);
+        selectConfigProvider(configProvider, false);
         setShowConfigModal(true);
     };
 
     const handleTestConnection = async () => {
+        if (isTestingConn || isSavingConn) return;
+        const revision = configRevision.current;
         setIsTestingConn(true);
         setTestResultMsg(null);
         try {
@@ -448,24 +471,24 @@ export default function StreamingTab() {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    provider: 'jellyfin',
+                    provider: configProvider,
                     url: serverUrlInput,
                     apiKey: apiKeyInput,
                 }),
             });
             const body = await res.json().catch(() => ({}));
             if (res.ok && body.ok) {
-                const msg = body.message || 'Connected to Jellyfin successfully!';
-                setTestResultMsg({ ok: true, text: msg });
+                const msg = body.message || `Connected to ${configProvider} successfully!`;
+                if (revision === configRevision.current) setTestResultMsg({ ok: true, text: msg });
                 addToast(msg, 'success');
             } else {
-                const errText = body.message || body.error || `Could not authenticate with Jellyfin (HTTP ${res.status})`;
-                setTestResultMsg({ ok: false, text: errText });
+                const errText = body.message || body.error || `Could not authenticate with ${configProvider} (HTTP ${res.status})`;
+                if (revision === configRevision.current) setTestResultMsg({ ok: false, text: errText });
                 addToast(errText, 'error');
             }
         } catch (err: unknown) {
             const errText = err instanceof Error ? err.message : 'Connection test failed';
-            setTestResultMsg({ ok: false, text: errText });
+            if (revision === configRevision.current) setTestResultMsg({ ok: false, text: errText });
             addToast(errText, 'error');
         } finally {
             setIsTestingConn(false);
@@ -474,16 +497,19 @@ export default function StreamingTab() {
 
     const handleSaveConfig = async (e: React.FormEvent) => {
         e.preventDefault();
+        if (isSavingConn || isTestingConn) return;
+        const revision = configRevision.current;
+        const provider = configProvider;
         setIsSavingConn(true);
         try {
-            const res = await apiFetch('/api/v1/admin/streaming/servers/jellyfin', {
+            const res = await apiFetch(`/api/v1/admin/streaming/servers/${provider}`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     name: serverNameInput,
                     url: serverUrlInput,
                     apiKey: apiKeyInput,
-                    enabled: true,
+                    enabled: serverEnabledInput,
                 }),
             });
             const body = await res.json().catch(() => ({}));
@@ -492,20 +518,23 @@ export default function StreamingTab() {
             }
             await mutate();
             const srvStatus = body.server?.status;
-            if (srvStatus === 'unreachable') {
+            if (srvStatus === 'unreachable' || srvStatus === 'unavailable') {
                 const errText =
                     body.server?.errorMessage ||
                     body.message ||
                     'Jellyfin configuration saved, but server is currently unreachable.';
-                setTestResultMsg({ ok: false, text: errText });
+                if (revision === configRevision.current) setTestResultMsg({ ok: false, text: errText });
                 addToast(errText, 'error');
             } else {
-                setShowConfigModal(false);
-                addToast(body.message || 'Jellyfin server saved and telemetry linked.', 'success');
+                if (revision === configRevision.current) {
+                    delete providerDrafts.current[provider];
+                    setShowConfigModal(false);
+                }
+                addToast(body.message || `${provider} connection settings saved.`, 'success');
             }
         } catch (err: unknown) {
             const errText = err instanceof Error ? err.message : 'Failed to save Jellyfin configuration';
-            setTestResultMsg({ ok: false, text: errText });
+            if (revision === configRevision.current) setTestResultMsg({ ok: false, text: errText });
             addToast(errText, 'error');
         } finally {
             setIsSavingConn(false);
@@ -523,7 +552,7 @@ export default function StreamingTab() {
                 throw new Error(body.message || body.error || 'History sync failed');
             }
             await mutate();
-            addToast(`Synchronized Jellyfin watch history (${body.imported ?? 0} new records imported).`, 'success');
+            addToast(`Synchronized Jellyfin item summaries (${body.imported ?? 0} records updated; not playback events).`, 'success');
         } catch (err: unknown) {
             addToast(err instanceof Error ? err.message : 'Failed to sync Jellyfin history', 'error');
         } finally {
@@ -566,12 +595,14 @@ export default function StreamingTab() {
         }
         const sessionId = session.sessionId;
         triggerHaptic(8, hapticFeedback);
-        setPendingSessionAction(`${sessionId}:${command}`);
+        const actionKey = `${session.provider}:${sessionId}:${command}`;
+        if (pendingSessionActions.has(actionKey)) return;
+        setPendingSessionActions(current => new Set(current).add(actionKey));
         try {
             const res = await apiFetch(`/api/v1/admin/streaming/sessions/${encodeURIComponent(sessionId)}/command`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ command }),
+                body: JSON.stringify({ command, provider: session.provider }),
             });
             if (!res.ok) {
                 const body = await res.json().catch(() => ({}));
@@ -584,9 +615,9 @@ export default function StreamingTab() {
                     if (!current) return current;
                     const updatedSessions =
                         command === 'stop'
-                            ? current.activeSessions.filter((s) => s.sessionId !== sessionId)
+                            ? current.activeSessions.filter((s) => s.sessionId !== sessionId || s.provider !== session.provider)
                             : current.activeSessions.map((s) => {
-                                  if (s.sessionId !== sessionId) return s;
+                                  if (s.sessionId !== sessionId || s.provider !== session.provider) return s;
                                   const nextState: 'playing' | 'paused' = command === 'pause' ? 'paused' : 'playing';
                                   const nextBw =
                                       nextState === 'paused'
@@ -606,13 +637,13 @@ export default function StreamingTab() {
         } catch (err: unknown) {
             addToast(err instanceof Error ? err.message : `Command ${command} failed`, 'error');
         } finally {
-            setPendingSessionAction(null);
+            setPendingSessionActions(current => { const next = new Set(current); next.delete(actionKey); return next; });
         }
     };
 
     const handleSendSessionMessage = async (e: React.FormEvent) => {
         e.preventDefault();
-        if (!messageSession || !messageBody.trim()) return;
+        if (!messageSession || !messageBody.trim() || isSendingMessage) return;
         const capabilities = evaluateSessionCapabilities(messageSession);
         if (!capabilities.message.supported) {
             addToast(capabilities.message.reason, 'error');
@@ -625,6 +656,7 @@ export default function StreamingTab() {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     command: 'message',
+                    provider: messageSession.provider,
                     header: messageHeader,
                     message: messageBody,
                 }),
@@ -764,6 +796,12 @@ export default function StreamingTab() {
     const bucketLabel = analytics.timeSeriesGranularity === 'month'
         ? 'Monthly'
         : analytics.timeSeriesGranularity === 'year' ? 'Yearly' : 'Daily';
+
+    if (!isAdmin) return <section className="min-w-0 max-w-full space-y-4" aria-label="Your streaming history">
+        <h2 className="text-lg font-bold">Your Streaming Archive</h2>
+        <p role="note" className="text-sm text-slate-400">Server-wide live telemetry is withheld for privacy, not zero or unconfigured. Your explicitly linked playback records are available below; ask an administrator to link your provider identity if none appear.</p>
+        <StreamingHistoryExplorer />
+    </section>;
 
     return (
         <div className="space-y-6 animate-fade-in relative z-10 w-full min-w-0">
@@ -1204,7 +1242,7 @@ export default function StreamingTab() {
                             <div className="w-12 h-12 rounded-2xl bg-white/[0.03] border border-white/[0.06] flex items-center justify-center text-slate-500 mb-3">
                                 <Tv size={24} />
                             </div>
-                            <p className="text-sm font-semibold text-slate-300">No Active Streams Right Now</p>
+                            <p className="text-sm font-semibold text-slate-300">{data?.servers.some(server => server.enabled && ['unavailable', 'unreachable'].includes(server.status)) ? 'Live telemetry unavailable — activity unknown' : 'No Active Streams Right Now'}</p>
                             <p className="text-xs text-slate-500 mt-1 max-w-md">
                                 Active Jellyfin sessions will appear here in real time with codec pipelines, resolution, client device, and live bandwidth consumption.
                             </p>
@@ -1216,7 +1254,7 @@ export default function StreamingTab() {
                                 const epBadge = formatEpisodeBadge(sess.seasonNumber, sess.episodeNumber);
                                 return (
                                     <article
-                                        key={sess.sessionId}
+                                        key={`${sess.provider}:${sess.sessionId}`}
                                         className="rounded-2xl border border-white/[0.08] bg-slate-950/60 hover:border-indigo-500/30 transition-all overflow-hidden flex flex-col justify-between shadow-lg"
                                     >
                                         {/* Top Media & User Header */}
@@ -1225,11 +1263,19 @@ export default function StreamingTab() {
                                                 {/* Poster / Cover Art Thumbnail */}
                                                 <div className="w-16 h-24 rounded-xl bg-slate-900 border border-white/10 overflow-hidden shrink-0 flex items-center justify-center relative">
                                                     {sess.hasArtwork && sess.artworkItemId ? (
+                                                        <>
                                                         <img
-                                                            src={`/api/v1/auth/streaming/artwork/${encodeURIComponent(sess.artworkItemId)}`}
+                                                            src={`/api/v1/auth/streaming/artwork/${encodeURIComponent(sess.artworkItemId)}?provider=${encodeURIComponent(sess.provider)}&serverId=${encodeURIComponent(sess.serverId || data?.servers.find(server => server.provider === sess.provider)?.serverId || '')}`}
+                                                            onError={event => {
+                                                                event.currentTarget.hidden = true;
+                                                                const fallback = event.currentTarget.nextElementSibling;
+                                                                if (fallback instanceof HTMLElement) fallback.hidden = false;
+                                                            }}
                                                             alt={sess.itemName}
-                                                            className="w-full h-full object-cover"
+                                                            className="w-full h-full object-cover relative"
                                                         />
+                                                        <span hidden role="img" aria-label={`Artwork unavailable for ${sess.itemName}`} className="text-indigo-400/60"><Film size={22} /></span>
+                                                        </>
                                                     ) : (
                                                         <div className="flex flex-col items-center justify-center text-indigo-400/60">
                                                             {sess.itemType === 'Audio' ? <Music size={22} /> : <Film size={22} />}
@@ -1382,9 +1428,9 @@ export default function StreamingTab() {
 
                                             {isAdmin && (() => {
                                                 const caps = evaluateSessionCapabilities(sess);
-                                                const isPausePending = pendingSessionAction === `${sess.sessionId}:pause`;
-                                                const isResumePending = pendingSessionAction === `${sess.sessionId}:resume`;
-                                                const isStopPending = pendingSessionAction === `${sess.sessionId}:stop`;
+                                                const isPausePending = pendingSessionActions.has(`${sess.provider}:${sess.sessionId}:pause`);
+                                                const isResumePending = pendingSessionActions.has(`${sess.provider}:${sess.sessionId}:resume`);
+                                                const isStopPending = pendingSessionActions.has(`${sess.provider}:${sess.sessionId}:stop`);
                                                 return (
                                                     <div className="flex items-center justify-between gap-2 pt-1">
                                                         <div className="flex items-center gap-1.5">
@@ -1458,7 +1504,7 @@ export default function StreamingTab() {
             )}
 
             <p role="note" className="text-sm text-slate-400">
-                Compatibility dashboard charts and the recent loaded preview mix item summaries and legacy records. They are not confirmed playback totals. Use the canonical archive and its connected insights for provenance-aware reporting.
+                Dashboard history uses canonical included observed sessions and imported events. Bandwidth peaks remain a legacy provider aggregate; use the canonical archive and its connected insights for scoped, provenance-aware reporting.
             </p>
             {(activeView === 'dashboard' || activeView === 'analytics' || activeView === 'history') && (
                 <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-3.5 flex flex-wrap items-center justify-between gap-3">
@@ -2297,10 +2343,7 @@ export default function StreamingTab() {
             {/* 7. SERVER CONFIGURATION MODAL (JELLYFIN FIRST, PLEX & EMBY LATER)         */}
             {/* ========================================================================= */}
             {showConfigModal && (
-                <div
-                    className="fixed inset-0 z-50 bg-black/75 backdrop-blur-md flex items-center justify-center p-4"
-                    onClick={() => setShowConfigModal(false)}
-                >
+                <StreamingDialog name="Media Server Providers" onClose={closeConfig}>
                     <div
                         className="w-full max-w-xl rounded-2xl border border-indigo-500/30 bg-slate-950/95 p-6 shadow-2xl space-y-5"
                         onClick={(e) => e.stopPropagation()}
@@ -2313,13 +2356,13 @@ export default function StreamingTab() {
                                 <div>
                                     <h3 className="text-base font-bold text-white">Media Server Providers</h3>
                                     <p className="text-xs text-slate-400">
-                                        Connect Jellyfin now; Plex and Emby provider adapters are queued for upcoming releases
+                                        Jellyfin telemetry and staged Emby configuration. Real-provider acceptance remains pending.
                                     </p>
                                 </div>
                             </div>
                             <button
                                 type="button"
-                                onClick={() => setShowConfigModal(false)}
+                                onClick={closeConfig}
                                 className="p-2 rounded-xl text-slate-400 hover:text-white hover:bg-white/10"
                                 aria-label="Close modal"
                             >
@@ -2354,11 +2397,24 @@ export default function StreamingTab() {
                                         Later
                                     </span>
                                 </div>
-                                <p className="text-xs text-slate-500 mt-1">Emby Connect API adapter</p>
+                                <p className="text-xs text-slate-500 mt-1">Staged telemetry; commands and summary sync unsupported</p>
                             </div>
                         </div>
 
                         <form onSubmit={handleSaveConfig} className="space-y-4">
+                            <label className="block text-sm">Provider
+                                <select aria-label="Provider" value={configProvider} disabled={isSavingConn || isTestingConn}
+                                    onChange={event => selectConfigProvider(event.target.value as 'jellyfin' | 'emby')}
+                                    className="block w-full bg-slate-900 rounded-lg p-2">
+                                    <option value="jellyfin">Jellyfin</option><option value="emby">Emby (staged)</option>
+                                </select>
+                            </label>
+                            <label className="flex items-center gap-2 text-sm">
+                                <input type="checkbox" checked={serverEnabledInput} onChange={event => {
+                                    configRevision.current += 1; setServerEnabledInput(event.target.checked);
+                                }} />Enable provider collection
+                            </label>
+                            <p className="text-xs text-slate-400">Disabling preserves credentials and historical evidence. Credential removal is not supported here. Unchanged masked keys preserve the saved secret. Emby commands and item-summary synchronization are unsupported.</p>
                             <div>
                                 <label
                                     htmlFor="jellyfin-server-name-input"
@@ -2370,7 +2426,7 @@ export default function StreamingTab() {
                                     id="jellyfin-server-name-input"
                                     type="text"
                                     value={serverNameInput}
-                                    onChange={(e) => setServerNameInput(e.target.value)}
+                                    onChange={(e) => { configRevision.current += 1; setServerNameInput(e.target.value); }}
                                     placeholder="AetherFlow Jellyfin"
                                     className="w-full px-3.5 py-2.5 rounded-xl bg-black/50 border border-white/10 text-sm text-white focus:outline-none focus:border-indigo-500"
                                 />
@@ -2381,13 +2437,13 @@ export default function StreamingTab() {
                                     htmlFor="jellyfin-server-url-input"
                                     className="block text-xs font-bold text-slate-300 uppercase tracking-wider mb-1.5"
                                 >
-                                    Jellyfin Server URL
+                                    {configProvider === 'emby' ? 'Emby' : 'Jellyfin'} Server URL
                                 </label>
                                 <input
                                     id="jellyfin-server-url-input"
                                     type="text"
                                     value={serverUrlInput}
-                                    onChange={(e) => setServerUrlInput(e.target.value)}
+                                    onChange={(e) => { configRevision.current += 1; setServerUrlInput(e.target.value); }}
                                     placeholder="http://127.0.0.1:8096"
                                     required
                                     className="w-full px-3.5 py-2.5 rounded-xl bg-black/50 border border-white/10 text-sm text-white font-mono focus:outline-none focus:border-indigo-500"
@@ -2399,13 +2455,13 @@ export default function StreamingTab() {
                                     htmlFor="jellyfin-api-key-input"
                                     className="block text-xs font-bold text-slate-300 uppercase tracking-wider mb-1.5"
                                 >
-                                    Jellyfin API Key
+                                    {configProvider === 'emby' ? 'Emby' : 'Jellyfin'} API Key
                                 </label>
                                 <input
                                     id="jellyfin-api-key-input"
                                     type="password"
                                     value={apiKeyInput}
-                                    onChange={(e) => setApiKeyInput(e.target.value)}
+                                    onChange={(e) => { configRevision.current += 1; setApiKeyInput(e.target.value); }}
                                     placeholder="Paste API key from Jellyfin Dashboard → Advanced → API Keys"
                                     className="w-full px-3.5 py-2.5 rounded-xl bg-black/50 border border-white/10 text-sm text-white font-mono focus:outline-none focus:border-indigo-500"
                                 />
@@ -2442,24 +2498,24 @@ export default function StreamingTab() {
                                 <div className="flex items-center gap-2">
                                     <button
                                         type="button"
-                                        onClick={() => setShowConfigModal(false)}
+                                        onClick={closeConfig}
                                         className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-400 hover:text-white"
                                     >
                                         Cancel
                                     </button>
                                     <button
                                         type="submit"
-                                        disabled={isSavingConn}
+                                        disabled={isSavingConn || isTestingConn}
                                         className="px-5 py-2 rounded-xl text-xs font-bold bg-indigo-600 hover:bg-indigo-500 text-white shadow-lg shadow-indigo-500/25 flex items-center gap-1.5 transition-all"
                                     >
                                         {isSavingConn ? <Loader2 size={14} className="animate-spin" /> : <CheckCircle2 size={14} />}
-                                        <span>Save & Connect</span>
+                                        <span>Save Connection</span>
                                     </button>
                                 </div>
                             </div>
                         </form>
                     </div>
-                </div>
+                </StreamingDialog>
             )}
 
             {/* ========================================================================= */}
@@ -2472,10 +2528,7 @@ export default function StreamingTab() {
             )}
 
             {messageSession && (
-                <div
-                    className="fixed inset-0 z-50 bg-black/75 backdrop-blur-md flex items-center justify-center p-4"
-                    onClick={() => setMessageSession(null)}
-                >
+                <StreamingDialog name={`Message ${messageSession.userName}`} onClose={closeMessage}>
                     <form
                         onSubmit={handleSendSessionMessage}
                         className="w-full max-w-md rounded-2xl border border-indigo-500/30 bg-slate-950/95 p-6 shadow-2xl space-y-4"
@@ -2489,7 +2542,7 @@ export default function StreamingTab() {
                             <button
                                 type="button"
                                 aria-label="Close message modal"
-                                onClick={() => setMessageSession(null)}
+                                onClick={closeMessage}
                                 className="p-1 text-slate-400 hover:text-white"
                             >
                                 <X size={16} />
@@ -2527,7 +2580,7 @@ export default function StreamingTab() {
                         <div className="flex justify-end gap-2 pt-2">
                             <button
                                 type="button"
-                                onClick={() => setMessageSession(null)}
+                                onClick={closeMessage}
                                 className="px-3 py-1.5 rounded-xl text-xs text-slate-400 hover:text-white"
                             >
                                 Cancel
@@ -2542,7 +2595,7 @@ export default function StreamingTab() {
                             </button>
                         </div>
                     </form>
-                </div>
+                </StreamingDialog>
             )}
         </div>
     );

@@ -82,6 +82,7 @@ type SystemctlRequest struct {
 
 // PackageRunnerRequest represents a marketplace package action sent to the root runner.
 type PackageRunnerRequest struct {
+	DeleteData bool   `json:"delete_data,omitempty"`
 	Action     string `json:"action"`
 	PackageID  string `json:"package_id"`
 	ScriptName string `json:"script_name"`
@@ -158,7 +159,12 @@ func DispatchSystemctl(serviceName, action string) error {
 // DispatchPackageStream executes a package installer via the root UNIX socket and
 // invokes onLine for each output line in real time.
 func DispatchPackageStream(action, pkgID, scriptName string, appPort int, onLine func(string)) error {
+	return DispatchPackageStreamWithOptions(action, pkgID, scriptName, appPort, false, onLine)
+}
+
+func DispatchPackageStreamWithOptions(action, pkgID, scriptName string, appPort int, deleteData bool, onLine func(string)) error {
 	payload, _ := json.Marshal(PackageRunnerRequest{
+		DeleteData: deleteData,
 		Action:     action,
 		PackageID:  pkgID,
 		ScriptName: scriptName,
@@ -404,6 +410,10 @@ func NewRunnerMux() *http.ServeMux {
 			http.Error(w, "disallowed package action", http.StatusBadRequest)
 			return
 		}
+		if req.DeleteData && req.Action != "remove" {
+			http.Error(w, "data purge is valid only for removal", http.StatusBadRequest)
+			return
+		}
 		if !safeScriptName.MatchString(req.ScriptName) || !safeScriptName.MatchString(req.PackageID) {
 			http.Error(w, "invalid script or package identifier", http.StatusBadRequest)
 			return
@@ -427,7 +437,7 @@ func NewRunnerMux() *http.ServeMux {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		flusher, _ := w.(http.Flusher)
 
-		cmd := buildHardenedPackageCommand(scriptPath, false, req.AppPort)
+		cmd := buildPackageLifecycleCommand(scriptPath, false, req.AppPort, req.Action, req.DeleteData)
 		stdout, err := cmd.StdoutPipe()
 		if err != nil {
 			_, _ = fmt.Fprintf(w, "__RUNNER_EXIT_ERROR__:%v\n", err)
@@ -785,7 +795,7 @@ func buildHardenedPackageCommand(scriptPath string, useSudo bool, appPort int) *
 		cmd = exec.Command("bash", scriptPath) // #nosec G204 -- scriptPath resolved from verified package dir
 	}
 	for _, entry := range os.Environ() {
-		if !strings.HasPrefix(entry, "AF_APP_PORT=") {
+		if !strings.HasPrefix(entry, "AF_APP_PORT=") && !strings.HasPrefix(entry, "DELETE_DATA=") && !strings.HasPrefix(entry, "AF_PACKAGE_ACTION=") {
 			cmd.Env = append(cmd.Env, entry)
 		}
 	}
@@ -793,9 +803,23 @@ func buildHardenedPackageCommand(scriptPath string, useSudo bool, appPort int) *
 		cmd.Env = append(cmd.Env, fmt.Sprintf("AF_APP_PORT=%d", appPort))
 	}
 	cmd.Env = append(cmd.Env,
+		"DELETE_DATA=false",
 		"DEBIAN_FRONTEND=noninteractive",
 		"DPKG_LOCK_TIMEOUT=120",
 	)
+	return cmd
+}
+
+// Lifecycle intent is explicit and cannot inherit destructive runner environment.
+func buildPackageLifecycleCommand(scriptPath string, useSudo bool, port int, action string, deleteData bool) *exec.Cmd {
+	cmd := buildHardenedPackageCommand(scriptPath, useSudo, port)
+	env := cmd.Env[:0]
+	for _, value := range cmd.Env {
+		if !strings.HasPrefix(value, "DELETE_DATA=") {
+			env = append(env, value)
+		}
+	}
+	cmd.Env = append(env, fmt.Sprintf("DELETE_DATA=%t", deleteData && action == "remove"), "AF_PACKAGE_ACTION="+action)
 	return cmd
 }
 

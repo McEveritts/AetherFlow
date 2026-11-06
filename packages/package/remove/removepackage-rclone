@@ -23,13 +23,12 @@ require_root
 log_info "Starting removal for ${PACKAGE_NAME}..."
 report_progress 20 "Stopping and unmounting rclone-vfs.service..."
 
-purge_systemd_unit "rclone-vfs"
+purge_systemd_unit "rclone-vfs" "rclone"
 if mountpoint -q /mnt/remote 2>/dev/null; then
     fusermount -uz /mnt/remote >> "$LOGFILE" 2>&1 || true
 fi
 
 report_progress 50 "Stopping and removing rclone.service..."
-purge_systemd_unit "rclone"
 
 report_progress 75 "Removing rclone binary, state directories, and user account..."
 rm -f /usr/bin/rclone
@@ -37,7 +36,7 @@ if [[ "${DELETE_DATA:-false}" == true ]]; then
     rm -rf /etc/rclone /var/lib/rclone
 fi
 purge_system_user "rclone"
-systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
+systemctl daemon-reload >> "$LOGFILE" 2>&1
 
 remove_lock "${PACKAGE_NAME}"
 report_progress 100 "Rclone removed; application data retained unless DELETE_DATA=true."

@@ -1,5 +1,5 @@
 import React from 'react';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, within, act } from '@testing-library/react';
 import StreamingTab, { StreamingDashboardData } from '@/components/tabs/StreamingTab';
 
 // Mock ToastContext
@@ -10,9 +10,10 @@ jest.mock('@/contexts/ToastContext', () => ({
 }));
 
 // Mock AuthContext
+let mockRole = 'admin';
 jest.mock('@/contexts/AuthContext', () => ({
     useAuth: () => ({
-        user: { id: 1, username: 'admin', role: 'admin' },
+        user: { id: 1, username: 'admin', role: mockRole },
     }),
 }));
 
@@ -97,6 +98,8 @@ const mockDashboardData: StreamingDashboardData = {
     activeSessions: [
         {
             sessionId: 'jf-live-1',
+            supportsMediaControl: true,
+            canSendMessage: true,
             provider: 'jellyfin',
             serverName: 'AetherFlow-Jellyfin',
             userId: 'u-1',
@@ -363,8 +366,70 @@ import {
 import { waitFor } from '@testing-library/react';
 
 describe('StreamingTab - Jellyfin Play Statistics, Data Usage & Stream Telemetry', () => {
+    it('withholds server-wide KPIs and onboarding from ordinary viewers', () => {
+        mockRole = 'user';
+        render(<StreamingTab />);
+        expect(screen.getByText(/Server-wide live telemetry is withheld/)).toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: /Configure Server/ })).not.toBeInTheDocument();
+        expect(screen.queryByText('Streaming Dashboard')).not.toBeInTheDocument();
+    });
+
+    it('requires explicit media-control evidence even with remote and transcode fallback hints', () => {
+        const session = { ...mockDashboardData.activeSessions[0], supportsMediaControl: undefined, supportsRemoteControl: true, playSessionId: 'active', playMethod: 'Transcode' as const };
+        expect(evaluateSessionCapabilities(session).stop.supported).toBe(false);
+        expect(evaluateSessionCapabilities(session).message.supported).toBe(false);
+    });
+
+    it('names, traps, Escape-dismisses and restores focus for both dialogs', () => {
+        render(<StreamingTab />);
+        const config = screen.getByRole('button', { name: /Configure Server/ });
+        config.focus();
+        fireEvent.click(config);
+        const dialog = screen.getByRole('dialog', { name: 'Media Server Providers' });
+        expect(dialog).toHaveAttribute('aria-modal', 'true');
+        expect(dialog).toContainElement(document.activeElement as HTMLElement);
+        const controls = within(dialog).getAllByRole('button');
+        controls[controls.length - 1].focus();
+        fireEvent.keyDown(document, { key: 'Tab' });
+        expect(controls[0]).toHaveFocus();
+        fireEvent.keyDown(document, { key: 'Escape' });
+        expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+        expect(config).toHaveFocus();
+        const message = screen.getAllByRole('button', { name: /^Message$/ })[0];
+        message.focus();
+        fireEvent.click(message);
+        expect(screen.getByRole('dialog', { name: /Message alex_operator/ })).toContainElement(document.activeElement as HTMLElement);
+        fireEvent.keyDown(document, { key: 'Escape' });
+        expect(message).toHaveFocus();
+    });
+
+    it('routes staged Emby config and preserves later edits during a pending save', async () => {
+        let resolveSave!: (value: Response) => void;
+        const fetchSpy = jest.spyOn(global, 'fetch').mockImplementation(async (input) => {
+            if (String(input).includes('/servers/emby')) return new Promise<Response>(resolve => { resolveSave = resolve; });
+            if (String(input).includes('csrf-token')) return { ok: true, json: async () => ({ csrf_token: 'streaming-test-csrf' }) } as Response;
+            return { ok: false, status: 401, json: async () => ({ error: 'test read unavailable' }) } as Response;
+        });
+        render(<StreamingTab />);
+        fireEvent.click(screen.getByRole('button', { name: /Configure Server/ }));
+        fireEvent.change(within(screen.getByRole('dialog')).getByLabelText('Provider'), { target: { value: 'emby' } });
+        fireEvent.change(screen.getByLabelText('Server Display Name'), { target: { value: 'Emby draft' } });
+        fireEvent.change(screen.getByLabelText('Emby Server URL'), { target: { value: 'http://127.0.0.1:8097' } });
+        fireEvent.click(screen.getByRole('button', { name: /Save Connection/ }));
+        await waitFor(() => expect(resolveSave).toBeDefined());
+        const saveCall = fetchSpy.mock.calls.find(([input]) => String(input).includes('/servers/emby'));
+        expect(JSON.parse(String(saveCall?.[1]?.body))).toMatchObject({ name: 'Emby draft', enabled: false, apiKey: '' });
+        fireEvent.change(screen.getByLabelText('Server Display Name'), { target: { value: 'Newer Emby draft' } });
+        fireEvent.keyDown(document, { key: 'Escape' });
+        expect(screen.getByRole('dialog')).toBeInTheDocument();
+        await act(async () => resolveSave({ ok: true, json: async () => ({ server: { status: 'disabled' } }) } as Response));
+        expect(screen.getByLabelText('Server Display Name')).toHaveValue('Newer Emby draft');
+        fetchSpy.mockRestore();
+    });
+
     beforeEach(() => {
         jest.clearAllMocks();
+        mockRole = 'admin';
         currentSwrState = {
             data: JSON.parse(JSON.stringify(mockDashboardData)) as StreamingDashboardData,
             error: null,
@@ -373,6 +438,7 @@ describe('StreamingTab - Jellyfin Play Statistics, Data Usage & Stream Telemetry
             mutate: mockMutate,
         };
         lastSwrKey = '';
+        currentSwrState.data?.activeSessions.forEach(session => { session.supportsMediaControl = true; session.canSendMessage = true; });
     });
 
     it('renders Jellyfin online status alongside Plex and Emby coming-soon indicators', () => {
@@ -478,7 +544,7 @@ describe('StreamingTab - Jellyfin Play Statistics, Data Usage & Stream Telemetry
         // Session 0 is DirectPlay without media/remote control or playSessionId -> Stop is disabled
         expect(stopBtns[0]).toBeDisabled();
         // Session 1 is Transcode -> Stop remains enabled via active transcode termination fallback
-        expect(stopBtns[1]).not.toBeDisabled();
+        expect(stopBtns[1]).toBeDisabled();
 
         // Verify non-Jellyfin provider disables all actions
         const plexCaps = evaluateSessionCapabilities({
@@ -816,7 +882,7 @@ describe('StreamingTab - Jellyfin Play Statistics, Data Usage & Stream Telemetry
         render(<StreamingTab />);
         fireEvent.click(screen.getByRole('button', { name: /Configure Server/i }));
 
-        const saveBtn = screen.getByRole('button', { name: /Save & Connect/i });
+        const saveBtn = screen.getByRole('button', { name: /Save Connection/i });
         fireEvent.click(saveBtn);
 
         await waitFor(() => {

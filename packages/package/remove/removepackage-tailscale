@@ -30,7 +30,7 @@ fi
 purge_systemd_unit "tailscaled"
 
 report_progress 55 "Removing Tailscale APT packages and repository..."
-DEBIAN_FRONTEND=noninteractive apt-get remove -y -qq tailscale >> "$LOGFILE" 2>&1 || true
+DEBIAN_FRONTEND=noninteractive apt-get remove -y -qq tailscale >> "$LOGFILE" 2>&1
 rm -f /etc/apt/sources.list.d/tailscale.list /etc/apt/keyrings/tailscale-archive-keyring.gpg /etc/sysctl.d/99-tailscale.conf
 
 if [[ "${DELETE_DATA:-false}" == "true" ]]; then
@@ -39,9 +39,9 @@ if [[ "${DELETE_DATA:-false}" == "true" ]]; then
     rm -rf /var/lib/tailscale /etc/default/tailscaled
 fi
 
-DEBIAN_FRONTEND=noninteractive apt-get autoremove -y -qq >> "$LOGFILE" 2>&1 || true
+DEBIAN_FRONTEND=noninteractive apt-get autoremove -y -qq >> "$LOGFILE" 2>&1
 sysctl --system >> "$LOGFILE" 2>&1 || true
-systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
+systemctl daemon-reload >> "$LOGFILE" 2>&1
 
 remove_lock "${PACKAGE_NAME}"
 report_progress 100 "Tailscale removed."

@@ -15,6 +15,10 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+#[cfg(test)]
+#[path = "middlewares_security_regressions.rs"]
+mod security_regressions;
+
 // ──────────────────────────────────────────────────────────────────────────────
 // 1. Subdomain & Host Resolution (`backend/services/blueprint_lifecycle.go`)
 // ──────────────────────────────────────────────────────────────────────────────
@@ -113,12 +117,33 @@ pub fn resolve_app_target_for_host(raw_host: &str) -> Option<(String, i32)> {
         return None;
     }
 
-    let configs = af_db::get_all_app_ingress_configs().unwrap_or_default();
+    let configs = af_db::get_all_app_ingress_configs().ok()?;
+    let jobs = af_services::package_job_snapshot().ok()?;
+    let packages = af_services::get_packages_with_jobs(&jobs).ok()?;
+    let authorized = |app: &str, active_ingress: bool| {
+        if jobs
+            .active
+            .keys()
+            .any(|name| name.eq_ignore_ascii_case(app))
+            || jobs.outcomes.values().any(|job| {
+                job.package_id.eq_ignore_ascii_case(app)
+                    && (job.status == "interrupted"
+                        || (job.status != "completed"
+                            && matches!(job.action.as_str(), "install" | "remove")))
+            })
+        {
+            return false;
+        }
+        active_ingress
+            || (packages.iter().any(|package| {
+                package.name.eq_ignore_ascii_case(app) && package.status == "installed"
+            }) && matches!(af_db::get_retained_app_ingress_config(app), Ok(None)))
+    };
 
     // 1. Exact match on configured `public_domain` (where `external_access_enabled` is true and `listen_port > 0`)
     //    or `<app>.aether.local` from `app_ingress_configs`
     for cfg in &configs {
-        if cfg.listen_port <= 0 {
+        if !(1..=65535).contains(&cfg.listen_port) || !authorized(&cfg.app_name, true) {
             continue;
         }
         let pub_dom = strip_host_port_and_dot(&cfg.public_domain);
@@ -148,12 +173,18 @@ pub fn resolve_app_target_for_host(raw_host: &str) -> Option<(String, i32)> {
     if let Some(app) = candidate_app {
         if !app.is_empty() && !app.contains('.') {
             if let Some(bp) = af_services::get_blueprint(app) {
-                if bp.default_port > 0 {
+                let ingress = configs
+                    .iter()
+                    .find(|config| config.app_name.eq_ignore_ascii_case(&bp.app_name));
+                if !authorized(&bp.app_name, ingress.is_some()) {
+                    return None;
+                }
+                if bp.default_port > 0 || ingress.is_some() {
                     let mut port = bp.default_port;
-                    if let Some(ing) = configs
-                        .iter()
-                        .find(|c| c.app_name.eq_ignore_ascii_case(&bp.app_name))
-                    {
+                    if let Some(ing) = ingress {
+                        if !(1..=65535).contains(&ing.listen_port) {
+                            return None;
+                        }
                         if !is_internal {
                             if !ing.external_access_enabled {
                                 return None;
@@ -167,7 +198,7 @@ pub fn resolve_app_target_for_host(raw_host: &str) -> Option<(String, i32)> {
                             port = ing.listen_port;
                         }
                     }
-                    if port > 0 {
+                    if (1..=65535).contains(&port) {
                         return Some((bp.app_name, port));
                     }
                 }

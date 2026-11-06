@@ -40,8 +40,7 @@ export function evaluateSessionCapabilities(session: ActiveStreamSession): Sessi
         };
     }
 
-    const mediaCtrlSupported = session.supportsMediaControl !== false;
-    const remoteCtrlSupported = session.supportsRemoteControl !== false;
+    const mediaCtrlSupported = session.supportsMediaControl === true;
 
     const pauseOrResumeSupported = mediaCtrlSupported;
     const pauseReason = pauseOrResumeSupported
@@ -51,21 +50,17 @@ export function evaluateSessionCapabilities(session: ActiveStreamSession): Sessi
         ? 'Resume Playback'
         : 'Client has no active remote-control WebSocket (SupportsMediaControl=false)';
 
-    // Stop requires either media control, remote control, or an active transcode/playSessionId that can be terminated
-    const hasActiveTranscodeOrPlaySession =
-        session.playMethod === 'Transcode' ||
-        Boolean(session.playSessionId && session.playSessionId.trim().length > 0);
-    const stopSupported = mediaCtrlSupported || remoteCtrlSupported || hasActiveTranscodeOrPlaySession;
+    const stopSupported = mediaCtrlSupported;
     const stopReason = stopSupported
         ? 'Stop / Terminate Session'
-        : 'Client does not support remote playback termination (SupportsMediaControl=false and no active transcode session)';
+        : 'Client does not advertise media control; fresh provider evidence is required';
 
     const explicitCanMessage =
         session.canSendMessage !== undefined
             ? session.canSendMessage
             : session.supportedCommands !== undefined
               ? hasSupportedCommand(session.supportedCommands, 'DisplayMessage')
-              : true;
+              : false;
 
     const messageSupported = mediaCtrlSupported && explicitCanMessage;
     const messageReason = !mediaCtrlSupported

@@ -1,5 +1,5 @@
 import React from 'react';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import '@testing-library/jest-dom';
 import StreamingHistoryAdmin, {
     STREAMING_ADMIN_IMPORT_STATUS_URL,
@@ -238,6 +238,43 @@ function setupDefaultAdminMocks() {
 }
 
 describe('StreamingHistoryAdmin', () => {
+    it('preserves policy drafts through refresh, pending save, and independent link mutation', async () => {
+        setupDefaultAdminMocks();
+        render(<StreamingHistoryAdmin />);
+        await screen.findByTestId('import-checkpoints-table');
+        fireEvent.click(screen.getByTestId('admin-tab-policies'));
+        fireEvent.change(screen.getByTestId('policy-min-watch-input'), { target: { value: '99' } });
+        fireEvent.click(screen.getByTestId('admin-refresh-btn'));
+        await waitFor(() => expect(screen.getByTestId('admin-refresh-btn')).not.toBeDisabled());
+        expect(screen.getByTestId('policy-min-watch-input')).toHaveValue(99);
+        let resolvePolicy!: (response: Response) => void;
+        let policySignal: AbortSignal | undefined;
+        mockedApiFetch.mockImplementation(async (input, init) => {
+            if (String(input) === STREAMING_ADMIN_POLICIES_URL && init?.method === 'PUT') {
+                policySignal = init.signal as AbortSignal;
+                return new Promise<Response>(resolve => { resolvePolicy = resolve; });
+            }
+            if (String(input) === STREAMING_ADMIN_USER_LINKS_URL) return jsonResponse(sampleLinksResponse);
+            if (String(input) === STREAMING_ADMIN_POLICIES_URL) return jsonResponse(samplePolicyResponse);
+            return jsonResponse(sampleStatusResponse);
+        });
+        fireEvent.change(screen.getByTestId('policy-min-watch-input'), { target: { value: '40' } });
+        fireEvent.click(screen.getByTestId('policy-save-btn'));
+        await waitFor(() => expect(resolvePolicy).toBeDefined());
+        fireEvent.change(screen.getByTestId('policy-min-watch-input'), { target: { value: '99' } });
+        fireEvent.click(screen.getByTestId('admin-tab-links'));
+        fireEvent.change(screen.getByTestId('link-af-user-id-input'), { target: { value: '9' } });
+        fireEvent.change(screen.getByTestId('link-server-id-input'), { target: { value: 'default' } });
+        fireEvent.change(screen.getByTestId('link-provider-user-id-input'), { target: { value: 'provider-9' } });
+        fireEvent.click(screen.getByTestId('link-upsert-btn'));
+        await waitFor(() => expect(screen.getByTestId('link-upsert-btn')).not.toBeDisabled());
+        expect(policySignal?.aborted).toBe(false);
+        await act(async () => resolvePolicy(jsonResponse({ ...samplePolicyResponse, minimumWatchSecs: 40, policyRevision: 4 })));
+        fireEvent.click(screen.getByTestId('admin-tab-policies'));
+        expect(screen.getByTestId('policy-min-watch-input')).toHaveValue(99);
+        expect(screen.getByTestId('policy-save-btn')).not.toBeDisabled();
+    });
+
     beforeEach(() => {
         jest.clearAllMocks();
         currentAuthState = {

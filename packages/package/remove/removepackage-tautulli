@@ -23,8 +23,7 @@ require_root
 log_info "Starting removal for ${PACKAGE_NAME}..."
 report_progress 25 "Stopping and removing tautulli.service..."
 
-purge_systemd_unit "tautulli"
-purge_systemd_unit "plexpy"
+purge_systemd_unit "tautulli" "plexpy"
 
 report_progress 65 "Removing Tautulli files, state directories, and user account..."
 rm -rf /opt/Tautulli
@@ -33,7 +32,7 @@ if [[ "${DELETE_DATA:-false}" == true ]]; then
 fi
 purge_system_user "tautulli"
 purge_system_user "plexpy"
-systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
+systemctl daemon-reload >> "$LOGFILE" 2>&1
 
 remove_lock "${PACKAGE_NAME}"
 report_progress 100 "Tautulli removed; application data retained unless DELETE_DATA=true."

@@ -25,6 +25,10 @@ use tokio::sync::broadcast;
 #[path = "storage_hillclimb_tests.rs"]
 mod hillclimb_tests;
 
+#[cfg(test)]
+#[path = "storage_update_observability_tests.rs"]
+mod update_observability_tests;
+
 #[path = "storage_accounting.rs"]
 mod accounting;
 
@@ -337,6 +341,32 @@ mod audit_tests {
         assert_eq!(verified.actual_sha256, expected_sha);
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn update_launch_ack_accepts_only_consistent_terminal_receipts() {
+        for success in [true, false] {
+            let mut receipt = af_models::SelfUpdateJobStatus {
+                status: if success { "succeeded" } else { "failed" }.into(),
+                completed: true,
+                success,
+                job_unit: "aetherflow-self-update-deploy-stable-abcdef12.service".into(),
+                error: if success { "" } else { "Fixture failure" }.into(),
+                exit_code: Some(if success { 0 } else { 9 }),
+            };
+            let raw = serde_json::to_string(&receipt).unwrap();
+            assert_eq!(
+                validate_runner_self_update_initiation_payload(&raw)
+                    .unwrap()
+                    .0,
+                receipt.job_unit
+            );
+            receipt.completed = false;
+            assert!(validate_runner_self_update_initiation_payload(
+                &serde_json::to_string(&receipt).unwrap()
+            )
+            .is_err());
+        }
     }
 
     #[test]
@@ -3357,18 +3387,17 @@ pub(crate) fn validate_runner_self_update_initiation_payload(
         .get("status")
         .and_then(|val| val.as_str())
         .unwrap_or("");
-    if status != "initiated" {
-        return Err(format!(
-            "runner self-update payload reported unexpected status {:?}",
-            status
-        ));
-    }
-    let completed = parsed_job
-        .get("completed")
-        .and_then(|val| val.as_bool())
-        .unwrap_or(true);
-    if completed {
-        return Err("runner self-update initiation payload reported completed=true".to_string());
+    if matches!(status, "succeeded" | "failed") {
+        let receipt: af_models::SelfUpdateJobStatus = serde_json::from_value(parsed_job.clone())
+            .map_err(|error| format!("runner returned invalid terminal receipt: {error}"))?;
+        receipt.validate_invariants(None)?;
+    } else if status != "initiated"
+        || parsed_job
+            .get("completed")
+            .and_then(|value| value.as_bool())
+            != Some(false)
+    {
+        return Err("runner returned neither a valid initiation nor a terminal receipt".into());
     }
     let job_unit = parsed_job
         .get("job_unit")
@@ -3415,6 +3444,28 @@ pub async fn run_update(req: Request) -> Response {
         .unwrap_or_else(|| "stable".to_string());
     let channel = normalize_update_channel(&channel).to_string();
 
+    // Serialize with Marketplace lifecycle jobs. The updater restarts the API
+    // and runner; a running package job would lose its runner stream and the
+    // package script would be killed mid-flight. Holding the lifecycle mutex
+    // across the launch also guarantees a queued job re-checks after the
+    // updater is registered (see dispatch_package_lifecycle).
+    // A short wait tolerates a brief af-heal restart holding the mutex.
+    let lifecycle_guard = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        af_services::PACKAGE_LIFECYCLE_MUTEX.lock(),
+    )
+    .await;
+    let _lifecycle_guard = match lifecycle_guard {
+        Ok(guard) if !af_services::has_active_package_jobs() => guard,
+        _ => {
+            return api_error(
+                StatusCode::CONFLICT,
+                "PACKAGE_LIFECYCLE_IN_PROGRESS",
+                "An application install, update, or removal is in progress; retry the system update after it finishes",
+            );
+        }
+    };
+
     let update_req = af_models::SelfUpdateRequest {
         command: "deploy".to_string(),
         channel: channel.clone(),
@@ -3454,6 +3505,25 @@ pub async fn run_update(req: Request) -> Response {
         );
     }
 
+    // A fast worker can finish before systemd-run returns. Preserve its exact
+    // terminal receipt instead of manufacturing a fresh pending operation.
+    if let Ok(receipt) = serde_json::from_str::<af_models::SelfUpdateJobStatus>(&runner_resp.output)
+    {
+        if receipt.completed {
+            return Json(serde_json::json!({
+                "message": if receipt.success { "System deployment completed successfully." } else { "System deployment failed; inspect its receipt and authenticated logs." },
+                "status": receipt.status,
+                "completed": receipt.completed,
+                "success": receipt.success,
+                "error": receipt.error,
+                "exit_code": receipt.exit_code,
+                "channel": channel,
+                "engine": engine_name,
+                "job_unit": job_unit,
+            })).into_response();
+        }
+    }
+
     Json(serde_json::json!({
         "message": "Atomic deployment initiated. The system will cleanly transition once builds are complete.",
         "status": "initiated",
@@ -3471,11 +3541,26 @@ pub async fn get_system_update_status(Query(q): Query<HashMap<String, String>>) 
         .or_else(|| q.get("unit"))
         .map(|s| s.trim().to_string())
         .unwrap_or_default();
-    if job_unit.is_empty() {
+    let action = |unit: &str| {
+        unit.strip_prefix("aetherflow-self-update-")
+            .and_then(|suffix| suffix.split('-').next())
+            .filter(|command| matches!(*command, "deploy" | "rollback" | "restart"))
+            .map(str::to_owned)
+    };
+    if !job_unit.is_empty() && !af_models::is_valid_self_update_job_unit_name(&job_unit) {
         return api_error(
             StatusCode::BAD_REQUEST,
             "BAD_REQUEST",
-            "job_unit query parameter is required",
+            "A valid self-update job_unit is required",
+        );
+    }
+    if q.get("action")
+        .is_some_and(|expected| action(&job_unit).as_ref() != Some(expected))
+    {
+        return api_error(
+            StatusCode::BAD_REQUEST,
+            "BAD_REQUEST",
+            "Update action does not match job identity",
         );
     }
 
@@ -3483,17 +3568,83 @@ pub async fn get_system_update_status(Query(q): Query<HashMap<String, String>>) 
         job_unit: job_unit.clone(),
     };
     match af_runner::dispatch_self_update_status_request(&status_req).await {
-        Ok(status) => Json(status).into_response(),
+        Ok(status) => {
+            let idle = job_unit.is_empty()
+                && status.job_unit.is_empty()
+                && status.status == "succeeded"
+                && status.completed
+                && status.success
+                && status.exit_code == Some(0)
+                && status.error.is_empty();
+            let recovery = job_unit.is_empty()
+                && status.job_unit.is_empty()
+                && status.status == "recovery_required"
+                && !status.completed
+                && !status.success
+                && status.exit_code.is_none();
+            if !idle
+                && !recovery
+                && (status.job_unit != status.job_unit.trim()
+                    || status
+                        .validate_invariants((!job_unit.is_empty()).then_some(job_unit.as_str()))
+                        .is_err())
+            {
+                return api_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "UPDATE_STATUS_ERROR",
+                    "Update status identity or state could not be verified",
+                );
+            }
+            let state = if idle {
+                "idle"
+            } else if recovery {
+                "interrupted"
+            } else {
+                match status.status.as_str() {
+                    "succeeded" => "complete",
+                    "failed" => "failed",
+                    _ => "running",
+                }
+            };
+            let error = if recovery {
+                "System update recovery is required before another update can start"
+            } else if !status.error.is_empty() {
+                "System update failed; inspect authenticated updater diagnostics"
+            } else {
+                ""
+            };
+            Json(serde_json::json!({
+                "state": state,
+                "action": action(&status.job_unit),
+                "operationId": if status.job_unit.is_empty() { None } else { Some(&status.job_unit) },
+                "job_unit": status.job_unit,
+                "active_job_unit": if !status.completed { &status.job_unit } else { "" },
+                "status": if idle { "idle" } else { &status.status },
+                "completed": status.completed,
+                "success": !idle && status.success,
+                "error": error,
+                "exit_code": if idle { None } else { status.exit_code },
+            })).into_response()
+        }
         Err(err) => {
             let msg = err.to_string();
-            let code = if msg.contains("invalid") || msg.contains("Invalid") {
-                StatusCode::BAD_REQUEST
-            } else if msg.contains("not found") || msg.contains("Not found") {
+            let code = if !job_unit.is_empty()
+                && (msg.contains("not found") || msg.contains("Not found"))
+            {
                 StatusCode::NOT_FOUND
             } else {
                 StatusCode::SERVICE_UNAVAILABLE
             };
-            api_error(code, "UPDATE_STATUS_ERROR", msg)
+            tracing::warn!(error = %err, "System update status observation failed");
+            api_error(
+                code,
+                "UPDATE_STATUS_ERROR",
+                if code == StatusCode::NOT_FOUND {
+                    "Tracked update receipt was not found; its outcome is unverified"
+                } else {
+                    "System update status is unavailable; no idle or completed state is confirmed"
+                },
+            )
         }
     }
 }
@@ -3573,63 +3724,55 @@ pub async fn handle_deploy_process(
         send_step("[STEP 0] Deployment sequence queued asynchronously.".to_string());
         tokio::time::sleep(std::time::Duration::from_millis(80)).await;
 
-        // Step 1: Validate and synchronize local DNS for internal_domain
-        send_step(format!(
-            "[STEP 1] Validating and synchronizing local DNS for {}...",
-            bp_clone.internal_domain
-        ));
-        if !bp_clone.internal_domain.trim().is_empty() {
-            if let Err(err) = af_services::mutators::sync_local_dns_domains(std::slice::from_ref(
-                &bp_clone.internal_domain,
-            ))
-            .await
-            {
+        let configuration =
+            af_services::mutators::with_blueprint_mutation(&bp_clone.app_name, async {
                 send_step(format!(
-                    "[ROLLBACK] Local DNS synchronization failed for {}: {}",
-                    bp_clone.internal_domain, err
+                    "[STEP 1] Validating and synchronizing local DNS for {}...",
+                    bp_clone.internal_domain
                 ));
-                cleanup_deploy_channel(&bp_clone.app_name).await;
-                return;
-            }
-        }
-
-        // Step 2: Allocate/verify port and apply blueprint app config
-        let target_port = allocate_or_verify_deploy_port(&bp_clone.app_name, bp_clone.default_port);
-        send_step(format!(
-            "[STEP 2] Applying blueprint configuration for {} on port {}...",
-            bp_clone.app_name, target_port
-        ));
-        if let Err(err) =
-            af_services::mutators::apply_blueprint_app_config(&bp_clone.app_name, target_port).await
-        {
-            send_step(format!(
-                "[ROLLBACK] Blueprint configuration mutation failed: {}",
-                err
-            ));
-            cleanup_deploy_channel(&bp_clone.app_name).await;
-            return;
-        }
-
-        // Step 3: Persist AppIngressConfig in SQLite
-        send_step(format!(
-            "[STEP 3] Persisting ingress routing configuration ({} -> 127.0.0.1:{})...",
-            bp_clone.internal_domain, target_port
-        ));
-        let ingress_cfg = match af_db::get_app_ingress_config(&bp_clone.app_name) {
-            Ok(existing) => deployment_ingress_config(&bp_clone.app_name, target_port, existing),
-            Err(err) => {
+                if !bp_clone.internal_domain.trim().is_empty() {
+                    af_services::mutators::sync_local_dns_domains(std::slice::from_ref(
+                        &bp_clone.internal_domain,
+                    ))
+                    .await
+                    .map_err(|error| {
+                        anyhow::anyhow!(
+                            "Local DNS synchronization failed for {}: {}",
+                            bp_clone.internal_domain,
+                            error
+                        )
+                    })?;
+                }
+                let target_port =
+                    allocate_or_verify_deploy_port(&bp_clone.app_name, bp_clone.default_port);
                 send_step(format!(
-                    "[ROLLBACK] Failed to read ingress configuration: {}",
-                    err
+                    "[STEP 2] Applying blueprint configuration for {} on port {}...",
+                    bp_clone.app_name, target_port
                 ));
-                cleanup_deploy_channel(&bp_clone.app_name).await;
-                return;
-            }
-        };
-        if let Err(err) = af_db::set_app_ingress_config(&ingress_cfg) {
+                af_services::mutators::apply_blueprint_app_config(&bp_clone.app_name, target_port)
+                    .await
+                    .map_err(|error| {
+                        anyhow::anyhow!("Blueprint configuration mutation failed: {}", error)
+                    })?;
+                send_step(format!(
+                    "[STEP 3] Persisting ingress routing configuration ({} -> 127.0.0.1:{})...",
+                    bp_clone.internal_domain, target_port
+                ));
+                let existing =
+                    af_db::get_app_ingress_config(&bp_clone.app_name).map_err(|error| {
+                        anyhow::anyhow!("Failed to read ingress configuration: {}", error)
+                    })?;
+                let ingress_cfg =
+                    deployment_ingress_config(&bp_clone.app_name, target_port, existing);
+                af_db::set_app_ingress_config(&ingress_cfg).map_err(|error| {
+                    anyhow::anyhow!("Failed to persist ingress configuration: {}", error)
+                })?;
+                Ok(())
+            })
+            .await;
+        if let Err(error) = configuration {
             send_step(format!(
-                "[ROLLBACK] Failed to persist ingress configuration: {}",
-                err
+                "[ROLLBACK] Deployment configuration rejected: {error:#}"
             ));
             cleanup_deploy_channel(&bp_clone.app_name).await;
             return;

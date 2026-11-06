@@ -161,6 +161,10 @@ func resolveExistingUpdatePort(pkgID string) (int, error) {
 }
 
 func applyPostInstallWithoutCallerRestart(pkgID string, allocatedPort int) (*BlueprintSetupResult, error) {
+	return applyPostInstallWithoutCallerRestartWithIngress(pkgID, allocatedPort, db.SetAppIngressConfig)
+}
+
+func applyPostInstallWithoutCallerRestartWithIngress(pkgID string, allocatedPort int, saveIngress func(models.AppIngressConfig) error) (*BlueprintSetupResult, error) {
 	cleanID := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(pkgID)), ".service")
 	blueprint := GetBlueprint(cleanID)
 	if blueprint == nil {
@@ -187,23 +191,25 @@ func applyPostInstallWithoutCallerRestart(pkgID string, allocatedPort int) (*Blu
 		ListenPort: activePort,
 	}
 	existing, existingErr := db.GetAppIngressConfig(blueprint.AppName)
-	if existingErr == nil && existing != nil && strings.TrimSpace(existing.PublicDomain) != "" {
-		ingressCfg.PublicDomain = strings.TrimSpace(existing.PublicDomain)
+	if existingErr == nil && existing == nil {
+		existing, existingErr = db.GetRetainedAppIngressConfig(blueprint.AppName)
+	}
+	if existingErr != nil {
+		return nil, fmt.Errorf("read reinstall ingress for %s: %w", blueprint.AppName, existingErr)
+	}
+	if existing != nil {
+		ingressCfg.PublicDomain = existing.PublicDomain
 		ingressCfg.ExternalAccessEnabled = existing.ExternalAccessEnabled
 		ingressCfg.TLSEnabled = existing.TLSEnabled
 	} else if baseDomain := ResolveBaseDomain(); baseDomain != "" && activePort > 0 {
 		ingressCfg.PublicDomain = FormatAppPublicDomain(blueprint.AppName, baseDomain)
 		ingressCfg.ExternalAccessEnabled = true
 		ingressCfg.TLSEnabled = true
-	} else if existingErr == nil && existing != nil {
-		ingressCfg.PublicDomain = existing.PublicDomain
-		ingressCfg.ExternalAccessEnabled = existing.ExternalAccessEnabled
-		ingressCfg.TLSEnabled = existing.TLSEnabled
 	}
 
 	if activePort > 0 || blueprint.IsNetworkApp {
-		if err := db.SetAppIngressConfig(ingressCfg); err != nil {
-			slog.Warn("failed to persist blueprint ingress config", "app", blueprint.AppName, "error", err)
+		if err := saveIngress(ingressCfg); err != nil {
+			return nil, fmt.Errorf("persist blueprint ingress for %s: %w", blueprint.AppName, err)
 		} else if activePort > 0 {
 			result.IngressSynced = true
 		}
@@ -235,6 +241,10 @@ func applyPostInstallWithoutCallerRestart(pkgID string, allocatedPort int) (*Blu
 // RunPackageAction executes the specified bash script for installing, updating, or removing a package.
 // It streams output line-by-line so we can track progress in real time.
 func RunPackageAction(action, pkgId, scriptName, lockFile string) {
+	RunPackageActionWithOptions(action, pkgId, scriptName, lockFile, false)
+}
+
+func RunPackageActionWithOptions(action, pkgId, scriptName, lockFile string, deleteData bool) {
 	status := "installing"
 	switch action {
 	case "remove":
@@ -254,6 +264,12 @@ func RunPackageAction(action, pkgId, scriptName, lockFile string) {
 	notifyPackageEvent(pkgId, action, job.Status, job.Progress, job.LastLine)
 
 	slog.Info("starting package action", "action", action, "package", pkgId)
+	failJob := func(err error) {
+		job.Status = "failed"
+		job.LastLine = "Error: " + err.Error()
+		job.Progress = 100
+		notifyPackageEvent(pkgId, action, job.Status, job.Progress, job.LastLine)
+	}
 
 	defer func() {
 		// Use a delayed deletion to allow frontend SWR polling to catch failure states
@@ -263,6 +279,17 @@ func RunPackageAction(action, pkgId, scriptName, lockFile string) {
 			slog.Info("package action finalized", "action", action, "package", pkgId)
 		}()
 	}()
+	canonicalApp := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(pkgId)), ".service")
+	if blueprint := GetBlueprint(canonicalApp); blueprint != nil {
+		canonicalApp = blueprint.AppName
+	}
+	aliases := append(ResolveServiceUnits(canonicalApp), pkgId)
+	jobID, releaseIngress, err := db.ReserveAppIngressLifecycle(canonicalApp, action, aliases...)
+	if err != nil {
+		failJob(fmt.Errorf("reserve package ingress lifecycle: %w", err))
+		return
+	}
+	defer releaseIngress()
 
 	scriptPath := ResolvePackageScriptPath(action, scriptName)
 	if scriptPath == "" {
@@ -332,7 +359,7 @@ func RunPackageAction(action, pkgId, scriptName, lockFile string) {
 	}
 
 	if IsRunnerAvailable() {
-		if err := DispatchPackageStream(action, pkgId, scriptName, allocatedPort, updateProgress); err != nil {
+		if err := DispatchPackageStreamWithOptions(action, pkgId, scriptName, allocatedPort, deleteData, updateProgress); err != nil {
 			slog.Error("runner package script exited with error", "action", action, "script", scriptName, "error", err)
 			job.Status = "failed"
 			job.LastLine = "Error: " + err.Error()
@@ -345,11 +372,11 @@ func RunPackageAction(action, pkgId, scriptName, lockFile string) {
 		packageMutex.Lock()
 		defer packageMutex.Unlock()
 
-		cmd := buildHardenedPackageCommand(scriptPath, true, allocatedPort)
+		cmd := buildPackageLifecycleCommand(scriptPath, true, allocatedPort, action, deleteData)
 		stdout, err := cmd.StdoutPipe()
 		if err != nil {
 			slog.Error("failed to create stdout pipe; running synchronous fallback", "action", action, "script", scriptName, "error", err)
-			output, runErr := buildHardenedPackageCommand(scriptPath, true, allocatedPort).CombinedOutput()
+			output, runErr := buildPackageLifecycleCommand(scriptPath, true, allocatedPort, action, deleteData).CombinedOutput()
 			job.LogLines = len(strings.Split(string(output), "\n"))
 			if runErr != nil {
 				job.Status = "failed"
@@ -400,12 +427,17 @@ func RunPackageAction(action, pkgId, scriptName, lockFile string) {
 			err   error
 		)
 		if ShouldRestartAfterUpdate(pkgId) {
-			bpRes, err = ApplyBlueprintPostInstall(pkgId, allocatedPort)
+			bpRes, err = applyBlueprintPostInstallWithIngress(canonicalApp, allocatedPort, func(config models.AppIngressConfig) error {
+				return db.SetAppIngressConfigForLifecycle(config, jobID, action)
+			})
 		} else {
-			bpRes, err = applyPostInstallWithoutCallerRestart(pkgId, allocatedPort)
+			bpRes, err = applyPostInstallWithoutCallerRestartWithIngress(canonicalApp, allocatedPort, func(config models.AppIngressConfig) error {
+				return db.SetAppIngressConfigForLifecycle(config, jobID, action)
+			})
 		}
 		if err != nil {
-			slog.Warn("blueprint post-install setup warning", "package", pkgId, "error", err)
+			failJob(fmt.Errorf("blueprint post-install setup: %w", err))
+			return
 		} else if bpRes != nil {
 			slog.Info("blueprint post-install applied",
 				"package", pkgId,
@@ -419,11 +451,15 @@ func RunPackageAction(action, pkgId, scriptName, lockFile string) {
 			}
 		}
 	case "remove":
-		if err := TeardownBlueprintUninstall(pkgId); err != nil {
-			slog.Warn("blueprint uninstall teardown warning", "package", pkgId, "error", err)
+		if err := teardownBlueprintUninstallWithIngress(canonicalApp, deleteData, func(app string, purge bool) error {
+			return db.ArchiveAppIngressConfigForLifecycle(app, purge, jobID)
+		}); err != nil {
+			failJob(fmt.Errorf("blueprint uninstall teardown: %w", err))
+			return
 		}
-		if err := DeletePackageUpdateRecord(pkgId); err != nil {
-			slog.Warn("failed to clear update state", "package", pkgId, "error", err)
+		if err := DeletePackageUpdateRecord(canonicalApp); err != nil {
+			failJob(fmt.Errorf("clear package update state: %w", err))
+			return
 		}
 	}
 

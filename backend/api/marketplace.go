@@ -174,6 +174,15 @@ func InstallPackage(c *gin.Context) {
 }
 
 func UninstallPackage(c *gin.Context) {
+	purge := false
+	switch c.Query("purge") {
+	case "", "false", "0":
+	case "true", "1":
+		purge = true
+	default:
+		RespondError(c, http.StatusBadRequest, "BAD_REQUEST", "purge must be true, false, 1, or 0")
+		return
+	}
 	pkgId := c.Param("id")
 	slog.Info("Received request to UNINSTALL package", "package", pkgId)
 
@@ -205,7 +214,7 @@ func UninstallPackage(c *gin.Context) {
 	db.RecordAudit(uid, uname, "package_uninstall", "package", pkg.Name, pkg.Label, c.ClientIP(), c.Request.UserAgent())
 
 	// Trigger async uninstall
-	go services.RunPackageAction("remove", pkg.Name, scriptName, pkg.LockFile)
+	go services.RunPackageActionWithOptions("remove", pkg.Name, scriptName, pkg.LockFile, purge)
 
 	c.JSON(http.StatusOK, gin.H{
 		"message": "Uninstallation started successfully",

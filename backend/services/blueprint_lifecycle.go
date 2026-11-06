@@ -80,9 +80,13 @@ func ResolveDynamicAppPort(appName string, checkHostListeners bool) (int, bool, 
 		return 0, false, nil
 	}
 
-	// 1. Check if this app already has a persisted port in app_ingress_configs
+	// 1. Check the active mapping, then retained reinstall settings.
 	if existing, err := db.GetAppIngressConfig(bp.AppName); err == nil && existing != nil && existing.ListenPort > 0 {
 		return existing.ListenPort, existing.ListenPort != bp.DefaultPort, nil
+	}
+
+	if retained, err := db.GetRetainedAppIngressConfig(bp.AppName); err == nil && retained != nil && retained.ListenPort > 0 {
+		return retained.ListenPort, retained.ListenPort != bp.DefaultPort, nil
 	}
 
 	// 2. Build reserved port set (system ports, other apps' persisted ports, and other catalog default ports)
@@ -589,14 +593,18 @@ func TriggerApacheCertSync() {
 }
 
 // ApplyBlueprintPostInstall executes the complete post-installation setup for an application:
-// 1. Resolves a conflict-free port (or uses preAllocatedPort).
-// 2. Writes/mutates the app's native configuration file.
-// 3. Persists AppIngressConfig in SQLite (auto-setting <app>.<baseDomain> if a base domain is configured)
-//    and triggers Apache2 Certbot SAN synchronization.
-// 4. Registers <app>.aether.local in /etc/hosts.
-// 5. Synchronizes networking DNS apps (Pi-hole / dnsmasq) with all active domains.
-// 6. Restarts the service if its port or config was dynamically modified.
+//  1. Resolves a conflict-free port (or uses preAllocatedPort).
+//  2. Writes/mutates the app's native configuration file.
+//  3. Persists AppIngressConfig in SQLite (auto-setting <app>.<baseDomain> if a base domain is configured)
+//     and triggers Apache2 Certbot SAN synchronization.
+//  4. Registers <app>.aether.local in /etc/hosts.
+//  5. Synchronizes networking DNS apps (Pi-hole / dnsmasq) with all active domains.
+//  6. Restarts the service if its port or config was dynamically modified.
 func ApplyBlueprintPostInstall(appName string, preAllocatedPort int) (*BlueprintSetupResult, error) {
+	return applyBlueprintPostInstallWithIngress(appName, preAllocatedPort, db.SetAppIngressConfig)
+}
+
+func applyBlueprintPostInstallWithIngress(appName string, preAllocatedPort int, saveIngress func(models.AppIngressConfig) error) (*BlueprintSetupResult, error) {
 	bp := GetBlueprint(appName)
 	if bp == nil {
 		return nil, fmt.Errorf("no blueprint registered for %q", appName)
@@ -639,23 +647,25 @@ func ApplyBlueprintPostInstall(appName string, preAllocatedPort int) (*Blueprint
 		ListenPort: activePort,
 	}
 	existing, existingErr := db.GetAppIngressConfig(bp.AppName)
-	if existingErr == nil && existing != nil && strings.TrimSpace(existing.PublicDomain) != "" {
-		ingressCfg.PublicDomain = strings.TrimSpace(existing.PublicDomain)
+	if existingErr == nil && existing == nil {
+		existing, existingErr = db.GetRetainedAppIngressConfig(bp.AppName)
+	}
+	if existingErr != nil {
+		return nil, fmt.Errorf("read reinstall ingress for %s: %w", bp.AppName, existingErr)
+	}
+	if existing != nil {
+		ingressCfg.PublicDomain = existing.PublicDomain
 		ingressCfg.ExternalAccessEnabled = existing.ExternalAccessEnabled
 		ingressCfg.TLSEnabled = existing.TLSEnabled
 	} else if baseDomain := ResolveBaseDomain(); baseDomain != "" && activePort > 0 {
 		ingressCfg.PublicDomain = FormatAppPublicDomain(bp.AppName, baseDomain)
 		ingressCfg.ExternalAccessEnabled = true
 		ingressCfg.TLSEnabled = true
-	} else if existingErr == nil && existing != nil {
-		ingressCfg.PublicDomain = existing.PublicDomain
-		ingressCfg.ExternalAccessEnabled = existing.ExternalAccessEnabled
-		ingressCfg.TLSEnabled = existing.TLSEnabled
 	}
 
 	if activePort > 0 || bp.IsNetworkApp {
-		if err := db.SetAppIngressConfig(ingressCfg); err != nil {
-			slog.Warn("failed to persist blueprint ingress config", "app", bp.AppName, "error", err)
+		if err := saveIngress(ingressCfg); err != nil {
+			return nil, fmt.Errorf("persist blueprint ingress for %s: %w", bp.AppName, err)
 		} else if activePort > 0 {
 			res.IngressSynced = true
 		}
@@ -696,6 +706,14 @@ func ApplyBlueprintPostInstall(appName string, preAllocatedPort int) (*Blueprint
 // TeardownBlueprintUninstall removes all AetherFlow managed routes, DNS records, and
 // persisted ingress state when an application is uninstalled.
 func TeardownBlueprintUninstall(appName string) error {
+	return TeardownBlueprintUninstallWithOptions(appName, false)
+}
+
+func TeardownBlueprintUninstallWithOptions(appName string, deleteData bool) error {
+	return teardownBlueprintUninstallWithIngress(appName, deleteData, db.ArchiveAppIngressConfig)
+}
+
+func teardownBlueprintUninstallWithIngress(appName string, deleteData bool, archiveIngress func(string, bool) error) error {
 	bp := GetBlueprint(appName)
 	canonicalName := strings.ToLower(strings.TrimSpace(appName))
 	internalDomain := fmt.Sprintf("%s.aether.local", canonicalName)
@@ -706,19 +724,20 @@ func TeardownBlueprintUninstall(appName string) error {
 		}
 	}
 
-	// 1. Remove internal domain from /etc/hosts
-	dnsMgr := NewDNSManager()
-	if err := dnsMgr.RemoveDomains([]string{internalDomain}); err != nil {
-		slog.Warn("blueprint /etc/hosts removal notice", "app", canonicalName, "warning", err)
+	// Keep reinstall settings separately from active gateway/DNS registrations.
+	if err := archiveIngress(canonicalName, deleteData); err != nil {
+		return fmt.Errorf("archive ingress for %s: %w", canonicalName, err)
 	}
 
-	// 2. Delete persisted ingress record from SQLite
-	if err := db.DeleteAppIngressConfig(canonicalName); err != nil {
-		slog.Warn("failed to delete ingress config on uninstall", "app", canonicalName, "error", err)
+	dnsMgr := NewDNSManager()
+	if err := dnsMgr.RemoveDomains([]string{internalDomain}); err != nil {
+		return fmt.Errorf("remove internal DNS for %s: %w", canonicalName, err)
 	}
 
 	// 3. Re-sync networking DNS providers (Pi-hole / dnsmasq) so removed domain is purged
-	_, _ = SyncNetworkDNSProviders()
+	if _, err := SyncNetworkDNSProviders(); err != nil {
+		return fmt.Errorf("sync network DNS after removing %s: %w", canonicalName, err)
+	}
 
 	ClearAppRuntimeMetaCache()
 
@@ -776,6 +795,28 @@ func ResolveAppTargetForHost(hostHeader string) (int, string, bool) {
 	}
 
 	if candidateApp != "" && !strings.Contains(candidateApp, ".") {
+		// Archived reinstall settings are not active routes. Catalog fallback
+		// requires the physical installation lock after ordinary removal.
+		active, err := db.GetAppIngressConfig(candidateApp)
+		if err != nil {
+			return 0, "", false
+		}
+		if active == nil {
+			installed := false
+			if catalog, err := GetPackageCatalog(); err == nil {
+				for _, pkg := range catalog {
+					if pkg.Name == candidateApp && pkg.LockFile != "" {
+						if _, err := os.Stat(resolveFilesystemPath(pkg.LockFile)); err == nil {
+							installed = true
+						}
+						break
+					}
+				}
+			}
+			if !installed {
+				return 0, "", false
+			}
+		}
 		if bp := GetBlueprint(candidateApp); bp != nil && bp.DefaultPort > 0 {
 			port := bp.DefaultPort
 			if ing, err := db.GetAppIngressConfig(bp.AppName); err == nil && ing != nil {
@@ -797,4 +838,3 @@ func ResolveAppTargetForHost(hostHeader string) (int, string, bool) {
 
 	return 0, "", false
 }
-

@@ -20,12 +20,12 @@ pub const MAX_EMBY_JSON_PAYLOAD_BYTES: usize = 4 * 1024 * 1024; // 4 MiB hard ca
 pub const MAX_EMBY_ARTWORK_PAYLOAD_BYTES: usize = 8 * 1024 * 1024; // 8 MiB hard cap for artwork images
 
 static EMBY_HTTP_CLIENT: Lazy<Client> = Lazy::new(|| {
-    Client::builder()
+    af_services::streaming_http_client_builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(10))
         .pool_max_idle_per_host(16)
         .build()
-        .unwrap_or_else(|_| Client::new())
+        .expect("guarded Emby HTTP client")
 });
 
 // ────────────────────────────────────────────────────────────────────────────

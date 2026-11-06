@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::RwLock;
+use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const HOSTS_BLOCK_START: &str = "# --- AETHERFLOW INTERNAL DNS ---";
@@ -27,6 +27,82 @@ static PLEX_TOKEN_ATTR_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r#"(?i)\bPlexOnlineToken\s*=\s*"([^"]+)""#).unwrap());
 static PHP_ORGANIZR_KEY_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r#"(?i)['"]organizrAPI['"]\s*=>\s*['"]([^'"]+)['"]"#).unwrap());
+
+tokio::task_local! {
+    static BLUEPRINT_ADMISSION: std::sync::Arc<af_release::ReleaseLockGuard>;
+}
+
+pub async fn with_blueprint_admission<Output, Operation>(
+    operation: Operation,
+) -> anyhow::Result<Output>
+where
+    Operation: std::future::Future<Output = anyhow::Result<Output>>,
+{
+    if BLUEPRINT_ADMISSION.try_with(|_| ()).is_ok() {
+        return operation.await;
+    }
+    let guard =
+        tokio::task::spawn_blocking(|| af_runner::acquire_lifecycle_admission_lock(None)).await??;
+    let status =
+        af_runner::dispatch_self_update_status_request(&af_models::SelfUpdateStatusRequest {
+            job_unit: String::new(),
+        })
+        .await?;
+    anyhow::ensure!(
+        status.completed
+            && matches!(status.status.as_str(), "succeeded" | "failed")
+            && (status.job_unit.is_empty() || status.validate_invariants(None).is_ok()),
+        af_runner::LifecycleBusy
+    );
+    BLUEPRINT_ADMISSION
+        .scope(std::sync::Arc::new(guard), operation)
+        .await
+}
+
+pub async fn with_blueprint_mutation<Output, Operation>(
+    app_name: &str,
+    operation: Operation,
+) -> anyhow::Result<Output>
+where
+    Operation: std::future::Future<Output = anyhow::Result<Output>>,
+{
+    let canonical = crate::get_blueprint(app_name)
+        .or_else(|| crate::get_blueprint(&normalize_app_key_name(app_name)))
+        .ok_or_else(|| anyhow::anyhow!("blueprint package identity is unavailable"))?
+        .app_name;
+    let owner = af_runner::current_package_job_id();
+    with_blueprint_admission(async move {
+        let admission = BLUEPRINT_ADMISSION.with(std::sync::Arc::clone);
+        tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+            let _admission = admission;
+            let units = af_runner::package_lifecycle::package_service_units(&canonical)?;
+            let conn = af_db::get_conn()?;
+            let database = conn.path().ok_or_else(|| {
+                anyhow::anyhow!("blueprint lifecycle database path is unavailable")
+            })?;
+            af_release::lifecycle::reconcile_jobs(&conn, Path::new(database))?;
+            af_release::lifecycle::check_package_reservation(
+                &conn, &canonical, &units, &owner, None,
+            )
+            .map_err(|error| error.context(af_runner::LifecycleBusy))?;
+            if !owner.is_empty() {
+                let action: String = conn.query_row(
+                    "SELECT action FROM package_lifecycle_jobs WHERE package_id=?1 AND job_id=?2",
+                    params![canonical, owner],
+                    |row| row.get(0),
+                )?;
+                anyhow::ensure!(
+                    matches!(action.as_str(), "install" | "update"),
+                    "removal cannot own blueprint configuration mutations"
+                );
+            }
+            Ok(())
+        })
+        .await??;
+        operation.await
+    })
+    .await
+}
 
 /// Resolves a filesystem path respecting `AETHERFLOW_CONFIG_ROOT` or `AETHERFLOW_FS_ROOT` overrides.
 pub fn resolve_config_path(raw_path: &str) -> PathBuf {
@@ -799,11 +875,9 @@ pub async fn sync_local_dns_domains(domains: &[String]) -> Result<(), String> {
     if !aether_local_domains.is_empty() {
         if let Err(runner_err) = af_runner::update_hosts_file_local(&aether_local_domains, false) {
             if let Err(fallback_err) = update_hosts_atomic_fallback(&aether_local_domains, false) {
-                tracing::warn!(
-                    runner_error = %runner_err,
-                    fallback_error = %fallback_err,
-                    "Notice: /etc/hosts update skipped (insufficient privileges or read-only fs)"
-                );
+                return Err(format!(
+                    "Local DNS synchronization failed: {runner_err}; {fallback_err}"
+                ));
             }
         }
     }
@@ -819,13 +893,9 @@ pub async fn sync_local_dns_domains(domains: &[String]) -> Result<(), String> {
 
     if dnsmasq_dir.is_dir() {
         let conf_path = dnsmasq_dir.join("aetherflow-local.conf");
-        if let Err(e) = update_dnsmasq_conf(&conf_path, &lan_ip, &validated) {
-            tracing::warn!(path = %conf_path.display(), error = %e, "Failed to update dnsmasq aetherflow-local.conf");
-        }
+        update_dnsmasq_conf(&conf_path, &lan_ip, &validated)?;
         let custom_dns_path = dnsmasq_dir.join("05-aetherflow-dns.conf");
-        if let Err(e) = update_dnsmasq_conf(&custom_dns_path, &lan_ip, &validated) {
-            tracing::warn!(path = %custom_dns_path.display(), error = %e, "Failed to update dnsmasq 05-aetherflow-dns.conf");
-        }
+        update_dnsmasq_conf(&custom_dns_path, &lan_ip, &validated)?;
     }
 
     // 3. Write Pi-hole custom.list if /etc/pihole exists
@@ -837,9 +907,7 @@ pub async fn sync_local_dns_domains(domains: &[String]) -> Result<(), String> {
 
     if pihole_dir.is_dir() {
         let custom_list = pihole_dir.join("custom.list");
-        if let Err(e) = update_pihole_custom_list(&custom_list, &lan_ip, &validated) {
-            tracing::warn!(path = %custom_list.display(), error = %e, "Failed to update Pi-hole custom.list");
-        }
+        update_pihole_custom_list(&custom_list, &lan_ip, &validated)?;
     }
 
     Ok(())
@@ -851,7 +919,8 @@ pub async fn sync_network_dns_providers() -> Result<bool, String> {
     let mut domain_set: BTreeSet<String> = BTreeSet::new();
     let base_domain = crate::resolve_base_domain();
 
-    if let Ok(configs) = af_db::get_all_app_ingress_configs() {
+    let configs = af_db::get_all_app_ingress_configs().map_err(|error| error.to_string())?;
+    {
         for cfg in configs {
             if !cfg.app_name.trim().is_empty() {
                 domain_set.insert(crate::resolve_app_internal_domain(&cfg.app_name));
@@ -867,7 +936,8 @@ pub async fn sync_network_dns_providers() -> Result<bool, String> {
         }
     }
 
-    if let Ok(pkgs) = crate::get_packages() {
+    let pkgs = crate::get_packages().map_err(|error| error.to_string())?;
+    {
         for p in pkgs {
             if p.status != "installed" {
                 continue;
@@ -888,9 +958,9 @@ pub async fn sync_network_dns_providers() -> Result<bool, String> {
         }
     }
 
-    if domain_set.is_empty() {
-        return Ok(false);
-    }
+    // Always keep the core domain so removing the last app clears stale
+    // managed DNS entries instead of skipping synchronization entirely.
+    domain_set.insert("aetherflow.aether.local".into());
 
     let domains: Vec<String> = domain_set.into_iter().collect();
     sync_local_dns_domains(&domains).await?;
@@ -929,9 +999,8 @@ pub fn sync_apache_app_vhost(
             "# Managed by AetherFlow v3.2.6\n<VirtualHost *:80>\n    ServerName {int_dom}\n    ProxyPreserveHost On\n    ProxyRequests Off\n    RewriteEngine On\n    RewriteCond %{{HTTP:Upgrade}} =websocket [NC]\n    RewriteRule /(.*) ws://127.0.0.1:{listen_port}/$1 [P,L]\n    ProxyPass / http://127.0.0.1:{listen_port}/\n    ProxyPassReverse / http://127.0.0.1:{listen_port}/\n    RequestHeader set X-Forwarded-Proto \"http\"\n</VirtualHost>\n"
         );
         let conf_file = sites_avail.join(format!("aetherflow-app-{}.conf", clean_app));
-        if write_file_atomic(&conf_file, vhost.as_bytes()).is_ok() {
-            wrote_any = true;
-        }
+        write_file_atomic(&conf_file, vhost.as_bytes())?;
+        wrote_any = true;
     }
 
     let ext_conf_file = sites_avail.join(format!("aetherflow-ext-{}.conf", clean_app));
@@ -940,11 +1009,11 @@ pub fn sync_apache_app_vhost(
         let ext_vhost = format!(
             "# Managed by AetherFlow v3.2.6 (External Ingress)\n<VirtualHost *:80>\n    ServerName {pub_dom}\n    ProxyPreserveHost On\n    ProxyRequests Off\n    RewriteEngine On\n    RewriteCond %{{HTTP:Upgrade}} =websocket [NC]\n    RewriteRule /(.*) ws://127.0.0.1:{listen_port}/$1 [P,L]\n    ProxyPass / http://127.0.0.1:{listen_port}/\n    ProxyPassReverse / http://127.0.0.1:{listen_port}/\n</VirtualHost>\n"
         );
-        if write_file_atomic(&ext_conf_file, ext_vhost.as_bytes()).is_ok() {
-            wrote_any = true;
-        }
+        write_file_atomic(&ext_conf_file, ext_vhost.as_bytes())?;
+        wrote_any = true;
     } else if ext_conf_file.exists() {
-        let _ = fs::remove_file(&ext_conf_file);
+        fs::remove_file(&ext_conf_file)
+            .map_err(|error| format!("failed to remove external vhost: {error}"))?;
     }
 
     Ok(wrote_any)
@@ -969,17 +1038,41 @@ pub async fn provision_all_installed_app_subdomains() -> usize {
 }
 
 async fn provision_installed_app_subdomains(base_domain: &str) -> usize {
+    match with_blueprint_admission(async {
+        provision_installed_app_subdomains_admitted(base_domain)
+            .await
+            .map_err(anyhow::Error::msg)
+    })
+    .await
+    {
+        Ok(count) => count,
+        Err(error) => {
+            tracing::error!(detail = %format!("{error:#}"), "installed application subdomain synchronization failed");
+            0
+        }
+    }
+}
+
+async fn provision_installed_app_subdomains_admitted(base_domain: &str) -> Result<usize, String> {
     let norm_base = af_db::normalize_base_domain(base_domain);
     let mut updated_count = 0usize;
 
     let existing_map: HashMap<String, af_models::AppIngressConfig> =
         af_db::get_all_app_ingress_configs()
-            .unwrap_or_default()
+            .map_err(|error| error.to_string())?
             .into_iter()
             .map(|c| (c.app_name.clone(), c))
             .collect();
 
-    if let Ok(pkgs) = crate::get_packages() {
+    let pkgs = crate::get_packages().map_err(|error| error.to_string())?;
+    for package in &pkgs {
+        if package.status == "installed" {
+            with_blueprint_mutation(&package.name, async { Ok(()) })
+                .await
+                .map_err(|error| format!("{error:#}"))?;
+        }
+    }
+    {
         for p in pkgs {
             if p.status != "installed" {
                 continue;
@@ -996,39 +1089,39 @@ async fn provision_installed_app_subdomains(base_domain: &str) -> usize {
                 crate::format_app_public_domain(&bp.app_name, &norm_base)
             };
 
-            let mut cfg = existing_map
-                .get(&bp.app_name)
-                .cloned()
-                .unwrap_or(af_models::AppIngressConfig {
-                    app_name: bp.app_name.clone(),
-                    listen_port: bp.default_port,
-                    public_domain: new_pub.clone(),
-                    external_access_enabled: false,
-                    tls_enabled: false,
-                    ..Default::default()
-                });
+            let mut cfg =
+                existing_map
+                    .get(&bp.app_name)
+                    .cloned()
+                    .unwrap_or(af_models::AppIngressConfig {
+                        app_name: bp.app_name.clone(),
+                        listen_port: bp.default_port,
+                        public_domain: new_pub.clone(),
+                        external_access_enabled: false,
+                        tls_enabled: false,
+                        ..Default::default()
+                    });
 
             if cfg.listen_port <= 0 {
                 cfg.listen_port = bp.default_port;
             }
             cfg.public_domain = new_pub;
 
-            if af_db::set_app_ingress_config(&cfg).is_ok() {
-                let _ = sync_apache_app_vhost(
-                    &cfg.app_name,
-                    cfg.listen_port,
-                    &crate::resolve_app_internal_domain(&cfg.app_name),
-                    &cfg.public_domain,
-                    cfg.external_access_enabled,
-                );
-                updated_count += 1;
-            }
+            af_db::set_app_ingress_config(&cfg).map_err(|error| error.to_string())?;
+            sync_apache_app_vhost(
+                &cfg.app_name,
+                cfg.listen_port,
+                &crate::resolve_app_internal_domain(&cfg.app_name),
+                &cfg.public_domain,
+                cfg.external_access_enabled,
+            )?;
+            updated_count += 1;
         }
     }
 
-    let _ = sync_network_dns_providers().await;
+    sync_network_dns_providers().await?;
     trigger_apache_cert_sync().await;
-    updated_count
+    Ok(updated_count)
 }
 
 /// Alias matching Go's `SyncInstalledAppsBaseDomain(oldBaseDomain, newBaseDomain)`.
@@ -1052,15 +1145,65 @@ fn is_zero_i32(v: &i32) -> bool {
     *v <= 0
 }
 
-static APP_META_CACHE: Lazy<RwLock<HashMap<String, (AppRuntimeMeta, Instant)>>> =
-    Lazy::new(|| RwLock::new(HashMap::new()));
+const APP_META_BUDGET: Duration = Duration::from_millis(1500);
+const MAX_APP_META_PROBES: usize = 4;
+const MAX_RUNNER_RESPONSE_BYTES: u64 = 64 * 1024;
+
+#[derive(Default)]
+struct AppMetaState {
+    generation: u64,
+    cached: HashMap<String, (AppRuntimeMeta, Instant)>,
+    in_flight: BTreeSet<String>,
+}
+
+static APP_META_CACHE: Lazy<(Mutex<AppMetaState>, Condvar)> =
+    Lazy::new(|| (Mutex::new(AppMetaState::default()), Condvar::new()));
 
 static PROMETHEUS_LISTEN_PORT_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"--web\.listen-address=[^\s'\x22]*:(\d{2,5})").unwrap());
 
 pub fn clear_app_runtime_meta_cache() {
-    if let Ok(mut guard) = APP_META_CACHE.write() {
-        guard.clear();
+    let mut state = APP_META_CACHE
+        .0
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    state.generation = state.generation.wrapping_add(1);
+    state.cached.clear();
+    drop(state);
+    crate::service_observations::invalidate();
+}
+
+pub(super) fn app_runtime_meta_epoch() -> u64 {
+    APP_META_CACHE
+        .0
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .generation
+}
+
+pub(super) fn cached_app_runtime_meta(app_name: &str) -> AppRuntimeMeta {
+    let state = APP_META_CACHE
+        .0
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    state
+        .cached
+        .get(&normalize_app_key_name(app_name))
+        .filter(|(_, expires)| Instant::now() < *expires)
+        .map(|(meta, _)| meta.clone())
+        .unwrap_or_default()
+}
+
+struct AppMetaFlight(String);
+
+impl Drop for AppMetaFlight {
+    fn drop(&mut self) {
+        let mut state = APP_META_CACHE
+            .0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        state.in_flight.remove(&self.0);
+        APP_META_CACHE.1.notify_all();
     }
 }
 
@@ -1203,14 +1346,18 @@ fn parse_deluge_conf_json(content: &str) -> Option<Value> {
     None
 }
 
-fn query_sqlite_first_text(db_path: &Path, queries: &[&str]) -> Option<String> {
-    if !db_path.is_file() {
+fn query_sqlite_first_text(db_path: &Path, queries: &[&str], deadline: Instant) -> Option<String> {
+    if Instant::now() >= deadline || !db_path.is_file() {
         return None;
     }
     let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
     let conn = Connection::open_with_flags(db_path, flags).ok()?;
-    let _ = conn.busy_timeout(Duration::from_millis(1500));
     for &q in queries {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        conn.busy_timeout(remaining.min(APP_META_BUDGET)).ok()?;
         if let Ok(val) = conn.query_row(q, [], |r| r.get::<_, String>(0)) {
             let trimmed = val.trim();
             if !trimmed.is_empty() {
@@ -1222,19 +1369,23 @@ fn query_sqlite_first_text(db_path: &Path, queries: &[&str]) -> Option<String> {
 }
 
 #[cfg(unix)]
-fn query_runner_app_meta_unix(canonical_app: &str) -> Option<AppRuntimeMeta> {
-    let response = request_runner_unix(
+fn query_runner_app_meta_unix(canonical_app: &str, deadline: Instant) -> Option<AppRuntimeMeta> {
+    let response = request_runner_unix_until(
         "/v1/app-meta",
         json!({ "app_name": canonical_app }),
-        Duration::from_millis(1500),
+        deadline,
     )?;
     parse_runner_app_meta(&response)
 }
 
 #[cfg(unix)]
 fn request_runner_unix(route: &str, payload: Value, timeout: Duration) -> Option<String> {
-    use std::io::{Read, Write};
-    use std::os::unix::net::UnixStream;
+    request_runner_unix_until(route, payload, Instant::now() + timeout)
+}
+
+#[cfg(unix)]
+fn request_runner_unix_until(route: &str, payload: Value, deadline: Instant) -> Option<String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     if ["AETHERFLOW_CONFIG_ROOT", "AETHERFLOW_FS_ROOT"].iter().any(|key| {
         env::var(key).ok().is_some_and(|value| !value.trim().is_empty())
@@ -1242,13 +1393,9 @@ fn request_runner_unix(route: &str, payload: Value, timeout: Duration) -> Option
         return None;
     }
     let sock_path = af_runner::runner_socket_path();
-    if !Path::new(&sock_path).exists() {
+    if Instant::now() >= deadline {
         return None;
     }
-
-    let mut stream = UnixStream::connect(&sock_path).ok()?;
-    let _ = stream.set_read_timeout(Some(timeout));
-    let _ = stream.set_write_timeout(Some(timeout));
 
     let body = serde_json::to_string(&payload).ok()?;
     let req = format!(
@@ -1257,10 +1404,38 @@ fn request_runner_unix(route: &str, payload: Value, timeout: Duration) -> Option
         body.len(),
         body
     );
-    stream.write_all(req.as_bytes()).ok()?;
-
-    let mut resp = String::new();
-    stream.read_to_string(&mut resp).ok()?;
+    if req.len() > MAX_RUNNER_RESPONSE_BYTES as usize {
+        return None;
+    }
+    let bytes = std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .ok()?;
+                runtime.block_on(async {
+                    tokio::time::timeout_at(deadline.into(), async {
+                        let mut stream = tokio::net::UnixStream::connect(&sock_path).await.ok()?;
+                        stream.write_all(req.as_bytes()).await.ok()?;
+                        let mut bytes = Vec::new();
+                        stream
+                            .take(MAX_RUNNER_RESPONSE_BYTES + 1)
+                            .read_to_end(&mut bytes)
+                            .await
+                            .ok()?;
+                        (bytes.len() <= MAX_RUNNER_RESPONSE_BYTES as usize).then_some(bytes)
+                    })
+                    .await
+                    .ok()
+                    .flatten()
+                })
+            })
+            .join()
+            .ok()
+            .flatten()
+    })?;
+    let resp = String::from_utf8(bytes).ok()?;
     let (headers, json_body) = resp.split_once("\r\n\r\n")?;
     if !headers.starts_with("HTTP/1.1 200 ") && !headers.starts_with("HTTP/1.0 200 ") {
         return None;
@@ -1282,19 +1457,43 @@ fn parse_runner_app_meta(json_body: &str) -> Option<AppRuntimeMeta> {
 
 /// Discovers runtime API key and configured port from an application's native config files.
 pub fn get_app_runtime_meta(app_name: &str) -> AppRuntimeMeta {
+    get_app_runtime_meta_until(app_name, Instant::now() + APP_META_BUDGET)
+}
+
+pub(super) fn get_app_runtime_meta_until(app_name: &str, deadline: Instant) -> AppRuntimeMeta {
     let canonical = normalize_app_key_name(app_name);
     if canonical.is_empty() {
         return AppRuntimeMeta::default();
     }
 
-    let now = Instant::now();
-    if let Ok(guard) = APP_META_CACHE.read() {
-        if let Some((meta, expires_at)) = guard.get(&canonical) {
-            if now < *expires_at {
+    let deadline = deadline.min(Instant::now() + APP_META_BUDGET);
+    let mut state = APP_META_CACHE
+        .0
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    loop {
+        if let Some((meta, expires)) = state.cached.get(&canonical) {
+            if Instant::now() < *expires {
                 return meta.clone();
             }
         }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return AppRuntimeMeta::default();
+        }
+        if !state.in_flight.contains(&canonical) && state.in_flight.len() < MAX_APP_META_PROBES {
+            break;
+        }
+        state = APP_META_CACHE
+            .1
+            .wait_timeout(state, remaining)
+            .unwrap_or_else(|error| error.into_inner())
+            .0;
     }
+    state.in_flight.insert(canonical.clone());
+    let generation = state.generation;
+    drop(state);
+    let _flight = AppMetaFlight(canonical.clone());
 
     let mut meta = AppRuntimeMeta::default();
     match canonical.as_str() {
@@ -1499,6 +1698,7 @@ pub fn get_app_runtime_meta(app_name: &str) -> AppRuntimeMeta {
                 if let Some(content_str) = query_sqlite_first_text(
                     &db_path,
                     &["SELECT Content FROM GlobalSettings WHERE SettingsName = 'OmbiSettings' LIMIT 1"],
+                    deadline,
                 ) {
                     if let Ok(val) = serde_json::from_str::<Value>(&content_str) {
                         if meta.api_key.is_empty() {
@@ -1797,6 +1997,7 @@ pub fn get_app_runtime_meta(app_name: &str) -> AppRuntimeMeta {
                 if let Some(port_str) = query_sqlite_first_text(
                     &db_path,
                     &["SELECT CAST(config_port AS TEXT) FROM settings LIMIT 1"],
+                    deadline,
                 ) {
                     let port = parse_valid_port(&port_str);
                     if port > 0 {
@@ -1981,6 +2182,7 @@ pub fn get_app_runtime_meta(app_name: &str) -> AppRuntimeMeta {
                         "SELECT AccessToken FROM ApiKeys ORDER BY DateCreated DESC LIMIT 1",
                         "SELECT AccessToken FROM Devices WHERE AccessToken IS NOT NULL AND AccessToken != '' ORDER BY DateLastActivity DESC LIMIT 1",
                     ],
+                    deadline,
                 ) {
                     meta.api_key = tok;
                     break;
@@ -2012,6 +2214,7 @@ pub fn get_app_runtime_meta(app_name: &str) -> AppRuntimeMeta {
                         "SELECT AccessToken FROM Tokens ORDER BY DateCreated DESC LIMIT 1",
                         "SELECT AccessToken FROM ApiKeys ORDER BY DateCreated DESC LIMIT 1",
                     ],
+                    deadline,
                 ) {
                     meta.api_key = tok;
                     break;
@@ -2127,16 +2330,26 @@ pub fn get_app_runtime_meta(app_name: &str) -> AppRuntimeMeta {
         _ => {}
     }
 
+    let mut confirmed = !meta.api_key.is_empty() || meta.configured_port > 0;
     #[cfg(unix)]
     if meta.api_key.is_empty() && meta.configured_port <= 0 {
-        if let Some(runner_meta) = query_runner_app_meta_unix(&canonical) {
+        if let Some(runner_meta) = query_runner_app_meta_unix(&canonical, deadline) {
             meta = runner_meta;
+            confirmed = true;
         }
     }
 
-    if let Ok(mut guard) = APP_META_CACHE.write() {
-        guard.insert(canonical, (meta.clone(), now + Duration::from_secs(15)));
+    let mut state = APP_META_CACHE
+        .0
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if state.generation != generation {
+        return AppRuntimeMeta::default();
     }
+    let ttl = Duration::from_secs(if confirmed { 15 } else { 3 });
+    state
+        .cached
+        .insert(canonical, (meta.clone(), Instant::now() + ttl));
     meta
 }
 
@@ -2736,10 +2949,17 @@ fn mutate_dispatcharr_port(file_path: &Path, port: i32) -> Result<bool, String> 
 ///    on disk, mutates its port/bind settings to match `listen_port` and injects master credentials where applicable.
 /// 3. Synchronizes `<app_name>.aether.local` (and public domain) via `sync_local_dns_domains` and Apache2 vhosts.
 /// 4. Returns a structured JSON summary of mutated files and synchronized DNS entries.
-pub async fn apply_blueprint_app_config(
-    app_name: &str,
-    listen_port: i32,
-) -> Result<Value, String> {
+pub async fn apply_blueprint_app_config(app_name: &str, listen_port: i32) -> Result<Value, String> {
+    with_blueprint_mutation(app_name, async {
+        apply_blueprint_app_config_admitted(app_name, listen_port)
+            .await
+            .map_err(anyhow::Error::msg)
+    })
+    .await
+    .map_err(|error| format!("{error:#}"))
+}
+
+async fn apply_blueprint_app_config_admitted(app_name: &str, listen_port: i32) -> Result<Value, String> {
     let canonical = normalize_app_key_name(app_name);
     let bp = crate::get_blueprint(&canonical)
         .or_else(|| crate::get_blueprint(app_name))
@@ -2750,6 +2970,23 @@ pub async fn apply_blueprint_app_config(
     } else {
         bp.default_port
     };
+
+    let app = bp.app_name.clone();
+    let lifecycle_owned = !af_runner::current_package_job_id().is_empty();
+    let existing_ingress = tokio::task::spawn_blocking(move || {
+        if lifecycle_owned {
+            // The enclosing blueprint admission has already verified the exact
+            // package, active owner and install/update action. Materialize from
+            // the same active-or-retained configuration as the durable callback.
+            let connection = af_db::get_conn()?;
+            af_db::load_lifecycle_ingress(&connection, &app)
+        } else {
+            af_db::get_app_ingress_config(&app)
+        }
+    })
+    .await
+    .map_err(|error| format!("cannot read blueprint ingress configuration: {error}"))?
+    .map_err(|error| format!("cannot read blueprint ingress configuration: {error}"))?;
 
     let spec = native_app_spec(&canonical, &bp.config_file_path);
     let mut mutated_files: Vec<String> = Vec::new();
@@ -2868,7 +3105,7 @@ pub async fn apply_blueprint_app_config(
                         whitelist = format!("{}, {}", public_domain, whitelist);
                     }
                 }
-                if let Ok(Some(ing)) = af_db::get_app_ingress_config("sabnzbd") {
+                if let Some(ing) = existing_ingress.as_ref() {
                     if ing.external_access_enabled {
                         let custom = ing.public_domain.trim().to_ascii_lowercase();
                         if !custom.is_empty() && !whitelist.to_ascii_lowercase().contains(&custom) {
@@ -2971,11 +3208,10 @@ pub async fn apply_blueprint_app_config(
                 "127.0.0.1".to_string(),
                 "qbittorrent.aether.local".to_string(),
             );
-            if let Ok(n) = inject_arr_download_client_routes(&db_path, &routes, 8080) {
-                sqlite_routes_injected = n;
-                if n > 0 {
-                    mutated_files.push(db_path.to_string_lossy().to_string());
-                }
+            let count = inject_arr_download_client_routes(&db_path, &routes, 8080)?;
+            sqlite_routes_injected = count;
+            if count > 0 {
+                mutated_files.push(db_path.to_string_lossy().to_string());
             }
         }
     }
@@ -2989,27 +3225,31 @@ pub async fn apply_blueprint_app_config(
     let mut dns_domains = vec![internal_domain.clone()];
     let base_domain = crate::resolve_base_domain();
     let mut public_domain = String::new();
-    if !base_domain.is_empty() && effective_port > 0 {
-        public_domain = crate::format_app_public_domain(&bp.app_name, &base_domain);
+    if effective_port > 0 {
+        public_domain = existing_ingress
+            .as_ref()
+            .map(|config| config.public_domain.trim().to_ascii_lowercase())
+            .filter(|domain| !domain.is_empty())
+            .unwrap_or_else(|| crate::format_app_public_domain(&bp.app_name, &base_domain));
         if !public_domain.is_empty() && !dns_domains.contains(&public_domain) {
             dns_domains.push(public_domain.clone());
         }
     }
 
-    let external_access_enabled = af_db::get_app_ingress_config(&bp.app_name)
-        .ok()
-        .flatten()
+    let external_access_enabled = existing_ingress
+        .as_ref()
         .map(|c| c.external_access_enabled)
         .unwrap_or(false);
-    let _ = sync_apache_app_vhost(
+    sync_apache_app_vhost(
         &bp.app_name,
         effective_port,
         &internal_domain,
         &public_domain,
         external_access_enabled,
-    );
+    )?;
 
-    let dns_synced = sync_local_dns_domains(&dns_domains).await.is_ok();
+    sync_local_dns_domains(&dns_domains).await?;
+    let dns_synced = true;
     clear_app_runtime_meta_cache();
 
     let mut summary = BTreeMap::new();

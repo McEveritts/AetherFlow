@@ -25,12 +25,11 @@ if [[ "${DELETE_DATA:-false}" == true ]]; then APT_REMOVE_ACTION=purge; fi
 log_info "Starting removal for ${PACKAGE_NAME}..."
 report_progress 20 "Stopping and removing transmission-daemon service..."
 
-purge_systemd_unit "transmission-daemon"
-purge_systemd_unit "transmission"
+purge_systemd_unit "transmission-daemon" "transmission"
 
 report_progress 50 "Purging Transmission APT packages..."
-DEBIAN_FRONTEND=noninteractive apt-get "$APT_REMOVE_ACTION" -y -qq transmission-daemon transmission-cli transmission-common >> "$LOGFILE" 2>&1 || true
-DEBIAN_FRONTEND=noninteractive apt-get autoremove -y -qq >> "$LOGFILE" 2>&1 || true
+DEBIAN_FRONTEND=noninteractive apt-get "$APT_REMOVE_ACTION" -y -qq transmission-daemon transmission-cli transmission-common >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get autoremove -y -qq >> "$LOGFILE" 2>&1
 
 report_progress 80 "Removing Transmission configuration, state directories, and user account..."
 rm -rf /usr/share/transmission
@@ -39,7 +38,7 @@ if [[ "${DELETE_DATA:-false}" == true ]]; then
 fi
 purge_system_user "debian-transmission"
 purge_system_user "transmission"
-systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
+systemctl daemon-reload >> "$LOGFILE" 2>&1
 
 remove_lock "${PACKAGE_NAME}"
 report_progress 100 "Transmission removed; application data retained unless DELETE_DATA=true."

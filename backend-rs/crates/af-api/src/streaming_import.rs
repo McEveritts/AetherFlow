@@ -2151,27 +2151,18 @@ fn compute_projected_counts(
     proposed: &[ReconciliationRowChange],
 ) -> ImportResult<(HistoryCounts, HistoryCounts)> {
     let counts_before = compute_canonical_counts(conn, user, now)?;
-    let mut counts_after = counts_before.clone();
-
-    for change in proposed {
-        if change.before.provenance == "legacy_unverified"
-            && change.after.provenance == "item_summary"
-        {
-            counts_after.legacy_records = (counts_after.legacy_records - 1).max(0);
-            counts_after.item_summaries += 1;
+    conn.execute_batch("SAVEPOINT streaming_count_projection")?;
+    let projected = (|| -> ImportResult<HistoryCounts> {
+        for change in proposed {
+            let after = &change.after;
+            conn.execute("UPDATE streaming_history SET server_id=?1,play_method=?2,data_used_bytes=?3,started_at=?4,provenance=?5,timestamp_certainty=?6,byte_accuracy=?7,policy_status=?8 WHERE id=?9 AND provenance='legacy_unverified'", params![after.server_id, after.play_method, after.data_used_bytes, after.started_at, after.provenance, after.timestamp_certainty, after.byte_accuracy, after.policy_status, change.id])?;
         }
-        let before_undated = change.before.started_at.trim().is_empty()
-            || DateTime::parse_from_rfc3339(change.before.started_at.trim()).is_err()
-                && NaiveDateTime::parse_from_str(
-                    change.before.started_at.trim(),
-                    "%Y-%m-%d %H:%M:%S",
-                )
-                .is_err();
-        let after_undated = change.after.started_at.trim().is_empty();
-        if !before_undated && after_undated {
-            counts_after.undated_records += 1;
-        }
-    }
+        compute_canonical_counts(conn, user, now)
+    })();
+    conn.execute_batch(
+        "ROLLBACK TO streaming_count_projection; RELEASE streaming_count_projection",
+    )?;
+    let counts_after = projected?;
 
     Ok((counts_before, counts_after))
 }

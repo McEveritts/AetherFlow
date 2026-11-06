@@ -33,7 +33,7 @@ if [[ "${DELETE_DATA:-false}" == true ]]; then
     rm -f /opt/AetherFlow/logs/vaultwarden_admin_token.txt
 fi
 purge_system_user "vaultwarden"
-systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
+systemctl daemon-reload >> "$LOGFILE" 2>&1
 
 remove_lock "${PACKAGE_NAME}"
 report_progress 100 "Vaultwarden removed; application data retained unless DELETE_DATA=true."

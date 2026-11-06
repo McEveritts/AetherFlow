@@ -29,7 +29,7 @@ rm -rf /var/log/cloudplow /opt/cloudplow/.venv
 if [[ "${DELETE_DATA:-false}" == true ]]; then
     rm -rf /opt/cloudplow
 fi
-systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
+systemctl daemon-reload >> "$LOGFILE" 2>&1
 
 remove_lock "${PACKAGE_NAME}"
 report_progress 100 "Cloudplow removed; application data retained unless DELETE_DATA=true."

@@ -73,40 +73,135 @@ write_self_update_status_receipt() {
     local err_msg="$5"
 
     [[ -n "${SELF_UPDATE_STATUS_FILE}" ]] || return 0
-    [[ ! -L "${SELF_UPDATE_STATUS_FILE}" ]] || return 0
-
-    local status_dir
-    status_dir="$(dirname "${SELF_UPDATE_STATUS_FILE}")"
-    mkdir -p "${status_dir}" 2>/dev/null || return 0
-
-    local tmp_status="${SELF_UPDATE_STATUS_FILE}.tmp.$$"
+    # The scheduler creates the directory and receipt and pins the directory's
+    # device/inode. Never bootstrap or rebind a worker receipt by a pathname.
     if command -v python3 >/dev/null 2>&1; then
-        python3 - "${tmp_status}" "${SELF_UPDATE_STATUS_FILE}" "${status_str}" "${completed_bool}" "${success_bool}" "${SELF_UPDATE_JOB_UNIT}" "${exit_code_val}" "${err_msg}" <<'PY' 2>/dev/null || true
-import json, os, sys
-tmp_path, final_path, status_str, completed_s, success_s, job_unit, exit_s, err_msg = sys.argv[1:9]
-payload = {
-    "status": status_str,
-    "completed": completed_s == "true",
-    "success": success_s == "true",
-    "job_unit": job_unit,
-    "error": err_msg,
-    "exit_code": None if exit_s == "null" else int(exit_s),
-}
-fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-with os.fdopen(fd, "w", encoding="utf-8") as fh:
-    json.dump(payload, fh)
-    fh.flush()
-    os.fsync(fh.fileno())
-os.replace(tmp_path, final_path)
+        python3 - "${SELF_UPDATE_STATUS_FILE}" "${status_str}" "${completed_bool}" "${success_bool}" "${SELF_UPDATE_JOB_UNIT}" "${exit_code_val}" "${err_msg}" "${AETHERFLOW_SELF_UPDATE_DIRECTORY_DEV:-}" "${AETHERFLOW_SELF_UPDATE_DIRECTORY_INO:-}" <<'PY'
+import fcntl, json, os, pathlib, stat, sys, uuid
+final_path, status_str, completed_s, success_s, job_unit, exit_s, err_msg, device, inode = sys.argv[1:]
+if not device.isdecimal() or not inode.isdecimal():
+    sys.exit("Scheduled self-update receipt directory identity is required")
+expected_directory = (int(device), int(inode))
+path = pathlib.Path(final_path)
+def identity(metadata):
+    return metadata.st_dev, metadata.st_ino
+
+class Directory:
+    def __init__(self, name):
+        parts = pathlib.PurePosixPath(name).parts
+        if not parts or parts[0] != "/" or ".." in parts:
+            raise RuntimeError("Receipt and lock paths must be absolute and non-traversing")
+        self.chain = [(None, os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC))]
+        try:
+            for component in parts[1:]:
+                child = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=self.fd)
+                self.chain.append((component, child))
+            self.verify()
+        except BaseException:
+            self.close()
+            raise
+
+    @property
+    def fd(self):
+        return self.chain[-1][1]
+
+    def verify(self):
+        for index, (component, descriptor) in enumerate(self.chain):
+            held = os.fstat(descriptor)
+            if not stat.S_ISDIR(held.st_mode) or held.st_nlink == 0:
+                raise RuntimeError("Receipt or lock directory disappeared")
+            if index:
+                entry = os.stat(component, dir_fd=self.chain[index - 1][1], follow_symlinks=False)
+                if not stat.S_ISDIR(entry.st_mode) or identity(entry) != identity(held):
+                    raise RuntimeError("Receipt or lock directory identity changed")
+
+    def close(self):
+        for _, descriptor in reversed(self.chain):
+            os.close(descriptor)
+        self.chain = []
+
+def verify_file(directory, name, descriptor):
+    directory.verify()
+    held = os.fstat(descriptor)
+    entry = os.stat(name, dir_fd=directory.fd, follow_symlinks=False)
+    if not stat.S_ISREG(held.st_mode) or held.st_nlink != 1 or identity(entry) != identity(held) or not stat.S_ISREG(entry.st_mode):
+        raise RuntimeError("Receipt or lock is not a private regular file with a stable identity")
+
+def open_file(directory, name, flags, mode=0o600):
+    directory.verify()
+    descriptor = os.open(name, flags | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, mode, dir_fd=directory.fd)
+    try:
+        verify_file(directory, name, descriptor)
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+directory = Directory(str(path.parent))
+lock_fd = None
+try:
+    if identity(os.fstat(directory.fd)) != expected_directory:
+        raise RuntimeError("Scheduled self-update receipt directory identity changed")
+    lock_name = path.name + ".lock"
+    lock_fd = open_file(directory, lock_name, os.O_RDWR | os.O_CREAT)
+    fcntl.flock(lock_fd, fcntl.LOCK_EX)
+    verify_file(directory, lock_name, lock_fd)
+    source_fd = open_file(directory, path.name, os.O_RDONLY)
+    with os.fdopen(source_fd, "rb") as source:
+        raw = source.read(256 * 1024 + 1)
+        if len(raw) > 256 * 1024:
+            raise RuntimeError("Self-update receipt exceeds the size limit")
+        current = json.loads(raw)
+        verify_file(directory, path.name, source.fileno())
+        source_identity = identity(os.fstat(source.fileno()))
+    if current.get("job_unit") != job_unit or not job_unit:
+        raise RuntimeError("Self-update receipt identity does not match")
+    if type(current.get("completed")) is not bool:
+        raise RuntimeError("Self-update receipt completion is invalid")
+    if current["completed"]:
+        sys.exit("Self-update admission was closed; refusing a late worker" if status_str == "running" else 0)
+    if current.get("status") not in ("launching", "running"):
+        raise RuntimeError("Self-update receipt is not an active admission")
+    payload = {
+        "status": status_str,
+        "completed": completed_s == "true",
+        "success": success_s == "true",
+        "job_unit": job_unit,
+        "error": err_msg,
+        "exit_code": None if exit_s == "null" else int(exit_s),
+    }
+    temporary = path.name + ".tmp." + uuid.uuid4().hex
+    try:
+        output_fd = open_file(directory, temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+        with os.fdopen(output_fd, "w", encoding="utf-8") as output:
+            # Keep the runner reader's existing readability contract.
+            os.fchmod(output.fileno(), 0o644)
+            json.dump(payload, output)
+            output.flush()
+            os.fsync(output.fileno())
+            verify_file(directory, temporary, output.fileno())
+            verify_file(directory, lock_name, lock_fd)
+            target = os.stat(path.name, dir_fd=directory.fd, follow_symlinks=False)
+            if not stat.S_ISREG(target.st_mode) or target.st_nlink != 1 or identity(target) != source_identity:
+                raise RuntimeError("Self-update receipt changed during update")
+            os.replace(temporary, path.name, src_dir_fd=directory.fd, dst_dir_fd=directory.fd)
+            temporary = None
+            verify_file(directory, path.name, output.fileno())
+            os.fsync(directory.fd)
+    finally:
+        if temporary is not None:
+            try:
+                os.unlink(temporary, dir_fd=directory.fd)
+            except FileNotFoundError:
+                pass
+finally:
+    if lock_fd is not None:
+        os.close(lock_fd)
+    directory.close()
 PY
     else
-        local esc_err="${err_msg//\\/\\\\}"
-        esc_err="${esc_err//\"/\\\"}"
-        esc_err="${esc_err//$'\n'/ }"
-        printf '{"status":"%s","completed":%s,"success":%s,"job_unit":"%s","error":"%s","exit_code":%s}\n' \
-            "${status_str}" "${completed_bool}" "${success_bool}" "${SELF_UPDATE_JOB_UNIT}" "${esc_err}" "${exit_code_val}" > "${tmp_status}" 2>/dev/null || true
-        chmod 0600 "${tmp_status}" 2>/dev/null || true
-        mv -f "${tmp_status}" "${SELF_UPDATE_STATUS_FILE}" 2>/dev/null || true
+        printf '%s\n' 'python3 is required for a locked self-update receipt' >&2
+        return 1
     fi
 }
 
@@ -122,7 +217,7 @@ finalize_self_update_status_on_exit() {
 }
 
 if [[ -n "${SELF_UPDATE_STATUS_FILE}" ]]; then
-    write_self_update_status_receipt "running" "false" "false" "null" ""
+    write_self_update_status_receipt "running" "false" "false" "null" "" || exit 1
     trap 'finalize_self_update_status_on_exit $?' EXIT
 fi
 
@@ -958,7 +1053,7 @@ pull_prebuilt_artifact() {
     local tag="$1"
     local base_url="https://github.com/${GITHUB_REPO}/releases/download/${tag}"
     local tmp_dir
-    tmp_dir="$(mktemp -d /tmp/af-release-XXXXXX)"
+    tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/af-release-XXXXXX")" || return 1
 
     log_info "Downloading pre-built release ${tag} (${ARTIFACT_NAME})..."
     if ! curl -fsSL --max-time 180 -o "${tmp_dir}/${ARTIFACT_NAME}" "${base_url}/${ARTIFACT_NAME}"; then
@@ -1646,6 +1741,58 @@ migrate_systemd() {
     log_info "MIGRATION COMPLETE: AetherFlow is running under hardened systemd units."
 }
 
+check_package_lifecycle_reservations() {
+    [[ "${DRY_RUN}" != true ]] || return 0
+    resolve_db_path_quiet
+    if ! python3 - "${RESOLVED_DB_PATH}" "${COMMAND}" <<'PY'
+import datetime, fcntl, os, pathlib, sqlite3, stat, sys, uuid
+database, command = pathlib.Path(sys.argv[1]), sys.argv[2]
+if not database.exists():
+    sys.exit(0)
+with database.open("rb") as source:
+    header = source.read(16)
+if not header:
+    sys.exit(0)
+if header != b"SQLite format 3\0":
+    sys.exit(0 if command == "rollback" else "Cannot verify application lifecycle journal: invalid SQLite header")
+try:
+    connection = sqlite3.connect(database.as_uri() + "?mode=rw", uri=True, timeout=5)
+    table = connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='package_lifecycle_jobs'").fetchone()
+    if not table:
+        sys.exit(0)
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(package_lifecycle_jobs)")}
+    if "owner_id" in columns:
+        for package, job, owner in connection.execute("SELECT package_id,job_id,owner_id FROM package_lifecycle_jobs WHERE status IN ('installing','updating','uninstalling')").fetchall():
+            try:
+                uuid.UUID(owner)
+                lease_path = database.with_suffix(".lifecycle-owners") / owner
+                descriptor = os.open(lease_path, os.O_RDONLY | os.O_NOFOLLOW)
+                with os.fdopen(descriptor, "rb") as lease:
+                    if not stat.S_ISREG(os.fstat(lease.fileno()).st_mode):
+                        continue
+                    fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    connection.execute("UPDATE package_lifecycle_jobs SET status='interrupted',finished_at=? WHERE package_id=? AND job_id=? AND owner_id=? AND status IN ('installing','updating','uninstalling')",
+                                       (datetime.datetime.now(datetime.timezone.utc).isoformat(), package, job, owner))
+            except (OSError, ValueError):
+                continue
+        connection.commit()
+    if connection.execute("SELECT 1 FROM package_lifecycle_jobs WHERE status NOT IN ('completed','failed','interrupted') LIMIT 1").fetchone():
+        sys.exit("Application lifecycle orchestration is active or its owner is unknown")
+except sqlite3.DatabaseError as error:
+    code = getattr(error, "sqlite_errorcode", None)
+    # Python 3.10 has neither sqlite_errorcode nor the SQLITE_* constants.
+    corrupt = (code is not None and (code & 255) in (11, 26)) or (
+        code is None and str(error) in ("database disk image is malformed", "file is not a database")
+    )
+    if command == "rollback" and corrupt:
+        sys.exit(0)
+    sys.exit(f"Cannot verify application lifecycle journal: {error}")
+PY
+    then
+        log_fatal "Application lifecycle admission is unavailable; release was not started."
+    fi
+}
+
 acquire_release_lock() {
     local shared_db_lock="${AETHERFLOW_MAINTENANCE_LOCK_PATH:-}"
     if [[ -z "${shared_db_lock}" ]]; then
@@ -1730,6 +1877,7 @@ acquire_release_lock() {
     if ! flock -w "${SNAPSHOT_TIMEOUT}" 199; then
         log_fatal "Could not acquire maintenance lock ${shared_db_lock} within ${SNAPSHOT_TIMEOUT}s."
     fi
+    check_package_lifecycle_reservations
     mkdir -p "${RELEASES_DIR}"
     local release_lock="${RELEASES_DIR}/.release.lock"
     if [[ -L "${release_lock}" ]]; then

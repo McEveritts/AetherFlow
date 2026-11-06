@@ -1,6 +1,8 @@
 #!/bin/bash
 #
 # [AetherFlow Remove Script - Dispatcharr]
+# Purge requires dedicated-storage provenance; names and account ownership are insufficient.
+# Unmarked legacy data stays retained until an operator establishes a safe migration.
 #
 set -euo pipefail
 
@@ -27,35 +29,86 @@ CONFIG_DIR="/etc/dispatcharr"
 export LOGFILE="/var/log/aetherflow/remove-${PACKAGE_NAME}.log"
 mkdir -p "$(dirname "$LOGFILE")"
 
+dispatcharr_confined_path() {
+    local path="$1"
+    if [[ "$(readlink -m -- "${path}")" != "${path}" ]]; then
+        printf '[ERROR] Dispatcharr path traverses a symlink: %s\n' "${path}" >&2
+        return 1
+    fi
+}
+
+dispatcharr_owned_data() {
+    local data_mode marker_mode
+    [[ -d "${DATA_DIR}" && ! -L "${DATA_DIR}" && -O "${DATA_DIR}" && -f "${DATA_MARKER}" && ! -L "${DATA_MARKER}" && -O "${DATA_MARKER}" ]] || return 1
+    data_mode="$(stat -c %a -- "${DATA_DIR}")" || return 1
+    marker_mode="$(stat -c %a -- "${DATA_MARKER}")" || return 1
+    (( (8#${data_mode} & 0022) == 0 && (8#${marker_mode} & 0022) == 0 )) || return 1
+    [[ "$(stat -c %h -- "${DATA_MARKER}")" == 1 && "$(cat -- "${DATA_MARKER}")" == "aetherflow-dispatcharr-data-v1:${DATA_DIR}" ]]
+}
+
+DATA_MARKER="${DATA_DIR}/.aetherflow-data-owner"
+for path in "${INSTALL_DIR}" "${DATA_DIR}" "${CONFIG_DIR}" /install /etc/systemd/system; do
+    dispatcharr_confined_path "${path}"
+done
+DATA_OWNED=0
+COMPATIBILITY_OWNED=0
+if [[ "${DELETE_DATA:-false}" == true ]]; then
+    if dispatcharr_owned_data; then
+        DATA_OWNED=1
+        if [[ -L /data && "$(readlink -m /data)" == "${DATA_DIR}" ]]; then
+            COMPATIBILITY_OWNED=1
+        fi
+    elif [[ -e "${DATA_DIR}" || -e "${CONFIG_DIR}" || -e /data || -L /data ]]; then
+        printf '[ERROR] Ownership of %s is not established. Purge refused; legacy data, credentials and installation marker are retained. Explicit operator migration is required.\n' "${DATA_DIR}" >&2
+        exit 1
+    fi
+fi
+
 log_info "Removing ${APP_NAME}..."
 report_progress 15 "Stopping ${APP_NAME} services..."
 
-purge_systemd_unit "dispatcharr-celerybeat"
-purge_systemd_unit "dispatcharr-celery"
-purge_systemd_unit "dispatcharr"
-systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
+purge_systemd_unit "dispatcharr-celerybeat" "dispatcharr-celery" "dispatcharr"
+systemctl daemon-reload >> "$LOGFILE" 2>&1
 
 report_progress 55 "Removing ${APP_NAME} runtime files..."
 rm -rf "${INSTALL_DIR}"
 
 if [[ "${DELETE_DATA:-false}" == "true" ]]; then
     log_info "DELETE_DATA=true: Purging ${CONFIG_DIR}, ${DATA_DIR}, and PostgreSQL database..."
-    # Only unlink our compatibility path, and do so before deleting its target.
-    # An unrelated symlink or a real /data directory may belong to other apps.
-    if [[ -L /data && "$(readlink -f /data)" == "${DATA_DIR}" ]]; then
-        rm -f /data
-    elif [[ -d /data && ! -L /data ]]; then
-        for sub in logos recordings uploads m3us epgs plugins backups logs cache; do
-            rm -rf -- "/data/${sub}"
-        done
-        rmdir /data 2>/dev/null || true
+    # SQL teardown is required. Keep configuration, credentials, data and the
+    # installation marker available if PostgreSQL cannot confirm either step.
+    su - postgres -c "psql -v ON_ERROR_STOP=1 -c 'DROP DATABASE IF EXISTS dispatcharr;'" >> "$LOGFILE" 2>&1
+    su - postgres -c "psql -v ON_ERROR_STOP=1 -c 'DROP USER IF EXISTS dispatcharr;'" >> "$LOGFILE" 2>&1
+    if [[ "${DATA_OWNED}" -eq 1 ]]; then
+        rm -rf -- "${DATA_DIR}"
+        [[ ! -e "${DATA_DIR}" && ! -L "${DATA_DIR}" ]]
     fi
-    rm -rf "${CONFIG_DIR}" "${DATA_DIR}"
-    su - postgres -c "psql -c 'DROP DATABASE IF EXISTS dispatcharr;'" >> "$LOGFILE" 2>&1 || true
-    su - postgres -c "psql -c 'DROP USER IF EXISTS dispatcharr;'" >> "$LOGFILE" 2>&1 || true
+    if [[ "${COMPATIBILITY_OWNED}" -eq 1 ]]; then
+        rm -f /data
+        [[ ! -L /data && ! -e /data ]]
+    elif [[ -e /data || -L /data ]]; then
+        log_info "Unowned /data path retained; no shared contents were adopted or purged."
+    fi
+    rm -rf "${CONFIG_DIR}"
+    [[ ! -e "${CONFIG_DIR}" && ! -L "${CONFIG_DIR}" ]]
+else
+    log_info "Retaining Dispatcharr data, configuration, database, account and compatibility path; legacy ownership is not inferred."
 fi
 
-purge_system_user "${APP_USER}"
+if [[ "${DELETE_DATA:-false}" == true ]]; then
+    for database in passwd group; do
+        if getent "${database}" "${APP_USER}" >/dev/null 2>&1; then
+            if [[ "${database}" == passwd ]]; then
+                userdel "${APP_USER}"
+            else
+                groupdel "${APP_USER}"
+            fi
+        else
+            status=$?
+            [[ "${status}" == 2 ]]
+        fi
+    done
+fi
 
 remove_lock "${PACKAGE_NAME}"
 report_progress 100 "${APP_NAME} removed"

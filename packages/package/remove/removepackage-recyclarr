@@ -23,10 +23,9 @@ require_root
 log_info "Starting removal for ${PACKAGE_NAME}..."
 report_progress 20 "Stopping and disabling companion recyclarr.timer..."
 
-purge_systemd_unit "recyclarr.timer"
+purge_systemd_unit "recyclarr.timer" "recyclarr.service"
 
 report_progress 45 "Stopping and purging recyclarr.service..."
-purge_systemd_unit "recyclarr.service"
 
 report_progress 70 "Removing Recyclarr binaries, configurations, and user account..."
 rm -f /usr/local/bin/recyclarr
@@ -34,7 +33,7 @@ if [[ "${DELETE_DATA:-false}" == true ]]; then
     rm -rf /var/lib/recyclarr /etc/recyclarr /opt/recyclarr
 fi
 purge_system_user "recyclarr"
-systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
+systemctl daemon-reload >> "$LOGFILE" 2>&1
 
 remove_lock "${PACKAGE_NAME}"
 report_progress 100 "Recyclarr removed; application data retained unless DELETE_DATA=true."

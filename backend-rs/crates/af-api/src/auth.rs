@@ -405,6 +405,15 @@ pub async fn auth_middleware(mut req: Request, next: Next) -> Response {
         } else {
             format!("/api/v1/auth{}", path)
         };
+        if crate::plugins::is_plugin_request_denied(&method, &check_path)
+            || crate::plugins::is_plugin_request_denied(&method, &path)
+        {
+            return api_error(
+                StatusCode::FORBIDDEN,
+                "PLUGIN_SCOPE_DENIED",
+                "Plugin tokens cannot delegate this HTTP capability",
+            );
+        }
         if !af_services::plugins::verify_plugin_route_scope(&claims.plugin_scopes, &check_path)
             && !af_services::plugins::verify_plugin_route_scope(&claims.plugin_scopes, &path)
         {
@@ -2425,6 +2434,88 @@ mod tests {
             assert_eq!(
                 verify_proxy_auth(headers).await.status(),
                 StatusCode::UNAUTHORIZED
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_plugin_session_denies_destructive_http_capabilities() {
+        use crate::plugins::tests::{ensure_shared_test_db, run_plugin_test_in_subprocess};
+        use axum::{
+            body::Body,
+            middleware,
+            routing::{get, post},
+            Router,
+        };
+        use tower::ServiceExt;
+        if run_plugin_test_in_subprocess() {
+            return;
+        }
+        ensure_shared_test_db();
+        let app = Router::new()
+            .route(
+                "/api/v1/admin/packages/fixture/uninstall",
+                post(|| async { StatusCode::NO_CONTENT }),
+            )
+            .route(
+                "/api/v1/admin/services/fixture/control",
+                post(|| async { StatusCode::NO_CONTENT }),
+            )
+            .route(
+                "/api/v1/admin/system/update/run",
+                post(|| async { StatusCode::NO_CONTENT }),
+            )
+            .route(
+                "/api/v1/auth/system/metrics",
+                get(|| async { StatusCode::NO_CONTENT }),
+            )
+            .layer(middleware::from_fn(auth_middleware));
+        for path in [
+            "/api/v1/admin/packages/fixture/uninstall",
+            "/api/v1/admin/services/fixture/control",
+            "/api/v1/admin/system/update/run",
+            "/api/v1/auth/system/metrics",
+        ] {
+            let now = Utc::now().timestamp();
+            let claims = SessionClaims {
+                user_id: 1,
+                sub: "1".into(),
+                iss: "aetherflow".into(),
+                iat: now,
+                auth_time: now,
+                exp: now + 600,
+                jti: Uuid::new_v4().to_string(),
+                cfp: String::new(),
+                plugin_id: "fixture".into(),
+                plugin_scopes: vec![path.into()],
+            };
+            let token = encode(
+                &Header::new(Algorithm::HS256),
+                &claims,
+                &EncodingKey::from_secret(&jwt_secret_bytes()),
+            )
+            .unwrap();
+            let read = path.ends_with("metrics");
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(if read { "GET" } else { "POST" })
+                        .uri(path)
+                        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                if read {
+                    StatusCode::NO_CONTENT
+                } else {
+                    StatusCode::FORBIDDEN
+                },
+                "{path}"
             );
         }
     }

@@ -269,7 +269,7 @@ static HEAL_WORKER_ACTIVE: AtomicBool = AtomicBool::new(false);
 const MAX_HEAL_RETRIES: u32 = 3;
 const BASE_BACKOFF_SECS: u64 = 10;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct ServiceHealState {
     failure_count: u32,
     next_retry_at: Option<Instant>,
@@ -328,56 +328,68 @@ fn is_component_policy_monitored(policy: &crate::ServiceComponentPolicy) -> bool
     matches!(policy.role, "required" | "timer") || (policy.role == "optional" && policy.configured)
 }
 
-fn collect_monitored_systemd_units() -> Vec<(String, String)> {
+struct HealPollInventory {
+    monitored: Vec<(String, String)>,
+    installed: HashSet<String>,
+}
+
+fn collect_monitored_systemd_units() -> anyhow::Result<HealPollInventory> {
     let mut units: Vec<(String, String)> = vec![
         ("nginx".to_string(), "Nginx".to_string()),
         ("smbd".to_string(), "Samba (smbd)".to_string()),
         ("wsdd".to_string(), "WSDD".to_string()),
     ];
     let mut seen: HashSet<String> = units.iter().map(|(u, _)| u.clone()).collect();
+    let mut installed = seen.clone();
+    let pkgs = crate::get_package_catalog()?;
+    let rclone_vfs_configured = crate::is_rclone_vfs_configured();
 
-    if let Ok(pkgs) = crate::get_package_catalog() {
-        for pkg in pkgs {
-            if pkg.service_type == "pm2" || pkg.service_type == "docker" {
-                continue;
-            }
-            if pkg.lock_file.is_empty() || !pkg.lock_file.starts_with("/install/") {
-                continue;
-            }
-            if !resolve_fs_path(&pkg.lock_file).exists() {
-                continue;
-            }
+    for pkg in &pkgs {
+        let is_installed = crate::package_lock_installed(pkg)?;
+        if pkg.service_type == "pm2" || pkg.service_type == "docker" {
+            continue;
+        }
+        if pkg.lock_file.is_empty() || !pkg.lock_file.starts_with("/install/") {
+            continue;
+        }
+        if !is_installed {
+            continue;
+        }
 
-            for policy in crate::resolve_service_component_policies(&pkg.name) {
-                if !is_component_policy_monitored(&policy) {
-                    continue;
-                }
-                let unit = policy.unit;
-                if seen.insert(unit.clone()) {
-                    let label = if pkg.label.trim().is_empty() {
-                        pkg.name.clone()
-                    } else {
-                        pkg.label.clone()
-                    };
-                    units.push((unit, label));
-                }
+        for policy in
+            crate::service_component_policies_with_catalog(&pkg.name, rclone_vfs_configured, &pkgs)
+        {
+            installed.insert(policy.unit.clone());
+            if !is_component_policy_monitored(&policy) {
+                continue;
+            }
+            let unit = policy.unit;
+            if seen.insert(unit.clone()) {
+                let label = if pkg.label.trim().is_empty() {
+                    pkg.name.clone()
+                } else {
+                    pkg.label.clone()
+                };
+                units.push((unit, label));
             }
         }
     }
-
-    units
+    Ok(HealPollInventory {
+        monitored: units,
+        installed,
+    })
 }
 
 /// Checks if a systemd unit is healthy (`active`) or if `systemctl` is unavailable
 /// (e.g. non-systemd dev/test hosts). Returns `Some(false)` only when systemd reports
 /// a failed/inactive state for an installed unit.
 async fn check_systemd_unit_healthy(unit: &str) -> Option<bool> {
-    let output = tokio::time::timeout(
+    let output = crate::async_status_command_output(
+        "systemctl",
+        &["is-active", unit],
         Duration::from_secs(10),
-        Command::new("systemctl").args(["is-active", unit]).output(),
     )
     .await
-    .ok()?
     .ok()?;
 
     let status_text = String::from_utf8_lossy(&output.stdout)
@@ -391,11 +403,10 @@ async fn check_systemd_unit_healthy(unit: &str) -> Option<bool> {
             // Query unit metadata for failed jobs too, rather than restarting a
             // scheduled collector outside its timer's schedule.
             {
-                if let Ok(Ok(load_out)) = tokio::time::timeout(
+                if let Ok(load_out) = crate::async_status_command_output(
+                    "systemctl",
+                    &["show", "-p", "LoadState", "-p", "Type", unit],
                     Duration::from_secs(5),
-                    Command::new("systemctl")
-                        .args(["show", "-p", "LoadState", "-p", "Type", unit])
-                        .output(),
                 )
                 .await
                 {
@@ -422,22 +433,36 @@ fn unit_metadata_allows_recovery(metadata: &str) -> bool {
         && !metadata.lines().any(|line| line.trim() == "type=oneshot")
 }
 
+// Healthy polling uses one read-only journal snapshot and never owns either
+// lifecycle mutation lock. Reconciliation belongs to an actual restart attempt.
+fn collect_heal_poll_units() -> anyhow::Result<Option<HealPollInventory>> {
+    let jobs = crate::package_job_snapshot()?;
+    if !jobs.active.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(collect_monitored_systemd_units()?))
+}
+
 async fn perform_heal_check() {
-    let units = collect_monitored_systemd_units();
+    let inventory = match tokio::task::spawn_blocking(collect_heal_poll_units).await {
+        Ok(Ok(Some(units))) => units,
+        result => {
+            if let Ok(Err(error)) = result {
+                tracing::warn!(%error, "af-heal: lifecycle state unknown; skipping this check");
+            }
+            return;
+        }
+    };
+    if let Ok(mut states) = HEAL_STATES.lock() {
+        states.retain(|unit, _| {
+            inventory.installed.contains(unit) || af_runner::is_package_execution_active(unit)
+        });
+    }
     let now = Instant::now();
 
-    for (unit, display_name) in units {
-        let Ok(_lifecycle_guard) = crate::PACKAGE_LIFECYCLE_MUTEX.try_lock() else {
-            if let Ok(mut states) = HEAL_STATES.lock() {
-                states.clear();
-            }
-            return;
-        };
-        if crate::has_active_package_jobs() || af_runner::is_package_execution_active(&unit) {
-            if let Ok(mut states) = HEAL_STATES.lock() {
-                states.clear();
-            }
-            return;
+    for (unit, display_name) in inventory.monitored {
+        if af_runner::is_package_execution_active(&unit) {
+            continue;
         }
         let Some(is_healthy) = check_systemd_unit_healthy(&unit).await else {
             continue;
@@ -475,18 +500,10 @@ async fn perform_heal_check() {
                 if now < next_at {
                     (false, st.failure_count, false)
                 } else {
-                    let attempt = st.failure_count;
-                    st.failure_count += 1;
-                    let backoff_secs = BASE_BACKOFF_SECS.saturating_mul(1u64 << attempt);
-                    st.next_retry_at = Some(now + Duration::from_secs(backoff_secs));
-                    (true, st.failure_count, false)
+                    (true, st.failure_count + 1, false)
                 }
             } else {
-                let attempt = st.failure_count;
-                st.failure_count += 1;
-                let backoff_secs = BASE_BACKOFF_SECS.saturating_mul(1u64 << attempt);
-                st.next_retry_at = Some(now + Duration::from_secs(backoff_secs));
-                (true, st.failure_count, false)
+                (true, st.failure_count + 1, false)
             }
         };
 
@@ -513,6 +530,33 @@ async fn perform_heal_check() {
             continue;
         }
 
+        let Ok(_lifecycle_guard) = crate::PACKAGE_LIFECYCLE_MUTEX.try_lock() else {
+            return;
+        };
+        // Only an unhealthy unit with an eligible retry reaches this mutation
+        // preflight. The runner rechecks the reservation while taking its guard.
+        if tokio::task::spawn_blocking(crate::has_active_package_jobs)
+            .await
+            .unwrap_or(true)
+        {
+            return;
+        }
+        let previous_state = {
+            let Ok(mut states) = HEAL_STATES.lock() else {
+                continue;
+            };
+            let state = states.entry(unit.clone()).or_default();
+            let previous = state.clone();
+            state.failure_count = attempt_num;
+            state.next_retry_at = Some(
+                Instant::now()
+                    + Duration::from_secs(
+                        BASE_BACKOFF_SECS.saturating_mul(1u64 << (attempt_num - 1)),
+                    ),
+            );
+            previous
+        };
+
         tracing::warn!(
             unit = %unit,
             service = %display_name,
@@ -524,7 +568,7 @@ async fn perform_heal_check() {
         match af_runner::dispatch_heal_restart(&unit).await {
             Ok(false) => {
                 if let Ok(mut states) = HEAL_STATES.lock() {
-                    states.remove(&unit);
+                    states.insert(unit.clone(), previous_state);
                 }
             }
             Ok(true) => {
@@ -794,7 +838,7 @@ pub struct PackageUpdateRecord {
     pub checked_at: String,
     #[serde(alias = "update_url")]
     pub release_url: String,
-    #[serde(alias = "last_error", default)]
+    #[serde(alias = "last_error", default, serialize_with = "serialize_update_error")]
     pub error: String,
 }
 
@@ -818,8 +862,23 @@ struct GitHubReleaseResponse {
     html_url: String,
 }
 
-/// Returns a snapshot of all known [`PackageUpdateRecord`] entries, merging persisted
-/// rows from `app_updates` in SQLite with the in-memory [`PACKAGE_UPDATE_CACHE`].
+/// Status text is public (Marketplace) and visible to ordinary Services viewers.
+/// Only fixed summaries may cross this boundary, including historical DB/cache rows.
+pub fn public_update_error(error: &str) -> String {
+    match error {
+        "" => String::new(),
+        "Installed version could not be confirmed"
+        | "Latest version could not be confirmed"
+        | "Installed version could not be confirmed; Latest version could not be confirmed" => error.to_string(),
+        _ => "Update status could not be confirmed".to_string(),
+    }
+}
+
+fn serialize_update_error<S: serde::Serializer>(error: &str, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(&public_update_error(error))
+}
+
+/// Returns persisted and cached update records with safe status summaries.
 pub fn get_package_update_map() -> HashMap<String, PackageUpdateRecord> {
     let mut result = HashMap::new();
 
@@ -860,6 +919,9 @@ pub fn get_package_update_map() -> HashMap<String, PackageUpdateRecord> {
         }
     }
 
+    for record in result.values_mut() {
+        record.error = public_update_error(&record.error);
+    }
     result
 }
 
@@ -902,10 +964,10 @@ pub async fn refresh_package_update_by_id(pkg_id: &str) -> Option<PackageUpdateR
 /// via binary `--version` / `dpkg-query` / version file where available, queries the
 /// upstream GitHub release API (or `apt-cache` / `git ls-remote`), compares versions,
 /// caches the results in [`PACKAGE_UPDATE_CACHE`] and `app_updates`, and returns the list.
-pub async fn refresh_all_package_updates() -> Vec<PackageUpdateRecord> {
-    let Ok(pkgs) = crate::get_packages() else {
-        return Vec::new();
-    };
+pub async fn refresh_all_package_updates() -> anyhow::Result<Vec<PackageUpdateRecord>> {
+    // Inventory errors must remain unknown, never a successful empty check.
+    // Journal/catalog/lock inspection can block, so keep it off the async thread.
+    let pkgs = tokio::task::spawn_blocking(crate::get_packages).await??;
 
     let client = build_github_http_client();
     let base_url = resolve_github_api_base_url();
@@ -937,7 +999,7 @@ pub async fn refresh_all_package_updates() -> Vec<PackageUpdateRecord> {
         records.push(record);
     }
 
-    records
+    Ok(records)
 }
 
 /// Spawns the background App Update Watcher task, running an initial check after a
@@ -957,7 +1019,9 @@ pub fn start_app_update_watcher() {
         );
 
         tokio::time::sleep(Duration::from_secs(45)).await;
-        let _ = refresh_all_package_updates().await;
+        if let Err(error) = refresh_all_package_updates().await {
+            tracing::warn!(error = %error, "application update watcher could not confirm inventory");
+        }
 
         let mut ticker = tokio::time::interval(interval);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -966,7 +1030,9 @@ pub fn start_app_update_watcher() {
 
         loop {
             ticker.tick().await;
-            let _ = refresh_all_package_updates().await;
+            if let Err(error) = refresh_all_package_updates().await {
+                tracing::warn!(error = %error, "application update watcher could not confirm inventory");
+            }
         }
     });
 }
@@ -1073,7 +1139,8 @@ fn build_package_update_record(
     let installed_version = match &installed_res {
         Ok(v) => v.clone(),
         Err(e) => {
-            err_parts.push(format!("installed version: {}", e));
+            tracing::warn!(package = pkg_name, error = %e, "installed version observation failed");
+            err_parts.push("Installed version could not be confirmed");
             prev_record
                 .map(|r| r.installed_version.clone())
                 .unwrap_or_default()
@@ -1083,7 +1150,8 @@ fn build_package_update_record(
     let (latest_version, release_url) = match &latest_res {
         Ok((v, u)) => (v.clone(), u.clone()),
         Err(e) => {
-            err_parts.push(format!("latest version: {}", e));
+            tracing::warn!(package = pkg_name, error = %e, "latest version observation failed");
+            err_parts.push("Latest version could not be confirmed");
             (
                 prev_record
                     .map(|r| r.latest_version.clone())
@@ -1116,21 +1184,26 @@ fn build_package_update_record(
     }
 }
 
+async fn update_probe_output(
+    command: Command,
+    budget: Duration,
+) -> anyhow::Result<std::process::Output> {
+    // The supervisor retains process-tree ownership through cancellation,
+    // deadline/output failure and pipe cleanup; a response timeout is not enough.
+    af_runner::bounded_command::output(command, budget, 1024 * 1024)
+        .await
+        .map_err(Into::into)
+}
+
 async fn detect_installed_version(pkg: &Package) -> anyhow::Result<String> {
     match pkg.update_source.as_str() {
         "apt" => {
             if pkg.update_package.is_empty() {
                 anyhow::bail!("no apt package configured for {}", pkg.name);
             }
-            let out = tokio::time::timeout(
-                Duration::from_secs(15),
-                Command::new("dpkg-query")
-                    .args(["-W", "-f=${Version}", &pkg.update_package])
-                    .output(),
-            )
-            .await
-            .map_err(|_| anyhow::anyhow!("dpkg-query timed out"))?
-            .map_err(|e| anyhow::anyhow!("dpkg-query failed: {}", e))?;
+            let mut command = Command::new("dpkg-query");
+            command.args(["-W", "-f=${Version}", &pkg.update_package]);
+            let out = update_probe_output(command, Duration::from_secs(15)).await?;
 
             if !out.status.success() {
                 anyhow::bail!(
@@ -1161,13 +1234,9 @@ async fn detect_installed_version(pkg: &Package) -> anyhow::Result<String> {
             }
             let prog = &pkg.version_command[0];
             let args = &pkg.version_command[1..];
-            let out = tokio::time::timeout(
-                Duration::from_secs(15),
-                Command::new(prog).args(args).output(),
-            )
-            .await
-            .map_err(|_| anyhow::anyhow!("version command timed out"))?
-            .map_err(|e| anyhow::anyhow!("version command failed: {}", e))?;
+            let mut command = Command::new(prog);
+            command.args(args);
+            let out = update_probe_output(command, Duration::from_secs(15)).await?;
 
             if !out.status.success() {
                 anyhow::bail!(
@@ -1215,14 +1284,9 @@ async fn detect_latest_version(
                 if repo_url.is_empty() {
                     anyhow::bail!("missing repository URL");
                 }
-                let output = tokio::time::timeout(
-                    Duration::from_secs(20),
-                    Command::new("git")
-                        .args(["ls-remote", "--exit-code", &repo_url, "HEAD"])
-                        .output(),
-                )
-                .await
-                .map_err(|_| anyhow::anyhow!("git ls-remote HEAD timed out"))??;
+                let mut command = Command::new("git");
+                command.args(["ls-remote", "--exit-code", &repo_url, "HEAD"]);
+                let output = update_probe_output(command, Duration::from_secs(20)).await?;
                 if !output.status.success() {
                     anyhow::bail!("git ls-remote HEAD failed: {}", output.status);
                 }
@@ -1240,15 +1304,9 @@ async fn detect_latest_version(
 }
 
 async fn detect_latest_apt_version(package_name: &str) -> anyhow::Result<(String, String)> {
-    let out = tokio::time::timeout(
-        Duration::from_secs(15),
-        Command::new("apt-cache")
-            .args(["policy", package_name])
-            .output(),
-    )
-    .await
-    .map_err(|_| anyhow::anyhow!("apt-cache timed out"))?
-    .map_err(|e| anyhow::anyhow!("apt-cache failed: {}", e))?;
+    let mut command = Command::new("apt-cache");
+    command.args(["policy", package_name]);
+    let out = update_probe_output(command, Duration::from_secs(15)).await?;
 
     if !out.status.success() {
         anyhow::bail!(
@@ -1312,15 +1370,9 @@ async fn detect_latest_git_tag(repo_url: &str, repo: &str) -> anyhow::Result<(St
         anyhow::bail!("missing repository URL");
     }
 
-    let out = tokio::time::timeout(
-        Duration::from_secs(20),
-        Command::new("git")
-            .args(["ls-remote", "--tags", "--refs", repo_url.trim()])
-            .output(),
-    )
-    .await
-    .map_err(|_| anyhow::anyhow!("git ls-remote timed out"))?
-    .map_err(|e| anyhow::anyhow!("git ls-remote failed: {}", e))?;
+    let mut command = Command::new("git");
+    command.args(["ls-remote", "--tags", "--refs", repo_url.trim()]);
+    let out = update_probe_output(command, Duration::from_secs(20)).await?;
 
     if !out.status.success() {
         anyhow::bail!(
@@ -1444,6 +1496,9 @@ pub fn is_remote_version_newer(local: &str, remote: &str) -> bool {
 }
 
 fn persist_and_cache_package_update(record: &PackageUpdateRecord) -> bool {
+    let mut safe_record = record.clone();
+    safe_record.error = public_update_error(&safe_record.error);
+    let record = &safe_record;
     let mut prev_update_available = false;
     let mut had_existing = false;
 
@@ -1687,6 +1742,246 @@ fn record_mediaflow_failure(job_id: i64, reason: &str) {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn heal_state_survives_unknown_and_active_lifecycle_until_recovery() {
+        use crate::inventory_regressions::{isolated, Fixture};
+        use std::os::unix::fs::PermissionsExt;
+        let name =
+            "workers::tests::heal_state_survives_unknown_and_active_lifecycle_until_recovery";
+        if !isolated(name) {
+            return;
+        }
+        let fixture = Fixture::new();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let exhausted = ServiceHealState {
+            failure_count: MAX_HEAL_RETRIES,
+            exhausted: true,
+            next_retry_at: Some(Instant::now() + Duration::from_secs(300)),
+        };
+        let backed_off = ServiceHealState {
+            failure_count: 2,
+            exhausted: false,
+            next_retry_at: Some(Instant::now() + Duration::from_secs(300)),
+        };
+        let seeded = HashMap::from([
+            ("fixture-main".to_string(), exhausted.clone()),
+            ("nginx".to_string(), exhausted.clone()),
+            ("smbd".to_string(), backed_off),
+            ("retired-unit".to_string(), exhausted.clone()),
+        ]);
+        *HEAL_STATES.lock().unwrap() = seeded.clone();
+        let hidden = fixture.journal.with_extension("unavailable");
+        std::fs::rename(&fixture.journal, &hidden).unwrap();
+        runtime.block_on(perform_heal_check());
+        assert_eq!(*HEAL_STATES.lock().unwrap(), seeded);
+        assert!(!fixture.calls.exists());
+        std::fs::rename(&hidden, &fixture.journal).unwrap();
+        let job = crate::PackageJobInfo {
+            job_id: "seeded-heal-job".into(),
+            package_id: "fixture".into(),
+            action: "update".into(),
+            status: "updating".into(),
+            progress: 0,
+            last_line: String::new(),
+            started_at: Utc::now().to_rfc3339(),
+        };
+        assert!(crate::try_start_package_job(job));
+        runtime.block_on(perform_heal_check());
+        assert_eq!(*HEAL_STATES.lock().unwrap(), seeded);
+        assert!(!fixture.calls.exists());
+        crate::finish_package_job("fixture", "update", true, "", "seeded-heal-job").unwrap();
+        std::fs::write(&fixture.catalog, "corrupt").unwrap();
+        runtime.block_on(perform_heal_check());
+        assert_eq!(*HEAL_STATES.lock().unwrap(), seeded);
+        fixture.write_packages(&[Fixture::package("fixture", "systemd", "fixture-main")]);
+        let install = fixture.root.join("install");
+        std::fs::set_permissions(&install, std::fs::Permissions::from_mode(0o000)).unwrap();
+        assert_eq!(
+            std::fs::symlink_metadata(install.join(".fixture.lock"))
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::PermissionDenied,
+        );
+        runtime.block_on(perform_heal_check());
+        std::fs::set_permissions(&install, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(*HEAL_STATES.lock().unwrap(), seeded);
+        assert!(!fixture.calls.exists());
+        fixture.command("systemctl", "printf '%s\\n' \"$*\" >> \"$AF_STATUS_CALLS\"\ncase \"$1 $2\" in 'is-active fixture-main') echo inactive; exit 3;; is-active*) echo active;; show*) printf 'LoadState=loaded\\nType=simple\\n';; *) exit 92;; esac\n");
+        runtime.block_on(perform_heal_check());
+        {
+            let states = HEAL_STATES.lock().unwrap();
+            assert_eq!(states["fixture-main"], exhausted);
+            assert_eq!(states["nginx"], ServiceHealState::default());
+            assert_eq!(states["smbd"], ServiceHealState::default());
+            assert!(!states.contains_key("retired-unit"));
+        }
+        fixture.command("systemctl", "printf '%s\\n' \"$*\" >> \"$AF_STATUS_CALLS\"\ntest \"$1\" = is-active || exit 92\necho active\n");
+        runtime.block_on(perform_heal_check());
+        assert_eq!(
+            HEAL_STATES.lock().unwrap()["fixture-main"],
+            ServiceHealState::default()
+        );
+        let suspended = HashMap::from([
+            (
+                "nginx".to_string(),
+                ServiceHealState {
+                    failure_count: 1,
+                    next_retry_at: None,
+                    exhausted: false,
+                },
+            ),
+            ("fixture-main".to_string(), exhausted),
+        ]);
+        *HEAL_STATES.lock().unwrap() = suspended.clone();
+        fixture.command("systemctl", "printf '%s\\n' \"$*\" >> \"$AF_STATUS_CALLS\"\ncase \"$1\" in is-active) echo inactive; exit 3;; show) printf 'LoadState=loaded\\nType=simple\\n';; *) exit 92;; esac\n");
+        let local_guard = crate::PACKAGE_LIFECYCLE_MUTEX.try_lock().unwrap();
+        runtime.block_on(perform_heal_check());
+        assert_eq!(*HEAL_STATES.lock().unwrap(), suspended);
+        drop(local_guard);
+        let calls = std::fs::read_to_string(&fixture.calls).unwrap();
+        assert!(calls
+            .lines()
+            .all(|call| call.starts_with("is-active ") || call.starts_with("show ")));
+        println!("seeded exhausted budgets, notification flag and retry deadlines survive journal/catalog uncertainty and active jobs; only recovered/deleted units reset");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn healing_status_timeouts_kill_and_reap_both_probe_children() {
+        use crate::inventory_regressions::{isolated, Fixture};
+        let name = "workers::tests::healing_status_timeouts_kill_and_reap_both_probe_children";
+        if !isolated(name) {
+            return;
+        }
+        let fixture = Fixture::new();
+        let fifo = fixture.root.join("blocked-health");
+        assert!(std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success());
+        std::env::set_var("AF_BLOCK_FIFO", fifo);
+        std::env::set_var("AF_STATUS_PID", fixture.root.join("health.pid"));
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        fixture.command(
+            "systemctl",
+            "printf '%s' \"$$\" > \"$AF_STATUS_PID\"\nexec /bin/cat \"$AF_BLOCK_FIFO\"\n",
+        );
+        let start = Instant::now();
+        assert_eq!(
+            runtime.block_on(check_systemd_unit_healthy("fixture-main")),
+            None
+        );
+        assert!(start.elapsed() >= Duration::from_secs(10));
+        assert!(start.elapsed() < Duration::from_secs(12));
+        let pid = std::fs::read_to_string(fixture.root.join("health.pid")).unwrap();
+        assert!(!Path::new("/proc").join(pid).exists());
+        fixture.command("systemctl", "case \"$1\" in is-active) echo inactive; exit 3;; show) printf '%s' \"$$\" > \"$AF_STATUS_PID\"; exec /bin/cat \"$AF_BLOCK_FIFO\";; *) exit 92;; esac\n");
+        let start = Instant::now();
+        assert_eq!(
+            runtime.block_on(check_systemd_unit_healthy("fixture-main")),
+            None
+        );
+        assert!(start.elapsed() >= Duration::from_secs(5));
+        assert!(start.elapsed() < Duration::from_secs(7));
+        let pid = std::fs::read_to_string(fixture.root.join("health.pid")).unwrap();
+        assert!(!Path::new("/proc").join(pid).exists());
+        println!("actual is-active (10s) and metadata show (5s) timeouts both return unknown and reap FIFO-blocked children");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn heal_poll_is_read_only_and_unknown_snapshots_skip_controls() {
+        let name = "workers::tests::heal_poll_is_read_only_and_unknown_snapshots_skip_controls";
+        if std::env::var("AF_HEAL_POLL_TEST_CHILD").as_deref() != Ok(name) {
+            assert!(std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", name, "--nocapture"])
+                .env("AF_HEAL_POLL_TEST_CHILD", name)
+                .status()
+                .unwrap()
+                .success());
+            return;
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("af-heal-poll-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::env::set_var("AETHERFLOW_FS_ROOT", &root);
+        std::env::set_var("AETHERFLOW_RELEASE_ROOT", &root);
+        let catalog = root.join("packages.json");
+        std::fs::write(
+            &catalog,
+            &serde_json::to_string(&[af_models::Package {
+                name: "fixture".into(),
+                service_name: "fixture".into(),
+                service_type: "systemd".into(),
+                lock_file: "/install/.fixture.lock".into(),
+                ..Default::default()
+            }])
+            .unwrap(),
+        )
+        .unwrap();
+        std::env::set_var("AETHERFLOW_PACKAGES_CONFIG", catalog);
+        let cfg = af_release::ReleaseConfig::for_root(&root);
+        let path = af_release::config::try_resolve_db_path(&cfg, None)
+            .unwrap()
+            .path;
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        crate::initialize_package_jobs(rusqlite::Connection::open(&path).unwrap()).unwrap();
+        let controls = root.join("bin");
+        std::fs::create_dir(&controls).unwrap();
+        let calls = root.join("calls");
+        let ctl = controls.join("systemctl");
+        std::fs::write(&ctl, "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$AF_HEAL_CALLS\"\ncase \"$1\" in is-active) echo active;; *) exit 92;; esac\n").unwrap();
+        std::fs::set_permissions(&ctl, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::env::set_var("AF_HEAL_CALLS", &calls);
+        std::env::set_var(
+            "PATH",
+            format!("{}:{}", controls.display(), std::env::var("PATH").unwrap()),
+        );
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        // Healthy observations still run while genuine mutations own both locks.
+        let admission = af_runner::acquire_lifecycle_admission_lock(Some(&root)).unwrap();
+        let local = crate::PACKAGE_LIFECYCLE_MUTEX.try_lock().unwrap();
+        runtime.block_on(perform_heal_check());
+        let observed = std::fs::read_to_string(&calls).unwrap_or_default();
+        assert_eq!(
+            observed.lines().count(),
+            3,
+            "healthy polling must not take mutation locks: {observed}"
+        );
+        assert!(observed.lines().all(|line| line.starts_with("is-active ")));
+        drop(local);
+        drop(admission);
+        std::fs::remove_file(&calls).unwrap();
+        let info = crate::PackageJobInfo {
+            job_id: "heal-poll-active".into(),
+            package_id: "fixture".into(),
+            action: "update".into(),
+            status: "updating".into(),
+            progress: 10,
+            last_line: String::new(),
+            started_at: chrono::Utc::now().to_rfc3339(),
+        };
+        assert!(crate::try_start_package_job(info));
+        runtime.block_on(perform_heal_check());
+        assert!(!calls.exists(), "a real active job excludes heal checks");
+        crate::finish_package_job("fixture", "update", true, "", "heal-poll-active").unwrap();
+        // A missing journal is unknown, not an empty service inventory.
+        let hidden = path.with_extension("temporarily-unavailable");
+        std::fs::rename(&path, &hidden).unwrap();
+        assert!(crate::get_active_services().is_err());
+        runtime.block_on(perform_heal_check());
+        assert!(
+            !calls.exists(),
+            "unknown state must not attempt service controls"
+        );
+        std::fs::rename(&hidden, &path).unwrap();
+        runtime.block_on(perform_heal_check());
+        assert_eq!(std::fs::read_to_string(&calls).unwrap().lines().count(), 3);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn test_health_recovery_excludes_scheduled_oneshot_jobs() {
         assert!(!unit_metadata_allows_recovery(
@@ -1714,6 +2009,154 @@ mod tests {
             [],
         )
         .unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    struct ProbeCleanup(std::path::PathBuf);
+
+    #[cfg(target_os = "linux")]
+    impl ProbeCleanup {
+        fn processes(&self) -> Vec<u32> {
+            std::fs::read_dir(&self.0)
+                .unwrap()
+                .flatten()
+                .filter(|entry| {
+                    entry
+                        .path()
+                        .extension()
+                        .is_some_and(|extension| extension == "pids")
+                })
+                .flat_map(|entry| {
+                    std::fs::read_to_string(entry.path())
+                        .unwrap()
+                        .split_whitespace()
+                        .map(|pid| pid.parse::<u32>().unwrap())
+                        .collect::<Vec<_>>()
+                })
+                .collect()
+        }
+        fn live(&self) -> Vec<u32> {
+            self.processes()
+                .into_iter()
+                .filter(|pid| {
+                    std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                        .ok()
+                        .and_then(|stat| {
+                            stat.rsplit_once(") ")
+                                .map(|(_, fields)| !fields.starts_with('Z') && !fields.starts_with('X'))
+                        })
+                        .unwrap_or(false)
+                })
+                .collect()
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    impl Drop for ProbeCleanup {
+        fn drop(&mut self) {
+            for pid in self.live() {
+                // Only PIDs published by this disposable fixture are eligible.
+                let _ = std::process::Command::new("/bin/kill")
+                    .args(["-KILL", "--", &pid.to_string()])
+                    .status();
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn slow_update_helpers(fixture: &crate::inventory_regressions::Fixture) -> ProbeCleanup {
+        for name in ["dpkg-query", "apt-cache", "git", "fixture-version"] {
+            fixture.command(name, r#"exec /usr/bin/python3 -c 'import os,pathlib,signal,subprocess,sys
+root=pathlib.Path(os.environ["AF_UPDATE_PROBE_ROOT"])
+child=subprocess.Popen([sys.executable,"-c","import signal; signal.pause()"])
+(root/(str(os.getpid())+".pids")).write_text(str(os.getpid())+" "+str(child.pid))
+if os.environ.get("AF_UPDATE_PROBE_OVERFLOW"): sys.stdout.write("x"*(2*1024*1024)); sys.stdout.flush()
+signal.pause()'
+    "#);
+        }
+        std::env::set_var("AF_UPDATE_PROBE_ROOT", &fixture.root);
+        ProbeCleanup(fixture.root.clone())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn version_probe_timeouts_reap_apt_binary_and_git_process_trees() {
+        use crate::inventory_regressions::{isolated, Fixture};
+        let name = "workers::tests::version_probe_timeouts_reap_apt_binary_and_git_process_trees";
+        if !isolated(name) {
+            return;
+        }
+        let fixture = Fixture::new();
+        let cleanup = slow_update_helpers(&fixture);
+        let mut package = Fixture::package("fixture", "systemd", "fixture");
+        package["update_source"] = serde_json::json!("apt");
+        package["update_package"] = serde_json::json!("fixture");
+        let apt: Package = serde_json::from_value(package.clone()).unwrap();
+        package["update_source"] = serde_json::json!("binary");
+        package["version_command"] = serde_json::json!(["fixture-version"]);
+        let binary: Package = serde_json::from_value(package.clone()).unwrap();
+        package["update_source"] = serde_json::json!("git");
+        package["update_repo_url"] = serde_json::json!("https://fixture.invalid/repo.git");
+        let git: Package = serde_json::from_value(package).unwrap();
+        let client = reqwest::Client::new();
+        let started = Instant::now();
+        let (installed_apt, installed_binary, latest_apt, latest_head, latest_tag) = tokio::join!(
+            detect_installed_version(&apt),
+            detect_installed_version(&binary),
+            detect_latest_apt_version("fixture"),
+            detect_latest_version(&client, "https://fixture.invalid", &git),
+            detect_latest_git_tag("https://fixture.invalid/repo.git", "fixture/repo"),
+        );
+        assert!(
+            installed_apt.is_err()
+                && installed_binary.is_err()
+                && latest_apt.is_err()
+                && latest_head.is_err()
+                && latest_tag.is_err()
+        );
+        assert!(started.elapsed() < Duration::from_secs(23));
+        assert_eq!(
+            cleanup.processes().len(),
+            10,
+            "all five real detector paths must execute"
+        );
+        assert!(
+            cleanup.live().is_empty(),
+            "timed-out helpers survived: {:?}",
+            cleanup.live()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn version_probe_cancellation_and_overflow_retain_cleanup_ownership() {
+        use crate::inventory_regressions::{isolated, Fixture};
+        let name = "workers::tests::version_probe_cancellation_and_overflow_retain_cleanup_ownership";
+        if !isolated(name) {
+            return;
+        }
+        let fixture = Fixture::new();
+        let cleanup = slow_update_helpers(&fixture);
+        let task = tokio::spawn(update_probe_output(
+            Command::new("fixture-version"),
+            Duration::from_secs(30),
+        ));
+        let ready = Instant::now() + Duration::from_secs(3);
+        while cleanup.processes().is_empty() && Instant::now() < ready {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(cleanup.processes().len(), 2);
+        task.abort();
+        let _ = task.await;
+        let cleaned = Instant::now() + Duration::from_secs(2);
+        while !cleanup.live().is_empty() && Instant::now() < cleaned {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(cleanup.live().is_empty(), "cancelled helper survived");
+        std::env::set_var("AF_UPDATE_PROBE_OVERFLOW", "1");
+        let result = update_probe_output(Command::new("fixture-version"), Duration::from_secs(5)).await;
+        assert!(result.is_err());
+        assert!(cleanup.live().is_empty(), "oversized helper survived");
     }
 
     #[test]
@@ -1764,6 +2207,37 @@ mod tests {
     }
 
     #[test]
+    fn update_failures_never_copy_command_diagnostics_into_status() {
+        let record = build_package_update_record(
+            "fixture", true,
+            Err(anyhow::anyhow!("SYNTHETIC_PRIVATE_DIAGNOSTIC /etc/private/config")),
+            Err(anyhow::anyhow!("remote endpoint returned SYNTHETIC_PRIVATE_DIAGNOSTIC")),
+            None, "2026-11-06T00:00:00Z".into(),
+        );
+        assert_eq!(record.error, "Installed version could not be confirmed; Latest version could not be confirmed");
+        assert!(!serde_json::to_string(&record).unwrap().contains("SYNTHETIC_PRIVATE_DIAGNOSTIC"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_update_errors_are_sanitized_from_database_and_cache() {
+        use crate::inventory_regressions::{isolated, Fixture};
+        if !isolated("workers::tests::legacy_update_errors_are_sanitized_from_database_and_cache") { return; }
+        let _fixture = Fixture::new();
+        af_db::init_db().unwrap();
+        af_db::get_conn().unwrap().execute(
+            "INSERT INTO app_updates(package_name,installed_version,latest_version,update_available,last_error) VALUES('fixture','1.0','1.1',1,'SYNTHETIC_PRIVATE_DIAGNOSTIC')", [],
+        ).unwrap();
+        assert_eq!(get_package_update_map()["fixture"].error, "Update status could not be confirmed");
+        let mut raw = get_package_update_map()["fixture"].clone();
+        raw.error = "different SYNTHETIC_PRIVATE_DIAGNOSTIC".into();
+        PACKAGE_UPDATE_CACHE.lock().unwrap().insert("fixture".into(), raw);
+        let safe = get_package_update_map();
+        assert_eq!(safe["fixture"].error, "Update status could not be confirmed");
+        assert!(safe["fixture"].update_available);
+    }
+
+    #[test]
     fn test_build_package_update_record_preserves_previous_versions_on_failure() {
         let prev = PackageUpdateRecord {
             package_id: "radarr".to_string(),
@@ -1791,10 +2265,7 @@ mod tests {
             "https://github.com/Radarr/Radarr/releases/tag/v5.15.0"
         );
         assert!(failed.update_available);
-        assert!(failed.error.contains("installed version: binary not found"));
-        assert!(failed
-            .error
-            .contains("latest version: github rate limit exceeded"));
+        assert_eq!(failed.error, "Installed version could not be confirmed; Latest version could not be confirmed");
     }
 
     #[test]

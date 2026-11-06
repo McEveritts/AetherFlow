@@ -149,16 +149,23 @@ youtube_ready() {
 
 youtube_remove() {
     require_root
-    local app="$1" unit
+    local app="$1"
     shift
-    for unit in "af-${app}" "$@"; do
-        if [[ -f "/etc/systemd/system/${unit}.service" ]]; then
-            systemctl disable --now "${unit}.service"
-            rm -f "/etc/systemd/system/${unit}.service"
-            rm -rf "/etc/systemd/system/${unit}.service.d"
-        fi
-    done
-    systemctl daemon-reload
-    remove_lock "$app"
-    print_info "${app} removed. Sources, configuration, PostgreSQL database and user data are preserved for reinstall."
+    case "$app" in piped|invidious) ;; *) return 1 ;; esac
+    export LOGFILE="/var/log/aetherflow/remove-${app}.log"
+    mkdir -p "$(dirname "$LOGFILE")" || return 1
+    purge_systemd_unit "af-${app}" "$@" || return 1
+    if [[ "${DELETE_DATA:-false}" == true ]]; then
+        runuser -u postgres -- psql --dbname=postgres -v ON_ERROR_STOP=1 --set="app=$app" >> "$LOGFILE" 2>&1 <<'SQL' || return 1
+SELECT format('DROP DATABASE IF EXISTS %I', :'app') \gexec
+SELECT format('DROP ROLE IF EXISTS %I', :'app') \gexec
+SQL
+        rm -rf "/opt/${app}" "/etc/${app}" "/var/lib/${app}" || return 1
+        purge_system_user "$app" || return 1
+        remove_lock "$app" || return 1
+        print_info "${app} purged, including its sources, configuration, PostgreSQL database and user data."
+    else
+        remove_lock "$app" || return 1
+        print_info "${app} removed. Sources, configuration, PostgreSQL database and user data are preserved for reinstall."
+    fi
 }

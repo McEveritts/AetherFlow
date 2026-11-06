@@ -28,8 +28,8 @@ report_progress 20 "Stopping and removing syncthing.service..."
 purge_systemd_unit "syncthing"
 
 report_progress 50 "Purging Syncthing APT package and repository..."
-DEBIAN_FRONTEND=noninteractive apt-get "$APT_REMOVE_ACTION" -y -qq syncthing >> "$LOGFILE" 2>&1 || true
-DEBIAN_FRONTEND=noninteractive apt-get autoremove -y -qq >> "$LOGFILE" 2>&1 || true
+DEBIAN_FRONTEND=noninteractive apt-get "$APT_REMOVE_ACTION" -y -qq syncthing >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get autoremove -y -qq >> "$LOGFILE" 2>&1
 rm -f /etc/apt/sources.list.d/syncthing.list /etc/apt/keyrings/syncthing-archive-keyring.gpg
 
 report_progress 80 "Removing Syncthing state directory and user account..."
@@ -37,7 +37,7 @@ if [[ "${DELETE_DATA:-false}" == true ]]; then
     rm -rf /var/lib/syncthing
 fi
 purge_system_user "syncthing"
-systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
+systemctl daemon-reload >> "$LOGFILE" 2>&1
 
 remove_lock "${PACKAGE_NAME}"
 report_progress 100 "Syncthing removed; application data retained unless DELETE_DATA=true."

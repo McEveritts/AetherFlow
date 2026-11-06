@@ -244,11 +244,21 @@ has_lock() {
     [[ -f "$(lock_path "$package_name")" ]]
 }
 
+launch_detached_helper() (
+    local maintenance_fd="${AF_MAINTENANCE_GUARD_FD:-}"
+    if [[ -n "$maintenance_fd" ]]; then
+        [[ "$maintenance_fd" =~ ^[0-9]+$ && "$maintenance_fd" -gt 2 ]] || return 1
+        exec {maintenance_fd}>&-
+    fi
+    unset AF_MAINTENANCE_GUARD_FD
+    "$@" </dev/null >/dev/null 2>&1 &
+)
+
 write_lock() {
     local package_name="$1"
     touch "$(lock_path "$package_name")"
     if [[ -x /usr/local/bin/af-certbot-sync ]]; then
-        /usr/local/bin/af-certbot-sync >/dev/null 2>&1 &
+        launch_detached_helper /usr/local/bin/af-certbot-sync
     fi
 }
 
@@ -418,30 +428,85 @@ ensure_node() {
     sync_node_global_bins
 }
 
-purge_systemd_unit() {
+systemd_unit_inactive() {
+    local unit="$1" absent_only="${2:-false}" state line load_state="" active_state=""
+    state="$(systemctl show --property=LoadState --property=ActiveState -- "$unit" 2>/dev/null)" || return 1
+    while IFS= read -r line; do
+        case "$line" in
+            LoadState=*) load_state="${line#LoadState=}" ;;
+            ActiveState=*) active_state="${line#ActiveState=}" ;;
+        esac
+    done <<< "$state"
+    [[ "$active_state" == inactive ]] || return 1
+    if [[ "$absent_only" == true ]]; then
+        [[ "$load_state" == not-found ]]
+    else
+        [[ "$load_state" == loaded || "$load_state" == masked || "$load_state" == not-found ]]
+    fi
+}
+
+stop_systemd_unit() {
     local unit="$1"
-    case "$unit" in
-        *.service|*.timer|*.socket) ;;
-        *) unit="${unit}.service" ;;
-    esac
-    systemctl stop "$unit" >/dev/null 2>&1 || true
-    systemctl disable "$unit" >/dev/null 2>&1 || true
-    systemctl reset-failed "$unit" >/dev/null 2>&1 || true
-    rm -f "/etc/systemd/system/${unit}"
-    rm -rf "/etc/systemd/system/${unit}.d"
+    if systemctl stop -- "$unit" >/dev/null 2>&1; then
+        return 0
+    fi
+    if systemd_unit_inactive "$unit"; then
+        return 0
+    fi
+    print_error "Cannot prove ${unit} is stopped; refusing teardown and data deletion."
+    return 1
+}
+
+purge_systemd_unit() {
+    local unit
+    local -a units=() triggers=()
+    for unit in "$@"; do
+        [[ "$unit" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.@:-]*$ && "$unit" != *..* ]] || return 1
+        case "$unit" in
+            *.service|*.timer|*.socket) ;;
+            *) unit="${unit}.service" ;;
+        esac
+        case "$unit" in
+            *.timer|*.socket) triggers+=("$unit") ;;
+            *) units+=("$unit") ;;
+        esac
+    done
+    units=("${triggers[@]}" "${units[@]}")
+    for unit in "${units[@]}"; do
+        stop_systemd_unit "$unit" || return 1
+    done
+    for unit in "${units[@]}"; do
+        if ! systemctl disable -- "$unit" >/dev/null 2>&1; then
+            systemd_unit_inactive "$unit" true || return 1
+        fi
+    done
+    for unit in "${units[@]}"; do
+        if ! systemctl reset-failed -- "$unit" >/dev/null 2>&1; then
+            systemd_unit_inactive "$unit" true || return 1
+        fi
+        rm -f "/etc/systemd/system/${unit}" || return 1
+        rm -rf "/etc/systemd/system/${unit}.d" || return 1
+    done
+    systemctl daemon-reload
 }
 
 purge_system_user() {
-    local username="$1"
+    local username="$1" database program status
     if [[ "${DELETE_DATA:-false}" != true ]]; then
         log_info "Retaining ${username} account and home directory with application data"
         return 0
     fi
-    if [[ -n "$username" && "$username" != "root" && "$username" != "www-data" ]]; then
-        userdel -r "$username" >/dev/null 2>&1 || userdel "$username" >/dev/null 2>&1 || true
-        groupdel "$username" >/dev/null 2>&1 || true
-        rm -rf "/home/${username}"
-    fi
+    [[ "$username" =~ ^[a-z_][a-z0-9_-]*$ && "$username" != root && "$username" != www-data ]] || return 1
+    for database in passwd group; do
+        if getent "$database" "$username" >/dev/null 2>&1; then
+            if [[ "$database" == passwd ]]; then program=userdel; else program=groupdel; fi
+            "$program" "$username" >/dev/null 2>&1 || return 1
+        else
+            status=$?
+            [[ "$status" == 2 ]] || return 1
+        fi
+    done
+    rm -rf "/home/${username}"
 }
 
 load_master_credentials() {

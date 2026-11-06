@@ -14,6 +14,7 @@ pub mod plugins;
 #[cfg(test)]
 mod plugins_router_tests;
 pub mod routes;
+mod service_logs;
 pub mod storage;
 pub mod streaming_emby;
 pub mod streaming_ext;
@@ -182,6 +183,18 @@ async fn main() -> anyhow::Result<()> {
 
     // Initialize SQLite WAL Database & AES-256-GCM Secret Encryption
     af_db::init_db()?;
+    af_services::initialize_package_jobs(rusqlite::Connection::open(af_db::get_db_path())?)?;
+    tokio::spawn(async {
+        let mut interval = tokio::time::interval(Duration::from_secs(15));
+        loop {
+            interval.tick().await;
+            match tokio::task::spawn_blocking(af_services::reconcile_package_jobs).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => tracing::warn!(%error, "package lifecycle reconciliation failed"),
+                Err(error) => tracing::warn!(%error, "package lifecycle reconciliation task failed"),
+            }
+        }
+    });
     af_db::init_aes_key()?;
     if let Err(e) = af_db::migrate_legacy_secrets() {
         tracing::warn!(error = %e, "failed to migrate legacy secrets");
@@ -212,6 +225,7 @@ async fn main() -> anyhow::Result<()> {
     // Background Subsystems: Metrics Recorder, Auto-Heal, Smart Backup, App Update Watcher,
     // Cluster Master/Worker Runtime, Notification Rule Engine, and Jellyfin Streaming Poller
     if !disable_workers {
+        af_services::lifecycle_cache::start_worker();
         af_services::workers::start_metrics_recorder();
         if !disable_autoheal {
             af_services::workers::start_heal_worker(10);

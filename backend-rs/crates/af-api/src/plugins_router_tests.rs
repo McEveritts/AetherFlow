@@ -8,6 +8,102 @@ use std::fs;
 use uuid::Uuid;
 
 #[tokio::test]
+async fn destructive_plugin_request_time_gate_preserves_admin_users_and_readers() {
+    use axum::http::Method;
+    use axum::middleware;
+    use axum::routing::{get, post};
+    use tower::ServiceExt;
+
+    let app = axum::Router::new()
+        .route(
+            "/api/v1/admin/packages/demo/uninstall",
+            post(|| async { StatusCode::NO_CONTENT }),
+        )
+        .route(
+            "/api/v1/admin/services/aetherflow-api/control",
+            post(|| async { StatusCode::NO_CONTENT }),
+        )
+        .route(
+            "/api/v1/admin/system/update/run",
+            post(|| async { StatusCode::NO_CONTENT }),
+        )
+        .route(
+            "/api/v1/admin/services/restart/status",
+            get(|| async { StatusCode::NO_CONTENT }),
+        )
+        .route_layer(middleware::from_fn(crate::auth::admin_only_middleware));
+    for path in [
+        "/api/v1/admin/packages/demo/uninstall",
+        "/api/v1/admin/services/aetherflow-api/control",
+        "/api/v1/admin/system/update/run",
+        "/api/v1/admin/services/restart/status",
+    ] {
+        let method = if path.ends_with("/status") {
+            Method::GET
+        } else {
+            Method::POST
+        };
+        for scope in [path, "/api/v1/admin/*", "/api/*"] {
+            let claims = PluginTokenClaims {
+                typ: PLUGIN_TOKEN_TYP.into(),
+                iss: PLUGIN_TOKEN_ISSUER.into(),
+                aud: PLUGIN_TOKEN_AUDIENCE.into(),
+                sub: "plugin:fixture".into(),
+                plugin_id: "fixture".into(),
+                jti: "fixture".into(),
+                iat: 1,
+                exp: 2,
+                epoch: 1,
+                scopes: vec![PluginScopeRule {
+                    method: method.to_string(),
+                    route: scope.into(),
+                }],
+            };
+            let mut request = Request::builder()
+                .method(method.clone())
+                .uri(path)
+                .body(Body::empty())
+                .unwrap();
+            request.extensions_mut().insert(claims);
+            let response = app.clone().oneshot(request).await.unwrap();
+            assert_eq!(
+                response.status(),
+                if method == Method::GET {
+                    StatusCode::NO_CONTENT
+                } else {
+                    StatusCode::FORBIDDEN
+                },
+                "{method} {path} from {scope}"
+            );
+        }
+        for role in ["admin", "user", "plugin"] {
+            let mut request = Request::builder()
+                .method(method.clone())
+                .uri(path)
+                .body(Body::empty())
+                .unwrap();
+            request.extensions_mut().insert(crate::auth::AuthUser {
+                user_id: 1,
+                username: "fixture".into(),
+                role: role.into(),
+                jti: "fixture".into(),
+                plugin_id: None,
+                plugin_scopes: Vec::new(),
+            });
+            let response = app.clone().oneshot(request).await.unwrap();
+            assert_eq!(
+                response.status(),
+                if role == "admin" {
+                    StatusCode::NO_CONTENT
+                } else {
+                    StatusCode::FORBIDDEN
+                }
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn test_end_to_end_plugin_router_boundaries_revocation_and_proxy_stripping() {
     if run_plugin_test_in_subprocess() {
         return;
@@ -16,6 +112,7 @@ async fn test_end_to_end_plugin_router_boundaries_revocation_and_proxy_stripping
     use tower::ServiceExt;
 
     let _env_guard = test_env_lock().lock().await;
+    std::env::set_var("ALLOWED_HOSTS", "localhost");
     let _ = ensure_shared_test_db();
 
     let tmp = std::env::temp_dir().join(format!("af-plugin-e2e-{}", Uuid::new_v4()));

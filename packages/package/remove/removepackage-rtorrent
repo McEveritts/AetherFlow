@@ -25,6 +25,13 @@ report_progress 25 "Stopping and purging rtorrent.service..."
 
 purge_systemd_unit "rtorrent"
 killall -9 rtorrent >> "$LOGFILE" 2>&1 || true
+if pgrep -x rtorrent >> "$LOGFILE" 2>&1; then
+    print_error "rTorrent processes remain; refusing teardown and data deletion."
+    exit 1
+else
+    status=$?
+    [[ "$status" == 1 ]] || exit 1
+fi
 
 report_progress 65 "Removing rTorrent session data and system user..."
 rm -rf /run/rtorrent
@@ -32,7 +39,7 @@ if [[ "${DELETE_DATA:-false}" == true ]]; then
     rm -rf /var/lib/rtorrent
 fi
 purge_system_user "rtorrent"
-systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
+systemctl daemon-reload >> "$LOGFILE" 2>&1
 
 remove_lock "${PACKAGE_NAME}"
 report_progress 100 "rTorrent removed; application data retained unless DELETE_DATA=true."

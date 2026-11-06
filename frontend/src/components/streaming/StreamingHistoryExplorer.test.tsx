@@ -8,7 +8,10 @@ import { StreamingHistoryPage, CanonicalStreamingHistoryItem } from '@/lib/strea
 
 Object.assign(globalThis, { TextEncoder, TextDecoder });
 
-jest.mock('@/components/streaming/StreamingInsights', () => ({ __esModule: true, default: () => null }));
+jest.mock('@/components/streaming/StreamingInsights', () => ({ __esModule: true, default: ({ onDrilldown }: { onDrilldown: (patch: { userId?: string; itemId?: string; serverId?: string }) => void }) => <div>
+    <button onClick={() => onDrilldown({ userId: 'drilled-user', serverId: 'scoped-server' })}>Test user drilldown</button>
+    <button onClick={() => onDrilldown({ itemId: 'drilled-item', serverId: '' })}>Test item drilldown</button>
+</div> }));
 jest.mock('@/components/streaming/StreamingPortability', () => ({ __esModule: true, default: () => null }));
 jest.mock('@/components/streaming/StreamingHistoryAdmin', () => ({ __esModule: true, default: () => null }));
 
@@ -128,6 +131,22 @@ function makeHistoryPage(
 }
 
 describe('StreamingHistoryExplorer', () => {
+    it('replaces prior drilldown facets and reveals effective all-instance filters', async () => {
+        mockedApiFetch.mockResolvedValue(createJsonResponse(makeHistoryPage()));
+        render(<StreamingHistoryExplorer />);
+        await screen.findByText('Dune: Part Two');
+        fireEvent.click(screen.getByRole('button', { name: 'Test user drilldown' }));
+        expect(screen.getByLabelText('Provider User ID')).toHaveValue('drilled-user');
+        fireEvent.click(screen.getByRole('button', { name: 'Test item drilldown' }));
+        expect(screen.getByLabelText('Provider User ID')).toHaveValue('');
+        await waitFor(() => {
+            const url = String(mockedApiFetch.mock.calls[mockedApiFetch.mock.calls.length - 1][0]);
+            expect(url).toContain('itemId=drilled-item');
+            expect(url).not.toContain('userId=drilled-user');
+            expect(url).not.toContain('serverId=scoped-server');
+        });
+    });
+
     beforeEach(() => {
         jest.clearAllMocks();
         mockAuthUser = { id: 1, username: 'admin_operator', role: 'admin' };

@@ -17,10 +17,7 @@ require_root
 export LOGFILE="/var/log/aetherflow/remove-xrdp.log"
 trap 'print_error "XRDP removal failed; see ${LOGFILE}."' ERR
 report_progress 20 "Stopping XRDP and its session manager..."
-for unit in xrdp.service xrdp-sesman.service; do
-    systemctl stop "$unit" >> "$LOGFILE" 2>&1 || true
-    systemctl disable "$unit" >> "$LOGFILE" 2>&1 || true
-done
+purge_systemd_unit xrdp.service xrdp-sesman.service
 rollback_file /etc/xrdp/startwm.sh
 report_progress 60 "Removing XRDP; preserving Linux users and shared desktop dependencies..."
 DEBIAN_FRONTEND=noninteractive apt-get remove -y xrdp xorgxrdp >> "$LOGFILE" 2>&1

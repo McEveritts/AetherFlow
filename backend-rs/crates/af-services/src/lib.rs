@@ -1,7 +1,18 @@
 pub mod cluster_daemon;
+pub mod lifecycle_cache;
 pub mod mutators;
 pub mod plugins;
 pub mod workers;
+mod service_observations;
+
+#[cfg(all(test, unix))]
+mod inventory_regressions;
+#[cfg(all(test, unix))]
+mod http_lifecycle_regressions;
+#[cfg(all(test, unix))]
+mod readiness_regressions;
+#[cfg(all(test, unix))]
+mod native_metadata_regressions;
 
 use af_models::{Package, PackageAutomation};
 use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
@@ -13,7 +24,6 @@ use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command as StdCommand;
 use std::sync::{Mutex, RwLock};
 use std::time::{Duration, Instant};
 use tokio::process::Command;
@@ -22,80 +32,142 @@ use tokio::process::Command;
 // Package Catalog, Automation & Marketplace Orchestration (`package_service.go`)
 // ─────────────────────────────────────────────────────────────────────────────
 
-const EMBEDDED_PACKAGES_JSON: &str =
-    include_str!("../../../../config/packages.json");
-const EMBEDDED_AUTOMATION_JSON: &str =
-    include_str!("../../../../config/package_automation.json");
+const EMBEDDED_PACKAGES_JSON: &str = include_str!("../../../../config/packages.json");
+const EMBEDDED_AUTOMATION_JSON: &str = include_str!("../../../../config/package_automation.json");
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PackageJobInfo {
-    pub package_id: String,
-    pub action: String,
-    pub status: String,
-    pub progress: i32,
-    pub last_line: String,
-    pub started_at: String,
-}
+mod package_jobs;
+pub use package_jobs::*;
 
-static ACTIVE_PACKAGE_JOBS: Lazy<RwLock<HashMap<String, PackageJobInfo>>> =
-    Lazy::new(|| RwLock::new(HashMap::new()));
-
-// Health recovery must finish before a lifecycle job intentionally stops services.
+// Shared with health recovery and API controls. Cross-process exclusion lives
+// in the runner's maintenance lock, since an API mutex cannot survive restart.
 pub static PACKAGE_LIFECYCLE_MUTEX: Lazy<tokio::sync::Mutex<()>> =
     Lazy::new(|| tokio::sync::Mutex::new(()));
 
-pub fn has_active_package_jobs() -> bool {
-    ACTIVE_PACKAGE_JOBS
-        .read()
-        .map(|jobs| {
-            jobs.values().any(|job| {
-                matches!(
-                    job.status.as_str(),
-                    "installing" | "updating" | "uninstalling"
-                )
-            })
-        })
-        .unwrap_or(true)
-}
-
-pub fn get_package_job_info(pkg_id: &str) -> Option<PackageJobInfo> {
-    ACTIVE_PACKAGE_JOBS.read().ok()?.get(pkg_id).cloned()
-}
-
-pub fn set_package_job_info(info: PackageJobInfo) {
-    if let Ok(mut guard) = ACTIVE_PACKAGE_JOBS.write() {
-        guard.insert(info.package_id.clone(), info);
+/// Maps a Services card name, catalog id, primary unit, or companion unit to
+/// the catalog package that owns it.
+pub fn resolve_owning_package_id(target: &str) -> Option<String> {
+    let clean = target
+        .trim()
+        .trim_end_matches(".service")
+        .to_ascii_lowercase();
+    if clean.is_empty() {
+        return None;
     }
-}
-
-pub fn try_start_package_job(info: PackageJobInfo) -> bool {
-    let Ok(mut jobs) = ACTIVE_PACKAGE_JOBS.write() else {
-        return false;
+    let catalog = get_package_catalog().ok()?;
+    let unit_matches = |unit: &str| {
+        let unit = unit.trim().trim_end_matches(".service");
+        !unit.is_empty() && unit.eq_ignore_ascii_case(&clean)
     };
-    if jobs.get(&info.package_id).is_some_and(|job| {
-        matches!(
-            job.status.as_str(),
-            "installing" | "updating" | "uninstalling"
-        )
+    if let Some(pkg) = catalog.iter().find(|p| {
+        p.name.eq_ignore_ascii_case(&clean)
+            || p.label.eq_ignore_ascii_case(target.trim())
+            || (p.service_name != "apache2" && unit_matches(&p.service_name))
+            || p.sandbox_service_ids.iter().any(|unit| unit_matches(unit))
     }) {
-        return false;
+        return Some(pkg.name.clone());
     }
-    jobs.insert(info.package_id.clone(), info);
-    true
+    let canonical = resolve_canonical_service_id(&clean);
+    catalog
+        .iter()
+        .find(|p| p.name.eq_ignore_ascii_case(&canonical))
+        .map(|p| p.name.clone())
 }
 
-pub fn clear_package_job_info(pkg_id: &str) {
-    if let Ok(mut guard) = ACTIVE_PACKAGE_JOBS.write() {
-        guard.remove(pkg_id);
+pub const CORE_SERVICE_IDS: [&str; 3] = ["aetherflow-api", "aetherflow-frontend", "apache2"];
+
+/// Validates a Services control request and returns the exact control target.
+///
+/// A card may only control its own logical service, primary unit, or catalog
+/// companion units. This prevents the administrative control endpoint from
+/// being used as a generic root `systemctl` proxy for unrelated host units.
+pub fn authorize_service_control_target(
+    card: &str,
+    process: &str,
+    managed_by: &str,
+) -> Result<String, String> {
+    let card_clean = card.trim();
+    let process_clean = process.trim();
+    let target = if process_clean.is_empty() {
+        card_clean
+    } else {
+        process_clean
+    };
+    let norm = |value: &str| {
+        value
+            .trim()
+            .trim_end_matches(".service")
+            .to_ascii_lowercase()
+    };
+    let card_canonical = resolve_canonical_service_id(card_clean);
+    if CORE_SERVICE_IDS.contains(&card_canonical.as_str()) {
+        if managed_by == "pm2" {
+            return Err("Core services require systemd controls".into());
+        }
+        if norm(target) == card_canonical || resolve_canonical_service_id(target) == card_canonical
+        {
+            return Ok(card_canonical);
+        }
+        return Err(format!("{} is not a component of {}", target, card_clean));
+    }
+    let Some(owner) = resolve_owning_package_id(card_clean) else {
+        return Err(format!(
+            "{} is not a managed AetherFlow service",
+            card_clean
+        ));
+    };
+    let pkg = get_package_catalog()
+        .ok()
+        .and_then(|catalog| catalog.into_iter().find(|p| p.name == owner))
+        .ok_or_else(|| format!("{} is not a managed AetherFlow service", card_clean))?;
+    if (managed_by == "pm2" && pkg.service_type != "pm2")
+        || (pkg.service_type == "pm2" && !matches!(managed_by, "" | "pm2"))
+    {
+        return Err(format!(
+            "Service manager does not match the catalog for {}",
+            card_clean
+        ));
+    }
+    let mut allowed: Vec<String> = vec![norm(&pkg.name)];
+    if !pkg.service_name.trim().is_empty() {
+        allowed.push(norm(&pkg.service_name));
+    }
+    if managed_by.trim().eq_ignore_ascii_case("pm2") {
+        if allowed.contains(&norm(target)) {
+            return Ok(target.to_string());
+        }
+        return Err(format!("{} is not a component of {}", target, card_clean));
+    }
+    allowed.extend(resolve_service_units(&pkg.name).iter().map(|u| norm(u)));
+    allowed.extend(pkg.sandbox_service_ids.iter().map(|u| norm(u)));
+    // Shared-vhost packages are hosted by Apache; only the Apache card may
+    // control the shared daemon.
+    allowed.retain(|unit| unit != "apache2");
+    if allowed.contains(&norm(target)) {
+        Ok(target.to_string())
+    } else {
+        Err(format!("{} is not a component of {}", target, card_clean))
     }
 }
 
-fn load_config_file_or_embedded(env_var: &str, filename: &str, embedded: &str) -> String {
+fn read_catalog_file(path: &Path) -> anyhow::Result<String> {
+    let metadata = fs::metadata(path)?;
+    anyhow::ensure!(
+        metadata.is_file(),
+        "catalog is not a regular file: {}",
+        path.display()
+    );
+    fs::read_to_string(path)
+        .map_err(|error| anyhow::anyhow!("cannot read catalog {}: {error}", path.display()))
+}
+
+fn load_config_file_or_embedded(
+    env_var: &str,
+    filename: &str,
+    embedded: &str,
+) -> anyhow::Result<String> {
     if let Ok(explicit) = env::var(env_var) {
         if !explicit.trim().is_empty() {
-            if let Ok(s) = fs::read_to_string(explicit.trim()) {
-                return s;
-            }
+            return read_catalog_file(Path::new(explicit.trim()));
         }
     }
     let mut candidates = vec![
@@ -115,30 +187,42 @@ fn load_config_file_or_embedded(env_var: &str, filename: &str, embedded: &str) -
         }
     }
     for c in candidates {
-        if let Ok(s) = fs::read_to_string(&c) {
-            return s;
+        match fs::symlink_metadata(&c) {
+            Ok(_) => return read_catalog_file(&c),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
         }
     }
-    embedded.to_string()
+    Ok(embedded.to_string())
 }
 
+#[cfg(test)]
+static CATALOG_READ_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 pub fn get_package_catalog() -> anyhow::Result<Vec<Package>> {
+    #[cfg(test)]
+    CATALOG_READ_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let raw_pkgs = load_config_file_or_embedded(
         "AETHERFLOW_PACKAGES_CONFIG",
         "packages.json",
         EMBEDDED_PACKAGES_JSON,
-    );
+    )?;
     let raw_auto = load_config_file_or_embedded(
         "AETHERFLOW_PACKAGE_AUTOMATION_CONFIG",
         "package_automation.json",
         EMBEDDED_AUTOMATION_JSON,
-    );
+    )?;
 
     let mut pkgs: Vec<Package> = serde_json::from_str(&raw_pkgs)?;
-    let auto_map: HashMap<String, PackageAutomation> =
-        serde_json::from_str(&raw_auto).unwrap_or_default();
+    let auto_map: HashMap<String, PackageAutomation> = serde_json::from_str(&raw_auto)?;
 
+    let mut names = std::collections::HashSet::new();
     for p in &mut pkgs {
+        anyhow::ensure!(
+            !p.name.trim().is_empty() && names.insert(p.name.to_ascii_lowercase()),
+            "catalog contains an empty or duplicate package id: {}",
+            p.name
+        );
         if let Some(auto) = auto_map.get(&p.name) {
             p.update_source = auto.update_source.clone();
             p.update_repo = auto.update_repo.clone();
@@ -166,13 +250,46 @@ fn resolve_filesystem_path(path_str: &str) -> PathBuf {
 }
 
 pub fn get_packages() -> anyhow::Result<Vec<Package>> {
+    get_packages_with_jobs(&package_job_snapshot()?)
+}
+
+pub fn get_packages_with_jobs(jobs: &PackageJobSnapshot) -> anyhow::Result<Vec<Package>> {
+    lifecycle_cache::observe(jobs);
     let mut pkgs = get_package_catalog()?;
+    populate_package_statuses(&mut pkgs, jobs)?;
+    Ok(pkgs)
+}
+
+fn package_lock_installed(package: &Package) -> anyhow::Result<bool> {
+    if package.lock_file.is_empty() {
+        return Ok(false);
+    }
+    let path = resolve_filesystem_path(&package.lock_file);
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.is_file() => Ok(true),
+        Ok(_) => anyhow::bail!(
+            "installation lock is not a regular file: {}",
+            path.display()
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(anyhow::anyhow!(
+            "cannot inspect installation lock {}: {error}",
+            path.display()
+        )),
+    }
+}
+
+fn populate_package_statuses(
+    pkgs: &mut [Package],
+    jobs: &PackageJobSnapshot,
+) -> anyhow::Result<()> {
     let update_map = get_package_update_map();
 
-    for p in &mut pkgs {
-        if let Some(job) = get_package_job_info(&p.name) {
-            p.status = job.status;
-        } else if !p.lock_file.is_empty() && resolve_filesystem_path(&p.lock_file).exists() {
+    for p in pkgs {
+        let installed = package_lock_installed(p)?;
+        if let Some(job) = jobs.active.get(&p.name) {
+            p.status = job.status.clone();
+        } else if installed {
             p.status = "installed".to_string();
         } else {
             p.status = "uninstalled".to_string();
@@ -188,7 +305,7 @@ pub fn get_packages() -> anyhow::Result<Vec<Package>> {
         }
     }
 
-    Ok(pkgs)
+    Ok(())
 }
 
 #[derive(Debug, Clone, Default)]
@@ -461,6 +578,13 @@ pub(crate) fn resolve_app_internal_domain(app_name: &str) -> String {
         .unwrap_or_else(|| format!("{}.aether.local", app_name.trim().to_lowercase()))
 }
 
+fn package_is_physically_installed(app: &str) -> bool {
+    get_package_catalog()
+        .ok()
+        .and_then(|pkgs| pkgs.into_iter().find(|p| p.name == app))
+        .is_some_and(|p| !p.lock_file.is_empty() && resolve_filesystem_path(&p.lock_file).is_file())
+}
+
 pub fn resolve_app_target_for_host(host_header: &str) -> Option<(String, i32)> {
     let host = host_header
         .split(':')
@@ -475,6 +599,10 @@ pub fn resolve_app_target_for_host(host_header: &str) -> Option<(String, i32)> {
     // 1. Check `<app>.aether.local`
     if let Some(app_prefix) = host.strip_suffix(".aether.local") {
         if let Some(bp) = get_blueprint(app_prefix) {
+            let active_config = af_db::get_app_ingress_config(app_prefix).ok().flatten();
+            if active_config.is_none() && !package_is_physically_installed(app_prefix) {
+                return None;
+            }
             let port = af_db::get_app_ingress_config(app_prefix)
                 .ok()
                 .flatten()
@@ -511,6 +639,10 @@ pub fn resolve_app_target_for_host(host_header: &str) -> Option<(String, i32)> {
         let suffix = format!(".{}", base);
         if let Some(app_prefix) = host.strip_suffix(&suffix) {
             if let Some(bp) = get_blueprint(app_prefix) {
+                let active_config = af_db::get_app_ingress_config(app_prefix).ok().flatten();
+                if active_config.is_none() && !package_is_physically_installed(app_prefix) {
+                    return None;
+                }
                 let port = af_db::get_app_ingress_config(app_prefix)
                     .ok()
                     .flatten()
@@ -588,12 +720,17 @@ pub struct ServiceStatusItem {
     pub update_error: String,
     #[serde(skip_serializing_if = "String::is_empty", default)]
     pub job_status: String,
+    #[serde(skip_serializing_if = "String::is_empty", default)]
+    pub job_id: String,
     #[serde(skip_serializing_if = "is_zero_i32", default)]
     pub progress: i32,
     #[serde(skip_serializing_if = "String::is_empty", default)]
     pub log_line: String,
     #[serde(skip_serializing_if = "String::is_empty", default)]
     pub started_at: String,
+    /// Terminal result of the most recent lifecycle job (authenticated view).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub last_job: Option<PackageJobOutcome>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -612,20 +749,24 @@ pub struct ServiceComponentPolicy {
 }
 
 type ServiceInfoCacheEntry = ((String, String, String), Instant);
-type Pm2ServicesCacheState = (HashMap<String, (String, String)>, Option<Instant>);
+type Pm2ServicesCacheState = (Option<HashMap<String, (String, String)>>, Option<Instant>);
 
 static SERVICE_INFO_CACHE: Lazy<RwLock<HashMap<String, ServiceInfoCacheEntry>>> =
     Lazy::new(|| RwLock::new(HashMap::new()));
 
 static PM2_SERVICES_CACHE: Lazy<RwLock<Pm2ServicesCacheState>> =
-    Lazy::new(|| RwLock::new((HashMap::new(), None)));
+    Lazy::new(|| RwLock::new((None, None)));
+
+static SERVICE_STATUS_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 pub fn clear_service_status_cache() {
+    SERVICE_STATUS_EPOCH.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    service_observations::invalidate();
     if let Ok(mut g) = SERVICE_INFO_CACHE.write() {
         g.clear();
     }
     if let Ok(mut g) = PM2_SERVICES_CACHE.write() {
-        g.0.clear();
+        g.0 = None;
         g.1 = None;
     }
 }
@@ -639,6 +780,10 @@ pub fn should_pre_stop_on_update(target: &str) -> bool {
 }
 
 pub fn resolve_canonical_service_id(target: &str) -> String {
+    resolve_canonical_service_id_with_catalog(target, &get_package_catalog().unwrap_or_default())
+}
+
+fn resolve_canonical_service_id_with_catalog(target: &str, catalog: &[Package]) -> String {
     let clean = target
         .trim()
         .trim_end_matches(".service")
@@ -663,18 +808,16 @@ pub fn resolve_canonical_service_id(target: &str) -> String {
         "aetherflow api" => "aetherflow-api".to_string(),
         "aetherflow frontend" => "aetherflow-frontend".to_string(),
         _ => {
-            if let Ok(catalog) = get_package_catalog() {
-                if let Some(pkg) = catalog.iter().find(|p| {
-                    p.name.eq_ignore_ascii_case(&clean)
-                        || p.label.eq_ignore_ascii_case(target.trim())
-                        || (!p.service_name.is_empty()
-                            && p.service_name != "apache2"
-                            && p.service_name
-                                .trim_end_matches(".service")
-                                .eq_ignore_ascii_case(&clean))
-                }) {
-                    return pkg.name.to_ascii_lowercase();
-                }
+            if let Some(pkg) = catalog.iter().find(|p| {
+                p.name.eq_ignore_ascii_case(&clean)
+                    || p.label.eq_ignore_ascii_case(target.trim())
+                    || (!p.service_name.is_empty()
+                        && p.service_name != "apache2"
+                        && p.service_name
+                            .trim_end_matches(".service")
+                            .eq_ignore_ascii_case(&clean))
+            }) {
+                return pkg.name.to_ascii_lowercase();
             }
             clean
         }
@@ -683,9 +826,13 @@ pub fn resolve_canonical_service_id(target: &str) -> String {
 
 pub fn resolve_service_web_scheme(target: &str, default_port: i32) -> &'static str {
     let clean = resolve_canonical_service_id(target);
+    service_web_scheme_for_id(&clean, default_port)
+}
+
+fn service_web_scheme_for_id(clean: &str, default_port: i32) -> &'static str {
     if default_port > 0
         || matches!(
-            clean.as_str(),
+            clean,
             "nextcloud" | "rutorrent" | "organizr" | "maintainerr" | "palate" | "kasmvnc" | "mcvnc"
         )
     {
@@ -697,10 +844,11 @@ pub fn resolve_service_web_scheme(target: &str, default_port: i32) -> &'static s
 
 pub fn resolve_service_bind_scope(target: &str) -> &'static str {
     let clean = resolve_canonical_service_id(target);
-    if matches!(
-        clean.as_str(),
-        "maintainerr" | "palate" | "kasmvnc" | "mcvnc"
-    ) {
+    service_bind_scope_for_id(&clean)
+}
+
+fn service_bind_scope_for_id(clean: &str) -> &'static str {
+    if matches!(clean, "maintainerr" | "palate" | "kasmvnc" | "mcvnc") {
         "loopback"
     } else {
         "network"
@@ -709,7 +857,11 @@ pub fn resolve_service_bind_scope(target: &str) -> &'static str {
 
 pub fn resolve_service_control_scope(target: &str) -> &'static str {
     let clean = resolve_canonical_service_id(target);
-    if matches!(clean.as_str(), "nextcloud" | "rutorrent" | "organizr") {
+    service_control_scope_for_id(&clean)
+}
+
+fn service_control_scope_for_id(clean: &str) -> &'static str {
+    if matches!(clean, "nextcloud" | "rutorrent" | "organizr") {
         "shared-vhost"
     } else {
         "service"
@@ -734,8 +886,29 @@ pub fn resolve_service_component_policies_with(
     target: &str,
     rclone_vfs_configured: bool,
 ) -> Vec<ServiceComponentPolicy> {
-    let clean = resolve_canonical_service_id(target);
-    let units = resolve_service_units(&clean);
+    service_component_policies_with_catalog(
+        target,
+        rclone_vfs_configured,
+        &get_package_catalog().unwrap_or_default(),
+    )
+}
+
+fn service_component_policies_with_catalog(
+    target: &str,
+    rclone_vfs_configured: bool,
+    catalog: &[Package],
+) -> Vec<ServiceComponentPolicy> {
+    let clean = resolve_canonical_service_id_with_catalog(target, catalog);
+    policies_for_units(
+        resolve_service_units_with_catalog(&clean, catalog),
+        rclone_vfs_configured,
+    )
+}
+
+fn policies_for_units(
+    units: Vec<String>,
+    rclone_vfs_configured: bool,
+) -> Vec<ServiceComponentPolicy> {
     units
         .into_iter()
         .map(|unit| {
@@ -799,6 +972,11 @@ pub fn aggregate_component_statuses(
     if components.is_empty() {
         return ("stopped".to_string(), primary_unit);
     }
+    if components.iter().any(|component| {
+        component.status == "unknown" && (component.role != "optional" || component.configured)
+    }) {
+        return ("unknown".to_string(), primary_unit);
+    }
 
     let mut required_or_timer_count = 0usize;
     let mut active_required_or_timer = 0usize;
@@ -860,34 +1038,36 @@ pub fn aggregate_component_statuses(
 
 /// Resolves a logical package or service name into its concrete systemd unit names (`systemctl.go`).
 pub fn resolve_service_units(target: &str) -> Vec<String> {
+    resolve_service_units_with_catalog(target, &get_package_catalog().unwrap_or_default())
+}
+
+fn resolve_service_units_with_catalog(target: &str, catalog: &[Package]) -> Vec<String> {
     let clean = target.trim().trim_end_matches(".service").to_string();
     if clean.is_empty() {
         return Vec::new();
     }
     let lower = clean.to_lowercase();
-    if let Ok(catalog) = get_package_catalog() {
-        if let Some(pkg) = catalog.iter().find(|p| {
-            p.name.eq_ignore_ascii_case(&lower)
-                || p.service_name
-                    .trim_end_matches(".service")
-                    .eq_ignore_ascii_case(&lower)
-                || p.sandbox_service_ids
-                    .iter()
-                    .any(|u| u.trim_end_matches(".service").eq_ignore_ascii_case(&lower))
-        }) {
-            let mut units = vec![if pkg.service_name.is_empty() {
-                pkg.name.clone()
-            } else {
-                pkg.service_name.clone()
-            }];
-            units.extend(pkg.sandbox_service_ids.iter().cloned());
-            let mut seen = std::collections::HashSet::new();
-            return units
-                .into_iter()
-                .map(|u| u.trim_end_matches(".service").to_string())
-                .filter(|u| !u.is_empty() && seen.insert(u.clone()))
-                .collect();
-        }
+    if let Some(pkg) = catalog.iter().find(|p| {
+        p.name.eq_ignore_ascii_case(&lower)
+            || p.service_name
+                .trim_end_matches(".service")
+                .eq_ignore_ascii_case(&lower)
+            || p.sandbox_service_ids
+                .iter()
+                .any(|u| u.trim_end_matches(".service").eq_ignore_ascii_case(&lower))
+    }) {
+        let mut units = vec![if pkg.service_name.is_empty() {
+            pkg.name.clone()
+        } else {
+            pkg.service_name.clone()
+        }];
+        units.extend(pkg.sandbox_service_ids.iter().cloned());
+        let mut seen = std::collections::HashSet::new();
+        return units
+            .into_iter()
+            .map(|u| u.trim_end_matches(".service").to_string())
+            .filter(|u| !u.is_empty() && seen.insert(u.clone()))
+            .collect();
     }
     match lower.as_str() {
         "deluge" | "deluged" => vec!["deluged".to_string(), "deluge-web".to_string()],
@@ -996,6 +1176,23 @@ pub fn get_service_info_detailed(
     service_name: &str,
 ) -> (String, String, String, Vec<ServiceComponentStatus>) {
     let policies = resolve_service_component_policies(service_name);
+    get_service_info_for_policies(service_name, policies)
+}
+
+fn get_service_info_for_policies(
+    service_name: &str,
+    policies: Vec<ServiceComponentPolicy>,
+) -> (String, String, String, Vec<ServiceComponentStatus>) {
+    service_info_from_observations(service_name, policies, |policy| {
+        query_single_systemd_unit_status(&policy.unit, policy.role, policy.configured)
+    })
+}
+
+fn service_info_from_observations(
+    service_name: &str,
+    policies: Vec<ServiceComponentPolicy>,
+    mut observe: impl FnMut(&ServiceComponentPolicy) -> (String, String),
+) -> (String, String, String, Vec<ServiceComponentStatus>) {
     if policies.is_empty() {
         return (
             "stopped".to_string(),
@@ -1009,8 +1206,7 @@ pub fn get_service_info_detailed(
     let mut best_uptime = "-".to_string();
 
     for policy in &policies {
-        let (unit_status, unit_uptime) =
-            query_single_systemd_unit_status(&policy.unit, policy.role, policy.configured);
+        let (unit_status, unit_uptime) = observe(policy);
         if matches!(policy.role, "required" | "timer")
             && unit_status == "running"
             && best_uptime == "-"
@@ -1056,7 +1252,9 @@ pub fn classify_systemd_unit_show_output(stdout: &str, role: &str) -> (String, S
             }
         }
     }
-    if active_state == "active"
+    if active_state.is_empty() && sub_state.is_empty() {
+        ("unknown".to_string(), "-".to_string())
+    } else if active_state == "active"
         || matches!(
             sub_state.as_str(),
             "running" | "exited" | "listening" | "waiting" | "elapsed"
@@ -1078,6 +1276,16 @@ pub fn classify_systemd_unit_show_output(stdout: &str, role: &str) -> (String, S
 }
 
 fn query_single_systemd_unit_status(unit: &str, role: &str, configured: bool) -> (String, String) {
+    query_systemd_unit_with_timeout(unit, role, configured, Duration::from_secs(2))
+}
+
+fn query_systemd_unit_with_timeout(
+    unit: &str,
+    role: &str,
+    configured: bool,
+    timeout: Duration,
+) -> (String, String) {
+    let epoch = SERVICE_STATUS_EPOCH.load(std::sync::atomic::Ordering::Acquire);
     let cache_key = format!("unit:{}:{}:{}", unit, role, configured);
     let now = Instant::now();
     if let Ok(guard) = SERVICE_INFO_CACHE.read() {
@@ -1088,45 +1296,72 @@ fn query_single_systemd_unit_status(unit: &str, role: &str, configured: bool) ->
         }
     }
 
-    let mut systemctl_available = false;
-    let mut resolved = ("stopped".to_string(), "-".to_string());
-
     #[cfg(target_os = "linux")]
-    if let Ok(out) = StdCommand::new("systemctl")
-        .args([
+    let resolved = match status_command_output(
+        "systemctl",
+        &[
             "show",
             unit,
             "--property=ActiveState,SubState,ActiveEnterTimestamp",
-        ])
-        .output()
-    {
-        if out.status.success() {
-            systemctl_available = true;
+        ],
+        timeout,
+    ) {
+        Ok(out) if out.status.success() => {
             let stdout = String::from_utf8_lossy(&out.stdout);
-            resolved = classify_systemd_unit_show_output(&stdout, role);
+            classify_systemd_unit_show_output(&stdout, role)
         }
-    }
+        _ => ("unknown".to_string(), "-".to_string()),
+    };
 
-    if !systemctl_available {
-        resolved = if role == "oneshot" {
-            ("idle".to_string(), "-".to_string())
-        } else if role == "optional" && !configured {
-            ("stopped".to_string(), "-".to_string())
-        } else {
-            ("running".to_string(), "Active".to_string())
-        };
-    }
+    #[cfg(not(target_os = "linux"))]
+    let resolved = if role == "oneshot" {
+        ("idle".to_string(), "-".to_string())
+    } else if role == "optional" && !configured {
+        ("stopped".to_string(), "-".to_string())
+    } else {
+        ("running".to_string(), "Active".to_string())
+    };
 
     if let Ok(mut guard) = SERVICE_INFO_CACHE.write() {
-        guard.insert(
-            cache_key,
-            (
-                (resolved.0.clone(), resolved.1.clone(), unit.to_string()),
-                now + Duration::from_secs(3),
-            ),
-        );
+        if SERVICE_STATUS_EPOCH.load(std::sync::atomic::Ordering::Acquire) == epoch {
+            guard.insert(
+                cache_key,
+                (
+                    (resolved.0.clone(), resolved.1.clone(), unit.to_string()),
+                    Instant::now() + Duration::from_secs(3),
+                ),
+            );
+        }
     }
     resolved
+}
+
+fn status_command_output(
+    program: &str,
+    args: &[&str],
+    timeout: Duration,
+) -> std::io::Result<std::process::Output> {
+    let program = program.to_string();
+    let args: Vec<String> = args.iter().map(|arg| arg.to_string()).collect();
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        runtime.block_on(async_status_command_output(&program, &args, timeout))
+    })
+    .join()
+    .map_err(|_| std::io::Error::other("service status command worker panicked"))?
+}
+
+async fn async_status_command_output(
+    program: &str,
+    args: &[&str],
+    timeout: Duration,
+) -> std::io::Result<std::process::Output> {
+    let mut command = Command::new(program);
+    command.args(args);
+    af_runner::bounded_command::output(command, timeout, 1024 * 1024).await
 }
 
 fn get_systemd_units_info(units: Vec<String>, service_name: &str) -> (String, String, String) {
@@ -1138,153 +1373,130 @@ fn get_systemd_units_info(units: Vec<String>, service_name: &str) -> (String, St
         return ("stopped".to_string(), "-".to_string(), primary_unit);
     }
 
-    let cache_key = units.join("+");
-    let now = Instant::now();
-    if let Ok(guard) = SERVICE_INFO_CACHE.read() {
-        if let Some((cached, expires_at)) = guard.get(&cache_key) {
-            if now < *expires_at {
-                return cached.clone();
-            }
-        }
-    }
-
-    let mut systemctl_available = false;
     let mut any_running = false;
     let mut any_restarting = false;
     let mut best_uptime = "-".to_string();
 
-    #[cfg(target_os = "linux")]
     for unit in &units {
-        if let Ok(out) = StdCommand::new("systemctl")
-            .args([
-                "show",
-                unit,
-                "--property=ActiveState,SubState,ActiveEnterTimestamp",
-            ])
-            .output()
-        {
-            if out.status.success() {
-                systemctl_available = true;
-                let stdout = String::from_utf8_lossy(&out.stdout);
-                let mut active_state = String::new();
-                let mut sub_state = String::new();
-                let mut enter_ts = String::new();
-                for line in stdout.lines() {
-                    if let Some((k, v)) = line.split_once('=') {
-                        match k.trim() {
-                            "ActiveState" => active_state = v.trim().to_lowercase(),
-                            "SubState" => sub_state = v.trim().to_lowercase(),
-                            "ActiveEnterTimestamp" => enter_ts = v.trim().to_string(),
-                            _ => {}
-                        }
-                    }
-                }
-                if active_state == "active"
-                    || matches!(sub_state.as_str(), "running" | "exited" | "listening")
-                {
-                    any_running = true;
-                    if best_uptime == "-" {
-                        best_uptime = format_uptime(&enter_ts);
-                    }
-                } else if matches!(
-                    active_state.as_str(),
-                    "activating" | "deactivating" | "reloading"
-                ) {
-                    any_restarting = true;
-                }
+        let (status, uptime) = query_single_systemd_unit_status(unit, "required", true);
+        if status == "unknown" {
+            return (status, "-".to_string(), primary_unit);
+        }
+        if status == "running" {
+            any_running = true;
+            if best_uptime == "-" {
+                best_uptime = uptime;
             }
+        } else if status == "restarting" {
+            any_restarting = true;
         }
     }
 
-    let result = if systemctl_available {
-        if any_running {
-            ("running".to_string(), best_uptime, primary_unit)
-        } else if any_restarting {
-            (
-                "restarting".to_string(),
-                "Transitioning".to_string(),
-                primary_unit,
-            )
-        } else {
-            ("stopped".to_string(), "-".to_string(), primary_unit)
-        }
+    if any_running {
+        ("running".to_string(), best_uptime, primary_unit)
+    } else if any_restarting {
+        (
+            "restarting".to_string(),
+            "Transitioning".to_string(),
+            primary_unit,
+        )
     } else {
-        // Non-systemd environment (container, dev, or test): default installed services to running
-        ("running".to_string(), "Active".to_string(), primary_unit)
-    };
+        ("stopped".to_string(), "-".to_string(), primary_unit)
+    }
+}
 
-    if let Ok(mut guard) = SERVICE_INFO_CACHE.write() {
-        guard.insert(cache_key, (result.clone(), now + Duration::from_secs(3)));
+pub fn get_pm2_services() -> anyhow::Result<HashMap<String, (String, String)>> {
+    get_pm2_services_with_timeout(Duration::from_secs(2))
+}
+
+fn get_pm2_services_with_timeout(
+    timeout: Duration,
+) -> anyhow::Result<HashMap<String, (String, String)>> {
+    let epoch = SERVICE_STATUS_EPOCH.load(std::sync::atomic::Ordering::Acquire);
+    let now = Instant::now();
+    if let Ok(cache) = PM2_SERVICES_CACHE.read() {
+        if cache.1.is_some_and(|expires| now < expires) {
+            return cache
+                .0
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("PM2 inventory unavailable"));
+        }
+    }
+    let result = (|| -> anyhow::Result<HashMap<String, (String, String)>> {
+        let mut map = HashMap::new();
+        #[cfg(target_os = "linux")]
+        {
+            let out = status_command_output("pm2", &["jlist"], timeout)?;
+            anyhow::ensure!(out.status.success(), "PM2 inventory command failed");
+            let entries: Vec<serde_json::Value> = serde_json::from_slice(&out.stdout)?;
+            for item in entries {
+                let name = item
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| anyhow::anyhow!("PM2 process name missing"))?;
+                let pm2_env = item.get("pm2_env");
+                let raw_status = pm2_env
+                    .and_then(|e| e.get("status"))
+                    .and_then(|v| v.as_str());
+                let status = match raw_status {
+                    Some("online") => "running",
+                    Some("launching" | "stopping" | "waiting restart") => "restarting",
+                    Some("stopped" | "errored") => "stopped",
+                    _ => "unknown",
+                };
+                let uptime = if status == "running" {
+                    pm2_env
+                        .and_then(|e| e.get("pm_uptime"))
+                        .and_then(|v| v.as_i64())
+                        .filter(|&ms| ms > 0 && Utc::now().timestamp_millis() >= ms)
+                        .map(|ms| {
+                            format_uptime_duration(chrono::Duration::milliseconds(
+                                Utc::now().timestamp_millis() - ms,
+                            ))
+                        })
+                        .unwrap_or_else(|| "Active".into())
+                } else {
+                    "-".into()
+                };
+                anyhow::ensure!(
+                    map.insert(name.to_string(), (status.to_string(), uptime))
+                        .is_none(),
+                    "duplicate PM2 process name"
+                );
+            }
+        }
+        Ok(map)
+    })();
+    if let Ok(mut cache) = PM2_SERVICES_CACHE.write() {
+        if SERVICE_STATUS_EPOCH.load(std::sync::atomic::Ordering::Acquire) == epoch {
+            *cache = (
+                result.as_ref().ok().cloned(),
+                Some(Instant::now() + Duration::from_secs(3)),
+            );
+        }
     }
     result
 }
 
-pub fn get_pm2_services() -> HashMap<String, (String, String)> {
-    let now = Instant::now();
-    if let Ok(guard) = PM2_SERVICES_CACHE.read() {
-        if let Some(exp) = guard.1 {
-            if now < exp {
-                return guard.0.clone();
-            }
-        }
-    }
-
-    let mut map = HashMap::new();
-    #[cfg(target_os = "linux")]
-    if let Ok(out) = StdCommand::new("pm2").arg("jlist").output() {
-        if out.status.success() {
-            if let Ok(arr) = serde_json::from_slice::<Vec<serde_json::Value>>(&out.stdout) {
-                for item in arr {
-                    let Some(name) = item.get("name").and_then(|v| v.as_str()) else {
-                        continue;
-                    };
-                    let pm2_env = item.get("pm2_env");
-                    let raw_status = pm2_env
-                        .and_then(|e| e.get("status"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("stopped");
-                    let status = match raw_status {
-                        "online" => "running",
-                        "launching" | "stopping" | "waiting restart" => "restarting",
-                        _ => "stopped",
-                    };
-                    let uptime = if status == "running" {
-                        if let Some(ms) = pm2_env
-                            .and_then(|e| e.get("pm_uptime"))
-                            .and_then(|v| v.as_i64())
-                        {
-                            let now_ms = Utc::now().timestamp_millis();
-                            if ms > 0 && now_ms >= ms {
-                                format_uptime_duration(chrono::Duration::milliseconds(now_ms - ms))
-                            } else {
-                                "Active".to_string()
-                            }
-                        } else {
-                            "Active".to_string()
-                        }
-                    } else {
-                        "-".to_string()
-                    };
-                    map.insert(name.to_string(), (status.to_string(), uptime));
-                }
-            }
-        }
-    }
-
-    if let Ok(mut guard) = PM2_SERVICES_CACHE.write() {
-        *guard = (map.clone(), Some(now + Duration::from_secs(3)));
-    }
-    map
+pub fn get_pm2_service_info(service_name: &str) -> (String, String) {
+    let map = match get_pm2_services() {
+        Ok(map) => map,
+        Err(_) => return ("unknown".into(), "-".into()),
+    };
+    pm2_service_info_from_observations(&map, service_name)
 }
 
-pub fn get_pm2_service_info(service_name: &str) -> (String, String) {
-    let map = get_pm2_services();
+fn pm2_service_info_from_observations(
+    map: &HashMap<String, (String, String)>,
+    service_name: &str,
+) -> (String, String) {
     if let Some(info) = map.get(service_name) {
         return info.clone();
     }
     for (k, v) in map {
         if k.eq_ignore_ascii_case(service_name) {
-            return v;
+            return v.clone();
         }
     }
     #[cfg(not(target_os = "linux"))]
@@ -1297,11 +1509,63 @@ pub fn get_pm2_service_info(service_name: &str) -> (String, String) {
     }
 }
 
-pub fn get_active_services() -> HashMap<String, ServiceStatusItem> {
+/// Unknown lifecycle state is an error, never an empty inventory.
+pub fn get_active_services() -> anyhow::Result<HashMap<String, ServiceStatusItem>> {
+    get_active_services_with_jobs(&package_job_snapshot()?)
+}
+
+pub fn get_active_services_with_jobs(
+    jobs: &PackageJobSnapshot,
+) -> anyhow::Result<HashMap<String, ServiceStatusItem>> {
+    let deadline = Instant::now() + service_observations::OBSERVATION_BUDGET;
+    lifecycle_cache::observe(jobs);
+    let mut pkgs = get_package_catalog()?;
+    populate_package_statuses(&mut pkgs, jobs)?;
+    let rclone_vfs_configured = is_rclone_vfs_configured();
+    let included = |package: &Package| {
+        package.status == "installed"
+            || jobs.active.contains_key(&package.name)
+            || jobs
+                .outcomes
+                .get(&package.name)
+                .is_some_and(|outcome| outcome.status != "completed")
+    };
+    let mut policies = policies_for_units(
+        CORE_SERVICE_IDS
+            .iter()
+            .map(|unit| unit.to_string())
+            .collect(),
+        rclone_vfs_configured,
+    );
+    let mut include_pm2 = false;
+    for package in pkgs.iter().filter(|package| included(package)) {
+        if package.service_type == "pm2" {
+            include_pm2 = true;
+        } else {
+            policies.extend(policies_for_units(
+                resolve_service_units_with_catalog(&package.name, &pkgs),
+                rclone_vfs_configured,
+            ));
+        }
+    }
+    let metadata = pkgs
+        .iter()
+        .filter(|package| included(package))
+        .map(|package| package.name.clone())
+        .collect();
+    let observations = service_observations::collect(policies, include_pm2, metadata, deadline);
     let mut map = HashMap::new();
+    let core_info = |unit: &str| {
+        let (status, uptime, process, _) = service_info_from_observations(
+            unit,
+            policies_for_units(vec![unit.to_string()], rclone_vfs_configured),
+            |policy| observations.systemd(policy),
+        );
+        (status, uptime, process)
+    };
 
     // 1. Core Systemd Services (`service_manager.go`: AetherFlow API, AetherFlow Frontend, Apache2 Web Server)
-    let (_api_st, api_up, _api_unit) = get_service_info("aetherflow-api");
+    let (_api_st, api_up, _api_unit) = core_info("aetherflow-api");
     map.insert(
         "AetherFlow API".to_string(),
         ServiceStatusItem {
@@ -1312,7 +1576,7 @@ pub fn get_active_services() -> HashMap<String, ServiceStatusItem> {
             } else {
                 api_up
             },
-            version: "v3.2.6".to_string(),
+            version: af_release::runtime::runtime_identity().version.clone(),
             managed_by: "systemd".to_string(),
             process: "aetherflow-api".to_string(),
             bind_scope: "network".to_string(),
@@ -1328,8 +1592,8 @@ pub fn get_active_services() -> HashMap<String, ServiceStatusItem> {
         },
     );
 
-    let (fe_st, fe_up, _fe_unit) = get_service_info("aetherflow-frontend");
-    let (fe_status, fe_uptime, fe_managed_by) = if fe_st == "running" {
+    let (fe_st, fe_up, _fe_unit) = core_info("aetherflow-frontend");
+    let (fe_status, fe_uptime, fe_managed_by) = if matches!(fe_st.as_str(), "running" | "unknown") {
         (fe_st, fe_up, "systemd".to_string())
     } else {
         (
@@ -1344,7 +1608,7 @@ pub fn get_active_services() -> HashMap<String, ServiceStatusItem> {
             id: "aetherflow-frontend".to_string(),
             status: fe_status.clone(),
             uptime: fe_uptime,
-            version: "v3.2.6".to_string(),
+            version: af_release::runtime::runtime_identity().version.clone(),
             managed_by: fe_managed_by,
             process: "aetherflow-frontend".to_string(),
             bind_scope: "network".to_string(),
@@ -1360,7 +1624,7 @@ pub fn get_active_services() -> HashMap<String, ServiceStatusItem> {
         },
     );
 
-    let (apache_st, apache_up, _apache_unit) = get_service_info("apache2");
+    let (apache_st, apache_up, _apache_unit) = core_info("apache2");
     map.insert(
         "Apache2 Web Server".to_string(),
         ServiceStatusItem {
@@ -1391,11 +1655,9 @@ pub fn get_active_services() -> HashMap<String, ServiceStatusItem> {
             .map(|c| (c.app_name.clone(), c))
             .collect();
     let base_domain = resolve_base_domain();
-    let pkgs = get_packages().unwrap_or_default();
-
-    for p in pkgs {
-        let active_job = get_package_job_info(&p.name);
-        if p.status != "installed" && active_job.is_none() {
+    for p in &pkgs {
+        let active_job = jobs.active.get(&p.name).cloned();
+        if !included(p) {
             continue;
         }
         let svc_name = if p.service_name.is_empty() {
@@ -1410,13 +1672,13 @@ pub fn get_active_services() -> HashMap<String, ServiceStatusItem> {
         };
 
         let units = if managed_by == "systemd" {
-            resolve_service_units(&p.name)
+            resolve_service_units_with_catalog(&p.name, &pkgs)
         } else {
             vec![svc_name.clone()]
         };
 
         let (mut svc_status, mut svc_uptime, primary_proc, components) = if managed_by == "pm2" {
-            let (st, up) = get_pm2_service_info(&svc_name);
+            let (st, up) = observations.pm2(&svc_name);
             (
                 st.clone(),
                 up,
@@ -1429,14 +1691,20 @@ pub fn get_active_services() -> HashMap<String, ServiceStatusItem> {
                 }],
             )
         } else {
-            get_service_info_detailed(&p.name)
+            service_info_from_observations(
+                &p.name,
+                policies_for_units(units.clone(), rclone_vfs_configured),
+                |policy| observations.systemd(policy),
+            )
         };
 
+        let mut job_id = String::new();
         let mut job_status = String::new();
         let mut progress = 0;
         let mut log_line = String::new();
         let mut started_at = String::new();
         if let Some(job) = active_job {
+            job_id = job.job_id;
             job_status = job.status.clone();
             progress = job.progress;
             log_line = job.last_line;
@@ -1447,7 +1715,7 @@ pub fn get_active_services() -> HashMap<String, ServiceStatusItem> {
             }
         }
 
-        let runtime_meta = mutators::get_app_runtime_meta(&p.name);
+        let runtime_meta = observations.runtime_meta(&p.name);
         let ing = ingress_map.get(&p.name);
         let mut active_port = ing
             .map(|c| c.listen_port)
@@ -1460,7 +1728,7 @@ pub fn get_active_services() -> HashMap<String, ServiceStatusItem> {
             active_port = p.default_port;
         }
 
-        let internal_domain = resolve_app_internal_domain(&p.name);
+        let internal_domain = format!("{}.aether.local", p.name.trim().to_lowercase());
 
         let mut public_domain = ing
             .map(|c| c.public_domain.clone())
@@ -1476,18 +1744,20 @@ pub fn get_active_services() -> HashMap<String, ServiceStatusItem> {
             .map(|c| c.tls_enabled)
             .unwrap_or(!public_domain.is_empty());
 
-        let version = if !p.installed_version.is_empty() {
-            p.installed_version.clone()
-        } else {
-            "latest".to_string()
-        };
+        // An absent measurement remains unknown; it is not evidence of latest.
+        let version = p.installed_version.clone();
         let web_scheme =
-            resolve_service_web_scheme(&p.name, active_port.max(p.default_port)).to_string();
-        let bind_scope = resolve_service_bind_scope(&p.name).to_string();
-        let control_scope = resolve_service_control_scope(&p.name).to_string();
+            service_web_scheme_for_id(&p.name, active_port.max(p.default_port)).to_string();
+        let bind_scope = service_bind_scope_for_id(&p.name).to_string();
+        let control_scope = service_control_scope_for_id(&p.name).to_string();
 
+        let display_name = p.label_or_name();
+        anyhow::ensure!(
+            !map.contains_key(&display_name),
+            "duplicate service inventory label: {display_name}"
+        );
         map.insert(
-            p.label_or_name(),
+            display_name,
             ServiceStatusItem {
                 id: p.name.clone(),
                 status: svc_status,
@@ -1512,20 +1782,22 @@ pub fn get_active_services() -> HashMap<String, ServiceStatusItem> {
                 control_scope,
                 components,
                 units,
-                installed_version: p.installed_version,
-                latest_version: p.latest_version,
+                installed_version: p.installed_version.clone(),
+                latest_version: p.latest_version.clone(),
                 update_available: p.update_available,
-                update_checked_at: p.update_checked_at,
-                update_url: p.update_url,
-                update_error: p.update_error,
+                update_checked_at: p.update_checked_at.clone(),
+                update_url: p.update_url.clone(),
+                update_error: p.update_error.clone(),
+                job_id,
                 job_status,
                 progress,
                 log_line,
                 started_at,
+                last_job: jobs.outcomes.get(&p.name).cloned(),
             },
         );
     }
-    map
+    Ok(map)
 }
 
 trait PackageExt {
@@ -1546,7 +1818,7 @@ impl PackageExt for Package {
 const RUNNER_SYSTEMCTL_TIMEOUT: Duration = Duration::from_secs(45);
 
 #[cfg(unix)]
-async fn dispatch_runner_systemctl_unix(action: &str, unit: &str) -> Option<Result<(), String>> {
+async fn dispatch_runner_systemctl_unix(action: &str, unit: &str) -> Option<anyhow::Result<()>> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::UnixStream;
 
@@ -1554,19 +1826,16 @@ async fn dispatch_runner_systemctl_unix(action: &str, unit: &str) -> Option<Resu
     if !Path::new(&sock_path).exists() {
         return None;
     }
-    let mut stream = match tokio::time::timeout(
-        Duration::from_secs(5),
-        UnixStream::connect(&sock_path),
-    )
-    .await
-    {
-        Ok(Ok(s)) => s,
-        _ => return None,
-    };
+    let mut stream =
+        match tokio::time::timeout(Duration::from_secs(5), UnixStream::connect(&sock_path)).await {
+            Ok(Ok(s)) => s,
+            _ => return None,
+        };
 
     let body = serde_json::to_string(&af_models::SystemctlRequest {
         action: action.to_string(),
         service: unit.to_string(),
+        lifecycle_job_id: af_runner::current_package_job_id(),
     })
     .ok()?;
     let req = format!(
@@ -1574,61 +1843,159 @@ async fn dispatch_runner_systemctl_unix(action: &str, unit: &str) -> Option<Resu
         body.len(),
         body
     );
-    tokio::time::timeout(Duration::from_secs(5), stream.write_all(req.as_bytes()))
-        .await
-        .ok()
-        .and_then(|res| res.ok())?;
+    match tokio::time::timeout(Duration::from_secs(5), stream.write_all(req.as_bytes())).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            return Some(Err(anyhow::Error::from(error).context(
+                "runner request transmission failed; service state is unconfirmed",
+            )))
+        }
+        Err(_) => {
+            return Some(Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "runner request transmission timed out; service state is unconfirmed",
+            )
+            .into()))
+        }
+    }
 
     let mut resp = String::new();
-    match tokio::time::timeout(RUNNER_SYSTEMCTL_TIMEOUT, stream.read_to_string(&mut resp)).await {
+    match tokio::time::timeout(
+        RUNNER_SYSTEMCTL_TIMEOUT,
+        stream.take(1024 * 1024 + 1).read_to_string(&mut resp),
+    )
+    .await
+    {
         Ok(Ok(_)) => {}
         Ok(Err(e)) => {
-            return Some(Err(format!(
+            return Some(Err(anyhow::anyhow!(
                 "runner socket read error for systemctl {} {}: {}",
-                action, unit, e
+                action,
+                unit,
+                e
             )));
         }
         Err(_) => {
-            return Some(Err(format!(
-                "runner socket timed out after {}s waiting for systemctl {} {}",
-                RUNNER_SYSTEMCTL_TIMEOUT.as_secs(),
-                action,
-                unit
-            )));
+            return Some(Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("runner socket timed out after {}s waiting for systemctl {} {}; resulting state is unconfirmed", RUNNER_SYSTEMCTL_TIMEOUT.as_secs(), action, unit),
+            ).into()));
         }
     }
 
-    let Some((headers, json_body)) = resp.split_once("\r\n\r\n") else {
-        return Some(Err(format!(
-            "malformed runner response for systemctl {} {}",
-            action, unit
-        )));
-    };
-    if headers.starts_with("HTTP/1.1 200") || headers.starts_with("HTTP/1.0 200") {
-        if let Ok(parsed) = serde_json::from_str::<af_models::RunnerResponse>(json_body.trim()) {
-            if !parsed.success {
-                let detail = if !parsed.output.trim().is_empty() {
-                    format!("{} ({})", parsed.error.trim(), parsed.output.trim())
-                } else {
-                    parsed.error.trim().to_string()
-                };
-                return Some(Err(detail));
-            }
+    Some(validate_runner_systemctl_response(&resp))
+}
+
+#[cfg(unix)]
+fn validate_runner_systemctl_response(response: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        response.len() <= 1024 * 1024,
+        "runner response exceeds acknowledgement limit; service state is unconfirmed"
+    );
+    let (headers, json_body) = response.split_once("\r\n\r\n").ok_or_else(|| {
+        anyhow::anyhow!("malformed runner response; service state is unconfirmed")
+    })?;
+    let mut lines = headers.split("\r\n");
+    let mut status_line = lines.next().unwrap_or_default().split_whitespace();
+    anyhow::ensure!(
+        matches!(status_line.next(), Some("HTTP/1.0" | "HTTP/1.1")),
+        "invalid runner HTTP version; service state is unconfirmed"
+    );
+    let status = status_line.next().unwrap_or_default();
+    anyhow::ensure!(
+        status.len() == 3 && status.bytes().all(|byte| byte.is_ascii_digit()),
+        "invalid runner HTTP status; service state is unconfirmed"
+    );
+    let mut content_length = None;
+    for line in lines {
+        let (name, value) = line.split_once(':').ok_or_else(|| {
+            anyhow::anyhow!("malformed runner header; service state is unconfirmed")
+        })?;
+        anyhow::ensure!(
+            !name.eq_ignore_ascii_case("transfer-encoding"),
+            "unsupported runner acknowledgement framing; service state is unconfirmed"
+        );
+        if name.eq_ignore_ascii_case("content-length") {
+            anyhow::ensure!(
+                content_length.is_none(),
+                "duplicate runner content length; service state is unconfirmed"
+            );
+            content_length = Some(value.trim().parse::<usize>()?);
         }
-        Some(Ok(()))
-    } else {
-        if let Ok(parsed) = serde_json::from_str::<af_models::RunnerResponse>(json_body.trim()) {
-            let detail = if !parsed.output.trim().is_empty() {
-                format!("{} ({})", parsed.error.trim(), parsed.output.trim())
-            } else if !parsed.error.trim().is_empty() {
-                parsed.error.trim().to_string()
-            } else {
-                json_body.trim().to_string()
-            };
-            return Some(Err(detail));
-        }
-        Some(Err(json_body.trim().to_string()))
     }
+    anyhow::ensure!(
+        content_length == Some(json_body.len()),
+        "missing or incomplete runner acknowledgement body; service state is unconfirmed"
+    );
+    if status == "504" {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "runner service control timed out; resulting state is unconfirmed",
+        )
+        .into());
+    }
+    if status == "409" {
+        return Err(af_runner::LifecycleBusy.into());
+    }
+    let parsed: af_models::RunnerResponse = serde_json::from_str(json_body).map_err(|error| {
+        anyhow::anyhow!("invalid runner acknowledgement; service state is unconfirmed: {error}")
+    })?;
+    anyhow::ensure!(
+        status == "200" && parsed.success && parsed.error.trim().is_empty(),
+        "runner service control refused (HTTP {}): {} {}",
+        status,
+        parsed.error.trim(),
+        parsed.output.trim()
+    );
+    Ok(())
+}
+
+fn guarded_service_command(
+    guard: &af_release::ReleaseLockGuard,
+    program: &str,
+    arguments: &[&str],
+) -> anyhow::Result<Command> {
+    #[cfg(unix)]
+    {
+        let mut command = Command::new("/bin/bash");
+        command
+            .args([
+                "-c",
+                "(exec {AF_MAINTENANCE_GUARD_FD}>&-; exec \"$@\"); result=$?; exit \"$result\"",
+                "af-service-control",
+            ])
+            .arg(program)
+            .args(arguments);
+        let descriptor = guard.preserve_in_child(command.as_std_mut())?;
+        command.env("AF_MAINTENANCE_GUARD_FD", descriptor.to_string());
+        Ok(command)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = guard;
+        let mut command = Command::new(program);
+        command.args(arguments);
+        Ok(command)
+    }
+}
+
+const SERVICE_CONTROL_BUDGET: Duration = Duration::from_secs(20);
+
+pub fn is_service_control_timeout(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|error| error.kind() == std::io::ErrorKind::TimedOut)
+    })
+}
+
+async fn service_command_output(
+    command: Command,
+    budget: Duration,
+) -> std::io::Result<std::process::Output> {
+    let result = af_runner::bounded_command::output(command, budget, 1024 * 1024).await;
+    clear_service_status_cache();
+    result
 }
 
 pub async fn control_service_with_manager(
@@ -1636,6 +2003,16 @@ pub async fn control_service_with_manager(
     action: &str,
     managed_by: &str,
 ) -> anyhow::Result<()> {
+    control_service_with_budget(service_name, action, managed_by, SERVICE_CONTROL_BUDGET).await
+}
+
+async fn control_service_with_budget(
+    service_name: &str,
+    action: &str,
+    managed_by: &str,
+    budget: Duration,
+) -> anyhow::Result<()> {
+    let deadline = Instant::now() + budget;
     let valid_name = Regex::new(r"^[a-zA-Z0-9][a-zA-Z0-9@._-]{0,63}$").unwrap();
     if !valid_name.is_match(service_name) {
         anyhow::bail!("invalid service name: {}", service_name);
@@ -1645,10 +2022,11 @@ pub async fn control_service_with_manager(
     }
 
     if managed_by.eq_ignore_ascii_case("pm2") {
-        let out = Command::new("pm2")
-            .args([action, service_name])
-            .output()
-            .await?;
+        let _guard = af_runner::acquire_service_maintenance_guard(service_name, action).await?;
+        let command = guarded_service_command(&_guard, "pm2", &[action, service_name])?;
+        let out =
+            service_command_output(command, deadline.saturating_duration_since(Instant::now()))
+                .await?;
         clear_service_status_cache();
         if out.status.success() {
             return Ok(());
@@ -1683,22 +2061,31 @@ pub async fn control_service_with_manager(
             Some(Ok(())) => continue,
             Some(Err(err_msg)) => {
                 clear_service_status_cache();
-                anyhow::bail!("systemctl {} {} failed: {}", action, unit, err_msg);
+                let detail = format!("systemctl {} {} failed: {}", action, unit, err_msg);
+                return Err(err_msg.context(detail));
             }
             None => {}
         }
 
-        let out = Command::new("sudo")
-            .args(["-n", "systemctl", action, "--", &unit])
-            .output()
-            .await;
+        let _guard = af_runner::acquire_service_maintenance_guard(&unit, action).await?;
+        let command =
+            guarded_service_command(&_guard, "sudo", &["-n", "systemctl", action, "--", &unit])?;
+        let out =
+            service_command_output(command, deadline.saturating_duration_since(Instant::now()))
+                .await;
         match out {
             Ok(o) if o.status.success() => continue,
+            // Timeout/output overflow is an unconfirmed mutation, not permission
+            // failure. Do not execute the same action again through fallback.
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error.into()),
             _ => {
-                let direct = Command::new("systemctl")
-                    .args([action, "--", &unit])
-                    .output()
-                    .await?;
+                let command =
+                    guarded_service_command(&_guard, "systemctl", &[action, "--", &unit])?;
+                let direct = service_command_output(
+                    command,
+                    deadline.saturating_duration_since(Instant::now()),
+                )
+                .await?;
                 if !direct.status.success() {
                     clear_service_status_cache();
                     anyhow::bail!(
@@ -2142,11 +2529,7 @@ pub fn validate_server_url(raw_url: &str) -> anyhow::Result<String> {
         .host_str()
         .ok_or_else(|| anyhow::anyhow!("URL host is required"))?
         .to_lowercase();
-    if host == "0.0.0.0"
-        || host == "::"
-        || host.starts_with("169.254.")
-        || host.starts_with("fe80:")
-        || host.starts_with("fd00:ec2:")
+    if host.trim_matches(['[', ']']).parse::<std::net::IpAddr>().is_ok_and(forbidden_streaming_ip)
         || host == "metadata.google.internal"
         || host.ends_with(".metadata.google.internal")
         || host == "metadata.goog"
@@ -2155,6 +2538,40 @@ pub fn validate_server_url(raw_url: &str) -> anyhow::Result<String> {
         anyhow::bail!("Disallowed target host");
     }
     Ok(parsed.as_str().trim_end_matches('/').to_string())
+}
+
+pub fn forbidden_streaming_ip(address: std::net::IpAddr) -> bool {
+    match address {
+        std::net::IpAddr::V4(address) => address.is_unspecified() || address.is_link_local(),
+        std::net::IpAddr::V6(address) => {
+            address.to_ipv4_mapped().map(|mapped| forbidden_streaming_ip(mapped.into())).unwrap_or_else(|| {
+                address.is_unspecified() || address.is_unicast_link_local()
+                    || address.segments()[..2] == [0xfd00, 0x0ec2]
+            })
+        }
+    }
+}
+
+struct StreamingResolver;
+
+impl reqwest::dns::Resolve for StreamingResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let hostname = name.as_str().to_string();
+        Box::pin(async move {
+            let addresses: Vec<_> = tokio::net::lookup_host((hostname.as_str(), 0)).await?.collect();
+            if addresses.is_empty() || addresses.iter().any(|address| forbidden_streaming_ip(address.ip())) {
+                return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "Disallowed resolved media-server address").into());
+            }
+            Ok(Box::new(addresses.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
+}
+
+pub fn streaming_http_client_builder() -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .dns_resolver(std::sync::Arc::new(StreamingResolver))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2237,6 +2654,39 @@ pub fn list_notifications(
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn local_service_guardian_outlives_parent_guard_without_leaking_into_daemon() {
+        use tokio::io::AsyncReadExt;
+        let root = env::temp_dir().join(format!("af-service-guardian-{}", uuid::Uuid::new_v4()));
+        let path = root.join("maintenance.lock");
+        let guard =
+            af_release::ReleaseLockGuard::acquire(&path, std::time::Duration::ZERO).unwrap();
+        let mut command = guarded_service_command(&guard, "/bin/sh", &[
+            "-c", "test ! -e /proc/self/fd/\"$AF_MAINTENANCE_GUARD_FD\" || exit 92; printf ready; /bin/cat",
+        ]).unwrap();
+        command
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped());
+        let mut child = command.spawn().unwrap();
+        drop(command);
+        let mut ready = [0u8; 5];
+        child
+            .stdout
+            .as_mut()
+            .unwrap()
+            .read_exact(&mut ready)
+            .await
+            .unwrap();
+        assert_eq!(&ready, b"ready");
+        drop(guard);
+        assert!(af_release::ReleaseLockGuard::acquire(&path, std::time::Duration::ZERO).is_err());
+        drop(child.stdin.take());
+        assert!(child.wait().await.unwrap().success());
+        drop(af_release::ReleaseLockGuard::acquire(&path, std::time::Duration::ZERO).unwrap());
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn test_marketplace_service_units_include_companions_and_exact_names() {
         for (package, expected) in [
@@ -2263,7 +2713,8 @@ mod tests {
     #[test]
     fn test_duplicate_lifecycle_job_is_rejected_atomically() {
         let job = PackageJobInfo {
-            package_id: "test-marketplace-duplicate".into(),
+            job_id: uuid::Uuid::new_v4().to_string(),
+            package_id: "jellyfin".into(),
             action: "update".into(),
             status: "updating".into(),
             progress: 0,
@@ -2613,5 +3064,151 @@ mod tests {
             .await
             .expect_err("shared-vhost service control must be rejected");
         assert!(err.to_string().contains("shared Apache virtual host"));
+    }
+
+    fn job(pkg: &str, action: &str, status: &str, started_at: &str) -> PackageJobInfo {
+        PackageJobInfo {
+            job_id: started_at.to_string(),
+            package_id: pkg.to_string(),
+            action: action.to_string(),
+            status: status.to_string(),
+            progress: 5,
+            last_line: String::new(),
+            started_at: started_at.to_string(),
+        }
+    }
+
+    #[test]
+    fn test_failed_lifecycle_outcome_survives_active_job_removal() {
+        // Regression: a failed update used to clear the active job and leave
+        // the package "installed", which clients reported as a successful update.
+        let pkg = "syncthing";
+        assert!(try_start_package_job(job(pkg, "update", "updating", "t1")));
+        assert!(get_package_job_outcome(pkg).is_none());
+        let outcome = finish_package_job(pkg, "update", false, "  exit status 1\n", "t1").unwrap();
+        assert_eq!(outcome.status, "failed");
+        assert_eq!(outcome.message, "Operation failed. Check authenticated service logs for details; rollback and data recovery are not confirmed.");
+        assert!(!outcome.message.contains("exit status 1"));
+        assert!(get_package_job_info(pkg).is_none());
+        let stored = get_package_job_outcome(pkg).expect("terminal outcome retained");
+        assert_eq!(stored.action, "update");
+        assert_eq!(stored.started_at, "t1");
+
+        // A new job supersedes the previous outcome atomically with registration.
+        assert!(try_start_package_job(job(pkg, "update", "updating", "t2")));
+        assert!(get_package_job_outcome(pkg).is_none());
+        finish_package_job(pkg, "update", true, "Completed update", "t2");
+        assert_eq!(get_package_job_outcome(pkg).unwrap().status, "completed");
+    }
+
+    #[test]
+    fn test_stale_finish_does_not_remove_newer_active_job() {
+        let pkg = "sonarr";
+        assert!(try_start_package_job(job(
+            pkg,
+            "install",
+            "installing",
+            "new"
+        )));
+        finish_package_job(pkg, "install", false, "late result from old job", "old");
+        let active = get_package_job_info(pkg).expect("newer job must remain active");
+        assert_eq!(active.started_at, "new");
+        assert!(
+            get_package_job_outcome(pkg).is_none(),
+            "stale finish must not publish an outcome while a newer job is active"
+        );
+        assert!(!try_start_package_job(job(
+            pkg,
+            "remove",
+            "uninstalling",
+            "other"
+        )));
+        finish_package_job(pkg, "install", true, "done", "new");
+        assert!(get_package_job_info(pkg).is_none());
+        // A late duplicate finish from the older job cannot replace the newer outcome.
+        finish_package_job(pkg, "install", false, "late again", "mid");
+        let stored = get_package_job_outcome(pkg).expect("newer outcome retained");
+        assert_eq!(stored.started_at, "new");
+        assert_eq!(stored.status, "completed");
+    }
+
+    #[test]
+    fn test_service_control_target_is_limited_to_card_units() {
+        // Core cards control only themselves.
+        assert_eq!(
+            authorize_service_control_target("AetherFlow API", "aetherflow-api", "systemd")
+                .unwrap(),
+            "aetherflow-api"
+        );
+        assert_eq!(
+            authorize_service_control_target("Apache2 Web Server", "apache2", "systemd").unwrap(),
+            "apache2"
+        );
+        assert!(authorize_service_control_target("AetherFlow API", "ssh", "systemd").is_err());
+        assert!(
+            authorize_service_control_target("apache2", "aetherflow-runner", "systemd-unit")
+                .is_err()
+        );
+
+        // Package cards control their own primary and companion units only.
+        assert_eq!(
+            authorize_service_control_target("sonarr", "sonarr", "systemd").unwrap(),
+            "sonarr"
+        );
+        assert_eq!(
+            authorize_service_control_target("sonarr", "", "systemd").unwrap(),
+            "sonarr"
+        );
+        assert_eq!(
+            authorize_service_control_target("sonarr", "sonarr.service", "systemd-unit").unwrap(),
+            "sonarr.service"
+        );
+        for foreign in [
+            "ssh",
+            "sshd",
+            "aetherflow-runner",
+            "aetherflow-api",
+            "radarr",
+            "apache2",
+        ] {
+            assert!(
+                authorize_service_control_target("sonarr", foreign, "systemd-unit").is_err(),
+                "sonarr card must not control {}",
+                foreign
+            );
+            assert!(
+                authorize_service_control_target("sonarr", foreign, "systemd").is_err(),
+                "sonarr card must not control {}",
+                foreign
+            );
+        }
+        assert_eq!(
+            authorize_service_control_target(
+                "paperless-ngx",
+                "paperless-worker.service",
+                "systemd-unit"
+            )
+            .unwrap(),
+            "paperless-worker.service"
+        );
+        // Shared-vhost packages cannot reach the shared Apache daemon.
+        assert!(authorize_service_control_target("nextcloud", "apache2", "systemd-unit").is_err());
+        // Unknown cards are not a back door to arbitrary units.
+        assert!(authorize_service_control_target("sshd", "sshd", "systemd").is_err());
+        assert!(authorize_service_control_target("", "", "systemd").is_err());
+    }
+
+    #[test]
+    fn test_companion_units_resolve_to_owning_package() {
+        assert_eq!(
+            resolve_owning_package_id("sonarr").as_deref(),
+            Some("sonarr")
+        );
+        assert_eq!(
+            resolve_owning_package_id("paperless-worker.service").as_deref(),
+            Some("paperless-ngx")
+        );
+        assert_eq!(resolve_owning_package_id("sshd"), None);
+        assert_eq!(resolve_owning_package_id("aetherflow-api"), None);
     }
 }

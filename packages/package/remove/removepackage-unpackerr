@@ -31,7 +31,7 @@ if [[ "${DELETE_DATA:-false}" == true ]]; then
     rm -rf /etc/unpackerr /var/lib/unpackerr /opt/unpackerr
 fi
 purge_system_user "unpackerr"
-systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
+systemctl daemon-reload >> "$LOGFILE" 2>&1
 
 remove_lock "${PACKAGE_NAME}"
 report_progress 100 "Unpackerr removed; application data retained unless DELETE_DATA=true."

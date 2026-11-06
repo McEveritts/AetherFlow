@@ -26,13 +26,13 @@ report_progress 25 "Stopping and removing audiobookshelf.service..."
 purge_systemd_unit "audiobookshelf"
 
 report_progress 65 "Removing Audiobookshelf package, state directories, and user account..."
-DEBIAN_FRONTEND=noninteractive dpkg -r audiobookshelf >> "$LOGFILE" 2>&1 || true
+DEBIAN_FRONTEND=noninteractive dpkg -r audiobookshelf >> "$LOGFILE" 2>&1
 rm -rf /var/cache/audiobookshelf /usr/share/keyrings/audiobookshelf-keyring.gpg
 if [[ "${DELETE_DATA:-false}" == true ]]; then
     rm -rf /opt/audiobookshelf /var/lib/audiobookshelf /etc/audiobookshelf /etc/apt/sources.list.d/audiobookshelf.list
 fi
 purge_system_user "audiobookshelf"
-systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
+systemctl daemon-reload >> "$LOGFILE" 2>&1
 
 remove_lock "${PACKAGE_NAME}"
 report_progress 100 "Audiobookshelf removed; application data retained unless DELETE_DATA=true."

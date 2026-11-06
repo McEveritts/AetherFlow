@@ -2437,7 +2437,23 @@ pub async fn metadata_results() -> Response {
 pub async fn bandwidth_analyze() -> Response {
     let ps = resolve_provider_settings();
     let m = af_hardware::get_system_metrics_core();
-    let active_services = af_services::get_active_services();
+    let active_services = match tokio::task::spawn_blocking(af_services::get_active_services)
+        .await
+        .map_err(anyhow::Error::from)
+        .and_then(|services| services)
+    {
+        Ok(services) => services,
+        Err(error) => {
+            tracing::warn!(%error, "Bandwidth analysis service state unavailable");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "error": "Service state is temporarily unavailable. Retry shortly."
+                })),
+            )
+                .into_response();
+        }
+    };
     let streaming = af_services::get_streaming_dashboard(7, true);
     let active_streams = streaming.live_summary.active_streams;
     let active_transcodes = streaming.live_summary.transcode_count;
@@ -3666,7 +3682,7 @@ pub async fn get_system_topology() -> Response {
     .into_response()
 }
 
-fn infer_log_level(line: &str) -> &'static str {
+pub(crate) fn infer_log_level(line: &str) -> &'static str {
     let lower = line.to_lowercase();
     if lower.contains("fatal") || lower.contains("panic") || lower.contains("crit") {
         "CRIT"
@@ -3681,168 +3697,11 @@ fn infer_log_level(line: &str) -> &'static str {
     }
 }
 
-const AUDIT_LOG_FALLBACK_SQL: &str =
+pub(crate) const AUDIT_LOG_FALLBACK_SQL: &str =
     "SELECT COALESCE(CAST(created_at AS TEXT), ''), COALESCE(action, 'event'), COALESCE(target_type, 'system'), COALESCE(detail, '') FROM admin_audit_log ORDER BY id DESC LIMIT ?1";
 
-pub async fn get_logs(Query(q): Query<HashMap<String, String>>) -> Response {
-    let source = q
-        .get("source")
-        .map(|s| s.trim().to_lowercase())
-        .unwrap_or_default();
-    let unit = q
-        .get("unit")
-        .map(|s| s.trim().to_string())
-        .unwrap_or_default();
-    let search = q
-        .get("search")
-        .or_else(|| q.get("filter"))
-        .or_else(|| q.get("keyword"))
-        .map(|s| s.trim().to_lowercase())
-        .unwrap_or_default();
-    let level_filter = q
-        .get("level")
-        .or_else(|| q.get("priority"))
-        .map(|s| s.trim().to_uppercase())
-        .unwrap_or_default();
-    let limit = q
-        .get("lines")
-        .or_else(|| q.get("limit"))
-        .and_then(|s| s.parse::<usize>().ok())
-        .filter(|&n| n > 0)
-        .unwrap_or(200)
-        .min(1000);
-    let offset = q
-        .get("offset")
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(0);
-
-    let mut raw_entries: Vec<serde_json::Value> = Vec::new();
-
-    // 1. Read from /var/log/aetherflow-deploy.log or /var/log/syslog or apache logs when requested
-    let mut candidate_files: Vec<(&str, &str)> = Vec::new();
-    match source.as_str() {
-        "application" | "deploy" => {
-            candidate_files.push(("application", "/var/log/aetherflow-deploy.log"));
-        }
-        "syslog" => {
-            candidate_files.push(("syslog", "/var/log/syslog"));
-            candidate_files.push(("syslog", "/var/log/messages"));
-        }
-        "apache" => {
-            candidate_files.push(("apache", "/var/log/apache2/error.log"));
-            candidate_files.push(("apache", "/var/log/apache2/access.log"));
-        }
-        "" => {
-            candidate_files.push(("application", "/var/log/aetherflow-deploy.log"));
-            candidate_files.push(("syslog", "/var/log/syslog"));
-            candidate_files.push(("apache", "/var/log/apache2/error.log"));
-        }
-        _ => {}
-    }
-
-    for (src_name, file_path) in candidate_files {
-        if let Ok(content) = std::fs::read_to_string(file_path) {
-            let all_lines: Vec<&str> = content.lines().collect();
-            let start_idx = all_lines.len().saturating_sub(limit + offset);
-            for line in &all_lines[start_idx..] {
-                let trimmed = line.trim();
-                if trimmed.is_empty() {
-                    continue;
-                }
-                let lvl = infer_log_level(trimmed);
-                raw_entries.push(serde_json::json!({
-                    "timestamp": Utc::now().to_rfc3339(),
-                    "source": src_name,
-                    "service": src_name,
-                    "level": lvl,
-                    "message": trimmed,
-                }));
-            }
-        }
-    }
-
-    // 2. Query journalctl if source is empty or "journald"
-    if source.is_empty() || source == "journald" {
-        let mut args = vec![
-            "-n".to_string(),
-            limit.to_string(),
-            "--no-pager".to_string(),
-            "-o".to_string(),
-            "short-iso".to_string(),
-        ];
-        if !unit.is_empty() {
-            args.push("-u".to_string());
-            args.push(unit.clone());
-        }
-        if let Ok(out) = Command::new("journalctl").args(&args).output() {
-            if out.status.success() {
-                let stdout = String::from_utf8_lossy(&out.stdout);
-                for line in stdout.lines() {
-                    let trimmed = line.trim();
-                    if trimmed.is_empty() || trimmed.starts_with("-- ") {
-                        continue;
-                    }
-                    let mut parts = trimmed.splitn(3, ' ');
-                    let ts = parts.next().unwrap_or("");
-                    let _host = parts.next().unwrap_or("");
-                    let rest = parts.next().unwrap_or(trimmed);
-                    let (svc, msg) = if let Some((s, m)) = rest.split_once(": ") {
-                        (s.trim(), m.trim())
-                    } else {
-                        ("journald", rest)
-                    };
-                    let lvl = infer_log_level(msg);
-                    raw_entries.push(serde_json::json!({
-                        "timestamp": ts,
-                        "source": "journald",
-                        "service": svc,
-                        "level": lvl,
-                        "message": msg,
-                    }));
-                }
-            }
-        }
-    }
-
-    // 3. Fallback: include audit/notification log entries from SQLite when host log files are absent
-    if raw_entries.is_empty() {
-        if let Ok(conn) = af_db::get_conn() {
-            if let Ok(mut stmt) = conn.prepare(AUDIT_LOG_FALLBACK_SQL) {
-                if let Ok(rows) = stmt.query_map(params![limit as i64], |r| {
-                    let ts: String = r.get(0)?;
-                    let action: String = r.get(1)?;
-                    let target: String = r.get(2)?;
-                    let details: String = r.get(3)?;
-                    let msg = if details.is_empty() {
-                        action.clone()
-                    } else {
-                        format!("{}: {}", action, details)
-                    };
-                    Ok(serde_json::json!({
-                        "timestamp": ts,
-                        "source": if source.is_empty() { "application" } else { source.as_str() },
-                        "service": target,
-                        "level": infer_log_level(&msg),
-                        "message": msg,
-                    }))
-                }) {
-                    for entry in rows.flatten() {
-                        raw_entries.push(entry);
-                    }
-                }
-            }
-        }
-    }
-
-    // Apply unit, level, and search filters
-    let filtered = filter_log_entries(raw_entries, &unit, &level_filter, &search, offset, limit);
-
-    let count = filtered.len();
-    Json(serde_json::json!({
-        "logs": filtered,
-        "count": count,
-    }))
-    .into_response()
+pub async fn get_logs(query: Query<HashMap<String, String>>) -> Response {
+    crate::service_logs::get_logs(query).await
 }
 
 pub(crate) fn filter_log_entries(
@@ -4143,7 +4002,9 @@ pub async fn get_worker_metrics(Path(node_id): Path<String>) -> Response {
         "hostname": hostname,
         "status": status,
         "metrics": null,
-        "services": [],
+        "services": null,
+        "services_status": "unknown",
+        "services_observed_at": null,
         "system_info": null,
         "last_heartbeat": last_hb,
     }))
@@ -4153,6 +4014,31 @@ pub async fn get_worker_metrics(Path(node_id): Path<String>) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn worker_metrics_fallback_keeps_inventory_unknown_without_marking_node_offline() {
+        if crate::plugins::tests::run_plugin_test_in_subprocess() {
+            return;
+        }
+        crate::plugins::tests::ensure_shared_test_db();
+        let node = format!("inventory-fallback-{}", uuid::Uuid::new_v4());
+        {
+            let conn = af_db::get_conn().unwrap();
+            conn.execute(
+                "INSERT INTO cluster_nodes (id,hostname,address,psk_hash,status,last_heartbeat) VALUES (?1,'fixture-worker','192.0.2.7','fixture-hash','online',CURRENT_TIMESTAMP)",
+                [&node],
+            )
+            .unwrap();
+        }
+        let response = get_worker_metrics(Path(node)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 65536).await.unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["status"], "online");
+        assert!(payload["services"].is_null());
+        assert_eq!(payload["services_status"], "unknown");
+        assert!(payload["services_observed_at"].is_null());
+    }
 
     #[test]
     fn test_filter_log_entries_preserves_journald_unit_lines_with_different_syslog_identifier() {

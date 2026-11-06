@@ -27,9 +27,17 @@ a2dissite nextcloud.conf >> "$LOGFILE" 2>&1 || true
 rm -f /etc/apache2/sites-available/nextcloud.conf /etc/apache2/sites-enabled/nextcloud.conf /etc/apache2/conf-available/nextcloud.conf /etc/apache2/conf-enabled/nextcloud.conf
 remove_apache_app_listener "$PACKAGE_NAME"
 
+# Detach this application before any data or database removal.
+apache2ctl configtest >> "$LOGFILE" 2>&1
+systemctl reload apache2 >> "$LOGFILE" 2>&1
+
 report_progress 50 "Dropping Nextcloud database and user..."
-if [[ "${DELETE_DATA:-false}" == true ]] && command_exists mysql; then
-    mysql -u root <<'EOF' >> "$LOGFILE" 2>&1 || true
+if [[ "${DELETE_DATA:-false}" == true ]]; then
+    if ! command_exists mysql; then
+        print_error "Cannot confirm Nextcloud database removal: mysql is unavailable"
+        exit 1
+    fi
+    mysql -u root <<'EOF' >> "$LOGFILE" 2>&1
 DROP DATABASE IF EXISTS nextcloud;
 DROP USER IF EXISTS 'nextclouduser'@'localhost';
 FLUSH PRIVILEGES;
@@ -43,8 +51,6 @@ fi
 if [[ "${DELETE_DATA:-false}" == true ]]; then
     rm -f /opt/AetherFlow/logs/nextcloud_credentials.txt
 fi
-apache2ctl configtest >> "$LOGFILE" 2>&1
-systemctl reload apache2 >> "$LOGFILE" 2>&1
 
 remove_lock "${PACKAGE_NAME}"
 report_progress 100 "Nextcloud removed; application data retained unless DELETE_DATA=true."

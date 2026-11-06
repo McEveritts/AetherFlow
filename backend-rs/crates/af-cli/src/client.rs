@@ -35,6 +35,8 @@ pub struct PackageStreamEvent {
 /// Summary report returned after a `/v1/package` stream finishes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PackageExecutionReceipt {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle: Option<af_runner::package_lifecycle::LifecycleReceipt>,
     pub action: String,
     pub package_id: String,
     pub script_name: String,
@@ -72,6 +74,8 @@ pub struct PackageStreamAccumulator {
     truncated_log_lines: usize,
     last_progress: Option<u8>,
     exit_error: Option<String>,
+    lifecycle_identity: Option<(String, String, String)>,
+    lifecycle_receipt: Option<af_runner::package_lifecycle::LifecycleReceipt>,
 }
 
 impl PackageStreamAccumulator {
@@ -125,6 +129,23 @@ impl PackageStreamAccumulator {
         if line.is_empty() {
             return;
         }
+        if let Some(raw) = line.strip_prefix(af_runner::package_lifecycle::JOB_MARKER) {
+            let parsed = serde_json::from_str::<serde_json::Value>(raw).ok().and_then(|value| {
+                Some((value.get("job_id")?.as_str()?.to_owned(),
+                    value.get("package_id")?.as_str()?.to_owned(), value.get("action")?.as_str()?.to_owned()))
+            });
+            if self.lifecycle_identity.is_some() || parsed.is_none() {
+                self.exit_error = Some("Invalid lifecycle admission identity".into());
+            } else { self.lifecycle_identity = parsed; }
+            return;
+        }
+        if let Some(raw) = line.strip_prefix(af_runner::package_lifecycle::RECEIPT_MARKER) {
+            match serde_json::from_str(raw) {
+                Ok(receipt) if self.lifecycle_receipt.is_none() => self.lifecycle_receipt = Some(receipt),
+                _ => self.exit_error = Some("Invalid durable lifecycle receipt".into()),
+            }
+            return;
+        }
         if let Some(err_msg) = line.strip_prefix("__RUNNER_EXIT_ERROR__:") {
             let detail = err_msg.trim();
             self.exit_error = Some(if detail.is_empty() {
@@ -172,6 +193,7 @@ impl PackageStreamAccumulator {
         }
 
         Ok(PackageExecutionReceipt {
+            lifecycle: self.lifecycle_receipt,
             action: req.action.clone(),
             package_id: req.package_id.clone(),
             script_name: req.script_name.clone(),
@@ -181,6 +203,31 @@ impl PackageStreamAccumulator {
             total_log_lines: self.total_log_lines,
             truncated_log_lines: self.truncated_log_lines,
         })
+    }
+
+    pub fn finish_verified<F>(self, req: &PackageRunnerRequest, on_event: F) -> CliResult<PackageExecutionReceipt>
+    where F: FnMut(&PackageStreamEvent),
+    {
+        let identity = self.lifecycle_identity.clone();
+        let receipt = self.finish(req, on_event)?;
+        let terminal = receipt.lifecycle.as_ref().ok_or_else(|| CliError::RunnerIpc {
+            endpoint: "/v1/package".into(),
+            message: "Transport ended without a durable lifecycle receipt; completion is unconfirmed. Inspect package status before retrying.".into(),
+        })?;
+        if identity.as_ref() != Some(&(terminal.job_id.clone(), req.package_id.clone(), req.action.clone()))
+            || terminal.package_id != req.package_id || terminal.action != req.action
+            || uuid::Uuid::parse_str(&terminal.job_id).is_err()
+            || terminal.started_at.is_empty() || terminal.finished_at.is_empty()
+        {
+            return Err(CliError::RunnerIpc { endpoint: "/v1/package".into(),
+                message: "Durable lifecycle receipt does not match the admitted operation".into() });
+        }
+        if terminal.status != "completed" {
+            return Err(CliError::Execution(format!(
+                "Package lifecycle {} ended as {}; rollback and data recovery are not confirmed. Check package status and logs before retrying.",
+                terminal.job_id, terminal.status)));
+        }
+        Ok(receipt)
     }
 }
 
@@ -518,7 +565,7 @@ impl UnixSocketRunnerClient {
                 }
             }
 
-            accumulator.finish(req_payload, &mut emit_cb)
+            accumulator.finish_verified(req_payload, &mut emit_cb)
         };
 
         tokio::time::timeout(timeout, fut)

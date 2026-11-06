@@ -2,6 +2,8 @@
 #
 # [AetherFlow Install Script - Dispatcharr]
 # Installs Dispatcharr IPTV/M3U stream proxy and management dashboard.
+# Data lives in marker-proven dedicated storage behind an exclusive /data link.
+# Shared /data and nonempty unmarked legacy storage require audited operator migration.
 #
 set -Eeuo pipefail
 
@@ -28,7 +30,8 @@ CONFIG_DIR="/etc/dispatcharr"
 SERVICE_FILE="/etc/systemd/system/dispatcharr.service"
 CELERY_SERVICE_FILE="/etc/systemd/system/dispatcharr-celery.service"
 BEAT_SERVICE_FILE="/etc/systemd/system/dispatcharr-celerybeat.service"
-APP_PORT="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-9191}}"
+APP_PORT_SUPPLIED="${AF_APP_PORT:-${AETHERFLOW_APP_PORT:-}}"
+APP_PORT="${APP_PORT_SUPPLIED:-9191}"
 export AF_APP_PORT="$APP_PORT"
 export LOGFILE="/var/log/aetherflow/install-${PACKAGE_NAME}.log"
 mkdir -p "$(dirname "$LOGFILE")" /install
@@ -103,52 +106,107 @@ if [[ ! "${APP_PORT}" =~ ^[0-9]{1,5}$ ]] || (( 10#${APP_PORT} < 1 || 10#${APP_PO
     exit 1
 fi
 
-prepare_dispatcharr_data() {
-    local sub nested
-    if [[ -L /data ]]; then
-        if [[ "$(readlink -f /data)" != "${DATA_DIR}" ]]; then
-            log_error "/data is an unrelated symlink; refusing to replace it."
-            return 1
-        fi
-        rm -f /data
-    fi
-    if [[ -L "${DATA_DIR}" || ( -e /data && ! -d /data ) ]]; then
-        log_error "Dispatcharr requires real /data and ${DATA_DIR} directories."
+dispatcharr_confined_path() {
+    local path="$1"
+    if [[ "$(readlink -m -- "${path}")" != "${path}" ]]; then
+        printf '[ERROR] Dispatcharr path traverses a symlink: %s\n' "${path}" >&2
         return 1
     fi
-    mkdir -p /data "${DATA_DIR}"
-    chown root:root "${DATA_DIR}"
-    chmod 755 "${DATA_DIR}"
-    for sub in logos recordings uploads m3us epgs plugins backups logs cache; do
-        if [[ -L "/data/${sub}" || ( -e "/data/${sub}" && ! -d "/data/${sub}" ) ]]; then
-            log_error "/data/${sub} must be a real directory."
+}
+
+dispatcharr_owned_data() {
+    local data_mode marker_mode
+    [[ -d "${DATA_DIR}" && ! -L "${DATA_DIR}" && -O "${DATA_DIR}" && -f "${DATA_MARKER}" && ! -L "${DATA_MARKER}" && -O "${DATA_MARKER}" ]] || return 1
+    data_mode="$(stat -c %a -- "${DATA_DIR}")" || return 1
+    marker_mode="$(stat -c %a -- "${DATA_MARKER}")" || return 1
+    (( (8#${data_mode} & 0022) == 0 && (8#${marker_mode} & 0022) == 0 )) || return 1
+    [[ "$(stat -c %h -- "${DATA_MARKER}")" == 1 && "$(cat -- "${DATA_MARKER}")" == "aetherflow-dispatcharr-data-v1:${DATA_DIR}" ]]
+}
+
+validate_dispatcharr_data() {
+    local path entry
+    for path in "${INSTALL_DIR}" "${DATA_DIR}" "${CONFIG_DIR}" /install /etc/systemd/system; do
+        dispatcharr_confined_path "${path}" || return 1
+    done
+    if [[ -L /data ]]; then
+        if [[ "$(readlink -m /data)" != "${DATA_DIR}" ]]; then
+            printf '[ERROR] /data is an unrelated symlink; refusing to replace it.\n' >&2
             return 1
         fi
-        mkdir -p "/data/${sub}"
-        if [[ -L "${DATA_DIR}/${sub}" ]]; then
-            if [[ "$(readlink -f "${DATA_DIR}/${sub}")" != "/data/${sub}" ]]; then
-                log_error "${DATA_DIR}/${sub} is an unrelated symlink."
+    elif [[ -e /data ]]; then
+        printf '[ERROR] /data must be an exclusive Dispatcharr compatibility symlink, not a real directory or file. Shared and legacy data is retained; explicit operator migration is required.\n' >&2
+        return 1
+    fi
+    if ! dispatcharr_owned_data; then
+        if [[ -e "${DATA_DIR}" ]]; then
+            if [[ ! -d "${DATA_DIR}" ]]; then
+                printf '[ERROR] %s must be a real dedicated directory.\n' "${DATA_DIR}" >&2
                 return 1
             fi
-        elif [[ -d "${DATA_DIR}/${sub}" ]]; then
-            cp -a -- "${DATA_DIR}/${sub}/." "/data/${sub}/"
-            rm -rf -- "${DATA_DIR:?}/${sub}"
-        elif [[ -e "${DATA_DIR}/${sub}" ]]; then
-            log_error "${DATA_DIR}/${sub} must be a directory."
+            entry="$(find "${DATA_DIR}" -mindepth 1 -maxdepth 1 -print -quit)" || return 1
+            if [[ -n "${entry}" ]]; then
+                printf '[ERROR] Ownership of %s is not established. Legacy data is retained; explicit operator migration is required.\n' "${DATA_DIR}" >&2
+                return 1
+            fi
+        fi
+    fi
+    for path in logos recordings uploads m3us epgs plugins backups logs cache media logo_cache uploads/m3us uploads/epgs; do
+        if [[ -L "${DATA_DIR}/${path}" || ( -e "${DATA_DIR}/${path}" && ! -d "${DATA_DIR}/${path}" ) ]]; then
+            printf '[ERROR] %s must be a real directory inside owned storage.\n' "${DATA_DIR}/${path}" >&2
             return 1
         fi
-        ln -sfn "/data/${sub}" "${DATA_DIR}/${sub}"
-        chown -R "${APP_USER}:${APP_USER}" "/data/${sub}"
-    done
-    for nested in m3us epgs; do
-        if [[ -L "/data/uploads/${nested}" ]]; then
-            log_error "/data/uploads/${nested} must be a real directory."
-            return 1
-        fi
-        mkdir -p "/data/uploads/${nested}"
-        chown "${APP_USER}:${APP_USER}" "/data/uploads/${nested}"
     done
 }
+
+prepare_dispatcharr_data() {
+    local path
+    validate_dispatcharr_data
+    if ! dispatcharr_owned_data; then
+        mkdir -p "${DATA_DIR}"
+        chown root:root "${DATA_DIR}"
+        chmod 755 "${DATA_DIR}"
+        (umask 077; set -o noclobber; printf '%s\n' "aetherflow-dispatcharr-data-v1:${DATA_DIR}" > "${DATA_MARKER}")
+        chown root:root "${DATA_MARKER}"
+        chmod 600 "${DATA_MARKER}"
+    fi
+    for path in logos recordings uploads m3us epgs plugins backups logs cache media logo_cache uploads/m3us uploads/epgs; do
+        if [[ ! -d "${DATA_DIR}/${path}" ]]; then
+            mkdir "${DATA_DIR}/${path}"
+            chown "${APP_USER}:${APP_USER}" "${DATA_DIR}/${path}"
+        fi
+    done
+    if [[ ! -L /data ]]; then
+        ln -s "${DATA_DIR}" /data
+    fi
+}
+
+DATA_MARKER="${DATA_DIR}/.aetherflow-data-owner"
+validate_dispatcharr_data
+if [[ -z "${APP_PORT_SUPPLIED}" && -f "${CONFIG_DIR}/dispatcharr.env" && ! -L "${CONFIG_DIR}/dispatcharr.env" ]]; then
+    retained_port="$(python3 - "${CONFIG_DIR}/dispatcharr.env" <<'PYEOF'
+from pathlib import Path
+import re
+import shlex
+import sys
+
+port = ""
+for line in Path(sys.argv[1]).read_text().splitlines():
+    match = re.match(r"\s*(?:export\s+)?DISPATCHARR_PORT=(.*)", line)
+    if match:
+        values = shlex.split(match.group(1), comments=True)
+        if len(values) != 1:
+            raise ValueError("Invalid retained Dispatcharr port")
+        port = values[0]
+print(port)
+PYEOF
+)"
+    APP_PORT="${retained_port:-${APP_PORT}}"
+    export AF_APP_PORT="${APP_PORT}"
+    if [[ ! "${APP_PORT}" =~ ^[0-9]{1,5}$ ]] || (( 10#${APP_PORT} < 1 || 10#${APP_PORT} > 65535 )); then
+        log_error "Invalid retained Dispatcharr port: ${APP_PORT}"
+        exit 1
+    fi
+fi
 
 log_info "Starting ${APP_NAME} installation (target port: ${APP_PORT})..."
 report_progress 10 "Preparing ${APP_NAME} installation..."
@@ -186,7 +244,7 @@ if ! "${PYTHON_BIN}" -c 'import sys; sys.exit(sys.version_info < (3, 13))'; then
 fi
 
 if ! id -u "${APP_USER}" >/dev/null 2>&1; then
-    useradd --system --user-group --create-home --home-dir "${DATA_DIR}" --shell /bin/false "${APP_USER}"
+    useradd --system --user-group --no-create-home --home-dir "${DATA_DIR}" --shell /bin/false "${APP_USER}"
 fi
 if [[ -L "${INSTALL_DIR}" || -L "${DATA_DIR}" || -L "${CONFIG_DIR}" ]]; then
     log_error "Dispatcharr installation, data, and configuration roots must not be symlinks."
@@ -282,13 +340,20 @@ APP_ACTIVATED=1
 chown -R root:root "${INSTALL_DIR}"
 chmod -R go-w "${INSTALL_DIR}"
 chmod 755 "${INSTALL_DIR}"
-mkdir -p "${INSTALL_DIR}"/{logo_cache,media}
 for relative in logo_cache media; do
-    if [[ -d "${BACKUP_DIR}/app/${relative}" && ! -L "${BACKUP_DIR}/app/${relative}" ]]; then
-        cp -a -- "${BACKUP_DIR}/app/${relative}/." "${INSTALL_DIR}/${relative}/"
+    if [[ -L "${INSTALL_DIR}/${relative}" || ( -e "${INSTALL_DIR}/${relative}" && ! -d "${INSTALL_DIR}/${relative}" ) ]]; then
+        log_error "Release ${relative} path must be a real directory."
+        exit 1
     fi
+    if [[ -d "${INSTALL_DIR}/${relative}" ]]; then
+        cp -a -- "${INSTALL_DIR}/${relative}/." "${DATA_DIR}/${relative}/"
+        rm -rf -- "${INSTALL_DIR}/${relative}"
+    fi
+    if [[ -d "${BACKUP_DIR}/app/${relative}" && ! -L "${BACKUP_DIR}/app/${relative}" ]]; then
+        cp -a -- "${BACKUP_DIR}/app/${relative}/." "${DATA_DIR}/${relative}/"
+    fi
+    ln -s "${DATA_DIR}/${relative}" "${INSTALL_DIR}/${relative}"
 done
-chown -R "${APP_USER}:${APP_USER}" "${INSTALL_DIR}/logo_cache" "${INSTALL_DIR}/media"
 
 ENV_FILE_TMP="$(mktemp "${CONFIG_DIR}/.dispatcharr.env.XXXXXX")"
 cat > "${ENV_FILE_TMP}" <<EOF
@@ -314,6 +379,34 @@ DISPATCHARR_PLUGINS_DIR=/data/plugins
 DATA_DIR=${DATA_DIR}
 PYTHONUNBUFFERED=1
 EOF
+python3 - "${CONFIG_DIR}/dispatcharr.env" "${ENV_FILE_TMP}" <<'PYEOF'
+from pathlib import Path
+import re
+import sys
+
+existing, candidate = map(Path, sys.argv[1:])
+defaults = dict(line.split("=", 1) for line in candidate.read_text().splitlines())
+required = {"POSTGRES_PASSWORD", "DJANGO_SECRET_KEY", "DISPATCHARR_PORT", "DISPATCHARR_LOG_DIR", "BACKUP_ROOT", "LOGOS_DIR", "UPLOADS_DIR", "PLUGINS_DIR", "DISPATCHARR_PLUGINS_DIR", "DATA_DIR"}
+lines = existing.read_text().splitlines(keepends=True) if existing.exists() else []
+seen = set()
+merged = []
+for line in lines:
+    match = re.match(r"(?:export\s+)?([A-Za-z_][A-Za-z_0-9]*)=", line)
+    key = match.group(1) if match else None
+    if key in defaults:
+        if key in required:
+            if key not in seen:
+                merged.append(f"{key}={defaults[key]}\n")
+        else:
+            merged.append(line)
+        seen.add(key)
+    else:
+        merged.append(line)
+if merged and not merged[-1].endswith("\n"):
+    merged[-1] += "\n"
+merged.extend(f"{key}={value}\n" for key, value in defaults.items() if key not in seen)
+candidate.write_text("".join(merged))
+PYEOF
 chmod 640 "${ENV_FILE_TMP}"
 chown "root:${APP_USER}" "${ENV_FILE_TMP}"
 mv -f -- "${ENV_FILE_TMP}" "${CONFIG_DIR}/dispatcharr.env"

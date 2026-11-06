@@ -186,6 +186,17 @@ func TestPilotAppsBlueprintLifecycleAndNetworkingDNS(t *testing.T) {
 		t.Fatalf("TeardownBlueprintUninstall(sonarr) failed: %v", err)
 	}
 
+	if _, _, matched := ResolveAppTargetForHost("sonarr.aether.local"); matched {
+		t.Fatal("uninstalled app still has a gateway route")
+	}
+	retained, err := db.GetRetainedAppIngressConfig("sonarr")
+	if err != nil || retained == nil || retained.ListenPort != results["sonarr"].AllocatedPort {
+		t.Fatalf("ordinary uninstall lost reinstall settings: %+v, %v", retained, err)
+	}
+	if port := PreAllocateAppPort("sonarr"); port != retained.ListenPort {
+		t.Fatalf("reinstall changed allocated port: %d != %d", port, retained.ListenPort)
+	}
+
 	// Verify Sonarr removed from SQLite app_ingress_configs, /etc/hosts, and Pi-hole custom.list
 	if ing, _ := db.GetAppIngressConfig("sonarr"); ing != nil {
 		t.Errorf("expected sonarr ingress config to be deleted on uninstall, got %+v", ing)
@@ -316,4 +327,3 @@ func TestMasterCredentialsSyncIntoAppBlueprint(t *testing.T) {
 		t.Errorf("expected isConfigPathWritable(%q) to be false when parent directory does not exist", nonExistentParent)
 	}
 }
-

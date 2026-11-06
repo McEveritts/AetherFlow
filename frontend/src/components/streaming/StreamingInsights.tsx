@@ -362,9 +362,7 @@ function buildScopeFilterPatch(
     if (typeof provider === 'string' && provider.trim() !== '' && provider.trim() !== 'all') {
         patch.provider = provider.trim();
     }
-    if (typeof serverId === 'string' && serverId.trim() !== '') {
-        patch.serverId = serverId.trim();
-    }
+    patch.serverId = typeof serverId === 'string' ? serverId.trim() : '';
     return patch;
 }
 
@@ -970,7 +968,7 @@ export function StreamingInsights({
                                         : `${concurrency.avgConcurrency.toFixed(2)} avg`}
                                 </div>
                                 <p className="text-xs text-slate-400 mt-0.5">
-                                    Across {concurrency?.totalSamplesAnalyzed.toLocaleString() ?? 0} 15s sample ticks
+                                    Across {concurrency?.totalSamplesAnalyzed.toLocaleString() ?? 0} observation timestamps (partial per-provider coverage)
                                 </p>
                             </div>
 

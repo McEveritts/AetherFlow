@@ -508,7 +508,7 @@ fn execute_package_command(
                 })),
             ))
         }
-        PackageCommand::Remove { packages } => {
+        PackageCommand::Remove { packages, purge } => {
             let mut receipts = Vec::new();
             let mut skipped_not_installed = Vec::new();
             let mut requests = Vec::new();
@@ -522,7 +522,8 @@ fn execute_package_command(
                     skipped_not_installed.push(pkg.clone());
                     continue;
                 }
-                let req = build_package_runner_request("remove", pkg, None)?;
+                let mut req = build_package_runner_request("remove", pkg, None)?;
+                req.delete_data = *purge;
                 if global.dry_run {
                     requests.push(req);
                 } else {
@@ -998,17 +999,9 @@ fn execute_local_release_with_status_receipt(
         resolve_local_self_update_status_context(explicit_status_file, explicit_job_unit);
 
     if let Some(ref path) = status_file {
-        let _ = write_self_update_job_status_atomic(
-            path,
-            &SelfUpdateJobStatus {
-                status: "running".to_string(),
-                completed: false,
-                success: false,
-                job_unit: unit_name.clone(),
-                error: String::new(),
-                exit_code: None,
-            },
-        );
+        af_runner::claim_self_update_job(path, &unit_name).map_err(|error| {
+            CliError::Validation(format!("Cannot claim self-update admission: {error}"))
+        })?;
     }
 
     let result: CliResult<CliResponseEnvelope> = (|| {
@@ -1023,7 +1016,7 @@ fn execute_local_release_with_status_receipt(
     if let Some(ref path) = status_file {
         match result {
             Ok(_) => {
-                let _ = write_self_update_job_status_atomic(
+                write_self_update_job_status_atomic(
                     path,
                     &SelfUpdateJobStatus {
                         status: "succeeded".to_string(),
@@ -1033,10 +1026,13 @@ fn execute_local_release_with_status_receipt(
                         error: String::new(),
                         exit_code: Some(0),
                     },
-                );
+                )
+                .map_err(|error| {
+                    CliError::io("persisting successful self-update receipt", error)
+                })?;
             }
             Err(ref err) => {
-                let _ = write_self_update_job_status_atomic(
+                write_self_update_job_status_atomic(
                     path,
                     &SelfUpdateJobStatus {
                         status: "failed".to_string(),
@@ -1046,7 +1042,13 @@ fn execute_local_release_with_status_receipt(
                         error: err.to_string(),
                         exit_code: Some(err.exit_code().as_i32()),
                     },
-                );
+                )
+                .map_err(|error| {
+                    CliError::io(
+                        format!("persisting failed self-update receipt after {err}"),
+                        error,
+                    )
+                })?;
             }
         }
     }

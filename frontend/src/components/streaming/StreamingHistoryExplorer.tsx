@@ -504,6 +504,7 @@ export function StreamingHistoryExplorer({
 
     const requestGenRef = useRef<number>(0);
     const exportControllerRef = useRef<AbortController | null>(null);
+    const drilldownOwnedRef = useRef<Partial<StreamingHistoryQuery>>({});
 
     useEffect(() => () => exportControllerRef.current?.abort(), []);
 
@@ -526,6 +527,7 @@ export function StreamingHistoryExplorer({
     // Update filter helper: resets cursor and cursor stack on any filter/sort/window/pageSize change
     const updateFilter = useCallback(
         <K extends keyof StreamingHistoryQuery>(key: K, value: StreamingHistoryQuery[K]) => {
+            delete drilldownOwnedRef.current[key];
             setCursorStack([]);
             setQueryState((prev) => ({
                 ...prev,
@@ -537,6 +539,7 @@ export function StreamingHistoryExplorer({
     );
 
     const handleResetFilters = useCallback(() => {
+        drilldownOwnedRef.current = {};
         setSearchInput('');
         setCursorStack([]);
         setIsConflict409(false);
@@ -1920,7 +1923,14 @@ export function StreamingHistoryExplorer({
                     onDrilldown={(filters) => {
                         setCursorStack([]);
                         setSearchInput('');
-                        setQueryState((previous) => ({ ...previous, search: '', ...filters, cursor: undefined, snapshot: undefined }));
+                        setShowAdvancedFilters(true);
+                        const previousBase = drilldownOwnedRef.current;
+                        const nextBase: Partial<StreamingHistoryQuery> = {};
+                        for (const key of Object.keys(filters) as Array<keyof StreamingHistoryQuery>) {
+                            Object.assign(nextBase, { [key]: key in previousBase ? previousBase[key] : queryState[key] });
+                        }
+                        drilldownOwnedRef.current = nextBase;
+                        setQueryState((previous) => ({ ...previous, ...previousBase, search: '', ...filters, cursor: undefined, snapshot: undefined }));
                     }}
                 />
             )}

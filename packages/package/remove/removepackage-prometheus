@@ -23,8 +23,7 @@ require_root
 log_info "Starting removal for ${PACKAGE_NAME}..."
 report_progress 25 "Stopping and removing prometheus and node_exporter services..."
 
-purge_systemd_unit "prometheus"
-purge_systemd_unit "node_exporter"
+purge_systemd_unit "prometheus" "node_exporter"
 
 report_progress 65 "Removing Prometheus binaries, time-series data, config, and user accounts..."
 rm -f /usr/local/bin/prometheus /usr/local/bin/promtool /usr/local/bin/node_exporter
@@ -33,7 +32,7 @@ if [[ "${DELETE_DATA:-false}" == true ]]; then
 fi
 purge_system_user "prometheus"
 purge_system_user "node_exporter"
-systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
+systemctl daemon-reload >> "$LOGFILE" 2>&1
 
 remove_lock "${PACKAGE_NAME}"
 report_progress 100 "Prometheus and Node Exporter removed; application data retained unless DELETE_DATA=true."

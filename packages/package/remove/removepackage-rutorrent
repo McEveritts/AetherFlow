@@ -27,12 +27,14 @@ a2dissite rutorrent.conf >> "$LOGFILE" 2>&1 || true
 rm -f /etc/apache2/sites-available/rutorrent.conf /etc/apache2/sites-enabled/rutorrent.conf
 remove_apache_app_listener "$PACKAGE_NAME"
 
+# Detach this application before any data or database removal.
+apache2ctl configtest >> "$LOGFILE" 2>&1
+systemctl reload apache2 >> "$LOGFILE" 2>&1
+
 report_progress 65 "Removing ruTorrent web directory and symlinks..."
 if [[ "${DELETE_DATA:-false}" == true ]]; then
     rm -rf /var/www/rutorrent /srv/rutorrent
 fi
-apache2ctl configtest >> "$LOGFILE" 2>&1
-systemctl reload apache2 >> "$LOGFILE" 2>&1
 
 remove_lock "${PACKAGE_NAME}"
 report_progress 100 "ruTorrent removed; application data retained unless DELETE_DATA=true."

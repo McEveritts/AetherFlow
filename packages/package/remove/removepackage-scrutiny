@@ -23,18 +23,16 @@ require_root
 log_info "Starting removal for ${PACKAGE_NAME}..."
 report_progress 20 "Stopping and disabling companion scrutiny-collector.timer and service..."
 
-purge_systemd_unit "scrutiny-collector.timer"
-purge_systemd_unit "scrutiny-collector.service"
+purge_systemd_unit "scrutiny-collector.timer" "scrutiny-collector.service" "scrutiny.service"
 
 report_progress 50 "Stopping and removing scrutiny.service dashboard..."
-purge_systemd_unit "scrutiny.service"
 
 report_progress 75 "Removing Scrutiny binaries, database, and user account..."
 if [[ "${DELETE_DATA:-false}" == true ]]; then
     rm -rf /opt/scrutiny /var/lib/scrutiny /etc/scrutiny
 fi
 purge_system_user "scrutiny"
-systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
+systemctl daemon-reload >> "$LOGFILE" 2>&1
 
 remove_lock "${PACKAGE_NAME}"
 report_progress 100 "Scrutiny removed; application data retained unless DELETE_DATA=true."

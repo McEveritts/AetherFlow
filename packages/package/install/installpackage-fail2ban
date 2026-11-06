@@ -26,12 +26,19 @@ report_progress 20 "Installing fail2ban and python3-systemd backend..."
 DEBIAN_FRONTEND=noninteractive apt-get update -y -qq >> "$LOGFILE" 2>&1
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq fail2ban python3-systemd iptables >> "$LOGFILE" 2>&1
 
-report_progress 60 "Configuring /etc/fail2ban/jail.local..."
-SSH_PORT="$(grep -E '^\s*Port\s+' /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' | head -n1 || true)"
-SSH_PORT="${SSH_PORT:-ssh}"
-
-mkdir -p /etc/fail2ban
-cat <<EOF > /etc/fail2ban/jail.local
+report_progress 60 "Preparing Fail2ban configuration..."
+mkdir -p /etc/fail2ban/jail.d
+if [[ -e /etc/fail2ban/jail.local || -L /etc/fail2ban/jail.local ]] || compgen -G '/etc/fail2ban/jail.d/*.local' >/dev/null; then
+    log_info "Retaining existing Fail2ban local jail configuration."
+else
+    SSH_PORT="$(grep -E '^\s*Port\s+' /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' | head -n1 || true)"
+    SSH_PORT="${SSH_PORT:-ssh}"
+    # Local operator policy takes precedence over bootstrap defaults. A separate
+    # fragment also avoids ever replacing jail.local during update/reinstall.
+    (
+        config_temp="$(mktemp /etc/fail2ban/jail.d/.aetherflow-XXXXXX)"
+        trap 'rm -f -- "${config_temp}"' EXIT
+        cat <<EOF > "${config_temp}"
 [DEFAULT]
 bantime  = 1h
 findtime = 10m
@@ -42,6 +49,10 @@ backend  = systemd
 enabled = true
 port    = ${SSH_PORT},ssh
 EOF
+        chmod 644 "${config_temp}"
+        ln -- "${config_temp}" /etc/fail2ban/jail.d/10-aetherflow.local
+    )
+fi
 
 report_progress 85 "Starting and enabling fail2ban.service..."
 systemctl daemon-reload >> "$LOGFILE" 2>&1

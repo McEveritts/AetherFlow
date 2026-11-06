@@ -4,6 +4,53 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[test]
+fn full_initialization_preserves_plugin_migration_and_repairs_only_conflicting_streaming_marker() {
+    let directory = TempTestDir::new("full_init_epoch");
+    let path = directory.db_file("full.sqlite");
+    let previous = std::env::var_os("DB_PATH");
+    std::env::set_var("DB_PATH", &path);
+    crate::init_db().expect("empty full schema initializes");
+    let plugin_description: String = {
+        let connection = crate::get_conn().unwrap();
+        connection.query_row("SELECT COUNT(*) FROM plugins_registry", [], |row| row.get::<_, i64>(0)).unwrap();
+        connection.execute("INSERT INTO plugins_registry(plugin_id,enabled) VALUES('retained-fixture',1)", []).unwrap();
+        connection.query_row("SELECT description FROM schema_versions WHERE version=21", [], |row| row.get(0)).unwrap()
+    };
+    for _ in 0..2 {
+        crate::init_db().expect("reopening complete schema succeeds");
+        let connection = crate::get_conn().unwrap();
+        assert_eq!(connection.query_row("SELECT description FROM schema_versions WHERE version=21", [], |row| row.get::<_, String>(0)).unwrap(), plugin_description);
+        assert_eq!(connection.query_row("SELECT enabled FROM plugins_registry WHERE plugin_id='retained-fixture'", [], |row| row.get::<_, bool>(0)).unwrap(), true);
+        assert_eq!(connection.query_row("SELECT COUNT(*) FROM schema_versions WHERE version=24", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
+    }
+    {
+        let connection = crate::get_conn().unwrap();
+        connection.execute_batch("DROP TABLE plugins_registry; DELETE FROM schema_versions WHERE version=24; UPDATE schema_versions SET description='Streaming historical read epoch; destructive revision retained' WHERE version=21;").unwrap();
+    }
+    crate::init_db().expect("exact bad21 marker is repaired before plugin migration");
+    {
+        let connection = crate::get_conn().unwrap();
+        connection.execute_batch("DROP TABLE plugins_registry; UPDATE schema_versions SET description='Streaming historical read epoch; destructive revision retained' WHERE version=21;").unwrap();
+    }
+    crate::init_db().expect("bad21 cleanup also precedes the already-applied24 return");
+    {
+        let connection = crate::get_conn().unwrap();
+        connection.query_row("SELECT COUNT(*) FROM plugins_registry", [], |row| row.get::<_, i64>(0)).unwrap();
+        assert_eq!(connection.query_row("SELECT description FROM schema_versions WHERE version=21", [], |row| row.get::<_, String>(0)).unwrap(), plugin_description);
+        connection.execute("UPDATE schema_versions SET description='unrelated-future-migration' WHERE version=24", []).unwrap();
+    }
+    let error = crate::init_db().unwrap_err();
+    assert!(format!("{error:#}").contains("version24 collision"));
+    {
+        let connection = crate::get_conn().unwrap();
+        assert_eq!(connection.query_row("SELECT description FROM schema_versions WHERE version=24", [], |row| row.get::<_, String>(0)).unwrap(), "unrelated-future-migration");
+        connection.execute("DELETE FROM schema_versions WHERE version=24", []).unwrap();
+    }
+    crate::init_db().expect("full initialization remains repeatable after marker repair");
+    match previous { Some(value) => std::env::set_var("DB_PATH", value), None => std::env::remove_var("DB_PATH") }
+}
+
 struct TempTestDir {
     path: PathBuf,
 }

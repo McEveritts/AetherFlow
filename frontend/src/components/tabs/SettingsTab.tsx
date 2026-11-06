@@ -29,8 +29,9 @@ import { useSystemStore } from '@/store/useSystemStore';
 import { useTranslations } from 'next-intl';
 import { SettingsSkeleton } from '@/components/layout/SkeletonBox';
 import { apiFetch } from '@/lib/fetcher';
+import { isTransientLifecycleError, LIFECYCLE_RECOVERY_INTERVAL_MS, useLifecyclePollRecovery } from '@/hooks/useLifecyclePollRecovery';
 import {
-    getSystemUpdateView, isSystemUpdateLaunchTerminal, UPDATE_STATUS_POLL_MS, UPDATE_CHECK_MAX_AGE_MS,
+    getSystemUpdateView, isSystemUpdateLaunchTerminal, UPDATE_STATUS_POLL_MS, UPDATE_STATUS_MAX_AGE_MS, UPDATE_CHECK_MAX_AGE_MS,
     type SystemUpdateCheck, type SystemUpdateLaunch, type SystemUpdateStatus, type SystemUpdateView, type UpdateSnapshot,
 } from '@/lib/system-update';
 
@@ -169,9 +170,9 @@ async function fetchUpdateSnapshot<Value>(url: string): Promise<UpdateSnapshot<V
     const timeout = setTimeout(() => controller.abort(), 10000);
     try {
         const response = await apiFetch(url, { signal: controller.signal, cache: 'no-store' });
-        const data = await response.json();
+        const data = await response.json().catch(() => null);
         if (!response.ok) throw Object.assign(new Error(data?.error || data?.message || `Update request failed (${response.status})`), { status: response.status });
-        if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('Invalid update response');
+        if (!data || typeof data !== 'object' || Array.isArray(data)) throw Object.assign(new Error('Invalid update response'), { status: response.status });
         return { ...data, checkedAt: Date.now() };
     } finally {
         clearTimeout(timeout);
@@ -192,6 +193,7 @@ interface UpdateStatusPayload {
     success?: boolean;
     job_unit?: string;
     active_job_unit?: string;
+    action?: string | null;
     channel?: string;
     engine?: string;
     error?: string | null;
@@ -204,8 +206,69 @@ interface SettingsTabProps {
     updateMaxPollAttempts?: number;
 }
 
+function getSettingsUpdateView(input: Parameters<typeof getSystemUpdateView>[0] & {
+    status?: UpdateSnapshot<SystemUpdateStatus & UpdateStatusPayload>;
+    statusError?: { status?: number; message: string };
+    checkError?: { status?: number; message: string };
+    trackedJobUnit: string;
+    jobCheckedAt: number | null;
+    updateOutcome: UpdateJobOutcome;
+    updateMessage: string;
+    isUpdating: boolean;
+}): SystemUpdateView {
+    const { status: updateStatus, check: updateData, statusError: updateStatusError, checkError: updateError,
+        trackedJobUnit, jobCheckedAt, updateOutcome, updateMessage, isUpdating, now } = input;
+    let view = getSystemUpdateView(input);
+    if (updateStatus?.status === 'idle' && updateStatus.state === 'idle' && updateStatus.job_unit === ''
+        && updateStatus.active_job_unit === '' && updateStatus.completed === true && !updateStatus.error && !updateStatusError
+        && updateStatus.checkedAt <= now && now - updateStatus.checkedAt < UPDATE_STATUS_MAX_AGE_MS) {
+        const versionsKnown = [updateData?.currentVersion, updateData?.latestVersion].every(version =>
+            typeof version === 'string' && /^(?:v?\d[\w.+-]*|(?:nightly|experimental)-[0-9a-f]{7,40})$/i.test(version)
+        );
+        const checkVerified = Boolean(updateData && !updateError && !updateData.error && versionsKnown
+            && updateData.checkedAt <= now && now - updateData.checkedAt < UPDATE_CHECK_MAX_AGE_MS
+            && (!updateData.channel || normalizeUpdateChannel(updateData.channel) === input.savedChannel));
+        const available = checkVerified && updateData?.updateAvailable === true
+            && updateData.currentVersion !== updateData.latestVersion;
+        view = {
+            ...view, kind: available ? 'available' : 'unknown', isLatest: false, updateAvailable: available,
+            canLaunch: available && !view.isBusy && !input.settingsPending && input.channel === input.savedChannel,
+            message: available ? `A verified update to ${updateData?.latestVersion} is available.`
+                : 'Independent runtime verification is unavailable; latest-release status is not confirmed.',
+        };
+    }
+    const permanentError = [updateStatusError, updateError].find(error => error && !isTransientLifecycleError(error));
+    if (permanentError) {
+        return { ...view, kind: 'failed', canLaunch: false, isLatest: false,
+            message: `${permanentError.message} ${permanentError.status === 401 || permanentError.status === 403
+                ? 'Restore authorization or authenticate again, then check for updates.'
+                : 'Update observation is unavailable. Check for updates to retry; no idle state is confirmed.'}` };
+    }
+    if (trackedJobUnit) {
+        const stale = jobCheckedAt !== null && now - jobCheckedAt >= UPDATE_STATUS_MAX_AGE_MS;
+        return { ...view, kind: updateOutcome === 'error' ? 'failed' : stale ? 'reconnecting' : 'running',
+            message: stale && updateOutcome !== 'error' ? `Update receipt is stale; outcome remains unverified. ${updateMessage}` : updateMessage,
+            isLatest: false, isBusy: true, canLaunch: false };
+    }
+    return {
+        ...view,
+        kind: isUpdating ? 'running' : view.kind,
+        message: isUpdating ? updateMessage : view.message,
+        isLatest: !isUpdating && view.isLatest,
+        isBusy: view.isBusy || isUpdating,
+        canLaunch: view.canLaunch && !isUpdating,
+    };
+}
+
 function isValidSelfUpdateJobUnit(jobUnit: string): boolean {
     return VALID_SELF_UPDATE_JOB_UNIT_PATTERN.test(jobUnit.trim());
+}
+
+function advertisedUpdateJob(payload: UpdateStatusPayload | undefined): string {
+    const unit = payload?.active_job_unit || (payload?.completed === false ? payload.job_unit : '');
+    if (typeof unit !== 'string' || !isValidSelfUpdateJobUnit(unit)) return '';
+    const action = unit.replace('aetherflow-self-update-', '').split('-')[0];
+    return payload?.action != null && payload.action !== action ? '' : unit;
 }
 
 function readStoredUpdateJobUnit(): string {
@@ -240,7 +303,7 @@ function writeStoredUpdateJobUnit(jobUnit: string): void {
 function evaluateUpdateStatusPayload(
     payload: UpdateStatusPayload | null | undefined,
     expectedJobUnit: string
-): { isTerminal: boolean; isSuccess: boolean; message: string } {
+): { isTerminal: boolean; isSuccess: boolean; message: string; confirmed?: boolean } {
     if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
         return { isTerminal: true, isSuccess: false, message: 'Update job returned an invalid status payload.' };
     }
@@ -248,22 +311,26 @@ function evaluateUpdateStatusPayload(
     const jobUnit = typeof payload.job_unit === 'string' ? payload.job_unit.trim() : '';
     const error = typeof payload.error === 'string' ? payload.error.trim() : '';
     const message = typeof payload.message === 'string' ? payload.message.trim() : '';
-    if (jobUnit !== expectedJobUnit || !isValidSelfUpdateJobUnit(jobUnit)) {
+    const action = jobUnit.replace('aetherflow-self-update-', '').split('-')[0];
+    if (jobUnit !== expectedJobUnit || !isValidSelfUpdateJobUnit(jobUnit)
+        || (payload.action != null && payload.action !== action)) {
         return { isTerminal: true, isSuccess: false, message: 'Update status returned a missing or mismatched job unit.' };
     }
-    const nonZeroExit = typeof payload.exit_code === 'number' && payload.exit_code !== 0;
-    if (status === 'running' && payload.completed === false && !error && !nonZeroExit) {
+    if (['initiated', 'queued', 'launching', 'running'].includes(status) && payload.completed === false
+        && payload.success !== true && !error && payload.exit_code == null) {
         return { isTerminal: false, isSuccess: false, message: message || `Updating system (${jobUnit})...` };
     }
     if (status === 'succeeded' && payload.completed === true && payload.success === true && payload.exit_code === 0 && !error) {
         return {
-            isTerminal: true, isSuccess: true,
+            isTerminal: true, isSuccess: true, confirmed: true,
             message: message || `System update completed successfully (${jobUnit}).`,
         };
     }
     const exitCode = typeof payload.exit_code === 'number' ? ` (exit code ${payload.exit_code})` : '';
     return {
         isTerminal: true, isSuccess: false,
+        confirmed: status === 'failed' && payload.completed === true && payload.success === false
+            && payload.exit_code !== 0 && Boolean(error),
         message: error || message || (status === 'failed'
             ? `System update failed${exitCode}.`
             : 'Update job status is unknown, unavailable, or inconsistent.'),
@@ -397,6 +464,13 @@ export default function SettingsTab({
     const pollingJobUnitRef = useRef('');
     const pollAbortControllerRef = useRef<AbortController | null>(null);
     const pollRetryTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+    const pollTimeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+    const launchTimeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+    const launchAbortControllerRef = useRef<AbortController | null>(null);
+    const [trackedJobUnit, setTrackedJobUnit] = useState(readStoredUpdateJobUnit);
+    const [jobCheckedAt, setJobCheckedAt] = useState<number | null>(null);
+    const stoppedJobRef = useRef('');
+    const settledJobRef = useRef('');
 
     useEffect(() => {
         isMountedRef.current = true;
@@ -406,6 +480,9 @@ export default function SettingsTab({
             pollingJobUnitRef.current = '';
             pollAbortControllerRef.current?.abort();
             if (pollRetryTimerRef.current) clearTimeout(pollRetryTimerRef.current);
+            clearTimeout(pollTimeoutRef.current);
+            clearTimeout(launchTimeoutRef.current);
+            launchAbortControllerRef.current?.abort();
         };
     }, []);
 
@@ -495,8 +572,13 @@ export default function SettingsTab({
             const data = await fetchUpdateSnapshot<SystemUpdateCheck & UpdateStatusPayload>(url);
             return { ...data, channel: normalizeUpdateChannel(data.channel || channel) };
         },
-        { refreshInterval: 60000, onSuccess: () => setUpdateNow(Date.now()) }
+        {
+            refreshInterval: 60000, shouldRetryOnError: false,
+            revalidateOnFocus: false, revalidateOnReconnect: false,
+            onSuccess: () => setUpdateNow(Date.now()),
+        }
     );
+    useLifecyclePollRecovery(`/api/v1/auth/system/update/check:${savedSettings.updateChannel}`, updateError, mutateUpdateData);
 
     const { data: updateStatus, error: updateStatusError, mutate: mutateUpdateStatus } = useSWR<UpdateSnapshot<SystemUpdateStatus & UpdateStatusPayload>>(
         '/api/v1/auth/system/update/status',
@@ -506,21 +588,16 @@ export default function SettingsTab({
             dedupingInterval: 1000,
             refreshWhenHidden: true,
             refreshWhenOffline: true,
-            revalidateOnFocus: true,
-            revalidateOnReconnect: true,
-            shouldRetryOnError: true,
-            errorRetryCount: Infinity,
-            errorRetryInterval: UPDATE_STATUS_POLL_MS,
+            revalidateOnFocus: false,
+            revalidateOnReconnect: false,
+            shouldRetryOnError: false,
             onSuccess: status => {
                 setUpdateNow(Date.now());
                 setUpdateLaunch(current => isSystemUpdateLaunchTerminal(current, status, Date.now()) ? null : current);
             },
-            onErrorRetry: (error, _key, _config, revalidate, { retryCount }) => {
-                if (error?.status === 400 && /job_unit/i.test(error.message)) return;
-                setTimeout(() => revalidate({ retryCount }), UPDATE_STATUS_POLL_MS);
-            },
         }
     );
+    useLifecyclePollRecovery('/api/v1/auth/system/update/status', updateStatusError, mutateUpdateStatus, UPDATE_STATUS_POLL_MS);
 
     const monitorUpdateJob = useCallback(
         async function monitorJob(rawJobUnit: string, initialMessage?: string): Promise<void> {
@@ -529,6 +606,7 @@ export default function SettingsTab({
             if (!isValidSelfUpdateJobUnit(jobUnit)) {
                 writeStoredUpdateJobUnit('');
                 pollingJobUnitRef.current = '';
+                setTrackedJobUnit('');
                 setUpdateLaunch(null);
                 setUpdateOutcome('error');
                 setUpdateMessage('Update initiation returned an invalid or missing self-update job unit.');
@@ -536,9 +614,12 @@ export default function SettingsTab({
                 return;
             }
             if (pollRetryTimerRef.current) clearTimeout(pollRetryTimerRef.current);
+            clearTimeout(pollTimeoutRef.current);
             pollAbortControllerRef.current?.abort();
             const pollId = ++activePollIdRef.current;
             pollingJobUnitRef.current = jobUnit;
+            stoppedJobRef.current = '';
+            setTrackedJobUnit(jobUnit);
             writeStoredUpdateJobUnit(jobUnit);
             setIsUpdating(true);
             setUpdateOutcome('pending');
@@ -547,11 +628,12 @@ export default function SettingsTab({
                 ? Math.max(1, Math.floor(updateMaxPollAttempts)) : DEFAULT_UPDATE_MAX_POLL_ATTEMPTS;
             const intervalMs = Number.isFinite(updatePollIntervalMs)
                 ? Math.max(5, updatePollIntervalMs) : DEFAULT_UPDATE_POLL_INTERVAL_MS;
-            for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+            const poll = async (attempt: number): Promise<void> => {
                 if (!isMountedRef.current || activePollIdRef.current !== pollId) return;
                 const controller = new AbortController();
                 pollAbortControllerRef.current = controller;
                 const timeout = setTimeout(() => controller.abort(), 10000);
+                pollTimeoutRef.current = timeout;
                 try {
                     const response = await apiFetch(
                         `/api/v1/auth/system/update/status?job_unit=${encodeURIComponent(jobUnit)}`,
@@ -559,18 +641,17 @@ export default function SettingsTab({
                     );
                     const payload: UpdateStatusPayload | null = await response.json().catch(() => null);
                     if (!isMountedRef.current || activePollIdRef.current !== pollId) return;
-                    if (!response.ok && (response.status >= 500 || response.status === 408 || response.status === 429)) {
-                        throw new Error('Update status is temporarily unavailable.');
+                    if (!response.ok) {
+                        throw Object.assign(new Error(payload?.error || payload?.message
+                            || `Failed to query update job status (HTTP ${response.status}).`), { status: response.status });
                     }
-                    const evaluation = response.ok
-                        ? evaluateUpdateStatusPayload(payload, jobUnit)
-                        : {
-                            isTerminal: true, isSuccess: false,
-                            message: payload?.error || payload?.message || `Failed to query update job status (HTTP ${response.status}).`,
-                        };
-                    if (evaluation.isTerminal) {
+                    const evaluation = evaluateUpdateStatusPayload(payload, jobUnit);
+                    if (evaluation.confirmed) {
+                        settledJobRef.current = jobUnit;
                         writeStoredUpdateJobUnit('');
                         pollingJobUnitRef.current = '';
+                        setTrackedJobUnit('');
+                        setJobCheckedAt(Date.now());
                         setUpdateLaunch(null);
                         setLaunchError(evaluation.isSuccess ? '' : evaluation.message);
                         setUpdateOutcome(evaluation.isSuccess ? 'success' : 'error');
@@ -582,37 +663,47 @@ export default function SettingsTab({
                         }
                         return;
                     }
+                    if (evaluation.isTerminal) {
+                        setUpdateOutcome('error');
+                        setIsUpdating(false);
+                        setUpdateMessage(`${evaluation.message} The job identity is retained; waiting for a verified receipt before another update.`);
+                        pollRetryTimerRef.current = setTimeout(() => void poll(1), LIFECYCLE_RECOVERY_INTERVAL_MS);
+                        return;
+                    }
+                    setJobCheckedAt(Date.now());
+                    setIsUpdating(true);
+                    setUpdateOutcome('pending');
                     setUpdateMessage(evaluation.message);
-                } catch {
+                } catch (error) {
                     if (!isMountedRef.current || activePollIdRef.current !== pollId) return;
+                    if (!isTransientLifecycleError(error)) {
+                        stoppedJobRef.current = jobUnit;
+                        setIsUpdating(false);
+                        setUpdateOutcome('error');
+                        const status = (error as { status?: number }).status;
+                        setUpdateMessage(`${(error as Error).message} ${status === 401 || status === 403
+                            ? 'Restore authorization and check for updates to resume observation.'
+                            : 'Automatic observation stopped; check for updates to retry.'} The tracked job outcome remains unverified.`);
+                        return;
+                    }
                     setUpdateMessage(`Reconnecting automatically to update status (${jobUnit}); no duplicate update will be submitted.`);
                 } finally {
                     clearTimeout(timeout);
                 }
-                if (attempt < maxAttempts) {
-                    await new Promise<void>(resolve => setTimeout(resolve, intervalMs));
-                }
-            }
-            if (!isMountedRef.current || activePollIdRef.current !== pollId) return;
-            setUpdateMessage(`Update is still pending (${jobUnit}). Monitoring will continue automatically.`);
-            pollRetryTimerRef.current = setTimeout(() => {
-                if (isMountedRef.current && activePollIdRef.current === pollId) void monitorJob(jobUnit);
-            }, intervalMs);
+                if (!isMountedRef.current || activePollIdRef.current !== pollId) return;
+                pollRetryTimerRef.current = setTimeout(() => void poll(attempt < maxAttempts ? attempt + 1 : 1), intervalMs);
+            };
+            await poll(1);
         },
         [mutateUpdateData, mutateUpdateStatus, updateMaxPollAttempts, updatePollIntervalMs]
     );
 
-    const recoverableJobUnit = [
-        updateData?.active_job_unit,
-        updateStatus?.active_job_unit,
-        updateData?.completed === false ? updateData.job_unit : '',
-        updateStatus?.completed === false ? updateStatus.job_unit : '',
-    ].find((unit): unit is string => typeof unit === 'string' && isValidSelfUpdateJobUnit(unit)) || '';
+    const recoverableJobUnit = advertisedUpdateJob(updateStatus) || advertisedUpdateJob(updateData);
 
     useEffect(() => {
-        const jobUnit = recoverableJobUnit || readStoredUpdateJobUnit();
-        if (jobUnit && pollingJobUnitRef.current !== jobUnit) void monitorUpdateJob(jobUnit);
-    }, [recoverableJobUnit, monitorUpdateJob]);
+        const jobUnit = trackedJobUnit || readStoredUpdateJobUnit() || recoverableJobUnit;
+        if (jobUnit && jobUnit !== settledJobRef.current && pollingJobUnitRef.current !== jobUnit) void monitorUpdateJob(jobUnit);
+    }, [trackedJobUnit, recoverableJobUnit, monitorUpdateJob]);
 
     useEffect(() => {
         const timer = setInterval(() => setUpdateNow(Date.now()), UPDATE_STATUS_POLL_MS);
@@ -627,35 +718,9 @@ export default function SettingsTab({
         status: updateStatus, check: updateData, statusError: updateStatusError, checkError: updateError,
         launch: updateLaunch, launchError, channel: updateChannel,
         savedChannel: savedSettings.updateChannel, settingsPending: isSaving, now: updateNow,
+        trackedJobUnit, jobCheckedAt, updateOutcome, updateMessage, isUpdating,
     };
-    const getCurrentUpdateView = (now: number): SystemUpdateView => {
-        let view = getSystemUpdateView({ ...updateViewInput, now });
-        if (updateStatusError?.status === 400 && /job_unit/i.test(updateStatusError.message || '')) {
-            const versionsKnown = [updateData?.currentVersion, updateData?.latestVersion].every(version =>
-                typeof version === 'string' && /^(?:v?\d[\w.+-]*|(?:nightly|experimental)-[0-9a-f]{7,40})$/i.test(version)
-            );
-            const checkVerified = Boolean(updateData && !updateError && !updateData.error && versionsKnown
-                && updateData.checkedAt <= now && now - updateData.checkedAt < UPDATE_CHECK_MAX_AGE_MS
-                && (!updateData.channel || normalizeUpdateChannel(updateData.channel) === savedSettings.updateChannel));
-            const available = checkVerified && updateData?.updateAvailable === true
-                && updateData.currentVersion !== updateData.latestVersion;
-            view = {
-                ...view, kind: available ? 'available' : 'unknown', isLatest: false, updateAvailable: available,
-                canLaunch: available && !view.isBusy && !isSaving && updateChannel === savedSettings.updateChannel,
-                message: available ? `A verified update to ${updateData?.latestVersion} is available.`
-                    : 'Independent runtime verification is unavailable; latest-release status is not confirmed.',
-            };
-        }
-        return {
-            ...view,
-            kind: isUpdating ? 'running' : view.kind,
-            message: isUpdating ? updateMessage : view.message,
-            isLatest: !isUpdating && view.isLatest,
-            isBusy: view.isBusy || isUpdating,
-            canLaunch: view.canLaunch && !isUpdating,
-        };
-    };
-    const updateView = getCurrentUpdateView(updateNow);
+    const updateView = getSettingsUpdateView(updateViewInput);
 
     if (isLoading) return <SettingsSkeleton />;
 
@@ -756,18 +821,20 @@ export default function SettingsTab({
         }
     };
 
-    const handleRunUpdate = async () => {
-        if (launchRequestInFlight.current || pollingJobUnitRef.current || !getCurrentUpdateView(Date.now()).canLaunch) return;
+    const handleRunUpdate = async (startedAt: number) => {
+        if (launchRequestInFlight.current || pollingJobUnitRef.current || !getSettingsUpdateView({ ...updateViewInput, now: startedAt }).canLaunch) return;
         launchRequestInFlight.current = true;
         setLaunchError('');
         setUpdateMessage('');
         setUpdateOutcome('idle');
         setUpdateLaunch({
-            state: 'launching', startedAt: Date.now(), operationId: null,
+            state: 'launching', startedAt, operationId: null,
             previousOperationId: updateStatus?.operationId ?? null, message: '',
         });
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), 10000);
+        launchAbortControllerRef.current = controller;
+        launchTimeoutRef.current = timeout;
         try {
             const res = await apiFetch('/api/v1/admin/system/update/run', {
                 method: 'POST', signal: controller.signal,
@@ -776,6 +843,23 @@ export default function SettingsTab({
             if (!isMountedRef.current) return;
             if (res.ok && data && (data.status !== undefined || data.job_unit !== undefined)) {
                 const jobUnit = typeof data.job_unit === 'string' ? data.job_unit.trim() : '';
+                if (isValidSelfUpdateJobUnit(jobUnit) && data.completed === true
+                    && (data.status === 'succeeded' || data.status === 'failed')) {
+                    const evaluation = evaluateUpdateStatusPayload(data, jobUnit);
+                    if (!evaluation.confirmed) {
+                        void monitorUpdateJob(jobUnit, evaluation.message);
+                        return;
+                    }
+                    settledJobRef.current = jobUnit;
+                    setUpdateLaunch(null);
+                    setLaunchError(evaluation.isSuccess ? '' : evaluation.message);
+                    setUpdateOutcome(evaluation.isSuccess ? 'success' : 'error');
+                    setUpdateMessage(evaluation.message);
+                    setIsUpdating(false);
+                    writeStoredUpdateJobUnit('');
+                    if (evaluation.isSuccess) void mutateUpdateData().catch(() => undefined);
+                    return;
+                }
                 if (data.status !== 'initiated' || data.completed !== false || !isValidSelfUpdateJobUnit(jobUnit)) {
                     const message = 'Update initiation returned an invalid or missing self-update job unit.';
                     setUpdateLaunch(null);
@@ -801,6 +885,7 @@ export default function SettingsTab({
                 setUpdateLaunch(null);
             }
         } catch {
+            if (!isMountedRef.current) return;
             setUpdateLaunch(current => current && ({
                 ...current, state: 'uncertain',
                 message: 'The update trigger response was lost. Reconnecting without submitting a duplicate request.',
@@ -808,12 +893,13 @@ export default function SettingsTab({
         } finally {
             clearTimeout(timeout);
             launchRequestInFlight.current = false;
-            void mutateUpdateStatus().catch(() => undefined);
+            if (isMountedRef.current) void mutateUpdateStatus().catch(() => undefined);
         }
     };
 
     const handleCheckForUpdates = async () => {
         addToast('Checking for updates...', 'success');
+        if (stoppedJobRef.current && trackedJobUnit) void monitorUpdateJob(trackedJobUnit);
         await Promise.allSettled([mutateUpdateData(), mutateUpdateStatus()]);
     };
 
@@ -1669,7 +1755,7 @@ export default function SettingsTab({
                                                         <button
                                                             type="button"
                                                             data-testid="run-system-update-button"
-                                                            onClick={handleRunUpdate}
+                                                            onClick={() => void handleRunUpdate(Date.now())}
                                                             disabled={!updateView.canLaunch}
                                                             className="obs-touch-target-standard obs-gpu-120hz-interactive w-full px-4 py-3 bg-blue-600 hover:bg-blue-500 disabled:bg-blue-600/50 disabled:cursor-not-allowed text-white font-bold rounded-xl transition-colors shadow-lg shadow-blue-500/20 text-center"
                                                         >

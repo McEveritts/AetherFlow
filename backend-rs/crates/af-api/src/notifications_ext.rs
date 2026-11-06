@@ -933,7 +933,13 @@ async fn evaluate_active_rules_once() {
     }
 
     let metrics = af_hardware::get_system_metrics_core();
-    let active_services = af_services::get_active_services();
+    let active_services = tokio::task::spawn_blocking(af_services::get_active_services)
+        .await
+        .map_err(anyhow::Error::from)
+        .and_then(|services| services)
+        .inspect_err(|error| {
+            tracing::warn!(%error, "Skipping service-down rules while service state is unknown");
+        });
 
     for rule in rules {
         // Check 15-minute per-rule cooldown
@@ -986,16 +992,11 @@ async fn evaluate_active_rules_once() {
             }
             "service_down" => {
                 let target_svc = rule.condition_value.trim();
-                if !target_svc.is_empty() {
-                    let is_up = active_services.iter().any(|(label, item)| {
-                        (label.eq_ignore_ascii_case(target_svc)
-                            || item.process.eq_ignore_ascii_case(target_svc))
-                            && item.status == "running"
-                    });
-                    if !is_up {
-                        triggered = true;
-                        message = format!("Service {} is down", target_svc);
-                    }
+                if !target_svc.is_empty()
+                    && service_down_confirmed(active_services.as_ref().ok(), target_svc)
+                {
+                    triggered = true;
+                    message = format!("Service {} is down", target_svc);
                 }
             }
             _ => {}
@@ -1058,9 +1059,41 @@ pub fn start_notification_engine() {
     });
 }
 
+fn service_down_confirmed(
+    services: Option<&std::collections::HashMap<String, af_services::ServiceStatusItem>>,
+    target: &str,
+) -> bool {
+    services.is_some_and(|services| {
+        !services.iter().any(|(label, item)| {
+            (label.eq_ignore_ascii_case(target) || item.process.eq_ignore_ascii_case(target))
+                && item.status == "running"
+        })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn service_down_rule_skips_unknown_then_resumes_on_known_state() {
+        assert!(!service_down_confirmed(None, "Fixture"));
+        let mut services = std::collections::HashMap::new();
+        services.insert(
+            "Fixture".to_string(),
+            af_services::ServiceStatusItem {
+                process: "fixture".into(),
+                status: "running".into(),
+                ..Default::default()
+            },
+        );
+        assert!(!service_down_confirmed(Some(&services), "fixture"));
+        services.get_mut("Fixture").unwrap().status = "stopped".into();
+        assert!(service_down_confirmed(Some(&services), "fixture"));
+        assert!(!service_down_confirmed(None, "fixture"));
+        services.get_mut("Fixture").unwrap().status = "running".into();
+        assert!(!service_down_confirmed(Some(&services), "FIXTURE"));
+    }
 
     fn recovery_database() -> rusqlite::Connection {
         let conn = rusqlite::Connection::open_in_memory().unwrap();

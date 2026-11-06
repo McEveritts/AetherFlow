@@ -21,6 +21,7 @@ pub mod engine;
 pub mod error;
 pub mod fs_security;
 pub mod health;
+pub mod lifecycle;
 pub mod lock;
 pub mod runtime;
 pub mod snapshot;

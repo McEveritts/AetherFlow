@@ -22,20 +22,18 @@ mkdir -p "$(dirname "$LOGFILE")"
 require_root
 log_info "Starting removal for ${PACKAGE_NAME}..."
 report_progress 15 "Stopping and purging companion paperless-scheduler.service..."
-purge_systemd_unit "paperless-scheduler"
+purge_systemd_unit "paperless-scheduler" "paperless-worker" "paperless-webserver"
 
 report_progress 35 "Stopping and purging companion paperless-worker.service..."
-purge_systemd_unit "paperless-worker"
 
 report_progress 55 "Stopping and purging primary paperless-webserver.service..."
-purge_systemd_unit "paperless-webserver"
 
 report_progress 75 "Removing Paperless-ngx virtualenv, app binaries, state, and user account..."
 if [[ "${DELETE_DATA:-false}" == true ]]; then
     rm -rf /opt/paperless /var/lib/paperless /etc/paperless.conf
 fi
 purge_system_user "paperless"
-systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
+systemctl daemon-reload >> "$LOGFILE" 2>&1
 
 remove_lock "${PACKAGE_NAME}"
 report_progress 100 "Paperless-ngx removed; application data retained unless DELETE_DATA=true."

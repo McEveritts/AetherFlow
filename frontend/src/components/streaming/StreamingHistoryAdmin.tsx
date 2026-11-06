@@ -272,11 +272,28 @@ export default function StreamingHistoryAdmin({ onChanged }: StreamingHistoryAdm
 
     const mountedRef = useRef(true);
     const loadGenRef = useRef(0);
-    const mutGenRef = useRef(0);
+    const importGenRef = useRef(0);
+    const policyGenRef = useRef(0);
+    const linkGenRef = useRef(0);
     const reconcileGenRef = useRef(0);
     const loadAbortRef = useRef<AbortController | null>(null);
-    const mutAbortRef = useRef<AbortController | null>(null);
+    const importAbortRef = useRef<AbortController | null>(null);
+    const policyAbortRef = useRef<AbortController | null>(null);
+    const linkAbortRef = useRef<AbortController | null>(null);
     const reconcileAbortRef = useRef<AbortController | null>(null);
+    const policyBaselineRef = useRef({ minimum: '0', reconnect: '0', users: '[]', libraries: '[]', revision: -1 });
+
+    const acceptPolicy = useCallback((body: TrackingPolicyResponse, submitted?: Omit<typeof policyBaselineRef.current, 'revision'>) => {
+        if (body.policyRevision < policyBaselineRef.current.revision) return;
+        const previous = submitted ?? policyBaselineRef.current;
+        const baseline = { minimum: String(body.minimumWatchSecs), reconnect: String(body.reconnectWindowSecs), users: JSON.stringify(body.excludedUsers, null, 2), libraries: JSON.stringify(body.excludedLibraries, null, 2), revision: body.policyRevision };
+        setPolicyData(body);
+        setMinWatchInput((current) => current === previous.minimum ? baseline.minimum : current);
+        setReconnectInput((current) => current === previous.reconnect ? baseline.reconnect : current);
+        setExcludedUsersText((current) => current === previous.users ? baseline.users : current);
+        setExcludedLibrariesText((current) => current === previous.libraries ? baseline.libraries : current);
+        policyBaselineRef.current = baseline;
+    }, []);
 
     const invalidateReconcileApproval = useCallback(() => {
         reconcileGenRef.current += 1;
@@ -312,11 +329,7 @@ export default function StreamingHistoryAdmin({ onChanged }: StreamingHistoryAdm
             const [statusBody, policyBody, linksBody] = (await Promise.all([statusRes.json(), policyRes.json(), linksRes.json()])) as [ImportStatusResponse, TrackingPolicyResponse, StreamingUserLinksResponse];
             if (!mountedRef.current || controller.signal.aborted || gen !== loadGenRef.current) return;
             setStatusData(statusBody);
-            setPolicyData(policyBody);
-            setMinWatchInput(String(policyBody.minimumWatchSecs));
-            setReconnectInput(String(policyBody.reconnectWindowSecs));
-            setExcludedUsersText(JSON.stringify(policyBody.excludedUsers, null, 2));
-            setExcludedLibrariesText(JSON.stringify(policyBody.excludedLibraries, null, 2));
+            acceptPolicy(policyBody);
             setLinksData(linksBody);
         } catch (err: unknown) {
             if (!mountedRef.current || controller.signal.aborted || isAbortError(err) || gen !== loadGenRef.current) return;
@@ -324,7 +337,7 @@ export default function StreamingHistoryAdmin({ onChanged }: StreamingHistoryAdm
         } finally {
             if (mountedRef.current && gen === loadGenRef.current) setIsLoadingInitial(false);
         }
-    }, [isAdmin]);
+    }, [isAdmin, acceptPolicy]);
 
     useEffect(() => {
         mountedRef.current = true;
@@ -332,10 +345,14 @@ export default function StreamingHistoryAdmin({ onChanged }: StreamingHistoryAdm
         return () => {
             mountedRef.current = false;
             loadGenRef.current += 1;
-            mutGenRef.current += 1;
+            importGenRef.current += 1;
+            policyGenRef.current += 1;
+            linkGenRef.current += 1;
             reconcileGenRef.current += 1;
             loadAbortRef.current?.abort();
-            mutAbortRef.current?.abort();
+            importAbortRef.current?.abort();
+            policyAbortRef.current?.abort();
+            linkAbortRef.current?.abort();
             reconcileAbortRef.current?.abort();
         };
     }, [isAdmin, loadAdminState]);
@@ -394,21 +411,21 @@ export default function StreamingHistoryAdmin({ onChanged }: StreamingHistoryAdm
             addToast(parsed.error, 'error');
             return;
         }
-        mutAbortRef.current?.abort();
+        importAbortRef.current?.abort();
         const controller = new AbortController();
-        mutAbortRef.current = controller;
-        const gen = ++mutGenRef.current;
+        importAbortRef.current = controller;
+        const gen = ++importGenRef.current;
         setIsImporting(true);
         try {
             const res = await apiFetch(STREAMING_ADMIN_IMPORT_EVENTS_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(parsed.request), signal: controller.signal });
-            if (!mountedRef.current || controller.signal.aborted || gen !== mutGenRef.current) return;
+            if (!mountedRef.current || controller.signal.aborted || gen !== importGenRef.current) return;
             if (!res.ok) {
                 const msg = await readErrorMessage(res, `Import failed (HTTP ${res.status}).`);
-                if (mountedRef.current && gen === mutGenRef.current) { setImportError(msg); addToast(msg, 'error'); }
+                if (mountedRef.current && gen === importGenRef.current) { setImportError(msg); addToast(msg, 'error'); }
                 return;
             }
             const body = (await res.json()) as ImportEventsBatchResponse;
-            if (!mountedRef.current || controller.signal.aborted || gen !== mutGenRef.current) return;
+            if (!mountedRef.current || controller.signal.aborted || gen !== importGenRef.current) return;
             setImportResult(body);
             setImportCheckpoint('');
             invalidateReconcileApproval();
@@ -416,12 +433,12 @@ export default function StreamingHistoryAdmin({ onChanged }: StreamingHistoryAdm
             void loadAdminState();
             addToast(`Imported ${body.batchSize} events (checkpoint ${body.checkpoint}). Provide a new opaque checkpoint for the next fresh batch.`, 'success');
         } catch (err: unknown) {
-            if (!mountedRef.current || controller.signal.aborted || isAbortError(err) || gen !== mutGenRef.current) return;
+            if (!mountedRef.current || controller.signal.aborted || isAbortError(err) || gen !== importGenRef.current) return;
             const msg = err instanceof Error ? err.message : 'Event batch import failed.';
             setImportError(msg);
             addToast(msg, 'error');
         } finally {
-            if (mountedRef.current && gen === mutGenRef.current) setIsImporting(false);
+            if (mountedRef.current && gen === importGenRef.current) setIsImporting(false);
         }
     };
 
@@ -437,34 +454,34 @@ export default function StreamingHistoryAdmin({ onChanged }: StreamingHistoryAdm
         const libsParsed = parsePolicyTargetsJson(excludedLibrariesText, 'excludedLibraries');
         if (!libsParsed.ok) { setPolicyError(libsParsed.error); return; }
         const payload: UpdateTrackingPolicyRequest = { minimumWatchSecs: minWatch, reconnectWindowSecs: reconnect, excludedUsers: usersParsed.targets, excludedLibraries: libsParsed.targets };
-        mutAbortRef.current?.abort();
+        const submitted = { minimum: minWatchInput, reconnect: reconnectInput, users: excludedUsersText, libraries: excludedLibrariesText };
+        loadGenRef.current += 1;
+        loadAbortRef.current?.abort();
+        setIsLoadingInitial(false);
+        policyAbortRef.current?.abort();
         const controller = new AbortController();
-        mutAbortRef.current = controller;
-        const gen = ++mutGenRef.current;
+        policyAbortRef.current = controller;
+        const gen = ++policyGenRef.current;
         setIsSavingPolicy(true);
         try {
             const res = await apiFetch(STREAMING_ADMIN_POLICIES_URL, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload), signal: controller.signal });
-            if (!mountedRef.current || controller.signal.aborted || gen !== mutGenRef.current) return;
+            if (!mountedRef.current || controller.signal.aborted || gen !== policyGenRef.current) return;
             if (!res.ok) {
                 const msg = await readErrorMessage(res, `Failed to update tracking policy (HTTP ${res.status}).`);
-                if (mountedRef.current && gen === mutGenRef.current) { setPolicyError(msg); addToast(msg, 'error'); }
+                if (mountedRef.current && gen === policyGenRef.current) { setPolicyError(msg); addToast(msg, 'error'); }
                 return;
             }
             const body = (await res.json()) as TrackingPolicyResponse;
-            if (!mountedRef.current || controller.signal.aborted || gen !== mutGenRef.current) return;
-            setPolicyData(body);
-            setMinWatchInput(String(body.minimumWatchSecs));
-            setReconnectInput(String(body.reconnectWindowSecs));
-            setExcludedUsersText(JSON.stringify(body.excludedUsers, null, 2));
-            setExcludedLibrariesText(JSON.stringify(body.excludedLibraries, null, 2));
+            if (!mountedRef.current || controller.signal.aborted || gen !== policyGenRef.current) return;
+            acceptPolicy(body, submitted);
             invalidateReconcileApproval();
             onChanged?.();
             addToast(`Tracking policy updated (revision ${body.policyRevision}).`, 'success');
         } catch (err: unknown) {
-            if (!mountedRef.current || controller.signal.aborted || isAbortError(err) || gen !== mutGenRef.current) return;
+            if (!mountedRef.current || controller.signal.aborted || isAbortError(err) || gen !== policyGenRef.current) return;
             setPolicyError(err instanceof Error ? err.message : 'Failed to update tracking policy.');
         } finally {
-            if (mountedRef.current && gen === mutGenRef.current) setIsSavingPolicy(false);
+            if (mountedRef.current && gen === policyGenRef.current) setIsSavingPolicy(false);
         }
     };
 
@@ -479,31 +496,31 @@ export default function StreamingHistoryAdmin({ onChanged }: StreamingHistoryAdm
         if (provider !== 'jellyfin' && provider !== 'emby') { setLinkError('provider must be "jellyfin" or "emby".'); return; }
         if (!serverId || !providerUserId) { setLinkError('serverId and providerUserId are required (no display-name guessing).'); return; }
         const payload: UpsertStreamingUserLinkRequest = { afUserId, provider, serverId, providerUserId };
-        mutAbortRef.current?.abort();
+        linkAbortRef.current?.abort();
         const controller = new AbortController();
-        mutAbortRef.current = controller;
-        const gen = ++mutGenRef.current;
+        linkAbortRef.current = controller;
+        const gen = ++linkGenRef.current;
         setIsMutatingLink(true);
         try {
             const res = await apiFetch(STREAMING_ADMIN_USER_LINKS_URL, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload), signal: controller.signal });
-            if (!mountedRef.current || controller.signal.aborted || gen !== mutGenRef.current) return;
+            if (!mountedRef.current || controller.signal.aborted || gen !== linkGenRef.current) return;
             if (!res.ok) {
                 const msg = await readErrorMessage(res, `Failed to save user link (HTTP ${res.status}).`);
-                if (mountedRef.current && gen === mutGenRef.current) { setLinkError(msg); addToast(msg, 'error'); }
+                if (mountedRef.current && gen === linkGenRef.current) { setLinkError(msg); addToast(msg, 'error'); }
                 return;
             }
             const body = (await res.json()) as StreamingUserLinksResponse;
-            if (!mountedRef.current || controller.signal.aborted || gen !== mutGenRef.current) return;
+            if (!mountedRef.current || controller.signal.aborted || gen !== linkGenRef.current) return;
             setLinksData(body);
             setLinkProviderUserId('');
             invalidateReconcileApproval();
             onChanged?.();
             addToast('Explicit user identity link saved.', 'success');
         } catch (err: unknown) {
-            if (!mountedRef.current || controller.signal.aborted || isAbortError(err) || gen !== mutGenRef.current) return;
+            if (!mountedRef.current || controller.signal.aborted || isAbortError(err) || gen !== linkGenRef.current) return;
             setLinkError(err instanceof Error ? err.message : 'Failed to save user link.');
         } finally {
-            if (mountedRef.current && gen === mutGenRef.current) setIsMutatingLink(false);
+            if (mountedRef.current && gen === linkGenRef.current) setIsMutatingLink(false);
         }
     };
 
@@ -511,30 +528,30 @@ export default function StreamingHistoryAdmin({ onChanged }: StreamingHistoryAdm
         if (!isAdmin || isMutatingLink) return;
         setLinkError(null);
         const payload: DeleteStreamingUserLinkRequest = { afUserId: link.afUserId, provider: link.provider, serverId: link.serverId, providerUserId: link.providerUserId };
-        mutAbortRef.current?.abort();
+        linkAbortRef.current?.abort();
         const controller = new AbortController();
-        mutAbortRef.current = controller;
-        const gen = ++mutGenRef.current;
+        linkAbortRef.current = controller;
+        const gen = ++linkGenRef.current;
         setIsMutatingLink(true);
         try {
             const res = await apiFetch(STREAMING_ADMIN_USER_LINKS_URL, { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload), signal: controller.signal });
-            if (!mountedRef.current || controller.signal.aborted || gen !== mutGenRef.current) return;
+            if (!mountedRef.current || controller.signal.aborted || gen !== linkGenRef.current) return;
             if (!res.ok) {
                 const msg = await readErrorMessage(res, `Failed to delete user link (HTTP ${res.status}).`);
-                if (mountedRef.current && gen === mutGenRef.current) { setLinkError(msg); addToast(msg, 'error'); }
+                if (mountedRef.current && gen === linkGenRef.current) { setLinkError(msg); addToast(msg, 'error'); }
                 return;
             }
             const body = (await res.json()) as StreamingUserLinksResponse;
-            if (!mountedRef.current || controller.signal.aborted || gen !== mutGenRef.current) return;
+            if (!mountedRef.current || controller.signal.aborted || gen !== linkGenRef.current) return;
             setLinksData(body);
             invalidateReconcileApproval();
             onChanged?.();
             addToast('Explicit user identity link removed.', 'success');
         } catch (err: unknown) {
-            if (!mountedRef.current || controller.signal.aborted || isAbortError(err) || gen !== mutGenRef.current) return;
+            if (!mountedRef.current || controller.signal.aborted || isAbortError(err) || gen !== linkGenRef.current) return;
             setLinkError(err instanceof Error ? err.message : 'Failed to delete user link.');
         } finally {
-            if (mountedRef.current && gen === mutGenRef.current) setIsMutatingLink(false);
+            if (mountedRef.current && gen === linkGenRef.current) setIsMutatingLink(false);
         }
     };
 

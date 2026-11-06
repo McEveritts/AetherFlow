@@ -488,7 +488,11 @@ fn query_concurrency_patterns_impl(
     };
 
     let (mut clauses, mut values) = scope_filters(query, user, watermark);
-    query_filters(query, as_of, &mut clauses, &mut values)?;
+    let mut parent_query = query.clone();
+    parent_query.window = "all".into();
+    parent_query.from.clear();
+    parent_query.until.clear();
+    query_filters(&parent_query, as_of, &mut clauses, &mut values)?;
     clauses.push("h.provenance = 'observed_session'".into());
     clauses.push(format!("({})", inclusion_predicate()));
 
@@ -668,6 +672,7 @@ fn query_concurrency_patterns_impl(
     };
 
     let limitations = vec![
+        "Partial per-provider observations: exact timestamps do not establish a complete simultaneous all-provider total. Missing provider evidence is unknown, not zero; no interpolation is performed.".into(),
         "Concurrency is derived exclusively from active samples in streaming_session_samples (playing = 1); item summaries and legacy unverified records are never counted as concurrent streams.".into(),
         "Detailed session samples are retained for at most 90 days; older periods are classified as retention_expired.".into(),
         "Intervals without session samples are classified as gap/unknown rather than assumed zero activity.".into(),

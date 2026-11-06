@@ -27,12 +27,14 @@ a2dissite organizr.conf >> "$LOGFILE" 2>&1 || true
 rm -f /etc/apache2/sites-available/organizr.conf /etc/apache2/sites-enabled/organizr.conf /etc/apache2/conf-available/organizr.conf /etc/apache2/conf-enabled/organizr.conf
 remove_apache_app_listener "$PACKAGE_NAME"
 
+# Detach this application before any data or database removal.
+apache2ctl configtest >> "$LOGFILE" 2>&1
+systemctl reload apache2 >> "$LOGFILE" 2>&1
+
 report_progress 65 "Removing Organizr webroot and reloading Apache..."
 if [[ "${DELETE_DATA:-false}" == true ]]; then
     rm -rf /var/www/organizr
 fi
-apache2ctl configtest >> "$LOGFILE" 2>&1
-systemctl reload apache2 >> "$LOGFILE" 2>&1
 
 remove_lock "${PACKAGE_NAME}"
 report_progress 100 "Organizr removed; application data retained unless DELETE_DATA=true."

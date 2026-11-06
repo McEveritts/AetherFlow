@@ -279,6 +279,10 @@ where
         let _shared_maintenance_lock =
             ReleaseLockGuard::acquire(&shared_lock_path, effective_cfg.snapshot_timeout)?;
 
+        if !opts.dry_run {
+            crate::admin::ensure_no_active_package_lifecycle_jobs(&effective_cfg, opts.command)?;
+        }
+
         let lock_path = effective_cfg.releases_dir.join(".release.lock");
         let _engine_lock = ReleaseLockGuard::acquire(&lock_path, effective_cfg.snapshot_timeout)?;
 

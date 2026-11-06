@@ -95,21 +95,49 @@ impl ReleaseLockGuard {
     pub fn path(&self) -> &Path {
         &self.lock_path
     }
+
+    #[cfg(unix)]
+    pub fn file_identity(&self) -> std::io::Result<(u64, u64)> {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = self._file.metadata()?;
+        if !metadata.is_file() {
+            return Err(std::io::Error::other(
+                "maintenance lock is not a regular file",
+            ));
+        }
+        Ok((metadata.dev(), metadata.ino()))
+    }
+
+    #[cfg(unix)]
+    pub fn preserve_in_child(
+        &self,
+        command: &mut std::process::Command,
+    ) -> std::io::Result<std::os::fd::RawFd> {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::process::CommandExt;
+        let file = self._file.try_clone()?;
+        let descriptor = file.as_raw_fd();
+        command.env("AF_MAINTENANCE_GUARD_FD", descriptor.to_string());
+        unsafe {
+            command.pre_exec(move || {
+                let descriptor = file.as_raw_fd();
+                let flags = libc::fcntl(descriptor, libc::F_GETFD);
+                if flags == -1
+                    || libc::fcntl(descriptor, libc::F_SETFD, flags & !libc::FD_CLOEXEC) == -1
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        Ok(descriptor)
+    }
 }
 
+#[cfg(not(unix))]
 impl Drop for ReleaseLockGuard {
     fn drop(&mut self) {
-        #[cfg(unix)]
-        {
-            use std::os::unix::io::AsRawFd;
-            unsafe {
-                let _ = libc::flock(self._file.as_raw_fd(), libc::LOCK_UN);
-            }
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = fs::remove_file(&self.lock_path);
-        }
+        let _ = fs::remove_file(&self.lock_path);
     }
 }
 

@@ -28,8 +28,8 @@ report_progress 20 "Stopping and disabling jellyfin service..."
 purge_systemd_unit "jellyfin"
 
 report_progress 50 "Purging jellyfin APT packages and repository..."
-DEBIAN_FRONTEND=noninteractive apt-get "$APT_REMOVE_ACTION" -y -qq "jellyfin*" >> "$LOGFILE" 2>&1 || true
-DEBIAN_FRONTEND=noninteractive apt-get autoremove -y -qq >> "$LOGFILE" 2>&1 || true
+DEBIAN_FRONTEND=noninteractive apt-get "$APT_REMOVE_ACTION" -y -qq "jellyfin*" >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get autoremove -y -qq >> "$LOGFILE" 2>&1
 rm -f /etc/apt/sources.list.d/jellyfin.list /etc/apt/sources.list.d/jellyfin.sources /etc/apt/keyrings/jellyfin.gpg
 
 report_progress 80 "Removing Jellyfin state, caches, logs, and user account..."
@@ -38,7 +38,7 @@ if [[ "${DELETE_DATA:-false}" == true ]]; then
     rm -rf /var/lib/jellyfin /etc/jellyfin
 fi
 purge_system_user "jellyfin"
-systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
+systemctl daemon-reload >> "$LOGFILE" 2>&1
 
 remove_lock "${PACKAGE_NAME}"
 report_progress 100 "Jellyfin removed; application data retained unless DELETE_DATA=true."

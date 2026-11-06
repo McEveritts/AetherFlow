@@ -226,6 +226,19 @@ class ReleaseManagerTests(unittest.TestCase):
         return env
 
     def run_manager(self, *args, **extra):
+        # Model the runner scheduler: a worker must receive an existing admitted
+        # receipt plus the directory identity captured before worker dispatch.
+        if "--job-status-file" in args:
+            import json
+            status_file = Path(args[args.index("--job-status-file") + 1])
+            unit = args[args.index("--job-unit") + 1]
+            status_file.parent.mkdir(parents=True, exist_ok=True)
+            metadata = status_file.parent.stat()
+            extra.setdefault("AETHERFLOW_SELF_UPDATE_DIRECTORY_DEV", str(metadata.st_dev))
+            extra.setdefault("AETHERFLOW_SELF_UPDATE_DIRECTORY_INO", str(metadata.st_ino))
+            if not status_file.exists():
+                status_file.write_text(json.dumps({"status": "launching", "completed": False,
+                    "success": False, "job_unit": unit, "error": "", "exit_code": None}))
         return subprocess.run(
             [self.bash, str(SCRIPT), *args],
             env=self.base_env(**extra),
@@ -238,6 +251,46 @@ class ReleaseManagerTests(unittest.TestCase):
             found = list(self.releases.glob("*/data-snapshot/aetherflow.sqlite.bak"))
         self.assertEqual(len(found), 1, f"expected one snapshot, found {found}")
         return found[0]
+
+    def test_late_worker_cannot_reopen_a_terminal_receipt(self):
+        import json
+
+        status_file = self.root / "closed-job.json"
+        terminal = {"status": "failed", "completed": True, "success": False,
+                    "job_unit": "aetherflow-self-update-deploy-nightly-aabbccdd.service",
+                    "error": "launch interrupted", "exit_code": 1}
+        status_file.write_text(json.dumps(terminal))
+        original = status_file.read_bytes()
+        result = self.run_manager("cleanup", "--job-status-file", str(status_file),
+                                  "--job-unit", terminal["job_unit"])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("admission was closed", result.stdout + result.stderr)
+        self.assertEqual(status_file.read_bytes(), original)
+        self.assertFalse((self.releases / ".release.lock").exists())
+
+    def test_live_owner_blocks_standalone_release_and_dead_owner_is_interrupted(self):
+        import fcntl
+        import sqlite3
+        import uuid
+
+        database = self.data / "aetherflow.sqlite"
+        owner = str(uuid.uuid4())
+        owners = database.with_suffix(".lifecycle-owners")
+        owners.mkdir()
+        with sqlite3.connect(database) as connection:
+            connection.execute("PRAGMA journal_mode=WAL")
+            connection.execute("CREATE TABLE package_lifecycle_jobs(package_id TEXT,job_id TEXT,action TEXT,status TEXT,started_at TEXT,finished_at TEXT,owner_id TEXT)")
+            connection.execute("INSERT INTO package_lifecycle_jobs VALUES ('fixture','job','update','updating','now','',?)", (owner,))
+        with (owners / owner).open("a+b") as lease:
+            fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            blocked = self.run_manager("cleanup")
+        self.assertNotEqual(blocked.returncode, 0, blocked.stdout + blocked.stderr)
+        self.assertIn("lifecycle orchestration is active", blocked.stdout + blocked.stderr)
+        self.assertFalse((self.releases / ".release.lock").exists())
+        recovered = self.run_manager("cleanup")
+        self.assertEqual(recovered.returncode, 0, recovered.stdout + recovered.stderr)
+        with sqlite3.connect(database) as connection:
+            self.assertEqual(connection.execute("SELECT status FROM package_lifecycle_jobs").fetchone()[0], "interrupted")
 
     @unittest.skipUnless(os.name == "posix", "requires POSIX advisory locks")
     def test_shared_maintenance_lock_is_acquired_before_release_lock(self):
@@ -565,6 +618,48 @@ class ReleaseManagerTests(unittest.TestCase):
             Path(f"{database_path}{suffix}").write_bytes(f"corrupt fixture {suffix}".encode())
         return database_path, snapshot_dir
 
+    def test_corrupt_lifecycle_journal_on_python310_only_allows_explicit_rollback(self):
+        import sqlite3
+        import sys
+        database = self.data / "lifecycle.sqlite"
+        connection = sqlite3.connect(database)
+        connection.execute("CREATE TABLE package_lifecycle_jobs (status TEXT)")
+        connection.execute("INSERT INTO package_lifecycle_jobs VALUES ('completed')")
+        connection.commit()
+        root_page = connection.execute("SELECT rootpage FROM sqlite_master WHERE name='package_lifecycle_jobs'").fetchone()[0]
+        page_size = connection.execute("PRAGMA page_size").fetchone()[0]
+        connection.close()
+        content = bytearray(database.read_bytes())
+        content[(root_page - 1) * page_size] = 255
+        database.write_bytes(content)
+        script = SCRIPT.read_text().split('check_package_lifecycle_reservations() {', 1)[1].split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+        # Match the Python 3.10 surface: neither constants nor exception codes.
+        compatibility = textwrap.dedent("""\
+            import sqlite3
+            for name in ("SQLITE_CORRUPT", "SQLITE_NOTADB"):
+                if hasattr(sqlite3, name): delattr(sqlite3, name)
+            class LegacyConnection(sqlite3.Connection):
+                def execute(self, *args, **kwargs):
+                    try:
+                        return super().execute(*args, **kwargs)
+                    except sqlite3.DatabaseError as error:
+                        for name in ("sqlite_errorcode", "sqlite_errorname"):
+                            if hasattr(error, name): delattr(error, name)
+                        raise
+            real_connect = sqlite3.connect
+            sqlite3.connect = lambda *args, **kwargs: real_connect(*args, **kwargs, factory=LegacyConnection)
+        """)
+        for command, unavailable, expected in [("rollback", False, 0), ("deploy", False, 1), ("rollback", True, 1)]:
+            with self.subTest(command=command, unavailable=unavailable):
+                before = database.read_bytes()
+                prelude = compatibility
+                if unavailable:
+                    prelude += 'def unavailable(*args, **kwargs): raise sqlite3.OperationalError("unable to open database file")\nsqlite3.connect = unavailable\n'
+                result = subprocess.run([sys.executable, "-c", prelude + script, str(database), command], capture_output=True, text=True)
+                self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+                self.assertNotIn("AttributeError", result.stderr)
+                self.assertEqual(database.read_bytes(), before)
+
     def test_rollback_verifies_snapshot_without_python311_digest_helper(self):
         database_path, snapshot_dir = self.prepare_rejected_snapshot_rollback()
         compatibility_dir = self.root / "python310-compatibility"
@@ -602,14 +697,14 @@ class ReleaseManagerTests(unittest.TestCase):
         database_path, snapshot_dir = self.prepare_rejected_snapshot_rollback()
         manifest = snapshot_dir / "MANIFEST.sha256"
         valid_manifest = manifest.read_text()
-        for invalid_manifest in (None, "0" * 64 + "  aetherflow.sqlite.bak\n", valid_manifest * 2):
+        for attempt, invalid_manifest in enumerate((None, "0" * 64 + "  aetherflow.sqlite.bak\n", valid_manifest * 2)):
             with self.subTest(manifest=invalid_manifest):
                 if invalid_manifest is None:
                     manifest.unlink(missing_ok=True)
                 else:
                     manifest.write_text(invalid_manifest)
                 self.commands.write_text("")
-                receipt_path = self.root / "rollback-status.json"
+                receipt_path = self.root / f"rollback-status-{attempt}.json"
                 result = self.run_manager(
                     "rollback", "--job-status-file", str(receipt_path),
                     "--job-unit", "aetherflow-self-update-rollback-stable-deadbeef.service",

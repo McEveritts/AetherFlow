@@ -29,12 +29,11 @@ mkdir -p "$(dirname "$LOGFILE")"
 log_info "Removing ${APP_NAME}..."
 report_progress 20 "Stopping ${APP_NAME} services..."
 
-purge_systemd_unit "novnc"
-purge_systemd_unit "novnc-xvnc"
-systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
+purge_systemd_unit "novnc" "novnc-xvnc"
+systemctl daemon-reload >> "$LOGFILE" 2>&1
 
 report_progress 60 "Removing ${APP_NAME} packages..."
-DEBIAN_FRONTEND=noninteractive apt-get remove -y novnc python3-websockify >> "$LOGFILE" 2>&1 || true
+DEBIAN_FRONTEND=noninteractive apt-get remove -y novnc python3-websockify >> "$LOGFILE" 2>&1
 
 if [[ "${DELETE_DATA:-false}" == "true" ]]; then
     log_info "DELETE_DATA=true: Purging ${CONFIG_DIR} and ${DATA_DIR}..."

@@ -28,15 +28,15 @@ report_progress 20 "Stopping and removing qbittorrent.service..."
 purge_systemd_unit "qbittorrent"
 
 report_progress 50 "Purging qbittorrent-nox package..."
-DEBIAN_FRONTEND=noninteractive apt-get "$APT_REMOVE_ACTION" -y -qq qbittorrent-nox >> "$LOGFILE" 2>&1 || true
-DEBIAN_FRONTEND=noninteractive apt-get autoremove -y -qq >> "$LOGFILE" 2>&1 || true
+DEBIAN_FRONTEND=noninteractive apt-get "$APT_REMOVE_ACTION" -y -qq qbittorrent-nox >> "$LOGFILE" 2>&1
+DEBIAN_FRONTEND=noninteractive apt-get autoremove -y -qq >> "$LOGFILE" 2>&1
 
 report_progress 80 "Removing qBittorrent state directories and user account..."
 if [[ "${DELETE_DATA:-false}" == true ]]; then
     rm -rf /var/lib/qbittorrent
 fi
 purge_system_user "qbittorrent"
-systemctl daemon-reload >> "$LOGFILE" 2>&1 || true
+systemctl daemon-reload >> "$LOGFILE" 2>&1
 
 remove_lock "${PACKAGE_NAME}"
 report_progress 100 "qBittorrent removed; application data retained unless DELETE_DATA=true."

@@ -17,6 +17,7 @@ struct WsTicketEntry {
     user_id: i64,
     client_ip: String,
     expires_at: Instant,
+    diagnostics_allowed: bool,
 }
 
 static WS_TICKETS: Lazy<Mutex<HashMap<String, WsTicketEntry>>> =
@@ -109,7 +110,7 @@ impl Telemetry {
 
     fn try_start_service_refresh<F>(self: &Arc<Self>, collector: F) -> Option<oneshot::Receiver<()>>
     where
-        F: FnOnce() -> serde_json::Value + Send + 'static,
+        F: FnOnce() -> anyhow::Result<serde_json::Value> + Send + 'static,
     {
         {
             let mut services = self
@@ -132,7 +133,7 @@ impl Telemetry {
             .name("ws-services".to_string())
             .spawn(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(collector));
-                let failed = result.is_err();
+                let failed = !matches!(&result, Ok(Ok(_)));
                 {
                     let mut services = telemetry
                         .services
@@ -140,7 +141,7 @@ impl Telemetry {
                         .unwrap_or_else(|poisoned| poisoned.into_inner());
                     services.in_flight = false;
                     services.last_finished = Some(Instant::now());
-                    if let Ok(value) = result {
+                    if let Ok(Ok(value)) = result {
                         services.value = Some(value);
                     }
                 }
@@ -167,7 +168,7 @@ impl Telemetry {
 
     async fn services_loop<F>(self: Arc<Self>, collector: F)
     where
-        F: Fn() -> serde_json::Value + Clone + Send + 'static,
+        F: Fn() -> anyhow::Result<serde_json::Value> + Clone + Send + 'static,
     {
         let mut tick = tokio::time::interval(SERVICES_INTERVAL);
         tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -206,6 +207,132 @@ pub fn broadcast_ws_message(payload: &serde_json::Value) {
     TELEMETRY.broadcast_message(payload);
 }
 
+pub(crate) fn package_diagnostics_allowed(user: &crate::auth::AuthUser) -> bool {
+    user.role == "admin" && user.plugin_id.is_none() && user.plugin_scopes.is_empty()
+}
+
+/// Shared HTTP/WebSocket projection for ordinary and plugin status viewers.
+/// New internal fields are private until explicitly added to this allowlist.
+pub(crate) fn sanitize_services_for_viewer(services: &mut serde_json::Value) {
+    let Some(services) = services.as_object_mut() else {
+        return;
+    };
+    for service in services.values_mut() {
+        let Some(service) = service.as_object_mut() else {
+            continue;
+        };
+        service.retain(|field, _| {
+            matches!(
+                field.as_str(),
+                "id" | "status"
+                    | "uptime"
+                    | "version"
+                    | "managed_by"
+                    | "process"
+                    | "default_port"
+                    | "active_port"
+                    | "internal_domain"
+                    | "public_domain"
+                    | "external_access_enabled"
+                    | "tls_enabled"
+                    | "web_path"
+                    | "web_scheme"
+                    | "bind_scope"
+                    | "control_scope"
+                    | "components"
+                    | "units"
+                    | "installed_version"
+                    | "latest_version"
+                    | "update_available"
+                    | "update_checked_at"
+                    | "update_url"
+                    | "update_error"
+                    | "job_status"
+                    | "job_id"
+                    | "progress"
+                    | "log_line"
+                    | "started_at"
+                    | "last_job"
+            )
+        });
+        if let Some(error) = service.get_mut("update_error") {
+            *error = af_services::workers::public_update_error(error.as_str().unwrap_or("")).into();
+        }
+        let summary = af_services::package_job_progress_summary(
+            service
+                .get("job_status")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(""),
+        );
+        if service
+            .get("log_line")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|line| !line.is_empty())
+        {
+            service.insert("log_line".into(), summary.into());
+        }
+        if let Some(outcome) = service
+            .get_mut("last_job")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            outcome.retain(|field, _| {
+                matches!(
+                    field.as_str(),
+                    "job_id" | "package_id" | "action" | "status" | "started_at" | "finished_at"
+                )
+            });
+        }
+    }
+}
+
+fn websocket_message_for_session(message: String, diagnostics_allowed: bool) -> Option<String> {
+    if diagnostics_allowed {
+        return Some(message);
+    }
+    let mut payload: serde_json::Value = serde_json::from_str(&message).ok()?;
+    match payload.get("type").and_then(serde_json::Value::as_str) {
+        Some("package:progress") => {
+            let mut sanitized = serde_json::json!({"type": "package:progress"});
+            for field in [
+                "package_id",
+                "job_id",
+                "action",
+                "status",
+                "started_at",
+                "finished_at",
+            ] {
+                if let Some(value) = payload.get(field).and_then(serde_json::Value::as_str) {
+                    sanitized[field] = value.into();
+                }
+            }
+            sanitized["progress"] = payload
+                .get("progress")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(0)
+                .clamp(0, 100)
+                .into();
+            sanitized["line"] = af_services::package_job_progress_summary(
+                payload
+                    .get("status")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or(""),
+            )
+            .into();
+            payload = sanitized;
+        }
+        Some("METRICS_UPDATE") => {
+            if let Some(services) = payload
+                .get_mut("data")
+                .and_then(|data| data.get_mut("services"))
+            {
+                sanitize_services_for_viewer(services);
+            }
+        }
+        _ => {}
+    }
+    serde_json::to_string(&payload).ok()
+}
+
 pub fn start_metrics_broadcast_loop() {
     let telemetry = Arc::clone(&TELEMETRY);
     tokio::spawn(telemetry.metrics_loop(|| {
@@ -214,7 +341,7 @@ pub fn start_metrics_broadcast_loop() {
 
     let telemetry = Arc::clone(&TELEMETRY);
     tokio::spawn(telemetry.services_loop(|| {
-        serde_json::to_value(af_services::get_active_services()).unwrap_or_default()
+        Ok(serde_json::to_value(af_services::get_active_services()?)?)
     }));
 }
 
@@ -228,6 +355,60 @@ mod telemetry_tests {
     use std::task::Poll;
     use std::time::Duration;
     use tokio::sync::{broadcast, oneshot};
+
+    #[test]
+    fn ordinary_and_plugin_services_frames_do_not_expose_update_diagnostics() {
+        let frame = json!({"type":"METRICS_UPDATE", "data":{"services": {
+            "Fixture": {"id":"fixture", "status":"running", "update_error":"SYNTHETIC_PRIVATE_DIAGNOSTIC /etc/private/config"}
+        }}});
+        let serialized = super::websocket_message_for_session(frame.to_string(), false).unwrap();
+        assert!(!serialized.contains("SYNTHETIC_PRIVATE_DIAGNOSTIC"));
+        let safe: Value = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(safe["data"]["services"]["Fixture"]["update_error"], "Update status could not be confirmed");
+        assert_eq!(safe["data"]["services"]["Fixture"]["status"], "running");
+    }
+
+    #[tokio::test]
+    async fn failed_service_snapshot_preserves_known_inventory_until_recovery() {
+        let telemetry = Arc::new(Telemetry::new());
+        let known = json!({"Fixture": {"status": "running"}});
+        let refresh = telemetry
+            .try_start_service_refresh({
+                let known = known.clone();
+                move || Ok(known)
+            })
+            .unwrap();
+        watchdog(refresh).await.unwrap();
+        telemetry.services.lock().unwrap().last_finished = None;
+        let failed = telemetry
+            .try_start_service_refresh(|| anyhow::bail!("journal unavailable"))
+            .unwrap();
+        watchdog(failed).await.unwrap();
+        let frame = telemetry.metrics_message(json!({"cpu_usage": 12.0}));
+        assert_eq!(frame["data"]["services"], known);
+        telemetry.services.lock().unwrap().last_finished = None;
+        let recovered = json!({"Fixture": {"status": "stopped"}});
+        let refresh = telemetry
+            .try_start_service_refresh({
+                let recovered = recovered.clone();
+                move || Ok(recovered)
+            })
+            .unwrap();
+        watchdog(refresh).await.unwrap();
+        assert_eq!(
+            telemetry.metrics_message(Value::Null)["data"]["services"],
+            recovered
+        );
+        let initial = Arc::new(Telemetry::new());
+        watchdog(
+            initial
+                .try_start_service_refresh(|| anyhow::bail!("journal unavailable"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert!(initial.metrics_message(Value::Null)["data"]["services"].is_null());
+    }
 
     async fn watchdog<F: Future>(future: F) -> F::Output {
         tokio::time::timeout(Duration::from_secs(10), future)
@@ -271,7 +452,7 @@ mod telemetry_tests {
             .try_start_service_refresh(move || {
                 started_sender.send(()).expect("start receiver open");
                 release_receiver.recv().expect("release sender open");
-                service_value
+                Ok(service_value)
             })
             .expect("first scan starts");
         watchdog(started_receiver).await.expect("scan started");
@@ -362,7 +543,7 @@ mod telemetry_tests {
                     let _ = sender.send(());
                 }
                 release_receiver.lock().unwrap().recv().unwrap();
-                json!({"apache2": {"status": "running"}})
+                Ok(json!({"apache2": {"status": "running"}}))
             }
         };
         let services_loop = tokio::spawn(Arc::clone(&telemetry).services_loop(collector));
@@ -403,7 +584,7 @@ mod telemetry_tests {
     async fn unwinding_service_refresh_preserves_cache_and_releases_single_flight() {
         let telemetry = Arc::new(Telemetry::new());
         let refresh = telemetry
-            .try_start_service_refresh(|| json!({"apache2": {"status": "running"}}))
+            .try_start_service_refresh(|| Ok(json!({"apache2": {"status": "running"}})))
             .expect("first scan starts");
         watchdog(refresh).await.expect("first scan completed");
         {
@@ -438,6 +619,7 @@ pub fn issue_ws_ticket_for_user(user_id: i64, client_ip: &str) -> String {
                 user_id,
                 client_ip: client_ip.to_string(),
                 expires_at: Instant::now() + Duration::from_secs(90),
+                diagnostics_allowed: false,
             },
         );
     }
@@ -458,28 +640,126 @@ fn consume_live_ws_ticket(
     connection: &rusqlite::Connection,
     ticket: &str,
 ) -> Option<WsTicketEntry> {
-    let entry = WS_TICKETS.lock().ok().and_then(|mut map| {
+    let mut entry = WS_TICKETS.lock().ok().and_then(|mut map| {
         map.retain(|_, value| value.expires_at > Instant::now());
         map.remove(ticket)
     })?;
-    connection
-        .query_row("SELECT 1 FROM users WHERE id = ?1", [entry.user_id], |_| {
-            Ok(())
-        })
+    let role: String = connection
+        .query_row(
+            "SELECT role FROM users WHERE id = ?1",
+            [entry.user_id],
+            |row| row.get(0),
+        )
         .ok()?;
+    entry.diagnostics_allowed = role == "admin";
     Some(entry)
 }
 
 #[cfg(test)]
 mod lifecycle_tests {
-    use super::{consume_live_ws_ticket, issue_ws_ticket_for_user};
+    use super::{consume_live_ws_ticket, issue_ws_ticket_for_user, websocket_message_for_session};
+
+    #[test]
+    fn websocket_progress_filters_installer_output_per_recipient() {
+        let message = serde_json::json!({
+            "type": "package:progress", "package_id": "sonarr", "job_id": "job-42",
+            "action": "update", "status": "updating", "progress": 42,
+            "started_at": "fixture", "line": "PASSWORD=private-installer-output",
+            "message": "PASSWORD=private-installer-output", "stderr": "private-installer-output",
+        })
+        .to_string();
+        assert_eq!(
+            websocket_message_for_session(message.clone(), true).unwrap(),
+            message
+        );
+        let ordinary = websocket_message_for_session(message, false).unwrap();
+        assert!(!ordinary.contains("private-installer-output"));
+        let ordinary: serde_json::Value = serde_json::from_str(&ordinary).unwrap();
+        assert_eq!(ordinary["job_id"], "job-42");
+        assert_eq!(ordinary["package_id"], "sonarr");
+        assert_eq!(ordinary["status"], "updating");
+        assert_eq!(ordinary["progress"], 42);
+        assert_eq!(ordinary["line"], "Updating application.");
+        assert!(ordinary.get("stderr").is_none());
+        assert!(ordinary.get("message").is_none());
+    }
+
+    #[test]
+    fn websocket_service_snapshots_cannot_bypass_progress_sanitization() {
+        let message = serde_json::json!({
+            "type": "METRICS_UPDATE", "data": {
+                "system": {"cpu_usage": 20}, "services": {"sonarr": {
+                    "job_id": "job-42", "job_status": "updating", "progress": 42,
+                    "api_key": "synthetic-service-credential",
+                    "future_private_field": "synthetic-private-config",
+                    "log_line": "PASSWORD=private-installer-output",
+                    "last_job": {"job_id": "old-job", "status": "failed", "message": "private-installer-output"},
+                }}
+            }
+        }).to_string();
+        assert_eq!(
+            websocket_message_for_session(message.clone(), true).unwrap(),
+            message
+        );
+        let ordinary = websocket_message_for_session(message, false).unwrap();
+        assert!(!ordinary.contains("private-installer-output"));
+        let ordinary: serde_json::Value = serde_json::from_str(&ordinary).unwrap();
+        assert!(!ordinary
+            .to_string()
+            .contains("synthetic-service-credential"));
+        assert!(!ordinary.to_string().contains("synthetic-private-config"));
+        assert!(ordinary["data"]["services"]["sonarr"]
+            .get("api_key")
+            .is_none());
+        assert_eq!(ordinary["data"]["services"]["sonarr"]["job_id"], "job-42");
+        assert_eq!(ordinary["data"]["services"]["sonarr"]["progress"], 42);
+        assert_eq!(ordinary["data"]["system"]["cpu_usage"], 20);
+    }
+
+    #[test]
+    fn established_websocket_privileges_are_revoked_and_never_promoted() {
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection.execute_batch(
+            "CREATE TABLE users (id INTEGER PRIMARY KEY, role TEXT NOT NULL); INSERT INTO users VALUES (1, 'admin');",
+        ).unwrap();
+        let ticket = issue_ws_ticket_for_user(1, "127.0.0.1");
+        let mut entry = consume_live_ws_ticket(&connection, &ticket).unwrap();
+        assert_eq!(
+            super::refresh_ws_authorization(&connection, &mut entry),
+            Some(true)
+        );
+        connection
+            .execute("UPDATE users SET role='user' WHERE id=1", [])
+            .unwrap();
+        assert_eq!(
+            super::refresh_ws_authorization(&connection, &mut entry),
+            Some(false)
+        );
+        connection
+            .execute("UPDATE users SET role='admin' WHERE id=1", [])
+            .unwrap();
+        assert_eq!(
+            super::refresh_ws_authorization(&connection, &mut entry),
+            Some(false)
+        );
+        connection.execute("DELETE FROM users", []).unwrap();
+        assert_eq!(
+            super::refresh_ws_authorization(&connection, &mut entry),
+            None
+        );
+        connection.execute_batch("DROP TABLE users").unwrap();
+        assert_eq!(
+            super::refresh_ws_authorization(&connection, &mut entry),
+            None
+        );
+    }
 
     #[test]
     fn issued_websocket_tickets_are_single_use_and_reject_deleted_users() {
         let connection = rusqlite::Connection::open_in_memory().unwrap();
         connection
             .execute_batch(
-                "CREATE TABLE users (id INTEGER PRIMARY KEY); INSERT INTO users VALUES (1), (2);",
+                "CREATE TABLE users (id INTEGER PRIMARY KEY, role TEXT NOT NULL); INSERT INTO users VALUES (1, 'admin'), (2, 'user');",
             )
             .unwrap();
         let ticket = issue_ws_ticket_for_user(1, "127.0.0.1");
@@ -490,6 +770,24 @@ mod lifecycle_tests {
             1
         );
         assert!(consume_live_ws_ticket(&connection, &ticket).is_none());
+        let demoted_ticket = issue_ws_ticket_for_user(1, "127.0.0.1");
+        connection
+            .execute("UPDATE users SET role='user' WHERE id=1", [])
+            .unwrap();
+        assert!(
+            !consume_live_ws_ticket(&connection, &demoted_ticket)
+                .unwrap()
+                .diagnostics_allowed
+        );
+        let admin_ticket = issue_ws_ticket_for_user(1, "127.0.0.1");
+        connection
+            .execute("UPDATE users SET role='admin' WHERE id=1", [])
+            .unwrap();
+        assert!(
+            consume_live_ws_ticket(&connection, &admin_ticket)
+                .unwrap()
+                .diagnostics_allowed
+        );
         let deleted_ticket = issue_ws_ticket_for_user(1, "127.0.0.1");
         let live_ticket = issue_ws_ticket_for_user(2, "127.0.0.1");
         connection
@@ -525,7 +823,7 @@ pub async fn handle_websocket(
     }
 
     let entry_opt = tokio::task::spawn_blocking(move || {
-        let connection = af_db::get_conn().ok()?;
+        let connection = af_db::get_read_conn().ok()?;
         consume_live_ws_ticket(&connection, &q.ticket)
     }).await.ok().flatten();
 
@@ -556,16 +854,52 @@ pub async fn handle_websocket(
             .into_response();
     }
 
-    ws.on_upgrade(handle_ws_socket)
+    ws.on_upgrade(move |socket| handle_ws_socket(socket, entry))
 }
 
-async fn handle_ws_socket(socket: WebSocket) {
+// A ticket authorizes the upgrade only. Existing sockets must not keep a stale
+// administrative capability after the account is demoted or removed.
+fn refresh_ws_authorization(
+    connection: &rusqlite::Connection,
+    entry: &mut WsTicketEntry,
+) -> Option<bool> {
+    let role: String = connection
+        .query_row(
+            "SELECT role FROM users WHERE id = ?1",
+            [entry.user_id],
+            |row| row.get(0),
+        )
+        .ok()?;
+    entry.diagnostics_allowed &= role == "admin";
+    Some(entry.diagnostics_allowed)
+}
+
+async fn current_ws_authorization(entry: &mut WsTicketEntry) -> Option<bool> {
+    let mut checked = entry.clone();
+    let allowed = tokio::task::spawn_blocking(move || {
+        let connection = af_db::get_read_conn().ok()?;
+        refresh_ws_authorization(&connection, &mut checked)
+    })
+    .await
+    .ok()??;
+    entry.diagnostics_allowed = allowed;
+    Some(allowed)
+}
+
+async fn handle_ws_socket(socket: WebSocket, mut entry: WsTicketEntry) {
     let (mut sender, mut receiver) = socket.split();
     let mut rx = TELEMETRY.broadcast.subscribe();
     TELEMETRY.service_refresh.notify_one();
 
     let init_payload = TELEMETRY.initial_snapshot().await;
-    if let Ok(text) = serde_json::to_string(&init_payload) {
+    let Some(diagnostics_allowed) = current_ws_authorization(&mut entry).await else {
+        let _ = sender.send(Message::Close(None)).await;
+        return;
+    };
+    if let Some(text) = serde_json::to_string(&init_payload)
+        .ok()
+        .and_then(|text| websocket_message_for_session(text, diagnostics_allowed))
+    {
         let _ = sender.send(Message::Text(text)).await;
     }
 
@@ -574,11 +908,21 @@ async fn handle_ws_socket(socket: WebSocket) {
         loop {
             tokio::select! {
                 Ok(msg) = rx.recv() => {
-                    if sender.send(Message::Text(msg)).await.is_err() {
+                    let Some(diagnostics_allowed) = current_ws_authorization(&mut entry).await else {
+                        let _ = sender.send(Message::Close(None)).await;
                         break;
+                    };
+                    if let Some(message) = websocket_message_for_session(msg, diagnostics_allowed) {
+                        if sender.send(Message::Text(message)).await.is_err() {
+                            break;
+                        }
                     }
                 }
                 _ = ping_interval.tick() => {
+                    if current_ws_authorization(&mut entry).await.is_none() {
+                        let _ = sender.send(Message::Close(None)).await;
+                        break;
+                    }
                     if sender.send(Message::Ping(Vec::new())).await.is_err() {
                         break;
                     }
@@ -718,12 +1062,8 @@ pub async fn handle_log_websocket(
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
-    if user.role != "admin" {
-        return crate::auth::api_error(
-            StatusCode::FORBIDDEN,
-            "FORBIDDEN",
-            "Admin access required",
-        );
+    if !package_diagnostics_allowed(&user) {
+        return crate::auth::api_error(StatusCode::FORBIDDEN, "FORBIDDEN", "Admin access required");
     }
     if !websocket_origin_matches_host(&headers) {
         return crate::auth::api_error(
@@ -732,7 +1072,18 @@ pub async fn handle_log_websocket(
             "Cross-origin WebSocket upgrade rejected",
         );
     }
-    ws.on_upgrade(|mut socket| async move {
+    let mut authorization = WsTicketEntry {
+        user_id: user.user_id,
+        client_ip: extract_client_ip(&headers),
+        expires_at: Instant::now(),
+        diagnostics_allowed: true,
+    };
+    ws.on_upgrade(move |mut socket| async move {
+        // Upgrading a connection does not grant a lasting raw-log capability.
+        if current_ws_authorization(&mut authorization).await != Some(true) {
+            let _ = socket.send(Message::Close(None)).await;
+            return;
+        }
         let welcome = serde_json::json!({
             "type": "LOG_ENTRY",
             "data": {
@@ -831,6 +1182,10 @@ pub async fn handle_log_websocket(
                     }
                 }
                 Some(entry) = rx.recv() => {
+                    if current_ws_authorization(&mut authorization).await != Some(true) {
+                        let _ = socket.send(Message::Close(None)).await;
+                        break;
+                    }
                     if !log_entry_matches_filter(&entry, &filter) {
                         continue;
                     }
@@ -845,6 +1200,10 @@ pub async fn handle_log_websocket(
                     }
                 }
                 _ = ping_interval.tick() => {
+                    if current_ws_authorization(&mut authorization).await != Some(true) {
+                        let _ = socket.send(Message::Close(None)).await;
+                        break;
+                    }
                     if socket.send(Message::Ping(Vec::new())).await.is_err() {
                         break;
                     }
@@ -853,6 +1212,7 @@ pub async fn handle_log_websocket(
         }
 
         reader_task.abort();
+        let _ = reader_task.await;
     })
 }
 
@@ -914,3 +1274,7 @@ pub fn build_set_cookie(
     }
     parts.join("; ")
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "log_authorization_regressions.rs"]
+mod log_authorization_regressions;

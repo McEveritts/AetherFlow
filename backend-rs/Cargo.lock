@@ -238,6 +238,7 @@ dependencies = [
 name = "af-runner"
 version = "4.0.0"
 dependencies = [
+ "af-db",
  "af-host",
  "af-models",
  "af-release",
@@ -276,10 +277,12 @@ dependencies = [
  "af-hardware",
  "af-host",
  "af-models",
+ "af-release",
  "af-runner",
  "anyhow",
  "base64 0.22.1",
  "chrono",
+ "futures",
  "hex",
  "once_cell",
  "rand 0.8.8",

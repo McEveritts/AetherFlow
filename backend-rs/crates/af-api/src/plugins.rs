@@ -290,6 +290,81 @@ pub fn is_route_default_denied(path: &str) -> bool {
     false
 }
 
+const ADMIN_USER_ONLY_WRITE_PREFIXES: &[&str] = &[
+    "/api/v1/admin/packages",
+    "/api/v1/admin/services",
+    "/api/v1/admin/system/update",
+    "/api/v1/auth/packages",
+    "/api/v1/auth/services",
+    "/api/v1/auth/system/update",
+    "/api/v1/auth/deploy",
+];
+
+fn canonical_plugin_route(path: &str) -> String {
+    match path.strip_prefix("/api/") {
+        Some(rest) if !rest.starts_with("v1/") => format!("/api/v1/{rest}"),
+        _ => path.to_string(),
+    }
+}
+
+fn route_is_within(path: &str, prefix: &str) -> bool {
+    path == prefix
+        || path
+            .strip_prefix(prefix)
+            .is_some_and(|rest| rest.starts_with('/'))
+}
+
+fn is_package_update_check(method: &str, path: &str) -> bool {
+    if method != "POST" {
+        return false;
+    }
+    let canonical = canonical_plugin_route(path);
+    if canonical == "/api/v1/admin/packages/updates/check" {
+        return true;
+    }
+    canonical
+        .strip_prefix("/api/v1/admin/packages/")
+        .and_then(|suffix| suffix.strip_suffix("/check-update"))
+        .is_some_and(|package| {
+            !package.is_empty() && !package.contains('/') && !package.contains('*')
+        })
+}
+
+pub fn is_plugin_request_denied(method: &Method, path: &str) -> bool {
+    if is_route_default_denied(path) {
+        return true;
+    }
+    if matches!(*method, Method::GET | Method::HEAD)
+        || is_package_update_check(method.as_str(), path)
+    {
+        return false;
+    }
+    let canonical = canonical_plugin_route(path);
+    ADMIN_USER_ONLY_WRITE_PREFIXES
+        .iter()
+        .any(|prefix| route_is_within(&canonical, prefix))
+}
+
+fn scope_delegates_admin_user_write(method: &str, route: &str) -> bool {
+    if matches!(method, "GET" | "HEAD") || is_package_update_check(method, route) {
+        return false;
+    }
+    [route.to_string(), canonical_plugin_route(route)]
+        .iter()
+        .any(|pattern| {
+            if let Some(prefix) = pattern.strip_suffix('*') {
+                ADMIN_USER_ONLY_WRITE_PREFIXES.iter().any(|protected| {
+                    protected.starts_with(prefix)
+                        || route_is_within(prefix.trim_end_matches('/'), protected)
+                })
+            } else {
+                ADMIN_USER_ONLY_WRITE_PREFIXES
+                    .iter()
+                    .any(|prefix| route_is_within(pattern, prefix))
+            }
+        })
+}
+
 pub fn normalize_scope_entry(
     raw: &RawScopeEntry,
     permissions: &[String],
@@ -346,6 +421,13 @@ pub fn normalize_scope_entry(
         }
     };
 
+    if methods.iter().any(|method| scope_delegates_admin_user_write(method, &raw_route)) {
+        return Err(format!(
+            "Plugin API scope '{}' delegates an admin-user-only destructive HTTP capability",
+            raw_route
+        ));
+    }
+
     Ok(methods
         .into_iter()
         .map(|method| PluginScopeRule {
@@ -397,7 +479,7 @@ pub fn plugin_claims_allow_request(
     method: &Method,
     path: &str,
 ) -> bool {
-    if is_route_default_denied(path) {
+    if is_plugin_request_denied(method, path) {
         return false;
     }
     let req_method = method.as_str().to_uppercase();
@@ -1998,6 +2080,134 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn destructive_plugin_scope_policy_rejects_explicit_and_overlapping_wildcards() {
+        let destructive = [
+            "/api/v1/admin/packages/demo/uninstall",
+            "/api/admin/packages/*",
+            "/api/v1/admin/services/aetherflow-api/control",
+            "/api/admin/services/aetherflow-runner/control",
+            "/api/v1/admin/system/update/run",
+            "/api/v1/auth/deploy/demo",
+            "/api/v1/auth/services/restart",
+            "/api/v1/admin/*",
+            "/api/v1/admin/pack*",
+            "/api/v*",
+            "/api/*",
+        ];
+        for permission in ["packages:write", "services:control", "system:admin"] {
+            for route in destructive {
+                for method in ["POST", "PUT", "PATCH", "DELETE"] {
+                    let scope = RawScopeEntry::Simple(format!("{method} {route}"));
+                    assert!(
+                        normalize_scope_entry(&scope, &[permission.into()]).is_err(),
+                        "{permission}: {method} {route}"
+                    );
+                }
+            }
+        }
+        for route in [
+            "/api/v1/auth/services",
+            "/api/v1/admin/services/restart/status",
+            "/api/admin/system/update/status",
+            "/api/v1/auth/packages/demo/progress",
+            "/api/v1/admin/*",
+        ] {
+            for method in ["GET", "HEAD"] {
+                assert!(
+                    normalize_scope_entry(
+                        &RawScopeEntry::Structured(PluginScopeRule {
+                            method: method.into(),
+                            route: route.into()
+                        }),
+                        &["system:read".into()]
+                    )
+                    .is_ok(),
+                    "{method} {route}"
+                );
+            }
+        }
+        assert!(normalize_scope_entry(
+            &RawScopeEntry::Simple("POST /api/v1/auth/notifications/1/read".into()),
+            &["system:read".into()]
+        )
+        .is_err());
+        assert!(normalize_scope_entry(
+            &RawScopeEntry::Simple("POST /api/v1/auth/notifications/1/read".into()),
+            &["notifications:write".into()]
+        )
+        .is_ok());
+        assert!(normalize_scope_entry(
+            &RawScopeEntry::Simple("POST /api/v1/admin/services-extra/action".into()),
+            &["demo:write".into()]
+        )
+        .is_ok());
+        for route in [
+            "/api/v1/admin/packages/demo/check-update",
+            "/api/admin/packages/updates/check",
+        ] {
+            assert!(normalize_scope_entry(
+                &RawScopeEntry::Simple(format!("POST {route}")),
+                &["packages:write".into()]
+            )
+            .is_ok());
+            assert!(!is_plugin_request_denied(&Method::POST, route));
+            assert!(is_plugin_request_denied(&Method::DELETE, route));
+        }
+    }
+
+    #[test]
+    fn destructive_plugin_request_policy_blocks_previously_minted_grants() {
+        let mut claims = PluginTokenClaims {
+            typ: PLUGIN_TOKEN_TYP.into(),
+            iss: PLUGIN_TOKEN_ISSUER.into(),
+            aud: PLUGIN_TOKEN_AUDIENCE.into(),
+            sub: "plugin:fixture".into(),
+            plugin_id: "fixture".into(),
+            jti: "fixture".into(),
+            iat: 1,
+            exp: 2,
+            epoch: 1,
+            scopes: Vec::new(),
+        };
+        for path in [
+            "/api/v1/admin/packages/demo/install",
+            "/api/admin/packages/demo/uninstall",
+            "/api/v1/admin/packages/demo/update",
+            "/api/v1/admin/services/aetherflow-api/control",
+            "/api/admin/services/demo/control",
+            "/api/v1/admin/system/update/run",
+            "/api/auth/deploy/demo",
+        ] {
+            for scope in [path, "/api/v1/admin/*", "/api/*"] {
+                for method in [Method::POST, Method::PUT, Method::PATCH, Method::DELETE] {
+                    claims.scopes = vec![PluginScopeRule {
+                        method: method.to_string(),
+                        route: scope.into(),
+                    }];
+                    assert!(
+                        !plugin_claims_allow_request(&claims, &method, path),
+                        "{method} {path} from {scope}"
+                    );
+                }
+            }
+        }
+        for path in [
+            "/api/v1/auth/services",
+            "/api/v1/admin/services/restart/status",
+            "/api/admin/system/update/status",
+            "/api/v1/auth/packages/demo/progress",
+        ] {
+            for method in [Method::GET, Method::HEAD] {
+                claims.scopes = vec![PluginScopeRule {
+                    method: method.to_string(),
+                    route: "/api/*".into(),
+                }];
+                assert!(plugin_claims_allow_request(&claims, &method, path));
+            }
+        }
+    }
+
+    #[test]
     fn test_scope_method_and_default_deny_enforcement() {
         let claims = PluginTokenClaims {
             typ: PLUGIN_TOKEN_TYP.to_string(),
@@ -2051,7 +2261,7 @@ pub(crate) mod tests {
 
         // Write permissions allow explicit POST scope on non-denied route
         let write_perms = vec!["services:control:write".to_string()];
-        let valid_post = RawScopeEntry::Simple("POST /api/v1/auth/services/restart".to_string());
+        let valid_post = RawScopeEntry::Simple("POST /api/v1/auth/notifications/1/read".to_string());
         let rules = normalize_scope_entry(&valid_post, &write_perms).unwrap();
         assert_eq!(rules.len(), 1);
         assert_eq!(rules[0].method, "POST");

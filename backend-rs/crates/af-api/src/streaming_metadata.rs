@@ -149,7 +149,7 @@ static METADATA_CACHE: Lazy<Mutex<MetadataCache>> =
     Lazy::new(|| Mutex::new(MetadataCache::default()));
 
 static METADATA_HTTP_CLIENT: Lazy<Client> = Lazy::new(|| {
-    Client::builder()
+    af_services::streaming_http_client_builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(HTTP_REQUEST_TIMEOUT)
         .pool_max_idle_per_host(8)
