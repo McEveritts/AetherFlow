@@ -1,6 +1,6 @@
 'use client';
 
-import { useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import useSWR from 'swr';
 import { useShallow } from 'zustand/react/shallow';
 import { TabId } from '@/types/dashboard';
@@ -24,6 +24,7 @@ import {
     Film,
     Tv,
     ChevronLeft,
+    ChevronRight,
     Menu,
     X,
     Radio,
@@ -51,12 +52,10 @@ export const BOTTOM_NAVIGATION = [
     { id: 'logout' as TabId, label: 'Log Out', icon: <LogOut size={19} /> },
 ];
 
-// Quick items for the Mobile Bottom Glass Dock (44px+ touch targets)
-const MOBILE_DOCK_ITEMS: { id: TabId; label: string; icon: React.ReactNode }[] = [
+export const MOBILE_DOCK_ITEMS: { id: TabId; label: string; icon: React.ReactNode }[] = [
     { id: 'overview', label: 'Overview', icon: <LayoutDashboard size={20} /> },
     { id: 'services', label: 'Services', icon: <Server size={20} /> },
-    { id: 'mediaflow', label: 'MediaFlow', icon: <Film size={20} /> },
-    { id: 'ai', label: 'FlowAI', icon: <Sparkles size={20} className="text-indigo-400" /> },
+    { id: 'streaming', label: 'Streaming', icon: <Tv size={20} /> },
 ];
 
 export default function Sidebar() {
@@ -64,7 +63,6 @@ export default function Sidebar() {
     const {
         activeTab,
         setActiveTab,
-        isSidebarHovered,
         setIsSidebarHovered,
         isMobileMenuOpen,
         setIsMobileMenuOpen,
@@ -73,7 +71,6 @@ export default function Sidebar() {
         useShallow((state) => ({
             activeTab: state.activeTab,
             setActiveTab: state.setActiveTab,
-            isSidebarHovered: state.isSidebarHovered,
             setIsSidebarHovered: state.setIsSidebarHovered,
             isMobileMenuOpen: state.isMobileMenuOpen,
             setIsMobileMenuOpen: state.setIsMobileMenuOpen,
@@ -86,8 +83,58 @@ export default function Sidebar() {
     );
     const pendingCount = pendingActionsData?.count ?? pendingActionsData?.actions?.length ?? 0;
     const touchStartXRef = useRef<number | null>(null);
+    const drawerRef = useRef<HTMLElement | null>(null);
+    const closeButtonRef = useRef<HTMLButtonElement | null>(null);
+    const previouslyFocusedElementRef = useRef<HTMLElement | null>(null);
+    const [isCollapsed, setIsCollapsed] = useState(false);
 
-    // Map connection state to Obsidian beacon class
+    useEffect(() => {
+        if (!isMobileMenuOpen) return;
+
+        previouslyFocusedElementRef.current = (document.activeElement as HTMLElement) || null;
+
+        const timer = setTimeout(() => {
+            closeButtonRef.current?.focus();
+        }, 50);
+
+        const handleKeyDown = (event: KeyboardEvent) => {
+            if (event.key === 'Escape') {
+                event.preventDefault();
+                setIsMobileMenuOpen(false);
+                return;
+            }
+
+            if (event.key === 'Tab' && drawerRef.current) {
+                const focusableElements = drawerRef.current.querySelectorAll<HTMLElement>(
+                    'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+                );
+                if (focusableElements.length === 0) return;
+
+                const firstElement = focusableElements[0];
+                const lastElement = focusableElements[focusableElements.length - 1];
+
+                if (event.shiftKey) {
+                    if (document.activeElement === firstElement) {
+                        event.preventDefault();
+                        lastElement.focus();
+                    }
+                } else {
+                    if (document.activeElement === lastElement) {
+                        event.preventDefault();
+                        firstElement.focus();
+                    }
+                }
+            }
+        };
+
+        window.addEventListener('keydown', handleKeyDown);
+        return () => {
+            clearTimeout(timer);
+            window.removeEventListener('keydown', handleKeyDown);
+            previouslyFocusedElementRef.current?.focus();
+        };
+    }, [isMobileMenuOpen, setIsMobileMenuOpen]);
+
     const getBeaconClass = () => {
         if (connectionState === 'CONNECTED') {
             return 'obs-beacon-live';
@@ -98,14 +145,14 @@ export default function Sidebar() {
         return 'obs-beacon-danger';
     };
 
-    const handleDrawerTouchStart = (e: React.TouchEvent) => {
-        touchStartXRef.current = e.touches[0]?.clientX ?? null;
+    const handleDrawerTouchStart = (touchEvent: React.TouchEvent) => {
+        touchStartXRef.current = touchEvent.touches[0]?.clientX ?? null;
     };
 
-    const handleDrawerTouchEnd = (e: React.TouchEvent) => {
+    const handleDrawerTouchEnd = (touchEvent: React.TouchEvent) => {
         if (touchStartXRef.current === null) return;
-        const endX = e.changedTouches[0]?.clientX ?? touchStartXRef.current;
-        const deltaX = endX - touchStartXRef.current;
+        const touchEndX = touchEvent.changedTouches[0]?.clientX ?? touchStartXRef.current;
+        const deltaX = touchEndX - touchStartXRef.current;
         touchStartXRef.current = null;
         if (deltaX < -55) {
             triggerHaptic(6, hapticFeedback);
@@ -113,37 +160,40 @@ export default function Sidebar() {
         }
     };
 
+    const handleToggleCollapse = () => {
+        triggerHaptic(6, hapticFeedback);
+        const nextCollapsed = !isCollapsed;
+        setIsCollapsed(nextCollapsed);
+        setIsSidebarHovered(!nextCollapsed);
+    };
+
     return (
         <>
-            {/* ========================================================================= */}
-            {/* 1. MOBILE BOTTOM GLASS DOCK (md:hidden)                                  */}
-            {/* Height: 64px, safe-area padding, >= 44px touch targets, connection beacon */}
-            {/* ========================================================================= */}
             <nav 
                 aria-label="Mobile Bottom Navigation"
-                className="md:hidden fixed bottom-0 left-0 right-0 z-40 h-16 glass-panel border-t border-white/10 backdrop-blur-2xl px-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] flex items-center justify-around"
+                className="md:hidden fixed bottom-0 left-0 right-0 z-40 h-16 glass-panel border-t border-white/10 px-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] flex items-center justify-around"
             >
-                {/* Chromatic Top Edge Accent */}
-                <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-cyan-400/50 via-indigo-500/80 to-fuchsia-400/50" />
+                <div className="absolute inset-x-0 top-0 h-px bg-indigo-500/20" />
 
                 {MOBILE_DOCK_ITEMS.map((item) => {
                     const isActive = activeTab === item.id;
                     return (
                         <button
                             key={item.id}
+                            type="button"
                             onClick={() => {
                                 triggerHaptic(8, hapticFeedback);
                                 setActiveTab(item.id);
                                 setIsMobileMenuOpen(false);
                             }}
-                            className={`flex flex-col items-center justify-center flex-1 h-full obs-touch-target-standard obs-gpu-120hz-interactive relative group ${
-                                isActive ? 'text-indigo-400 font-bold' : 'text-slate-400 hover:text-slate-200'
+                            className={`flex flex-col items-center justify-center flex-1 h-full obs-touch-target-standard obs-gpu-120hz-interactive relative ${
+                                isActive ? 'text-indigo-400 font-semibold' : 'text-slate-400 hover:text-slate-200'
                             }`}
                         >
                             {isActive && (
-                                <span className="absolute top-1 w-8 h-1 bg-gradient-to-r from-indigo-500 to-fuchsia-500 rounded-full shadow-[0_0_8px_#6366f1]" />
+                                <span className="absolute top-1 w-8 h-1 bg-indigo-500 rounded-full" />
                             )}
-                            <div className={`p-1 transition-transform ${isActive ? 'scale-110 drop-shadow-[0_0_8px_rgba(99,102,241,0.5)]' : ''}`}>
+                            <div className="p-1">
                                 {item.icon}
                             </div>
                             <span className="text-xs tracking-tight leading-none mt-0.5">{item.label}</span>
@@ -151,50 +201,51 @@ export default function Sidebar() {
                     );
                 })}
 
-                {/* Mobile Drawer Trigger with Live Status Beacon */}
                 <button
+                    type="button"
                     onClick={() => {
                         triggerHaptic(8, hapticFeedback);
                         setIsMobileMenuOpen(!isMobileMenuOpen);
                     }}
                     aria-label="Toggle Navigation Drawer"
+                    aria-expanded={isMobileMenuOpen}
+                    aria-controls="mobile-navigation-drawer"
+                    aria-haspopup="dialog"
                     className={`flex flex-col items-center justify-center flex-1 h-full obs-touch-target-standard obs-gpu-120hz-interactive relative ${
-                        isMobileMenuOpen ? 'text-indigo-300' : 'text-slate-400 hover:text-slate-200'
+                        isMobileMenuOpen ? 'text-indigo-300 font-semibold' : 'text-slate-400 hover:text-slate-200'
                     }`}
                 >
-                    <div className="relative p-1">
+                    <div className="p-1">
                         <Menu size={20} />
-                        <span 
-                            className={`absolute top-0 right-0 ${getBeaconClass()}`} 
-                            title={`Status: ${connectionState}`}
-                        />
                     </div>
-                    <span className="text-xs tracking-tight leading-none mt-0.5">More</span>
+                    <span className="text-xs tracking-tight leading-none mt-0.5">Menu</span>
                 </button>
             </nav>
 
-            {/* ========================================================================= */}
-            {/* 2. MOBILE EXPANDABLE DRAWER OVERLAY (md:hidden)                          */}
-            {/* ========================================================================= */}
             {isMobileMenuOpen && (
                 <div
-                    className="fixed inset-0 bg-black/75 backdrop-blur-md z-50 md:hidden transition-opacity"
+                    className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 md:hidden transition-opacity"
                     onClick={() => setIsMobileMenuOpen(false)}
                 >
-                    <aside 
-                        className="fixed inset-y-0 left-0 w-72 max-w-[85vw] glass-panel obs-sidebar-surface bg-[#080915]/96 backdrop-blur-2xl p-5 flex flex-col z-50 border-r border-indigo-500/30 shadow-[0_24px_60px_rgba(0,0,0,0.9)] overflow-y-auto no-scrollbar obs-gpu-120hz-rail"
-                        onClick={(e) => e.stopPropagation()}
+                    <aside
+                        id="mobile-navigation-drawer"
+                        ref={drawerRef}
+                        role="dialog"
+                        aria-modal="true"
+                        aria-label="Navigation Menu"
+                        tabIndex={-1}
+                        className="fixed inset-y-0 left-0 w-72 max-w-[85vw] glass-panel bg-[#0a0e18]/98 p-5 flex flex-col z-50 border-r border-white/10 shadow-2xl overflow-y-auto no-scrollbar outline-none"
+                        onClick={(clickEvent) => clickEvent.stopPropagation()}
                         onTouchStart={handleDrawerTouchStart}
                         onTouchEnd={handleDrawerTouchEnd}
                     >
-                        {/* Drawer Header */}
                         <div className="flex items-center justify-between pb-4 mb-4 border-b border-white/10">
                             <div className="flex items-center gap-3">
-                                <div className="w-10 h-10 rounded-2xl bg-indigo-500/10 border border-indigo-500/30 flex items-center justify-center shadow-[0_0_20px_rgba(99,102,241,0.4)]">
-                                    <img src="/img/aetherflow-mark.svg" alt="AetherFlow Logo" className="w-7 h-7" />
+                                <div className="w-9 h-9 rounded-xl bg-indigo-500/10 border border-indigo-500/30 flex items-center justify-center">
+                                    <img src="/img/aetherflow-mark.svg" alt="AetherFlow Logo" className="w-6 h-6" />
                                 </div>
                                 <div>
-                                    <h2 className="text-lg font-bold text-white tracking-tight">AetherFlow</h2>
+                                    <h2 className="text-base font-bold text-white tracking-tight">AetherFlow</h2>
                                     <div className="flex items-center gap-2 mt-0.5">
                                         <span className={getBeaconClass()} />
                                         <span className="text-xs font-mono text-slate-400 uppercase">{connectionState}</span>
@@ -202,146 +253,19 @@ export default function Sidebar() {
                                 </div>
                             </div>
                             <button
+                                ref={closeButtonRef}
+                                type="button"
                                 onClick={() => setIsMobileMenuOpen(false)}
-                                className="obs-touch-target-standard p-2 rounded-xl text-slate-400 hover:text-white hover:bg-white/10 obs-gpu-120hz-interactive flex items-center justify-center"
+                                className="obs-touch-target-standard min-h-[40px] min-w-[40px] p-2 rounded-xl text-slate-400 hover:text-white hover:bg-white/10 flex items-center justify-center transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
                                 aria-label="Close Navigation Drawer"
+                                title="Close Navigation Drawer"
                             >
                                 <X size={20} />
                             </button>
                         </div>
 
-                        {/* Navigation Items (All touch targets >= 44px) */}
-                        <div className="text-xs font-bold text-slate-500 uppercase tracking-widest px-2 mb-2">Nexus Navigation</div>
+                        <div className="text-xs font-semibold text-slate-400 uppercase tracking-wider px-2 mb-2 select-none">Workspace</div>
                         <div className="space-y-1 mb-6">
-                            {NAVIGATION.map((item) => {
-                                const isActive = activeTab === item.id;
-                                return (
-                                    <button
-                                        key={item.id}
-                                        onClick={() => {
-                                            triggerHaptic(8, hapticFeedback);
-                                            setActiveTab(item.id);
-                                            setIsMobileMenuOpen(false);
-                                        }}
-                                        className={`w-full flex items-center gap-3.5 px-3 py-2.5 min-h-[44px] obs-touch-target-standard rounded-xl obs-gpu-120hz-interactive ${
-                                            isActive
-                                                ? 'bg-gradient-to-r from-indigo-500/25 to-fuchsia-500/20 text-white border border-indigo-500/40 shadow-[0_0_16px_rgba(99,102,241,0.25)]'
-                                                : 'text-slate-400 hover:bg-white/5 hover:text-slate-200'
-                                        }`}
-                                    >
-                                        <div className={isActive ? 'text-indigo-400 drop-shadow-[0_0_8px_rgba(129,140,248,0.5)]' : ''}>
-                                            {item.icon}
-                                        </div>
-                                        <span className="font-semibold text-sm">{item.label}</span>
-                                    </button>
-                                );
-                            })}
-                        </div>
-
-                        {/* Admin Section */}
-                        <div className="mt-auto pt-4 border-t border-white/10 space-y-1">
-                            <div className="text-xs font-bold text-slate-500 uppercase tracking-widest px-2 mb-2">System</div>
-                            {BOTTOM_NAVIGATION.filter(item => {
-                                if (['settings', 'security', 'users', 'audit', 'oidc-clients', 'network', 'cluster'].includes(item.id)) {
-                                    return user?.role === 'admin';
-                                }
-                                return true;
-                            }).map((item) => (
-                                <button
-                                    key={item.id}
-                                    onClick={() => {
-                                        triggerHaptic(8, hapticFeedback);
-                                        setIsMobileMenuOpen(false);
-                                        if (item.id === 'logout') logout();
-                                        else setActiveTab(item.id);
-                                    }}
-                                    className={`w-full flex items-center gap-3.5 px-3 py-2.5 min-h-[44px] obs-touch-target-standard rounded-xl text-slate-400 hover:text-slate-200 hover:bg-white/5 obs-gpu-120hz-interactive ${
-                                        activeTab === item.id ? 'bg-gradient-to-r from-indigo-500/20 to-fuchsia-500/20 text-white' : ''
-                                    }`}
-                                >
-                                    <div className="text-slate-400">{item.icon}</div>
-                                    <span className="text-sm font-semibold">{item.label}</span>
-                                </button>
-                            ))}
-                        </div>
-                    </aside>
-                </div>
-            )}
-
-            {/* ========================================================================= */}
-            {/* 3. TABLET & DESKTOP DOCKED RAIL (md:block)                               */}
-            {/* Spacer syncs width with rail so expanded sidebar never covers content    */}
-            {/* ========================================================================= */}
-            <div
-                className="hidden md:block shrink-0 relative z-50 md:w-[4.5rem]"
-            >
-                <aside
-                    className={`fixed inset-y-0 left-0 z-50 flex flex-col obs-gpu-120hz-rail ${
-                        isSidebarHovered ? 'md:w-64' : 'md:w-[4.5rem]'
-                    }`}
-                    onMouseEnter={() => setIsSidebarHovered(true)}
-                    onMouseLeave={() => setIsSidebarHovered(false)}
-                >
-                    <div className="w-full h-full obs-sidebar-surface overflow-hidden flex flex-col">
-                        {/* Top Header Area — flush height h-20 aligned with Header.tsx */}
-                        <div
-                            className={`flex h-20 items-center border-b border-white/[0.06] relative shrink-0 ${
-                                isSidebarHovered ? 'px-4 justify-between' : 'justify-center px-0'
-                            }`}
-                        >
-                            <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-indigo-500/40 via-purple-500/60 to-transparent" />
-
-                            <div className={`flex items-center ${isSidebarHovered ? 'gap-3' : 'justify-center'}`}>
-                                <button
-                                    type="button"
-                                    onClick={() => {
-                                        triggerHaptic(6, hapticFeedback);
-                                        setIsSidebarHovered(!isSidebarHovered);
-                                    }}
-                                    aria-label={isSidebarHovered ? 'Collapse Sidebar' : 'Expand Sidebar'}
-                                    title={isSidebarHovered ? 'Collapse Sidebar' : 'Expand Sidebar'}
-                                    className="w-10 h-10 shrink-0 rounded-xl shadow-[0_0_20px_rgba(99,102,241,0.35)] relative overflow-hidden bg-indigo-500/10 border border-indigo-500/30 flex items-center justify-center obs-inline-action obs-gpu-120hz-interactive focus:outline-none focus-visible:outline-none"
-                                >
-                                    <img src="/img/aetherflow-mark.svg" alt="AetherFlow Logo" className="w-7 h-7" />
-                                </button>
-                                {isSidebarHovered && (
-                                    <div className="flex flex-col min-w-0">
-                                        <h1 className="text-base font-bold tracking-tight text-white whitespace-nowrap leading-tight">
-                                            AetherFlow
-                                        </h1>
-                                        <div className="flex items-center gap-1.5 mt-0.5">
-                                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shadow-[0_0_6px_#34d399]" />
-                                            <span className="text-xs font-mono text-slate-400 uppercase tracking-wider truncate">
-                                                Nexus OS
-                                            </span>
-                                        </div>
-                                    </div>
-                                )}
-                            </div>
-
-                            {isSidebarHovered && (
-                                <button
-                                    type="button"
-                                    onClick={(e) => {
-                                        e.stopPropagation();
-                                        triggerHaptic(6, hapticFeedback);
-                                        setIsSidebarHovered(false);
-                                    }}
-                                    aria-label="Collapse Sidebar Rail"
-                                    className="w-7 h-7 obs-inline-action rounded-lg bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.08] text-slate-400 hover:text-white flex items-center justify-center transition-colors focus:outline-none focus-visible:outline-none"
-                                >
-                                    <ChevronLeft size={15} />
-                                </button>
-                            )}
-                        </div>
-
-                        {/* Primary Navigation List */}
-                        <nav className="flex-1 px-2.5 py-3 space-y-1 overflow-y-auto no-scrollbar relative z-10">
-                            {isSidebarHovered && (
-                                <div className="px-2.5 pb-1.5 text-xs font-bold text-slate-500 uppercase tracking-widest whitespace-nowrap">
-                                    Workspace
-                                </div>
-                            )}
                             {NAVIGATION.map((item) => {
                                 const isActive = activeTab === item.id;
                                 return (
@@ -351,70 +275,31 @@ export default function Sidebar() {
                                         onClick={() => {
                                             triggerHaptic(8, hapticFeedback);
                                             setActiveTab(item.id);
+                                            setIsMobileMenuOpen(false);
                                         }}
-                                        title={!isSidebarHovered ? item.label : undefined}
-                                        className={`flex items-center relative rounded-xl obs-gpu-120hz-interactive group obs-inline-action focus:outline-none focus-visible:outline-none ${
-                                            isSidebarHovered
-                                                ? 'w-full px-3 py-2.5 gap-3 justify-start'
-                                                : 'w-11 h-11 mx-auto justify-center'
-                                        } ${
+                                        className={`w-full flex items-center gap-3 px-3 py-2.5 min-h-[44px] obs-touch-target-standard rounded-xl transition-colors ${
                                             isActive
-                                                ? 'bg-indigo-500/[0.16] text-white border border-indigo-500/30 shadow-[0_0_16px_rgba(99,102,241,0.18)]'
-                                                : 'text-slate-400 border border-transparent hover:bg-white/[0.05] hover:text-slate-200'
+                                                ? 'bg-indigo-500/20 text-white border border-indigo-500/40'
+                                                : 'text-slate-400 hover:bg-white/5 hover:text-slate-200 border border-transparent'
                                         }`}
                                     >
-                                        {isActive && (
-                                            <div className="absolute left-0 top-1/2 -translate-y-1/2 w-1 h-5 bg-indigo-400 rounded-r-full shadow-[0_0_8px_#6366f1]" />
-                                        )}
-
-                                        <div
-                                            className={`shrink-0 flex items-center justify-center transition-colors ${
-                                                isActive
-                                                    ? 'text-indigo-400 drop-shadow-[0_0_8px_rgba(129,140,248,0.45)]'
-                                                    : item.id === 'ai'
-                                                    ? 'text-indigo-400/80 group-hover:text-indigo-300'
-                                                    : 'text-slate-400 group-hover:text-slate-200'
-                                            }`}
-                                        >
+                                        <div className={isActive ? 'text-indigo-400' : 'text-slate-400'}>
                                             {item.icon}
                                         </div>
-
-                                        {isSidebarHovered && (
-                                            <span className="font-medium whitespace-nowrap text-sm tracking-tight truncate">
-                                                {item.label}
-                                            </span>
-                                        )}
-
+                                        <span className="font-medium text-sm">{item.label}</span>
                                         {item.id === 'inbox' && pendingCount > 0 && (
-                                            isSidebarHovered ? (
-                                                <span className="ml-auto bg-indigo-500/20 text-indigo-300 border border-indigo-500/40 text-xs font-bold px-2 py-0.5 rounded-full shrink-0">
-                                                    {pendingCount}
-                                                </span>
-                                            ) : (
-                                                <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-indigo-400 shadow-[0_0_8px_#818CF8]" />
-                                            )
-                                        )}
-
-                                        {isActive && item.id === 'ai' && (
-                                            <div
-                                                className={`rounded-full bg-indigo-400 shadow-[0_0_8px_#818CF8] animate-pulse ${
-                                                    isSidebarHovered ? 'ml-auto w-1.5 h-1.5' : 'absolute top-1.5 right-1.5 w-1.5 h-1.5'
-                                                }`}
-                                            />
+                                            <span className="ml-auto bg-indigo-500/20 text-indigo-300 border border-indigo-500/40 text-xs font-bold px-2 py-0.5 rounded-full shrink-0">
+                                                {pendingCount}
+                                            </span>
                                         )}
                                     </button>
                                 );
                             })}
-                        </nav>
+                        </div>
 
-                        {/* Bottom System & Admin Navigation — continuous surface, no opaque black overlay */}
-                        <div className="px-2.5 py-3 border-t border-white/[0.06] relative z-10 shrink-0 space-y-1">
-                            {isSidebarHovered && (
-                                <div className="px-2.5 pb-1 text-xs font-bold text-slate-500 uppercase tracking-widest whitespace-nowrap">
-                                    System
-                                </div>
-                            )}
-                            {BOTTOM_NAVIGATION.filter(item => {
+                        <div className="mt-auto pt-4 border-t border-white/10 space-y-1">
+                            <div className="text-xs font-semibold text-slate-400 uppercase tracking-wider px-2 mb-2 select-none">System</div>
+                            {BOTTOM_NAVIGATION.filter((item) => {
                                 if (['settings', 'security', 'users', 'audit', 'oidc-clients', 'network', 'cluster'].includes(item.id)) {
                                     return user?.role === 'admin';
                                 }
@@ -428,45 +313,218 @@ export default function Sidebar() {
                                         type="button"
                                         onClick={() => {
                                             triggerHaptic(8, hapticFeedback);
+                                            setIsMobileMenuOpen(false);
                                             if (isLogout) logout();
                                             else setActiveTab(item.id);
                                         }}
-                                        title={!isSidebarHovered ? item.label : undefined}
-                                        className={`flex items-center relative rounded-xl obs-gpu-120hz-interactive group obs-inline-action focus:outline-none focus-visible:outline-none ${
-                                            isSidebarHovered
-                                                ? 'w-full px-3 py-2.5 gap-3 justify-start'
-                                                : 'w-11 h-11 mx-auto justify-center'
-                                        } ${
+                                        className={`w-full flex items-center gap-3 px-3 py-2.5 min-h-[44px] obs-touch-target-standard rounded-xl transition-colors ${
                                             isActive
-                                                ? 'bg-indigo-500/[0.16] text-white border border-indigo-500/30 shadow-[0_0_16px_rgba(99,102,241,0.18)]'
+                                                ? 'bg-indigo-500/20 text-white border border-indigo-500/40'
                                                 : isLogout
-                                                ? 'text-slate-400 border border-transparent hover:bg-rose-500/10 hover:text-rose-300'
-                                                : 'text-slate-400 border border-transparent hover:bg-white/[0.05] hover:text-slate-200'
+                                                ? 'text-slate-400 hover:bg-rose-500/10 hover:text-rose-300 border border-transparent'
+                                                : 'text-slate-400 hover:bg-white/5 hover:text-slate-200 border border-transparent'
                                         }`}
                                     >
-                                        {isActive && (
-                                            <div className="absolute left-0 top-1/2 -translate-y-1/2 w-1 h-5 bg-indigo-400 rounded-r-full shadow-[0_0_8px_#6366f1]" />
-                                        )}
-                                        <div
-                                            className={`shrink-0 flex items-center justify-center transition-colors ${
-                                                isActive
-                                                    ? 'text-indigo-400 drop-shadow-[0_0_8px_rgba(129,140,248,0.45)]'
-                                                    : isLogout
-                                                    ? 'text-slate-400 group-hover:text-rose-400'
-                                                    : 'text-slate-400 group-hover:text-slate-200'
-                                            }`}
-                                        >
-                                            {item.icon}
-                                        </div>
-                                        {isSidebarHovered && (
-                                            <span className="text-sm font-medium tracking-tight whitespace-nowrap truncate">
-                                                {item.label}
-                                            </span>
-                                        )}
+                                        <div className={isLogout ? 'text-rose-400' : 'text-slate-400'}>{item.icon}</div>
+                                        <span className="text-sm font-medium">{item.label}</span>
                                     </button>
                                 );
                             })}
                         </div>
+                    </aside>
+                </div>
+            )}
+
+            <div
+                className={`hidden md:block shrink-0 relative z-40 transition-all duration-200 ${
+                    isCollapsed ? 'md:w-16' : 'md:w-52'
+                }`}
+            >
+                <aside
+                    className={`fixed inset-y-0 left-0 z-40 flex flex-col transition-all duration-200 ${
+                        isCollapsed ? 'md:w-16' : 'md:w-52'
+                    }`}
+                >
+                    <div className="w-full h-full obs-sidebar-surface overflow-hidden flex flex-col">
+                        <div
+                            className={`flex h-16 md:h-20 items-center border-b border-white/[0.08] relative shrink-0 ${
+                                isCollapsed ? 'justify-center px-0' : 'px-4 justify-between'
+                            }`}
+                        >
+                            {!isCollapsed ? (
+                                <>
+                                    <div className="flex items-center gap-2.5 min-w-0">
+                                        <div className="w-8 h-8 shrink-0 rounded-lg bg-indigo-500/10 border border-indigo-500/30 flex items-center justify-center">
+                                            <img src="/img/aetherflow-mark.svg" alt="AetherFlow Logo" className="w-5 h-5" />
+                                        </div>
+                                        <div className="flex flex-col min-w-0">
+                                            <span className="text-sm font-bold tracking-tight text-white whitespace-nowrap leading-tight truncate">
+                                                AetherFlow
+                                            </span>
+                                            <span className="text-[11px] font-mono text-slate-400 uppercase tracking-wider truncate">
+                                                Nexus OS
+                                            </span>
+                                        </div>
+                                    </div>
+                                    <button
+                                        type="button"
+                                        onClick={handleToggleCollapse}
+                                        aria-label="Collapse Sidebar"
+                                        title="Collapse Sidebar"
+                                        className="w-10 h-10 min-h-[40px] min-w-[40px] rounded-lg text-slate-400 hover:text-white hover:bg-white/[0.06] flex items-center justify-center transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
+                                    >
+                                        <ChevronLeft size={16} />
+                                    </button>
+                                </>
+                            ) : (
+                                <button
+                                    type="button"
+                                    onClick={handleToggleCollapse}
+                                    aria-label="Expand Sidebar"
+                                    title="Expand Sidebar"
+                                    className="w-10 h-10 min-h-[40px] min-w-[40px] rounded-lg text-slate-400 hover:text-white hover:bg-white/[0.06] flex items-center justify-center transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
+                                >
+                                    <ChevronRight size={18} />
+                                </button>
+                            )}
+                        </div>
+
+                        <nav className="flex-1 px-2.5 py-3 flex flex-col overflow-y-auto no-scrollbar relative z-10">
+                            <div className="space-y-1">
+                                {!isCollapsed && (
+                                    <div className="px-2.5 pb-1 text-xs font-semibold text-slate-400 uppercase tracking-wider whitespace-nowrap select-none">
+                                        Workspace
+                                    </div>
+                                )}
+                                {NAVIGATION.map((item) => {
+                                    const isActive = activeTab === item.id;
+                                    return (
+                                        <button
+                                            key={item.id}
+                                            type="button"
+                                            onClick={() => {
+                                                triggerHaptic(8, hapticFeedback);
+                                                setActiveTab(item.id);
+                                            }}
+                                            aria-label={item.label}
+                                            aria-current={isActive ? 'page' : undefined}
+                                            title={isCollapsed ? item.label : undefined}
+                                            className={`flex items-center relative rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 ${
+                                                !isCollapsed
+                                                    ? 'w-full min-h-[40px] px-2.5 py-2 gap-3 justify-start'
+                                                    : 'w-10 h-10 min-h-[40px] min-w-[40px] mx-auto justify-center'
+                                            } ${
+                                                isActive
+                                                    ? 'bg-indigo-500/15 text-indigo-200 border border-indigo-500/30'
+                                                    : 'text-slate-400 border border-transparent hover:bg-white/[0.05] hover:text-slate-200'
+                                            }`}
+                                        >
+                                            {isActive && (
+                                                <span className="absolute left-0 top-1/2 -translate-y-1/2 w-1 h-5 bg-indigo-400 rounded-r-full" />
+                                            )}
+
+                                            <div
+                                                className={`shrink-0 flex items-center justify-center transition-colors ${
+                                                    isActive
+                                                        ? 'text-indigo-400'
+                                                        : item.id === 'ai'
+                                                        ? 'text-indigo-400/80'
+                                                        : 'text-slate-400'
+                                                }`}
+                                            >
+                                                {item.icon}
+                                            </div>
+
+                                            {!isCollapsed && (
+                                                <span className="font-medium whitespace-nowrap text-sm tracking-tight truncate">
+                                                    {item.label}
+                                                </span>
+                                            )}
+
+                                            {item.id === 'inbox' && pendingCount > 0 && (
+                                                !isCollapsed ? (
+                                                    <span className="ml-auto bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 text-xs font-semibold px-2 py-0.5 rounded-full shrink-0">
+                                                        {pendingCount}
+                                                    </span>
+                                                ) : (
+                                                    <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-indigo-400" />
+                                                )
+                                            )}
+
+                                            {isActive && item.id === 'ai' && (
+                                                <span
+                                                    className={`rounded-full bg-indigo-400 ${
+                                                        !isCollapsed ? 'ml-auto w-1.5 h-1.5' : 'absolute top-1.5 right-1.5 w-1.5 h-1.5'
+                                                    }`}
+                                                />
+                                            )}
+                                        </button>
+                                    );
+                                })}
+                            </div>
+
+                            <div className="mt-auto pt-3 border-t border-white/[0.08] relative z-10 shrink-0 space-y-1">
+                                {!isCollapsed && (
+                                    <div className="px-2.5 pb-1 text-xs font-semibold text-slate-400 uppercase tracking-wider whitespace-nowrap select-none">
+                                        System
+                                    </div>
+                                )}
+                                {BOTTOM_NAVIGATION.filter((item) => {
+                                    if (['settings', 'security', 'users', 'audit', 'oidc-clients', 'network', 'cluster'].includes(item.id)) {
+                                        return user?.role === 'admin';
+                                    }
+                                    return true;
+                                }).map((item) => {
+                                    const isActive = activeTab === item.id;
+                                    const isLogout = item.id === 'logout';
+                                    return (
+                                        <button
+                                            key={item.id}
+                                            type="button"
+                                            onClick={() => {
+                                                triggerHaptic(8, hapticFeedback);
+                                                if (isLogout) logout();
+                                                else setActiveTab(item.id);
+                                            }}
+                                            aria-label={item.label}
+                                            aria-current={isActive ? 'page' : undefined}
+                                            title={isCollapsed ? item.label : undefined}
+                                            className={`flex items-center relative rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 ${
+                                                !isCollapsed
+                                                    ? 'w-full min-h-[40px] px-2.5 py-2 gap-3 justify-start'
+                                                    : 'w-10 h-10 min-h-[40px] min-w-[40px] mx-auto justify-center'
+                                            } ${
+                                                isActive
+                                                    ? 'bg-indigo-500/15 text-indigo-200 border border-indigo-500/30'
+                                                    : isLogout
+                                                    ? 'text-slate-400 border border-transparent hover:bg-rose-500/10 hover:text-rose-300'
+                                                    : 'text-slate-400 border border-transparent hover:bg-white/[0.05] hover:text-slate-200'
+                                            }`}
+                                        >
+                                            {isActive && (
+                                                <span className="absolute left-0 top-1/2 -translate-y-1/2 w-1 h-5 bg-indigo-400 rounded-r-full" />
+                                            )}
+                                            <div
+                                                className={`shrink-0 flex items-center justify-center transition-colors ${
+                                                    isActive
+                                                        ? 'text-indigo-400'
+                                                        : isLogout
+                                                        ? 'text-slate-400'
+                                                        : 'text-slate-400'
+                                                }`}
+                                            >
+                                                {item.icon}
+                                            </div>
+                                            {!isCollapsed && (
+                                                <span className="text-sm font-medium tracking-tight whitespace-nowrap truncate">
+                                                    {item.label}
+                                                </span>
+                                            )}
+                                        </button>
+                                    );
+                                })}
+                            </div>
+                        </nav>
                     </div>
                 </aside>
             </div>

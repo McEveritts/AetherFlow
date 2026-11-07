@@ -26,6 +26,20 @@ export interface DiskPartition {
     used_pct: number;
 }
 
+export interface ServiceTelemetryInfo {
+    status: 'running' | 'stopped' | 'error';
+    uptime?: string;
+    version?: string;
+    job_status?: 'install_failed' | 'installing' | 'failed' | 'completed' | string;
+    last_job?: {
+        action?: string;
+        status?: string;
+        error?: string;
+    };
+    health?: 'healthy' | 'degraded' | 'unhealthy' | string;
+    degraded_components?: string[];
+}
+
 export interface SystemMetrics {
     cpu_usage: number;
     per_core_cpu: number[];
@@ -42,7 +56,7 @@ export interface SystemMetrics {
     };
     is_windows: boolean;
     services: {
-        [key: string]: { status: 'running' | 'stopped' | 'error', uptime: string, version: string };
+        [key: string]: ServiceTelemetryInfo;
     };
     memory: {
         total: number;
@@ -78,10 +92,10 @@ export interface MetricsHistory {
 }
 
 export interface CPUInfo {
-    vendor: string;
-    model: string;
-    cores: number;
-    threads: number;
+    vendor?: string;
+    model?: string;
+    cores?: number;
+    threads?: number;
 }
 
 export interface MemoryInfo {

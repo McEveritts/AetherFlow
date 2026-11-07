@@ -6,67 +6,75 @@ interface DiskIOWidgetProps {
     diskIoData: SystemMetrics['disk_io'];
     history: MetricsHistory;
     density?: 'compact' | 'immersive';
+    selectedWindow?: string;
+    hasSharedSummary?: boolean;
 }
 
-function formatBytesPerSec(bytes: number): string {
-    if (bytes < 1024) return `${bytes.toFixed(0)} B/s`;
-    if (bytes < 1048576) return `${(bytes / 1024).toFixed(1)} KB/s`;
-    if (bytes < 1073741824) return `${(bytes / 1048576).toFixed(1)} MB/s`;
-    return `${(bytes / 1073741824).toFixed(2)} GB/s`;
+function formatBytesPerSec(bytesPerSecond: number): string {
+    if (!Number.isFinite(bytesPerSecond) || bytesPerSecond <= 0) return '0.0 B/s';
+    if (bytesPerSecond < 1024) return `${bytesPerSecond.toFixed(1)} B/s`;
+    if (bytesPerSecond < 1048576) return `${(bytesPerSecond / 1024).toFixed(1)} KB/s`;
+    if (bytesPerSecond < 1073741824) return `${(bytesPerSecond / 1048576).toFixed(1)} MB/s`;
+    return `${(bytesPerSecond / 1073741824).toFixed(1)} GB/s`;
 }
 
-export default function DiskIOWidget({ diskIoData, history, density = 'compact' }: DiskIOWidgetProps) {
+export default function DiskIOWidget({ diskIoData, history, density = 'compact', selectedWindow, hasSharedSummary }: DiskIOWidgetProps) {
     const isImmersive = density === 'immersive';
-    const read = diskIoData?.read_bytes_sec || 0;
-    const write = diskIoData?.write_bytes_sec || 0;
+    const readBytesPerSecond = diskIoData?.read_bytes_sec || 0;
+    const writeBytesPerSecond = diskIoData?.write_bytes_sec || 0;
+    const totalBytesPerSecond = readBytesPerSecond + writeBytesPerSecond;
 
     return (
-        <div className={`rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl relative overflow-hidden flex flex-col justify-between h-full ${isImmersive ? 'p-6' : 'p-5'}`}>
+        <div className={`rounded-2xl border border-slate-800/80 bg-slate-900/85 backdrop-blur-xl relative overflow-hidden flex flex-col ${isImmersive ? 'p-6' : 'p-5'}`}>
             <div>
-                {/* Header */}
-                <div className="flex items-center justify-between pb-3 mb-3.5 border-b border-white/[0.06]">
-                    <div className="flex items-center gap-2.5">
+                <div className="flex flex-wrap items-center justify-between gap-2 pb-3 mb-3.5 border-b border-slate-800/80">
+                    <div className="flex items-center gap-2.5 min-w-0">
                         <div className="h-8 w-8 rounded-lg bg-amber-500/10 border border-amber-500/20 flex items-center justify-center text-amber-400 shrink-0">
                             <HardDrive size={16} />
                         </div>
-                        <div>
+                        <div className="min-w-0">
                             <h2 className="text-sm font-bold text-slate-100 tracking-tight leading-none">Disk I/O</h2>
-                            <p className="text-[11px] text-slate-500 mt-1">Block device read/write rate</p>
+                            <p className="text-[13px] text-slate-300 mt-1">
+                                Total throughput <span className="font-semibold text-slate-200 tabular-nums">{formatBytesPerSec(totalBytesPerSecond)}</span>
+                            </p>
                         </div>
                     </div>
-                    <span className="text-[11px] font-mono font-semibold text-amber-300/90 bg-amber-500/10 border border-amber-500/20 px-2 py-0.5 rounded-lg tabular-nums">
-                        {formatBytesPerSec(read + write)}
-                    </span>
+                    <div className="flex flex-col items-end text-right shrink-0">
+                        <div className="flex items-baseline gap-1.5">
+                            <span className="text-[13px] font-semibold text-amber-400">Read</span>
+                            <span className="text-lg sm:text-xl font-extrabold tracking-tight text-white tabular-nums">
+                                {formatBytesPerSec(readBytesPerSecond)}
+                            </span>
+                        </div>
+                        <div className="flex items-baseline gap-1.5 mt-0.5">
+                            <span className="text-[13px] font-semibold text-sky-400">Write</span>
+                            <span className="text-lg sm:text-xl font-extrabold tracking-tight text-white tabular-nums">
+                                {formatBytesPerSec(writeBytesPerSecond)}
+                            </span>
+                        </div>
+                    </div>
                 </div>
 
-                {/* Dual-line Sparkline */}
-                <div className="rounded-xl overflow-hidden bg-black/30 border border-white/[0.04] mb-3.5">
+                <div className="rounded-xl overflow-hidden bg-slate-950/60 border border-slate-800/60">
                     <Sparkline
-                        data={history.diskRead.length > 0 ? history.diskRead : [read, read]}
-                        data2={history.diskWrite.length > 0 ? history.diskWrite : [write, write]}
+                        data={history.diskRead.length > 0 ? history.diskRead : [readBytesPerSecond]}
+                        data2={history.diskWrite.length > 0 ? history.diskWrite : [writeBytesPerSecond]}
                         color="#f59e0b"
-                        color2="#ef4444"
+                        color2="#38bdf8"
                         gradientFrom="#f59e0b"
-                        gradientFrom2="#ef4444"
+                        gradientFrom2="#38bdf8"
                         height={isImmersive ? 120 : 88}
                         showArea={true}
+                        showMagnitudeReferences={true}
+                        unit="B/s"
+                        timestamps={history.timestamps}
+                        selectedWindow={selectedWindow}
                         label="Read"
                         label2="Write"
-                        currentValue={formatBytesPerSec(read)}
-                        currentValue2={formatBytesPerSec(write)}
+                        currentValue={formatBytesPerSec(readBytesPerSecond)}
+                        currentValue2={formatBytesPerSec(writeBytesPerSecond)}
+                        hasSharedSummary={hasSharedSummary}
                     />
-                </div>
-            </div>
-
-            {/* Stats */}
-            <div className="grid grid-cols-2 gap-2.5">
-                <div className="bg-black/30 rounded-xl px-3 py-2 border border-white/[0.04] flex items-center justify-between">
-                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Read</span>
-                    <span className="text-xs font-mono font-bold text-amber-400 tabular-nums">{formatBytesPerSec(read)}</span>
-                </div>
-                <div className="bg-black/30 rounded-xl px-3 py-2 border border-white/[0.04] flex items-center justify-between">
-                    <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Write</span>
-                    <span className="text-xs font-mono font-bold text-rose-400 tabular-nums">{formatBytesPerSec(write)}</span>
                 </div>
             </div>
         </div>

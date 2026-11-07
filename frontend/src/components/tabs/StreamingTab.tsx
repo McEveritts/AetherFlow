@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useMemo, useRef } from 'react';
+import React, { useState, useMemo, useRef, useSyncExternalStore } from 'react';
 import useSWR from 'swr';
 import StreamingHistoryExplorer from '@/components/streaming/StreamingHistoryExplorer';
 import StreamingDialog from '@/components/streaming/StreamingDialog';
@@ -38,10 +38,11 @@ import {
     Database,
     Download,
     ChevronLeft,
-    ChevronRight
+    ChevronRight,
+    ChevronDown
 } from 'lucide-react';
+import { computeDualLinearScales, formatStreamingAxisDateTick } from '@/components/streaming/streamingChartScales';
 import {
-    AreaChart,
     Area,
     Bar,
     ComposedChart,
@@ -64,7 +65,6 @@ import {
     normalizePlayMethodKind,
     downloadStreamingHistoryCsv,
     parseStreamingTimestamp,
-    formatStreamingBucket,
 } from '@/lib/streaming';
 
 export interface StreamingLibraryCounts {
@@ -289,10 +289,10 @@ export interface StreamingDashboardData {
 
 function formatBytes(bytes: number, decimals = 2): string {
     if (!bytes || bytes <= 0) return '0 B';
-    const k = 1024;
+    const kilo = 1024;
     const sizes = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
-    const i = Math.min(sizes.length - 1, Math.floor(Math.log(bytes) / Math.log(k)));
-    return `${parseFloat((bytes / Math.pow(k, i)).toFixed(decimals))} ${sizes[i]}`;
+    const unitIndex = Math.min(sizes.length - 1, Math.floor(Math.log(bytes) / Math.log(kilo)));
+    return `${parseFloat((bytes / Math.pow(kilo, unitIndex)).toFixed(decimals))} ${sizes[unitIndex]}`;
 }
 
 function formatBandwidthMbps(bandwidthMbps?: number, bitrateBps?: number): string {
@@ -305,27 +305,36 @@ function formatBandwidthMbps(bandwidthMbps?: number, bitrateBps?: number): strin
     return '0.0';
 }
 
+function formatProviderDisplayName(rawProvider?: string | null): string {
+    if (!rawProvider) return '';
+    const normalizedProvider = rawProvider.trim().toLowerCase();
+    if (normalizedProvider === 'plex') return 'Plex';
+    if (normalizedProvider === 'jellyfin') return 'Jellyfin';
+    if (normalizedProvider === 'emby') return 'Emby';
+    return rawProvider;
+}
+
 function formatDurationClock(secs: number): string {
     if (!secs || secs <= 0) return '0:00';
-    const h = Math.floor(secs / 3600);
-    const m = Math.floor((secs % 3600) / 60);
-    const s = Math.floor(secs % 60);
-    if (h > 0) {
-        return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+    const hours = Math.floor(secs / 3600);
+    const minutes = Math.floor((secs % 3600) / 60);
+    const remainingSeconds = Math.floor(secs % 60);
+    if (hours > 0) {
+        return `${hours}:${String(minutes).padStart(2, '0')}:${String(remainingSeconds).padStart(2, '0')}`;
     }
-    return `${m}:${String(s).padStart(2, '0')}`;
+    return `${minutes}:${String(remainingSeconds).padStart(2, '0')}`;
 }
 
 function formatWatchDuration(secs: number): string {
     if (!secs || secs <= 0) return '0m';
     if (secs < 60) return `${secs}s`;
     const hours = Math.floor(secs / 3600);
-    const mins = Math.floor((secs % 3600) / 60);
-    if (hours === 0) return `${mins}m`;
-    if (hours < 24) return mins > 0 ? `${hours}h ${mins}m` : `${hours}h`;
+    const minutes = Math.floor((secs % 3600) / 60);
+    if (hours === 0) return `${minutes}m`;
+    if (hours < 24) return minutes > 0 ? `${hours}h ${minutes}m` : `${hours}h`;
     const days = Math.floor(hours / 24);
-    const remHours = hours % 24;
-    return remHours > 0 ? `${days}d ${remHours}h` : `${days}d`;
+    const remainingHours = hours % 24;
+    return remainingHours > 0 ? `${days}d ${remainingHours}h` : `${days}d`;
 }
 
 function formatEpisodeBadge(season?: number, episode?: number): string | null {
@@ -334,10 +343,12 @@ function formatEpisodeBadge(season?: number, episode?: number): string | null {
     return `S${String(season ?? 1).padStart(2, '0')}E${String(episode ?? 1).padStart(2, '0')}`;
 }
 
+const renderHiddenUpperDateTick = () => null;
+
 function formatTranscodeReason(reason: string): string {
     return reason
         .replace(/([A-Z])/g, ' $1')
-        .replace(/^./, (s) => s.toUpperCase())
+        .replace(/^./, (match) => match.toUpperCase())
         .trim();
 }
 
@@ -375,22 +386,63 @@ function getPlayMethodStyle(method?: string | null) {
     }
 }
 
+function subscribeToDesktopViewport(onStoreChange: () => void) {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
+        return () => {};
+    }
+    const mediaQuery = window.matchMedia('(min-width: 640px)');
+    if (typeof mediaQuery.addEventListener === 'function') {
+        mediaQuery.addEventListener('change', onStoreChange);
+        return () => mediaQuery.removeEventListener('change', onStoreChange);
+    } else if (typeof mediaQuery.addListener === 'function') {
+        mediaQuery.addListener(onStoreChange);
+        return () => mediaQuery.removeListener(onStoreChange);
+    }
+    return () => {};
+}
+
+function getDesktopViewportSnapshot(): boolean {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
+        return true;
+    }
+    return window.matchMedia('(min-width: 640px)').matches;
+}
+
+function getServerDesktopViewportSnapshot(): boolean {
+    return true;
+}
+
+const HISTORICAL_PLAY_METHOD_OPTIONS: Array<{ id: string; label: string }> = [
+    { id: 'all', label: 'All Methods' },
+    { id: 'DirectPlay', label: 'Direct Play' },
+    { id: 'DirectStream', label: 'Direct Stream' },
+    { id: 'Transcode', label: 'Transcode' },
+    { id: 'Unknown', label: 'Unknown' },
+];
+
+const HISTORICAL_MEDIA_TYPE_OPTIONS: Array<{ id: string; label: string }> = [
+    { id: 'all', label: 'All Media' },
+    { id: 'Movie', label: 'Movies' },
+    { id: 'Episode', label: 'Episodes' },
+    { id: 'Audio', label: 'Audio' },
+];
+
 export default function StreamingTab() {
     const { user } = useAuth();
     const { addToast } = useToast();
     const { hapticFeedback } = useSystemStore();
     const isAdmin = user?.role === 'admin';
 
-    // View & filter state
     const [activeView, setActiveView] = useState<'dashboard' | 'streams' | 'analytics' | 'history'>('dashboard');
     const [windowDays, setWindowDays] = useState<number>(30);
     const [playMethodFilter, setPlayMethodFilter] = useState<string>('all');
     const [mediaTypeFilter, setMediaTypeFilter] = useState<string>('all');
+    const selectedDeliverySummary = HISTORICAL_PLAY_METHOD_OPTIONS.find((option) => option.id === playMethodFilter)?.label || (playMethodFilter === 'all' ? 'All Methods' : playMethodFilter);
+    const selectedMediaTypeSummary = HISTORICAL_MEDIA_TYPE_OPTIONS.find((option) => option.id === mediaTypeFilter)?.label || (mediaTypeFilter === 'all' ? 'All Media' : mediaTypeFilter);
     const [historySearch, setHistorySearch] = useState<string>('');
     const [historyPage, setHistoryPage] = useState<number>(1);
     const [historyPageSize, setHistoryPageSize] = useState<number>(20);
 
-    // Server Configuration Drawer state
     const [showConfigModal, setShowConfigModal] = useState<boolean>(false);
     const [serverNameInput, setServerNameInput] = useState<string>('Jellyfin');
     const [serverUrlInput, setServerUrlInput] = useState<string>('http://127.0.0.1:8096');
@@ -406,14 +458,19 @@ export default function StreamingTab() {
     const [testResultMsg, setTestResultMsg] = useState<{ ok: boolean; text: string } | null>(null);
     const [pendingSessionActions, setPendingSessionActions] = useState<Set<string>>(new Set());
 
-    // Message modal state for active stream
     const [messageSession, setMessageSession] = useState<ActiveStreamSession | null>(null);
     const [messageHeader, setMessageHeader] = useState<string>('AetherFlow Notice');
     const [messageBody, setMessageBody] = useState<string>('');
     const [isSendingMessage, setIsSendingMessage] = useState<boolean>(false);
 
-    // When 'Unknown' is selected in the UI, fetch all play methods from backend and filter client-side
-    // because historical sync rows may store '' or 'Unknown' in SQLite.
+    const isDesktopViewport = useSyncExternalStore(
+        subscribeToDesktopViewport,
+        getDesktopViewportSnapshot,
+        getServerDesktopViewportSnapshot
+    );
+    const [isMobileActionsOpen, setIsMobileActionsOpen] = useState<boolean>(false);
+    const [isMobileFiltersOpen, setIsMobileFiltersOpen] = useState<boolean>(false);
+
     const swrKey = `/api/v1/auth/streaming/dashboard?window=${windowDays}&playMethod=${encodeURIComponent(playMethodFilter)}&mediaType=${encodeURIComponent(mediaTypeFilter)}`;
     const { data, error, isLoading, isValidating, mutate } = useSWR<StreamingDashboardData>(swrKey, fetcher, {
         refreshInterval: 5000,
@@ -422,7 +479,7 @@ export default function StreamingTab() {
     });
 
     const jellyfinServer = useMemo(() => {
-        return data?.servers?.find((s) => s.provider === 'jellyfin') || {
+        return data?.servers?.find((server) => server.provider === 'jellyfin') || {
             provider: 'jellyfin' as const,
             name: 'Jellyfin',
             url: 'http://127.0.0.1:8096',
@@ -469,7 +526,7 @@ export default function StreamingTab() {
         setIsTestingConn(true);
         setTestResultMsg(null);
         try {
-            const res = await apiFetch('/api/v1/admin/streaming/servers/test', {
+            const response = await apiFetch('/api/v1/admin/streaming/servers/test', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -478,33 +535,33 @@ export default function StreamingTab() {
                     apiKey: apiKeyInput,
                 }),
             });
-            const body = await res.json().catch(() => ({}));
-            if (res.ok && body.ok) {
-                const msg = body.message || `Connected to ${configProvider} successfully!`;
-                if (revision === configRevision.current) setTestResultMsg({ ok: true, text: msg });
-                addToast(msg, 'success');
+            const responseBody = await response.json().catch(() => ({}));
+            if (response.ok && responseBody.ok) {
+                const message = responseBody.message || `Connected to ${configProvider} successfully!`;
+                if (revision === configRevision.current) setTestResultMsg({ ok: true, text: message });
+                addToast(message, 'success');
             } else {
-                const errText = body.message || body.error || `Could not authenticate with ${configProvider} (HTTP ${res.status})`;
-                if (revision === configRevision.current) setTestResultMsg({ ok: false, text: errText });
-                addToast(errText, 'error');
+                const errorMessage = responseBody.message || responseBody.error || `Could not authenticate with ${configProvider} (HTTP ${response.status})`;
+                if (revision === configRevision.current) setTestResultMsg({ ok: false, text: errorMessage });
+                addToast(errorMessage, 'error');
             }
-        } catch (err: unknown) {
-            const errText = err instanceof Error ? err.message : 'Connection test failed';
-            if (revision === configRevision.current) setTestResultMsg({ ok: false, text: errText });
-            addToast(errText, 'error');
+        } catch (thrownError: unknown) {
+            const errorMessage = thrownError instanceof Error ? thrownError.message : 'Connection test failed';
+            if (revision === configRevision.current) setTestResultMsg({ ok: false, text: errorMessage });
+            addToast(errorMessage, 'error');
         } finally {
             setIsTestingConn(false);
         }
     };
 
-    const handleSaveConfig = async (e: React.FormEvent) => {
-        e.preventDefault();
+    const handleSaveConfig = async (event: React.FormEvent) => {
+        event.preventDefault();
         if (isSavingConn || isTestingConn) return;
         const revision = configRevision.current;
         const provider = configProvider;
         setIsSavingConn(true);
         try {
-            const res = await apiFetch(`/api/v1/admin/streaming/servers/${provider}`, {
+            const response = await apiFetch(`/api/v1/admin/streaming/servers/${provider}`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -514,30 +571,30 @@ export default function StreamingTab() {
                     enabled: serverEnabledInput,
                 }),
             });
-            const body = await res.json().catch(() => ({}));
-            if (!res.ok) {
-                throw new Error(body.message || body.error || 'Failed to save Jellyfin configuration');
+            const responseBody = await response.json().catch(() => ({}));
+            if (!response.ok) {
+                throw new Error(responseBody.message || responseBody.error || 'Failed to save Jellyfin configuration');
             }
             await mutate();
-            const srvStatus = body.server?.status;
-            if (srvStatus === 'unreachable' || srvStatus === 'unavailable') {
-                const errText =
-                    body.server?.errorMessage ||
-                    body.message ||
+            const serverStatus = responseBody.server?.status;
+            if (serverStatus === 'unreachable' || serverStatus === 'unavailable') {
+                const errorMessage =
+                    responseBody.server?.errorMessage ||
+                    responseBody.message ||
                     'Jellyfin configuration saved, but server is currently unreachable.';
-                if (revision === configRevision.current) setTestResultMsg({ ok: false, text: errText });
-                addToast(errText, 'error');
+                if (revision === configRevision.current) setTestResultMsg({ ok: false, text: errorMessage });
+                addToast(errorMessage, 'error');
             } else {
                 if (revision === configRevision.current) {
                     delete providerDrafts.current[provider];
                     setShowConfigModal(false);
                 }
-                addToast(body.message || `${provider} connection settings saved.`, 'success');
+                addToast(responseBody.message || `${provider} connection settings saved.`, 'success');
             }
-        } catch (err: unknown) {
-            const errText = err instanceof Error ? err.message : 'Failed to save Jellyfin configuration';
-            if (revision === configRevision.current) setTestResultMsg({ ok: false, text: errText });
-            addToast(errText, 'error');
+        } catch (thrownError: unknown) {
+            const errorMessage = thrownError instanceof Error ? thrownError.message : 'Failed to save Jellyfin configuration';
+            if (revision === configRevision.current) setTestResultMsg({ ok: false, text: errorMessage });
+            addToast(errorMessage, 'error');
         } finally {
             setIsSavingConn(false);
         }
@@ -546,17 +603,17 @@ export default function StreamingTab() {
     const handleSyncHistory = async () => {
         setIsSyncingHistory(true);
         try {
-            const res = await apiFetch('/api/v1/admin/streaming/servers/jellyfin/sync', {
+            const response = await apiFetch('/api/v1/admin/streaming/servers/jellyfin/sync', {
                 method: 'POST',
             });
-            const body = await res.json().catch(() => ({}));
-            if (!res.ok) {
-                throw new Error(body.message || body.error || 'History sync failed');
+            const responseBody = await response.json().catch(() => ({}));
+            if (!response.ok) {
+                throw new Error(responseBody.message || responseBody.error || 'History sync failed');
             }
             await mutate();
-            addToast(`Synchronized Jellyfin item summaries (${body.imported ?? 0} records updated; not playback events).`, 'success');
-        } catch (err: unknown) {
-            addToast(err instanceof Error ? err.message : 'Failed to sync Jellyfin history', 'error');
+            addToast(`Synchronized Jellyfin item summaries (${responseBody.imported ?? 0} records updated; not playback events).`, 'success');
+        } catch (thrownError: unknown) {
+            addToast(thrownError instanceof Error ? thrownError.message : 'Failed to sync Jellyfin history', 'error');
         } finally {
             setIsSyncingHistory(false);
         }
@@ -565,14 +622,14 @@ export default function StreamingTab() {
     const handleToggleDemo = async (action: 'seed' | 'clear') => {
         setIsDemoLoading(true);
         try {
-            const res = await apiFetch('/api/v1/admin/streaming/demo', {
+            const response = await apiFetch('/api/v1/admin/streaming/demo', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ action }),
             });
-            const body = await res.json().catch(() => ({}));
-            if (!res.ok) {
-                throw new Error(body.message || body.error || 'Failed to toggle demo telemetry');
+            const responseBody = await response.json().catch(() => ({}));
+            if (!response.ok) {
+                throw new Error(responseBody.message || responseBody.error || 'Failed to toggle demo telemetry');
             }
             await mutate();
             addToast(
@@ -581,8 +638,8 @@ export default function StreamingTab() {
                     : 'Demo telemetry cleared.',
                 'info'
             );
-        } catch (err: unknown) {
-            addToast(err instanceof Error ? err.message : 'Failed to update demo telemetry state', 'error');
+        } catch (thrownError: unknown) {
+            addToast(thrownError instanceof Error ? thrownError.message : 'Failed to update demo telemetry state', 'error');
         } finally {
             setIsDemoLoading(false);
         }
@@ -590,9 +647,9 @@ export default function StreamingTab() {
 
     const handleSessionCommand = async (session: ActiveStreamSession, command: 'pause' | 'resume' | 'stop') => {
         const capabilities = evaluateSessionCapabilities(session);
-        const cap = capabilities[command];
-        if (!cap.supported) {
-            addToast(cap.reason, 'error');
+        const capability = capabilities[command];
+        if (!capability.supported) {
+            addToast(capability.reason, 'error');
             return;
         }
         const sessionId = session.sessionId;
@@ -601,31 +658,29 @@ export default function StreamingTab() {
         if (pendingSessionActions.has(actionKey)) return;
         setPendingSessionActions(current => new Set(current).add(actionKey));
         try {
-            const res = await apiFetch(`/api/v1/admin/streaming/sessions/${encodeURIComponent(sessionId)}/command`, {
+            const response = await apiFetch(`/api/v1/admin/streaming/sessions/${encodeURIComponent(sessionId)}/command`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ command, provider: session.provider }),
             });
-            if (!res.ok) {
-                const body = await res.json().catch(() => ({}));
-                throw new Error(body.message || body.error || `Failed to ${command} session`);
+            if (!response.ok) {
+                const responseBody = await response.json().catch(() => ({}));
+                throw new Error(responseBody.message || responseBody.error || `Failed to ${command} session`);
             }
-            // Optimistically update the local SWR cache while the Jellyfin client processes
-            // the WebSocket command and posts back /Sessions/Playing/Progress or /Stopped.
             await mutate(
                 (current) => {
                     if (!current) return current;
                     const updatedSessions =
                         command === 'stop'
-                            ? current.activeSessions.filter((s) => s.sessionId !== sessionId || s.provider !== session.provider)
-                            : current.activeSessions.map((s) => {
-                                  if (s.sessionId !== sessionId || s.provider !== session.provider) return s;
+                            ? current.activeSessions.filter((activeSession) => activeSession.sessionId !== sessionId || activeSession.provider !== session.provider)
+                            : current.activeSessions.map((activeSession) => {
+                                  if (activeSession.sessionId !== sessionId || activeSession.provider !== session.provider) return activeSession;
                                   const nextState: 'playing' | 'paused' = command === 'pause' ? 'paused' : 'playing';
-                                  const nextBw =
+                                  const nextBandwidth =
                                       nextState === 'paused'
                                           ? 0
-                                          : Math.round((s.bitrateBps / 1_000_000) * 100) / 100;
-                                  return { ...s, state: nextState, bandwidthMbps: nextBw };
+                                          : Math.round((activeSession.bitrateBps / 1_000_000) * 100) / 100;
+                                  return { ...activeSession, state: nextState, bandwidthMbps: nextBandwidth };
                               });
                     return {
                         ...current,
@@ -636,15 +691,15 @@ export default function StreamingTab() {
                 { revalidate: true }
             );
             addToast(`Sent ${command} command to stream session.`, 'success');
-        } catch (err: unknown) {
-            addToast(err instanceof Error ? err.message : `Command ${command} failed`, 'error');
+        } catch (thrownError: unknown) {
+            addToast(thrownError instanceof Error ? thrownError.message : `Command ${command} failed`, 'error');
         } finally {
             setPendingSessionActions(current => { const next = new Set(current); next.delete(actionKey); return next; });
         }
     };
 
-    const handleSendSessionMessage = async (e: React.FormEvent) => {
-        e.preventDefault();
+    const handleSendSessionMessage = async (event: React.FormEvent) => {
+        event.preventDefault();
         if (!messageSession || !messageBody.trim() || isSendingMessage) return;
         const capabilities = evaluateSessionCapabilities(messageSession);
         if (!capabilities.message.supported) {
@@ -653,7 +708,7 @@ export default function StreamingTab() {
         }
         setIsSendingMessage(true);
         try {
-            const res = await apiFetch(`/api/v1/admin/streaming/sessions/${encodeURIComponent(messageSession.sessionId)}/command`, {
+            const response = await apiFetch(`/api/v1/admin/streaming/sessions/${encodeURIComponent(messageSession.sessionId)}/command`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -663,15 +718,15 @@ export default function StreamingTab() {
                     message: messageBody,
                 }),
             });
-            if (!res.ok) {
-                const body = await res.json().catch(() => ({}));
-                throw new Error(body.message || body.error || 'Failed to send message to client');
+            if (!response.ok) {
+                const responseBody = await response.json().catch(() => ({}));
+                throw new Error(responseBody.message || responseBody.error || 'Failed to send message to client');
             }
             addToast(`Message delivered to ${messageSession.userName} (${messageSession.deviceName})`, 'success');
             setMessageSession(null);
             setMessageBody('');
-        } catch (err: unknown) {
-            addToast(err instanceof Error ? err.message : 'Failed to deliver message', 'error');
+        } catch (thrownError: unknown) {
+            addToast(thrownError instanceof Error ? thrownError.message : 'Failed to deliver message', 'error');
         } finally {
             setIsSendingMessage(false);
         }
@@ -691,6 +746,22 @@ export default function StreamingTab() {
     };
 
     const activeSessions = data?.activeSessions || [];
+
+    const isPlexObserved = useMemo(() => {
+        const hasPlexSession = (data?.activeSessions || []).some(
+            (session) => (session.provider || '').toLowerCase() === 'plex'
+        );
+        const hasPlexActiveServer = (data?.servers || []).some(
+            (server) => (server.provider || '').toLowerCase() === 'plex' && server.status !== 'coming_soon' && server.status !== 'unconfigured'
+        );
+        return hasPlexSession || hasPlexActiveServer;
+    }, [data?.activeSessions, data?.servers]);
+
+    const sessionGridClass = activeSessions.length === 1
+        ? 'grid grid-cols-1 gap-4 items-start'
+        : activeSessions.length === 2
+        ? 'grid grid-cols-1 lg:grid-cols-2 gap-4 items-start'
+        : 'grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-4 items-start';
     const analytics = data?.analytics || {
         windowDays: 30,
         totalPlays: 0,
@@ -719,27 +790,27 @@ export default function StreamingTab() {
 
     const loadedHistory = useMemo(() => analytics.recentHistory || [], [analytics.recentHistory]);
     const filteredHistory = useMemo(() => {
-        const q = historySearch.trim().toLowerCase();
-        const pmFilter = playMethodFilter.trim().toLowerCase();
-        const mtFilter = mediaTypeFilter.trim().toLowerCase();
-        return loadedHistory.filter((item) => {
-            if (pmFilter !== '' && pmFilter !== 'all') {
-                const itemPm = normalizePlayMethodKind(item.playMethod).toLowerCase();
-                if (itemPm !== pmFilter) return false;
+        const query = historySearch.trim().toLowerCase();
+        const playFilter = playMethodFilter.trim().toLowerCase();
+        const mediaFilter = mediaTypeFilter.trim().toLowerCase();
+        return loadedHistory.filter((historyItem) => {
+            if (playFilter !== '' && playFilter !== 'all') {
+                const itemMethod = normalizePlayMethodKind(historyItem.playMethod).toLowerCase();
+                if (itemMethod !== playFilter) return false;
             }
-            if (mtFilter !== '' && mtFilter !== 'all') {
-                if ((item.itemType || '').trim().toLowerCase() !== mtFilter) return false;
+            if (mediaFilter !== '' && mediaFilter !== 'all') {
+                if ((historyItem.itemType || '').trim().toLowerCase() !== mediaFilter) return false;
             }
-            if (!q) return true;
+            if (!query) return true;
             return (
-                (item.itemName || '').toLowerCase().includes(q) ||
-                Boolean(item.seriesName && item.seriesName.toLowerCase().includes(q)) ||
-                (item.userName || '').toLowerCase().includes(q) ||
-                (item.clientName || '').toLowerCase().includes(q) ||
-                (item.deviceName || '').toLowerCase().includes(q) ||
-                (item.videoCodec || '').toLowerCase().includes(q) ||
-                (item.playMethod || '').toLowerCase().includes(q) ||
-                (item.serverName || '').toLowerCase().includes(q)
+                (historyItem.itemName || '').toLowerCase().includes(query) ||
+                Boolean(historyItem.seriesName && historyItem.seriesName.toLowerCase().includes(query)) ||
+                (historyItem.userName || '').toLowerCase().includes(query) ||
+                (historyItem.clientName || '').toLowerCase().includes(query) ||
+                (historyItem.deviceName || '').toLowerCase().includes(query) ||
+                (historyItem.videoCodec || '').toLowerCase().includes(query) ||
+                (historyItem.playMethod || '').toLowerCase().includes(query) ||
+                (historyItem.serverName || '').toLowerCase().includes(query)
             );
         });
     }, [loadedHistory, historySearch, playMethodFilter, mediaTypeFilter]);
@@ -748,22 +819,22 @@ export default function StreamingTab() {
     const safeHistoryPage = Math.min(historyPage, totalHistoryPages);
 
     const paginatedHistory = useMemo(() => {
-        const start = (safeHistoryPage - 1) * historyPageSize;
-        return filteredHistory.slice(start, start + historyPageSize);
+        const startIndex = (safeHistoryPage - 1) * historyPageSize;
+        return filteredHistory.slice(startIndex, startIndex + historyPageSize);
     }, [filteredHistory, safeHistoryPage, historyPageSize]);
 
     const hasHistoricalSyncImports = useMemo(() => {
-        return loadedHistory.some((h) => isHistoricalSyncEntry(h));
+        return loadedHistory.some((historyItem) => isHistoricalSyncEntry(historyItem));
     }, [loadedHistory]);
 
     const isHistoryBounded = analytics.totalPlays > loadedHistory.length;
 
     const unknownPlaysCount = useMemo(() => {
-        const known =
+        const knownCount =
             (analytics.streamTypes.directPlayCount || 0) +
             (analytics.streamTypes.directStreamCount || 0) +
             (analytics.streamTypes.transcodeCount || 0);
-        return Math.max(0, (analytics.totalPlays || 0) - known);
+        return Math.max(0, (analytics.totalPlays || 0) - knownCount);
     }, [analytics.streamTypes, analytics.totalPlays]);
 
     const unknownPlaysPct = useMemo(() => {
@@ -782,173 +853,303 @@ export default function StreamingTab() {
                 ? `Exported ${filteredHistory.length} loaded rows (bounded from ${analytics.totalPlays} total records).`
                 : `Exported ${filteredHistory.length} playback history rows to CSV.`;
             addToast(scopeNote, 'success');
-        } catch (err: unknown) {
-            addToast(err instanceof Error ? err.message : 'Failed to export playback history CSV', 'error');
+        } catch (thrownError: unknown) {
+            addToast(thrownError instanceof Error ? thrownError.message : 'Failed to export playback history CSV', 'error');
         }
     };
 
     const chartData = useMemo(() => {
-        return (analytics.timeSeries || []).map((pt) => ({
-            ...pt,
-            watchHours: Math.round((pt.watchTimeSecs / 3600) * 100) / 100,
-            dataGB: Math.round((pt.dataUsedBytes / (1024 * 1024 * 1024)) * 100) / 100,
-            unknownPlayCount: Math.max(0, pt.plays - pt.directPlayCount - pt.directStreamCount - pt.transcodeCount),
+        return (analytics.timeSeries || []).map((point) => ({
+            ...point,
+            watchHours: Math.round((point.watchTimeSecs / 3600) * 100) / 100,
+            dataGB: Math.round((point.dataUsedBytes / (1024 * 1024 * 1024)) * 100) / 100,
+            unknownPlayCount: Math.max(0, point.plays - point.directPlayCount - point.directStreamCount - point.transcodeCount),
         }));
     }, [analytics.timeSeries]);
+
+    const chartedPeakMbps = useMemo(() => {
+        let maxPeak = 0;
+        for (const point of chartData) {
+            if (typeof point.peakBandwidthMbps === 'number' && Number.isFinite(point.peakBandwidthMbps) && point.peakBandwidthMbps > maxPeak) {
+                maxPeak = point.peakBandwidthMbps;
+            }
+        }
+        return maxPeak;
+    }, [chartData]);
+
+    const chart1Scales = useMemo(() => {
+        let maxDataGB = 0;
+        let maxBandwidthMbps = 0;
+        for (const point of chartData) {
+            if (Number.isFinite(point.dataGB) && point.dataGB > maxDataGB) {
+                maxDataGB = point.dataGB;
+            }
+            if (Number.isFinite(point.peakBandwidthMbps) && point.peakBandwidthMbps > maxBandwidthMbps) {
+                maxBandwidthMbps = point.peakBandwidthMbps;
+            }
+        }
+        return computeDualLinearScales(maxDataGB, maxBandwidthMbps, {
+            leftMinCeiling: 4,
+            rightMinCeiling: 10,
+            intervalCount: 4,
+        });
+    }, [chartData]);
+
+    const chart2Scales = useMemo(() => {
+        let maxPlays = 0;
+        let maxHours = 0;
+        for (const point of chartData) {
+            const pointPlays = (point.directPlayCount || 0) +
+                (point.directStreamCount || 0) +
+                (point.transcodeCount || 0) +
+                (point.unknownPlayCount || 0);
+            if (pointPlays > maxPlays) {
+                maxPlays = pointPlays;
+            }
+            if (Number.isFinite(point.watchHours) && point.watchHours > maxHours) {
+                maxHours = point.watchHours;
+            }
+        }
+        return computeDualLinearScales(maxPlays, maxHours, {
+            leftIntegerOnly: true,
+            leftMinCeiling: 4,
+            rightMinCeiling: 1,
+            intervalCount: 4,
+        });
+    }, [chartData]);
+
+    const sortedResolutionBreakdown = useMemo(() => {
+        return [...analytics.resolutionBreakdown].sort((firstEntry, secondEntry) => {
+            const countDifference = secondEntry.count - firstEntry.count;
+            if (countDifference !== 0) {
+                return countDifference;
+            }
+            const pctDifference = secondEntry.pct - firstEntry.pct;
+            if (pctDifference !== 0) {
+                return pctDifference;
+            }
+            return 0;
+        });
+    }, [analytics.resolutionBreakdown]);
+
     const bucketLabel = analytics.timeSeriesGranularity === 'month'
         ? 'Monthly'
         : analytics.timeSeriesGranularity === 'year' ? 'Yearly' : 'Daily';
 
-    if (!isAdmin) return <section className="min-w-0 max-w-full space-y-4" aria-label="Your streaming history">
-        <h2 className="text-lg font-bold">Your Streaming Archive</h2>
-        <p role="note" className="text-sm text-slate-400">Server-wide live telemetry is withheld for privacy, not zero or unconfigured. Your explicitly linked playback records are available below; ask an administrator to link your provider identity if none appear.</p>
-        <StreamingHistoryExplorer />
-    </section>;
+    const lastContactFormatted = useMemo(() => {
+        let candidateTimestamp = jellyfinServer.lastConnectedAt;
+        if (!candidateTimestamp && data?.servers) {
+            for (const serverItem of data.servers) {
+                if (serverItem.lastConnectedAt) {
+                    candidateTimestamp = serverItem.lastConnectedAt;
+                    break;
+                }
+            }
+        }
+        if (!candidateTimestamp) return null;
+        const parsedDate = parseStreamingTimestamp(candidateTimestamp);
+        if (!parsedDate) return null;
+        return `${parsedDate.toISOString().slice(0, 16).replace('T', ' ')} UTC`;
+    }, [data, jellyfinServer.lastConnectedAt]);
+
+    if (!isAdmin) return (
+        <section className="min-w-0 max-w-full space-y-4" aria-label="Your streaming history">
+            <h2 className="text-lg font-bold text-slate-100">Your Streaming Archive</h2>
+            <p role="note" className="text-sm text-slate-400">Server-wide live telemetry is withheld for privacy, not zero or unconfigured. Your explicitly linked playback records are available below; ask an administrator to link your provider identity if none appear.</p>
+            <StreamingHistoryExplorer />
+        </section>
+    );
+
+    const isConfigureServerPrimary = jellyfinServer.status !== 'connected';
 
     return (
-        <div className="space-y-6 animate-fade-in relative z-10 w-full min-w-0">
-            {/* ========================================================================= */}
-            {/* 1. TOP COMMAND HEADER & MULTI-SERVER PROVIDER BAR                         */}
-            {/* ========================================================================= */}
-            <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-4 pb-4 border-b border-white/[0.06] relative z-30">
-                <div className="flex items-start sm:items-center gap-3.5">
-                    <div className="h-11 w-11 rounded-2xl flex items-center justify-center border bg-indigo-500/20 border-indigo-500/30 shadow-[0_0_24px_rgba(99,102,241,0.2)] text-indigo-400 shrink-0">
-                        <Tv size={22} />
-                    </div>
-                    <div>
-                        <div className="flex flex-wrap items-center gap-2.5">
-                            <h2 className="text-lg md:text-xl font-extrabold text-slate-100 tracking-tight">
+        <div className="space-y-3 sm:space-y-6 animate-fade-in relative z-10 w-full min-w-0">
+            <div className="flex flex-col gap-2.5 sm:gap-4 pb-2.5 sm:pb-4 border-b border-white/[0.08] relative z-30">
+                <div className="flex flex-wrap sm:flex-nowrap items-center justify-between gap-2 sm:gap-3.5 w-full min-w-0">
+                    <div className="flex items-center gap-2.5 sm:gap-3.5 min-w-0">
+                        <div className="h-9 w-9 sm:h-10 sm:w-10 rounded-xl flex items-center justify-center border bg-indigo-500/10 border-indigo-500/20 text-indigo-400 shrink-0 mt-0.5 sm:mt-0">
+                            <Tv size={18} className="sm:hidden" />
+                            <Tv size={20} className="hidden sm:block" />
+                        </div>
+                        <div className="min-w-0">
+                            <h2 className="text-base sm:text-xl font-bold text-slate-100 tracking-tight">
                                 Streaming Dashboard
                             </h2>
-                            {/* Jellyfin Active Provider Pill */}
+                            <p className="hidden sm:block text-xs text-slate-400 mt-0.5 sm:mt-1">
+                                Real-time stream telemetry, transcode pipelines, and playback analytics
+                            </p>
+                        </div>
+                    </div>
+
+                    <details
+                        open={isDesktopViewport || isMobileActionsOpen}
+                        onToggle={(event) => {
+                            if (!isDesktopViewport) {
+                                setIsMobileActionsOpen(event.currentTarget.open);
+                            }
+                        }}
+                        className={`group shrink-0 sm:order-last sm:self-center open:w-full open:mt-2 open:rounded-xl open:border open:border-white/[0.08] open:bg-slate-950/90 open:p-2.5 sm:open:w-auto sm:open:mt-0 sm:open:border-0 sm:open:bg-transparent sm:open:p-0 transition-all ${
+                            isMobileActionsOpen
+                                ? 'w-full mt-2 rounded-xl border border-white/[0.08] bg-slate-950/90 p-2.5 sm:w-auto sm:mt-0 sm:border-0 sm:bg-transparent sm:p-0'
+                                : 'w-auto sm:w-auto sm:border-0 sm:bg-transparent sm:p-0'
+                        }`}
+                    >
+                        <summary
+                            className="sm:hidden cursor-pointer font-medium text-xs text-slate-300 hover:text-white flex items-center justify-between gap-1.5 select-none min-h-[44px] px-2.5 py-1.5 rounded-xl border border-white/[0.08] bg-slate-950/80 shrink-0 obs-touch-target-standard"
+                            aria-label="Server & Provider Actions"
+                        >
+                            <span className="flex items-center gap-1.5">
+                                <Settings2 size={13} className="text-indigo-400 shrink-0" />
+                                <span className="sr-only">Server & Provider Actions</span>
+                                <span aria-hidden="true">Server actions</span>
+                            </span>
+                            <ChevronDown size={14} className="text-slate-400 group-open:rotate-180 transition-transform shrink-0" />
+                        </summary>
+                        <div className="mt-2 sm:mt-0 pt-2 sm:pt-0 border-t border-white/[0.06] sm:border-t-0 flex flex-wrap sm:flex-nowrap items-center gap-2">
+                            {isAdmin && (
+                                <>
+                                    {(jellyfinServer.status === 'connected' || jellyfinServer.configured) && (
+                                        <button
+                                            type="button"
+                                            onClick={handleSyncHistory}
+                                            disabled={isSyncingHistory}
+                                            className="obs-touch-target-standard min-h-[44px] flex-1 sm:flex-initial flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl text-xs font-medium bg-slate-800/80 hover:bg-slate-700/80 border border-white/10 text-slate-200 transition-all disabled:opacity-50"
+                                            title="Import played media items and watch history from Jellyfin"
+                                        >
+                                            <Database size={14} className={isSyncingHistory ? 'animate-pulse text-indigo-400 shrink-0' : 'text-indigo-400 shrink-0'} />
+                                            <span>{isSyncingHistory ? 'Syncing...' : 'Sync Jellyfin'}</span>
+                                        </button>
+                                    )}
+
+                                    <button
+                                        type="button"
+                                        onClick={openServerConfig}
+                                        className={`obs-touch-target-standard min-h-[44px] flex-1 sm:flex-initial flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl text-xs transition-all ${
+                                            isConfigureServerPrimary
+                                                ? 'bg-indigo-600 hover:bg-indigo-500 text-white font-semibold shadow-sm'
+                                                : 'bg-slate-800/80 hover:bg-slate-700/80 border border-white/10 text-slate-200 font-medium'
+                                        }`}
+                                    >
+                                        <Settings2 size={14} className={isConfigureServerPrimary ? 'text-white shrink-0' : 'text-indigo-400 shrink-0'} />
+                                        <span>Configure Server</span>
+                                    </button>
+                                </>
+                            )}
+
                             <button
                                 type="button"
-                                onClick={isAdmin ? openServerConfig : undefined}
-                                className={`inline-flex items-center gap-1.5 text-xs font-bold px-2.5 py-0.5 rounded-full border transition-all ${
-                                    jellyfinServer.status === 'connected'
-                                        ? 'bg-purple-500/15 text-purple-300 border-purple-500/30 hover:bg-purple-500/25'
-                                        : jellyfinServer.status === 'demo'
-                                        ? 'bg-indigo-500/15 text-indigo-300 border-indigo-500/30 hover:bg-indigo-500/25'
-                                        : 'bg-amber-500/15 text-amber-300 border-amber-500/30 hover:bg-amber-500/25'
-                                }`}
-                                title="Click to configure Jellyfin connection"
+                                onClick={() => void mutate()}
+                                aria-label="Refresh Streaming Telemetry"
+                                className="obs-touch-target-standard min-h-[44px] flex-1 sm:flex-initial flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl text-xs font-medium bg-slate-800/80 hover:bg-slate-700/80 border border-white/10 text-slate-200 transition-all"
+                                title="Refresh Streaming Telemetry"
                             >
-                                <span
-                                    className={`h-1.5 w-1.5 rounded-full ${
-                                        jellyfinServer.status === 'connected'
-                                            ? 'bg-emerald-400 shadow-[0_0_6px_#34d399]'
-                                            : jellyfinServer.status === 'demo'
-                                            ? 'bg-indigo-400 shadow-[0_0_6px_#818cf8]'
-                                            : 'bg-amber-400'
-                                    }`}
-                                />
-                                <span>
-                                    Jellyfin
-                                    {jellyfinServer.version ? ` v${jellyfinServer.version}` : ''}
-                                    {jellyfinServer.status === 'demo' ? ' (Demo Preview)' : ''}
-                                </span>
+                                <RefreshCw size={14} className={isValidating ? 'animate-spin text-indigo-400 shrink-0' : 'text-slate-400 shrink-0'} />
+                                <span>Refresh</span>
                             </button>
-
-                            {/* Upcoming Providers: Plex & Emby */}
-                            <span
-                                className="inline-flex items-center gap-1 text-xs font-semibold px-2 py-0.5 rounded-full border bg-white/[0.03] text-slate-400 border-white/10"
-                                title="Plex integration is planned for a future update"
-                            >
-                                <span className="h-1.5 w-1.5 rounded-full bg-amber-400/50" />
-                                Plex · Later
-                            </span>
-                            <span
-                                className="inline-flex items-center gap-1 text-xs font-semibold px-2 py-0.5 rounded-full border bg-white/[0.03] text-slate-400 border-white/10"
-                                title="Emby integration is planned for a future update"
-                            >
-                                <span className="h-1.5 w-1.5 rounded-full bg-emerald-400/50" />
-                                Emby · Later
-                            </span>
                         </div>
-                        <p className="text-xs text-slate-400 mt-1">
-                            Real-time stream inspector, codec & transcode pipeline monitor, data usage telemetry, and historical watch analytics
-                        </p>
+                    </details>
+
+                    <div className="w-full sm:w-auto flex flex-wrap items-center gap-1.5 sm:gap-2.5 order-3 sm:order-none">
+                        <button
+                            type="button"
+                            onClick={isAdmin ? openServerConfig : undefined}
+                            className={`inline-flex items-center gap-1.5 text-xs font-medium px-2.5 py-0.5 rounded-full border transition-all ${
+                                jellyfinServer.status === 'connected'
+                                    ? 'bg-purple-500/15 text-purple-300 border-purple-500/30 hover:bg-purple-500/25'
+                                    : jellyfinServer.status === 'demo'
+                                    ? 'bg-indigo-500/15 text-indigo-300 border-indigo-500/30 hover:bg-indigo-500/25'
+                                    : 'bg-amber-500/15 text-amber-300 border-amber-500/30 hover:bg-amber-500/25'
+                            }`}
+                            title="Click to configure Jellyfin connection"
+                        >
+                            <span
+                                className={`h-1.5 w-1.5 rounded-full ${
+                                    jellyfinServer.status === 'connected'
+                                        ? 'bg-emerald-400 shadow-[0_0_6px_#34d399]'
+                                        : jellyfinServer.status === 'demo'
+                                        ? 'bg-indigo-400 shadow-[0_0_6px_#818cf8]'
+                                        : 'bg-amber-400'
+                                }`}
+                            />
+                            <span>
+                                Jellyfin
+                                {jellyfinServer.version ? ` v${jellyfinServer.version}` : ''}
+                                {jellyfinServer.status === 'demo' ? ' (Demo Preview)' : ''}
+                            </span>
+                        </button>
+
+                        {isPlexObserved && (
+                            <span
+                                className="inline-flex items-center gap-1.5 text-xs font-medium px-2 py-0.5 rounded-full border border-white/10 bg-white/[0.04] text-slate-300"
+                                title="Observed stream telemetry from Plex session (monitoring only; control unsupported)"
+                            >
+                                <span className="h-1.5 w-1.5 rounded-full bg-slate-400" />
+                                Plex &middot; Read-only telemetry
+                            </span>
+                        )}
                     </div>
                 </div>
 
-                {/* View Switcher & Action Controls */}
-                <div className="flex flex-wrap items-center gap-2">
-                    <div className="flex items-center gap-1 p-1 bg-white/[0.04] border border-white/10 rounded-xl">
+                <nav aria-label="Streaming views" className="w-full min-w-0 shrink-0">
+                    <div className="sm:hidden w-full">
+                        <label htmlFor="mobile-streaming-view-selector" className="sr-only">Select streaming view</label>
+                        <div className="relative">
+                            <select
+                                id="mobile-streaming-view-selector"
+                                aria-label="Select streaming view"
+                                value={activeView}
+                                onChange={(event) => {
+                                    triggerHaptic(6, hapticFeedback);
+                                    setActiveView(event.target.value as 'dashboard' | 'streams' | 'analytics' | 'history');
+                                }}
+                                className="w-full obs-touch-target-standard min-h-[44px] appearance-none rounded-xl bg-slate-900/90 border border-white/10 px-3.5 py-2.5 text-xs font-medium text-slate-200 focus:outline-none focus:border-indigo-500 pr-9 shadow-sm"
+                            >
+                                <option value="dashboard">Dashboard</option>
+                                <option value="streams">Live ({liveSummary.activeStreams})</option>
+                                <option value="analytics">Playback Analytics</option>
+                                <option value="history">Watch History</option>
+                            </select>
+                            <ChevronDown size={14} className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                        </div>
+                    </div>
+
+                    <div className="hidden sm:flex sm:items-center gap-1 sm:gap-1.5 p-1 bg-slate-950/80 border border-white/[0.08] rounded-xl">
                         {([
                             { id: 'dashboard', label: 'Dashboard', icon: Tv },
                             { id: 'streams', label: `Live (${liveSummary.activeStreams})`, icon: Radio },
-                            { id: 'analytics', label: 'Play & Data Stats', icon: Activity },
+                            { id: 'analytics', label: 'Playback Analytics', icon: Activity },
                             { id: 'history', label: 'Watch History', icon: Clock },
                         ] as const).map((tab) => {
-                            const Icon = tab.icon;
+                            const TabIcon = tab.icon;
                             const isActive = activeView === tab.id;
                             return (
                                 <button
                                     key={tab.id}
                                     type="button"
+                                    aria-pressed={isActive}
                                     onClick={() => {
                                         triggerHaptic(6, hapticFeedback);
                                         setActiveView(tab.id);
                                     }}
-                                    className={`obs-touch-target-standard obs-gpu-120hz-interactive px-3 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center gap-1.5 ${
+                                    className={`obs-touch-target-standard min-h-[44px] px-3 sm:px-3.5 py-1.5 sm:py-2 rounded-lg text-xs font-medium transition-all flex items-center justify-center sm:justify-start gap-1.5 shrink-0 min-w-0 ${
                                         isActive
-                                            ? 'bg-indigo-500/20 border border-indigo-500/30 text-indigo-300 shadow-md shadow-indigo-500/10'
-                                            : 'text-slate-400 hover:text-white'
+                                            ? 'bg-indigo-600 text-white shadow-sm'
+                                            : 'text-slate-300 hover:text-white hover:bg-white/[0.05]'
                                     }`}
                                 >
-                                    <Icon size={13} />
-                                    <span>{tab.label}</span>
+                                    <TabIcon size={14} className="shrink-0" />
+                                    <span className="whitespace-nowrap">{tab.label}</span>
                                 </button>
                             );
                         })}
                     </div>
-
-                    {isAdmin && (
-                        <>
-                            {(jellyfinServer.status === 'connected' || jellyfinServer.configured) && (
-                                <button
-                                    type="button"
-                                    onClick={handleSyncHistory}
-                                    disabled={isSyncingHistory}
-                                    className="obs-touch-target-standard obs-gpu-120hz-interactive flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-purple-500/15 border border-purple-500/30 text-purple-300 hover:bg-purple-500/25 transition-all disabled:opacity-50"
-                                    title="Import played media items and watch history from Jellyfin"
-                                >
-                                    <Database size={13} className={isSyncingHistory ? 'animate-pulse' : ''} />
-                                    <span>{isSyncingHistory ? 'Syncing...' : 'Sync Jellyfin'}</span>
-                                </button>
-                            )}
-
-                            <button
-                                type="button"
-                                onClick={openServerConfig}
-                                className="obs-touch-target-standard obs-gpu-120hz-interactive flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-white/[0.04] border border-white/10 text-slate-200 hover:bg-white/[0.08] transition-all"
-                            >
-                                <Settings2 size={14} className="text-indigo-400" />
-                                <span>Configure Server</span>
-                            </button>
-                        </>
-                    )}
-
-                    <button
-                        type="button"
-                        onClick={() => void mutate()}
-                        aria-label="Refresh Streaming Telemetry"
-                        className="obs-touch-target-standard obs-gpu-120hz-interactive flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-white/[0.04] border border-white/10 text-slate-300 hover:bg-white/[0.08] hover:text-white transition-all"
-                        title="Refresh Streaming Telemetry"
-                    >
-                        <RefreshCw size={14} className={isValidating ? 'animate-spin text-indigo-400' : 'text-slate-400'} />
-                        <span className="hidden sm:inline">Refresh</span>
-                    </button>
-                </div>
+                </nav>
             </div>
 
-            {/* ========================================================================= */}
-            {/* 1B. TELEMETRY POLLING ERROR / STALE DATA ALERT BANNER                     */}
-            {/* ========================================================================= */}
             {error && (
                 <div
                     role="alert"
-                    className="rounded-2xl border border-rose-500/35 bg-rose-950/35 backdrop-blur-xl p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3"
+                    className="rounded-xl border border-rose-500/35 bg-rose-950/35 p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3"
                 >
                     <div className="flex items-start gap-3">
                         <AlertCircle size={18} className="text-rose-400 shrink-0 mt-0.5" />
@@ -973,15 +1174,12 @@ export default function StreamingTab() {
                 </div>
             )}
 
-            {/* ========================================================================= */}
-            {/* 2. CONNECTION ONBOARDING / UNREACHABLE / DEMO BANNER                      */}
-            {/* ========================================================================= */}
             {jellyfinServer.status !== 'connected' && (
                 <div
-                    className={`rounded-2xl border backdrop-blur-xl p-4 sm:p-5 flex flex-col lg:flex-row items-start lg:items-center justify-between gap-4 ${
+                    className={`rounded-xl border p-4 sm:p-5 flex flex-col lg:flex-row items-start lg:items-center justify-between gap-4 ${
                         jellyfinServer.status === 'unreachable'
-                            ? 'border-rose-500/35 bg-gradient-to-r from-rose-950/40 via-slate-900/60 to-amber-950/25'
-                            : 'border-indigo-500/30 bg-gradient-to-r from-indigo-950/40 via-slate-900/60 to-purple-950/30'
+                            ? 'border-rose-500/30 bg-rose-950/25'
+                            : 'border-indigo-500/25 bg-slate-900/60'
                     }`}
                 >
                     <div className="flex items-start gap-3.5">
@@ -1004,7 +1202,7 @@ export default function StreamingTab() {
                                           : 'Connect Jellyfin to Track Live Streams, Bandwidth & Play Statistics'}
                                 </h3>
                                 <span className="text-xs font-mono uppercase px-2 py-0.5 rounded-full bg-purple-500/20 text-purple-300 border border-purple-500/30">
-                                    Jellyfin First · Plex & Emby Coming Later
+                                    Jellyfin First &middot; Plex & Emby Coming Later
                                 </span>
                             </div>
                             <p className="text-xs text-slate-300 mt-1 leading-relaxed">
@@ -1021,7 +1219,7 @@ export default function StreamingTab() {
                                     type="button"
                                     onClick={() => void mutate()}
                                     disabled={isValidating}
-                                    className="obs-touch-target-standard obs-gpu-120hz-interactive px-3.5 py-2 rounded-xl text-xs font-bold bg-rose-500/20 hover:bg-rose-500/30 border border-rose-500/40 text-rose-200 flex items-center gap-1.5 transition-all disabled:opacity-50"
+                                    className="obs-touch-target-standard px-3.5 py-2 rounded-xl text-xs font-bold bg-rose-500/20 hover:bg-rose-500/30 border border-rose-500/40 text-rose-200 flex items-center gap-1.5 transition-all disabled:opacity-50"
                                 >
                                     <RefreshCw size={14} className={isValidating ? 'animate-spin' : ''} />
                                     <span>Retry Connection</span>
@@ -1030,7 +1228,7 @@ export default function StreamingTab() {
                             <button
                                 type="button"
                                 onClick={openServerConfig}
-                                className="obs-touch-target-standard obs-gpu-120hz-interactive px-4 py-2 rounded-xl text-xs font-bold bg-indigo-600 hover:bg-indigo-500 text-white shadow-lg shadow-indigo-500/25 flex items-center gap-1.5 transition-all"
+                                className="obs-touch-target-standard px-4 py-2 rounded-xl text-xs font-bold bg-indigo-600 hover:bg-indigo-500 text-white shadow-sm flex items-center gap-1.5 transition-all"
                             >
                                 <Settings2 size={14} />
                                 <span>Connect Jellyfin</span>
@@ -1040,7 +1238,7 @@ export default function StreamingTab() {
                                     type="button"
                                     onClick={() => handleToggleDemo('clear')}
                                     disabled={isDemoLoading}
-                                    className="obs-touch-target-standard obs-gpu-120hz-interactive px-3.5 py-2 rounded-xl text-xs font-semibold bg-white/[0.06] hover:bg-white/[0.12] border border-white/10 text-slate-200 flex items-center gap-1.5 transition-all"
+                                    className="obs-touch-target-standard px-3.5 py-2 rounded-xl text-xs font-medium bg-slate-800/80 hover:bg-slate-700/80 border border-white/10 text-slate-200 flex items-center gap-1.5 transition-all"
                                 >
                                     <X size={14} />
                                     <span>Clear Demo Data</span>
@@ -1050,7 +1248,7 @@ export default function StreamingTab() {
                                     type="button"
                                     onClick={() => handleToggleDemo('seed')}
                                     disabled={isDemoLoading}
-                                    className="obs-touch-target-standard obs-gpu-120hz-interactive px-3.5 py-2 rounded-xl text-xs font-semibold bg-purple-500/15 hover:bg-purple-500/25 border border-purple-500/30 text-purple-200 flex items-center gap-1.5 transition-all"
+                                    className="obs-touch-target-standard px-3.5 py-2 rounded-xl text-xs font-medium bg-purple-500/15 hover:bg-purple-500/25 border border-purple-500/30 text-purple-200 flex items-center gap-1.5 transition-all"
                                 >
                                     <Sparkles size={14} />
                                     <span>{isDemoLoading ? 'Loading...' : 'Load Demo Telemetry'}</span>
@@ -1061,165 +1259,201 @@ export default function StreamingTab() {
                 </div>
             )}
 
-            {/* ========================================================================= */}
-            {/* 3. REAL-TIME TELEMETRY & DATA USAGE KPI STRIP                             */}
-            {/* ========================================================================= */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
-                {/* KPI 1: Active Streams */}
-                <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-4 flex flex-col justify-between">
-                    <div className="flex items-center justify-between">
-                        <span className="text-xs text-slate-400 font-semibold uppercase tracking-wider">Active Streams</span>
-                        <div className="h-9 w-9 rounded-xl bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center text-indigo-400">
-                            <Radio size={18} />
+            <section aria-label="Live Stream Overview" className="space-y-2 sm:space-y-2.5">
+                {activeSessions.length === 0 ? (
+                    <div className="rounded-xl border border-white/[0.08] bg-slate-900/60 p-3 sm:p-3.5 space-y-2">
+                        <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1">
+                            <div className="flex items-center gap-2">
+                                <span className="relative flex h-2.5 w-2.5">
+                                    <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-slate-600" />
+                                </span>
+                                <h3 className="text-sm font-semibold text-slate-100 tracking-tight">
+                                    Live Stream Telemetry
+                                </h3>
+                            </div>
+                            <div className="flex items-center gap-2.5 sm:gap-4 text-xs font-medium">
+                                <div className="flex items-baseline gap-1">
+                                    <span className="text-slate-400">Active streams:</span>
+                                    <span className="text-sm sm:text-base font-bold text-white tabular-nums">{liveSummary.activeStreams}</span>
+                                </div>
+                                <span className="text-slate-600">&middot;</span>
+                                <div className="flex items-baseline gap-1">
+                                    <span className="text-slate-400">Bandwidth:</span>
+                                    <span className="text-sm sm:text-base font-bold text-cyan-300 tabular-nums">
+                                        {formatBandwidthMbps(liveSummary.totalBandwidthMbps, liveSummary.totalBitrateBps)}
+                                    </span>
+                                    <span className="text-cyan-400">Mbps</span>
+                                </div>
+                            </div>
                         </div>
+
+                        {(activeView === 'dashboard' || activeView === 'streams') && (
+                            <div
+                                data-testid="compact-no-streams-state"
+                                className="pt-2 border-t border-white/[0.06] flex flex-wrap items-center justify-between gap-x-2 gap-y-1 text-xs text-slate-300"
+                            >
+                                {isLoading && !data ? (
+                                    <div className="flex items-center gap-2 text-slate-400">
+                                        <Loader2 size={14} className="animate-spin text-indigo-400 shrink-0" />
+                                        <span>Polling media server sessions...</span>
+                                    </div>
+                                ) : jellyfinServer.errorMessage || data?.servers.some((server) => server.enabled && ['unavailable', 'unreachable'].includes(server.status)) ? (
+                                    <>
+                                        <div className="flex items-center gap-2 text-amber-300">
+                                            <AlertCircle size={14} className="text-amber-400 shrink-0" />
+                                            <span className="font-medium">
+                                                {jellyfinServer.errorMessage || 'Live telemetry unavailable \u2014 media server unreachable or offline'}
+                                            </span>
+                                        </div>
+                                        {lastContactFormatted && (
+                                            <span className="text-xs text-slate-300 font-mono break-words">
+                                                Last contact: {lastContactFormatted}
+                                            </span>
+                                        )}
+                                    </>
+                                ) : jellyfinServer.status === 'connected' ? (
+                                    <>
+                                        <div className="flex items-center gap-2 text-slate-300">
+                                            <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 shrink-0" />
+                                            <span className="font-medium">
+                                                {jellyfinServer.name} connected &middot; Idle
+                                            </span>
+                                        </div>
+                                        {lastContactFormatted && (
+                                            <span className="text-xs text-slate-300 font-mono break-words">
+                                                Last contact: {lastContactFormatted}
+                                            </span>
+                                        )}
+                                    </>
+                                ) : jellyfinServer.status === 'demo' ? (
+                                    <>
+                                        <div className="flex items-center gap-2 text-indigo-300">
+                                            <Sparkles size={14} className="text-indigo-400 shrink-0" />
+                                            <span>Demo preview telemetry active &middot; Standing by for simulated playback</span>
+                                        </div>
+                                        {lastContactFormatted && (
+                                            <span className="text-xs text-slate-300 font-mono break-words">
+                                                Last contact: {lastContactFormatted}
+                                            </span>
+                                        )}
+                                    </>
+                                ) : jellyfinServer.status === 'unavailable' || jellyfinServer.status === 'unreachable' ? (
+                                    <>
+                                        <div className="flex items-center gap-2 text-amber-300">
+                                            <AlertCircle size={14} className="text-amber-400 shrink-0" />
+                                            <span>Live telemetry unavailable &middot; Media server unreachable</span>
+                                        </div>
+                                        {lastContactFormatted && (
+                                            <span className="text-xs text-slate-300 font-mono break-words">
+                                                Last contact: {lastContactFormatted}
+                                            </span>
+                                        )}
+                                    </>
+                                ) : (
+                                    <div className="flex items-center gap-2 text-slate-400">
+                                        <span>No media server configured &middot; Connect Jellyfin to track live playback</span>
+                                    </div>
+                                )}
+                            </div>
+                        )}
                     </div>
-                    <div className="mt-2">
-                        <div className="flex items-baseline gap-2">
-                            <span className="text-2xl font-extrabold text-white tabular-nums">{liveSummary.activeStreams}</span>
-                            <span className="text-xs text-slate-400">
-                                {liveSummary.lanStreams} LAN · {liveSummary.wanStreams} WAN
-                            </span>
-                        </div>
-                        <div className="flex flex-wrap items-center gap-1.5 mt-2 text-xs font-semibold">
-                            <span className="px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/20">
-                                {liveSummary.directPlayCount} Direct Play
-                            </span>
-                            {liveSummary.directStreamCount > 0 && (
-                                <span className="px-1.5 py-0.5 rounded bg-sky-500/15 text-sky-300 border border-sky-500/20">
-                                    {liveSummary.directStreamCount} Direct Stream
+                ) : (
+                    <>
+                        <div className="flex items-center justify-between gap-2">
+                            <div className="flex items-center gap-2">
+                                <span className="relative flex h-2.5 w-2.5">
+                                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
+                                    <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500" />
+                                </span>
+                                <h3 className="text-sm font-semibold text-slate-100 tracking-tight">
+                                    Live Stream Telemetry
+                                </h3>
+                            </div>
+                            {lastContactFormatted && (
+                                <span className="text-xs text-slate-300 font-mono break-words">
+                                    Last contact: {lastContactFormatted}
                                 </span>
                             )}
-                            <span className="px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/20">
-                                {liveSummary.transcodeCount} Transcode
-                            </span>
                         </div>
-                    </div>
-                </div>
 
-                {/* KPI 2: Live Stream Bandwidth */}
-                <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-4 flex flex-col justify-between">
-                    <div className="flex items-center justify-between">
-                        <span className="text-xs text-slate-400 font-semibold uppercase tracking-wider">Live Bandwidth</span>
-                        <div className="h-9 w-9 rounded-xl bg-cyan-500/10 border border-cyan-500/20 flex items-center justify-center text-cyan-400">
-                            <Wifi size={18} />
-                        </div>
-                    </div>
-                    <div className="mt-2">
-                        <div className="flex items-baseline gap-1.5">
-                            <span className="text-2xl font-extrabold text-cyan-300 tabular-nums">
-                                {formatBandwidthMbps(liveSummary.totalBandwidthMbps, liveSummary.totalBitrateBps)}
-                            </span>
-                            <span className="text-xs font-bold text-cyan-400/80">Mbps</span>
-                        </div>
-                        <p className="text-xs text-slate-400 mt-1.5">
-                            Estimated active session transfer: <span className="text-slate-200 font-mono">{formatBytes(liveSummary.activeSessionBytes, 1)}</span>
-                        </p>
-                    </div>
-                </div>
+                        <div className="grid grid-cols-2 gap-3 sm:gap-3.5">
+                            <div className="rounded-xl border border-white/[0.08] bg-slate-900/60 p-3 sm:p-4 flex flex-col">
+                                <div className="flex items-center justify-between">
+                                    <span className="text-xs text-slate-400 font-medium uppercase tracking-wider leading-snug">Active Streams</span>
+                                    <div className="hidden sm:flex h-8 w-8 rounded-lg bg-indigo-500/10 border border-indigo-500/20 items-center justify-center text-indigo-400 shrink-0">
+                                        <Radio size={16} />
+                                    </div>
+                                </div>
+                                <div className="mt-2 flex items-baseline gap-1.5">
+                                    <span className="text-2xl font-bold text-white tabular-nums">{liveSummary.activeStreams}</span>
+                                    <span className="text-xs font-semibold text-slate-400/90">
+                                        {liveSummary.activeStreams === 1 ? 'stream' : 'streams'}
+                                    </span>
+                                </div>
+                                <div className="mt-2 text-xs text-slate-300 leading-relaxed break-words flex-1 flex flex-col justify-start">
+                                    <p>
+                                        {liveSummary.lanStreams} LAN &middot; {liveSummary.wanStreams} WAN
+                                    </p>
+                                    <div className="flex flex-wrap items-center gap-1 sm:gap-1.5 mt-1.5 font-medium">
+                                        <span className="px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/20 text-xs break-words">
+                                            {liveSummary.directPlayCount} Direct Play
+                                        </span>
+                                        {liveSummary.directStreamCount > 0 && (
+                                            <span className="px-1.5 py-0.5 rounded bg-sky-500/15 text-sky-300 border border-sky-500/20 text-xs break-words">
+                                                {liveSummary.directStreamCount} Direct Stream
+                                            </span>
+                                        )}
+                                        <span className="px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/20 text-xs break-words">
+                                            {liveSummary.transcodeCount} Transcode
+                                        </span>
+                                    </div>
+                                </div>
+                            </div>
 
-                {/* KPI 3: Cumulative Data Usage */}
-                <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-4 flex flex-col justify-between">
-                    <div className="flex items-center justify-between">
-                        <span className="text-xs text-slate-400 font-semibold uppercase tracking-wider">
-                            Data Usage ({windowDays === 0 ? 'All' : `${windowDays}d`})
-                        </span>
-                        <div className="h-9 w-9 rounded-xl bg-teal-500/10 border border-teal-500/20 flex items-center justify-center text-teal-400">
-                            <HardDrive size={18} />
+                            <div className="rounded-xl border border-white/[0.08] bg-slate-900/60 p-3 sm:p-4 flex flex-col">
+                                <div className="flex items-center justify-between">
+                                    <span className="text-xs text-slate-400 font-medium uppercase tracking-wider leading-snug">Live Bandwidth</span>
+                                    <div className="hidden sm:flex h-8 w-8 rounded-lg bg-cyan-500/10 border border-cyan-500/20 items-center justify-center text-cyan-400 shrink-0">
+                                        <Wifi size={16} />
+                                    </div>
+                                </div>
+                                <div className="mt-2 flex items-baseline gap-1.5">
+                                    <span className="text-2xl font-bold text-cyan-300 tabular-nums">
+                                        {formatBandwidthMbps(liveSummary.totalBandwidthMbps, liveSummary.totalBitrateBps)}
+                                    </span>
+                                    <span className="text-xs font-semibold text-cyan-400/90">Mbps</span>
+                                </div>
+                                <div className="mt-2 text-xs text-slate-300 leading-relaxed break-words flex-1 flex flex-col justify-start">
+                                    {liveSummary.activeSessionBytes > 0 ? (
+                                        <div className="space-y-1">
+                                            <p>
+                                                Estimated active transfer: <span className="text-slate-100 font-mono font-semibold">{formatBytes(liveSummary.activeSessionBytes, 1)}</span>
+                                            </p>
+                                            <p className="text-[13px] text-slate-300 leading-normal">
+                                                Accumulated from observed playing intervals (bitrate &times; poll duration &divide; 8) across active playback sessions
+                                            </p>
+                                        </div>
+                                    ) : (
+                                        <p>Idle &middot; No active throughput</p>
+                                    )}
+                                </div>
+                            </div>
                         </div>
-                    </div>
-                    <div className="mt-2">
-                        <div className="flex items-baseline gap-2">
-                            <span className="text-2xl font-extrabold text-teal-300 tabular-nums">
-                                {formatBytes(analytics.totalDataUsedBytes, 2)}
-                            </span>
-                            {analytics.totalDataUsedBytes > 0 && (
-                                <span
-                                    className="text-xs font-semibold px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30"
-                                    title="Transfer totals are estimates based on bitrate and observed playing time, not measured network traffic. Historical imports do not reconstruct missing transfer bytes."
-                                >
-                                    Estimated
-                                </span>
-                            )}
-                        </div>
-                        <p className="text-xs text-slate-400 mt-1.5">
-                            Peak throughput: <span className="text-slate-200 font-mono">{formatBandwidthMbps(analytics.peakBandwidthMbps)} Mbps</span>
-                        </p>
-                    </div>
-                </div>
+                    </>
+                )}
+            </section>
 
-                {/* KPI 4: Play Statistics & Watch Time */}
-                <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-4 flex flex-col justify-between">
-                    <div className="flex items-center justify-between">
-                        <span className="text-xs text-slate-400 font-semibold uppercase tracking-wider">
-                            Confirmed Play Statistics ({windowDays === 0 ? 'All' : `${windowDays}d`})
-                        </span>
-                        <div className="h-9 w-9 rounded-xl bg-purple-500/10 border border-purple-500/20 flex items-center justify-center text-purple-400">
-                            <Activity size={18} />
-                        </div>
-                    </div>
-                    <div className="mt-2">
-                        <div className="flex items-baseline gap-2">
-                            <span className="text-2xl font-extrabold text-white tabular-nums">{analytics.totalPlays}</span>
-                            <span className="text-xs text-slate-400">confirmed plays · {formatWatchDuration(analytics.totalWatchTimeSecs)}</span>
-                        </div>
-                        <p className="text-xs text-slate-400 mt-1.5">
-                            {analytics.uniqueUsers} viewers · <span className="text-emerald-400 font-semibold">{analytics.avgCompletionPct}%</span> avg completion
-                        </p>
-                    </div>
-                </div>
-
-                {/* KPI 5: Library Inventory */}
-                <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-4 flex flex-col justify-between">
-                    <div className="flex items-center justify-between">
-                        <span className="text-xs text-slate-400 font-semibold uppercase tracking-wider">Jellyfin Library</span>
-                        <div className="h-9 w-9 rounded-xl bg-fuchsia-500/10 border border-fuchsia-500/20 flex items-center justify-center text-fuchsia-400">
-                            <Film size={18} />
-                        </div>
-                    </div>
-                    <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
-                        <div className="flex items-center justify-between">
-                            <span className="text-slate-400">Movies</span>
-                            <span className="font-bold text-slate-100 tabular-nums">{jellyfinServer.libraryCounts?.movies || 0}</span>
-                        </div>
-                        <div className="flex items-center justify-between">
-                            <span className="text-slate-400">Series</span>
-                            <span className="font-bold text-slate-100 tabular-nums">{jellyfinServer.libraryCounts?.series || 0}</span>
-                        </div>
-                        <div className="flex items-center justify-between">
-                            <span className="text-slate-400">Episodes</span>
-                            <span className="font-bold text-slate-100 tabular-nums">{jellyfinServer.libraryCounts?.episodes || 0}</span>
-                        </div>
-                        <div className="flex items-center justify-between">
-                            <span className="text-slate-400">Audio</span>
-                            <span className="font-bold text-slate-100 tabular-nums">{jellyfinServer.libraryCounts?.audio || 0}</span>
-                        </div>
-                    </div>
-                </div>
-            </div>
-
-            {/* ========================================================================= */}
-            {/* 4. LIVE ACTIVE STREAMS SECTION (STREAM INFO, CODECS & CONTROLS)           */}
-            {/* ========================================================================= */}
-            {(activeView === 'dashboard' || activeView === 'streams') && (
-                <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-5">
-                    <div className="flex flex-wrap items-center justify-between gap-3 mb-4 pb-3 border-b border-white/[0.06]">
+            {(activeView === 'dashboard' || activeView === 'streams') && activeSessions.length > 0 && (
+                <div className="rounded-xl border border-white/[0.08] bg-slate-900/60 p-4 sm:p-5">
+                    <div className="flex flex-wrap items-center justify-between gap-2.5 mb-3 pb-2.5 border-b border-white/[0.06]">
                         <div className="flex items-center gap-2.5">
                             <div className="relative flex h-2.5 w-2.5">
-                                {liveSummary.activeStreams > 0 && (
-                                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
-                                )}
-                                <span
-                                    className={`relative inline-flex rounded-full h-2.5 w-2.5 ${
-                                        liveSummary.activeStreams > 0 ? 'bg-emerald-500' : 'bg-slate-600'
-                                    }`}
-                                />
+                                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
+                                <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500" />
                             </div>
-                            <h3 className="text-sm font-bold text-slate-100 tracking-tight">
-                                Active Jellyfin Sessions
+                            <h3 className="text-sm font-semibold text-slate-100 tracking-tight">
+                                Active Media Sessions
                             </h3>
-                            <span className="text-xs font-mono px-2 py-0.5 rounded-full bg-white/[0.05] text-slate-300 border border-white/10">
-                                {liveSummary.activeStreams} active · {formatBandwidthMbps(liveSummary.totalBandwidthMbps, liveSummary.totalBitrateBps)} Mbps total
-                            </span>
                         </div>
                         <div className="text-xs text-slate-400 flex items-center gap-3">
                             <span className="inline-flex items-center gap-1.5">
@@ -1234,265 +1468,332 @@ export default function StreamingTab() {
                         </div>
                     </div>
 
-                    {isLoading && !data ? (
-                        <div className="py-12 flex items-center justify-center gap-2 text-slate-400 text-sm">
-                            <Loader2 size={18} className="animate-spin text-indigo-400" />
-                            <span>Polling Jellyfin sessions...</span>
-                        </div>
-                    ) : activeSessions.length === 0 ? (
-                        <div className="py-12 flex flex-col items-center justify-center text-center">
-                            <div className="w-12 h-12 rounded-2xl bg-white/[0.03] border border-white/[0.06] flex items-center justify-center text-slate-500 mb-3">
-                                <Tv size={24} />
-                            </div>
-                            <p className="text-sm font-semibold text-slate-300">{data?.servers.some(server => server.enabled && ['unavailable', 'unreachable'].includes(server.status)) ? 'Live telemetry unavailable — activity unknown' : 'No Active Streams Right Now'}</p>
-                            <p className="text-xs text-slate-500 mt-1 max-w-md">
-                                Active Jellyfin sessions will appear here in real time with codec pipelines, resolution, client device, and live bandwidth consumption.
-                            </p>
-                        </div>
-                    ) : (
-                        <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-4">
-                            {activeSessions.map((sess) => {
-                                const methodStyle = getPlayMethodStyle(sess.playMethod);
-                                const epBadge = formatEpisodeBadge(sess.seasonNumber, sess.episodeNumber);
+                    <div data-testid="active-sessions-grid" className={sessionGridClass}>
+                            {activeSessions.map((session) => {
+                                const methodStyle = getPlayMethodStyle(session.playMethod);
+                                const episodeBadge = formatEpisodeBadge(session.seasonNumber, session.episodeNumber);
                                 return (
                                     <article
-                                        key={`${sess.provider}:${sess.sessionId}`}
-                                        className="rounded-2xl border border-white/[0.08] bg-slate-950/60 hover:border-indigo-500/30 transition-all overflow-hidden flex flex-col justify-between shadow-lg"
+                                        key={`${session.provider}:${session.sessionId}`}
+                                        className="rounded-xl border border-white/[0.08] bg-slate-950/60 hover:border-indigo-500/30 transition-all overflow-hidden flex flex-col justify-start"
                                     >
-                                        {/* Top Media & User Header */}
-                                        <div className="p-4 space-y-3">
-                                            <div className="flex items-start gap-3.5">
-                                                {/* Poster / Cover Art Thumbnail */}
+                                        <div className="p-3 sm:p-4 space-y-3">
+                                            <div className="flex items-start gap-3 sm:gap-3.5">
                                                 <div className="w-16 h-24 rounded-xl bg-slate-900 border border-white/10 overflow-hidden shrink-0 flex items-center justify-center relative">
-                                                    {sess.hasArtwork && sess.artworkItemId ? (
+                                                    {session.hasArtwork && session.artworkItemId ? (
                                                         <>
                                                         <img
-                                                            src={`/api/v1/auth/streaming/artwork/${encodeURIComponent(sess.artworkItemId)}?provider=${encodeURIComponent(sess.provider)}&serverId=${encodeURIComponent(sess.serverId || data?.servers.find(server => server.provider === sess.provider)?.serverId || '')}`}
+                                                            src={`/api/v1/auth/streaming/artwork/${encodeURIComponent(session.artworkItemId)}?provider=${encodeURIComponent(session.provider)}&serverId=${encodeURIComponent(session.serverId || data?.servers.find(server => server.provider === session.provider)?.serverId || '')}`}
                                                             onError={event => {
                                                                 event.currentTarget.hidden = true;
                                                                 const fallback = event.currentTarget.nextElementSibling;
                                                                 if (fallback instanceof HTMLElement) fallback.hidden = false;
                                                             }}
-                                                            alt={sess.itemName}
+                                                            alt={session.itemName}
                                                             className="w-full h-full object-cover relative"
                                                         />
-                                                        <span hidden role="img" aria-label={`Artwork unavailable for ${sess.itemName}`} className="text-indigo-400/60"><Film size={22} /></span>
+                                                        <span hidden role="img" aria-label={`Artwork unavailable for ${session.itemName}`} className="text-indigo-400/60"><Film size={22} /></span>
                                                         </>
                                                     ) : (
                                                         <div className="flex flex-col items-center justify-center text-indigo-400/60">
-                                                            {sess.itemType === 'Audio' ? <Music size={22} /> : <Film size={22} />}
+                                                            {session.itemType === 'Audio' ? <Music size={22} /> : <Film size={22} />}
                                                         </div>
                                                     )}
                                                     <span
                                                         className={`absolute bottom-1 left-1 right-1 text-center text-xs font-bold uppercase py-0.5 rounded ${
-                                                            sess.state === 'playing'
+                                                            session.state === 'playing'
                                                                 ? 'bg-emerald-500/90 text-slate-950'
                                                                 : 'bg-amber-500/90 text-slate-950'
                                                         }`}
                                                     >
-                                                        {sess.state === 'playing' ? 'Playing' : 'Paused'}
+                                                        {session.state === 'playing' ? 'Playing' : 'Paused'}
                                                     </span>
                                                 </div>
 
-                                                {/* Title, Series, User & Device */}
                                                 <div className="flex-1 min-w-0">
-                                                    <div className="flex items-center justify-between gap-2">
-                                                        <span className={`text-xs font-bold px-2 py-0.5 rounded-full border ${methodStyle.badge}`}>
-                                                            {methodStyle.label}
-                                                            {sess.hwAccel ? ` · ${sess.hwAccel}` : ''}
-                                                        </span>
-                                                        <span className="text-xs font-mono font-bold text-cyan-300 tabular-nums">
-                                                            {formatBandwidthMbps(sess.bandwidthMbps, sess.bitrateBps)} Mbps
+                                                    <div className="flex flex-wrap items-center justify-between gap-1.5">
+                                                        <div className="flex flex-wrap items-center gap-1.5 min-w-0">
+                                                            <span className="text-xs font-semibold tracking-wider px-1.5 py-0.5 rounded border border-white/10 bg-white/[0.06] text-slate-200 shrink-0">
+                                                                {formatProviderDisplayName(session.provider)}
+                                                            </span>
+                                                            <span className={`text-xs font-semibold px-2 py-0.5 rounded-full border ${methodStyle.badge} break-words whitespace-normal`}>
+                                                                {methodStyle.label}
+                                                                {session.hwAccel ? ` \u00b7 ${session.hwAccel}` : ''}
+                                                            </span>
+                                                        </div>
+                                                        <span className="text-xs font-mono font-bold text-cyan-300 tabular-nums shrink-0">
+                                                            {formatBandwidthMbps(session.bandwidthMbps, session.bitrateBps)} Mbps
                                                         </span>
                                                     </div>
 
-                                                    <h4 className="text-sm font-bold text-white truncate mt-1.5" title={sess.itemName}>
-                                                        {sess.seriesName ? sess.seriesName : sess.itemName}
+                                                    <h4 className="text-sm sm:text-base font-bold text-white break-words mt-1.5" title={session.itemName}>
+                                                        {session.seriesName ? session.seriesName : session.itemName}
                                                     </h4>
-                                                    <p className="text-xs text-slate-400 truncate">
-                                                        {sess.seriesName ? (
+                                                    <p className="text-xs text-slate-300 break-words">
+                                                        {session.seriesName ? (
                                                             <>
-                                                                {epBadge && <span className="font-mono text-indigo-300 mr-1.5">{epBadge}</span>}
-                                                                <span>{sess.itemName}</span>
+                                                                {episodeBadge && <span className="font-mono text-indigo-300 mr-1.5">{episodeBadge}</span>}
+                                                                <span>{session.itemName}</span>
                                                             </>
                                                         ) : (
                                                             <span>
-                                                                {sess.itemType} {sess.productionYear ? `· ${sess.productionYear}` : ''}
+                                                                {session.itemType} {session.productionYear ? ` \u00b7 ${session.productionYear}` : ''}
                                                             </span>
                                                         )}
                                                     </p>
 
-                                                    {/* User & Client Device */}
-                                                    <div className="mt-2.5 pt-2 border-t border-white/[0.06] flex flex-col gap-1 text-xs">
-                                                        <div className="flex items-center justify-between text-slate-200">
-                                                            <span className="font-semibold flex items-center gap-1.5 truncate">
+                                                    <div className="mt-2.5 pt-2 border-t border-white/[0.06] flex flex-col gap-1.5 text-xs">
+                                                        <div className="flex flex-wrap items-center justify-between gap-1 text-slate-200">
+                                                            <span className="font-semibold flex items-center gap-1.5 break-words min-w-0">
                                                                 <Users size={12} className="text-indigo-400 shrink-0" />
-                                                                {sess.userName}
+                                                                <span>{session.userName}</span>
                                                             </span>
                                                             <span
-                                                                className={`text-xs font-mono px-1.5 py-0.2 rounded border ${
-                                                                    sess.isLan
+                                                                className={`text-xs font-mono px-1.5 py-0.5 rounded border break-all ${
+                                                                    session.isLan
                                                                         ? 'bg-emerald-500/10 text-emerald-300 border-emerald-500/20'
                                                                         : 'bg-purple-500/10 text-purple-300 border-purple-500/20'
                                                                 }`}
                                                             >
-                                                                {sess.isLan ? 'LAN' : 'WAN'}{sess.ipAddress ? ` · ${sess.ipAddress}` : ''}
+                                                                {session.isLan ? 'LAN' : 'WAN'}{session.ipAddress ? ` \u00b7 ${session.ipAddress}` : ''}
                                                             </span>
                                                         </div>
-                                                        <div className="flex items-center justify-between text-slate-400">
-                                                            <span className="truncate flex items-center gap-1.5" title={`${sess.clientName} · ${sess.deviceName}`}>
-                                                                <Monitor size={12} className="text-slate-500 shrink-0" />
-                                                                {sess.clientName} · {sess.deviceName}
+                                                        <div className="flex flex-wrap items-center justify-between gap-1 text-slate-300">
+                                                            <span className="break-words flex items-center gap-1.5 min-w-0" title={`${session.clientName} \u00b7 ${session.deviceName}`}>
+                                                                <Monitor size={12} className="text-slate-400 shrink-0" />
+                                                                <span>{session.clientName} &middot; {session.deviceName}</span>
+                                                            </span>
+                                                            <span className="font-mono text-teal-300 font-semibold shrink-0">
+                                                                {formatBytes(session.sessionDataBytes, 2)}
                                                             </span>
                                                         </div>
                                                     </div>
                                                 </div>
                                             </div>
 
-                                            {/* Stream Information & Codec Pipeline Matrix */}
-                                            <div className="rounded-xl bg-black/40 border border-white/[0.05] p-3 space-y-1.5 text-xs">
-                                                <div className="flex items-center justify-between">
-                                                    <span className="text-slate-400">Container</span>
-                                                    <span className="font-mono text-slate-200 font-semibold">
-                                                        {sess.container || 'MKV'}
-                                                        {sess.targetContainer && sess.targetContainer !== sess.container && (
-                                                            <span className="text-amber-300"> &rarr; {sess.targetContainer}</span>
-                                                        )}
-                                                    </span>
+                                            {session.transcodeReasons && session.transcodeReasons.length > 0 && (
+                                                <div className="rounded-lg bg-amber-500/10 border border-amber-500/20 px-3 py-2 text-[13px] text-slate-300 leading-relaxed">
+                                                    <span className="font-semibold text-amber-300">Transcode reason: </span>
+                                                    <span>{session.transcodeReasons.map(formatTranscodeReason).join(', ')}</span>
                                                 </div>
-                                                <div className="flex items-center justify-between">
-                                                    <span className="text-slate-400">Video Stream</span>
-                                                    <span className="font-mono text-slate-200 font-semibold">
-                                                        {sess.videoResolution} · {sess.videoCodec}
-                                                        {sess.targetVideoCodec && !sess.isVideoDirect && (
-                                                            <span className="text-amber-300"> &rarr; {sess.targetVideoCodec}</span>
-                                                        )}
-                                                        <span className="ml-1.5 text-xs px-1.5 py-0.2 rounded bg-white/10 text-slate-300">
-                                                            {sess.videoRange}
+                                            )}
+
+                                            <details className="group rounded-xl bg-slate-950/60 border border-white/[0.06] overflow-hidden text-[13px]">
+                                                <summary className="px-3 py-2.5 cursor-pointer select-none font-medium text-slate-300 flex items-center justify-between hover:bg-white/[0.02] transition-colors focus:outline-none min-h-[44px] obs-touch-target-standard text-[13px]">
+                                                    <span className="flex items-center gap-1.5">
+                                                        <Layers size={13} className="text-slate-400 shrink-0" />
+                                                        <span>Stream pipeline &amp; codec details</span>
+                                                    </span>
+                                                    <ChevronDown size={14} className="text-slate-400 group-open:rotate-180 transition-transform shrink-0" />
+                                                </summary>
+                                                <div className="p-3 pt-1 border-t border-white/[0.04] space-y-2 text-[13px]">
+                                                    <div className="flex flex-wrap items-baseline justify-between border-b border-white/[0.04] pb-1 gap-x-2 gap-y-0.5">
+                                                        <span className="text-[13px] text-slate-300 font-medium shrink-0">Container</span>
+                                                        <span className="font-mono text-slate-100 font-semibold text-right break-words min-w-0 text-[13px]">
+                                                            {session.container || 'MKV'}
+                                                            {session.targetContainer && session.targetContainer !== session.container && (
+                                                                <span className="text-amber-300 font-normal"> &rarr; {session.targetContainer}</span>
+                                                            )}
                                                         </span>
-                                                    </span>
-                                                </div>
-                                                <div className="flex items-center justify-between">
-                                                    <span className="text-slate-400">Audio Stream</span>
-                                                    <span className="font-mono text-slate-200 font-semibold">
-                                                        {sess.audioCodec} ({sess.audioLayout})
-                                                        {sess.targetAudioCodec && !sess.isAudioDirect && (
-                                                            <span className="text-amber-300"> &rarr; {sess.targetAudioCodec}</span>
-                                                        )}
-                                                    </span>
-                                                </div>
-                                                <div className="flex items-center justify-between">
-                                                    <span className="text-slate-400">Data Transferred</span>
-                                                    <span className="font-mono text-teal-300 font-semibold">
-                                                        {formatBytes(sess.sessionDataBytes, 2)}
-                                                        {sess.transcodeFps ? ` · ${sess.transcodeFps} fps` : ''}
-                                                    </span>
-                                                </div>
-
-                                                {sess.transcodeReasons && sess.transcodeReasons.length > 0 && (
-                                                    <div className="pt-1.5 border-t border-white/[0.05] flex flex-wrap items-center gap-1">
-                                                        <span className="text-xs text-amber-400/90 font-semibold mr-1">Reason:</span>
-                                                        {sess.transcodeReasons.map((r) => (
-                                                            <span
-                                                                key={r}
-                                                                className="text-xs px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-300 border border-amber-500/20"
-                                                            >
-                                                                {formatTranscodeReason(r)}
-                                                            </span>
-                                                        ))}
                                                     </div>
-                                                )}
-                                            </div>
+                                                    <div className="flex flex-wrap items-baseline justify-between border-b border-white/[0.04] pb-1 gap-x-2 gap-y-0.5">
+                                                        <span className="text-[13px] text-slate-300 font-medium shrink-0">Video Stream</span>
+                                                        <div className="font-mono text-slate-100 font-semibold text-right break-words flex flex-wrap items-center justify-end gap-1.5 min-w-0 text-[13px]">
+                                                            <span>
+                                                                {session.videoResolution} &middot; {session.videoCodec}
+                                                                {session.targetVideoCodec && !session.isVideoDirect && (
+                                                                    <span className="text-amber-300 font-normal"> &rarr; {session.targetVideoCodec}</span>
+                                                                )}
+                                                            </span>
+                                                            {session.videoRange && (
+                                                                <span className="text-xs px-1.5 py-0.5 rounded bg-white/10 text-slate-200 font-medium shrink-0">
+                                                                    {session.videoRange}
+                                                                </span>
+                                                            )}
+                                                        </div>
+                                                    </div>
+                                                    <div className="flex flex-wrap items-baseline justify-between border-b border-white/[0.04] pb-1 gap-x-2 gap-y-0.5">
+                                                        <span className="text-[13px] text-slate-300 font-medium shrink-0">Audio Stream</span>
+                                                        <span className="font-mono text-slate-100 font-semibold text-right break-words min-w-0 text-[13px]">
+                                                            {session.audioCodec} ({session.audioLayout})
+                                                            {session.targetAudioCodec && !session.isAudioDirect && (
+                                                                <span className="text-amber-300 font-normal"> &rarr; {session.targetAudioCodec}</span>
+                                                            )}
+                                                        </span>
+                                                    </div>
+                                                    <div className="flex flex-wrap items-baseline justify-between gap-x-2 gap-y-0.5">
+                                                        <span className="text-[13px] text-slate-300 font-medium shrink-0">Stream Throughput</span>
+                                                        <span className="font-mono text-teal-300 font-semibold text-right break-words min-w-0 text-[13px]">
+                                                            {formatBandwidthMbps(session.bandwidthMbps, session.bitrateBps)} Mbps {session.transcodeFps ? `\u00b7 ${session.transcodeFps} fps` : ''}
+                                                        </span>
+                                                    </div>
+                                                </div>
+                                            </details>
                                         </div>
 
-                                        {/* Playback Timeline & Admin Controls Footer */}
-                                        <div className="px-4 pb-3.5 pt-2 bg-white/[0.02] border-t border-white/[0.05] space-y-2.5">
+                                        <div className="px-3 sm:px-4 pb-3.5 pt-2 bg-white/[0.02] border-t border-white/[0.06] space-y-2.5">
                                             <div>
-                                                <div className="flex items-center justify-between text-xs font-mono text-slate-400 mb-1">
-                                                    <span>{formatDurationClock(sess.positionSecs)}</span>
-                                                    <span className="text-slate-200 font-bold">{(Number.isFinite(sess.progressPct) ? sess.progressPct : 0).toFixed(1)}%</span>
-                                                    <span>{formatDurationClock(sess.durationSecs)}</span>
-                                                </div>
-                                                <div className="h-1.5 w-full rounded-full bg-slate-800 overflow-hidden relative">
-                                                    {sess.transcodeProgressPct && sess.transcodeProgressPct > sess.progressPct && (
-                                                        <div
-                                                            className="absolute inset-y-0 left-0 bg-amber-500/25 rounded-full"
-                                                            style={{ width: `${Math.min(100, sess.transcodeProgressPct)}%` }}
-                                                            title={`Transcode buffer: ${sess.transcodeProgressPct}%`}
-                                                        />
-                                                    )}
-                                                    <div
-                                                        className={`h-full rounded-full relative z-10 ${methodStyle.bar}`}
-                                                        style={{ width: `${Math.min(100, sess.progressPct)}%` }}
-                                                    />
-                                                </div>
+                                                {(() => {
+                                                    const hasTranscodeBuffer =
+                                                        typeof session.transcodeProgressPct === 'number' &&
+                                                        Number.isFinite(session.transcodeProgressPct) &&
+                                                        session.transcodeProgressPct > (Number.isFinite(session.progressPct) ? session.progressPct : 0);
+                                                    return (
+                                                        <div className="space-y-1.5">
+                                                            <div>
+                                                                <div className="flex flex-wrap items-center justify-between text-[13px] font-mono text-slate-300 mb-1 gap-x-2 gap-y-0.5">
+                                                                    <span>{formatDurationClock(session.positionSecs)}</span>
+                                                                    <div className="flex flex-wrap items-center gap-1.5 text-[13px]">
+                                                                        <span className="text-slate-100 font-semibold">
+                                                                            Playback {(Number.isFinite(session.progressPct) ? session.progressPct : 0).toFixed(1)}%
+                                                                        </span>
+                                                                    </div>
+                                                                    <span>{formatDurationClock(session.durationSecs)}</span>
+                                                                </div>
+                                                                <div className="h-1.5 w-full rounded-full bg-slate-800 overflow-hidden">
+                                                                    <div
+                                                                        className={`h-full rounded-full ${methodStyle.bar}`}
+                                                                        style={{ width: `${Math.min(100, Math.max(0, session.progressPct || 0))}%` }}
+                                                                    />
+                                                                </div>
+                                                            </div>
+                                                            {hasTranscodeBuffer && (
+                                                                <div className="pt-0.5 space-y-1">
+                                                                    <div className="flex items-center justify-between text-[13px] text-amber-300">
+                                                                        <span className="font-medium">
+                                                                            Transcode buffer {session.transcodeProgressPct?.toFixed(1)}%
+                                                                        </span>
+                                                                        <span className="text-[13px] font-mono text-amber-400 font-semibold uppercase tracking-wider">
+                                                                            Buffer track
+                                                                        </span>
+                                                                    </div>
+                                                                    <div className="h-1.5 w-full rounded-full bg-slate-800 overflow-hidden">
+                                                                        <div
+                                                                            className="h-full rounded-full bg-amber-400/80"
+                                                                            style={{ width: `${Math.min(100, Math.max(0, session.transcodeProgressPct || 0))}%` }}
+                                                                        />
+                                                                    </div>
+                                                                </div>
+                                                            )}
+                                                        </div>
+                                                    );
+                                                })()}
                                             </div>
 
                                             {isAdmin && (() => {
-                                                const caps = evaluateSessionCapabilities(sess);
-                                                const isPausePending = pendingSessionActions.has(`${sess.provider}:${sess.sessionId}:pause`);
-                                                const isResumePending = pendingSessionActions.has(`${sess.provider}:${sess.sessionId}:resume`);
-                                                const isStopPending = pendingSessionActions.has(`${sess.provider}:${sess.sessionId}:stop`);
+                                                const capabilities = evaluateSessionCapabilities(session);
+                                                const isPermanentlyUnsupported =
+                                                    !capabilities.pause.supported &&
+                                                    !capabilities.resume.supported &&
+                                                    !capabilities.stop.supported &&
+                                                    !capabilities.message.supported &&
+                                                    capabilities.pause.reason.toLowerCase().includes('not supported for provider');
+
+                                                if (isPermanentlyUnsupported) {
+                                                    return (
+                                                        <div className="pt-1.5">
+                                                            <div
+                                                                className="flex items-center justify-between gap-2 text-[13px] text-slate-200 py-1.5 px-3 rounded-lg bg-slate-900/80 border border-white/[0.08]"
+                                                                title={capabilities.pause.reason}
+                                                            >
+                                                                <span className="inline-flex items-center gap-1.5 text-[13px] text-slate-200 font-medium">
+                                                                    <ShieldCheck size={14} className="text-slate-400 shrink-0" />
+                                                                    <span>Read-only stream telemetry &middot; Remote control unsupported for {formatProviderDisplayName(session.provider)}</span>
+                                                                </span>
+                                                                <span className="text-[11px] font-mono uppercase tracking-wider px-2 py-0.5 rounded border border-white/10 bg-white/[0.06] text-slate-300 font-semibold shrink-0">
+                                                                    Read-Only
+                                                                </span>
+                                                            </div>
+                                                        </div>
+                                                    );
+                                                }
+
+                                                const isPausePending = pendingSessionActions.has(`${session.provider}:${session.sessionId}:pause`);
+                                                const isResumePending = pendingSessionActions.has(`${session.provider}:${session.sessionId}:resume`);
+                                                const isStopPending = pendingSessionActions.has(`${session.provider}:${session.sessionId}:stop`);
+                                                const unsupportedReasons: string[] = [];
+                                                if (session.state === 'playing') {
+                                                    if (!capabilities.pause.supported && capabilities.pause.reason) {
+                                                        unsupportedReasons.push(capabilities.pause.reason);
+                                                    }
+                                                } else {
+                                                    if (!capabilities.resume.supported && capabilities.resume.reason) {
+                                                        unsupportedReasons.push(capabilities.resume.reason);
+                                                    }
+                                                }
+                                                if (!capabilities.stop.supported && capabilities.stop.reason && !unsupportedReasons.includes(capabilities.stop.reason)) {
+                                                    unsupportedReasons.push(capabilities.stop.reason);
+                                                }
+                                                if (!capabilities.message.supported && capabilities.message.reason && !unsupportedReasons.includes(capabilities.message.reason)) {
+                                                    unsupportedReasons.push(capabilities.message.reason);
+                                                }
+                                                const visibleReason = unsupportedReasons.join(' · ');
                                                 return (
-                                                    <div className="flex items-center justify-between gap-2 pt-1">
-                                                        <div className="flex items-center gap-1.5">
-                                                            {sess.state === 'playing' ? (
+                                                    <div className="space-y-1.5 pt-1">
+                                                        <div className="flex flex-wrap items-center gap-2">
+                                                            {session.state === 'playing' ? (
                                                                 <button
                                                                     type="button"
-                                                                    disabled={!caps.pause.supported || isPausePending}
-                                                                    aria-disabled={!caps.pause.supported || isPausePending}
-                                                                    onClick={() => handleSessionCommand(sess, 'pause')}
-                                                                    className="px-2.5 py-1 rounded-lg bg-white/[0.05] hover:bg-white/[0.1] border border-white/10 text-xs font-semibold text-slate-200 flex items-center gap-1 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-                                                                    title={caps.pause.reason}
+                                                                    disabled={!capabilities.pause.supported || isPausePending}
+                                                                    aria-disabled={!capabilities.pause.supported || isPausePending}
+                                                                    onClick={() => handleSessionCommand(session, 'pause')}
+                                                                    className="flex-1 min-w-max sm:flex-initial min-h-[44px] sm:min-h-[40px] px-2.5 sm:px-3 py-2 rounded-xl bg-white/[0.05] hover:bg-white/[0.1] border border-white/10 text-xs font-medium text-slate-200 flex items-center justify-center gap-1.5 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                                                                    title={capabilities.pause.reason}
                                                                 >
-                                                                    <Pause size={12} />
+                                                                    <Pause size={13} className="shrink-0" />
                                                                     <span>Pause</span>
                                                                 </button>
                                                             ) : (
                                                                 <button
                                                                     type="button"
-                                                                    disabled={!caps.resume.supported || isResumePending}
-                                                                    aria-disabled={!caps.resume.supported || isResumePending}
-                                                                    onClick={() => handleSessionCommand(sess, 'resume')}
-                                                                    className="px-2.5 py-1 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-xs font-semibold text-emerald-300 flex items-center gap-1 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-                                                                    title={caps.resume.reason}
+                                                                    disabled={!capabilities.resume.supported || isResumePending}
+                                                                    aria-disabled={!capabilities.resume.supported || isResumePending}
+                                                                    onClick={() => handleSessionCommand(session, 'resume')}
+                                                                    className="flex-1 min-w-max sm:flex-initial min-h-[44px] sm:min-h-[40px] px-2.5 sm:px-3 py-2 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-xs font-medium text-emerald-300 flex items-center justify-center gap-1.5 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                                                                    title={capabilities.resume.reason}
                                                                 >
-                                                                    <Play size={12} />
+                                                                    <Play size={13} className="shrink-0" />
                                                                     <span>Resume</span>
                                                                 </button>
                                                             )}
 
                                                             <button
                                                                 type="button"
-                                                                disabled={!caps.stop.supported || isStopPending}
-                                                                aria-disabled={!caps.stop.supported || isStopPending}
-                                                                onClick={() => handleSessionCommand(sess, 'stop')}
-                                                                className="px-2.5 py-1 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/30 text-xs font-semibold text-rose-300 flex items-center gap-1 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-                                                                title={caps.stop.reason}
+                                                                disabled={!capabilities.stop.supported || isStopPending}
+                                                                aria-disabled={!capabilities.stop.supported || isStopPending}
+                                                                onClick={() => handleSessionCommand(session, 'stop')}
+                                                                className="flex-1 min-w-max sm:flex-initial min-h-[44px] sm:min-h-[40px] px-2.5 sm:px-3 py-2 rounded-xl bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/30 text-xs font-medium text-rose-300 flex items-center justify-center gap-1.5 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                                                                title={capabilities.stop.reason}
                                                             >
-                                                                <Square size={12} />
+                                                                <Square size={13} className="shrink-0" />
                                                                 <span>Stop</span>
                                                             </button>
-                                                        </div>
 
-                                                        <button
-                                                            type="button"
-                                                            disabled={!caps.message.supported}
-                                                            aria-disabled={!caps.message.supported}
-                                                            onClick={() => {
-                                                                if (!caps.message.supported) {
-                                                                    addToast(caps.message.reason, 'error');
-                                                                    return;
-                                                                }
-                                                                setMessageSession(sess);
-                                                                setMessageBody('');
-                                                            }}
-                                                            className="px-2.5 py-1 rounded-lg bg-indigo-500/15 hover:bg-indigo-500/25 border border-indigo-500/30 text-xs font-semibold text-indigo-300 flex items-center gap-1 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-                                                            title={caps.message.reason}
-                                                        >
-                                                            <MessageSquare size={12} />
-                                                            <span>Message</span>
-                                                        </button>
+                                                            <button
+                                                                type="button"
+                                                                disabled={!capabilities.message.supported}
+                                                                aria-disabled={!capabilities.message.supported}
+                                                                onClick={() => {
+                                                                    if (!capabilities.message.supported) {
+                                                                        addToast(capabilities.message.reason, 'error');
+                                                                        return;
+                                                                    }
+                                                                    setMessageSession(session);
+                                                                    setMessageBody('');
+                                                                }}
+                                                                className="flex-1 min-w-max sm:flex-initial min-h-[44px] sm:min-h-[40px] px-2.5 sm:px-3 py-2 rounded-xl bg-indigo-500/15 hover:bg-indigo-500/25 border border-indigo-500/30 text-xs font-medium text-indigo-300 flex items-center justify-center gap-1.5 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                                                                title={capabilities.message.reason}
+                                                            >
+                                                                <MessageSquare size={13} className="shrink-0" />
+                                                                <span>Message</span>
+                                                            </button>
+                                                        </div>
+                                                        {visibleReason ? (
+                                                            <div className="text-xs text-amber-300/90 leading-snug flex items-start gap-1.5 pt-0.5">
+                                                                <AlertCircle size={12} className="shrink-0 text-amber-400 mt-0.5" />
+                                                                <span>{visibleReason}</span>
+                                                            </div>
+                                                        ) : null}
                                                     </div>
                                                 );
                                             })()}
@@ -1501,291 +1802,585 @@ export default function StreamingTab() {
                                 );
                             })}
                         </div>
-                    )}
                 </div>
             )}
 
-            <p role="note" className="text-sm text-slate-400">
-                Confirmed statistics use included observed sessions and imported events. Preserved imported and legacy watch-time estimates appear separately below; use All Time to see older records. Bandwidth peaks remain a legacy provider aggregate.
-            </p>
             {(activeView === 'dashboard' || activeView === 'analytics' || activeView === 'history') && (
-                <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-3.5 flex flex-wrap items-center justify-between gap-3">
-                    <div className="flex flex-wrap items-center gap-2">
-                        <span className="text-xs font-bold text-slate-400 uppercase tracking-wider px-2">
-                            Analytics Filters:
-                        </span>
-                        {/* Play Method Filter */}
-                        <div
-                            role="group"
-                            aria-label="Play Method Filter"
-                            className="flex items-center gap-1 bg-black/40 p-1 rounded-xl border border-white/10"
-                        >
-                            {[
-                                { id: 'all', label: 'All Methods' },
-                                { id: 'DirectPlay', label: 'Direct Play' },
-                                { id: 'DirectStream', label: 'Direct Stream' },
-                                { id: 'Transcode', label: 'Transcode' },
-                                { id: 'Unknown', label: 'Unknown' },
-                            ].map((m) => (
-                                <button
-                                    key={m.id}
-                                    type="button"
-                                    aria-pressed={playMethodFilter === m.id}
-                                    onClick={() => {
-                                        setPlayMethodFilter(m.id);
-                                        setHistoryPage(1);
-                                    }}
-                                    className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-all ${
-                                        playMethodFilter === m.id
-                                            ? 'bg-indigo-500/25 text-indigo-300 border border-indigo-500/30'
-                                            : 'text-slate-400 hover:text-slate-200'
-                                    }`}
-                                >
-                                    {m.label}
-                                </button>
-                            ))}
-                        </div>
-
-                        {/* Media Type Filter */}
-                        <div
-                            role="group"
-                            aria-label="Media Type Filter"
-                            className="flex items-center gap-1 bg-black/40 p-1 rounded-xl border border-white/10"
-                        >
-                            {[
-                                { id: 'all', label: 'All Media' },
-                                { id: 'Movie', label: 'Movies' },
-                                { id: 'Episode', label: 'Episodes' },
-                                { id: 'Audio', label: 'Audio' },
-                            ].map((mt) => (
-                                <button
-                                    key={mt.id}
-                                    type="button"
-                                    aria-pressed={mediaTypeFilter === mt.id}
-                                    onClick={() => {
-                                        setMediaTypeFilter(mt.id);
-                                        setHistoryPage(1);
-                                    }}
-                                    className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-all ${
-                                        mediaTypeFilter === mt.id
-                                            ? 'bg-purple-500/25 text-purple-300 border border-purple-500/30'
-                                            : 'text-slate-400 hover:text-slate-200'
-                                    }`}
-                                >
-                                    {mt.label}
-                                </button>
-                            ))}
-                        </div>
-                    </div>
-
-                    {/* Time Window Selector */}
-                    <div
-                        role="group"
-                        aria-label="Time Window Filter"
-                        className="flex items-center gap-1 bg-black/40 p-1 rounded-xl border border-white/10"
+                <div className="space-y-3">
+                    <details
+                        open={isDesktopViewport || isMobileFiltersOpen}
+                        onToggle={(event) => {
+                            if (!isDesktopViewport) {
+                                setIsMobileFiltersOpen(event.currentTarget.open);
+                            }
+                        }}
+                        className="group rounded-xl border border-white/[0.08] bg-slate-900/60 p-2.5 sm:p-3.5 space-y-3"
                     >
-                        {[
-                            { days: 7, label: '7 Days' },
-                            { days: 30, label: '30 Days' },
-                            { days: 90, label: '90 Days' },
-                            { days: 0, label: 'All Time' },
-                        ].map((w) => (
-                            <button
-                                key={w.days}
-                                type="button"
-                                aria-pressed={windowDays === w.days}
-                                onClick={() => {
-                                    setWindowDays(w.days);
-                                    setHistoryPage(1);
-                                }}
-                                className={`px-3 py-1 rounded-lg text-xs font-bold transition-all ${
-                                    windowDays === w.days
-                                        ? 'bg-indigo-600 text-white shadow'
-                                        : 'text-slate-400 hover:text-slate-200'
-                                }`}
-                            >
-                                {w.label}
-                            </button>
-                        ))}
+                        <summary
+                            className="sm:hidden cursor-pointer select-none min-h-[44px] flex items-center justify-between gap-2.5 text-xs py-1"
+                            aria-label="Historical Analytics Filters"
+                        >
+                            <div className="flex flex-col gap-0.5 min-w-0 flex-1">
+                                <div className="flex items-center gap-1.5">
+                                    <span className="font-semibold text-slate-200 text-xs">Historical Filters</span>
+                                    <span className="text-[11px] text-slate-400 font-normal">&middot; Confirmed &amp; estimated</span>
+                                </div>
+                                <span className="text-xs text-slate-300 break-words leading-relaxed">
+                                    Window: {windowDays === 0 ? 'All Time' : `${windowDays} Days`} &middot; {selectedDeliverySummary} &middot; {selectedMediaTypeSummary}
+                                </span>
+                            </div>
+                            <span className="text-xs font-medium text-indigo-400 flex items-center gap-1 shrink-0 self-center">
+                                <span>{isMobileFiltersOpen ? 'Hide' : 'Edit filters'}</span>
+                                <ChevronDown size={14} className="group-open:rotate-180 transition-transform shrink-0" />
+                            </span>
+                        </summary>
+
+                        <div className="flex flex-wrap items-center justify-between gap-2 pb-2.5 border-b border-white/[0.06]">
+                            <div className="flex flex-wrap items-center gap-2.5 min-w-0">
+                                <h3 className="text-sm sm:text-base font-bold text-slate-100 tracking-tight">
+                                    Historical Analytics ({windowDays === 0 ? 'All Time' : `${windowDays} Days`})
+                                </h3>
+                                <span className="text-xs font-medium px-2 py-0.5 rounded-full border border-indigo-500/20 bg-indigo-500/10 text-indigo-300 shrink-0">
+                                    All recorded providers
+                                </span>
+                            </div>
+                            <details className="group text-xs text-slate-400 shrink-0">
+                                <summary className="cursor-pointer font-medium text-slate-300 hover:text-white flex items-center gap-1.5 select-none min-h-[44px] px-2 py-1 rounded-lg hover:bg-white/[0.04] transition-colors obs-touch-target-standard">
+                                    <span>How these metrics are measured</span>
+                                    <ChevronDown size={14} className="text-slate-400 group-open:rotate-180 transition-transform shrink-0" />
+                                </summary>
+                                <div className="mt-2 p-3 rounded-xl border border-white/[0.06] bg-slate-900/60 space-y-1.5 text-slate-300 text-xs leading-relaxed max-w-xl">
+                                    <h4 className="font-semibold text-slate-200">Measurement methodology, overlap &amp; nonadditivity details</h4>
+                                    <p role="note">Confirmed statistics use included observed sessions and imported events across all recorded providers. Preserved imported and legacy watch-time estimates appear separately below; use All Time to see older records. Bandwidth peaks remain a legacy provider aggregate.</p>
+                                    <p>Confirmed statistics reflect observed live Jellyfin sessions and imported item summaries. Preserved legacy watch-time estimates and item runtimes are unverified and not measured session durations.</p>
+                                    <p>Imported items and legacy series may overlap: these series are kept separate, not added together or to confirmed watch time.</p>
+                                    <p>Data transfer totals and peak bandwidth are estimates based on bitrate and observed playing time, not measured network interface traffic. Historical imports do not reconstruct missing transfer bytes.</p>
+                                </div>
+                            </details>
+                        </div>
+
+                        <div className="pt-1 sm:pt-0 flex flex-wrap items-center gap-x-6 gap-y-4 w-full min-w-0 max-w-full">
+                            <div className="flex flex-col sm:flex-row items-start sm:items-center gap-1.5 sm:gap-2 w-full max-w-full min-w-0 sm:w-auto sm:shrink-0">
+                                <span className="text-xs font-semibold text-slate-400 shrink-0">Time Window:</span>
+                                <div
+                                    role="group"
+                                    aria-label="Time Window Filter"
+                                    className="flex flex-wrap sm:flex-nowrap items-center gap-1 bg-slate-950/60 p-1 rounded-xl border border-white/[0.08] w-full max-w-full min-w-0 sm:w-auto sm:shrink-0"
+                                >
+                                    {[
+                                        { days: 7, label: '7 Days' },
+                                        { days: 30, label: '30 Days' },
+                                        { days: 90, label: '90 Days' },
+                                        { days: 0, label: 'All Time' },
+                                    ].map((windowOption) => (
+                                        <button
+                                            key={windowOption.days}
+                                            type="button"
+                                            aria-pressed={windowDays === windowOption.days}
+                                            onClick={() => {
+                                                setWindowDays(windowOption.days);
+                                                setHistoryPage(1);
+                                            }}
+                                            className={`obs-touch-target-standard min-h-[44px] px-3.5 py-2 rounded-lg text-xs font-medium whitespace-nowrap shrink-0 transition-all ${
+                                                windowDays === windowOption.days
+                                                    ? 'bg-indigo-600/30 border border-indigo-500/50 text-indigo-200 shadow-sm'
+                                                    : 'border border-transparent text-slate-300 hover:text-white hover:bg-white/[0.06]'
+                                            }`}
+                                        >
+                                            {windowOption.label}
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+
+                            <div className="flex flex-col sm:flex-row items-start sm:items-center gap-1.5 sm:gap-2 w-full max-w-full min-w-0 sm:w-auto sm:shrink-0">
+                                <span className="text-xs font-semibold text-slate-400 shrink-0">Delivery:</span>
+                                <div
+                                    role="group"
+                                    aria-label="Play Method Filter"
+                                    className="flex flex-wrap sm:flex-nowrap items-center gap-1 bg-slate-950/60 p-1 rounded-xl border border-white/[0.08] w-full max-w-full min-w-0 sm:w-auto sm:shrink-0"
+                                >
+                                    {HISTORICAL_PLAY_METHOD_OPTIONS.map((methodOption) => (
+                                        <button
+                                            key={methodOption.id}
+                                            type="button"
+                                            aria-pressed={playMethodFilter === methodOption.id}
+                                            onClick={() => {
+                                                setPlayMethodFilter(methodOption.id);
+                                                setHistoryPage(1);
+                                            }}
+                                            className={`obs-touch-target-standard min-h-[44px] px-3 py-2 rounded-lg text-xs font-medium whitespace-nowrap shrink-0 transition-all ${
+                                                playMethodFilter === methodOption.id
+                                                    ? 'bg-indigo-600/30 border border-indigo-500/50 text-indigo-200 shadow-sm'
+                                                    : 'border border-transparent text-slate-300 hover:text-white hover:bg-white/[0.06]'
+                                            }`}
+                                        >
+                                            {methodOption.label}
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+
+                            <div className="flex flex-col sm:flex-row items-start sm:items-center gap-1.5 sm:gap-2 w-full max-w-full min-w-0 sm:w-auto sm:shrink-0">
+                                <span className="text-xs font-semibold text-slate-400 shrink-0">Media:</span>
+                                <div
+                                    role="group"
+                                    aria-label="Media Type Filter"
+                                    className="flex flex-wrap sm:flex-nowrap items-center gap-1 bg-slate-950/60 p-1 rounded-xl border border-white/[0.08] w-full max-w-full min-w-0 sm:w-auto sm:shrink-0"
+                                >
+                                    {HISTORICAL_MEDIA_TYPE_OPTIONS.map((mediaTypeOption) => (
+                                        <button
+                                            key={mediaTypeOption.id}
+                                            type="button"
+                                            aria-pressed={mediaTypeFilter === mediaTypeOption.id}
+                                            onClick={() => {
+                                                setMediaTypeFilter(mediaTypeOption.id);
+                                                setHistoryPage(1);
+                                            }}
+                                            className={`obs-touch-target-standard min-h-[44px] px-3 py-2 rounded-lg text-xs font-medium whitespace-nowrap shrink-0 transition-all ${
+                                                mediaTypeFilter === mediaTypeOption.id
+                                                    ? 'bg-indigo-600/30 border border-indigo-500/50 text-indigo-200 shadow-sm'
+                                                    : 'border border-transparent text-slate-300 hover:text-white hover:bg-white/[0.06]'
+                                            }`}
+                                        >
+                                            {mediaTypeOption.label}
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+                        </div>
+                    </details>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3.5">
+                        <div className="rounded-xl border border-white/[0.08] bg-slate-900/60 p-4 flex flex-col justify-between">
+                            <div className="flex items-center justify-between">
+                                <span className="text-[13px] text-slate-300 font-medium uppercase tracking-wider">
+                                    Data Usage ({windowDays === 0 ? 'All' : `${windowDays}d`})
+                                </span>
+                                <div className="h-8 w-8 rounded-lg bg-teal-500/10 border border-teal-500/20 flex items-center justify-center text-teal-400 shrink-0">
+                                    <HardDrive size={16} />
+                                </div>
+                            </div>
+                            <div className="mt-3">
+                                <div className="flex items-baseline gap-2">
+                                    <span className="text-2xl font-bold text-teal-300 tabular-nums">
+                                        {formatBytes(analytics.totalDataUsedBytes, 2)}
+                                    </span>
+                                    {analytics.totalDataUsedBytes > 0 ? (
+                                        <span
+                                            className="text-xs font-semibold px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30 uppercase tracking-wide"
+                                            title="Transfer totals are estimates based on bitrate and observed playing time, not measured network traffic. Historical imports do not reconstruct missing transfer bytes."
+                                        >
+                                            ESTIMATED
+                                        </span>
+                                    ) : null}
+                                </div>
+                                <div className="text-[13px] text-slate-300 mt-2 leading-relaxed">
+                                    {analytics.peakBandwidthMbps > 0 ? (
+                                        <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+                                            <span>
+                                                Window peak (incl. live):{' '}
+                                                <span className="text-slate-200 font-mono font-semibold">
+                                                    {formatBandwidthMbps(analytics.peakBandwidthMbps)} Mbps
+                                                </span>
+                                            </span>
+                                            {chartedPeakMbps > 0 && analytics.peakBandwidthMbps > chartedPeakMbps ? (
+                                                <span className="text-[13px] text-slate-300">
+                                                    &middot; Charted peak: {formatBandwidthMbps(chartedPeakMbps)} Mbps
+                                                </span>
+                                            ) : chartedPeakMbps === 0 && analytics.peakBandwidthMbps > 0 ? (
+                                                <span className="text-[13px] text-slate-300">
+                                                    &middot; Window summary and recorded buckets differ
+                                                </span>
+                                            ) : null}
+                                        </div>
+                                    ) : (
+                                        <p>No recorded throughput peaks</p>
+                                    )}
+                                </div>
+                            </div>
+                        </div>
+
+                        <div className="rounded-xl border border-white/[0.08] bg-slate-900/60 p-4 flex flex-col justify-between">
+                            <div className="flex items-center justify-between">
+                                <span className="text-[13px] text-slate-300 font-medium uppercase tracking-wider">
+                                    Confirmed Play Statistics ({windowDays === 0 ? 'All' : `${windowDays}d`})
+                                </span>
+                                <div className="h-8 w-8 rounded-lg bg-purple-500/10 border border-purple-500/20 flex items-center justify-center text-purple-400 shrink-0">
+                                    <Activity size={16} />
+                                </div>
+                            </div>
+                            <div className="mt-3">
+                                <div className="flex items-baseline gap-2">
+                                    <span className="text-2xl font-bold text-white tabular-nums">{analytics.totalPlays}</span>
+                                    {analytics.totalPlays > 0 ? (
+                                        <span className="text-[13px] text-slate-300">
+                                            confirmed plays &middot; {formatWatchDuration(analytics.totalWatchTimeSecs)}
+                                        </span>
+                                    ) : (
+                                        <span className="text-[13px] text-slate-300">No playback in window</span>
+                                    )}
+                                </div>
+                                <p className="text-[13px] text-slate-300 mt-2 leading-relaxed">
+                                    {analytics.totalPlays > 0 ? (
+                                        <>{analytics.uniqueUsers} viewers &middot; <span className="text-emerald-400 font-medium">{analytics.avgCompletionPct}%</span> avg completion</>
+                                    ) : (
+                                        'Standing by for playback events'
+                                    )}
+                                </p>
+                            </div>
+                        </div>
+
+                        <div className="rounded-xl border border-white/[0.08] bg-slate-900/60 p-4 flex flex-col justify-between sm:col-span-2 lg:col-span-1">
+                            <div className="flex items-center justify-between">
+                                <span className="text-[13px] text-slate-300 font-medium uppercase tracking-wider">Jellyfin Library</span>
+                                <div className="h-8 w-8 rounded-lg bg-fuchsia-500/10 border border-fuchsia-500/20 flex items-center justify-center text-fuchsia-400 shrink-0">
+                                    <Film size={16} />
+                                </div>
+                            </div>
+                            <div className="mt-3 grid grid-cols-2 gap-x-3 gap-y-1.5 text-[13px]">
+                                <div className="flex items-center justify-between">
+                                    <span className="text-slate-300">Movies</span>
+                                    <span className="font-semibold text-slate-200 tabular-nums">{jellyfinServer.libraryCounts?.movies || 0}</span>
+                                </div>
+                                <div className="flex items-center justify-between">
+                                    <span className="text-slate-300">Series</span>
+                                    <span className="font-semibold text-slate-200 tabular-nums">{jellyfinServer.libraryCounts?.series || 0}</span>
+                                </div>
+                                <div className="flex items-center justify-between">
+                                    <span className="text-slate-300">Episodes</span>
+                                    <span className="font-semibold text-slate-200 tabular-nums">{jellyfinServer.libraryCounts?.episodes || 0}</span>
+                                </div>
+                                <div className="flex items-center justify-between">
+                                    <span className="text-slate-300">Audio</span>
+                                    <span className="font-semibold text-slate-200 tabular-nums">{jellyfinServer.libraryCounts?.audio || 0}</span>
+                                </div>
+                            </div>
+                        </div>
                     </div>
                 </div>
             )}
 
             {(activeView === 'dashboard' || activeView === 'analytics') && (
                 <>
-
-                    <StreamingImportedHistory estimates={analytics.historicalEstimates ?? []} windowDays={windowDays} />
-
-                    {/* Time-Series Charts Row: Bandwidth/Data Usage & Play Statistics */}
                     <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                        {/* Chart 1: Data Usage & Bandwidth Telemetry */}
-                        <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-5 flex flex-col">
+                        <div className="rounded-xl border border-white/[0.08] bg-slate-900/60 p-5 flex flex-col">
                             <div className="flex items-center justify-between mb-4">
                                 <div>
-                                    <h3 className="text-sm font-bold text-slate-100 flex items-center gap-2">
+                                    <h3 className="text-sm font-semibold text-slate-100 flex items-center gap-2">
                                         <HardDrive size={16} className="text-teal-400" />
                                         Stream Data Usage & Bandwidth Over Time
                                     </h3>
                                     <p className="text-xs text-slate-400 mt-0.5">
-                                        {bucketLabel} estimated transfer (GB) and peak playing bitrate (Mbps)
+                                        {bucketLabel} estimated transfer (GB) and recorded peak bitrate (Mbps) &middot; UTC
                                     </p>
                                 </div>
-                                <span className="text-xs font-mono font-bold text-teal-300 bg-teal-500/10 px-2.5 py-1 rounded-lg border border-teal-500/20">
+                                <span className="text-xs font-mono font-medium text-teal-300 bg-teal-500/10 px-2.5 py-1 rounded-lg border border-teal-500/20 whitespace-nowrap shrink-0">
                                     Total: {formatBytes(analytics.totalDataUsedBytes, 2)}
                                 </span>
                             </div>
 
-                            <div className="h-[220px] w-full">
-                                <ResponsiveContainer width="100%" height={220}>
-                                    <AreaChart data={chartData} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
-                                        <defs>
-                                            <linearGradient id="streamDataGrad" x1="0" y1="0" x2="0" y2="1">
-                                                <stop offset="5%" stopColor="#2dd4bf" stopOpacity={0.4} />
-                                                <stop offset="95%" stopColor="#2dd4bf" stopOpacity={0.02} />
-                                            </linearGradient>
-                                            <linearGradient id="streamBwGrad" x1="0" y1="0" x2="0" y2="1">
-                                                <stop offset="5%" stopColor="#38bdf8" stopOpacity={0.35} />
-                                                <stop offset="95%" stopColor="#38bdf8" stopOpacity={0.02} />
-                                            </linearGradient>
-                                        </defs>
-                                        <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" vertical={false} />
-                                        <XAxis
-                                            dataKey="date"
-                                            stroke="rgba(255,255,255,0.2)"
-                                            tick={{ fill: 'rgba(255,255,255,0.45)', fontSize: 10 }}
-                                            tickFormatter={(value) => formatStreamingBucket(value, analytics.timeSeriesGranularity)}
-                                            minTickGap={20}
-                                        />
-                                        <YAxis
-                                            yAxisId="gb"
-                                            stroke="rgba(255,255,255,0.2)"
-                                            tick={{ fill: 'rgba(255,255,255,0.45)', fontSize: 10 }}
-                                            tickFormatter={(v) => `${v} GB`}
-                                            width={52}
-                                        />
-                                        <YAxis
-                                            yAxisId="mbps"
-                                            orientation="right"
-                                            stroke="rgba(56,189,248,0.25)"
-                                            tick={{ fill: 'rgba(56,189,248,0.65)', fontSize: 10 }}
-                                            tickFormatter={(v) => `${v} Mbps`}
-                                            width={58}
-                                        />
-                                        <Tooltip
-                                            contentStyle={{
-                                                backgroundColor: 'rgba(15, 23, 42, 0.94)',
-                                                border: '1px solid rgba(255,255,255,0.12)',
-                                                borderRadius: '12px',
-                                            }}
-                                            labelStyle={{ color: '#94a3b8', fontSize: '11px', marginBottom: '4px' }}
-                                            formatter={(value, name) => {
-                                                if (name === 'Data Used') return [`${value} GB`, 'Data Used'];
-                                                return [`${value} Mbps`, String(name)];
-                                            }}
-                                        />
-                                        <Area
-                                            yAxisId="gb"
-                                            type="monotone"
-                                            name="Data Used"
-                                            dataKey="dataGB"
-                                            stroke="#2dd4bf"
-                                            strokeWidth={2}
-                                            fillOpacity={1}
-                                            fill="url(#streamDataGrad)"
-                                        />
-                                        <Area
-                                            yAxisId="mbps"
-                                            type="monotone"
-                                            name="Peak Bandwidth"
-                                            dataKey="peakBandwidthMbps"
-                                            stroke="#38bdf8"
-                                            strokeWidth={1.75}
-                                            fillOpacity={1}
-                                            fill="url(#streamBwGrad)"
-                                        />
-                                    </AreaChart>
-                                </ResponsiveContainer>
+                            <div className="flex flex-wrap items-center justify-between gap-2 pb-1.5 border-b border-white/[0.06] mb-2 text-[13px]">
+                                <div className="flex items-center gap-1.5">
+                                    <span className="inline-block w-3.5 h-3.5 rounded-sm bg-teal-400/30 border-2 border-teal-400" />
+                                    <span className="text-teal-300 font-semibold">Transferred data (GB)</span>
+                                    <span className="text-xs text-amber-300 bg-amber-500/15 px-1.5 py-0.5 rounded border border-amber-500/30 uppercase font-semibold">Estimated</span>
+                                </div>
+                            </div>
+
+                            <div className="h-[160px] w-full">
+                                {chartData.length === 0 ? (
+                                    <div className="h-full flex flex-col items-center justify-center text-slate-400 text-xs">
+                                        <Activity size={20} className="text-slate-500 mb-2" />
+                                        <span>No time-series data recorded for this window</span>
+                                    </div>
+                                ) : (
+                                    <ResponsiveContainer width="100%" height={160}>
+                                        <ComposedChart
+                                            syncId="stream-transfer-bandwidth"
+                                            syncMethod="value"
+                                            data={chartData}
+                                            margin={{ top: 8, right: 18, left: 0, bottom: 0 }}
+                                        >
+                                            <defs>
+                                                <linearGradient id="streamDataGrad" x1="0" y1="0" x2="0" y2="1">
+                                                    <stop offset="5%" stopColor="#2dd4bf" stopOpacity={0.4} />
+                                                    <stop offset="95%" stopColor="#2dd4bf" stopOpacity={0.02} />
+                                                </linearGradient>
+                                            </defs>
+                                            <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" syncWithTicks={true} />
+                                            <XAxis
+                                                dataKey="date"
+                                                stroke="rgba(255,255,255,0.15)"
+                                                tick={renderHiddenUpperDateTick}
+                                                tickLine={false}
+                                                axisLine={{ stroke: 'rgba(255,255,255,0.1)' }}
+                                                height={8}
+                                                minTickGap={24}
+                                                tickFormatter={(dateTickValue) => formatStreamingAxisDateTick(dateTickValue, analytics.timeSeriesGranularity)}
+                                            />
+                                            <YAxis
+                                                stroke="rgba(255,255,255,0.2)"
+                                                tick={{ fill: '#e2e8f0', fontSize: 13 }}
+                                                tickFormatter={(numericalValue) => `${numericalValue}`}
+                                                domain={chart1Scales.leftAxis.domain}
+                                                ticks={chart1Scales.leftAxis.ticks}
+                                                interval={0}
+                                                width={56}
+                                            />
+                                            <Tooltip
+                                                contentStyle={{
+                                                    backgroundColor: '#0f172a',
+                                                    border: '1px solid rgba(255,255,255,0.12)',
+                                                    borderRadius: '10px',
+                                                }}
+                                                labelFormatter={(label) => label ? `${label} UTC` : ''}
+                                                labelStyle={{ color: '#cbd5e1', fontSize: '13px', marginBottom: '4px' }}
+                                                formatter={(value, name) => {
+                                                    if (name === 'Transferred data (GB)' || name === 'Data Used') return [`${value} GB`, 'Transferred data (GB) \u00b7 Estimated'];
+                                                    return [String(value), String(name)];
+                                                }}
+                                            />
+                                            <Area
+                                                type="linear"
+                                                name="Transferred data (GB)"
+                                                dataKey="dataGB"
+                                                stroke="#2dd4bf"
+                                                strokeWidth={2}
+                                                fillOpacity={1}
+                                                fill="url(#streamDataGrad)"
+                                            />
+                                        </ComposedChart>
+                                    </ResponsiveContainer>
+                                )}
+                            </div>
+
+                            <div className="flex flex-wrap items-center justify-between gap-2 pb-1 border-b border-white/[0.06] mb-1.5 text-[13px] pt-2.5">
+                                <div className="flex items-center gap-1.5">
+                                    <span className="inline-block w-4 h-0.5 bg-violet-400" />
+                                    <span className="text-violet-300 font-semibold">Recorded peak bitrate (Mbps)</span>
+                                    <span className="text-[13px] text-slate-300">({bucketLabel} UTC buckets)</span>
+                                </div>
+                            </div>
+
+                            <div className="h-[160px] w-full">
+                                {chartData.length === 0 ? (
+                                    <div className="h-full flex flex-col items-center justify-center text-slate-400 text-xs">
+                                        <Activity size={20} className="text-slate-500 mb-2" />
+                                        <span>No time-series data recorded for this window</span>
+                                    </div>
+                                ) : (
+                                    <ResponsiveContainer width="100%" height={160}>
+                                        <ComposedChart
+                                            syncId="stream-transfer-bandwidth"
+                                            syncMethod="value"
+                                            data={chartData}
+                                            margin={{ top: 8, right: 18, left: 0, bottom: 0 }}
+                                        >
+                                            <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" syncWithTicks={true} />
+                                            <XAxis
+                                                dataKey="date"
+                                                stroke="rgba(255,255,255,0.2)"
+                                                tick={{ fill: '#e2e8f0', fontSize: 13 }}
+                                                tickFormatter={(dateTickValue) => formatStreamingAxisDateTick(dateTickValue, analytics.timeSeriesGranularity)}
+                                                minTickGap={24}
+                                            />
+                                            <YAxis
+                                                stroke="rgba(167,139,250,0.35)"
+                                                tick={{ fill: '#ddd6fe', fontSize: 13 }}
+                                                tickFormatter={(numericalValue) => `${numericalValue}`}
+                                                domain={chart1Scales.rightAxis.domain}
+                                                ticks={chart1Scales.rightAxis.ticks}
+                                                interval={0}
+                                                width={56}
+                                            />
+                                            <Tooltip
+                                                contentStyle={{
+                                                    backgroundColor: '#0f172a',
+                                                    border: '1px solid rgba(255,255,255,0.12)',
+                                                    borderRadius: '10px',
+                                                }}
+                                                labelFormatter={(label) => label ? `${label} UTC` : ''}
+                                                labelStyle={{ color: '#cbd5e1', fontSize: '13px', marginBottom: '4px' }}
+                                                formatter={(value, name) => {
+                                                    if (name === 'Recorded peak bitrate (Mbps)' || name === 'Peak bitrate (Mbps)' || name === 'Peak Bandwidth') return [`${value} Mbps`, 'Recorded peak bitrate (Mbps)'];
+                                                    return [String(value), String(name)];
+                                                }}
+                                            />
+                                            <Line
+                                                type="linear"
+                                                name="Recorded peak bitrate (Mbps)"
+                                                dataKey="peakBandwidthMbps"
+                                                stroke="#a78bfa"
+                                                strokeWidth={2.25}
+                                                dot={false}
+                                            />
+                                        </ComposedChart>
+                                    </ResponsiveContainer>
+                                )}
                             </div>
                         </div>
 
-                        {/* Chart 2: Watch Time & Play Method Trends */}
-                        <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-5 flex flex-col">
+                        <div className="rounded-xl border border-white/[0.08] bg-slate-900/60 p-5 flex flex-col">
                             <div className="flex items-center justify-between mb-4">
                                 <div>
-                                    <h3 className="text-sm font-bold text-slate-100 flex items-center gap-2">
+                                    <h3 className="text-sm font-semibold text-slate-100 flex items-center gap-2">
                                         <Activity size={16} className="text-indigo-400" />
                                         Play Sessions & Watch Time Activity
                                     </h3>
                                     <p className="text-xs text-slate-400 mt-0.5">
-                                        {bucketLabel} sessions by delivery method (including Unknown) and Watch Hours · UTC
+                                        {bucketLabel} sessions by delivery method (including Unknown) and Watch Hours &middot; UTC
                                     </p>
                                 </div>
-                                <span className="text-xs font-mono font-bold text-indigo-300 bg-indigo-500/10 px-2.5 py-1 rounded-lg border border-indigo-500/20">
+                                <span className="text-xs font-mono font-medium text-indigo-300 bg-indigo-500/10 px-2.5 py-1 rounded-lg border border-indigo-500/20 whitespace-nowrap shrink-0">
                                     Watch Time: {formatWatchDuration(analytics.totalWatchTimeSecs)}
                                 </span>
                             </div>
 
-                            <div className="h-[220px] w-full">
-                                <ResponsiveContainer width="100%" height={220}>
-                                    <ComposedChart data={chartData} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
-                                        <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" vertical={false} />
-                                        <XAxis
-                                            dataKey="date"
-                                            stroke="rgba(255,255,255,0.2)"
-                                            tick={{ fill: 'rgba(255,255,255,0.45)', fontSize: 10 }}
-                                            tickFormatter={(value) => formatStreamingBucket(value, analytics.timeSeriesGranularity)}
-                                            minTickGap={20}
-                                        />
-                                        <YAxis
-                                            yAxisId="plays"
-                                            stroke="rgba(255,255,255,0.2)"
-                                            tick={{ fill: 'rgba(255,255,255,0.45)', fontSize: 10 }}
-                                            allowDecimals={false}
-                                            width={36}
-                                        />
-                                        <YAxis
-                                            yAxisId="hours"
-                                            orientation="right"
-                                            stroke="rgba(165,180,252,0.25)"
-                                            tick={{ fill: 'rgba(165,180,252,0.7)', fontSize: 10 }}
-                                            tickFormatter={(v) => `${v}h`}
-                                            width={42}
-                                        />
-                                        <Tooltip
-                                            contentStyle={{
-                                                backgroundColor: 'rgba(15, 23, 42, 0.94)',
-                                                border: '1px solid rgba(255,255,255,0.12)',
-                                                borderRadius: '12px',
-                                            }}
-                                            labelStyle={{ color: '#94a3b8', fontSize: '11px', marginBottom: '4px' }}
-                                            formatter={(value, name) => {
-                                                if (name === 'Watch Hours') return [`${value} h`, 'Watch Hours'];
-                                                return [value, String(name)];
-                                            }}
-                                        />
-                                        <Bar yAxisId="plays" dataKey="directPlayCount" name="Direct Play" stackId="plays" fill="#10b981" radius={[0, 0, 0, 0]} />
-                                        <Bar yAxisId="plays" dataKey="directStreamCount" name="Direct Stream" stackId="plays" fill="#38bdf8" radius={[0, 0, 0, 0]} />
-                                        <Bar yAxisId="plays" dataKey="transcodeCount" name="Transcode" stackId="plays" fill="#f59e0b" radius={[4, 4, 0, 0]} />
-                                        <Bar yAxisId="plays" dataKey="unknownPlayCount" name="Unknown" stackId="plays" fill="#64748b" />
-                                        <Line
-                                            yAxisId="hours"
-                                            type="monotone"
-                                            dataKey="watchHours"
-                                            name="Watch Hours"
-                                            stroke="#a855f7"
-                                            strokeWidth={2}
-                                            dot={false}
-                                        />
-                                    </ComposedChart>
-                                </ResponsiveContainer>
+                            <div className="flex flex-wrap items-center justify-between gap-2 pb-1.5 border-b border-white/[0.06] mb-2 text-[13px]">
+                                <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                                    <span className="text-slate-200 font-semibold mr-1">Play sessions</span>
+                                    <div className="flex items-center gap-1.5">
+                                        <span className="inline-block w-2.5 h-2.5 rounded-sm bg-emerald-500" />
+                                        <span className="text-slate-200">Direct Play (sessions)</span>
+                                    </div>
+                                    <div className="flex items-center gap-1.5">
+                                        <span className="inline-block w-2.5 h-2.5 rounded-sm bg-sky-400" />
+                                        <span className="text-slate-200">Direct Stream (sessions)</span>
+                                    </div>
+                                    <div className="flex items-center gap-1.5">
+                                        <span className="inline-block w-2.5 h-2.5 rounded-sm bg-amber-400" />
+                                        <span className="text-slate-200">Transcode (sessions)</span>
+                                    </div>
+                                    <div className="flex items-center gap-1.5">
+                                        <span className="inline-block w-2.5 h-2.5 rounded-sm bg-slate-400" />
+                                        <span className="text-slate-200">Unknown (sessions)</span>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div className="h-[160px] w-full">
+                                {chartData.length === 0 ? (
+                                    <div className="h-full flex flex-col items-center justify-center text-slate-400 text-xs">
+                                        <Activity size={20} className="text-slate-500 mb-2" />
+                                        <span>No watch activity recorded for this window</span>
+                                    </div>
+                                ) : (
+                                    <ResponsiveContainer width="100%" height={160}>
+                                        <ComposedChart
+                                            syncId="stream-sessions-watchtime"
+                                            syncMethod="value"
+                                            data={chartData}
+                                            margin={{ top: 8, right: 18, left: 0, bottom: 0 }}
+                                        >
+                                            <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" syncWithTicks={true} />
+                                            <XAxis
+                                                dataKey="date"
+                                                scale="band"
+                                                stroke="rgba(255,255,255,0.15)"
+                                                tick={renderHiddenUpperDateTick}
+                                                tickLine={false}
+                                                axisLine={{ stroke: 'rgba(255,255,255,0.1)' }}
+                                                height={8}
+                                                minTickGap={24}
+                                                tickFormatter={(dateTickValue) => formatStreamingAxisDateTick(dateTickValue, analytics.timeSeriesGranularity)}
+                                            />
+                                            <YAxis
+                                                stroke="rgba(255,255,255,0.2)"
+                                                tick={{ fill: '#e2e8f0', fontSize: 13 }}
+                                                allowDecimals={false}
+                                                tickFormatter={(numericalValue) => `${numericalValue}`}
+                                                domain={chart2Scales.leftAxis.domain}
+                                                ticks={chart2Scales.leftAxis.ticks}
+                                                interval={0}
+                                                width={48}
+                                            />
+                                            <Tooltip
+                                                contentStyle={{
+                                                    backgroundColor: '#0f172a',
+                                                    border: '1px solid rgba(255,255,255,0.12)',
+                                                    borderRadius: '10px',
+                                                }}
+                                                labelFormatter={(label) => label ? `${label} UTC` : ''}
+                                                labelStyle={{ color: '#cbd5e1', fontSize: '13px', marginBottom: '4px' }}
+                                                formatter={(value, name) => [`${value} sessions`, String(name)]}
+                                            />
+                                            <Bar dataKey="directPlayCount" name="Direct Play (sessions)" stackId="plays" fill="#10b981" radius={[0, 0, 0, 0]} />
+                                            <Bar dataKey="directStreamCount" name="Direct Stream (sessions)" stackId="plays" fill="#38bdf8" radius={[0, 0, 0, 0]} />
+                                            <Bar dataKey="transcodeCount" name="Transcode (sessions)" stackId="plays" fill="#f59e0b" radius={[4, 4, 0, 0]} />
+                                            <Bar dataKey="unknownPlayCount" name="Unknown (sessions)" stackId="plays" fill="#94a3b8" />
+                                        </ComposedChart>
+                                    </ResponsiveContainer>
+                                )}
+                            </div>
+
+                            <div className="flex flex-wrap items-center justify-between gap-2 pb-1 border-b border-white/[0.06] mb-1.5 text-[13px] pt-2.5">
+                                <div className="flex items-center gap-1.5">
+                                    <span className="inline-block w-4 h-0 border-t-2 border-dashed border-purple-400" />
+                                    <span className="text-purple-300 font-semibold">Watch time (hours)</span>
+                                </div>
+                            </div>
+
+                            <div className="h-[160px] w-full">
+                                {chartData.length === 0 ? (
+                                    <div className="h-full flex flex-col items-center justify-center text-slate-400 text-xs">
+                                        <Activity size={20} className="text-slate-500 mb-2" />
+                                        <span>No watch activity recorded for this window</span>
+                                    </div>
+                                ) : (
+                                    <ResponsiveContainer width="100%" height={160}>
+                                        <ComposedChart
+                                            syncId="stream-sessions-watchtime"
+                                            syncMethod="value"
+                                            data={chartData}
+                                            margin={{ top: 8, right: 18, left: 0, bottom: 0 }}
+                                        >
+                                            <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" syncWithTicks={true} />
+                                            <XAxis
+                                                dataKey="date"
+                                                scale="band"
+                                                stroke="rgba(255,255,255,0.2)"
+                                                tick={{ fill: '#e2e8f0', fontSize: 13 }}
+                                                tickFormatter={(dateTickValue) => formatStreamingAxisDateTick(dateTickValue, analytics.timeSeriesGranularity)}
+                                                minTickGap={24}
+                                            />
+                                            <YAxis
+                                                stroke="rgba(196,181,253,0.35)"
+                                                tick={{ fill: '#ddd6fe', fontSize: 13 }}
+                                                tickFormatter={(numericalValue) => `${numericalValue}`}
+                                                domain={chart2Scales.rightAxis.domain}
+                                                ticks={chart2Scales.rightAxis.ticks}
+                                                interval={0}
+                                                width={48}
+                                            />
+                                            <Tooltip
+                                                contentStyle={{
+                                                    backgroundColor: '#0f172a',
+                                                    border: '1px solid rgba(255,255,255,0.12)',
+                                                    borderRadius: '10px',
+                                                }}
+                                                labelFormatter={(label) => label ? `${label} UTC` : ''}
+                                                labelStyle={{ color: '#cbd5e1', fontSize: '13px', marginBottom: '4px' }}
+                                                formatter={(value) => [`${value} h`, 'Watch time (hours)']}
+                                            />
+                                            <Line
+                                                type="linear"
+                                                dataKey="watchHours"
+                                                name="Watch time (hours)"
+                                                stroke="#a855f7"
+                                                strokeWidth={2}
+                                                strokeDasharray="4 4"
+                                                dot={false}
+                                            />
+                                        </ComposedChart>
+                                    </ResponsiveContainer>
+                                )}
                             </div>
                         </div>
                     </div>
 
-                    {/* Stream Type, Resolution & Codec Distribution Strip */}
                     <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                        {/* Stream Type Distribution */}
-                        <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-4 space-y-3">
+                        <div className="rounded-xl border border-white/[0.08] bg-slate-900/60 p-4 space-y-3">
                             <div className="flex items-center justify-between">
                                 <h4 className="text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
                                     <Zap size={14} className="text-emerald-400" />
@@ -1820,22 +2415,22 @@ export default function StreamingTab() {
                                     />
                                 )}
                             </div>
-                            <div className={`grid ${unknownPlaysCount > 0 ? 'grid-cols-2 sm:grid-cols-4' : 'grid-cols-3'} gap-2 pt-1 text-xs`}>
-                                <div className="bg-black/30 rounded-xl p-2 border border-white/5">
+                            <div className={`grid ${unknownPlaysCount > 0 ? 'grid-cols-2 sm:grid-cols-4' : 'grid-cols-3'} gap-2.5 sm:gap-3 pt-2 text-xs`}>
+                                <div className="bg-slate-950/60 rounded-xl p-3 border border-white/[0.06]">
                                     <span className="text-xs text-emerald-400 font-semibold block">Direct Play</span>
                                     <span className="text-sm font-bold text-white tabular-nums">
                                         {analytics.streamTypes.directPlayCount}{' '}
                                         <span className="text-xs text-slate-400 font-normal">({analytics.streamTypes.directPlayPct}%)</span>
                                     </span>
                                 </div>
-                                <div className="bg-black/30 rounded-xl p-2 border border-white/5">
+                                <div className="bg-slate-950/60 rounded-xl p-3 border border-white/[0.06]">
                                     <span className="text-xs text-sky-400 font-semibold block">Direct Stream</span>
                                     <span className="text-sm font-bold text-white tabular-nums">
                                         {analytics.streamTypes.directStreamCount}{' '}
                                         <span className="text-xs text-slate-400 font-normal">({analytics.streamTypes.directStreamPct}%)</span>
                                     </span>
                                 </div>
-                                <div className="bg-black/30 rounded-xl p-2 border border-white/5">
+                                <div className="bg-slate-950/60 rounded-xl p-3 border border-white/[0.06]">
                                     <span className="text-xs text-amber-400 font-semibold block">Transcode</span>
                                     <span className="text-sm font-bold text-white tabular-nums">
                                         {analytics.streamTypes.transcodeCount}{' '}
@@ -1843,7 +2438,7 @@ export default function StreamingTab() {
                                     </span>
                                 </div>
                                 {unknownPlaysCount > 0 && (
-                                    <div className="bg-black/30 rounded-xl p-2 border border-white/5" title="Imported from Jellyfin played-items sync where live play method was not recorded">
+                                    <div className="bg-slate-950/60 rounded-xl p-3 border border-white/[0.06]" title="Imported from Jellyfin played-items sync where live play method was not recorded">
                                         <span className="text-xs text-slate-300 font-semibold block">Unknown</span>
                                         <span className="text-sm font-bold text-white tabular-nums">
                                             {unknownPlaysCount}{' '}
@@ -1854,28 +2449,41 @@ export default function StreamingTab() {
                             </div>
                         </div>
 
-                        {/* Resolution Breakdown */}
-                        <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-4 space-y-2.5">
-                            <h4 className="text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
-                                <Monitor size={14} className="text-indigo-400" />
-                                Resolution & Bandwidth Share
-                            </h4>
+                        <div className="rounded-xl border border-white/[0.08] bg-slate-900/60 p-4 space-y-2.5">
+                            <div className="flex flex-col gap-0.5">
+                                <h4 className="text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
+                                    <Monitor size={14} className="text-indigo-400" />
+                                    Resolution Mix &middot; Share of Plays
+                                </h4>
+                                <span className="text-xs text-slate-400">
+                                    Bar reflects share of plays; estimated transfer shown separately
+                                </span>
+                            </div>
                             <div className="space-y-2">
-                                {analytics.resolutionBreakdown.length === 0 ? (
+                                {sortedResolutionBreakdown.length === 0 ? (
                                     <p className="text-xs text-slate-500 py-4 text-center">No resolution metrics recorded yet</p>
                                 ) : (
-                                    analytics.resolutionBreakdown.slice(0, 4).map((item) => (
-                                        <div key={item.label} className="space-y-1">
-                                            <div className="flex items-center justify-between text-xs">
-                                                <span className="font-semibold text-slate-200">{item.label}</span>
-                                                <span className="text-slate-400 font-mono text-xs">
-                                                    {item.count} plays ({item.pct}%) · {formatBytes(item.dataUsedBytes, 1)}
-                                                </span>
+                                    sortedResolutionBreakdown.slice(0, 4).map((resolutionEntry) => (
+                                        <div key={resolutionEntry.label} className="space-y-1.5">
+                                            <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+                                                <span className="text-[13px] font-medium text-slate-200 shrink-0">{resolutionEntry.label}</span>
+                                                <div className="flex flex-wrap items-baseline gap-x-2.5 gap-y-0.5 font-mono text-[13px]">
+                                                    <span className="font-semibold text-slate-100 tabular-nums">
+                                                        {resolutionEntry.count} plays
+                                                    </span>
+                                                    <span className="text-slate-400 tabular-nums">
+                                                        ({resolutionEntry.pct}%)
+                                                    </span>
+                                                    <span className="text-slate-500">&middot;</span>
+                                                    <span className="text-[13px] text-slate-300 font-medium tabular-nums">
+                                                        est. {formatBytes(resolutionEntry.dataUsedBytes, 1)}
+                                                    </span>
+                                                </div>
                                             </div>
                                             <div className="h-1.5 w-full rounded-full bg-slate-800 overflow-hidden">
                                                 <div
                                                     className="h-full rounded-full bg-gradient-to-r from-indigo-500 to-cyan-400"
-                                                    style={{ width: `${Math.max(4, item.pct)}%` }}
+                                                    style={{ width: `${Math.min(100, Math.max(0, resolutionEntry.pct))}%` }}
                                                 />
                                             </div>
                                         </div>
@@ -1884,28 +2492,41 @@ export default function StreamingTab() {
                             </div>
                         </div>
 
-                        {/* Video Codec Breakdown */}
-                        <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-4 space-y-2.5">
-                            <h4 className="text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
-                                <Layers size={14} className="text-fuchsia-400" />
-                                Source Codec Telemetry
-                            </h4>
+                        <div className="rounded-xl border border-white/[0.08] bg-slate-900/60 p-4 space-y-2.5">
+                            <div className="flex flex-col gap-0.5">
+                                <h4 className="text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
+                                    <Layers size={14} className="text-fuchsia-400" />
+                                    Source Codec Telemetry &middot; Share of Plays
+                                </h4>
+                                <span className="text-xs text-slate-400">
+                                    Bar reflects share of plays; estimated transfer shown separately
+                                </span>
+                            </div>
                             <div className="space-y-2">
                                 {analytics.codecBreakdown.length === 0 ? (
                                     <p className="text-xs text-slate-500 py-4 text-center">No codec metrics recorded yet</p>
                                 ) : (
-                                    analytics.codecBreakdown.slice(0, 4).map((item) => (
-                                        <div key={item.label} className="space-y-1">
-                                            <div className="flex items-center justify-between text-xs">
-                                                <span className="font-mono font-bold text-slate-200">{item.label}</span>
-                                                <span className="text-slate-400 font-mono text-xs">
-                                                    {item.count} plays ({item.pct}%) · {formatBytes(item.dataUsedBytes, 1)}
-                                                </span>
+                                    analytics.codecBreakdown.slice(0, 4).map((codecEntry) => (
+                                        <div key={codecEntry.label} className="space-y-1.5">
+                                            <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+                                                <span className="text-[13px] font-mono font-medium text-slate-200 shrink-0">{codecEntry.label}</span>
+                                                <div className="flex flex-wrap items-baseline gap-x-2.5 gap-y-0.5 font-mono text-[13px]">
+                                                    <span className="font-semibold text-slate-100 tabular-nums">
+                                                        {codecEntry.count} plays
+                                                    </span>
+                                                    <span className="text-slate-400 tabular-nums">
+                                                        ({codecEntry.pct}%)
+                                                    </span>
+                                                    <span className="text-slate-500">&middot;</span>
+                                                    <span className="text-[13px] text-slate-300 font-medium tabular-nums">
+                                                        est. {formatBytes(codecEntry.dataUsedBytes, 1)}
+                                                    </span>
+                                                </div>
                                             </div>
                                             <div className="h-1.5 w-full rounded-full bg-slate-800 overflow-hidden">
                                                 <div
                                                     className="h-full rounded-full bg-gradient-to-r from-fuchsia-500 to-purple-400"
-                                                    style={{ width: `${Math.max(4, item.pct)}%` }}
+                                                    style={{ width: `${Math.min(100, Math.max(0, codecEntry.pct))}%` }}
                                                 />
                                             </div>
                                         </div>
@@ -1915,10 +2536,8 @@ export default function StreamingTab() {
                         </div>
                     </div>
 
-                    {/* Top Watchers Leaderboard & Top Watched Titles */}
                     <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                        {/* Top Watchers & Data Consumers */}
-                        <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl overflow-hidden">
+                        <div className="rounded-xl border border-white/[0.08] bg-slate-900/60 overflow-hidden">
                             <div className="px-5 py-4 border-b border-white/[0.06] flex items-center justify-between">
                                 <h3 className="text-sm font-bold text-slate-100 flex items-center gap-2">
                                     <Trophy size={16} className="text-amber-400" />
@@ -1928,53 +2547,49 @@ export default function StreamingTab() {
                             </div>
                             <div className="divide-y divide-white/[0.04]">
                                 {analytics.topUsers.length === 0 ? (
-                                    <div className="py-12 text-center text-xs text-slate-500">
+                                    <div className="py-12 text-center text-xs text-slate-400">
                                         No user playback statistics recorded for this period.
                                     </div>
                                 ) : (
-                                    analytics.topUsers.map((u, idx) => {
-                                        const rankMedal = idx === 0 ? '🥇' : idx === 1 ? '🥈' : idx === 2 ? '🥉' : `#${idx + 1}`;
-                                        return (
-                                            <div
-                                                key={u.userName}
-                                                className="px-5 py-3.5 flex items-center justify-between gap-3 hover:bg-white/[0.02] transition-colors"
-                                            >
-                                                <div className="flex items-center gap-3 min-w-0">
-                                                    <span className="w-6 text-center text-sm font-bold text-slate-400 shrink-0">
-                                                        {rankMedal}
-                                                    </span>
-                                                    <div className="w-9 h-9 rounded-full bg-indigo-500/20 border border-indigo-500/30 flex items-center justify-center text-xs font-bold text-indigo-300 shrink-0 uppercase">
-                                                        {u.userName.slice(0, 2)}
-                                                    </div>
-                                                    <div className="min-w-0">
-                                                        <p className="text-sm font-bold text-slate-100 truncate">{u.userName}</p>
-                                                        <p className="text-xs text-slate-400 truncate">
-                                                            {u.uniqueItems} unique titles · {u.lastDevice || 'Jellyfin Client'}
-                                                        </p>
-                                                    </div>
+                                    analytics.topUsers.map((userStat, index) => (
+                                        <div
+                                            key={userStat.userName}
+                                            className="px-5 py-3.5 flex items-center justify-between gap-3 hover:bg-white/[0.02] transition-colors"
+                                        >
+                                            <div className="flex items-center gap-3 min-w-0">
+                                                <span className="w-6 h-6 rounded-lg bg-white/[0.05] border border-white/10 flex items-center justify-center text-xs font-bold text-slate-300 shrink-0">
+                                                    {index + 1}
+                                                </span>
+                                                <div className="w-9 h-9 rounded-full bg-indigo-500/20 border border-indigo-500/30 flex items-center justify-center text-xs font-bold text-indigo-300 shrink-0 uppercase">
+                                                    {userStat.userName.slice(0, 2)}
                                                 </div>
-                                                <div className="text-right shrink-0">
-                                                    <div className="flex items-center justify-end gap-2">
-                                                        <span className="text-xs font-mono font-bold text-teal-300 bg-teal-500/10 px-2 py-0.5 rounded border border-teal-500/20">
-                                                            {formatBytes(u.totalDataBytes, 1)}
-                                                        </span>
-                                                        <span className="text-sm font-bold text-white tabular-nums">
-                                                            {u.totalPlays} plays
-                                                        </span>
-                                                    </div>
-                                                    <p className="text-xs text-slate-400 mt-0.5 tabular-nums">
-                                                        {formatWatchDuration(u.totalWatchSecs)} watched · {u.directPlayCount} direct / {u.transcodeCount} transcode
+                                                <div className="min-w-0">
+                                                    <p className="text-sm font-bold text-slate-100 truncate">{userStat.userName}</p>
+                                                    <p className="text-[13px] text-slate-300 truncate">
+                                                        {userStat.uniqueItems} unique titles &middot; {userStat.lastDevice || 'Jellyfin Client'}
                                                     </p>
                                                 </div>
                                             </div>
-                                        );
-                                    })
+                                            <div className="text-right shrink-0">
+                                                <div className="flex items-center justify-end gap-2">
+                                                    <span className="text-xs font-mono font-bold text-teal-300 bg-teal-500/10 px-2 py-0.5 rounded border border-teal-500/20">
+                                                        {formatBytes(userStat.totalDataBytes, 1)}
+                                                    </span>
+                                                    <span className="text-sm font-bold text-white tabular-nums">
+                                                        {userStat.totalPlays} plays
+                                                    </span>
+                                                </div>
+                                                <p className="text-[13px] text-slate-300 mt-0.5 tabular-nums">
+                                                    {formatWatchDuration(userStat.totalWatchSecs)} watched &middot; {userStat.directPlayCount} direct / {userStat.transcodeCount} transcode
+                                                </p>
+                                            </div>
+                                        </div>
+                                    ))
                                 )}
                             </div>
                         </div>
 
-                        {/* Top Watched Titles */}
-                        <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl overflow-hidden">
+                        <div className="rounded-xl border border-white/[0.08] bg-slate-900/60 overflow-hidden">
                             <div className="px-5 py-4 border-b border-white/[0.06] flex items-center justify-between">
                                 <h3 className="text-sm font-bold text-slate-100 flex items-center gap-2">
                                     <Flame size={16} className="text-orange-400" />
@@ -1988,34 +2603,34 @@ export default function StreamingTab() {
                                         No media titles played in this window yet.
                                     </div>
                                 ) : (
-                                    analytics.topTitles.map((t, idx) => (
+                                    analytics.topTitles.map((titleStat, index) => (
                                         <div
-                                            key={`${t.itemName}-${idx}`}
+                                            key={`${titleStat.itemName}-${index}`}
                                             className="px-5 py-3.5 flex items-center justify-between gap-3 hover:bg-white/[0.02] transition-colors"
                                         >
                                             <div className="flex items-center gap-3 min-w-0">
                                                 <span className="w-6 h-6 rounded-lg bg-white/[0.05] border border-white/10 flex items-center justify-center text-xs font-bold text-slate-300 shrink-0">
-                                                    {idx + 1}
+                                                    {index + 1}
                                                 </span>
                                                 <div className="min-w-0">
                                                     <div className="flex items-center gap-2">
-                                                        <p className="text-sm font-bold text-slate-100 truncate">{t.itemName}</p>
-                                                        {t.productionYear ? (
-                                                            <span className="text-xs font-mono text-slate-400">({t.productionYear})</span>
+                                                        <p className="text-sm font-bold text-slate-100 truncate">{titleStat.itemName}</p>
+                                                        {titleStat.productionYear ? (
+                                                            <span className="text-[13px] font-mono text-slate-300">({titleStat.productionYear})</span>
                                                         ) : null}
                                                     </div>
-                                                    <div className="flex flex-wrap items-center gap-1.5 mt-0.5 text-xs">
+                                                    <div className="flex flex-wrap items-center gap-1.5 mt-0.5 text-[13px]">
                                                         <span className="px-1.5 py-0.2 rounded bg-purple-500/15 text-purple-300 border border-purple-500/20">
-                                                            {t.itemType}
+                                                            {titleStat.itemType}
                                                         </span>
-                                                        {t.videoResolution && (
+                                                        {titleStat.videoResolution && (
                                                             <span className="px-1.5 py-0.2 rounded bg-white/10 text-slate-300 font-mono">
-                                                                {t.videoResolution}
+                                                                {titleStat.videoResolution}
                                                             </span>
                                                         )}
-                                                        {t.videoCodec && (
+                                                        {titleStat.videoCodec && (
                                                             <span className="px-1.5 py-0.2 rounded bg-indigo-500/15 text-indigo-300 font-mono">
-                                                                {t.videoCodec}
+                                                                {titleStat.videoCodec}
                                                             </span>
                                                         )}
                                                     </div>
@@ -2024,14 +2639,14 @@ export default function StreamingTab() {
                                             <div className="text-right shrink-0">
                                                 <div className="flex items-center justify-end gap-2">
                                                     <span className="text-xs font-mono text-teal-300">
-                                                        {formatBytes(t.totalDataBytes, 1)}
+                                                        {formatBytes(titleStat.totalDataBytes, 1)}
                                                     </span>
                                                     <span className="text-sm font-bold text-white tabular-nums">
-                                                        {t.totalPlays} plays
+                                                        {titleStat.totalPlays} plays
                                                     </span>
                                                 </div>
-                                                <p className="text-xs text-slate-400 mt-0.5 tabular-nums">
-                                                    {t.uniqueViewers} viewer{t.uniqueViewers === 1 ? '' : 's'} · {formatWatchDuration(t.totalWatchSecs)}
+                                                <p className="text-[13px] text-slate-300 mt-0.5 tabular-nums">
+                                                    {titleStat.uniqueViewers} viewer{titleStat.uniqueViewers === 1 ? '' : 's'} &middot; {formatWatchDuration(titleStat.totalWatchSecs)}
                                                 </p>
                                             </div>
                                         </div>
@@ -2040,14 +2655,13 @@ export default function StreamingTab() {
                             </div>
                         </div>
                     </div>
+
+                    <StreamingImportedHistory estimates={analytics.historicalEstimates ?? []} windowDays={windowDays} />
                 </>
             )}
 
-            {/* ========================================================================= */}
-            {/* 6. PLAYBACK & DATA USAGE HISTORY LOG TABLE                                */}
-            {/* ========================================================================= */}
             {(activeView === 'dashboard' || activeView === 'history') && (
-                <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-5">
+                <div className="rounded-xl border border-white/[0.08] bg-slate-900/60 p-5">
                     <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 mb-4 pb-3 border-b border-white/[0.06]">
                         <div>
                             <div className="flex flex-wrap items-center gap-2">
@@ -2057,7 +2671,7 @@ export default function StreamingTab() {
                                 </h3>
                                 <span
                                     data-testid="history-result-count"
-                                    className="text-xs font-mono px-2 py-0.5 rounded-full bg-white/[0.06] border border-white/10 text-slate-300"
+                                    className="text-xs font-mono px-2.5 py-1 rounded-full bg-indigo-500/15 border border-indigo-500/30 text-indigo-200 font-semibold"
                                 >
                                     {filteredHistory.length === 0
                                         ? `0 matching of ${loadedHistory.length} loaded`
@@ -2070,13 +2684,12 @@ export default function StreamingTab() {
                                         : ''}
                                 </span>
                             </div>
-                            <p className="text-xs text-slate-400 mt-0.5">
+                            <p className="text-xs text-slate-300 mt-0.5">
                                 Detailed per-session audit of play method, codecs, bitrate, data consumed, and completion
                             </p>
                         </div>
 
                         <div className="flex flex-wrap items-center gap-2">
-                            {/* Inline Play Method Filter (accessible in both Dashboard & History views) */}
                             <label htmlFor="history-play-method-select" className="sr-only">
                                 Filter history by play method
                             </label>
@@ -2084,11 +2697,11 @@ export default function StreamingTab() {
                                 id="history-play-method-select"
                                 aria-label="Filter history by play method"
                                 value={playMethodFilter}
-                                onChange={(e) => {
-                                    setPlayMethodFilter(e.target.value);
+                                onChange={(event) => {
+                                    setPlayMethodFilter(event.target.value);
                                     setHistoryPage(1);
                                 }}
-                                className="px-2.5 py-1.5 rounded-xl bg-black/40 border border-white/10 text-xs text-slate-200 focus:outline-none focus:border-indigo-500/50"
+                                className="min-h-[40px] px-3 py-2 rounded-xl bg-slate-950/60 border border-white/10 text-xs text-slate-200 focus:outline-none focus:border-indigo-500/50"
                             >
                                 <option value="all">All Play Methods</option>
                                 <option value="DirectPlay">Direct Play</option>
@@ -2097,7 +2710,6 @@ export default function StreamingTab() {
                                 <option value="Unknown">Unknown (Imported)</option>
                             </select>
 
-                            {/* Page Size Selector */}
                             <label htmlFor="history-page-size-select" className="sr-only">
                                 History rows per page
                             </label>
@@ -2105,11 +2717,11 @@ export default function StreamingTab() {
                                 id="history-page-size-select"
                                 aria-label="History rows per page"
                                 value={historyPageSize}
-                                onChange={(e) => {
-                                    setHistoryPageSize(Number(e.target.value) || 10);
+                                onChange={(event) => {
+                                    setHistoryPageSize(Number(event.target.value) || 10);
                                     setHistoryPage(1);
                                 }}
-                                className="px-2.5 py-1.5 rounded-xl bg-black/40 border border-white/10 text-xs text-slate-200 focus:outline-none focus:border-indigo-500/50"
+                                className="min-h-[40px] px-3 py-2 rounded-xl bg-slate-950/60 border border-white/10 text-xs text-slate-200 focus:outline-none focus:border-indigo-500/50"
                             >
                                 <option value={10}>10 / page</option>
                                 <option value={20}>20 / page</option>
@@ -2117,23 +2729,21 @@ export default function StreamingTab() {
                                 <option value={50}>50 / page</option>
                             </select>
 
-                            {/* Search Input */}
                             <div className="relative w-full sm:w-64">
-                                <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
+                                <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
                                 <input
                                     type="text"
                                     aria-label="Search playback history"
                                     value={historySearch}
-                                    onChange={(e) => {
-                                        setHistorySearch(e.target.value);
+                                    onChange={(event) => {
+                                        setHistorySearch(event.target.value);
                                         setHistoryPage(1);
                                     }}
                                     placeholder="Search title, user, client, device..."
-                                    className="w-full pl-9 pr-3 py-1.5 rounded-xl bg-black/40 border border-white/10 text-xs text-slate-200 placeholder:text-slate-500 focus:outline-none focus:border-indigo-500/50"
+                                    className="min-h-[40px] w-full pl-9 pr-3 py-2 rounded-xl bg-slate-950/60 border border-white/10 text-xs text-slate-200 placeholder:text-slate-400 focus:outline-none focus:border-indigo-500/50"
                                 />
                             </div>
 
-                            {/* Honest CSV Export Button */}
                             <button
                                 type="button"
                                 onClick={handleExportHistoryCsv}
@@ -2148,7 +2758,7 @@ export default function StreamingTab() {
                                         ? `Exports the ${filteredHistory.length} loaded matching rows (${analytics.totalPlays} total records exist in backend window)`
                                         : `Export ${filteredHistory.length} matching rows to CSV`
                                 }
-                                className="px-3 py-1.5 rounded-xl text-xs font-semibold bg-white/[0.06] hover:bg-white/[0.12] disabled:opacity-40 disabled:cursor-not-allowed border border-white/10 text-slate-200 flex items-center gap-1.5 transition-all"
+                                className="min-h-[40px] px-3.5 py-2 rounded-xl text-xs font-medium bg-slate-850 hover:bg-slate-750 disabled:opacity-40 disabled:cursor-not-allowed border border-white/10 text-slate-200 flex items-center gap-1.5 transition-all"
                             >
                                 <Download size={13} />
                                 <span>
@@ -2160,13 +2770,12 @@ export default function StreamingTab() {
                         </div>
                     </div>
 
-                    {/* Bounded History & Historical Import Estimate Disclosures */}
                     {(isHistoryBounded || hasHistoricalSyncImports) && (
                         <div className="mb-4 flex flex-col gap-2">
                             {isHistoryBounded && (
                                 <div
                                     data-testid="bounded-history-notice"
-                                    className="px-3.5 py-2 rounded-xl border border-amber-500/25 bg-amber-500/10 text-xs text-amber-200 flex items-center justify-between gap-2"
+                                    className="px-3.5 py-2 rounded-xl border border-amber-500/35 bg-amber-500/15 text-xs text-amber-200 flex items-center justify-between gap-2"
                                 >
                                     <span>
                                         Showing the most recent <strong>{loadedHistory.length}</strong> loaded history rows out of{' '}
@@ -2177,10 +2786,10 @@ export default function StreamingTab() {
                             {hasHistoricalSyncImports && (
                                 <div
                                     data-testid="historical-estimate-notice"
-                                    className="px-3.5 py-2 rounded-xl border border-slate-500/30 bg-slate-800/50 text-xs text-slate-300 flex items-center justify-between gap-2"
+                                    className="px-3.5 py-2 rounded-xl border border-slate-400/35 bg-slate-800/70 text-xs text-slate-200 flex items-center justify-between gap-2"
                                 >
                                     <span>
-                                        <strong>Historical Import Limitation:</strong> Jellyfin played-item imports are last-played summaries, not complete session logs. Client, delivery method and transfer bytes are unrecorded. Retained legacy byte values and live-poll transfer totals are estimates, not measured network traffic.
+                                        <strong className="text-white font-semibold">Historical Import Limitation:</strong> Jellyfin played-item imports are last-played summaries, not complete session logs. Client, delivery method and transfer bytes are unrecorded. Retained legacy byte values and live-poll transfer totals are estimates, not measured network traffic.
                                     </span>
                                 </div>
                             )}
@@ -2209,21 +2818,21 @@ export default function StreamingTab() {
                                     </tr>
                                 ) : filteredHistory.length === 0 ? (
                                     <tr>
-                                        <td colSpan={7} className="py-10 text-center text-slate-500">
+                                        <td colSpan={7} className="py-10 text-center text-slate-400">
                                             No playback history entries match the current filter.
                                         </td>
                                     </tr>
                                 ) : (
-                                    paginatedHistory.map((h) => {
-                                        const mStyle = getPlayMethodStyle(h.playMethod);
-                                        const epBadge = formatEpisodeBadge(h.seasonNumber, h.episodeNumber);
-                                        const isSyncedEstimate = isHistoricalSyncEntry(h);
-                                        const playbackTime = parseStreamingTimestamp(h.startedAt || h.lastSeenAt);
+                                    paginatedHistory.map((historyItem) => {
+                                        const methodStyle = getPlayMethodStyle(historyItem.playMethod);
+                                        const episodeBadge = formatEpisodeBadge(historyItem.seasonNumber, historyItem.episodeNumber);
+                                        const isSyncedEstimate = isHistoricalSyncEntry(historyItem);
+                                        const playbackTime = parseStreamingTimestamp(historyItem.startedAt || historyItem.lastSeenAt);
                                         return (
-                                            <tr key={h.id} className="hover:bg-white/[0.02] transition-colors">
+                                            <tr key={historyItem.id} className="hover:bg-white/[0.02] transition-colors">
                                                 <td className="py-3 px-3">
                                                     <div className="flex items-center gap-2">
-                                                        {h.isActive && (
+                                                        {historyItem.isActive && (
                                                             <span
                                                                 className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse shrink-0"
                                                                 title="Currently Playing"
@@ -2231,71 +2840,71 @@ export default function StreamingTab() {
                                                         )}
                                                         <div>
                                                             <p className="font-bold text-slate-100">
-                                                                {h.seriesName ? `${h.seriesName} · ` : ''}
-                                                                {epBadge ? `${epBadge} — ` : ''}
-                                                                {h.itemName}
+                                                                {historyItem.seriesName ? `${historyItem.seriesName} · ` : ''}
+                                                                {episodeBadge ? `${episodeBadge} — ` : ''}
+                                                                {historyItem.itemName}
                                                             </p>
-                                                            <p className="text-xs text-slate-500 mt-0.5">
-                                                                {h.itemType} {h.productionYear ? `(${h.productionYear})` : ''} · {h.serverName}
+                                                            <p className="text-xs text-slate-400 mt-0.5">
+                                                                {historyItem.itemType} {historyItem.productionYear ? `(${historyItem.productionYear})` : ''} &middot; {historyItem.serverName}
                                                             </p>
                                                         </div>
                                                     </div>
                                                 </td>
-                                                <td className="py-3 px-3 whitespace-nowrap text-slate-400">
+                                                <td className="py-3 px-3 whitespace-nowrap text-slate-300">
                                                     <time dateTime={playbackTime?.toISOString()}>
                                                         {playbackTime ? `${playbackTime.toISOString().slice(0, 19).replace('T', ' ')} UTC` : 'Unknown date'}
                                                     </time>
                                                 </td>
-                                                <td className="py-3 px-3 font-semibold text-slate-200">{h.userName}</td>
+                                                <td className="py-3 px-3 font-semibold text-slate-200">{historyItem.userName}</td>
                                                 <td className="py-3 px-3">
-                                                    <p className="text-slate-200">{h.clientName || (isSyncedEstimate ? 'Historical Import' : 'Unknown Client')}</p>
-                                                    <p className="text-xs text-slate-500">
-                                                        {h.deviceName || (isSyncedEstimate ? 'Unrecorded device' : 'Unknown device')} {h.ipAddress ? `· ${h.ipAddress}` : ''}
+                                                    <p className="text-slate-200">{historyItem.clientName || (isSyncedEstimate ? 'Historical Import' : 'Unknown Client')}</p>
+                                                    <p className="text-xs text-slate-400">
+                                                        {historyItem.deviceName || (isSyncedEstimate ? 'Unrecorded device' : 'Unknown device')} {historyItem.ipAddress ? `· ${historyItem.ipAddress}` : ''}
                                                     </p>
                                                 </td>
                                                 <td className="py-3 px-3">
                                                     <div className="flex flex-wrap items-center gap-1">
-                                                        <span className={`text-xs font-bold px-2 py-0.5 rounded-full border ${mStyle.badge}`}>
-                                                            {mStyle.label}
-                                                            {h.hwAccel ? ` (${h.hwAccel})` : ''}
+                                                        <span className={`text-xs font-bold px-2 py-0.5 rounded-full border ${methodStyle.badge}`}>
+                                                            {methodStyle.label}
+                                                            {historyItem.hwAccel ? ` (${historyItem.hwAccel})` : ''}
                                                         </span>
                                                         <span className="text-xs font-mono bg-white/[0.06] text-slate-300 px-1.5 py-0.5 rounded">
-                                                            {[h.videoResolution, [h.videoCodec, h.audioCodec].filter(Boolean).join(' / ')].filter(Boolean).join(' · ') || 'Unrecorded pipeline'}
+                                                            {[historyItem.videoResolution, [historyItem.videoCodec, historyItem.audioCodec].filter(Boolean).join(' / ')].filter(Boolean).join(' · ') || 'Unrecorded pipeline'}
                                                         </span>
                                                     </div>
                                                 </td>
                                                 <td className="py-3 px-3 font-mono">
                                                     <div className="flex items-center gap-1.5">
                                                         <p className="text-teal-300 font-bold">
-                                                            {isSyncedEstimate && (!h.dataUsedBytes || h.dataUsedBytes <= 0)
+                                                            {isSyncedEstimate && (!historyItem.dataUsedBytes || historyItem.dataUsedBytes <= 0)
                                                                 ? 'Unrecorded'
-                                                                : formatBytes(h.dataUsedBytes, 2)}
+                                                                : formatBytes(historyItem.dataUsedBytes, 2)}
                                                         </p>
                                                         {isSyncedEstimate && (
                                                             <span
                                                                 className="text-xs font-sans font-semibold px-1.5 py-0.2 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30"
                                                                 title="Imported from Jellyfin played-item history; live session bytes and delivery method were not measured"
                                                             >
-                                                                {h.dataUsedBytes && h.dataUsedBytes > 0 ? 'Est.' : 'Sync'}
+                                                                {historyItem.dataUsedBytes && historyItem.dataUsedBytes > 0 ? 'Est.' : 'Sync'}
                                                             </span>
                                                         )}
                                                     </div>
-                                                    <p className="text-xs text-slate-400">{formatBandwidthMbps(h.bandwidthMbps, h.bitrateBps)} Mbps</p>
+                                                    <p className="text-xs text-slate-400">{formatBandwidthMbps(historyItem.bandwidthMbps, historyItem.bitrateBps)} Mbps</p>
                                                 </td>
                                                 <td className="py-3 px-3">
                                                     <div className="flex items-center gap-2">
                                                         <div className="w-20 h-1.5 bg-slate-800 rounded-full overflow-hidden">
                                                             <div
                                                                 className="h-full bg-indigo-500 rounded-full"
-                                                                style={{ width: `${Math.min(100, Number.isFinite(h.completionPct) ? h.completionPct : 0)}%` }}
+                                                                style={{ width: `${Math.min(100, Number.isFinite(historyItem.completionPct) ? historyItem.completionPct : 0)}%` }}
                                                             />
                                                         </div>
                                                         <span className="text-xs font-mono text-slate-300">
-                                                            {Math.round(Number.isFinite(h.completionPct) ? h.completionPct : 0)}%
+                                                            {Math.round(Number.isFinite(historyItem.completionPct) ? historyItem.completionPct : 0)}%
                                                         </span>
                                                     </div>
-                                                    <p className="text-xs text-slate-500 mt-0.5">
-                                                        {formatWatchDuration(h.watchedSecs)} / {formatWatchDuration(h.durationSecs)}
+                                                    <p className="text-xs text-slate-400 mt-0.5">
+                                                        {formatWatchDuration(historyItem.watchedSecs)} / {formatWatchDuration(historyItem.durationSecs)}
                                                     </p>
                                                 </td>
                                             </tr>
@@ -2306,7 +2915,6 @@ export default function StreamingTab() {
                         </table>
                     </div>
 
-                    {/* Pagination Footer */}
                     {filteredHistory.length > 0 && (
                         <div className="mt-4 pt-3 border-t border-white/[0.06] flex flex-col sm:flex-row items-center justify-between gap-3 text-xs text-slate-400">
                             <span>
@@ -2319,7 +2927,7 @@ export default function StreamingTab() {
                                     type="button"
                                     aria-label="Previous loaded history page"
                                     disabled={safeHistoryPage <= 1}
-                                    onClick={() => setHistoryPage((p) => Math.max(1, p - 1))}
+                                    onClick={() => setHistoryPage((page) => Math.max(1, page - 1))}
                                     className="px-2.5 py-1 rounded-lg bg-white/[0.05] hover:bg-white/[0.1] disabled:opacity-40 disabled:cursor-not-allowed border border-white/10 text-slate-200 flex items-center gap-1"
                                 >
                                     <ChevronLeft size={13} />
@@ -2329,7 +2937,7 @@ export default function StreamingTab() {
                                     type="button"
                                     aria-label="Next loaded history page"
                                     disabled={safeHistoryPage >= totalHistoryPages}
-                                    onClick={() => setHistoryPage((p) => Math.min(totalHistoryPages, p + 1))}
+                                    onClick={() => setHistoryPage((page) => Math.min(totalHistoryPages, page + 1))}
                                     className="px-2.5 py-1 rounded-lg bg-white/[0.05] hover:bg-white/[0.1] disabled:opacity-40 disabled:cursor-not-allowed border border-white/10 text-slate-200 flex items-center gap-1"
                                 >
                                     <span>Next</span>
@@ -2343,23 +2951,21 @@ export default function StreamingTab() {
 
             {(activeView === 'dashboard' || activeView === 'history' || activeView === 'analytics') && <StreamingHistoryExplorer />}
 
-            {/* ========================================================================= */}
-            {/* 7. SERVER CONFIGURATION MODAL (JELLYFIN FIRST, PLEX & EMBY LATER)         */}
-            {/* ========================================================================= */}
             {showConfigModal && (
                 <StreamingDialog name="Media Server Providers" onClose={closeConfig}>
                     <div
-                        className="w-full max-w-xl rounded-2xl border border-indigo-500/30 bg-slate-950/95 p-6 shadow-2xl space-y-5"
-                        onClick={(e) => e.stopPropagation()}
+                        className="w-full max-w-xl rounded-2xl border border-indigo-500/30 bg-slate-950/95 p-4 sm:p-6 shadow-2xl space-y-4 sm:space-y-5"
+                        onClick={(event) => event.stopPropagation()}
                     >
-                        <div className="flex items-center justify-between pb-3 border-b border-white/10">
-                            <div className="flex items-center gap-3">
-                                <div className="h-10 w-10 rounded-xl bg-purple-500/20 border border-purple-500/30 flex items-center justify-center text-purple-300">
-                                    <Server size={20} />
+                        <div className="flex items-center justify-between pb-3 border-b border-white/10 gap-2">
+                            <div className="flex items-center gap-2.5 sm:gap-3 min-w-0">
+                                <div className="h-9 w-9 sm:h-10 sm:w-10 rounded-xl bg-purple-500/20 border border-purple-500/30 flex items-center justify-center text-purple-300 shrink-0">
+                                    <Server size={18} className="sm:hidden" />
+                                    <Server size={20} className="hidden sm:block" />
                                 </div>
-                                <div>
-                                    <h3 className="text-base font-bold text-white">Media Server Providers</h3>
-                                    <p className="text-xs text-slate-400">
+                                <div className="min-w-0">
+                                    <h3 className="text-sm sm:text-base font-bold text-white break-words">Media Server Providers</h3>
+                                    <p className="text-xs text-slate-400 leading-snug">
                                         Jellyfin telemetry and staged Emby configuration. Real-provider acceptance remains pending.
                                     </p>
                                 </div>
@@ -2367,41 +2973,44 @@ export default function StreamingTab() {
                             <button
                                 type="button"
                                 onClick={closeConfig}
-                                className="p-2 rounded-xl text-slate-400 hover:text-white hover:bg-white/10"
+                                className="obs-touch-target-standard min-h-[44px] min-w-[44px] sm:min-h-[40px] sm:min-w-[40px] p-2 rounded-xl text-slate-400 hover:text-white hover:bg-white/10 shrink-0 flex items-center justify-center transition-colors"
                                 aria-label="Close modal"
                             >
                                 <X size={18} />
                             </button>
                         </div>
 
-                        {/* Provider Roadmap Cards */}
-                        <div className="grid grid-cols-3 gap-2.5">
-                            <div className="rounded-xl border border-purple-500/40 bg-purple-500/10 p-3">
-                                <div className="flex items-center justify-between">
-                                    <span className="text-xs font-bold text-white">Jellyfin</span>
-                                    <span className="text-xs font-bold uppercase px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300">
+                        <div className="grid grid-cols-1 min-[360px]:grid-cols-3 gap-2 sm:gap-2.5">
+                            <div className="rounded-xl border border-purple-500/40 bg-purple-500/10 p-2.5 sm:p-3 min-w-0">
+                                <div className="flex flex-wrap items-center justify-between gap-1">
+                                    <span className="text-xs font-bold text-white shrink-0">Jellyfin</span>
+                                    <span className="text-xs font-bold uppercase px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 shrink-0">
                                         Active
                                     </span>
                                 </div>
                                 <p className="text-xs text-slate-300 mt-1">Full stream, codec & bandwidth telemetry</p>
                             </div>
-                            <div className="rounded-xl border border-white/10 bg-white/[0.02] p-3 opacity-70">
-                                <div className="flex items-center justify-between">
-                                    <span className="text-xs font-bold text-slate-300">Plex</span>
-                                    <span className="text-xs font-mono px-1.5 py-0.5 rounded bg-white/10 text-slate-400">
-                                        Later
+                            <div className="rounded-xl border border-white/10 bg-white/[0.02] p-2.5 sm:p-3 opacity-70 min-w-0">
+                                <div className="flex flex-wrap items-center justify-between gap-1">
+                                    <span className="text-xs font-bold text-slate-300 shrink-0">Plex</span>
+                                    <span className="text-xs font-mono px-1.5 py-0.5 rounded bg-white/10 text-slate-400 shrink-0">
+                                        {isPlexObserved ? 'Observed' : 'Planned'}
                                     </span>
                                 </div>
-                                <p className="text-xs text-slate-500 mt-1">X-Plex-Token session adapter</p>
+                                <p className="text-xs text-slate-400 mt-1">
+                                    {isPlexObserved
+                                        ? 'Observed stream telemetry from Plex session'
+                                        : 'Planned integration · X-Plex-Token session adapter'}
+                                </p>
                             </div>
-                            <div className="rounded-xl border border-white/10 bg-white/[0.02] p-3 opacity-70">
-                                <div className="flex items-center justify-between">
-                                    <span className="text-xs font-bold text-slate-300">Emby</span>
-                                    <span className="text-xs font-mono px-1.5 py-0.5 rounded bg-white/10 text-slate-400">
-                                        Later
+                            <div className="rounded-xl border border-white/10 bg-white/[0.02] p-2.5 sm:p-3 opacity-70 min-w-0">
+                                <div className="flex flex-wrap items-center justify-between gap-1">
+                                    <span className="text-xs font-bold text-slate-300 shrink-0">Emby</span>
+                                    <span className="text-xs font-mono px-1.5 py-0.5 rounded bg-white/10 text-slate-400 shrink-0">
+                                        Planned
                                     </span>
                                 </div>
-                                <p className="text-xs text-slate-500 mt-1">Staged telemetry; commands and summary sync unsupported</p>
+                                <p className="text-xs text-slate-400 mt-1">Planned integration · Staged telemetry</p>
                             </div>
                         </div>
 
@@ -2430,7 +3039,7 @@ export default function StreamingTab() {
                                     id="jellyfin-server-name-input"
                                     type="text"
                                     value={serverNameInput}
-                                    onChange={(e) => { configRevision.current += 1; setServerNameInput(e.target.value); }}
+                                    onChange={(event) => { configRevision.current += 1; setServerNameInput(event.target.value); }}
                                     placeholder="AetherFlow Jellyfin"
                                     className="w-full px-3.5 py-2.5 rounded-xl bg-black/50 border border-white/10 text-sm text-white focus:outline-none focus:border-indigo-500"
                                 />
@@ -2447,7 +3056,7 @@ export default function StreamingTab() {
                                     id="jellyfin-server-url-input"
                                     type="text"
                                     value={serverUrlInput}
-                                    onChange={(e) => { configRevision.current += 1; setServerUrlInput(e.target.value); }}
+                                    onChange={(event) => { configRevision.current += 1; setServerUrlInput(event.target.value); }}
                                     placeholder="http://127.0.0.1:8096"
                                     required
                                     className="w-full px-3.5 py-2.5 rounded-xl bg-black/50 border border-white/10 text-sm text-white font-mono focus:outline-none focus:border-indigo-500"
@@ -2465,11 +3074,11 @@ export default function StreamingTab() {
                                     id="jellyfin-api-key-input"
                                     type="password"
                                     value={apiKeyInput}
-                                    onChange={(e) => { configRevision.current += 1; setApiKeyInput(e.target.value); }}
+                                    onChange={(event) => { configRevision.current += 1; setApiKeyInput(event.target.value); }}
                                     placeholder="Paste API key from Jellyfin Dashboard → Advanced → API Keys"
                                     className="w-full px-3.5 py-2.5 rounded-xl bg-black/50 border border-white/10 text-sm text-white font-mono focus:outline-none focus:border-indigo-500"
                                 />
-                                <p className="text-xs text-slate-500 mt-1 flex items-center gap-1">
+                                <p className="text-xs text-slate-400 mt-1 flex items-center gap-1">
                                     <ShieldCheck size={12} className="text-emerald-400" />
                                     Encrypted at rest with AES-256-GCM in SQLite WAL.
                                 </p>
@@ -2493,24 +3102,24 @@ export default function StreamingTab() {
                                     type="button"
                                     onClick={handleTestConnection}
                                     disabled={isTestingConn}
-                                    className="px-4 py-2 rounded-xl text-xs font-bold bg-white/[0.06] hover:bg-white/[0.12] border border-white/10 text-slate-200 flex items-center gap-1.5 transition-all"
+                                    className="obs-touch-target-standard min-h-[44px] sm:min-h-[40px] px-4 py-2.5 rounded-xl text-xs font-bold bg-white/[0.06] hover:bg-white/[0.12] border border-white/10 text-slate-200 flex items-center justify-center gap-1.5 transition-all"
                                 >
                                     {isTestingConn ? <Loader2 size={14} className="animate-spin" /> : <Wifi size={14} />}
                                     <span>Test Connection</span>
                                 </button>
 
-                                <div className="flex items-center gap-2">
+                                <div className="flex flex-wrap items-center gap-2">
                                     <button
                                         type="button"
                                         onClick={closeConfig}
-                                        className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-400 hover:text-white"
+                                        className="obs-touch-target-standard min-h-[44px] sm:min-h-[40px] px-4 py-2.5 rounded-xl text-xs font-semibold text-slate-400 hover:text-white flex items-center justify-center transition-colors"
                                     >
                                         Cancel
                                     </button>
                                     <button
                                         type="submit"
                                         disabled={isSavingConn || isTestingConn}
-                                        className="px-5 py-2 rounded-xl text-xs font-bold bg-indigo-600 hover:bg-indigo-500 text-white shadow-lg shadow-indigo-500/25 flex items-center gap-1.5 transition-all"
+                                        className="obs-touch-target-standard min-h-[44px] sm:min-h-[40px] px-5 py-2.5 rounded-xl text-xs font-bold bg-indigo-600 hover:bg-indigo-500 text-white shadow-lg shadow-indigo-500/25 flex items-center justify-center gap-1.5 transition-all"
                                     >
                                         {isSavingConn ? <Loader2 size={14} className="animate-spin" /> : <CheckCircle2 size={14} />}
                                         <span>Save Connection</span>
@@ -2522,9 +3131,6 @@ export default function StreamingTab() {
                 </StreamingDialog>
             )}
 
-            {/* ========================================================================= */}
-            {/* 8. SEND MESSAGE TO JELLYFIN VIEWER MODAL                                  */}
-            {/* ========================================================================= */}
             {!isAdmin && (
                 <p role="note" className="text-sm text-slate-400">
                     Shared legacy dashboard statistics are withheld for privacy. Your explicitly linked playback records are available in the canonical archive.
@@ -2536,7 +3142,7 @@ export default function StreamingTab() {
                     <form
                         onSubmit={handleSendSessionMessage}
                         className="w-full max-w-md rounded-2xl border border-indigo-500/30 bg-slate-950/95 p-6 shadow-2xl space-y-4"
-                        onClick={(e) => e.stopPropagation()}
+                        onClick={(event) => event.stopPropagation()}
                     >
                         <div className="flex items-center justify-between pb-2 border-b border-white/10">
                             <h3 className="text-sm font-bold text-white flex items-center gap-2">
@@ -2561,7 +3167,7 @@ export default function StreamingTab() {
                                 id="session-message-header"
                                 type="text"
                                 value={messageHeader}
-                                onChange={(e) => setMessageHeader(e.target.value)}
+                                onChange={(event) => setMessageHeader(event.target.value)}
                                 className="w-full px-3 py-2 rounded-xl bg-black/50 border border-white/10 text-xs text-white"
                             />
                         </div>
@@ -2574,7 +3180,7 @@ export default function StreamingTab() {
                                 id="session-message-body"
                                 rows={3}
                                 value={messageBody}
-                                onChange={(e) => setMessageBody(e.target.value)}
+                                onChange={(event) => setMessageBody(event.target.value)}
                                 placeholder="Enter message to display on viewer's screen..."
                                 required
                                 className="w-full px-3 py-2 rounded-xl bg-black/50 border border-white/10 text-xs text-white"

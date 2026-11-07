@@ -34,6 +34,12 @@ describe('StreamingImportedHistory', () => {
         expect(screen.getByText(/1 undated records included in this total, not plotted/)).toBeInTheDocument();
     });
 
+    it('renders methodology disclosure and explicit ESTIMATED badge labels', () => {
+        render(<StreamingImportedHistory estimates={estimates} windowDays={30} />);
+        expect(screen.getByText(/Import methodology, overlap & nonadditivity details/i)).toBeInTheDocument();
+        expect(screen.getAllByText('ESTIMATED').length).toBeGreaterThan(0);
+    });
+
     it('keeps the earlier chart dates and overlapping source values separate, without zeroing unknown values', () => {
         expect(importedWatchChartData(estimates)).toEqual([
             { date: '2026-08-09', item_summary: 1, legacy_unverified: 1 },

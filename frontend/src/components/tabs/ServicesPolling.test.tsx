@@ -49,8 +49,10 @@ async function scenario(clickOtherControlDuringOutage: boolean) {
     await act(async () => { await jest.advanceTimersByTimeAsync(3000); }); // fetch now fails; SWR error set
     await act(async () => { await jest.advanceTimersByTimeAsync(100000 - (Date.now() - t0)); });
     if (clickOtherControlDuringOutage) {
-        const enabledRestart = screen.getAllByTitle('Restart service').filter(b => !(b as HTMLButtonElement).disabled);
-        expect(enabledRestart).toHaveLength(1); // Other only; Fixture is busy
+        const otherManageButton = screen.getByRole('button', { name: 'Manage Other service actions' });
+        fireEvent.click(otherManageButton);
+        const enabledRestart = screen.getAllByTitle('Restart service').filter(buttonElement => !(buttonElement as HTMLButtonElement).disabled);
+        expect(enabledRestart).toHaveLength(1);
         await act(async () => { fireEvent.click(enabledRestart[0]); });
     }
     await act(async () => { await jest.advanceTimersByTimeAsync(130000 - (Date.now() - t0)); });

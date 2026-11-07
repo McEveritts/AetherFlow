@@ -1,6 +1,6 @@
 'use client';
 
-import { RefreshCw, Box, Settings, Globe, RotateCcw, Square, Play, Server, Cpu, X, Network, ArrowUpCircle, ExternalLink, Key, Eye, EyeOff, Copy, Check, AlertCircle } from 'lucide-react';
+import { RefreshCw, Box, Settings, Globe, RotateCcw, Square, Play, Server, Cpu, X, Network, ArrowUpCircle, ExternalLink, Key, Eye, EyeOff, Copy, Check, AlertCircle, AlertTriangle, LayoutList, LayoutGrid, Search, Sliders, ChevronDown, ChevronUp } from 'lucide-react';
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useCoreRestart } from '@/hooks/useCoreRestart';
 import { useLifecyclePollRecovery } from '@/hooks/useLifecyclePollRecovery';
@@ -11,6 +11,7 @@ import { ServicesSkeleton } from '@/components/layout/SkeletonBox';
 import { apiFetch } from '@/lib/fetcher';
 import RequireClaim from '@/components/auth/RequireClaim';
 import ServiceLogsModal from '@/components/tabs/ServiceLogsModal';
+import StreamingDialog from '@/components/streaming/StreamingDialog';
 import { Terminal } from 'lucide-react';
 import { useSystemStore } from '@/store/useSystemStore';
 import { ExternalAccessCard } from '@/components/ingress/ExternalAccessCard';
@@ -18,7 +19,6 @@ import { DeploymentStatus } from '@/components/deploy/DeploymentStatus';
 import { ProgressRing } from '@/components/ui/ProgressRing';
 import { isLifecycleStatus, lifecycleIdentity, matchingActiveJob, matchingJobOutcome, MarketplaceJobOutcome, PendingAction, LIFECYCLE_RECEIPT_TIMEOUT_MS } from '@/hooks/useMarketplace';
 
-// Fallback map when default_port is not provided by backend
 const SERVICE_WEB_PORTS: Record<string, number | string> = {
     'plexmediaserver': 32400,
     'jellyfin': 8096,
@@ -90,7 +90,86 @@ const SERVICE_WEB_PORTS: Record<string, number | string> = {
     'af-mcvnc': 6900,
     'apache2': 443,
     'aetherflow-frontend': '/',
-    'aetherflow-api': '/api/v1/admin/services',
+};
+
+const SERVICE_DISPLAY_NAMES: Record<string, string> = {
+    'calibreweb': 'Calibre-Web',
+    'qbittorrent': 'qBittorrent',
+    'jellyfin': 'Jellyfin',
+    'jellyseerr': 'Jellyseerr',
+    'overseerr': 'Overseerr',
+    'ombi': 'Ombi',
+    'sonarr': 'Sonarr',
+    'radarr': 'Radarr',
+    'prowlarr': 'Prowlarr',
+    'bazarr': 'Bazarr',
+    'lidarr': 'Lidarr',
+    'readarr': 'Readarr',
+    'deluged': 'Deluge',
+    'deluge': 'Deluge',
+    'transmission-daemon': 'Transmission',
+    'transmission': 'Transmission',
+    'nextcloud': 'Nextcloud',
+    'home-assistant@homeassistant': 'Home Assistant',
+    'homeassistant': 'Home Assistant',
+    'vaultwarden': 'Vaultwarden',
+    'wireguard': 'WireGuard',
+    'tailscale': 'Tailscale',
+    'paperless-ngx': 'Paperless-ngx',
+    'paperless-webserver': 'Paperless-ngx',
+    'plexmediaserver': 'Plex Media Server',
+    'emby-server': 'Emby',
+    'sabnzbd': 'SABnzbd',
+    'nzbget': 'NZBGet',
+    'tautulli': 'Tautulli',
+    'af-maintainerr': 'Maintainerr',
+    'maintainerr': 'Maintainerr',
+    'jackett': 'Jackett',
+    'flaresolverr': 'FlareSolverr',
+    'navidrome': 'Navidrome',
+    'threadfin': 'Threadfin',
+    'flood': 'Flood',
+    'autobrr': 'Autobrr',
+    'qui': 'Qui',
+    'syncthing': 'Syncthing',
+    'filebrowser': 'FileBrowser',
+    'pihole-ftl': 'Pi-hole',
+    'grafana-server': 'Grafana',
+    'prometheus': 'Prometheus',
+    'netdata': 'Netdata',
+    'uptime-kuma': 'Uptime Kuma',
+    'adguardhome': 'AdGuard Home',
+    'rutorrent': 'ruTorrent',
+    'rclone': 'Rclone',
+    'autoscan': 'Autoscan',
+    'audiobookshelf': 'Audiobookshelf',
+    'kavita': 'Kavita',
+    'librespeed': 'LibreSpeed',
+    'thelounge': 'The Lounge',
+    'znc': 'ZNC',
+    'scrutiny': 'Scrutiny',
+    'n8n': 'n8n',
+    'gitea': 'Gitea',
+    'organizr': 'Organizr',
+    'dispatcharr': 'Dispatcharr',
+    'duplicati': 'Duplicati',
+    'filebot': 'FileBot',
+    'listenarr': 'Listenarr',
+    'notifiarr': 'Notifiarr',
+    'novnc': 'noVNC',
+    'pyload': 'pyLoad',
+    'requestrr': 'Requestrr',
+    'seedcross': 'SeedCross',
+    'unmanic': 'Unmanic',
+    'palate': 'Palate',
+    'af-palate': 'Palate',
+    'kasmvnc': 'KasmVNC',
+    'af-kasmvnc': 'KasmVNC',
+    'mcvnc': 'McVNC',
+    'af-mcvnc': 'McVNC',
+    'apache2': 'Apache Gateway',
+    'aetherflow-frontend': 'AetherFlow Frontend',
+    'aetherflow-api': 'AetherFlow API',
 };
 
 export interface ServiceComponentInfo {
@@ -168,10 +247,10 @@ function normalizeUpdateRecord(raw: unknown): NormalizedUpdateCheckRecord {
     const top = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
     const nested = (top.update && typeof top.update === 'object' ? top.update : {}) as Record<string, unknown>;
 
-    const pickString = (...vals: unknown[]): string => {
-        for (const v of vals) {
-            if (typeof v === 'string' && v.trim()) {
-                return v.trim();
+    const pickString = (...candidateValues: unknown[]): string => {
+        for (const candidate of candidateValues) {
+            if (typeof candidate === 'string' && candidate.trim()) {
+                return candidate.trim();
             }
         }
         return '';
@@ -222,8 +301,79 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
     const [logsModalUnits, setLogsModalUnits] = useState<string[] | undefined>(undefined);
     const [ingressModalApp, setIngressModalApp] = useState<string | null>(null);
     const [revealedKeys, setRevealedKeys] = useState<Set<string>>(new Set());
+    const [stopConfirmService, setStopConfirmService] = useState<{ name: string; data: ServiceInfo } | null>(null);
+    const [guardedStartConfirmService, setGuardedStartConfirmService] = useState<{ name: string; data: ServiceInfo } | null>(null);
+    const [searchQuery, setSearchQuery] = useState('');
+    const [statusFilter, setStatusFilter] = useState<'all' | 'running' | 'stopped' | 'attention' | 'updates'>('all');
+    const [isMobileFiltersOpen, setIsMobileFiltersOpen] = useState(false);
+    const [viewMode, setViewMode] = useState<'list' | 'card'>('list');
+    const [openManageMenuService, setOpenManageMenuService] = useState<string | null>(null);
+    const [openAccessMenuService, setOpenAccessMenuService] = useState<string | null>(null);
+    const [expandedDetailsServices, setExpandedDetailsServices] = useState<Set<string>>(new Set());
     const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-    useEffect(() => () => { if (copyTimerRef.current) clearTimeout(copyTimerRef.current); }, []);
+
+    useEffect(() => {
+        if (!guardedStartConfirmService && !stopConfirmService) return;
+        const handleKeyDown = (event: KeyboardEvent) => {
+            if (event.key === 'Escape') {
+                setGuardedStartConfirmService(null);
+                setStopConfirmService(null);
+            }
+        };
+        window.addEventListener('keydown', handleKeyDown);
+        return () => {
+            window.removeEventListener('keydown', handleKeyDown);
+        };
+    }, [guardedStartConfirmService, stopConfirmService]);
+
+    useEffect(() => {
+        if (!openManageMenuService) return;
+        const handleKeyDown = (event: KeyboardEvent) => {
+            if (event.key === 'Escape') {
+                setOpenManageMenuService(null);
+            }
+        };
+        const handleClickOutside = (event: MouseEvent) => {
+            const target = event.target as HTMLElement | null;
+            if (!target?.closest(`[data-manage-menu="${openManageMenuService}"]`)) {
+                setOpenManageMenuService(null);
+            }
+        };
+        window.addEventListener('keydown', handleKeyDown);
+        window.addEventListener('mousedown', handleClickOutside);
+        return () => {
+            window.removeEventListener('keydown', handleKeyDown);
+            window.removeEventListener('mousedown', handleClickOutside);
+        };
+    }, [openManageMenuService]);
+
+    useEffect(() => {
+        if (!openAccessMenuService) return;
+        const handleKeyDown = (event: KeyboardEvent) => {
+            if (event.key === 'Escape') {
+                setOpenAccessMenuService(null);
+            }
+        };
+        const handleClickOutside = (event: MouseEvent) => {
+            const target = event.target as HTMLElement | null;
+            if (!target?.closest(`[data-access-menu="${openAccessMenuService}"]`)) {
+                setOpenAccessMenuService(null);
+            }
+        };
+        window.addEventListener('keydown', handleKeyDown);
+        window.addEventListener('mousedown', handleClickOutside);
+        return () => {
+            window.removeEventListener('keydown', handleKeyDown);
+            window.removeEventListener('mousedown', handleClickOutside);
+        };
+    }, [openAccessMenuService]);
+
+    useEffect(() => () => {
+        if (copyTimerRef.current) {
+            clearTimeout(copyTimerRef.current);
+        }
+    }, []);
+
     const [copiedKeyService, setCopiedKeyService] = useState<string | null>(null);
     const canControlServices = user?.role === 'admin';
     const { setActiveTab } = useSystemStore();
@@ -237,18 +387,21 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
         if (!updatingServices.size || !updateDeadlinesRef.current.size) return;
         let timer: ReturnType<typeof setTimeout>;
         const schedule = () => {
-            if (updateDeadlinesRef.current.size) timer = setTimeout(checkDeadlines, Math.max(0, Math.min(...updateDeadlinesRef.current.values()) - Date.now()));
+            if (updateDeadlinesRef.current.size) {
+                timer = setTimeout(checkDeadlines, Math.max(0, Math.min(...updateDeadlinesRef.current.values()) - Date.now()));
+            }
         };
         const checkDeadlines = () => {
             const expired: string[] = [];
             updateDeadlinesRef.current.forEach((deadline, appId) => {
                 if (deadline > Date.now()) return;
                 expired.push(appId);
-                // Retain accepted identity so a late terminal receipt still resolves.
                 updateDeadlinesRef.current.delete(appId);
                 addToast(`${appId}: update outcome could not be confirmed; its receipt may have been superseded. Check service state and logs before retrying.`, 'error');
             });
-            if (expired.length) setUpdatingServices(current => new Set([...current].filter(appId => !expired.includes(appId))));
+            if (expired.length) {
+                setUpdatingServices(current => new Set([...current].filter(appId => !expired.includes(appId))));
+            }
             schedule();
         };
         schedule();
@@ -271,7 +424,7 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                 if (updatingServices.size > 0) return 1500;
                 if (!currentData) return 15000;
                 const hasActiveJob = Object.values(currentData).some(
-                    (s) => s.status === 'updating' || s.job_status === 'updating' || s.job_status === 'installing' || s.job_status === 'uninstalling'
+                    (item) => item.status === 'updating' || item.job_status === 'updating' || item.job_status === 'installing' || item.job_status === 'uninstalling'
                 );
                 return hasActiveJob ? 1500 : 15000;
             },
@@ -292,7 +445,9 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
             const appId = info.id || name;
             const activeAction = isLifecycleStatus(info.job_status) ? info.job_status : isLifecycleStatus(info.status) ? info.status : undefined;
             const activeIdentity = lifecycleIdentity(info);
-            if (activeAction && activeIdentity && (!updatingServices.has(appId) || activeIdentity === expectedJobsRef.current.get(appId))) observedJobsRef.current.set(appId, { action: activeAction, identity: activeIdentity });
+            if (activeAction && activeIdentity && (!updatingServices.has(appId) || activeIdentity === expectedJobsRef.current.get(appId))) {
+                observedJobsRef.current.set(appId, { action: activeAction, identity: activeIdentity });
+            }
             const observed = observedJobsRef.current.get(appId);
             const localPending = updatingServices.has(appId);
             const acceptedIdentity = expectedJobsRef.current.get(appId);
@@ -314,27 +469,26 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
             }
             void globalMutate('/api/v1/public/marketplace');
         });
-
     }, [services, updatingServices, addToast, globalMutate]);
 
     const handleCheckAllUpdates = async () => {
         setCheckingUpdates(true);
         try {
             if (canControlServices) {
-                const res = await apiFetch('/api/v1/admin/packages/updates/check', { method: 'POST' });
-                if (!res.ok) throw new Error('Application update inventory unavailable');
-                if (res.ok) {
-                    const payload = await res.json().catch(() => null);
+                const response = await apiFetch('/api/v1/admin/packages/updates/check', { method: 'POST' });
+                if (!response.ok) throw new Error('Application update inventory unavailable');
+                if (response.ok) {
+                    const payload = await response.json().catch(() => null);
                     await mutate();
                     globalMutate('/api/v1/public/marketplace');
                     const records = Array.isArray(payload?.updates)
                         ? (payload.updates as unknown[]).map((item) => normalizeUpdateRecord(item))
                         : [];
-                    const failedRecords = records.filter((rec) => Boolean(rec.error));
+                    const failedRecords = records.filter((record) => Boolean(record.error));
                     const availableCount =
                         typeof payload?.updates_available === 'number'
                             ? payload.updates_available
-                            : records.filter((rec) => rec.updateAvailable).length;
+                            : records.filter((record) => record.updateAvailable).length;
                     if (failedRecords.length > 0) {
                         if (availableCount > 0) {
                             addToast(
@@ -374,14 +528,14 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
         if (!canControlServices || !data.id) return;
         setCheckingSingleService(name);
         try {
-            const res = await apiFetch(`/api/v1/admin/packages/${encodeURIComponent(data.id)}/check-update`, {
+            const response = await apiFetch(`/api/v1/admin/packages/${encodeURIComponent(data.id)}/check-update`, {
                 method: 'POST',
             });
-            if (!res.ok) {
-                const d = await res.json().catch(() => ({}));
-                throw new Error(d.message || d.error || 'Update check failed.');
+            if (!response.ok) {
+                const errorData = await response.json().catch(() => ({}));
+                throw new Error(errorData.message || errorData.error || 'Update check failed.');
             }
-            const result = await res.json().catch(() => ({}));
+            const result = await response.json().catch(() => ({}));
             const normalized = normalizeUpdateRecord(result);
             await mutate();
             globalMutate('/api/v1/public/marketplace');
@@ -394,8 +548,8 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
             } else {
                 addToast(`${name} is up to date${normalized.installedVersion ? ` (v${normalized.installedVersion.replace(/^v/i, '')})` : ''}.`, 'success');
             }
-        } catch (err: unknown) {
-            addToast(err instanceof Error ? err.message : 'Unable to check for updates.', 'error');
+        } catch (error: unknown) {
+            addToast(error instanceof Error ? error.message : 'Unable to check for updates.', 'error');
         } finally {
             setCheckingSingleService(null);
         }
@@ -417,14 +571,14 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
         updateDeadlinesRef.current.set(appId, Date.now() + LIFECYCLE_RECEIPT_TIMEOUT_MS);
         setUpdatingServices(curr => new Set(curr).add(appId));
         try {
-            const res = await apiFetch(`/api/v1/admin/packages/${encodeURIComponent(appId)}/update`, {
+            const response = await apiFetch(`/api/v1/admin/packages/${encodeURIComponent(appId)}/update`, {
                 method: 'POST',
             });
-            if (!res.ok) {
-                const d = await res.json().catch(() => ({}));
-                throw new Error(d.message || d.error || 'Package update request rejected.');
+            if (!response.ok) {
+                const errorData = await response.json().catch(() => ({}));
+                throw new Error(errorData.message || errorData.error || 'Package update request rejected.');
             }
-            const receipt = await res.json() as { job_id?: string; started_at?: string };
+            const receipt = await response.json() as { job_id?: string; started_at?: string };
             const identity = lifecycleIdentity(receipt);
             if (!identity) throw new Error('The server did not return a job identity. Refresh status and check logs before retrying.');
             if (!updateDeadlinesRef.current.has(appId)) throw new Error('Acceptance arrived after status tracking expired. Check service state and logs before retrying.');
@@ -434,7 +588,7 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
             addToast(`Updating ${name}${targetVer}...`, 'info');
             mutate();
             globalMutate('/api/v1/public/marketplace');
-        } catch (err: unknown) {
+        } catch (error: unknown) {
             expectedJobsRef.current.delete(appId);
             updateDeadlinesRef.current.delete(appId);
             observedJobsRef.current.delete(appId);
@@ -444,7 +598,7 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                 return next;
             });
             mutate();
-            addToast(err instanceof Error ? err.message : 'Update failed to start.', 'error');
+            addToast(error instanceof Error ? error.message : 'Update failed to start.', 'error');
         }
     };
 
@@ -461,15 +615,13 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
             return;
         }
 
-        // Keep optimistic feedback local: SWR mutate(data) clears its error and
-        // would make a cached lifecycle receipt look like a fresh server poll.
         const optimisticStatus = action === 'stop' ? 'stopping' : action === 'start' ? 'starting' : 'restarting';
         setServiceControl({ name, status: optimisticStatus });
 
         const canonicalTarget = (data.id || data.process || name).trim();
         const processTarget = (data.id || data.process || name).trim();
         try {
-            const res = await apiFetch(`/api/v1/admin/services/${encodeURIComponent(canonicalTarget)}/control`, {
+            const response = await apiFetch(`/api/v1/admin/services/${encodeURIComponent(canonicalTarget)}/control`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -478,17 +630,17 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                     process: processTarget,
                 })
             });
-            if (!res.ok) {
-                const d = await res.json().catch(() => ({}));
-                throw new Error(d.message || d.error || 'Daemon control operation rejected.');
+            if (!response.ok) {
+                const errorData = await response.json().catch(() => ({}));
+                throw new Error(errorData.message || errorData.error || 'Daemon control operation rejected.');
             }
-            const receipt = await res.json().catch(() => ({}));
+            const receipt = await response.json().catch(() => ({}));
             if (receipt.status === 'accepted') trackRestart(name, receipt);
             else addToast(`Successfully executed '${action}' on ${name}.`, 'success');
             void mutate();
-        } catch (err: unknown) {
+        } catch (error: unknown) {
             void mutate();
-            addToast(err instanceof Error ? err.message : 'Undefined system exception encountered.', 'error');
+            addToast(error instanceof Error ? error.message : 'Undefined system exception encountered.', 'error');
         } finally {
             setServiceControl(null);
         }
@@ -501,6 +653,10 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
         corePlatformProcesses.includes(info.id || info.process || '');
 
     const hasWebUI = (info: ServiceInfo) => {
+        const identifier = (info.id || info.process || '').trim().toLowerCase();
+        if (identifier === 'aetherflow-api') {
+            return false;
+        }
         if (typeof info.default_port === 'number') {
             return info.default_port > 0;
         }
@@ -510,20 +666,118 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
         );
     };
 
-    const coreServices = allEntries.filter(([, d]) => isCorePlatformService(d as ServiceInfo));
-    const appServices = allEntries.filter(([, d]) => !isCorePlatformService(d as ServiceInfo));
+    const appServices = allEntries.filter(([, serviceData]) => !isCorePlatformService(serviceData as ServiceInfo));
 
-    const runningCount = allEntries.filter(([, d]) => (d as ServiceInfo).status === 'running').length;
-    const updatesAvailableCount = appServices.filter(([, d]) => Boolean((d as ServiceInfo).update_available && !(d as ServiceInfo).update_error)).length;
+    const isExemptComponent = (component: ServiceComponentInfo) => {
+        const unit = (component.unit || '').trim().toLowerCase();
+        const role = (component.role || '').trim().toLowerCase();
+        const status = (component.status || '').trim().toLowerCase();
+        if (role === 'required' || role === 'timer' || unit.endsWith('.timer')) return false;
+        const optional = role === 'optional' || role === 'optional-mount' || (!role && (unit === 'rclone-vfs' || unit === 'rclone-vfs.service'));
+        if (optional && component.configured !== true) return true;
+        const oneshot = role === 'oneshot' || role === 'scheduled-job' || (!role && (unit === 'recyclarr' || unit === 'recyclarr.service' || unit === 'scrutiny-collector' || unit === 'scrutiny-collector.service'));
+        if (oneshot) return status === 'stopped' || status === 'inactive' || status === 'completed' || status === 'success';
+        return false;
+    };
+
+    const isComponentHealthy = (component: ServiceComponentInfo) => {
+        if (isExemptComponent(component)) return true;
+        const status = (component.status || '').trim().toLowerCase();
+        return status === 'running' || status === 'active' || status === 'listening' || status === 'exited';
+    };
+
+    const getDegradedSummary = (serviceData: ServiceInfo): { degraded: boolean; unhealthyUnits: string[] } => {
+        const explicitDegraded = (serviceData.status || '').trim().toLowerCase() === 'degraded';
+        const components = Array.isArray(serviceData.components) ? serviceData.components : [];
+        const requiredComponents = components.filter((component) => !isExemptComponent(component));
+        const unhealthyUnits = requiredComponents
+            .filter((component) => !isComponentHealthy(component))
+            .map((component) => component.unit);
+        const healthyCount = requiredComponents.length - unhealthyUnits.length;
+        const hasFailedComponent = requiredComponents.some((component) => ['failed', 'error'].includes((component.status || '').toLowerCase()));
+        const componentDegraded = requiredComponents.length > 0 && unhealthyUnits.length > 0 && (healthyCount > 0 || serviceData.status === 'running' || explicitDegraded || hasFailedComponent);
+        return {
+            degraded: explicitDegraded || componentDegraded,
+            unhealthyUnits,
+        };
+    };
+
+    const isFailedInstall = (serviceData: ServiceInfo): boolean => {
+        const lastJob = serviceData.last_job;
+        const isJobFailed = Boolean(
+            lastJob &&
+            lastJob.action === 'install' &&
+            lastJob.status !== 'completed'
+        );
+        const isStatusFailed = serviceData.status === 'install_failed' || serviceData.job_status === 'install_failed';
+        return isJobFailed || isStatusFailed;
+    };
+
+    const hasAttentionNeed = (serviceData: ServiceInfo): boolean => {
+        if (isFailedInstall(serviceData)) return true;
+        if (serviceData.status === 'error' || serviceData.status === 'failed') return true;
+        if (getDegradedSummary(serviceData).degraded) return true;
+        if (serviceData.last_job && serviceData.last_job.status !== 'completed') return true;
+        if (serviceData.update_error && serviceData.update_error.trim().length > 0) return true;
+        return false;
+    };
+
+    const hasAvailableUpdate = (serviceData: ServiceInfo): boolean => {
+        return Boolean(serviceData.update_available && !serviceData.update_error);
+    };
+
+    const runningCount = allEntries.filter(([, serviceData]) => (serviceData as ServiceInfo).status === 'running').length;
+    const stoppedCount = allEntries.filter(([, serviceData]) => {
+        const info = serviceData as ServiceInfo;
+        const isStoppedStatus = info.status === 'stopped' || info.status === 'inactive' || !info.status;
+        return isStoppedStatus && !hasAttentionNeed(info);
+    }).length;
+    const attentionCount = allEntries.filter(([, serviceData]) => hasAttentionNeed(serviceData as ServiceInfo)).length;
+    const updatesAvailableCount = appServices.filter(([, serviceData]) => hasAvailableUpdate(serviceData as ServiceInfo)).length;
+    const attentionEntries = allEntries.filter(([, serviceData]) => hasAttentionNeed(serviceData as ServiceInfo));
+    const primaryAttentionService = attentionEntries.length > 0 ? attentionEntries[0] : null;
+
+    const activeFilterLabel =
+        statusFilter === 'running'
+            ? 'Running'
+            : statusFilter === 'stopped'
+                ? 'Stopped'
+                : statusFilter === 'attention'
+                    ? 'Needs Attention'
+                    : statusFilter === 'updates'
+                        ? 'Updates'
+                        : 'All';
+    const activeFilterCount =
+        statusFilter === 'running'
+            ? runningCount
+            : statusFilter === 'stopped'
+                ? stoppedCount
+                : statusFilter === 'attention'
+                    ? attentionCount
+                    : statusFilter === 'updates'
+                        ? updatesAvailableCount
+                        : allEntries.length;
 
     const formatVersion = (ver?: string) => {
         if (!ver || ver === '-') return '-';
         return ver.startsWith('v') || ver.startsWith('V') ? ver : `v${ver}`;
     };
 
-    const resolveServicePort = (name: string, data: ServiceInfo): { port: number | null; defaultPort: number | null; reassigned: boolean } => {
-        const activePort = typeof data.active_port === 'number' && data.active_port > 0 ? data.active_port : null;
-        const defaultPort = typeof data.default_port === 'number' && data.default_port > 0 ? data.default_port : null;
+    const getHumanDisplayName = (name: string, data: ServiceInfo): string => {
+        const candidateKeys = [name, data.id, data.process]
+            .filter((value): value is string => Boolean(value))
+            .map((value) => value.trim().toLowerCase());
+        for (const candidateKey of candidateKeys) {
+            if (SERVICE_DISPLAY_NAMES[candidateKey]) {
+                return SERVICE_DISPLAY_NAMES[candidateKey];
+            }
+        }
+        return name;
+    };
+
+    const resolveServicePort = (name: string, serviceData: ServiceInfo): { port: number | null; defaultPort: number | null; reassigned: boolean } => {
+        const activePort = typeof serviceData.active_port === 'number' && serviceData.active_port > 0 ? serviceData.active_port : null;
+        const defaultPort = typeof serviceData.default_port === 'number' && serviceData.default_port > 0 ? serviceData.default_port : null;
         if (activePort != null) {
             return {
                 port: activePort,
@@ -534,8 +788,8 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
         if (defaultPort != null) {
             return { port: defaultPort, defaultPort, reassigned: false };
         }
-        const process = data.process || name;
-        const fallback = (data.id ? SERVICE_WEB_PORTS[data.id] : undefined) ?? SERVICE_WEB_PORTS[process];
+        const process = serviceData.process || name;
+        const fallback = (serviceData.id ? SERVICE_WEB_PORTS[serviceData.id] : undefined) ?? SERVICE_WEB_PORTS[process];
         if (typeof fallback === 'number' && fallback > 0) {
             return { port: fallback, defaultPort: fallback, reassigned: false };
         }
@@ -543,14 +797,14 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
     };
 
     const toggleRevealKey = (serviceKey: string) => {
-        setRevealedKeys((prev) => {
-            const next = new Set(prev);
-            if (next.has(serviceKey)) {
-                next.delete(serviceKey);
+        setRevealedKeys((previousState) => {
+            const nextState = new Set(previousState);
+            if (nextState.has(serviceKey)) {
+                nextState.delete(serviceKey);
             } else {
-                next.add(serviceKey);
+                nextState.add(serviceKey);
             }
-            return next;
+            return nextState;
         });
     };
 
@@ -561,7 +815,7 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
             addToast(`Copied ${name} API key to clipboard.`, 'success');
             if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
             copyTimerRef.current = setTimeout(() => {
-                setCopiedKeyService((curr) => (curr === name ? null : curr));
+                setCopiedKeyService((current) => (current === name ? null : current));
             }, 2000);
         } catch {
             addToast('Unable to copy API key to clipboard.', 'error');
@@ -576,73 +830,39 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
         return `${'•'.repeat(12)}${trimmed.slice(-4)}`;
     };
 
-    const isLoopbackService = (name: string, data: ServiceInfo) => {
-        const scope = (data.bind_scope || '').trim().toLowerCase();
+    const isLoopbackService = (name: string, serviceData: ServiceInfo) => {
+        const scope = (serviceData.bind_scope || '').trim().toLowerCase();
         if (scope === 'loopback') return true;
         if (scope === 'network') return false;
-        const identifiers = [data.id, data.process, name]
+        const identifiers = [serviceData.id, serviceData.process, name]
             .filter((value): value is string => Boolean(value))
             .map((value) => value.trim().toLowerCase());
         return identifiers.some((value) => LOOPBACK_IDENTIFIERS.has(value));
     };
 
-    const isSharedVhostService = (name: string, data: ServiceInfo) => {
-        if (isCorePlatformService(data)) return false;
-        const scope = (data.control_scope || '').trim().toLowerCase();
+    const isSharedVhostService = (name: string, serviceData: ServiceInfo) => {
+        if (isCorePlatformService(serviceData)) return false;
+        const scope = (serviceData.control_scope || '').trim().toLowerCase();
         if (scope === 'shared-vhost') return true;
         if (scope === 'service') return false;
-        const id = (data.id || '').trim().toLowerCase();
-        if (SHARED_VHOST_APP_IDS.has(id)) return true;
-        const process = (data.process || '').trim().toLowerCase().replace(/\.service$/i, '');
+        const identifier = (serviceData.id || '').trim().toLowerCase();
+        if (SHARED_VHOST_APP_IDS.has(identifier)) return true;
+        const process = (serviceData.process || '').trim().toLowerCase().replace(/\.service$/i, '');
         const normalizedName = name.trim().toLowerCase();
         if (SHARED_VHOST_APP_IDS.has(normalizedName)) return true;
-        return process === 'apache2' && id !== 'apache2';
+        return process === 'apache2' && identifier !== 'apache2';
     };
 
-    const isExemptComponent = (comp: ServiceComponentInfo) => {
-        const unit = (comp.unit || '').trim().toLowerCase();
-        const role = (comp.role || '').trim().toLowerCase();
-        const status = (comp.status || '').trim().toLowerCase();
-        if (role === 'required' || role === 'timer' || unit.endsWith('.timer')) return false;
-        const optional = role === 'optional' || role === 'optional-mount' || (!role && (unit === 'rclone-vfs' || unit === 'rclone-vfs.service'));
-        if (optional && comp.configured !== true) return true;
-        const oneshot = role === 'oneshot' || role === 'scheduled-job' || (!role && (unit === 'recyclarr' || unit === 'recyclarr.service' || unit === 'scrutiny-collector' || unit === 'scrutiny-collector.service'));
-        if (oneshot) return status === 'stopped' || status === 'inactive' || status === 'completed' || status === 'success';
-        return false;
-    };
-
-    const isComponentHealthy = (comp: ServiceComponentInfo) => {
-        if (isExemptComponent(comp)) return true;
-        const status = (comp.status || '').trim().toLowerCase();
-        return status === 'running' || status === 'active' || status === 'listening' || status === 'exited';
-    };
-
-    const getDegradedSummary = (data: ServiceInfo): { degraded: boolean; unhealthyUnits: string[] } => {
-        const explicitDegraded = (data.status || '').trim().toLowerCase() === 'degraded';
-        const components = Array.isArray(data.components) ? data.components : [];
-        const requiredComponents = components.filter((c) => !isExemptComponent(c));
-        const unhealthyUnits = requiredComponents
-            .filter((c) => !isComponentHealthy(c))
-            .map((c) => c.unit);
-        const healthyCount = requiredComponents.length - unhealthyUnits.length;
-        const hasFailedComponent = requiredComponents.some((component) => ['failed', 'error'].includes((component.status || '').toLowerCase()));
-        const componentDegraded = requiredComponents.length > 0 && unhealthyUnits.length > 0 && (healthyCount > 0 || data.status === 'running' || explicitDegraded || hasFailedComponent);
-        return {
-            degraded: explicitDegraded || componentDegraded,
-            unhealthyUnits,
-        };
-    };
-
-    const resolveServiceLogUnits = (name: string, data: ServiceInfo): string[] => {
-        const fromComponents = Array.isArray(data.components)
-            ? data.components.map((c) => (c.unit || '').trim()).filter(Boolean)
+    const resolveServiceLogUnits = (name: string, serviceData: ServiceInfo): string[] => {
+        const fromComponents = Array.isArray(serviceData.components)
+            ? serviceData.components.map((component) => (component.unit || '').trim()).filter(Boolean)
             : [];
-        const fromUnits = Array.isArray(data.units)
-            ? data.units.map((u) => (u || '').trim()).filter(Boolean)
+        const fromUnits = Array.isArray(serviceData.units)
+            ? serviceData.units.map((unit) => (unit || '').trim()).filter(Boolean)
             : [];
         const merged = Array.from(new Set([...fromComponents, ...fromUnits]));
         if (merged.length > 0) return merged;
-        return [data.process || name];
+        return [serviceData.process || name];
     };
 
     const isLocalBrowserHost = (hostname: string) => {
@@ -664,13 +884,13 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
         return typeof window !== 'undefined' ? window.location.hostname || '' : '';
     };
 
-    const resolveDirectAppProtocol = (data: ServiceInfo) => {
-        const rawScheme = (data.web_scheme || '').trim().toLowerCase().replace(/:$/, '');
+    const resolveDirectAppProtocol = (serviceData: ServiceInfo) => {
+        const rawScheme = (serviceData.web_scheme || '').trim().toLowerCase().replace(/:$/, '');
         if (rawScheme === 'https' || rawScheme === 'http') {
             return `${rawScheme}:`;
         }
-        if (isCorePlatformService(data)) {
-            const idOrProc = (data.id || data.process || '').trim().toLowerCase();
+        if (isCorePlatformService(serviceData)) {
+            const idOrProc = (serviceData.id || serviceData.process || '').trim().toLowerCase();
             if (idOrProc === 'apache2') {
                 return 'https:';
             }
@@ -679,11 +899,11 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
         return 'http:';
     };
 
-    const isRemoteLoopbackRestricted = (name: string, data: ServiceInfo) => {
-        if (!isLoopbackService(name, data)) {
+    const isRemoteLoopbackRestricted = (name: string, serviceData: ServiceInfo) => {
+        if (!isLoopbackService(name, serviceData)) {
             return false;
         }
-        if (data.external_access_enabled && Boolean(data.public_domain?.trim())) {
+        if (serviceData.external_access_enabled && Boolean(serviceData.public_domain?.trim())) {
             return false;
         }
         const hostname = resolveBrowserHostname();
@@ -696,15 +916,15 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
     const buildRemoteLoopbackMessage = (name: string) =>
         `${name} binds strictly to 127.0.0.1. Enable External Access with a public domain in Ingress & Deployment to open its Web UI remotely.`;
 
-    const handleOpenWebUI = (name: string, data: ServiceInfo) => {
-        const pathSuffix = data.web_path ? (data.web_path.startsWith('/') ? data.web_path : `/${data.web_path}`) : '';
-        const publicDomain = data.public_domain?.trim();
-        if (data.external_access_enabled && publicDomain) {
-            const proto = data.tls_enabled === false ? 'http:' : 'https:';
+    const handleOpenWebUI = (name: string, serviceData: ServiceInfo) => {
+        const pathSuffix = serviceData.web_path ? (serviceData.web_path.startsWith('/') ? serviceData.web_path : `/${serviceData.web_path}`) : '';
+        const publicDomain = serviceData.public_domain?.trim();
+        if (serviceData.external_access_enabled && publicDomain) {
+            const proto = serviceData.tls_enabled === false ? 'http:' : 'https:';
             window.open(`${proto}//${publicDomain}${pathSuffix}`, '_blank');
             return;
         }
-        if (isRemoteLoopbackRestricted(name, data)) {
+        if (isRemoteLoopbackRestricted(name, serviceData)) {
             addToast(
                 buildRemoteLoopbackMessage(name),
                 'info'
@@ -712,16 +932,16 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
             return;
         }
         const browserHostname = resolveBrowserHostname();
-        const useLoopbackHost = isLoopbackService(name, data) && isLocalBrowserHost(browserHostname);
+        const useLoopbackHost = isLoopbackService(name, serviceData) && isLocalBrowserHost(browserHostname);
         const host = useLoopbackHost ? '127.0.0.1' : browserHostname;
-        const protocol = resolveDirectAppProtocol(data);
-        const effectivePort = data.active_port || data.default_port;
+        const protocol = resolveDirectAppProtocol(serviceData);
+        const effectivePort = serviceData.active_port || serviceData.default_port;
         if (effectivePort && effectivePort > 0) {
             window.open(`${protocol}//${host}:${effectivePort}${pathSuffix}`, '_blank');
             return;
         }
-        const process = data.process || name;
-        const portOrPath = (data.id ? SERVICE_WEB_PORTS[data.id] : undefined) ?? SERVICE_WEB_PORTS[process];
+        const process = serviceData.process || name;
+        const portOrPath = (serviceData.id ? SERVICE_WEB_PORTS[serviceData.id] : undefined) ?? SERVICE_WEB_PORTS[process];
         if (portOrPath != null) {
             const url = typeof portOrPath === 'string'
                 ? portOrPath.startsWith('/') ? `${resolveBrowserProtocol()}//${host}${portOrPath}` : portOrPath
@@ -732,13 +952,64 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
         }
     };
 
-    const handleOpenSettings = (name: string, data: ServiceInfo) => {
-        if (isCorePlatformService(data)) {
+    const handleOpenSettings = (name: string, serviceData: ServiceInfo) => {
+        if (isCorePlatformService(serviceData)) {
             setActiveTab('settings');
         } else {
-            handleOpenWebUI(name, data);
+            handleOpenWebUI(name, serviceData);
         }
     };
+
+    const resolveUptimeDisplay = (serviceData: ServiceInfo): string => {
+        if (isFailedInstall(serviceData)) {
+            return 'Not running';
+        }
+        if (!serviceData.uptime || serviceData.uptime === 'stopped' || serviceData.uptime === '-') {
+            return serviceData.status === 'running' ? '-' : 'Not running';
+        }
+        return serviceData.uptime;
+    };
+
+    const filteredEntries = allEntries.filter(([name, rawData]) => {
+        const serviceData = rawData as ServiceInfo;
+        const displayName = getHumanDisplayName(name, serviceData);
+        if (searchQuery.trim().length > 0) {
+            const query = searchQuery.trim().toLowerCase();
+            const matchesName = name.toLowerCase().includes(query);
+            const matchesDisplay = displayName.toLowerCase().includes(query);
+            const matchesId = Boolean(serviceData.id && serviceData.id.toLowerCase().includes(query));
+            const matchesProcess = Boolean(serviceData.process && serviceData.process.toLowerCase().includes(query));
+            const matchesPublicDomain = Boolean(serviceData.public_domain && serviceData.public_domain.toLowerCase().includes(query));
+            const matchesInternalDomain = Boolean(serviceData.internal_domain && serviceData.internal_domain.toLowerCase().includes(query));
+            const { port: effectivePort } = resolveServicePort(name, serviceData);
+            const matchesPort = effectivePort != null && String(effectivePort).includes(query);
+            if (!matchesName && !matchesDisplay && !matchesId && !matchesProcess && !matchesPublicDomain && !matchesInternalDomain && !matchesPort) {
+                return false;
+            }
+        }
+
+        if (statusFilter === 'running') {
+            return serviceData.status === 'running';
+        }
+        if (statusFilter === 'stopped') {
+            const isStopped = serviceData.status === 'stopped' || serviceData.status === 'inactive' || !serviceData.status;
+            return isStopped && !hasAttentionNeed(serviceData);
+        }
+        if (statusFilter === 'attention') {
+            return hasAttentionNeed(serviceData);
+        }
+        if (statusFilter === 'updates') {
+            return hasAvailableUpdate(serviceData);
+        }
+        return true;
+    });
+
+    const sortedFilteredEntries = [...filteredEntries].sort(([firstName], [secondName]) => {
+        return firstName.localeCompare(secondName, undefined, { sensitivity: 'base' });
+    });
+
+    const filteredCoreServices = sortedFilteredEntries.filter(([, serviceData]) => isCorePlatformService(serviceData as ServiceInfo));
+    const filteredAppServices = sortedFilteredEntries.filter(([, serviceData]) => !isCorePlatformService(serviceData as ServiceInfo));
 
     const renderServiceCard = (name: string, rawData: unknown) => {
         const info = rawData as ServiceInfo;
@@ -751,8 +1022,9 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
             isLifecycleStatus(data.status) ||
             (appId ? updatingServices.has(appId) : false);
         const { degraded: isDegraded, unhealthyUnits } = getDegradedSummary(data);
+        const failedInstall = isFailedInstall(data);
         const isRunning = (data.status === 'running' || isDegraded) && !isUpdating;
-        const isError = data.status === 'error';
+        const isError = data.status === 'error' || data.status === 'failed';
         const isBusy = serviceControl?.name === name || isUpdating || restarts.has(name);
         const controlDisabled = isBusy || !canControlServices;
         const sharedVhost = isSharedVhostService(name, data);
@@ -767,13 +1039,14 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
         const latestVer = data.latest_version;
         const isCheckingThis = checkingSingleService === name;
         const serviceLogUnits = resolveServiceLogUnits(name, data);
+        const humanName = getHumanDisplayName(name, data);
 
         return (
-            <div key={name} className={`glass-card relative bg-slate-950/80 border rounded-2xl p-6 transition-all group cursor-default overflow-hidden ${hasUpdate || isDegraded ? 'border-amber-500/30 hover:border-amber-400/60' : 'border-white/10 hover:border-indigo-500/50'}`}>
-                <div className={`absolute top-0 left-0 w-1 h-full ${isUpdating ? 'bg-amber-400 animate-pulse' : (isDegraded ? 'bg-amber-500' : (hasUpdate ? 'bg-amber-500/70' : (isRunning ? 'bg-emerald-500/50' : (isError ? 'bg-red-500/50' : 'bg-slate-500/50'))))} transition-colors z-20`}></div>
+            <div key={name} role="article" aria-label={`${name} service`} className="relative bg-slate-900/60 border border-slate-800 hover:border-slate-700/80 rounded-2xl p-5 transition-all group overflow-hidden">
+                <div className={`absolute top-0 left-0 w-1 h-full ${isUpdating ? 'bg-amber-400 animate-pulse' : (failedInstall || isError ? 'bg-red-500' : (isDegraded ? 'bg-amber-500' : (hasUpdate ? 'bg-amber-400' : (isRunning ? 'bg-emerald-500' : 'bg-slate-600'))))} transition-colors z-20`} />
 
                 {isUpdating && (
-                    <div className="mb-4 min-w-0 max-w-full rounded-xl bg-slate-900/90 p-4 text-center">
+                    <div className="mb-4 min-w-0 max-w-full rounded-xl bg-slate-950/90 p-4 text-center border border-amber-500/20">
                         <ProgressRing
                             progress={data.progress || 10}
                             status={isLifecycleStatus(data.job_status) ? data.job_status : 'updating'}
@@ -783,59 +1056,98 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                     </div>
                 )}
 
-                {data.components && data.components.length > 1 && (
-                    <ul aria-label="Service components" className="mb-4 min-w-0 max-w-full space-y-1 text-xs text-slate-400">
-                        {data.components.map(component => <li key={component.unit} className="flex min-w-0 items-center justify-between gap-2"><span className="min-w-0 break-all">{component.unit}: {component.status || 'unknown'} ({component.role || 'required'}{component.configured === false ? ', unconfigured' : ''})</span><button disabled={!canControlServices} title={`View logs for ${component.unit}`} onClick={() => { setLogsModalUnits(serviceLogUnits); setLogsModalService(component.unit); }} className="shrink-0 rounded p-2 text-indigo-300 disabled:opacity-50"><Terminal size={14} /></button></li>)}
-                    </ul>
+                {failedInstall && (
+                    <div role="status" className="mb-4 min-w-0 max-w-full rounded-xl border border-slate-700/80 bg-slate-950/80 p-3 text-xs text-slate-200 shadow-inner">
+                        <div className="font-semibold flex items-center gap-1.5 mb-1 text-rose-300">
+                            <AlertCircle size={14} className="shrink-0 text-rose-300" />
+                            Install failed — rollback/recovery unconfirmed
+                        </div>
+                        <p className="text-slate-200 text-xs sm:text-[13px] leading-relaxed break-words">
+                            {data.last_job?.message || 'The application installer encountered an error. State recovery is unconfirmed.'}
+                        </p>
+                    </div>
                 )}
-                {data.last_job && data.last_job.status !== 'completed' && !isUpdating && (
-                    <div role="status" className="mb-4 min-w-0 max-w-full break-words rounded-lg border border-red-500/20 bg-red-500/5 p-3 text-xs text-red-300">
+
+                {!failedInstall && data.last_job && data.last_job.status !== 'completed' && !isUpdating && (
+                    <div role="status" className="mb-4 min-w-0 max-w-full break-words rounded-xl border border-red-500/20 bg-red-500/5 p-3 text-xs text-red-300">
                         Last {data.last_job.action}: {data.last_job.status}. {data.last_job.message || 'Check application state and logs before retrying.'}
                     </div>
                 )}
-                <div className="flex justify-between items-start mb-6 relative z-10">
-                    <div className="flex items-center gap-4">
-                        <div className="h-12 w-12 bg-white/5 rounded-xl border border-white/10 flex items-center justify-center shadow-inner overflow-hidden group-hover:scale-105 transition-transform">
+
+                {data.components && data.components.length > 1 && (
+                    <ul aria-label="Service components" className="mb-4 min-w-0 max-w-full space-y-1 text-xs text-slate-400">
+                        {data.components.map((component) => (
+                            <li key={component.unit} className="flex min-w-0 items-center justify-between gap-2 p-1.5 rounded-lg bg-slate-950/40 border border-white/5">
+                                <span className="min-w-0 break-all text-[11px]">
+                                    {component.unit}: {component.status || 'unknown'} ({component.role || 'required'}{component.configured === false ? ', unconfigured' : ''})
+                                </span>
+                                <button
+                                    type="button"
+                                    disabled={!canControlServices}
+                                    title={`View logs for ${component.unit}`}
+                                    onClick={() => {
+                                        setLogsModalUnits(serviceLogUnits);
+                                        setLogsModalService(component.unit);
+                                    }}
+                                    className="shrink-0 rounded p-1.5 text-indigo-300 hover:text-indigo-200 hover:bg-white/5 disabled:opacity-50 min-h-[40px] min-w-[40px] flex items-center justify-center"
+                                >
+                                    <Terminal size={13} />
+                                </button>
+                            </li>
+                        ))}
+                    </ul>
+                )}
+
+                <div className="flex justify-between items-start mb-4 relative z-10 gap-3">
+                    <div className="flex items-center gap-3 min-w-0">
+                        <div className="h-11 w-11 shrink-0 bg-slate-950 rounded-xl border border-slate-800 flex items-center justify-center shadow-inner overflow-hidden">
                             {isCore ? (
-                                <Cpu size={24} className={isRunning ? 'text-emerald-400' : (isError ? 'text-red-400' : 'text-slate-500')} />
+                                <Cpu size={22} className={isRunning ? 'text-emerald-400' : (isError || failedInstall ? 'text-rose-300' : 'text-slate-500')} />
                             ) : data.id ? (
-                                <div className="relative w-8 h-8 flex items-center justify-center">
-                                    <img 
-                                        src={`/img/${data.id.toLowerCase()}.png`} 
+                                <div className="relative w-7 h-7 flex items-center justify-center">
+                                    <img
+                                        src={`/img/${data.id.toLowerCase()}.png`}
                                         alt={name}
                                         className="w-full h-full object-contain"
-                                        onError={(e) => {
-                                            e.currentTarget.style.display = 'none';
-                                            e.currentTarget.parentElement?.querySelector('.fallback')?.classList.remove('hidden');
+                                        onError={(event) => {
+                                            event.currentTarget.style.display = 'none';
+                                            event.currentTarget.parentElement?.querySelector('.fallback')?.classList.remove('hidden');
                                         }}
                                     />
-                                    <Box size={24} className={`fallback hidden ${isRunning ? 'text-emerald-400' : (isError ? 'text-red-400' : 'text-slate-500')} absolute`} />
+                                    <Box size={22} className={`fallback hidden ${isRunning ? 'text-emerald-400' : (isError || failedInstall ? 'text-rose-300' : 'text-slate-500')} absolute`} />
                                 </div>
                             ) : (
-                                <Box size={24} className={isRunning ? 'text-emerald-400' : (isError ? 'text-red-400' : 'text-slate-500')} />
+                                <Box size={22} className={isRunning ? 'text-emerald-400' : (isError || failedInstall ? 'text-rose-300' : 'text-slate-500')} />
                             )}
                         </div>
-                        <div>
+                        <div className="min-w-0">
                             <div className="flex items-center gap-2 flex-wrap">
-                                <h3 className="text-base font-bold text-slate-200 group-hover:text-white transition-colors">{name}</h3>
+                                <h3 className="text-sm font-semibold text-slate-100 truncate max-w-[220px]" title={humanName !== name ? `${humanName} (${name})` : name}>
+                                    {humanName}
+                                </h3>
+                                {humanName !== name && (
+                                    <span className="text-xs font-mono text-slate-300 break-all sm:break-normal" title={name}>
+                                        {name}
+                                    </span>
+                                )}
                                 {hasUpdate && (
-                                    <span className="inline-flex items-center gap-1 text-xs font-bold px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-300 border border-amber-500/30">
-                                        <ArrowUpCircle size={12} className="text-amber-400" />
+                                    <span className="inline-flex items-center gap-1 text-[11px] font-semibold px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-300 border border-amber-500/30">
+                                        <ArrowUpCircle size={11} className="text-amber-400" />
                                         {latestVer ? `Update ${formatVersion(latestVer)}` : 'Update Available'}
                                     </span>
                                 )}
                             </div>
                             <div className="flex items-center gap-2 mt-1 flex-wrap">
                                 <span className="relative flex h-2 w-2">
-                                    {isRunning && !isDegraded && <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>}
-                                    <span className={`relative inline-flex rounded-full h-2 w-2 ${isUpdating || isDegraded ? 'bg-amber-400' : (isRunning ? 'bg-emerald-500' : (isError ? 'bg-red-500' : 'bg-slate-500'))}`}></span>
+                                    {isRunning && !isDegraded && <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />}
+                                    <span className={`relative inline-flex rounded-full h-2 w-2 ${isUpdating ? 'bg-amber-400' : (failedInstall || isError ? 'bg-red-500' : (isDegraded ? 'bg-amber-500' : (isRunning ? 'bg-emerald-500' : 'bg-slate-500')))}`} />
                                 </span>
-                                <span className={`text-xs font-medium capitalize ${isDegraded ? 'text-amber-400' : 'text-slate-400'}`}>
-                                    {isUpdating ? (data.job_status || 'updating') : (isDegraded ? 'degraded' : data.status)}
+                                <span className={`text-xs font-medium capitalize ${failedInstall || isError ? 'text-rose-300' : (isDegraded ? 'text-amber-400' : 'text-slate-300')}`}>
+                                    {isUpdating ? (data.job_status || 'updating') : (failedInstall ? 'install failed' : (isDegraded ? 'degraded' : data.status))}
                                 </span>
                                 {isDegraded && unhealthyUnits.length > 0 && (
                                     <span
-                                        className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30 font-mono"
+                                        className="text-xs px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30 font-mono"
                                         title={`Unhealthy required components: ${unhealthyUnits.join(', ')}`}
                                     >
                                         {unhealthyUnits.join(', ')} down
@@ -843,55 +1155,58 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                                 )}
                                 {sharedVhost && (
                                     <span
-                                        className="text-[10px] px-1.5 py-0.5 rounded bg-white/5 text-slate-400 border border-white/10 uppercase tracking-wider"
+                                        className="text-xs px-1.5 py-0.5 rounded bg-white/5 text-slate-300 border border-white/10 uppercase tracking-wider"
                                         title={sharedVhostMessage}
                                     >
                                         shared vhost
                                     </span>
                                 )}
                                 {data.managed_by && (
-                                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-white/5 text-slate-500 border border-white/5 uppercase tracking-wider">
+                                    <span className="text-xs px-1.5 py-0.5 rounded bg-white/5 text-slate-300 border border-white/10 uppercase tracking-wider">
                                         {data.managed_by}
                                     </span>
                                 )}
                                 {data.public_domain && (
-                                    <span className="text-[10px] px-2 py-0.5 rounded bg-indigo-500/10 text-indigo-300 border border-indigo-500/20 font-mono truncate max-w-[160px]" title={data.public_domain}>
+                                    <span className="text-xs px-2 py-0.5 rounded bg-indigo-500/10 text-indigo-300 border border-indigo-500/20 font-mono truncate max-w-[150px]" title={data.public_domain}>
                                         {data.public_domain}
                                     </span>
                                 )}
                             </div>
                         </div>
                     </div>
-                    <div className="flex items-center gap-1">
-                                <button
-                                    onClick={() => {
-                                        setLogsModalUnits(serviceLogUnits);
-                                        setLogsModalService(serviceLogUnits[0] || data.process || name);
-                                    }}
-                                    disabled={!canControlServices}
-                                    title={canControlServices ? 'View live logs' : 'Admin access required'}
-                                    className="obs-touch-target-standard obs-gpu-120hz-interactive p-2.5 bg-slate-800/80 hover:bg-indigo-500/20 hover:text-indigo-400 text-slate-400 rounded-lg transition-colors disabled:opacity-50 flex items-center justify-center"
-                                >
-                                    <Terminal size={16} />
-                                </button>
+                    <div className="flex items-center gap-1 shrink-0">
+                        <button
+                            type="button"
+                            onClick={() => {
+                                setLogsModalUnits(serviceLogUnits);
+                                setLogsModalService(serviceLogUnits[0] || data.process || name);
+                            }}
+                            disabled={!canControlServices}
+                            title={canControlServices ? 'View live logs' : 'Admin access required'}
+                            className="obs-touch-target-standard p-2 bg-slate-800/90 hover:bg-slate-700/90 text-slate-200 hover:text-white border border-slate-700/80 rounded-lg transition-colors disabled:opacity-50 flex items-center justify-center min-h-[40px] min-w-[40px]"
+                        >
+                            <Terminal size={15} />
+                        </button>
                         {!isCore && webAvailable && (
-                            <button 
+                            <button
+                                type="button"
                                 onClick={() => setIngressModalApp(data.id || data.process || name)}
                                 disabled={isBusy}
-                                className="obs-touch-target-standard obs-gpu-120hz-interactive p-2.5 text-slate-500 hover:text-indigo-400 hover:bg-white/5 rounded-lg transition-colors disabled:opacity-50 flex items-center justify-center"
+                                className="obs-touch-target-standard p-2 text-slate-400 hover:text-indigo-400 hover:bg-white/5 rounded-lg transition-colors disabled:opacity-50 flex items-center justify-center min-h-[40px] min-w-[40px]"
                                 title="Ingress & Deployment"
                             >
-                                <Network size={18} />
+                                <Network size={16} />
                             </button>
                         )}
                         {(isCore || webAvailable) && (
-                            <button 
+                            <button
+                                type="button"
                                 onClick={() => handleOpenSettings(name, data)}
                                 disabled={isBusy || (!isCore && remoteLoopbackBlocked)}
-                                className="obs-touch-target-standard obs-gpu-120hz-interactive p-2.5 text-slate-500 hover:text-slate-300 hover:bg-white/5 rounded-lg transition-colors disabled:opacity-50 flex items-center justify-center"
+                                className="obs-touch-target-standard p-2 text-slate-400 hover:text-slate-200 hover:bg-white/5 rounded-lg transition-colors disabled:opacity-50 flex items-center justify-center min-h-[40px] min-w-[40px]"
                                 title={!isCore && remoteLoopbackBlocked ? remoteLoopbackMessage : 'Settings'}
                             >
-                                <Settings size={18} />
+                                <Settings size={16} />
                             </button>
                         )}
                     </div>
@@ -904,45 +1219,46 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                     const isKeyCopied = copiedKeyService === name;
 
                     return (
-                        <div className="mb-6 space-y-3">
-                            <div className="grid grid-cols-3 gap-3">
-                                <div className={`bg-slate-900/50 rounded-xl p-3 border ${hasUpdate ? 'border-amber-500/20 bg-amber-500/[0.03]' : 'border-white/[0.02]'}`}>
+                        <div className="mb-4 space-y-2.5">
+                            <div className="grid grid-cols-3 gap-2 text-left">
+                                <div className={`bg-slate-950/60 rounded-xl p-2.5 border ${hasUpdate ? 'border-amber-500/20 bg-amber-500/[0.03]' : 'border-slate-800'}`}>
                                     <div className="flex items-center justify-between">
-                                        <span className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">Version</span>
+                                        <span className="text-xs uppercase font-bold text-slate-400 tracking-wider">Version</span>
                                         {!isCore && data.id && canControlServices && (
                                             <button
+                                                type="button"
                                                 onClick={() => handleCheckSingleUpdate(name, data)}
                                                 disabled={isBusy || isCheckingThis}
                                                 title="Check for updates"
-                                                className="text-slate-500 hover:text-slate-300 transition-colors disabled:opacity-40"
+                                                className="text-slate-400 hover:text-slate-200 transition-colors disabled:opacity-40 min-h-[24px] min-w-[24px] flex items-center justify-center"
                                             >
                                                 <RefreshCw size={11} className={isCheckingThis ? 'animate-spin text-indigo-400' : ''} />
                                             </button>
                                         )}
                                     </div>
                                     <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
-                                        <span className="text-sm font-medium text-slate-300 truncate">{formatVersion(installedVer)}</span>
+                                        <span className="text-xs font-medium text-slate-300 truncate">{formatVersion(installedVer)}</span>
                                         {hasUpdate && latestVer && (
                                             data.update_url && /^https?:\/\//i.test(data.update_url) ? (
                                                 <a
                                                     href={data.update_url}
                                                     target="_blank"
                                                     rel="noopener noreferrer"
-                                                    className="inline-flex items-center gap-0.5 text-xs font-bold text-amber-400 hover:text-amber-300 transition-colors"
+                                                    className="inline-flex items-center gap-0.5 text-xs font-semibold text-amber-400 hover:text-amber-300 transition-colors"
                                                     title="View release notes"
                                                 >
                                                     → {formatVersion(latestVer)}
                                                     <ExternalLink size={10} />
                                                 </a>
                                             ) : (
-                                                <span className="text-xs font-bold text-amber-400">
+                                                <span className="text-xs font-semibold text-amber-400">
                                                     → {formatVersion(latestVer)}
                                                 </span>
                                             )
                                         )}
                                         {!hasUpdate && updateError && (
                                             <span
-                                                className="inline-flex items-center gap-1 text-[10px] font-semibold text-red-400 bg-red-500/10 border border-red-500/20 px-1.5 py-0.5 rounded"
+                                                className="inline-flex items-center gap-1 text-xs font-semibold text-red-400 bg-red-500/10 border border-red-500/20 px-1.5 py-0.5 rounded"
                                                 title={`Update check failed: ${updateError}`}
                                             >
                                                 <AlertCircle size={10} />
@@ -951,15 +1267,15 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                                         )}
                                     </div>
                                 </div>
-                                <div className="bg-slate-900/50 rounded-xl p-3 border border-white/[0.02]">
-                                    <span className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">Port</span>
+                                <div className="bg-slate-950/60 rounded-xl p-2.5 border border-slate-800">
+                                    <span className="text-xs uppercase font-bold text-slate-400 tracking-wider">Port</span>
                                     <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
                                         {effectivePort != null ? (
                                             <>
-                                                <span className="text-sm font-mono font-medium text-slate-200">:{effectivePort}</span>
+                                                <span className="text-xs font-mono font-medium text-slate-200">:{effectivePort}</span>
                                                 {reassigned && defaultPort && (
                                                     <span
-                                                        className="text-[10px] px-1.5 py-0.5 rounded bg-indigo-500/10 text-indigo-300 border border-indigo-500/20 font-mono"
+                                                        className="text-xs px-1 py-0.5 rounded bg-indigo-500/10 text-indigo-300 border border-indigo-500/20 font-mono"
                                                         title={`Dynamically reassigned from default port ${defaultPort}`}
                                                     >
                                                         def :{defaultPort}
@@ -967,23 +1283,23 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                                                 )}
                                             </>
                                         ) : (
-                                            <span className="text-xs font-medium text-slate-500">Headless</span>
+                                            <span className="text-xs font-medium text-slate-400">Headless</span>
                                         )}
                                     </div>
                                 </div>
-                                <div className="bg-slate-900/50 rounded-xl p-3 border border-white/[0.02]">
-                                    <span className="text-[10px] uppercase font-bold text-slate-500 tracking-wider">Uptime</span>
-                                    <p className="text-sm font-medium text-slate-300 mt-0.5 truncate" title={data.uptime || '-'}>{data.uptime || '-'}</p>
+                                <div className="bg-slate-950/60 rounded-xl p-2.5 border border-slate-800">
+                                    <span className="text-xs uppercase font-bold text-slate-400 tracking-wider">Uptime</span>
+                                    <p className="text-xs font-medium text-slate-300 mt-0.5 truncate" title={resolveUptimeDisplay(data)}>{resolveUptimeDisplay(data)}</p>
                                 </div>
                             </div>
 
                             {apiKey && (
-                                <div className="bg-slate-900/50 rounded-xl px-3 py-2.5 border border-white/[0.04] flex items-center justify-between gap-2">
+                                <div className="bg-slate-950/60 rounded-xl px-3 py-2 border border-slate-800 flex items-center justify-between gap-2">
                                     <div className="flex items-center gap-2 min-w-0 flex-1">
-                                        <Key size={13} className="text-indigo-400 shrink-0" />
-                                        <span className="text-[10px] uppercase font-bold text-slate-500 tracking-wider shrink-0">API Key</span>
+                                        <Key size={12} className="text-indigo-400 shrink-0" />
+                                        <span className="text-xs uppercase font-bold text-slate-400 tracking-wider shrink-0">API Key</span>
                                         <code
-                                            className="text-xs font-mono text-slate-300 truncate select-all bg-slate-950/60 px-2 py-0.5 rounded border border-white/5"
+                                            className="text-xs font-mono text-slate-300 truncate select-all bg-slate-900 px-2 py-0.5 rounded border border-white/5"
                                             title={isKeyRevealed ? apiKey : 'Click eye icon to reveal API key'}
                                         >
                                             {isKeyRevealed ? apiKey : formatMaskedApiKey(apiKey)}
@@ -995,7 +1311,7 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                                             onClick={() => toggleRevealKey(name)}
                                             title={isKeyRevealed ? 'Hide API key' : 'Reveal API key'}
                                             aria-label={isKeyRevealed ? `Hide ${name} API key` : `Reveal ${name} API key`}
-                                            className="p-1.5 text-slate-400 hover:text-slate-200 hover:bg-white/5 rounded-md transition-colors"
+                                            className="p-1.5 text-slate-400 hover:text-slate-200 hover:bg-white/5 rounded-md transition-colors min-h-[40px] min-w-[40px] flex items-center justify-center"
                                         >
                                             {isKeyRevealed ? <EyeOff size={13} /> : <Eye size={13} />}
                                         </button>
@@ -1004,7 +1320,7 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                                             onClick={() => handleCopyApiKey(name, apiKey)}
                                             title="Copy API key"
                                             aria-label={`Copy ${name} API key`}
-                                            className="p-1.5 text-slate-400 hover:text-indigo-400 hover:bg-white/5 rounded-md transition-colors"
+                                            className="p-1.5 text-slate-400 hover:text-indigo-400 hover:bg-white/5 rounded-md transition-colors min-h-[40px] min-w-[40px] flex items-center justify-center"
                                         >
                                             {isKeyCopied ? <Check size={13} className="text-emerald-400" /> : <Copy size={13} />}
                                         </button>
@@ -1018,63 +1334,719 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                 {hasUpdate && data.id && (
                     <RequireClaim>
                         <button
+                            type="button"
                             onClick={() => handleUpdateService(name, data)}
                             disabled={controlDisabled}
                             title={canControlServices ? `Update ${name}${latestVer ? ` to ${formatVersion(latestVer)}` : ''}` : 'Admin access required'}
-                            className="obs-touch-target-standard obs-gpu-120hz-interactive w-full mb-2.5 py-2.5 bg-amber-500/15 hover:bg-amber-500 text-amber-300 hover:text-slate-950 text-xs font-bold rounded-lg transition-all flex items-center justify-center gap-2 border border-amber-500/30 shadow-lg shadow-amber-950/20 disabled:opacity-50"
+                            className="obs-touch-target-standard w-full mb-2.5 py-2.5 bg-amber-500/15 hover:bg-amber-500 text-amber-300 hover:text-slate-950 text-xs font-semibold rounded-lg transition-all flex items-center justify-center gap-2 border border-amber-500/30 disabled:opacity-50 min-h-[40px]"
                         >
-                            <ArrowUpCircle size={15} />
+                            <ArrowUpCircle size={14} />
                             {isUpdating ? 'Updating...' : `Update ${name}${latestVer ? ` to ${formatVersion(latestVer)}` : ''}`}
                         </button>
                     </RequireClaim>
                 )}
 
-                <div className="flex gap-2">
+                <div className="flex gap-2 flex-wrap">
                     {isRunning || isUpdating ? (
                         <>
                             {webAvailable && (
                                 <button
+                                    type="button"
                                     onClick={() => handleOpenWebUI(name, data)}
                                     title={remoteLoopbackBlocked ? remoteLoopbackMessage : `Open ${name} Web UI`}
-                                    className="obs-touch-target-standard obs-gpu-120hz-interactive flex-1 py-2.5 bg-slate-800/80 hover:bg-slate-700 text-slate-300 text-xs font-semibold rounded-lg transition-colors flex items-center justify-center gap-2 disabled:opacity-50"
+                                    className="obs-touch-target-standard flex-1 min-w-[90px] py-2 px-3 bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-200 hover:text-white border border-indigo-500/40 text-xs font-semibold rounded-lg transition-colors flex items-center justify-center gap-1.5 disabled:opacity-50 min-h-[40px]"
                                     disabled={isBusy || remoteLoopbackBlocked}
                                 >
                                     <Globe size={14} /> Web UI
                                 </button>
                             )}
                             <RequireClaim>
-
                                 <button
+                                    type="button"
                                     onClick={() => handleServiceControl(name, data, 'restart')}
                                     disabled={daemonControlDisabled}
                                     title={!canControlServices ? 'Admin access required' : (sharedVhost ? sharedVhostMessage : 'Restart service')}
-                                    className="obs-touch-target-standard obs-gpu-120hz-interactive p-2.5 bg-slate-800/80 hover:bg-amber-500/20 hover:text-amber-400 text-slate-400 rounded-lg transition-colors disabled:opacity-50 flex items-center justify-center"
+                                    className="obs-touch-target-standard py-2 px-3 bg-amber-500/10 hover:bg-amber-500/20 text-amber-300/90 hover:text-amber-200 border border-amber-500/30 rounded-lg text-xs font-semibold transition-colors disabled:opacity-50 flex items-center justify-center gap-1.5 min-h-[40px]"
                                 >
-                                    <RotateCcw size={16} className={isBusy ? 'animate-spin' : ''} />
+                                    <RotateCcw size={14} className={isBusy ? 'animate-spin' : ''} /> Restart
                                 </button>
                                 <button
-                                    onClick={() => handleServiceControl(name, data, 'stop')}
+                                    type="button"
+                                    onClick={() => setStopConfirmService({ name, data })}
                                     disabled={daemonControlDisabled}
                                     title={!canControlServices ? 'Admin access required' : (sharedVhost ? sharedVhostMessage : 'Stop service')}
-                                    className="obs-touch-target-standard obs-gpu-120hz-interactive p-2.5 bg-slate-800/80 hover:bg-red-500/20 hover:text-red-400 text-slate-400 rounded-lg transition-colors disabled:opacity-50 flex items-center justify-center"
+                                    className="obs-touch-target-standard py-2 px-3 bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 hover:text-rose-200 border border-rose-500/40 rounded-lg text-xs font-semibold transition-colors disabled:opacity-50 flex items-center justify-center gap-1.5 min-h-[40px]"
                                 >
-                                    <Square size={16} className="fill-current" />
+                                    <Square size={13} className="fill-current" /> Stop
+                                </button>
+                            </RequireClaim>
+                        </>
+                    ) : failedInstall ? (
+                        <>
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    setLogsModalUnits(serviceLogUnits);
+                                    setLogsModalService(serviceLogUnits[0] || data.process || name);
+                                }}
+                                disabled={!canControlServices}
+                                title={canControlServices ? 'Review installation failure logs' : 'Admin access required'}
+                                className="obs-touch-target-standard flex-1 min-w-[120px] py-2 px-3.5 bg-red-500/20 hover:bg-red-500/30 text-red-200 border border-red-500/40 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors disabled:opacity-50 min-h-[40px]"
+                            >
+                                <Terminal size={14} /> Review installation failure
+                            </button>
+                            <RequireClaim>
+                                <button
+                                    type="button"
+                                    onClick={() => setGuardedStartConfirmService({ name, data })}
+                                    disabled={daemonControlDisabled}
+                                    title={!canControlServices ? 'Admin access required' : 'Start service (warning: install failed and recovery state is unconfirmed)'}
+                                    className="obs-touch-target-standard py-2 px-3 bg-slate-900/80 hover:bg-slate-800 text-slate-300 hover:text-white border border-slate-800/90 rounded-lg text-xs font-medium flex items-center justify-center gap-1.5 transition-colors disabled:opacity-50 min-h-[40px]"
+                                >
+                                    <Play size={13} className="fill-current" /> Start Service (Guarded)
                                 </button>
                             </RequireClaim>
                         </>
                     ) : (
+                        <>
+                            <RequireClaim>
+                                <button
+                                    type="button"
+                                    onClick={() => handleServiceControl(name, data, 'start')}
+                                    disabled={daemonControlDisabled}
+                                    title={!canControlServices ? 'Admin access required' : (sharedVhost ? sharedVhostMessage : 'Start service')}
+                                    className="obs-touch-target-standard flex-1 min-w-[120px] py-2 px-3 bg-indigo-500/20 hover:bg-indigo-500 text-indigo-300 hover:text-white text-xs font-semibold rounded-lg transition-colors flex items-center justify-center gap-2 border border-indigo-500/30 disabled:opacity-50 min-h-[40px]"
+                                >
+                                    <Play size={14} className="fill-current" /> {isBusy ? 'Starting...' : 'Start Service'}
+                                </button>
+                            </RequireClaim>
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    setLogsModalUnits(serviceLogUnits);
+                                    setLogsModalService(serviceLogUnits[0] || data.process || name);
+                                }}
+                                disabled={!canControlServices}
+                                title={canControlServices ? 'View live logs' : 'Admin access required'}
+                                className="obs-touch-target-standard py-2 px-3 bg-slate-800/90 hover:bg-slate-700/90 text-slate-200 hover:text-white border border-slate-700/80 rounded-lg text-xs font-medium transition-colors disabled:opacity-50 flex items-center justify-center gap-1.5 min-h-[40px]"
+                            >
+                                <Terminal size={14} /> Logs
+                            </button>
+                        </>
+                    )}
+                </div>
+            </div>
+        );
+    };
+
+    const renderServiceRow = (name: string, rawData: unknown) => {
+        const info = rawData as ServiceInfo;
+        const data = serviceControl?.name === name ? { ...info, status: serviceControl.status } : info;
+        const isCore = isCorePlatformService(data);
+        const appId = data.id || '';
+        const isUpdating =
+            data.status === 'updating' ||
+            isLifecycleStatus(data.job_status) ||
+            isLifecycleStatus(data.status) ||
+            (appId ? updatingServices.has(appId) : false);
+        const { degraded: isDegraded, unhealthyUnits } = getDegradedSummary(data);
+        const failedInstall = isFailedInstall(data);
+        const isRunning = (data.status === 'running' || isDegraded) && !isUpdating;
+        const isError = data.status === 'error' || data.status === 'failed';
+        const isBusy = serviceControl?.name === name || isUpdating || restarts.has(name);
+        const controlDisabled = isBusy || !canControlServices;
+        const sharedVhost = isSharedVhostService(name, data);
+        const sharedVhostMessage = `${name} runs on the shared Apache web server. Per-app stop/restart is disabled to protect other sites and the gateway.`;
+        const daemonControlDisabled = controlDisabled || sharedVhost;
+        const webAvailable = hasWebUI(data);
+        const remoteLoopbackBlocked = isRemoteLoopbackRestricted(name, data);
+        const remoteLoopbackMessage = buildRemoteLoopbackMessage(name);
+        const hasUpdate = Boolean(!isCore && data.update_available && !data.update_error);
+        const updateError = !isCore && data.update_error ? data.update_error.trim() : '';
+        const installedVer = data.installed_version || data.version || '-';
+        const latestVer = data.latest_version;
+        const isCheckingThis = checkingSingleService === name;
+        const serviceLogUnits = resolveServiceLogUnits(name, data);
+        const { port: effectivePort, defaultPort, reassigned } = resolveServicePort(name, data);
+        const apiKey = user?.role === 'admin' ? data.api_key?.trim() || '' : '';
+        const isKeyRevealed = revealedKeys.has(name);
+        const isKeyCopied = copiedKeyService === name;
+        const humanName = getHumanDisplayName(name, data);
+
+        return (
+            <div
+                key={name}
+                role="article"
+                aria-label={`${name} service`}
+                className="bg-slate-900/40 hover:bg-slate-900/80 border border-slate-800/80 rounded-xl p-2.5 sm:py-1.5 sm:px-3.5 transition-colors flex flex-col gap-2 @[960px]:grid @[960px]:grid-cols-[minmax(180px,1fr)_95px_100px_140px_65px_280px] @[960px]:items-center @[960px]:gap-3 @[1250px]:grid-cols-[minmax(280px,360px)_120px_130px_minmax(180px,220px)_90px_minmax(280px,auto)] @[1250px]:gap-4"
+            >
+                <div className="grid grid-cols-[1fr_auto] items-start gap-x-3 gap-y-1.5 sm:flex sm:items-center sm:justify-between @[960px]:contents @[1250px]:contents min-w-0 w-full">
+                    <div className="col-start-1 flex items-start gap-2.5 min-w-0 w-full sm:flex-1">
+                    <div className="h-8 w-8 shrink-0 bg-slate-950 rounded-lg border border-slate-800 flex items-center justify-center overflow-hidden">
+                        {isCore ? (
+                            <Cpu size={18} className={isRunning ? 'text-emerald-400' : (isError || failedInstall ? 'text-red-400' : 'text-slate-500')} />
+                        ) : data.id ? (
+                            <div className="relative w-5 h-5 flex items-center justify-center">
+                                <img
+                                    src={`/img/${data.id.toLowerCase()}.png`}
+                                    alt={name}
+                                    className="w-full h-full object-contain"
+                                    onError={(event) => {
+                                        event.currentTarget.style.display = 'none';
+                                        event.currentTarget.parentElement?.querySelector('.fallback')?.classList.remove('hidden');
+                                    }}
+                                />
+                                <Box size={18} className={`fallback hidden ${isRunning ? 'text-emerald-400' : (isError || failedInstall ? 'text-red-400' : 'text-slate-500')} absolute`} />
+                            </div>
+                        ) : (
+                            <Box size={18} className={isRunning ? 'text-emerald-400' : (isError || failedInstall ? 'text-red-400' : 'text-slate-500')} />
+                        )}
+                    </div>
+
+                    <div className="min-w-0 flex-1">
+                        <div className="flex flex-col justify-center min-h-[40px]">
+                            <span className="text-sm font-semibold text-slate-100 break-words leading-tight" title={humanName !== name ? `${humanName} (${name})` : name}>
+                                {humanName}
+                            </span>
+                            {humanName !== name ? (
+                                <div className="flex items-center gap-1.5 flex-wrap mt-0.5">
+                                    <span className="text-xs font-mono text-slate-300 break-all sm:break-normal" title={name}>
+                                        {name}
+                                    </span>
+                                    {sharedVhost && (
+                                        <span className="text-xs px-1.5 py-0.5 rounded bg-white/5 text-slate-300 border border-white/10 uppercase tracking-wider" title={sharedVhostMessage}>
+                                            shared vhost
+                                        </span>
+                                    )}
+                                </div>
+                            ) : sharedVhost ? (
+                                <span className="text-xs px-1.5 py-0.5 rounded bg-white/5 text-slate-300 border border-white/10 uppercase tracking-wider w-fit mt-0.5" title={sharedVhostMessage}>
+                                    shared vhost
+                                </span>
+                            ) : null}
+                        </div>
+
+                        {data.components && data.components.length > 1 && (
+                            <ul aria-label="Service components" className="mt-1 space-y-0.5 text-xs text-slate-400">
+                                {data.components.map((component) => (
+                                    <li key={component.unit} className="flex min-w-0 items-center gap-2">
+                                        <span className="min-w-0 break-all text-xs">
+                                            {component.unit}: {component.status || 'unknown'} ({component.role || 'required'}{component.configured === false ? ', unconfigured' : ''})
+                                        </span>
+                                        <button
+                                            type="button"
+                                            disabled={!canControlServices}
+                                            title={`View logs for ${component.unit}`}
+                                            onClick={() => {
+                                                setLogsModalUnits(serviceLogUnits);
+                                                setLogsModalService(component.unit);
+                                            }}
+                                            className="shrink-0 rounded p-1 text-indigo-300 hover:text-indigo-200 disabled:opacity-50 min-h-[40px] min-w-[40px] flex items-center justify-center"
+                                        >
+                                            <Terminal size={12} />
+                                        </button>
+                                    </li>
+                                ))}
+                            </ul>
+                        )}
+
+                            {apiKey && (
+                            <div className="mt-1.5 flex items-center gap-2 flex-wrap">
+                                <Key size={12} className="text-indigo-400 shrink-0" />
+                                <span className="text-xs uppercase font-bold text-slate-400 tracking-wider">API Key</span>
+                                <code
+                                    className="text-xs font-mono text-slate-300 truncate select-all bg-slate-950 px-2 py-0.5 rounded border border-white/5"
+                                    title={isKeyRevealed ? apiKey : 'Click eye icon to reveal API key'}
+                                >
+                                    {isKeyRevealed ? apiKey : formatMaskedApiKey(apiKey)}
+                                </code>
+                                <button
+                                    type="button"
+                                    onClick={() => toggleRevealKey(name)}
+                                    title={isKeyRevealed ? 'Hide API key' : 'Reveal API key'}
+                                    aria-label={isKeyRevealed ? `Hide ${name} API key` : `Reveal ${name} API key`}
+                                    className="p-1 text-slate-400 hover:text-slate-200 rounded min-h-[40px] min-w-[40px] flex items-center justify-center"
+                                >
+                                    {isKeyRevealed ? <EyeOff size={12} /> : <Eye size={12} />}
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => handleCopyApiKey(name, apiKey)}
+                                    title="Copy API key"
+                                    aria-label={`Copy ${name} API key`}
+                                    className="p-1 text-slate-400 hover:text-indigo-400 rounded min-h-[40px] min-w-[40px] flex items-center justify-center"
+                                >
+                                    {isKeyCopied ? <Check size={12} className="text-emerald-400" /> : <Copy size={12} />}
+                                </button>
+                            </div>
+                        )}
+                    </div>
+                </div>
+
+                    <div className="col-start-1 sm:col-auto flex flex-col justify-center gap-0.5 shrink-0 min-w-0 pl-[42px] sm:pl-0 sm:items-end @[960px]:items-start @[960px]:w-[95px] @[1250px]:w-[120px] min-h-[20px] sm:min-h-[40px]">
+                        <div className="flex items-center gap-1.5 min-w-0">
+                            <span className="relative flex h-2 w-2 shrink-0">
+                                {isRunning && !isDegraded && <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />}
+                                <span className={`relative inline-flex rounded-full h-2 w-2 ${isUpdating ? 'bg-amber-400' : (failedInstall || isError ? 'bg-red-500' : (isDegraded ? 'bg-amber-500' : (isRunning ? 'bg-emerald-500' : 'bg-slate-500')))}`} />
+                            </span>
+                            <span className={`text-xs sm:text-[13px] font-medium capitalize truncate ${failedInstall || isError ? 'text-rose-300' : (isDegraded ? 'text-amber-400' : 'text-slate-300')}`}>
+                                {isUpdating ? (data.job_status || 'updating') : (failedInstall ? 'install failed' : (isDegraded ? 'degraded' : data.status))}
+                            </span>
+                            {isDegraded && unhealthyUnits.length > 0 && (
+                                <span className="text-xs px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30 font-mono shrink-0">
+                                    {unhealthyUnits.join(', ')} down
+                                </span>
+                            )}
+                        </div>
+                        {data.managed_by && (
+                            <span className="hidden sm:inline-flex text-xs px-1.5 py-0.5 rounded bg-white/5 text-slate-300 border border-white/10 uppercase tracking-wider">
+                                {data.managed_by}
+                            </span>
+                        )}
+                    </div>
+
+                    <div className="col-start-2 row-start-1 row-span-2 sm:hidden flex items-center justify-end shrink-0 self-center">
+                        <button
+                            type="button"
+                            onClick={() => {
+                                setExpandedDetailsServices((currentExpanded) => {
+                                    const updatedExpanded = new Set(currentExpanded);
+                                    if (updatedExpanded.has(name)) {
+                                        updatedExpanded.delete(name);
+                                    } else {
+                                        updatedExpanded.add(name);
+                                    }
+                                    return updatedExpanded;
+                                });
+                            }}
+                            aria-expanded={expandedDetailsServices.has(name)}
+                            aria-label={`Toggle details for ${name}`}
+                            title={`Toggle details for ${name}`}
+                            className="sm:hidden obs-touch-target-standard py-1.5 px-2.5 bg-slate-800/80 hover:bg-slate-700 text-slate-300 hover:text-slate-100 border border-slate-700/60 rounded-lg text-xs font-medium flex items-center justify-center gap-1 min-h-[44px] min-w-[44px] shrink-0"
+                        >
+                            {expandedDetailsServices.has(name) ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+                            <span>Details</span>
+                        </button>
+                    </div>
+                </div>
+
+                <div className="flex flex-wrap items-center justify-between gap-2.5 min-w-0 w-full pt-1 border-t border-slate-800/40 @[960px]:border-t-0 @[960px]:pt-0 @[960px]:contents @[1250px]:border-t-0 @[1250px]:pt-0 @[1250px]:contents">
+                    <div className={`items-center gap-3 sm:gap-4 text-xs @[960px]:contents @[1250px]:contents min-w-0 shrink-0 ${expandedDetailsServices.has(name) ? 'flex flex-wrap w-full pt-1.5 border-t border-slate-800/40 sm:flex-nowrap sm:border-t-0 sm:pt-0' : 'hidden sm:flex sm:flex-nowrap'}`}>
+                        <div className="min-w-0 sm:w-[130px] @[960px]:w-[100px] @[1250px]:w-[130px] shrink-0 flex items-center gap-1.5 min-h-[40px]">
+                            <span className="text-xs uppercase font-bold text-slate-400 tracking-wider @[960px]:hidden @[1250px]:hidden shrink-0">Version</span>
+                            <div className="flex items-center gap-1.5 min-h-[40px] flex-nowrap min-w-0">
+                                <span className="text-xs sm:text-[13px] font-medium text-slate-300 truncate">{formatVersion(installedVer)}</span>
+                                {hasUpdate && latestVer && (
+                                    data.update_url && /^https?:\/\//i.test(data.update_url) ? (
+                                        <a
+                                            href={data.update_url}
+                                            target="_blank"
+                                            rel="noopener noreferrer"
+                                            className="inline-flex items-center gap-0.5 text-xs font-semibold text-amber-400 hover:text-amber-300 shrink-0"
+                                            title="View release notes"
+                                        >
+                                            → {formatVersion(latestVer)}
+                                            <ExternalLink size={10} />
+                                        </a>
+                                    ) : (
+                                        <span className="text-xs font-semibold text-amber-400 shrink-0">
+                                            → {formatVersion(latestVer)}
+                                        </span>
+                                    )
+                                )}
+                                {!hasUpdate && updateError && (
+                                    <span
+                                        className="inline-flex items-center gap-1 text-xs font-semibold text-rose-300 bg-red-500/10 border border-red-500/20 px-1.5 py-0.5 rounded shrink-0"
+                                        title={`Update check failed: ${updateError}`}
+                                    >
+                                        <AlertCircle size={10} />
+                                        Check failed
+                                    </span>
+                                )}
+                            </div>
+                        </div>
+
+                        <div className="relative min-w-0 sm:w-[180px] @[960px]:w-[140px] @[1250px]:w-[180px] shrink-0 flex items-center min-h-[40px]" data-access-menu={name}>
+                            <div className="flex flex-wrap @[1250px]:flex-nowrap items-center gap-3 min-h-[40px] shrink-0 max-w-full">
+                                <span className="text-xs uppercase font-bold text-slate-400 tracking-wider @[960px]:hidden @[1250px]:hidden shrink-0">Port</span>
+                                {effectivePort != null ? (
+                                    <>
+                                        <span className="text-xs font-mono font-medium text-slate-100 whitespace-nowrap shrink-0 inline-block min-w-[6ch]">:{effectivePort}</span>
+                                        {reassigned && defaultPort && (
+                                            <span className="text-xs px-1.5 py-0.5 rounded bg-indigo-500/10 text-indigo-300 font-mono whitespace-nowrap shrink-0 hidden @[1250px]:inline-block" title={`Default ${defaultPort}`}>
+                                                def :{defaultPort}
+                                            </span>
+                                        )}
+                                    </>
+                                ) : (
+                                    <span className="text-xs font-medium text-slate-400 whitespace-nowrap inline-block min-w-[6ch]">Headless</span>
+                                )}
+                                {(webAvailable || isCore || Boolean(data.public_domain || data.internal_domain)) && (
+                                    <div className="inline-flex shrink-0">
+                                        <button
+                                            type="button"
+                                            id={`connection-trigger-${appId || name}`}
+                                            onClick={() => setOpenAccessMenuService((currentOpen) => (currentOpen === name ? null : name))}
+                                            aria-expanded={openAccessMenuService === name}
+                                            aria-haspopup="menu"
+                                            aria-controls={`connection-menu-${appId || name}`}
+                                            aria-label={`Connection details for ${name}`}
+                                            title={`Connection details for ${name}`}
+                                            className={`obs-touch-target-standard py-1 px-2 border rounded-lg text-xs font-semibold transition-colors flex items-center justify-center gap-1 min-h-[44px] sm:min-h-[40px] shrink-0 ${
+                                                openAccessMenuService === name
+                                                    ? 'bg-slate-700 text-white border-slate-500'
+                                                    : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700/60'
+                                            }`}
+                                        >
+                                            <span>Connection</span>
+                                            <ChevronDown size={14} className={`transition-transform ${openAccessMenuService === name ? 'rotate-180' : ''}`} />
+                                        </button>
+                                    </div>
+                                )}
+                            </div>
+                            {(webAvailable || isCore || Boolean(data.public_domain || data.internal_domain)) && openAccessMenuService === name && (
+                                <div
+                                    id={`connection-menu-${appId || name}`}
+                                    role="menu"
+                                    aria-label={`Connection details for ${name}`}
+                                    className="absolute left-0 top-full mt-1.5 z-30 min-w-[200px] p-1.5 bg-slate-900 border border-slate-700 rounded-xl shadow-2xl flex flex-col gap-1.5"
+                                >
+                                    {(data.public_domain || data.internal_domain) && (
+                                        <div className="px-2.5 py-1.5 border-b border-slate-800 text-xs">
+                                            <span className="text-[11px] uppercase font-bold text-slate-400 tracking-wider block">Endpoint</span>
+                                            {data.public_domain && (
+                                                <span className="font-mono text-indigo-300 break-all select-all block mt-0.5" title={data.public_domain}>
+                                                    {data.public_domain}
+                                                </span>
+                                            )}
+                                            {data.internal_domain && data.internal_domain !== data.public_domain && (
+                                                <span className="font-mono text-slate-300 break-all select-all block mt-0.5" title={data.internal_domain}>
+                                                    {data.internal_domain}
+                                                </span>
+                                            )}
+                                        </div>
+                                    )}
+                                    {!isCore && webAvailable && (
+                                        <button
+                                            type="button"
+                                            role="menuitem"
+                                            onClick={() => {
+                                                setOpenAccessMenuService(null);
+                                                setIngressModalApp(data.id || data.process || name);
+                                            }}
+                                            disabled={isBusy}
+                                            className="obs-touch-target-standard w-full py-2 px-2.5 text-left text-slate-300 hover:text-white hover:bg-slate-800 rounded-lg text-xs font-medium transition-colors disabled:opacity-50 flex items-center gap-2 min-h-[40px]"
+                                            aria-label={`Ingress and deployment for ${name}`}
+                                            title="Ingress & Deployment"
+                                        >
+                                            <Network size={14} className="text-indigo-400 shrink-0" />
+                                            <span>Ingress & Deployment</span>
+                                        </button>
+                                    )}
+                                    {(isCore || webAvailable) && (
+                                        <button
+                                            type="button"
+                                            role="menuitem"
+                                            onClick={() => {
+                                                setOpenAccessMenuService(null);
+                                                handleOpenSettings(name, data);
+                                            }}
+                                            disabled={isBusy || (!isCore && remoteLoopbackBlocked)}
+                                            className="obs-touch-target-standard w-full py-2 px-2.5 text-left text-slate-300 hover:text-white hover:bg-slate-800 rounded-lg text-xs font-medium transition-colors disabled:opacity-50 flex items-center gap-2 min-h-[40px]"
+                                            aria-label={`Settings for ${name}`}
+                                            title={!isCore && remoteLoopbackBlocked ? remoteLoopbackMessage : 'Settings'}
+                                        >
+                                            <Settings size={14} className="text-slate-400 shrink-0" />
+                                            <span>Settings</span>
+                                        </button>
+                                    )}
+                                </div>
+                            )}
+                        </div>
+
+                        <div className="min-w-0 sm:w-[90px] @[960px]:w-[65px] @[1250px]:w-[90px] shrink-0 flex items-center gap-1.5 min-h-[40px]">
+                            <span className="text-xs uppercase font-bold text-slate-400 tracking-wider @[960px]:hidden @[1250px]:hidden shrink-0">Uptime</span>
+                            <div className="flex items-center min-h-[40px]">
+                                <span className="text-xs sm:text-[13px] font-medium text-slate-300 truncate" title={resolveUptimeDisplay(data)}>{resolveUptimeDisplay(data)}</span>
+                            </div>
+                        </div>
+
+                        {expandedDetailsServices.has(name) && (data.managed_by || data.public_domain || data.internal_domain) && (
+                            <div className="sm:hidden min-w-0 w-full flex items-center gap-2 flex-wrap text-xs pt-1 border-t border-slate-800/40">
+                                <span className="text-xs uppercase font-bold text-slate-400 tracking-wider shrink-0">Runtime</span>
+                                {data.managed_by && (
+                                    <span className="text-xs px-2 py-0.5 rounded bg-white/5 text-slate-300 border border-white/10 uppercase tracking-wider">
+                                        {data.managed_by}
+                                    </span>
+                                )}
+                                {data.public_domain && (
+                                    <span className="text-xs px-2 py-0.5 rounded bg-indigo-500/10 text-indigo-300 border border-indigo-500/20 font-mono break-all" title={data.public_domain}>
+                                        {data.public_domain}
+                                    </span>
+                                )}
+                                {data.internal_domain && data.internal_domain !== data.public_domain && (
+                                    <span className="text-xs px-2 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700 font-mono break-all" title={data.internal_domain}>
+                                        {data.internal_domain}
+                                    </span>
+                                )}
+                            </div>
+                        )}
+                    </div>
+
+                    {!failedInstall ? (
+                        <div className="grid grid-cols-3 gap-1.5 w-full sm:flex sm:flex-wrap sm:w-auto sm:items-center sm:justify-end sm:gap-2 @[960px]:w-[280px] @[960px]:justify-end @[1250px]:w-[280px] @[1250px]:min-w-[280px] @[1250px]:justify-start min-w-0 pt-0.5 @[960px]:pt-0 shrink-0">
+                    {hasUpdate && data.id && (
                         <RequireClaim>
                             <button
-                                onClick={() => handleServiceControl(name, data, 'start')}
-                                disabled={daemonControlDisabled}
-                                title={!canControlServices ? 'Admin access required' : (sharedVhost ? sharedVhostMessage : 'Start service')}
-                                className="obs-touch-target-standard obs-gpu-120hz-interactive w-full py-2.5 bg-indigo-500/20 hover:bg-indigo-500 text-indigo-300 hover:text-white text-xs font-semibold rounded-lg transition-colors flex items-center justify-center gap-2 border border-indigo-500/30 disabled:opacity-50"
+                                type="button"
+                                onClick={() => handleUpdateService(name, data)}
+                                disabled={controlDisabled}
+                                title={canControlServices ? `Update ${name}${latestVer ? ` to ${formatVersion(latestVer)}` : ''}` : 'Admin access required'}
+                                className="col-span-3 sm:w-full obs-touch-target-standard py-2 px-3 bg-amber-500/15 hover:bg-amber-500 text-amber-300 hover:text-slate-950 text-xs font-semibold rounded-lg transition-all flex items-center justify-center gap-1.5 border border-amber-500/30 disabled:opacity-50 min-h-[44px] sm:min-h-[40px] shrink-0"
                             >
-                                <Play size={14} className="fill-current" /> {isBusy ? 'Starting...' : 'Start Service'}
+                                <ArrowUpCircle size={14} /> Update
                             </button>
                         </RequireClaim>
                     )}
+
+                    {isRunning || isUpdating ? (
+                        <>
+                            {webAvailable ? (
+                                <button
+                                    type="button"
+                                    onClick={() => handleOpenWebUI(name, data)}
+                                    title={remoteLoopbackBlocked ? remoteLoopbackMessage : `Open ${name} Web UI`}
+                                    className="col-span-1 obs-touch-target-standard py-2 px-2 sm:px-2.5 bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-200 hover:text-white border border-indigo-500/40 text-xs font-semibold rounded-lg transition-colors flex items-center justify-center gap-1 sm:gap-1.5 disabled:opacity-50 min-h-[44px] sm:min-h-[40px] shrink-0 w-full sm:w-[88px]"
+                                    disabled={isBusy || remoteLoopbackBlocked}
+                                >
+                                    <Globe size={14} /> Web UI
+                                </button>
+                            ) : (
+                                <div className="hidden sm:block sm:w-[88px] shrink-0" aria-hidden="true" />
+                            )}
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    setLogsModalUnits(serviceLogUnits);
+                                    setLogsModalService(serviceLogUnits[0] || data.process || name);
+                                }}
+                                disabled={!canControlServices}
+                                title={canControlServices ? 'View live logs' : 'Admin access required'}
+                                className={`obs-touch-target-standard py-2 px-2 sm:px-2.5 bg-slate-800/90 hover:bg-slate-700/90 text-slate-200 hover:text-white border border-slate-700/80 rounded-lg text-xs font-medium transition-colors disabled:opacity-50 flex items-center justify-center gap-1 sm:gap-1.5 min-h-[44px] sm:min-h-[40px] shrink-0 w-full sm:w-[74px] ${
+                                    webAvailable ? 'col-span-1' : 'col-span-2'
+                                }`}
+                            >
+                                <Terminal size={14} /> Logs
+                            </button>
+                            <div className="relative inline-flex col-span-1 w-full sm:w-[94px] shrink-0" data-manage-menu={name}>
+                                <button
+                                    type="button"
+                                    id={`manage-trigger-${appId || name}`}
+                                    onClick={() => setOpenManageMenuService((currentOpen) => (currentOpen === name ? null : name))}
+                                    aria-expanded={openManageMenuService === name}
+                                    aria-haspopup="menu"
+                                    aria-controls={`manage-menu-${appId || name}`}
+                                    aria-label={`Manage ${name} service actions`}
+                                    title={!canControlServices ? 'Admin access required' : `Manage ${name} service actions`}
+                                    className={`obs-touch-target-standard py-2 px-2 sm:px-2.5 border rounded-lg text-xs font-medium transition-colors flex items-center justify-center gap-1 sm:gap-1.5 min-h-[44px] sm:min-h-[40px] shrink-0 w-full ${
+                                        openManageMenuService === name
+                                            ? 'bg-slate-700 text-white border-slate-500'
+                                            : 'bg-slate-800/90 hover:bg-slate-700/90 text-slate-200 hover:text-white border border-slate-700/80'
+                                    }`}
+                                >
+                                    <Sliders size={14} /> Manage
+                                </button>
+                                {openManageMenuService === name && (
+                                    <div
+                                        id={`manage-menu-${appId || name}`}
+                                        role="menu"
+                                        aria-label={`${name} service actions`}
+                                        className="absolute right-0 top-full mt-1.5 z-30 min-w-[170px] p-1.5 bg-slate-900 border border-slate-700 rounded-xl shadow-2xl flex flex-col gap-1.5"
+                                    >
+                                        <RequireClaim>
+                                            <button
+                                                type="button"
+                                                role="menuitem"
+                                                onClick={() => {
+                                                    void handleServiceControl(name, data, 'restart');
+                                                }}
+                                                disabled={daemonControlDisabled}
+                                                title={!canControlServices ? 'Admin access required' : (sharedVhost ? sharedVhostMessage : 'Restart service')}
+                                                aria-label={`Restart ${name} service`}
+                                                className="obs-touch-target-standard w-full py-2 px-3 bg-amber-500/10 hover:bg-amber-500/20 text-amber-300/90 hover:text-amber-200 border border-amber-500/30 rounded-lg text-xs font-semibold transition-colors disabled:opacity-50 flex items-center justify-start gap-2 min-h-[40px]"
+                                            >
+                                                <RotateCcw size={14} className={isBusy ? 'animate-spin' : ''} /> Restart
+                                            </button>
+                                            <button
+                                                type="button"
+                                                role="menuitem"
+                                                onClick={() => {
+                                                    setOpenManageMenuService(null);
+                                                    setStopConfirmService({ name, data });
+                                                }}
+                                                disabled={daemonControlDisabled}
+                                                title={!canControlServices ? 'Admin access required' : (sharedVhost ? sharedVhostMessage : 'Stop service')}
+                                                aria-label={`Stop ${name} service`}
+                                                className="obs-touch-target-standard w-full py-2 px-3 bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 hover:text-rose-200 border border-rose-500/40 rounded-lg text-xs font-semibold transition-colors disabled:opacity-50 flex items-center justify-start gap-2 min-h-[40px]"
+                                            >
+                                                <Square size={13} className="fill-current" /> Stop
+                                            </button>
+                                            {!isCore && data.id && (
+                                                <button
+                                                    type="button"
+                                                    role="menuitem"
+                                                    onClick={() => {
+                                                        void handleCheckSingleUpdate(name, data);
+                                                    }}
+                                                    disabled={isBusy || isCheckingThis || !canControlServices}
+                                                    title={!canControlServices ? 'Admin access required' : 'Check for updates'}
+                                                    aria-label={`Check for updates for ${name}`}
+                                                    className="obs-touch-target-standard w-full py-2 px-3 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700/60 rounded-lg text-xs font-semibold transition-colors disabled:opacity-50 flex items-center justify-start gap-2 min-h-[40px]"
+                                                >
+                                                    <RefreshCw size={14} className={isCheckingThis ? 'animate-spin text-indigo-400' : ''} />
+                                                    <span>{isCheckingThis ? 'Checking updates...' : 'Check for updates'}</span>
+                                                </button>
+                                            )}
+                                        </RequireClaim>
+                                    </div>
+                                )}
+                            </div>
+                        </>
+                    ) : (
+                        <>
+                            <RequireClaim>
+                                <button
+                                    type="button"
+                                    onClick={() => handleServiceControl(name, data, 'start')}
+                                    disabled={daemonControlDisabled}
+                                    title={!canControlServices ? 'Admin access required' : (sharedVhost ? sharedVhostMessage : 'Start service')}
+                                    className={`obs-touch-target-standard py-2 px-2 sm:px-3 bg-indigo-500/20 hover:bg-indigo-500 text-indigo-300 hover:text-white text-xs font-semibold rounded-lg transition-colors flex items-center justify-center gap-1.5 border border-indigo-500/30 disabled:opacity-50 min-h-[44px] sm:min-h-[40px] shrink-0 w-full sm:w-auto ${
+                                        !isCore && data.id ? 'col-span-1' : 'col-span-2 sm:col-span-1'
+                                    }`}
+                                >
+                                    <Play size={13} className="fill-current" /> {isBusy ? 'Starting...' : 'Start Service'}
+                                </button>
+                            </RequireClaim>
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    setLogsModalUnits(serviceLogUnits);
+                                    setLogsModalService(serviceLogUnits[0] || data.process || name);
+                                }}
+                                disabled={!canControlServices}
+                                title={canControlServices ? 'View live logs' : 'Admin access required'}
+                                className="col-span-1 obs-touch-target-standard py-2 px-2 sm:px-3 bg-slate-800/90 hover:bg-slate-700/90 text-slate-200 hover:text-white border border-slate-700/80 rounded-lg text-xs font-medium transition-colors disabled:opacity-50 flex items-center justify-center gap-1.5 min-h-[44px] sm:min-h-[40px] shrink-0 w-full sm:w-auto"
+                            >
+                                <Terminal size={14} /> Logs
+                            </button>
+                            {!isCore && data.id && (
+                                <div className="relative inline-flex col-span-1 w-full sm:w-auto" data-manage-menu={name}>
+                                    <button
+                                        type="button"
+                                        id={`manage-trigger-${appId || name}`}
+                                        onClick={() => setOpenManageMenuService((currentOpen) => (currentOpen === name ? null : name))}
+                                        aria-expanded={openManageMenuService === name}
+                                        aria-haspopup="menu"
+                                        aria-controls={`manage-menu-${appId || name}`}
+                                        aria-label={`Manage ${name} service actions`}
+                                        title={!canControlServices ? 'Admin access required' : `Manage ${name} service actions`}
+                                        className={`obs-touch-target-standard py-2 px-2 sm:px-3 border rounded-lg text-xs font-medium transition-colors flex items-center justify-center gap-1 sm:gap-1.5 min-h-[44px] sm:min-h-[40px] shrink-0 w-full sm:w-auto ${
+                                            openManageMenuService === name
+                                                ? 'bg-slate-700 text-white border-slate-500'
+                                                : 'bg-slate-800/90 hover:bg-slate-700/90 text-slate-200 hover:text-white border border-slate-700/80'
+                                        }`}
+                                    >
+                                        <Sliders size={14} /> Manage
+                                    </button>
+                                    {openManageMenuService === name && (
+                                        <div
+                                            id={`manage-menu-${appId || name}`}
+                                            role="menu"
+                                            aria-label={`${name} service actions`}
+                                            className="absolute right-0 top-full mt-1.5 z-30 min-w-[170px] p-1.5 bg-slate-900 border border-slate-700 rounded-xl shadow-2xl flex flex-col gap-1.5"
+                                        >
+                                            <RequireClaim>
+                                                <button
+                                                    type="button"
+                                                    role="menuitem"
+                                                    onClick={() => {
+                                                        void handleCheckSingleUpdate(name, data);
+                                                    }}
+                                                    disabled={isBusy || isCheckingThis || !canControlServices}
+                                                    title={!canControlServices ? 'Admin access required' : 'Check for updates'}
+                                                    aria-label={`Check for updates for ${name}`}
+                                                    className="obs-touch-target-standard w-full py-2 px-3 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700/60 rounded-lg text-xs font-semibold transition-colors disabled:opacity-50 flex items-center justify-start gap-2 min-h-[40px]"
+                                                >
+                                                    <RefreshCw size={14} className={isCheckingThis ? 'animate-spin text-indigo-400' : ''} />
+                                                    <span>{isCheckingThis ? 'Checking updates...' : 'Check for updates'}</span>
+                                                </button>
+                                            </RequireClaim>
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+                        </>
+                    )}
                 </div>
+            ) : (
+                <div className="w-full sm:flex sm:flex-wrap sm:w-auto sm:items-center sm:justify-start sm:gap-2 @[960px]:w-[280px] @[960px]:justify-start @[1250px]:w-[280px] @[1250px]:min-w-[280px] @[1250px]:justify-start min-w-0 pt-0.5 @[960px]:pt-0 shrink-0">
+                    <button
+                        type="button"
+                        onClick={() => {
+                            setLogsModalUnits(serviceLogUnits);
+                            setLogsModalService(serviceLogUnits[0] || data.process || name);
+                        }}
+                        disabled={!canControlServices}
+                        title={canControlServices ? 'Review installation failure logs' : 'Admin access required'}
+                        className="obs-touch-target-standard py-2 px-3 bg-red-500/20 hover:bg-red-500/30 text-red-200 border border-red-500/40 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors disabled:opacity-50 min-h-[44px] sm:min-h-[40px] shrink-0 w-full sm:w-auto"
+                    >
+                        <Terminal size={14} className="shrink-0" />
+                        <span>Review installation failure</span>
+                    </button>
+                </div>
+            )}
+                </div>
+
+                {failedInstall && (
+                    <div
+                        role="status"
+                        className="w-full order-last @[960px]:col-span-full @[960px]:order-last @[1250px]:col-span-full @[1250px]:order-last rounded-lg border border-slate-700/80 bg-slate-950/80 p-2.5 text-xs text-slate-200 break-words shadow-inner flex flex-col gap-2"
+                    >
+                        <div className="font-semibold flex items-center gap-1.5 text-rose-300 mb-1">
+                            <AlertCircle size={14} className="shrink-0 text-rose-300" />
+                            Install failed — rollback/recovery unconfirmed
+                        </div>
+                        <p className="text-slate-200 text-sm leading-relaxed">
+                            {data.last_job?.message || 'The application installer encountered an error. State recovery is unconfirmed.'}
+                        </p>
+                        <div className="flex flex-col sm:flex-row items-end sm:items-center justify-end gap-2 sm:gap-3 pt-2 border-t border-slate-800/80 w-full">
+                            <span className="text-xs sm:text-[13px] text-amber-300/90 flex items-center gap-1.5">
+                                <AlertTriangle size={13} className="shrink-0 text-amber-400" />
+                                <span>Confirmation required; starting does not repair the failed installation.</span>
+                            </span>
+                            <RequireClaim>
+                                <button
+                                    type="button"
+                                    onClick={() => setGuardedStartConfirmService({ name, data })}
+                                    disabled={daemonControlDisabled}
+                                    title={!canControlServices ? 'Admin access required' : 'Start service (warning: install failed and recovery state is unconfirmed)'}
+                                    className="obs-touch-target-standard py-2 px-3 bg-slate-900/80 hover:bg-slate-800 text-slate-200 hover:text-white border border-slate-800/90 rounded-lg text-xs sm:text-[13px] font-medium flex items-center justify-center gap-1.5 transition-colors disabled:opacity-50 min-h-[44px] shrink-0 w-full sm:w-auto text-center"
+                                >
+                                    <Play size={13} className="fill-current shrink-0" /> <span>Start Service (Guarded)</span>
+                                </button>
+                            </RequireClaim>
+                        </div>
+                    </div>
+                )}
+
+                {!failedInstall && data.last_job && data.last_job.status !== 'completed' && !isUpdating && (
+                    <div
+                        role="status"
+                        className="w-full order-last @[960px]:col-span-full @[960px]:order-last @[1250px]:col-span-full @[1250px]:order-last mt-1 text-xs text-amber-300 bg-amber-500/10 border border-amber-500/20 rounded-md p-2 break-words"
+                    >
+                        Last {data.last_job.action}: {data.last_job.status}. {data.last_job.message || 'Check application state and logs before retrying.'}
+                    </div>
+                )}
             </div>
         );
     };
@@ -1084,57 +2056,300 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
     }
 
     return (
-        <div className="space-y-8 animate-fade-in relative z-10 w-full min-h-screen">
-            <div className="absolute inset-0 bg-blue-500/5 rounded-full blur-[120px] pointer-events-none -translate-y-1/2 -translate-x-1/2"></div>
-            {/* Header */}
-            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-end gap-4">
-                <div>
-                    <h2 className="text-2xl font-bold text-slate-100 flex flex-wrap items-center gap-3">
-                        App Ecosystem
-                        <span className="text-xs font-semibold px-2.5 py-1 bg-white/10 rounded-full text-slate-300 border border-white/5">{allEntries.length} Total</span>
-                        <span className="text-xs font-semibold px-2.5 py-1 bg-emerald-500/10 rounded-full text-emerald-400 border border-emerald-500/20">{runningCount} Running</span>
-                        {updatesAvailableCount > 0 && (
-                            <span className="text-xs font-semibold px-2.5 py-1 bg-amber-500/15 rounded-full text-amber-300 border border-amber-500/30 flex items-center gap-1.5">
-                                <ArrowUpCircle size={13} className="text-amber-400" />
-                                {updatesAvailableCount} {updatesAvailableCount === 1 ? 'Update' : 'Updates'} Available
-                            </span>
-                        )}
+        <div className="space-y-3 sm:space-y-4 relative z-10 w-full min-h-screen">
+            <div className="flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                    <h2 className="text-xl sm:text-2xl font-bold text-slate-100 flex items-center gap-2">
+                        Services
+                        <span className="text-xs font-semibold px-2 py-0.5 bg-white/10 rounded-full text-slate-300 border border-white/5">
+                            {allEntries.length} Total
+                        </span>
                     </h2>
-                    <p className="text-slate-400 text-sm mt-2">Manage, monitor, and update services within the nexus.</p>
+                    <p className="hidden sm:block text-slate-400 text-xs mt-0.5">
+                        Monitor daemon health, inspect logs, and manage application lifecycles across the fleet.
+                    </p>
                 </div>
-                <div className="flex gap-3">
-                    <button
-                        onClick={handleCheckAllUpdates}
-                        disabled={checkingUpdates}
-                        className="obs-touch-target-standard obs-gpu-120hz-interactive px-4 py-2 bg-white/[0.03] hover:bg-white/[0.08] border border-white/10 rounded-lg text-sm font-medium text-slate-300 transition-all flex items-center gap-2 disabled:opacity-50"
-                    >
-                        <RefreshCw size={14} className={checkingUpdates ? 'animate-spin text-indigo-400' : ''} />
-                        {checkingUpdates ? 'Checking Updates...' : 'Check Updates & Sync'}
-                    </button>
-                </div>
+                <button
+                    type="button"
+                    onClick={handleCheckAllUpdates}
+                    disabled={checkingUpdates}
+                    aria-label="Check Updates & Sync"
+                    title="Check Updates & Sync"
+                    className="obs-touch-target-standard h-10 sm:h-11 min-h-[40px] sm:min-h-[44px] px-3 sm:px-3.5 bg-white/[0.04] hover:bg-white/[0.08] border border-white/10 rounded-lg text-xs sm:text-sm font-medium text-slate-200 transition-all flex items-center gap-1.5 sm:gap-2 disabled:opacity-50 shrink-0"
+                >
+                    <RefreshCw size={14} className={checkingUpdates ? 'animate-spin text-indigo-400' : ''} />
+                    <span className="sm:hidden">{checkingUpdates ? 'Syncing...' : 'Sync'}</span>
+                    <span className="hidden sm:inline">{checkingUpdates ? 'Checking Updates...' : 'Check Updates & Sync'}</span>
+                </button>
             </div>
 
-            {/* Core Platform */}
-            {coreServices.length > 0 && (
-                <div>
-                    <h3 className="text-sm font-semibold text-slate-400 uppercase tracking-wider mb-4 flex items-center gap-2">
-                        <Server size={14} className="text-indigo-400" /> Core Platform
-                    </h3>
-                    <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-5">
-                        {coreServices.map(([name, data]) => renderServiceCard(name, data))}
+            {attentionCount > 0 && (
+                <div role="region" aria-label="Fleet attention required" className="rounded-xl border border-red-500/20 bg-red-500/[0.04] p-2 sm:p-2.5 text-slate-200">
+                    <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between sm:gap-3">
+                        <div className="flex items-start gap-2.5 w-full min-w-0 flex-1">
+                            <AlertTriangle className="text-red-400 shrink-0 mt-0.5" size={16} />
+                            <div className="min-w-0 text-xs leading-relaxed">
+                                <span className="font-semibold text-red-200">
+                                    Attention ({attentionCount}):
+                                </span>{' '}
+                                {attentionEntries.map(([serviceName, serviceDataRaw], attentionIndex) => {
+                                    const serviceData = serviceDataRaw as ServiceInfo;
+                                    const humanName = getHumanDisplayName(serviceName, serviceData);
+                                    const failedInstall = isFailedInstall(serviceData);
+                                    const degradedSummary = getDegradedSummary(serviceData);
+                                    const reason = failedInstall
+                                        ? 'Install failed · Recovery unconfirmed'
+                                        : degradedSummary.degraded
+                                            ? `Degraded (${degradedSummary.unhealthyUnits.join(', ')} offline)`
+                                            : serviceData.update_error
+                                                ? 'Update check error'
+                                                : serviceData.last_job
+                                                    ? `${serviceData.last_job.action} ${serviceData.last_job.status}`
+                                                    : 'Attention needed';
+                                    return (
+                                        <span key={serviceName} className="text-red-300">
+                                            {attentionIndex > 0 ? ', ' : ''}
+                                            <strong className="text-red-200 font-semibold">{humanName}</strong> — {reason}
+                                        </span>
+                                    );
+                                })}
+                            </div>
+                        </div>
+                        <div className="flex items-center gap-1.5 self-start sm:self-auto shrink-0 flex-wrap">
+                            {primaryAttentionService && (
+                                <button
+                                    type="button"
+                                    disabled={!canControlServices}
+                                    onClick={() => {
+                                        const logUnits = resolveServiceLogUnits(primaryAttentionService[0], primaryAttentionService[1]);
+                                        setLogsModalUnits(logUnits);
+                                        setLogsModalService(logUnits[0] || primaryAttentionService[1].process || primaryAttentionService[0]);
+                                    }}
+                                    title={canControlServices ? `Inspect failure logs for ${primaryAttentionService[0]}` : 'Admin access required'}
+                                    className="obs-touch-target-standard h-9 min-h-[40px] px-2.5 sm:px-3 bg-red-500/15 hover:bg-red-500/25 text-red-200 rounded-lg text-xs font-semibold transition-colors disabled:opacity-50 flex items-center gap-1.5"
+                                >
+                                    <Terminal size={13} /> Inspect Logs
+                                </button>
+                            )}
+                            <button
+                                type="button"
+                                onClick={() => setStatusFilter(statusFilter === 'attention' ? 'all' : 'attention')}
+                                className="obs-touch-target-standard h-9 min-h-[40px] px-2.5 rounded-lg bg-slate-800/80 hover:bg-slate-700 text-slate-300 text-xs font-medium transition-colors flex items-center border border-slate-700/50"
+                            >
+                                {statusFilter === 'attention'
+                                    ? 'Show all services'
+                                    : attentionCount === 1
+                                        ? 'Filter affected service'
+                                        : 'Filter affected services'}
+                            </button>
+                        </div>
                     </div>
                 </div>
             )}
 
-            {/* Installed Apps */}
-            {appServices.length > 0 && (
+            <div className="space-y-2 p-2 sm:p-2.5 bg-slate-900/60 border border-slate-800 rounded-xl">
+                <div className="flex items-center gap-2">
+                    <div className="relative flex-1 min-w-0">
+                        <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 pointer-events-none" />
+                        <input
+                            type="text"
+                            value={searchQuery}
+                            onChange={(event) => setSearchQuery(event.target.value)}
+                            placeholder="Name, domain or port"
+                            aria-label="Search services by name, domain, port"
+                            className="w-full h-11 min-h-[44px] pl-9 pr-8 bg-slate-950 border border-slate-800 rounded-lg text-xs sm:text-sm text-slate-200 placeholder-slate-500 focus:outline-none focus:border-indigo-500"
+                        />
+                        {searchQuery.length > 0 && (
+                            <button
+                                type="button"
+                                onClick={() => setSearchQuery('')}
+                                title="Clear search"
+                                className="obs-touch-target-standard absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300 p-1.5 rounded min-h-[44px] sm:min-h-[40px] min-w-[44px] sm:min-w-[40px] flex items-center justify-center"
+                            >
+                                <X size={14} />
+                            </button>
+                        )}
+                    </div>
+                    <div className="flex bg-slate-900 border border-slate-800 rounded-lg p-0.5 h-11 min-h-[44px] items-center shrink-0">
+                        <button
+                            type="button"
+                            onClick={() => setViewMode('list')}
+                            title="Compact list view"
+                            aria-label="Compact list view"
+                            className={`obs-touch-target-standard h-10 min-h-[44px] sm:min-h-[40px] min-w-[44px] sm:min-w-[40px] px-2.5 sm:px-3 rounded-md text-xs font-medium flex items-center justify-center gap-1.5 transition-colors ${viewMode === 'list' ? 'bg-slate-800 text-white shadow-sm' : 'text-slate-400 hover:text-slate-200'}`}
+                        >
+                            <LayoutList size={14} /> <span className="hidden sm:inline">List</span>
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => setViewMode('card')}
+                            title="Card grid view"
+                            aria-label="Card grid view"
+                            className={`obs-touch-target-standard h-10 min-h-[44px] sm:min-h-[40px] min-w-[44px] sm:min-w-[40px] px-2.5 sm:px-3 rounded-md text-xs font-medium flex items-center justify-center gap-1.5 transition-colors ${viewMode === 'card' ? 'bg-slate-800 text-white shadow-sm' : 'text-slate-400 hover:text-slate-200'}`}
+                        >
+                            <LayoutGrid size={14} /> <span className="hidden sm:inline">Cards</span>
+                        </button>
+                    </div>
+                </div>
+
+                <div className="sm:hidden">
+                    <button
+                        type="button"
+                        onClick={() => setIsMobileFiltersOpen((previousOpen) => !previousOpen)}
+                        aria-expanded={isMobileFiltersOpen}
+                        aria-controls="services-status-filter-group"
+                        aria-label={`Status filter: ${activeFilterLabel} (${activeFilterCount})${attentionCount > 0 ? `, ${attentionCount} need attention` : ''}${updatesAvailableCount > 0 ? `, ${updatesAvailableCount} ${updatesAvailableCount === 1 ? 'update' : 'updates'} available` : ''}. Tap to change filter.`}
+                        className="obs-touch-target-standard w-full flex items-center justify-between gap-2 flex-wrap px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-xs font-medium text-slate-200 min-h-[44px]"
+                    >
+                        <span className="flex items-center gap-1.5 flex-wrap min-w-0">
+                            <span className="text-slate-400 font-normal">Filter:</span>
+                            <span className="font-semibold text-slate-100">{activeFilterLabel}</span>
+                            <span className="px-1.5 py-0.5 rounded bg-white/10 text-slate-300 font-mono text-xs">
+                                {activeFilterCount}
+                            </span>
+                            {attentionCount > 0 && (
+                                <span className="text-xs text-rose-300 font-medium whitespace-nowrap">
+                                    · {attentionCount} attention
+                                </span>
+                            )}
+                            {updatesAvailableCount > 0 && (
+                                <span className="text-xs text-amber-300 font-medium whitespace-nowrap">
+                                    · {updatesAvailableCount} {updatesAvailableCount === 1 ? 'update' : 'updates'}
+                                </span>
+                            )}
+                        </span>
+                        <span className="flex items-center gap-1 text-slate-400 text-xs min-h-[44px] min-w-[44px] justify-end shrink-0">
+                            <span>{isMobileFiltersOpen ? 'Collapse' : 'Change'}</span>
+                            <ChevronDown size={14} className={`transition-transform duration-200 ${isMobileFiltersOpen ? 'rotate-180' : ''}`} />
+                        </span>
+                    </button>
+                </div>
+
+                <div
+                    id="services-status-filter-group"
+                    className={`${isMobileFiltersOpen ? 'flex' : 'hidden'} sm:flex items-center gap-1.5 flex-wrap pt-0.5 sm:pt-0`}
+                >
+                    <button
+                        type="button"
+                        onClick={() => {
+                            setStatusFilter('all');
+                            setIsMobileFiltersOpen(false);
+                        }}
+                        className={`obs-touch-target-standard px-3 py-2 rounded-lg text-xs font-medium transition-colors min-h-[40px] flex items-center ${statusFilter === 'all' ? 'bg-indigo-600 text-white shadow-sm' : 'bg-slate-950 text-slate-400 hover:text-slate-200 border border-slate-800'}`}
+                    >
+                        All ({allEntries.length})
+                    </button>
+                    <button
+                        type="button"
+                        onClick={() => {
+                            setStatusFilter('running');
+                            setIsMobileFiltersOpen(false);
+                        }}
+                        className={`obs-touch-target-standard px-3 py-2 rounded-lg text-xs font-medium transition-colors min-h-[40px] flex items-center ${statusFilter === 'running' ? 'bg-emerald-600 text-white shadow-sm' : 'bg-slate-950 text-slate-400 hover:text-slate-200 border border-slate-800'}`}
+                    >
+                        Running ({runningCount})
+                    </button>
+                    <button
+                        type="button"
+                        onClick={() => {
+                            setStatusFilter('stopped');
+                            setIsMobileFiltersOpen(false);
+                        }}
+                        className={`obs-touch-target-standard px-3 py-2 rounded-lg text-xs font-medium transition-colors min-h-[40px] flex items-center ${statusFilter === 'stopped' ? 'bg-slate-700 text-white shadow-sm' : 'bg-slate-950 text-slate-400 hover:text-slate-200 border border-slate-800'}`}
+                    >
+                        Stopped ({stoppedCount})
+                    </button>
+                    <button
+                        type="button"
+                        onClick={() => {
+                            setStatusFilter('attention');
+                            setIsMobileFiltersOpen(false);
+                        }}
+                        className={`obs-touch-target-standard px-3 py-2 rounded-lg text-xs font-medium transition-colors min-h-[40px] flex items-center gap-1.5 ${statusFilter === 'attention' ? 'bg-red-600 text-white shadow-sm' : 'bg-slate-950 text-slate-400 hover:text-slate-200 border border-slate-800'}`}
+                    >
+                        {attentionCount > 0 && <AlertTriangle size={12} className={statusFilter === 'attention' ? 'text-white' : 'text-red-400'} />}
+                        Needs Attention ({attentionCount})
+                    </button>
+                    <button
+                        type="button"
+                        onClick={() => {
+                            setStatusFilter('updates');
+                            setIsMobileFiltersOpen(false);
+                        }}
+                        className={`obs-touch-target-standard px-3 py-2 rounded-lg text-xs font-medium transition-colors min-h-[40px] flex items-center gap-1.5 ${statusFilter === 'updates' ? 'bg-amber-600 text-white shadow-sm' : 'bg-slate-950 text-slate-400 hover:text-slate-200 border border-slate-800'}`}
+                    >
+                        {updatesAvailableCount > 0 && <ArrowUpCircle size={12} className={statusFilter === 'updates' ? 'text-white' : 'text-amber-400'} />}
+                        Updates ({updatesAvailableCount})
+                    </button>
+                </div>
+            </div>
+
+            {(searchQuery.trim().length > 0 || statusFilter !== 'all') && (
+                <div className="flex items-center justify-between gap-3 text-xs text-slate-400 px-1">
+                    <span>
+                        Showing {sortedFilteredEntries.length} of {allEntries.length} services
+                    </span>
+                    <button
+                        type="button"
+                        onClick={() => {
+                            setSearchQuery('');
+                            setStatusFilter('all');
+                            setIsMobileFiltersOpen(false);
+                        }}
+                        className="obs-touch-target-standard text-indigo-400 hover:text-indigo-300 font-medium underline underline-offset-2 min-h-[44px] sm:min-h-[40px] min-w-[44px] sm:min-w-[40px] px-2 py-1 flex items-center justify-center"
+                    >
+                        Reset filters
+                    </button>
+                </div>
+            )}
+
+            {filteredCoreServices.length > 0 && (
                 <div>
-                    <h3 className="text-sm font-semibold text-slate-400 uppercase tracking-wider mb-4 flex items-center gap-2">
+                    <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2 flex items-center gap-2">
+                        <Server size={14} className="text-indigo-400" /> Core Platform
+                    </h3>
+                    {viewMode === 'card' ? (
+                        <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-3.5">
+                            {filteredCoreServices.map(([name, data]) => renderServiceCard(name, data))}
+                        </div>
+                    ) : (
+                        <div className="@container space-y-2">
+                            <div className="hidden @[960px]:grid @[960px]:grid-cols-[minmax(180px,1fr)_95px_100px_140px_65px_280px] @[960px]:gap-3 @[1250px]:grid-cols-[minmax(280px,360px)_120px_130px_minmax(180px,220px)_90px_minmax(280px,auto)] @[1250px]:gap-4 items-center px-3.5 py-1 text-xs font-bold uppercase tracking-wider text-slate-300 border-b border-slate-800/80">
+                                <div>Service</div>
+                                <div>Status</div>
+                                <div>Version</div>
+                                <div>Port & Access</div>
+                                <div>Uptime</div>
+                                <div className="text-right @[1250px]:text-left pr-2 @[1250px]:pr-0">Actions</div>
+                            </div>
+                            {filteredCoreServices.map(([name, data]) => renderServiceRow(name, data))}
+                        </div>
+                    )}
+                </div>
+            )}
+
+            {filteredAppServices.length > 0 && (
+                <div>
+                    <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2 flex items-center gap-2">
                         <Box size={14} className="text-emerald-400" /> Installed Applications
                     </h3>
-                    <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-5">
-                        {appServices.map(([name, data]) => renderServiceCard(name, data))}
-                    </div>
+                    {viewMode === 'card' ? (
+                        <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-3.5">
+                            {filteredAppServices.map(([name, data]) => renderServiceCard(name, data))}
+                        </div>
+                    ) : (
+                        <div className="@container space-y-2">
+                            <div className="hidden @[960px]:grid @[960px]:grid-cols-[minmax(180px,1fr)_95px_100px_140px_65px_280px] @[960px]:gap-3 @[1250px]:grid-cols-[minmax(280px,360px)_120px_130px_minmax(180px,220px)_90px_minmax(280px,auto)] @[1250px]:gap-4 items-center px-3.5 py-1 text-xs font-bold uppercase tracking-wider text-slate-300 border-b border-slate-800/80">
+                                <div>Service</div>
+                                <div>Status</div>
+                                <div>Version</div>
+                                <div>Port & Access</div>
+                                <div>Uptime</div>
+                                <div className="text-right @[1250px]:text-left pr-2 @[1250px]:pr-0">Actions</div>
+                            </div>
+                            {filteredAppServices.map(([name, data]) => renderServiceRow(name, data))}
+                        </div>
+                    )}
                 </div>
             )}
 
@@ -1146,14 +2361,115 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                 </div>
             )}
 
-            <ServiceLogsModal 
-                serviceName={logsModalService} 
+            {allEntries.length > 0 && sortedFilteredEntries.length === 0 && (
+                <div role="status" className="text-center py-12 px-4 bg-slate-900/30 rounded-2xl border border-slate-800">
+                    <Box size={36} className="mx-auto text-slate-500 mb-2" />
+                    <h3 className="text-sm font-semibold text-slate-200 mb-1">No matching services found</h3>
+                    <p className="text-xs text-slate-400 mb-3">
+                        No services match &ldquo;{searchQuery}&rdquo; with filter &ldquo;{statusFilter}&rdquo;.
+                    </p>
+                    <button
+                        type="button"
+                        onClick={() => {
+                            setSearchQuery('');
+                            setStatusFilter('all');
+                            setIsMobileFiltersOpen(false);
+                        }}
+                        className="obs-touch-target-standard px-4 py-2 bg-indigo-500/20 hover:bg-indigo-500 text-indigo-300 hover:text-white rounded-lg text-xs font-semibold transition-colors min-h-[44px] sm:min-h-[40px] min-w-[44px] sm:min-w-[40px] flex items-center justify-center"
+                    >
+                        Reset filters
+                    </button>
+                </div>
+            )}
+
+            <ServiceLogsModal
+                serviceName={logsModalService}
                 units={logsModalUnits}
                 onClose={() => {
                     setLogsModalService(null);
                     setLogsModalUnits(undefined);
                 }}
             />
+
+            {stopConfirmService && (
+                <div role="dialog" aria-modal="true" aria-labelledby="stop-service-title" className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md">
+                    <div className="glass-panel w-full max-w-md rounded-2xl p-6 border border-slate-800 bg-slate-950 shadow-2xl space-y-4">
+                        <div className="flex items-center gap-3 text-rose-300">
+                            <AlertCircle size={22} className="shrink-0" />
+                            <h3 id="stop-service-title" className="text-base font-bold text-white">
+                                Stop {stopConfirmService.name}?
+                            </h3>
+                        </div>
+                        <p className="text-sm text-slate-300 leading-relaxed">
+                            Stopping this service will terminate active processes and disconnect running clients. Daemon controls can restart it later.
+                        </p>
+                        <div className="flex justify-end gap-3 pt-2">
+                            <button
+                                type="button"
+                                onClick={() => setStopConfirmService(null)}
+                                className="obs-touch-target-standard px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs font-semibold transition-colors min-h-[40px]"
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    const target = stopConfirmService;
+                                    setStopConfirmService(null);
+                                    void handleServiceControl(target.name, target.data, 'stop');
+                                }}
+                                className="obs-touch-target-standard px-4 py-2 bg-red-600 hover:bg-red-500 text-white rounded-lg text-xs font-semibold transition-colors min-h-[40px]"
+                            >
+                                Confirm Stop
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {guardedStartConfirmService && (
+                <StreamingDialog
+                    name={`Start ${guardedStartConfirmService.name} (Guarded)`}
+                    onClose={() => setGuardedStartConfirmService(null)}
+                >
+                    <div className="glass-panel w-full max-w-md rounded-2xl p-6 border border-slate-800 bg-slate-950 shadow-2xl space-y-4">
+                        <div className="flex items-center gap-3 text-rose-300">
+                            <AlertCircle size={22} className="shrink-0" />
+                            <h3 id="guarded-start-title" className="text-base font-bold text-white">
+                                Start {guardedStartConfirmService.name} (Guarded)?
+                            </h3>
+                        </div>
+                        <div id="guarded-start-description" className="space-y-2 text-sm text-slate-300 leading-relaxed">
+                            <p>
+                                The previous installation of {guardedStartConfirmService.name} failed and state recovery or rollback is unconfirmed.
+                            </p>
+                            <p className="text-xs text-slate-400">
+                                Starting this service in an unconfirmed recovery state may fail or cause unexpected behavior. Review failure logs before attempting manual operations. No safe recovery is guaranteed.
+                            </p>
+                        </div>
+                        <div className="flex flex-wrap items-center justify-end gap-3 pt-2">
+                            <button
+                                type="button"
+                                onClick={() => setGuardedStartConfirmService(null)}
+                                className="obs-touch-target-standard px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white rounded-lg text-xs font-semibold transition-colors min-h-[44px] min-w-[44px]"
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    const targetService = guardedStartConfirmService;
+                                    setGuardedStartConfirmService(null);
+                                    void handleServiceControl(targetService.name, targetService.data, 'start');
+                                }}
+                                className="obs-touch-target-standard px-4 py-2.5 bg-rose-600 hover:bg-rose-500 text-white rounded-lg text-xs font-semibold transition-colors min-h-[44px] min-w-[44px]"
+                            >
+                                Start anyway
+                            </button>
+                        </div>
+                    </div>
+                </StreamingDialog>
+            )}
 
             {ingressModalApp && (
                 <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-fade-in">
@@ -1164,8 +2480,9 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                                 <h3 className="text-lg font-bold text-white capitalize">{ingressModalApp} Ingress & Deploy</h3>
                             </div>
                             <button
+                                type="button"
                                 onClick={() => setIngressModalApp(null)}
-                                className="obs-touch-target-standard p-2 text-slate-400 hover:text-white rounded-lg hover:bg-white/5 transition-colors flex items-center justify-center"
+                                className="obs-touch-target-standard p-2 text-slate-400 hover:text-white rounded-lg hover:bg-white/5 transition-colors flex items-center justify-center min-h-[40px] min-w-[40px]"
                             >
                                 <X size={18} />
                             </button>

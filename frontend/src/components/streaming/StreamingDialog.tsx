@@ -1,16 +1,24 @@
 'use client';
 
-import { useEffect, useRef, type ReactNode } from 'react';
+import { useEffect, useRef, useSyncExternalStore, type ReactNode } from 'react';
+import { createPortal } from 'react-dom';
+
+const emptySubscribe = () => () => {};
+const getClientSnapshot = () => true;
+const getServerSnapshot = () => false;
 
 export default function StreamingDialog({ name, onClose, children }: {
     name: string;
     onClose: () => void;
     children: ReactNode;
 }) {
+    const isMounted = useSyncExternalStore(emptySubscribe, getClientSnapshot, getServerSnapshot);
     const panelRef = useRef<HTMLDivElement>(null);
     const closeRef = useRef(onClose);
     useEffect(() => { closeRef.current = onClose; }, [onClose]);
+
     useEffect(() => {
+        if (!isMounted) return;
         const panel = panelRef.current;
         if (!panel) return;
         const invoker = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -45,12 +53,29 @@ export default function StreamingDialog({ name, onClose, children }: {
             document.removeEventListener('focusin', containFocus);
             if (invoker?.isConnected) invoker.focus();
         };
-    }, []);
-    return <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-md flex items-center justify-center p-4"
-        onClick={event => { if (event.target === event.currentTarget) onClose(); }}>
-        <div ref={panelRef} role="dialog" aria-modal="true" aria-label={name} tabIndex={-1}
-            className="min-w-0 max-w-full max-h-[calc(100dvh-2rem)] overflow-y-auto">
-            {children}
+    }, [isMounted]);
+
+    if (!isMounted || typeof document === 'undefined') {
+        return null;
+    }
+
+    const dialogOverlay = (
+        <div
+            className="fixed inset-0 z-50 bg-black/75 backdrop-blur-md flex items-center justify-center p-4"
+            onClick={event => { if (event.target === event.currentTarget) onClose(); }}
+        >
+            <div
+                ref={panelRef}
+                role="dialog"
+                aria-modal="true"
+                aria-label={name}
+                tabIndex={-1}
+                className="min-w-0 max-w-full max-h-[calc(100dvh-2rem)] overflow-y-auto"
+            >
+                {children}
+            </div>
         </div>
-    </div>;
+    );
+
+    return createPortal(dialogOverlay, document.body);
 }

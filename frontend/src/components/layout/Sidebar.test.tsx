@@ -3,9 +3,8 @@ import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import Sidebar from "@/components/layout/Sidebar";
 import Header from "@/components/layout/Header";
 import { useSystemStore } from "@/store/useSystemStore";
-import { useConnectionStore } from "@/store/useConnectionStore";
+import { useConnectionStore, ConnectionState } from "@/store/useConnectionStore";
 
-// Mock AuthContext
 jest.mock("@/contexts/AuthContext", () => ({
   useAuth: () => ({
     user: { id: 1, username: "admin", role: "admin" },
@@ -21,7 +20,7 @@ jest.mock("@/contexts/ToastContext", () => ({
   }),
 }));
 
-describe("Sidebar - Tri-Mode Navigation Architecture & Touch/120Hz Support", () => {
+describe("Sidebar - Persistent Navigation Architecture, Collapse, and Accessibility", () => {
   beforeEach(() => {
     useSystemStore.setState({
       activeTab: "overview",
@@ -43,11 +42,10 @@ describe("Sidebar - Tri-Mode Navigation Architecture & Touch/120Hz Support", () 
     expect(mobileNav).toHaveClass("fixed");
     expect(mobileNav).toHaveClass("bottom-0");
 
-    // Check dock buttons have obs-touch-target-standard
     const dockButtons = mobileNav.querySelectorAll("button");
     expect(dockButtons.length).toBeGreaterThanOrEqual(4);
-    dockButtons.forEach((btn) => {
-      expect(btn).toHaveClass("obs-touch-target-standard");
+    dockButtons.forEach((buttonElement) => {
+      expect(buttonElement).toHaveClass("obs-touch-target-standard");
     });
   });
 
@@ -61,42 +59,143 @@ describe("Sidebar - Tri-Mode Navigation Architecture & Touch/120Hz Support", () 
     expect(useSystemStore.getState().activeTab).toBe("services");
   });
 
-  it("opens mobile drawer when More button is clicked and closes on swipe-left gesture", () => {
+  it("renders labeled Overview, Services, and Streaming access in mobile bottom dock", () => {
     render(<Sidebar />);
 
-    const moreBtn = screen.getByRole("button", { name: /toggle navigation drawer/i });
-    fireEvent.click(moreBtn);
+    const mobileNav = screen.getByRole("navigation", { name: "Mobile Bottom Navigation" });
+    expect(within(mobileNav).getByRole("button", { name: /overview/i })).toBeInTheDocument();
+    expect(within(mobileNav).getByRole("button", { name: /services/i })).toBeInTheDocument();
+    expect(within(mobileNav).getByRole("button", { name: /streaming/i })).toBeInTheDocument();
+    expect(within(mobileNav).getByRole("button", { name: /toggle navigation drawer/i })).toBeInTheDocument();
+    expect(within(mobileNav).getByText("Menu")).toBeInTheDocument();
+  });
+
+  it("opens mobile drawer when Menu toggle is clicked and closes on swipe-left gesture", () => {
+    render(<Sidebar />);
+
+    const menuToggle = screen.getByRole("button", { name: /toggle navigation drawer/i });
+    expect(menuToggle).toHaveAttribute("aria-expanded", "false");
+    expect(menuToggle).toHaveAttribute("aria-controls", "mobile-navigation-drawer");
+    expect(menuToggle).toHaveAttribute("aria-haspopup", "dialog");
+
+    fireEvent.click(menuToggle);
 
     expect(useSystemStore.getState().isMobileMenuOpen).toBe(true);
+    expect(menuToggle).toHaveAttribute("aria-expanded", "true");
+
+    const drawerDialog = screen.getByRole("dialog", { name: "Navigation Menu" });
+    expect(drawerDialog).toBeInTheDocument();
+    expect(drawerDialog).toHaveAttribute("aria-modal", "true");
+
     const closeBtn = screen.getByRole("button", { name: /close navigation drawer/i });
     expect(closeBtn).toBeInTheDocument();
 
-    const drawerAside = document.querySelector("aside")!;
-    fireEvent.touchStart(drawerAside, { touches: [{ clientX: 200 }] });
-    fireEvent.touchEnd(drawerAside, { changedTouches: [{ clientX: 100 }] });
+    fireEvent.touchStart(drawerDialog, { touches: [{ clientX: 200 }] });
+    fireEvent.touchEnd(drawerDialog, { changedTouches: [{ clientX: 100 }] });
 
     expect(useSystemStore.getState().isMobileMenuOpen).toBe(false);
   });
 
-  it("allows touch/tablet users to expand and collapse the sidebar via tap toggle buttons", () => {
+  it("closes mobile drawer when visible Close button is clicked", () => {
+    useSystemStore.setState({ isMobileMenuOpen: true });
     render(<Sidebar />);
 
-    expect(useSystemStore.getState().isSidebarHovered).toBe(false);
+    const closeBtn = screen.getByRole("button", { name: /close navigation drawer/i });
+    expect(closeBtn).toBeInTheDocument();
+    fireEvent.click(closeBtn);
 
-    const expandBtns = screen.getAllByRole("button", { name: /expand sidebar/i });
-    expect(expandBtns.length).toBeGreaterThanOrEqual(1);
-    fireEvent.click(expandBtns[0]);
+    expect(useSystemStore.getState().isMobileMenuOpen).toBe(false);
+  });
 
-    expect(useSystemStore.getState().isSidebarHovered).toBe(true);
+  it("closes mobile drawer when Escape key is pressed", () => {
+    useSystemStore.setState({ isMobileMenuOpen: true });
+    render(<Sidebar />);
 
-    const collapseBtns = screen.getAllByRole("button", { name: /collapse sidebar/i });
-    fireEvent.click(collapseBtns[0]);
+    expect(screen.getByRole("dialog", { name: "Navigation Menu" })).toBeInTheDocument();
+    fireEvent.keyDown(window, { key: "Escape" });
 
-    expect(useSystemStore.getState().isSidebarHovered).toBe(false);
+    expect(useSystemStore.getState().isMobileMenuOpen).toBe(false);
+  });
+
+  it("renders a persistent labeled sidebar on desktop around 208px width with product mark and name", () => {
+    const { container } = render(<Sidebar />);
+
+    const desktopAside = container.querySelector("aside")!;
+    const desktopSpacer = desktopAside.parentElement!;
+
+    expect(desktopSpacer).toHaveClass("md:w-52");
+    expect(desktopAside).toHaveClass("md:w-52");
+
+    expect(screen.getByText("AetherFlow")).toBeInTheDocument();
+    expect(screen.getByText("Nexus OS")).toBeInTheDocument();
+    expect(screen.getByAltText("AetherFlow Logo")).toBeInTheDocument();
+  });
+
+  it("does not depend on hover for essential labels", () => {
+    const { container } = render(<Sidebar />);
+    const desktopAside = container.querySelector("aside")!;
+
+    expect(within(desktopAside).getByText("Workspace")).toBeInTheDocument();
+    expect(within(desktopAside).getByText("System")).toBeInTheDocument();
+
+    expect(within(desktopAside).getByRole("button", { name: "Overview" })).toBeInTheDocument();
+    expect(within(desktopAside).getByRole("button", { name: "Services" })).toBeInTheDocument();
+    expect(within(desktopAside).getByRole("button", { name: "Settings" })).toBeInTheDocument();
+  });
+
+  it("allows collapsing to compact rail and expanding back via accessible toggle button", () => {
+    const { container } = render(<Sidebar />);
+
+    const desktopAside = container.querySelector("aside")!;
+    const desktopSpacer = desktopAside.parentElement!;
+
+    expect(desktopSpacer).toHaveClass("md:w-52");
+
+    const collapseButton = screen.getByRole("button", { name: /collapse sidebar/i });
+    expect(collapseButton).toBeInTheDocument();
+    fireEvent.click(collapseButton);
+
+    expect(desktopSpacer).toHaveClass("md:w-16");
+    expect(desktopAside).toHaveClass("md:w-16");
+
+    const expandButton = screen.getByRole("button", { name: /expand sidebar/i });
+    expect(expandButton).toBeInTheDocument();
+    fireEvent.click(expandButton);
+
+    expect(desktopSpacer).toHaveClass("md:w-52");
+    expect(desktopAside).toHaveClass("md:w-52");
+  });
+
+  it("marks the active item with aria-current page and single indigo indicator", () => {
+    useSystemStore.setState({ activeTab: "services" });
+    const { container } = render(<Sidebar />);
+    const desktopAside = container.querySelector("aside")!;
+
+    const activeServicesBtn = within(desktopAside).getByRole("button", { name: "Services" });
+    expect(activeServicesBtn).toHaveAttribute("aria-current", "page");
+    expect(activeServicesBtn).toHaveClass("border-indigo-500/30");
+  });
+
+  it("ensures all interactive navigation controls meet >= 40px touch and click target requirement", () => {
+    const { container } = render(<Sidebar />);
+
+    const desktopAside = container.querySelector("aside")!;
+    const allButtons = desktopAside.querySelectorAll("button");
+
+    allButtons.forEach((buttonElement) => {
+      const className = buttonElement.className;
+      const satisfiesMinDimension = className.includes("min-h-[40px]") || className.includes("h-10");
+      expect(satisfiesMinDimension).toBe(true);
+    });
   });
 
   it("displays the connection status beacon", () => {
-    render(<Sidebar />);
+    render(
+      <>
+        <Header />
+        <Sidebar />
+      </>
+    );
 
     const beacon = document.querySelector(".obs-beacon-live");
     expect(beacon).toBeInTheDocument();
@@ -110,31 +209,6 @@ describe("Sidebar - Tri-Mode Navigation Architecture & Touch/120Hz Support", () 
 
     const clusterBtns = screen.getAllByRole("button", { name: /cluster/i });
     expect(clusterBtns.length).toBeGreaterThan(0);
-  });
-
-  it("keeps the desktop in-flow spacer width fixed at 4.5rem while the fixed rail expands on hover", () => {
-    const { container } = render(<Sidebar />);
-
-    const desktopAside = container.querySelector("aside")!;
-    const desktopSpacer = desktopAside.parentElement!;
-
-    expect(desktopSpacer).toHaveClass("md:w-[4.5rem]");
-    expect(desktopSpacer).not.toHaveClass("md:w-64");
-    expect(desktopSpacer).not.toHaveClass("obs-gpu-120hz-rail");
-    expect(desktopAside).toHaveClass("md:w-[4.5rem]");
-
-    fireEvent.mouseEnter(desktopAside);
-
-    expect(useSystemStore.getState().isSidebarHovered).toBe(true);
-    expect(desktopSpacer).toHaveClass("md:w-[4.5rem]");
-    expect(desktopSpacer).not.toHaveClass("md:w-64");
-    expect(desktopAside).toHaveClass("md:w-64");
-
-    fireEvent.mouseLeave(desktopAside);
-
-    expect(useSystemStore.getState().isSidebarHovered).toBe(false);
-    expect(desktopSpacer).toHaveClass("md:w-[4.5rem]");
-    expect(desktopAside).toHaveClass("md:w-[4.5rem]");
   });
 
   it("does not re-render Sidebar or Header when lastMessageAt updates, but updates on displayed connection fields", () => {
@@ -171,6 +245,97 @@ describe("Sidebar - Tri-Mode Navigation Architecture & Touch/120Hz Support", () 
 
     expect(sidebarCommits).toBeGreaterThan(initialSidebarCommits);
     expect(headerCommits).toBeGreaterThan(initialHeaderCommits);
-    expect(screen.getByText("Reconnecting (2)")).toBeInTheDocument();
+    expect(screen.getAllByText("Reconnecting (2)").length).toBeGreaterThan(0);
+  });
+
+  it("renders Header with accessible mobile toggle, responsive title, and hidden secondary breadcrumb segment", () => {
+    render(<Header />);
+
+    const menuButton = screen.getByRole("button", { name: "Toggle Menu" });
+    expect(menuButton).toHaveAttribute("aria-expanded", "false");
+    expect(menuButton).toHaveAttribute("aria-controls", "mobile-navigation-drawer");
+
+    const breadcrumbNav = screen.getByRole("navigation", { name: "Breadcrumb" });
+    expect(breadcrumbNav).toBeInTheDocument();
+    expect(within(breadcrumbNav).getByText("AetherFlow")).toHaveClass("hidden", "md:inline");
+
+    const secondarySegment = within(breadcrumbNav).getByText("Workspace");
+    expect(secondarySegment).toHaveClass("hidden", "md:inline");
+
+    const pageHeading = screen.getByRole("heading", { level: 1 });
+    expect(pageHeading).toHaveTextContent("Overview");
+    expect(pageHeading).toHaveClass("truncate");
+  });
+
+  it("renders mobile Menu dock button as symmetric icon-over-label stack without notification lookalikes", () => {
+    render(<Sidebar />);
+
+    const mobileNav = screen.getByRole("navigation", { name: "Mobile Bottom Navigation" });
+    const menuButton = within(mobileNav).getByRole("button", { name: "Toggle Navigation Drawer" });
+    expect(menuButton).toBeInTheDocument();
+    expect(menuButton).toHaveClass("obs-touch-target-standard");
+    expect(within(menuButton).getByText("Menu")).toBeInTheDocument();
+    expect(within(menuButton).queryByText(/^[0-9]+$/)).not.toBeInTheDocument();
+
+    const menuIcon = menuButton.querySelector(".p-1 svg");
+    expect(menuIcon).toBeInTheDocument();
+
+    expect(within(menuButton).queryByText("Online")).not.toBeInTheDocument();
+    expect(menuButton.querySelector(".obs-beacon-live")).not.toBeInTheDocument();
+
+    fireEvent.click(menuButton);
+    const drawerDialog = screen.getByRole("dialog", { name: "Navigation Menu" });
+    expect(drawerDialog).toBeInTheDocument();
+    expect(drawerDialog.querySelector(".obs-beacon-live")).toBeInTheDocument();
+    expect(within(drawerDialog).getByText("CONNECTED")).toBeInTheDocument();
+  });
+
+  it("renders explicit connection states and beacons in shared mobile Header across all canonical states without truncation", () => {
+    const canonicalCases = [
+      { state: "CONNECTING", label: "Connecting...", beaconClass: "obs-beacon-reconnecting" },
+      { state: "RECONNECTING", attempt: 3, label: "Reconnecting (3)", beaconClass: "obs-beacon-reconnecting" },
+      { state: "FALLBACK", label: "HTTP Fallback", beaconClass: "obs-beacon-reconnecting" },
+      { state: "STALE", label: "Stale Data", beaconClass: "obs-beacon-offline" },
+      { state: "DEGRADED", label: "Degraded", beaconClass: "obs-beacon-reconnecting" },
+      { state: "UNAUTHORIZED", label: "Unauthorized", beaconClass: "obs-beacon-danger" },
+      { state: "BLOCKED", label: "Pending Approval", beaconClass: "obs-beacon-danger" },
+      { state: "EMPTY", label: "Initial Setup", beaconClass: "obs-beacon-offline" },
+      { state: "OFFLINE", label: "Offline", beaconClass: "obs-beacon-danger" },
+      { state: "CONNECTED", label: "Connected", beaconClass: "obs-beacon-live" },
+    ];
+
+    const { rerender } = render(<Header />);
+
+    for (const testCase of canonicalCases) {
+      act(() => {
+        useConnectionStore.setState({
+          connectionState: testCase.state as unknown as ConnectionState,
+          reconnectAttempt: testCase.attempt ?? 0,
+        });
+      });
+      rerender(<Header />);
+
+      const statusLabels = screen.getAllByText(testCase.label);
+      expect(statusLabels.length).toBe(2);
+
+      const mobileStatusLabel = statusLabels[0];
+      const mobileContainer = mobileStatusLabel.parentElement;
+      expect(mobileContainer).toHaveClass("md:hidden");
+      expect(mobileContainer).toHaveClass("flex-wrap");
+      expect(mobileStatusLabel).not.toHaveClass("truncate");
+      expect(mobileStatusLabel).toHaveClass("break-words");
+      expect(mobileStatusLabel).toHaveClass("leading-tight");
+
+      const mobileBeacon = mobileContainer?.querySelector(`.${testCase.beaconClass}`);
+      expect(mobileBeacon).toBeInTheDocument();
+
+      const desktopStatusLabel = statusLabels[1];
+      const desktopContainer = desktopStatusLabel.closest(".rounded-full");
+      expect(desktopContainer).toHaveClass("hidden");
+      expect(desktopContainer).toHaveClass("md:flex");
+
+      const desktopBeacon = desktopContainer?.querySelector(`.${testCase.beaconClass}`);
+      expect(desktopBeacon).toBeInTheDocument();
+    }
   });
 });
