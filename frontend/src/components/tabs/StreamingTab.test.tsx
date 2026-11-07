@@ -482,8 +482,23 @@ describe('StreamingTab - Jellyfin Play Statistics, Data Usage & Stream Telemetry
         expect(screen.getByText(/Active Streams/i)).toBeInTheDocument();
         expect(screen.getByText(/Live Bandwidth/i)).toBeInTheDocument();
         expect(screen.getByText(/Data Usage \(30d\)/i)).toBeInTheDocument();
-        expect(screen.getByText(/Legacy Record Statistics \(30d\)/i)).toBeInTheDocument();
+        expect(screen.getByText(/Confirmed Play Statistics \(30d\)/i)).toBeInTheDocument();
         expect(screen.getByText(/Jellyfin Library/i)).toBeInTheDocument();
+    });
+
+    it('keeps imported estimates visible alongside confirmed statistics and preserves member privacy', () => {
+        const customData = JSON.parse(JSON.stringify(mockDashboardData)) as StreamingDashboardData;
+        customData.analytics.historicalEstimates = [{
+            provenance: 'legacy_unverified', records: 842, reportedWatchTimeSecs: 1811081,
+            undatedRecords: 0, timeSeries: [{ date: '2026-10-27', watchTimeSecs: 1811081 }],
+        }];
+        currentSwrState = { ...currentSwrState, data: customData };
+        const { rerender } = render(<StreamingTab />);
+        expect(screen.getByRole('region', { name: 'Imported watch history' })).toHaveTextContent('503h 4m');
+        expect(screen.getByText(/Confirmed Play Statistics/)).toBeInTheDocument();
+        mockRole = 'user';
+        rerender(<StreamingTab />);
+        expect(screen.queryByRole('region', { name: 'Imported watch history' })).not.toBeInTheDocument();
     });
 
     it('renders active stream cards with codec pipeline, Direct Play / Transcode badges, and session data usage', () => {

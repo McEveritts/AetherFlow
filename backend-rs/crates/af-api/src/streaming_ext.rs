@@ -2,7 +2,7 @@ use crate::auth::{api_error, AuthUser};
 use crate::ws::extract_client_ip;
 use af_services::{
     ActiveStreamSession, BreakdownEntry, StreamTypeDistribution, StreamingAnalytics,
-    StreamingDashboardResponse, StreamingHistoryItem, StreamingLibraryCounts, StreamingLiveSummary,
+    StreamingDashboardResponse, StreamingHistoryEstimate, StreamingHistoryItem, StreamingLibraryCounts, StreamingLiveSummary,
     StreamingServerStatus, StreamingTimeSeriesPoint, StreamingTitleStat, StreamingUserStat,
 };
 use axum::body::Body;
@@ -3718,6 +3718,62 @@ fn streaming_time_buckets(first_day: NaiveDate, today: NaiveDate) -> (&'static s
     (granularity, keys)
 }
 
+fn query_streaming_history_estimates(
+    conn: &rusqlite::Connection,
+    where_sql: &str,
+    args: &[String],
+    date_format: &str,
+    day_keys: &[String],
+) -> rusqlite::Result<Vec<StreamingHistoryEstimate>> {
+    let mut estimates = Vec::new();
+    let totals_sql = format!(
+        "SELECT provenance, COUNT(*), COALESCE(SUM(MAX(COALESCE(watched_secs,0),0)),0), \
+         COALESCE(SUM(event_unix IS NULL),0) FROM streaming_history {where_sql} \
+         AND provenance IN ('item_summary','legacy_unverified') GROUP BY provenance ORDER BY provenance"
+    );
+    let mut totals = conn.prepare(&totals_sql)?;
+    for estimate in totals.query_map(params_from_iter(args.iter()), |row| {
+        Ok(StreamingHistoryEstimate {
+            provenance: row.get(0)?,
+            records: row.get(1)?,
+            reported_watch_time_secs: row.get(2)?,
+            undated_records: row.get(3)?,
+            time_series: day_keys.iter().map(|date| StreamingTimeSeriesPoint {
+                date: date.clone(),
+                ..Default::default()
+            }).collect(),
+        })
+    })? {
+        estimates.push(estimate?);
+    }
+    let series_sql = format!(
+        "SELECT provenance, strftime('{date_format}',event_unix,'unixepoch'), COUNT(*), \
+         COALESCE(SUM(MAX(COALESCE(watched_secs,0),0)),0) FROM streaming_history {where_sql} \
+         AND provenance IN ('item_summary','legacy_unverified') AND event_unix IS NOT NULL \
+         GROUP BY provenance, 2 ORDER BY 2"
+    );
+    let mut series = conn.prepare(&series_sql)?;
+    let date_indexes: HashMap<&str, usize> = day_keys.iter().enumerate()
+        .map(|(index, date)| (date.as_str(), index)).collect();
+    for point in series.query_map(params_from_iter(args.iter()), |row| {
+        Ok((row.get::<_, String>(0)?, StreamingTimeSeriesPoint {
+            date: row.get(1)?,
+            plays: row.get(2)?,
+            watch_time_secs: row.get(3)?,
+            ..Default::default()
+        }))
+    })? {
+        let (provenance, point) = point?;
+        if let (Some(estimate), Some(index)) = (
+            estimates.iter_mut().find(|estimate| estimate.provenance == provenance),
+            date_indexes.get(point.date.as_str()),
+        ) {
+            estimate.time_series[*index] = point;
+        }
+    }
+    Ok(estimates)
+}
+
 pub fn query_streaming_analytics(
     window_days: i32,
     play_method_filter: &str,
@@ -3773,7 +3829,7 @@ pub fn query_streaming_analytics(
 
     if !use_demo {
         where_clauses.push("provider != 'demo'".to_string());
-        where_clauses.push(format!("id IN (SELECT h.id FROM streaming_history h CROSS JOIN streaming_tracking_policies p WHERE p.id=1 AND ({}) AND h.provenance IN ('observed_session','imported_event'))", crate::streaming_history::inclusion_predicate()));
+        where_clauses.push(format!("id IN (SELECT h.id FROM streaming_history h CROSS JOIN streaming_tracking_policies p WHERE p.id=1 AND ({}))", crate::streaming_history::inclusion_predicate()));
     } else {
         where_clauses.push("provider = 'demo'".into());
     }
@@ -3802,14 +3858,19 @@ pub fn query_streaming_analytics(
         args.push(normalized_mt);
     }
 
-    let where_sql = format!("WHERE {}", where_clauses.join(" AND "));
+    let evidence_where_sql = format!("WHERE {}", where_clauses.join(" AND "));
+    let where_sql = if use_demo {
+        evidence_where_sql.clone()
+    } else {
+        format!("{evidence_where_sql} AND provenance IN ('observed_session','imported_event')")
+    };
 
     let first_day = if resolved_window > 0 {
         (now - chrono::Duration::days(resolved_window as i64)).date_naive()
     } else {
         let min_day_sql = format!(
             "SELECT COALESCE(MIN(date(event_unix, 'unixepoch')), '') FROM streaming_history {}",
-            where_sql
+            evidence_where_sql
         );
         let earliest_date = conn
             .query_row(&min_day_sql, params_from_iter(args.iter()), |r| {
@@ -3830,6 +3891,14 @@ pub fn query_streaming_analytics(
         "year" => "%Y-01-01",
         _ => "%Y-%m-%d",
     };
+    if !use_demo {
+        result.historical_estimates = query_streaming_history_estimates(
+            &conn, &evidence_where_sql, &args, date_format, &day_keys,
+        ).unwrap_or_else(|error| {
+            tracing::warn!(%error, "Imported streaming estimate query failed");
+            Vec::new()
+        });
+    }
     let mut daily_map: HashMap<String, StreamingTimeSeriesPoint> = HashMap::new();
     for day in &day_keys {
         daily_map.insert(
@@ -4535,6 +4604,65 @@ mod tests {
 
     fn mark_dashboard_fixtures_as_observed() {
         af_db::get_conn().unwrap().execute("UPDATE streaming_history SET provenance='observed_session', timestamp_certainty='observed', byte_accuracy='estimated' WHERE provider!='demo'", []).unwrap();
+    }
+
+    #[test]
+    fn test_dashboard_preserves_imported_estimates_without_double_counting_confirmed_time() {
+        let _guard = TEST_STREAMING_DB_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let path = init_isolated_streaming_db("imported_estimates");
+        let now = Utc::now();
+        let old = (now - chrono::Duration::days(45)).format("%Y-%m-%d %H:%M:%S").to_string();
+        let current = now.format("%Y-%m-%d %H:%M:%S").to_string();
+        let conn = af_db::get_conn().unwrap();
+        for (key, provenance, timestamp, seconds, policy, user) in [
+            ("legacy", "legacy_unverified", old.as_str(), 3600, "included", "viewer"),
+            ("summary", "item_summary", old.as_str(), 3600, "included", "viewer"),
+            ("undated", "item_summary", "", 600, "included", "viewer"),
+            ("negative", "legacy_unverified", old.as_str(), -5, "included", "viewer"),
+            ("observed", "observed_session", current.as_str(), 120, "included", "viewer"),
+            ("event", "imported_event", current.as_str(), 240, "included", "viewer"),
+            ("excluded", "legacy_unverified", old.as_str(), 9999, "excluded", "viewer"),
+            ("duplicate", "item_summary", old.as_str(), 9999, "duplicate", "viewer"),
+            ("hidden-user", "item_summary", old.as_str(), 9999, "included", "hidden"),
+        ] {
+            conn.execute(
+                "INSERT INTO streaming_history (session_key,provider,server_id,user_id,item_id,item_type,started_at,watched_secs,provenance,policy_status) VALUES (?1,'jellyfin','server',?2,'same-item','Movie',?3,?4,?5,?6)",
+                params![key,user,timestamp,seconds,provenance,policy],
+            ).unwrap();
+        }
+        conn.execute("UPDATE streaming_tracking_policies SET excluded_users='[{\"provider\":\"jellyfin\",\"serverId\":\"server\",\"id\":\"hidden\"}]'", []).unwrap();
+        let before: (i64, i64) = conn.query_row("SELECT COUNT(*),SUM(watched_secs) FROM streaming_history", [], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+        drop(conn);
+        let all = query_streaming_analytics(0, "all", "all", false, true, 0.0);
+        assert_eq!(all.total_plays, 2);
+        assert_eq!(all.total_watch_time_secs, 360);
+        assert_eq!(all.total_data_used_bytes, 0);
+        assert_eq!(all.historical_estimates.len(), 2);
+        let item = all.historical_estimates.iter().find(|estimate| estimate.provenance == "item_summary").unwrap();
+        assert_eq!((item.records, item.reported_watch_time_secs, item.undated_records), (2, 4200, 1));
+        let legacy = all.historical_estimates.iter().find(|estimate| estimate.provenance == "legacy_unverified").unwrap();
+        assert_eq!((legacy.records, legacy.reported_watch_time_secs), (2, 3600));
+        for estimate in &all.historical_estimates {
+            assert_eq!(estimate.time_series.len(), all.time_series.len());
+            assert_eq!(estimate.time_series.iter().map(|point| point.watch_time_secs).sum::<i64>(), 3600);
+            assert!(estimate.time_series.iter().any(|point| point.date == old[..10] && point.watch_time_secs == 3600));
+            assert!(estimate.time_series.iter().all(|point| point.data_used_bytes == 0 && point.direct_play_count == 0));
+        }
+        assert!(all.time_series.first().unwrap().date <= old[..10].to_string());
+        assert!(query_streaming_analytics(7, "all", "all", false, true, 0.0).historical_estimates.is_empty());
+        assert!(query_streaming_analytics(0, "transcode", "all", false, true, 0.0).historical_estimates.is_empty());
+        assert!(query_streaming_analytics(0, "all", "episode", false, true, 0.0).historical_estimates.is_empty());
+        assert!(query_streaming_analytics(0, "all", "all", true, true, 0.0).historical_estimates.is_empty());
+        let conn = af_db::get_conn().unwrap();
+        let after: (i64, i64) = conn.query_row("SELECT COUNT(*),SUM(watched_secs) FROM streaming_history", [], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+        assert_eq!(before, after);
+        conn.execute("UPDATE streaming_tracking_policies SET minimum_watch_secs=180", []).unwrap();
+        drop(conn);
+        let threshold = query_streaming_analytics(0, "all", "all", false, true, 0.0);
+        assert_eq!(threshold.total_plays, 1);
+        assert_eq!(threshold.total_watch_time_secs, 240);
+        assert_eq!(threshold.historical_estimates[0].records, 2);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]

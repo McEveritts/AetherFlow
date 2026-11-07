@@ -4,6 +4,7 @@ import React, { useState, useMemo, useRef } from 'react';
 import useSWR from 'swr';
 import StreamingHistoryExplorer from '@/components/streaming/StreamingHistoryExplorer';
 import StreamingDialog from '@/components/streaming/StreamingDialog';
+import StreamingImportedHistory, { StreamingHistoryEstimate } from '@/components/streaming/StreamingImportedHistory';
 import {
     Tv,
     Play,
@@ -275,6 +276,7 @@ export interface StreamingAnalytics {
     topUsers: StreamingUserStat[];
     topTitles: StreamingTitleStat[];
     recentHistory: StreamingHistoryItem[];
+    historicalEstimates?: StreamingHistoryEstimate[];
 }
 
 export interface StreamingDashboardData {
@@ -1149,7 +1151,7 @@ export default function StreamingTab() {
                 <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-4 flex flex-col justify-between">
                     <div className="flex items-center justify-between">
                         <span className="text-xs text-slate-400 font-semibold uppercase tracking-wider">
-                            Legacy Record Statistics ({windowDays === 0 ? 'All' : `${windowDays}d`})
+                            Confirmed Play Statistics ({windowDays === 0 ? 'All' : `${windowDays}d`})
                         </span>
                         <div className="h-9 w-9 rounded-xl bg-purple-500/10 border border-purple-500/20 flex items-center justify-center text-purple-400">
                             <Activity size={18} />
@@ -1158,7 +1160,7 @@ export default function StreamingTab() {
                     <div className="mt-2">
                         <div className="flex items-baseline gap-2">
                             <span className="text-2xl font-extrabold text-white tabular-nums">{analytics.totalPlays}</span>
-                            <span className="text-xs text-slate-400">mixed records · unverified {formatWatchDuration(analytics.totalWatchTimeSecs)}</span>
+                            <span className="text-xs text-slate-400">confirmed plays · {formatWatchDuration(analytics.totalWatchTimeSecs)}</span>
                         </div>
                         <p className="text-xs text-slate-400 mt-1.5">
                             {analytics.uniqueUsers} viewers · <span className="text-emerald-400 font-semibold">{analytics.avgCompletionPct}%</span> avg completion
@@ -1504,7 +1506,7 @@ export default function StreamingTab() {
             )}
 
             <p role="note" className="text-sm text-slate-400">
-                Dashboard history uses canonical included observed sessions and imported events. Bandwidth peaks remain a legacy provider aggregate; use the canonical archive and its connected insights for scoped, provenance-aware reporting.
+                Confirmed statistics use included observed sessions and imported events. Preserved imported and legacy watch-time estimates appear separately below; use All Time to see older records. Bandwidth peaks remain a legacy provider aggregate.
             </p>
             {(activeView === 'dashboard' || activeView === 'analytics' || activeView === 'history') && (
                 <div className="rounded-2xl border border-white/[0.06] bg-slate-900/40 backdrop-blur-xl p-3.5 flex flex-wrap items-center justify-between gap-3">
@@ -1611,6 +1613,8 @@ export default function StreamingTab() {
 
             {(activeView === 'dashboard' || activeView === 'analytics') && (
                 <>
+
+                    <StreamingImportedHistory estimates={analytics.historicalEstimates ?? []} windowDays={windowDays} />
 
                     {/* Time-Series Charts Row: Bandwidth/Data Usage & Play Statistics */}
                     <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">

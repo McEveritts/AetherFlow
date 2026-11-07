@@ -2370,6 +2370,16 @@ pub struct StreamingHistoryItem {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
+pub struct StreamingHistoryEstimate {
+    pub provenance: String,
+    pub records: i64,
+    pub reported_watch_time_secs: i64,
+    pub undated_records: i64,
+    pub time_series: Vec<StreamingTimeSeriesPoint>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct StreamingAnalytics {
     pub window_days: i32,
     pub total_plays: i32,
@@ -2389,6 +2399,8 @@ pub struct StreamingAnalytics {
     pub top_users: Vec<StreamingUserStat>,
     pub top_titles: Vec<StreamingTitleStat>,
     pub recent_history: Vec<StreamingHistoryItem>,
+    #[serde(default)]
+    pub historical_estimates: Vec<StreamingHistoryEstimate>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
