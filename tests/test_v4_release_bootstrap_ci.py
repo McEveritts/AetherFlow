@@ -100,6 +100,7 @@ class V4ReleaseBootstrapCiTests(unittest.TestCase):
         self.assertIn('kill -TERM -- "-${RUNNER_PID}"', harness)
         self.assertIn("Refusing to reuse occupied E2E listener", harness)
         self.assertLess(harness.index("probe.bind((host, port))"), harness.index('API_PID=$!'))
+        self.assertIn('--socket "${RUNNER_SOCK}"', harness)
 
     def test_release_workflow_enforces_ubuntu_2204_and_security_gate_dag_before_publish(self):
         release_yml = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")

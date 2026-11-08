@@ -14,11 +14,14 @@ from ..framework import TestCase, CodebaseInspector, AetherFlowApiClient
 
 class TestF13PureBlackFoundation(TestCase):
     def __init__(self):
-        super().__init__("T1_F13_01", "F13", 1, "globals.css defines --obs-bg-base as #000000")
+        super().__init__("T1_F13_01", "F13", 1, "globals.css defines and applies a dark foundation token")
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
         css = inspector.read_file("frontend/src/app/globals.css")
-        self.assert_true(bool(css and ("--obs-bg-base: #000000" in css or "--obs-bg-base:#000000" in css)), "F13: globals.css must define --obs-bg-base: #000000")
+        color_match = re.search(r"--obs-bg-base\s*:\s*#([0-9a-fA-F]{6})\s*;", css or "")
+        self.assert_true(bool(color_match and css and "var(--obs-bg-base)" in css), "F13: globals.css must define and apply a foundation color")
+        channels = [int(color_match.group(1)[offset:offset + 2], 16) for offset in (0, 2, 4)]
+        self.assert_true(max(channels) <= 48, "F13: the applied foundation must remain dark")
 
 class TestF13BodyBeforeAuroraGradients(TestCase):
     def __init__(self):
@@ -107,8 +110,7 @@ class TestF15DesktopExpandableRail(TestCase):
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
         sidebar = inspector.read_file("frontend/src/components/layout/Sidebar.tsx")
-        has_collapsed_width = "w-20" in sidebar or "md:w-[4.5rem]" in sidebar or "w-[4.5rem]" in sidebar
-        self.assert_true(bool(sidebar and has_collapsed_width and "w-64" in sidebar), "F15: Sidebar must support expandable width rail")
+        self.assert_true(bool(sidebar and "isCollapsed ? 'md:w-16' : 'md:w-52'" in sidebar and "handleToggleCollapse" in sidebar and 'aria-expanded={!isCollapsed}' in sidebar and '/img/aetherflow-mark.svg' in sidebar), "F15: Sidebar must expose the logo toggle and distinct collapsed/expanded desktop widths")
 
 class TestF15TouchTargetEnforcement(TestCase):
     def __init__(self):

@@ -9,9 +9,10 @@ const mockSetActiveTab = jest.fn();
 const mockMutateServices = jest.fn();
 const mockGlobalMutate = jest.fn();
 const mockLogsModalSpy = jest.fn();
-let mockServicesPayload: Record<string, unknown> = {};
+let mockServicesPayload: Record<string, unknown> | undefined = {};
 let mockServicesError: Error | undefined;
 let mockServicesIsValidating = false;
+let mockServicesIsLoading = false;
 let mockServicesOptions: { onSuccess: (services: Record<string, unknown>) => void };
 
 jest.mock('@/lib/fetcher', () => ({
@@ -70,7 +71,7 @@ jest.mock('swr', () => {
                 error: mockServicesError,
                 isValidating: mockServicesIsValidating,
                 mutate: mockMutateServices,
-                isLoading: false,
+                isLoading: mockServicesIsLoading,
             };
         }
         return { data: null, mutate: jest.fn(), isLoading: false };
@@ -93,6 +94,10 @@ describe('ServicesTab Loopback, Protocol, Update, Component & Control Contracts'
 
     beforeEach(() => {
         mockUserRole = 'admin';
+        mockServicesPayload = {};
+        mockServicesError = undefined;
+        mockServicesIsValidating = false;
+        mockServicesIsLoading = false;
         mockAddToast.mockReset();
         mockSetActiveTab.mockReset();
         mockMutateServices.mockReset();
@@ -566,7 +571,7 @@ describe('Services lifecycle receipts and diagnostics', () => {
                 mockServicesIsValidating = true; view.rerender(<ServicesTab />);
                 mockServicesIsValidating = false; view.rerender(<ServicesTab />);
             } else {
-                act(() => mockServicesOptions.onSuccess(mockServicesPayload));
+                act(() => mockServicesOptions.onSuccess(mockServicesPayload!));
             }
             expect(screen.getByTitle('Restart service')).toBeDisabled();
             expect(mockAddToast.mock.calls.some(call => String(call[0]).includes('receipt may have been superseded'))).toBe(false);
@@ -708,6 +713,10 @@ describe('Services UI/UX Fleet Triage, Search, Filtering, and Lifecycle Safety',
 
     beforeEach(() => {
         mockUserRole = 'admin';
+        mockServicesPayload = {};
+        mockServicesError = undefined;
+        mockServicesIsValidating = false;
+        mockServicesIsLoading = false;
         mockAddToast.mockReset();
         mockSetActiveTab.mockReset();
         mockMutateServices.mockReset();
@@ -719,6 +728,61 @@ describe('Services UI/UX Fleet Triage, Search, Filtering, and Lifecycle Safety',
 
     afterEach(() => {
         windowOpenSpy.mockRestore();
+    });
+
+    it('keeps first-load loading separate from an unavailable fleet', () => {
+        mockServicesPayload = undefined;
+        mockServicesIsLoading = true;
+
+        render(<ServicesTab />);
+
+        expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+        expect(screen.queryByText('No Services Detected')).not.toBeInTheDocument();
+    });
+
+    it('shows a retryable unavailable state instead of a false empty fleet on initial inventory failure', () => {
+        mockServicesPayload = undefined;
+        mockServicesError = new Error('service API unreachable');
+
+        render(<ServicesTab />);
+
+        expect(screen.getByRole('alert')).toHaveTextContent('Service inventory unavailable');
+        expect(screen.getByRole('alert')).toHaveTextContent('an empty fleet cannot be confirmed');
+        expect(screen.queryByText('No Services Detected')).not.toBeInTheDocument();
+        fireEvent.click(screen.getByRole('button', { name: 'Retry service inventory' }));
+        expect(mockMutateServices).toHaveBeenCalled();
+    });
+
+    it('keeps successful empty inventory distinct from unavailable data', () => {
+        mockServicesPayload = {};
+
+        render(<ServicesTab />);
+
+        expect(screen.getByText('No Services Detected')).toBeInTheDocument();
+        expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    });
+
+    it('retains the latest WebSocket-updated service snapshot when a background refresh fails', () => {
+        mockServicesPayload = {
+            Sonarr: {
+                id: 'sonarr',
+                process: 'sonarr',
+                status: 'running',
+                version: '4.1.0',
+                uptime: '3h',
+                managed_by: 'systemd',
+                default_port: 8989,
+            },
+        };
+        mockServicesError = new Error('refresh request failed');
+
+        render(<ServicesTab />);
+
+        expect(screen.getByText(/Service refresh failed/)).toHaveAttribute('role', 'status');
+        expect(screen.getByText(/newer WebSocket service updates remain visible/)).toBeInTheDocument();
+        expect(screen.getByRole('article', { name: 'Sonarr service' })).toHaveTextContent('v4.1.0');
+        expect(screen.getByRole('button', { name: 'Running (1)' })).toBeInTheDocument();
+        expect(screen.queryByText('No Services Detected')).not.toBeInTheDocument();
     });
 
     it('handles search, status filters, reset controls, and empty states accurately', () => {
@@ -1268,6 +1332,66 @@ describe('Services UI/UX Fleet Triage, Search, Filtering, and Lifecycle Safety',
 
         fireEvent.mouseDown(document.body);
         expect(screen.queryByRole('menu', { name: 'Connection details for Audiobookshelf' })).not.toBeInTheDocument();
+    });
+
+    it('restores the stable Connection trigger after dismissing ingress opened from its menu', () => {
+        mockServicesPayload = {
+            Sonarr: { id: 'sonarr', process: 'sonarr', status: 'running', version: '4.0', uptime: '2h', managed_by: 'systemd', default_port: 8989 },
+        };
+        render(<ServicesTab />);
+        const article = screen.getByRole('article', { name: 'Sonarr service' });
+        const connectionTrigger = within(article).getByRole('button', { name: 'Connection details for Sonarr' });
+        connectionTrigger.focus();
+        fireEvent.click(connectionTrigger);
+        fireEvent.click(screen.getByRole('menuitem', { name: 'Ingress and deployment for Sonarr' }));
+        const dialog = screen.getByRole('dialog', { name: 'sonarr Ingress & Deploy' });
+        expect(dialog.contains(document.activeElement)).toBe(true);
+        fireEvent.keyDown(document, { key: 'Escape' });
+        expect(screen.queryByRole('dialog', { name: 'sonarr Ingress & Deploy' })).not.toBeInTheDocument();
+        expect(document.activeElement).toBe(connectionTrigger);
+        expect(mockedApiFetch).not.toHaveBeenCalled();
+    });
+
+    it('retains running daemon controls alongside failed-install warnings and guards disruptive actions', () => {
+        mockServicesPayload = {
+            Sonarr: {
+                id: 'sonarr', process: 'sonarr', status: 'running', version: '4.0', uptime: '2h', managed_by: 'systemd', default_port: 8989,
+                last_job: { action: 'install', status: 'failed', message: 'installation failed' },
+            },
+        };
+        render(<ServicesTab />);
+        const article = screen.getByRole('article', { name: 'Sonarr service' });
+        expect(article).toHaveTextContent('Install failed — rollback/recovery unconfirmed');
+        expect(article).toHaveTextContent(/running/i);
+        expect(article).toHaveTextContent('2h');
+        expect(article).not.toHaveTextContent('Not running');
+        expect(within(article).queryByRole('button', { name: /Start Service \(Guarded\)/i })).not.toBeInTheDocument();
+        expect(within(article).getByRole('button', { name: /Web UI/i })).toBeEnabled();
+        const manageTrigger = within(article).getByRole('button', { name: 'Manage Sonarr service actions' });
+        fireEvent.click(manageTrigger);
+        fireEvent.click(within(article).getByRole('menuitem', { name: 'Restart Sonarr service' }));
+        const restartDialog = screen.getByRole('dialog', { name: 'Restart Sonarr?' });
+        expect(restartDialog).toHaveTextContent('recovery is unconfirmed');
+        expect(document.activeElement).toBe(within(restartDialog).getByRole('button', { name: 'Cancel' }));
+        fireEvent.keyDown(document, { key: 'Escape' });
+        expect(document.activeElement).toBe(manageTrigger);
+        fireEvent.click(manageTrigger);
+        fireEvent.click(within(article).getByRole('menuitem', { name: 'Stop Sonarr service' }));
+        expect(screen.getByRole('dialog', { name: 'Stop Sonarr?' })).toBeInTheDocument();
+        fireEvent.keyDown(document, { key: 'Escape' });
+        expect(mockedApiFetch).not.toHaveBeenCalled();
+        fireEvent.click(screen.getByRole('button', { name: 'Card grid view' }));
+        const card = screen.getByRole('article', { name: 'Sonarr service' });
+        expect(card).toHaveTextContent('Install failed — rollback/recovery unconfirmed');
+        expect(card).toHaveTextContent('2h');
+        expect(within(card).getByRole('button', { name: 'Web UI' })).toBeEnabled();
+        const restartButton = within(card).getByRole('button', { name: 'Restart' });
+        restartButton.focus();
+        fireEvent.click(restartButton);
+        expect(screen.getByRole('dialog', { name: 'Restart Sonarr?' })).toBeInTheDocument();
+        fireEvent.keyDown(document, { key: 'Escape' });
+        expect(document.activeElement).toBe(restartButton);
+        expect(mockedApiFetch).not.toHaveBeenCalled();
     });
 
     it('enforces bounded mobile actions grid with at most WebUI, Logs, Manage and spans Logs for headless apps', () => {
@@ -1969,6 +2093,49 @@ describe('Services UI/UX Fleet Triage, Search, Filtering, and Lifecycle Safety',
                 })
             );
         });
+    });
+
+    it('focuses safe Stop cancellation, traps focus, restores Manage focus, and never posts on dismissal', () => {
+        mockServicesPayload = {
+            Radarr: {
+                id: 'radarr',
+                process: 'radarr',
+                status: 'running',
+                version: '1.0.0',
+                uptime: '2h',
+                managed_by: 'systemd',
+            },
+        };
+
+        render(<ServicesTab />);
+        const radarrArticle = screen.getByRole('article', { name: 'Radarr service' });
+        const manageButton = within(radarrArticle).getByRole('button', { name: 'Manage Radarr service actions' });
+        manageButton.focus();
+        fireEvent.click(manageButton);
+        fireEvent.click(within(radarrArticle).getByRole('menuitem', { name: 'Stop Radarr service' }));
+
+        const stopDialog = screen.getByRole('dialog', { name: 'Stop Radarr?' });
+        const cancelButton = within(stopDialog).getByRole('button', { name: 'Cancel' });
+        const confirmButton = within(stopDialog).getByRole('button', { name: 'Confirm Stop' });
+        expect(document.activeElement).toBe(cancelButton);
+
+        fireEvent.keyDown(document, { key: 'Tab', shiftKey: true });
+        expect(document.activeElement).toBe(confirmButton);
+        fireEvent.keyDown(document, { key: 'Tab' });
+        expect(document.activeElement).toBe(cancelButton);
+
+        fireEvent.keyDown(document, { key: 'Escape' });
+        expect(screen.queryByRole('dialog', { name: 'Stop Radarr?' })).not.toBeInTheDocument();
+        expect(document.activeElement).toBe(manageButton);
+        expect(mockedApiFetch).not.toHaveBeenCalled();
+
+        fireEvent.click(manageButton);
+        fireEvent.click(within(radarrArticle).getByRole('menuitem', { name: 'Stop Radarr service' }));
+        const reopenedDialog = screen.getByRole('dialog', { name: 'Stop Radarr?' });
+        fireEvent.click(reopenedDialog.parentElement as HTMLElement);
+        expect(screen.queryByRole('dialog', { name: 'Stop Radarr?' })).not.toBeInTheDocument();
+        expect(document.activeElement).toBe(manageButton);
+        expect(mockedApiFetch).not.toHaveBeenCalled();
     });
 
     it('supports 4-action variant with honest flex-wrap inside 280px track without overlapping metadata', () => {

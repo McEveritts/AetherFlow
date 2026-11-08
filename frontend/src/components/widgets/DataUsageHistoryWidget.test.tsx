@@ -1,6 +1,6 @@
 import React from 'react';
 import { render, screen, waitFor, fireEvent } from '@testing-library/react';
-import DataUsageHistoryWidget from '@/components/widgets/DataUsageHistoryWidget';
+import DataUsageHistoryWidget, { deriveDailyUsage } from '@/components/widgets/DataUsageHistoryWidget';
 import { fetcher } from '@/lib/fetcher';
 
 jest.mock('@/lib/fetcher', () => ({
@@ -60,6 +60,39 @@ describe('DataUsageHistoryWidget', () => {
         jest.clearAllMocks();
     });
 
+    it('sorts cumulative samples globally and assigns cross-midnight intervals to their end day', () => {
+        const result = deriveDailyUsage([
+            { timestamp: '2026-11-02T00:05:00Z', net_rx_bytes: 180, net_tx_bytes: 90 },
+            { timestamp: '2026-11-01T23:55:00Z', net_rx_bytes: 100, net_tx_bytes: 50 },
+            { timestamp: '2026-11-02T00:05:00Z', net_rx_bytes: 180, net_tx_bytes: 90 },
+            { timestamp: '2026-11-03T00:00:00Z', net_rx_bytes: 20, net_tx_bytes: 10 },
+        ]);
+        expect(result.usageData).toEqual([
+            { date: '2026-11-01', downloadedBytes: null, uploadedBytes: null },
+            { date: '2026-11-02', downloadedBytes: 80, uploadedBytes: 40 },
+            { date: '2026-11-03', downloadedBytes: 20, uploadedBytes: 10 },
+        ]);
+        expect(result.duplicateSamples).toBe(1);
+        expect(result.counterResets).toBe(2);
+    });
+
+    it('does not invent observations or bridge invalid and conflicting counters', () => {
+        expect(deriveDailyUsage([]).usageData).toEqual([]);
+        const result = deriveDailyUsage([
+            { timestamp: '2026-11-01T00:00:00Z', net_rx_bytes: 10, net_tx_bytes: 5 },
+            { timestamp: '2026-11-02T00:00:00Z', net_rx_bytes: -1, net_tx_bytes: 8 },
+            { timestamp: '2026-11-03T00:00:00Z', net_rx_bytes: 50, net_tx_bytes: 25 },
+            { timestamp: '2026-11-03T00:00:00Z', net_rx_bytes: 60, net_tx_bytes: 25 },
+            { timestamp: '2026-11-04T00:00:00Z', net_rx_bytes: 70, net_tx_bytes: 30 },
+        ]);
+        expect(result.usageData).toEqual([
+            { date: '2026-11-01', downloadedBytes: null, uploadedBytes: null },
+            { date: '2026-11-04', downloadedBytes: null, uploadedBytes: null },
+        ]);
+        expect(result.invalidSamples).toBe(1);
+        expect(result.conflictingSamples).toBe(1);
+    });
+
     it('renders truthful daily transfer title, explains sparse coverage, and uses consistent cyan and indigo colors', async () => {
         const sampleSnapshots = [
             { timestamp: '2026-11-01T00:00:00Z', net_rx_bytes: 1000000, net_tx_bytes: 500000 },
@@ -77,10 +110,10 @@ describe('DataUsageHistoryWidget', () => {
         expect(screen.getByText('Truthful daily network ingress and egress volume')).toBeInTheDocument();
 
         await waitFor(() => {
-            expect(screen.getByText(/Coverage: 3 of 30 days available/)).toBeInTheDocument();
+            expect(screen.getByText(/Coverage: 3 of 30 days observed/)).toBeInTheDocument();
         });
 
-        const coverageTextElement = screen.getByText(/Coverage: 3 of 30 days available/);
+        const coverageTextElement = screen.getByText(/Coverage: 3 of 30 days observed/);
         expect(coverageTextElement).toHaveClass('text-slate-200');
 
         expect(screen.getByText(/Sparse telemetry captured in window/)).toBeInTheDocument();
@@ -95,6 +128,14 @@ describe('DataUsageHistoryWidget', () => {
 
         expect(screen.getByText('Download (30d)')).toBeInTheDocument();
         expect(screen.getByText('Upload (30d)')).toBeInTheDocument();
+    });
+
+    it('does not present zero transfer when no interval can be calculated', async () => {
+        mockedFetcher.mockResolvedValueOnce([{ timestamp: '2026-11-01T00:00:00Z', net_rx_bytes: 10, net_tx_bytes: 5 }]);
+        render(<DataUsageHistoryWidget density="compact" />);
+        await waitFor(() => expect(screen.getByText(/Coverage: 1 of 30 days observed/)).toBeInTheDocument());
+        expect(screen.getAllByText('Unavailable')).toHaveLength(2);
+        expect(screen.queryByText('0 B')).not.toBeInTheDocument();
     });
 
     it('re-fetches telemetry history with updated window when window option button is clicked', async () => {

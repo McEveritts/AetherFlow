@@ -93,7 +93,7 @@ class TestComboSingleBinarySpaAtmosphere(TestCase):
         css = inspector.read_file("frontend/src/app/globals.css")
         has_export = bool(stack and "NEXT_STATIC_EXPORT" in stack)
         has_embed = bool(embed and "all:dist" in embed)
-        has_obsidian = bool(css and "--obs-bg-base: #000000" in css)
+        has_obsidian = bool(css and "--obs-bg-base:" in css and "var(--obs-bg-base)" in css and "--obs-chromatic-edge-gradient" in css)
         self.assert_true(has_export and has_embed and has_obsidian, "Combo 07: Single binary, static embed, and Obsidian CSS must be satisfied")
 
 class TestComboPrivilegeBoundarySandbox(TestCase):

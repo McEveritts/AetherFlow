@@ -1,16 +1,19 @@
 'use client';
 
-import { useEffect, useRef, useSyncExternalStore, type ReactNode } from 'react';
+import { useEffect, useRef, useSyncExternalStore, type ReactNode, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
 
 const emptySubscribe = () => () => {};
 const getClientSnapshot = () => true;
 const getServerSnapshot = () => false;
 
-export default function StreamingDialog({ name, onClose, children }: {
+export default function StreamingDialog({ name, onClose, children, initialFocusRef, returnFocusRef, labelledBy }: {
     name: string;
     onClose: () => void;
     children: ReactNode;
+    initialFocusRef?: RefObject<HTMLElement | null>;
+    returnFocusRef?: RefObject<HTMLElement | null>;
+    labelledBy?: string;
 }) {
     const isMounted = useSyncExternalStore(emptySubscribe, getClientSnapshot, getServerSnapshot);
     const panelRef = useRef<HTMLDivElement>(null);
@@ -21,11 +24,12 @@ export default function StreamingDialog({ name, onClose, children }: {
         if (!isMounted) return;
         const panel = panelRef.current;
         if (!panel) return;
-        const invoker = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+        const invoker = returnFocusRef?.current ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
         const focusable = () => Array.from(panel.querySelectorAll<HTMLElement>(
             'button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled), a[href], [tabindex="0"]'
         )).filter(element => !element.hidden && element.getAttribute('aria-hidden') !== 'true');
-        (focusable()[0] || panel).focus();
+        const initialFocus = initialFocusRef?.current;
+        (initialFocus && panel.contains(initialFocus) ? initialFocus : focusable()[0] || panel).focus();
         const onKey = (event: KeyboardEvent) => {
             if (event.key === 'Escape') {
                 event.preventDefault();
@@ -53,7 +57,7 @@ export default function StreamingDialog({ name, onClose, children }: {
             document.removeEventListener('focusin', containFocus);
             if (invoker?.isConnected) invoker.focus();
         };
-    }, [isMounted]);
+    }, [isMounted, initialFocusRef, returnFocusRef]);
 
     if (!isMounted || typeof document === 'undefined') {
         return null;
@@ -69,6 +73,7 @@ export default function StreamingDialog({ name, onClose, children }: {
                 role="dialog"
                 aria-modal="true"
                 aria-label={name}
+                aria-labelledby={labelledBy}
                 tabIndex={-1}
                 className="min-w-0 max-w-full max-h-[calc(100dvh-2rem)] overflow-y-auto"
             >

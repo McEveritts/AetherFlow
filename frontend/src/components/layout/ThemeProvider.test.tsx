@@ -1,4 +1,6 @@
 import { render, screen, act } from "@testing-library/react";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import ThemeProvider from "@/components/layout/ThemeProvider";
 import { useSystemStore } from "@/store/useSystemStore";
 
@@ -16,6 +18,19 @@ describe("ThemeProvider - Obsidian V2 Atmosphere & 120Hz/Touch Synchronization",
       touchMode: "auto",
       detectedTouchDevice: false,
     });
+  });
+
+  it("keeps the original cyan-indigo-fuchsia glass and gradient palette enabled", () => {
+    const stylesheet = readFileSync(join(process.cwd(), "src/app/globals.css"), "utf8");
+
+    expect(stylesheet).toContain("--obs-chromatic-border-cyan: rgba(56, 189, 248, 0.44);");
+    expect(stylesheet).toContain("--obs-chromatic-border-indigo: rgba(129, 140, 248, 0.48);");
+    expect(stylesheet).toContain("--obs-chromatic-border-fuchsia: rgba(217, 70, 239, 0.44);");
+    expect(stylesheet).toContain("--obs-card-bg: linear-gradient(135deg,");
+    expect(stylesheet).toContain("--obs-shadow-glow-fuchsia: 0 0 24px rgba(217, 70, 239, 0.35);");
+    expect(stylesheet).toContain("background: var(--obs-chromatic-edge-gradient);");
+    expect(stylesheet).toContain("border-right: 1px solid var(--obs-chromatic-border-fuchsia);");
+    expect(stylesheet).not.toContain("--obs-chromatic-edge-gradient: none;");
   });
 
   it("synchronizes Obsidian atmosphere CSS variables to root element", () => {

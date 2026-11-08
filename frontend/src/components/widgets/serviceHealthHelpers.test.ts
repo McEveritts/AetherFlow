@@ -17,6 +17,11 @@ describe('serviceHealthHelpers', () => {
             expect(isServiceException(errorService)).toBe(true);
         });
 
+        it('identifies the backend degraded status as an exception', () => {
+            expect(isServiceException({ status: 'degraded' })).toBe(true);
+            expect(getServiceExceptionDetail({ status: 'degraded' })).toBe('Degraded status reported');
+        });
+
         it('identifies install_failed job_status as exception even when status is stopped', () => {
             const failedInstallService: ServiceTelemetryInfo = {
                 status: 'stopped',

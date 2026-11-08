@@ -64,7 +64,7 @@ test.describe('Real Embedded Single-Binary Full-Stack E2E (Zero Mocks)', () => {
     const initialHistory = await initialHistoryPromise;
     expect((await initialHistory.json()).length).toBeGreaterThan(1);
     expect(await (await initialSettingsPromise).json()).toBeTruthy();
-    await expect(page.getByText('Hyperspeed (Live)', { exact: true })).toBeVisible();
+    await expect(page.getByText('Live Telemetry')).toBeVisible();
 
     const onboardingHeading = page.getByRole('heading', { name: 'Welcome to AetherFlow' });
     if (await onboardingHeading.isVisible()) {
@@ -334,7 +334,7 @@ test.describe('Real Embedded Single-Binary Full-Stack E2E (Zero Mocks)', () => {
     const reconnectedFrame = await reconnectedSocket.waitForEvent('framereceived');
     expect(reconnectedFrame.payload).toBeTruthy();
     expect((await (await reconnectedHistoryPromise).json()).length).toBeGreaterThan(1);
-    await expect(page.getByText('Hyperspeed (Live)', { exact: true })).toBeVisible();
+    await expect(page.getByText('Live Telemetry')).toBeVisible();
 
     const reloadedHistoryPromise = page.waitForResponse((response) =>
       new URL(response.url()).pathname === '/api/v1/auth/system/metrics/history' && response.ok()
@@ -343,7 +343,7 @@ test.describe('Real Embedded Single-Binary Full-Stack E2E (Zero Mocks)', () => {
     await expect(page).not.toHaveURL(/\/login/);
     expect((await (await reloadedHistoryPromise).json()).length).toBeGreaterThan(1);
     await expect(windowSelector).toBeVisible();
-    await expect(page.getByText('Hyperspeed (Live)', { exact: true })).toBeVisible();
+    await expect(page.getByText('Live Telemetry')).toBeVisible();
     await expect(page.locator('path.recharts-area-curve').first()).toHaveAttribute('d', /\S+/);
   });
 });

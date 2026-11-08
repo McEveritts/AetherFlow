@@ -187,6 +187,7 @@ API_LOG="${WORK_DIR}/api.log"
 RUNNER_LOG="${WORK_DIR}/runner.log"
 RUNNER_SOCK="${RUN_DIR}/runner.sock"
 DB_FILE="${DATA_DIR}/aetherflow.sqlite"
+FS_FIXTURE="${WORK_DIR}/fs-browser"
 
 mkdir -p \
     "${FS_ROOT}/etc/aetherflow" \
@@ -194,8 +195,10 @@ mkdir -p \
     "${FS_ROOT}/var/log/aetherflow" \
     "${FS_ROOT}/opt/AetherFlow/config" \
     "${FS_ROOT}/opt/AetherFlow/packages" \
+    "${FS_FIXTURE}/storage/media" \
     "${DATA_DIR}" \
     "${RUN_DIR}"
+printf 'fixture data\n' > "${FS_FIXTURE}/storage/media/fixture.txt"
 
 if [[ -d "${ROOT_DIR}/config" ]]; then
     cp -R "${ROOT_DIR}/config/." "${FS_ROOT}/opt/AetherFlow/config/"
@@ -230,6 +233,7 @@ ALLOWED_CORS_ORIGIN=http://localhost:${PORT},http://127.0.0.1:${PORT},http://loc
 DB_PATH=${DB_FILE}
 AETHERFLOW_DB_PATH=${DB_FILE}
 AETHERFLOW_FS_ROOT=${FS_ROOT}
+AF_ALLOWED_FS_ROOTS=/mnt,${FS_FIXTURE}
 AETHERFLOW_PLUGINS_DIR=${PLUGINS_DIR}
 AETHERFLOW_RUNNER_SOCK=${RUNNER_SOCK}
 AETHERFLOW_ENV_FILE=${ENV_FILE}
@@ -252,6 +256,8 @@ export ALLOWED_CORS_ORIGIN="http://localhost:${PORT},http://127.0.0.1:${PORT},ht
 export DB_PATH="${DB_FILE}"
 export AETHERFLOW_DB_PATH="${DB_FILE}"
 export AETHERFLOW_FS_ROOT="${FS_ROOT}"
+export AF_ALLOWED_FS_ROOTS="/mnt,${FS_FIXTURE}"
+export AETHERFLOW_E2E_FS_FIXTURE="${FS_FIXTURE}"
 export AETHERFLOW_PLUGINS_DIR="${PLUGINS_DIR}"
 export AETHERFLOW_RUNNER_SOCK="${RUNNER_SOCK}"
 export AETHERFLOW_ENV_FILE="${ENV_FILE}"
@@ -376,7 +382,7 @@ AETHERFLOW_E2E_USER="${ADMIN_USER}" \
 AETHERFLOW_E2E_PASS="${ADMIN_PASS}" \
 AETHERFLOW_E2E_USERNAME="${ADMIN_USER}" \
 AETHERFLOW_E2E_PASSWORD="${ADMIN_PASS}" \
-python3 "${ROOT_DIR}/tests/run_e2e.py" --mode live --url "${BASE_URL}" --json-out "${WORK_DIR}/e2e-report.json"
+python3 "${ROOT_DIR}/tests/run_e2e.py" --mode live --url "${BASE_URL}" --socket "${RUNNER_SOCK}" --json-out "${WORK_DIR}/e2e-report.json"
 
 if [[ "${RUN_PLAYWRIGHT}" == "1" ]]; then
     python3 - "${DB_FILE}" "${WORK_DIR}" <<'PY'

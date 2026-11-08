@@ -27,7 +27,7 @@ export interface DiskPartition {
 }
 
 export interface ServiceTelemetryInfo {
-    status: 'running' | 'stopped' | 'error';
+    status: 'running' | 'stopped' | 'error' | 'degraded';
     uptime?: string;
     version?: string;
     job_status?: 'install_failed' | 'installing' | 'failed' | 'completed' | string;

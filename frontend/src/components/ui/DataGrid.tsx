@@ -23,6 +23,7 @@ interface DataGridProps<TData, TValue> {
   getRowCanExpand?: (row: Row<TData>) => boolean;
   className?: string;
   rowHeight?: number;
+  initialSorting?: SortingState;
 }
 
 export function DataGrid<TData, TValue>({
@@ -32,8 +33,9 @@ export function DataGrid<TData, TValue>({
   getRowCanExpand = () => false,
   className = '',
   rowHeight = 64,
+  initialSorting = [],
 }: DataGridProps<TData, TValue>) {
-  const [sorting, setSorting] = useState<SortingState>([]);
+  const [sorting, setSorting] = useState<SortingState>(initialSorting);
   const [expanded, setExpanded] = useState<ExpandedState>({});
 
   // eslint-disable-next-line react-hooks/incompatible-library -- TanStack Table is incompatible with React Compiler memoization by design
@@ -83,16 +85,16 @@ export function DataGrid<TData, TValue>({
                   <th
                     key={header.id}
                     colSpan={header.colSpan}
+                    aria-sort={header.column.getIsSorted() === 'asc' ? 'ascending' : header.column.getIsSorted() === 'desc' ? 'descending' : undefined}
                     className="p-4 text-xs font-semibold text-slate-300 uppercase tracking-wider group select-none first:pl-6 last:pr-6"
                     style={{
                       width: header.getSize() !== 150 ? header.getSize() : 'auto',
                     }}
                   >
                     {header.isPlaceholder ? null : (
-                      <div
-                        className={`flex items-center gap-2 ${
-                          header.column.getCanSort() ? 'cursor-pointer hover:text-white transition-colors' : ''
-                        }`}
+                      header.column.getCanSort() ? <button
+                        type="button"
+                        className="flex w-full items-center gap-2 cursor-pointer hover:text-white transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400 rounded"
                         onClick={header.column.getToggleSortingHandler()}
                       >
                         {flexRender(
@@ -100,16 +102,17 @@ export function DataGrid<TData, TValue>({
                           header.getContext()
                         )}
                         {{
-                          asc: <ArrowUp size={14} className="text-indigo-400" />,
-                          desc: <ArrowDown size={14} className="text-indigo-400" />,
+                          asc: <ArrowUp aria-hidden="true" size={14} className="text-indigo-400" />,
+                          desc: <ArrowDown aria-hidden="true" size={14} className="text-indigo-400" />,
                         }[header.column.getIsSorted() as string] ??
                           (header.column.getCanSort() ? (
                             <ArrowUpDown
+                              aria-hidden="true"
                               size={14}
                               className="text-slate-500 obs-touch-action-reveal opacity-40 md:opacity-0 md:group-hover:opacity-100 transition-opacity"
                             />
                           ) : null)}
-                      </div>
+                      </button> : <div>{flexRender(header.column.columnDef.header, header.getContext())}</div>
                     )}
                   </th>
                 );

@@ -279,7 +279,7 @@ export default function Sidebar() {
                                         }}
                                         className={`w-full flex items-center gap-3 px-3 py-2.5 min-h-[44px] obs-touch-target-standard rounded-xl transition-colors ${
                                             isActive
-                                                ? 'bg-indigo-500/20 text-white border border-indigo-500/40'
+                                                ? 'bg-gradient-to-r from-indigo-500/25 to-fuchsia-500/20 text-white border border-indigo-500/40 shadow-[0_0_16px_rgba(99,102,241,0.25)]'
                                                 : 'text-slate-400 hover:bg-white/5 hover:text-slate-200 border border-transparent'
                                         }`}
                                     >
@@ -319,7 +319,7 @@ export default function Sidebar() {
                                         }}
                                         className={`w-full flex items-center gap-3 px-3 py-2.5 min-h-[44px] obs-touch-target-standard rounded-xl transition-colors ${
                                             isActive
-                                                ? 'bg-indigo-500/20 text-white border border-indigo-500/40'
+                                                ? 'bg-gradient-to-r from-indigo-500/25 to-fuchsia-500/20 text-white border border-indigo-500/40 shadow-[0_0_16px_rgba(99,102,241,0.25)]'
                                                 : isLogout
                                                 ? 'text-slate-400 hover:bg-rose-500/10 hover:text-rose-300 border border-transparent'
                                                 : 'text-slate-400 hover:bg-white/5 hover:text-slate-200 border border-transparent'
@@ -341,6 +341,7 @@ export default function Sidebar() {
                 }`}
             >
                 <aside
+                    id="desktop-sidebar-navigation"
                     className={`fixed inset-y-0 left-0 z-40 flex flex-col transition-all duration-200 ${
                         isCollapsed ? 'md:w-16' : 'md:w-52'
                     }`}
@@ -351,42 +352,29 @@ export default function Sidebar() {
                                 isCollapsed ? 'justify-center px-0' : 'px-4 justify-between'
                             }`}
                         >
-                            {!isCollapsed ? (
-                                <>
-                                    <div className="flex items-center gap-2.5 min-w-0">
-                                        <div className="w-8 h-8 shrink-0 rounded-lg bg-indigo-500/10 border border-indigo-500/30 flex items-center justify-center">
-                                            <img src="/img/aetherflow-mark.svg" alt="AetherFlow Logo" className="w-5 h-5" />
-                                        </div>
-                                        <div className="flex flex-col min-w-0">
-                                            <span className="text-sm font-bold tracking-tight text-white whitespace-nowrap leading-tight truncate">
-                                                AetherFlow
-                                            </span>
-                                            <span className="text-[11px] font-mono text-slate-400 uppercase tracking-wider truncate">
-                                                Nexus OS
-                                            </span>
-                                        </div>
-                                    </div>
-                                    <button
-                                        type="button"
-                                        onClick={handleToggleCollapse}
-                                        aria-label="Collapse Sidebar"
-                                        title="Collapse Sidebar"
-                                        className="w-10 h-10 min-h-[40px] min-w-[40px] rounded-lg text-slate-400 hover:text-white hover:bg-white/[0.06] flex items-center justify-center transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
-                                    >
-                                        <ChevronLeft size={16} />
-                                    </button>
-                                </>
-                            ) : (
+                            <div className={`flex items-center ${isCollapsed ? 'justify-center' : 'gap-2.5 min-w-0'}`}>
                                 <button
                                     type="button"
                                     onClick={handleToggleCollapse}
-                                    aria-label="Expand Sidebar"
-                                    title="Expand Sidebar"
-                                    className="w-10 h-10 min-h-[40px] min-w-[40px] rounded-lg text-slate-400 hover:text-white hover:bg-white/[0.06] flex items-center justify-center transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
+                                    aria-label={isCollapsed ? 'Expand Sidebar' : 'Collapse Sidebar'}
+                                    aria-expanded={!isCollapsed}
+                                    aria-controls="desktop-sidebar-navigation"
+                                    title={isCollapsed ? 'Expand Sidebar' : 'Collapse Sidebar'}
+                                    className="w-10 h-10 min-h-[40px] min-w-[40px] shrink-0 rounded-xl shadow-[0_0_20px_rgba(99,102,241,0.35)] relative overflow-hidden bg-indigo-500/10 border border-indigo-500/30 flex items-center justify-center obs-inline-action obs-gpu-120hz-interactive focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-950"
                                 >
-                                    <ChevronRight size={18} />
+                                    <img src="/img/aetherflow-mark.svg" alt="AetherFlow Logo" className="w-7 h-7" />
                                 </button>
-                            )}
+                                {!isCollapsed && (
+                                    <div className="flex flex-col min-w-0">
+                                        <span className="text-sm font-bold tracking-tight text-white whitespace-nowrap leading-tight truncate">
+                                            AetherFlow
+                                        </span>
+                                        <span className="text-[11px] font-mono text-slate-400 uppercase tracking-wider truncate">
+                                            Nexus OS
+                                        </span>
+                                    </div>
+                                )}
+                            </div>
                         </div>
 
                         <nav className="flex-1 px-2.5 py-3 flex flex-col overflow-y-auto no-scrollbar relative z-10">
@@ -415,7 +403,7 @@ export default function Sidebar() {
                                                     : 'w-10 h-10 min-h-[40px] min-w-[40px] mx-auto justify-center'
                                             } ${
                                                 isActive
-                                                    ? 'bg-indigo-500/15 text-indigo-200 border border-indigo-500/30'
+                                                    ? 'bg-gradient-to-r from-indigo-500/25 to-fuchsia-500/20 text-white border border-indigo-500/40 shadow-[0_0_16px_rgba(99,102,241,0.18)]'
                                                     : 'text-slate-400 border border-transparent hover:bg-white/[0.05] hover:text-slate-200'
                                             }`}
                                         >

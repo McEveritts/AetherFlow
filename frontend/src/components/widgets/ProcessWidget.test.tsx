@@ -4,10 +4,12 @@ import ProcessWidget from '@/components/widgets/ProcessWidget';
 import { ProcessInfo } from '@/types/dashboard';
 
 let capturedGridProcesses: ProcessInfo[] = [];
+let capturedInitialSorting: { id: string; desc: boolean }[] = [];
 
 jest.mock('@/components/ui/DataGrid', () => ({
-    DataGrid: function MockDataGrid({ data, columns }: { data: ProcessInfo[]; columns: Array<{ header: string | (() => React.ReactNode); cell: (info: { getValue: () => unknown }) => React.ReactNode }> }) {
+    DataGrid: function MockDataGrid({ data, columns, initialSorting }: { data: ProcessInfo[]; initialSorting: { id: string; desc: boolean }[]; columns: Array<{ header: string | (() => React.ReactNode); cell: (info: { getValue: () => unknown }) => React.ReactNode }> }) {
         capturedGridProcesses = data;
+        capturedInitialSorting = initialSorting;
         return (
             <div data-testid="mock-data-grid">
                 {columns.map((columnItem, columnIndex) => (
@@ -109,7 +111,8 @@ describe('ProcessWidget CPU sorting and contract regressions', () => {
         const { container } = render(<ProcessWidget processes={testProcesses} />);
 
         expect(screen.getByText('CPU %')).toBeInTheDocument();
-        expect(screen.getByText('↓')).toBeInTheDocument();
+        expect(capturedInitialSorting).toEqual([{ id: 'cpu', desc: true }]);
+        expect(screen.queryByText('↓')).not.toBeInTheDocument();
 
         const cpuValueElement = screen.getByText('14.8%');
         expect(cpuValueElement).toBeInTheDocument();

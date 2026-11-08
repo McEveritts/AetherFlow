@@ -17,6 +17,7 @@ import { useSystemStore } from '@/store/useSystemStore';
 import { ExternalAccessCard } from '@/components/ingress/ExternalAccessCard';
 import { DeploymentStatus } from '@/components/deploy/DeploymentStatus';
 import { ProgressRing } from '@/components/ui/ProgressRing';
+import { Modal } from '@/components/ui/Modal';
 import { isLifecycleStatus, lifecycleIdentity, matchingActiveJob, matchingJobOutcome, MarketplaceJobOutcome, PendingAction, LIFECYCLE_RECEIPT_TIMEOUT_MS } from '@/hooks/useMarketplace';
 
 const SERVICE_WEB_PORTS: Record<string, number | string> = {
@@ -300,9 +301,16 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
     const [logsModalService, setLogsModalService] = useState<string | null>(null);
     const [logsModalUnits, setLogsModalUnits] = useState<string[] | undefined>(undefined);
     const [ingressModalApp, setIngressModalApp] = useState<string | null>(null);
+    const ingressReturnFocusRef = useRef<HTMLElement | null>(null);
+    const [servicesPollError, setServicesPollError] = useState<unknown>(undefined);
     const [revealedKeys, setRevealedKeys] = useState<Set<string>>(new Set());
     const [stopConfirmService, setStopConfirmService] = useState<{ name: string; data: ServiceInfo } | null>(null);
+    const [restartConfirmService, setRestartConfirmService] = useState<{ name: string; data: ServiceInfo } | null>(null);
     const [guardedStartConfirmService, setGuardedStartConfirmService] = useState<{ name: string; data: ServiceInfo } | null>(null);
+    const stopDialogReturnFocusRef = useRef<HTMLElement | null>(null);
+    const stopDialogCancelRef = useRef<HTMLButtonElement | null>(null);
+    const restartDialogReturnFocusRef = useRef<HTMLElement | null>(null);
+    const restartDialogCancelRef = useRef<HTMLButtonElement | null>(null);
     const [searchQuery, setSearchQuery] = useState('');
     const [statusFilter, setStatusFilter] = useState<'all' | 'running' | 'stopped' | 'attention' | 'updates'>('all');
     const [isMobileFiltersOpen, setIsMobileFiltersOpen] = useState(false);
@@ -311,20 +319,6 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
     const [openAccessMenuService, setOpenAccessMenuService] = useState<string | null>(null);
     const [expandedDetailsServices, setExpandedDetailsServices] = useState<Set<string>>(new Set());
     const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-    useEffect(() => {
-        if (!guardedStartConfirmService && !stopConfirmService) return;
-        const handleKeyDown = (event: KeyboardEvent) => {
-            if (event.key === 'Escape') {
-                setGuardedStartConfirmService(null);
-                setStopConfirmService(null);
-            }
-        };
-        window.addEventListener('keydown', handleKeyDown);
-        return () => {
-            window.removeEventListener('keydown', handleKeyDown);
-        };
-    }, [guardedStartConfirmService, stopConfirmService]);
 
     useEffect(() => {
         if (!openManageMenuService) return;
@@ -417,7 +411,7 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
         });
     }, []);
 
-    const { data: services, error: servicesError, mutate, isLoading, isValidating } = useSWR<Record<string, ServiceInfo>>(
+    const { data: services, error: servicesError, mutate, isValidating } = useSWR<Record<string, ServiceInfo>>(
         '/api/v1/auth/services',
         {
             refreshInterval: (currentData) => {
@@ -428,16 +422,21 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                 );
                 return hasActiveJob ? 1500 : 15000;
             },
-            onSuccess: renewActiveUpdates,
+            onSuccess: (snapshot) => {
+                setServicesPollError(undefined);
+                renewActiveUpdates(snapshot);
+            },
+            onError: (error) => setServicesPollError(error),
             shouldRetryOnError: false,
         }
     );
 
-    useLifecyclePollRecovery('/api/v1/auth/services', servicesError, () => mutate());
+    const inventoryError = servicesError || servicesPollError;
+    useLifecyclePollRecovery('/api/v1/auth/services', inventoryError, () => mutate());
 
     useEffect(() => {
-        if (!servicesError && !isValidating) renewActiveUpdates(services);
-    }, [services, servicesError, isValidating, renewActiveUpdates]);
+        if (!inventoryError && !isValidating) renewActiveUpdates(services);
+    }, [services, inventoryError, isValidating, renewActiveUpdates]);
 
     useEffect(() => {
         if (!services) return;
@@ -707,7 +706,7 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
         const isJobFailed = Boolean(
             lastJob &&
             lastJob.action === 'install' &&
-            lastJob.status !== 'completed'
+            lastJob.status === 'failed'
         );
         const isStatusFailed = serviceData.status === 'install_failed' || serviceData.job_status === 'install_failed';
         return isJobFailed || isStatusFailed;
@@ -724,6 +723,22 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
 
     const hasAvailableUpdate = (serviceData: ServiceInfo): boolean => {
         return Boolean(serviceData.update_available && !serviceData.update_error);
+    };
+
+    const openStopConfirmation = (name: string, serviceData: ServiceInfo) => {
+        stopDialogReturnFocusRef.current = document.getElementById(`manage-trigger-${serviceData.id || name}`);
+        setOpenManageMenuService(null);
+        setStopConfirmService({ name, data: serviceData });
+    };
+
+    const restartService = (name: string, serviceData: ServiceInfo, trigger: HTMLElement) => {
+        if (!isFailedInstall(serviceData)) {
+            void handleServiceControl(name, serviceData, 'restart');
+            return;
+        }
+        restartDialogReturnFocusRef.current = document.getElementById(`manage-trigger-${serviceData.id || name}`) || trigger;
+        setOpenManageMenuService(null);
+        setRestartConfirmService({ name, data: serviceData });
     };
 
     const runningCount = allEntries.filter(([, serviceData]) => (serviceData as ServiceInfo).status === 'running').length;
@@ -961,7 +976,7 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
     };
 
     const resolveUptimeDisplay = (serviceData: ServiceInfo): string => {
-        if (isFailedInstall(serviceData)) {
+        if (isFailedInstall(serviceData) && !['running', 'degraded'].includes(serviceData.status)) {
             return 'Not running';
         }
         if (!serviceData.uptime || serviceData.uptime === 'stopped' || serviceData.uptime === '-') {
@@ -1023,7 +1038,8 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
             (appId ? updatingServices.has(appId) : false);
         const { degraded: isDegraded, unhealthyUnits } = getDegradedSummary(data);
         const failedInstall = isFailedInstall(data);
-        const isRunning = (data.status === 'running' || isDegraded) && !isUpdating;
+        const isRunning = data.status === 'running' && !isUpdating;
+        const isOperational = (data.status === 'running' || isDegraded) && !isUpdating;
         const isError = data.status === 'error' || data.status === 'failed';
         const isBusy = serviceControl?.name === name || isUpdating || restarts.has(name);
         const controlDisabled = isBusy || !canControlServices;
@@ -1140,10 +1156,10 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                             <div className="flex items-center gap-2 mt-1 flex-wrap">
                                 <span className="relative flex h-2 w-2">
                                     {isRunning && !isDegraded && <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />}
-                                    <span className={`relative inline-flex rounded-full h-2 w-2 ${isUpdating ? 'bg-amber-400' : (failedInstall || isError ? 'bg-red-500' : (isDegraded ? 'bg-amber-500' : (isRunning ? 'bg-emerald-500' : 'bg-slate-500')))}`} />
+                                    <span className={`relative inline-flex rounded-full h-2 w-2 ${isUpdating ? 'bg-amber-400' : (isError ? 'bg-red-500' : (isDegraded ? 'bg-amber-500' : (isRunning ? 'bg-emerald-500' : 'bg-slate-500')))}`} />
                                 </span>
-                                <span className={`text-xs font-medium capitalize ${failedInstall || isError ? 'text-rose-300' : (isDegraded ? 'text-amber-400' : 'text-slate-300')}`}>
-                                    {isUpdating ? (data.job_status || 'updating') : (failedInstall ? 'install failed' : (isDegraded ? 'degraded' : data.status))}
+                                <span className={`text-xs font-medium capitalize ${isError ? 'text-rose-300' : (isDegraded ? 'text-amber-400' : 'text-slate-300')}`}>
+                                    {isUpdating ? (data.job_status || 'updating') : (isDegraded ? 'degraded' : data.status)}
                                 </span>
                                 {isDegraded && unhealthyUnits.length > 0 && (
                                     <span
@@ -1190,7 +1206,10 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                         {!isCore && webAvailable && (
                             <button
                                 type="button"
-                                onClick={() => setIngressModalApp(data.id || data.process || name)}
+                                onClick={(event) => {
+                                    ingressReturnFocusRef.current = event.currentTarget;
+                                    setIngressModalApp(data.id || data.process || name);
+                                }}
                                 disabled={isBusy}
                                 className="obs-touch-target-standard p-2 text-slate-400 hover:text-indigo-400 hover:bg-white/5 rounded-lg transition-colors disabled:opacity-50 flex items-center justify-center min-h-[40px] min-w-[40px]"
                                 title="Ingress & Deployment"
@@ -1347,7 +1366,7 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                 )}
 
                 <div className="flex gap-2 flex-wrap">
-                    {isRunning || isUpdating ? (
+                    {isOperational || isUpdating ? (
                         <>
                             {webAvailable && (
                                 <button
@@ -1363,7 +1382,7 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                             <RequireClaim>
                                 <button
                                     type="button"
-                                    onClick={() => handleServiceControl(name, data, 'restart')}
+                                    onClick={(event) => restartService(name, data, event.currentTarget)}
                                     disabled={daemonControlDisabled}
                                     title={!canControlServices ? 'Admin access required' : (sharedVhost ? sharedVhostMessage : 'Restart service')}
                                     className="obs-touch-target-standard py-2 px-3 bg-amber-500/10 hover:bg-amber-500/20 text-amber-300/90 hover:text-amber-200 border border-amber-500/30 rounded-lg text-xs font-semibold transition-colors disabled:opacity-50 flex items-center justify-center gap-1.5 min-h-[40px]"
@@ -1372,7 +1391,7 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                                 </button>
                                 <button
                                     type="button"
-                                    onClick={() => setStopConfirmService({ name, data })}
+                                    onClick={() => openStopConfirmation(name, data)}
                                     disabled={daemonControlDisabled}
                                     title={!canControlServices ? 'Admin access required' : (sharedVhost ? sharedVhostMessage : 'Stop service')}
                                     className="obs-touch-target-standard py-2 px-3 bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 hover:text-rose-200 border border-rose-500/40 rounded-lg text-xs font-semibold transition-colors disabled:opacity-50 flex items-center justify-center gap-1.5 min-h-[40px]"
@@ -1451,7 +1470,8 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
             (appId ? updatingServices.has(appId) : false);
         const { degraded: isDegraded, unhealthyUnits } = getDegradedSummary(data);
         const failedInstall = isFailedInstall(data);
-        const isRunning = (data.status === 'running' || isDegraded) && !isUpdating;
+        const isRunning = data.status === 'running' && !isUpdating;
+        const isOperational = (data.status === 'running' || isDegraded) && !isUpdating;
         const isError = data.status === 'error' || data.status === 'failed';
         const isBusy = serviceControl?.name === name || isUpdating || restarts.has(name);
         const controlDisabled = isBusy || !canControlServices;
@@ -1587,10 +1607,10 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                         <div className="flex items-center gap-1.5 min-w-0">
                             <span className="relative flex h-2 w-2 shrink-0">
                                 {isRunning && !isDegraded && <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />}
-                                <span className={`relative inline-flex rounded-full h-2 w-2 ${isUpdating ? 'bg-amber-400' : (failedInstall || isError ? 'bg-red-500' : (isDegraded ? 'bg-amber-500' : (isRunning ? 'bg-emerald-500' : 'bg-slate-500')))}`} />
+                                <span className={`relative inline-flex rounded-full h-2 w-2 ${isUpdating ? 'bg-amber-400' : (isError ? 'bg-red-500' : (isDegraded ? 'bg-amber-500' : (isRunning ? 'bg-emerald-500' : 'bg-slate-500')))}`} />
                             </span>
-                            <span className={`text-xs sm:text-[13px] font-medium capitalize truncate ${failedInstall || isError ? 'text-rose-300' : (isDegraded ? 'text-amber-400' : 'text-slate-300')}`}>
-                                {isUpdating ? (data.job_status || 'updating') : (failedInstall ? 'install failed' : (isDegraded ? 'degraded' : data.status))}
+                            <span className={`text-xs sm:text-[13px] font-medium capitalize truncate ${isError ? 'text-rose-300' : (isDegraded ? 'text-amber-400' : 'text-slate-300')}`}>
+                                {isUpdating ? (data.job_status || 'updating') : (isDegraded ? 'degraded' : data.status)}
                             </span>
                             {isDegraded && unhealthyUnits.length > 0 && (
                                 <span className="text-xs px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30 font-mono shrink-0">
@@ -1730,7 +1750,8 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                                         <button
                                             type="button"
                                             role="menuitem"
-                                            onClick={() => {
+                                            onClick={(event) => {
+                                                ingressReturnFocusRef.current = event.currentTarget.closest('[data-access-menu]')?.querySelector<HTMLElement>('[aria-haspopup="menu"]') ?? null;
                                                 setOpenAccessMenuService(null);
                                                 setIngressModalApp(data.id || data.process || name);
                                             }}
@@ -1793,9 +1814,9 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                         )}
                     </div>
 
-                    {!failedInstall ? (
+                    {!failedInstall || isOperational ? (
                         <div className="grid grid-cols-3 gap-1.5 w-full sm:flex sm:flex-wrap sm:w-auto sm:items-center sm:justify-end sm:gap-2 @[960px]:w-[280px] @[960px]:justify-end @[1250px]:w-[280px] @[1250px]:min-w-[280px] @[1250px]:justify-start min-w-0 pt-0.5 @[960px]:pt-0 shrink-0">
-                    {hasUpdate && data.id && (
+                    {hasUpdate && data.id && !failedInstall && (
                         <RequireClaim>
                             <button
                                 type="button"
@@ -1809,7 +1830,7 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                         </RequireClaim>
                     )}
 
-                    {isRunning || isUpdating ? (
+                    {isOperational || isUpdating ? (
                         <>
                             {webAvailable ? (
                                 <button
@@ -1867,9 +1888,7 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                                             <button
                                                 type="button"
                                                 role="menuitem"
-                                                onClick={() => {
-                                                    void handleServiceControl(name, data, 'restart');
-                                                }}
+                                                onClick={(event) => restartService(name, data, event.currentTarget)}
                                                 disabled={daemonControlDisabled}
                                                 title={!canControlServices ? 'Admin access required' : (sharedVhost ? sharedVhostMessage : 'Restart service')}
                                                 aria-label={`Restart ${name} service`}
@@ -1881,8 +1900,7 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                                                 type="button"
                                                 role="menuitem"
                                                 onClick={() => {
-                                                    setOpenManageMenuService(null);
-                                                    setStopConfirmService({ name, data });
+                                                    openStopConfirmation(name, data);
                                                 }}
                                                 disabled={daemonControlDisabled}
                                                 title={!canControlServices ? 'Admin access required' : (sharedVhost ? sharedVhostMessage : 'Stop service')}
@@ -2019,7 +2037,7 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                         <p className="text-slate-200 text-sm leading-relaxed">
                             {data.last_job?.message || 'The application installer encountered an error. State recovery is unconfirmed.'}
                         </p>
-                        <div className="flex flex-col sm:flex-row items-end sm:items-center justify-end gap-2 sm:gap-3 pt-2 border-t border-slate-800/80 w-full">
+                        {isOperational ? <p className="text-xs text-amber-300/90">The daemon is running; installation recovery remains unconfirmed.</p> : <div className="flex flex-col sm:flex-row items-end sm:items-center justify-end gap-2 sm:gap-3 pt-2 border-t border-slate-800/80 w-full">
                             <span className="text-xs sm:text-[13px] text-amber-300/90 flex items-center gap-1.5">
                                 <AlertTriangle size={13} className="shrink-0 text-amber-400" />
                                 <span>Confirmation required; starting does not repair the failed installation.</span>
@@ -2035,7 +2053,7 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                                     <Play size={13} className="fill-current shrink-0" /> <span>Start Service (Guarded)</span>
                                 </button>
                             </RequireClaim>
-                        </div>
+                        </div>}
                     </div>
                 )}
 
@@ -2051,8 +2069,31 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
         );
     };
 
-    if (isLoading) {
-        return <ServicesSkeleton />;
+    if (services === undefined && inventoryError) {
+        return (
+            <section className="w-full min-h-[50vh] flex items-center justify-center px-4">
+                <div role="alert" className="w-full max-w-xl rounded-2xl border border-rose-500/30 bg-rose-950/30 p-5 sm:p-6 text-center space-y-3">
+                    <AlertCircle size={28} className="mx-auto text-rose-300" />
+                    <h2 className="text-base font-semibold text-rose-100">Service inventory unavailable</h2>
+                    <p className="text-sm text-rose-200/90">
+                        No service inventory has been loaded, so an empty fleet cannot be confirmed.
+                        {inventoryError instanceof Error ? ` ${inventoryError.message}` : ''}
+                    </p>
+                    <button
+                        type="button"
+                        onClick={() => void mutate()}
+                        disabled={isValidating}
+                        className="obs-touch-target-standard min-h-[44px] px-4 py-2 rounded-lg border border-rose-400/40 bg-rose-500/15 text-rose-100 hover:bg-rose-500/25 disabled:opacity-50"
+                    >
+                        {isValidating ? 'Retrying inventory…' : 'Retry service inventory'}
+                    </button>
+                </div>
+            </section>
+        );
+    }
+
+    if (services === undefined) {
+        return <div role="status" aria-label="Loading service inventory"><ServicesSkeleton /></div>;
     }
 
     return (
@@ -2082,6 +2123,20 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                     <span className="hidden sm:inline">{checkingUpdates ? 'Checking Updates...' : 'Check Updates & Sync'}</span>
                 </button>
             </div>
+
+            {Boolean(inventoryError) && (
+                <div role="status" className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-100">
+                    Service refresh failed. Showing the most recently available inventory; newer WebSocket service updates remain visible when received.
+                    <button
+                        type="button"
+                        onClick={() => void mutate()}
+                        disabled={isValidating}
+                        className="ml-2 min-h-[40px] px-2 underline underline-offset-2 disabled:opacity-50"
+                    >
+                        {isValidating ? 'Retrying…' : 'Retry'}
+                    </button>
+                </div>
+            )}
 
             {attentionCount > 0 && (
                 <div role="region" aria-label="Fleet attention required" className="rounded-xl border border-red-500/20 bg-red-500/[0.04] p-2 sm:p-2.5 text-slate-200">
@@ -2392,7 +2447,13 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
             />
 
             {stopConfirmService && (
-                <div role="dialog" aria-modal="true" aria-labelledby="stop-service-title" className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md">
+                <StreamingDialog
+                    name={`Stop ${stopConfirmService.name}`}
+                    labelledBy="stop-service-title"
+                    initialFocusRef={stopDialogCancelRef}
+                    returnFocusRef={stopDialogReturnFocusRef}
+                    onClose={() => setStopConfirmService(null)}
+                >
                     <div className="glass-panel w-full max-w-md rounded-2xl p-6 border border-slate-800 bg-slate-950 shadow-2xl space-y-4">
                         <div className="flex items-center gap-3 text-rose-300">
                             <AlertCircle size={22} className="shrink-0" />
@@ -2405,6 +2466,7 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                         </p>
                         <div className="flex justify-end gap-3 pt-2">
                             <button
+                                ref={stopDialogCancelRef}
                                 type="button"
                                 onClick={() => setStopConfirmService(null)}
                                 className="obs-touch-target-standard px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs font-semibold transition-colors min-h-[40px]"
@@ -2424,7 +2486,43 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
                             </button>
                         </div>
                     </div>
-                </div>
+                </StreamingDialog>
+            )}
+
+            {restartConfirmService && (
+                <StreamingDialog
+                    name={`Restart ${restartConfirmService.name}`}
+                    labelledBy="restart-service-title"
+                    initialFocusRef={restartDialogCancelRef}
+                    returnFocusRef={restartDialogReturnFocusRef}
+                    onClose={() => setRestartConfirmService(null)}
+                >
+                    <div className="glass-panel w-full max-w-md rounded-2xl p-6 border border-slate-800 bg-slate-950 shadow-2xl space-y-4">
+                        <div className="flex items-center gap-3 text-amber-300">
+                            <AlertCircle size={22} className="shrink-0" />
+                            <h3 id="restart-service-title" className="text-base font-bold text-white">
+                                Restart {restartConfirmService.name}?
+                            </h3>
+                        </div>
+                        <p className="text-sm text-slate-300 leading-relaxed">
+                            Its last installation failed and recovery is unconfirmed. Restarting may interrupt clients or leave the service unavailable; review the failure logs first.
+                        </p>
+                        <div className="flex justify-end gap-3 pt-2">
+                            <button ref={restartDialogCancelRef} type="button" onClick={() => setRestartConfirmService(null)} className="obs-touch-target-standard px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs font-semibold transition-colors min-h-[40px]">Cancel</button>
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    const target = restartConfirmService;
+                                    setRestartConfirmService(null);
+                                    void handleServiceControl(target.name, target.data, 'restart');
+                                }}
+                                className="obs-touch-target-standard px-4 py-2 bg-amber-600 hover:bg-amber-500 text-white rounded-lg text-xs font-semibold transition-colors min-h-[40px]"
+                            >
+                                Confirm Restart
+                            </button>
+                        </div>
+                    </div>
+                </StreamingDialog>
             )}
 
             {guardedStartConfirmService && (
@@ -2472,27 +2570,18 @@ export default function ServicesTab({ browserOrigin }: ServicesTabProps = {}) {
             )}
 
             {ingressModalApp && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-fade-in">
-                    <div className="glass-panel w-full max-w-xl max-h-[85vh] overflow-y-auto rounded-3xl p-6 border border-white/10 relative shadow-2xl">
-                        <div className="flex items-center justify-between pb-4 border-b border-white/10">
-                            <div className="flex items-center gap-2">
-                                <Network className="text-indigo-400" size={20} />
-                                <h3 className="text-lg font-bold text-white capitalize">{ingressModalApp} Ingress & Deploy</h3>
-                            </div>
-                            <button
-                                type="button"
-                                onClick={() => setIngressModalApp(null)}
-                                className="obs-touch-target-standard p-2 text-slate-400 hover:text-white rounded-lg hover:bg-white/5 transition-colors flex items-center justify-center min-h-[40px] min-w-[40px]"
-                            >
-                                <X size={18} />
-                            </button>
-                        </div>
-                        <div className="space-y-4">
-                            <ExternalAccessCard appName={ingressModalApp} />
-                            <DeploymentStatus appName={ingressModalApp} isTriggered={true} />
-                        </div>
+                <Modal
+                    isOpen
+                    title={`${ingressModalApp} Ingress & Deploy`}
+                    onClose={() => setIngressModalApp(null)}
+                    returnFocusRef={ingressReturnFocusRef}
+                    className="max-w-xl max-h-[85vh] rounded-3xl"
+                >
+                    <div className="space-y-4">
+                        <ExternalAccessCard appName={ingressModalApp} />
+                        <DeploymentStatus appName={ingressModalApp} isTriggered={true} />
                     </div>
-                </div>
+                </Modal>
             )}
         </div>
     );

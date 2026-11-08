@@ -475,7 +475,6 @@ export default function StreamingTab() {
     const { data, error, isLoading, isValidating, mutate } = useSWR<StreamingDashboardData>(swrKey, fetcher, {
         refreshInterval: 5000,
         revalidateOnFocus: true,
-        keepPreviousData: true,
     });
 
     const jellyfinServer = useMemo(() => {
@@ -495,6 +494,8 @@ export default function StreamingTab() {
             libraryCounts: { movies: 0, series: 0, episodes: 0, audio: 0 },
         };
     }, [data]);
+
+    const connectedServer = data?.servers?.find((server) => server.enabled && server.status === 'connected');
 
     const selectConfigProvider = (provider: 'jellyfin' | 'emby', preserveCurrent = true) => {
         if (preserveCurrent) providerDrafts.current[configProvider] = {
@@ -746,6 +747,7 @@ export default function StreamingTab() {
     };
 
     const activeSessions = data?.activeSessions || [];
+    const isAnalyticsPayloadUnavailable = !data;
 
     const isPlexObserved = useMemo(() => {
         const hasPlexSession = (data?.activeSessions || []).some(
@@ -1054,7 +1056,9 @@ export default function StreamingTab() {
                             type="button"
                             onClick={isAdmin ? openServerConfig : undefined}
                             className={`inline-flex items-center gap-1.5 text-xs font-medium px-2.5 py-0.5 rounded-full border transition-all ${
-                                jellyfinServer.status === 'connected'
+                                !data
+                                    ? 'bg-slate-500/15 text-slate-300 border-slate-500/30 hover:bg-slate-500/25'
+                                    : jellyfinServer.status === 'connected'
                                     ? 'bg-purple-500/15 text-purple-300 border-purple-500/30 hover:bg-purple-500/25'
                                     : jellyfinServer.status === 'demo'
                                     ? 'bg-indigo-500/15 text-indigo-300 border-indigo-500/30 hover:bg-indigo-500/25'
@@ -1064,7 +1068,9 @@ export default function StreamingTab() {
                         >
                             <span
                                 className={`h-1.5 w-1.5 rounded-full ${
-                                    jellyfinServer.status === 'connected'
+                                    !data
+                                        ? 'bg-slate-400'
+                                        : jellyfinServer.status === 'connected'
                                         ? 'bg-emerald-400 shadow-[0_0_6px_#34d399]'
                                         : jellyfinServer.status === 'demo'
                                         ? 'bg-indigo-400 shadow-[0_0_6px_#818cf8]'
@@ -1073,6 +1079,7 @@ export default function StreamingTab() {
                             />
                             <span>
                                 Jellyfin
+                                {!data ? (error ? ' (Status unavailable)' : ' (Loading status)') : ''}
                                 {jellyfinServer.version ? ` v${jellyfinServer.version}` : ''}
                                 {jellyfinServer.status === 'demo' ? ' (Demo Preview)' : ''}
                             </span>
@@ -1116,7 +1123,7 @@ export default function StreamingTab() {
                     <div className="hidden sm:flex sm:items-center gap-1 sm:gap-1.5 p-1 bg-slate-950/80 border border-white/[0.08] rounded-xl">
                         {([
                             { id: 'dashboard', label: 'Dashboard', icon: Tv },
-                            { id: 'streams', label: `Live (${liveSummary.activeStreams})`, icon: Radio },
+                            { id: 'streams', label: `Live (${data ? liveSummary.activeStreams : '—'})`, icon: Radio },
                             { id: 'analytics', label: 'Playback Analytics', icon: Activity },
                             { id: 'history', label: 'Watch History', icon: Clock },
                         ] as const).map((tab) => {
@@ -1174,7 +1181,7 @@ export default function StreamingTab() {
                 </div>
             )}
 
-            {jellyfinServer.status !== 'connected' && (
+            {data && jellyfinServer.status !== 'connected' && (
                 <div
                     className={`rounded-xl border p-4 sm:p-5 flex flex-col lg:flex-row items-start lg:items-center justify-between gap-4 ${
                         jellyfinServer.status === 'unreachable'
@@ -1259,7 +1266,7 @@ export default function StreamingTab() {
                 </div>
             )}
 
-            <section aria-label="Live Stream Overview" className="space-y-2 sm:space-y-2.5">
+            {data ? <section aria-label="Live Stream Overview" className="space-y-2 sm:space-y-2.5">
                 {activeSessions.length === 0 ? (
                     <div className="rounded-xl border border-white/[0.08] bg-slate-900/60 p-3 sm:p-3.5 space-y-2">
                         <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1">
@@ -1297,12 +1304,12 @@ export default function StreamingTab() {
                                         <Loader2 size={14} className="animate-spin text-indigo-400 shrink-0" />
                                         <span>Polling media server sessions...</span>
                                     </div>
-                                ) : jellyfinServer.errorMessage || data?.servers.some((server) => server.enabled && ['unavailable', 'unreachable'].includes(server.status)) ? (
+                                ) : connectedServer ? (
                                     <>
-                                        <div className="flex items-center gap-2 text-amber-300">
-                                            <AlertCircle size={14} className="text-amber-400 shrink-0" />
+                                        <div className="flex items-center gap-2 text-slate-300">
+                                            <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 shrink-0" />
                                             <span className="font-medium">
-                                                {jellyfinServer.errorMessage || 'Live telemetry unavailable \u2014 media server unreachable or offline'}
+                                                {connectedServer.name} connected &middot; Idle{connectedServer.supportStage === 'coming_soon' ? ' (staged)' : ''}
                                             </span>
                                         </div>
                                         {lastContactFormatted && (
@@ -1311,12 +1318,12 @@ export default function StreamingTab() {
                                             </span>
                                         )}
                                     </>
-                                ) : jellyfinServer.status === 'connected' ? (
+                                ) : jellyfinServer.errorMessage || data?.servers.some((server) => server.enabled && ['unavailable', 'unreachable'].includes(server.status)) ? (
                                     <>
-                                        <div className="flex items-center gap-2 text-slate-300">
-                                            <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 shrink-0" />
+                                        <div className="flex items-center gap-2 text-amber-300">
+                                            <AlertCircle size={14} className="text-amber-400 shrink-0" />
                                             <span className="font-medium">
-                                                {jellyfinServer.name} connected &middot; Idle
+                                                {jellyfinServer.errorMessage || 'Live telemetry unavailable \u2014 media server unreachable or offline'}
                                             </span>
                                         </div>
                                         {lastContactFormatted && (
@@ -1441,7 +1448,11 @@ export default function StreamingTab() {
                         </div>
                     </>
                 )}
-            </section>
+            </section> : (
+                <div role="status" className="rounded-xl border border-white/[0.08] bg-slate-900/60 p-4 text-sm text-slate-300">
+                    {error ? 'Live stream telemetry is unavailable.' : 'Loading live stream telemetry…'}
+                </div>
+            )}
 
             {(activeView === 'dashboard' || activeView === 'streams') && activeSessions.length > 0 && (
                 <div className="rounded-xl border border-white/[0.08] bg-slate-900/60 p-4 sm:p-5">
@@ -1852,7 +1863,7 @@ export default function StreamingTab() {
                                 <div className="mt-2 p-3 rounded-xl border border-white/[0.06] bg-slate-900/60 space-y-1.5 text-slate-300 text-xs leading-relaxed max-w-xl">
                                     <h4 className="font-semibold text-slate-200">Measurement methodology, overlap &amp; nonadditivity details</h4>
                                     <p role="note">Confirmed statistics use included observed sessions and imported events across all recorded providers. Preserved imported and legacy watch-time estimates appear separately below; use All Time to see older records. Bandwidth peaks remain a legacy provider aggregate.</p>
-                                    <p>Confirmed statistics reflect observed live Jellyfin sessions and imported item summaries. Preserved legacy watch-time estimates and item runtimes are unverified and not measured session durations.</p>
+                                    <p>Imported item summaries and preserved legacy watch-time estimates are unverified and not measured session durations.</p>
                                     <p>Imported items and legacy series may overlap: these series are kept separate, not added together or to confirmed watch time.</p>
                                     <p>Data transfer totals and peak bandwidth are estimates based on bitrate and observed playing time, not measured network interface traffic. Historical imports do not reconstruct missing transfer bytes.</p>
                                 </div>
@@ -1951,6 +1962,13 @@ export default function StreamingTab() {
                         </div>
                     </details>
 
+                    {isAnalyticsPayloadUnavailable ? (
+                        <div role="status" className="rounded-xl border border-indigo-500/25 bg-indigo-500/[0.06] px-4 py-6 text-center text-sm text-slate-300">
+                            {error
+                                ? 'Analytics for the selected filters are unavailable. Retry to load this cohort.'
+                                : `Loading analytics for ${windowDays === 0 ? 'All Time' : `${windowDays} Days`}, ${selectedDeliverySummary}, ${selectedMediaTypeSummary}…`}
+                        </div>
+                    ) : (
                     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3.5">
                         <div className="rounded-xl border border-white/[0.08] bg-slate-900/60 p-4 flex flex-col justify-between">
                             <div className="flex items-center justify-between">
@@ -2058,10 +2076,11 @@ export default function StreamingTab() {
                             </div>
                         </div>
                     </div>
+                    )}
                 </div>
             )}
 
-            {(activeView === 'dashboard' || activeView === 'analytics') && (
+            {(activeView === 'dashboard' || activeView === 'analytics') && data && (
                 <>
                     <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
                         <div className="rounded-xl border border-white/[0.08] bg-slate-900/60 p-5 flex flex-col">
@@ -2660,7 +2679,7 @@ export default function StreamingTab() {
                 </>
             )}
 
-            {(activeView === 'dashboard' || activeView === 'history') && (
+            {(activeView === 'dashboard' || activeView === 'history') && data && (
                 <div className="rounded-xl border border-white/[0.08] bg-slate-900/60 p-5">
                     <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 mb-4 pb-3 border-b border-white/[0.06]">
                         <div>

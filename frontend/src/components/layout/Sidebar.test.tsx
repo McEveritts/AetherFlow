@@ -1,9 +1,11 @@
 import React, { Profiler } from "react";
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import Sidebar from "@/components/layout/Sidebar";
 import Header from "@/components/layout/Header";
 import { useSystemStore } from "@/store/useSystemStore";
 import { useConnectionStore, ConnectionState } from "@/store/useConnectionStore";
+import { useTaskStore } from "@/store/useTaskStore";
 
 jest.mock("@/contexts/AuthContext", () => ({
   useAuth: () => ({
@@ -143,6 +145,39 @@ describe("Sidebar - Persistent Navigation Architecture, Collapse, and Accessibil
     expect(within(desktopAside).getByRole("button", { name: "Settings" })).toBeInTheDocument();
   });
 
+  it("keeps the colorful brand mark visible and operable as the desktop rail toggle", async () => {
+    const user = userEvent.setup();
+    useSystemStore.setState({ activeTab: "services" });
+    const { container } = render(<Sidebar />);
+
+    const desktopAside = container.querySelector<HTMLElement>("#desktop-sidebar-navigation")!;
+    const desktopSpacer = desktopAside.parentElement!;
+    const expandedLogoButton = within(desktopAside).getByRole("button", { name: "Collapse Sidebar" });
+
+    expect(expandedLogoButton).toHaveAttribute("aria-expanded", "true");
+    expect(expandedLogoButton).toHaveAttribute("aria-controls", "desktop-sidebar-navigation");
+    expect(expandedLogoButton.querySelector("img")).toHaveAttribute("src", "/img/aetherflow-mark.svg");
+    expect(expandedLogoButton).toHaveClass("focus-visible:ring-2");
+
+    await user.click(expandedLogoButton);
+
+    const collapsedLogoButton = within(desktopAside).getByRole("button", { name: "Expand Sidebar" });
+    expect(collapsedLogoButton).toHaveAttribute("aria-expanded", "false");
+    expect(collapsedLogoButton).toHaveAttribute("aria-controls", "desktop-sidebar-navigation");
+    expect(collapsedLogoButton.querySelector("img")).toHaveAttribute("src", "/img/aetherflow-mark.svg");
+    expect(desktopSpacer).toHaveClass("md:w-16");
+    expect(within(desktopAside).getByRole("button", { name: "Services" })).toHaveAttribute("aria-current", "page");
+    expect(useSystemStore.getState().activeTab).toBe("services");
+
+    collapsedLogoButton.focus();
+    await user.keyboard("{Enter}");
+    expect(within(desktopAside).getByRole("button", { name: "Collapse Sidebar" })).toHaveAttribute("aria-expanded", "true");
+
+    await user.keyboard(" ");
+    expect(within(desktopAside).getByRole("button", { name: "Expand Sidebar" })).toHaveAttribute("aria-expanded", "false");
+    expect(useSystemStore.getState().activeTab).toBe("services");
+  });
+
   it("allows collapsing to compact rail and expanding back via accessible toggle button", () => {
     const { container } = render(<Sidebar />);
 
@@ -173,7 +208,7 @@ describe("Sidebar - Persistent Navigation Architecture, Collapse, and Accessibil
 
     const activeServicesBtn = within(desktopAside).getByRole("button", { name: "Services" });
     expect(activeServicesBtn).toHaveAttribute("aria-current", "page");
-    expect(activeServicesBtn).toHaveClass("border-indigo-500/30");
+    expect(activeServicesBtn).toHaveClass("border-indigo-500/40", "from-indigo-500/25", "to-fuchsia-500/20");
   });
 
   it("ensures all interactive navigation controls meet >= 40px touch and click target requirement", () => {
@@ -265,6 +300,31 @@ describe("Sidebar - Persistent Navigation Architecture, Collapse, and Accessibil
     const pageHeading = screen.getByRole("heading", { level: 1 });
     expect(pageHeading).toHaveTextContent("Overview");
     expect(pageHeading).toHaveClass("truncate");
+  });
+
+  it("links Header disclosures and returns focus on Escape without trapping Tab", () => {
+    useTaskStore.setState({ tasks: [{ id: "task-one", title: "Backup", progress: 30, status: "running", type: "backup" }] });
+    render(<Header />);
+    const taskTrigger = screen.getByRole("button", { name: "Background Tasks" });
+    fireEvent.click(taskTrigger);
+    expect(taskTrigger).toHaveAttribute("aria-expanded", "true");
+    expect(document.getElementById(taskTrigger.getAttribute("aria-controls") || "")).toHaveTextContent("Backup");
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(taskTrigger).toHaveAttribute("aria-expanded", "false");
+    expect(document.activeElement).toBe(taskTrigger);
+
+    const userTrigger = screen.getByRole("button", { name: "User Menu" });
+    fireEvent.click(userTrigger);
+    expect(userTrigger).toHaveAttribute("aria-expanded", "true");
+    const panel = document.getElementById(userTrigger.getAttribute("aria-controls") || "");
+    expect(panel).toHaveTextContent("Sign Out");
+    const tabEvent = new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true });
+    document.dispatchEvent(tabEvent);
+    expect(tabEvent.defaultPrevented).toBe(false);
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(userTrigger).toHaveAttribute("aria-expanded", "false");
+    expect(document.activeElement).toBe(userTrigger);
+    useTaskStore.setState({ tasks: [] });
   });
 
   it("renders mobile Menu dock button as symmetric icon-over-label stack without notification lookalikes", () => {

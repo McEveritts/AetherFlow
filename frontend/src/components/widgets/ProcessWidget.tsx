@@ -101,7 +101,6 @@ export default function ProcessWidget({ processes, density = 'compact' }: Proces
             header: () => (
                 <div className="text-right w-full text-xs font-semibold text-slate-300 flex items-center justify-end gap-1">
                     <span>CPU %</span>
-                    <span className="text-indigo-400 font-bold">↓</span>
                 </div>
             ),
             cell: cellInformation => {
@@ -160,6 +159,7 @@ export default function ProcessWidget({ processes, density = 'compact' }: Proces
 
             <div className="flex-1 overflow-hidden rounded-xl border border-slate-800/60 bg-slate-950/60">
                 <DataGrid
+                    initialSorting={[{ id: 'cpu', desc: true }]}
                     columns={columns}
                     data={sortedProcesses}
                     className="h-full !max-h-full border-none shadow-none rounded-xl"

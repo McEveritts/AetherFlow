@@ -42,6 +42,7 @@ export default function AppTopologyMap({ topologyData, density = 'compact' }: Ap
     );
 
     const svgRef = useRef<SVGSVGElement>(null);
+    const graphSvgRef = useRef<SVGSVGElement | null>(null);
     const zoomBehaviorRef = useRef<d3.ZoomBehavior<SVGSVGElement, unknown> | null>(null);
     const simulationRef = useRef<d3.Simulation<D3Node, D3Link> | null>(null);
     const nodesRef = useRef<D3Node[]>([]);
@@ -69,7 +70,9 @@ export default function AppTopologyMap({ topologyData, density = 'compact' }: Ap
     const totalManagedServicesCount = serviceEntries.length;
     const allPrioritizedServices = useMemo(() => {
         const errorList = [...errorServices];
-        const coreList = serviceEntries.filter(([serviceName, serviceInfo]) => isCoreService(serviceName) && !isServiceException(serviceInfo));
+        const coreList = serviceEntries.filter(([serviceName, serviceInfo]) =>
+            isCoreService(serviceName) && !isServiceException(serviceInfo) && serviceInfo.status !== 'stopped'
+        );
         const activeList = [...activeServices];
         const stoppedList = [...stoppedServices];
         const alreadyIncluded = new Set([
@@ -119,7 +122,13 @@ export default function AppTopologyMap({ topologyData, density = 'compact' }: Ap
     };
 
     useEffect(() => {
-        if (viewMode !== 'graph' || !svgRef.current) return;
+        if (viewMode !== 'graph' || !svgRef.current) {
+            if (viewMode !== 'graph' && simulationRef.current) {
+                simulationRef.current.on('tick', null);
+                simulationRef.current.stop();
+            }
+            return;
+        }
 
         const containerWidth = svgRef.current.parentElement?.clientWidth || 720;
         const containerHeight = isImmersive ? 380 : 300;
@@ -131,7 +140,9 @@ export default function AppTopologyMap({ topologyData, density = 'compact' }: Ap
             .attr('viewBox', [0, 0, containerWidth, containerHeight]);
 
         let graphContainer = svgSelection.select<SVGGElement>('g.container');
-        if (graphContainer.empty()) {
+        const isNewGraphContainer = graphSvgRef.current !== svgRef.current || graphContainer.empty();
+        graphSvgRef.current = svgRef.current;
+        if (isNewGraphContainer) {
             graphContainer = svgSelection.append('g').attr('class', 'container');
             graphContainer.append('g').attr('class', 'links');
             graphContainer.append('g').attr('class', 'nodes');
@@ -212,6 +223,13 @@ export default function AppTopologyMap({ topologyData, density = 'compact' }: Ap
         }
 
         const previousNodes = nodesRef.current;
+        const nodeIds = (nodes: D3Node[]) => nodes.map(node => node.id).sort().join('\u0000');
+        const linkIds = (links: D3Link[]) => links.map(link => {
+            const source = typeof link.source === 'string' ? link.source : link.source.id;
+            const target = typeof link.target === 'string' ? link.target : link.target.id;
+            return JSON.stringify([source, target, link.value]);
+        }).sort().join('\u0000');
+        const graphChanged = nodeIds(previousNodes) !== nodeIds(nextNodes) || linkIds(linksRef.current) !== linkIds(nextLinks);
         const mergedNodes = nextNodes.map(freshNode => {
             const existingNodeMatch = previousNodes.find(candidateNode => candidateNode.id === freshNode.id);
             if (existingNodeMatch) {
@@ -297,7 +315,7 @@ export default function AppTopologyMap({ topologyData, density = 'compact' }: Ap
         simulation.nodes(mergedNodes);
         simulation.force<d3.ForceLink<D3Node, D3Link>>('link')?.links(linksRef.current);
 
-        if (mergedNodes.length !== previousNodes.length) {
+        if (graphChanged || isNewGraphContainer) {
             simulation.alpha(0.3).restart();
         }
 
@@ -359,6 +377,13 @@ export default function AppTopologyMap({ topologyData, density = 'compact' }: Ap
         }
 
     }, [topologyData, isImmersive, realTopology, viewMode, canonicalCoreEntry]);
+
+    useEffect(() => () => {
+        if (simulationRef.current) {
+            simulationRef.current.on('tick', null);
+            simulationRef.current.stop();
+        }
+    }, []);
 
     return (
         <div className={`rounded-2xl border border-slate-800/80 bg-slate-900/85 backdrop-blur-xl relative overflow-hidden flex flex-col justify-between h-full ${isImmersive ? 'p-6' : 'p-5'}`}>

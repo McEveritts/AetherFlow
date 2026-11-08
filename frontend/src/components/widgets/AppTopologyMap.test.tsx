@@ -3,6 +3,7 @@ import { render, screen, fireEvent } from '@testing-library/react';
 import AppTopologyMap from '@/components/widgets/AppTopologyMap';
 import { SystemMetrics } from '@/types/dashboard';
 import { useSystemStore } from '@/store/useSystemStore';
+import * as d3 from 'd3';
 
 jest.mock('d3', () => {
     const mockSelection = {
@@ -33,8 +34,10 @@ jest.mock('d3', () => {
         force: jest.Mock;
         nodes: jest.Mock;
         alpha: jest.Mock;
+        alphaMin: jest.Mock;
         alphaTarget: jest.Mock;
         restart: jest.Mock;
+        stop: jest.Mock;
         on: jest.Mock;
     } = {
         force: jest.fn((name: string, forceInstance?: unknown) => {
@@ -46,8 +49,10 @@ jest.mock('d3', () => {
         }),
         nodes: jest.fn().mockReturnThis(),
         alpha: jest.fn().mockReturnThis(),
+        alphaMin: jest.fn().mockReturnValue(0.001),
         alphaTarget: jest.fn().mockReturnThis(),
         restart: jest.fn().mockReturnThis(),
+        stop: jest.fn().mockReturnThis(),
         on: jest.fn().mockReturnThis(),
     };
     return {
@@ -170,6 +175,28 @@ describe('AppTopologyMap', () => {
         expect(screen.getByText('Service Health')).toBeInTheDocument();
         expect(screen.getByText('Registered Services')).toBeInTheDocument();
         expect(screen.getByText('3 Services')).toBeInTheDocument();
+    });
+
+    it('stops the simulation on list view and reheats it when a fresh graph is mounted', () => {
+        const view = render(<AppTopologyMap topologyData={sampleTopologyData} density="compact" />);
+        fireEvent.click(screen.getByRole('button', { name: /Show interactive topology graph/i }));
+        const simulation = jest.mocked(d3.forceSimulation).mock.results.at(-1)?.value;
+        expect(simulation).toBeDefined();
+        const restart = simulation!.restart as jest.Mock;
+        const stop = simulation!.stop as jest.Mock;
+        expect(restart).toHaveBeenCalled();
+        restart.mockClear();
+        stop.mockClear();
+        fireEvent.click(screen.getByRole('button', { name: /Show scannable service health list/i }));
+        expect(stop).toHaveBeenCalled();
+        fireEvent.click(screen.getByRole('button', { name: /Show interactive topology graph/i }));
+        expect(simulation!.alpha).toHaveBeenCalledWith(0.3);
+        expect(restart).toHaveBeenCalledTimes(1);
+        restart.mockClear();
+        view.rerender(<AppTopologyMap topologyData={{ ...sampleTopologyData }} density="compact" />);
+        expect(restart).not.toHaveBeenCalled();
+        view.unmount();
+        expect(stop).toHaveBeenCalledTimes(2);
     });
 
     it('provides complete-row preview with Showing X of N services and expandable page flow', () => {

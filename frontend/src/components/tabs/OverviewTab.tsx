@@ -188,11 +188,7 @@ const MemoStorageWidget = React.memo(StorageWidget, (previousProps, nextProps) =
     return getDiskSignature(previousProps.storageData) === getDiskSignature(nextProps.storageData) && previousProps.density === nextProps.density && previousProps.hardware === nextProps.hardware;
 });
 
-const MemoAppTopologyMap = React.memo(AppTopologyMap, (previousProps, nextProps) => {
-    const getTopologyStatusSignature = (topologyServices: SystemMetrics['services']) =>
-        Object.entries(topologyServices || {}).map(([serviceName, nodeInfo]) => `${serviceName}-${nodeInfo.status}-${nodeInfo.job_status || ''}-${nodeInfo.health || ''}`).join(':');
-    return getTopologyStatusSignature(previousProps.topologyData) === getTopologyStatusSignature(nextProps.topologyData) && previousProps.density === nextProps.density;
-});
+const MemoAppTopologyMap = React.memo(AppTopologyMap);
 
 const MemoGpuWidget = React.memo(GpuWidget, (previousProps, nextProps) => {
     const getGpuSignature = (gpuList: GpuMetric[]) => (gpuList || []).map(gpuItem => `${gpuItem.index}-${gpuItem.usage_pct}-${gpuItem.temp}-${gpuItem.memory_used}-${gpuItem.memory_total}`).join(':');
@@ -275,7 +271,7 @@ export default function OverviewTab({ metrics, hardware, history }: OverviewTabP
                                                 : 'bg-amber-400 animate-pulse'
                                         }`}
                                     />
-                                    {connectionState === 'CONNECTED' ? 'Live Telemetry' : 'Reconnecting'}
+                                    {{ CONNECTED: 'Live Telemetry', CONNECTING: 'Connecting', RECONNECTING: 'Reconnecting', FALLBACK: 'HTTP Fallback', DEGRADED: 'Degraded', DISCONNECTED: 'Disconnected' }[connectionState]}
                                     <span className="hidden sm:inline"> · 1.0s Interval</span>
                                 </span>
 

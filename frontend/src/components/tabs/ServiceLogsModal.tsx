@@ -283,7 +283,7 @@ function ServiceLogsUnit({ serviceName, activeUnit, normalizedUnits, onSelectUni
             </div>
 
             {/* AI Remediation Approval Boundary */}
-            <Modal isOpen={showRemediationBoundary} onClose={() => setShowRemediationBoundary(false)}>
+            <Modal isOpen={showRemediationBoundary} aria-label="Remediation proposed" onClose={() => setShowRemediationBoundary(false)}>
                 <div className="flex flex-col items-center text-center">
                     <div className="h-16 w-16 bg-amber-500/20 rounded-2xl border border-amber-500/30 flex items-center justify-center mb-6 shadow-inner">
                         <AlertCircle size={32} className="text-amber-400" />

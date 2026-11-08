@@ -28,6 +28,14 @@ describe('ServiceLogsModal', () => {
         }));
     });
 
+    it('exposes an accessible dialog and named close action through the shared modal', () => {
+        render(<ServiceLogsModal onClose={jest.fn()} serviceName="sonarr" />);
+
+        const dialog = screen.getByRole('dialog', { name: 'sonarr Daemon Matrix' });
+        expect(dialog).toHaveAttribute('aria-modal', 'true');
+        expect(screen.getByRole('button', { name: 'Close sonarr Daemon Matrix' })).toBeInTheDocument();
+    });
+
     it('exposes unit selection tabs when multiple units are provided and switches log query target', () => {
         render(
             <ServiceLogsModal

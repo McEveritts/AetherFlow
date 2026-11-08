@@ -9,6 +9,9 @@ Features:
 - F06: System Topology Endpoint
 """
 
+import os
+from urllib.parse import quote
+
 from ..framework import TestCase, CodebaseInspector, AetherFlowApiClient
 
 class TestF01DirectoryListingValidPath(TestCase):
@@ -33,9 +36,14 @@ class TestF01ParentPathCalculation(TestCase):
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
         if mode == "live" and client.is_server_reachable():
-            code, body, _ = client.request("GET", "/api/v1/auth/fs?path=/mnt/storage/media")
+            fixture = os.environ.get("AETHERFLOW_E2E_FS_FIXTURE")
+            self.assert_true(bool(fixture), "AETHERFLOW_E2E_FS_FIXTURE is required for nested filesystem coverage")
+            parent = os.path.join(os.path.realpath(fixture), "storage")
+            nested = os.path.join(parent, "media")
+            code, body, _ = client.request("GET", "/api/v1/auth/fs?path=" + quote(nested, safe="/"))
             self.assert_status_code(code, 200)
-            self.assert_equal(body.get("parent_path"), "/mnt/storage")
+            self.assert_equal(body.get("current_path"), nested)
+            self.assert_equal(body.get("parent_path"), parent)
         else:
             handler_code = inspector.read_file("backend/api/fs_handlers.go")
             self.assert_true(bool(handler_code and "filepath.Dir" in handler_code), "F01: fs_handlers.go must compute parent directory path")
@@ -46,13 +54,21 @@ class TestF01EntryMetadataStructure(TestCase):
 
     def run(self, inspector: CodebaseInspector, client: AetherFlowApiClient, mode: str = "contract"):
         if mode == "live" and client.is_server_reachable():
-            code, body, _ = client.request("GET", "/api/v1/auth/fs?path=/opt/AetherFlow")
+            fixture = os.environ.get("AETHERFLOW_E2E_FS_FIXTURE")
+            self.assert_true(bool(fixture), "AETHERFLOW_E2E_FS_FIXTURE is required for directory-entry coverage")
+            nested = os.path.join(os.path.realpath(fixture), "storage", "media")
+            code, body, _ = client.request("GET", "/api/v1/auth/fs?path=" + quote(nested, safe="/"))
             self.assert_status_code(code, 200)
             entries = body.get("entries", [])
-            if entries:
-                first = entries[0]
-                self.assert_in("name", first)
-                self.assert_in("is_dir", first)
+            matching = [entry for entry in entries if entry.get("name") == "fixture.txt"]
+            self.assert_equal(len(matching), 1, "Fixture file must be returned")
+            entry = matching[0]
+            for field in ("name", "path", "is_dir", "size", "mod_time"):
+                self.assert_in(field, entry)
+            self.assert_equal(entry["path"], os.path.join(nested, "fixture.txt"))
+            self.assert_equal(entry["is_dir"], False)
+            self.assert_true(isinstance(entry["size"], int) and entry["size"] > 0)
+            self.assert_true(isinstance(entry["mod_time"], str) and bool(entry["mod_time"]))
         else:
             handler_code = inspector.read_file("backend/api/fs_handlers.go")
             self.assert_true(bool(handler_code and "is_dir" in handler_code and "mod_time" in handler_code), "F01: Directory entry struct must include name, is_dir, size, mod_time")

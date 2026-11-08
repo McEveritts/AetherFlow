@@ -7,6 +7,7 @@ import sqlite3
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 from installer_test_helpers import common_functions, replace_paths_once
 
@@ -406,6 +407,7 @@ set_config_value() { :; }
         env = {
             **os.environ,
             "PATH": f"{self.root}/mock-bin:{os.environ['PATH']}",
+            "HOME": f"{root_posix}/home",
             "TEST_ROOT": root_posix,
             "LOGFILE": f"{root_posix}/test.log",
             **environment,
@@ -698,6 +700,17 @@ set_config_value() { :; }
 
         unit_file = self.root / "etc/systemd/system/af-mcvnc.service"
         self.assertIn(f"ExecStart={self.root}/usr/local/bin/mcvnc play --bind ${{MCVNC_BIND}} --device ${{MCVNC_DEVICE}} --preset ${{MCVNC_PRESET}} --fps ${{MCVNC_FPS}} --qp ${{MCVNC_QP}}", unit_file.read_text())
+
+    def test_mcvnc_fixture_never_sources_host_cargo_environment(self):
+        host_home = self.root / "host-home"
+        host_cargo = host_home / ".cargo"
+        host_cargo.mkdir(parents=True)
+        (host_cargo / "env").write_text(f'printf sourced > "{self.root}/host-cargo-sourced"\nexit 101\n')
+        with mock.patch.dict(os.environ, {"HOME": str(host_home)}):
+            result = self.run_script("mcvnc")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((self.root / "host-cargo-sourced").exists())
+        self.assertIn("cargo build --release", (self.root / "mock_commands.log").read_text())
 
     def test_virtualenv_paths_survive_activation_and_failed_pip_restores_runtime(self):
         for package, directory in (('cloudplow', 'opt/cloudplow/.venv'),

@@ -22,8 +22,8 @@ jest.mock('@/components/widgets/ProcessWidget', () => function MockProcessWidget
 jest.mock('@/components/widgets/StorageWidget', () => function MockStorageWidget() {
     return <div data-testid="storage-widget" />;
 });
-jest.mock('@/components/widgets/AppTopologyMap', () => function MockAppTopologyMap() {
-    return <div data-testid="topology-widget" />;
+jest.mock('@/components/widgets/AppTopologyMap', () => function MockAppTopologyMap({ topologyData }: { topologyData: SystemMetrics['services'] }) {
+    return <div data-testid="topology-widget">{JSON.stringify(topologyData)}</div>;
 });
 jest.mock('@/components/widgets/GpuWidget', () => function MockGpuWidget() {
     return <div data-testid="gpu-widget" />;
@@ -78,6 +78,23 @@ const mockHardware: HardwareReport = {
 describe('OverviewTab', () => {
     beforeEach(() => {
         useConnectionStore.setState({ connectionState: 'CONNECTED' });
+    });
+
+    it('updates topology when only terminal-job or degraded-component metadata changes', () => {
+        const metrics = createMockMetrics({ sonarr: { status: 'running', health: 'healthy' } });
+        const view = render(<OverviewTab metrics={metrics} hardware={mockHardware} history={mockHistory} />);
+        expect(screen.getByTestId('topology-widget')).not.toHaveTextContent('storage missing');
+        const changedMetrics = createMockMetrics({ sonarr: { status: 'running', health: 'healthy', last_job: { action: 'install', status: 'failed', error: 'storage missing' }, degraded_components: ['proxy'] } });
+        view.rerender(<OverviewTab metrics={changedMetrics} hardware={mockHardware} history={mockHistory} />);
+        expect(screen.getByTestId('topology-widget')).toHaveTextContent('storage missing');
+        expect(screen.getByTestId('topology-widget')).toHaveTextContent('proxy');
+    });
+
+    it('labels a disconnected connection without claiming it is reconnecting', () => {
+        useConnectionStore.setState({ connectionState: 'DISCONNECTED' });
+        render(<OverviewTab metrics={createMockMetrics()} hardware={mockHardware} history={mockHistory} />);
+        expect(screen.getByText('Disconnected')).toBeInTheDocument();
+        expect(screen.queryByText('Reconnecting')).not.toBeInTheDocument();
     });
 
     it('surfaces actual service exceptions naming affected services without treating clean stopped as failures', () => {

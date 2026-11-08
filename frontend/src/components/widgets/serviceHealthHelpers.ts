@@ -3,6 +3,7 @@ import { ServiceTelemetryInfo } from '@/types/dashboard';
 export function isServiceException(serviceInfo?: ServiceTelemetryInfo | null): boolean {
     if (!serviceInfo) return false;
     if (serviceInfo.status === 'error') return true;
+    if (serviceInfo.status === 'degraded') return true;
     if (serviceInfo.job_status === 'install_failed' || serviceInfo.job_status === 'failed') return true;
     if (serviceInfo.last_job?.status === 'failed') return true;
     if (serviceInfo.last_job?.action === 'install' && serviceInfo.last_job?.status !== 'completed' && Boolean(serviceInfo.last_job?.error)) return true;
@@ -21,6 +22,9 @@ export function getServiceExceptionDetail(serviceInfo?: ServiceTelemetryInfo | n
     }
     if (serviceInfo.status === 'error') {
         return 'Error state reported';
+    }
+    if (serviceInfo.status === 'degraded') {
+        return 'Degraded status reported';
     }
     if (serviceInfo.health === 'degraded' || (serviceInfo.degraded_components && serviceInfo.degraded_components.length > 0)) {
         return serviceInfo.degraded_components ? `Degraded: ${serviceInfo.degraded_components.join(', ')}` : 'Component degraded';

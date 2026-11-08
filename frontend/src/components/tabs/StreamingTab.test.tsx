@@ -1350,6 +1350,18 @@ describe('StreamingTab - Jellyfin Play Statistics, Data Usage & Stream Telemetry
         expect(screen.queryByTestId('active-sessions-grid')).not.toBeInTheDocument();
     });
 
+    it('identifies a staged Emby-only connection as idle telemetry', () => {
+        const idleData = JSON.parse(JSON.stringify(mockDashboardData)) as StreamingDashboardData;
+        idleData.activeSessions = [];
+        idleData.liveSummary.activeStreams = 0;
+        idleData.servers[0].status = 'unconfigured';
+        idleData.servers[0].configured = false;
+        idleData.servers[2] = { ...idleData.servers[2], name: 'Lab Emby', enabled: true, configured: true, status: 'connected' };
+        currentSwrState = { ...currentSwrState, data: idleData };
+        render(<StreamingTab />);
+        expect(within(screen.getByTestId('compact-no-streams-state')).getByText(/Lab Emby connected · Idle \(staged\)/)).toBeInTheDocument();
+    });
+
     it('verifies Candidate G single secondary roadmap location in server config dialog and absence from operational toolbar', () => {
         render(<StreamingTab />);
         expect(screen.queryByText('Planned integrations:')).not.toBeInTheDocument();

@@ -8,14 +8,137 @@ import { computeNiceByteScale } from '@/components/widgets/bandwidthScaleHelpers
 
 interface DailyUsage {
     date: string;
-    downloadedBytes: number;
-    uploadedBytes: number;
+    downloadedBytes: number | null;
+    uploadedBytes: number | null;
 }
 
 interface MetricsSnapshot {
     timestamp: string;
     net_rx_bytes: number;
     net_tx_bytes: number;
+}
+
+interface ParsedMetricsSnapshot {
+    timestampMs: number;
+    date: string;
+    rxBytes: number;
+    txBytes: number;
+    sourceIndex: number;
+}
+
+interface InvalidMetricsTimestamp {
+    timestampMs: number;
+    sourceIndex: number;
+    invalid: true;
+}
+
+interface DailyUsageResult {
+    usageData: DailyUsage[];
+    duplicateSamples: number;
+    conflictingSamples: number;
+    invalidSamples: number;
+    counterResets: number;
+}
+
+export function deriveDailyUsage(rawMetrics: unknown): DailyUsageResult {
+    const parsedSamples: (ParsedMetricsSnapshot | InvalidMetricsTimestamp)[] = [];
+    let invalidSamples = 0;
+
+    (Array.isArray(rawMetrics) ? rawMetrics : []).forEach((rawRecord, sourceIndex) => {
+        if (!rawRecord || typeof rawRecord !== 'object') {
+            invalidSamples += 1;
+            return;
+        }
+
+        const record = rawRecord as Partial<MetricsSnapshot>;
+        const timestampMs = typeof record.timestamp === 'string' ? Date.parse(record.timestamp) : Number.NaN;
+        if (!Number.isFinite(timestampMs)) {
+            invalidSamples += 1;
+            return;
+        }
+
+        const rxBytes = record.net_rx_bytes;
+        const txBytes = record.net_tx_bytes;
+        if (typeof rxBytes !== 'number' || !Number.isFinite(rxBytes) || rxBytes < 0 ||
+            typeof txBytes !== 'number' || !Number.isFinite(txBytes) || txBytes < 0) {
+            invalidSamples += 1;
+            parsedSamples.push({ timestampMs, sourceIndex, invalid: true });
+            return;
+        }
+
+        parsedSamples.push({
+            timestampMs,
+            date: new Date(timestampMs).toISOString().slice(0, 10),
+            rxBytes,
+            txBytes,
+            sourceIndex,
+        });
+    });
+
+    parsedSamples.sort((firstSample, secondSample) =>
+        firstSample.timestampMs - secondSample.timestampMs || firstSample.sourceIndex - secondSample.sourceIndex
+    );
+
+    const usageByDate = new Map<string, DailyUsage>();
+    let previousSample: ParsedMetricsSnapshot | null = null;
+    let duplicateSamples = 0;
+    let conflictingSamples = 0;
+    let counterResets = 0;
+
+    for (let sampleIndex = 0; sampleIndex < parsedSamples.length;) {
+        const timestampMs = parsedSamples[sampleIndex].timestampMs;
+        const sameTimestampSamples: (ParsedMetricsSnapshot | InvalidMetricsTimestamp)[] = [];
+        while (sampleIndex < parsedSamples.length && parsedSamples[sampleIndex].timestampMs === timestampMs) {
+            sameTimestampSamples.push(parsedSamples[sampleIndex]);
+            sampleIndex += 1;
+        }
+
+        if (sameTimestampSamples.some((sample) => 'invalid' in sample)) {
+            previousSample = null;
+            continue;
+        }
+
+        const validSamples = sameTimestampSamples as ParsedMetricsSnapshot[];
+        const firstSample = validSamples[0];
+        const hasConflictingCounters = validSamples.some((sample) =>
+            sample.rxBytes !== firstSample.rxBytes || sample.txBytes !== firstSample.txBytes
+        );
+        if (hasConflictingCounters) {
+            conflictingSamples += 1;
+            previousSample = null;
+            continue;
+        }
+
+        duplicateSamples += validSamples.length - 1;
+        const currentSample = firstSample;
+        const dayUsage = usageByDate.get(currentSample.date) || {
+            date: currentSample.date,
+            downloadedBytes: null,
+            uploadedBytes: null,
+        };
+        usageByDate.set(currentSample.date, dayUsage);
+
+        if (previousSample) {
+            const rxReset = currentSample.rxBytes < previousSample.rxBytes;
+            const txReset = currentSample.txBytes < previousSample.txBytes;
+            if (rxReset) counterResets += 1;
+            if (txReset) counterResets += 1;
+            const downloadDelta = rxReset ? currentSample.rxBytes : currentSample.rxBytes - previousSample.rxBytes;
+            const uploadDelta = txReset ? currentSample.txBytes : currentSample.txBytes - previousSample.txBytes;
+            dayUsage.downloadedBytes = (dayUsage.downloadedBytes ?? 0) + downloadDelta;
+            dayUsage.uploadedBytes = (dayUsage.uploadedBytes ?? 0) + uploadDelta;
+        }
+
+        previousSample = currentSample;
+    }
+
+    return {
+        usageData: Array.from(usageByDate.values()).sort((firstEntry, secondEntry) => firstEntry.date.localeCompare(secondEntry.date)),
+        duplicateSamples,
+        conflictingSamples,
+        invalidSamples,
+        counterResets,
+    };
 }
 
 function formatBytes(bytesCount: number, decimalPlaces = 1): string {
@@ -37,83 +160,24 @@ export default function DataUsageHistoryWidget({ density = 'compact' }: DataUsag
     const [isLoading, setIsLoading] = useState(true);
     const [errorMessage, setErrorMessage] = useState<string | null>(null);
     const [usageData, setUsageData] = useState<DailyUsage[]>([]);
+    const [counterResetCount, setCounterResetCount] = useState(0);
+    const [ignoredSampleCount, setIgnoredSampleCount] = useState(0);
 
     useEffect(() => {
         let isMounted = true;
         const fetchUsageHistory = async () => {
             setIsLoading(true);
             setErrorMessage(null);
+            setUsageData([]);
+            setCounterResetCount(0);
+            setIgnoredSampleCount(0);
             try {
                 const rawMetrics = await fetcher<MetricsSnapshot[]>(`/api/v1/admin/ai/predictions/history?days=${daysWindow}`);
                 if (!isMounted) return;
-
-                const dailySamplesMap = new Map<string, { timestampMs: number; rxBytes: number; txBytes: number }[]>();
-
-                (Array.isArray(rawMetrics) ? rawMetrics : []).forEach(record => {
-                    const dateKey = record.timestamp.split(/[ T]/)[0];
-                    const timestampMs = new Date(record.timestamp).getTime() || 0;
-                    const sample = { timestampMs, rxBytes: record.net_rx_bytes ?? 0, txBytes: record.net_tx_bytes ?? 0 };
-                    const existingSamples = dailySamplesMap.get(dateKey);
-                    if (!existingSamples) {
-                        dailySamplesMap.set(dateKey, [sample]);
-                    } else {
-                        existingSamples.push(sample);
-                    }
-                });
-
-                const parsedChartData: DailyUsage[] = Array.from(dailySamplesMap.entries()).map(([entryDate, samplesList]) => {
-                    samplesList.sort((firstSample, secondSample) => firstSample.timestampMs - secondSample.timestampMs);
-                    let downloadDelta = 0;
-                    let uploadDelta = 0;
-                    for (let sampleIndex = 1; sampleIndex < samplesList.length; sampleIndex++) {
-                        const previousSample = samplesList[sampleIndex - 1];
-                        const currentSample = samplesList[sampleIndex];
-                        downloadDelta += currentSample.rxBytes >= previousSample.rxBytes
-                            ? currentSample.rxBytes - previousSample.rxBytes
-                            : currentSample.rxBytes;
-                        uploadDelta += currentSample.txBytes >= previousSample.txBytes
-                            ? currentSample.txBytes - previousSample.txBytes
-                            : currentSample.txBytes;
-                    }
-                    return {
-                        date: entryDate,
-                        downloadedBytes: downloadDelta,
-                        uploadedBytes: uploadDelta,
-                    };
-                }).sort((firstEntry, secondEntry) => firstEntry.date.localeCompare(secondEntry.date));
-
-                if (parsedChartData.length === 1) {
-                    const initialDate = new Date(`${parsedChartData[0].date}T00:00:00`);
-                    if (!isNaN(initialDate.getTime())) {
-                        initialDate.setDate(initialDate.getDate() - 1);
-                        const yearString = initialDate.getFullYear();
-                        const monthString = String(initialDate.getMonth() + 1).padStart(2, '0');
-                        const dayString = String(initialDate.getDate()).padStart(2, '0');
-                        parsedChartData.unshift({
-                            date: `${yearString}-${monthString}-${dayString}`,
-                            downloadedBytes: 0,
-                            uploadedBytes: 0,
-                        });
-                    } else {
-                        parsedChartData.unshift({
-                            date: 'Prior',
-                            downloadedBytes: 0,
-                            uploadedBytes: 0,
-                        });
-                    }
-                } else if (parsedChartData.length === 0) {
-                    const todayDate = new Date();
-                    const yesterdayDate = new Date(todayDate);
-                    yesterdayDate.setDate(todayDate.getDate() - 1);
-                    const formatDateString = (targetDate: Date) =>
-                        `${targetDate.getFullYear()}-${String(targetDate.getMonth() + 1).padStart(2, '0')}-${String(targetDate.getDate()).padStart(2, '0')}`;
-                    parsedChartData.push(
-                        { date: formatDateString(yesterdayDate), downloadedBytes: 0, uploadedBytes: 0 },
-                        { date: formatDateString(todayDate), downloadedBytes: 0, uploadedBytes: 0 }
-                    );
-                }
-
-                setUsageData(parsedChartData);
+                const usageResult = deriveDailyUsage(rawMetrics);
+                setUsageData(usageResult.usageData);
+                setCounterResetCount(usageResult.counterResets);
+                setIgnoredSampleCount(usageResult.invalidSamples + usageResult.conflictingSamples);
             } catch (error: unknown) {
                 if (isMounted) setErrorMessage(error instanceof Error ? error.message : 'Failed to load usage history');
             } finally {
@@ -128,8 +192,8 @@ export default function DataUsageHistoryWidget({ density = 'compact' }: DataUsag
     const { totalDownloadedBytes, totalUploadedBytes } = useMemo(() => {
         return usageData.reduce(
             (accumulator, currentItem) => {
-                accumulator.totalDownloadedBytes += currentItem.downloadedBytes;
-                accumulator.totalUploadedBytes += currentItem.uploadedBytes;
+                accumulator.totalDownloadedBytes += currentItem.downloadedBytes ?? 0;
+                accumulator.totalUploadedBytes += currentItem.uploadedBytes ?? 0;
                 return accumulator;
             },
             { totalDownloadedBytes: 0, totalUploadedBytes: 0 }
@@ -139,10 +203,10 @@ export default function DataUsageHistoryWidget({ density = 'compact' }: DataUsag
     const peakDailyBytes = useMemo(() => {
         let maxFoundBytes = 0;
         for (const dataEntry of usageData) {
-            if (dataEntry.downloadedBytes > maxFoundBytes) {
+            if (dataEntry.downloadedBytes !== null && dataEntry.downloadedBytes > maxFoundBytes) {
                 maxFoundBytes = dataEntry.downloadedBytes;
             }
-            if (dataEntry.uploadedBytes > maxFoundBytes) {
+            if (dataEntry.uploadedBytes !== null && dataEntry.uploadedBytes > maxFoundBytes) {
                 maxFoundBytes = dataEntry.uploadedBytes;
             }
         }
@@ -155,6 +219,7 @@ export default function DataUsageHistoryWidget({ density = 'compact' }: DataUsag
 
     const chartHeight = isImmersive ? 360 : 260;
     const recordedDayCount = usageData.length;
+    const hasMeasuredInterval = usageData.some((entry) => entry.downloadedBytes !== null || entry.uploadedBytes !== null);
     const isPartialCoverage = recordedDayCount > 0 && recordedDayCount < daysWindow;
 
     return (
@@ -197,7 +262,7 @@ export default function DataUsageHistoryWidget({ density = 'compact' }: DataUsag
                     <div className="flex items-center gap-2 text-xs text-slate-300">
                         <Calendar size={13} className="text-indigo-400" />
                         <span className="font-mono text-slate-200">
-                            Coverage: {recordedDayCount} of {daysWindow} days available
+                            Coverage: {recordedDayCount} of {daysWindow} days observed
                         </span>
                         {isPartialCoverage && (
                             <span className="text-slate-300 hidden sm:inline">
@@ -214,6 +279,12 @@ export default function DataUsageHistoryWidget({ density = 'compact' }: DataUsag
                         </span>
                     </div>
                 </div>
+
+                <p role="note" className="mb-3 px-1 text-xs leading-relaxed text-slate-400">
+                    Counter deltas are assigned to the UTC day of the ending sample; sparse intervals may span days, so daily allocation is estimated.
+                    {counterResetCount > 0 ? ` ${counterResetCount} counter reset${counterResetCount === 1 ? '' : 's'} detected; only post-reset values are counted.` : ''}
+                    {ignoredSampleCount > 0 ? ` ${ignoredSampleCount} invalid or conflicting sample${ignoredSampleCount === 1 ? '' : 's'} ignored.` : ''}
+                </p>
 
                 {errorMessage && !isLoading && (
                     <div
@@ -234,6 +305,10 @@ export default function DataUsageHistoryWidget({ density = 'compact' }: DataUsag
                         {isLoading && usageData.length === 0 ? (
                             <div className="absolute inset-0 flex items-center justify-center">
                                 <div className="w-5 h-5 border-2 border-indigo-500/30 border-t-indigo-500 rounded-full animate-spin" />
+                            </div>
+                        ) : usageData.length === 0 ? (
+                            <div role="note" className="absolute inset-0 flex items-center justify-center px-4 text-center text-xs text-slate-400">
+                                No bandwidth observations for this window; no zero-valued days are inferred.
                             </div>
                         ) : (
                             <ResponsiveContainer width="100%" height={chartHeight - 16}>
@@ -315,7 +390,7 @@ export default function DataUsageHistoryWidget({ density = 'compact' }: DataUsag
                         <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Download ({daysWindow}d)</span>
                     </div>
                     <span className="text-xs font-mono font-bold text-cyan-400 tabular-nums">
-                        {isLoading && usageData.length === 0 ? '...' : formatBytes(totalDownloadedBytes)}
+                        {isLoading ? '...' : hasMeasuredInterval ? formatBytes(totalDownloadedBytes) : 'Unavailable'}
                     </span>
                 </div>
                 <div className="bg-slate-950/60 rounded-xl px-3.5 py-2.5 border border-slate-800/60 flex items-center justify-between">
@@ -324,7 +399,7 @@ export default function DataUsageHistoryWidget({ density = 'compact' }: DataUsag
                         <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Upload ({daysWindow}d)</span>
                     </div>
                     <span className="text-xs font-mono font-bold text-indigo-400 tabular-nums">
-                        {isLoading && usageData.length === 0 ? '...' : formatBytes(totalUploadedBytes)}
+                        {isLoading ? '...' : hasMeasuredInterval ? formatBytes(totalUploadedBytes) : 'Unavailable'}
                     </span>
                 </div>
             </div>

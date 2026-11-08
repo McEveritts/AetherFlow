@@ -41,6 +41,8 @@ export default function Header() {
     const [tasksOpen, setTasksOpen] = useState(false);
     const dropdownRef = useRef<HTMLDivElement>(null);
     const tasksRef = useRef<HTMLDivElement>(null);
+    const dropdownTriggerRef = useRef<HTMLButtonElement>(null);
+    const tasksTriggerRef = useRef<HTMLButtonElement>(null);
 
     useEffect(() => {
         const handleClickOutside = (event: PointerEvent | MouseEvent) => {
@@ -54,6 +56,23 @@ export default function Header() {
         document.addEventListener('pointerdown', handleClickOutside);
         return () => document.removeEventListener('pointerdown', handleClickOutside);
     }, []);
+
+    useEffect(() => {
+        const handleEscape = (event: KeyboardEvent) => {
+            if (event.key !== 'Escape') return;
+            if (dropdownOpen) {
+                event.preventDefault();
+                setDropdownOpen(false);
+                dropdownTriggerRef.current?.focus();
+            } else if (tasksOpen) {
+                event.preventDefault();
+                setTasksOpen(false);
+                tasksTriggerRef.current?.focus();
+            }
+        };
+        document.addEventListener('keydown', handleEscape);
+        return () => document.removeEventListener('keydown', handleEscape);
+    }, [dropdownOpen, tasksOpen]);
 
     const getTabLabel = () => {
         return (
@@ -204,16 +223,19 @@ export default function Header() {
                     <div className="relative" ref={tasksRef}>
                         <button
                             type="button"
-                            onClick={() => setTasksOpen(!tasksOpen)}
+                            ref={tasksTriggerRef}
+                            onClick={() => { setDropdownOpen(false); setTasksOpen(!tasksOpen); }}
                             className="min-h-[40px] relative flex items-center gap-2 px-3 py-2 bg-indigo-500/10 text-indigo-300 hover:text-white hover:bg-indigo-500/20 border border-indigo-500/30 rounded-xl transition-colors"
                             aria-label="Background Tasks"
+                            aria-expanded={tasksOpen}
+                            aria-controls="header-background-tasks"
                         >
                             <Loader2 size={16} className="animate-spin text-indigo-400" />
                             <span className="text-xs font-bold mr-1">{tasks.filter((taskItem) => taskItem.status === 'running').length}</span>
                         </button>
 
                         {tasksOpen && (
-                            <div className="absolute right-0 mt-2 w-72 glass-panel border border-indigo-500/30 rounded-2xl shadow-2xl overflow-hidden z-50">
+                            <div id="header-background-tasks" className="absolute right-0 mt-2 w-72 glass-panel border border-indigo-500/30 rounded-2xl shadow-2xl overflow-hidden z-50">
                                 <div className="p-3 border-b border-white/5 bg-white/[0.02]">
                                     <p className="text-xs uppercase font-bold text-slate-400 tracking-wider">Active Background Processes</p>
                                 </div>
@@ -248,9 +270,12 @@ export default function Header() {
                 <div className="relative" ref={dropdownRef}>
                     <button 
                         type="button"
-                        onClick={() => setDropdownOpen(!dropdownOpen)}
+                        ref={dropdownTriggerRef}
+                        onClick={() => { setTasksOpen(false); setDropdownOpen(!dropdownOpen); }}
                         className="min-h-[40px] flex items-center gap-2.5 rounded-full bg-white/[0.04] hover:bg-white/[0.08] border border-white/10 hover:border-indigo-500/40 pl-1 pr-3 md:pr-4 py-1 transition-colors group focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
                         aria-label="User Menu"
+                        aria-expanded={dropdownOpen}
+                        aria-controls="header-user-menu"
                     >
                         <div className="relative h-8 w-8 md:h-9 md:w-9 rounded-full bg-slate-900 border border-indigo-400/30 flex items-center justify-center overflow-hidden">
                             {user?.avatar_url ? (
@@ -267,7 +292,7 @@ export default function Header() {
                     </button>
 
                     {dropdownOpen && (
-                        <div className="absolute right-0 mt-2 w-56 glass-panel border border-indigo-500/30 rounded-2xl shadow-2xl overflow-hidden z-50">
+                        <div id="header-user-menu" className="absolute right-0 mt-2 w-56 glass-panel border border-indigo-500/30 rounded-2xl shadow-2xl overflow-hidden z-50">
                             <div className="p-4 border-b border-white/5 bg-white/[0.02]">
                                 <p className="text-sm font-bold text-slate-200">{user?.username || 'Admin'}</p>
                                 <p className="text-xs text-slate-400 truncate">{user?.email || 'admin@aetherflow.local'}</p>
